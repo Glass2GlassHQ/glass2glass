@@ -26,6 +26,10 @@
 
 #![cfg(all(target_os = "android", feature = "nnapi"))]
 
+#[path = "../../g2g-plugins/tests/common/android_binder.rs"]
+mod android_binder;
+use android_binder::start_binder_threadpool;
+
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
@@ -66,42 +70,6 @@ fn quant() -> (f32, i32) {
         env_or("G2G_MN_SCALE", DEFAULT_SCALE),
         env_or("G2G_MN_ZERO_POINT", DEFAULT_ZERO_POINT),
     )
-}
-
-/// Start a binder threadpool so the NNAPI vendor HAL (DarwiNN, over binder/AIDL)
-/// can bring up the accelerator from this bare native binary. Same shim as the
-/// MediaCodec / M439-M442 probes.
-fn start_binder_threadpool() {
-    use core::ffi::{c_char, c_int, c_void};
-    extern "C" {
-        fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    }
-    const RTLD_NOW: c_int = 2;
-    // SAFETY: libbinder_ndk.so is loadable; the dlsym'd symbols match
-    // <android/binder_process.h>.
-    unsafe {
-        let lib = dlopen(b"libbinder_ndk.so\0".as_ptr() as *const c_char, RTLD_NOW);
-        if lib.is_null() {
-            return;
-        }
-        let set = dlsym(
-            lib,
-            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
-        );
-        if !set.is_null() {
-            let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
-            set(1);
-        }
-        let start = dlsym(
-            lib,
-            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
-        );
-        if !start.is_null() {
-            let start: extern "C" fn() = core::mem::transmute(start);
-            start();
-        }
-    }
 }
 
 /// Tally the provider of every node compute event in an ORT profiling JSON
@@ -182,7 +150,7 @@ fn read_input_f32_bytes() -> Vec<u8> {
 /// -> TensorPostprocess::argmax` yields a valid ImageNet class.
 #[tokio::test]
 async fn classifier_runs_through_g2g_chain() {
-    start_binder_threadpool();
+    start_binder_threadpool(1);
     let model = std::fs::read(model_path()).expect("read pushed model (mn_u8in.onnx)");
     let input_bytes = read_input_f32_bytes();
     let (scale, zp) = quant();
@@ -245,7 +213,7 @@ async fn classifier_runs_through_g2g_chain() {
 /// may remain on CPU, so the split is reported, not asserted to be fully on NNAPI.
 #[tokio::test]
 async fn nnapi_claims_the_classifier() {
-    start_binder_threadpool();
+    start_binder_threadpool(1);
     let model = std::fs::read(model_path()).expect("read pushed model");
     let (scale, zp) = quant();
 

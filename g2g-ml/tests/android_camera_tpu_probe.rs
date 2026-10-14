@@ -18,6 +18,10 @@
 
 #![cfg(all(target_os = "android", feature = "camera2-tpu"))]
 
+#[path = "../../g2g-plugins/tests/common/android_binder.rs"]
+mod android_binder;
+use android_binder::start_binder_threadpool;
+
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
@@ -37,38 +41,6 @@ const IN_ZERO_POINT: i32 = 0;
 const CAM_W: u32 = 640;
 const CAM_H: u32 = 480;
 const MODEL_HW: usize = 4; // the model's input is [1,3,4,4]
-
-fn start_binder_threadpool() {
-    use core::ffi::{c_char, c_int, c_void};
-    extern "C" {
-        fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    }
-    const RTLD_NOW: c_int = 2;
-    // SAFETY: libbinder_ndk.so is loadable; symbols match <android/binder_process.h>.
-    unsafe {
-        let lib = dlopen(b"libbinder_ndk.so\0".as_ptr() as *const c_char, RTLD_NOW);
-        if lib.is_null() {
-            return;
-        }
-        let set = dlsym(
-            lib,
-            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
-        );
-        if !set.is_null() {
-            let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
-            set(1);
-        }
-        let start = dlsym(
-            lib,
-            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
-        );
-        if !start.is_null() {
-            let start: extern "C" fn() = core::mem::transmute(start);
-            start();
-        }
-    }
-}
 
 /// Captures the first NV12 frame's bytes (the camera source's output).
 #[derive(Default)]
@@ -191,7 +163,7 @@ async fn capture_one() -> Option<Vec<u8>> {
 
 #[tokio::test]
 async fn live_camera_quantize_to_edge_tpu() {
-    start_binder_threadpool();
+    start_binder_threadpool(1);
 
     // 1. A real camera frame, or a synthetic NV12 gradient if the camera is denied.
     let (nv12, live) = match capture_one().await {

@@ -24,6 +24,10 @@
 
 #![cfg(all(target_os = "android", feature = "nnapi", feature = "xnnpack"))]
 
+#[path = "../../g2g-plugins/tests/common/android_binder.rs"]
+mod android_binder;
+use android_binder::start_binder_threadpool;
+
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
@@ -62,42 +66,6 @@ fn providers_from_profiling(json: &str) -> std::collections::BTreeMap<String, us
     providers
 }
 
-/// Start a binder threadpool so the NNAPI vendor HAL (DarwiNN, reached over
-/// binder/AIDL) can set up the accelerator from this bare native binary. Same shim
-/// as the MediaCodec / M439 probes.
-fn start_binder_threadpool() {
-    use core::ffi::{c_char, c_int, c_void};
-    extern "C" {
-        fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    }
-    const RTLD_NOW: c_int = 2;
-    // SAFETY: libbinder_ndk.so is loadable; the dlsym'd symbols match
-    // <android/binder_process.h>.
-    unsafe {
-        let lib = dlopen(b"libbinder_ndk.so\0".as_ptr() as *const c_char, RTLD_NOW);
-        if lib.is_null() {
-            return;
-        }
-        let set = dlsym(
-            lib,
-            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
-        );
-        if !set.is_null() {
-            let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
-            set(1);
-        }
-        let start = dlsym(
-            lib,
-            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
-        );
-        if !start.is_null() {
-            let start: extern "C" fn() = core::mem::transmute(start);
-            start();
-        }
-    }
-}
-
 #[derive(Default)]
 struct Collect {
     packets: Vec<PipelinePacket>,
@@ -129,7 +97,7 @@ fn rgba_frame(bytes: Vec<u8>, sequence: u64) -> Frame {
 /// correct-shape, ReLU-nonnegative output (the element handles a real conv).
 #[tokio::test]
 async fn conv_runs_through_android_ep_stack() {
-    start_binder_threadpool();
+    start_binder_threadpool(1);
 
     let mut inf = OrtInference::from_memory_for_android(QCONV).expect("quantized conv model loads");
     // OrtInference reads the model's static [N,3,H,W] input geometry as W x H RGBA.
@@ -187,7 +155,7 @@ async fn conv_runs_through_android_ep_stack() {
 /// the quantized conv ran on the accelerator, not the CPU fallback.
 #[tokio::test]
 async fn nnapi_claims_the_quantized_conv() {
-    start_binder_threadpool();
+    start_binder_threadpool(1);
 
     // ORT appends `_<timestamp>.json`; end_profiling returns the full path.
     let profile_prefix = "/data/local/tmp/g2g_qconv_profile";
@@ -254,7 +222,7 @@ async fn nnapi_claims_the_quantized_conv() {
 /// nothing left on the CPU. Proves the full conv graph runs on the Edge TPU (M442).
 #[tokio::test]
 async fn fully_on_tpu_with_uint8_input() {
-    start_binder_threadpool();
+    start_binder_threadpool(1);
 
     let profile_prefix = "/data/local/tmp/g2g_qconv_u8_profile";
     let mut session = Session::builder()

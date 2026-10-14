@@ -11,48 +11,16 @@
 
 #![cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
 
+#[path = "../../g2g-plugins/tests/common/android_binder.rs"]
+mod android_binder;
+use android_binder::start_binder_threadpool;
+
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
 use g2g_ml::wgpupreprocess::WgpuPreprocess;
 use g2g_plugins::mediacodecdec::MediaCodecDec;
-
-/// Start a binder threadpool so Codec2 can allocate the decoder's output graphic
-/// buffers (it calls back over binder). Same shim as the g2g-plugins tests; a
-/// bare native binary has none, so the allocate transaction would stall.
-fn start_binder_threadpool() {
-    use core::ffi::{c_char, c_int, c_void};
-    extern "C" {
-        fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    }
-    const RTLD_NOW: c_int = 2;
-    // SAFETY: libbinder_ndk.so is already loaded by MediaCodec; the dlsym'd
-    // symbols have the C signatures from <android/binder_process.h>.
-    unsafe {
-        let lib = dlopen(b"libbinder_ndk.so\0".as_ptr() as *const c_char, RTLD_NOW);
-        if lib.is_null() {
-            return;
-        }
-        let set = dlsym(
-            lib,
-            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
-        );
-        if !set.is_null() {
-            let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
-            set(1);
-        }
-        let start = dlsym(
-            lib,
-            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
-        );
-        if !start.is_null() {
-            let start: extern "C" fn() = core::mem::transmute(start);
-            start();
-        }
-    }
-}
 
 /// 640x480 H.264 Annex-B fixture, shared with the g2g-plugins on-device tests.
 const H264: &[u8] = include_bytes!("../../g2g-plugins/tests/fixtures/h264_640x480.h264");
@@ -132,7 +100,7 @@ fn access_units(s: &[u8]) -> Vec<&[u8]> {
 
 #[tokio::test]
 async fn decode_gpu_to_preprocess_tensor() {
-    start_binder_threadpool();
+    start_binder_threadpool(1);
 
     let (w, h) = (640u32, 480u32);
 

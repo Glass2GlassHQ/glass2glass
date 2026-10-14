@@ -14,43 +14,17 @@
 
 #![cfg(all(target_os = "android", feature = "camera2"))]
 
+#[path = "common/android_binder.rs"]
+mod android_binder;
+use android_binder::start_binder_threadpool;
+
+const CAMERA_BINDER_THREADS: u32 = 4;
+
 use g2g_core::element::{OutputSink, PushOutcome};
 use g2g_core::frame::PipelinePacket;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{Caps, Dim, G2gError, RawVideoFormat};
 use g2g_plugins::camera2src::Camera2Src;
-
-/// Start a binder threadpool so the camera HAL can deliver capture buffers (it
-/// calls back over binder into this process, like Codec2 for the decoder). A
-/// bare native binary has no threadpool, so buffers never arrive and teardown
-/// stalls; the `ABinderProcess_*` symbols live in libbinder_ndk.so but not the
-/// NDK link stub, so dlsym them.
-fn start_binder_threadpool() {
-    use core::ffi::{c_char, c_int, c_void};
-    extern "C" {
-        fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    }
-    const RTLD_NOW: c_int = 2;
-    // SAFETY: libbinder_ndk.so is loadable; the dlsym'd symbols have the C
-    // signatures from <android/binder_process.h>.
-    unsafe {
-        let lib = dlopen(c"libbinder_ndk.so".as_ptr(), RTLD_NOW);
-        if lib.is_null() {
-            return;
-        }
-        let set = dlsym(lib, c"ABinderProcess_setThreadPoolMaxThreadCount".as_ptr());
-        if !set.is_null() {
-            let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
-            set(4);
-        }
-        let start = dlsym(lib, c"ABinderProcess_startThreadPool".as_ptr());
-        if !start.is_null() {
-            let start: extern "C" fn() = core::mem::transmute(start);
-            start();
-        }
-    }
-}
 
 /// Counts captured NV12 frames and records the byte length of the first.
 #[derive(Default)]
@@ -80,7 +54,7 @@ impl OutputSink for CaptureSink {
 
 #[tokio::test]
 async fn camera2_capture_best_effort() {
-    start_binder_threadpool();
+    start_binder_threadpool(CAMERA_BINDER_THREADS);
     let (w, h) = (640u32, 480u32);
     let mut src = Camera2Src::new(w, h, 5);
 

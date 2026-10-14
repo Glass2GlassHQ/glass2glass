@@ -18,6 +18,10 @@
 
 #![cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
 
+#[path = "common/android_binder.rs"]
+mod android_binder;
+use android_binder::start_binder_threadpool;
+
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
@@ -29,44 +33,6 @@ use g2g_plugins::mediacodec_wgpu::{
 use g2g_plugins::mediacodecdec::MediaCodecDec;
 
 use ash::vk;
-
-/// Start a binder threadpool so Codec2 can allocate the decoder's output graphic
-/// buffers (it calls back over binder). A bare native binary has no threadpool,
-/// so the allocate transaction stalls; the `ABinderProcess_*` symbols live in
-/// the device's libbinder_ndk.so but not the NDK link stub, so dlsym them. Same
-/// shim as `android_mediacodec_smoke`.
-fn start_binder_threadpool() {
-    use core::ffi::{c_char, c_int, c_void};
-    extern "C" {
-        fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    }
-    const RTLD_NOW: c_int = 2;
-    // SAFETY: libbinder_ndk.so is already loaded by MediaCodec; the dlsym'd
-    // symbols have the C signatures from <android/binder_process.h>.
-    unsafe {
-        let lib = dlopen(b"libbinder_ndk.so\0".as_ptr() as *const c_char, RTLD_NOW);
-        if lib.is_null() {
-            return;
-        }
-        let set = dlsym(
-            lib,
-            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
-        );
-        if !set.is_null() {
-            let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
-            set(1);
-        }
-        let start = dlsym(
-            lib,
-            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
-        );
-        if !start.is_null() {
-            let start: extern "C" fn() = core::mem::transmute(start);
-            start();
-        }
-    }
-}
 
 /// 640x480 H.264 Annex-B fixture (parameter sets + IDR + inter frames), embedded
 /// so the binary is self-contained. HW decoders reject sub-minimum dimensions.
@@ -163,7 +129,7 @@ fn access_units(s: &[u8]) -> Vec<&[u8]> {
 
 #[tokio::test]
 async fn probe_ahb_vulkan_format() {
-    start_binder_threadpool();
+    start_binder_threadpool(1);
 
     // Decode the fixture far enough to capture a real decoded hardware buffer.
     let mut dec = MediaCodecDec::h264();
@@ -314,7 +280,7 @@ async fn probe_ahb_vulkan_format() {
 /// wgpu hand-off (read back through wgpu on the texture's own device).
 #[tokio::test]
 async fn mediacodec_gpu_output_emits_wgpu_texture() {
-    start_binder_threadpool();
+    start_binder_threadpool(1);
 
     let (w, h) = (640u32, 480u32);
     let mut dec = MediaCodecDec::h264().with_gpu_output();
