@@ -8,8 +8,11 @@
 //! payload (what `Mp4Mux` writes and CMAF single-track files share). Anything
 //! else fails loud rather than emitting a corrupt bitstream.
 
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use g2g_core::time::ticks_to_ns;
 
 use g2g_core::{
     AudioFormat, Chapter, ClosedCaptionFormat, G2gError, TagList, TextFormat, VideoCodec,
@@ -709,48 +712,58 @@ fn deframe_wvtt(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The decode state carried from a `moof` to its following `mdat`: the track id,
-/// the per-sample timing, the per-sample crypto for an encrypted track, and the
-/// fragment's start offset in the stream (which keys the rotating content key).
-type PendingFragment = (u32, Vec<FragmentSampleTiming>, Vec<SampleCrypt>, u64);
+/// One sample of a `moof`+`mdat` fragment as stored: still framed, and still
+/// encrypted when its track is.
+#[derive(Debug)]
+pub(crate) struct MoofSample<'a> {
+    /// The `tfhd` `track_ID`, `None` for a `traf` with no `tfhd`.
+    pub(crate) track_id: Option<u32>,
+    pub(crate) bytes: &'a [u8],
+    pub(crate) timing: FragmentSampleTiming,
+    /// `None` for a clear track, or for a sample past the ones the fragment's
+    /// crypto describes.
+    pub(crate) crypt: Option<SampleCrypt>,
+    /// Where the fragment's `moof` sits in the source byte stream, which keys a
+    /// rotating content key.
+    pub(crate) fragment_at: u64,
+}
 
-/// Walk the `moof`+`mdat` fragments of a multi-track fMP4 and split every sample
-/// out, keyed by its `track_ID`. Each `traf`'s `tfhd` names the track, so a
-/// fragment is routed to the matching [`TrackHeader`]: video samples are
-/// de-framed AVCC->Annex-B with a keyframe scan, audio samples pass through (each
-/// is a sync sample). Fragments for an unknown `track_ID` are skipped.
+/// A `moof` waiting for its `mdat`.
+struct OpenFragment {
+    track_id: Option<u32>,
+    timings: Vec<FragmentSampleTiming>,
+    crypt: Vec<SampleCrypt>,
+    fragment_at: u64,
+}
+
+/// Walk the `moof`+`mdat` pairs in `data` and split every sample out of its
+/// `mdat`, timed in its track's timescale. `track` maps a fragment's `track_ID`
+/// to that track's timescale and encryption, and a fragment it returns `None`
+/// for is skipped. `base_offset` is where `data` sits in the source byte stream.
 ///
-/// An encrypted track's samples are decrypted in place via `decrypt` before
-/// de-framing, using the crypto the fragment's sample auxiliary information and
-/// `seig` groups resolve (see [`fragment_sample_crypt`]); an encrypted track with
-/// no `decrypt` supplied fails loud (`CapsMismatch`), so a keyless build never
-/// emits garbage. `base_offset` is where `data` sits in the source byte stream,
-/// so a rotating key can be selected by fragment position. The multi-track analog
-/// of [`parse_fragments`]; a non-conforming fragment is mis-split, not rejected,
-/// the same caveat as there.
-pub(crate) fn parse_fragments_multi(
-    data: &[u8],
-    tracks: &[TrackHeader],
+/// Assumes each `trun`'s samples are stored contiguously from the start of the
+/// following `mdat` payload; the `trun` `data_offset` is not honored. This holds
+/// for ffmpeg / CMAF output. A non-conforming fragment that positions its sample
+/// data elsewhere in the `mdat` is mis-split, not rejected.
+pub(crate) fn moof_samples<'a, 't>(
+    data: &'a [u8],
     base_offset: u64,
-    mut decrypt: Option<SampleDecrypt<'_>>,
-) -> Result<Vec<(u32, Sample)>, G2gError> {
+    track: impl Fn(Option<u32>) -> Option<(u32, Option<&'t CencTrack>)>,
+) -> Result<Vec<MoofSample<'a>>, G2gError> {
     let mut out = Vec::new();
-    let mut pending: Option<PendingFragment> = None;
-
+    // `Some(None)` is an open fragment of a skipped track.
+    let mut open: Option<Option<OpenFragment>> = None;
     for (kind, payload, box_at) in boxes_at(data) {
         match kind {
             b"moof" => {
                 let traf = find_box(payload, b"traf").ok_or(G2gError::CapsMismatch)?;
-                let tfhd = find_box(traf, b"tfhd").ok_or(G2gError::CapsMismatch)?;
+                let tfhd = find_box(traf, b"tfhd");
                 // tfhd: track_ID at payload offset 4 (after version/flags).
-                let track_id = be32(tfhd, 4)?;
-                let Some(track) = tracks.iter().find(|t| t.track_id == track_id) else {
-                    // A fragment for a track we don't forward: hold the id so the
-                    // following mdat is skipped, not mis-split into another track.
-                    pending = Some((track_id, Vec::new(), Vec::new(), 0));
+                let track_id = tfhd.map(|tfhd| be32(tfhd, 4)).transpose()?;
+                let Some((timescale, cenc)) = track(track_id) else {
+                    open = Some(None);
                     continue;
                 };
-                let timescale = track.timescale;
                 let tfdt = find_box(traf, b"tfdt").ok_or(G2gError::CapsMismatch)?;
                 let base_time = match tfdt.first() {
                     Some(1) => be64(tfdt, 4)?,
@@ -758,92 +771,137 @@ pub(crate) fn parse_fragments_multi(
                     _ => return Err(G2gError::CapsMismatch),
                 };
                 let trun = find_box(traf, b"trun").ok_or(G2gError::CapsMismatch)?;
-                let (default_duration, default_size) = tfhd_defaults(tfhd)?;
+                // The `tfhd` is where a CMAF fragment declares the sample duration
+                // its `trun` then omits.
+                let (default_duration, default_size) =
+                    tfhd.map(tfhd_defaults).transpose()?.unwrap_or((0, 0));
                 let trun_samples = parse_trun(trun, default_duration, default_size, data.len())?;
                 // An encrypted track's per-sample IVs / subsample maps live in the
                 // fragment's aux info, addressed from the start of this `moof`.
-                let crypt = match &track.cenc {
+                let crypt = match cenc {
                     Some(c) => {
                         let from_moof = data.get(box_at..).ok_or(G2gError::CapsMismatch)?;
                         fragment_sample_crypt(traf, from_moof, c, trun_samples.len())?
                     }
                     None => Vec::new(),
                 };
-                pending = Some((
+                open = Some(Some(OpenFragment {
                     track_id,
-                    fragment_sample_timings(base_time, &trun_samples, timescale),
+                    timings: fragment_sample_timings(base_time, &trun_samples, timescale),
                     crypt,
-                    base_offset.saturating_add(box_at as u64),
-                ));
+                    fragment_at: base_offset.saturating_add(box_at as u64),
+                }));
             }
             b"mdat" => {
-                let Some((track_id, timings, crypt, frag_at)) = pending.take() else {
+                let Some(fragment) = open.take() else {
                     return Err(G2gError::CapsMismatch); // mdat without moof
                 };
-                let Some(track) = tracks.iter().find(|t| t.track_id == track_id) else {
-                    continue; // skipped (unforwarded track), no samples emitted
+                let Some(fragment) = fragment else {
+                    continue;
                 };
+                let mut crypt = fragment.crypt.into_iter();
                 let mut at = 0usize;
-                for (i, timing) in timings.iter().enumerate() {
-                    let size = timing.size as usize;
-                    let raw = payload.get(at..at + size).ok_or(G2gError::CapsMismatch)?;
-                    at += size;
-                    // Decrypt an encrypted track's sample in place before de-framing.
-                    let owned;
-                    let bytes: &[u8] = match (&track.cenc, crypt.get(i)) {
-                        // A sample a `seig` group declares clear needs no key at
-                        // all, so it never reaches the decryptor.
-                        (Some(_), Some(sc)) if !sc.protected => raw,
-                        (Some(_), Some(sc)) => {
-                            let decrypt = decrypt.as_deref_mut().ok_or(G2gError::CapsMismatch)?;
-                            let mut buf = raw.to_vec();
-                            decrypt(sc, frag_at, &mut buf)?;
-                            owned = buf;
-                            &owned
-                        }
-                        // An encrypted track whose fragment described fewer samples
-                        // than the `trun` holds: fail rather than emit ciphertext.
-                        (Some(_), None) => return Err(G2gError::CapsMismatch),
-                        (None, _) => raw,
-                    };
-                    let (annexb, keyframe) = match &track.kind {
-                        TrackKind::Video { codec, .. } => {
-                            let annexb = avcc_to_annexb(bytes)?;
-                            let kf = au_is_keyframe(*codec, &annexb);
-                            (annexb, kf)
-                        }
-                        // Audio access units are stored verbatim; each is a sync point.
-                        TrackKind::Audio { .. } => (bytes.to_vec(), true),
-                        // A caption sample de-frames to the cc_data triple stream.
-                        TrackKind::ClosedCaption { format } => (deframe_cc(bytes, *format), true),
-                        // A timed-text cue is independent; strip its sample framing
-                        // (tx3g / wvtt) or pass the whole TTML document (stpp).
-                        TrackKind::Text { sample, .. } => {
-                            let cue = match SampleFraming::of_text(*sample) {
-                                SampleFraming::WvttText => deframe_wvtt(bytes),
-                                SampleFraming::PassThrough => bytes.to_vec(),
-                                _ => deframe_tx3g(bytes),
-                            };
-                            (cue, true)
-                        }
-                    };
-                    out.push((
-                        track_id,
-                        Sample {
-                            annexb,
-                            pts_ns: timing.pts_ns,
-                            dts_ns: timing.dts_ns,
-                            duration_ns: timing.duration_ns,
-                            keyframe,
-                        },
-                    ));
+                for timing in fragment.timings {
+                    let end = at
+                        .checked_add(timing.size as usize)
+                        .ok_or(G2gError::CapsMismatch)?;
+                    let bytes = payload.get(at..end).ok_or(G2gError::CapsMismatch)?;
+                    at = end;
+                    out.push(MoofSample {
+                        track_id: fragment.track_id,
+                        bytes,
+                        timing,
+                        crypt: crypt.next(),
+                        fragment_at: fragment.fragment_at,
+                    });
                 }
             }
             _ => {}
         }
     }
-    if pending.is_some() {
+    if open.is_some() {
         return Err(G2gError::CapsMismatch); // trailing moof without mdat
+    }
+    Ok(out)
+}
+
+/// A stored sample's clear bytes. A protected sample of an `encrypted` track is
+/// decrypted in a copy, one a `seig` group declares clear needs no key at all.
+fn clear_sample_bytes<'a>(
+    sample: &MoofSample<'a>,
+    encrypted: bool,
+    decrypt: &mut Option<SampleDecrypt<'_>>,
+) -> Result<Cow<'a, [u8]>, G2gError> {
+    if !encrypted {
+        return Ok(Cow::Borrowed(sample.bytes));
+    }
+    // Fewer crypto records than samples: fail rather than emit ciphertext.
+    let crypt = sample.crypt.as_ref().ok_or(G2gError::CapsMismatch)?;
+    if !crypt.protected {
+        return Ok(Cow::Borrowed(sample.bytes));
+    }
+    let decrypt = decrypt.as_deref_mut().ok_or(G2gError::CapsMismatch)?;
+    let mut buf = sample.bytes.to_vec();
+    decrypt(crypt, sample.fragment_at, &mut buf)?;
+    Ok(Cow::Owned(buf))
+}
+
+/// Split every sample of a multi-track fMP4 out, keyed by its `track_ID`, for
+/// the tracks in `tracks` (fragments of any other track are skipped): video
+/// samples are de-framed AVCC->Annex-B with a keyframe scan, audio samples pass
+/// through (each is a sync sample).
+///
+/// An encrypted track's samples are decrypted via `decrypt` before de-framing,
+/// using the crypto the fragment's sample auxiliary information and `seig`
+/// groups resolve (see [`fragment_sample_crypt`]); an encrypted track with no
+/// `decrypt` supplied fails loud (`CapsMismatch`), so a keyless build never
+/// emits garbage. `base_offset` is where `data` sits in the source byte stream,
+/// so a rotating key can be selected by fragment position.
+pub(crate) fn parse_fragments_multi(
+    data: &[u8],
+    tracks: &[TrackHeader],
+    base_offset: u64,
+    mut decrypt: Option<SampleDecrypt<'_>>,
+) -> Result<Vec<(u32, Sample)>, G2gError> {
+    let track_of = |track_id: Option<u32>| tracks.iter().find(|t| Some(t.track_id) == track_id);
+    let stored = moof_samples(data, base_offset, |track_id| {
+        track_of(track_id).map(|t| (t.timescale, t.cenc.as_ref()))
+    })?;
+    let mut out = Vec::with_capacity(stored.len());
+    for sample in &stored {
+        let track = track_of(sample.track_id).expect("the walk kept only known tracks");
+        let bytes = clear_sample_bytes(sample, track.cenc.is_some(), &mut decrypt)?;
+        let (annexb, keyframe) = match &track.kind {
+            TrackKind::Video { codec, .. } => {
+                let annexb = avcc_to_annexb(&bytes)?;
+                let kf = au_is_keyframe(*codec, &annexb);
+                (annexb, kf)
+            }
+            // Audio access units are stored verbatim; each is a sync point.
+            TrackKind::Audio { .. } => (bytes.into_owned(), true),
+            // A caption sample de-frames to the cc_data triple stream.
+            TrackKind::ClosedCaption { format } => (deframe_cc(&bytes, *format), true),
+            // A timed-text cue is independent; strip its sample framing
+            // (tx3g / wvtt) or pass the whole TTML document (stpp).
+            TrackKind::Text { sample, .. } => {
+                let cue = match SampleFraming::of_text(*sample) {
+                    SampleFraming::WvttText => deframe_wvtt(&bytes),
+                    SampleFraming::PassThrough => bytes.into_owned(),
+                    _ => deframe_tx3g(&bytes),
+                };
+                (cue, true)
+            }
+        };
+        out.push((
+            track.track_id,
+            Sample {
+                annexb,
+                pts_ns: sample.timing.pts_ns,
+                dts_ns: sample.timing.dts_ns,
+                duration_ns: sample.timing.duration_ns,
+                keyframe,
+            },
+        ));
     }
     Ok(out)
 }
@@ -856,14 +914,10 @@ pub(crate) use crate::annexb::parse_hvcc;
 // their import path.
 pub(crate) use crate::annexb::{parse_avcc, prepend_param_sets, starts_with_param_set};
 
-/// Walk the `moof`+`mdat` pairs in `data` and split every sample out of its
-/// `mdat`, converting AVCC framing back to Annex-B. `codec` selects the IDR NAL
-/// type used to flag keyframes (the seek snap points).
-///
-/// Assumes each `trun`'s samples are stored contiguously from the start of the
-/// following `mdat` payload; the `trun` `data_offset` is not honored. This holds
-/// for ffmpeg / CMAF output. A non-conforming fragment that positions its sample
-/// data elsewhere in the `mdat` is mis-split, not rejected.
+/// Split every sample of a single-track fMP4 out of its `mdat`, converting AVCC
+/// framing back to Annex-B. `codec` selects the IDR NAL type used to flag
+/// keyframes (the seek snap points). Every fragment is taken as this track's,
+/// whatever its `track_ID`.
 pub(crate) fn parse_fragments(
     data: &[u8],
     timescale: u32,
@@ -872,82 +926,25 @@ pub(crate) fn parse_fragments(
     base_offset: u64,
     mut decrypt: Option<SampleDecrypt<'_>>,
 ) -> Result<Vec<Sample>, G2gError> {
-    let mut samples = Vec::new();
-    let mut pending: Option<Vec<FragmentSampleTiming>> = None;
-    let mut pending_crypt: Vec<SampleCrypt> = Vec::new();
-    let mut frag_at = 0u64;
-
-    for (kind, payload, box_at) in boxes_at(data) {
-        match kind {
-            b"moof" => {
-                let traf = find_box(payload, b"traf").ok_or(G2gError::CapsMismatch)?;
-                let tfdt = find_box(traf, b"tfdt").ok_or(G2gError::CapsMismatch)?;
-                let base_time = match tfdt.first() {
-                    Some(1) => be64(tfdt, 4)?,
-                    Some(0) => be32(tfdt, 4)? as u64,
-                    _ => return Err(G2gError::CapsMismatch),
-                };
-                let trun = find_box(traf, b"trun").ok_or(G2gError::CapsMismatch)?;
-                // The `tfhd` is where a CMAF fragment declares the sample duration
-                // its `trun` then omits.
-                let (default_duration, default_size) = match find_box(traf, b"tfhd") {
-                    Some(tfhd) => tfhd_defaults(tfhd)?,
-                    None => (0, 0),
-                };
-                let trun_samples = parse_trun(trun, default_duration, default_size, data.len())?;
-                pending = Some(fragment_sample_timings(base_time, &trun_samples, timescale));
-                frag_at = base_offset.saturating_add(box_at as u64);
-                pending_crypt = match cenc {
-                    Some(c) => {
-                        let from_moof = data.get(box_at..).ok_or(G2gError::CapsMismatch)?;
-                        fragment_sample_crypt(traf, from_moof, c, trun_samples.len())?
-                    }
-                    None => Vec::new(),
-                };
-            }
-            b"mdat" => {
-                let Some(timings) = pending.take() else {
-                    return Err(G2gError::CapsMismatch); // mdat without moof
-                };
-                let mut at = 0usize;
-                for (i, timing) in timings.iter().enumerate() {
-                    let size = timing.size as usize;
-                    let raw = payload.get(at..at + size).ok_or(G2gError::CapsMismatch)?;
-                    let annexb = if cenc.is_some() {
-                        // Encrypted: decrypt the sample in place, then de-frame. A
-                        // sample a `seig` group declares clear needs no key.
-                        let sc = pending_crypt.get(i).ok_or(G2gError::CapsMismatch)?;
-                        if sc.protected {
-                            let decrypt = decrypt.as_deref_mut().ok_or(G2gError::CapsMismatch)?;
-                            let mut buf = raw.to_vec();
-                            decrypt(sc, frag_at, &mut buf)?;
-                            avcc_to_annexb(&buf)?
-                        } else {
-                            avcc_to_annexb(raw)?
-                        }
-                    } else if matches!(codec, VideoCodec::Mpeg4Part2 | VideoCodec::Av1) {
-                        // Raw elementary samples (start codes / low-overhead
-                        // OBUs): no length-prefix de-framing.
-                        raw.to_vec()
-                    } else {
-                        avcc_to_annexb(raw)?
-                    };
-                    let keyframe = au_is_keyframe(codec, &annexb);
-                    samples.push(Sample {
-                        annexb,
-                        pts_ns: timing.pts_ns,
-                        dts_ns: timing.dts_ns,
-                        duration_ns: timing.duration_ns,
-                        keyframe,
-                    });
-                    at += size;
-                }
-            }
-            _ => {}
-        }
-    }
-    if pending.is_some() {
-        return Err(G2gError::CapsMismatch); // trailing moof without mdat
+    let stored = moof_samples(data, base_offset, |_| Some((timescale, cenc)))?;
+    let mut samples = Vec::with_capacity(stored.len());
+    for sample in &stored {
+        let bytes = clear_sample_bytes(sample, cenc.is_some(), &mut decrypt)?;
+        let annexb = if matches!(codec, VideoCodec::Mpeg4Part2 | VideoCodec::Av1) {
+            // Raw elementary samples (start codes / low-overhead OBUs): no
+            // length-prefix de-framing.
+            bytes.into_owned()
+        } else {
+            avcc_to_annexb(&bytes)?
+        };
+        let keyframe = au_is_keyframe(codec, &annexb);
+        samples.push(Sample {
+            annexb,
+            pts_ns: sample.timing.pts_ns,
+            dts_ns: sample.timing.dts_ns,
+            duration_ns: sample.timing.duration_ns,
+            keyframe,
+        });
     }
     Ok(samples)
 }
@@ -1182,9 +1179,9 @@ fn parse_progressive_track(
         };
         samples.push(Sample {
             annexb,
-            pts_ns: timescale_to_ns(pts, timescale),
-            dts_ns: timescale_to_ns(dts, timescale),
-            duration_ns: timescale_to_ns(durations[i] as u64, timescale),
+            pts_ns: ticks_to_ns(pts, timescale),
+            dts_ns: ticks_to_ns(dts, timescale),
+            duration_ns: ticks_to_ns(durations[i] as u64, timescale),
             keyframe,
         });
         dts = dts.saturating_add(durations[i] as u64);
@@ -1488,11 +1485,11 @@ pub(crate) fn parse_trun(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct FragmentSampleTiming {
-    size: u32,
-    dts_ns: u64,
-    pts_ns: u64,
-    duration_ns: u64,
+pub(crate) struct FragmentSampleTiming {
+    pub(crate) size: u32,
+    pub(crate) dts_ns: u64,
+    pub(crate) pts_ns: u64,
+    pub(crate) duration_ns: u64,
 }
 
 fn fragment_sample_timings(
@@ -1506,12 +1503,12 @@ fn fragment_sample_timings(
         .map(|sample| {
             let timing = FragmentSampleTiming {
                 size: sample.size,
-                dts_ns: timescale_to_ns(decode_time, timescale),
-                pts_ns: timescale_to_ns(
+                dts_ns: ticks_to_ns(decode_time, timescale),
+                pts_ns: ticks_to_ns(
                     decode_time.saturating_add_signed(sample.composition_offset),
                     timescale,
                 ),
-                duration_ns: timescale_to_ns(u64::from(sample.duration), timescale),
+                duration_ns: ticks_to_ns(u64::from(sample.duration), timescale),
             };
             // base_time and durations are untrusted
             decode_time = decode_time.saturating_add(u64::from(sample.duration));
@@ -1524,10 +1521,6 @@ fn fragment_sample_timings(
 fn avcc_to_annexb(avcc: &[u8]) -> Result<Vec<u8>, G2gError> {
     crate::annexb::length_prefixed_to_annexb(avcc, crate::annexb::AVCC_LENGTH_SIZE)
         .ok_or(G2gError::CapsMismatch)
-}
-
-fn timescale_to_ns(t: u64, timescale: u32) -> u64 {
-    t.saturating_mul(1_000_000_000) / timescale as u64
 }
 
 /// Incremental CMAF chunk splitter for a segment still being written (M888): fed
@@ -1744,12 +1737,6 @@ mod tests {
     }
 
     #[test]
-    fn timescale_conversion_inverts_the_sink() {
-        assert_eq!(timescale_to_ns(90_000, 90_000), 1_000_000_000);
-        assert_eq!(timescale_to_ns(2999, 90_000), 33_322_222);
-    }
-
-    #[test]
     fn sps_detection_reads_the_first_nal_type() {
         assert!(starts_with_param_set(
             &[0, 0, 0, 1, 0x67, 0xAA],
@@ -1795,7 +1782,7 @@ mod tests {
         include_str!("../tests/fixtures/h264_64x48_bframes_frag.mp4.pts_dts");
 
     fn probed_pts_dts_ns(timescale: u32) -> Vec<(u64, u64)> {
-        let ticks_ns = |ticks: &str| timescale_to_ns(ticks.parse().unwrap(), timescale);
+        let ticks_ns = |ticks: &str| ticks_to_ns(ticks.parse().unwrap(), timescale);
         BFRAME_FRAGMENTED_PTS_DTS
             .lines()
             .map(|line| {

@@ -154,8 +154,8 @@ struct Sample {
 }
 
 // box read primitives are shared across the MP4 elements.
-use crate::fmp4::{parse_trun, tfhd_defaults};
-use crate::mp4box::{be32, be64, boxes, find_box, find_path, parse_esds};
+use crate::fmp4::moof_samples;
+use crate::mp4box::{be32, find_box, find_path, parse_esds};
 
 fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
     let moov = find_box(data, b"moov").ok_or(G2gError::CapsMismatch)?;
@@ -199,77 +199,19 @@ fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
 /// Walk `moof`+`mdat` pairs and split every raw AAC access unit out of its
 /// `mdat`.
 fn parse_fragments(data: &[u8], timescale: u32) -> Result<Vec<Sample>, G2gError> {
-    let mut samples = Vec::new();
-    let mut pending: Option<Vec<(u32, u64)>> = None; // (size, pts_ns)
-    let mut durations: Vec<u64> = Vec::new();
-
-    for (kind, payload) in boxes(data) {
-        match kind {
-            b"moof" => {
-                let traf = find_box(payload, b"traf").ok_or(G2gError::CapsMismatch)?;
-                let tfdt = find_box(traf, b"tfdt").ok_or(G2gError::CapsMismatch)?;
-                let base_time = match tfdt.first() {
-                    Some(1) => be64(tfdt, 4)?,
-                    Some(0) => be32(tfdt, 4)? as u64,
-                    _ => return Err(G2gError::CapsMismatch),
-                };
-                let trun = find_box(traf, b"trun").ok_or(G2gError::CapsMismatch)?;
-                let (default_duration, default_size) = match find_box(traf, b"tfhd") {
-                    Some(tfhd) => tfhd_defaults(tfhd)?,
-                    None => (0, 0),
-                };
-                let trun_samples = parse_trun(trun, default_duration, default_size, data.len())?;
-                let mut t = base_time;
-                let mut tagged = Vec::with_capacity(trun_samples.len());
-                durations.clear();
-                for sample in &trun_samples {
-                    tagged.push((sample.size, timescale_to_ns(t, timescale)));
-                    durations.push(timescale_to_ns(u64::from(sample.duration), timescale));
-                    // base_time and durations are untrusted
-                    t = t.saturating_add(u64::from(sample.duration));
-                }
-                pending = Some(tagged);
-            }
-            b"mdat" => {
-                let Some(tagged) = pending.take() else {
-                    return Err(G2gError::CapsMismatch);
-                };
-                let mut at = 0usize;
-                for (i, (size, pts_ns)) in tagged.iter().enumerate() {
-                    let au = payload
-                        .get(at..at + *size as usize)
-                        .ok_or(G2gError::CapsMismatch)?
-                        .to_vec();
-                    samples.push(Sample {
-                        au,
-                        pts_ns: *pts_ns,
-                        duration_ns: durations[i],
-                    });
-                    at += *size as usize;
-                }
-            }
-            _ => {}
-        }
-    }
-    if pending.is_some() {
-        return Err(G2gError::CapsMismatch);
-    }
-    Ok(samples)
-}
-
-fn timescale_to_ns(t: u64, timescale: u32) -> u64 {
-    t.saturating_mul(1_000_000_000) / timescale as u64
+    Ok(moof_samples(data, 0, |_| Some((timescale, None)))?
+        .into_iter()
+        .map(|sample| Sample {
+            au: sample.bytes.to_vec(),
+            pts_ns: sample.timing.pts_ns,
+            duration_ns: sample.timing.duration_ns,
+        })
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn timescale_conversion() {
-        // 48 kHz timescale: 1024 ticks is one AAC frame ~21.33 ms.
-        assert_eq!(timescale_to_ns(1024, 48_000), 21_333_333);
-    }
 
     #[test]
     fn fragment_decode_time_saturates() {
@@ -297,7 +239,13 @@ mod tests {
         ]
         .concat();
         let samples = parse_fragments(&file, TIMESCALE).expect("fragment parses");
-        assert_eq!(samples[0].pts_ns, timescale_to_ns(BASE_TIME, TIMESCALE));
-        assert_eq!(samples[1].pts_ns, timescale_to_ns(u64::MAX, TIMESCALE));
+        assert_eq!(
+            samples[0].pts_ns,
+            g2g_core::time::ticks_to_ns(BASE_TIME, TIMESCALE)
+        );
+        assert_eq!(
+            samples[1].pts_ns,
+            g2g_core::time::ticks_to_ns(u64::MAX, TIMESCALE)
+        );
     }
 }

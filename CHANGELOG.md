@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1359: fMP4 and `mp4audiosrc` share one `moof` walker with rounded tick conversion and composition offsets.
 - M1358: `fmp4mux` and `mp4audiosink` use mp4muxn's `moov` and fragment writers, with rounded timescale conversion.
 - M1357: MP4, Matroska, FLV and MPEG-TS muxers write each payload once into a pre-sized buffer.
 - M1356: PS, Ogg, IVF, Matroska and fMP4 demuxers parse from a read offset instead of draining per unit.
