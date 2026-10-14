@@ -39,6 +39,8 @@ const DEFAULT_LATENCY_MS: u16 = 120;
 const RECV_BUF: usize = 2048;
 /// Send a NAK at most this often (ns), so a gap is not re-requested every packet.
 const NACK_MIN_INTERVAL_NS: u64 = 20_000_000;
+/// The SRT full ACK period (the 10 ms SYN interval).
+const ACK_INTERVAL_NS: u64 = 10_000_000;
 /// Receive timeout (ms) so the TSBPD buffer still flushes due packets when no new
 /// datagram arrives; bounds the extra delivery jitter a silent gap can add.
 const TSBPD_WAKE_MS: u64 = 5;
@@ -277,6 +279,7 @@ impl SourceLoop for SrtSrc {
             let limit = self.frame_limit;
             let mut emitted = 0u64;
             let mut last_nack_ns = 0u64;
+            let mut last_ack_ns = 0u64;
             loop {
                 // A short receive timeout so buffered packets still flush on their
                 // TSBPD schedule when no new datagram arrives (a silent gap).
@@ -338,7 +341,7 @@ impl SourceLoop for SrtSrc {
                     }
                 }
 
-                // Request retransmission of any open gaps, rate-limited, and ACK.
+                // Request retransmission of any open gaps, rate-limited.
                 if now.saturating_sub(last_nack_ns) >= NACK_MIN_INTERVAL_NS {
                     let missing = receiver.missing();
                     if !missing.is_empty() {
@@ -347,14 +350,12 @@ impl SourceLoop for SrtSrc {
                         socket.send_to(&nak, peer).await.map_err(io_err)?;
                         last_nack_ns = now;
                     }
-                    let ack = srt::build_control(
-                        &Control::Ack {
-                            ack_no: 0,
-                            ack_seq: receiver.ack_seq(),
-                        },
-                        0,
-                        peer_socket_id,
-                    );
+                }
+                let ack_due = now.saturating_sub(last_ack_ns) >= ACK_INTERVAL_NS;
+                if let Some(ack_seq) = receiver.ack_seq().filter(|_| ack_due) {
+                    last_ack_ns = now;
+                    let ack =
+                        srt::build_control(&Control::Ack { ack_no: 0, ack_seq }, 0, peer_socket_id);
                     socket.send_to(&ack, peer).await.map_err(io_err)?;
                 }
             }

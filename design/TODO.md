@@ -37,8 +37,6 @@ Bugs:
 - ST 2110 depacketizers read the payload at offset 12 without `RtpHeader::parse`.
 - RTP timestamp rebasing in `rtprecv` and four ST 2110 receivers does not unwrap.
   Use the core RTP extenders there and in `XorFecBuffer`, rtpjitter, st2110dup, rtcp.
-- `srt.rs` trims the send buffer with a plain `>=` instead of `seq_ge`, and
-  `srtsrc` ACKs every datagram.
 - `streamdec` and `vulkanvideo` compute the H.264 coded height without
   `frame_mbs_only_flag`, so field-coded streams get half the height.
 - `sink_arm_loop` drops flushed frames without `pop_transit_ns`.

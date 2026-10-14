@@ -9,6 +9,8 @@
 use core::future::Future;
 use core::pin::Pin;
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
@@ -77,8 +79,14 @@ impl OutputSink for NullOut {
     }
 }
 
-/// Relay caller<->listener, dropping the SRT data packet with `drop_seq` once.
-async fn lossy_proxy(proxy: tokio::net::UdpSocket, listener_addr: SocketAddr, drop_seq: u32) {
+/// Relay caller<->listener, dropping the SRT data packet with `drop_seq` once
+/// and counting the ACKs the listener sends.
+async fn lossy_proxy(
+    proxy: tokio::net::UdpSocket,
+    listener_addr: SocketAddr,
+    drop_seq: Option<u32>,
+    acks_seen: Arc<AtomicUsize>,
+) {
     let mut caller: Option<SocketAddr> = None;
     let mut dropped = false;
     let mut buf = [0u8; 2048];
@@ -91,7 +99,7 @@ async fn lossy_proxy(proxy: tokio::net::UdpSocket, listener_addr: SocketAddr, dr
             // Caller -> listener. Drop the target data packet exactly once.
             if !srt::is_control(&buf[..n]) {
                 if let Some(d) = srt::parse_data_packet(&buf[..n]) {
-                    if d.seq == drop_seq && !dropped {
+                    if Some(d.seq) == drop_seq && !dropped {
                         dropped = true;
                         continue;
                     }
@@ -100,6 +108,12 @@ async fn lossy_proxy(proxy: tokio::net::UdpSocket, listener_addr: SocketAddr, dr
             let _ = proxy.send_to(&buf[..n], listener_addr).await;
         } else {
             // Listener -> caller (NAK / ACK / handshake replies).
+            if matches!(
+                srt::parse_control(&buf[..n]),
+                Some(srt::Control::Ack { .. })
+            ) {
+                acks_seen.fetch_add(1, Ordering::Relaxed);
+            }
             if let Some(dest) = caller {
                 let _ = proxy.send_to(&buf[..n], dest).await;
             }
@@ -120,7 +134,7 @@ async fn srt_handshake_and_arq_recover_a_dropped_payload() {
     let proxy_addr = proxy.local_addr().unwrap();
 
     // Init seq is 1, so the 3rd data packet is seq 3; drop it once.
-    let proxy_task = tokio::spawn(lossy_proxy(proxy, listener_addr, 3));
+    let proxy_task = tokio::spawn(lossy_proxy(proxy, listener_addr, Some(3), Arc::default()));
 
     let mut src = SrtSrc::from_socket(listener_std)
         .unwrap()
@@ -188,6 +202,76 @@ async fn srt_handshake_and_arq_recover_a_dropped_payload() {
     assert!(
         retransmits >= 1,
         "caller retransmitted the dropped packet on NAK"
+    );
+}
+
+#[tokio::test]
+async fn listener_acks_on_its_timer_not_per_datagram() {
+    const N: u8 = 200;
+    const ACK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+    // The first ACK goes out at once, and a timer wake can land at the boundary.
+    const ACK_SLACK: usize = 2;
+
+    let listener_std = StdUdpSocket::bind("127.0.0.1:0").expect("bind listener");
+    let listener_addr = listener_std.local_addr().unwrap();
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy");
+    let proxy_addr = proxy.local_addr().unwrap();
+    let acks_seen = Arc::new(AtomicUsize::new(0));
+    let proxy_task = tokio::spawn(lossy_proxy(proxy, listener_addr, None, acks_seen.clone()));
+
+    let mut src = SrtSrc::from_socket(listener_std)
+        .unwrap()
+        .with_frame_limit(N as u64);
+    let mut sink_collect = TagSink::default();
+    let clock = ZeroClock;
+
+    let caller = async {
+        let mut sink = SrtSink::new(proxy_addr);
+        sink.configure_pipeline(&Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::MpegTs,
+        })
+        .expect("configure");
+        let mut null = NullOut;
+        for i in 0..N {
+            let frame = Frame {
+                domain: MemoryDomain::System(SystemSlice::from_boxed(
+                    vec![i; 100].into_boxed_slice(),
+                )),
+                timing: FrameTiming::default(),
+                sequence: i as u64,
+                meta: Default::default(),
+            };
+            sink.process(PipelinePacket::DataFrame(frame), &mut null)
+                .await
+                .expect("send");
+        }
+    };
+
+    let start = std::time::Instant::now();
+    let recv = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        run_simple_pipeline(
+            &mut src,
+            &mut sink_collect,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
+    );
+    let (recv_res, ()) = tokio::join!(recv, caller);
+    let elapsed = start.elapsed();
+    proxy_task.abort();
+
+    let stats = recv_res
+        .expect("listener finishes within 15s")
+        .expect("receive pipeline ok");
+    assert_eq!(stats.frames_emitted, N as u64);
+    let ack_bound = (elapsed.as_nanos() / ACK_INTERVAL.as_nanos()) as usize + ACK_SLACK;
+    let acks = acks_seen.load(Ordering::Relaxed);
+    assert!(
+        acks <= ack_bound,
+        "{acks} ACKs in {elapsed:?} for {N} datagrams, the 10 ms timer allows {ack_bound}"
     );
 }
 

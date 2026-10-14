@@ -830,7 +830,7 @@ impl SrtSender {
                 for &seq in loss {
                     // Resend with the parity the packet was originally encrypted
                     // under, not the current active key.
-                    if let Some((_, kk, payload)) = self.buffer.iter().find(|(s, _, _)| *s == seq) {
+                    if let Some((_, kk, payload)) = self.buffered(seq) {
                         out.push(build_data_packet(
                             seq,
                             0,
@@ -847,11 +847,25 @@ impl SrtSender {
             }
             Control::Ack { ack_seq, .. } => {
                 // Everything before ack_seq is received; drop it from the buffer.
-                self.buffer.retain(|(s, _, _)| *s >= *ack_seq);
+                while self
+                    .buffer
+                    .front()
+                    .is_some_and(|(s, _, _)| !seq_ge(*s, *ack_seq))
+                {
+                    self.buffer.pop_front();
+                }
                 Vec::new()
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The buffered packet `seq`, found by its offset from the oldest one since
+    /// the buffer holds consecutive sequences in send order.
+    fn buffered(&self, seq: u32) -> Option<&(u32, u8, Vec<u8>)> {
+        let (oldest, _, _) = self.buffer.front()?;
+        let entry = self.buffer.get(seq_distance(seq, *oldest) as usize)?;
+        (entry.0 == seq).then_some(entry)
     }
 }
 
@@ -1033,8 +1047,10 @@ impl SrtReceiver {
     }
 
     /// The next-to-deliver sequence, the ACK point (everything before it is in).
-    pub fn ack_seq(&self) -> u32 {
-        self.next_deliver
+    /// `None` until the first data packet, since an ACK then names no real
+    /// sequence and libsrt drops the connection over it.
+    pub fn ack_seq(&self) -> Option<u32> {
+        self.have_base.then_some(self.next_deliver)
     }
 }
 
@@ -1129,8 +1145,13 @@ fn seq_ge(a: u32, b: u32) -> bool {
 
 /// 31-bit sequence comparison (wrap-aware): is `a > b`?
 fn seq_gt(a: u32, b: u32) -> bool {
-    let diff = a.wrapping_sub(b) & 0x7FFF_FFFF;
+    let diff = seq_distance(a, b);
     diff != 0 && diff < 0x4000_0000
+}
+
+/// How far `a` is past `b` on the 31-bit sequence circle.
+fn seq_distance(a: u32, b: u32) -> u32 {
+    a.wrapping_sub(b) & 0x7FFF_FFFF
 }
 
 #[cfg(test)]
@@ -1339,6 +1360,47 @@ mod tests {
         );
         assert!(receiver.missing().is_empty(), "no gaps remain");
         assert_eq!(sender.retransmits(), 1);
+    }
+
+    #[test]
+    fn receiver_has_no_ack_point_before_the_first_packet() {
+        let mut sender = SrtSender::new(0x1234, 100, 64);
+        let mut receiver = SrtReceiver::new();
+        assert_eq!(receiver.ack_seq(), None);
+        receiver.on_data(parse_data_packet(&sender.send(b"p0", 0)).unwrap());
+        assert_eq!(receiver.ack_seq(), Some(100));
+    }
+
+    #[test]
+    fn ack_across_the_sequence_wrap_keeps_unacked_packets() {
+        const LAST_SEQUENCE: u32 = 0x7FFF_FFFF;
+        const PACKETS_BEFORE_WRAP: u32 = 3;
+        const PACKETS_AFTER_WRAP: u32 = 3;
+        let first = LAST_SEQUENCE - (PACKETS_BEFORE_WRAP - 1);
+        let mut sender = SrtSender::new(0x1234, first, 64);
+        for i in 0..PACKETS_BEFORE_WRAP + PACKETS_AFTER_WRAP {
+            sender.send(format!("p{i}").as_bytes(), i);
+        }
+
+        // Everything before the wrap arrived, the post-wrap packets 0, 1, 2 did not.
+        sender.on_control(
+            &Control::Ack {
+                ack_no: 0,
+                ack_seq: 0,
+            },
+            0,
+        );
+        let resends = sender.on_control(
+            &Control::Nak {
+                loss: vec![LAST_SEQUENCE, 0, 1, 2],
+            },
+            0,
+        );
+        let resent: Vec<u32> = resends
+            .iter()
+            .map(|p| parse_data_packet(p).unwrap().seq)
+            .collect();
+        assert_eq!(resent, [0, 1, 2], "acked packets dropped, unacked kept");
     }
 
     #[test]
