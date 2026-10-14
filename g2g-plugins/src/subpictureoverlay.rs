@@ -337,29 +337,12 @@ impl MultiInputElement for SubPictureOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::CollectSink;
     use g2g_core::frame::{Frame, FrameTiming};
     use g2g_core::memory::SystemSlice;
-    use g2g_core::PushOutcome;
 
     const W: u32 = 8;
     const H: u32 = 4;
-
-    #[derive(Default)]
-    struct CollectSink {
-        packets: Vec<PipelinePacket>,
-    }
-    impl OutputSink for CollectSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-
-            self.packets.push(packet);
-            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-        }
-    }
 
     fn rgba(w: u32, h: u32) -> Caps {
         Caps::RawVideo {

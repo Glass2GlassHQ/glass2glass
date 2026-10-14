@@ -691,6 +691,7 @@ mod tests {
     use super::*;
     use crate::access_unit::access_unit_starts;
     use crate::annexb::{nal_units, BitWriter};
+    use crate::testutil::{frame_with_bytes, CollectSink};
 
     // A malformed HEVC SPS whose short-term RPS carries huge Exp-Golomb POC
     // deltas: the running POC accumulation overflowed i32 (found by cargo-fuzz).
@@ -707,9 +708,7 @@ mod tests {
     }
     use alloc::vec;
 
-    use g2g_core::{
-        AsyncElement, Caps, CapsConstraint, Dim, G2gError, OutputSink, PipelinePacket, Rate,
-    };
+    use g2g_core::{AsyncElement, Caps, CapsConstraint, Dim, G2gError, PipelinePacket, Rate};
 
     /// Build an Annex-B H.265 SPS for `pic_w` x `pic_h` luma samples at
     /// `chroma_format_idc`, optionally with a conformance window
@@ -1063,38 +1062,6 @@ mod tests {
 
     // -- Element-level tests (drive H265Parse::process directly) -----------
 
-    use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
-    use g2g_core::{FrameTiming, MemoryDomain, PushOutcome};
-
-    #[derive(Default)]
-    struct RecordingSink {
-        packets: Vec<PipelinePacket>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            core::task::Poll::Ready({
-                self.packets.push(packet);
-                Ok(PushOutcome::Accepted)
-            })
-        }
-    }
-
-    fn frame_with_bytes(seq: u64, bytes: Vec<u8>) -> Frame {
-        Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: seq,
-            meta: Default::default(),
-        }
-    }
-
     fn h265_caps() -> Caps {
         Caps::CompressedVideo {
             codec: VideoCodec::H265,
@@ -1109,7 +1076,7 @@ mod tests {
     async fn emits_caps_changed_before_first_data_frame() {
         let mut parse = H265Parse::new();
         parse.configure_pipeline(&h265_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let frame = frame_with_bytes(0, build_annexb_sps(1920, 1080, 1, None));
         parse
@@ -1138,7 +1105,7 @@ mod tests {
     async fn does_not_re_emit_caps_when_unchanged() {
         let mut parse = H265Parse::new();
         parse.configure_pipeline(&h265_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         for seq in 0..3 {
             let frame = frame_with_bytes(seq, build_annexb_sps(1280, 720, 1, None));
@@ -1161,7 +1128,7 @@ mod tests {
     async fn re_emits_caps_on_resolution_change() {
         let mut parse = H265Parse::new();
         parse.configure_pipeline(&h265_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         parse
             .process(
@@ -1246,7 +1213,7 @@ mod tests {
         v
     }
 
-    fn data_payloads(sink: &RecordingSink) -> Vec<Vec<u8>> {
+    fn data_payloads(sink: &CollectSink) -> Vec<Vec<u8>> {
         sink.packets
             .iter()
             .filter_map(|p| match p {
@@ -1276,7 +1243,7 @@ mod tests {
     async fn reframing_splits_two_access_units_in_one_buffer() {
         let mut parse = H265Parse::reframing();
         parse.configure_pipeline(&h265_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let au0 = annexb_vcl_h265(true, 1);
         let au1 = annexb_vcl_h265(true, 2);
@@ -1308,7 +1275,7 @@ mod tests {
         // framing keeps it Annex-B instead of misreading the tail as length-prefixed.
         let mut parse = H265Parse::reframing();
         parse.configure_pipeline(&h265_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let au = annexb_vcl_h265(true, 7);
         let split = 7; // mid-NAL: past start code + 2-byte header + first RBSP byte
@@ -1345,7 +1312,7 @@ mod tests {
         // An IDR_W_RADL (type 19) access unit is a keyframe; a TRAIL_R (type 1) is not.
         let mut parse = H265Parse::reframing();
         parse.configure_pipeline(&h265_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         // IDR: NAL header first byte = (19 << 1) = 0x26, first-slice flag set.
         let mut idr = vec![0u8, 0, 0, 1, 0x26, 0x01, 0x80, 0xAA];

@@ -308,6 +308,7 @@ fn decrypt_aac_frame(frame: &[u8], header_len: usize, key: &[u8; 16], iv: &[u8; 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{data_bytes, CollectSink};
     use aes::cipher::{BlockEncryptMut, KeyIvInit};
     use alloc::vec;
 
@@ -502,29 +503,7 @@ mod tests {
     // -- element-level: drive process() like the chain would ----------------
 
     use g2g_core::frame::FrameTiming;
-    use g2g_core::{Dim, PushOutcome, Rate};
-
-    #[derive(Default)]
-    struct RecordingSink {
-        frames: Vec<Vec<u8>>,
-    }
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            core::task::Poll::Ready({
-                if let PipelinePacket::DataFrame(f) = packet {
-                    if let Some(s) = f.domain.as_system_slice() {
-                        self.frames.push(s.to_vec());
-                    }
-                }
-                Ok(PushOutcome::Accepted)
-            })
-        }
-    }
+    use g2g_core::{Dim, Rate};
 
     #[tokio::test]
     async fn element_decrypts_avc_data_frame() {
@@ -547,13 +526,13 @@ mod tests {
             sequence: 0,
             meta: Default::default(),
         };
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         elem.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .unwrap();
         assert_eq!(
-            sink.frames,
-            vec![cleartext],
+            data_bytes(&sink.packets),
+            cleartext,
             "element emits the decrypted access unit"
         );
     }
@@ -586,13 +565,13 @@ mod tests {
             sequence: 0,
             meta: Default::default(),
         };
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         elem.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .unwrap();
         assert_eq!(
-            sink.frames,
-            vec![cleartext],
+            data_bytes(&sink.packets),
+            cleartext,
             "key from the shared handle decrypts the AU"
         );
     }
@@ -615,13 +594,13 @@ mod tests {
             sequence: 0,
             meta: Default::default(),
         };
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         elem.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .unwrap();
         assert_eq!(
-            sink.frames,
-            vec![bytes],
+            data_bytes(&sink.packets),
+            bytes,
             "no key in the handle: pass through untouched"
         );
     }

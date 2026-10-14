@@ -708,12 +708,9 @@ static TENSORCONVERT_PROPS: &[PropertySpec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::CollectSink;
 
     use alloc::vec;
-
-    use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
-    use g2g_core::{FrameTiming, PushOutcome};
 
     #[test]
     fn quantize_then_dequantize_round_trips_within_a_step() {
@@ -863,35 +860,11 @@ mod tests {
 
     // -- Element-level tests (drive TensorConvert::process directly) ---------
 
-    #[derive(Default)]
-    struct RecordingSink {
-        packets: Vec<PipelinePacket>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            core::task::Poll::Ready({
-                self.packets.push(packet);
-                Ok(PushOutcome::Accepted)
-            })
-        }
-    }
-
     fn frame(bytes: Vec<u8>) -> PipelinePacket {
-        PipelinePacket::DataFrame(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: 0,
-            meta: Default::default(),
-        })
+        PipelinePacket::DataFrame(crate::testutil::frame(bytes))
     }
 
-    fn first_data(sink: &RecordingSink) -> Vec<u8> {
+    fn first_data(sink: &CollectSink) -> Vec<u8> {
         for p in &sink.packets {
             if let PipelinePacket::DataFrame(f) = p {
                 let Some(s) = f.domain.as_system_slice() else {
@@ -903,7 +876,7 @@ mod tests {
         panic!("no DataFrame emitted");
     }
 
-    fn first_caps(sink: &RecordingSink) -> Caps {
+    fn first_caps(sink: &CollectSink) -> Caps {
         for p in &sink.packets {
             if let PipelinePacket::CapsChanged(c) = p {
                 return c.clone();
@@ -922,7 +895,7 @@ mod tests {
             layout: TensorLayout::Nchw,
         };
         conv.configure_pipeline(&in_caps).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         conv.process(frame((0u8..8).collect()), &mut sink)
             .await
             .unwrap();
@@ -953,7 +926,7 @@ mod tests {
         for v in [0.0f32, 0.5, 1.0, 1.5] {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         conv.process(frame(bytes), &mut sink).await.unwrap();
 
         assert_eq!(first_data(&sink), vec![0, 2, 1, 3]);
@@ -980,7 +953,7 @@ mod tests {
         for v in [1.0f32, 0.5, -2.0, 0.0] {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         conv.process(frame(bytes), &mut sink).await.unwrap();
 
         let out = first_data(&sink);

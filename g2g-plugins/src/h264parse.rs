@@ -377,12 +377,11 @@ mod tests {
     use super::*;
     use crate::access_unit::access_unit_starts;
     use crate::annexb::{nal_units, BitWriter};
+    use crate::testutil::{frame_with_bytes, CollectSink};
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use g2g_core::{
-        AsyncElement, Caps, CapsConstraint, Dim, G2gError, OutputSink, PipelinePacket, Rate,
-    };
+    use g2g_core::{AsyncElement, Caps, CapsConstraint, Dim, G2gError, PipelinePacket, Rate};
 
     /// Build a minimal baseline-profile SPS RBSP for `width` x `height`
     /// (both multiples of 16), then frame it in Annex-B. Returns the
@@ -707,7 +706,7 @@ mod tests {
         // must carry the VUI colour description, not discard it.
         let mut parse = H264Parse::new();
         parse.configure_pipeline(&h264_parse_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         let stream = build_annexb_sps_with_color(1, 1, 1, false);
         parse
             .process(
@@ -836,38 +835,6 @@ mod tests {
 
     // -- Element-level tests (drive H264Parse::process directly) -----------
 
-    use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
-    use g2g_core::{FrameTiming, MemoryDomain, PushOutcome};
-
-    #[derive(Default)]
-    struct RecordingSink {
-        packets: Vec<PipelinePacket>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            core::task::Poll::Ready({
-                self.packets.push(packet);
-                Ok(PushOutcome::Accepted)
-            })
-        }
-    }
-
-    fn frame_with_bytes(seq: u64, bytes: Vec<u8>) -> Frame {
-        Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: seq,
-            meta: Default::default(),
-        }
-    }
-
     fn h264_parse_caps() -> Caps {
         Caps::CompressedVideo {
             codec: VideoCodec::H264,
@@ -882,7 +849,7 @@ mod tests {
     async fn emits_caps_changed_before_first_data_frame() {
         let mut parse = H264Parse::new();
         parse.configure_pipeline(&h264_parse_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let stream = build_test_annexb_sps(1280, 720);
         let frame = frame_with_bytes(0, stream);
@@ -907,7 +874,7 @@ mod tests {
     async fn emits_caps_from_an_avcc_access_unit() {
         let mut parse = H264Parse::new();
         parse.configure_pipeline(&h264_parse_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         // Re-frame the SPS NAL as AVCC (4-byte length prefix).
         let annexb = build_test_annexb_sps(1280, 720);
@@ -936,7 +903,7 @@ mod tests {
     async fn marks_avcc_keyframes() {
         let mut parse = H264Parse::new();
         parse.configure_pipeline(&h264_parse_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         let idr_slice: &[u8] = &[0x65, 0x88];
         let non_idr_slice: &[u8] = &[0x41, 0x9A];
         for (seq, nal) in [idr_slice, non_idr_slice].into_iter().enumerate() {
@@ -965,7 +932,7 @@ mod tests {
     async fn does_not_re_emit_caps_when_unchanged() {
         let mut parse = H264Parse::new();
         parse.configure_pipeline(&h264_parse_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         for seq in 0..3 {
             let stream = build_test_annexb_sps(1280, 720);
@@ -992,7 +959,7 @@ mod tests {
     async fn re_emits_caps_on_resolution_change() {
         let mut parse = H264Parse::new();
         parse.configure_pipeline(&h264_parse_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let frame_720 = frame_with_bytes(0, build_test_annexb_sps(1280, 720));
         parse
@@ -1072,7 +1039,7 @@ mod tests {
     }
 
     /// Pull the `DataFrame` byte payloads out of a sink, in order.
-    fn data_payloads(sink: &RecordingSink) -> Vec<Vec<u8>> {
+    fn data_payloads(sink: &CollectSink) -> Vec<Vec<u8>> {
         sink.packets
             .iter()
             .filter_map(|p| match p {
@@ -1102,7 +1069,7 @@ mod tests {
     async fn reframing_splits_two_access_units_in_one_buffer() {
         let mut parse = H264Parse::reframing();
         parse.configure_pipeline(&h264_parse_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         // One input buffer carrying two complete pictures back to back.
         let au0 = annexb_vcl(true, 1);
@@ -1138,7 +1105,7 @@ mod tests {
     async fn reframing_stops_holding_once_the_input_proves_au_aligned() {
         let mut parse = H264Parse::reframing();
         parse.configure_pipeline(&h264_parse_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let aus: Vec<Vec<u8>> = (0..4).map(|tag| annexb_vcl(true, tag as u8)).collect();
         for (seq, au) in aus.iter().enumerate() {
@@ -1167,7 +1134,7 @@ mod tests {
     async fn reframing_still_holds_the_tail_of_a_chunked_byte_stream() {
         let mut parse = H264Parse::reframing();
         parse.configure_pipeline(&h264_parse_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let aus: Vec<Vec<u8>> = (0..4).map(|tag| annexb_vcl(true, tag as u8)).collect();
         let stream: Vec<u8> = aus.concat();
@@ -1201,7 +1168,7 @@ mod tests {
         // tail as AVCC and corrupt it; latching the framing keeps it Annex-B.
         let mut parse = H264Parse::reframing();
         parse.configure_pipeline(&h264_parse_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let au = annexb_vcl(true, 7);
         let split = 6; // mid-NAL: after the start code + header + first RBSP byte

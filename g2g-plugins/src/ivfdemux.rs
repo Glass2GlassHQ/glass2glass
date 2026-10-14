@@ -320,28 +320,9 @@ pub fn fuzz_parse(data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::CollectSink;
     use alloc::vec;
-    use g2g_core::element::PushOutcome;
     use g2g_core::FrameTiming;
-
-    #[derive(Default)]
-    struct RecordingSink {
-        packets: Vec<PipelinePacket>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            core::task::Poll::Ready({
-                self.packets.push(packet);
-                Ok(PushOutcome::Accepted)
-            })
-        }
-    }
 
     fn ivf_stream(fourcc: &[u8; 4], w: u16, h: u16, frames: &[&[u8]]) -> Vec<u8> {
         let mut v = Vec::new();
@@ -396,7 +377,7 @@ mod tests {
     async fn demuxes_ivf_into_codec_caps_then_frames() {
         let stream = ivf_stream(b"VP90", 176, 144, &[&[1, 2, 3], &[4, 5, 6, 7]]);
         let mut demux = configured();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         demux
             .process(PipelinePacket::DataFrame(data_frame(stream)), &mut sink)
             .await
@@ -426,7 +407,7 @@ mod tests {
         ] {
             let stream = ivf_stream(fourcc, 64, 48, &[&[0xAB]]);
             let mut demux = configured();
-            let mut sink = RecordingSink::default();
+            let mut sink = CollectSink::default();
             demux
                 .process(PipelinePacket::DataFrame(data_frame(stream)), &mut sink)
                 .await
@@ -444,7 +425,7 @@ mod tests {
     async fn reassembles_a_frame_split_across_chunks() {
         let stream = ivf_stream(b"AV01", 64, 48, &[&[9u8; 100]]);
         let mut demux = configured();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         let split = 40; // mid-frame: past the file header, inside the payload
         demux
             .process(

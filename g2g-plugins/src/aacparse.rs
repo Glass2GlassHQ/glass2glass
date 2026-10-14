@@ -673,6 +673,7 @@ pub(crate) mod test_frames {
 mod tests {
     use super::*;
     use crate::annexb::BitWriter;
+    use crate::testutil::{frame_with_bytes, CollectSink};
     use alloc::vec;
 
     use test_frames::adts_frame as build_adts;
@@ -804,35 +805,7 @@ mod tests {
 
     use g2g_core::frame::Frame;
     use g2g_core::memory::SystemSlice;
-    use g2g_core::{FrameTiming, MemoryDomain, PushOutcome};
-
-    #[derive(Default)]
-    struct RecordingSink {
-        packets: Vec<PipelinePacket>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            core::task::Poll::Ready({
-                self.packets.push(packet);
-                Ok(PushOutcome::Accepted)
-            })
-        }
-    }
-
-    fn frame_with_bytes(seq: u64, bytes: Vec<u8>) -> Frame {
-        Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: seq,
-            meta: Default::default(),
-        }
-    }
+    use g2g_core::{FrameTiming, MemoryDomain};
 
     fn aac_caps() -> Caps {
         // Sentinel pre-parse caps: format pinned, channels/rate unknown.
@@ -845,10 +818,10 @@ mod tests {
     }
 
     /// Push every buffer in `buffers`, then end the stream.
-    async fn run(buffers: &[Vec<u8>]) -> (AacParse, RecordingSink) {
+    async fn run(buffers: &[Vec<u8>]) -> (AacParse, CollectSink) {
         let mut parse = AacParse::new();
         parse.configure_pipeline(&aac_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         for (seq, bytes) in buffers.iter().enumerate() {
             parse
                 .process(
@@ -863,7 +836,7 @@ mod tests {
     }
 
     /// The (channels, rate) of every `CapsChanged` pushed, in order.
-    fn caps_params(sink: &RecordingSink) -> Vec<(u8, u32)> {
+    fn caps_params(sink: &CollectSink) -> Vec<(u8, u32)> {
         sink.packets
             .iter()
             .filter_map(|p| match p {
@@ -877,7 +850,7 @@ mod tests {
             .collect()
     }
 
-    fn data_frames(sink: &RecordingSink) -> Vec<&Frame> {
+    fn data_frames(sink: &CollectSink) -> Vec<&Frame> {
         sink.packets
             .iter()
             .filter_map(|p| match p {
@@ -985,7 +958,7 @@ mod tests {
         const DEMUXER_PTS_NS: u64 = 3_000_000_000;
         let mut parse = AacParse::new();
         parse.configure_pipeline(&aac_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         let mut stream = adts_frame(2, 4, 16);
         stream.extend(adts_frame(2, 4, 16));
         let frame = Frame::new(
@@ -1008,7 +981,7 @@ mod tests {
     async fn loas_latm_drives_caps_through_process() {
         let mut parse = AacParse::new();
         parse.configure_pipeline(&aac_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let frame = frame_with_bytes(0, loas_frame(&latm_mux_element(2, 3, 6)));
         parse
