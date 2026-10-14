@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1319: hex and base64 helpers live in one `textencoding` module.
 - M1318: remote senders share one caps de-dup type.
 - M1317: LiveKit and WebRTC elements share the signalling, token, media-time and transmit helpers.
 - M1315: ST 2110-20 builds packets and parses SRDs without per-packet allocations.

@@ -13,6 +13,8 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use crate::textencoding::{hex_decode, hex_encode};
 use core::fmt::Write as _;
 
 /// One variant stream in a master playlist.
@@ -588,19 +590,7 @@ fn parse_iv(value: &str) -> Option<[u8; 16]> {
     let hex = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))?;
-    // Work on bytes: slicing the &str by index would panic on a non-ASCII byte
-    // that lands mid-char in the untrusted attribute.
-    let hex = hex.as_bytes();
-    if hex.len() != 32 {
-        return None;
-    }
-    let mut iv = [0u8; 16];
-    for (i, byte) in iv.iter_mut().enumerate() {
-        let hi = (hex[i * 2] as char).to_digit(16)?;
-        let lo = (hex[i * 2 + 1] as char).to_digit(16)?;
-        *byte = (hi * 16 + lo) as u8;
-    }
-    Some(iv)
+    hex_decode(hex)?.try_into().ok()
 }
 
 /// Split a comma-separated `KEY=VALUE` attribute list, respecting double-quoted
@@ -720,22 +710,13 @@ fn key_tag(key: Option<&SegmentKey>) -> String {
     let mut line = String::new();
     let _ = write!(line, "#EXT-X-KEY:METHOD={method},URI=\"{}\"", key.uri);
     if let Some(iv) = key.iv {
-        let _ = write!(line, ",IV={}", hex16(&iv));
+        let _ = write!(line, ",IV=0x{}", hex_encode(&iv));
     }
     if let Some(kid) = key.key_id {
-        let _ = write!(line, ",KEYID={}", hex16(&kid));
+        let _ = write!(line, ",KEYID=0x{}", hex_encode(&kid));
     }
     line.push('\n');
     line
-}
-
-/// 16 bytes as the `0x<32 hex digits>` form [`parse_iv`] reads back.
-fn hex16(bytes: &[u8; 16]) -> String {
-    let mut s = String::from("0x");
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 #[cfg(test)]

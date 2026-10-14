@@ -22,14 +22,14 @@ use g2g_core::{
 };
 
 use crate::srtp::{
-    decode_hexadecimal, encode_hexadecimal, flow_caps, forward_until_data_frame,
-    is_fatal_send_error, protect_for_flow, protection_property_flow, push_frame_bytes,
-    synchronization_source, validate_replay_window, validated_mki, KeyUsage, RtcpProtectionMode,
-    SrtpAuthentication, SrtpCipher, SrtpError, SrtpFlow, SrtpKeySettings, SrtpKeyUsage,
-    SrtpMasterKey, SrtpPolicy, SrtpSender, SrtpSoftLimits, DEFAULT_REPLAY_WINDOW,
-    KEY_PROPERTY_BLURB, RTCP_AUTHENTICATION_PROPERTY, RTCP_CIPHER_PROPERTY,
+    decode_hexadecimal, flow_caps, forward_until_data_frame, is_fatal_send_error, protect_for_flow,
+    protection_property_flow, push_frame_bytes, synchronization_source, validate_replay_window,
+    validated_mki, KeyUsage, RtcpProtectionMode, SrtpAuthentication, SrtpCipher, SrtpError,
+    SrtpFlow, SrtpKeySettings, SrtpKeyUsage, SrtpMasterKey, SrtpPolicy, SrtpSender, SrtpSoftLimits,
+    DEFAULT_REPLAY_WINDOW, KEY_PROPERTY_BLURB, RTCP_AUTHENTICATION_PROPERTY, RTCP_CIPHER_PROPERTY,
     RTP_AUTHENTICATION_PROPERTY, RTP_CIPHER_PROPERTY, UNAUTHENTICATED_POLICY_WARNING,
 };
+use crate::textencoding::hex_encode;
 
 /// Posted once when the key reaches its soft use limit, the analog of the gst
 /// `soft-limit` signal.
@@ -498,10 +498,7 @@ impl AsyncElement for SrtpEnc {
             "allow-repeat-tx" => Some(PropValue::Bool(self.allow_repeat_transmission)),
             // The MKI is not secret: it names the key, it is not the key.
             "mki" => Some(PropValue::Str(
-                self.mki
-                    .as_deref()
-                    .map(encode_hexadecimal)
-                    .unwrap_or_default(),
+                self.mki.as_deref().map(hex_encode).unwrap_or_default(),
             )),
             _ => None,
         }

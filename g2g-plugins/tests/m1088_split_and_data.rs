@@ -20,6 +20,7 @@ use g2g_plugins::dataurisrc::DataUriSrc;
 use g2g_plugins::multifilesrc::MultiFileSrc;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::splitfilesrc::SplitFileSrc;
+use g2g_plugins::textencoding::base64_encode;
 
 /// An ffmpeg-authored MPEG-TS fixture: the whole file is the reference the parts
 /// have to add back up to.
@@ -201,7 +202,7 @@ fn imagesequencesrc_is_a_registered_source_with_gsts_defaults() {
 #[tokio::test]
 async fn a_data_uri_carrying_a_still_decodes_through_decodebin() {
     let png = std::fs::read(fixture("still_64x48_pal8.png")).expect("the fixture is checked in");
-    let uri = format!("data:image/png;base64,{}", base64(&png));
+    let uri = format!("data:image/png;base64,{}", base64_encode(&png));
     let mut src = DataUriSrc::new(&uri);
     let caps = futures_lite_block(src.intercept_caps()).expect("the payload types");
     assert_eq!(
@@ -221,7 +222,7 @@ async fn a_data_uri_carrying_a_still_decodes_through_decodebin() {
 #[tokio::test]
 async fn a_data_uri_byte_stream_reaches_a_sink_whole() {
     let whole = std::fs::read(fixture(TS_FIXTURE)).expect("the fixture is checked in");
-    let uri = format!("data:video/mp2t;base64,{}", base64(&whole));
+    let uri = format!("data:video/mp2t;base64,{}", base64_encode(&whole));
     let dir = temp_dir("datauri");
     let out = dir.join("payload.ts");
     let line = format!(
@@ -244,29 +245,6 @@ async fn a_data_uri_byte_stream_reaches_a_sink_whole() {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
-
-/// Standard-alphabet base64 (RFC 4648) with padding, so the test can build a
-/// `data:` URI without a dependency.
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    const PAD: char = '=';
-    let mut out = String::new();
-    for group in bytes.chunks(3) {
-        let mut packed = 0u32;
-        for (index, byte) in group.iter().enumerate() {
-            packed |= u32::from(*byte) << (16 - 8 * index);
-        }
-        let sextets = group.len() + 1;
-        for index in 0..sextets {
-            let sextet = (packed >> (18 - 6 * index)) & 0x3F;
-            out.push(ALPHABET[sextet as usize] as char);
-        }
-        for _ in sextets..4 {
-            out.push(PAD);
-        }
-    }
-    out
-}
 
 /// Drive a `!Send`-free future to completion on the current thread: the source
 /// caps futures are `Ready`, so one poll is enough.

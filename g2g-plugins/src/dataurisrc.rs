@@ -111,7 +111,7 @@ fn decode_data_uri(uri: &str) -> Option<Vec<u8>> {
     let rest = uri.strip_prefix(SCHEME)?;
     let (header, payload) = rest.split_once(PAYLOAD_SEPARATOR)?;
     if header.to_ascii_lowercase().ends_with(BASE64_PARAMETER) {
-        return crate::sdp::base64_decode(payload.trim());
+        return crate::textencoding::base64_decode(payload.trim());
     }
     percent_decode(payload)
 }

@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 use g2g_core::{AudioFormat, Caps, Dim, Rate, VideoCodec};
 
 use crate::nalparse::NalCodec;
+use crate::textencoding::base64_decode;
 
 /// One media section's raw SDP fields, before any codec interpretation: the
 /// `m=` line plus the attributes under it, with the session-level connection
@@ -354,40 +355,6 @@ fn parse_q16_fps(s: &str) -> Option<u32> {
     (q16 > 0).then_some(q16)
 }
 
-/// Decode standard-alphabet base64 (RFC 4648, padding optional). `None` on any
-/// character outside the alphabet or a truncated final group, so a malformed
-/// `sprop` never yields half a parameter set. Hand-rolled to keep this module on
-/// the `no_std` baseline instead of pulling an optional dependency into it.
-pub(crate) fn base64_decode(s: &str) -> Option<Vec<u8>> {
-    fn sextet(c: u8) -> Option<u32> {
-        Some(match c {
-            b'A'..=b'Z' => (c - b'A') as u32,
-            b'a'..=b'z' => (c - b'a') as u32 + 26,
-            b'0'..=b'9' => (c - b'0') as u32 + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        })
-    }
-    let bytes: &[u8] = s.trim_end_matches('=').as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
-    let mut acc = 0u32;
-    let mut bits = 0u32;
-    for &c in bytes {
-        acc = (acc << 6) | sextet(c)?;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    // A leftover group of one sextet (2 bits short of a byte) is truncated input.
-    if bits >= 6 {
-        return None;
-    }
-    Some(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,14 +479,6 @@ mod tests {
         assert_eq!(parse_q16_fps("15"), Some(15 << 16));
         assert_eq!(parse_q16_fps("0"), None, "a zero rate is not a rate");
         assert_eq!(parse_q16_fps("x"), None);
-    }
-
-    #[test]
-    fn base64_rejects_bad_input_and_decodes_unpadded() {
-        assert_eq!(base64_decode("aGk="), Some(alloc::vec![b'h', b'i']));
-        assert_eq!(base64_decode("aGk"), Some(alloc::vec![b'h', b'i']));
-        assert_eq!(base64_decode("a"), None, "a lone sextet is truncated");
-        assert_eq!(base64_decode("a b"), None, "space is outside the alphabet");
     }
 
     #[test]

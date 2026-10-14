@@ -50,6 +50,7 @@ use libloading::Library;
 use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 
 use super::PluginError;
+use crate::textencoding::{hex_decode, hex_encode};
 
 /// Bytes in an Ed25519 public key.
 pub const PUBLIC_KEY_LEN: usize = 32;
@@ -287,7 +288,7 @@ pub fn verify_plugin(
     let detached = DetachedSignature::read(&signature_path(plugin))?;
     if !trusted.contains(&detached.signer) {
         return Err(SigningError::UntrustedSigner {
-            signer: to_hex(&detached.signer),
+            signer: hex_encode(&detached.signer),
         });
     }
     UnparsedPublicKey::new(&ED25519, detached.signer)
@@ -387,7 +388,7 @@ impl SigningKey {
 /// Write a public key file: 64 hex characters and a newline.
 pub fn write_public_key_file(path: impl AsRef<Path>, key: &PublicKey) -> Result<(), SigningError> {
     let path = path.as_ref();
-    std::fs::write(path, format!("{}\n", to_hex(key))).map_err(|e| SigningError::Io {
+    std::fs::write(path, format!("{}\n", hex_encode(key))).map_err(|e| SigningError::Io {
         path: path.to_path_buf(),
         message: e.to_string(),
     })
@@ -412,7 +413,7 @@ pub fn read_public_key_file(path: impl AsRef<Path>) -> Result<PublicKey, Signing
         .read_to_string(&mut text)
         .map_err(|e| bad(e.to_string()))?;
     let text = text.trim();
-    let bytes = from_hex(text).ok_or_else(|| bad("not hexadecimal".to_string()))?;
+    let bytes = hex_decode(text).ok_or_else(|| bad("not hexadecimal".to_string()))?;
     let key: PublicKey = bytes.try_into().map_err(|_| {
         bad(format!(
             "{} hex characters, expected {}",
@@ -486,30 +487,6 @@ pub(super) fn open_verified(plugin: &Path, _bytes: &[u8]) -> Result<Library, Plu
         path: plugin.to_path_buf(),
         message: e.to_string(),
     })
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(DIGITS[(byte >> 4) as usize] as char);
-        out.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn from_hex(text: &str) -> Option<Vec<u8>> {
-    let (pairs, odd) = text.as_bytes().as_chunks::<2>();
-    if !odd.is_empty() {
-        return None;
-    }
-    let mut out = Vec::with_capacity(pairs.len());
-    for [hi, lo] in pairs {
-        let hi = (*hi as char).to_digit(16)?;
-        let lo = (*lo as char).to_digit(16)?;
-        out.push((hi * 16 + lo) as u8);
-    }
-    Some(out)
 }
 
 #[cfg(test)]

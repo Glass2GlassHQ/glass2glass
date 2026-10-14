@@ -91,6 +91,9 @@ pub mod capssetter;
 pub mod capturepixelformat;
 // Buffer digests, for checking a codec change is bit-exact.
 pub mod checksumsink;
+// Hexadecimal and RFC 4648 base64 text forms of bytes, hand-rolled for the
+// no_std baseline.
+pub mod textencoding;
 // `debugspy`: passthrough that hashes each buffer.
 pub mod debugspy;
 // Byte-stream re-chunker: step-aligned random buffer sizes.

@@ -19,6 +19,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 
+use crate::textencoding::hex_encode;
 use md5::Md5;
 use sha1::{Digest, Sha1};
 use sha2::{Sha256, Sha512};
@@ -216,10 +217,10 @@ pub fn checksum_line(pts_ns: u64, digest: String) -> String {
 /// cannot arrive: `set_property` only accepts the declared nicks.
 pub fn digest_hex(hash: &str, bytes: &[u8]) -> String {
     match hash {
-        "md5" => hex(&Md5::digest(bytes)),
-        "sha256" => hex(&Sha256::digest(bytes)),
-        "sha512" => hex(&Sha512::digest(bytes)),
-        _ => hex(&Sha1::digest(bytes)),
+        "md5" => hex_encode(&Md5::digest(bytes)),
+        "sha256" => hex_encode(&Sha256::digest(bytes)),
+        "sha512" => hex_encode(&Sha512::digest(bytes)),
+        _ => hex_encode(&Sha1::digest(bytes)),
     }
 }
 
@@ -231,11 +232,3 @@ static CHECKSUMSINK_PROPS: &[PropertySpec] =
             .with_enum_values(HASH_VALUES)
             .with_default(DEFAULT_HASH),
     ];
-
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}

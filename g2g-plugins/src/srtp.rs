@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::ops::Range;
 
+use crate::textencoding::hex_decode_into;
 use aes_gcm::aead::{array::Array, AeadInOut};
 use aes_gcm::aes::cipher::{BlockCipherEncrypt, KeyInit as AesKeyInit};
 use aes_gcm::aes::{Aes128, Aes256};
@@ -693,39 +694,13 @@ impl SrtpKeySettings {
     }
 }
 
-const fn hexadecimal_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
 /// The bytes `text` spells, two hexadecimal digits each. `None` when it is not
 /// an even run of hexadecimal digits. Zeroized because the master key comes
 /// through here.
 pub(crate) fn decode_hexadecimal(text: &str) -> Option<Zeroizing<Vec<u8>>> {
-    let (pairs, remainder) = text.as_bytes().as_chunks::<2>();
-    if !remainder.is_empty() {
-        return None;
-    }
-    let mut bytes = Zeroizing::new(Vec::with_capacity(pairs.len()));
-    for pair in pairs {
-        bytes.push(hexadecimal_digit(pair[0])? << 4 | hexadecimal_digit(pair[1])?);
-    }
+    let mut bytes = Zeroizing::new(Vec::new());
+    hex_decode_into(text, &mut bytes)?;
     Some(bytes)
-}
-
-/// `bytes` as lowercase hexadecimal digits, the form a property reads back.
-pub(crate) fn encode_hexadecimal(bytes: &[u8]) -> alloc::string::String {
-    use core::fmt::Write;
-
-    let mut text = alloc::string::String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(text, "{byte:02x}");
-    }
-    text
 }
 
 /// An MKI is 1..=[`MAXIMUM_MKI_LENGTH`] bytes, libsrtp's `SRTP_MAX_MKI_LEN`.
@@ -2473,20 +2448,9 @@ mod tests {
     };
 
     fn hexadecimal(input: &str) -> Vec<u8> {
-        let digits: Vec<u8> = input
-            .bytes()
-            .filter(|byte| !byte.is_ascii_whitespace())
-            .collect();
-        let (pairs, remainder) = digits.as_chunks::<2>();
-        assert!(remainder.is_empty());
-        pairs
-            .iter()
-            .map(|pair| {
-                let high = hexadecimal_digit(pair[0]).expect("hex digit");
-                let low = hexadecimal_digit(pair[1]).expect("hex digit");
-                high << 4 | low
-            })
-            .collect()
+        let digits: alloc::string::String =
+            input.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        crate::textencoding::hex_decode(&digits).expect("hex digits")
     }
 
     fn rfc_rtp_packet() -> Vec<u8> {
@@ -3657,7 +3621,7 @@ mod tests {
     #[test]
     fn hexadecimal_text_round_trips_through_both_directions() {
         const MKI: &[u8] = &[0x00, 0x9f, 0xff, 0x10];
-        assert_eq!(encode_hexadecimal(MKI), "009fff10");
+        assert_eq!(crate::textencoding::hex_encode(MKI), "009fff10");
         assert_eq!(decode_hexadecimal("009FFF10").unwrap().as_slice(), MKI);
         assert!(decode_hexadecimal("009").is_none());
         assert!(decode_hexadecimal("00zz").is_none());

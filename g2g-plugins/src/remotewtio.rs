@@ -33,6 +33,7 @@ use g2g_core::{
 };
 
 use crate::remotewire::{map_wire, send_framed, FramedRead};
+use crate::textencoding::hex_decode;
 
 /// Any WebTransport / QUIC / TLS failure maps to an internal hardware error (the
 /// network boundary), matching how the other transports treat a transport fault.
@@ -259,7 +260,7 @@ pub(crate) fn parse_cert_hashes(spec: &str) -> Result<Vec<Vec<u8>>, G2gError> {
         if item.is_empty() {
             continue;
         }
-        let bytes = hex_bytes(item).ok_or(G2gError::NotConfigured)?;
+        let bytes = hex_decode(&item.replace(':', "")).ok_or(G2gError::NotConfigured)?;
         // A SHA-256 digest and nothing else: the verifier compares raw bytes, so
         // a wrong-length entry would silently never match.
         if bytes.len() != 32 {
@@ -268,22 +269,6 @@ pub(crate) fn parse_cert_hashes(spec: &str) -> Result<Vec<Vec<u8>>, G2gError> {
         out.push(bytes);
     }
     Ok(out)
-}
-
-/// Decode an even-length hex string, tolerating `:` separators.
-fn hex_bytes(s: &str) -> Option<Vec<u8>> {
-    let digits: Vec<u8> = s.bytes().filter(|b| *b != b':').collect();
-    if !digits.len().is_multiple_of(2) {
-        return None;
-    }
-    digits
-        .chunks(2)
-        .map(|pair| {
-            let hi = (pair[0] as char).to_digit(16)?;
-            let lo = (pair[1] as char).to_digit(16)?;
-            Some((hi * 16 + lo) as u8)
-        })
-        .collect()
 }
 
 #[cfg(test)]

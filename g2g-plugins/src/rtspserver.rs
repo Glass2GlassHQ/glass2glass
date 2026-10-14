@@ -15,6 +15,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use crate::textencoding::base64_encode;
+
 /// What the I/O layer should do after a request, beyond sending the response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RtspEvent {
@@ -154,31 +156,9 @@ fn h264_fmtp(payload_type: u8, sps: Option<&[u8]>, pps: Option<&[u8]>) -> Option
     Some(format!(
         "a=fmtp:{payload_type} packetization-mode=1; \
          sprop-parameter-sets={},{}; profile-level-id={hex}\r\n",
-        base64(sps),
-        base64(pps),
+        base64_encode(sps),
+        base64_encode(pps),
     ))
-}
-
-/// Base64 with the RFC 4648 §4 standard alphabet and `=` padding, which is what
-/// `sprop-parameter-sets` is coded in. Hand-rolled: this module is in the
-/// `no_std` baseline and one SDP attribute is not worth a dependency there.
-fn base64(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let group = (u32::from(chunk[0]) << 16)
-            | (u32::from(chunk.get(1).copied().unwrap_or(0)) << 8)
-            | u32::from(chunk.get(2).copied().unwrap_or(0));
-        for sextet in 0..4 {
-            // A chunk of n bytes codes n+1 characters; the rest is padding.
-            out.push(if sextet <= chunk.len() {
-                ALPHABET[((group >> (18 - 6 * sextet)) & 0x3F) as usize] as char
-            } else {
-                '='
-            });
-        }
-    }
-    out
 }
 
 /// Sans-IO RTSP server responder for one session.
@@ -441,23 +421,6 @@ mod tests {
     /// profile_iop 0, level_idc 40, so profile-level-id must read 640028.
     const SPS: &[u8] = &[0x67, 0x64, 0x00, 0x28, 0xAC, 0xD9];
     const PPS: &[u8] = &[0x68, 0xEB, 0xEC, 0xB2];
-
-    /// The RFC 4648 §10 test vectors, so the encoder is checked against the spec
-    /// rather than against itself.
-    #[test]
-    fn base64_matches_the_rfc_vectors() {
-        for (input, expected) in [
-            ("", ""),
-            ("f", "Zg=="),
-            ("fo", "Zm8="),
-            ("foo", "Zm9v"),
-            ("foob", "Zm9vYg=="),
-            ("fooba", "Zm9vYmE="),
-            ("foobar", "Zm9vYmFy"),
-        ] {
-            assert_eq!(base64(input.as_bytes()), expected, "base64 of {input:?}");
-        }
-    }
 
     /// M1117: without the fmtp line a client that will not decode before it has
     /// parameter sets (retina) cannot set up from the DESCRIBE at all. The
