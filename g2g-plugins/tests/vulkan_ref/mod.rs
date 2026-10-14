@@ -70,7 +70,11 @@ pub(crate) fn planar_frames(frames: Vec<Nv12Frame>, size: (u32, u32)) -> Vec<Vec
         .into_iter()
         .map(|frame| {
             assert_eq!((frame.width, frame.height), size);
-            two_plane_to_planar(&[frame.luma, frame.chroma].concat(), frame.bit_depth, size)
+            two_plane_to_planar(
+                &[frame.luma(), frame.chroma()].concat(),
+                frame.bit_depth,
+                size,
+            )
         })
         .collect()
 }

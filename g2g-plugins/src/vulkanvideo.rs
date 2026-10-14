@@ -3792,24 +3792,16 @@ fn apply_film_grain_nv12(frame: &mut Nv12Frame, fg: &Av1FilmGrain, is_id: bool) 
     let scaling_cb = fg_generate_scaling(&fg.uv_points[0][..fg.num_uv_points[0]]);
     let scaling_cr = fg_generate_scaling(&fg.uv_points[1][..fg.num_uv_points[1]]);
 
+    let (luma, chroma) = frame.planes_mut();
     // Luma: apply in 32-row bands over a copy of the grain-free source.
     if fg.num_y_points != 0 {
-        let src_y = frame.luma.clone();
+        let src_y = luma.to_vec();
         let rows = h.div_ceil(FG_BLOCK_SIZE);
         for row in 0..rows {
             let band_y0 = row * FG_BLOCK_SIZE;
             let bh = core::cmp::min(h - band_y0, FG_BLOCK_SIZE);
             fg_apply_y_band(
-                fg,
-                &mut frame.luma,
-                &src_y,
-                w,
-                w,
-                &scaling_y,
-                &grain_y,
-                bh,
-                row,
-                band_y0,
+                fg, luma, &src_y, w, w, &scaling_y, &grain_y, bh, row, band_y0,
             );
         }
     }
@@ -3822,8 +3814,8 @@ fn apply_film_grain_nv12(frame: &mut Nv12Frame, fg: &Av1FilmGrain, is_id: bool) 
     let mut cb = alloc::vec![0u8; cw * ch];
     let mut cr = alloc::vec![0u8; cw * ch];
     for i in 0..cw * ch {
-        cb[i] = frame.chroma[2 * i];
-        cr[i] = frame.chroma[2 * i + 1];
+        cb[i] = chroma[2 * i];
+        cr[i] = chroma[2 * i + 1];
     }
     let rows = h.div_ceil(FG_BLOCK_SIZE);
     for (uv, (plane, gr)) in [(&mut cb, &*grain_cb), (&mut cr, &*grain_cr)]
@@ -3846,26 +3838,13 @@ fn apply_film_grain_nv12(frame: &mut Nv12Frame, fg: &Av1FilmGrain, is_id: bool) 
             let luma_band = core::cmp::min(h - row * FG_BLOCK_SIZE, FG_BLOCK_SIZE);
             let bh = (luma_band + 1) >> 1;
             fg_apply_uv_band_420(
-                fg,
-                plane,
-                &src,
-                cw,
-                cw,
-                &frame.luma,
-                w,
-                scaling,
-                gr,
-                bh,
-                row,
-                band_cy0,
-                uv,
-                is_id,
+                fg, plane, &src, cw, cw, luma, w, scaling, gr, bh, row, band_cy0, uv, is_id,
             );
         }
     }
     for i in 0..cw * ch {
-        frame.chroma[2 * i] = cb[i];
-        frame.chroma[2 * i + 1] = cr[i];
+        chroma[2 * i] = cb[i];
+        chroma[2 * i + 1] = cr[i];
     }
 }
 
@@ -5564,16 +5543,26 @@ impl ReadbackLayout {
     }
 
     // `mapped` must point at `self.len()` bytes a finished `copy_regions` copy wrote
-    unsafe fn read_planes(&self, mapped: *const u8) -> (alloc::vec::Vec<u8>, alloc::vec::Vec<u8>) {
+    unsafe fn read_frame(&self, mapped: *const u8, bit_depth: u8) -> Nv12Frame {
         // SAFETY: both ranges lie inside the `self.len()` bytes the contract guarantees.
-        unsafe {
-            let luma = core::slice::from_raw_parts(mapped, self.luma_len as usize).to_vec();
-            let chroma = core::slice::from_raw_parts(
-                mapped.add(self.chroma_offset as usize),
-                self.chroma_len as usize,
+        let (luma, chroma) = unsafe {
+            (
+                core::slice::from_raw_parts(mapped, self.luma_len as usize),
+                core::slice::from_raw_parts(
+                    mapped.add(self.chroma_offset as usize),
+                    self.chroma_len as usize,
+                ),
             )
-            .to_vec();
-            (luma, chroma)
+        };
+        let mut data = alloc::vec::Vec::with_capacity(luma.len() + chroma.len());
+        data.extend_from_slice(luma);
+        data.extend_from_slice(chroma);
+        Nv12Frame {
+            width: self.width,
+            height: self.height,
+            bit_depth,
+            data: data.into_boxed_slice(),
+            luma_len: luma.len(),
         }
     }
 }
@@ -8431,7 +8420,7 @@ impl VulkanVideoDevice {
             })
         };
 
-        let planes = match submitted {
+        let frame = match submitted {
             Ok(()) => {
                 // SAFETY: readback_mem is host-visible/coherent and holds `layout.len()`
                 // bytes written by the completed copy.
@@ -8440,9 +8429,9 @@ impl VulkanVideoDevice {
                         .map_memory(readback_mem, 0, layout.len(), vk::MemoryMapFlags::empty())
                         .map_err(VulkanVideoError::QueryFailed)?
                         as *const u8;
-                    let planes = layout.read_planes(ptr);
+                    let frame = layout.read_frame(ptr, bit_depth);
                     dev.unmap_memory(readback_mem);
-                    Ok(planes)
+                    Ok(frame)
                 }
             }
             Err(e) => Err(VulkanVideoError::QueryFailed(e)),
@@ -8456,14 +8445,7 @@ impl VulkanVideoDevice {
             dev.free_memory(readback_mem, None);
         }
 
-        let (luma, chroma) = planes?;
-        Ok(Nv12Frame {
-            width: w,
-            height: h,
-            luma,
-            chroma,
-            bit_depth,
-        })
+        frame
     }
 
     /// Decode a single IDR frame and return just the luma plane (`width*height`
@@ -8474,10 +8456,13 @@ impl VulkanVideoDevice {
         idr_au: &[u8],
     ) -> Result<DecodedLuma, VulkanVideoError> {
         let f = self.decode_idr_nv12(session, idr_au)?;
+        let (width, height, luma_len) = (f.width, f.height, f.luma_len);
+        let mut luma = f.into_data().into_vec();
+        luma.truncate(luma_len);
         Ok(DecodedLuma {
-            width: f.width,
-            height: f.height,
-            luma: f.luma,
+            width,
+            height,
+            luma,
         })
     }
 
@@ -9190,11 +9175,15 @@ impl VulkanVideoDevice {
         };
         // SAFETY: fresh buffer.
         let rreq = unsafe { self.raw_device.get_buffer_memory_requirements(readback) };
+        let host_coherent =
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        // the CPU reads every decoded frame from here, uncached memory makes that read slow
         let rtype = find_memory_type(
             &self.mem_props,
             rreq.memory_type_bits,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        );
+            host_coherent | vk::MemoryPropertyFlags::HOST_CACHED,
+        )
+        .or_else(|| find_memory_type(&self.mem_props, rreq.memory_type_bits, host_coherent));
         let readback_mem = match rtype {
             Some(t) => {
                 let rai = vk::MemoryAllocateInfo::default()
@@ -9225,6 +9214,23 @@ impl VulkanVideoDevice {
                 unsafe { self.raw_device.destroy_buffer(readback, None) };
                 free_slots(&slots);
                 return Err(VulkanVideoError::ExtensionUnsupported);
+            }
+        };
+        // SAFETY: readback_mem is host-visible and not mapped yet.
+        let mapped = unsafe {
+            self.raw_device
+                .map_memory(readback_mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+        };
+        let readback_mapped = match mapped {
+            Ok(mapped) => MappedPointer(mapped.cast()),
+            Err(e) => {
+                // SAFETY: free readback + slots made above.
+                unsafe {
+                    self.raw_device.free_memory(readback_mem, None);
+                    self.raw_device.destroy_buffer(readback, None);
+                }
+                free_slots(&slots);
+                return Err(VulkanVideoError::QueryFailed(e));
             }
         };
 
@@ -9368,6 +9374,7 @@ impl VulkanVideoDevice {
                 cb,
                 copy,
                 fence,
+                bitstream: None,
                 in_flight: None,
             });
         }
@@ -9444,6 +9451,7 @@ impl VulkanVideoDevice {
             pool,
             readback,
             readback_mem,
+            readback_mapped,
             readback_layout,
             readback_stride,
             ring_pool,
@@ -9453,7 +9461,8 @@ impl VulkanVideoDevice {
             ring_next: 0,
             ready: alloc::collections::VecDeque::new(),
             chain_next: false,
-            pending_tex_bitstream: None,
+            texture_bitstream: None,
+            chained_decode_pending: false,
             first: true,
             gpu,
             color,
@@ -9923,9 +9932,9 @@ impl Drop for GpuTextureCtx {
 /// path stays synchronous (its decode -> compute-convert hand-off crosses queues).
 const DECODE_RING_DEPTH: usize = 4;
 
-/// One entry in the system-path decode ring: a persistent command buffer + fence
-/// and, while the slot is occupied, the transient bitstream buffer to free and
-/// the frame geometry to read back when the slot retires.
+/// One entry in the system-path decode ring: a persistent command buffer + fence,
+/// the slot's bitstream buffer, and, while the slot is occupied, the frame
+/// geometry to read back when the slot retires.
 #[derive(Debug)]
 struct RingSlot {
     cb: vk::CommandBuffer,
@@ -9933,17 +9942,34 @@ struct RingSlot {
     /// semaphore its submission waits, when the decode queue cannot transfer.
     copy: Option<(vk::CommandBuffer, vk::Semaphore)>,
     fence: vk::Fence,
+    /// Rewritten for each decode this slot carries, `None` until the first.
+    bitstream: Option<BitstreamBuffer>,
     in_flight: Option<InFlightDecode>,
 }
 
-/// A submitted-but-not-yet-retired system-path decode. The bitstream buffer is
-/// referenced by the in-flight submission, so it (and the frame geometry needed
-/// to read the decoded NV12 back out of the ring's readback region) is held here
-/// until the slot's fence is waited.
+/// A host-visible bitstream buffer kept mapped and rewritten per picture, replaced
+/// by a larger one when a picture outgrows it.
+#[derive(Debug)]
+struct BitstreamBuffer {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    mapped: MappedPointer,
+    size: u64,
+}
+
+/// The host address of persistently mapped device memory.
+#[derive(Debug, Clone, Copy)]
+struct MappedPointer(*mut u8);
+
+// SAFETY: the address points into device memory owned by the struct holding it,
+// which reads or writes it only through its own `&mut self`.
+unsafe impl Send for MappedPointer {}
+
+/// A submitted-but-not-yet-retired system-path decode: the frame geometry needed
+/// to read the decoded NV12 back out of the ring's readback region once the
+/// slot's fence is waited.
 #[derive(Debug)]
 struct InFlightDecode {
-    bitstream: vk::Buffer,
-    bitstream_mem: vk::DeviceMemory,
     dpb_slot: usize,
     w: u32,
     h: u32,
@@ -9989,6 +10015,8 @@ struct DpbCore {
     pool: vk::CommandPool,
     readback: vk::Buffer,
     readback_mem: vk::DeviceMemory,
+    /// `readback_mem` mapped once for the core's lifetime.
+    readback_mapped: MappedPointer,
     readback_layout: ReadbackLayout,
     /// Per-slot byte stride within `readback` (`readback_layout.len()` rounded up so each
     /// slot's `bufferOffset` satisfies the copy alignment). The readback buffer
@@ -10014,10 +10042,12 @@ struct DpbCore {
     /// takes the chained path (signal `gpu.sem_dc`, no fence wait) instead of the
     /// synchronous one; cleared as it is consumed.
     chain_next: bool,
-    /// A chained texture decode's bitstream buffer, held until the picture's
-    /// compute (which chains on `sem_dc`) has completed, then freed by
-    /// `decode_picture_to_texture`. `Some` only mid-conversion.
-    pending_tex_bitstream: Option<(vk::Buffer, vk::DeviceMemory)>,
+    /// The texture path's bitstream buffer. That path decodes one picture at a
+    /// time, so one buffer serves every decode on it.
+    texture_bitstream: Option<BitstreamBuffer>,
+    /// A chained texture decode was submitted and its compute has not yet been
+    /// waited, so `texture_bitstream` may still be read by the GPU.
+    chained_decode_pending: bool,
     /// The video session needs a `RESET` control on its first coding operation
     /// (and after a seek [`reset`](H264DpbDecoder::reset)).
     first: bool,
@@ -10057,6 +10087,15 @@ impl Drop for DpbCore {
         // fence, and the texture path waits its fence per decode, so nothing is in
         // flight.
         unsafe {
+            for bitstream in self
+                .ring
+                .iter_mut()
+                .filter_map(|slot| slot.bitstream.take())
+                .chain(self.texture_bitstream.take())
+            {
+                dev.destroy_buffer(bitstream.buffer, None);
+                dev.free_memory(bitstream.memory, None);
+            }
             for slot in &self.ring {
                 dev.destroy_fence(slot.fence, None);
                 if let Some((_, sem)) = slot.copy {
@@ -10130,72 +10169,134 @@ impl DpbCore {
         }
     }
 
-    /// Allocate + fill a transient host-visible bitstream buffer holding one
-    /// picture's slices, chained to the codec `profile`. The caller frees it with
-    /// [`free_bitstream`](Self::free_bitstream) after the decode fence is waited.
-    /// Returns the buffer, its memory, and the (alignment-rounded) size the
-    /// decode's `src_buffer_range` uses.
-    fn new_bitstream(
+    /// Create a host-visible bitstream buffer of `size` bytes chained to the codec
+    /// `profile`, mapped for its whole lifetime.
+    fn create_bitstream_buffer(
         &self,
-        data: &[u8],
+        size: u64,
         profile: &vk::VideoProfileInfoKHR,
-    ) -> Result<(vk::Buffer, vk::DeviceMemory, u64), VulkanVideoError> {
+    ) -> Result<BitstreamBuffer, VulkanVideoError> {
         let dev = &self.raw_device;
-        let buf_size = round_up(data.len() as u64, self.size_align);
         let mut buf_profile_list =
             vk::VideoProfileListInfoKHR::default().profiles(core::slice::from_ref(profile));
         let buf_ci = vk::BufferCreateInfo::default()
-            .size(buf_size)
+            .size(size)
             .usage(vk::BufferUsageFlags::VIDEO_DECODE_SRC_KHR)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .push_next(&mut buf_profile_list);
         // SAFETY: valid create info; chained profile list outlives the call.
-        let bitstream =
+        let buffer =
             unsafe { dev.create_buffer(&buf_ci, None) }.map_err(VulkanVideoError::QueryFailed)?;
-        // SAFETY: fresh buffer; allocate host-visible memory, bind, map, fill.
-        let bitstream_mem = unsafe {
-            let breq = dev.get_buffer_memory_requirements(bitstream);
-            let bt = find_memory_type(
+        // SAFETY: fresh buffer; allocate host-visible memory, bind and map it, and
+        // destroy what was made on any failure.
+        unsafe {
+            let requirements = dev.get_buffer_memory_requirements(buffer);
+            let Some(memory_type) = find_memory_type(
                 &self.mem_props,
-                breq.memory_type_bits,
+                requirements.memory_type_bits,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            );
-            let bt = match bt {
-                Some(t) => t,
-                None => {
-                    dev.destroy_buffer(bitstream, None);
-                    return Err(VulkanVideoError::ExtensionUnsupported);
+            ) else {
+                dev.destroy_buffer(buffer, None);
+                return Err(VulkanVideoError::ExtensionUnsupported);
+            };
+            let allocate_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(requirements.size)
+                .memory_type_index(memory_type);
+            let memory = match dev.allocate_memory(&allocate_info, None) {
+                Ok(memory) => memory,
+                Err(error) => {
+                    dev.destroy_buffer(buffer, None);
+                    return Err(VulkanVideoError::QueryFailed(error));
                 }
             };
-            let bai = vk::MemoryAllocateInfo::default()
-                .allocation_size(breq.size)
-                .memory_type_index(bt);
-            let m = dev
-                .allocate_memory(&bai, None)
-                .map_err(VulkanVideoError::QueryFailed)?;
-            dev.bind_buffer_memory(bitstream, m, 0)
-                .map_err(VulkanVideoError::QueryFailed)?;
-            let ptr = dev
-                .map_memory(m, 0, breq.size, vk::MemoryMapFlags::empty())
-                .map_err(VulkanVideoError::QueryFailed)? as *mut u8;
-            fill_bitstream(ptr, data, buf_size);
-            dev.unmap_memory(m);
-            m
-        };
-        Ok((bitstream, bitstream_mem, buf_size))
+            let mapped = dev.bind_buffer_memory(buffer, memory, 0).and_then(|()| {
+                dev.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+            });
+            match mapped {
+                Ok(mapped) => Ok(BitstreamBuffer {
+                    buffer,
+                    memory,
+                    mapped: MappedPointer(mapped.cast()),
+                    size,
+                }),
+                Err(error) => {
+                    dev.destroy_buffer(buffer, None);
+                    dev.free_memory(memory, None);
+                    Err(VulkanVideoError::QueryFailed(error))
+                }
+            }
+        }
     }
 
-    /// Free a bitstream buffer from [`new_bitstream`](Self::new_bitstream).
-    /// # Safety
-    /// The buffer + memory must have come from `new_bitstream` on this core and no
-    /// submission referencing them may still be in flight (the decode fence waited).
-    unsafe fn free_bitstream(&self, bitstream: vk::Buffer, bitstream_mem: vk::DeviceMemory) {
-        let dev = &self.raw_device;
-        // SAFETY: contract above; freed exactly once.
-        unsafe {
-            dev.destroy_buffer(bitstream, None);
-            dev.free_memory(bitstream_mem, None);
+    /// Write one picture's `units`, each led by `start_code`, into the bitstream
+    /// buffer the next decode on this path reads (the claimed ring slot's on the
+    /// system path, the texture path's own otherwise), replacing it with a larger
+    /// one if the picture outgrows it. Returns the buffer, the range the decode
+    /// reads, and each unit's offset in it.
+    fn write_bitstream(
+        &mut self,
+        to_system: bool,
+        start_code: &[u8],
+        units: &[&[u8]],
+        profile: &vk::VideoProfileInfoKHR,
+    ) -> Result<(vk::Buffer, u64, alloc::vec::Vec<u32>), VulkanVideoError> {
+        let len: usize = units.iter().map(|unit| start_code.len() + unit.len()).sum();
+        let range = round_up(len as u64, self.size_align);
+        let held = if to_system {
+            let idx = self.ring_next;
+            // the slot's previous decode still reads its bitstream until retired
+            if self.ring[idx].in_flight.is_some() {
+                self.retire_slot(idx)?;
+            }
+            self.ring[idx].bitstream.take()
+        } else {
+            if self.chained_decode_pending {
+                // a chained decode signals no fence of its own
+                // SAFETY: the decode queue handle is valid for this core's lifetime.
+                unsafe { self.raw_device.queue_wait_idle(self.decode_queue) }
+                    .map_err(VulkanVideoError::QueryFailed)?;
+                self.chained_decode_pending = false;
+            }
+            self.texture_bitstream.take()
+        };
+        let bitstream = match held {
+            Some(bitstream) if bitstream.size >= range => bitstream,
+            outgrown => {
+                if let Some(old) = outgrown {
+                    // SAFETY: no submission reads it (waited above).
+                    unsafe {
+                        self.raw_device.destroy_buffer(old.buffer, None);
+                        self.raw_device.free_memory(old.memory, None);
+                    }
+                }
+                let size = round_up(range.next_power_of_two(), self.size_align);
+                self.create_bitstream_buffer(size, profile)?
+            }
+        };
+        // SAFETY: the mapping covers `bitstream.size >= range` bytes and no
+        // submission reads the buffer (its last decode was waited above).
+        let destination =
+            unsafe { core::slice::from_raw_parts_mut(bitstream.mapped.0, range as usize) };
+        let mut offsets = alloc::vec::Vec::with_capacity(units.len());
+        let mut at = 0;
+        for unit in units {
+            offsets.push(at as u32);
+            destination[at..at + start_code.len()].copy_from_slice(start_code);
+            at += start_code.len();
+            destination[at..at + unit.len()].copy_from_slice(unit);
+            at += unit.len();
         }
+        // The decode reads the whole aligned range, so leftover bytes from an
+        // earlier picture would be read as trailing bytes of this one: garbage
+        // there makes the driver reject the stream, zeros are a legal trailer.
+        destination[at..].fill(0);
+        let buffer = bitstream.buffer;
+        if to_system {
+            self.ring[self.ring_next].bitstream = Some(bitstream);
+        } else {
+            self.texture_bitstream = Some(bitstream);
+        }
+        Ok((buffer, range, offsets))
     }
 
     /// Record the copy of one decoded picture's two planes into `readback` at
@@ -10381,58 +10482,45 @@ impl DpbCore {
     }
 
     /// Record + submit one picture's decode (built codec-side into `begin_info` /
-    /// `decode_info`) into DPB slot `target`, taking ownership of the transient
-    /// `bitstream` buffer. Issues the session `RESET` control on the first
-    /// operation (or after a reset). This is the shared, codec-agnostic GPU
-    /// command path for all `*DpbDecoder`s.
+    /// `decode_info`, reading the bitstream [`write_bitstream`](Self::write_bitstream)
+    /// wrote for the same path) into DPB slot `target`. Issues the session `RESET`
+    /// control on the first operation (or after a reset). This is the shared,
+    /// codec-agnostic GPU command path for all `*DpbDecoder`s.
     ///
     /// `to_system == false` (texture path) is synchronous: it waits the decode
-    /// fence before returning and frees the bitstream, leaving the slot in
-    /// `VIDEO_DECODE_DPB_KHR` layout for the compute pass. `to_system == true`
-    /// (NV12 path) is pipelined through the decode ring: it retires the oldest
-    /// in-flight slot if the ring is full (reading its frame into `self.ready`),
-    /// records + submits this picture without waiting, and holds the bitstream in
-    /// the ring slot until that slot is later retired.
+    /// fence before returning, leaving the slot in `VIDEO_DECODE_DPB_KHR` layout
+    /// for the compute pass. `to_system == true` (NV12 path) is pipelined through
+    /// the decode ring: it retires the oldest in-flight slot if the ring is full
+    /// (reading its frame into `self.ready`) and records + submits this picture
+    /// without waiting.
     fn record_and_submit(
         &mut self,
         begin_info: &vk::VideoBeginCodingInfoKHR,
         decode_info: &vk::VideoDecodeInfoKHR,
         target: usize,
-        bitstream: vk::Buffer,
-        bitstream_mem: vk::DeviceMemory,
         to_system: bool,
     ) -> Result<(), VulkanVideoError> {
         if to_system {
-            self.submit_ring(begin_info, decode_info, target, bitstream, bitstream_mem)
+            self.submit_ring(begin_info, decode_info, target)
         } else {
-            self.submit_texture(begin_info, decode_info, target, bitstream, bitstream_mem)
+            self.submit_texture(begin_info, decode_info, target)
         }
     }
 
     /// Texture-path submit. When `chain_next` is set (by
     /// `decode_picture_to_texture`), the decode is submitted with a `sem_dc` signal
     /// and no fence wait, so the following compute pass chains on it with no CPU
-    /// stall (the bitstream is held in `pending_tex_bitstream` until that compute
-    /// completes). Otherwise it is synchronous: reset `self.pool`, record + submit,
-    /// wait the fence, free the bitstream. Either way the decoded slot is left in
-    /// DPB layout.
+    /// stall. Otherwise it is synchronous: reset `self.pool`, record + submit,
+    /// wait the fence. Either way the decoded slot is left in DPB layout.
     fn submit_texture(
         &mut self,
         begin_info: &vk::VideoBeginCodingInfoKHR,
         decode_info: &vk::VideoDecodeInfoKHR,
         target: usize,
-        bitstream: vk::Buffer,
-        bitstream_mem: vk::DeviceMemory,
     ) -> Result<(), VulkanVideoError> {
         if self.chain_next {
             self.chain_next = false;
-            return self.submit_texture_chained(
-                begin_info,
-                decode_info,
-                target,
-                bitstream,
-                bitstream_mem,
-            );
+            return self.submit_texture_chained(begin_info, decode_info, target);
         }
         let issue_reset = self.first;
         // Reset the command pool and allocate one primary buffer.
@@ -10466,9 +10554,6 @@ impl DpbCore {
                     r
                 })
         };
-        // SAFETY: transient bitstream, freed once now that the fence is waited (or
-        // the submission failed, in which case nothing references it).
-        unsafe { self.free_bitstream(bitstream, bitstream_mem) };
         r.map_err(VulkanVideoError::QueryFailed)?;
         self.first = false;
         Ok(())
@@ -10478,9 +10563,8 @@ impl DpbCore {
     /// submit it signalling `gpu.sem_dc` with NO fence and NO CPU wait, so the
     /// following ycbcr compute pass (which waits `sem_dc`) starts the instant the
     /// decode finishes, overlapping the compute's CPU prep with the decode's GPU
-    /// execution. The bitstream is stashed in `pending_tex_bitstream` and freed by
-    /// `decode_picture_to_texture` once that compute has completed (it waits its own
-    /// fence). Cross-frame overlap is impossible (the next decode references this
+    /// execution. `chained_decode_pending` marks the bitstream busy until that
+    /// compute has completed (it waits its own fence). Cross-frame overlap is impossible (the next decode references this
     /// slot and must wait its in-place compute restore), so this stays one picture
     /// at a time; the win is removing the mid-picture decode fence wait + CPU gap.
     fn submit_texture_chained(
@@ -10488,8 +10572,6 @@ impl DpbCore {
         begin_info: &vk::VideoBeginCodingInfoKHR,
         decode_info: &vk::VideoDecodeInfoKHR,
         target: usize,
-        bitstream: vk::Buffer,
-        bitstream_mem: vk::DeviceMemory,
     ) -> Result<(), VulkanVideoError> {
         let issue_reset = self.first;
         let sem_dc = self
@@ -10531,16 +10613,10 @@ impl DpbCore {
                     )
                 })
         };
-        if let Err(e) = r {
-            // The decode never ran (record or submit failed); nothing references
-            // the bitstream and `sem_dc` was not signalled, so the caller's `?`
-            // aborts before the waiting compute is submitted.
-            // SAFETY: freed once, no in-flight reference.
-            unsafe { self.free_bitstream(bitstream, bitstream_mem) };
-            return Err(VulkanVideoError::QueryFailed(e));
-        }
-        // Held until the picture's compute (chained on `sem_dc`) completes.
-        self.pending_tex_bitstream = Some((bitstream, bitstream_mem));
+        // On failure the decode never ran and `sem_dc` was not signalled, so the
+        // caller's `?` aborts before the waiting compute is submitted.
+        r.map_err(VulkanVideoError::QueryFailed)?;
+        self.chained_decode_pending = true;
         self.first = false;
         Ok(())
     }
@@ -10548,15 +10624,12 @@ impl DpbCore {
     /// Pipelined system-path submit into the decode ring. Retires the oldest
     /// in-flight slot first if the ring is full (its frame lands in `self.ready`),
     /// then records this picture into the claimed slot's persistent command buffer
-    /// (copying NV12 into the slot's readback region) and submits without waiting;
-    /// the bitstream stays owned by the slot until it is later retired.
+    /// (copying NV12 into the slot's readback region) and submits without waiting.
     fn submit_ring(
         &mut self,
         begin_info: &vk::VideoBeginCodingInfoKHR,
         decode_info: &vk::VideoDecodeInfoKHR,
         target: usize,
-        bitstream: vk::Buffer,
-        bitstream_mem: vk::DeviceMemory,
     ) -> Result<(), VulkanVideoError> {
         // a copy on another queue may still be reading the picture this decode overwrites
         if self.copy_pool.is_some() {
@@ -10581,8 +10654,8 @@ impl DpbCore {
         // SAFETY: the slot's command buffers are in the reset state (their previous
         // submission was waited when the slot was retired above, or they are
         // untouched); `begin_command_buffer` re-records them (RESET_COMMAND_BUFFER
-        // pools). All handles outlive the submission (the bitstream is held by the
-        // slot until retirement).
+        // pools). All handles outlive the submission (the slot keeps its bitstream
+        // buffer until it is rewritten after retirement).
         unsafe {
             // The copy rides in the decode's own command buffer unless it has to run
             // on another queue, where it becomes a second submission chained on the
@@ -10642,15 +10715,9 @@ impl DpbCore {
                     })
                 }
             };
-            if let Err(error) = submitted {
-                dev.destroy_buffer(bitstream, None);
-                dev.free_memory(bitstream_mem, None);
-                return Err(VulkanVideoError::QueryFailed(error));
-            }
+            submitted.map_err(VulkanVideoError::QueryFailed)?;
         }
         self.ring[idx].in_flight = Some(InFlightDecode {
-            bitstream,
-            bitstream_mem,
             dpb_slot: target,
             w,
             h,
@@ -10669,33 +10736,18 @@ impl DpbCore {
         w: u32,
         h: u32,
     ) -> Result<Nv12Frame, VulkanVideoError> {
-        let dev = &self.raw_device;
-        // SAFETY: readback_mem is host-visible/coherent and holds
-        // `readback_layout.len()` bytes at `offset` written by the completed copy;
-        // mapped and unmapped here.
-        unsafe {
-            let ptr = dev
-                .map_memory(
-                    self.readback_mem,
-                    offset,
-                    self.readback_layout.len(),
-                    vk::MemoryMapFlags::empty(),
-                )
-                .map_err(VulkanVideoError::QueryFailed)? as *const u8;
-            let (luma, chroma) = self.readback_layout.read_planes(ptr);
-            dev.unmap_memory(self.readback_mem);
-            Ok(Nv12Frame {
-                width: w,
-                height: h,
-                luma,
-                chroma,
-                bit_depth: self.bit_depth,
-            })
-        }
+        // SAFETY: `readback_mapped` maps all of readback_mem, which holds
+        // `readback_layout.len()` bytes at `offset` written by the completed copy.
+        let frame = unsafe {
+            self.readback_layout
+                .read_frame(self.readback_mapped.0.add(offset as usize), self.bit_depth)
+        };
+        debug_assert_eq!((frame.width, frame.height), (w, h));
+        Ok(frame)
     }
 
-    /// Wait on ring slot `idx`'s in-flight decode, read its NV12 frame into
-    /// `self.ready`, and free its bitstream. No-op if the slot is empty.
+    /// Wait on ring slot `idx`'s in-flight decode and read its NV12 frame into
+    /// `self.ready`. No-op if the slot is empty.
     fn retire_slot(&mut self, idx: usize) -> Result<(), VulkanVideoError> {
         let inf = match self.ring[idx].in_flight.take() {
             Some(i) => i,
@@ -10712,8 +10764,6 @@ impl DpbCore {
         let offset = idx as u64 * self.readback_stride;
         let frame = self.read_back_nv12_at(offset, inf.w, inf.h)?;
         self.ready.push_back(frame);
-        // SAFETY: nothing references the bitstream now the fence is waited.
-        unsafe { self.free_bitstream(inf.bitstream, inf.bitstream_mem) };
         Ok(())
     }
 
@@ -10826,8 +10876,8 @@ impl DpbCore {
     }
 
     /// Convert slot `slot`'s just-decoded picture to an RGBA `wgpu::Texture`, chained
-    /// on `gpu.sem_dc` (the decode signals it), then free the chained decode's held
-    /// bitstream now that the conversion has completed (`convert` waits its fence).
+    /// on `gpu.sem_dc` (the decode signals it), which also completes the chained
+    /// decode (`convert` waits its fence).
     /// The shared tail of every `decode_picture_to_texture` / `decode_frame_to_texture`.
     ///
     /// # Safety
@@ -10849,11 +10899,7 @@ impl DpbCore {
                     .output(gpu.output, picture, w, h, gpu.sem_dc)?
             }
         };
-        // The decode + its chained compute are both complete; free the held bitstream.
-        if let Some((bitstream, bitstream_mem)) = self.pending_tex_bitstream.take() {
-            // SAFETY: nothing references the bitstream now the compute fence waited.
-            unsafe { self.free_bitstream(bitstream, bitstream_mem) };
-        }
+        self.chained_decode_pending = false;
         Ok(tex)
     }
 
@@ -10910,31 +10956,27 @@ impl DpbCore {
         })
     }
 
-    /// Wait on and free every in-flight ring decode WITHOUT reading it back, then
-    /// rewind the ring. Used on `reset` (seek) and `Drop`, where any pending
-    /// system-path output is discarded. Also frees a chained texture decode's
-    /// bitstream if one is mid-flight (only on an error unwind), draining the
-    /// decode queue first since that decode has no fence of its own.
+    /// Wait on every in-flight ring decode WITHOUT reading it back, then rewind
+    /// the ring. Used on `reset` (seek) and `Drop`, where any pending system-path
+    /// output is discarded. Also waits a chained texture decode that is
+    /// mid-flight (only on an error unwind), draining the decode queue since that
+    /// decode has no fence of its own.
     fn abort_ring(&mut self) {
         let dev = self.raw_device.clone();
         for slot in &mut self.ring {
-            if let Some(inf) = slot.in_flight.take() {
-                // SAFETY: the fence was submitted with this slot; wait then free.
+            if slot.in_flight.take().is_some() {
+                // SAFETY: the fence was submitted with this slot.
                 unsafe {
                     let _ = dev.wait_for_fences(&[slot.fence], true, u64::MAX);
-                    dev.destroy_buffer(inf.bitstream, None);
-                    dev.free_memory(inf.bitstream_mem, None);
                 }
             }
         }
-        if let Some((bitstream, bitstream_mem)) = self.pending_tex_bitstream.take() {
-            // SAFETY: the chained decode may still be in flight (it signals only
-            // `sem_dc`, no fence); drain the decode queue before freeing.
+        if self.chained_decode_pending {
+            // SAFETY: the decode queue handle is valid for this core's lifetime.
             unsafe {
                 let _ = dev.queue_wait_idle(self.decode_queue);
-                dev.destroy_buffer(bitstream, None);
-                dev.free_memory(bitstream_mem, None);
             }
+            self.chained_decode_pending = false;
         }
         self.ready.clear();
         self.ring_next = 0;
@@ -11389,25 +11431,7 @@ impl H264DpbDecoder {
             .position(|r| r.is_none())
             .ok_or(VulkanVideoError::UnsupportedStream)?;
 
-        // Build the concatenated bitstream (each slice NAL framed with a 4-byte
-        // start code) and the per-slice offsets the driver needs.
-        let mut bitstream_data: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-        let mut slice_offsets: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(slices.len());
-        for nal in slices {
-            slice_offsets.push(bitstream_data.len() as u32);
-            bitstream_data.extend_from_slice(&[0, 0, 0, 1]);
-            bitstream_data.extend_from_slice(nal);
-        }
-
-        self.submit_decode(
-            hdr,
-            poc,
-            target,
-            &active,
-            &bitstream_data,
-            &slice_offsets,
-            to_system,
-        )?;
+        self.submit_decode(hdr, poc, target, &active, slices, to_system)?;
 
         // Reference marking: store the decoded picture as a short-term reference,
         // freeing a slot first if the DPB is full. The stream picks which picture
@@ -11470,17 +11494,19 @@ impl H264DpbDecoder {
         poc: i32,
         target: usize,
         active: &[(usize, RefPic)],
-        bitstream_data: &[u8],
-        slice_offsets: &[u32],
+        slices: &[&[u8]],
         to_system: bool,
     ) -> Result<(), VulkanVideoError> {
         let (w, h) = self.core.coded_extent;
         let num_refs = active.len();
 
-        // Transient host-visible bitstream buffer holding this picture's slices.
-        let (bitstream, bitstream_mem, buf_size) = self
-            .core
-            .new_bitstream(bitstream_data, &self.profile.profile)?;
+        // Each slice NAL framed with a 4-byte start code.
+        let (bitstream, buf_size, slice_offsets) = self.core.write_bitstream(
+            to_system,
+            &crate::annexb::ANNEX_B_START_CODE,
+            slices,
+            &self.profile.profile,
+        )?;
 
         // Per-picture Std picture info.
         // SAFETY: bitfield POD, valid all-zero.
@@ -11502,7 +11528,7 @@ impl H264DpbDecoder {
         };
         let mut h264_pic = vk::VideoDecodeH264PictureInfoKHR::default()
             .std_picture_info(&std_pic)
-            .slice_offsets(slice_offsets);
+            .slice_offsets(&slice_offsets);
 
         // Reference-slot chains. These Vecs are sized exactly and fully populated
         // before any pointer into them is taken, so their heap addresses are
@@ -11615,16 +11641,9 @@ impl H264DpbDecoder {
             .push_next(&mut h264_pic);
 
         // Record + submit the decode (barriers, begin/decode/end coding, optional
-        // NV12 readback) via the shared codec-agnostic core, which takes ownership
-        // of the transient bitstream buffer.
-        self.core.record_and_submit(
-            &begin_info,
-            &decode_info,
-            target,
-            bitstream,
-            bitstream_mem,
-            to_system,
-        )
+        // NV12 readback) via the shared codec-agnostic core.
+        self.core
+            .record_and_submit(&begin_info, &decode_info, target, to_system)
     }
 }
 
@@ -12130,33 +12149,8 @@ impl H265DpbDecoder {
             .position(|r| r.is_none())
             .ok_or(VulkanVideoError::UnsupportedStream)?;
 
-        // Concatenate the slice NALs (each framed with a 4-byte start code) and
-        // record the per-slice offsets the driver needs.
-        // Frame each slice with a 3-BYTE start code (`00 00 01`), not the 4-byte
-        // form. NVIDIA's Vulkan H.265 slice-header parser mis-locates the header
-        // with a 4-byte start code and reads a garbage PPS id for every non-IDR
-        // slice (the IDR tolerates it because its decode uses the picture info,
-        // not the parsed header). ffmpeg's Vulkan HEVC path uses 3 bytes too; the
-        // H.264 path (M492) is unaffected and keeps its 4-byte code.
-        let mut bitstream_data: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-        let mut slice_offsets: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(slices.len());
-        for nal in slices {
-            slice_offsets.push(bitstream_data.len() as u32);
-            bitstream_data.extend_from_slice(&[0, 0, 1]);
-            bitstream_data.extend_from_slice(nal);
-        }
-
         self.submit_decode(
-            hdr,
-            poc,
-            target,
-            &active,
-            &before,
-            &after,
-            &lt,
-            &bitstream_data,
-            &slice_offsets,
-            to_system,
+            hdr, poc, target, &active, &before, &after, &lt, slices, to_system,
         )?;
 
         if h265_is_reference(hdr.nal_unit_type) {
@@ -12202,17 +12196,24 @@ impl H265DpbDecoder {
         ref_before: &[u8; 8],
         ref_after: &[u8; 8],
         ref_lt: &[u8; 8],
-        bitstream_data: &[u8],
-        slice_offsets: &[u32],
+        slices: &[&[u8]],
         to_system: bool,
     ) -> Result<(), VulkanVideoError> {
         let (w, h) = self.core.coded_extent;
         let num_refs = active.len();
 
-        // Transient host-visible bitstream buffer holding this picture's slices.
-        let (bitstream, bitstream_mem, buf_size) = self
-            .core
-            .new_bitstream(bitstream_data, &self.profile.profile)?;
+        // Frame each slice with a 3-BYTE start code (`00 00 01`), not the 4-byte
+        // form. NVIDIA's Vulkan H.265 slice-header parser mis-locates the header
+        // with a 4-byte start code and reads a garbage PPS id for every non-IDR
+        // slice (the IDR tolerates it because its decode uses the picture info,
+        // not the parsed header). ffmpeg's Vulkan HEVC path uses 3 bytes too; the
+        // H.264 path (M492) is unaffected and keeps its 4-byte code.
+        let (bitstream, buf_size, slice_offsets) = self.core.write_bitstream(
+            to_system,
+            &crate::annexb::START_CODE_PREFIX,
+            slices,
+            &self.profile.profile,
+        )?;
 
         // Per-picture Std picture info.
         // SAFETY: bitfield POD, valid all-zero.
@@ -12237,7 +12238,7 @@ impl H265DpbDecoder {
         };
         let mut h265_pic = vk::VideoDecodeH265PictureInfoKHR::default()
             .std_picture_info(&std_pic)
-            .slice_segment_offsets(slice_offsets);
+            .slice_segment_offsets(&slice_offsets);
 
         // Reference-slot chains (see H264DpbDecoder::submit_decode for the manual
         // pointer-chaining rationale). Sized exactly + fully populated before any
@@ -12343,16 +12344,9 @@ impl H265DpbDecoder {
             .push_next(&mut h265_pic);
 
         // Record + submit the decode (barriers, begin/decode/end coding, optional
-        // NV12 readback) via the shared codec-agnostic core, which takes ownership
-        // of the transient bitstream buffer.
-        self.core.record_and_submit(
-            &begin_info,
-            &decode_info,
-            target,
-            bitstream,
-            bitstream_mem,
-            to_system,
-        )
+        // NV12 readback) via the shared codec-agnostic core.
+        self.core
+            .record_and_submit(&begin_info, &decode_info, target, to_system)
     }
 }
 
@@ -12892,10 +12886,10 @@ impl Av1DpbDecoder {
         let (w, h) = self.core.coded_extent;
         let num_refs = active.len();
 
-        // Transient host-visible bitstream buffer holding the frame OBU payload.
-        let (bitstream, bitstream_mem, buf_size) = self
-            .core
-            .new_bitstream(bitstream_data, &self.profile.profile)?;
+        // The frame OBU payload as it came, no start code.
+        let (bitstream, buf_size, _) =
+            self.core
+                .write_bitstream(to_system, &[], &[bitstream_data], &self.profile.profile)?;
 
         // AV1 picture info (points at the owned Std sub-structs in `std_pic`).
         let mut av1_pic = vk::VideoDecodeAV1PictureInfoKHR::default()
@@ -13023,16 +13017,9 @@ impl Av1DpbDecoder {
             .push_next(&mut av1_pic);
 
         // Record + submit the decode (barriers, begin/decode/end coding, optional
-        // NV12 readback) via the shared codec-agnostic core, which takes ownership
-        // of the transient bitstream buffer.
-        self.core.record_and_submit(
-            &begin_info,
-            &decode_info,
-            target,
-            bitstream,
-            bitstream_mem,
-            to_system,
-        )
+        // NV12 readback) via the shared codec-agnostic core.
+        self.core
+            .record_and_submit(&begin_info, &decode_info, target, to_system)
     }
 }
 
@@ -13561,15 +13548,57 @@ pub struct DecodedLuma {
 pub struct Nv12Frame {
     pub width: u32,
     pub height: u32,
-    /// Luma (Y) plane, row-major. `bit_depth` bytes per sample: `width * height`
-    /// bytes for 8-bit, `2 * width * height` for 10-bit (little-endian 16-bit
-    /// samples, value in the top 10 bits, the G10X6 layout).
-    pub luma: alloc::vec::Vec<u8>,
-    /// Interleaved Cb,Cr plane, row-major, `ceil(width/2) * ceil(height/2)` pairs
-    /// (same bytes-per-sample as luma).
-    pub chroma: alloc::vec::Vec<u8>,
     /// Sample bit depth: 8 (one byte per sample) or 10 (two bytes per sample).
     pub bit_depth: u8,
+    /// The luma (Y) plane, then the interleaved Cb,Cr plane, both row-major and
+    /// unpadded: the NV12 / P010 frame layout. 10-bit samples are little-endian
+    /// 16-bit with the value in the top 10 bits (the G10X6 layout).
+    data: alloc::boxed::Box<[u8]>,
+    luma_len: usize,
+}
+
+impl Nv12Frame {
+    /// A frame from its two planes. `None` when `luma` is not the size of a
+    /// `width x height` plane at `bit_depth`.
+    pub fn from_planes(
+        width: u32,
+        height: u32,
+        bit_depth: u8,
+        luma: &[u8],
+        chroma: &[u8],
+    ) -> Option<Self> {
+        let luma_len = two_plane_raw_format(bit_depth).plane_bytes(0, width, height)?;
+        if luma.len() as u64 != luma_len {
+            return None;
+        }
+        Some(Self {
+            width,
+            height,
+            bit_depth,
+            data: [luma, chroma].concat().into_boxed_slice(),
+            luma_len: luma.len(),
+        })
+    }
+
+    /// Luma (Y) plane: `width * height` samples.
+    pub fn luma(&self) -> &[u8] {
+        &self.data[..self.luma_len]
+    }
+
+    /// Interleaved Cb,Cr plane: `ceil(width/2) * ceil(height/2)` pairs.
+    pub fn chroma(&self) -> &[u8] {
+        &self.data[self.luma_len..]
+    }
+
+    /// Both planes, writable.
+    pub fn planes_mut(&mut self) -> (&mut [u8], &mut [u8]) {
+        self.data.split_at_mut(self.luma_len)
+    }
+
+    /// The whole frame, luma plane then chroma plane.
+    pub fn into_data(self) -> alloc::boxed::Box<[u8]> {
+        self.data
+    }
 }
 
 /// The colour matrix a decoded frame's luma / chroma are separated by, from the
@@ -13713,12 +13742,13 @@ fn nv12_to_rgba(frame: &Nv12Frame, color: VideoColorSpace) -> alloc::vec::Vec<u8
     let cr_g = 2.0 * kr * (1.0 - kr) / kg * c_scale;
     let cb_g = 2.0 * kb * (1.0 - kb) / kg * c_scale;
     let mut rgba = alloc::vec![0u8; w * h * 4];
+    let (luma, chroma) = (frame.luma(), frame.chroma());
     for y in 0..h {
         for x in 0..w {
-            let yc = (frame.luma[y * w + x] as f32 - y_off) * y_scale;
+            let yc = (luma[y * w + x] as f32 - y_off) * y_scale;
             let ci = ((y / 2) * cw + (x / 2)) * 2;
-            let cb = frame.chroma[ci] as f32 - 128.0;
-            let cr = frame.chroma[ci + 1] as f32 - 128.0;
+            let cb = chroma[ci] as f32 - 128.0;
+            let cr = chroma[ci + 1] as f32 - 128.0;
             let r = yc + cr_r * cr;
             let g = yc - cr_g * cr - cb_g * cb;
             let b = yc + cb_b * cb;
@@ -13765,13 +13795,13 @@ fn nv12_to_two_plane_texture(
     let planes = [
         (
             wgpu::TextureAspect::Plane0,
-            &frame.luma,
+            frame.luma(),
             frame.width,
             frame.height,
         ),
         (
             wgpu::TextureAspect::Plane1,
-            &frame.chroma,
+            frame.chroma(),
             frame.width / 2,
             frame.height / 2,
         ),
@@ -14562,8 +14592,12 @@ impl VulkanVideoDec {
         );
         let built = self.decoder.is_some();
         // Byte fingerprint of this AU's parameter sets; unchanged bytes (the same
-        // sets re-sent on a keyframe) keep the session, any change rebuilds.
+        // sets re-sent on a keyframe) keep the session without parsing them again,
+        // any change rebuilds.
         let fp = parameter_set_fingerprint(self.codec, au);
+        if built && self.ps_fingerprint == fp {
+            return Ok(true);
+        }
 
         let (session, decoder, emit_wgpu, geometry, reorder_bound, stream_colorimetry) =
             match self.codec {
@@ -14574,9 +14608,6 @@ impl VulkanVideoDec {
                         return Ok(built);
                     };
                     let (width, height) = ps.sps.coded_extent();
-                    if built && self.ps_fingerprint == fp {
-                        return Ok(true);
-                    }
                     let session = device
                         .create_h264_session(&ps, width, height)
                         .map_err(decode_refused)?;
@@ -14605,9 +14636,6 @@ impl VulkanVideoDec {
                     };
                     let width = ps.sps.pic_width_in_luma_samples;
                     let height = ps.sps.pic_height_in_luma_samples;
-                    if built && self.ps_fingerprint == fp {
-                        return Ok(true);
-                    }
                     // The SPS's own reorder bound for the stream's top temporal layer
                     // (the sub-layer ordering parse fills at least that entry).
                     let reorder_bound = Some(usize::from(
@@ -14642,9 +14670,6 @@ impl VulkanVideoDec {
                     };
                     let width = seq.max_frame_width_minus_1 + 1;
                     let height = seq.max_frame_height_minus_1 + 1;
-                    if built && self.ps_fingerprint == fp {
-                        return Ok(true);
-                    }
                     let std = to_std_av1_seq_header(&seq);
                     let session = device
                         .create_av1_session(&std, width, height)
@@ -14758,13 +14783,8 @@ impl VulkanVideoDec {
             out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
             self.last_caps = Some(caps);
         }
-        // NV12 = luma plane followed by interleaved CbCr, which is exactly the
-        // two planes `Nv12Frame` carries: concatenate.
-        let mut nv12 = alloc::vec::Vec::with_capacity(f.luma.len() + f.chroma.len());
-        nv12.extend_from_slice(&f.luma);
-        nv12.extend_from_slice(&f.chroma);
         let out_frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(nv12.into_boxed_slice())),
+            domain: MemoryDomain::System(SystemSlice::from_boxed(f.into_data())),
             timing: self.out_timing(&src_timing),
             sequence: self.emitted,
             meta: Default::default(),
@@ -15213,15 +15233,11 @@ impl AsyncElement for VulkanVideoDec {
         alloc::boxed::Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let slice = frame
+                    let au = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    // Decode the access unit. The whole thing is owned by the
-                    // packet, so borrow the bytes into an owned Vec first (the
-                    // decoder borrows `self.decoder` mutably below).
-                    let au = slice.to_vec();
                     let src_timing = frame.timing;
-                    if !self.ensure_decoder(&au)? {
+                    if !self.ensure_decoder(au)? {
                         // No SPS/PPS yet (a leading non-keyframe AU); skip it.
                         return Ok(());
                     }
@@ -15255,7 +15271,7 @@ impl AsyncElement for VulkanVideoDec {
                                 .decoder
                                 .as_mut()
                                 .expect("decoder built")
-                                .decode_display_to_textures(&au)
+                                .decode_display_to_textures(au)
                             {
                                 Ok(t) => t,
                                 Err(VulkanVideoError::NoDecodableSlice) => alloc::vec::Vec::new(),
@@ -15274,7 +15290,7 @@ impl AsyncElement for VulkanVideoDec {
                                 .decoder
                                 .as_mut()
                                 .expect("decoder built")
-                                .decode_push_to_textures(&au)
+                                .decode_push_to_textures(au)
                                 .map_err(decode_refused)?;
                             let mut ready = alloc::vec::Vec::new();
                             for (meta, tex) in metas.into_iter().zip(textures) {
@@ -15300,7 +15316,7 @@ impl AsyncElement for VulkanVideoDec {
                             .decoder
                             .as_mut()
                             .expect("decoder built")
-                            .decode_push_meta(&au)
+                            .decode_push_meta(au)
                             .map_err(decode_refused)?;
                         for meta in metas {
                             self.pending_meta.push_back((src_timing, meta));
@@ -15328,7 +15344,7 @@ impl AsyncElement for VulkanVideoDec {
                             .decoder
                             .as_mut()
                             .expect("decoder built")
-                            .decode_display(&au)
+                            .decode_display(au)
                         {
                             Ok(f) => f,
                             Err(VulkanVideoError::NoDecodableSlice) => alloc::vec::Vec::new(),
@@ -16132,13 +16148,7 @@ mod tests {
     /// A 2x2 NV12 frame with a constant (Y, Cb, Cr) sample, for exercising the
     /// colour conversion on a single known triple.
     fn solid_nv12(y: u8, cb: u8, cr: u8) -> Nv12Frame {
-        Nv12Frame {
-            width: 2,
-            height: 2,
-            luma: alloc::vec![y; 4],
-            chroma: alloc::vec![cb, cr],
-            bit_depth: 8,
-        }
+        Nv12Frame::from_planes(2, 2, 8, &[y; 4], &[cb, cr]).expect("2x2 luma plane")
     }
 
     #[test]
@@ -16229,13 +16239,16 @@ mod tests {
         let luma_value = 120;
         let chroma_pairs = [(90u8, 200u8), (100, 210), (60, 30), (220, 140)];
         let chroma_columns = width.div_ceil(2) as usize;
-        let frame = Nv12Frame {
+        let chroma: alloc::vec::Vec<u8> =
+            chroma_pairs.iter().flat_map(|&(cb, cr)| [cb, cr]).collect();
+        let frame = Nv12Frame::from_planes(
             width,
             height,
-            luma: alloc::vec![luma_value; (width * height) as usize],
-            chroma: chroma_pairs.iter().flat_map(|&(cb, cr)| [cb, cr]).collect(),
-            bit_depth: 8,
-        };
+            8,
+            &alloc::vec![luma_value; (width * height) as usize],
+            &chroma,
+        )
+        .expect("3x3 luma plane");
         let rgba = nv12_to_rgba(&frame, VideoColorSpace::BT601_STUDIO);
         const RGBA_PIXEL_BYTES: usize = 4;
         for (index, pixel) in rgba.as_chunks::<RGBA_PIXEL_BYTES>().0.iter().enumerate() {

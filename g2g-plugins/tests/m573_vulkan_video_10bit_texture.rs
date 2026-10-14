@@ -183,7 +183,7 @@ fn ten_bit_gpu_texture_hevc_and_av1() {
             let frames = cpu.decode_all(HEVC).expect("cpu 10-bit decode");
             frames
                 .iter()
-                .map(|f| nv12_10bit_to_rgb(&f.luma, &f.chroma, color))
+                .map(|f| nv12_10bit_to_rgb(f.luma(), f.chroma(), color))
                 .collect()
         });
     let Some(cpu_rgb) = cpu_rgb else { return };

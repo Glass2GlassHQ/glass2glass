@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1300: Vulkan decode reuses mapped bitstream and readback buffers and emits decoded frames without a copy.
 - M1299: one access-unit framer serves every elementary-stream parser, scanning each byte once and releasing aligned access units without holding one back.
 - M1298: slice headers are read without de-escaping the whole NAL.
 - M1297: Vulkan decode sizes field-coded H.264 by both fields.

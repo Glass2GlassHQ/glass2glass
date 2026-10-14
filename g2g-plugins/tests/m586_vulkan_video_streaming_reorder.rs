@@ -117,9 +117,9 @@ fn au_frame(bytes: Vec<u8>, seq: u64) -> Frame {
 /// The concatenated NV12 planes of a decoded frame (luma then interleaved CbCr),
 /// exactly what the element emits as its system-memory buffer.
 fn planes(f: &Nv12Frame) -> Vec<u8> {
-    let mut v = Vec::with_capacity(f.luma.len() + f.chroma.len());
-    v.extend_from_slice(&f.luma);
-    v.extend_from_slice(&f.chroma);
+    let mut v = Vec::with_capacity(f.luma().len() + f.chroma().len());
+    v.extend_from_slice(f.luma());
+    v.extend_from_slice(f.chroma());
     v
 }
 

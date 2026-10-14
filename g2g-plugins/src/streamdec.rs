@@ -504,7 +504,7 @@ impl VulkanStreamDecoder {
             .map(|f| DecodedVideoFrame {
                 width: f.width,
                 height: f.height,
-                data: nv12_to_i420(&f),
+                data: nv12_to_i420(f),
                 layout: VideoPixelLayout::Y_U_V420,
                 range,
                 coefficients,
@@ -592,25 +592,19 @@ impl VulkanStreamDecoder {
 }
 
 /// Deinterleave a decoder NV12 frame (Y plane + interleaved Cb/Cr) into packed
-/// I420 (Y, then U, then V), the conventional planar layout.
-fn nv12_to_i420(nv12: &Nv12Frame) -> Vec<u8> {
-    let w = nv12.width as usize;
-    let h = nv12.height as usize;
-    let cw = w.div_ceil(2);
-    let ch = h.div_ceil(2);
-    let mut out = Vec::with_capacity(w * h + 2 * cw * ch);
-    out.extend_from_slice(&nv12.luma);
+/// I420 (Y, then U, then V), the conventional planar layout, in the frame's own
+/// buffer.
+fn nv12_to_i420(nv12: Nv12Frame) -> Vec<u8> {
+    let interleaved = nv12.chroma().to_vec();
+    let luma_len = nv12.luma().len();
+    let mut i420 = nv12.into_data().into_vec();
     // NV12 chroma is Cb,Cr interleaved (U then V per pair) -> split into planes.
-    let n = cw * ch;
-    let mut u = Vec::with_capacity(n);
-    let mut v = Vec::with_capacity(n);
-    for px in nv12.chroma.as_chunks::<2>().0 {
-        u.push(px[0]);
-        v.push(px[1]);
+    let (u, v) = i420[luma_len..].split_at_mut(interleaved.len() / 2);
+    for ((pair, u), v) in interleaved.as_chunks::<2>().0.iter().zip(u).zip(v) {
+        *u = pair[0];
+        *v = pair[1];
     }
-    out.append(&mut u);
-    out.append(&mut v);
-    out
+    i420
 }
 
 /// Append `nal` to `out` in Annex-B framing (4-byte start code + NAL).

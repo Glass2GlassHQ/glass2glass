@@ -47,7 +47,7 @@ struct Decoded {
 fn digest(frames: &[Nv12Frame]) -> Vec<(u32, u32, u64, u64)> {
     frames
         .iter()
-        .map(|f| (f.width, f.height, fnv1a_64(&f.luma), fnv1a_64(&f.chroma)))
+        .map(|f| (f.width, f.height, fnv1a_64(f.luma()), fnv1a_64(f.chroma())))
         .collect()
 }
 

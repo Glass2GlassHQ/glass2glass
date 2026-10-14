@@ -332,7 +332,7 @@ fn run_codec(stream: &[u8], xfer: u32, label: &str) {
         .expect("cpu decode")
         .iter()
         .map(|f| {
-            nv12_10bit_to_rgb(&f.luma, &f.chroma, color)
+            nv12_10bit_to_rgb(f.luma(), f.chroma(), color)
                 .iter()
                 .map(|&c| tonemap_hdr(c, xfer))
                 .collect()

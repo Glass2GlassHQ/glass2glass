@@ -78,9 +78,9 @@ fn main() {
     for (i, f) in frames.iter().enumerate() {
         let path = out_dir.join(format!("frame_{i:03}.ppm"));
         write_ppm(&path, f);
-        let min = *f.luma.iter().min().unwrap();
-        let max = *f.luma.iter().max().unwrap();
-        let mean = f.luma.iter().map(|&b| b as u64).sum::<u64>() / f.luma.len() as u64;
+        let min = *f.luma().iter().min().unwrap();
+        let max = *f.luma().iter().max().unwrap();
+        let mean = f.luma().iter().map(|&b| b as u64).sum::<u64>() / f.luma().len() as u64;
         println!(
             "  frame {i:>3}: luma {min:>3}..={max:<3} mean {mean:>3}  -> {}",
             path.display()
@@ -96,10 +96,10 @@ fn write_ppm(path: &std::path::Path, frame: &Nv12Frame) {
     let mut rgb = Vec::with_capacity(w * h * 3);
     for y in 0..h {
         for x in 0..w {
-            let yv = frame.luma[y * w + x] as f32;
+            let yv = frame.luma()[y * w + x] as f32;
             let ci = ((y / 2) * cw + (x / 2)) * 2;
-            let cb = frame.chroma[ci] as f32 - 128.0;
-            let cr = frame.chroma[ci + 1] as f32 - 128.0;
+            let cb = frame.chroma()[ci] as f32 - 128.0;
+            let cr = frame.chroma()[ci + 1] as f32 - 128.0;
             let yc = (yv - 16.0) * 1.164_383;
             let r = yc + 1.596_027 * cr;
             let g = yc - 0.391_762 * cb - 0.812_968 * cr;

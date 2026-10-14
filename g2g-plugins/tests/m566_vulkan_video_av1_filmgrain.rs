@@ -64,9 +64,9 @@ fn decodes_filmgrain_av1_stream() {
     for (i, f) in frames.iter().enumerate() {
         assert_eq!(f.width, W as u32);
         assert_eq!(f.height, H as u32);
-        assert_eq!(f.luma.len(), W * H);
-        let min = *f.luma.iter().min().unwrap();
-        let max = *f.luma.iter().max().unwrap();
+        assert_eq!(f.luma().len(), W * H);
+        let min = *f.luma().iter().min().unwrap();
+        let max = *f.luma().iter().max().unwrap();
         assert!(
             max > min,
             "frame {i} luma is uniform ({min}=={max}); no real content"
@@ -90,7 +90,7 @@ fn decodes_filmgrain_av1_stream() {
             let ref_u = &ref_yuv[base + W * H..base + W * H + cw * ch];
             let ref_v = &ref_yuv[base + W * H + cw * ch..base + frame_bytes];
             let ysad: u64 = f
-                .luma
+                .luma()
                 .iter()
                 .zip(ref_y)
                 .map(|(&a, &b)| (a as i32 - b as i32).unsigned_abs() as u64)
@@ -98,8 +98,8 @@ fn decodes_filmgrain_av1_stream() {
             let mut usad = 0u64;
             let mut vsad = 0u64;
             for k in 0..cw * ch {
-                usad += (f.chroma[2 * k] as i32 - ref_u[k] as i32).unsigned_abs() as u64;
-                vsad += (f.chroma[2 * k + 1] as i32 - ref_v[k] as i32).unsigned_abs() as u64;
+                usad += (f.chroma()[2 * k] as i32 - ref_u[k] as i32).unsigned_abs() as u64;
+                vsad += (f.chroma()[2 * k + 1] as i32 - ref_v[k] as i32).unsigned_abs() as u64;
             }
             eprintln!(
                 "frame {i}: Y SAD/px={:.6} U SAD/px={:.6} V SAD/px={:.6}",

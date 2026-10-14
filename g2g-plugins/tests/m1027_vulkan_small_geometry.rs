@@ -57,9 +57,9 @@ fn a_64x48_clip_decodes() {
     for (i, f) in frames.iter().enumerate() {
         assert_eq!(f.width, WIDTH);
         assert_eq!(f.height, HEIGHT);
-        assert_eq!(f.luma.len(), (WIDTH * HEIGHT) as usize);
+        assert_eq!(f.luma().len(), (WIDTH * HEIGHT) as usize);
         assert!(
-            f.luma.iter().any(|&p| p != f.luma[0]),
+            f.luma().iter().any(|&p| p != f.luma()[0]),
             "frame {i} decoded to real content, not a flat field"
         );
     }

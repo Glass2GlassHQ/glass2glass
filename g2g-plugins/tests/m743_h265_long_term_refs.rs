@@ -85,7 +85,7 @@ fn assert_bit_exact(frames: &[Nv12Frame], ref_yuv: &[u8]) {
         let ru = &ref_yuv[base + W * H..base + W * H + cw * ch];
         let rv = &ref_yuv[base + W * H + cw * ch..base + fb];
         let ysad: u64 = f
-            .luma
+            .luma()
             .iter()
             .zip(ry)
             .map(|(&a, &b)| (a as i32 - b as i32).unsigned_abs() as u64)
@@ -93,8 +93,8 @@ fn assert_bit_exact(frames: &[Nv12Frame], ref_yuv: &[u8]) {
         let mut usad = 0u64;
         let mut vsad = 0u64;
         for k in 0..cw * ch {
-            usad += (f.chroma[2 * k] as i32 - ru[k] as i32).unsigned_abs() as u64;
-            vsad += (f.chroma[2 * k + 1] as i32 - rv[k] as i32).unsigned_abs() as u64;
+            usad += (f.chroma()[2 * k] as i32 - ru[k] as i32).unsigned_abs() as u64;
+            vsad += (f.chroma()[2 * k + 1] as i32 - rv[k] as i32).unsigned_abs() as u64;
         }
         if ysad != 0 || usad != 0 || vsad != 0 {
             eprintln!(
@@ -164,8 +164,8 @@ fn h265_long_term_refs_decode_bit_exact() {
     assert!(frames.len() > 100, "vector has hundreds of pictures");
     for (i, f) in frames.iter().enumerate() {
         assert_eq!((f.width, f.height), (W as u32, H as u32));
-        let min = *f.luma.iter().min().unwrap();
-        let max = *f.luma.iter().max().unwrap();
+        let min = *f.luma().iter().min().unwrap();
+        let max = *f.luma().iter().max().unwrap();
         assert!(max > min, "display frame {i} luma uniform; decode failed");
     }
 

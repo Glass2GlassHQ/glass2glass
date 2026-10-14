@@ -58,9 +58,9 @@ fn decodes_whole_av1_stream_with_references() {
     for (i, f) in frames.iter().enumerate() {
         assert_eq!(f.width, W as u32);
         assert_eq!(f.height, H as u32);
-        assert_eq!(f.luma.len(), W * H, "one luma byte per sample");
-        let min = *f.luma.iter().min().unwrap();
-        let max = *f.luma.iter().max().unwrap();
+        assert_eq!(f.luma().len(), W * H, "one luma byte per sample");
+        let min = *f.luma().iter().min().unwrap();
+        let max = *f.luma().iter().max().unwrap();
         assert!(
             max > min,
             "frame {i} luma is uniform ({min}=={max}); no real content"
@@ -69,14 +69,14 @@ fn decodes_whole_av1_stream_with_references() {
 
     // An INTER frame must differ from the key frame (inter prediction happened),
     // and consecutive frames must differ (the animated content moved).
-    let key = &frames[0].luma;
+    let key = &frames[0].luma();
     assert!(
-        frames[1].luma != *key,
+        frames[1].luma() != *key,
         "frame 1 (INTER) must differ from the key frame"
     );
     for i in 1..frames.len() {
         assert!(
-            frames[i].luma != frames[i - 1].luma,
+            frames[i].luma() != frames[i - 1].luma(),
             "frame {i} must differ from {}",
             i - 1
         );
@@ -93,13 +93,13 @@ fn decodes_whole_av1_stream_with_references() {
             let y0 = i * frame_bytes;
             let ref_y = &ref_yuv[y0..y0 + W * H];
             let sad: u64 = f
-                .luma
+                .luma()
                 .iter()
                 .zip(ref_y)
                 .map(|(&a, &b)| (a as i32 - b as i32).unsigned_abs() as u64)
                 .sum();
             let sad_per_px = sad as f64 / (W * H) as f64;
-            let ndiff = f.luma.iter().zip(ref_y).filter(|(a, b)| a != b).count();
+            let ndiff = f.luma().iter().zip(ref_y).filter(|(a, b)| a != b).count();
             eprintln!("frame {i}: SAD/px = {sad_per_px:.6}  diff_px = {ndiff}");
             // Every frame is bit-exact vs the ffmpeg software decoder, including
             // the compound / temporal-MV inter frames. M506c chased what was once a

@@ -53,7 +53,7 @@ fn assert_bit_exact(frames: &[Nv12Frame], ref_yuv: &[u8]) {
         let ru = &ref_yuv[base + W * H..base + W * H + cw * ch];
         let rv = &ref_yuv[base + W * H + cw * ch..base + fb];
         let ysad: u64 = f
-            .luma
+            .luma()
             .iter()
             .zip(ry)
             .map(|(&a, &b)| (a as i32 - b as i32).unsigned_abs() as u64)
@@ -61,8 +61,8 @@ fn assert_bit_exact(frames: &[Nv12Frame], ref_yuv: &[u8]) {
         let mut usad = 0u64;
         let mut vsad = 0u64;
         for k in 0..cw * ch {
-            usad += (f.chroma[2 * k] as i32 - ru[k] as i32).unsigned_abs() as u64;
-            vsad += (f.chroma[2 * k + 1] as i32 - rv[k] as i32).unsigned_abs() as u64;
+            usad += (f.chroma()[2 * k] as i32 - ru[k] as i32).unsigned_abs() as u64;
+            vsad += (f.chroma()[2 * k + 1] as i32 - rv[k] as i32).unsigned_abs() as u64;
         }
         eprintln!(
             "display frame {i}: Y {:.4} U {:.4} V {:.4}",

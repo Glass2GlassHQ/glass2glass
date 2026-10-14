@@ -76,9 +76,9 @@ fn decodes_hevc_main10_10bit() {
     for (i, f) in frames.iter().enumerate() {
         assert_eq!((f.width, f.height), (W as u32, H as u32));
         assert_eq!(f.bit_depth, 10, "frame {i} not reported 10-bit");
-        assert_eq!(f.luma.len(), W * H * 2, "10-bit luma is 2 bytes/sample");
+        assert_eq!(f.luma().len(), W * H * 2, "10-bit luma is 2 bytes/sample");
         assert_eq!(
-            f.chroma.len(),
+            f.chroma().len(),
             W * H,
             "10-bit chroma is 2 bytes/sample, half the luma count"
         );
@@ -86,7 +86,7 @@ fn decodes_hevc_main10_10bit() {
         // the top-10-bit G10X6 packing, so shift down to the 0..=1023 range.
         let (mut lo, mut hi) = (u16::MAX, 0u16);
         for p in 0..W * H {
-            let v = le16(&f.luma, p) >> 6;
+            let v = le16(f.luma(), p) >> 6;
             lo = lo.min(v);
             hi = hi.max(v);
         }
@@ -109,15 +109,16 @@ fn decodes_hevc_main10_10bit() {
             let rv = &ref_yuv[base + W * H * 2 + cw * ch * 2..base + fb];
             let mut ysad = 0u64;
             for p in 0..W * H {
-                ysad += ((le16(&f.luma, p) >> 6) as i32 - le16(ry, p) as i32).unsigned_abs() as u64;
+                ysad +=
+                    ((le16(f.luma(), p) >> 6) as i32 - le16(ry, p) as i32).unsigned_abs() as u64;
             }
             // NV12 chroma is interleaved Cb,Cr; the reference is planar U then V.
             let mut usad = 0u64;
             let mut vsad = 0u64;
             for k in 0..cw * ch {
-                usad += ((le16(&f.chroma, 2 * k) >> 6) as i32 - le16(ru, k) as i32).unsigned_abs()
+                usad += ((le16(f.chroma(), 2 * k) >> 6) as i32 - le16(ru, k) as i32).unsigned_abs()
                     as u64;
-                vsad += ((le16(&f.chroma, 2 * k + 1) >> 6) as i32 - le16(rv, k) as i32)
+                vsad += ((le16(f.chroma(), 2 * k + 1) >> 6) as i32 - le16(rv, k) as i32)
                     .unsigned_abs() as u64;
             }
             eprintln!(

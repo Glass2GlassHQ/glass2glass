@@ -56,12 +56,12 @@ fn decodes_whole_h265_stream_with_references() {
     for (i, f) in frames.iter().enumerate() {
         assert_eq!(f.width, 640);
         assert_eq!(f.height, 480);
-        assert_eq!(f.luma.len(), 640 * 480, "one luma byte per sample");
+        assert_eq!(f.luma().len(), 640 * 480, "one luma byte per sample");
         // A real decoded picture has varied luma; a cleared / failed decode would
         // be uniform. Per-frame proof pixels came out. (Every frame here is also
         // bit-exact against the ffmpeg software decoder, verified out of band.)
-        let min = *f.luma.iter().min().unwrap();
-        let max = *f.luma.iter().max().unwrap();
+        let min = *f.luma().iter().min().unwrap();
+        let max = *f.luma().iter().max().unwrap();
         assert!(
             max > min,
             "frame {i} luma is uniform ({min}=={max}); no real content"
@@ -81,7 +81,7 @@ fn decodes_whole_h265_stream_with_references() {
     for gop_start in [0usize, 5] {
         for p in 1..5 {
             assert!(
-                sad(&frames[gop_start + p].luma, &frames[gop_start].luma) > 0,
+                sad(frames[gop_start + p].luma(), frames[gop_start].luma()) > 0,
                 "P frame {} is byte-identical to its keyframe; inter prediction did not run",
                 gop_start + p
             );
@@ -90,7 +90,7 @@ fn decodes_whole_h265_stream_with_references() {
     // Consecutive frames differ (motion decoded, not frozen).
     for i in 1..frames.len() {
         assert!(
-            sad(&frames[i].luma, &frames[i - 1].luma) > 0,
+            sad(frames[i].luma(), frames[i - 1].luma()) > 0,
             "frame {i} is identical to frame {}; no motion decoded",
             i - 1
         );

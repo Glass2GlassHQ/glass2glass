@@ -81,9 +81,7 @@ fn hevc_decoder_api_frames() -> Vec<Vec<u8>> {
         .into_iter()
         .map(|f| {
             assert_eq!(f.bit_depth, 10, "the fixture decodes 10-bit");
-            let mut bytes = f.luma;
-            bytes.extend_from_slice(&f.chroma);
-            bytes
+            f.into_data().into_vec()
         })
         .collect()
 }
