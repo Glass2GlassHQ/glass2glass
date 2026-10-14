@@ -58,8 +58,6 @@ Core runtime:
 Core, bindings, ML:
 
 - `TensorView::materialize` copies one element at a time.
-- Log `enabled()` locks per call site once a category override exists, and sinks
-  emit under spinlocks.
 - `wire::encode_packet` starts at zero capacity and copies the payload twice.
 - `ElectedClock::now_ns` locks per read, `pacing::judge` clones `ClockSync` twice.
 - `BlobMeta::get` allocates a `String` per lookup.

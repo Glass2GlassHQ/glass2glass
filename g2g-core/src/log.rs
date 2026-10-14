@@ -39,7 +39,7 @@
 #[cfg(feature = "std")]
 extern crate std;
 
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicU8, Ordering};
 
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
@@ -588,6 +588,15 @@ impl LogConfig {
     fn has_overrides(&self) -> bool {
         !self.overrides.is_empty()
     }
+
+    fn most_verbose(&self) -> LogLevel {
+        self.overrides
+            .iter()
+            .map(|(_, level)| *level)
+            .chain(core::iter::once(self.default))
+            .max_by_key(|level| *level as u8)
+            .unwrap_or(self.default)
+    }
 }
 
 /// Minimal glob over ASCII category names: `*` matches any run (including
@@ -619,15 +628,18 @@ fn glob_match(pattern: &str, s: &str) -> bool {
     pi == p.len()
 }
 
-// Process-global filter + sink. `DEFAULT_LEVEL` / `HAS_OVERRIDES` mirror `CONFIG`
-// so the common no-override `enabled` check reads an atomic without locking.
+// Process-global filter + sink. `DEFAULT_LEVEL` / `HAS_OVERRIDES` / `MOST_VERBOSE`
+// mirror `CONFIG` so `enabled` reads atomics, and locks only for a level some
+// override could enable.
 static DEFAULT_LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Error as u8);
 static HAS_OVERRIDES: AtomicBool = AtomicBool::new(false);
+static MOST_VERBOSE: AtomicU8 = AtomicU8::new(LogLevel::Error as u8);
 static CONFIG: Mutex<LogConfig> = Mutex::new(LogConfig::new());
+// Sinks are cloned out of their locks, so a slow sink never holds them.
+static SINK: Mutex<Option<Arc<dyn LogSink>>> = Mutex::new(None);
+// `HAS_EXTRA_SINKS` mirrors a non-empty `EXTRA_SINKS` so the common case skips the lock.
 #[allow(clippy::type_complexity)]
-static SINK: Mutex<Option<Box<dyn LogSink>>> = Mutex::new(None);
-// `HAS_EXTRA_SINKS` mirrors `!EXTRA_SINKS.is_empty()` so the common case skips the lock.
-static EXTRA_SINKS: Mutex<Vec<(SinkId, Box<dyn LogSink>)>> = Mutex::new(Vec::new());
+static EXTRA_SINKS: Mutex<Option<Arc<Vec<(SinkId, Arc<dyn LogSink>)>>>> = Mutex::new(None);
 static HAS_EXTRA_SINKS: AtomicBool = AtomicBool::new(false);
 static NEXT_SINK_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -638,6 +650,7 @@ pub struct SinkId(u64);
 fn sync_caches(cfg: &LogConfig) {
     DEFAULT_LEVEL.store(cfg.default as u8, Ordering::Relaxed);
     HAS_OVERRIDES.store(cfg.has_overrides(), Ordering::Relaxed);
+    MOST_VERBOSE.store(cfg.most_verbose() as u8, Ordering::Relaxed);
 }
 
 /// Whether a `level` message in `category` is enabled by the global config. The
@@ -647,6 +660,9 @@ pub fn enabled(category: &str, level: LogLevel) -> bool {
         return false;
     }
     let lvl = level as u8;
+    if lvl > MOST_VERBOSE.load(Ordering::Relaxed) {
+        return false;
+    }
     if HAS_OVERRIDES.load(Ordering::Relaxed) {
         lvl <= CONFIG.lock().level_for(category) as u8
     } else {
@@ -681,11 +697,13 @@ pub fn emit_fields(
         fields,
         message,
     };
-    if let Some(sink) = SINK.lock().as_deref() {
+    let primary = SINK.lock().clone();
+    if let Some(sink) = primary {
         sink.emit(&record);
     }
     if HAS_EXTRA_SINKS.load(Ordering::Relaxed) {
-        for (_, sink) in EXTRA_SINKS.lock().iter() {
+        let extra = EXTRA_SINKS.lock().clone();
+        for (_, sink) in extra.iter().flat_map(|sinks| sinks.iter()) {
             sink.emit(&record);
         }
     }
@@ -695,25 +713,26 @@ pub fn emit_fields(
 /// Any epoch, as long as it is consistent: a sink reports it verbatim.
 pub type TimeSource = fn() -> u64;
 
-static TIME_SOURCE: Mutex<Option<TimeSource>> = Mutex::new(None);
-// Mirrors `TIME_SOURCE.is_some()` so the unset case skips the lock.
-static HAS_TIME_SOURCE: AtomicBool = AtomicBool::new(false);
+// A `TimeSource` cast to a pointer, null while unset, so a stamp takes no lock.
+static TIME_SOURCE: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Install the clock that stamps records. Core reads no clock of its own (the
 /// `no_std` baseline has none), so without this every record's `timestamp_ns`
 /// is `None`. On `std`, [`init_from_env`] installs [`unix_time_source`].
 pub fn set_time_source(source: TimeSource) {
-    *TIME_SOURCE.lock() = Some(source);
-    HAS_TIME_SOURCE.store(true, Ordering::Relaxed);
+    TIME_SOURCE.store(source as *mut (), Ordering::Release);
 }
 
 /// The current timestamp from the installed source, `None` if none.
 pub fn timestamp_now() -> Option<u64> {
-    if !HAS_TIME_SOURCE.load(Ordering::Relaxed) {
+    let pointer = TIME_SOURCE.load(Ordering::Acquire);
+    if pointer.is_null() {
         return None;
     }
-    let source = *TIME_SOURCE.lock();
-    source.map(|f| f())
+    // SAFETY: only `set_time_source` stores a non-null pointer, cast from a
+    // `TimeSource`, so this casts it back to the same function pointer type.
+    let source = unsafe { core::mem::transmute::<*mut (), TimeSource>(pointer) };
+    Some(source())
 }
 
 /// Nanoseconds since the UNIX epoch, the `std` [`TimeSource`].
@@ -725,7 +744,7 @@ pub fn unix_time_source() -> u64 {
 /// Install (replace) the global log sink. Without one, records are dropped.
 /// Sinks added with [`add_sink`] are unaffected.
 pub fn set_sink(sink: Box<dyn LogSink>) {
-    *SINK.lock() = Some(sink);
+    *SINK.lock() = Some(Arc::from(sink));
 }
 
 /// Subscribe a second sink beside the one [`set_sink`] installed: every record
@@ -735,7 +754,9 @@ pub fn set_sink(sink: Box<dyn LogSink>) {
 pub fn add_sink(sink: Box<dyn LogSink>) -> SinkId {
     let id = SinkId(NEXT_SINK_ID.fetch_add(1, Ordering::Relaxed));
     let mut sinks = EXTRA_SINKS.lock();
-    sinks.push((id, sink));
+    let mut updated: Vec<_> = sinks.iter().flat_map(|s| s.iter().cloned()).collect();
+    updated.push((id, Arc::from(sink)));
+    *sinks = Some(Arc::new(updated));
     HAS_EXTRA_SINKS.store(true, Ordering::Relaxed);
     id
 }
@@ -743,10 +764,16 @@ pub fn add_sink(sink: Box<dyn LogSink>) -> SinkId {
 /// Unsubscribe a sink added with [`add_sink`]; `false` if it was not subscribed.
 pub fn remove_sink(id: SinkId) -> bool {
     let mut sinks = EXTRA_SINKS.lock();
-    let before = sinks.len();
-    sinks.retain(|(sink_id, _)| *sink_id != id);
-    HAS_EXTRA_SINKS.store(!sinks.is_empty(), Ordering::Relaxed);
-    sinks.len() != before
+    let current: Vec<_> = sinks.iter().flat_map(|s| s.iter().cloned()).collect();
+    let before = current.len();
+    let kept: Vec<_> = current
+        .into_iter()
+        .filter(|(sink_id, _)| *sink_id != id)
+        .collect();
+    let removed = kept.len() != before;
+    HAS_EXTRA_SINKS.store(!kept.is_empty(), Ordering::Relaxed);
+    *sinks = (!kept.is_empty()).then(|| Arc::new(kept));
+    removed
 }
 
 /// The global default threshold.
@@ -788,10 +815,9 @@ pub fn reset() {
     *cfg = LogConfig::new();
     sync_caches(&cfg);
     *SINK.lock() = None;
-    EXTRA_SINKS.lock().clear();
+    *EXTRA_SINKS.lock() = None;
     HAS_EXTRA_SINKS.store(false, Ordering::Relaxed);
-    *TIME_SOURCE.lock() = None;
-    HAS_TIME_SOURCE.store(false, Ordering::Relaxed);
+    TIME_SOURCE.store(core::ptr::null_mut(), Ordering::Release);
 }
 
 /// A bounded in-memory [`LogSink`] (M845), the flight recorder: it keeps the
@@ -1301,6 +1327,34 @@ pub(crate) mod tests {
 
     // Serializes the few tests that touch the process-global config / sink.
     pub(crate) static GLOBAL_GUARD: Mutex<()> = Mutex::new(());
+
+    // Logs from inside its own `emit`, as a sink that fails and reports it would.
+    struct ReentrantSink(Arc<Mutex<Vec<CapturedRecord>>>);
+    impl LogSink for ReentrantSink {
+        fn emit(&self, r: &LogRecord<'_>) {
+            if r.category == "outer" {
+                emit(
+                    "inner",
+                    None,
+                    LogLevel::Error,
+                    format_args!("from the sink"),
+                );
+            }
+            CaptureSink(self.0.clone()).emit(r);
+        }
+    }
+
+    #[test]
+    fn a_sink_can_log_while_it_emits() {
+        let _g = GLOBAL_GUARD.lock();
+        reset();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        set_sink(Box::new(ReentrantSink(captured.clone())));
+        emit("outer", None, LogLevel::Error, format_args!("first"));
+        let categories: Vec<String> = captured.lock().iter().map(|r| r.1.clone()).collect();
+        assert_eq!(categories, ["inner", "outer"]);
+        reset();
+    }
 
     #[test]
     fn macros_respect_global_filtering_and_route_to_sink() {
