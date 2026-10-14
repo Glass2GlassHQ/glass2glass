@@ -43,8 +43,10 @@ use g2g_core::{MediaClock, RawVideoFormat};
 const EXT_SEQ_LEN: usize = 2;
 /// One SRD line header: Length(16) + F|Line(16) + C|Offset(16).
 const SRD_HEADER_LEN: usize = 6;
-/// Largest pgroup we handle, in octets (RGBA 16-bit would be 8); sizes a scratch.
-const MAX_PGROUP: usize = 8;
+/// SRD offset word bit: another SRD header follows this one.
+const SRD_CONTINUATION: u16 = 0x8000;
+/// The 15-bit line number and pixel offset fields of an SRD.
+const SRD_FIELD_MASK: u16 = 0x7FFF;
 
 /// An RFC 4175 sampling, tying a [`RawVideoFormat`] to a wire pixel group.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,56 +303,50 @@ impl St2110VideoPacketizer {
         let rtp_ts = self.clock.rtp_timestamp(g2g_core::TaiNs(tai_ns)).get();
 
         let mut packets = Vec::new();
-        let mut scratch = [0u8; MAX_PGROUP];
-        // Cursor over the frame in pgroups, scan line then group within the line.
-        let mut line = 0usize;
-        let mut group = 0usize;
-        while line < height {
-            // Pack SRD runs into one packet up to the size cap.
-            let mut srds: Vec<(usize, usize, usize)> = Vec::new(); // (line, offset_px, len_octets)
-            let mut data: Vec<u8> = Vec::new();
-            let mut avail = self.max_packet - RTP_HEADER_LEN - EXT_SEQ_LEN;
-            while line < height {
-                // Each new run costs an SRD header; need room for at least one pgroup.
-                if avail < SRD_HEADER_LEN + opg {
-                    break;
-                }
-                let by_budget = (avail - SRD_HEADER_LEN) / opg;
-                let take = (groups_per_line - group).min(by_budget);
-                if take == 0 {
-                    break;
-                }
-                for gi in 0..take {
-                    layout.read_group(frame, line, group + gi, &mut scratch[..opg]);
-                    data.extend_from_slice(&scratch[..opg]);
-                }
-                srds.push((line, group * ppg, take * opg));
-                avail -= SRD_HEADER_LEN + take * opg;
-                group += take;
-                if group == groups_per_line {
-                    line += 1;
-                    group = 0;
+        let mut cursor = RunCursor {
+            line: 0,
+            group: 0,
+            height,
+            groups_per_line,
+            octets_per_group: opg,
+        };
+        let payload_budget = self.max_packet - RTP_HEADER_LEN - EXT_SEQ_LEN;
+        while cursor.line < height {
+            // a dry run sizes the packet, so SRDs and pgroups go straight into it
+            let mut sizing = cursor.packet_runs(payload_budget);
+            let (run_count, data_len) = sizing.by_ref().fold((0, 0), |(count, len), run| {
+                (count + 1, len + run.take * opg)
+            });
+            let marker = sizing.cursor.line >= height;
+            let headers_end = RTP_HEADER_LEN + EXT_SEQ_LEN + run_count * SRD_HEADER_LEN;
+            let mut pkt = alloc::vec![0u8; headers_end + data_len];
+            self.write_headers(&mut pkt, rtp_ts, marker);
+            let mut header_at = RTP_HEADER_LEN + EXT_SEQ_LEN;
+            let mut data_at = headers_end;
+            for (index, run) in cursor.packet_runs(payload_budget).enumerate() {
+                let continues = index + 1 < run_count;
+                write_srd(
+                    &mut pkt[header_at..header_at + SRD_HEADER_LEN],
+                    run.take * opg,
+                    run.line,
+                    run.group * ppg,
+                    continues,
+                );
+                header_at += SRD_HEADER_LEN;
+                for group in run.group..run.group + run.take {
+                    layout.read_group(frame, run.line, group, &mut pkt[data_at..data_at + opg]);
+                    data_at += opg;
                 }
             }
-            let marker = line >= height;
-            packets.push(self.build_packet(rtp_ts, marker, &srds, &data));
+            cursor = sizing.cursor;
+            packets.push(pkt);
             self.sequence = self.sequence.wrapping_add(1);
         }
         Some(packets)
     }
 
-    fn build_packet(
-        &self,
-        rtp_ts: u32,
-        marker: bool,
-        srds: &[(usize, usize, usize)],
-        data: &[u8],
-    ) -> Vec<u8> {
-        let mut pkt = Vec::with_capacity(
-            RTP_HEADER_LEN + EXT_SEQ_LEN + srds.len() * SRD_HEADER_LEN + data.len(),
-        );
-        // RTP header (the low 16 sequence bits; the high 16 ride the RFC 4175
-        // extended sequence field below).
+    // RFC 4175 carries the high 16 sequence bits after the RTP header
+    fn write_headers(&self, pkt: &mut [u8], rtp_ts: u32, marker: bool) {
         let header = RtpHeader {
             payload_type: self.payload_type,
             marker,
@@ -358,20 +354,80 @@ impl St2110VideoPacketizer {
             timestamp: rtp_ts,
             ssrc: self.ssrc,
         };
-        pkt.extend_from_slice(&header.to_bytes());
-        // RFC 4175 payload header: Extended Sequence Number (high 16 bits).
-        pkt.extend_from_slice(&((self.sequence >> 16) as u16).to_be_bytes());
-        // SRD line headers; the last has C=0, the rest C=1.
-        for (i, &(line, offset_px, len)) in srds.iter().enumerate() {
-            let c = if i + 1 < srds.len() { 0x8000 } else { 0 };
-            pkt.extend_from_slice(&(len as u16).to_be_bytes());
-            pkt.extend_from_slice(&((line as u16) & 0x7FFF).to_be_bytes()); // F=0 | Line No
-            pkt.extend_from_slice(&(c | (offset_px as u16 & 0x7FFF)).to_be_bytes());
-            // C | Offset
-        }
-        pkt.extend_from_slice(data);
-        pkt
+        pkt[..RTP_HEADER_LEN].copy_from_slice(&header.to_bytes());
+        pkt[RTP_HEADER_LEN..RTP_HEADER_LEN + EXT_SEQ_LEN]
+            .copy_from_slice(&((self.sequence >> 16) as u16).to_be_bytes());
     }
+}
+
+// one sample row run: `take` pgroups of `line` starting at pgroup `group`
+#[derive(Clone, Copy, Debug)]
+struct Run {
+    line: usize,
+    group: usize,
+    take: usize,
+}
+
+// position in the frame in pgroups, scan line then group within the line
+#[derive(Clone, Copy, Debug)]
+struct RunCursor {
+    line: usize,
+    group: usize,
+    height: usize,
+    groups_per_line: usize,
+    octets_per_group: usize,
+}
+
+impl RunCursor {
+    fn packet_runs(self, payload_budget: usize) -> PacketRuns {
+        PacketRuns {
+            cursor: self,
+            avail: payload_budget,
+        }
+    }
+}
+
+// the runs one packet carries, each costing an SRD header plus its pgroups
+#[derive(Debug)]
+struct PacketRuns {
+    cursor: RunCursor,
+    avail: usize,
+}
+
+impl Iterator for PacketRuns {
+    type Item = Run;
+
+    fn next(&mut self) -> Option<Run> {
+        let opg = self.cursor.octets_per_group;
+        if self.cursor.line >= self.cursor.height || self.avail < SRD_HEADER_LEN + opg {
+            return None;
+        }
+        let by_budget = (self.avail - SRD_HEADER_LEN) / opg;
+        let take = (self.cursor.groups_per_line - self.cursor.group).min(by_budget);
+        if take == 0 {
+            return None;
+        }
+        let run = Run {
+            line: self.cursor.line,
+            group: self.cursor.group,
+            take,
+        };
+        self.avail -= SRD_HEADER_LEN + take * opg;
+        self.cursor.group += take;
+        if self.cursor.group == self.cursor.groups_per_line {
+            self.cursor.line += 1;
+            self.cursor.group = 0;
+        }
+        Some(run)
+    }
+}
+
+// SRD length, F=0 | line number, C | offset, C set on all but the last
+fn write_srd(out: &mut [u8], len: usize, line: usize, offset_px: usize, continues: bool) {
+    let continuation = if continues { SRD_CONTINUATION } else { 0 };
+    out[0..2].copy_from_slice(&(len as u16).to_be_bytes());
+    out[2..4].copy_from_slice(&((line as u16) & SRD_FIELD_MASK).to_be_bytes());
+    out[4..6].copy_from_slice(&(continuation | (offset_px as u16 & SRD_FIELD_MASK)).to_be_bytes());
 }
 
 /// A completed ST 2110-20 frame: its RTP timestamp and the reassembled packed
@@ -422,21 +478,15 @@ impl St2110VideoDepacketizer {
         if payload.len() < EXT_SEQ_LEN {
             return None;
         }
-        let mut hi = EXT_SEQ_LEN; // header cursor
         let opg = self.layout.sampling.octets_per_group();
         let ppg = self.layout.sampling.pixels_per_group();
 
-        // Parse the SRD header list (C=1 chains another header).
-        let mut srds: Vec<(usize, usize, usize)> = Vec::new(); // (line, offset_px, len)
+        // Find the end of the SRD header list (C=1 chains another header).
+        let mut headers_end = EXT_SEQ_LEN;
         loop {
-            let hdr = payload.get(hi..hi + SRD_HEADER_LEN)?;
-            let len = usize::from(u16::from_be_bytes([hdr[0], hdr[1]]));
-            let line = usize::from(u16::from_be_bytes([hdr[2], hdr[3]]) & 0x7FFF);
-            let co = u16::from_be_bytes([hdr[4], hdr[5]]);
-            let offset_px = usize::from(co & 0x7FFF);
-            srds.push((line, offset_px, len));
-            hi += SRD_HEADER_LEN;
-            if co & 0x8000 == 0 {
+            let hdr = payload.get(headers_end..headers_end + SRD_HEADER_LEN)?;
+            headers_end += SRD_HEADER_LEN;
+            if u16::from_be_bytes([hdr[4], hdr[5]]) & SRD_CONTINUATION == 0 {
                 break;
             }
         }
@@ -444,8 +494,14 @@ impl St2110VideoDepacketizer {
         // Sample data follows the header list; write each run into the frame. The
         // geometry checks (line, offset on the pgroup grid, run within the row) keep
         // every `write_group` in bounds (never trust the stream).
-        let mut di = hi;
-        for (line, offset_px, len) in srds {
+        let mut di = headers_end;
+        for hdr in payload[EXT_SEQ_LEN..headers_end]
+            .as_chunks::<SRD_HEADER_LEN>()
+            .0
+        {
+            let len = usize::from(u16::from_be_bytes([hdr[0], hdr[1]]));
+            let line = usize::from(u16::from_be_bytes([hdr[2], hdr[3]]) & SRD_FIELD_MASK);
+            let offset_px = usize::from(u16::from_be_bytes([hdr[4], hdr[5]]) & SRD_FIELD_MASK);
             if line >= self.height || offset_px % ppg != 0 || len % opg != 0 {
                 return None;
             }
@@ -461,14 +517,15 @@ impl St2110VideoDepacketizer {
             di += len;
         }
 
-        if marker {
-            Some(St2110VideoFrame {
-                rtp_timestamp,
-                bytes: self.frame.clone(),
-            })
-        } else {
-            None
+        if !marker {
+            return None;
         }
+        // the finished frame goes downstream, reassembly restarts in a fresh buffer
+        let fresh = alloc::vec![0u8; self.frame.len()];
+        Some(St2110VideoFrame {
+            rtp_timestamp,
+            bytes: core::mem::replace(&mut self.frame, fresh),
+        })
     }
 }
 
