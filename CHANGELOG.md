@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1341: `tensorconvert` transposes directly and passes unchanged tensors through.
 - M1340: `gaussianblur` filters in fixed point with a reused scratch.
 - M1339: `textoverlay` caches shaped cue layouts and rasterized glyphs.
 - M1338: `videorate` repeats share the held buffer instead of copying it.

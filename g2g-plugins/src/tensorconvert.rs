@@ -220,56 +220,70 @@ fn resolve(
     Some((out, conv))
 }
 
-/// For a layout change, the output shape (in `to` order) and a permutation
-/// `perm` where output element `i` is sourced from input element `perm[i]`.
-/// `from == to` is the identity permutation at any rank; an actual transpose is
-/// defined only for rank-4 tensors (returns `None` otherwise).
-fn layout_permutation(
+/// Rank of the tensors a layout transpose is defined for.
+const TRANSPOSE_RANK: usize = 4;
+
+/// For a layout change, which input axis each output axis reads, in `to` order.
+/// `None` for a pair with no transpose defined.
+fn transpose_axes(from: TensorLayout, to: TensorLayout) -> Option<[usize; TRANSPOSE_RANK]> {
+    match (from, to) {
+        (TensorLayout::Nchw, TensorLayout::Nhwc) => Some([0, 2, 3, 1]),
+        (TensorLayout::Nhwc, TensorLayout::Nchw) => Some([0, 3, 1, 2]),
+        _ => None,
+    }
+}
+
+/// The input dims of a rank-4 `shape`, `None` at any other rank.
+fn rank4_dims(shape: &TensorShape) -> Option<[usize; TRANSPOSE_RANK]> {
+    let dims: [u32; TRANSPOSE_RANK] = shape.dims().try_into().ok()?;
+    Some(dims.map(|d| d as usize))
+}
+
+/// The shape of `in_shape` laid out `to` instead of `from`. `from == to` keeps
+/// it at any rank; an actual transpose is defined only for rank-4 tensors.
+fn transposed_shape(
     in_shape: &TensorShape,
     from: TensorLayout,
     to: TensorLayout,
-) -> Option<(TensorShape, Vec<usize>)> {
+) -> Option<TensorShape> {
     if from == to {
-        let n = in_shape.elements();
-        return Some((*in_shape, (0..n).collect()));
+        return Some(*in_shape);
     }
-    if in_shape.dims().len() != 4 {
-        return None;
+    let dims = rank4_dims(in_shape)?;
+    let axes = transpose_axes(from, to)?;
+    Some(TensorShape::new(axes.map(|axis| dims[axis] as u32)))
+}
+
+/// Reorder the `element_size`-byte elements of `src` (shape `in_shape`, laid
+/// out `from`) into layout `to`, writing the output in order.
+fn transpose(
+    src: &[u8],
+    in_shape: &TensorShape,
+    from: TensorLayout,
+    to: TensorLayout,
+    element_size: usize,
+) -> Option<Vec<u8>> {
+    let dims = rank4_dims(in_shape)?;
+    let axes = transpose_axes(from, to)?;
+    let mut strides = [1usize; TRANSPOSE_RANK];
+    for axis in (0..TRANSPOSE_RANK - 1).rev() {
+        strides[axis] = strides[axis + 1] * dims[axis + 1];
     }
-    let d: Vec<usize> = in_shape.dims().iter().map(|&x| x as usize).collect();
-    match (from, to) {
-        (TensorLayout::Nchw, TensorLayout::Nhwc) => {
-            let (n, c, h, w) = (d[0], d[1], d[2], d[3]);
-            let out = TensorShape::new([n as u32, h as u32, w as u32, c as u32]);
-            let mut perm = Vec::with_capacity(n * c * h * w);
-            for nn in 0..n {
-                for hh in 0..h {
-                    for ww in 0..w {
-                        for cc in 0..c {
-                            perm.push(((nn * c + cc) * h + hh) * w + ww);
-                        }
-                    }
+    let out_dims = axes.map(|axis| dims[axis]);
+    let steps = axes.map(|axis| strides[axis] * element_size);
+    let mut out = Vec::with_capacity(src.len());
+    for i0 in 0..out_dims[0] {
+        for i1 in 0..out_dims[1] {
+            for i2 in 0..out_dims[2] {
+                let base = i0 * steps[0] + i1 * steps[1] + i2 * steps[2];
+                for i3 in 0..out_dims[3] {
+                    let at = base + i3 * steps[3];
+                    out.extend_from_slice(&src[at..at + element_size]);
                 }
             }
-            Some((out, perm))
         }
-        (TensorLayout::Nhwc, TensorLayout::Nchw) => {
-            let (n, h, w, c) = (d[0], d[1], d[2], d[3]);
-            let out = TensorShape::new([n as u32, c as u32, h as u32, w as u32]);
-            let mut perm = Vec::with_capacity(n * c * h * w);
-            for nn in 0..n {
-                for cc in 0..c {
-                    for hh in 0..h {
-                        for ww in 0..w {
-                            perm.push(((nn * h + hh) * w + ww) * c + cc);
-                        }
-                    }
-                }
-            }
-            Some((out, perm))
-        }
-        _ => None,
     }
+    Some(out)
 }
 
 /// The output caps an instance derives from a tensor input, matching exactly
@@ -290,7 +304,7 @@ fn derive_output_caps(
     };
     let (out_dtype, _) = resolve(*dtype, target)?;
     let to = out_layout.unwrap_or(*layout);
-    let (out_shape, _) = layout_permutation(shape, *layout, to)?;
+    let out_shape = transposed_shape(shape, *layout, to)?;
     Some(Caps::Tensor {
         dtype: out_dtype,
         shape: out_shape,
@@ -396,8 +410,9 @@ impl TensorConvert {
         Ok((*dtype, *shape, *layout))
     }
 
-    /// Convert one frame's tensor bytes per the configured (dtype, layout) change.
-    fn convert_frame(&self, src: &[u8]) -> Result<(Caps, Vec<u8>), G2gError> {
+    /// Convert one frame's tensor bytes per the configured (dtype, layout)
+    /// change. `None` bytes when neither changes: the input passes through.
+    fn convert_frame(&self, src: &[u8]) -> Result<(Caps, Option<Vec<u8>>), G2gError> {
         let (in_dtype, in_shape, in_layout) = self.input.ok_or(G2gError::NotConfigured)?;
         let (out_dtype, conv) = resolve(in_dtype, self.target).ok_or(G2gError::CapsMismatch)?;
         let count = in_shape.elements();
@@ -406,8 +421,8 @@ impl TensorConvert {
         }
 
         // Step 1: elementwise dtype op, output bytes in the input element order.
-        let elems: Vec<u8> = match conv {
-            Conversion::Identity => src[..count * in_dtype.size()].to_vec(),
+        let elems: Option<Vec<u8>> = match conv {
+            Conversion::Identity => None,
             Conversion::Quantize => {
                 let floats: Vec<f32> = src
                     .as_chunks::<4>()
@@ -416,8 +431,10 @@ impl TensorConvert {
                     .take(count)
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect();
-                quantize_f32(&floats, out_dtype, self.scale, self.zero_point)
-                    .ok_or(G2gError::CapsMismatch)?
+                Some(
+                    quantize_f32(&floats, out_dtype, self.scale, self.zero_point)
+                        .ok_or(G2gError::CapsMismatch)?,
+                )
             }
             Conversion::Dequantize => {
                 let floats =
@@ -427,7 +444,7 @@ impl TensorConvert {
                 for f in floats {
                     bytes.extend_from_slice(&f.to_le_bytes());
                 }
-                bytes
+                Some(bytes)
             }
             Conversion::NarrowF16 => {
                 let mut bytes = Vec::with_capacity(count * 2);
@@ -435,7 +452,7 @@ impl TensorConvert {
                     let f = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
                     bytes.extend_from_slice(&f32_to_f16_bits(f).to_le_bytes());
                 }
-                bytes
+                Some(bytes)
             }
             Conversion::WidenF16 => {
                 let mut bytes = Vec::with_capacity(count * 4);
@@ -443,21 +460,19 @@ impl TensorConvert {
                     let f = f16_bits_to_f32(u16::from_le_bytes([c[0], c[1]]));
                     bytes.extend_from_slice(&f.to_le_bytes());
                 }
-                bytes
+                Some(bytes)
             }
         };
 
         // Step 2: layout transpose (if requested and the layout actually differs).
         let to = self.out_layout.unwrap_or(in_layout);
         let (out_shape, out_bytes) = if to != in_layout {
-            let (out_shape, perm) =
-                layout_permutation(&in_shape, in_layout, to).ok_or(G2gError::CapsMismatch)?;
-            let es = out_dtype.size();
-            let mut reordered = alloc::vec![0u8; elems.len()];
-            for (i, &s) in perm.iter().enumerate() {
-                reordered[i * es..(i + 1) * es].copy_from_slice(&elems[s * es..(s + 1) * es]);
-            }
-            (out_shape, reordered)
+            let source = elems.as_deref().unwrap_or(&src[..count * in_dtype.size()]);
+            let out_shape =
+                transposed_shape(&in_shape, in_layout, to).ok_or(G2gError::CapsMismatch)?;
+            let reordered = transpose(source, &in_shape, in_layout, to, out_dtype.size())
+                .ok_or(G2gError::CapsMismatch)?;
+            (out_shape, Some(reordered))
         } else {
             (in_shape, elems)
         };
@@ -526,15 +541,19 @@ impl AsyncElement for TensorConvert {
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let (new_caps, converted) = self.convert_frame(slice)?;
+                    let domain = match converted {
+                        Some(bytes) => {
+                            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice()))
+                        }
+                        None => frame.domain,
+                    };
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                             .await?;
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(
-                            converted.into_boxed_slice(),
-                        )),
+                        domain,
                         timing: frame.timing,
                         sequence: self.emitted,
                         meta: Default::default(),
@@ -769,28 +788,47 @@ mod tests {
     }
 
     #[test]
-    fn layout_permutation_nchw_to_nhwc_reorders_channels_last() {
+    fn transpose_nchw_to_nhwc_reorders_channels_last() {
         // [1, 2, 2, 2]: NCHW flat index is the value at each position.
         let shape = TensorShape::new([1, 2, 2, 2]);
-        let (out_shape, perm) = layout_permutation(&shape, TensorLayout::Nchw, TensorLayout::Nhwc)
+        let nchw: Vec<u8> = (0..8).collect();
+        let nhwc = transpose(&nchw, &shape, TensorLayout::Nchw, TensorLayout::Nhwc, 1)
             .expect("4D transpose");
-        assert_eq!(out_shape, TensorShape::new([1, 2, 2, 2]));
-        assert_eq!(perm, vec![0, 4, 1, 5, 2, 6, 3, 7]);
-        // Round trip back to NCHW is the identity permutation over the data.
-        let (_, back) = layout_permutation(&out_shape, TensorLayout::Nhwc, TensorLayout::Nchw)
+        assert_eq!(nhwc, vec![0, 4, 1, 5, 2, 6, 3, 7]);
+        let out_shape = transposed_shape(&shape, TensorLayout::Nchw, TensorLayout::Nhwc).unwrap();
+        let back = transpose(&nhwc, &out_shape, TensorLayout::Nhwc, TensorLayout::Nchw, 1)
             .expect("inverse");
-        let composed: Vec<usize> = back.iter().map(|&i| perm[i]).collect();
-        assert_eq!(
-            composed,
-            (0..8).collect::<Vec<_>>(),
-            "NCHW->NHWC->NCHW is identity"
-        );
+        assert_eq!(back, nchw, "NCHW->NHWC->NCHW is identity");
+    }
+
+    #[test]
+    fn an_unchanged_tensor_passes_through_without_a_copy() {
+        let caps = Caps::Tensor {
+            dtype: TensorDType::U8,
+            shape: TensorShape::new([1, 2, 2, 2]),
+            layout: TensorLayout::Nhwc,
+        };
+        let mut convert = TensorConvert::transpose(TensorLayout::Nhwc);
+        convert.configure_pipeline(&caps).unwrap();
+        let frame = crate::testutil::frame((0..8).collect());
+        let input = frame.domain.as_system_slice().unwrap().as_ptr();
+        let mut sink = crate::testutil::CollectSink::default();
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(convert.process(PipelinePacket::DataFrame(frame), &mut sink))
+            .unwrap();
+        let output = sink.packets.iter().find_map(|packet| match packet {
+            PipelinePacket::DataFrame(frame) => frame.domain.as_system_slice(),
+            _ => None,
+        });
+        assert_eq!(output.map(<[u8]>::as_ptr), Some(input));
     }
 
     #[test]
     fn layout_transpose_rejected_for_non_4d() {
         let shape = TensorShape::new([1, 10]);
-        assert!(layout_permutation(&shape, TensorLayout::Nchw, TensorLayout::Nhwc).is_none());
+        assert!(transposed_shape(&shape, TensorLayout::Nchw, TensorLayout::Nhwc).is_none());
     }
 
     #[test]

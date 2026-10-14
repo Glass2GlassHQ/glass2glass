@@ -45,7 +45,6 @@ Codecs and parsers:
 
 Raw video and GPU:
 
-- `tensorconvert` builds a permutation per frame.
 - `videoconvert` hub path allocates i32 planes per frame, has no direct
   P010/NV12 arm, and computes U and V for every luma sample.
 - `dmabufwgpu` and `wgpudmabuf` create Vulkan buffers per frame.
