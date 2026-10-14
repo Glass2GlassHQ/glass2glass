@@ -131,15 +131,32 @@ pub(crate) type ProtectedSeqsFn = fn(&[u8]) -> Option<Vec<u16>>;
 /// format, given the survivors as `(seq, packet)`.
 pub(crate) type RecoverFn = fn(&[u8], &[(u16, &[u8])]) -> Option<Vec<u8>>;
 
+// Starting one cycle up keeps a packet reordered before the first from underflowing.
+const SEQUENCE_CYCLE: u64 = 1 << 16;
+
+#[derive(Debug)]
+struct RepairEntry {
+    packet: Vec<u8>,
+    protected_sequences: Vec<u64>,
+}
+
+enum RepairOutcome {
+    Recovered { sequence: u64 },
+    AllMembersPresent,
+    MembersStillMissing,
+}
+
 /// Buffers received media + repair packets and chains single-loss recoveries.
 /// The wire format is supplied as two function pointers: one reading a repair's
-/// protected sequence set, one rebuilding a missing member from it.
+/// protected sequence set, one rebuilding a missing member from it. Sequences
+/// are extended past the 16-bit wrap, so eviction always drops the oldest.
 #[derive(Debug)]
 pub(crate) struct XorFecBuffer {
-    media: BTreeMap<u16, Vec<u8>>,
-    fecs: VecDeque<Vec<u8>>,
+    media: BTreeMap<u64, Vec<u8>>,
+    fecs: VecDeque<RepairEntry>,
     recovered: Vec<Vec<u8>>,
     capacity: usize,
+    highest_media_sequence: Option<u64>,
     protected_seqs: ProtectedSeqsFn,
     recover: RecoverFn,
 }
@@ -155,68 +172,105 @@ impl XorFecBuffer {
             fecs: VecDeque::new(),
             recovered: Vec::new(),
             capacity: capacity.max(16),
+            highest_media_sequence: None,
             protected_seqs,
             recover,
         }
     }
 
-    pub(crate) fn push_media(&mut self, seq: u16, packet: &[u8]) {
-        self.media.insert(seq, packet.to_vec());
-        while self.media.len() > self.capacity {
-            let first = *self.media.keys().next().expect("non-empty");
-            self.media.remove(&first);
+    /// `seq` placed in the cycle nearest the highest media sequence seen.
+    fn extend(&self, seq: u16) -> u64 {
+        let Some(highest) = self.highest_media_sequence else {
+            return SEQUENCE_CYCLE + u64::from(seq);
+        };
+        let distance = seq.wrapping_sub(highest as u16) as i16;
+        highest.saturating_add_signed(i64::from(distance))
+    }
+
+    fn insert_media(&mut self, sequence: u64, packet: Vec<u8>) {
+        self.media.insert(sequence, packet);
+        if self
+            .highest_media_sequence
+            .is_none_or(|highest| sequence > highest)
+        {
+            self.highest_media_sequence = Some(sequence);
         }
-        self.try_recover();
+        while self.media.len() > self.capacity {
+            self.media.pop_first();
+        }
+    }
+
+    pub(crate) fn push_media(&mut self, seq: u16, packet: &[u8]) {
+        let sequence = self.extend(seq);
+        self.insert_media(sequence, packet.to_vec());
+        self.recover_from(sequence);
     }
 
     pub(crate) fn push_fec(&mut self, packet: &[u8]) {
+        let Some(seqs) = (self.protected_seqs)(packet) else {
+            return;
+        };
+        let protected_sequences = seqs.iter().map(|s| self.extend(*s)).collect();
         if self.fecs.len() >= self.capacity {
             self.fecs.pop_front();
         }
-        self.fecs.push_back(packet.to_vec());
-        self.try_recover();
+        self.fecs.push_back(RepairEntry {
+            packet: packet.to_vec(),
+            protected_sequences,
+        });
+        if let RepairOutcome::Recovered { sequence } = self.try_repair(self.fecs.len() - 1) {
+            self.recover_from(sequence);
+        }
     }
 
     pub(crate) fn take_recovered(&mut self) -> Vec<Vec<u8>> {
         core::mem::take(&mut self.recovered)
     }
 
-    /// Try every buffered repair packet; recover a group missing exactly one
-    /// member, inject the recovery into the media map (so chained recovery and
-    /// later groups see it), and retire the spent repair packet.
-    fn try_recover(&mut self) {
-        let mut progressed = true;
-        while progressed {
-            progressed = false;
-            let mut spent = None;
-            for (idx, fec) in self.fecs.iter().enumerate() {
-                let Some(seqs) = (self.protected_seqs)(fec) else {
+    /// Retry the repairs protecting `sequence`, which just became present, and
+    /// chain through every packet those recoveries add.
+    fn recover_from(&mut self, sequence: u64) {
+        let mut arrived = vec![sequence];
+        while let Some(sequence) = arrived.pop() {
+            let mut idx = 0;
+            while idx < self.fecs.len() {
+                if !self.fecs[idx].protected_sequences.contains(&sequence) {
+                    idx += 1;
                     continue;
-                };
-                let present: Vec<(u16, &[u8])> = seqs
-                    .iter()
-                    .filter_map(|s| self.media.get(s).map(|p| (*s, p.as_slice())))
-                    .collect();
-                let missing = seqs.len().saturating_sub(present.len());
-                if missing == 1 {
-                    if let Some(rec) = (self.recover)(fec, &present) {
-                        let seq = u16::from_be_bytes([rec[2], rec[3]]);
-                        self.media.insert(seq, rec.clone());
-                        self.recovered.push(rec);
-                        spent = Some(idx);
-                        progressed = true;
-                        break;
-                    }
-                } else if missing == 0 {
-                    spent = Some(idx); // fully received, no longer useful
-                    progressed = true;
-                    break;
+                }
+                match self.try_repair(idx) {
+                    RepairOutcome::Recovered { sequence } => arrived.push(sequence),
+                    RepairOutcome::AllMembersPresent => {}
+                    RepairOutcome::MembersStillMissing => idx += 1,
                 }
             }
-            if let Some(idx) = spent {
-                self.fecs.remove(idx);
+        }
+    }
+
+    /// Rebuild the one missing member of the repair at `idx` into the media
+    /// map. The repair is retired once it is spent or every member is present.
+    fn try_repair(&mut self, idx: usize) -> RepairOutcome {
+        let entry = &self.fecs[idx];
+        let mut missing = None;
+        let mut present: Vec<(u16, &[u8])> = Vec::with_capacity(entry.protected_sequences.len());
+        for sequence in &entry.protected_sequences {
+            match self.media.get(sequence) {
+                Some(packet) => present.push((*sequence as u16, packet.as_slice())),
+                None if missing.is_some() => return RepairOutcome::MembersStillMissing,
+                None => missing = Some(*sequence),
             }
         }
+        let Some(missing) = missing else {
+            self.fecs.remove(idx);
+            return RepairOutcome::AllMembersPresent;
+        };
+        let Some(recovered) = (self.recover)(&entry.packet, &present) else {
+            return RepairOutcome::MembersStillMissing;
+        };
+        self.fecs.remove(idx);
+        self.insert_media(missing, recovered.clone());
+        self.recovered.push(recovered);
+        RepairOutcome::Recovered { sequence: missing }
     }
 }
 
@@ -478,10 +532,59 @@ impl FecDecoder {
     }
 }
 
+/// `count` RTP media packets with distinct payloads on consecutive sequences
+/// from `first_seq`, wrapping past 65535.
+#[cfg(test)]
+pub(crate) fn rtp_media_run(first_seq: u16, count: usize) -> Vec<Vec<u8>> {
+    const MEDIA_PT: u8 = 96;
+    const MEDIA_SSRC: u32 = 0x1111_2222;
+    const TIMESTAMP_STEP: u32 = 90;
+    (0..count)
+        .map(|i| {
+            let mut p = vec![0x80, MEDIA_PT];
+            p.extend_from_slice(&first_seq.wrapping_add(i as u16).to_be_bytes());
+            p.extend_from_slice(&(i as u32 * TIMESTAMP_STEP).to_be_bytes());
+            p.extend_from_slice(&MEDIA_SSRC.to_be_bytes());
+            p.extend_from_slice(&(i as u32).to_be_bytes());
+            p
+        })
+        .collect()
+}
+
+// Enough packets before the wrap to fill a minimum-capacity buffer.
+#[cfg(test)]
+const WRAP_TEST_PACKETS_BEFORE_WRAP: u16 = 64;
+#[cfg(test)]
+pub(crate) const WRAP_TEST_FIRST_SEQ: u16 = 0u16.wrapping_sub(WRAP_TEST_PACKETS_BEFORE_WRAP);
+#[cfg(test)]
+pub(crate) const WRAP_TEST_PACKETS: usize = 2 * WRAP_TEST_PACKETS_BEFORE_WRAP as usize;
+#[cfg(test)]
+const WRAP_TEST_LOST_SEQ: u16 = 9;
+#[cfg(test)]
+pub(crate) const WRAP_TEST_LOST_INDEX: usize =
+    (WRAP_TEST_PACKETS_BEFORE_WRAP + WRAP_TEST_LOST_SEQ) as usize;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rtppay::RtpH264Packetizer;
+
+    #[test]
+    fn recovers_a_loss_after_the_sequence_wraps() {
+        const GROUP: usize = 4;
+        let media = rtp_media_run(WRAP_TEST_FIRST_SEQ, WRAP_TEST_PACKETS);
+        let mut enc = FecEncoder::new(GROUP, 97, 0xFEC0_0000);
+        let mut dec = FecDecoder::new(16);
+        for (i, p) in media.iter().enumerate() {
+            if i != WRAP_TEST_LOST_INDEX {
+                dec.push_media(u16::from_be_bytes([p[2], p[3]]), p);
+            }
+            if let Some(fec) = enc.push(p) {
+                dec.push_fec(&fec);
+            }
+        }
+        assert_eq!(dec.take_recovered(), [media[WRAP_TEST_LOST_INDEX].clone()]);
+    }
 
     /// Make `n` consecutive RTP packets (distinct payloads, one NAL each).
     fn media_run(n: u8) -> Vec<Vec<u8>> {

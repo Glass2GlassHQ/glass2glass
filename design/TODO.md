@@ -30,8 +30,6 @@ Highest leverage first:
 
 Bugs:
 
-- `XorFecBuffer` evicts the smallest raw `u16` seq, so ULPFEC, FlexFEC and
-  ST 2022-1 stop recovering after the sequence wraps. Key by extended seq.
 - `videoconvert::raw_format_to_str` panics on `Rgb8` and `raw_format_from_str`
   accepts 5 of 15 formats. Use one GStreamer format-name table from core.
 - `SrtpReceiverSet::receiver_for` keeps a receiver for an SSRC before the
@@ -40,6 +38,7 @@ Bugs:
   onto `PixelFilter`.
 - ST 2110 depacketizers read the payload at offset 12 without `RtpHeader::parse`.
 - RTP timestamp rebasing in `rtprecv` and four ST 2110 receivers does not unwrap.
+  Use the core RTP extenders there and in `XorFecBuffer`, rtpjitter, st2110dup, rtcp.
 - `srt.rs` trims the send buffer with a plain `>=` instead of `seq_ge`, and
   `srtsrc` ACKs every datagram.
 - `streamdec` and `vulkanvideo` compute the H.264 coded height without
@@ -152,7 +151,6 @@ Audio:
 
 Network:
 
-- `XorFecBuffer::try_recover` walks every repair and allocates per media packet.
 - ST 2110 pacing sleeps on 1 ms tokio timers, receivers block in async `run`.
 - SRTP re-keys HMAC per packet, SRT rebuilds the AES schedule per packet.
 - `udpsink` uses `RetransmissionHistory` from rist.

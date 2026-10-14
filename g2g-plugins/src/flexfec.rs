@@ -342,7 +342,27 @@ impl FlexFecDecoder {
 mod tests {
     use super::*;
     use crate::rtppay::RtpH264Packetizer;
+    use crate::ulpfec::{
+        rtp_media_run, WRAP_TEST_FIRST_SEQ, WRAP_TEST_LOST_INDEX, WRAP_TEST_PACKETS,
+    };
     use alloc::vec;
+
+    #[test]
+    fn recovers_a_loss_after_the_sequence_wraps() {
+        const GROUP: usize = 4;
+        let media = rtp_media_run(WRAP_TEST_FIRST_SEQ, WRAP_TEST_PACKETS);
+        let mut enc = FlexFecEncoder::new(GROUP, 110, 0xFEC0_0000);
+        let mut dec = FlexFecDecoder::new(16);
+        for (i, p) in media.iter().enumerate() {
+            if i != WRAP_TEST_LOST_INDEX {
+                dec.push_media(u16::from_be_bytes([p[2], p[3]]), p);
+            }
+            for fec in enc.push(p) {
+                dec.push_fec(&fec);
+            }
+        }
+        assert_eq!(dec.take_recovered(), [media[WRAP_TEST_LOST_INDEX].clone()]);
+    }
 
     /// `n` consecutive RTP packets (distinct payloads, one NAL each).
     fn media_run(n: u16) -> Vec<Vec<u8>> {

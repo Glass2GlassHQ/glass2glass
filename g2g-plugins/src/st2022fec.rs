@@ -420,7 +420,28 @@ impl St2022FecDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ulpfec::{
+        rtp_media_run, WRAP_TEST_FIRST_SEQ, WRAP_TEST_LOST_INDEX, WRAP_TEST_PACKETS,
+    };
     use alloc::vec;
+
+    #[test]
+    fn recovers_a_loss_after_the_sequence_wraps() {
+        const COLUMNS: usize = 4;
+        const ROWS: usize = 4;
+        let media = rtp_media_run(WRAP_TEST_FIRST_SEQ, WRAP_TEST_PACKETS);
+        let mut enc = St2022FecEncoder::new(COLUMNS, ROWS, 96, 0xFEC0_0000).with_row_fec(true);
+        let mut dec = St2022FecDecoder::new(16);
+        for (i, p) in media.iter().enumerate() {
+            if i != WRAP_TEST_LOST_INDEX {
+                dec.push_media(u16::from_be_bytes([p[2], p[3]]), p);
+            }
+            for repair in enc.push(p) {
+                dec.push_fec(&repair.packet);
+            }
+        }
+        assert_eq!(dec.take_recovered(), [media[WRAP_TEST_LOST_INDEX].clone()]);
+    }
 
     /// An MPEG-TS-over-RTP media packet (PT 33) with a recognisable payload.
     fn media(seq: u16, ts: u32, fill: u8, len: usize) -> Vec<u8> {
