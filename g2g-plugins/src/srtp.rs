@@ -23,10 +23,10 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::ops::Range;
 
-use aes_gcm::aead::{array::Array, Aead, Payload};
+use aes_gcm::aead::{array::Array, AeadInOut};
 use aes_gcm::aes::cipher::{BlockCipherEncrypt, KeyInit as AesKeyInit};
 use aes_gcm::aes::{Aes128, Aes256};
-use aes_gcm::{Aes128Gcm, Aes256Gcm};
+use aes_gcm::{Aes128Gcm, Aes256Gcm, Tag};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::rtp::RtpHeader;
@@ -112,6 +112,8 @@ const RTCP_SOURCE_RANGE: Range<usize> = 4..8;
 const AES_128_KEY_LENGTH: usize = 16;
 const AES_256_KEY_LENGTH: usize = 32;
 const AES_BLOCK_LENGTH: usize = 16;
+/// Counter blocks encrypted per call, so the AES backend can pipeline them.
+const KEYSTREAM_BATCH_BLOCKS: usize = 8;
 /// RFC 3711 section 4.2.1 derives a 160-bit HMAC-SHA1 session key.
 const SESSION_AUTHENTICATION_KEY_LENGTH: usize = 20;
 /// The 48-bit SRTP packet index occupies these bytes of the counter block, the
@@ -902,13 +904,12 @@ impl AesBlockCipher {
         }
     }
 
-    fn encrypt_block(&self, input: [u8; AES_BLOCK_LENGTH]) -> [u8; AES_BLOCK_LENGTH] {
-        let mut block = Array(input);
+    fn encrypt_blocks(&self, blocks: &mut [[u8; AES_BLOCK_LENGTH]]) {
+        let blocks = Array::cast_slice_from_core_mut(blocks);
         match self {
-            Self::Aes128(cipher) => cipher.encrypt_block(&mut block),
-            Self::Aes256(cipher) => cipher.encrypt_block(&mut block),
+            Self::Aes128(cipher) => cipher.encrypt_blocks(blocks),
+            Self::Aes256(cipher) => cipher.encrypt_blocks(blocks),
         }
-        block.0
     }
 }
 
@@ -942,47 +943,56 @@ impl AesGcmCipher {
         }
     }
 
+    /// Encrypt `buffer` in place, returning the tag that follows it on the wire.
     fn encrypt(
         &self,
         initialization_vector: [u8; 12],
         associated_data: &[u8],
-        plaintext: &[u8],
-    ) -> Result<Vec<u8>, SrtpError> {
-        let payload = Payload {
-            msg: plaintext,
-            aad: associated_data,
-        };
+        buffer: &mut [u8],
+    ) -> Result<[u8; AUTHENTICATION_TAG_LENGTH], SrtpError> {
+        let nonce = Array(initialization_vector);
         let result = match self {
-            Self::Aes128(cipher) => cipher.encrypt(&Array(initialization_vector), payload),
-            Self::Aes256(cipher) => cipher.encrypt(&Array(initialization_vector), payload),
+            Self::Aes128(cipher) => {
+                cipher.encrypt_inout_detached(&nonce, associated_data, buffer.into())
+            }
+            Self::Aes256(cipher) => {
+                cipher.encrypt_inout_detached(&nonce, associated_data, buffer.into())
+            }
         };
-        result.map_err(|_| SrtpError::PacketTooLarge)
+        result
+            .map(|tag| tag.0)
+            .map_err(|_| SrtpError::PacketTooLarge)
     }
 
+    /// Decrypt `buffer` in place once `tag` authenticates it.
     fn decrypt(
         &self,
         initialization_vector: [u8; 12],
         associated_data: &[u8],
-        ciphertext: &[u8],
-    ) -> Result<Vec<u8>, SrtpError> {
-        let payload = Payload {
-            msg: ciphertext,
-            aad: associated_data,
-        };
+        buffer: &mut [u8],
+        tag: &[u8],
+    ) -> Result<(), SrtpError> {
+        let nonce = Array(initialization_vector);
+        let tag = Tag::try_from(tag).map_err(|_| SrtpError::AuthenticationFailed)?;
         let result = match self {
-            Self::Aes128(cipher) => cipher.decrypt(&Array(initialization_vector), payload),
-            Self::Aes256(cipher) => cipher.decrypt(&Array(initialization_vector), payload),
+            Self::Aes128(cipher) => {
+                cipher.decrypt_inout_detached(&nonce, associated_data, buffer.into(), &tag)
+            }
+            Self::Aes256(cipher) => {
+                cipher.decrypt_inout_detached(&nonce, associated_data, buffer.into(), &tag)
+            }
         };
         result.map_err(|_| SrtpError::AuthenticationFailed)
     }
 }
 
 /// One flow's derived transform state: the cipher with its session salt, and
-/// the HMAC-SHA1 key when the policy authenticates separately.
+/// the HMAC-SHA1 keyed once, cloned for each packet when the policy
+/// authenticates separately.
 struct FlowKeys {
     cipher: FlowCipher,
     authentication: SrtpAuthentication,
-    authentication_key: Zeroizing<[u8; SESSION_AUTHENTICATION_KEY_LENGTH]>,
+    keyed_mac: HmacSha1,
 }
 
 enum FlowCipher {
@@ -1084,7 +1094,7 @@ impl FlowKeys {
         Ok(Self {
             cipher,
             authentication: policy.authentication,
-            authentication_key,
+            keyed_mac: keyed_mac(&authentication_key),
         })
     }
 
@@ -1123,7 +1133,7 @@ impl FlowKeys {
         if tag_length == 0 {
             return None;
         }
-        let mut mac = self.mac();
+        let mut mac = self.keyed_mac.clone();
         for part in message {
             mac.update(part);
         }
@@ -1134,18 +1144,17 @@ impl FlowKeys {
         if self.authentication.tag_length() == 0 {
             return Ok(());
         }
-        let mut mac = self.mac();
+        let mut mac = self.keyed_mac.clone();
         for part in message {
             mac.update(part);
         }
         mac.verify_truncated_left(tag)
             .map_err(|_| SrtpError::AuthenticationFailed)
     }
+}
 
-    fn mac(&self) -> HmacSha1 {
-        HmacSha1::new_from_slice(&self.authentication_key[..])
-            .expect("HMAC-SHA1 accepts a key of any length")
-    }
+fn keyed_mac(authentication_key: &[u8; SESSION_AUTHENTICATION_KEY_LENGTH]) -> HmacSha1 {
+    HmacSha1::new_from_slice(authentication_key).expect("HMAC-SHA1 accepts a key of any length")
 }
 
 /// The three RFC 3711 key-derivation labels of one flow.
@@ -1225,7 +1234,7 @@ impl SessionKeys {
                 salt,
             },
             authentication: policy.authentication,
-            authentication_key: Zeroizing::new([0_u8; SESSION_AUTHENTICATION_KEY_LENGTH]),
+            keyed_mac: keyed_mac(&[0_u8; SESSION_AUTHENTICATION_KEY_LENGTH]),
         };
         Self {
             rtp: flow(),
@@ -1256,13 +1265,16 @@ impl SessionKeys {
                 rollover_counter,
                 parsed.header.sequence,
             );
-            let mut output = packet[..parsed.payload_offset].to_vec();
-            let ciphertext = cipher.encrypt(
+            let mut output = Vec::with_capacity(
+                packet.len() + AUTHENTICATION_TAG_LENGTH + mki.map_or(0, <[u8]>::len),
+            );
+            output.extend_from_slice(packet);
+            let tag = cipher.encrypt(
                 initialization_vector,
                 &packet[..parsed.payload_offset],
-                &packet[parsed.payload_offset..],
+                &mut output[parsed.payload_offset..],
             )?;
-            output.extend_from_slice(&ciphertext);
+            output.extend_from_slice(&tag);
             append_mki(&mut output, mki);
             return Ok(output);
         }
@@ -1307,13 +1319,14 @@ impl SessionKeys {
                 rollover_counter,
                 parsed.header.sequence,
             );
-            let plaintext = cipher.decrypt(
+            let tag_offset = body_end - AUTHENTICATION_TAG_LENGTH;
+            let mut output = packet[..tag_offset].to_vec();
+            cipher.decrypt(
                 initialization_vector,
                 &packet[..parsed.payload_offset],
-                &packet[parsed.payload_offset..body_end],
+                &mut output[parsed.payload_offset..],
+                &packet[tag_offset..body_end],
             )?;
-            let mut output = packet[..parsed.payload_offset].to_vec();
-            output.extend_from_slice(&plaintext);
             RtpHeader::parse(&output).ok_or(SrtpError::InvalidRtpPacket)?;
             return Ok(output);
         }
@@ -1365,13 +1378,19 @@ impl SessionKeys {
                     .copy_from_slice(&packet[..RTCP_AUTHENTICATED_PREFIX_LENGTH]);
                 associated_data[RTCP_AUTHENTICATED_PREFIX_LENGTH..]
                     .copy_from_slice(&index_word.to_be_bytes());
-                let ciphertext = cipher.encrypt(
+                let mut output = Vec::with_capacity(
+                    packet.len()
+                        + AUTHENTICATION_TAG_LENGTH
+                        + SRTCP_INDEX_LENGTH
+                        + mki.map_or(0, <[u8]>::len),
+                );
+                output.extend_from_slice(packet);
+                let tag = cipher.encrypt(
                     initialization_vector,
                     &associated_data,
-                    &packet[RTCP_AUTHENTICATED_PREFIX_LENGTH..],
+                    &mut output[RTCP_AUTHENTICATED_PREFIX_LENGTH..],
                 )?;
-                let mut output = packet[..RTCP_AUTHENTICATED_PREFIX_LENGTH].to_vec();
-                output.extend_from_slice(&ciphertext);
+                output.extend_from_slice(&tag);
                 output.extend_from_slice(&index_word.to_be_bytes());
                 append_mki(&mut output, mki);
                 return Ok(output);
@@ -1379,7 +1398,7 @@ impl SessionKeys {
             let mut associated_data = packet.to_vec();
             associated_data.extend_from_slice(&index_word.to_be_bytes());
             let authentication_tag =
-                cipher.encrypt(initialization_vector, &associated_data, &[])?;
+                cipher.encrypt(initialization_vector, &associated_data, &mut [])?;
             let mut output = packet.to_vec();
             output.extend_from_slice(&authentication_tag);
             output.extend_from_slice(&index_word.to_be_bytes());
@@ -1457,6 +1476,11 @@ impl SessionKeys {
         if let FlowCipher::AuthenticatedEncryption { cipher, salt } = &self.rtcp.cipher {
             let initialization_vector =
                 rtcp_initialization_vector(*salt, synchronization_source, srtcp_index);
+            let tag_offset = index_offset
+                .checked_sub(AUTHENTICATION_TAG_LENGTH)
+                .filter(|offset| *offset >= RTCP_AUTHENTICATED_PREFIX_LENGTH)
+                .ok_or(SrtpError::InvalidRtcpPacket)?;
+            let tag = &packet[tag_offset..index_offset];
             let output = if encryption_flag {
                 let mut associated_data =
                     [0_u8; RTCP_AUTHENTICATED_PREFIX_LENGTH + SRTCP_INDEX_LENGTH];
@@ -1464,26 +1488,18 @@ impl SessionKeys {
                     .copy_from_slice(&packet[..RTCP_AUTHENTICATED_PREFIX_LENGTH]);
                 associated_data[RTCP_AUTHENTICATED_PREFIX_LENGTH..]
                     .copy_from_slice(&index_word.to_be_bytes());
-                let plaintext = cipher.decrypt(
-                    initialization_vector,
-                    &associated_data,
-                    &packet[RTCP_AUTHENTICATED_PREFIX_LENGTH..index_offset],
-                )?;
-                let mut output = packet[..RTCP_AUTHENTICATED_PREFIX_LENGTH].to_vec();
-                output.extend_from_slice(&plaintext);
-                output
-            } else {
-                let tag_offset = index_offset
-                    .checked_sub(AUTHENTICATION_TAG_LENGTH)
-                    .filter(|offset| *offset >= RTCP_AUTHENTICATED_PREFIX_LENGTH)
-                    .ok_or(SrtpError::InvalidRtcpPacket)?;
-                let mut associated_data = packet[..tag_offset].to_vec();
-                associated_data.extend_from_slice(&index_word.to_be_bytes());
+                let mut output = packet[..tag_offset].to_vec();
                 cipher.decrypt(
                     initialization_vector,
                     &associated_data,
-                    &packet[tag_offset..index_offset],
+                    &mut output[RTCP_AUTHENTICATED_PREFIX_LENGTH..],
+                    tag,
                 )?;
+                output
+            } else {
+                let mut associated_data = packet[..tag_offset].to_vec();
+                associated_data.extend_from_slice(&index_word.to_be_bytes());
+                cipher.decrypt(initialization_vector, &associated_data, &mut [], tag)?;
                 packet[..tag_offset].to_vec()
             };
             validate_rtcp_packet(&output)?;
@@ -1547,12 +1563,18 @@ fn apply_counter_mode(
     initial_block: [u8; AES_BLOCK_LENGTH],
     data: &mut [u8],
 ) -> Result<(), SrtpError> {
-    let mut block = Zeroizing::new(initial_block);
-    for (number, chunk) in data.chunks_mut(AES_BLOCK_LENGTH).enumerate() {
-        let number = u16::try_from(number).map_err(|_| SrtpError::PacketTooLarge)?;
-        block[AES_BLOCK_LENGTH - 2..].copy_from_slice(&number.to_be_bytes());
-        let keystream = cipher.encrypt_block(*block);
-        for (byte, keystream_byte) in chunk.iter_mut().zip(keystream) {
+    let mut keystream = Zeroizing::new([[0_u8; AES_BLOCK_LENGTH]; KEYSTREAM_BATCH_BLOCKS]);
+    let batch_length = AES_BLOCK_LENGTH * KEYSTREAM_BATCH_BLOCKS;
+    for (batch_number, batch) in data.chunks_mut(batch_length).enumerate() {
+        let batch_blocks = &mut keystream[..batch.len().div_ceil(AES_BLOCK_LENGTH)];
+        for (offset, block) in batch_blocks.iter_mut().enumerate() {
+            let number = u16::try_from(batch_number * KEYSTREAM_BATCH_BLOCKS + offset)
+                .map_err(|_| SrtpError::PacketTooLarge)?;
+            *block = initial_block;
+            block[AES_BLOCK_LENGTH - 2..].copy_from_slice(&number.to_be_bytes());
+        }
+        cipher.encrypt_blocks(batch_blocks);
+        for (byte, keystream_byte) in batch.iter_mut().zip(batch_blocks.as_flattened()) {
             *byte ^= keystream_byte;
         }
     }
@@ -2658,6 +2680,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn batched_keystream_matches_one_block_at_a_time() {
+        const SESSION_KEY: [u8; AES_128_KEY_LENGTH] = [0x2B; AES_128_KEY_LENGTH];
+        const SALT: [u8; COUNTER_MODE_MASTER_SALT_LENGTH] = [0xF0; COUNTER_MODE_MASTER_SALT_LENGTH];
+        // Several batches plus a partial final block.
+        const LENGTH: usize = 3 * KEYSTREAM_BATCH_BLOCKS * AES_BLOCK_LENGTH + 5;
+        const MAXIMUM_BLOCKS: usize = 1 << 16;
+
+        let initial_block = counter_mode_block(&SALT, 0x1234_5678, 0x0001_0002);
+        let reference_cipher = Aes128::new_from_slice(&SESSION_KEY).unwrap();
+        let expected: Vec<u8> = (0..LENGTH.div_ceil(AES_BLOCK_LENGTH) as u16)
+            .flat_map(|number| {
+                let mut block = Array(initial_block);
+                block[AES_BLOCK_LENGTH - 2..].copy_from_slice(&number.to_be_bytes());
+                reference_cipher.encrypt_block(&mut block);
+                block.0
+            })
+            .take(LENGTH)
+            .collect();
+        let cipher = AesBlockCipher::new(&SESSION_KEY).unwrap();
+        let mut keystream = alloc::vec![0_u8; LENGTH];
+        apply_counter_mode(&cipher, initial_block, &mut keystream).unwrap();
+        assert_eq!(keystream, expected);
+
+        let mut too_long = alloc::vec![0_u8; MAXIMUM_BLOCKS * AES_BLOCK_LENGTH + 1];
+        assert_eq!(
+            apply_counter_mode(&cipher, initial_block, &mut too_long),
+            Err(SrtpError::PacketTooLarge)
+        );
+    }
+
     /// HMAC-SHA1 itself, from RFC 2202 section 3, truncated the way RFC 3711
     /// section 4.2.1 truncates it.
     #[test]
@@ -2676,7 +2729,7 @@ mod tests {
             let keys = FlowKeys {
                 cipher: FlowCipher::Null,
                 authentication,
-                authentication_key: authentication_key.clone(),
+                keyed_mac: keyed_mac(&authentication_key),
             };
             let tag = keys.authentication_tag(&[DATA]).expect("a tag");
             assert_eq!(

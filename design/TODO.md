@@ -150,7 +150,7 @@ Audio:
 Network:
 
 - ST 2110 pacing sleeps on 1 ms tokio timers, receivers block in async `run`.
-- SRTP re-keys HMAC per packet, SRT rebuilds the AES schedule per packet.
+- SRT rebuilds the AES key schedule per packet.
 - `udpsink` uses `RetransmissionHistory` from rist.
 - Remote TCP sets `TCP_NODELAY` and writes length and body once.
 - `rtppay`, `rtspserversink` and `rtpdepay` copy each payload two or three times.
