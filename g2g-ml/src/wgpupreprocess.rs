@@ -54,8 +54,10 @@ use g2g_core::{
 // The GPU-resident NV12 frame owner lives with the interop code that produces it
 // (the CUDA and dma-buf bridges); re-exported so this module's consumers keep
 // naming it here.
+use crate::wgpu_transfer::{write_padded, ReadbackStaging};
 pub use g2g_plugins::gpu::WgpuNv12Texture;
 use g2g_plugins::gpu::{nv12_plane_views, packed_nv12_extent, texture_layout, WgpuTextureLayout};
+use std::sync::Arc;
 // The one place the YUV <-> RGB coefficients are derived, shared with the CPU
 // converters and shaders in g2g-plugins so no two stages disagree.
 use g2g_plugins::yuvmatrix::{YuvToRgbWeights, SAMPLE_SPAN};
@@ -436,11 +438,10 @@ struct Gpu {
     dims_buf: wgpu::Buffer,
     input_buf: wgpu::Buffer,
     out_buf: wgpu::Buffer,
-    staging: wgpu::Buffer,
+    staging: Arc<ReadbackStaging>,
     /// Input row stride, one half of what the dims uniform says.
     stride: u32,
     input_len: usize,
-    input_padded: usize,
     out_bytes: usize,
 }
 
@@ -458,7 +459,7 @@ struct ImportGpu {
     pipeline: wgpu::ComputePipeline,
     dims_buf: wgpu::Buffer,
     out_buf: wgpu::Buffer,
-    staging: wgpu::Buffer,
+    staging: Arc<ReadbackStaging>,
     out_bytes: usize,
 }
 
@@ -597,9 +598,7 @@ impl WgpuPreprocess {
         if pixels.len() < gpu.input_len {
             return Err(G2gError::CapsMismatch);
         }
-        let mut padded = vec![0u8; gpu.input_padded];
-        padded[..gpu.input_len].copy_from_slice(&pixels[..gpu.input_len]);
-        gpu.queue.write_buffer(&gpu.input_buf, 0, &padded);
+        write_padded(&gpu.queue, &gpu.input_buf, &pixels[..gpu.input_len]);
         // A mid-stream caps change can move the colorimetry after the pipeline
         // was built, and rewriting 48 bytes costs less than tracking whether it
         // did.
@@ -623,27 +622,14 @@ impl WgpuPreprocess {
             let gy = self.height.div_ceil(WORKGROUP);
             pass.dispatch_workgroups(gx, gy, 1);
         }
-        encoder.copy_buffer_to_buffer(&gpu.out_buf, 0, &gpu.staging, 0, gpu.out_bytes as u64);
-        gpu.queue.submit([encoder.finish()]);
-
-        let slice = gpu.staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        gpu.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            })
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        rx.recv()
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-
-        let bytes = slice.get_mapped_range().to_vec().into_boxed_slice();
-        gpu.staging.unmap();
-        Ok(bytes)
+        let bytes = gpu.staging.read_back(
+            &gpu.device,
+            &gpu.queue,
+            encoder,
+            &gpu.out_buf,
+            gpu.out_bytes as u64,
+        )?;
+        Ok(bytes.into_boxed_slice())
     }
 
     /// GPU-output variant of [`dispatch`](Self::dispatch) (M215): run the same
@@ -658,9 +644,7 @@ impl WgpuPreprocess {
         if pixels.len() < gpu.input_len {
             return Err(G2gError::CapsMismatch);
         }
-        let mut padded = vec![0u8; gpu.input_padded];
-        padded[..gpu.input_len].copy_from_slice(&pixels[..gpu.input_len]);
-        gpu.queue.write_buffer(&gpu.input_buf, 0, &padded);
+        write_padded(&gpu.queue, &gpu.input_buf, &pixels[..gpu.input_len]);
         // A mid-stream caps change can move the colorimetry after the pipeline
         // was built, and rewriting 48 bytes costs less than tracking whether it
         // did.
@@ -702,7 +686,8 @@ impl WgpuPreprocess {
             gpu.queue.clone(),
             frame_buf,
             gpu.out_bytes,
-        );
+        )
+        .with_staging(gpu.staging.clone());
         Ok(OwnedWgpuBuffer::new(
             gpu.out_bytes,
             std::sync::Arc::new(owner),
@@ -1109,31 +1094,23 @@ fn finish_import(
         encoder.copy_buffer_to_buffer(&ig.out_buf, 0, &frame_buf, 0, ig.out_bytes as u64);
         ig.queue.submit([encoder.finish()]);
         let owner =
-            WgpuBufferOwner::new(ig.device.clone(), ig.queue.clone(), frame_buf, ig.out_bytes);
+            WgpuBufferOwner::new(ig.device.clone(), ig.queue.clone(), frame_buf, ig.out_bytes)
+                .with_staging(ig.staging.clone());
         return Ok(MemoryDomain::WgpuBuffer(OwnedWgpuBuffer::new(
             ig.out_bytes,
             std::sync::Arc::new(owner),
         )));
     }
-    encoder.copy_buffer_to_buffer(&ig.out_buf, 0, &ig.staging, 0, ig.out_bytes as u64);
-    ig.queue.submit([encoder.finish()]);
-    let slice = ig.staging.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    ig.device
-        .poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        })
-        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-    rx.recv()
-        .map_err(|_| G2gError::Hardware(HardwareError::Other))?
-        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-    let bytes = slice.get_mapped_range().to_vec().into_boxed_slice();
-    ig.staging.unmap();
-    Ok(MemoryDomain::System(SystemSlice::from_boxed(bytes)))
+    let bytes = ig.staging.read_back(
+        &ig.device,
+        &ig.queue,
+        encoder,
+        &ig.out_buf,
+        ig.out_bytes as u64,
+    )?;
+    Ok(MemoryDomain::System(SystemSlice::from_boxed(
+        bytes.into_boxed_slice(),
+    )))
 }
 
 /// Owns a GPU-resident linear tensor buffer: the `wgpu::Buffer` holding an f32
@@ -1155,6 +1132,7 @@ pub struct WgpuBufferOwner {
     queue: wgpu::Queue,
     buffer: wgpu::Buffer,
     len: usize,
+    staging: Arc<ReadbackStaging>,
 }
 
 impl WgpuBufferOwner {
@@ -1167,7 +1145,14 @@ impl WgpuBufferOwner {
             queue,
             buffer,
             len,
+            staging: Arc::default(),
         }
+    }
+
+    // reuses the producing element's staging buffer for `read_back`
+    pub(crate) fn with_staging(mut self, staging: Arc<ReadbackStaging>) -> Self {
+        self.staging = staging;
+        self
     }
 
     /// The backing GPU buffer, for a downstream GPU consumer to bind directly.
@@ -1193,35 +1178,16 @@ impl WgpuBufferOwner {
     /// pays, instead of the element paying it for every frame): copy into a
     /// `MAP_READ` staging buffer, map, and return the little-endian f32 bytes.
     pub fn read_back(&self) -> Result<Vec<u8>, G2gError> {
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("preprocess-readback"),
-            size: self.len as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut encoder = self
+        let encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, self.len as u64);
-        self.queue.submit([encoder.finish()]);
-
-        let slice = staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        self.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            })
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        rx.recv()
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        let bytes = slice.get_mapped_range().to_vec();
-        staging.unmap();
-        Ok(bytes)
+        self.staging.read_back(
+            &self.device,
+            &self.queue,
+            encoder,
+            &self.buffer,
+            self.len as u64,
+        )
     }
 }
 
@@ -1485,12 +1451,6 @@ async fn build_gpu(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
-    let staging = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: out_bytes as u64,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
     let dims_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("dims"),
         size: DIMS_BYTES as u64,
@@ -1544,10 +1504,9 @@ async fn build_gpu(
         dims_buf,
         input_buf,
         out_buf,
-        staging,
+        staging: Arc::default(),
         stride,
         input_len,
-        input_padded,
         out_bytes,
     })
 }
@@ -1618,12 +1577,6 @@ fn build_import_gpu(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
-    let staging = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: out_bytes as u64,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
     let dims_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("dims"),
         size: DIMS_BYTES as u64,
@@ -1656,7 +1609,7 @@ fn build_import_gpu(
         pipeline,
         dims_buf,
         out_buf,
-        staging,
+        staging: Arc::default(),
         out_bytes,
     }
 }

@@ -62,6 +62,9 @@ pub mod ortsegment;
 #[cfg(feature = "wgpu")]
 pub mod wgpupreprocess;
 
+#[cfg(feature = "wgpu")]
+mod wgpu_transfer;
+
 // GPU-resident tensor inference (design/ml.md, M216): a wgpu matmul compute
 // pass that binds WgpuPreprocess's GPU-resident output tensor directly, so the
 // tensor never leaves the GPU between preprocess and inference. The consumer

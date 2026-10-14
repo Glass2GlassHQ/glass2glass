@@ -54,8 +54,6 @@ Core, bindings, ML:
 - `ElectedClock::now_ns` locks per read, `pacing::judge` clones `ClockSync` twice.
 - `BlobMeta::get` allocates a `String` per lookup.
 - Frames crossing the plugin ABI always arrive read-only.
-- `wgpupreprocess` copies each frame into a padded Vec before upload, and four
-  wgpu readbacks are written by hand with per-frame staging buffers.
 - Dedup in `g2g-ml`: RGBA to NCHW preprocessing, f32 byte conversion, dtype size,
   the `only-on` gate shared with `g2g-python`.
 - One YUYV to I420 converter for `g2g-mcu` and the plugins.

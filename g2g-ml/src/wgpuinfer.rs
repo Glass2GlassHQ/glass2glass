@@ -55,12 +55,13 @@ use core::pin::Pin;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, HardwareError,
-    MemoryDomain, OutputSink, OwnedWgpuBuffer, PipelinePacket, TensorDType, TensorLayout,
-    TensorShape,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, MemoryDomain,
+    OutputSink, OwnedWgpuBuffer, PipelinePacket, TensorDType, TensorLayout, TensorShape,
 };
 
+use crate::wgpu_transfer::ReadbackStaging;
 use crate::wgpupreprocess::WgpuBufferOwner;
+use std::sync::Arc;
 
 /// One invocation per output; the dispatch covers ceil(N / 64).
 const WORKGROUP: u32 = 64;
@@ -714,6 +715,7 @@ struct Gpu {
     /// ones (activation / pooling), whose shader binds only (meta, input, out).
     weight_buf: Option<wgpu::Buffer>,
     bias_buf: Option<wgpu::Buffer>,
+    staging: Arc<ReadbackStaging>,
 }
 
 /// # Example
@@ -1793,6 +1795,7 @@ impl WgpuInference {
             meta_buf,
             weight_buf,
             bias_buf,
+            staging: Arc::default(),
         });
     }
 
@@ -1937,35 +1940,17 @@ impl WgpuInference {
     /// the System path owes.
     fn read_back(&self, logits: &wgpu::Buffer) -> Result<Box<[u8]>, G2gError> {
         let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
-        let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("infer-readback"),
-            size: self.out_bytes as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut encoder = gpu
+        let encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        encoder.copy_buffer_to_buffer(logits, 0, &staging, 0, self.out_bytes as u64);
-        gpu.queue.submit([encoder.finish()]);
-
-        let slice = staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        gpu.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            })
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        rx.recv()
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        let bytes = slice.get_mapped_range().to_vec().into_boxed_slice();
-        staging.unmap();
-        Ok(bytes)
+        let bytes = gpu.staging.read_back(
+            &gpu.device,
+            &gpu.queue,
+            encoder,
+            logits,
+            self.out_bytes as u64,
+        )?;
+        Ok(bytes.into_boxed_slice())
     }
 }
 
@@ -2048,7 +2033,8 @@ impl AsyncElement for WgpuInference {
                             gpu.queue.clone(),
                             logits,
                             self.out_bytes,
-                        );
+                        )
+                        .with_staging(gpu.staging.clone());
                         MemoryDomain::WgpuBuffer(OwnedWgpuBuffer::new(
                             self.out_bytes,
                             std::sync::Arc::new(owner),
