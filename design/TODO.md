@@ -48,7 +48,6 @@ Bugs:
 
 Core runtime:
 
-- `JoinAll` and `DynamicJoin` re-poll every arm on any wake. Poll only woken arms.
 - Remove the muxer forwarder arm, link `MuxerPad::Link(in_rx)` directly.
 - `FlowGate` takes the shared lock per frame in Playing. Check the state
   atomically first.

@@ -22,7 +22,7 @@ pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     let inner = Arc::new(Mutex::new(Inner {
         queue: VecDeque::with_capacity(capacity),
         capacity,
-        send_waker: None,
+        send_wakers: Vec::new(),
         recv_waker: None,
         senders: 1,
         receivers: 1,
@@ -39,10 +39,19 @@ pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 struct Inner<T> {
     queue: VecDeque<T>,
     capacity: usize,
-    send_waker: Option<Waker>,
+    // One per parked sender: a cloned sender parks alongside the original.
+    send_wakers: Vec<Waker>,
     recv_waker: Option<Waker>,
     senders: usize,
     receivers: usize,
+}
+
+impl<T> Inner<T> {
+    fn wake_senders(&mut self) {
+        for waker in self.send_wakers.drain(..) {
+            waker.wake();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -88,9 +97,7 @@ impl<T> Drop for Receiver<T> {
             let mut g = self.inner.lock();
             g.receivers -= 1;
             if g.receivers == 0 {
-                if let Some(w) = g.send_waker.take() {
-                    w.wake();
-                }
+                g.wake_senders();
                 core::mem::take(&mut g.queue)
             } else {
                 VecDeque::new()
@@ -153,7 +160,9 @@ impl<T> Sender<T> {
             }
             return Poll::Ready(Ok(()));
         }
-        g.send_waker = Some(cx.waker().clone());
+        if !g.send_wakers.iter().any(|w| w.will_wake(cx.waker())) {
+            g.send_wakers.push(cx.waker().clone());
+        }
         Poll::Pending
     }
 
@@ -202,9 +211,7 @@ impl<T> Receiver<T> {
         let mut g = self.inner.lock();
         let v = g.queue.pop_front();
         if v.is_some() {
-            if let Some(w) = g.send_waker.take() {
-                w.wake();
-            }
+            g.wake_senders();
         }
         v
     }
@@ -227,9 +234,7 @@ impl<'a, T> Future for RecvFuture<'a, T> {
         let this = self.get_mut();
         let mut g = this.receiver.inner.lock();
         if let Some(v) = g.queue.pop_front() {
-            if let Some(w) = g.send_waker.take() {
-                w.wake();
-            }
+            g.wake_senders();
             return Poll::Ready(Some(v));
         }
         if g.senders == 0 {

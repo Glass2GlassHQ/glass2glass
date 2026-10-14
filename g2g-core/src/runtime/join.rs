@@ -1,13 +1,152 @@
 use core::future::Future;
 use core::mem;
 use core::pin::Pin;
-use core::task::{Context, Poll};
+use core::task::{Context, Poll, Waker};
 
+use alloc::sync::Arc;
+use alloc::task::Wake;
 use alloc::vec::Vec;
+
+use spin::Mutex;
 
 use crate::element::BoxFuture;
 #[cfg(feature = "std")]
 use crate::runtime::channel::Receiver;
+
+const ARMS_PER_WORD: usize = u64::BITS as usize;
+
+#[derive(Default)]
+struct WokenArms {
+    bits: Vec<u64>,
+    parent: Option<Waker>,
+    // Set once a wake reached the task, cleared when the task polls the join.
+    parent_woken: bool,
+}
+
+impl WokenArms {
+    // The task's waker, when this wake is the first since the task last polled.
+    fn mark(&mut self, index: usize) -> Option<Waker> {
+        self.bits[index / ARMS_PER_WORD] |= 1 << (index % ARMS_PER_WORD);
+        if self.parent_woken {
+            return None;
+        }
+        self.parent_woken = true;
+        self.parent.clone()
+    }
+
+    fn take_next(&mut self, from: usize) -> Option<usize> {
+        let mut word_index = from / ARMS_PER_WORD;
+        let mut mask = u64::MAX << (from % ARMS_PER_WORD);
+        while let Some(word) = self.bits.get_mut(word_index) {
+            let candidates = *word & mask;
+            if candidates != 0 {
+                let bit = candidates.trailing_zeros() as usize;
+                *word &= !(1 << bit);
+                return Some(word_index * ARMS_PER_WORD + bit);
+            }
+            word_index += 1;
+            mask = u64::MAX;
+        }
+        None
+    }
+}
+
+// One per arm, so a push that wakes one arm re-polls only that arm.
+struct ArmWake {
+    index: usize,
+    woken: Arc<Mutex<WokenArms>>,
+}
+
+impl Wake for ArmWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let parent = self.woken.lock().mark(self.index);
+        if let Some(parent) = parent {
+            parent.wake();
+        }
+    }
+}
+
+// Allocates only in `new` and `push`, so polling stays heap-free.
+struct ArmSet<'a, T> {
+    arms: Vec<Option<BoxFuture<'a, T>>>,
+    wakers: Vec<Waker>,
+    woken: Arc<Mutex<WokenArms>>,
+    live: usize,
+}
+
+impl<'a, T> ArmSet<'a, T> {
+    fn new(arms: Vec<BoxFuture<'a, T>>) -> Self {
+        let mut set = Self {
+            arms: Vec::with_capacity(arms.len()),
+            wakers: Vec::with_capacity(arms.len()),
+            woken: Arc::new(Mutex::new(WokenArms::default())),
+            live: 0,
+        };
+        for arm in arms {
+            set.push(arm);
+        }
+        set
+    }
+
+    // The new arm starts woken, so the next poll reaches it.
+    fn push(&mut self, arm: BoxFuture<'a, T>) {
+        let index = self.arms.len();
+        self.arms.push(Some(arm));
+        self.live += 1;
+        self.wakers.push(Waker::from(Arc::new(ArmWake {
+            index,
+            woken: self.woken.clone(),
+        })));
+        let mut woken = self.woken.lock();
+        woken.bits.resize(index / ARMS_PER_WORD + 1, 0);
+        woken.mark(index);
+    }
+
+    // In index order, and an arm woken by a lower one during the pass is polled
+    // in the same pass, so a frame can cross the whole graph in one poll.
+    fn poll_woken(&mut self, cx: &mut Context<'_>, mut on_done: impl FnMut(usize, T)) {
+        {
+            let mut woken = self.woken.lock();
+            let registered = woken
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.will_wake(cx.waker()));
+            if !registered {
+                woken.parent = Some(cx.waker().clone());
+            }
+            woken.parent_woken = false;
+        }
+        let mut from = 0;
+        loop {
+            let Some(index) = self.woken.lock().take_next(from) else {
+                return;
+            };
+            from = index + 1;
+            let Some(arm) = &mut self.arms[index] else {
+                continue;
+            };
+            let mut arm_cx = Context::from_waker(&self.wakers[index]);
+            if let Poll::Ready(output) = arm.as_mut().poll(&mut arm_cx) {
+                self.arms[index] = None;
+                self.live -= 1;
+                on_done(index, output);
+            }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn len(&self) -> usize {
+        self.arms.len()
+    }
+
+    fn all_done(&self) -> bool {
+        self.live == 0
+    }
+}
 
 /// Polls a homogeneous set of boxed futures concurrently to completion,
 /// returning their outputs in input order. The fan-out runner joins N+2
@@ -18,7 +157,7 @@ use crate::runtime::channel::Receiver;
 /// and therefore `Unpin`, so each arm polls through a plain `&mut`.
 #[allow(missing_debug_implementations)]
 pub struct JoinAll<'a, T> {
-    arms: Vec<Option<BoxFuture<'a, T>>>,
+    arms: ArmSet<'a, T>,
     outputs: Vec<Option<T>>,
 }
 
@@ -30,7 +169,7 @@ pub fn join_all<T: Unpin>(futs: Vec<BoxFuture<'_, T>>) -> JoinAll<'_, T> {
     let mut outputs = Vec::with_capacity(futs.len());
     outputs.resize_with(futs.len(), || None);
     JoinAll {
-        arms: futs.into_iter().map(Some).collect(),
+        arms: ArmSet::new(futs),
         outputs,
     }
 }
@@ -42,19 +181,10 @@ impl<'a, T: Unpin> Future for JoinAll<'a, T> {
         // `JoinAll` is `Unpin` (a `Vec` of `Pin<Box<..>>` and `Option<T>`),
         // so a plain `&mut` is sound.
         let this = self.get_mut();
-        let mut all_done = true;
-        for (arm, slot) in this.arms.iter_mut().zip(this.outputs.iter_mut()) {
-            if let Some(fut) = arm {
-                match fut.as_mut().poll(cx) {
-                    Poll::Ready(v) => {
-                        *slot = Some(v);
-                        *arm = None;
-                    }
-                    Poll::Pending => all_done = false,
-                }
-            }
-        }
-        if all_done {
+        let outputs = &mut this.outputs;
+        this.arms
+            .poll_woken(cx, |index, output| outputs[index] = Some(output));
+        if this.arms.all_done() {
             Poll::Ready(
                 this.outputs
                     .iter_mut()
@@ -81,7 +211,7 @@ impl<'a, T: Unpin> Future for JoinAll<'a, T> {
 #[cfg(feature = "std")]
 #[allow(missing_debug_implementations)]
 pub(crate) struct DynamicJoin<'a, T> {
-    arms: Vec<Option<BoxFuture<'a, T>>>,
+    arms: ArmSet<'a, T>,
     /// `None` once the control channel has closed; no more arms can arrive.
     new_arms: Option<Receiver<BoxFuture<'a, T>>>,
     /// Resolved outputs, in the order [`JoinMode`] keeps them.
@@ -113,7 +243,7 @@ pub(crate) fn dynamic_join<'a, T: Unpin>(
     new_arms: Receiver<BoxFuture<'a, T>>,
 ) -> DynamicJoin<'a, T> {
     DynamicJoin {
-        arms: initial.into_iter().map(Some).collect(),
+        arms: ArmSet::new(initial),
         new_arms: Some(new_arms),
         outputs: Vec::new(),
         mode: JoinMode::UntilClosed,
@@ -132,7 +262,7 @@ pub(crate) fn dynamic_join_open<'a, T: Unpin>(
     new_arms: Receiver<BoxFuture<'a, T>>,
 ) -> DynamicJoin<'a, T> {
     DynamicJoin {
-        arms: initial.into_iter().map(Some).collect(),
+        arms: ArmSet::new(initial),
         new_arms: Some(new_arms),
         outputs: Vec::new(),
         mode: JoinMode::UntilIdle,
@@ -160,7 +290,7 @@ impl<'a, T: Unpin> Future for DynamicJoin<'a, T> {
                     Pin::new(&mut rf).poll(cx)
                 };
                 match polled {
-                    Poll::Ready(Some(fut)) => this.arms.push(Some(fut)),
+                    Poll::Ready(Some(fut)) => this.arms.push(fut),
                     Poll::Ready(None) => {
                         this.new_arms = None;
                         break;
@@ -170,34 +300,26 @@ impl<'a, T: Unpin> Future for DynamicJoin<'a, T> {
             }
         }
 
-        // 2. Poll every live arm and buffer its output. `UntilIdle` parks each
+        // 2. Poll every woken arm and buffer its output. `UntilIdle` parks each
         // one in its own arm's slot, so the initial arms keep their input order
         // (the graph runner indexes its per-arm bookkeeping by position);
         // `UntilClosed` appends, which is the completion order its callers have
         // always seen.
-        let mut all_done = true;
         if this.mode == JoinMode::UntilIdle {
             this.outputs.resize_with(this.arms.len(), || None);
         }
-        for (index, arm) in this.arms.iter_mut().enumerate() {
-            if let Some(fut) = arm {
-                match fut.as_mut().poll(cx) {
-                    Poll::Ready(v) => {
-                        match this.mode {
-                            JoinMode::UntilIdle => this.outputs[index] = Some(v),
-                            JoinMode::UntilClosed => this.outputs.push(Some(v)),
-                        }
-                        *arm = None;
-                    }
-                    Poll::Pending => all_done = false,
-                }
-            }
-        }
+        let mode = this.mode;
+        let outputs = &mut this.outputs;
+        this.arms.poll_woken(cx, |index, output| match mode {
+            JoinMode::UntilIdle => outputs[index] = Some(output),
+            JoinMode::UntilClosed => outputs.push(Some(output)),
+        });
 
         // 3. Done once every arm has resolved, and, for `UntilClosed`, once no
         // more can arrive. Every slot holding an output is filled by then, so
         // flattening drops nothing.
-        if all_done && (this.mode == JoinMode::UntilIdle || this.new_arms.is_none()) {
+        let more_may_arrive = this.mode == JoinMode::UntilClosed && this.new_arms.is_some();
+        if this.arms.all_done() && !more_may_arrive {
             Poll::Ready(mem::take(&mut this.outputs).into_iter().flatten().collect())
         } else {
             Poll::Pending
@@ -453,5 +575,36 @@ mod tests {
             "open control channel keeps the join alive"
         );
         drop(tx);
+    }
+
+    #[cfg(feature = "std")]
+    struct CountPolls<'a>(&'a core::cell::Cell<u32>);
+
+    #[cfg(feature = "std")]
+    impl Future for CountPolls<'_> {
+        type Output = ();
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+            self.0.set(self.0.get() + 1);
+            Poll::Pending
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_wake_polls_only_the_woken_arm() {
+        let (tx, rx) = bounded::<u32>(1);
+        let idle_polls = core::cell::Cell::new(0);
+        let woken: BoxFuture<'_, ()> = Box::pin(async {
+            rx.recv().await;
+        });
+        let idle: BoxFuture<'_, ()> = Box::pin(CountPolls(&idle_polls));
+        let mut join = join_all(alloc::vec![woken, idle]);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(Pin::new(&mut join).poll(&mut cx).is_pending());
+        assert_eq!(idle_polls.get(), 1, "the first poll reaches every arm");
+
+        tx.try_send(1).unwrap();
+        assert!(Pin::new(&mut join).poll(&mut cx).is_pending());
+        assert_eq!(idle_polls.get(), 1, "the send woke the other arm only");
     }
 }
