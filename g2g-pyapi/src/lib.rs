@@ -44,8 +44,10 @@ mod pymod {
         block_on, parse_chain, parse_element, parse_launch, parse_source, set_property_text,
         GraphMutator, MutationError, ParseError, RunBuilder, RunStats,
     };
-    use g2g_core::{Bus, BusMessage, G2gError, MemoryDomain};
-    use g2g_plugins::appsink::{register_appsink_pull, AppSinkPull, Pull};
+    use g2g_core::{Bus, G2gError};
+    use g2g_plugins::appsink::{
+        register_appsink_pull, AppSinkPull, FlatBusMessage, HostFrame, Pull,
+    };
     use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
     use g2g_plugins::clock::WallClock;
     use g2g_plugins::registry::{default_registry, mutator_with_defaults};
@@ -247,7 +249,10 @@ mod pymod {
         /// bus is empty. `kind` is a lowercase string; `a`/`b` are kind-specific
         /// (see the C header).
         fn bus_poll(&self) -> Option<(String, Option<String>, u64, u64)> {
-            self.bus.try_recv().map(|m| project(&m))
+            self.bus.try_recv().map(|message| {
+                let flat = FlatBusMessage::new(&message);
+                (flat.kind.name().to_string(), flat.text, flat.a, flat.b)
+            })
         }
 
         /// True once the run thread has finished (EOS or error).
@@ -322,11 +327,7 @@ mod pymod {
     #[pyclass]
     #[derive(Debug)]
     struct FrameView {
-        frame: Frame,
-        /// A contiguous copy made once for a strided `SystemView` (so the lent
-        /// pointer is stable); `None` for a `System` frame, lent directly with
-        /// no copy at all.
-        materialized: Option<Box<[u8]>>,
+        host: HostFrame,
         /// Presentation timestamp, in nanoseconds.
         #[pyo3(get)]
         pts_ns: u64,
@@ -335,27 +336,10 @@ mod pymod {
     impl FrameView {
         fn new(frame: Frame) -> Self {
             let pts_ns = frame.timing.pts_ns;
-            let materialized = match &frame.domain {
-                MemoryDomain::SystemView(sv) => Some(sv.materialize()),
-                _ => None,
-            };
             FrameView {
-                frame,
-                materialized,
+                host: HostFrame::new(frame),
                 pts_ns,
             }
-        }
-
-        /// The host-visible bytes to lend, or `None` for a non-host (GPU /
-        /// foreign) domain that has no CPU-mapped buffer.
-        fn host_bytes(&self) -> Option<(*const u8, usize)> {
-            if let Some(b) = &self.materialized {
-                return Some((b.as_ptr(), b.len()));
-            }
-            self.frame
-                .domain
-                .as_system_slice()
-                .map(|sl| (sl.as_ptr(), sl.len()))
         }
     }
 
@@ -364,7 +348,7 @@ mod pymod {
         /// Number of host-visible bytes (0 for a non-host domain).
         #[getter]
         fn nbytes(&self) -> usize {
-            self.host_bytes().map_or(0, |(_, len)| len)
+            self.host.bytes().map_or(0, <[u8]>::len)
         }
 
         unsafe fn __getbuffer__(
@@ -375,7 +359,7 @@ mod pymod {
             if view.is_null() {
                 return Err(PyBufferError::new_err("null buffer view"));
             }
-            let Some((ptr, len)) = slf.host_bytes() else {
+            let Some(bytes) = slf.host.bytes() else {
                 return Err(PyBufferError::new_err(
                     "frame is not host-visible (GPU / foreign memory domain)",
                 ));
@@ -389,8 +373,8 @@ mod pymod {
                 pyo3::ffi::PyBuffer_FillInfo(
                     view,
                     slf.as_ptr(),
-                    ptr as *mut core::ffi::c_void,
-                    len as pyo3::ffi::Py_ssize_t,
+                    bytes.as_ptr().cast_mut().cast(),
+                    bytes.len() as pyo3::ffi::Py_ssize_t,
                     1, // readonly
                     flags,
                 )
@@ -403,7 +387,7 @@ mod pymod {
         }
 
         unsafe fn __releasebuffer__(&self, _view: *mut pyo3::ffi::Py_buffer) {
-            // The lent bytes are owned by `self.frame` / `self.materialized`;
+            // The lent bytes are owned by `self.host`;
             // CPython manages the exporter refcount, so release is a no-op.
         }
     }
@@ -458,24 +442,6 @@ mod pymod {
                 Pull::Frame(frame) => Some(FrameView::new(frame)),
                 Pull::Empty | Pull::Ended => None,
             }
-        }
-    }
-
-    /// Flatten a [`BusMessage`] to `(kind, text, a, b)`; mirrors the C ABI shape.
-    fn project(msg: &BusMessage) -> (String, Option<String>, u64, u64) {
-        match msg {
-            BusMessage::StreamStart => ("stream-start".into(), None, 0, 0),
-            BusMessage::Eos => ("eos".into(), None, 0, 0),
-            BusMessage::Info(m) => ("info".into(), Some(m.clone()), 0, 0),
-            BusMessage::Error(e) => ("error".into(), Some(format!("{e:?}")), 0, 0),
-            BusMessage::Warning(e) => ("warning".into(), Some(format!("{e:?}")), 0, 0),
-            BusMessage::Buffering { percent, element } => {
-                ("buffering".into(), element.clone(), u64::from(*percent), 0)
-            }
-            BusMessage::DurationChanged { duration_ns } => {
-                ("duration-changed".into(), None, *duration_ns, 0)
-            }
-            _ => ("other".into(), None, 0, 0),
         }
     }
 

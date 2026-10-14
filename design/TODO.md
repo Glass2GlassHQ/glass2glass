@@ -58,7 +58,6 @@ Core, bindings, ML:
   wgpu readbacks are written by hand with per-frame staging buffers.
 - Dedup in `g2g-ml`: RGBA to NCHW preprocessing, f32 byte conversion, dtype size,
   the `only-on` gate shared with `g2g-python`.
-- Dedup the `BusMessage` projection and host-bytes frame view in capi and pyapi.
 - One YUYV to I420 converter for `g2g-mcu` and the plugins.
 
 Containers:

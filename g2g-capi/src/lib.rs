@@ -14,7 +14,7 @@
 //! 1. [`g2g_pipeline_launch`] parses the description against
 //!    [`default_registry`] and starts it on a background thread (the parsed
 //!    graph is `'static` and, under the `multi-thread` feature, `Send`).
-//! 2. [`g2g_pipeline_bus_poll`] drains one [`BusMessage`] at a time, projected
+//! 2. [`g2g_pipeline_bus_poll`] drains one [`g2g_core::BusMessage`] at a time, projected
 //!    into a flat [`G2gBusMessage`] (the `gst_bus_pop` analog).
 //! 3. [`g2g_pipeline_wait`] blocks for the natural end of stream and yields the
 //!    final [`RunStats`]; [`g2g_pipeline_free`] joins and releases.
@@ -24,21 +24,20 @@
 //! buffer injection and extraction are the planned next slice.
 
 use std::ffi::{c_char, c_void, CStr, CString};
-use std::fmt::Write as _;
 use std::os::raw::c_int;
 use std::ptr;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
-use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
     block_on, parse_chain, parse_element, parse_launch, parse_source, set_property_text,
     GraphMutator, MutationError, RunBuilder, RunStats,
 };
-use g2g_core::{Bus, BusMessage, G2gError, MemoryDomain, PipelineState};
+use g2g_core::{Bus, G2gError};
 use g2g_plugins::appsink::{
-    register_appsink_pull, set_appsink_callback, AppSinkPull, Pull, SampleCallback,
+    register_appsink_pull, set_appsink_callback, AppSinkPull, BusKind, FlatBusMessage, HostFrame,
+    Pull, SampleCallback,
 };
 use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
 use g2g_plugins::clock::WallClock;
@@ -70,7 +69,7 @@ pub struct Pipeline {
 }
 
 /// Discriminant for [`G2gBusMessage::kind`]. Mirrors the common
-/// [`BusMessage`] variants; richer ones collapse to [`G2gBusKind::Other`].
+/// [`g2g_core::BusMessage`] variants; richer ones collapse to [`G2gBusKind::Other`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum G2gBusKind {
@@ -213,13 +212,13 @@ pub unsafe extern "C" fn g2g_pipeline_bus_poll(p: *mut Pipeline, out: *mut G2gBu
         return 0;
     };
 
-    let (kind, text, a, b) = project(&msg);
-    p.last_text = text.and_then(|t| CString::new(t).ok());
+    let flat = FlatBusMessage::new(&msg);
+    p.last_text = flat.text.and_then(|t| CString::new(t).ok());
     let cmsg = G2gBusMessage {
-        kind: kind as c_int,
+        kind: G2gBusKind::from(flat.kind) as c_int,
         text: p.last_text.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
-        a,
-        b,
+        a: flat.a,
+        b: flat.b,
     };
     // SAFETY: caller contract: `out` is writable.
     unsafe { *out = cmsg };
@@ -867,45 +866,7 @@ pub struct AppSink {
 /// Opaque pulled sample. Owns the frame, so its bytes stay valid (zero-copy,
 /// including an `appsrc` foreign lend) until [`g2g_sample_free`].
 #[derive(Debug)]
-pub struct Sample {
-    // Keeps the frame's bytes alive for the sample's lifetime; never read
-    // directly (the flat view below points into it).
-    _frame: Frame,
-    // A materialized copy for strided `SystemView` frames, owned here so its
-    // pointer stays valid; `None` for a contiguous `System` frame.
-    _materialized: Option<Box<[u8]>>,
-    data: *const u8,
-    len: usize,
-    pts_ns: u64,
-}
-
-/// Build a flat sample view over a pulled frame without copying contiguous
-/// system memory (a strided view is materialized once).
-fn sample_from_frame(frame: Frame) -> Sample {
-    let mut materialized: Option<Box<[u8]>> = None;
-    let (data, len) = match &frame.domain {
-        MemoryDomain::System(s) => {
-            let b = s.as_slice();
-            (b.as_ptr(), b.len())
-        }
-        MemoryDomain::SystemView(sv) => {
-            let b = sv.materialize();
-            let view = (b.as_ptr(), b.len());
-            materialized = Some(b);
-            view
-        }
-        // GPU-resident frames need a download the v1 path does not do.
-        _ => (ptr::null(), 0),
-    };
-    let pts_ns = frame.timing.pts_ns;
-    Sample {
-        _frame: frame,
-        _materialized: materialized,
-        data,
-        len,
-        pts_ns,
-    }
-}
+pub struct Sample(HostFrame);
 
 /// Register `appsink channel=<name>` (null -> "default") in pull mode and return
 /// its handle. Call before launch.
@@ -939,7 +900,7 @@ pub unsafe extern "C" fn g2g_appsink_pull(sink: *const AppSink, out: *mut *mut S
     match block_on(s.pull.pull()) {
         Some(frame) => {
             // SAFETY: caller contract: `out` is writable.
-            unsafe { *out = Box::into_raw(Box::new(sample_from_frame(frame))) };
+            unsafe { *out = Box::into_raw(Box::new(Sample(HostFrame::new(frame)))) };
             1
         }
         None => 0,
@@ -966,7 +927,7 @@ pub unsafe extern "C" fn g2g_appsink_try_pull(
     match s.pull.try_pull() {
         Pull::Frame(frame) => {
             // SAFETY: caller contract: `out` is writable.
-            unsafe { *out = Box::into_raw(Box::new(sample_from_frame(frame))) };
+            unsafe { *out = Box::into_raw(Box::new(Sample(HostFrame::new(frame)))) };
             1
         }
         Pull::Empty => 0,
@@ -995,7 +956,9 @@ pub unsafe extern "C" fn g2g_appsink_free(sink: *mut AppSink) {
 #[no_mangle]
 pub unsafe extern "C" fn g2g_sample_data(s: *const Sample) -> *const u8 {
     // SAFETY: caller contract: `s` is a live handle.
-    unsafe { s.as_ref() }.map_or(ptr::null(), |s| s.data)
+    unsafe { s.as_ref() }
+        .and_then(|s| s.0.bytes())
+        .map_or(ptr::null(), <[u8]>::as_ptr)
 }
 
 /// Length in bytes of a sample's data.
@@ -1005,7 +968,9 @@ pub unsafe extern "C" fn g2g_sample_data(s: *const Sample) -> *const u8 {
 #[no_mangle]
 pub unsafe extern "C" fn g2g_sample_len(s: *const Sample) -> usize {
     // SAFETY: caller contract: `s` is a live handle.
-    unsafe { s.as_ref() }.map_or(0, |s| s.len)
+    unsafe { s.as_ref() }
+        .and_then(|s| s.0.bytes())
+        .map_or(0, <[u8]>::len)
 }
 
 /// Presentation timestamp (ns) of a sample.
@@ -1015,7 +980,7 @@ pub unsafe extern "C" fn g2g_sample_len(s: *const Sample) -> usize {
 #[no_mangle]
 pub unsafe extern "C" fn g2g_sample_pts(s: *const Sample) -> u64 {
     // SAFETY: caller contract: `s` is a live handle.
-    unsafe { s.as_ref() }.map_or(0, |s| s.pts_ns)
+    unsafe { s.as_ref() }.map_or(0, |s| s.0.frame().timing.pts_ns)
 }
 
 /// Free a sample (releasing its frame; an `appsrc` lend's free callback fires
@@ -1045,53 +1010,20 @@ unsafe fn opt_cstr<'a>(p: *const c_char) -> Option<&'a str> {
     unsafe { CStr::from_ptr(p) }.to_str().ok()
 }
 
-/// Project a [`BusMessage`] into the flat C shape: a kind, optional owned text,
-/// and two kind-specific numeric fields.
-fn project(msg: &BusMessage) -> (G2gBusKind, Option<String>, u64, u64) {
-    match msg {
-        BusMessage::StreamStart => (G2gBusKind::StreamStart, None, 0, 0),
-        BusMessage::Eos => (G2gBusKind::Eos, None, 0, 0),
-        BusMessage::Info(s) => (G2gBusKind::Info, Some(s.clone()), 0, 0),
-        BusMessage::Error(e) => (G2gBusKind::Error, Some(format_err(e)), 0, 0),
-        BusMessage::Warning(e) => (G2gBusKind::Warning, Some(format_err(e)), 0, 0),
-        BusMessage::StateChanged { old, new } => (
-            G2gBusKind::StateChanged,
-            None,
-            state_code(*new),
-            state_code(*old),
-        ),
-        BusMessage::Buffering { percent, element } => (
-            G2gBusKind::Buffering,
-            element.clone(),
-            u64::from(*percent),
-            0,
-        ),
-        BusMessage::DurationChanged { duration_ns } => {
-            (G2gBusKind::DurationChanged, None, *duration_ns, 0)
+impl From<BusKind> for G2gBusKind {
+    fn from(kind: BusKind) -> Self {
+        match kind {
+            BusKind::StreamStart => G2gBusKind::StreamStart,
+            BusKind::Eos => G2gBusKind::Eos,
+            BusKind::Error => G2gBusKind::Error,
+            BusKind::Warning => G2gBusKind::Warning,
+            BusKind::Info => G2gBusKind::Info,
+            BusKind::StateChanged => G2gBusKind::StateChanged,
+            BusKind::Buffering => G2gBusKind::Buffering,
+            BusKind::DurationChanged => G2gBusKind::DurationChanged,
+            BusKind::Other => G2gBusKind::Other,
         }
-        // Qos / Tag / NegotiationFailed / AsyncDone / Custom: surfaced as Other
-        // until the C shape grows fields for them.
-        _ => (G2gBusKind::Other, None, 0, 0),
     }
-}
-
-/// Stable small-integer code for a [`PipelineState`] (matches the doc on
-/// [`G2gBusMessage`]).
-fn state_code(s: PipelineState) -> u64 {
-    match s {
-        PipelineState::Null => 0,
-        PipelineState::Ready => 1,
-        PipelineState::Paused => 2,
-        PipelineState::Playing => 3,
-    }
-}
-
-/// Render a [`G2gError`] to a human string (the error type is `Debug`, not
-/// `Display`-rich, so debug formatting is the faithful projection).
-fn format_err(e: &G2gError) -> String {
-    let mut s = String::new();
-    let _ = write!(s, "{e:?}");
-    s
 }
 
 /// Write an owned C string to `*err_out` for the caller to free, if `err_out`

@@ -24,6 +24,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -36,9 +37,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::DomainSet;
 use g2g_core::runtime::{bounded, Receiver, Sender};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    AsyncElement, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PipelineState,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
 /// Bounded depth of the element -> application pull channel. A full channel
@@ -140,6 +141,112 @@ impl AppSinkPull {
             Some(Pulled::Frame(f)) => Some(f),
             _ => None,
         }
+    }
+}
+
+// a strided `SystemView` is copied to contiguous bytes once, here
+#[derive(Debug)]
+pub struct HostFrame {
+    frame: Frame,
+    materialized: Option<Box<[u8]>>,
+}
+
+impl HostFrame {
+    pub fn new(frame: Frame) -> Self {
+        let materialized = match &frame.domain {
+            MemoryDomain::SystemView(view) => Some(view.materialize()),
+            _ => None,
+        };
+        HostFrame {
+            frame,
+            materialized,
+        }
+    }
+
+    pub fn frame(&self) -> &Frame {
+        &self.frame
+    }
+
+    // `None` for a GPU-resident frame, which needs a download first
+    pub fn bytes(&self) -> Option<&[u8]> {
+        match &self.materialized {
+            Some(bytes) => Some(bytes),
+            None => self.frame.domain.as_system_slice(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusKind {
+    StreamStart,
+    Eos,
+    Error,
+    Warning,
+    Info,
+    StateChanged,
+    Buffering,
+    DurationChanged,
+    Other,
+}
+
+impl BusKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            BusKind::StreamStart => "stream-start",
+            BusKind::Eos => "eos",
+            BusKind::Error => "error",
+            BusKind::Warning => "warning",
+            BusKind::Info => "info",
+            BusKind::StateChanged => "state-changed",
+            BusKind::Buffering => "buffering",
+            BusKind::DurationChanged => "duration-changed",
+            BusKind::Other => "other",
+        }
+    }
+}
+
+// `a` and `b` mean what `G2gBusMessage` in the C header says for each kind
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlatBusMessage {
+    pub kind: BusKind,
+    pub text: Option<String>,
+    pub a: u64,
+    pub b: u64,
+}
+
+impl FlatBusMessage {
+    pub fn new(message: &BusMessage) -> Self {
+        let flat = |kind, text, a, b| FlatBusMessage { kind, text, a, b };
+        match message {
+            BusMessage::StreamStart => flat(BusKind::StreamStart, None, 0, 0),
+            BusMessage::Eos => flat(BusKind::Eos, None, 0, 0),
+            BusMessage::Info(text) => flat(BusKind::Info, Some(text.clone()), 0, 0),
+            BusMessage::Error(error) => flat(BusKind::Error, Some(format!("{error:?}")), 0, 0),
+            BusMessage::Warning(error) => flat(BusKind::Warning, Some(format!("{error:?}")), 0, 0),
+            BusMessage::StateChanged { old, new } => flat(
+                BusKind::StateChanged,
+                None,
+                state_code(*new),
+                state_code(*old),
+            ),
+            BusMessage::Buffering { percent, element } => {
+                flat(BusKind::Buffering, element.clone(), u64::from(*percent), 0)
+            }
+            BusMessage::DurationChanged { duration_ns } => {
+                flat(BusKind::DurationChanged, None, *duration_ns, 0)
+            }
+            _ => flat(BusKind::Other, None, 0, 0),
+        }
+    }
+}
+
+// the C header documents these codes
+fn state_code(state: PipelineState) -> u64 {
+    match state {
+        PipelineState::Null => 0,
+        PipelineState::Ready => 1,
+        PipelineState::Paused => 2,
+        PipelineState::Playing => 3,
     }
 }
 
@@ -296,17 +403,13 @@ impl AsyncElement for AppSink {
                         // Callback: deliver a borrowed view of host-visible
                         // memory (GPU-resident frames need a download the v1
                         // path skips; the count still advances).
-                        Some(SinkMode::Callback(slot)) => match &f.domain {
-                            MemoryDomain::System(s) => {
-                                let b = s.as_slice();
-                                (slot.cb)(b.as_ptr(), b.len(), f.timing.pts_ns, slot.user);
+                        Some(SinkMode::Callback(slot)) => {
+                            let pts_ns = f.timing.pts_ns;
+                            let host = HostFrame::new(f);
+                            if let Some(bytes) = host.bytes() {
+                                (slot.cb)(bytes.as_ptr(), bytes.len(), pts_ns, slot.user);
                             }
-                            MemoryDomain::SystemView(sv) => {
-                                let b = sv.materialize();
-                                (slot.cb)(b.as_ptr(), b.len(), f.timing.pts_ns, slot.user);
-                            }
-                            _ => {}
-                        },
+                        }
                         // Pull: hand the whole frame over (zero-copy); awaiting
                         // a full channel backpressures the pipeline. A closed
                         // channel (app dropped its handle) drops the frame.
@@ -397,5 +500,27 @@ static APPSINK_PROPS: &[PropertySpec] = &[
 impl PadTemplates for AppSink {
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([PadTemplate::sink_any()])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_state_change_carries_the_new_then_the_old_state() {
+        let flat = FlatBusMessage::new(&BusMessage::StateChanged {
+            old: PipelineState::Paused,
+            new: PipelineState::Playing,
+        });
+        assert_eq!(flat.kind.name(), "state-changed");
+        assert_eq!(
+            (flat.a, flat.b),
+            (
+                state_code(PipelineState::Playing),
+                state_code(PipelineState::Paused)
+            )
+        );
+        assert_ne!(flat.a, flat.b);
     }
 }

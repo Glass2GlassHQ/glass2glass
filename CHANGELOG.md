@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1370: the C and Python bindings share one bus-message projection and one host-bytes frame view, and Python reports state changes.
 - M1369: `AppSink.pull(timeout_ms=...)` in the Python bindings waits on the channel instead of polling every millisecond.
 - M1368: hosted Python sinks and non-anchor batch frames get read-only views instead of a forced writable copy.
 - M1367: `g2g_bridge_push_buf` copies the buffer once instead of on every retry of a full feed.
