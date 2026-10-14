@@ -76,7 +76,7 @@ use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{with_meta_demand, AllocationParams, LatencyReport};
 use crate::runtime::channel::{
     advertise_orientation, bounded, link, link_with_transit, LinkReceiver, LinkSender,
-    ProducerEndpoint, QosSlot, Receiver, ReconfigureAnswered, RecvFuture, Sender, SenderSink,
+    ProducerEndpoint, QosSlot, Receiver, ReconfigureAnswered, Sender, SenderSink,
 };
 use crate::runtime::coordinator::{
     log_caps_forward, log_caps_rejected, realloc_local_dyn, report_nego_failure, ArmDirective,
@@ -1931,12 +1931,15 @@ fn build_channels<'a>(
         // default; most edges leave it `None` and take `link_capacity`.
         let cap = vg.edge(eid).capacity.unwrap_or(link_capacity);
         // Transit instrumentation only where it is measured + read: `Block` edges
-        // (no drops -> the stamp ring stays aligned) into a transform/sink arm
-        // (which pops the stamp). Elsewhere a plain link (zero cost).
+        // (no drops -> the stamp ring stays aligned) into a transform, sink or muxer
+        // arm (which pops the stamp). Elsewhere a plain link (zero cost).
         let dst_kind = vg.kind(vg.edge(eid).dst.node);
         let instr_edge = instrument
             && vg.edge(eid).policy == crate::link::LinkPolicy::Block
-            && matches!(dst_kind, NodeKind::Transform | NodeKind::Sink);
+            && matches!(
+                dst_kind,
+                NodeKind::Transform | NodeKind::Sink | NodeKind::Muxer(_)
+            );
         let (mut tx, rx) = if instr_edge {
             link_with_transit(cap)
         } else {
@@ -2209,8 +2212,8 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
             .collect();
         let element = vg.take_element(node);
 
-        // A muxer contributes N+1 arms (one forwarder per input pad plus the
-        // muxer arm), so it is built before the single-arm match below.
+        // A muxer reads its input links itself, so it is built before the
+        // single-arm match below.
         if let NodeKind::Muxer(_) = kind {
             let Some(GraphNodeRef::Muxer(mux)) = element else {
                 return Err(G2gError::CapsMismatch);
@@ -2224,26 +2227,15 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
             let beta = mux_beta(&vg, node, &in_e, out_e[0], &solution, coord_handle.clone());
             let mux_ctrl = arm_ctrl_rx[node.0 as usize].take().expect("muxer ctrl rx");
             let input_count = in_rxs.len();
-            // Each input pad gets its OWN bounded channel feeding the muxer arm,
-            // which drains them round-robin. A single shared FIFO would let a
-            // fast input (e.g. a free-running background) monopolize the queue
-            // and starve a slower real-time input (e.g. a 30 fps camera): the
-            // camera's overlay would freeze and, worse, its EOS would never
-            // arrive, hanging the all-inputs-EOS aggregation forever. Forwarders
-            // are still indexed by pad so a muxer's `process(pad, ..)` keeps its
+            // The arm drains each input link round-robin. A single shared FIFO
+            // would let a fast input (e.g. a free-running background) monopolize
+            // the queue and starve a slower real-time input (e.g. a 30 fps
+            // camera): the camera's overlay would freeze and, worse, its EOS would
+            // never arrive, hanging the all-inputs-EOS aggregation forever. Links
+            // are indexed by pad so a muxer's `process(pad, ..)` keeps its
             // per-input geometry straight even if pads link out of order.
-            let mut pad_rxs: Vec<(usize, MuxerPad)> = Vec::with_capacity(input_count);
-            let mut input_qos: Vec<QosSlot> = Vec::with_capacity(input_count);
-            for (in_rx, pad) in in_rxs.into_iter().zip(pads) {
-                let (pad_tx, pad_rx) = bounded::<PipelinePacket>(link_capacity);
-                input_qos.push(in_rx.qos_slot());
-                let fwd: BoxFuture<'c, Result<u64, G2gError>> =
-                    Box::pin(muxer_forwarder(in_rx, pad_tx));
-                arms.push(fwd);
-                arm_kinds.push(kind);
-                arm_names.push(names[node.0 as usize].clone());
-                pad_rxs.push((pad, MuxerPad::Tagged(pad_rx)));
-            }
+            let input_qos: Vec<QosSlot> = in_rxs.iter().map(LinkReceiver::qos_slot).collect();
+            let pad_rxs: Vec<(usize, LinkReceiver)> = pads.into_iter().zip(in_rxs).collect();
             // A muxer can opt into runner-level PTS-ordered delivery (the runner
             // merges its inputs by DataFrame PTS); the default drains round-robin
             // in arrival order. The hook picks the arm from
@@ -2823,20 +2815,8 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             let beta = mux_beta(&vg, node, &in_e, out_e[0], &solution, coord_handle.clone());
             let mux_ctrl = arm_ctrl_rx[node.0 as usize].take().expect("muxer ctrl rx");
             let input_count = in_rxs.len();
-            let mut pad_rxs: Vec<(usize, MuxerPad)> = Vec::with_capacity(input_count);
-            let mut input_qos: Vec<QosSlot> = Vec::with_capacity(input_count);
-            for (in_rx, pad) in in_rxs.into_iter().zip(pads) {
-                let (pad_tx, pad_rx) = bounded::<PipelinePacket>(link_capacity);
-                input_qos.push(in_rx.qos_slot());
-                let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
-                    alloc::boxed::Box::new(move || -> LocalArmFuture {
-                        Box::pin(muxer_forwarder(in_rx, pad_tx))
-                    });
-                handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
-                arm_kinds.push(kind);
-                arm_names.push(names[node.0 as usize].clone());
-                pad_rxs.push((pad, MuxerPad::Tagged(pad_rx)));
-            }
+            let input_qos: Vec<QosSlot> = in_rxs.iter().map(LinkReceiver::qos_slot).collect();
+            let pad_rxs: Vec<(usize, LinkReceiver)> = pads.into_iter().zip(in_rxs).collect();
             let mux_probe = probes[node.0 as usize].clone();
             let mux_ticker = ticker.clone();
             let mux_control = controllers[node.0 as usize].take();
@@ -5042,76 +5022,6 @@ pub(crate) async fn broadcast(
     Ok(())
 }
 
-/// One muxer input: drain its edge and tag every packet with its pad index for
-/// the muxer arm. A per-input `Eos` (or a closed edge) is tagged so the muxer
-/// arm can aggregate the single merged `Eos`.
-async fn muxer_forwarder(
-    in_rx: LinkReceiver,
-    tagged: Sender<PipelinePacket>,
-) -> Result<u64, G2gError> {
-    loop {
-        match in_rx.recv().await {
-            Some(PipelinePacket::Eos) | None => {
-                tagged
-                    .send(PipelinePacket::Eos)
-                    .await
-                    .map_err(|_| G2gError::Shutdown)?;
-                return Ok(0);
-            }
-            Some(packet) => {
-                tagged.send(packet).await.map_err(|_| G2gError::Shutdown)?;
-            }
-        }
-    }
-}
-
-/// A pad receiver a fan-in arm can round-robin over: either a muxer's per-pad
-/// bounded [`Receiver`] or a terminal fan-in's input-edge [`LinkReceiver`]. Both
-/// expose the same `RecvFuture`, so [`muxer_recv_any`] blocks on either kind.
-trait PadReceiver {
-    fn recv_packet(&self) -> RecvFuture<'_, PipelinePacket>;
-}
-
-impl PadReceiver for Receiver<PipelinePacket> {
-    fn recv_packet(&self) -> RecvFuture<'_, PipelinePacket> {
-        self.recv()
-    }
-}
-
-/// One muxer input pad as the arm reads it: the per-pad channel a forwarder
-/// fills for a pad the graph was built with, or, for an input attached mid-run,
-/// the source's link itself.
-#[allow(missing_debug_implementations)]
-pub(crate) enum MuxerPad {
-    Tagged(Receiver<PipelinePacket>),
-    Link(LinkReceiver),
-}
-
-impl MuxerPad {
-    fn try_recv(&self) -> Option<PipelinePacket> {
-        match self {
-            MuxerPad::Tagged(rx) => rx.try_recv(),
-            MuxerPad::Link(rx) => rx.try_recv(),
-        }
-    }
-
-    fn fill_percent(&self) -> u8 {
-        match self {
-            MuxerPad::Tagged(rx) => rx.fill_percent(),
-            MuxerPad::Link(rx) => rx.fill_percent(),
-        }
-    }
-}
-
-impl PadReceiver for MuxerPad {
-    fn recv_packet(&self) -> RecvFuture<'_, PipelinePacket> {
-        match self {
-            MuxerPad::Tagged(rx) => rx.recv(),
-            MuxerPad::Link(rx) => rx.recv(),
-        }
-    }
-}
-
 /// What woke a parked muxer arm: a β directive, a packet on a pad, or an input
 /// to attach. A closed channel in any of the three reads as `None`.
 enum MuxerWake {
@@ -5124,7 +5034,7 @@ enum MuxerWake {
 /// bias they had over each other; an input to attach ranks last.
 async fn muxer_park(
     control: Option<&Receiver<ArmDirective>>,
-    pad_rxs: &[(usize, MuxerPad)],
+    pad_rxs: &[(usize, LinkReceiver)],
     open: &[bool],
     next: usize,
     adds: Option<&Receiver<PadAdd>>,
@@ -5180,7 +5090,7 @@ fn negotiate_runtime_pad(
 async fn admit_runtime_pad<E: MultiInputElement>(
     mux: &mut E,
     add: PadAdd,
-    pad_rxs: &mut Vec<(usize, MuxerPad)>,
+    pad_rxs: &mut Vec<(usize, LinkReceiver)>,
     open: &mut Vec<bool>,
     current_output: &mut Caps,
     out: &mut SenderSink,
@@ -5200,7 +5110,7 @@ async fn admit_runtime_pad<E: MultiInputElement>(
         }
     };
     out.relay_qos_to(pad_rx.qos_slot(), false);
-    pad_rxs.push((pad, MuxerPad::Link(pad_rx)));
+    pad_rxs.push((pad, pad_rx));
     open.push(true);
     let new_output = solve_mux_output_dyn(mux as &dyn DynMultiInputElement)?;
     if new_output != *current_output {
@@ -5211,19 +5121,13 @@ async fn admit_runtime_pad<E: MultiInputElement>(
     Ok(true)
 }
 
-impl PadReceiver for LinkReceiver {
-    fn recv_packet(&self) -> RecvFuture<'_, PipelinePacket> {
-        self.recv()
-    }
-}
-
 /// Block until some open input pad delivers a packet (or closes), scanning
 /// round-robin from `start` so the wake-up path stays fair too. Returns the
 /// pad's slot index (into `pad_rxs`) and its packet; `None` means that pad's
 /// channel closed without an `Eos` (an upstream error), treated as an end. All
 /// receivers register the same task waker, so a push on any one wakes us.
-async fn muxer_recv_any<R: PadReceiver>(
-    pad_rxs: &[(usize, R)],
+async fn muxer_recv_any(
+    pad_rxs: &[(usize, LinkReceiver)],
     open: &[bool],
     start: usize,
 ) -> (usize, Option<PipelinePacket>) {
@@ -5236,7 +5140,7 @@ async fn muxer_recv_any<R: PadReceiver>(
             }
             // `RecvFuture` holds only a `&Receiver`, so it is `Unpin`; polling it
             // parks our waker on that channel when pending.
-            let mut f = pad_rxs[slot].1.recv_packet();
+            let mut f = pad_rxs[slot].1.recv();
             if let core::task::Poll::Ready(v) = core::future::Future::poll(Pin::new(&mut f), cx) {
                 return core::task::Poll::Ready((slot, v));
             }
@@ -5711,7 +5615,7 @@ async fn park_or_tick<T, E: MultiInputElement>(
 /// same payload.
 #[allow(missing_debug_implementations)]
 pub(crate) struct MuxerArmParts {
-    pub(crate) pad_rxs: Vec<(usize, MuxerPad)>,
+    pub(crate) pad_rxs: Vec<(usize, LinkReceiver)>,
     /// The reverse QoS slot of every input link, so a downstream report is
     /// relayed onto each of them (M1242).
     pub(crate) input_qos: Vec<QosSlot>,
@@ -5958,13 +5862,15 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
             }
             packet => {
                 // M694: time the data-frame `process()` and sample this pad's
-                // input fill; the per-pad channel is a plain `Receiver`, so it has
-                // no transit ring (transit stays empty for muxer pads).
-                let timed = probe
-                    .as_deref()
-                    .filter(|_| matches!(&packet, PipelinePacket::DataFrame(_)));
+                // input fill and queue residency.
+                let is_data = matches!(&packet, PipelinePacket::DataFrame(_));
+                let transit_ns = is_data.then(|| pad_rxs[slot].1.pop_transit_ns()).flatten();
+                let timed = probe.as_deref().filter(|_| is_data);
                 if let Some(p) = timed {
                     p.record_fill(pad_rxs[slot].1.fill_percent());
+                    if let Some(t) = transit_ns {
+                        p.record_transit(t);
+                    }
                 }
                 // M882: sample the animated properties at this frame's PTS.
                 // M1175: as in the transform arm.
@@ -6066,7 +5972,7 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
         while let Some((slot, frame)) = agg.take_earliest_by(|f| f.timing.pts_ns) {
             let pad = pad_rxs[slot].0;
             // M694: released frames are all DataFrames; time each `process()` and
-            // sample this pad's input fill (plain `Receiver`, so no transit).
+            // sample this pad's input fill.
             if let Some(p) = probe.as_deref() {
                 p.record_fill(pad_rxs[slot].1.fill_percent());
             }
@@ -6156,7 +6062,13 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
         let pad = pad_rxs[slot].0;
         // A closed channel with no `Eos` is an upstream end (as in `muxer_arm`).
         match maybe.unwrap_or(PipelinePacket::Eos) {
-            PipelinePacket::DataFrame(frame) => agg.push(slot, frame),
+            PipelinePacket::DataFrame(frame) => {
+                let transit_ns = pad_rxs[slot].1.pop_transit_ns();
+                if let (Some(p), Some(t)) = (probe.as_deref(), transit_ns) {
+                    p.record_transit(t);
+                }
+                agg.push(slot, frame);
+            }
             PipelinePacket::Eos => {
                 mux.process(pad, PipelinePacket::Eos, &mut adapter).await?;
                 open[slot] = false;

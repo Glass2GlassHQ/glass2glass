@@ -48,7 +48,6 @@ Bugs:
 
 Core runtime:
 
-- Remove the muxer forwarder arm, link `MuxerPad::Link(in_rx)` directly.
 - `FlowGate` takes the shared lock per frame in Playing. Check the state
   atomically first.
 - Each push takes about six spin locks. Lock only when a signal flag is set.
