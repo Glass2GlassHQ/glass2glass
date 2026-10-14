@@ -32,8 +32,6 @@ Bugs:
 
 - `videoconvert::raw_format_to_str` panics on `Rgb8` and `raw_format_from_str`
   accepts 5 of 15 formats. Use one GStreamer format-name table from core.
-- `SrtpReceiverSet::receiver_for` keeps a receiver for an SSRC before the
-  packet authenticates. Insert only after unprotect succeeds, and cap the count.
 - `gamma`, `videobalance` and `alpha` swallow incoming `CapsChanged`. Move them
   onto `PixelFilter`.
 - ST 2110 depacketizers read the payload at offset 12 without `RtpHeader::parse`.

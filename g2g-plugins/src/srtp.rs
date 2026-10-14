@@ -88,6 +88,8 @@ pub const MAXIMUM_MKI_LENGTH: usize = 128;
 /// The E-flag and 31-bit SRTCP index every SRTCP packet ends with, before an
 /// optional MKI.
 pub const SRTCP_INDEX_LENGTH: usize = 4;
+/// Most sources one [`SrtpReceiverSet`] keeps a context for.
+pub const MAXIMUM_RECEIVE_CONTEXTS: usize = 1024;
 
 const RTP_ENCRYPTION_KEY_LABEL: u8 = 0x00;
 const RTP_AUTHENTICATION_KEY_LABEL: u8 = 0x01;
@@ -816,6 +818,7 @@ pub enum SrtpError {
     InconsistentMki,
     AeadCipherTakesNoAuthentication,
     UnsupportedKeyMaterialLength { actual: usize },
+    TooManySynchronizationSources,
 }
 
 impl fmt::Display for SrtpError {
@@ -861,6 +864,10 @@ impl fmt::Display for SrtpError {
             Self::UnsupportedKeyMaterialLength { actual } => write!(
                 formatter,
                 "{actual} bytes of key material match no SRTP cipher's key plus salt"
+            ),
+            Self::TooManySynchronizationSources => write!(
+                formatter,
+                "already {MAXIMUM_RECEIVE_CONTEXTS} SRTP receive contexts, refusing a new source"
             ),
         }
     }
@@ -2181,8 +2188,9 @@ where
 
     pub fn unprotect_rtp(&mut self, packet: &[u8]) -> Result<Vec<u8>, SrtpError> {
         let parsed = RtpHeader::parse_header(packet).ok_or(SrtpError::InvalidRtpPacket)?;
-        let receiver = self.receiver_for(parsed.header.ssrc)?;
-        receiver.unprotect_rtp(packet)
+        self.unprotect_with(parsed.header.ssrc, |receiver| {
+            receiver.unprotect_rtp(packet)
+        })
     }
 
     pub fn unprotect_rtcp(&mut self, packet: &[u8]) -> Result<Vec<u8>, SrtpError> {
@@ -2191,8 +2199,9 @@ where
             .and_then(|bytes| bytes.try_into().ok())
             .map(u32::from_be_bytes)
             .ok_or(SrtpError::InvalidRtcpPacket)?;
-        let receiver = self.receiver_for(synchronization_source)?;
-        receiver.unprotect_rtcp(packet)
+        self.unprotect_with(synchronization_source, |receiver| {
+            receiver.unprotect_rtcp(packet)
+        })
     }
 
     pub fn replace_key(
@@ -2242,28 +2251,36 @@ where
         true
     }
 
-    fn receiver_for(
+    /// Unprotect through the source's context. A new source's context is kept
+    /// only once its first packet authenticates, as libsrtp does, so forged
+    /// sources cannot grow the set.
+    fn unprotect_with(
         &mut self,
         synchronization_source: u32,
-    ) -> Result<&mut SrtpReceiver, SrtpError> {
-        if let Some(position) = self
+        unprotect: impl FnOnce(&mut SrtpReceiver) -> Result<Vec<u8>, SrtpError>,
+    ) -> Result<Vec<u8>, SrtpError> {
+        if let Some(receiver) = self
             .receivers
-            .iter()
-            .position(|receiver| receiver.synchronization_source == synchronization_source)
+            .iter_mut()
+            .find(|receiver| receiver.synchronization_source == synchronization_source)
         {
-            return Ok(&mut self.receivers[position]);
+            return unprotect(receiver);
+        }
+        if self.receivers.len() >= MAXIMUM_RECEIVE_CONTEXTS {
+            return Err(SrtpError::TooManySynchronizationSources);
         }
         let keys = self.key_provider.keys_for(synchronization_source);
         if keys.is_empty() {
             return Err(SrtpError::MissingKey);
         }
-        let receiver = SrtpReceiver::new_with_keys_and_window(
+        let mut receiver = SrtpReceiver::new_with_keys_and_window(
             synchronization_source,
             keys,
             self.replay_window,
         )?;
+        let unprotected = unprotect(&mut receiver)?;
         self.receivers.push(receiver);
-        self.receivers.last_mut().ok_or(SrtpError::MissingKey)
+        Ok(unprotected)
     }
 }
 
@@ -3192,6 +3209,95 @@ mod tests {
         assert_eq!(
             receivers.unprotect_rtp(&unknown_header.to_bytes()),
             Err(SrtpError::MissingKey)
+        );
+    }
+
+    /// Distinct sources spread over the 32-bit space, as a spoofer would send.
+    fn spoofed_sources(count: usize) -> impl Iterator<Item = u32> {
+        const GOLDEN_RATIO_MULTIPLIER: u32 = 0x9E37_79B9;
+        (1..=count as u32).map(|i| i.wrapping_mul(GOLDEN_RATIO_MULTIPLIER))
+    }
+
+    #[test]
+    fn spoofed_sources_with_bad_tags_never_create_a_context() {
+        let key = [0x25_u8; 16];
+        let salt = [0x38_u8; 12];
+        let source = 0x1111_1111;
+        let mut receivers = SrtpReceiverSet::new(|_| {
+            Vec::from([SrtpKeyingMaterial::new(AES_128_GCM, &key, &salt, 0).unwrap()])
+        });
+        let mut sender = SrtpSender::new(AES_128_GCM, &key, &salt, source).unwrap();
+        let header = RtpHeader {
+            payload_type: 96,
+            marker: false,
+            sequence: 1,
+            timestamp: 0,
+            ssrc: source,
+        };
+        let mut rtp = header.to_bytes().to_vec();
+        rtp.extend_from_slice(b"source payload");
+        let protected_rtp = sender.protect_rtp(&rtp).unwrap();
+        let rtcp = hexadecimal("80c90001 11111111");
+        let protected_rtcp = sender
+            .protect_rtcp(&rtcp, RtcpProtectionMode::Encrypt)
+            .unwrap();
+
+        // The source sits in the AEAD associated data, so rewriting it breaks the tag.
+        for spoofed in spoofed_sources(MAXIMUM_RECEIVE_CONTEXTS + 1) {
+            let mut forged_rtp = protected_rtp.clone();
+            forged_rtp[8..12].copy_from_slice(&spoofed.to_be_bytes());
+            assert_eq!(
+                receivers.unprotect_rtp(&forged_rtp),
+                Err(SrtpError::AuthenticationFailed)
+            );
+            let mut forged_rtcp = protected_rtcp.clone();
+            forged_rtcp[RTCP_SOURCE_RANGE].copy_from_slice(&spoofed.to_be_bytes());
+            assert_eq!(
+                receivers.unprotect_rtcp(&forged_rtcp),
+                Err(SrtpError::AuthenticationFailed)
+            );
+        }
+        assert!(receivers.stream_statistics().is_empty());
+
+        assert_eq!(receivers.unprotect_rtp(&protected_rtp).unwrap(), rtp);
+        assert_eq!(receivers.unprotect_rtcp(&protected_rtcp).unwrap(), rtcp);
+        assert_eq!(receivers.synchronization_sources(), [source]);
+    }
+
+    #[test]
+    fn receiver_set_refuses_sources_past_its_cap() {
+        let unauthenticated = SrtpPolicy {
+            cipher: SrtpCipher::Null,
+            authentication: SrtpAuthentication::Null,
+        };
+        let key = [0x25_u8; 16];
+        let salt = [0x38_u8; COUNTER_MODE_MASTER_SALT_LENGTH];
+        let mut receivers = SrtpReceiverSet::new(|_| {
+            Vec::from([SrtpKeyingMaterial::new(unauthenticated, &key, &salt, 0).unwrap()])
+        });
+        let packet_from = |ssrc| {
+            RtpHeader {
+                payload_type: 96,
+                marker: false,
+                sequence: 0,
+                timestamp: 0,
+                ssrc,
+            }
+            .to_bytes()
+            .to_vec()
+        };
+        let mut sources = spoofed_sources(MAXIMUM_RECEIVE_CONTEXTS + 1);
+        for source in sources.by_ref().take(MAXIMUM_RECEIVE_CONTEXTS) {
+            receivers.unprotect_rtp(&packet_from(source)).unwrap();
+        }
+        let one_too_many = sources.next().unwrap();
+        assert_eq!(
+            receivers.unprotect_rtp(&packet_from(one_too_many)),
+            Err(SrtpError::TooManySynchronizationSources)
+        );
+        assert_eq!(
+            receivers.stream_statistics().len(),
+            MAXIMUM_RECEIVE_CONTEXTS
         );
     }
 

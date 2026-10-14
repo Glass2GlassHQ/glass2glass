@@ -272,8 +272,8 @@ async fn statistics_count_what_each_element_handled() {
     );
 
     // One packet no longer authenticates, and one comes from a second source.
-    // The `key` property answers for every source, so the second one gets a
-    // context of its own and then fails to authenticate under that key.
+    // The `key` property answers for every source, but the second one fails to
+    // authenticate under that key, so it never gets a context of its own.
     *protected[TAMPERED_PACKET]
         .last_mut()
         .expect("a protected packet is never empty") ^= 1;
@@ -293,16 +293,10 @@ async fn statistics_count_what_each_element_handled() {
         SrtpDecStats {
             packets_received: protected.len() as u64,
             packets_dropped: 2,
-            streams: Vec::from([
-                SrtpStreamStats {
-                    synchronization_source: SYNCHRONIZATION_SOURCE,
-                    rollover_counter: 0,
-                },
-                SrtpStreamStats {
-                    synchronization_source: stray_source,
-                    rollover_counter: 0,
-                },
-            ]),
+            streams: Vec::from([SrtpStreamStats {
+                synchronization_source: SYNCHRONIZATION_SOURCE,
+                rollover_counter: 0,
+            }]),
         }
     );
 

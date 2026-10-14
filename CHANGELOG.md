@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1267: srtpdec and dtlssrtpdec keep a new source's context only once its first packet authenticates, capped at 1024 sources.
 - M1266: ULPFEC, FlexFEC and ST 2022-1 recovery keep working after the RTP sequence wraps.
 - M1274: one H.264/H.265 keyframe check serves every parser, muxer and receive source, so H264Parse flags AVCC keyframes and fMP4 seeks land on CRA pictures.
 - M1273: fragmented MP4 demuxing applies trun composition offsets, so B-frame fragments get correct PTS.
