@@ -39,6 +39,8 @@ use g2g_mcu::adpcm::{
     MAX_BLOCK_CHANNELS,
 };
 
+use crate::fifobuffer::FifoBuffer;
+
 /// Bytes per block, the `blockalign` default: what WAV writers (ffmpeg's
 /// `adpcm_ima_wav`, GStreamer's `adpcmenc`) use.
 pub const DEFAULT_BLOCK_ALIGN: usize = 1024;
@@ -126,7 +128,7 @@ pub struct AdpcmEnc {
     sample_rate: u32,
     channels: u8,
     /// S16LE bytes not yet packed into a whole block.
-    pending: Vec<u8>,
+    pending: FifoBuffer<u8>,
     /// Per-channel coder state carried across blocks, as the reference encoder
     /// does.
     states: [ImaState; MAX_BLOCK_CHANNELS],
@@ -149,7 +151,7 @@ impl AdpcmEnc {
             block_align: DEFAULT_BLOCK_ALIGN,
             sample_rate: 0,
             channels: 1,
-            pending: Vec::new(),
+            pending: FifoBuffer::default(),
             states: [ImaState::default(); MAX_BLOCK_CHANNELS],
             next_pts_ns: None,
             last_out: None,
@@ -217,12 +219,13 @@ impl AdpcmEnc {
         }
         while self.pending.len() >= source_block {
             let mut block = alloc::vec![0u8; self.block_align];
-            let samples: Vec<u8> = self.pending.drain(..source_block).collect();
+            let samples = &self.pending.as_slice()[..source_block];
             let states = self
                 .states
                 .get_mut(..self.channels.max(1) as usize)
                 .ok_or(G2gError::CapsMismatch)?;
-            encode_block_channels(states, &samples, &mut block).ok_or(G2gError::CapsMismatch)?;
+            encode_block_channels(states, samples, &mut block).ok_or(G2gError::CapsMismatch)?;
+            self.pending.discard(source_block);
             let new_caps = coded_caps(self.channels, self.sample_rate);
             if self.last_out.as_ref() != Some(&new_caps) {
                 out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -399,7 +402,7 @@ pub struct AdpcmDec {
     sample_rate: u32,
     channels: u8,
     /// Coded bytes not yet forming a whole block.
-    pending: Vec<u8>,
+    pending: FifoBuffer<u8>,
     /// PTS of the next block's PCM, anchored to the first input frame's PTS.
     next_pts_ns: Option<u64>,
     last_out: Option<Caps>,
@@ -419,7 +422,7 @@ impl AdpcmDec {
             block_align: DEFAULT_BLOCK_ALIGN,
             sample_rate: 0,
             channels: 1,
-            pending: Vec::new(),
+            pending: FifoBuffer::default(),
             next_pts_ns: None,
             last_out: None,
             sequence: 0,
@@ -483,10 +486,11 @@ impl AdpcmDec {
             if self.sample_rate == ANY_SAMPLE_RATE {
                 return Err(G2gError::CapsMismatch);
             }
-            let block: Vec<u8> = self.pending.drain(..self.block_align).collect();
+            let block = &self.pending.as_slice()[..self.block_align];
             let mut pcm = alloc::vec![0u8; pcm_block];
-            decode_block_channels(self.channels.max(1) as usize, &block, &mut pcm)
+            decode_block_channels(self.channels.max(1) as usize, block, &mut pcm)
                 .ok_or(G2gError::CapsMismatch)?;
+            self.pending.discard(self.block_align);
             let new_caps = self.output_caps();
             if self.last_out.as_ref() != Some(&new_caps) {
                 out.push(PipelinePacket::CapsChanged(new_caps.clone()))

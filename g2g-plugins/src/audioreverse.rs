@@ -37,7 +37,8 @@ use g2g_core::{
     PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
-use crate::audioconvert::{ns_to_samples, pcm_formats, sample_bytes, samples_to_ns};
+use crate::audioconvert::{frame_bytes, ns_to_samples, pcm_formats, samples_to_ns};
+use crate::fifobuffer::FifoBuffer;
 
 /// One second of audio per reversed buffer.
 const DEFAULT_CHUNK_DURATION_NS: u64 = 1_000_000_000;
@@ -74,7 +75,7 @@ pub struct AudioReverse {
     /// batched (`chunk-duration` 0) or before the rate is known.
     chunk_frames: u64,
     /// Bytes not yet cut into a reversed buffer.
-    adapter: Vec<u8>,
+    adapter: FifoBuffer<u8>,
     /// Timestamp of the sample the adapter was last anchored at, and the frames
     /// emitted since. A buffer arriving on an empty adapter re-anchors both.
     anchor_ns: u64,
@@ -96,7 +97,7 @@ impl AudioReverse {
             configured: false,
             last_caps: None,
             chunk_frames: 0,
-            adapter: Vec::new(),
+            adapter: FifoBuffer::default(),
             anchor_ns: 0,
             anchor_offset: 0,
             emitted: 0,
@@ -136,13 +137,6 @@ impl AudioReverse {
         Ok((*format, *channels, *sample_rate))
     }
 
-    fn bytes_per_frame(&self) -> usize {
-        match self.input {
-            Some((format, channels, _)) => sample_bytes(format) * channels as usize,
-            None => 0,
-        }
-    }
-
     fn update_chunk_frames(&mut self) {
         self.chunk_frames = match self.input {
             Some((_, _, rate)) => ns_to_samples(self.chunk_duration_ns, rate),
@@ -173,7 +167,7 @@ impl AudioReverse {
         let Some((format, channels, rate)) = self.input else {
             return Err(G2gError::NotConfigured);
         };
-        let bytes_per_frame = sample_bytes(format) * channels as usize;
+        let bytes_per_frame = frame_bytes(format, channels);
         if bytes_per_frame == 0 {
             return Err(G2gError::CapsMismatch);
         }
@@ -193,7 +187,7 @@ impl AudioReverse {
             } else {
                 self.adapter.len()
             };
-            let mut bytes: Vec<u8> = self.adapter.drain(..take).collect();
+            let mut bytes = self.adapter.take_front(take);
             reverse_frames(&mut bytes, bytes_per_frame);
 
             let frames = (take / bytes_per_frame) as u64;
@@ -270,7 +264,9 @@ impl AsyncElement for AudioReverse {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let bytes_per_frame = self.bytes_per_frame();
+                    let bytes_per_frame = self
+                        .input
+                        .map_or(0, |(format, channels, _)| frame_bytes(format, channels));
                     let bytes = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;

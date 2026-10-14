@@ -27,6 +27,7 @@ use g2g_core::{
 };
 
 use crate::audioconvert::{ns_to_samples, samples_to_ns};
+use crate::fifobuffer::FifoBuffer;
 
 /// # Example
 ///
@@ -53,7 +54,7 @@ pub struct AudioMixer {
     /// (where its next buffer appends when continuous).
     end_frame: Vec<u64>,
     /// Interleaved i32 accumulator of summed samples, `acc[0]` at `acc_start`.
-    acc: Vec<i32>,
+    acc: FifoBuffer<i32>,
     /// Absolute sample-frame index of the first slot in `acc`.
     acc_start: u64,
     /// Whether `acc_start` has been anchored to the first buffer's position.
@@ -84,7 +85,7 @@ impl AudioMixer {
             sample_rate,
             done: vec![false; inputs],
             end_frame: vec![0; inputs],
-            acc: Vec::new(),
+            acc: FifoBuffer::default(),
             acc_start: 0,
             started: false,
             emitted_any: false,
@@ -117,9 +118,7 @@ impl AudioMixer {
             // grow the accumulator downward. Only reachable before the first
             // emit (afterwards every input's coverage is >= acc_start).
             let shift = (self.acc_start - start) as usize * self.channels;
-            let mut grown = vec![0i32; shift];
-            grown.extend_from_slice(&self.acc);
-            self.acc = grown;
+            self.acc.prepend(shift, 0);
             self.acc_start = start;
         }
 
@@ -128,7 +127,10 @@ impl AudioMixer {
         if self.acc.len() < needed {
             self.acc.resize(needed, 0);
         }
-        accumulate(&mut self.acc[off..], &bytes[..n_frames * bytes_per_frame]);
+        accumulate(
+            &mut self.acc.as_mut_slice()[off..],
+            &bytes[..n_frames * bytes_per_frame],
+        );
         self.end_frame[input] = start + n_frames as u64;
     }
 
@@ -156,8 +158,8 @@ impl AudioMixer {
         let n_samples = ((safe - self.acc_start) as usize * self.channels).min(self.acc.len());
         let pts_ns = samples_to_ns(self.acc_start, self.sample_rate);
         let duration_ns = samples_to_ns(safe, self.sample_rate).saturating_sub(pts_ns);
-        let bytes = clamp_to_bytes(&self.acc[..n_samples]);
-        self.acc.drain(0..n_samples);
+        let bytes = clamp_to_bytes(&self.acc.as_slice()[..n_samples]);
+        self.acc.discard(n_samples);
         self.acc_start = safe;
         self.emitted_any = true;
 

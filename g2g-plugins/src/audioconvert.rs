@@ -194,6 +194,11 @@ pub(crate) fn sample_bytes(format: AudioFormat) -> usize {
     }
 }
 
+// bytes per interleaved frame
+pub(crate) fn frame_bytes(format: AudioFormat, channels: u8) -> usize {
+    sample_bytes(format) * usize::from(channels)
+}
+
 const NS_PER_SECOND: u64 = 1_000_000_000;
 
 /// The sample format an element declares when the solver needs its caps before

@@ -38,7 +38,8 @@ use g2g_core::{
     PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
-use crate::audioconvert::{ns_to_samples, pcm_formats, sample_bytes, samples_to_ns, silence_byte};
+use crate::audioconvert::{frame_bytes, ns_to_samples, pcm_formats, samples_to_ns, silence_byte};
+use crate::fifobuffer::FifoBuffer;
 
 /// gst's default `output-buffer-duration`, 20 ms.
 const DEFAULT_OUTPUT_BUFFER_DURATION: (i32, i32) = (1, 50);
@@ -171,7 +172,7 @@ pub struct AudioBufferSplit {
     accumulated_error: u64,
 
     /// Bytes not yet cut into an output buffer.
-    adapter: Vec<u8>,
+    adapter: FifoBuffer<u8>,
     /// Output frames emitted since the last resync, `None` before the first.
     current_offset: Option<u64>,
     /// Timestamp the current run of output buffers is measured from.
@@ -205,7 +206,7 @@ impl AudioBufferSplit {
             samples_per_buffer: 0,
             error_per_buffer: 0,
             accumulated_error: 0,
-            adapter: Vec::new(),
+            adapter: FifoBuffer::default(),
             current_offset: None,
             resync_pts: 0,
             align: StreamAlign::default(),
@@ -281,17 +282,12 @@ impl AudioBufferSplit {
         Ok((*format, *channels, *sample_rate))
     }
 
-    fn bytes_per_frame(&self) -> usize {
-        match self.input {
-            Some((format, channels, _)) => sample_bytes(format) * channels as usize,
-            None => 0,
-        }
-    }
-
     /// The buffer duration in effect: `output-buffer-size` when it is set (it
     /// names a frame count at the stream's rate), else the fraction property.
     fn effective_duration(&self) -> (u64, u64) {
-        let bytes_per_frame = self.bytes_per_frame();
+        let bytes_per_frame = self
+            .input
+            .map_or(0, |(format, channels, _)| frame_bytes(format, channels));
         let Some((_, _, rate)) = self.input else {
             return (
                 self.duration_numerator as u64,
@@ -370,7 +366,7 @@ impl AudioBufferSplit {
         let Some((format, channels, rate)) = self.input else {
             return Err(G2gError::NotConfigured);
         };
-        let bytes_per_frame = sample_bytes(format) * channels as usize;
+        let bytes_per_frame = frame_bytes(format, channels);
         if bytes_per_frame == 0 {
             return Err(G2gError::CapsMismatch);
         }
@@ -388,7 +384,7 @@ impl AudioBufferSplit {
             if take == 0 {
                 break;
             }
-            let bytes: Vec<u8> = self.adapter.drain(..take).collect();
+            let bytes = self.adapter.take_front(take);
             let frames = (take / bytes_per_frame) as u64;
             let offset = self.current_offset.unwrap_or(0);
             let pts = self.resync_pts.saturating_add(samples_to_ns(offset, rate));
@@ -436,7 +432,7 @@ impl AudioBufferSplit {
         let Some((format, channels, rate)) = self.input else {
             return Err(G2gError::NotConfigured);
         };
-        let bytes_per_frame = sample_bytes(format) * channels as usize;
+        let bytes_per_frame = frame_bytes(format, channels);
         let available_frames = (self.adapter.len() / bytes_per_frame.max(1)) as u64;
 
         let forced = self.current_offset.is_none();
@@ -557,7 +553,9 @@ impl AsyncElement for AudioBufferSplit {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let bytes_per_frame = self.bytes_per_frame();
+                    let bytes_per_frame = self
+                        .input
+                        .map_or(0, |(format, channels, _)| frame_bytes(format, channels));
                     let bytes = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
