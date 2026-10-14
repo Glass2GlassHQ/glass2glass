@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1380: one `cuda_driver_ffi` module declares the shared CUDA driver calls.
 - M1379: Media Foundation elements share one `mfcommon` module for errors, samples and the ProcessInput/ProcessOutput loop.
 - M1363: one bounds-checked big-endian reader replaces the per-parser copies.
 - M1362: `rtmp` reuses the FLV tag reader and writer from `flv`.

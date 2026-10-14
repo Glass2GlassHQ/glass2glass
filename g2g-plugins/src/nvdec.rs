@@ -1365,21 +1365,10 @@ mod ffi {
         pub fn cuvid_ctx_lock_destroy(lock: *mut c_void) -> i32;
     }
 
-    #[link(name = "cuda")]
-    extern "C" {
-        #[link_name = "cuInit"]
-        pub fn cu_init(flags: u32) -> i32;
-        #[link_name = "cuDeviceGet"]
-        pub fn cu_device_get(dev: *mut i32, ordinal: i32) -> i32;
-        #[link_name = "cuCtxCreate_v2"]
-        pub fn cu_ctx_create(pctx: *mut *mut c_void, flags: u32, dev: i32) -> i32;
-        #[link_name = "cuCtxDestroy_v2"]
-        pub fn cu_ctx_destroy(ctx: *mut c_void) -> i32;
-        #[link_name = "cuCtxPushCurrent_v2"]
-        pub fn cu_ctx_push_current(ctx: *mut c_void) -> i32;
-        #[link_name = "cuCtxPopCurrent_v2"]
-        pub fn cu_ctx_pop_current(pctx: *mut *mut c_void) -> i32;
-    }
+    pub(crate) use crate::cuda_driver_ffi::{
+        cu_ctx_create, cu_ctx_destroy, cu_ctx_pop_current, cu_ctx_push_current, cu_device_get,
+        cu_init,
+    };
 }
 
 #[cfg(test)]
@@ -1990,32 +1979,15 @@ mod tests {
     /// CUDA driver FFI to synthesize an NV12 surface for the encode leg and to
     /// read a decoded luma plane back for verification. The allocate / upload
     /// half is only used by the `nvenc` round trips.
-    #[allow(unreachable_pub, dead_code)]
     mod cu {
-        use core::ffi::c_void;
-        #[link(name = "cuda")]
-        extern "C" {
-            #[link_name = "cuInit"]
-            pub fn cu_init(flags: u32) -> i32;
-            #[link_name = "cuDeviceGet"]
-            pub fn cu_device_get(dev: *mut i32, ordinal: i32) -> i32;
-            #[link_name = "cuCtxCreate_v2"]
-            pub fn cu_ctx_create(pctx: *mut *mut c_void, flags: u32, dev: i32) -> i32;
-            #[link_name = "cuCtxDestroy_v2"]
-            pub fn cu_ctx_destroy(ctx: *mut c_void) -> i32;
-            #[link_name = "cuCtxPushCurrent_v2"]
-            pub fn cu_ctx_push_current(ctx: *mut c_void) -> i32;
-            #[link_name = "cuCtxPopCurrent_v2"]
-            pub fn cu_ctx_pop_current(pctx: *mut *mut c_void) -> i32;
-            #[link_name = "cuMemAlloc_v2"]
-            pub fn cu_mem_alloc(dptr: *mut u64, bytesize: usize) -> i32;
-            #[link_name = "cuMemFree_v2"]
-            pub fn cu_mem_free(dptr: u64) -> i32;
-            #[link_name = "cuMemcpyHtoD_v2"]
-            pub fn cu_memcpy_htod(dst: u64, src: *const c_void, bytesize: usize) -> i32;
-            #[link_name = "cuMemcpyDtoH_v2"]
-            pub fn cu_memcpy_dtoh(dst: *mut c_void, src: u64, bytesize: usize) -> i32;
-        }
+        #[cfg(feature = "nvenc")]
+        pub(super) use crate::cuda_driver_ffi::{
+            cu_ctx_create, cu_ctx_destroy, cu_device_get, cu_init, cu_mem_alloc, cu_mem_free,
+            cu_memcpy_htod,
+        };
+        pub(super) use crate::cuda_driver_ffi::{
+            cu_ctx_pop_current, cu_ctx_push_current, cu_memcpy_dtoh,
+        };
     }
 
     #[cfg(feature = "nvenc")]

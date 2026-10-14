@@ -252,24 +252,15 @@ fn cuda_name(buf: &[u8]) -> String {
 mod ffi {
     use core::ffi::c_char;
 
-    /// `CUresult` is a C `enum` (int-sized).
-    pub(super) type CuResult = i32;
-    /// `CUdevice` is an int handle.
-    pub(super) type CuDevice = i32;
-
-    pub(super) const CUDA_SUCCESS: CuResult = 0;
+    pub(super) use crate::cuda_driver_ffi::{
+        cu_device_get, cu_init, CuDevice, CuResult, CUDA_SUCCESS,
+    };
 
     #[link(name = "cuda")]
     extern "C" {
-        /// Initialise the CUDA driver API (flags must be 0). Idempotent.
-        #[link_name = "cuInit"]
-        pub(super) fn cu_init(flags: u32) -> CuResult;
         /// Number of devices with compute capability, through `count`.
         #[link_name = "cuDeviceGetCount"]
         pub(super) fn cu_device_get_count(count: *mut i32) -> CuResult;
-        /// Get a device handle by ordinal.
-        #[link_name = "cuDeviceGet"]
-        pub(super) fn cu_device_get(device: *mut CuDevice, ordinal: i32) -> CuResult;
         /// Write the device's NUL-terminated name into `name` (at most `len`).
         #[link_name = "cuDeviceGetName"]
         pub(super) fn cu_device_get_name(name: *mut c_char, len: i32, dev: CuDevice) -> CuResult;

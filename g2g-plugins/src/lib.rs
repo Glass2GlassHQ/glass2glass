@@ -1565,6 +1565,8 @@ pub mod pwdevice;
 // stream reaches the CPU sinks. Hand-rolled libcuda FFI; Linux + NVIDIA only.
 #[cfg(all(target_os = "linux", feature = "cuda"))]
 pub mod cuda;
+#[cfg(all(target_os = "linux", feature = "cuda"))]
+mod cuda_driver_ffi;
 
 // Local zero-copy IPC over CUDA IPC memory handles (M556): share a device
 // allocation with another same-machine + same-GPU process with no

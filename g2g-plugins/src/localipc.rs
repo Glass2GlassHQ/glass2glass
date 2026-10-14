@@ -244,19 +244,13 @@ pub unsafe fn ipc_close(dptr: u64) -> Result<(), G2gError> {
     unsafe { check(ffi::cu_ipc_close_mem_handle(dptr)) }
 }
 
-/// Thin hand-rolled CUDA Driver API FFI for the IPC path, linking `libcuda`
-/// directly (the `cuda` feature's gate guarantees Linux + NVIDIA). Kept separate
-/// from `cuda.rs`'s FFI so the `local-ipc` feature is self-contained; the driver
-/// `#define`s the unsuffixed names to their `_v2` symbols, so we name the `_v2`
-/// exports the shared object provides.
+/// The IPC-only CUDA Driver API calls on top of the shared driver bindings.
 mod ffi {
-    use core::ffi::c_void;
+    pub(super) use crate::cuda_driver_ffi::{
+        cu_ctx_create, cu_ctx_destroy, cu_device_get, cu_init, cu_mem_alloc, cu_mem_free,
+        cu_memcpy_dtoh, cu_memcpy_htod, CuContext, CuDevice, CuResult, CUDA_SUCCESS,
+    };
 
-    pub(super) type CuContext = *mut c_void;
-    pub(super) type CuResult = i32;
-    pub(super) type CuDevice = i32;
-
-    pub(super) const CUDA_SUCCESS: CuResult = 0;
     /// `CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS`: enable peer access lazily on first
     /// use, the documented default flag for `cuIpcOpenMemHandle`.
     pub(super) const CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS: u32 = 0x1;
@@ -270,28 +264,12 @@ mod ffi {
 
     #[link(name = "cuda")]
     extern "C" {
-        #[link_name = "cuInit"]
-        pub(super) fn cu_init(flags: u32) -> CuResult;
-        #[link_name = "cuDeviceGet"]
-        pub(super) fn cu_device_get(device: *mut CuDevice, ordinal: i32) -> CuResult;
-        #[link_name = "cuCtxCreate_v2"]
-        pub(super) fn cu_ctx_create(pctx: *mut CuContext, flags: u32, dev: CuDevice) -> CuResult;
-        #[link_name = "cuCtxDestroy_v2"]
-        pub(super) fn cu_ctx_destroy(ctx: CuContext) -> CuResult;
-        #[link_name = "cuMemAlloc_v2"]
-        pub(super) fn cu_mem_alloc(dptr: *mut u64, size: usize) -> CuResult;
-        #[link_name = "cuMemFree_v2"]
-        pub(super) fn cu_mem_free(dptr: u64) -> CuResult;
         #[link_name = "cuMemGetAddressRange_v2"]
         pub(super) fn cu_mem_get_address_range(
             pbase: *mut u64,
             psize: *mut usize,
             dptr: u64,
         ) -> CuResult;
-        #[link_name = "cuMemcpyHtoD_v2"]
-        pub(super) fn cu_memcpy_htod(dst: u64, src: *const c_void, size: usize) -> CuResult;
-        #[link_name = "cuMemcpyDtoH_v2"]
-        pub(super) fn cu_memcpy_dtoh(dst: *mut c_void, src: u64, size: usize) -> CuResult;
         #[link_name = "cuMemcpyDtoD_v2"]
         pub(super) fn cu_memcpy_dtod(dst: u64, src: u64, size: usize) -> CuResult;
         /// Export an allocation as a 64-byte IPC handle.
