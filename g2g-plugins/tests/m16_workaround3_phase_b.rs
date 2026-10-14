@@ -233,11 +233,10 @@ impl AsyncElement for PickySink {
 }
 
 /// Hostile mid-stream `CapsChanged` (RGBA from a "boundary" that
-/// declares NV12 nowhere) is short-circuited by Phase B's solver gate
-/// against the sink's declared `Accepts(NV12)` constraint — never
-/// reaches `configure_pipeline` or `process`. The pipeline keeps
-/// draining; the upstream Renegotiate signal is in-band but no element
-/// reacts in this test.
+/// declares NV12 nowhere) is stopped by Phase B's solver gate against the
+/// sink's declared `Accepts(NV12)` constraint and never reaches the sink.
+/// No producer re-solves its output, so the run fails rather than draining
+/// frames relabelled RGBA into an NV12 sink.
 #[tokio::test]
 async fn hostile_mid_stream_capschanged_blocked_by_solver_gate() {
     let nv12 = nv12_caps(1280, 720);
@@ -260,16 +259,14 @@ async fn hostile_mid_stream_capschanged_blocked_by_solver_gate() {
     };
     let clock = ZeroClock;
 
-    g2g_core::runtime::run_source_transform_sink(&mut src, &mut tx, &mut snk, &clock, 8)
-        .await
-        .expect("pipeline must complete despite hostile mid-stream CapsChanged");
+    let outcome =
+        g2g_core::runtime::run_source_transform_sink(&mut src, &mut tx, &mut snk, &clock, 8).await;
+    assert!(
+        matches!(outcome, Err(G2gError::CapsMismatch)),
+        "a CapsChanged the sink cannot accept fails the run, got {outcome:?}"
+    );
 
     let g = inner.lock().unwrap();
-    assert!(g.saw_eos, "EOS must reach the sink");
-    assert_eq!(
-        g.received_frames, 6,
-        "all source frames must reach the sink"
-    );
     // The hostile RGBA `CapsChanged` was rejected by the solver gate;
     // the sink's `process` never saw it. Pre-Phase B it would have
     // landed in the queue because `configure_pipeline` accepts anything.

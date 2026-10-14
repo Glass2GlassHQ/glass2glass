@@ -418,7 +418,7 @@ fn synthetic_aac_aus(count: usize) -> Vec<(Vec<u8>, FrameTiming)> {
 /// derives it (whole sample ticks converted to nanoseconds), so the fed and
 /// recovered timestamps are comparable without a tolerance.
 fn aac_pts_ns(i: usize) -> u64 {
-    i as u64 * AAC_AU_SAMPLES * 1_000_000_000 / AUDIO_RATE as u64
+    g2g_core::time::ticks_to_ns(i as u64 * AAC_AU_SAMPLES, AUDIO_RATE)
 }
 
 /// One pad's feed: its caps and the access units (payload, timing) to deliver.
