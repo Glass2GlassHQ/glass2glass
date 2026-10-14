@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1257: `linux-full` builds the EGL `glimagesink`, so a launch line's `glimagesink` takes RGBA instead of falling back to the NV12-only `waylandsink`.
 - M1253: `mpegtsmux` gains `transport-stream-id`, `original-network-id`, `start-pid`, `pmt-start-pid` and `tables-version`.
 - M1252: `mpegtsmux` gains a `bitrate` property for constant-bitrate output padded with null packets.
 - M1251: `mpegtsmux` sets the random access indicator on keyframes, with a PCR on keyframes of the PCR stream.

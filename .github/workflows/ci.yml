@@ -243,7 +243,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libssl-dev libasound2-dev libpulse-dev \
-            libopus-dev libwayland-dev libxkbcommon-dev libdav1d-dev nasm \
+            libopus-dev libwayland-dev libegl-dev libxkbcommon-dev libdav1d-dev nasm \
             clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
             libva-dev libdrm-dev libgbm-dev libvpx-dev libpipewire-0.3-dev \
             mosquitto mosquitto-clients
