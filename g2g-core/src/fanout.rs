@@ -26,7 +26,8 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::caps::{Caps, CapsSet};
 use crate::element::{
-    AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
+    AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, PushFuture, PushOutcome,
+    Reconfigure,
 };
 use crate::error::G2gError;
 use crate::format_element::CapsConstraint;
@@ -1002,9 +1003,31 @@ impl GateHandle {
     }
 }
 
+// The push of a packet the gate passes, or nothing for one it holds back.
+#[allow(missing_debug_implementations)]
+pub struct GateFuture<'a> {
+    push: Option<PushFuture<'a, dyn OutputSink + 'a>>,
+}
+
+impl core::future::Future for GateFuture<'_> {
+    type Output = Result<(), G2gError>;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        match &mut self.get_mut().push {
+            Some(push) => core::pin::Pin::new(push)
+                .poll(cx)
+                .map(|outcome| outcome.map(|_| ())),
+            None => core::task::Poll::Ready(Ok(())),
+        }
+    }
+}
+
 impl AsyncElement for Gate {
     type ProcessFuture<'a>
-        = BoxFuture<'a, Result<(), G2gError>>
+        = GateFuture<'a>
     where
         Self: 'a;
 
@@ -1021,31 +1044,19 @@ impl AsyncElement for Gate {
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
-        let open = self.open.load(Ordering::SeqCst);
-        Box::pin(async move {
-            match packet {
-                PipelinePacket::DataFrame(f) => {
-                    if open {
-                        out.push(PipelinePacket::DataFrame(f)).await?;
-                    }
-                }
-                PipelinePacket::CapsChanged(c) => {
-                    out.push(PipelinePacket::CapsChanged(c)).await?;
-                }
-                // Flush is control: forward regardless of open state.
-                PipelinePacket::Flush => {
-                    out.push(PipelinePacket::Flush).await?;
-                }
-                // Segment is control: forward regardless of open state.
-                PipelinePacket::Segment(s) => {
-                    out.push(PipelinePacket::Segment(s)).await?;
-                }
-                // Runner forwards Eos after process() returns. A fan-in arm's
-                // deadline tick never reaches a 1->1 element.
-                PipelinePacket::Eos | PipelinePacket::Tick => {}
+        let forward = match &packet {
+            PipelinePacket::DataFrame(_) => self.open.load(Ordering::SeqCst),
+            // Caps, Flush and Segment are control: forward regardless of open state.
+            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {
+                true
             }
-            Ok(())
-        })
+            // Runner forwards Eos after process() returns. A fan-in arm's
+            // deadline tick never reaches a 1->1 element.
+            PipelinePacket::Eos | PipelinePacket::Tick => false,
+        };
+        GateFuture {
+            push: forward.then(|| out.push(packet)),
+        }
     }
 }
 
@@ -1112,9 +1123,56 @@ impl RouterHandle {
     }
 }
 
+// One push to the selected port, or the same control packet to every port in turn.
+#[allow(missing_debug_implementations)]
+pub struct RouterFuture<'a> {
+    out: &'a mut dyn MultiOutputSink,
+    packet: Option<PipelinePacket>,
+    // Ports still to be sent the packet, in order.
+    ports: core::ops::Range<usize>,
+    in_flight: Option<PipelinePacket>,
+    sending: bool,
+}
+
+// Only control packets go to every port.
+fn copy_control(packet: &PipelinePacket) -> PipelinePacket {
+    match packet {
+        PipelinePacket::CapsChanged(caps) => PipelinePacket::CapsChanged(caps.clone()),
+        PipelinePacket::Flush => PipelinePacket::Flush,
+        PipelinePacket::Segment(segment) => PipelinePacket::Segment(*segment),
+        other => unreachable!("only control packets are broadcast, got {other:?}"),
+    }
+}
+
+impl core::future::Future for RouterFuture<'_> {
+    type Output = Result<(), G2gError>;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        while this.ports.start < this.ports.end {
+            let port = this.ports.start;
+            if !this.sending {
+                this.in_flight = match this.ports.len() {
+                    1 => this.packet.take(),
+                    _ => this.packet.as_ref().map(copy_control),
+                };
+                this.out.begin_push_to(port);
+                this.sending = true;
+            }
+            core::task::ready!(this.out.poll_push_to(cx, port, &mut this.in_flight))?;
+            this.sending = false;
+            this.ports.start += 1;
+        }
+        core::task::Poll::Ready(Ok(()))
+    }
+}
+
 impl MultiOutputElement for Router {
     type ProcessFuture<'a>
-        = BoxFuture<'a, Result<(), G2gError>>
+        = RouterFuture<'a>
     where
         Self: 'a;
 
@@ -1143,36 +1201,23 @@ impl MultiOutputElement for Router {
         // Clamp defensively so a stale handle write can never index past the
         // port list (the runner allocated exactly `ports` branches).
         let selected = self.selected.load(Ordering::SeqCst).min(self.ports - 1);
-        let ports = self.ports;
-        Box::pin(async move {
-            match packet {
-                PipelinePacket::DataFrame(f) => {
-                    out.push_to(selected, PipelinePacket::DataFrame(f)).await?;
-                }
-                PipelinePacket::CapsChanged(c) => {
-                    for port in 0..ports {
-                        out.push_to(port, PipelinePacket::CapsChanged(c.clone()))
-                            .await?;
-                    }
-                }
-                // Flush is broadcast to every branch, like CapsChanged.
-                PipelinePacket::Flush => {
-                    for port in 0..ports {
-                        out.push_to(port, PipelinePacket::Flush).await?;
-                    }
-                }
-                // Segment is broadcast to every branch, like CapsChanged.
-                PipelinePacket::Segment(s) => {
-                    for port in 0..ports {
-                        out.push_to(port, PipelinePacket::Segment(s)).await?;
-                    }
-                }
-                // Runner broadcasts Eos to all ports after process() returns. A
-                // fan-in arm's deadline tick never reaches a 1->N element.
-                PipelinePacket::Eos | PipelinePacket::Tick => {}
+        let ports = match &packet {
+            PipelinePacket::DataFrame(_) => selected..selected + 1,
+            // CapsChanged, Flush and Segment are broadcast to every branch.
+            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {
+                0..self.ports
             }
-            Ok(())
-        })
+            // Runner broadcasts Eos to all ports after process() returns. A
+            // fan-in arm's deadline tick never reaches a 1->N element.
+            PipelinePacket::Eos | PipelinePacket::Tick => 0..0,
+        };
+        RouterFuture {
+            out,
+            packet: Some(packet),
+            ports,
+            in_flight: None,
+            sending: false,
+        }
     }
 }
 
