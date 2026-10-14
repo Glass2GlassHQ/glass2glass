@@ -514,6 +514,7 @@ impl FlvMuxer {
         let codec = self.video.unwrap_or(FlvCodec::H264);
         // frame type (1 keyframe, 2 interframe) | codec id.
         let frame_type = if keyframe { 1u8 } else { 2u8 };
+        // The tag body: these codec header bytes, then the access unit.
         let mut body = alloc::vec![(frame_type << 4) | codec.tag_id()];
         match codec {
             FlvCodec::H264 => {
@@ -529,8 +530,7 @@ impl FlvMuxer {
             }
             _ => {}
         }
-        body.extend_from_slice(au);
-        self.emit_tag(&mut out, TAG_VIDEO, dts_ms, &body);
+        self.emit_tag(&mut out, TAG_VIDEO, dts_ms, &[&body, au]);
         out
     }
 
@@ -545,8 +545,7 @@ impl FlvMuxer {
         if self.audio == Some(FlvCodec::Aac) {
             body.push(0x01);
         }
-        body.extend_from_slice(au);
-        self.emit_tag(&mut out, TAG_AUDIO, pts_ms, &body);
+        self.emit_tag(&mut out, TAG_AUDIO, pts_ms, &[&body, au]);
         out
     }
 
@@ -573,43 +572,49 @@ impl FlvMuxer {
 
         if !self.tags.is_empty() {
             let script = on_metadata_body(&self.tags);
-            self.emit_tag(out, TAG_SCRIPT, 0, &script);
+            self.emit_tag(out, TAG_SCRIPT, 0, &[&script]);
         }
         // Sequence headers (AVC packet type 0 / AAC packet type 0) carry the
         // decoder config a player needs before the media frames. Only H.264 and
         // AAC have one: VP6's config byte rides each media tag instead.
         if self.video == Some(FlvCodec::H264) && !self.video_config.is_empty() {
-            let mut body = alloc::vec![0x17u8, 0x00, 0x00, 0x00, 0x00];
-            body.extend_from_slice(&self.video_config);
-            self.emit_tag(out, TAG_VIDEO, 0, &body);
+            let config = self.video_config.clone();
+            self.emit_tag(
+                out,
+                TAG_VIDEO,
+                0,
+                &[&[0x17, 0x00, 0x00, 0x00, 0x00], &config],
+            );
         }
         if self.audio == Some(FlvCodec::Aac) && !self.audio_config.is_empty() {
-            let mut body = alloc::vec![self.audio_flags, 0x00];
-            body.extend_from_slice(&self.audio_config);
-            self.emit_tag(out, TAG_AUDIO, 0, &body);
+            let config = self.audio_config.clone();
+            self.emit_tag(out, TAG_AUDIO, 0, &[&[self.audio_flags, 0x00], &config]);
         }
     }
 
-    /// Append one tag, prefixed by the prior tag's `PreviousTagSize` (0 for the
-    /// first tag), and record this tag's size for the next.
-    fn emit_tag(&mut self, out: &mut Vec<u8>, tag_type: u8, pts_ms: u32, body: &[u8]) {
+    /// Append one tag whose body is `parts` in order, prefixed by the prior
+    /// tag's `PreviousTagSize` (0 for the first tag), and record this tag's size
+    /// for the next.
+    fn emit_tag(&mut self, out: &mut Vec<u8>, tag_type: u8, pts_ms: u32, parts: &[&[u8]]) {
+        let body_len: usize = parts.iter().map(|part| part.len()).sum();
+        out.reserve(PREV_TAG_SIZE_LEN + TAG_HEADER_LEN + body_len);
         out.extend_from_slice(&self.prev_tag_size.to_be_bytes());
-        let tag = flv_tag(tag_type, pts_ms, body);
-        self.prev_tag_size = tag.len() as u32;
-        out.extend_from_slice(&tag);
+        put_tag_header(out, tag_type, pts_ms, body_len);
+        for part in parts {
+            out.extend_from_slice(part);
+        }
+        self.prev_tag_size = (TAG_HEADER_LEN + body_len) as u32;
     }
 }
 
-/// Build one FLV tag: 11-byte header (type, 24-bit size, 24+8-bit timestamp,
-/// stream id) then the body.
-fn flv_tag(tag_type: u8, pts_ms: u32, body: &[u8]) -> Vec<u8> {
-    let mut tag = alloc::vec![tag_type];
-    write_u24(&mut tag, body.len() as u32);
-    write_u24(&mut tag, pts_ms & 0x00FF_FFFF);
-    tag.push((pts_ms >> 24) as u8); // timestamp extension
-    write_u24(&mut tag, 0); // stream id
-    tag.extend_from_slice(body);
-    tag
+/// Append one FLV tag's 11-byte header: type, 24-bit body size, 24+8-bit
+/// timestamp, stream id.
+pub(crate) fn put_tag_header(out: &mut Vec<u8>, tag_type: u8, timestamp_ms: u32, body_len: usize) {
+    out.push(tag_type);
+    write_u24(out, body_len as u32);
+    write_u24(out, timestamp_ms & 0x00FF_FFFF);
+    out.push((timestamp_ms >> 24) as u8); // timestamp extension
+    write_u24(out, 0); // stream id
 }
 
 /// Serialize a [`TagList`] as an `onMetaData` script body (AMF0): the event-name

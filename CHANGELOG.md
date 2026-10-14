@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1357: MP4, Matroska, FLV and MPEG-TS muxers write each payload once into a pre-sized buffer.
 - M1356: PS, Ogg, IVF, Matroska and fMP4 demuxers parse from a read offset instead of draining per unit.
 - M1355: progressive MP4 and AVI demuxers de-frame only the selected tracks, and `mp4demuxn` interleaves its output by decode time.
 - M1354: the AVI writer builds the file in one pre-sized buffer, and progressive MP4 emits each sample as its own frame.

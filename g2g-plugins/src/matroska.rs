@@ -2008,30 +2008,24 @@ impl MatroskaMuxer {
             // generic reader understands, `DiscardPadding` what carries the ns
             // the millisecond grid would round away.
             Some((duration, discard_ns)) => {
-                let block = build_simple_block(track_number, rel, false, data);
-                let mut group = elem_vec(ID_BLOCK, &block);
-                group.extend_from_slice(&elem_vec(ID_BLOCK_DURATION, &uint_bytes(duration)));
-                group.extend_from_slice(&elem_vec(ID_DISCARD_PADDING, &int_bytes(discard_ns)));
-                out.extend_from_slice(&elem_vec(ID_BLOCK_GROUP, &group));
+                let mut trailer = elem_vec(ID_BLOCK_DURATION, &uint_bytes(duration));
+                trailer.extend_from_slice(&elem_vec(ID_DISCARD_PADDING, &int_bytes(discard_ns)));
+                put_block_group(&mut out, track_number, rel, data, &trailer);
             }
             // A subtitle cue lasts as long as its `BlockDuration` says, and a
             // SimpleBlock has nowhere to put one, so a text block is always a
             // BlockGroup (M898). The Block's flags stay 0: the keyframe bit is a
             // SimpleBlock field.
             None if self.is_subtitle_track(track) => {
-                let block = build_simple_block(track_number, rel, false, data);
-                let mut group = elem_vec(ID_BLOCK, &block);
+                let mut trailer = Vec::new();
                 if duration_ns > 0 {
                     let ticks =
                         (duration_ns + DEFAULT_TIMESTAMP_SCALE / 2) / DEFAULT_TIMESTAMP_SCALE;
-                    group.extend_from_slice(&elem_vec(ID_BLOCK_DURATION, &uint_bytes(ticks)));
+                    trailer = elem_vec(ID_BLOCK_DURATION, &uint_bytes(ticks));
                 }
-                out.extend_from_slice(&elem_vec(ID_BLOCK_GROUP, &group));
+                put_block_group(&mut out, track_number, rel, data, &trailer);
             }
-            None => {
-                let block = build_simple_block(track_number, rel, keyframe, data);
-                out.extend_from_slice(&elem_vec(ID_SIMPLE_BLOCK, &block));
-            }
+            None => put_block(&mut out, ID_SIMPLE_BLOCK, track_number, rel, keyframe, data),
         }
         self.segment_pos += (out.len() - before) as u64;
         // Index this Cluster in the Cues if it holds a keyframe on the cue track,
@@ -2473,22 +2467,54 @@ fn tag_name_value(tag: &Tag) -> (Cow<'_, str>, Cow<'_, str>) {
     (name, tag.value_string())
 }
 
-/// A SimpleBlock body: track-number VINT, signed relative timestamp, flags, data.
-fn build_simple_block(track: u64, rel: i16, keyframe: bool, data: &[u8]) -> Vec<u8> {
-    let mut b = encode_vint(track);
-    b.extend_from_slice(&rel.to_be_bytes());
-    b.push(if keyframe { 0x80 } else { 0x00 }); // keyframe flag, no lacing
-    b.extend_from_slice(data);
-    b
+/// Append a `Block` or `SimpleBlock` element: track-number VINT, signed relative
+/// timestamp, flags, data.
+fn put_block(out: &mut Vec<u8>, id: u32, track: u64, rel: i16, keyframe: bool, data: &[u8]) {
+    let mut header = encode_vint(track);
+    header.extend_from_slice(&rel.to_be_bytes());
+    header.push(if keyframe { 0x80 } else { 0x00 }); // keyframe flag, no lacing
+    let body_len = header.len() + data.len();
+    out.reserve(elem_len(id, body_len));
+    put_elem_header(out, id, body_len);
+    out.extend_from_slice(&header);
+    out.extend_from_slice(data);
 }
+
+/// Append a `BlockGroup` of one flagless `Block` followed by the `trailer`
+/// elements.
+fn put_block_group(out: &mut Vec<u8>, track: u64, rel: i16, data: &[u8], trailer: &[u8]) {
+    let block_body_len = encode_vint(track).len() + BLOCK_TIMESTAMP_AND_FLAGS_LEN + data.len();
+    put_elem_header(
+        out,
+        ID_BLOCK_GROUP,
+        elem_len(ID_BLOCK, block_body_len) + trailer.len(),
+    );
+    put_block(out, ID_BLOCK, track, rel, false, data);
+    out.extend_from_slice(trailer);
+}
+
+/// A block's 16-bit relative timestamp plus its flags byte.
+const BLOCK_TIMESTAMP_AND_FLAGS_LEN: usize = 3;
 
 /// One EBML element: serialized id, a size VINT, then the body.
 fn elem_vec(id: u32, body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    id_bytes(id, &mut out);
-    out.extend_from_slice(&encode_vint(body.len() as u64));
+    let mut out = Vec::with_capacity(elem_len(id, body.len()));
+    put_elem_header(&mut out, id, body.len());
     out.extend_from_slice(body);
     out
+}
+
+/// Append an element's id and the size VINT of a `body_len` body.
+fn put_elem_header(out: &mut Vec<u8>, id: u32, body_len: usize) {
+    id_bytes(id, out);
+    out.extend_from_slice(&encode_vint(body_len as u64));
+}
+
+/// A whole element's length: id, size VINT and body.
+fn elem_len(id: u32, body_len: usize) -> usize {
+    let mut header = Vec::new();
+    put_elem_header(&mut header, id, body_len);
+    header.len() + body_len
 }
 
 /// Serialize an element ID to its 1..4 bytes (the length marker is part of the

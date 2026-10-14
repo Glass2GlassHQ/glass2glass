@@ -14,11 +14,19 @@ pub(crate) const MATRIX: [u32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000
 
 /// A size-prefixed box: `[u32 size][4cc kind][payload]`.
 pub(crate) fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
-    let mut b = Vec::with_capacity(8 + payload.len());
-    b.extend_from_slice(&((payload.len() as u32 + 8).to_be_bytes()));
-    b.extend_from_slice(kind);
+    let mut b = Vec::with_capacity(BOX_HEADER_LEN + payload.len());
+    put_box_header(&mut b, kind, payload.len());
     b.extend_from_slice(payload);
     b
+}
+
+/// A compact box header: 32-bit size, then the type.
+pub(crate) const BOX_HEADER_LEN: usize = 8;
+
+/// Append the header of a box whose payload is `payload_len` bytes.
+pub(crate) fn put_box_header(out: &mut Vec<u8>, kind: &[u8; 4], payload_len: usize) {
+    out.extend_from_slice(&((payload_len + BOX_HEADER_LEN) as u32).to_be_bytes());
+    out.extend_from_slice(kind);
 }
 
 /// A full box: a version byte plus 24-bit flags, then the payload.

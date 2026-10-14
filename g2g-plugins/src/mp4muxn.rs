@@ -52,7 +52,10 @@ use crate::fmp4mux::{
     vp8_keyframe, vp9_keyframe,
 };
 use crate::mp4audiosink::esds;
-use crate::mp4box::{ftyp, ftyp_cmaf, full_box, mp4_box, prft, styp_cmaf, udta_with_tags, MATRIX};
+use crate::mp4box::{
+    ftyp, ftyp_cmaf, full_box, mp4_box, prft, put_box_header, styp_cmaf, udta_with_tags,
+    BOX_HEADER_LEN, MATRIX,
+};
 use crate::opusparse::{
     dops_from_opus_head, is_opus_config, parse_opus_head, OPUS_ENCODER_PRE_SKIP,
 };
@@ -903,13 +906,14 @@ impl Mp4MuxN {
         }
 
         self.sequence += 1;
-        bytes.extend_from_slice(&av_fragment(
+        av_fragment(
+            &mut bytes,
             track_id,
             self.sequence,
             base_decode_time,
             self.cmaf,
             &samples,
-        ));
+        );
 
         let out_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
@@ -1956,16 +1960,17 @@ fn trak(
     )
 }
 
-/// One `moof`+`mdat` fragment holding `samples` for `track_id`, with a
+/// Append one `moof`+`mdat` fragment holding `samples` for `track_id`, with a
 /// multi-sample `trun` (a single sample in the default per-AU mode). `tfdt` is the
 /// track's decode time at the first sample.
 fn av_fragment(
+    out: &mut Vec<u8>,
     track_id: u32,
     sequence: u64,
     base_decode_time: u64,
     cmaf: bool,
     samples: &[PendingSample],
-) -> Vec<u8> {
+) {
     let build_moof = |data_offset: u32| -> Vec<u8> {
         let mfhd = full_box(b"mfhd", 0, 0, &(sequence as u32).to_be_bytes());
         let tfhd = tfhd(track_id, cmaf);
@@ -1985,14 +1990,14 @@ fn av_fragment(
         let traf = mp4_box(b"traf", &[tfhd, tfdt, trun].concat());
         mp4_box(b"moof", &[mfhd, traf].concat())
     };
-    let moof_len = build_moof(0).len() as u32;
-    let moof = build_moof(moof_len + 8);
-    let mut mdat_payload = Vec::new();
+    let moof_len = build_moof(0).len();
+    let payload_len: usize = samples.iter().map(|s| s.bytes.len()).sum();
+    out.reserve(moof_len + BOX_HEADER_LEN + payload_len);
+    out.extend_from_slice(&build_moof((moof_len + BOX_HEADER_LEN) as u32));
+    put_box_header(out, b"mdat", payload_len);
     for s in samples {
-        mdat_payload.extend_from_slice(&s.bytes);
+        out.extend_from_slice(&s.bytes);
     }
-    let mdat = mp4_box(b"mdat", &mdat_payload);
-    [moof, mdat].concat()
 }
 
 #[cfg(test)]

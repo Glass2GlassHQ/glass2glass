@@ -14,6 +14,7 @@
 //! stream for H.264 / H.265 is already Annex-B, so a unit feeds `h264parse`
 //! directly.
 
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -2077,6 +2078,8 @@ const PCR_BYTE_OFFSET: usize = 11;
 
 const TS_HEADER_LEN: usize = 4;
 const TS_PAYLOAD_MAX: usize = TS_PACKET_LEN - TS_HEADER_LEN;
+// a packet whose adaptation field carries a PCR
+const TS_PAYLOAD_MIN: usize = TS_PAYLOAD_MAX - AF_LENGTH_AND_FLAGS_LEN - PCR_FIELD_LEN;
 const PUSI_FLAG: u8 = 0x40;
 const AFC_PAYLOAD_ONLY: u8 = 0x10;
 const AFC_ADAPTATION_ONLY: u8 = 0x20;
@@ -2610,10 +2613,14 @@ impl TsMuxer {
         let delay = self.decoder_delay_90khz();
         let written_pts = pts_90khz.map(|pts| pts.saturating_add(delay));
         let written_dts = dts_90khz.map(|dts| dts.saturating_add(delay));
-        let pes = self.pes_for(stream_index, au, written_pts, written_dts);
+        let (pes_header, payload) = self.pes_for(stream_index, au, written_pts, written_dts);
+        let pes_len = pes_header.len() + payload.len();
+        out.reserve(pes_len.div_ceil(TS_PAYLOAD_MIN) * TS_PACKET_LEN);
+        // The first packet's payload: the PES header, then the head of the AU.
+        let mut first_payload = [0u8; TS_PAYLOAD_MAX];
         let mut off = 0;
         let mut first = true;
-        while off < pes.len() {
+        while off < pes_len {
             let pcr = if self.constant_bitrate() {
                 self.write_due_pcr_only_packets(Some(stream_index), &mut out);
                 self.embedded_pcr(stream_index, first && force_pcr, &out)
@@ -2626,16 +2633,18 @@ impl TsMuxer {
                 pcr_27mhz: pcr,
                 random_access: first && random_access,
             };
-            let take = (pes.len() - off).min(TS_PAYLOAD_MAX - adaptation.len());
+            let take = (pes_len - off).min(TS_PAYLOAD_MAX - adaptation.len());
+            let packet_payload = if first {
+                let (header_part, au_part) = first_payload[..take].split_at_mut(pes_header.len());
+                header_part.copy_from_slice(&pes_header);
+                au_part.copy_from_slice(&payload[..take - pes_header.len()]);
+                &first_payload[..take]
+            } else {
+                let at = off - pes_header.len();
+                &payload[at..at + take]
+            };
             let s = &mut self.streams[stream_index];
-            ts_packet(
-                s.pid,
-                first,
-                s.es_cc,
-                adaptation,
-                &pes[off..off + take],
-                &mut out,
-            );
+            ts_packet(s.pid, first, s.es_cc, adaptation, packet_payload, &mut out);
             s.es_cc = advance_continuity_counter(s.es_cc);
             first = false;
             off += take;
@@ -2665,13 +2674,15 @@ impl TsMuxer {
         );
     }
 
-    fn pes_for(
+    /// The PES header for an access unit, and the payload it heads: the AU, or
+    /// the AU wrapped in its stream's data field.
+    fn pes_for<'a>(
         &mut self,
         stream_index: usize,
-        au: &[u8],
+        au: &'a [u8],
         pts_90khz: Option<u64>,
         dts_90khz: Option<u64>,
-    ) -> Vec<u8> {
+    ) -> (Vec<u8>, Cow<'a, [u8]>) {
         let s = &mut self.streams[stream_index];
         // Synchronous KLV rides one metadata AU cell per access unit. An AU too
         // big for the cell's 16-bit length goes out bare (no ST 0601 local set
@@ -2688,12 +2699,9 @@ impl TsMuxer {
             .dvb_subtitle
             .then(|| crate::dvbsub::pes_data_field(au))
             .or(cell);
-        build_pes(
-            s.stream_id,
-            field.as_deref().unwrap_or(au),
-            pts_90khz,
-            dts_90khz,
-        )
+        let payload = field.map_or(Cow::Borrowed(au), Cow::Owned);
+        let header = pes_header(s.stream_id, payload.len(), pts_90khz, dts_90khz);
+        (header, payload)
     }
 
     // pending is the byte count already in this call's output
@@ -2989,11 +2997,17 @@ fn metadata_au_cell(sequence_number: u8, au: &[u8]) -> Vec<u8> {
     cell
 }
 
-/// Build a PES packet for one access unit (start code + stream_id + length + an
-/// optional header carrying the PTS, plus a DTS for reordered video), matching
-/// what [`parse_pes_header`] reads. A DTS is written (flags '11', a 10-byte field
-/// pair) only when it is present and differs from the PTS; otherwise PTS-only.
-fn build_pes(stream_id: u8, au: &[u8], pts_90khz: Option<u64>, dts_90khz: Option<u64>) -> Vec<u8> {
+/// The PES header for a `payload_len` access unit (start code + stream_id +
+/// length + an optional header carrying the PTS, plus a DTS for reordered
+/// video), matching what [`parse_pes_header`] reads. A DTS is written (flags
+/// '11', a 10-byte field pair) only when it is present and differs from the PTS;
+/// otherwise PTS-only.
+fn pes_header(
+    stream_id: u8,
+    payload_len: usize,
+    pts_90khz: Option<u64>,
+    dts_90khz: Option<u64>,
+) -> Vec<u8> {
     let mut header = Vec::new();
     header.push(0x80); // marker '10'
     match (pts_90khz, dts_90khz) {
@@ -3013,7 +3027,7 @@ fn build_pes(stream_id: u8, au: &[u8], pts_90khz: Option<u64>, dts_90khz: Option
             header.push(0);
         }
     }
-    let pes_payload_len = header.len() + au.len();
+    let pes_payload_len = header.len() + payload_len;
     let mut pes = alloc::vec![0x00, 0x00, 0x01, stream_id];
     // PES_packet_length: the real length when it fits, else 0 (unbounded, the
     // standard video case). The demuxer delimits by TS packet boundaries anyway.
@@ -3021,7 +3035,6 @@ fn build_pes(stream_id: u8, au: &[u8], pts_90khz: Option<u64>, dts_90khz: Option
     pes.push((len_field >> 8) as u8);
     pes.push(len_field as u8);
     pes.extend_from_slice(&header);
-    pes.extend_from_slice(au);
     pes
 }
 
@@ -4383,18 +4396,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn build_pes_pts_only_and_pts_dts_headers() {
+    fn pes_header_pts_only_and_pts_dts_headers() {
         // PTS-only: optional-header marker '10', PTS_DTS_flags '10', one 5-byte field.
-        let pts_only = build_pes(0xE0, &[0xAA], Some(6000), None);
+        let pts_only = pes_header(0xE0, 1, Some(6000), None);
         assert_eq!(pts_only[6] & 0xC0, 0x80, "optional-header marker '10'");
         assert_eq!(pts_only[7] >> 6, 0b10, "PTS_DTS_flags = '10'");
         assert_eq!(pts_only[8], 5, "one 5-byte timestamp field");
         // A DTS equal to the PTS adds nothing: still PTS-only.
-        let equal = build_pes(0xE0, &[0xAA], Some(6000), Some(6000));
+        let equal = pes_header(0xE0, 1, Some(6000), Some(6000));
         assert_eq!(equal[7] >> 6, 0b10);
         assert_eq!(equal[8], 5);
         // A distinct DTS: flags '11', two 5-byte fields decoding to PTS then DTS.
-        let both = build_pes(0xE0, &[0xAA], Some(6000), Some(3600));
+        let both = pes_header(0xE0, 1, Some(6000), Some(3600));
         assert_eq!(both[7] >> 6, 0b11, "PTS_DTS_flags = '11'");
         assert_eq!(both[8], 10, "two 5-byte timestamp fields");
         assert_eq!(decode_timestamp(&both[9..14]), 6000);
