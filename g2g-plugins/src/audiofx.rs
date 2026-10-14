@@ -465,8 +465,7 @@ impl DirectFir {
     }
 }
 
-/// FFT overlap-save FIR, gst's path for long kernels. Output comes a block at a
-/// time, so a call can return fewer frames than it was given.
+/// FFT overlap-save FIR, gst's path for long kernels.
 #[derive(Debug)]
 struct FftFir {
     plan: FftPlan,
@@ -515,26 +514,17 @@ impl FftFir {
 
     fn run(&mut self, input: &[f32], output: &mut Vec<f32>) {
         self.pending.extend_from_slice(input);
-        let block_samples = self.block_frames() * self.channels;
-        while self.pending.len() >= block_samples {
-            self.filter_block(output);
+        loop {
+            let frames = (self.pending.len() / self.channels).min(self.block_frames());
+            if frames == 0 {
+                break;
+            }
+            self.filter_block(frames, output);
         }
     }
 
-    fn flush(&mut self, output: &mut Vec<f32>) {
-        let frames = self.pending.len() / self.channels;
-        if frames == 0 {
-            return;
-        }
-        let padded = self.block_frames() * self.channels;
-        self.pending.resize(padded, 0.0);
-        let start = output.len();
-        self.filter_block(output);
-        output.truncate(start + frames * self.channels);
-    }
-
-    fn filter_block(&mut self, output: &mut Vec<f32>) {
-        let frames = self.block_frames();
+    // a short block zero-fills past its new frames: the outputs kept never wrap into that tail
+    fn filter_block(&mut self, frames: usize, output: &mut Vec<f32>) {
         let overlap_len = self.taps - 1;
         let start = output.len();
         output.resize(start + frames * self.channels, 0.0);
@@ -546,8 +536,8 @@ impl FftFir {
             for (slot, &sample) in self.re[overlap_len..].iter_mut().zip(new_inputs) {
                 *slot = sample as f64;
             }
-            let newest = &self.re[self.plan.size() - overlap_len..];
-            overlap.copy_from_slice(newest);
+            self.re[overlap_len + frames..].fill(0.0);
+            overlap.copy_from_slice(&self.re[frames..frames + overlap_len]);
             self.im.fill(0.0);
             self.plan.forward(&mut self.re, &mut self.im);
             let spectrum = self.re.iter_mut().zip(self.im.iter_mut());
@@ -601,14 +591,6 @@ impl FirConvolver {
         match self {
             Self::Direct(fir) => fir.run(input, output),
             Self::Fft(fir) => fir.run(input, output),
-        }
-    }
-
-    // the input a block-based convolver still holds
-    fn flush(&mut self, output: &mut Vec<f32>) {
-        match self {
-            Self::Direct(_) => {}
-            Self::Fft(fir) => fir.flush(output),
         }
     }
 }
@@ -719,7 +701,6 @@ impl FirStream {
         }
         let silence = vec![0.0f32; self.latency * self.channels];
         self.convolver.run(&silence, &mut self.output);
-        self.convolver.flush(&mut self.output);
         self.drop_group_delay();
     }
 
@@ -1324,7 +1305,6 @@ mod tests {
         for buffer in input.chunks(TEST_BUFFER_FRAMES * TEST_CHANNELS) {
             fft.run(buffer, &mut got);
         }
-        fft.flush(&mut got);
         assert_eq!(got.len(), expected.len());
         for (index, (fast, slow)) in got.iter().zip(&expected).enumerate() {
             assert!(

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1393: the FFT FIR path filters partial blocks as they arrive, so a long-kernel filter holds back only its group delay.
 - M1296: audio elements take sample width from `AudioFormat::bytes_per_sample()`, and i16 round-and-clamp is one `saturate_i16`.
 - M1295: `audiotestsrc` plays tones at their exact frequency, sharing one phase helper with `tonegeneratesrc` and `dtmfsrc`.
 - M1294: `spectrum` precomputes its window and FFT twiddles and reuses its buffers.
