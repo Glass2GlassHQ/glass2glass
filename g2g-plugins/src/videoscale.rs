@@ -443,7 +443,11 @@ pub(crate) fn bilerp(p00: u8, p10: u8, p01: u8, p11: u8, fx: u32, fy: u32) -> u8
 /// How each output sample along one axis of a plane reads the source: the
 /// plane's samples are the luma extent divided by `1 << shift`, rounded up, and
 /// positions map through the luma scale `in_luma / out_luma`.
-fn axis_samples(in_luma: usize, out_luma: usize, shift: u32) -> Vec<(usize, usize, u32)> {
+pub(crate) fn axis_samples(
+    in_luma: usize,
+    out_luma: usize,
+    shift: u32,
+) -> Vec<(usize, usize, u32)> {
     let src_n = in_luma.div_ceil(1 << shift);
     let dst_n = out_luma.div_ceil(1 << shift);
     (0..dst_n)

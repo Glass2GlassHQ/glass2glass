@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1346: the compositor scales with videoscale's sampling and clips each blit once.
 - M1345: dma-buf imports are cached and wgpu dma-buf exports recycle a ring of four buffers.
 - M1344: `deinterlace` holds its input frames and reuses the dropped one for output.
 - M1343: `colorspace` looks up HDR gains and target codes in tables.

@@ -51,6 +51,7 @@ use alloc::vec::Vec;
 use crate::padprop::split_pad_name;
 use crate::paint::blend_px;
 use crate::pixel::{frame_byte_size, planar_planes};
+use crate::videoscale::{axis_samples, bilerp};
 use crate::yuvmatrix::YuvRgbMatrix;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
@@ -945,28 +946,30 @@ fn blend_over(
     y0: i32,
     galpha: u8,
 ) {
-    for sy in 0..sh {
-        let dy = y0 + sy as i32;
-        if dy < 0 || dy as usize >= ch {
-            continue;
-        }
-        for sx in 0..sw {
-            let dx = x0 + sx as i32;
-            if dx < 0 || dx as usize >= cw {
-                continue;
-            }
+    let columns = visible(x0, sw, cw);
+    for sy in visible(y0, sh, ch) {
+        let dy = (y0 + sy as i32) as usize;
+        for sx in columns.clone() {
             let s = (sy * sw + sx) * 4;
-            let d = (dy as usize * cw + dx as usize) * 4;
+            let d = (dy * cw + (x0 + sx as i32) as usize) * 4;
             let px = [src[s], src[s + 1], src[s + 2], src[s + 3]];
             blend_px(canvas, d, px, galpha);
         }
     }
 }
 
+/// The indices of a `extent`-long run placed at `origin` that land inside
+/// `0..limit`, so a blit clips once instead of per pixel.
+fn visible(origin: i32, extent: usize, limit: usize) -> core::ops::Range<usize> {
+    let start = (-(origin as i64)).clamp(0, extent as i64) as usize;
+    let end = (limit as i64 - origin as i64).clamp(0, extent as i64) as usize;
+    start..end.max(start)
+}
+
 /// Alpha-blend a `sw` x `sh` RGBA8 source onto the canvas, resampled (bilinear)
 /// to a `dw` x `dh` rectangle with its top-left at `(x0, y0)`. Same source-over
-/// math as [`blend_over`], with integer fixed-point sampling (no float intrinsics
-/// for the `no_std` baseline). Pixels outside the canvas are clipped.
+/// math as [`blend_over`], sampled as `videoscale` does. Pixels outside the
+/// canvas are clipped.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn blend_over_scaled(
     canvas: &mut [u8],
@@ -984,44 +987,28 @@ pub(crate) fn blend_over_scaled(
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
         return;
     }
-    // Center-aligned source coordinate for a destination index, in Q16 fixed
-    // point: ((d + 0.5) * s / dst - 0.5). Clamped into the source extent.
-    let map = |d: usize, s: usize, dst: usize, max: i64| -> i64 {
-        let q = ((2 * d as i64 + 1) * s as i64 * 32768) / dst as i64 - 32768;
-        q.clamp(0, max)
-    };
-    let max_x = ((sw - 1) as i64) << 16;
-    let max_y = ((sh - 1) as i64) << 16;
-    for ddy in 0..dh {
-        let dy = y0 + ddy as i32;
-        if dy < 0 || dy as usize >= ch {
-            continue;
-        }
-        let fy = map(ddy, sh, dh, max_y);
-        let y0i = (fy >> 16) as usize;
-        let y1i = (y0i + 1).min(sh - 1);
-        let ty = ((fy >> 8) & 0xFF) as u32;
-        for ddx in 0..dw {
-            let dx = x0 + ddx as i32;
-            if dx < 0 || dx as usize >= cw {
-                continue;
-            }
-            let fx = map(ddx, sw, dw, max_x);
-            let x0i = (fx >> 16) as usize;
-            let x1i = (x0i + 1).min(sw - 1);
-            let tx = ((fx >> 8) & 0xFF) as u32;
-            // Bilinear: interpolate the 2x2 source neighbourhood per channel.
-            let i00 = (y0i * sw + x0i) * 4;
-            let i01 = (y0i * sw + x1i) * 4;
-            let i10 = (y1i * sw + x0i) * 4;
-            let i11 = (y1i * sw + x1i) * 4;
+    let source_columns = axis_samples(sw, dw, 0);
+    let source_rows = axis_samples(sh, dh, 0);
+    let columns = visible(x0, dw, cw);
+    for ddy in visible(y0, dh, ch) {
+        let (top, bottom, fy) = source_rows[ddy];
+        let (top, bottom) = (top * sw, bottom * sw);
+        let row = (y0 + ddy as i32) as usize * cw;
+        for ddx in columns.clone() {
+            let (left, right, fx) = source_columns[ddx];
             let mut px = [0u8; 4];
-            for c in 0..4 {
-                let top = src[i00 + c] as u32 * (256 - tx) + src[i01 + c] as u32 * tx;
-                let bot = src[i10 + c] as u32 * (256 - tx) + src[i11 + c] as u32 * tx;
-                px[c] = ((top * (256 - ty) + bot * ty) >> 16) as u8;
+            for (c, out) in px.iter_mut().enumerate() {
+                let at = |x: usize, y: usize| src[(y + x) * 4 + c];
+                *out = bilerp(
+                    at(left, top),
+                    at(right, top),
+                    at(left, bottom),
+                    at(right, bottom),
+                    fx,
+                    fy,
+                );
             }
-            let d = (dy as usize * cw + dx as usize) * 4;
+            let d = (row + (x0 + ddx as i32) as usize) * 4;
             blend_px(canvas, d, px, galpha);
         }
     }
@@ -1146,26 +1133,20 @@ fn blend_u8(dst: u8, src: u8, alpha: u8) -> u8 {
 /// of the same format; samples outside the destination are clipped.
 #[allow(clippy::too_many_arguments)]
 fn blend_channel(dst: &mut [u8], dc: &Chan, src: &[u8], sc: &Chan, x0: i32, y0: i32, alpha: u8) {
-    for sy in 0..sc.h {
-        let dy = y0 + sy as i32;
-        if dy < 0 || dy as usize >= dc.h {
-            continue;
-        }
-        for sx in 0..sc.w {
-            let dx = x0 + sx as i32;
-            if dx < 0 || dx as usize >= dc.w {
-                continue;
-            }
+    let columns = visible(x0, sc.w, dc.w);
+    for sy in visible(y0, sc.h, dc.h) {
+        let dy = (y0 + sy as i32) as usize;
+        for sx in columns.clone() {
             let s = sc.base + (sy * sc.w + sx) * sc.stride + sc.off;
-            let d = dc.base + (dy as usize * dc.w + dx as usize) * dc.stride + dc.off;
+            let d = dc.base + (dy * dc.w + (x0 + sx as i32) as usize) * dc.stride + dc.off;
             dst[d] = blend_u8(dst[d], src[s], alpha);
         }
     }
 }
 
 /// Alpha-blend a source plane onto a destination plane, bilinearly resampled to
-/// `dw` x `dh` (channel-space) at `(x0, y0)`. Integer fixed-point sampling, same
-/// mapping as the packed [`blend_over_scaled`]; clipped to the destination.
+/// `dw` x `dh` (channel-space) at `(x0, y0)`, sampled as the packed
+/// [`blend_over_scaled`] is; clipped to the destination.
 #[allow(clippy::too_many_arguments)]
 fn blend_channel_scaled(
     dst: &mut [u8],
@@ -1181,35 +1162,24 @@ fn blend_channel_scaled(
     if sc.w == 0 || sc.h == 0 || dw == 0 || dh == 0 {
         return;
     }
-    let map = |d: usize, s: usize, dst_dim: usize, max: i64| -> i64 {
-        let q = ((2 * d as i64 + 1) * s as i64 * 32768) / dst_dim as i64 - 32768;
-        q.clamp(0, max)
-    };
-    let max_x = ((sc.w - 1) as i64) << 16;
-    let max_y = ((sc.h - 1) as i64) << 16;
-    let sample = |xi: usize, yi: usize| src[sc.base + (yi * sc.w + xi) * sc.stride + sc.off] as u32;
-    for ddy in 0..dh {
-        let dy = y0 + ddy as i32;
-        if dy < 0 || dy as usize >= dc.h {
-            continue;
-        }
-        let fy = map(ddy, sc.h, dh, max_y);
-        let y0i = (fy >> 16) as usize;
-        let y1i = (y0i + 1).min(sc.h - 1);
-        let ty = ((fy >> 8) & 0xFF) as u32;
-        for ddx in 0..dw {
-            let dx = x0 + ddx as i32;
-            if dx < 0 || dx as usize >= dc.w {
-                continue;
-            }
-            let fx = map(ddx, sc.w, dw, max_x);
-            let x0i = (fx >> 16) as usize;
-            let x1i = (x0i + 1).min(sc.w - 1);
-            let tx = ((fx >> 8) & 0xFF) as u32;
-            let top = sample(x0i, y0i) * (256 - tx) + sample(x1i, y0i) * tx;
-            let bot = sample(x0i, y1i) * (256 - tx) + sample(x1i, y1i) * tx;
-            let v = ((top * (256 - ty) + bot * ty) >> 16) as u8;
-            let d = dc.base + (dy as usize * dc.w + dx as usize) * dc.stride + dc.off;
+    let source_columns = axis_samples(sc.w, dw, 0);
+    let source_rows = axis_samples(sc.h, dh, 0);
+    let sample = |x: usize, y: usize| src[sc.base + (y * sc.w + x) * sc.stride + sc.off];
+    let columns = visible(x0, dw, dc.w);
+    for ddy in visible(y0, dh, dc.h) {
+        let (top, bottom, fy) = source_rows[ddy];
+        let row = (y0 + ddy as i32) as usize * dc.w;
+        for ddx in columns.clone() {
+            let (left, right, fx) = source_columns[ddx];
+            let v = bilerp(
+                sample(left, top),
+                sample(right, top),
+                sample(left, bottom),
+                sample(right, bottom),
+                fx,
+                fy,
+            );
+            let d = dc.base + (row + (x0 + ddx as i32) as usize) * dc.stride + dc.off;
             dst[d] = blend_u8(dst[d], v, alpha);
         }
     }
@@ -1607,6 +1577,51 @@ mod tests {
             [255, 0, 0, 255],
             "beyond the region red"
         );
+    }
+
+    #[test]
+    fn a_clipped_scaled_blend_matches_videoscale() {
+        const SOURCE: (usize, usize) = (3, 2);
+        const SCALED: (usize, usize) = (5, 4);
+        const CANVAS: usize = 4;
+        const ORIGIN: (i32, i32) = (-1, 1);
+        let source: Vec<u8> = (0..SOURCE.0 * SOURCE.1)
+            .flat_map(|i| [(i * 40) as u8, (200 - i * 30) as u8, (i * 7) as u8, u8::MAX])
+            .collect();
+        let scaled = crate::videoscale::scale(
+            &source,
+            RawVideoFormat::Rgba8,
+            SOURCE.0,
+            SOURCE.1,
+            SCALED.0,
+            SCALED.1,
+        );
+        let mut canvas = vec![0u8; CANVAS * CANVAS * 4];
+        blend_over_scaled(
+            &mut canvas,
+            CANVAS,
+            CANVAS,
+            &source,
+            SOURCE.0,
+            SOURCE.1,
+            ORIGIN.0,
+            ORIGIN.1,
+            SCALED.0,
+            SCALED.1,
+            u8::MAX,
+        );
+        for y in 0..CANVAS {
+            for x in 0..CANVAS {
+                let (sx, sy) = (x as i32 - ORIGIN.0, y as i32 - ORIGIN.1);
+                let inside =
+                    (0..SCALED.0 as i32).contains(&sx) && (0..SCALED.1 as i32).contains(&sy);
+                let expected = match inside {
+                    true => px(&scaled, SCALED.0, sx as usize, sy as usize),
+                    false => [0; 4],
+                };
+                assert_eq!(px(&canvas, CANVAS, x, y), expected, "({x}, {y})");
+            }
+        }
     }
 
     #[test]
