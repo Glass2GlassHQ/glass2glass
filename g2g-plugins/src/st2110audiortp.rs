@@ -102,7 +102,7 @@ fn pcm_to_samples(format: AudioFormat, bytes: &[u8]) -> Vec<i32> {
 
 /// The inverse of [`pcm_to_samples`]: `i32` samples -> interleaved-PCM bytes.
 fn samples_to_pcm(format: AudioFormat, samples: &[i32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(samples.len() * bytes_per_sample(format));
+    let mut out = Vec::with_capacity(samples.len() * format.bytes_per_sample().unwrap_or(0));
     match format {
         AudioFormat::PcmS16Le => {
             for &s in samples {
@@ -123,16 +123,6 @@ fn samples_to_pcm(format: AudioFormat, samples: &[i32]) -> Vec<u8> {
         _ => {}
     }
     out
-}
-
-/// Bytes per sample of a supported PCM format.
-fn bytes_per_sample(format: AudioFormat) -> usize {
-    match format {
-        AudioFormat::PcmS16Le => 2,
-        AudioFormat::PcmF32Le => 4,
-        AudioFormat::PcmS24Le => 3,
-        _ => 0,
-    }
 }
 
 /// Sample-frames per packet for a packet time in microseconds (e.g. 1000 = 1 ms).

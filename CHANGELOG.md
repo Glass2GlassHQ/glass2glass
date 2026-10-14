@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1421: `st2110audiortp` takes sample width from `AudioFormat::bytes_per_sample`.
 - M1420: 61 integration test files use the shared collecting sink.
 - M1419: source unit tests in seven elements use the shared collecting sink.
 - M1418: `cuda.rs` calls the CUDA driver through the shared FFI module.
