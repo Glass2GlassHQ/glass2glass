@@ -14,6 +14,8 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::audiofx::{IirCascade, IirSection};
+
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -25,60 +27,26 @@ use g2g_core::{
 const CENTERS_HZ: [f64; 3] = [100.0, 1000.0, 10000.0];
 const Q: f64 = 1.0;
 
-/// A normalized biquad (a0 folded into the other coefficients).
-#[derive(Debug, Clone, Copy)]
-struct Biquad {
-    b0: f64,
-    b1: f64,
-    b2: f64,
-    a1: f64,
-    a2: f64,
-}
-
-impl Biquad {
-    /// The identity filter (used before the rate is known).
-    fn identity() -> Self {
-        Self {
-            b0: 1.0,
-            b1: 0.0,
-            b2: 0.0,
-            a1: 0.0,
-            a2: 0.0,
-        }
-    }
-
-    /// RBJ cookbook peaking EQ at `f0` for sample rate `fs`, `gain_db` dB.
-    fn peaking(f0: f64, fs: f64, q: f64, gain_db: f64) -> Self {
-        let a = crate::mathf::powf(10.0, gain_db / 40.0);
-        // w0 in turns (cycles): sin/cos take turns, so f0/fs is w0/(2*pi) already.
-        let turns = (f0 / fs) as f32;
-        let cos_w0 = crate::mathf::cos_turns(turns) as f64;
-        let sin_w0 = crate::mathf::sin_turns(turns) as f64;
-        let alpha = sin_w0 / (2.0 * q);
-        let a0 = 1.0 + alpha / a;
-        Self {
-            b0: (1.0 + alpha * a) / a0,
-            b1: (-2.0 * cos_w0) / a0,
-            b2: (1.0 - alpha * a) / a0,
-            a1: (-2.0 * cos_w0) / a0,
-            a2: (1.0 - alpha / a) / a0,
-        }
-    }
-}
-
-/// Transposed direct-form II state for one biquad on one channel.
-#[derive(Debug, Clone, Copy, Default)]
-struct BiquadState {
-    z1: f64,
-    z2: f64,
-}
-
-impl BiquadState {
-    fn step(&mut self, bq: &Biquad, x: f64) -> f64 {
-        let y = bq.b0 * x + self.z1;
-        self.z1 = bq.b1 * x - bq.a1 * y + self.z2;
-        self.z2 = bq.b2 * x - bq.a2 * y;
-        y
+/// RBJ cookbook peaking EQ at `f0` for sample rate `fs`, `gain_db` dB, as a
+/// normalized biquad (a0 folded into the other coefficients).
+fn peaking_section(f0: f64, fs: f64, q: f64, gain_db: f64) -> IirSection {
+    let a = crate::mathf::powf(10.0, gain_db / 40.0);
+    // w0 in turns (cycles): sin/cos take turns, so f0/fs is w0/(2*pi) already.
+    let turns = (f0 / fs) as f32;
+    let cos_w0 = crate::mathf::cos_turns(turns) as f64;
+    let sin_w0 = crate::mathf::sin_turns(turns) as f64;
+    let alpha = sin_w0 / (2.0 * q);
+    let a0 = 1.0 + alpha / a;
+    // IirSection adds its feedback terms, so the cookbook's a1 / a2 go in negated
+    IirSection {
+        b: [
+            (1.0 + alpha * a) / a0,
+            (-2.0 * cos_w0) / a0,
+            (1.0 - alpha * a) / a0,
+            0.0,
+            0.0,
+        ],
+        a: [0.0, (2.0 * cos_w0) / a0, -(1.0 - alpha / a) / a0, 0.0, 0.0],
     }
 }
 
@@ -93,11 +61,10 @@ impl BiquadState {
 #[derive(Debug)]
 pub struct Equalizer3Bands {
     gains_db: [f64; 3],
-    coeffs: [Biquad; 3],
     channels: usize,
     sample_rate: u32,
-    // per-channel, per-band filter state.
-    state: Vec<[BiquadState; 3]>,
+    // the three bands in series, with per-channel state
+    cascade: IirCascade,
     configured: bool,
 }
 
@@ -111,10 +78,9 @@ impl Equalizer3Bands {
     pub fn new() -> Self {
         Self {
             gains_db: [0.0; 3],
-            coeffs: [Biquad::identity(); 3],
             channels: 0,
             sample_rate: 0,
-            state: Vec::new(),
+            cascade: IirCascade::default(),
             configured: false,
         }
     }
@@ -131,9 +97,9 @@ impl Equalizer3Bands {
             return;
         }
         let fs = self.sample_rate as f64;
-        for (b, coeff) in self.coeffs.iter_mut().enumerate() {
-            *coeff = Biquad::peaking(CENTERS_HZ[b], fs, Q, self.gains_db[b]);
-        }
+        let sections: [IirSection; 3] =
+            core::array::from_fn(|b| peaking_section(CENTERS_HZ[b], fs, Q, self.gains_db[b]));
+        self.cascade.retune(&sections);
     }
 
     fn accept_input(&self, caps: &Caps) -> Result<(u32, u32), G2gError> {
@@ -152,7 +118,10 @@ impl Equalizer3Bands {
         let (channels, rate) = self.accept_input(caps)?;
         self.channels = channels as usize;
         self.sample_rate = rate;
-        self.state = vec![[BiquadState::default(); 3]; self.channels];
+        self.cascade.set_sections(
+            vec![IirSection::identity(); CENTERS_HZ.len()],
+            self.channels,
+        );
         self.recompute();
         Ok(())
     }
@@ -166,11 +135,8 @@ impl Equalizer3Bands {
             .zip(dst.as_chunks_mut::<2>().0.iter_mut())
             .enumerate()
         {
-            let c = i % ch;
-            let mut x = i16::from_le_bytes([s[0], s[1]]) as f64;
-            for b in 0..3 {
-                x = self.state[c][b].step(&self.coeffs[b], x);
-            }
+            let x = i16::from_le_bytes([s[0], s[1]]) as f64;
+            let x = self.cascade.filter_sample(i % ch, x);
             let rounded = if x >= 0.0 { x + 0.5 } else { x - 0.5 };
             let out = rounded.clamp(i16::MIN as f64, i16::MAX as f64) as i16;
             d.copy_from_slice(&out.to_le_bytes());
@@ -367,10 +333,11 @@ mod tests {
 
     #[test]
     fn peaking_at_zero_db_is_identity_transfer() {
-        let bq = Biquad::peaking(1000.0, 48_000.0, 1.0, 0.0);
-        assert!((bq.b0 - 1.0).abs() < 1e-9);
-        assert!((bq.b1 - bq.a1).abs() < 1e-12);
-        assert!((bq.b2 - bq.a2).abs() < 1e-12);
+        let section = peaking_section(1000.0, 48_000.0, 1.0, 0.0);
+        assert!((section.b[0] - 1.0).abs() < 1e-9);
+        // the feedback terms are stored negated, so numerator == denominator
+        assert!((section.b[1] + section.a[1]).abs() < 1e-12);
+        assert!((section.b[2] + section.a[2]).abs() < 1e-12);
     }
 
     #[test]

@@ -32,44 +32,73 @@ use crate::audiofx;
 /// The reference's defaults: a single unity tap on both sides, a pass-through.
 const DEFAULT_COEFFICIENTS_TEXT: &str = "1";
 
-/// Direct-form-I state of one channel: the last inputs and the last outputs,
-/// newest first.
+// the last `len` values, each stored at `head` and `head + len` so newest-first is one slice
+#[derive(Debug, Default, Clone)]
+struct History {
+    values: Vec<f64>,
+    len: usize,
+    head: usize,
+}
+
+impl History {
+    fn new(len: usize) -> Self {
+        Self {
+            values: vec![0.0; 2 * len],
+            len,
+            head: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.values.fill(0.0);
+        self.head = 0;
+    }
+
+    fn newest_first(&self) -> &[f64] {
+        &self.values[self.head..self.head + self.len]
+    }
+
+    fn push(&mut self, value: f64) {
+        if self.len == 0 {
+            return;
+        }
+        self.head = self.head.checked_sub(1).unwrap_or(self.len - 1);
+        self.values[self.head] = value;
+        self.values[self.head + self.len] = value;
+    }
+}
+
+/// Direct-form-I state of one channel: the last inputs and the last outputs.
 #[derive(Debug, Default, Clone)]
 struct ChannelHistory {
-    x: Vec<f64>,
-    y: Vec<f64>,
+    x: History,
+    y: History,
 }
 
 impl ChannelHistory {
     fn new(numerator_taps: usize, denominator_taps: usize) -> Self {
         Self {
-            x: vec![0.0; numerator_taps.saturating_sub(1)],
-            y: vec![0.0; denominator_taps.saturating_sub(1)],
+            x: History::new(numerator_taps.saturating_sub(1)),
+            y: History::new(denominator_taps.saturating_sub(1)),
         }
     }
 
     fn reset(&mut self) {
-        self.x.fill(0.0);
-        self.y.fill(0.0);
+        self.x.reset();
+        self.y.reset();
     }
 
     fn step(&mut self, b: &[f64], a: &[f64], x0: f64) -> f64 {
         let mut value = b[0] * x0;
-        for (coefficient, past) in b[1..].iter().zip(self.x.iter()) {
+        for (coefficient, past) in b[1..].iter().zip(self.x.newest_first()) {
             value += coefficient * past;
         }
-        for (coefficient, past) in a[1..].iter().zip(self.y.iter()) {
+        for (coefficient, past) in a[1..].iter().zip(self.y.newest_first()) {
             value -= coefficient * past;
         }
         value /= a[0];
-        if !self.x.is_empty() {
-            self.x.rotate_right(1);
-            self.x[0] = x0;
-        }
-        if !self.y.is_empty() {
-            self.y.rotate_right(1);
-            self.y[0] = value;
-        }
+        self.x.push(x0);
+        self.y.push(value);
         value
     }
 }

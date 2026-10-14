@@ -119,7 +119,6 @@ Raw video and GPU:
 
 Audio:
 
-- One IIR implementation for equalizer and audioiirfilter.
 - `spectrum` recomputes the window and twiddles per FFT.
 - One tone phase helper, one sample-width table, one `saturate_i16`.
 

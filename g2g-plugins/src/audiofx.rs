@@ -864,7 +864,7 @@ pub(crate) struct IirSection {
 
 impl IirSection {
     /// The identity section, used before the rate is known.
-    fn identity() -> Self {
+    pub(crate) fn identity() -> Self {
         let mut b = [0.0; 5];
         b[0] = 1.0;
         Self { b, a: [0.0; 5] }
@@ -947,6 +947,11 @@ impl IirCascade {
         }
     }
 
+    // new coefficients for the same number of sections, the filter state carries over
+    pub(crate) fn retune(&mut self, sections: &[IirSection]) {
+        self.sections.copy_from_slice(sections);
+    }
+
     /// |H(z)| of the whole cascade at a point on the unit circle.
     pub(crate) fn magnitude(&self, zr: f64, zi: f64) -> f64 {
         self.sections
@@ -979,13 +984,15 @@ impl IirCascade {
             return;
         }
         for (index, sample) in samples.iter_mut().enumerate() {
-            let channel = index % self.channels;
-            let mut value = *sample as f64;
-            for (section_index, section) in self.sections.iter().enumerate() {
-                value = self.state[section_index * self.channels + channel].step(section, value);
-            }
-            *sample = value as f32;
+            *sample = self.filter_sample(index % self.channels, *sample as f64) as f32;
         }
+    }
+
+    pub(crate) fn filter_sample(&mut self, channel: usize, mut value: f64) -> f64 {
+        for (section_index, section) in self.sections.iter().enumerate() {
+            value = self.state[section_index * self.channels + channel].step(section, value);
+        }
+        value
     }
 }
 
