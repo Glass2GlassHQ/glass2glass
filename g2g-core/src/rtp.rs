@@ -376,9 +376,144 @@ impl CaptureTimeExtensionIds {
     }
 }
 
+// starts one wrap up to leave room for packets reordered before the first
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RtpSequenceExtender {
+    highest: Option<u64>,
+}
+
+impl RtpSequenceExtender {
+    pub const fn new() -> Self {
+        Self { highest: None }
+    }
+
+    pub fn extend(&mut self, sequence: u16) -> u64 {
+        extend_wrapping(&mut self.highest, u64::from(sequence), u16::BITS)
+    }
+
+    pub fn highest(&self) -> Option<u64> {
+        self.highest
+    }
+}
+
+// starts one wrap up to leave room for packets reordered before the first
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RtpTimestampExtender {
+    highest: Option<u64>,
+}
+
+impl RtpTimestampExtender {
+    pub const fn new() -> Self {
+        Self { highest: None }
+    }
+
+    pub fn extend(&mut self, timestamp: u32) -> u64 {
+        extend_wrapping(&mut self.highest, u64::from(timestamp), u32::BITS)
+    }
+
+    pub fn highest(&self) -> Option<u64> {
+        self.highest
+    }
+}
+
+// a step of half the wrap period or more counts as backward
+fn extend_wrapping(highest: &mut Option<u64>, value: u64, bits: u32) -> u64 {
+    let period = 1u64 << bits;
+    let Some(high) = *highest else {
+        let extended = period + value;
+        *highest = Some(extended);
+        return extended;
+    };
+    let forward_distance = value.wrapping_sub(high) & (period - 1);
+    let extended = if forward_distance < period / 2 {
+        high.saturating_add(forward_distance)
+    } else {
+        // cannot underflow: highest starts one wrap up
+        high - (period - forward_distance)
+    };
+    if extended > high {
+        *highest = Some(extended);
+    }
+    extended
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SEQUENCE_PERIOD: u64 = 1 << u16::BITS;
+    const TIMESTAMP_PERIOD: u64 = 1 << u32::BITS;
+
+    #[test]
+    fn sequence_extender_unwraps_forward_across_the_wrap() {
+        let mut extender = RtpSequenceExtender::new();
+        let first = extender.extend(u16::MAX - 1);
+        assert_eq!(first, SEQUENCE_PERIOD + u64::from(u16::MAX - 1));
+        assert_eq!(extender.extend(u16::MAX), first + 1);
+        assert_eq!(extender.extend(0), first + 2);
+        assert_eq!(extender.extend(1), first + 3);
+        assert_eq!(extender.highest(), Some(first + 3));
+    }
+
+    #[test]
+    fn sequence_extender_keeps_a_reorder_across_the_wrap_behind() {
+        let mut extender = RtpSequenceExtender::new();
+        let first = extender.extend(u16::MAX);
+        let after_wrap = extender.extend(1);
+        assert_eq!(after_wrap, first + 2);
+        assert_eq!(extender.extend(0), first + 1, "late packet from before 1");
+        assert_eq!(
+            extender.highest(),
+            Some(after_wrap),
+            "a late packet does not move the high mark"
+        );
+    }
+
+    #[test]
+    fn sequence_extender_puts_a_packet_reordered_before_the_first_one_in_the_past() {
+        let mut extender = RtpSequenceExtender::new();
+        let first = extender.extend(0);
+        assert_eq!(extender.extend(u16::MAX), first - 1);
+        assert_eq!(extender.extend(1), first + 1);
+    }
+
+    #[test]
+    fn sequence_extender_reads_a_half_period_step_as_backward() {
+        let half = SEQUENCE_PERIOD / 2;
+        let mut extender = RtpSequenceExtender::new();
+        let first = extender.extend(0);
+        assert_eq!(extender.extend(half as u16), first - half);
+        let mut extender = RtpSequenceExtender::new();
+        let first = extender.extend(0);
+        assert_eq!(extender.extend((half - 1) as u16), first + half - 1);
+    }
+
+    #[test]
+    fn timestamp_extender_unwraps_across_the_wrap() {
+        const VIDEO_FRAME_TICKS: u32 = 3_003;
+        let mut extender = RtpTimestampExtender::new();
+        let start = u32::MAX - VIDEO_FRAME_TICKS;
+        let first = extender.extend(start);
+        assert_eq!(first, TIMESTAMP_PERIOD + u64::from(start));
+        let wrapped = start.wrapping_add(2 * VIDEO_FRAME_TICKS);
+        assert_eq!(
+            extender.extend(wrapped),
+            first + 2 * u64::from(VIDEO_FRAME_TICKS)
+        );
+        assert_eq!(
+            extender.extend(start.wrapping_add(VIDEO_FRAME_TICKS)),
+            first + u64::from(VIDEO_FRAME_TICKS),
+            "reordered frame between the two"
+        );
+    }
+
+    #[test]
+    fn timestamp_extender_puts_a_frame_reordered_before_the_first_one_in_the_past() {
+        let mut extender = RtpTimestampExtender::new();
+        let first = extender.extend(10);
+        assert_eq!(extender.extend(u32::MAX - 10), first - 21);
+        assert!(extender.extend(20) > first);
+    }
 
     #[test]
     fn header_bytes_match_the_wire_layout() {

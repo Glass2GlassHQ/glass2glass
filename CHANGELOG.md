@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1264: g2g-core has shared helpers for clock-tick and Q16 framerate conversion, PCM sample width, GStreamer format names and RTP sequence and timestamp unwrapping.
 - M1263: g2g opens wgpu devices only on a fully WebGPU-compliant adapter and never starts the GL backend, so a software GL renderer gets a clean error instead of a vello panic.
 - M1262: `udpsink` and `udpsrc` carry each frame's capture time in the `ntp-64` and `abs-capture-time` RTP header extensions, and sinks report per-frame loss, duplicates and latency on the bus.
 - M1261: the `glass2glass` GStreamer element carries `GstAnalyticsRelationMeta` in and out as `AnalyticsMeta`, behind `g2g-bridge`'s `gst-analytics` feature.

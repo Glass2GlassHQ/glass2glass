@@ -16,7 +16,7 @@
 //! extended-timestamp technique, so a receiver recovers the full sampling time of
 //! a packet whose timestamp has wrapped.
 
-use crate::time::{RtpTs, TaiNs};
+use crate::time::{ns_to_ticks, ticks_to_ns, RtpTs, TaiNs};
 
 /// A media clock running at a fixed rate, converting PTP/TAI nanoseconds to and
 /// from RTP timestamps.
@@ -53,10 +53,10 @@ impl MediaClock {
         self.rate_hz
     }
 
-    /// Full 64-bit media-clock tick count at a PTP/TAI time.
+    /// Full 64-bit media-clock tick count at a PTP/TAI time, rounded to the
+    /// nearest tick.
     pub fn ticks(&self, tai: TaiNs) -> u64 {
-        // u128 so the ns*rate product (up to ~1.7e18 * 9e4) does not overflow.
-        (u128::from(tai.get()) * u128::from(self.rate_hz) / 1_000_000_000) as u64
+        ns_to_ticks(tai.get(), self.rate_hz)
     }
 
     /// The 32-bit (wrapping) RTP timestamp for a PTP/TAI time, as it goes on the
@@ -69,7 +69,7 @@ impl MediaClock {
     /// count for audio, a frame's duration for video). A duration, not an absolute
     /// time, so it stays a plain `u64`.
     pub fn ticks_to_ns(&self, ticks: u64) -> u64 {
-        (u128::from(ticks) * 1_000_000_000 / u128::from(self.rate_hz)) as u64
+        ticks_to_ns(ticks, self.rate_hz)
     }
 
     /// Recover the full PTP/TAI time of a 32-bit RTP timestamp, resolving the wrap

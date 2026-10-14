@@ -7,9 +7,9 @@
 use alloc::vec::Vec;
 
 use crate::caps::{
-    batch_alternatives, pcm_from_gst_format, AudioFormat, ByteStreamEncoding, Caps, CapsSet,
-    Colorimetry, Dim, Interlace, Rate, RawVideoFormat, SubPictureFormat, TextFormat, VideoCodec,
-    PCM_FORMATS,
+    batch_alternatives, framerate_q16_from_fraction, pcm_from_gst_format, AudioFormat,
+    ByteStreamEncoding, Caps, CapsSet, Colorimetry, Dim, Interlace, Rate, RawVideoFormat,
+    SubPictureFormat, TextFormat, VideoCodec, PCM_FORMATS,
 };
 use crate::channels::ChannelLayout;
 
@@ -490,17 +490,8 @@ fn parse_audio_format(s: &str) -> Option<AudioFormat> {
 /// Parse a framerate `num/den` (or bare integer) into a Q16 fixed-point value.
 /// Shared by [`parse_rate`] and the `[min,max]` framerate-range expansion.
 fn rate_q16(s: &str) -> Option<u32> {
-    Some(match s.trim().split_once('/') {
-        Some((n, d)) => {
-            let n: u64 = n.trim().parse().ok()?;
-            let d: u64 = d.trim().parse().ok()?;
-            if d == 0 {
-                return None;
-            }
-            ((n << 16) / d) as u32
-        }
-        None => (s.trim().parse::<u64>().ok()? << 16) as u32,
-    })
+    let (num, den) = s.trim().split_once('/').unwrap_or((s, "1"));
+    framerate_q16_from_fraction(num.trim().parse().ok()?, den.trim().parse().ok()?)
 }
 
 /// Parse a framerate `num/den` (or bare integer) into a Q16 [`Rate::Fixed`].
@@ -527,6 +518,18 @@ mod tests {
             let parsed = CapsSet::from_gst_string(&printed)
                 .unwrap_or_else(|| panic!("{printed} does not parse back"));
             assert_eq!(parsed.alternatives(), [caps].as_slice(), "{printed}");
+        }
+    }
+
+    #[test]
+    fn every_raw_format_parses_back_from_its_gst_name() {
+        for format in crate::caps::ALL_RAW_VIDEO_FORMATS {
+            assert_eq!(
+                parse_raw_format(format.gst_name()),
+                Some(format),
+                "{}",
+                format.gst_name()
+            );
         }
     }
 

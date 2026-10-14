@@ -465,7 +465,7 @@ impl Caps {
                 interlace,
                 colorimetry,
             } => {
-                let mut s = format!("video/x-raw,format={}", raw_format_gst_name(*format));
+                let mut s = format!("video/x-raw,format={}", format.gst_name());
                 push_dim(&mut s, "width", width);
                 push_dim(&mut s, "height", height);
                 push_rate(&mut s, framerate);
@@ -614,29 +614,6 @@ fn subpicture_gst_media_type(f: SubPictureFormat) -> &'static str {
         SubPictureFormat::VobSub => "subpicture/x-dvd",
         SubPictureFormat::DvbSub => "subpicture/x-dvb",
         SubPictureFormat::Pgs => "subpicture/x-pgs",
-    }
-}
-
-/// The GStreamer `format=` name for a raw video format (uppercase, the M182
-/// vocabulary the parser also accepts).
-#[cfg(feature = "alloc")]
-fn raw_format_gst_name(f: RawVideoFormat) -> &'static str {
-    match f {
-        RawVideoFormat::Nv12 => "NV12",
-        RawVideoFormat::I420 => "I420",
-        RawVideoFormat::Rgba8 => "RGBA",
-        RawVideoFormat::Bgra8 => "BGRA",
-        RawVideoFormat::Rgb8 => "RGB",
-        RawVideoFormat::Yuyv => "YUY2",
-        RawVideoFormat::I420p10 => "I420_10LE",
-        RawVideoFormat::I420p12 => "I420_12LE",
-        RawVideoFormat::I422 => "Y42B",
-        RawVideoFormat::I422p10 => "I422_10LE",
-        RawVideoFormat::I422p12 => "I422_12LE",
-        RawVideoFormat::I444 => "Y444",
-        RawVideoFormat::I444p10 => "Y444_10LE",
-        RawVideoFormat::I444p12 => "Y444_12LE",
-        RawVideoFormat::P010 => "P010_10LE",
     }
 }
 
@@ -791,6 +768,13 @@ impl Dim {
         matches!(self, Dim::Fixed(_))
     }
 
+    pub fn fixed(&self) -> Option<u32> {
+        match self {
+            Dim::Fixed(v) => Some(*v),
+            Dim::Any | Dim::Range { .. } => None,
+        }
+    }
+
     /// Collapse to a single `Fixed` value: `Range` picks its minimum, `Any`
     /// has nothing to pick and yields `None`. An inverted range (`min > max`)
     /// is the empty set, as [`Dim::intersect`] treats it, so it also yields
@@ -875,6 +859,32 @@ impl Rate {
             },
         }
     }
+}
+
+const Q16_FRACTION_BITS: u32 = 16;
+const Q16_DENOMINATOR: u32 = 1 << Q16_FRACTION_BITS;
+
+// rounds down, None for a zero denominator or a rate past the Q16 range
+pub fn framerate_q16_from_fraction(num: u32, den: u32) -> Option<u32> {
+    let q16 = (u64::from(num) << Q16_FRACTION_BITS).checked_div(u64::from(den))?;
+    u32::try_from(q16).ok()
+}
+
+pub fn framerate_q16_to_fraction(q16: u32) -> (u32, u32) {
+    let divisor = greatest_common_divisor(q16, Q16_DENOMINATOR);
+    (q16 / divisor, Q16_DENOMINATOR / divisor)
+}
+
+// rounds down like GStreamer's frame duration, None for a zero rate
+pub fn framerate_q16_period_ns(q16: u32) -> Option<u64> {
+    (crate::time::NANOS_PER_SECOND << Q16_FRACTION_BITS).checked_div(u64::from(q16))
+}
+
+fn greatest_common_divisor(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 /// Scan structure of raw video (M935). `Any` is the unconstrained default
@@ -1956,6 +1966,27 @@ pub enum RawVideoFormat {
 }
 
 impl RawVideoFormat {
+    /// The GStreamer `format=` name, which `caps_parse::parse_raw_format` reads back.
+    pub const fn gst_name(self) -> &'static str {
+        match self {
+            RawVideoFormat::Nv12 => "NV12",
+            RawVideoFormat::I420 => "I420",
+            RawVideoFormat::Rgba8 => "RGBA",
+            RawVideoFormat::Bgra8 => "BGRA",
+            RawVideoFormat::Rgb8 => "RGB",
+            RawVideoFormat::Yuyv => "YUY2",
+            RawVideoFormat::I420p10 => "I420_10LE",
+            RawVideoFormat::I420p12 => "I420_12LE",
+            RawVideoFormat::I422 => "Y42B",
+            RawVideoFormat::I422p10 => "I422_10LE",
+            RawVideoFormat::I422p12 => "I422_12LE",
+            RawVideoFormat::I444 => "Y444",
+            RawVideoFormat::I444p10 => "Y444_10LE",
+            RawVideoFormat::I444p12 => "Y444_12LE",
+            RawVideoFormat::P010 => "P010_10LE",
+        }
+    }
+
     /// Bits per sample of a YUV format: 8, 10, or 12. The 10- and 12-bit formats
     /// store each sample little-endian in a 2-byte word (P010 in the word's top
     /// bits, the planar family in the low bits). The RGBA / packed formats
@@ -2228,6 +2259,29 @@ pub enum AudioFormat {
     ImaAdpcm,
 }
 
+impl AudioFormat {
+    /// Bytes per sample of a fixed-width format, `None` for a coded format.
+    /// `PcmS24Le` is 3-byte packed.
+    pub const fn bytes_per_sample(self) -> Option<usize> {
+        match self {
+            AudioFormat::PcmU8 | AudioFormat::Mulaw | AudioFormat::Alaw => Some(1),
+            AudioFormat::PcmS16Le => Some(2),
+            AudioFormat::PcmS24Le => Some(3),
+            AudioFormat::PcmS32Le | AudioFormat::PcmF32Le => Some(4),
+            // ADPCM packs two samples per byte
+            AudioFormat::Aac
+            | AudioFormat::Opus
+            | AudioFormat::Mp2
+            | AudioFormat::Ac3
+            | AudioFormat::Mp3
+            | AudioFormat::Speex
+            | AudioFormat::Flac
+            | AudioFormat::Vorbis
+            | AudioFormat::ImaAdpcm => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TensorDType {
@@ -2348,6 +2402,82 @@ impl core::fmt::Debug for TensorShape {
 pub enum TensorLayout {
     Nchw,
     Nhwc,
+}
+
+#[cfg(all(test, feature = "alloc"))]
+pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 15] = [
+    RawVideoFormat::Nv12,
+    RawVideoFormat::I420,
+    RawVideoFormat::Rgba8,
+    RawVideoFormat::Bgra8,
+    RawVideoFormat::Rgb8,
+    RawVideoFormat::Yuyv,
+    RawVideoFormat::I420p10,
+    RawVideoFormat::I420p12,
+    RawVideoFormat::I422,
+    RawVideoFormat::I422p10,
+    RawVideoFormat::I422p12,
+    RawVideoFormat::I444,
+    RawVideoFormat::I444p10,
+    RawVideoFormat::I444p12,
+    RawVideoFormat::P010,
+];
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    #[test]
+    fn dim_fixed_reads_only_a_fixed_value() {
+        assert_eq!(Dim::Fixed(720).fixed(), Some(720));
+        assert_eq!(Dim::Range { min: 1, max: 2 }.fixed(), None);
+        assert_eq!(Dim::Any.fixed(), None);
+    }
+
+    #[test]
+    fn framerate_q16_from_fraction_rounds_down_and_rejects_overflow() {
+        assert_eq!(framerate_q16_from_fraction(30, 1), Some(30 << 16));
+        // 30000/1001 is 1964115.9 in Q16
+        assert_eq!(framerate_q16_from_fraction(30_000, 1_001), Some(1_964_115));
+        assert_eq!(framerate_q16_from_fraction(30, 0), None);
+        assert_eq!(framerate_q16_from_fraction(1 << 16, 1), None, "past u32");
+        assert_eq!(
+            framerate_q16_from_fraction(u32::MAX, u32::MAX),
+            Some(1 << 16)
+        );
+    }
+
+    #[test]
+    fn framerate_q16_to_fraction_reduces() {
+        assert_eq!(framerate_q16_to_fraction(30 << 16), (30, 1));
+        assert_eq!(framerate_q16_to_fraction(1 << 15), (1, 2));
+        assert_eq!(framerate_q16_to_fraction(1_964_115), (1_964_115, 1 << 16));
+        assert_eq!(framerate_q16_to_fraction(0), (0, 1));
+        let (num, den) = framerate_q16_to_fraction(u32::MAX);
+        assert_eq!(framerate_q16_from_fraction(num, den), Some(u32::MAX));
+    }
+
+    #[test]
+    fn framerate_q16_period_ns_rounds_down() {
+        assert_eq!(framerate_q16_period_ns(25 << 16), Some(40_000_000));
+        // 1/60 s is 16666666.67 ns
+        assert_eq!(framerate_q16_period_ns(60 << 16), Some(16_666_666));
+        assert_eq!(framerate_q16_period_ns(1), Some(1_000_000_000 << 16));
+        assert_eq!(framerate_q16_period_ns(0), None);
+    }
+
+    #[test]
+    fn audio_bytes_per_sample() {
+        assert_eq!(AudioFormat::PcmU8.bytes_per_sample(), Some(1));
+        assert_eq!(AudioFormat::Mulaw.bytes_per_sample(), Some(1));
+        assert_eq!(AudioFormat::Alaw.bytes_per_sample(), Some(1));
+        assert_eq!(AudioFormat::PcmS16Le.bytes_per_sample(), Some(2));
+        assert_eq!(AudioFormat::PcmS24Le.bytes_per_sample(), Some(3));
+        assert_eq!(AudioFormat::PcmS32Le.bytes_per_sample(), Some(4));
+        assert_eq!(AudioFormat::PcmF32Le.bytes_per_sample(), Some(4));
+        assert_eq!(AudioFormat::Aac.bytes_per_sample(), None);
+        assert_eq!(AudioFormat::ImaAdpcm.bytes_per_sample(), None);
+    }
 }
 
 #[cfg(all(test, feature = "alloc"))]
@@ -3234,12 +3364,7 @@ mod tests {
 
     #[test]
     fn every_raw_format_has_a_distinct_gst_name() {
-        use RawVideoFormat::*;
-        let all = [
-            Nv12, I420, Rgba8, Bgra8, Yuyv, I420p10, I420p12, I422, I422p10, I422p12, I444,
-            I444p10, I444p12, P010,
-        ];
-        let mut names: Vec<&str> = all.iter().map(|f| raw_format_gst_name(*f)).collect();
+        let mut names: Vec<&str> = ALL_RAW_VIDEO_FORMATS.iter().map(|f| f.gst_name()).collect();
         let n = names.len();
         names.sort_unstable();
         names.dedup();

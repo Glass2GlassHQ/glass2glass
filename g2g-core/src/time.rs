@@ -66,7 +66,7 @@ impl From<u64> for RefNs {
 /// reader subtracts this to reach Unix time and a writer adds it.
 pub const NTP_TO_UNIX_EPOCH_SECS: u64 = 2_208_988_800;
 
-const NANOS_PER_SECOND: u64 = 1_000_000_000;
+pub(crate) const NANOS_PER_SECOND: u64 = 1_000_000_000;
 const NTP_FRACTION_BITS: u32 = 32;
 const NTP_FRACTION_MASK: u64 = 0xFFFF_FFFF;
 const NTP_SECONDS_PER_ERA: i64 = 1 << NTP_FRACTION_BITS;
@@ -99,6 +99,23 @@ pub fn unix_nanos_from_ntp(ntp: u64) -> Option<i64> {
     let fraction = ntp & NTP_FRACTION_MASK;
     let nanos = (fraction * NANOS_PER_SECOND + (1 << (NTP_FRACTION_BITS - 1))) >> NTP_FRACTION_BITS;
     Some(seconds * NANOS_PER_SECOND as i64 + nanos as i64)
+}
+
+// rounds to the nearest tick, a zero rate gives 0
+pub fn ns_to_ticks(ns: u64, rate: u32) -> u64 {
+    scale_rounded(ns, u64::from(rate), NANOS_PER_SECOND)
+}
+
+// rounds to the nearest ns, a zero rate saturates to u64::MAX
+pub fn ticks_to_ns(ticks: u64, rate: u32) -> u64 {
+    scale_rounded(ticks, NANOS_PER_SECOND, u64::from(rate))
+}
+
+fn scale_rounded(value: u64, numerator: u64, denominator: u64) -> u64 {
+    let scaled = (u128::from(value) * u128::from(numerator) + u128::from(denominator / 2))
+        .checked_div(u128::from(denominator))
+        .unwrap_or(u128::MAX);
+    u64::try_from(scaled).unwrap_or(u64::MAX)
 }
 
 /// A 32-bit RTP media-clock timestamp as it appears on the wire (wraps at `2^32`).
@@ -197,6 +214,46 @@ mod tests {
             Some(1 << 32)
         );
         assert_eq!(ntp_from_unix_nanos(i64::MIN), None, "before 1900");
+    }
+
+    #[test]
+    fn ns_to_ticks_rounds_to_the_nearest_tick() {
+        const AUDIO_RATE: u32 = 48_000;
+        // one 48 kHz tick is 20833.33 ns
+        assert_eq!(ns_to_ticks(20_833, AUDIO_RATE), 1);
+        assert_eq!(ns_to_ticks(10_416, AUDIO_RATE), 0, "just under half a tick");
+        assert_eq!(ns_to_ticks(10_417, AUDIO_RATE), 1, "just over half a tick");
+        assert_eq!(ns_to_ticks(NANOS_PER_SECOND, AUDIO_RATE), 48_000);
+        assert_eq!(ns_to_ticks(u64::MAX, u32::MAX), u64::MAX, "saturates");
+        assert_eq!(ns_to_ticks(NANOS_PER_SECOND, 0), 0);
+    }
+
+    #[test]
+    fn ticks_to_ns_rounds_to_the_nearest_ns() {
+        const VIDEO_RATE: u32 = 90_000;
+        // one 90 kHz tick is 11111.11 ns, two are 22222.22, five are 55555.56
+        assert_eq!(ticks_to_ns(1, VIDEO_RATE), 11_111);
+        assert_eq!(ticks_to_ns(5, VIDEO_RATE), 55_556);
+        assert_eq!(
+            ticks_to_ns(u64::from(VIDEO_RATE), VIDEO_RATE),
+            1_000_000_000
+        );
+        assert_eq!(ticks_to_ns(u64::MAX, 1), u64::MAX, "saturates");
+        assert_eq!(ticks_to_ns(1, 0), u64::MAX, "zero rate saturates");
+    }
+
+    #[test]
+    fn ticks_round_trip_through_ns_exactly() {
+        // a floored ns lands just under the tick and a floored conversion back loses it
+        for rate in [8_000, 44_100, 48_000, 90_000, 96_000] {
+            for ticks in [1, 3_003, 1_001_001, 0x1_0000_0000 + 7, 1 << 40] {
+                assert_eq!(
+                    ns_to_ticks(ticks_to_ns(ticks, rate), rate),
+                    ticks,
+                    "{ticks} ticks at {rate} Hz"
+                );
+            }
+        }
     }
 
     #[test]
