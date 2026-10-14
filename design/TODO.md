@@ -53,7 +53,6 @@ Core, bindings, ML:
 - `wire::encode_packet` starts at zero capacity and copies the payload twice.
 - `ElectedClock::now_ns` locks per read, `pacing::judge` clones `ClockSync` twice.
 - `BlobMeta::get` allocates a `String` per lookup.
-- `g2g_bridge_push_buf` re-copies the frame on every retry.
 - `g2g-python` `handoff` makes System frames writable for `Consume` jobs.
 - Frames crossing the plugin ABI always arrive read-only.
 - `g2g-pyapi` `pull_timeout` polls with 1 ms sleeps.

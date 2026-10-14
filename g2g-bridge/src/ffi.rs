@@ -270,6 +270,10 @@ pub unsafe extern "C" fn g2g_bridge_tight_planes(
     }
 }
 
+// a full feed for longer than this means the graph is stuck
+const PUSH_RETRY_ATTEMPTS: u32 = 1000;
+const PUSH_RETRY_INTERVAL: core::time::Duration = core::time::Duration::from_micros(100);
+
 /// Push one buffer (copied) into the sub-graph, retrying briefly if the feed is
 /// momentarily full. Returns 1 on success, 0 if it stayed full (the graph is
 /// wedged) or the handle is null.
@@ -291,15 +295,17 @@ pub unsafe extern "C" fn g2g_bridge_push_buf(
     // SAFETY: caller guarantees `len` readable bytes at `data`.
     let bytes = unsafe { slice::from_raw_parts(data, len) };
     let meta = bridge.take_frame_meta();
+    let mut frame = MemoryDomain::System(SystemSlice::from_boxed(bytes.into()));
+    // each retry pushes a refcounted handle instead of copying the bytes again
+    frame.make_shareable();
     // The 1-in / 1-out shell pulls after every push, so the bounded feed only
     // fills under a transient stall; a short bounded retry rides it out without
     // a hard busy-loop.
-    for _ in 0..1000 {
-        let frame = MemoryDomain::System(SystemSlice::from_boxed(bytes.into()));
-        if bridge.graph.push_frame(frame, pts_ns, meta.clone()) {
+    for _ in 0..PUSH_RETRY_ATTEMPTS {
+        if bridge.graph.push_frame(frame.share(), pts_ns, meta.clone()) {
             return 1;
         }
-        std::thread::sleep(core::time::Duration::from_micros(100));
+        std::thread::sleep(PUSH_RETRY_INTERVAL);
     }
     0
 }
