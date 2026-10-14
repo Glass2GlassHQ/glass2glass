@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1321: fan-out runners build a graph and use the shared sink arm, so branch sinks relay QoS upstream.
 - M1320: linear runners drive the graph runner's source and sink arms, so they fail loud on a rejected mid-stream caps change and send the opening segment.
 - M1395: MP4 muxers drop the empty NAL that adjacent start codes split out, which the strict length-prefixed reader refused.
 - M1373: `webortdetect` reads fixed caps dimensions through `Dim::fixed`.

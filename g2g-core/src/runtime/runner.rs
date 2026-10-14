@@ -20,9 +20,7 @@ use crate::query::{AllocationParams, LatencyReport};
 #[cfg(feature = "std")]
 use crate::runtime::channel::{advertise_orientation, link, SenderSink};
 #[cfg(feature = "std")]
-use crate::runtime::coordinator::{
-    log_caps_rejected, realloc_local_dyn, report_nego_failure, solve_last_link,
-};
+use crate::runtime::coordinator::solve_last_link;
 #[cfg(feature = "std")]
 use crate::runtime::instrument::ElementProbe;
 #[cfg(feature = "std")]
@@ -68,7 +66,7 @@ where
 #[cfg(feature = "std")]
 use crate::element::DynAsyncElement;
 #[cfg(feature = "std")]
-use crate::fanout::{MultiOutputElement, MultiOutputSinkExt, MultiOutputSource, MultiSenderSink};
+use crate::fanout::{MultiOutputElement, MultiOutputSource};
 #[cfg(feature = "std")]
 use crate::graph::Graph;
 #[cfg(feature = "std")]
@@ -78,9 +76,9 @@ use crate::runtime::graph_runner::{
     broadcast, run_graph_inner, run_source, sink_arm_on, GraphNodeRef, SinkArmIo, SourceArmIo,
 };
 #[cfg(feature = "std")]
-use crate::runtime::join::{dynamic_join, join_all};
+use crate::runtime::join::dynamic_join;
 #[cfg(feature = "std")]
-use crate::runtime::observe::{link_tapped, register_runner_tap, TapEdge, TapNode};
+use crate::runtime::observe::{link_tapped, register_runner_tap};
 #[cfg(feature = "std")]
 use crate::runtime::{NodeRole, Observer, Probe};
 #[cfg(feature = "std")]
@@ -857,7 +855,7 @@ async fn run_source_fanout_inner<Src, Tx, Clk>(
     source: &mut Src,
     fanout: &mut Tx,
     sinks: Vec<&mut dyn DynAsyncElement>,
-    _clock: &Clk,
+    clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
     bus: Option<&BusHandle>,
     observer: Option<&Observer>,
@@ -867,231 +865,38 @@ where
     Tx: MultiOutputElement,
     Clk: PipelineClock,
 {
-    let link_capacity: usize = link_capacity.into().get();
-    let branch_count = sinks.len();
-    assert!(branch_count > 0, "fan-out needs at least one sink");
-
-    // M846: instance naming + a measured-latency probe for every node with a
-    // `process()` (the fan-out element and each branch sink), as in the linear
-    // runners. The fan-out element has no naming hook, so its probe is keyed by
-    // its type name.
-    let mut sinks = sinks;
-    let mut namer = crate::log::InstanceNamer::new();
-    let source_name = namer.add(crate::log::short_type_name::<Src>(), None);
-    SourceLoop::set_instance_name(source, source_name.clone());
-    let fanout_probe = ElementProbe::new(namer.add(crate::log::short_type_name::<Tx>(), None));
-    let mut sink_probes = Vec::with_capacity(branch_count);
-    for sink in sinks.iter_mut() {
-        let name = namer.add(sink.log_category(), None);
-        sink.set_instance_name(name.clone());
-        sink_probes.push(ElementProbe::new(name));
+    assert!(!sinks.is_empty(), "fan-out needs at least one sink");
+    // A thin builder over the DAG runner: the fan-out element is the graph's
+    // demux node, each sink hangs off one of its ports.
+    let mut g: Graph<GraphNodeRef<'_>> = Graph::new();
+    let src = g.add_source(GraphNodeRef::source_ref(source));
+    let port_count = u8::try_from(sinks.len()).map_err(|_| G2gError::CapsMismatch)?;
+    let demux = g.add_demux(GraphNodeRef::demux_ref(fanout), port_count);
+    // Named after the element type, as a fan-out has no category of its own.
+    let fanout_name =
+        crate::log::InstanceNamer::new().add(crate::log::short_type_name::<Tx>(), None);
+    g.set_node_name(demux.node(), fanout_name);
+    g.link(src, demux.input())
+        .map_err(|_| G2gError::CapsMismatch)?;
+    for (port, sink) in (0..port_count).zip(sinks) {
+        let node = g.add_sink(GraphNodeRef::element_ref(sink));
+        g.link(demux.out(port), node)
+            .map_err(|_| G2gError::CapsMismatch)?;
     }
-
-    // M18 step 1: solve source → fanout via the solver using the new
-    // `MultiOutputElement::caps_constraint_as_input()` trait method
-    // (M16 step 4c had this constructing `LegacySink` inline). The
-    // fan-out acts as the linear "sink" of the negotiation chain;
-    // the real sinks downstream of it broadcast-receive the same
-    // fixated caps and don't participate in narrowing. Phase C FO-2
-    // (per-branch downstream re-solve once a mid-stream `CapsChanged`
-    // crosses the fan-out boundary) lands once β (the coordinator
-    // restructure) does — it slots in here via per-branch calls to
-    // `re_solve_downstream_sink`.
-    let fixated = {
-        let src_c = source.caps_constraint().await?;
-        let fanout_c = fanout.caps_constraint_as_input();
-        solve_last_link(&[&src_c, &fanout_c], bus)?
-    };
-
-    source.configure_pipeline(&fixated)?.reject_refixate()?;
-    MultiOutputElement::configure_pipeline(fanout, &fixated)?.reject_refixate()?;
-    for sink in sinks.iter_mut() {
-        sink.configure_pipeline(&fixated)?.reject_refixate()?;
-    }
-
-    let tap = observer.is_some();
-    let (src_tx, src_rx, src_tap) = link_tapped(link_capacity, tap);
-    let mut branch_senders = Vec::with_capacity(branch_count);
-    let mut branch_receivers = Vec::with_capacity(branch_count);
-    let mut branch_taps = Vec::with_capacity(branch_count);
-    for _ in 0..branch_count {
-        let (tx, rx, edge) = link_tapped(link_capacity, tap);
-        branch_senders.push(SenderSink::new(tx));
-        branch_receivers.push(rx);
-        branch_taps.push(edge);
-    }
-
-    // Dev-tooling tap: source 0, fan-out 1, then the branch sinks.
-    if let Some(obs) = observer {
-        let mut nodes: Vec<TapNode> = alloc::vec![
-            (source_name.clone(), NodeRole::Source, None),
-            (
-                alloc::string::String::from(fanout_probe.name()),
-                NodeRole::Tee,
-                Some(fanout_probe.clone()),
-            ),
-        ];
-        let mut edges: Vec<TapEdge> = alloc::vec![(0, 1, fixated.clone(), src_tap)];
-        for (i, (probe, edge)) in sink_probes
-            .iter()
-            .zip(core::mem::take(&mut branch_taps))
-            .enumerate()
-        {
-            nodes.push((
-                alloc::string::String::from(probe.name()),
-                NodeRole::Sink,
-                Some(probe.clone()),
-            ));
-            edges.push((1, 2 + i, fixated.clone(), edge));
-        }
-        register_runner_tap(obs, nodes, edges);
-    }
-
-    let source_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
-        let mut adapter = SenderSink::new(src_tx);
-        source.run(&mut adapter).await
-    });
-
-    let probe_for_fanout = fanout_probe.clone();
-    let router_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
-        let mut multi = MultiSenderSink::new(branch_senders);
-        // M947: a slow branch backs this router up; count that as push-wait.
-        multi.set_push_wait_probe(Some(probe_for_fanout.clone()));
-        loop {
-            match src_rx.recv().await {
-                Some(PipelinePacket::Eos) => {
-                    MultiOutputElement::process(fanout, PipelinePacket::Eos, &mut multi).await?;
-                    for port in 0..branch_count {
-                        // An element that forwards Eos itself already ended
-                        // this port; a second Eos behind it breaks the
-                        // one-terminal contract the drain machinery relies on.
-                        if !multi.eos_forwarded(port) {
-                            multi.push_to(port, PipelinePacket::Eos).await?;
-                        }
-                    }
-                    return Ok::<u64, G2gError>(0);
-                }
-                Some(packet) => {
-                    let is_data = matches!(packet, PipelinePacket::DataFrame(_));
-                    if is_data {
-                        probe_for_fanout.record_fill(src_rx.fill_percent());
-                    }
-                    let t0 = is_data.then(ElementProbe::mark).flatten();
-                    MultiOutputElement::process(fanout, packet, &mut multi).await?;
-                    if is_data {
-                        probe_for_fanout.record_proc_since(t0);
-                    }
-                }
-                None => return Ok(0),
-            }
-        }
-    });
-
-    let mut arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> = Vec::with_capacity(branch_count + 2);
-    arms.push(source_fut);
-    arms.push(router_fut);
-
-    for ((sink, rx), probe) in sinks
-        .into_iter()
-        .zip(branch_receivers)
-        .zip(sink_probes.iter().cloned())
-    {
-        let bus_for_branch = bus.cloned();
-        let sink_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
-            let bus_for_branch = bus_for_branch;
-            let mut null = NullSink;
-            let mut consumed: u64 = 0;
-            loop {
-                match rx.recv().await {
-                    Some(PipelinePacket::Eos) => {
-                        sink.process(PipelinePacket::Eos, &mut null).await?;
-                        return Ok::<u64, G2gError>(consumed);
-                    }
-                    Some(PipelinePacket::CapsChanged(new_caps)) => {
-                        // M18 Phase C FO-2: per-branch downstream re-solve
-                        // (Phase B applied per branch). Each branch runs in
-                        // its own arm, so the broadcast `CapsChanged` is
-                        // re-solved on every branch concurrently. FO-1
-                        // strict default: a branch whose declared
-                        // `caps_constraint_as_sink()` rejects the new caps
-                        // fails the fan-out loud (matches GStreamer's
-                        // `tee`-with-rejecting-downstream). `AllowBranchDrop`
-                        // graceful degradation is a future opt-in.
-                        let branch_caps =
-                            re_solve_downstream_dyn_sink(&new_caps, &*sink).map_err(|f| {
-                                report_nego_failure(bus_for_branch.as_ref(), f);
-                                G2gError::CapsMismatch
-                            })?;
-                        match log_caps_rejected(
-                            Some(probe.name()),
-                            &branch_caps,
-                            sink.configure_pipeline(&branch_caps),
-                        )? {
-                            ConfigureOutcome::Accepted => {
-                                // M18 α: element-local re-allocation of this
-                                // branch under its re-solved caps.
-                                realloc_local_dyn(sink, &branch_caps);
-                                sink.process(PipelinePacket::CapsChanged(branch_caps), &mut null)
-                                    .await?;
-                            }
-                            ConfigureOutcome::ReFixate(counter) => {
-                                rx.request_reconfigure(Reconfigure::Propose(counter));
-                            }
-                        }
-                    }
-                    Some(packet) => {
-                        let is_data = matches!(packet, PipelinePacket::DataFrame(_));
-                        if is_data {
-                            consumed += 1;
-                            probe.record_fill(rx.fill_percent());
-                        }
-                        let t0 = is_data.then(ElementProbe::mark).flatten();
-                        sink.process(packet, &mut null).await?;
-                        if is_data {
-                            probe.record_proc_since(t0);
-                        }
-                    }
-                    None => return Ok(consumed),
-                }
-            }
-        });
-        arms.push(sink_fut);
-    }
-
-    let results = join_all(arms).await;
-    // M81: a real branch error closes the shared links, surfacing as Shutdown on
-    // the sibling arms; surface the substantive error rather than whichever arm
-    // the count loop unwraps first (consistent with the linear path).
-    // Arm order: [source, router, sink0, sink1, ...].
-    let arm_names = [source_name.as_str(), fanout_probe.name()]
-        .into_iter()
-        .chain(sink_probes.iter().map(|p| p.name()));
-    if let Some(e) = substantive_error(arm_names.zip(results.iter().map(|r| r.as_ref().err()))) {
-        return Err(e);
-    }
-    let mut counts = Vec::with_capacity(results.len());
-    for r in results {
-        counts.push(r?);
-    }
-    // Arm order: [source, router, sink0, sink1, ...].
-    let emitted = counts[0];
-    let consumed: u64 = counts[2..].iter().copied().sum();
-    // Fan-out latency / allocation / clock election across N branches is
-    // deferred (M12 covers the linear path); report neutral values rather than
-    // a misleading partial one.
-    let mut probes: Vec<Probe> = alloc::vec![Some(fanout_probe)];
-    probes.extend(sink_probes.into_iter().map(Some));
-    Ok(RunStats {
-        frames_emitted: emitted,
-        frames_consumed: consumed,
-        frames_dropped: 0,
-        latency: LatencyReport::ZERO,
-        allocation: None,
-        clock_priority: ClockPriority::SystemFallback,
-        base_time_ns: 0,
-        coordinator_events: 0,
-        per_element: crate::runtime::snapshot_all(&probes),
-    })
+    run_graph_inner(
+        g,
+        clock,
+        link_capacity,
+        bus,
+        None,
+        None,
+        None,
+        observer,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 // ===========================================================================
@@ -1471,7 +1276,9 @@ async fn attach_branch<'a>(
         .await?;
     ports.push(port);
     let arm: BoxFuture<'a, Result<DynArmOut, G2gError>> = Box::pin(async move {
-        dyn_branch_loop(sink.as_mut(), brx, &probe)
+        // The sticky caps arrive as the arm's first packet, so it configures
+        // the way any sink arm does.
+        sink.drive_sink_arm_borrowed(SinkArmIo::standalone(brx, Some(probe)))
             .await
             .map(DynArmOut::Branch)
     });
@@ -1540,58 +1347,6 @@ async fn route_packet(
     }
 }
 
-/// A dynamic branch's loop: configure from the first (sticky) `CapsChanged`, then
-/// process frames until `Eos` / channel close. The configure path mirrors the
-/// static fan-out branch arm so a runtime branch negotiates exactly like a built
-/// one.
-#[cfg(feature = "std")]
-async fn dyn_branch_loop(
-    sink: &mut dyn DynAsyncElement,
-    rx: crate::runtime::channel::LinkReceiver,
-    probe: &ElementProbe,
-) -> Result<u64, G2gError> {
-    let mut null = NullSink;
-    let mut consumed = 0u64;
-    loop {
-        match rx.recv().await {
-            Some(PipelinePacket::Eos) => {
-                sink.process(PipelinePacket::Eos, &mut null).await?;
-                return Ok(consumed);
-            }
-            Some(PipelinePacket::CapsChanged(caps)) => {
-                let branch_caps = re_solve_downstream_dyn_sink(&caps, &*sink)
-                    .map_err(|_| G2gError::CapsMismatch)?;
-                match log_caps_rejected(
-                    Some(probe.name()),
-                    &branch_caps,
-                    sink.configure_pipeline(&branch_caps),
-                )? {
-                    ConfigureOutcome::Accepted => {
-                        sink.process(PipelinePacket::CapsChanged(branch_caps), &mut null)
-                            .await?;
-                    }
-                    ConfigureOutcome::ReFixate(counter) => {
-                        rx.request_reconfigure(Reconfigure::Propose(counter));
-                    }
-                }
-            }
-            Some(packet) => {
-                let is_data = matches!(packet, PipelinePacket::DataFrame(_));
-                if is_data {
-                    consumed += 1;
-                    probe.record_fill(rx.fill_percent());
-                }
-                let t0 = is_data.then(ElementProbe::mark).flatten();
-                sink.process(packet, &mut null).await?;
-                if is_data {
-                    probe.record_proc_since(t0);
-                }
-            }
-            None => return Ok(consumed),
-        }
-    }
-}
-
 /// Drives a terminal multi-output *source* ([`MultiOutputSource`]: 0 inputs to N
 /// outputs) into N sinks, with no upstream, the fan-out mirror of
 /// [`run_fanin_session`](crate::runtime::run_fanin_session). A WHEP session
@@ -1637,7 +1392,7 @@ where
 async fn run_fanout_session_inner<Sess, Clk>(
     session: &mut Sess,
     sinks: Vec<&mut dyn DynAsyncElement>,
-    _clock: &Clk,
+    clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
     observer: Option<&Observer>,
 ) -> Result<RunStats, G2gError>
@@ -1645,142 +1400,39 @@ where
     Sess: MultiOutputSource,
     Clk: PipelineClock,
 {
-    let link_capacity: usize = link_capacity.into().get();
-    let branch_count = sinks.len();
-    assert!(branch_count > 0, "fan-out session needs at least one sink");
+    assert!(!sinks.is_empty(), "fan-out session needs at least one sink");
     assert!(
-        session.output_count() == branch_count,
+        session.output_count() == sinks.len(),
         "session output count must match the number of sinks"
     );
-
-    // M846: instance naming + one measured-latency probe per sink (the session
-    // drives itself through `run`, so it has no `process()` to time).
-    let mut sinks = sinks;
-    let mut namer = crate::log::InstanceNamer::new();
-    let session_name = namer.add(crate::log::short_type_name::<Sess>(), None);
-    let mut sink_probes = Vec::with_capacity(branch_count);
-    for sink in sinks.iter_mut() {
-        let name = namer.add(sink.log_category(), None);
-        sink.set_instance_name(name.clone());
-        sink_probes.push(ElementProbe::new(name));
+    // A thin builder over the DAG runner: the session is the graph's fan-out
+    // source node, each sink hangs off one of its outputs.
+    let mut g: Graph<GraphNodeRef<'_>> = Graph::new();
+    let port_count = u8::try_from(sinks.len()).map_err(|_| G2gError::CapsMismatch)?;
+    let fanout = g.add_fanout_src(GraphNodeRef::fanout_source_ref(session), port_count);
+    // Named after the session type, as a session has no category of its own.
+    let session_name =
+        crate::log::InstanceNamer::new().add(crate::log::short_type_name::<Sess>(), None);
+    g.set_node_name(fanout.node(), session_name);
+    for (port, sink) in (0..port_count).zip(sinks) {
+        let node = g.add_sink(GraphNodeRef::element_ref(sink));
+        g.link(fanout.output(port), node)
+            .map_err(|_| G2gError::CapsMismatch)?;
     }
-
-    // Negotiate per output: the session self-fixates each output's caps and
-    // configures the matching sink (the sink's own constraint is not consulted).
-    let mut output_caps: Vec<Caps> = Vec::with_capacity(branch_count);
-    for (i, sink) in sinks.iter_mut().enumerate() {
-        let fixated = session.output_caps(i)?.fixate()?;
-        sink.configure_pipeline(&fixated)?.reject_refixate()?;
-        output_caps.push(fixated);
-    }
-
-    let tap = observer.is_some();
-    let mut branch_senders = Vec::with_capacity(branch_count);
-    let mut branch_receivers = Vec::with_capacity(branch_count);
-    let mut branch_taps = Vec::with_capacity(branch_count);
-    for _ in 0..branch_count {
-        let (tx, rx, edge) = link_tapped(link_capacity, tap);
-        branch_senders.push(SenderSink::new(tx));
-        branch_receivers.push(rx);
-        branch_taps.push(edge);
-    }
-
-    // Dev-tooling tap: the session is node 0, its sinks follow.
-    if let Some(obs) = observer {
-        let mut nodes: Vec<TapNode> = alloc::vec![(session_name, NodeRole::Source, None)];
-        let mut edges: Vec<TapEdge> = Vec::with_capacity(branch_count);
-        for (i, ((probe, caps), edge)) in sink_probes
-            .iter()
-            .zip(output_caps.iter())
-            .zip(core::mem::take(&mut branch_taps))
-            .enumerate()
-        {
-            nodes.push((
-                alloc::string::String::from(probe.name()),
-                NodeRole::Sink,
-                Some(probe.clone()),
-            ));
-            edges.push((0, 1 + i, caps.clone(), edge));
-        }
-        register_runner_tap(obs, nodes, edges);
-    }
-
-    let session_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
-        let mut multi = MultiSenderSink::new(branch_senders);
-        session.run(&mut multi).await
-    });
-
-    let mut arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> = Vec::with_capacity(branch_count + 1);
-    arms.push(session_fut);
-    for ((sink, rx), probe) in sinks
-        .into_iter()
-        .zip(branch_receivers)
-        .zip(sink_probes.iter().cloned())
-    {
-        let sink_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
-            let mut null = NullSink;
-            let mut consumed: u64 = 0;
-            loop {
-                match rx.recv().await {
-                    Some(PipelinePacket::Eos) => {
-                        sink.process(PipelinePacket::Eos, &mut null).await?;
-                        return Ok::<u64, G2gError>(consumed);
-                    }
-                    Some(PipelinePacket::CapsChanged(new_caps)) => {
-                        match log_caps_rejected(
-                            Some(probe.name()),
-                            &new_caps,
-                            sink.configure_pipeline(&new_caps),
-                        )? {
-                            ConfigureOutcome::Accepted => {
-                                sink.process(PipelinePacket::CapsChanged(new_caps), &mut null)
-                                    .await?;
-                            }
-                            ConfigureOutcome::ReFixate(counter) => {
-                                rx.request_reconfigure(Reconfigure::Propose(counter));
-                            }
-                        }
-                    }
-                    Some(packet) => {
-                        let is_data = matches!(packet, PipelinePacket::DataFrame(_));
-                        if is_data {
-                            consumed += 1;
-                            probe.record_fill(rx.fill_percent());
-                        }
-                        let t0 = is_data.then(ElementProbe::mark).flatten();
-                        sink.process(packet, &mut null).await?;
-                        if is_data {
-                            probe.record_proc_since(t0);
-                        }
-                    }
-                    None => return Ok(consumed),
-                }
-            }
-        });
-        arms.push(sink_fut);
-    }
-
-    let results = join_all(arms).await;
-    let mut counts = Vec::with_capacity(results.len());
-    for r in results {
-        counts.push(r?);
-    }
-    // Arm order: [session, sink0, sink1, ...].
-    let emitted = counts[0];
-    let consumed: u64 = counts[1..].iter().copied().sum();
-    Ok(RunStats {
-        frames_emitted: emitted,
-        frames_consumed: consumed,
-        frames_dropped: 0,
-        latency: LatencyReport::ZERO,
-        allocation: None,
-        clock_priority: ClockPriority::SystemFallback,
-        base_time_ns: 0,
-        coordinator_events: 0,
-        per_element: crate::runtime::snapshot_all(
-            &sink_probes.into_iter().map(Some).collect::<Vec<_>>(),
-        ),
-    })
+    run_graph_inner(
+        g,
+        clock,
+        link_capacity,
+        None,
+        None,
+        None,
+        None,
+        observer,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Drives an arbitrary-length linear pipeline:

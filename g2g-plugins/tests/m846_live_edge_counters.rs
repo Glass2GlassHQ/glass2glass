@@ -240,7 +240,10 @@ async fn observed_fanout_run_reports_named_per_element_rows() {
             .collect::<Vec<_>>(),
         vec![(0, 1), (1, 2), (1, 3)],
     );
-    assert_eq!(snap.edges[0].counts.packets, 6, "5 frames + Eos");
+    assert_eq!(
+        snap.edges[0].counts.packets, 7,
+        "opening Segment + 5 frames + Eos"
+    );
     assert!(
         snap.edges[1].counts.bytes > 0,
         "the selected branch carried bytes"

@@ -8,10 +8,11 @@
 use core::future::Future;
 use core::pin::Pin;
 
-use g2g_core::runtime::{run_graph, GraphNode};
+use g2g_core::element::DynAsyncElement;
+use g2g_core::runtime::{run_graph, run_source_fanout, GraphNode};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, Frame, G2gError, Graph, OutputSink,
-    PipelineClock, PipelinePacket, QosMessage, Rate, RawVideoFormat,
+    PipelineClock, PipelinePacket, QosMessage, Rate, RawVideoFormat, Router,
 };
 use g2g_plugins::batchmux::BatchMux;
 use g2g_plugins::streamdemux::StreamDemux;
@@ -156,5 +157,24 @@ async fn both_sources_skip_on_a_report_from_behind_a_muxer() {
         "the sources skipped on the report relayed past the muxer ({} < {})",
         stats.frames_emitted,
         2 * TARGET
+    );
+}
+
+#[tokio::test]
+async fn the_source_skips_on_a_report_through_the_fanout_runner() {
+    let mut src = source();
+    let mut router = Router::new(2);
+    let mut s0 = late_sink();
+    let mut s1 = late_sink();
+    let sinks: Vec<&mut dyn DynAsyncElement> = vec![&mut s0, &mut s1];
+
+    let stats = run_source_fanout(&mut src, &mut router, sinks, &ZeroClock, 4)
+        .await
+        .expect("fan-out runs");
+    assert!(stats.frames_consumed > 0, "frames reached the sinks");
+    assert!(
+        stats.frames_emitted < TARGET,
+        "the source skipped on the report relayed past the router ({} < {TARGET})",
+        stats.frames_emitted
     );
 }
