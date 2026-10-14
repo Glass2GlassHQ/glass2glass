@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1350: `wgpusink` and `wgpucompositor` read back through the gpu helpers without blocking the runner, and the WGSL compositor samples like the CPU one.
 - M1349: `timeoverlay` and `analyticsoverlay` draw through the shared paint canvas.
 - M1348: NV12 and I420 plane sizes come from the shared pixel helpers.
 - M1347: `waylandsink` converts NV12 straight into the shm buffer on its worker thread.

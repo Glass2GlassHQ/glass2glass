@@ -464,6 +464,30 @@ pub(crate) fn map_for_read(
     Ok(slice.get_mapped_range())
 }
 
+/// [`map_for_read`] that yields to the executor until the GPU is done, rather
+/// than blocking the calling thread in `PollType::Wait`.
+pub(crate) async fn map_for_read_async(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+) -> Result<wgpu::BufferView, G2gError> {
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    loop {
+        device.poll(wgpu::PollType::Poll).map_err(gpu_err)?;
+        match rx.try_recv() {
+            Ok(mapped) => {
+                mapped.map_err(gpu_err)?;
+                return Ok(slice.get_mapped_range());
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
+            Err(disconnected) => return Err(gpu_err(disconnected)),
+        }
+    }
+}
+
 /// Map any wgpu / Vello failure to a structured hardware error.
 pub(crate) fn gpu_err<E>(_e: E) -> G2gError {
     G2gError::Hardware(HardwareError::Other)

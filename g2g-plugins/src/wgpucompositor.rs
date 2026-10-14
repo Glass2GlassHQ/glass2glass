@@ -57,7 +57,7 @@ use crate::compositor::{
     color_property, color_value, dim_property, frame_period_ns, framerate_property, pad_property,
     paint_order, set_pad_property, CompositorPad, CompositorState, WGPU_COMPOSITOR_PROPS,
 };
-use crate::gpu::{gpu_err, texture_of, GpuContext, WgpuTextureKeepAlive};
+use crate::gpu::{map_for_read_async, texture_of, GpuContext, WgpuTextureKeepAlive};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedWgpuTexture, SystemSlice};
 use g2g_core::{
@@ -160,15 +160,43 @@ fn sample_scaled(p: Pad, dx: u32, dy: u32) -> vec4<u32> {
     let y0 = u32(fy >> 16);
     let x1 = min(x0 + 1u, p.sw - 1u);
     let y1 = min(y0 + 1u, p.sh - 1u);
-    let tx = u32((fx >> 8) & 0xff);
-    let ty = u32((fy >> 8) & 0xff);
+    let tx = u32(fx & 0xffff);
+    let ty = u32(fy & 0xffff);
     let s00 = fetch(p, x0, y0);
     let s01 = fetch(p, x1, y0);
     let s10 = fetch(p, x0, y1);
     let s11 = fetch(p, x1, y1);
-    let top = s00 * (256u - tx) + s01 * tx;
-    let bot = s10 * (256u - tx) + s11 * tx;
-    return (top * (256u - ty) + bot * ty) >> vec4<u32>(16u);
+    let top = s00 * (65536u - tx) + s01 * tx;
+    let bot = s10 * (65536u - tx) + s11 * tx;
+    let rounding = Wide(vec4<u32>(0u), vec4<u32>(0x80000000u));
+    return add_wide(add_wide(mul_wide(top, 65536u - ty), mul_wide(bot, ty)), rounding).hi;
+}
+
+// a 64-bit value as two u32 words per channel: videoscale's bilerp needs 40 bits
+struct Wide {
+    hi: vec4<u32>,
+    lo: vec4<u32>,
+}
+
+// split at 16 bits so no partial product leaves u32
+fn mul_wide(a: vec4<u32>, b: u32) -> Wide {
+    let al = a & vec4<u32>(0xffffu);
+    let ah = a >> vec4<u32>(16u);
+    let bl = b & 0xffffu;
+    let bh = b >> 16u;
+    let low = al * bl;
+    let mid_a = ah * bl;
+    let mid = mid_a + al * bh;
+    let mid_carry = select(vec4<u32>(0u), vec4<u32>(0x10000u), mid < mid_a);
+    let lo = low + (mid << vec4<u32>(16u));
+    let lo_carry = select(vec4<u32>(0u), vec4<u32>(1u), lo < low);
+    return Wide(ah * bh + (mid >> vec4<u32>(16u)) + mid_carry + lo_carry, lo);
+}
+
+fn add_wide(a: Wide, b: Wide) -> Wide {
+    let lo = a.lo + b.lo;
+    let carry = select(vec4<u32>(0u), vec4<u32>(1u), lo < a.lo);
+    return Wide(a.hi + b.hi + carry, lo);
 }
 
 @compute @workgroup_size(8, 8)
@@ -763,7 +791,7 @@ impl WgpuCompositor {
     /// Read the composited canvas back to system memory: tightly packed, or with
     /// the GPU's own row padding left in place when a downstream consumer asked
     /// for the [`PlaneLayout`](g2g_core::meta::PlaneLayout) that describes it.
-    fn read_canvas(&self) -> Result<Box<[u8]>, G2gError> {
+    async fn read_canvas(&self) -> Result<Box<[u8]>, G2gError> {
         let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
         let bytes = gpu.row_bytes * self.out_h as usize;
         let mut encoder = gpu
@@ -772,20 +800,7 @@ impl WgpuCompositor {
         encoder.copy_buffer_to_buffer(&gpu.out_buf, 0, &gpu.staging, 0, bytes as u64);
         gpu.queue.submit([encoder.finish()]);
 
-        let slice = gpu.staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        gpu.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            })
-            .map_err(gpu_err)?;
-        rx.recv().map_err(gpu_err)?.map_err(gpu_err)?;
-
-        let mapped = slice.get_mapped_range();
+        let mapped = map_for_read_async(&gpu.device, &gpu.staging).await?;
         let tight = self.out_w as usize * 4;
         let out = match self.keeps_row_padding() {
             true => mapped.to_vec(),
@@ -884,7 +899,11 @@ impl WgpuCompositor {
 
     /// Composite `base0` and wrap the result as the next output frame, in
     /// whichever memory domain this compositor was built for.
-    fn compose_frame(&mut self, base0: &Source, timing: FrameTiming) -> Result<Frame, G2gError> {
+    async fn compose_frame(
+        &mut self,
+        base0: &Source,
+        timing: FrameTiming,
+    ) -> Result<Frame, G2gError> {
         self.dispatch(base0)?;
         let domain = if self.gpu_output {
             MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
@@ -893,7 +912,7 @@ impl WgpuCompositor {
                 Arc::new(self.canvas_texture()?),
             ))
         } else {
-            MemoryDomain::System(SystemSlice::from_boxed(self.read_canvas()?))
+            MemoryDomain::System(SystemSlice::from_boxed(self.read_canvas().await?))
         };
         #[allow(unused_mut)]
         let mut frame = Frame::new(domain, timing, self.state.next_sequence());
@@ -1072,7 +1091,7 @@ impl MultiInputElement for WgpuCompositor {
 
                     while let Some((timing, base)) = self.state.take_due() {
                         self.ensure_gpu().await?;
-                        let frame = self.compose_frame(&base, timing)?;
+                        let frame = self.compose_frame(&base, timing).await?;
                         self.state.record_emitted(timing, base);
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                     }
@@ -1085,7 +1104,7 @@ impl MultiInputElement for WgpuCompositor {
                     let period = frame_period_ns(self.framerate_q16);
                     if let Some((timing, base)) = self.state.take_tick_due(period) {
                         self.ensure_gpu().await?;
-                        let frame = self.compose_frame(&base, timing)?;
+                        let frame = self.compose_frame(&base, timing).await?;
                         self.state.record_held(timing, base);
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                     }

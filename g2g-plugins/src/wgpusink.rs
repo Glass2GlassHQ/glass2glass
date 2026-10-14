@@ -39,8 +39,8 @@ use g2g_core::{
 
 use crate::clock::wait_to_present;
 use crate::gpu::{
-    gpu_err, nv12_plane_views, packed_nv12_extent, texture_layout, texture_of, GpuContext,
-    WgpuTextureLayout,
+    nv12_plane_views, packed_nv12_extent, read_texture_plane, texture_layout, texture_of,
+    GpuContext, WgpuTextureLayout,
 };
 use crate::yuvmatrix::YuvToRgbWeights;
 
@@ -854,67 +854,19 @@ impl WgpuSink {
         else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let (w, h) = (*width, *height);
-        let unpadded = (w * 4) as usize;
-        let padded = unpadded.next_multiple_of(256);
-        let buffer = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("wgpu-sink-readback"),
-            size: (padded * h as usize) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut encoder = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded as u32),
-                    rows_per_image: Some(h),
-                },
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.ctx.queue.submit([encoder.finish()]);
-
-        let slice = buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        self.ctx
-            .device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            })
-            .map_err(gpu_err)?;
-        rx.recv().map_err(gpu_err)?.map_err(gpu_err)?;
-
-        let mapped = slice.get_mapped_range();
-        let mut out = Vec::with_capacity(unpadded * h as usize);
-        for row in 0..h as usize {
-            let start = row * padded;
-            out.extend_from_slice(&mapped[start..start + unpadded]);
-        }
-        drop(mapped);
-        buffer.unmap();
-        Ok(out)
+        read_texture_plane(
+            &self.ctx.device,
+            &self.ctx.queue,
+            texture,
+            wgpu::TextureAspect::All,
+            (*width, *height),
+            RGBA_BYTES_PER_PIXEL,
+        )
     }
 }
+
+/// Bytes per pixel of the RGBA8 offscreen target.
+const RGBA_BYTES_PER_PIXEL: u32 = 4;
 
 impl AsyncElement for WgpuSink {
     type ProcessFuture<'a>

@@ -45,7 +45,6 @@ Codecs and parsers:
 
 Raw video and GPU:
 
-- `wgpusink` and `wgpucompositor` hand-write readback.
 
 Audio:
 
