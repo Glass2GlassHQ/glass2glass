@@ -802,7 +802,8 @@ where
             // ends the arm. In non-live `Paused` the gate admits exactly one
             // buffer (this sink's preroll frame) before it holds.
             if let Some(sc) = &state_for_sink {
-                if sc.flow_gate(prerolled_self, preroll_gen).await == Flow::Stop {
+                if !sc.is_playing() && sc.flow_gate(prerolled_self, preroll_gen).await == Flow::Stop
+                {
                     return Ok::<u64, G2gError>(consumed);
                 }
                 // M360: a `request_repreroll` (paused flushing seek) bumped the

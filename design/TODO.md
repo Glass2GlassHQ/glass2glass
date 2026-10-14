@@ -48,8 +48,6 @@ Bugs:
 
 Core runtime:
 
-- `FlowGate` takes the shared lock per frame in Playing. Check the state
-  atomically first.
 - Each push takes about six spin locks. Lock only when a signal flag is set.
 - `park_or_tick` builds a new boxed sleep per park.
 - Mutator runs drive every element through `DynRef` (a boxed future per packet).

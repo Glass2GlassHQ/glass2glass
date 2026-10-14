@@ -4630,7 +4630,7 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
         // draining its edge and backpressure stalls the DAG upstream. Non-live
         // `Paused` admits this sink's one preroll buffer; `Null` ends the arm.
         if let Some(sc) = &state {
-            if sc.flow_gate(prerolled_self, preroll_gen).await == Flow::Stop {
+            if !sc.is_playing() && sc.flow_gate(prerolled_self, preroll_gen).await == Flow::Stop {
                 return Ok(consumed);
             }
             // M360: a `request_repreroll` (paused flushing seek) bumped the

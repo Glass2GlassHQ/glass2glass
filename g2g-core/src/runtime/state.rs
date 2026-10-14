@@ -409,6 +409,11 @@ impl Future for FlowGate {
     type Output = Flow;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Flow> {
+        match PipelineState::from_u8(self.inner.state.load(Ordering::Acquire)) {
+            PipelineState::Null => return Poll::Ready(Flow::Stop),
+            PipelineState::Playing => return Poll::Ready(Flow::Go),
+            PipelineState::Ready | PipelineState::Paused => {}
+        }
         // Hold the waker lock across the state load + park. `set_state` takes
         // the same lock to drain/wake *after* swapping the state, so either we
         // observe the new state here (and return Ready) or we park the waker
