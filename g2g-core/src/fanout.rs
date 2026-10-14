@@ -1293,7 +1293,6 @@ mod tests {
     use crate::frame::{Frame, FrameTiming};
     use crate::memory::{MemoryDomain, SystemSlice};
     use core::future::Future;
-    use core::pin::Pin;
 
     fn caps() -> Caps {
         Caps::RawVideo {
@@ -1382,12 +1381,10 @@ mod tests {
     }
 
     /// Single-poll block_on; all futures here resolve immediately.
-    fn block_on<F: Future>(mut fut: F) -> F::Output {
+    fn block_on<F: Future>(fut: F) -> F::Output {
         use core::task::{Context, Poll, Waker};
         let mut cx = Context::from_waker(Waker::noop());
-        // SAFETY: `fut` is pinned to the stack for the duration of this call.
-        let mut pinned = unsafe { Pin::new_unchecked(&mut fut) };
-        match pinned.as_mut().poll(&mut cx) {
+        match core::pin::pin!(fut).poll(&mut cx) {
             Poll::Ready(v) => v,
             Poll::Pending => panic!("fanout::tests::block_on saw Pending"),
         }

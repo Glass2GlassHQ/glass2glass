@@ -470,11 +470,7 @@ mod tests {
     /// of the drop-safety test below.
     fn poll_once<F: Future>(fut: F) -> Poll<F::Output> {
         let mut cx = Context::from_waker(Waker::noop());
-        let mut fut = fut;
-        // SAFETY: `fut` lives on this stack frame and is not moved after
-        // pinning; it is dropped when the frame returns.
-        let pinned = unsafe { Pin::new_unchecked(&mut fut) };
-        pinned.poll(&mut cx)
+        core::pin::pin!(fut).poll(&mut cx)
     }
 
     #[test]
@@ -532,12 +528,11 @@ mod tests {
     /// control messages, channel closure) rather than waiting on an external
     /// wake.
     #[cfg(feature = "std")]
-    fn spin<F: Future>(mut fut: F) -> F::Output {
+    fn spin<F: Future>(fut: F) -> F::Output {
         let mut cx = Context::from_waker(Waker::noop());
+        let mut fut = core::pin::pin!(fut);
         loop {
-            // SAFETY: `fut` stays on this frame and is not moved after pinning.
-            let p = unsafe { Pin::new_unchecked(&mut fut) };
-            if let Poll::Ready(v) = p.poll(&mut cx) {
+            if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
                 return v;
             }
         }

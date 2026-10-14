@@ -219,7 +219,6 @@ mod tests {
     use super::*;
     use crate::caps::{Caps, Dim, Rate, RawVideoFormat};
     use core::future::Future;
-    use core::pin::Pin;
     use core::task::{Context, Poll, Waker};
 
     /// Busy-poll a future to completion. Every channel op in these tests
@@ -227,10 +226,7 @@ mod tests {
     /// senders close deterministically), so this never spins.
     fn block_on<F: Future>(fut: F) -> F::Output {
         let mut cx = Context::from_waker(Waker::noop());
-        let mut fut = fut;
-        // SAFETY: `fut` lives on this stack frame and is not moved after
-        // pinning.
-        let mut pinned = unsafe { Pin::new_unchecked(&mut fut) };
+        let mut pinned = core::pin::pin!(fut);
         loop {
             if let Poll::Ready(v) = pinned.as_mut().poll(&mut cx) {
                 return v;

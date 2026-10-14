@@ -276,12 +276,10 @@ mod tests {
 
     /// Block on a future using a noop waker; sufficient because all the
     /// futures in these tests resolve in a single poll.
-    fn block_on<F: Future>(mut fut: F) -> F::Output {
+    fn block_on<F: Future>(fut: F) -> F::Output {
         use core::task::{Context, Poll, Waker};
         let mut cx = Context::from_waker(Waker::noop());
-        // SAFETY: pin to stack for duration of fn.
-        let mut pinned = unsafe { Pin::new_unchecked(&mut fut) };
-        match pinned.as_mut().poll(&mut cx) {
+        match core::pin::pin!(fut).poll(&mut cx) {
             Poll::Ready(v) => v,
             Poll::Pending => panic!("slot::tests::block_on saw Pending"),
         }

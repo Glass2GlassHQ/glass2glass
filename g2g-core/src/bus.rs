@@ -345,15 +345,12 @@ impl Bus {
 mod tests {
     use super::*;
     use core::future::Future;
-    use core::pin::Pin;
 
     /// Single-poll block_on; the bus futures here resolve immediately.
-    fn block_on<F: Future>(mut fut: F) -> F::Output {
+    fn block_on<F: Future>(fut: F) -> F::Output {
         use core::task::{Context, Poll, Waker};
         let mut cx = Context::from_waker(Waker::noop());
-        // SAFETY: `fut` is pinned to the stack for the duration of this call.
-        let mut pinned = unsafe { Pin::new_unchecked(&mut fut) };
-        match pinned.as_mut().poll(&mut cx) {
+        match core::pin::pin!(fut).poll(&mut cx) {
             Poll::Ready(v) => v,
             Poll::Pending => panic!("bus::tests::block_on saw Pending"),
         }

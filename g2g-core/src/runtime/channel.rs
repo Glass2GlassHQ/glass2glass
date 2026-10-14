@@ -1618,15 +1618,11 @@ mod link_tests {
     use crate::memory::{MemoryDomain, SystemSlice};
     use alloc::boxed::Box;
     use alloc::vec::Vec;
-    use core::pin::Pin;
     use core::task::{Context, Poll, Waker};
 
-    fn run_to_ready<F: core::future::Future>(mut fut: F) -> F::Output {
+    fn run_to_ready<F: core::future::Future>(fut: F) -> F::Output {
         let mut cx = Context::from_waker(Waker::noop());
-        // SAFETY: `fut` lives on the stack for the duration of this fn
-        // and we never move it after pinning.
-        let mut pinned = unsafe { Pin::new_unchecked(&mut fut) };
-        match pinned.as_mut().poll(&mut cx) {
+        match core::pin::pin!(fut).poll(&mut cx) {
             Poll::Ready(v) => v,
             Poll::Pending => panic!("link_tests::run_to_ready saw Pending"),
         }
