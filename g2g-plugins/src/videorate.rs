@@ -28,7 +28,6 @@ use g2g_core::caps::{
     framerate_q16_from_fraction, framerate_q16_period_ns, framerate_q16_to_fraction,
 };
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsTransform, ConfigureOutcome, Dim, ElementMetadata,
     FieldTransform, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError,
@@ -37,7 +36,8 @@ use g2g_core::{
 
 #[derive(Debug)]
 struct HeldFrame {
-    bytes: Box<[u8]>,
+    /// Made shareable once, so each repeat is a handle share.
+    domain: MemoryDomain,
     pts_ns: u64,
     arrival_ns: u64,
     capture_ns: u64,
@@ -161,14 +161,14 @@ impl VideoRate {
 
     async fn emit_held(
         &mut self,
-        held_bytes: &[u8],
+        domain: MemoryDomain,
         arrival_ns: u64,
         capture_ns: u64,
         slot_pts: u64,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(held_bytes.into())),
+            domain,
             timing: FrameTiming {
                 pts_ns: slot_pts,
                 dts_ns: slot_pts,
@@ -314,11 +314,12 @@ impl AsyncElement for VideoRate {
                         return Err(G2gError::NotConfigured);
                     }
                     let (format, w, h) = self.input.ok_or(G2gError::NotConfigured)?;
-                    let slice = frame
+                    frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let cur_pts = frame.timing.pts_ns;
-                    let cur_bytes: Box<[u8]> = slice.into();
+                    let mut cur_domain = frame.domain;
+                    cur_domain.make_shareable();
 
                     // fill the output slots the held frame still owns, then
                     // make the new frame the held one.
@@ -332,20 +333,21 @@ impl AsyncElement for VideoRate {
                         None => (Vec::new(), cur_pts),
                     };
                     if !slots.is_empty() {
-                        let (bytes, arrival, capture) = {
+                        let (held, arrival, capture) = {
                             let p = self.prev.as_ref().expect("slots imply a held frame");
-                            (p.bytes.clone(), p.arrival_ns, p.capture_ns)
+                            (p.domain.share(), p.arrival_ns, p.capture_ns)
                         };
                         if let Some(caps) = self.caps_to_emit(format, w, h) {
                             out.push(PipelinePacket::CapsChanged(caps)).await?;
                         }
                         for slot in slots {
-                            self.emit_held(&bytes, arrival, capture, slot, out).await?;
+                            self.emit_held(held.share(), arrival, capture, slot, out)
+                                .await?;
                         }
                     }
                     self.next_pts = Some(new_next);
                     self.prev = Some(HeldFrame {
-                        bytes: cur_bytes,
+                        domain: cur_domain,
                         pts_ns: cur_pts,
                         arrival_ns: frame.timing.arrival_ns,
                         capture_ns: frame.timing.capture_ns,
@@ -382,7 +384,7 @@ impl AsyncElement for VideoRate {
                             if let Some(caps) = self.caps_to_emit(format, w, h) {
                                 out.push(PipelinePacket::CapsChanged(caps)).await?;
                             }
-                            self.emit_held(&p.bytes, p.arrival_ns, p.capture_ns, slot, out)
+                            self.emit_held(p.domain, p.arrival_ns, p.capture_ns, slot, out)
                                 .await?;
                         }
                     }
@@ -485,6 +487,44 @@ mod tests {
         assert!(out.iter().all(|&t| t % DT_10 == 0));
         // ~1-in-3 of the 9 inputs (the final frame is flushed on EOS, not here).
         assert_eq!(out.len(), 3, "got {out:?}");
+    }
+
+    #[test]
+    fn repeated_frames_share_one_buffer() {
+        const SIDE: u32 = 2;
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(SIDE),
+            height: Dim::Fixed(SIDE),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        let mut rate = VideoRate::new(60.0);
+        rate.configure_pipeline(&caps).unwrap();
+        let mut sink = crate::testutil::CollectSink::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        for k in 0..2u64 {
+            let mut frame = crate::testutil::frame(vec![0u8; (SIDE * SIDE * 4) as usize]);
+            frame.timing.pts_ns = k * STEP_30;
+            runtime
+                .block_on(rate.process(PipelinePacket::DataFrame(frame), &mut sink))
+                .unwrap();
+        }
+        let repeats: Vec<*const u8> = sink
+            .packets
+            .iter()
+            .filter_map(|packet| match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    Some(frame.domain.as_system_slice().unwrap().as_ptr())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(repeats.len(), 2, "the first input fills two 60 fps slots");
+        assert_eq!(repeats[0], repeats[1], "the repeat is a deep copy");
     }
 
     #[test]

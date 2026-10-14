@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1338: `videorate` repeats share the held buffer instead of copying it.
 - M1337: pixel filters edit the frame's own buffer instead of copying it.
 - M1336: `gamma`, `videobalance` and `alpha` run on the shared videofx loop and forward `CapsChanged`.
 - M1335: raw video format names and parsing come from g2g-core everywhere, so every format round-trips through the `format` property.
