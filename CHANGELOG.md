@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1303: one H.264 SPS and VUI parser serves the parsers and Vulkan Video.
 - M1302: ffmpeg encode reuses its input frame and offload decode copies each access unit once.
 - M1301: NVENC registers each input surface once.
 - M1300: Vulkan decode reuses mapped bitstream and readback buffers and emits decoded frames without a copy.

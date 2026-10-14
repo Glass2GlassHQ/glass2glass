@@ -134,6 +134,8 @@ pub mod mux;
 // Access-unit framing shared by the NAL and start-code elementary-stream parsers.
 pub mod access_unit;
 pub mod nalparse;
+// The H.264 / H.265 VUI walk shared by the parsers and the Vulkan decoder.
+mod vui;
 // Shared access-unit framing for the start-code elementary streams that are not
 // NAL streams (MPEG-1/2 video, MPEG-4 Part 2, VC-1).
 pub mod startcodeparse;

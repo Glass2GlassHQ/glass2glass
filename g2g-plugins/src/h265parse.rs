@@ -338,30 +338,8 @@ fn parse_vui_framerate(
 
     // vui_parameters() (E.2.1) down to timing_info. The head mirrors H.264's,
     // then HEVC inserts four flags and the default display window.
-    if br.read_bit()? == 1 {
-        // aspect_ratio_info_present_flag; 255 = Extended_SAR.
-        if br.read_bits(8)? == 255 {
-            br.read_bits(16)?; // sar_width
-            br.read_bits(16)?; // sar_height
-        }
-    }
-    if br.read_bit()? == 1 {
-        br.read_bit()?; // overscan_appropriate_flag
-    }
-    if br.read_bit()? == 1 {
-        // video_signal_type_present_flag
-        br.read_bits(3)?; // video_format
-        let video_full_range_flag = br.read_bit()? == 1;
-        // colour_description_present_flag; absent leaves the CICP codepoints
-        // at unspecified (2), which maps to Unknown.
-        let (mut primaries, mut transfer, mut matrix) = (2u8, 2u8, 2u8);
-        if br.read_bit()? == 1 {
-            primaries = br.read_bits(8)? as u8;
-            transfer = br.read_bits(8)? as u8;
-            matrix = br.read_bits(8)? as u8;
-        }
-        tail.colorimetry =
-            Colorimetry::from_cicp(primaries, transfer, matrix, video_full_range_flag);
+    if let Some(signal) = crate::vui::read_vui_signal_type(br)? {
+        tail.colorimetry = signal.colorimetry();
     }
     if br.read_bit()? == 1 {
         // chroma_loc_info_present_flag

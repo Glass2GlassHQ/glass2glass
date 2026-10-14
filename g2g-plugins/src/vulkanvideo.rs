@@ -394,6 +394,7 @@ pub fn aligned_extent(extent: (u32, u32), granularity: (u32, u32)) -> (u32, u32)
 // ============================================================================
 
 use crate::annexb::{nal_units_any, strip_emulation_prevention, BitReader};
+use crate::vui::VideoSignalType;
 
 /// Parsed H.264 sequence parameter set, the fields the `Std*` SPS needs. Plain
 /// data, no bitstream cursor. Baseline / main / high 4:2:0 8-bit; scaling
@@ -481,236 +482,76 @@ pub struct H264ParameterSets {
     pub pps: H264Pps,
 }
 
-/// Profiles carrying the chroma / bit-depth / scaling header block.
-fn is_high_profile(profile_idc: u8) -> bool {
-    matches!(
-        profile_idc,
-        100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
-    )
-}
-
-/// The colour fields at the head of an H.264 / H.265 VUI, whose layout is
-/// identical in both codecs: aspect ratio, overscan, then the `video_signal_type`
-/// block carrying `video_full_range_flag` and the optional CICP colour
-/// description. Reads from the bit position just after `vui_parameters_present_flag`
-/// (the caller checks that flag). Returns `(color_primaries, transfer_characteristics,
-/// matrix_coefficients, video_full_range_flag)` as CICP codepoints (2 = unspecified);
-/// any field not coded keeps its unspecified default. `None` only on truncation, so
-/// the caller can fall back to unspecified.
-fn parse_vui_color(br: &mut BitReader) -> Option<(u8, u8, u8, bool)> {
-    let (mut primaries, mut transfer, mut matrix, mut full_range) = (2u8, 2u8, 2u8, false);
-    // aspect_ratio_info_present_flag
-    if br.read_bit()? == 1 {
-        let idc = br.read_bits(8)?;
-        // Extended_SAR: explicit sar_width / sar_height follow.
-        if idc == 255 {
-            br.read_bits(16)?;
-            br.read_bits(16)?;
-        }
-    }
-    // overscan_info_present_flag -> overscan_appropriate_flag
-    if br.read_bit()? == 1 {
-        br.read_bit()?;
-    }
-    // video_signal_type_present_flag -> video_format, full_range, colour desc
-    if br.read_bit()? == 1 {
-        br.read_bits(3)?; // video_format
-        full_range = br.read_bit()? == 1;
-        if br.read_bit()? == 1 {
-            primaries = br.read_bits(8)? as u8;
-            transfer = br.read_bits(8)? as u8;
-            matrix = br.read_bits(8)? as u8;
-        }
-    }
-    Some((primaries, transfer, matrix, full_range))
-}
-
-/// Skip an H.264 `hrd_parameters()` block (E.1.2). `None` on truncation or a
-/// bogus CPB count.
-fn skip_h264_hrd(br: &mut BitReader) -> Option<()> {
-    let cpb_cnt_minus1 = br.read_ue()?;
-    // cpb_cnt_minus1 is 0..31 by spec; a larger value means a desynced parse.
-    if cpb_cnt_minus1 > 31 {
-        return None;
-    }
-    br.read_bits(4)?; // bit_rate_scale
-    br.read_bits(4)?; // cpb_size_scale
-    for _ in 0..=cpb_cnt_minus1 {
-        br.read_ue()?; // bit_rate_value_minus1
-        br.read_ue()?; // cpb_size_value_minus1
-        br.read_bit()?; // cbr_flag
-    }
-    br.read_bits(5)?; // initial_cpb_removal_delay_length_minus1
-    br.read_bits(5)?; // cpb_removal_delay_length_minus1
-    br.read_bits(5)?; // dpb_output_delay_length_minus1
-    br.read_bits(5)?; // time_offset_length
-    Some(())
-}
-
-/// Continue an H.264 VUI from just past the colour prefix ([`parse_vui_color`]'s
-/// end position) to the `bitstream_restriction` block and return its
-/// `max_num_reorder_frames`. `None` when the block is absent or the VUI is
-/// truncated (callers fall back to the DPB size).
-fn parse_h264_vui_reorder(br: &mut BitReader) -> Option<u8> {
-    // chroma_loc_info_present_flag
-    if br.read_bit()? == 1 {
-        br.read_ue()?; // chroma_sample_loc_type_top_field
-        br.read_ue()?; // chroma_sample_loc_type_bottom_field
-    }
-    // timing_info_present_flag
-    if br.read_bit()? == 1 {
-        br.read_bits(32)?; // num_units_in_tick
-        br.read_bits(32)?; // time_scale
-        br.read_bit()?; // fixed_frame_rate_flag
-    }
-    let nal_hrd = br.read_bit()? == 1;
-    if nal_hrd {
-        skip_h264_hrd(br)?;
-    }
-    let vcl_hrd = br.read_bit()? == 1;
-    if vcl_hrd {
-        skip_h264_hrd(br)?;
-    }
-    if nal_hrd || vcl_hrd {
-        br.read_bit()?; // low_delay_hrd_flag
-    }
-    br.read_bit()?; // pic_struct_present_flag
-                    // bitstream_restriction_flag
-    if br.read_bit()? != 1 {
-        return None;
-    }
-    br.read_bit()?; // motion_vectors_over_pic_boundaries_flag
-    br.read_ue()?; // max_bytes_per_pic_denom
-    br.read_ue()?; // max_bits_per_mb_denom
-    br.read_ue()?; // log2_max_mv_length_horizontal
-    br.read_ue()?; // log2_max_mv_length_vertical
-    let reorder = br.read_ue()?;
-    // max_dec_frame_buffering follows; the reorder bound is all we need. A value
-    // past the 16-frame DPB ceiling means a desynced parse: discard it.
-    if reorder > 16 {
-        return None;
-    }
-    Some(reorder as u8)
-}
-
 const H264_MACROBLOCK_SIZE: u32 = 16;
 
 /// Parse an SPS RBSP (the bytes after the NAL header, emulation-prevention
 /// already stripped). `None` on truncation or an unsupported feature.
 pub fn parse_h264_sps(rbsp: &[u8]) -> Option<H264Sps> {
-    if rbsp.len() < 3 {
+    let (head, mut br) = crate::h264parse::parse_h264_sps_head(rbsp)?;
+    // Separate colour planes (4:4:4 planar) and custom scaling matrices (we pass
+    // no scaling lists) are unsupported: reject rather than mis-decode.
+    if head.poc.separate_colour_plane_flag || head.seq_scaling_matrix_present {
         return None;
     }
-    let profile_idc = rbsp[0];
-    let level_idc = rbsp[2];
-    let mut br = BitReader::new(&rbsp[3..]);
-
-    let seq_parameter_set_id = br.read_ue()?;
-
-    let mut chroma_format_idc = 1u32;
-    let mut bit_depth_luma_minus8 = 0u32;
-    let mut bit_depth_chroma_minus8 = 0u32;
-    if is_high_profile(profile_idc) {
-        chroma_format_idc = br.read_ue()?;
-        if chroma_format_idc == 3 {
-            // separate_colour_plane_flag: unsupported (4:4:4 planar), reject.
-            if br.read_bit()? == 1 {
-                return None;
-            }
-        }
-        bit_depth_luma_minus8 = br.read_ue()?;
-        bit_depth_chroma_minus8 = br.read_ue()?;
-        let _qpprime_y_zero_transform_bypass_flag = br.read_bit()?;
-        // Custom scaling matrices: unsupported (we pass no scaling lists), reject.
-        if br.read_bit()? == 1 {
-            return None;
-        }
-    }
-
-    let log2_max_frame_num_minus4 = br.read_ue()?;
-    if log2_max_frame_num_minus4 > crate::poc::MAX_LOG2_MINUS4 {
-        return None;
-    }
-    let mut poc = crate::poc::SpsPocParams::default();
-    crate::poc::read_h264_poc_block(&mut br, &mut poc)?;
-    let pic_order_cnt_type = u32::from(poc.pic_order_cnt_type);
-    let log2_max_pic_order_cnt_lsb_minus4 = poc.log2_max_pic_order_cnt_lsb.saturating_sub(4);
     // POC type 1 with a ref-frame offset cycle needs pOffsetForRefFrame; we
     // do not carry it, so reject rather than mis-decode.
-    if !poc.offsets_for_ref_frame.is_empty() {
+    if !head.poc.offsets_for_ref_frame.is_empty() {
         return None;
     }
-    let max_num_ref_frames = br.read_ue()?;
-    let gaps_in_frame_num_value_allowed_flag = br.read_bit()?;
-
-    let pic_width_in_mbs_minus1 = br.read_ue()?;
-    let pic_height_in_map_units_minus1 = br.read_ue()?;
-    let frame_mbs_only_flag = br.read_bit()?;
+    let frame_mbs_only_flag = u32::from(head.poc.frame_mbs_only_flag);
     // `H264Sps::coded_extent` multiplies these out unchecked
-    pic_width_in_mbs_minus1
+    head.pic_width_in_mbs_minus1
         .checked_add(1)?
         .checked_mul(H264_MACROBLOCK_SIZE)?;
-    pic_height_in_map_units_minus1
+    head.pic_height_in_map_units_minus1
         .checked_add(1)?
         .checked_mul(H264_MACROBLOCK_SIZE)?
         .checked_mul(2 - frame_mbs_only_flag)?;
-    let mut mb_adaptive_frame_field_flag = 0u32;
-    if frame_mbs_only_flag == 0 {
-        mb_adaptive_frame_field_flag = br.read_bit()?;
-    }
-    let direct_8x8_inference_flag = br.read_bit()?;
 
-    let frame_cropping_flag = br.read_bit()?;
-    let (crop_l, crop_r, crop_t, crop_b) = if frame_cropping_flag == 1 {
-        (br.read_ue()?, br.read_ue()?, br.read_ue()?, br.read_ue()?)
-    } else {
-        (0, 0, 0, 0)
-    };
-
-    // VUI (optional): read the colour prefix for the YUV -> RGB conversion, then
-    // continue to the bitstream-restriction reorder bound. Best-effort: a
+    // VUI (optional): read the colour description for the YUV -> RGB conversion,
+    // then continue to the bitstream-restriction reorder bound. Best-effort: a
     // truncated / absent VUI leaves the colour unspecified and the bound `None`.
-    let mut max_num_reorder_frames = None;
-    let (color_primaries, transfer_characteristics, matrix_coefficients, video_full_range_flag) =
-        if br.read_bit().unwrap_or(0) == 1 {
-            match parse_vui_color(&mut br) {
-                Some(color) => {
-                    max_num_reorder_frames = parse_h264_vui_reorder(&mut br);
-                    color
-                }
-                None => (2, 2, 2, false),
-            }
-        } else {
-            (2, 2, 2, false)
-        };
+    let (signal, max_num_reorder_frames) = if br.read_bit().unwrap_or(0) == 1 {
+        match crate::vui::read_vui_signal_type(&mut br) {
+            Some(signal) => (
+                signal.unwrap_or(VideoSignalType::UNSPECIFIED),
+                crate::vui::read_h264_vui_tail(&mut br).max_num_reorder_frames,
+            ),
+            None => (VideoSignalType::UNSPECIFIED, None),
+        }
+    } else {
+        (VideoSignalType::UNSPECIFIED, None)
+    };
+    let [crop_l, crop_r, crop_t, crop_b] = head.frame_crop_offsets;
 
     Some(H264Sps {
-        profile_idc,
-        level_idc,
-        seq_parameter_set_id: seq_parameter_set_id as u8,
-        chroma_format_idc: chroma_format_idc as u8,
-        bit_depth_luma_minus8: bit_depth_luma_minus8 as u8,
-        bit_depth_chroma_minus8: bit_depth_chroma_minus8 as u8,
-        log2_max_frame_num_minus4: log2_max_frame_num_minus4 as u8,
-        pic_order_cnt_type: pic_order_cnt_type as u8,
-        log2_max_pic_order_cnt_lsb_minus4: log2_max_pic_order_cnt_lsb_minus4 as u8,
-        delta_pic_order_always_zero_flag: u8::from(poc.delta_pic_order_always_zero_flag),
-        max_num_ref_frames: max_num_ref_frames as u8,
-        pic_width_in_mbs_minus1,
-        pic_height_in_map_units_minus1,
+        profile_idc: head.profile_idc,
+        level_idc: head.level_idc,
+        seq_parameter_set_id: head.seq_parameter_set_id as u8,
+        chroma_format_idc: head.chroma_format_idc as u8,
+        bit_depth_luma_minus8: head.bit_depth_luma_minus8 as u8,
+        bit_depth_chroma_minus8: head.bit_depth_chroma_minus8 as u8,
+        log2_max_frame_num_minus4: (head.poc.log2_max_frame_num - 4) as u8,
+        pic_order_cnt_type: head.poc.pic_order_cnt_type,
+        log2_max_pic_order_cnt_lsb_minus4: head.poc.log2_max_pic_order_cnt_lsb.saturating_sub(4)
+            as u8,
+        delta_pic_order_always_zero_flag: u8::from(head.poc.delta_pic_order_always_zero_flag),
+        max_num_ref_frames: head.max_num_ref_frames as u8,
+        pic_width_in_mbs_minus1: head.pic_width_in_mbs_minus1,
+        pic_height_in_map_units_minus1: head.pic_height_in_map_units_minus1,
         frame_mbs_only_flag: frame_mbs_only_flag as u8,
-        mb_adaptive_frame_field_flag: mb_adaptive_frame_field_flag as u8,
-        direct_8x8_inference_flag: direct_8x8_inference_flag as u8,
-        gaps_in_frame_num_value_allowed_flag: gaps_in_frame_num_value_allowed_flag as u8,
-        frame_cropping_flag: frame_cropping_flag as u8,
+        mb_adaptive_frame_field_flag: u8::from(head.mb_adaptive_frame_field_flag),
+        direct_8x8_inference_flag: u8::from(head.direct_8x8_inference_flag),
+        gaps_in_frame_num_value_allowed_flag: u8::from(head.gaps_in_frame_num_value_allowed_flag),
+        frame_cropping_flag: u8::from(head.frame_cropping_flag),
         frame_crop_left_offset: crop_l,
         frame_crop_right_offset: crop_r,
         frame_crop_top_offset: crop_t,
         frame_crop_bottom_offset: crop_b,
-        color_primaries,
-        transfer_characteristics,
-        matrix_coefficients,
-        video_full_range_flag,
+        color_primaries: signal.color_primaries,
+        transfer_characteristics: signal.transfer_characteristics,
+        matrix_coefficients: signal.matrix_coefficients,
+        video_full_range_flag: signal.video_full_range_flag,
         max_num_reorder_frames,
     })
 }
@@ -1256,12 +1097,19 @@ pub fn parse_h265_sps(rbsp: &[u8]) -> Option<H265Sps> {
     // The Std mapping needs nothing past here, but the VUI colour description
     // (same layout as H.264's) drives the YUV -> RGB conversion. Best-effort: a
     // truncated / absent VUI leaves the colour unspecified.
-    let (color_primaries, transfer_characteristics, matrix_coefficients, video_full_range_flag) =
-        if br.read_bit().unwrap_or(0) == 1 {
-            parse_vui_color(&mut br).unwrap_or((2, 2, 2, false))
-        } else {
-            (2, 2, 2, false)
-        };
+    let signal = if br.read_bit().unwrap_or(0) == 1 {
+        crate::vui::read_vui_signal_type(&mut br)
+            .flatten()
+            .unwrap_or(VideoSignalType::UNSPECIFIED)
+    } else {
+        VideoSignalType::UNSPECIFIED
+    };
+    let VideoSignalType {
+        color_primaries,
+        transfer_characteristics,
+        matrix_coefficients,
+        video_full_range_flag,
+    } = signal;
 
     Some(H265Sps {
         sps_video_parameter_set_id,
