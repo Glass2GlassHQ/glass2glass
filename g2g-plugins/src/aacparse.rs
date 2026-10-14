@@ -659,6 +659,7 @@ pub(crate) mod test_frames {
     }
 
     /// One 48 kHz stereo AAC-LC access unit carrying `payload`.
+    #[cfg(feature = "std")]
     pub(crate) fn adts_au(payload: &[u8]) -> Vec<u8> {
         const STEREO: u8 = 2;
         const FREQ_INDEX_48000: u8 = 3;

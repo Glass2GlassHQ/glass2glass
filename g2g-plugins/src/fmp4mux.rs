@@ -702,6 +702,15 @@ mod tests {
     }
 
     #[test]
+    fn avcc_sample_drops_empty_nalus() {
+        let nalus: Vec<&[u8]> = vec![&[0x67, 1], &[], &[0x65, 3]];
+        assert_eq!(
+            avcc_sample(&nalus),
+            vec![0, 0, 0, 2, 0x67, 1, 0, 0, 0, 2, 0x65, 3]
+        );
+    }
+
+    #[test]
     fn ns_to_timescale_is_90khz() {
         assert_eq!(ns_to_timescale(1_000_000_000), 90_000);
         assert_eq!(ns_to_timescale(33_333_333), 2999);

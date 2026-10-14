@@ -515,7 +515,8 @@ pub(crate) fn parameter_sets<'a>(
 /// length (parameter sets stay in-band, which fMP4 players accept).
 pub(crate) fn avcc_sample(nalus: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::new();
-    for n in nalus {
+    // adjacent start codes split out an empty NAL, which readers refuse
+    for n in nalus.iter().filter(|n| !n.is_empty()) {
         out.extend_from_slice(&(n.len() as u32).to_be_bytes());
         out.extend_from_slice(n);
     }

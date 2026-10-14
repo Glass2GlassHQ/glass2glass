@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1395: MP4 muxers drop the empty NAL that adjacent start codes split out, which the strict length-prefixed reader refused.
 - M1373: `webortdetect` reads fixed caps dimensions through `Dim::fixed`.
 - M1372: g2g-ml shares one RGBA-to-NCHW converter and one f32 byte codec, and a short RGBA frame in `burninfer` fails instead of panicking.
 - M1371: `wgpupreprocess` uploads frames without a padded copy, and wgpu readbacks reuse one staging buffer per element.
