@@ -34,10 +34,6 @@ Bugs:
   accepts 5 of 15 formats. Use one GStreamer format-name table from core.
 - `gamma`, `videobalance` and `alpha` swallow incoming `CapsChanged`. Move them
   onto `PixelFilter`.
-- `run_source_transform_sink` fails a startup `ReFixate` with `FixationFailed`
-  instead of retrying (it runs through `run_graph` since M1320).
-- Run `cargo semver-checks` on g2g-core for M1284 (`Gate`/`Router` `ProcessFuture`
-  types) and M1285 (new `DynAsyncElement` provided methods).
 - `VideoTestSrc::with_shared_memory` keeps every emitted frame.
 
 Core, bindings, ML:

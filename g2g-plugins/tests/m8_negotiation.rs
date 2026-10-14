@@ -11,11 +11,12 @@ use std::sync::Mutex;
 
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{run_simple_pipeline, SourceLoop};
+use g2g_core::runtime::{run_simple_pipeline, run_source_transform_sink, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock,
     PipelinePacket, PushOutcome, Rate, RawVideoFormat, Reconfigure,
 };
+use g2g_plugins::identity::IdentityTransform;
 
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -305,6 +306,45 @@ async fn phase3_refixate_gives_up_after_bounded_attempts() {
     let clock = ZeroClock;
 
     let err = run_simple_pipeline(&mut src, &mut snk, &clock, 4)
+        .await
+        .expect_err("infinite refixate must fail");
+    assert_eq!(err, G2gError::FixationFailed);
+}
+
+#[tokio::test]
+async fn transform_chain_refixate_restarts_negotiation_with_counter() {
+    let mut src = StaticCapsSrc {
+        proposal: caps_at(640, 480),
+    };
+    let mut tx = IdentityTransform::new();
+    let counter = caps_at(320, 240);
+    let mut snk = RefixateOnceSink::new(counter.clone());
+    let clock = ZeroClock;
+
+    run_source_transform_sink(&mut src, &mut tx, &mut snk, &clock, 4)
+        .await
+        .expect("bounded retry must converge through a transform");
+
+    assert_eq!(snk.configures, 2, "sink must see two configure attempts");
+    assert_eq!(
+        snk.last_accepted_caps.as_ref(),
+        Some(&counter),
+        "second attempt must use the sink's counter-proposal"
+    );
+}
+
+#[tokio::test]
+async fn transform_chain_refixate_gives_up_after_bounded_attempts() {
+    let mut src = StaticCapsSrc {
+        proposal: caps_at(640, 480),
+    };
+    let mut tx = IdentityTransform::new();
+    let mut snk = AlwaysRefixateSink {
+        counter: caps_at(320, 240),
+    };
+    let clock = ZeroClock;
+
+    let err = run_source_transform_sink(&mut src, &mut tx, &mut snk, &clock, 4)
         .await
         .expect_err("infinite refixate must fail");
     assert_eq!(err, G2gError::FixationFailed);

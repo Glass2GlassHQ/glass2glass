@@ -1860,7 +1860,8 @@ where
 /// aliasing). The output emits one `Eos` after every input has ended.
 ///
 /// Negotiation is per-input: each source ↔ its muxer pad fixate independently;
-/// the sink is configured against `mux.output_caps()`. A `ReFixate` anywhere
+/// the sink is configured against `mux.output_caps()`. A pad's `ReFixate`
+/// restarts negotiation with the counter as that pad's source caps, a sink's
 /// fails with `FixationFailed`.
 ///
 /// When `clock` can sleep on a deadline ([`PipelineClock::as_ticker`], which every

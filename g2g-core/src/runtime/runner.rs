@@ -32,10 +32,10 @@ use crate::runtime::state::StateController;
 #[cfg(feature = "std")]
 use crate::segment::Segment;
 
-/// Startup negotiation passes before [`run_simple_pipeline`] gives up with
-/// `FixationFailed`: enough for a source, sink, source counter-proposal chain.
+/// Startup negotiation passes before a runner gives up with `FixationFailed`:
+/// enough for a source, sink, source counter-proposal chain.
 #[cfg(feature = "std")]
-const MAX_FIXATION_ATTEMPTS: u32 = 3;
+pub(crate) const MAX_FIXATION_ATTEMPTS: u32 = 3;
 
 /// Pick the most informative error from a pipeline's arm results. A closed-link
 /// `Shutdown` is usually the *consequence* of another arm erroring first (it
@@ -1446,6 +1446,8 @@ where
 ///
 /// Negotiation runs the solver over all `N + 2` constraints at once and
 /// configures each element with its input-side caps (the source with link 0).
+/// A startup `ReFixate` restarts negotiation with the counter as the source's
+/// caps, up to `MAX_FIXATION_ATTEMPTS` passes.
 /// Data flows over `N + 1` bounded links across `N + 2` concurrently-joined
 /// arms. On a mid-stream `CapsChanged` each interior element re-fixates its
 /// output against a downstream feasibility snapshot (Caps-α), re-allocates its
@@ -1456,8 +1458,7 @@ where
 ///
 /// Owed: Caps-β, a forward coordinator re-solve walk for a downstream
 /// `DerivedOutput` element that must re-derive mid-stream (driver-gated,
-/// design/caps.md). ReFixate at startup fails loud
-/// (`FixationFailed`), as in `run_source_fanout`.
+/// design/caps.md).
 #[cfg(feature = "std")]
 pub async fn run_linear_chain<Src, Snk, Clk>(
     source: &mut Src,

@@ -92,6 +92,7 @@ use crate::runtime::progress::PipelineProgress;
 use crate::runtime::property_mailbox::{drain_properties, PropertyMailbox};
 use crate::runtime::runner::{
     re_solve_downstream_dyn_sink, LinkCapacity, NullSink, RunStats, SourceLoop,
+    MAX_FIXATION_ATTEMPTS,
 };
 use crate::runtime::solver::{
     graph_downstream_feasibility, resolve_forward_output, solve_graph_preferred, solve_linear,
@@ -1448,6 +1449,105 @@ struct Prepared {
     sink_clock_sync: Option<ClockSync>,
 }
 
+// Returns the first counter-proposal, paired with the node producing into its proposer.
+fn configure_nodes(
+    vg: &mut ValidatedGraph<GraphNodeRef<'_>>,
+    topo: &[NodeId],
+    solution: &[Caps],
+) -> Result<Option<(NodeId, Caps)>, G2gError> {
+    for &node in topo {
+        match vg.kind(node) {
+            NodeKind::Source => {
+                let caps = solution[vg.out_edges(node)[0]].clone();
+                let GraphNodeRef::Source(src) =
+                    vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
+                else {
+                    return Err(G2gError::CapsMismatch);
+                };
+                if let ConfigureOutcome::ReFixate(counter) = src.configure_pipeline(&caps)? {
+                    return Ok(Some((node, counter)));
+                }
+            }
+            NodeKind::Transform | NodeKind::Sink => {
+                let caps = solution[vg.in_edges(node)[0]].clone();
+                // A transform also learns its negotiated OUTPUT caps (M185), so a
+                // caps-driven transform (videoscale fed by a downstream
+                // capsfilter) can take its target from the solve. Sinks have no
+                // output edge and skip it.
+                let out_caps = vg.out_edges(node).first().map(|&eid| solution[eid].clone());
+                let GraphNodeRef::Element(elem) =
+                    vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
+                else {
+                    return Err(G2gError::CapsMismatch);
+                };
+                if let ConfigureOutcome::ReFixate(counter) = elem.configure_pipeline(&caps)? {
+                    return Ok(Some((vg.edge(vg.in_edges(node)[0]).src.node, counter)));
+                }
+                if let Some(out_caps) = out_caps {
+                    elem.configure_output(&out_caps)?;
+                }
+            }
+            NodeKind::Tee(_) => {
+                // A plain (broadcast) tee carries no element. A demux is a
+                // tee-shaped node carrying a `MultiOutputElement`, configured
+                // with its single input edge's negotiated caps (the byte stream);
+                // each branch retypes later via per-output `CapsChanged`.
+                if matches!(vg.element(node), Some(GraphNodeRef::Demux(_))) {
+                    let caps = solution[vg.in_edges(node)[0]].clone();
+                    let GraphNodeRef::Demux(elem) =
+                        vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
+                    else {
+                        return Err(G2gError::CapsMismatch);
+                    };
+                    if let ConfigureOutcome::ReFixate(counter) = elem.configure_pipeline(&caps)? {
+                        return Ok(Some((vg.edge(vg.in_edges(node)[0]).src.node, counter)));
+                    }
+                }
+            }
+            // A terminal fan-out source has no configure hook: its ports'
+            // caps were solved from `output_caps` and each downstream sink
+            // configures from its own in-edge.
+            NodeKind::FanoutSrc(_) => {}
+            NodeKind::Muxer(_) | NodeKind::FaninSink(_) => {
+                // Configure each input pad with its in-edge's negotiated caps
+                // (a terminal fan-in has no output edge to configure).
+                let in_edges: Vec<usize> = vg.in_edges(node).to_vec();
+                for &eid in &in_edges {
+                    let pad = vg.edge(eid).dst.index as usize;
+                    let caps = solution[eid].clone();
+                    let GraphNodeRef::Muxer(elem) =
+                        vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
+                    else {
+                        return Err(G2gError::CapsMismatch);
+                    };
+                    if let ConfigureOutcome::ReFixate(counter) =
+                        elem.configure_pipeline(pad, &caps)?
+                    {
+                        return Ok(Some((vg.edge(eid).src.node, counter)));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+// A demux or muxer on the way up has no source whose caps the counter could replace.
+fn upstream_source(vg: &ValidatedGraph<GraphNodeRef<'_>>, mut node: NodeId) -> Option<NodeId> {
+    loop {
+        let passes_caps_up = match vg.kind(node) {
+            NodeKind::Source => return Some(node),
+            NodeKind::Transform => true,
+            NodeKind::Tee(_) => vg.element(node).is_none(),
+            _ => false,
+        };
+        if !passes_caps_up {
+            return None;
+        }
+        node = vg.edge(vg.in_edges(node)[0]).src.node;
+    }
+}
+
 /// Phases 1-3.5 of the graph runner: name instances + mint probes, probe source
 /// caps, solve + configure the whole DAG, run the allocation cascade, and elect
 /// the clock. Mutates `vg` (configure / clock-sync / instance names) and returns
@@ -1601,102 +1701,49 @@ async fn prepare_graph<'a>(
         }
     }
 
-    // Phase 2: build a per-node constraint and solve the whole DAG, and snapshot
-    // each edge's downstream feasibility (D4) for the mid-stream re-solve. The
-    // transform/sink constraints borrow their elements immutably (coexisting),
-    // so both are computed and the borrows released before configure.
-    let (solution, feasibility): (Vec<Caps>, Vec<Option<CapsSet>>) = {
-        let constraints = build_node_constraints(vg, &source_caps)?;
-        let preferences = build_node_preferences(vg);
-        let solution =
-            solve_graph_preferred(vg, &constraints, &preferences, &|node| caps_label(vg, node))
-                .map_err(|f| {
-                    report_nego_failure(bus, f);
-                    G2gError::CapsMismatch
-                })?;
-        let feasibility = graph_downstream_feasibility(vg, &constraints, &solution);
-        (solution, feasibility)
-    };
-
-    // Allocation cascade in reverse topo order: each element absorbs the
-    // proposal arriving on its output edge(s) (`configure_allocation`), then
-    // proposes from its output-link caps; the proposal is stored on its input
-    // edge(s) for its upstream to absorb. A tee joins its branch proposals
-    // (most-restrictive intersection, loud failure on a domain conflict) onto
-    // its single input; a muxer proposes its own per-pad demand onto each input
-    // edge (the boundary now crosses at startup). The source's absorbed proposal
-    // is the reported `allocation`. For a linear chain this is byte-for-byte the
-    // linear runner's sink->source fold. It runs before Phase 3 so a decoder
-    // sizes its pool from the downstream `min_buffers` when it opens.
-    let allocation = cascade_allocation(vg, topo, &solution)?;
-
-    // Phase 3: configure each element with its negotiated caps. Source nodes
-    // take their single output edge's caps (no input); transforms and sinks
-    // take their input edge's caps.
-    for &node in topo {
-        match vg.kind(node) {
-            NodeKind::Source => {
-                let caps = solution[vg.out_edges(node)[0]].clone();
-                let GraphNodeRef::Source(src) =
-                    vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
-                else {
-                    return Err(G2gError::CapsMismatch);
-                };
-                src.configure_pipeline(&caps)?.reject_refixate()?;
-            }
-            NodeKind::Transform | NodeKind::Sink => {
-                let caps = solution[vg.in_edges(node)[0]].clone();
-                // A transform also learns its negotiated OUTPUT caps (M185), so a
-                // caps-driven transform (videoscale fed by a downstream
-                // capsfilter) can take its target from the solve. Sinks have no
-                // output edge and skip it.
-                let out_caps = vg.out_edges(node).first().map(|&eid| solution[eid].clone());
-                let GraphNodeRef::Element(elem) =
-                    vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
-                else {
-                    return Err(G2gError::CapsMismatch);
-                };
-                elem.configure_pipeline(&caps)?.reject_refixate()?;
-                if let Some(out_caps) = out_caps {
-                    elem.configure_output(&out_caps)?;
-                }
-            }
-            NodeKind::Tee(_) => {
-                // A plain (broadcast) tee carries no element. A demux is a
-                // tee-shaped node carrying a `MultiOutputElement`, configured
-                // with its single input edge's negotiated caps (the byte stream);
-                // each branch retypes later via per-output `CapsChanged`.
-                if matches!(vg.element(node), Some(GraphNodeRef::Demux(_))) {
-                    let caps = solution[vg.in_edges(node)[0]].clone();
-                    let GraphNodeRef::Demux(elem) =
-                        vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
-                    else {
-                        return Err(G2gError::CapsMismatch);
-                    };
-                    elem.configure_pipeline(&caps)?.reject_refixate()?;
-                }
-            }
-            // A terminal fan-out source has no configure hook: its ports'
-            // caps were solved from `output_caps` and each downstream sink
-            // configures from its own in-edge.
-            NodeKind::FanoutSrc(_) => {}
-            NodeKind::Muxer(_) | NodeKind::FaninSink(_) => {
-                // Configure each input pad with its in-edge's negotiated caps
-                // (a terminal fan-in has no output edge to configure).
-                let in_edges: Vec<usize> = vg.in_edges(node).to_vec();
-                for &eid in &in_edges {
-                    let pad = vg.edge(eid).dst.index as usize;
-                    let caps = solution[eid].clone();
-                    let GraphNodeRef::Muxer(elem) =
-                        vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
-                    else {
-                        return Err(G2gError::CapsMismatch);
-                    };
-                    elem.configure_pipeline(pad, &caps)?.reject_refixate()?;
-                }
-            }
+    let mut attempts = 0u32;
+    let (solution, feasibility, allocation) = loop {
+        attempts += 1;
+        if attempts > MAX_FIXATION_ATTEMPTS {
+            return Err(G2gError::FixationFailed);
         }
-    }
+        // Phase 2: build a per-node constraint and solve the whole DAG, and snapshot
+        // each edge's downstream feasibility (D4) for the mid-stream re-solve. The
+        // transform/sink constraints borrow their elements immutably (coexisting),
+        // so both are computed and the borrows released before configure.
+        let (solution, feasibility): (Vec<Caps>, Vec<Option<CapsSet>>) = {
+            let constraints = build_node_constraints(vg, &source_caps)?;
+            let preferences = build_node_preferences(vg);
+            let solution =
+                solve_graph_preferred(vg, &constraints, &preferences, &|node| caps_label(vg, node))
+                    .map_err(|f| {
+                        report_nego_failure(bus, f);
+                        G2gError::CapsMismatch
+                    })?;
+            let feasibility = graph_downstream_feasibility(vg, &constraints, &solution);
+            (solution, feasibility)
+        };
+
+        // Allocation cascade in reverse topo order: each element absorbs the
+        // proposal arriving on its output edge(s) (`configure_allocation`), then
+        // proposes from its output-link caps; the proposal is stored on its input
+        // edge(s) for its upstream to absorb. A tee joins its branch proposals
+        // (most-restrictive intersection, loud failure on a domain conflict) onto
+        // its single input; a muxer proposes its own per-pad demand onto each input
+        // edge (the boundary now crosses at startup). The source's absorbed proposal
+        // is the reported `allocation`. For a linear chain this is byte-for-byte the
+        // linear runner's sink->source fold. It runs before Phase 3 so a decoder
+        // sizes its pool from the downstream `min_buffers` when it opens.
+        let allocation = cascade_allocation(vg, topo, &solution)?;
+
+        // Phase 3: configure each element with its negotiated caps.
+        let Some((proposer, counter)) = configure_nodes(vg, topo, &solution)? else {
+            break (solution, feasibility, allocation);
+        };
+        // A counter-proposal restarts negotiation with it as the upstream source's produce set.
+        let source = upstream_source(vg, proposer).ok_or(G2gError::FixationFailed)?;
+        source_caps[source.0 as usize] = Some(CapsSet::one(counter));
+    };
 
     // Phase 3.5: DAG-wide M12 folds, so the runner reports the same latency /
     // clock / allocation the linear runners do (the convenience wrappers reduce
