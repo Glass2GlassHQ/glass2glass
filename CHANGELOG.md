@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1331: uniquely held frames cross the plugin ABI writable in place.
 - M1330: test polls use `pin!` instead of unsafe `Pin::new_unchecked`.
 - M1329: clock reads, pacing judgements and blob-meta lookups stop cloning or allocating per call.
 - M1328: wire encode sizes its buffer once and materializes views straight into it.

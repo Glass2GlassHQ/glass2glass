@@ -15,7 +15,8 @@
 //!   that drops the box, so the receiver's eventual `free` call is what ends the
 //!   allocation's life.
 //! - [`packet_from_ffi`] wraps the pointer with
-//!   [`SystemSlice::from_foreign`], which calls `free` when the frame is
+//!   [`SystemSlice::from_foreign`] (or `from_foreign_exclusive` when the sender
+//!   set [`FRAME_EXCLUSIVE`]), which calls `free` when the frame is
 //!   dropped. If it rejects the frame first, it calls `free` itself, because the
 //!   sender has already let go.
 //! - [`release_packet`] is for a packet that was taken but never delivered (a
@@ -33,9 +34,9 @@ use core::ffi::c_void;
 use super::caps::{caps_from_ffi, caps_into_ffi};
 use super::{
     FfiFraction, FfiFrame, FfiPacket, FfiPropStr, FfiPropValue, FfiPropValueBody, FfiPropertySpec,
-    FfiStatus, FfiStr, MAX_FRAME_BYTES, MAX_STRING_LEN, PACKET_CAPS_CHANGED, PACKET_DATA_FRAME,
-    PACKET_EOS, PACKET_FLUSH, PROP_BOOL, PROP_DOUBLE, PROP_FRACTION, PROP_INT, PROP_STR, PROP_UINT,
-    STATUS_ERROR,
+    FfiStatus, FfiStr, FRAME_EXCLUSIVE, MAX_FRAME_BYTES, MAX_STRING_LEN, PACKET_CAPS_CHANGED,
+    PACKET_DATA_FRAME, PACKET_EOS, PACKET_FLUSH, PROP_BOOL, PROP_DOUBLE, PROP_FRACTION, PROP_INT,
+    PROP_STR, PROP_UINT, STATUS_ERROR,
 };
 
 /// Release a `SystemSlice` that was lent across the boundary.
@@ -72,10 +73,17 @@ pub fn packet_into_ffi(packet: PipelinePacket) -> Result<FfiPacket, G2gError> {
             };
             // The slice moves to the heap so its address survives this call; the
             // payload it points at is untouched, so nothing is copied.
-            let boxed = Box::new(slice);
-            let bytes = boxed.as_slice();
-            let data = bytes.as_ptr();
-            let len = bytes.len();
+            let exclusive = slice.is_uniquely_held();
+            let mut boxed = Box::new(slice);
+            // A uniquely held slice lends a pointer the receiver may write through,
+            // and `as_mut_slice` copies nothing for one.
+            let (data, len) = if exclusive {
+                let bytes = boxed.as_mut_slice();
+                (bytes.as_mut_ptr().cast_const(), bytes.len())
+            } else {
+                let bytes = boxed.as_slice();
+                (bytes.as_ptr(), bytes.len())
+            };
             let free_user = Box::into_raw(boxed).cast::<c_void>();
             Ok(FfiPacket {
                 tag: PACKET_DATA_FRAME,
@@ -91,7 +99,7 @@ pub fn packet_into_ffi(packet: PipelinePacket) -> Result<FfiPacket, G2gError> {
                     arrival_ns: frame.timing.arrival_ns,
                     sequence: frame.sequence,
                     keyframe: u32::from(frame.timing.keyframe),
-                    reserved: 0,
+                    reserved: if exclusive { FRAME_EXCLUSIVE } else { 0 },
                 },
                 ..FfiPacket::NONE
             })
@@ -132,8 +140,21 @@ pub unsafe fn packet_from_ffi(packet: FfiPacket) -> Result<PipelinePacket, FfiSt
                 return Err(STATUS_ERROR);
             }
             // SAFETY: forwarded from this function's contract; `free` /
-            // `free_user` are the release pair the ABI requires alongside them.
-            let slice = unsafe { SystemSlice::from_foreign(f.data, f.len, f.free, f.free_user) };
+            // `free_user` are the release pair the ABI requires alongside them,
+            // and `FRAME_EXCLUSIVE` is the sender's word that nothing else
+            // touches the bytes.
+            let slice = unsafe {
+                if f.reserved & FRAME_EXCLUSIVE != 0 {
+                    SystemSlice::from_foreign_exclusive(
+                        f.data.cast_mut(),
+                        f.len,
+                        f.free,
+                        f.free_user,
+                    )
+                } else {
+                    SystemSlice::from_foreign(f.data, f.len, f.free, f.free_user)
+                }
+            };
             Ok(PipelinePacket::DataFrame(Frame::new(
                 MemoryDomain::System(slice),
                 FrameTiming {
@@ -342,6 +363,49 @@ mod tests {
             }
             other => panic!("expected a data frame, got {other:?}"),
         }
+    }
+
+    fn crossed_slice(domain: MemoryDomain) -> (u32, SystemSlice) {
+        let packet = PipelinePacket::DataFrame(Frame::new(domain, FrameTiming::default(), 0));
+        let ffi = packet_into_ffi(packet).expect("a System frame crosses");
+        let flags = ffi.frame.reserved;
+        // SAFETY: `ffi` is the value just produced, whose payload this test owns.
+        match unsafe { packet_from_ffi(ffi) } {
+            Ok(PipelinePacket::DataFrame(Frame {
+                domain: MemoryDomain::System(slice),
+                ..
+            })) => (flags, slice),
+            other => panic!("expected a System data frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_uniquely_held_frame_arrives_writable_in_place() {
+        let payload: Box<[u8]> = Box::new([1u8, 2, 3]);
+        let original = payload.as_ptr();
+        let (flags, mut slice) =
+            crossed_slice(MemoryDomain::System(SystemSlice::from_boxed(payload)));
+        assert_eq!(flags & FRAME_EXCLUSIVE, FRAME_EXCLUSIVE);
+        assert!(slice.is_uniquely_held());
+        slice.as_mut_slice()[0] = 9;
+        assert_eq!(slice.as_slice(), &[9, 2, 3]);
+        assert_eq!(slice.as_slice().as_ptr(), original, "written in place");
+    }
+
+    #[test]
+    fn a_tee_shared_frame_arrives_read_only() {
+        let mut domain = MemoryDomain::System(SystemSlice::from_boxed(Box::new([1u8, 2, 3])));
+        domain.make_shareable();
+        let sibling = domain.share();
+        let (flags, mut slice) = crossed_slice(domain);
+        assert_eq!(flags & FRAME_EXCLUSIVE, 0);
+        assert!(!slice.is_uniquely_held());
+        slice.as_mut_slice()[0] = 9;
+        assert_eq!(
+            sibling.as_system_slice(),
+            Some(&[1u8, 2, 3][..]),
+            "the sibling branch's bytes are untouched"
+        );
     }
 
     #[test]

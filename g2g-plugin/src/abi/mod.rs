@@ -461,9 +461,13 @@ pub struct FfiFrame {
     pub sequence: u64,
     /// Non-zero when this frame starts an independently decodable unit.
     pub keyframe: u32,
-    /// Padding. Must be zero.
+    /// `FRAME_*` flag bits. Senders older than the flags write 0.
     pub reserved: u32,
 }
+
+/// [`FfiFrame::reserved`] bit: the sender held the payload alone, so the
+/// receiver may write it in place.
+pub const FRAME_EXCLUSIVE: u32 = 1;
 
 impl FfiFrame {
     /// An empty frame with no payload and no owner.

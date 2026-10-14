@@ -434,7 +434,50 @@ impl SystemSlice {
                 len,
                 free,
                 user: user as usize,
+                writable: false,
             }),
+        }
+    }
+
+    /// As [`from_foreign`](Self::from_foreign), for bytes the pipeline holds
+    /// exclusively: [`as_mut_slice`](Self::as_mut_slice) writes `ptr[..len]` in
+    /// place instead of copying it out first.
+    ///
+    /// # Safety
+    /// The `from_foreign` contract, and nothing but this slice reads or writes
+    /// `ptr[..len]` until `free` runs.
+    pub unsafe fn from_foreign_exclusive(
+        ptr: *mut u8,
+        len: usize,
+        free: Option<unsafe extern "C" fn(*mut c_void)>,
+        user: *mut c_void,
+    ) -> Self {
+        Self {
+            inner: SystemSliceInner::Foreign(ForeignSlice {
+                ptr: ptr as usize,
+                len,
+                free,
+                user: user as usize,
+                writable: true,
+            }),
+        }
+    }
+
+    /// Whether writing these bytes in place touches nothing another holder
+    /// reads: an owned or pooled buffer, an exclusive foreign lend, or a tee
+    /// share no sibling branch still holds. [`as_mut_slice`](Self::as_mut_slice)
+    /// copies nothing when this is true.
+    pub fn is_uniquely_held(&self) -> bool {
+        match &self.inner {
+            #[cfg(feature = "alloc")]
+            SystemSliceInner::Owned(_) => true,
+            #[cfg(feature = "runtime")]
+            SystemSliceInner::Pooled { .. } => true,
+            SystemSliceInner::Foreign(f) => f.writable,
+            #[cfg(feature = "alloc")]
+            SystemSliceInner::Shared(arc) => Arc::strong_count(arc) == 1,
+            #[cfg(feature = "runtime")]
+            SystemSliceInner::SharedPooled { buffer, .. } => Arc::strong_count(buffer) == 1,
         }
     }
 
@@ -476,8 +519,11 @@ impl SystemSlice {
         // sibling branch's shared frame. A uniquely-held `Shared` Arc is
         // reclaimed without a copy.
         let needs_cow = matches!(
-            self.inner,
-            SystemSliceInner::Foreign(_) | SystemSliceInner::Shared(_)
+            &self.inner,
+            SystemSliceInner::Foreign(ForeignSlice {
+                writable: false,
+                ..
+            }) | SystemSliceInner::Shared(_)
         ) || {
             #[cfg(feature = "runtime")]
             {
@@ -516,7 +562,8 @@ impl SystemSlice {
             SystemSliceInner::Owned(b) => b,
             #[cfg(feature = "runtime")]
             SystemSliceInner::Pooled { buffer, len } => &mut buffer.as_mut()[..*len],
-            _ => unreachable!("Foreign / Shared / SharedPooled converted to Owned above"),
+            SystemSliceInner::Foreign(f) => f.as_mut_slice(),
+            _ => unreachable!("Shared / SharedPooled converted to Owned above"),
         }
     }
 
@@ -578,6 +625,8 @@ pub struct ForeignSlice {
     len: usize,
     free: Option<unsafe extern "C" fn(*mut c_void)>,
     user: usize,
+    /// Lent exclusively, so `as_mut_slice` may write it in place.
+    writable: bool,
 }
 
 impl ForeignSlice {
@@ -588,6 +637,17 @@ impl ForeignSlice {
         // SAFETY: the lend contract (see `SystemSlice::from_foreign`) guarantees
         // `ptr` covers `len` valid bytes, unmodified for this slice's lifetime.
         unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.len) }
+    }
+
+    /// Only reached for an exclusive lend: a shared one is copied out first.
+    #[cfg(feature = "alloc")]
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        if self.len == 0 {
+            return &mut [];
+        }
+        // SAFETY: `SystemSlice::from_foreign_exclusive` guarantees `ptr` covers
+        // `len` valid bytes nothing else touches while this slice lives.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr as *mut u8, self.len) }
     }
 }
 

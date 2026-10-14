@@ -200,8 +200,11 @@ typedef struct {
     uint64_t arrival_ns;
     uint64_t sequence;
     uint32_t keyframe; /* non-zero starts an independently decodable unit */
-    uint32_t reserved;
+    uint32_t reserved; /* G2G_FRAME_* flags, 0 from senders that predate them */
 } G2gFrame;
+
+/* The sender held the payload alone: the receiver may write it in place. */
+#define G2G_FRAME_EXCLUSIVE 1u
 
 #define G2G_PACKET_NONE 0u         /* empty slot, or the callee took what was here */
 #define G2G_PACKET_CAPS_CHANGED 1u /* `caps` is live */
