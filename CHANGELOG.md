@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1271: ffmpegdec gets a reorder seed from High-profile SPS that carry custom scaling matrices.
 - M1276: audioconvert forwards same-format buffers untouched and converts in whole-buffer passes.
 - M1275: PCM decode and encode share one 2^(n-1) full scale, so every integer sample code survives a float round trip.
 - M1265: every hand-rolled no-op waker is `Waker::noop()`, and the runtime state waker is a safe `Wake` impl.

@@ -36,7 +36,6 @@ Bugs:
   accepts 5 of 15 formats. Use one GStreamer format-name table from core.
 - `SrtpReceiverSet::receiver_for` keeps a receiver for an SSRC before the
   packet authenticates. Insert only after unprotect succeeds, and cap the count.
-- `parse_sps_reorder` returns `None` on SPS scaling lists.
 - `gamma`, `videobalance` and `alpha` swallow incoming `CapsChanged`. Move them
   onto `PixelFilter`.
 - The `fmp4` fragment parsers ignore the `trun` composition offset.

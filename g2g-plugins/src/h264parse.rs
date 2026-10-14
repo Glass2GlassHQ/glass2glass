@@ -423,7 +423,8 @@ fn parse_sps_reorder(rbsp: &[u8]) -> Option<u8> {
         br.read_ue()?; // bit_depth_chroma_minus8
         br.read_bit()?; // qpprime_y_zero_transform_bypass_flag
         if br.read_bit()? == 1 {
-            return None; // scaling lists not walked; leave reorder unknown
+            let lists = if chroma_format_idc == 3 { 12 } else { 8 };
+            crate::poc::skip_h264_scaling_lists(&mut br, lists)?;
         }
     }
 
@@ -609,6 +610,41 @@ mod tests {
         w.align_to_byte();
         let au = annexb_sps(77, 40, &w.into_bytes());
         assert_eq!(sps_reorder_frames(&au), Some(0));
+    }
+
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+    #[test]
+    fn sps_reorder_frames_crosses_scaling_lists() {
+        // High profile with a custom scaling matrix: the lists sit before the
+        // dimensions, so the walk has to skip them to reach the DPB bound.
+        let mut w = BitWriter::default();
+        w.write_ue(0); // seq_parameter_set_id
+        w.write_ue(1); // chroma_format_idc (4:2:0)
+        w.write_ue(0); // bit_depth_luma_minus8
+        w.write_ue(0); // bit_depth_chroma_minus8
+        w.write_bit(0); // qpprime_y_zero_transform_bypass_flag
+        w.write_bit(1); // seq_scaling_matrix_present_flag
+        w.write_bit(1); // seq_scaling_list_present_flag[0]
+        w.write_ue(7); // delta_scale = se(+4)
+        for _ in 1..16 {
+            w.write_ue(0); // delta_scale = se(0)
+        }
+        for _ in 1..8 {
+            w.write_bit(0); // seq_scaling_list_present_flag[1..8]
+        }
+        w.write_ue(0); // log2_max_frame_num_minus4
+        w.write_ue(0); // pic_order_cnt_type
+        w.write_ue(0); // log2_max_pic_order_cnt_lsb_minus4
+        w.write_ue(1); // max_num_ref_frames
+        w.write_bit(0); // gaps_in_frame_num_value_allowed_flag
+        w.write_ue(1920 / 16 - 1); // pic_width_in_mbs_minus1
+        w.write_ue(1088 / 16 - 1); // pic_height_in_map_units_minus1
+        w.write_bit(1); // frame_mbs_only_flag
+        w.write_bit(1); // rbsp_trailing_bits
+        w.align_to_byte();
+        let au = annexb_sps(100, 40, &w.into_bytes());
+        // Same 1080p level-4.0 bound as the no-matrix case: 32768 / 8160 = 4.
+        assert_eq!(sps_reorder_frames(&au), Some(4));
     }
 
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
