@@ -32,6 +32,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
     FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
@@ -39,6 +40,8 @@ use g2g_core::{
 };
 
 use crate::pgs::{PgsDecoder, DEFAULT_VIDEO_HEIGHT, DEFAULT_VIDEO_WIDTH, MAX_VIDEO_DIM};
+
+const PGS_CLOCK_HZ: u32 = 90_000;
 
 /// Decodes PGS display sets into full-frame RGBA canvases.
 ///
@@ -191,7 +194,7 @@ impl PgsDec {
             }
             let offset_ns = match (base_pts_90k, set.pts_90k) {
                 (Some(base), Some(pts)) => {
-                    (pts.saturating_sub(base) as u64) * 1_000_000_000 / 90_000
+                    ticks_to_ns(u64::from(pts.saturating_sub(base)), PGS_CLOCK_HZ)
                 }
                 _ => 0,
             };

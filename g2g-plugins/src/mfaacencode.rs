@@ -40,6 +40,7 @@ use crate::mfcommon::{
 };
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
     G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
@@ -312,7 +313,7 @@ impl AsyncElement for MfAacEncode {
             };
             // Each access unit covers AAC_FRAME_SAMPLES; derive pts from the
             // emitted-frame count so the stream is monotonic and gap-free.
-            let ns_per_frame = AAC_FRAME_SAMPLES * 1_000_000_000 / self.sample_rate.max(1) as u64;
+            let ns_per_frame = ticks_to_ns(AAC_FRAME_SAMPLES, self.sample_rate.max(1));
             for au in encoded {
                 if self.last_caps.as_ref() != Some(&aac_caps) {
                     out.push(PipelinePacket::CapsChanged(aac_caps.clone()))

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1388: plugin ns to clock-tick conversions use the core time helpers and round to nearest.
 - M1387: plugin Q16 framerate math uses the core caps helpers, and an overflowing framerate property is rejected instead of wrapping.
 - M1386: integration tests share one ffmpeg and ffprobe presence check.
 - M1385: test modules share `testutil::CollectSink` and a common collecting sink for integration tests.

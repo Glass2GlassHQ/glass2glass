@@ -26,6 +26,7 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_error, g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
@@ -35,9 +36,6 @@ use g2g_core::{
 use crate::audioframe::{
     ac3_bsid, ac3_header, locate_frame, Ac3Header, Located, AC3_MAX_BSID, AC3_SAMPLES_PER_FRAME,
 };
-
-/// Nanoseconds per second, the presentation-time unit.
-const NS_PER_SECOND: u128 = 1_000_000_000;
 
 /// # Example
 ///
@@ -127,8 +125,7 @@ impl Ac3Parse {
                 self.pending_rebase = None;
             }
         }
-        let rate = u128::from(header.sample_rate);
-        let ns = |samples: u64| (u128::from(samples) * NS_PER_SECOND / rate) as u64;
+        let ns = |samples: u64| ticks_to_ns(samples, header.sample_rate);
         let pts_ns = self.base_ns + ns(self.samples);
         let duration_ns = ns(u64::from(AC3_SAMPLES_PER_FRAME));
         self.samples += u64::from(AC3_SAMPLES_PER_FRAME);
@@ -285,6 +282,8 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    const NS_PER_SECOND: u64 = 1_000_000_000;
+
     use g2g_core::PushOutcome;
 
     use crate::audioframe::test_frames::{ac3_frame, AC3_192K_48000_LEN};
@@ -411,9 +410,8 @@ mod tests {
     #[tokio::test]
     async fn stamps_pts_from_the_sample_count() {
         let sink = parse(stream(3)).await;
-        let pts = |frames: u64| {
-            frames * u64::from(AC3_SAMPLES_PER_FRAME) * NS_PER_SECOND as u64 / FRAME_RATE_HZ
-        };
+        let pts =
+            |frames: u64| frames * u64::from(AC3_SAMPLES_PER_FRAME) * NS_PER_SECOND / FRAME_RATE_HZ;
         let duration = pts(1);
         let times: Vec<(u64, u64)> = sink
             .frames()

@@ -54,6 +54,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::time::{ns_to_ticks, ticks_to_ns};
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
@@ -358,7 +359,7 @@ impl OpusDec {
         if !self.plc && !self.fec {
             return Ok(None);
         }
-        let missing = ns_to_samples(pts_ns.saturating_sub(expected));
+        let missing = ns_to_ticks(pts_ns.saturating_sub(expected), OPUS_RATE_HZ);
         let gap = ((missing + PLC_STEP_SAMPLES / 2) / PLC_STEP_SAMPLES) * PLC_STEP_SAMPLES;
         if gap == 0 || gap > MAX_PLC_SAMPLES {
             return Ok(None);
@@ -423,27 +424,14 @@ impl OpusDec {
     }
 }
 
-/// Per-channel 48 kHz sample count for a duration in nanoseconds, rounded to the
-/// nearest sample.
-fn ns_to_samples(ns: u64) -> u64 {
-    (ns.saturating_mul(OPUS_RATE_HZ as u64)
-        .saturating_add(500_000_000))
-        / 1_000_000_000
-}
-
-/// The exact inverse for whole samples: 48 kHz divides a second evenly.
-fn samples_to_ns(samples: u64) -> u64 {
-    samples.saturating_mul(1_000_000_000) / OPUS_RATE_HZ as u64
-}
-
 /// Per-channel valid sample count encoded in a frame's `duration_ns` (48 kHz),
 /// or `None` when unset (`0`). Rounds to the nearest sample; the demuxer's
-/// truncating ns conversion round-trips back to the exact count.
+/// ns conversion round-trips back to the exact count.
 fn duration_to_samples(duration_ns: u64) -> Option<u64> {
     if duration_ns == 0 {
         return None;
     }
-    Some(ns_to_samples(duration_ns))
+    Some(ns_to_ticks(duration_ns, OPUS_RATE_HZ))
 }
 
 impl AsyncElement for OpusDec {
@@ -628,7 +616,7 @@ impl AsyncElement for OpusDec {
                                 FrameTiming {
                                     pts_ns,
                                     dts_ns: pts_ns,
-                                    duration_ns: samples_to_ns(samples),
+                                    duration_ns: ticks_to_ns(samples, OPUS_RATE_HZ),
                                     ..FrameTiming::default()
                                 },
                                 out,
@@ -643,7 +631,7 @@ impl AsyncElement for OpusDec {
                         frame
                             .timing
                             .pts_ns
-                            .saturating_add(samples_to_ns(self.prev_samples)),
+                            .saturating_add(ticks_to_ns(self.prev_samples, OPUS_RATE_HZ)),
                     );
 
                     let keep = duration_to_samples(frame.timing.duration_ns);

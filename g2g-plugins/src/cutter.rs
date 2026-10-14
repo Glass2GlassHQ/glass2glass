@@ -14,6 +14,7 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
@@ -148,7 +149,7 @@ impl Cutter {
         }
         let mean_square = sumsq / total as f64;
         let frames = (total / self.channels.max(1) as usize) as u64;
-        let dur_ns = frames.saturating_mul(1_000_000_000) / self.sample_rate.max(1) as u64;
+        let dur_ns = ticks_to_ns(frames, self.sample_rate.max(1));
         match self.state.push(mean_square, dur_ns) {
             Some(true) => self.below_count += 1,
             Some(false) => self.above_count += 1,

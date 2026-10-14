@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::time::ns_to_ticks;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
@@ -74,7 +75,7 @@ impl EchoState {
 }
 
 fn delay_frames(delay_ns: u64, sample_rate: u32) -> usize {
-    ((delay_ns as u128 * sample_rate as u128) / 1_000_000_000u128) as usize
+    ns_to_ticks(delay_ns, sample_rate) as usize
 }
 
 /// # Example

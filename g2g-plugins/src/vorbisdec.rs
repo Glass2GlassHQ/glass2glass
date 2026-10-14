@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::time::{ns_to_ticks, ticks_to_ns};
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
@@ -250,19 +251,15 @@ impl AsyncElement for VorbisDec {
                     }
                     let channels = usize::from(self.channels.max(1));
                     let decoded = pcm.len() / channels;
-                    let ns = |s: u64| {
-                        (s as u128 * 1_000_000_000 / self.sample_rate.max(1) as u128) as u64
-                    };
+                    let ns = |s: u64| ticks_to_ns(s, self.sample_rate.max(1));
                     // Demux-provided timing (M778): the packet's timeline
                     // duration arrives end-granule clamped, so trim the decoded
                     // PCM to it (the final block's encoder padding drops here).
                     // Untimed input (duration 0) self-stamps from the decoded
                     // sample count.
                     let (pts_ns, duration_ns, keep) = if frame.timing.duration_ns > 0 {
-                        let k = ((frame.timing.duration_ns as u128
-                            * u128::from(self.sample_rate.max(1))
-                            + 500_000_000)
-                            / 1_000_000_000) as usize;
+                        let k =
+                            ns_to_ticks(frame.timing.duration_ns, self.sample_rate.max(1)) as usize;
                         (
                             frame.timing.pts_ns,
                             frame.timing.duration_ns,

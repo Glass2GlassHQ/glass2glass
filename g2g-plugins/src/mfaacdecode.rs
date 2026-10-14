@@ -37,6 +37,7 @@ use crate::mfcommon::{
 };
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
     G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
@@ -289,7 +290,7 @@ impl AsyncElement for MfAacDecode {
                         .await?;
                     self.last_caps = Some(pcm_caps.clone());
                 }
-                let pts_ns = self.out_frames * 1_000_000_000 / self.sample_rate.max(1) as u64;
+                let pts_ns = ticks_to_ns(self.out_frames, self.sample_rate.max(1));
                 let n_frames = pcm.len() as u64 / frame_bytes;
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),

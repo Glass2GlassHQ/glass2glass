@@ -31,10 +31,13 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
     G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, TextFormat,
 };
+
+const MPEG_TS_CLOCK_HZ: u32 = 90_000;
 
 /// Horizontal text alignment within a cue box (the WebVTT `align:` setting;
 /// `left`/`right` map to `Start`/`End`). The default is `Center`.
@@ -482,8 +485,8 @@ fn parse_timestamp_map(line: &str) -> Option<i64> {
             _ => {}
         }
     }
-    // 90 kHz ticks to ns, in i128 so an attacker-supplied MPEGTS cannot overflow.
-    let mpegts_ns = i128::from(mpegts?) * 1_000_000_000 / 90_000;
+    // ticks_to_ns saturates, so an attacker-supplied MPEGTS cannot overflow.
+    let mpegts_ns = i128::from(ticks_to_ns(mpegts?, MPEG_TS_CLOCK_HZ));
     i64::try_from(mpegts_ns - i128::from(local?)).ok()
 }
 

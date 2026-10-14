@@ -25,6 +25,7 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_warn, AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
@@ -47,8 +48,6 @@ const DEFAULT_CHANNELS_TEXT: &str = "2";
 /// there rather than sizing a buffer from it.
 const MAX_SAMPLE_RATE: u64 = 768_000;
 const MAX_CHANNELS: u64 = 64;
-
-const NS_PER_SECOND: u128 = 1_000_000_000;
 
 static RAWAUDIOPARSE_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
@@ -172,8 +171,7 @@ impl RawAudioParse {
                 .await?;
             self.caps_sent = true;
         }
-        let rate = u128::from(self.sample_rate);
-        let ns = |samples: u64| (u128::from(samples) * NS_PER_SECOND / rate) as u64;
+        let ns = |samples: u64| ticks_to_ns(samples, self.sample_rate);
         let samples = (bytes.len() / frame_bytes) as u64;
         let pts_ns = ns(self.samples);
         let duration_ns = ns(samples);

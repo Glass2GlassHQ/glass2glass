@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
     G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
@@ -174,7 +175,7 @@ impl SourceLoop for AudioTestSrc {
                 return Err(G2gError::NotConfigured);
             }
             let samples_per_buffer = (self.sample_rate as u64 * BUFFER_MS / 1000).max(1);
-            let buffer_duration_ns = samples_per_buffer * 1_000_000_000 / self.sample_rate as u64;
+            let buffer_duration_ns = ticks_to_ns(samples_per_buffer, self.sample_rate);
 
             for seq in 0..self.target_buffers {
                 let base = seq * samples_per_buffer;

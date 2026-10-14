@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::time::ns_to_ticks;
 use g2g_core::{
     AsyncElement, AudioFormat, AudioShape, Caps, CapsConstraint, CapsSet, CapsTransform,
     ChannelLayout, ChannelPosition, ConfigureOutcome, ElementMetadata, FieldTransform, G2gError,
@@ -272,11 +273,7 @@ pub(crate) fn samples_to_ns(samples: u64, rate: u32) -> u64 {
 /// Sample frames spanning `ns` at `rate`, rounded to nearest so half a sample
 /// of jitter does not leave a permanent one-sample offset.
 pub(crate) fn ns_to_samples(ns: u64, rate: u32) -> u64 {
-    if rate == 0 {
-        return 0;
-    }
-    let scale = NS_PER_SECOND as u128;
-    ((ns as u128 * rate as u128 + scale / 2) / scale) as u64
+    ns_to_ticks(ns, rate)
 }
 
 impl AsyncElement for AudioConvert {
