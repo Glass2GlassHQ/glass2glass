@@ -15,54 +15,13 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::fft::FftPlan;
+
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
     PropValue, PropertySpec,
 };
-
-/// In-place iterative radix-2 Cooley-Tukey FFT (decimation in time). `re`/`im`
-/// have the same power-of-two length; twiddles come from the crate's `libm`-free
-/// trig. Forward transform (`exp(-2*pi*i*k/N)`).
-fn fft(re: &mut [f64], im: &mut [f64]) {
-    let n = re.len();
-    debug_assert!(n.is_power_of_two());
-    // bit-reversal permutation.
-    let mut j = 0usize;
-    for i in 1..n {
-        let mut bit = n >> 1;
-        while j & bit != 0 {
-            j ^= bit;
-            bit >>= 1;
-        }
-        j |= bit;
-        if i < j {
-            re.swap(i, j);
-            im.swap(i, j);
-        }
-    }
-    let mut len = 2;
-    while len <= n {
-        let half = len / 2;
-        for start in (0..n).step_by(len) {
-            for k in 0..half {
-                // w = exp(-2*pi*i*k/len); sin/cos take turns, so the turn is -k/len.
-                let turns = -(k as f32) / (len as f32);
-                let wr = crate::mathf::cos_turns(turns) as f64;
-                let wi = crate::mathf::sin_turns(turns) as f64;
-                let (pr, pi) = (re[start + k], im[start + k]);
-                let (qr, qi) = (re[start + k + half], im[start + k + half]);
-                let vr = qr * wr - qi * wi;
-                let vi = qr * wi + qi * wr;
-                re[start + k] = pr + vr;
-                im[start + k] = pi + vi;
-                re[start + k + half] = pr - vr;
-                im[start + k + half] = pi - vi;
-            }
-        }
-        len <<= 1;
-    }
-}
 
 /// # Example
 ///
@@ -77,7 +36,11 @@ pub struct Spectrum {
     bands: usize,
     post_messages: bool,
     channels: usize,
-    fft_size: usize,
+    plan: FftPlan,
+    // Hann window over one FFT window, rebuilt with the plan
+    window: Vec<f64>,
+    re: Vec<f64>,
+    im: Vec<f64>,
     // mono-mixed samples accumulated toward the next FFT window.
     acc: Vec<f64>,
     magnitudes: Vec<f64>,
@@ -98,7 +61,10 @@ impl Spectrum {
             bands: 128,
             post_messages: true,
             channels: 0,
-            fft_size: 0,
+            plan: FftPlan::new(1),
+            window: Vec::new(),
+            re: Vec::new(),
+            im: Vec::new(),
             acc: Vec::new(),
             magnitudes: Vec::new(),
             configured: false,
@@ -119,7 +85,14 @@ impl Spectrum {
     }
 
     fn set_fft_size(&mut self) {
-        self.fft_size = (self.bands * 2).next_power_of_two();
+        let size = (self.bands * 2).next_power_of_two();
+        self.plan = FftPlan::new(size);
+        // Hann window: 0.5*(1 - cos(2*pi*i/(n-1))), turn = i/(n-1).
+        self.window = (0..size)
+            .map(|i| 0.5 * (1.0 - crate::mathf::cos_turns((i as f32) / ((size - 1) as f32)) as f64))
+            .collect();
+        self.re = vec![0.0; size];
+        self.im = vec![0.0; size];
         self.acc.clear();
     }
 
@@ -144,7 +117,7 @@ impl Spectrum {
                 sum += i16::from_le_bytes([s[0], s[1]]) as f64;
             }
             self.acc.push(sum / ch as f64 / FULL_SCALE);
-            if self.acc.len() == self.fft_size {
+            if self.acc.len() == self.plan.size() {
                 self.analyze();
                 self.acc.clear();
             }
@@ -152,18 +125,16 @@ impl Spectrum {
     }
 
     fn analyze(&mut self) {
-        let n = self.fft_size;
-        let mut re = vec![0.0f64; n];
-        let mut im = vec![0.0f64; n];
-        for (i, (slot, &x)) in re.iter_mut().zip(self.acc.iter()).enumerate() {
-            // Hann window: 0.5*(1 - cos(2*pi*i/(n-1))), turn = i/(n-1).
-            let w = 0.5 * (1.0 - crate::mathf::cos_turns((i as f32) / ((n - 1) as f32)) as f64);
+        let n = self.plan.size();
+        for ((slot, &x), &w) in self.re.iter_mut().zip(&self.acc).zip(&self.window) {
             *slot = x * w;
         }
-        fft(&mut re, &mut im);
+        self.im.fill(0.0);
+        self.plan.forward(&mut self.re, &mut self.im);
         self.magnitudes.clear();
         for k in 0..self.bands {
-            let mag = crate::mathf::sqrt(re[k] * re[k] + im[k] * im[k]) / (n as f64);
+            let (re, im) = (self.re[k], self.im[k]);
+            let mag = crate::mathf::sqrt(re * re + im * im) / (n as f64);
             self.magnitudes.push(mag);
         }
     }
@@ -291,43 +262,6 @@ impl PadTemplates for Spectrum {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fft_of_a_single_cosine_peaks_at_its_bin() {
-        // x[n] = cos(2*pi*3*n/N): the DFT is real with peaks at bins 3 and N-3.
-        let n = 16usize;
-        let mut re = vec![0.0f64; n];
-        let mut im = vec![0.0f64; n];
-        for (i, slot) in re.iter_mut().enumerate() {
-            *slot = crate::mathf::cos_turns(3.0 * (i as f32) / (n as f32)) as f64;
-        }
-        fft(&mut re, &mut im);
-        let mag: Vec<f64> = (0..n)
-            .map(|k| crate::mathf::sqrt(re[k] * re[k] + im[k] * im[k]))
-            .collect();
-        // bin 3 should dominate over a non-adjacent bin like 6.
-        assert!(
-            mag[3] > mag[6] * 4.0,
-            "bin 3 {} vs bin 6 {}",
-            mag[3],
-            mag[6]
-        );
-        assert!(mag[3] > mag[0] * 4.0, "bin 3 {} vs DC {}", mag[3], mag[0]);
-    }
-
-    #[test]
-    fn dc_signal_concentrates_in_bin_zero() {
-        let mut re = vec![1.0f64; 8];
-        let mut im = vec![0.0f64; 8];
-        fft(&mut re, &mut im);
-        assert!((re[0] - 8.0).abs() < 1e-9, "DC bin should be N");
-        for k in 1..8 {
-            assert!(
-                re[k].abs() < 1e-9 && im[k].abs() < 1e-9,
-                "bin {k} should be ~0"
-            );
-        }
-    }
 
     #[test]
     fn observe_fills_a_window_and_produces_bands() {
