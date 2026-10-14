@@ -5637,6 +5637,121 @@ pub struct MuxerArmOwnedTickIo {
     pub(crate) ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
 }
 
+/// Admit every input queued for attach so far, so a busy muxer takes one as
+/// promptly as a parked one. Returns how many joined.
+async fn admit_queued_pads<E: MultiInputElement>(
+    mux: &mut E,
+    pad_adds: Option<&Receiver<PadAdd>>,
+    pad_rxs: &mut Vec<(usize, LinkReceiver)>,
+    open: &mut Vec<bool>,
+    current_output: &mut Caps,
+    adapter: &mut SenderSink,
+) -> Result<usize, G2gError> {
+    let Some(adds) = pad_adds else {
+        return Ok(0);
+    };
+    let mut admitted = 0;
+    while let Some(add) = adds.try_recv() {
+        if admit_runtime_pad(mux, add, pad_rxs, open, current_output, adapter).await? {
+            admitted += 1;
+        }
+    }
+    Ok(admitted)
+}
+
+/// What a parked muxer arm does once [`settle_wake`] has handled its wake.
+enum WokenMuxer {
+    /// A packet arrived on this pad slot, or `None` when its channel closed.
+    Pad(usize, Option<PipelinePacket>),
+    /// A runtime input joined.
+    Admitted,
+    /// A directive or a closed control or attach channel was handled.
+    Settled,
+}
+
+/// Handle a parked muxer arm's wake: apply a β directive, admit an input, or
+/// note a closed channel, and hand pad data back to the arm.
+#[allow(clippy::too_many_arguments)]
+async fn settle_wake<E: MultiInputElement>(
+    wake: MuxerWake,
+    mux: &mut E,
+    beta: &mut MuxBeta,
+    control_open: &mut bool,
+    pad_adds: &mut Option<Receiver<PadAdd>>,
+    pad_rxs: &mut Vec<(usize, LinkReceiver)>,
+    open: &mut Vec<bool>,
+    current_output: &mut Caps,
+    adapter: &mut SenderSink,
+) -> Result<WokenMuxer, G2gError> {
+    match wake {
+        MuxerWake::Directive(Some(directive)) => {
+            apply_mux_directive(
+                &mut *mux as &mut dyn DynMultiInputElement,
+                beta,
+                directive,
+                current_output,
+            )
+            .await?;
+            Ok(WokenMuxer::Settled)
+        }
+        MuxerWake::Directive(None) => {
+            *control_open = false;
+            Ok(WokenMuxer::Settled)
+        }
+        MuxerWake::Add(Some(add)) => {
+            if admit_runtime_pad(mux, add, pad_rxs, open, current_output, adapter).await? {
+                Ok(WokenMuxer::Admitted)
+            } else {
+                Ok(WokenMuxer::Settled)
+            }
+        }
+        MuxerWake::Add(None) => {
+            *pad_adds = None;
+            Ok(WokenMuxer::Settled)
+        }
+        MuxerWake::Pad(slot, maybe) => Ok(WokenMuxer::Pad(slot, maybe)),
+    }
+}
+
+/// An input's `CapsChanged` on a muxer arm. MX-1: re-solve the input against its
+/// pad constraint and reconfigure the pad; the input-side change is consumed,
+/// not forwarded as if it were the merged output. MX-2: emit one downstream
+/// `CapsChanged` only when the merged output actually shifts. MX-1β / M839:
+/// walk the allocation change through this boundary.
+#[allow(clippy::too_many_arguments)]
+async fn apply_pad_caps<E: MultiInputElement>(
+    mux: &mut E,
+    beta: &mut MuxBeta,
+    pad: usize,
+    slot: usize,
+    new_caps: &Caps,
+    probe: &Probe,
+    current_output: &mut Caps,
+    adapter: &mut SenderSink,
+) -> Result<(), G2gError> {
+    let input_caps = solve_mux_input_dyn(new_caps, &*mux as &dyn DynMultiInputElement, pad)?;
+    log_caps_rejected(
+        probe.as_deref().map(|p| p.name()),
+        &input_caps,
+        mux.configure_pipeline(pad, &input_caps),
+    )?
+    .reject_refixate()?;
+    let new_output = solve_mux_output_dyn(&*mux as &dyn DynMultiInputElement)?;
+    if new_output != *current_output {
+        *current_output = new_output.clone();
+        adapter
+            .push(PipelinePacket::CapsChanged(new_output))
+            .await?;
+    }
+    beta.pad_changed(
+        &mut *mux as &mut dyn DynMultiInputElement,
+        slot,
+        input_caps,
+        current_output,
+    )
+    .await
+}
+
 /// The muxer arm: drain the per-input channels round-robin, combine each input's
 /// packets via `process(pad, ..)`, and emit a single `Eos` once every input has
 /// ended. Round-robin draining keeps a fast input from starving a slow one (a
@@ -5691,24 +5806,16 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
     let mut tick = ArmTick::new(ticker, &mux as &dyn DynMultiInputElement);
     beta.seed(&mux as &dyn DynMultiInputElement, &current_output);
     loop {
-        // An input attached mid-run joins before the next packet is picked, so
-        // a busy muxer admits it as promptly as a parked one.
-        if let Some(adds) = &pad_adds {
-            while let Some(add) = adds.try_recv() {
-                if admit_runtime_pad(
-                    &mut mux,
-                    add,
-                    &mut pad_rxs,
-                    &mut open,
-                    &mut current_output,
-                    &mut adapter,
-                )
-                .await?
-                {
-                    input_count += 1;
-                }
-            }
-        }
+        // An input attached mid-run joins before the next packet is picked.
+        input_count += admit_queued_pads(
+            &mut mux,
+            pad_adds.as_ref(),
+            &mut pad_rxs,
+            &mut open,
+            &mut current_output,
+            &mut adapter,
+        )
+        .await?;
         // M839: a consumer's demand on the merged output arrives here. Checked
         // before the data drain so a busy muxer still applies it promptly.
         while let Some(directive) = arm_rx.try_recv() {
@@ -5753,41 +5860,25 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
                 else {
                     continue;
                 };
-                let (slot, maybe) = match parked {
-                    MuxerWake::Directive(Some(directive)) => {
-                        apply_mux_directive(
-                            &mut mux as &mut dyn DynMultiInputElement,
-                            &mut beta,
-                            directive,
-                            &current_output,
-                        )
-                        .await?;
+                let woken = settle_wake(
+                    parked,
+                    &mut mux,
+                    &mut beta,
+                    &mut control_open,
+                    &mut pad_adds,
+                    &mut pad_rxs,
+                    &mut open,
+                    &mut current_output,
+                    &mut adapter,
+                )
+                .await?;
+                let (slot, maybe) = match woken {
+                    WokenMuxer::Pad(slot, maybe) => (slot, maybe),
+                    WokenMuxer::Admitted => {
+                        input_count += 1;
                         continue;
                     }
-                    MuxerWake::Directive(None) => {
-                        control_open = false;
-                        continue;
-                    }
-                    MuxerWake::Add(Some(add)) => {
-                        if admit_runtime_pad(
-                            &mut mux,
-                            add,
-                            &mut pad_rxs,
-                            &mut open,
-                            &mut current_output,
-                            &mut adapter,
-                        )
-                        .await?
-                        {
-                            input_count += 1;
-                        }
-                        continue;
-                    }
-                    MuxerWake::Add(None) => {
-                        pad_adds = None;
-                        continue;
-                    }
-                    MuxerWake::Pad(slot, maybe) => (slot, maybe),
+                    WokenMuxer::Settled => continue,
                 };
                 next = (slot + 1) % input_count;
                 // A closed channel with no `Eos` is an upstream end; fold it into
@@ -5807,32 +5898,15 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
                 }
             }
             PipelinePacket::CapsChanged(new_caps) => {
-                // MX-1: re-solve this input against its pad constraint and
-                // reconfigure the pad; the input-side `CapsChanged` is consumed,
-                // not forwarded as if it were the merged output.
-                let input_caps =
-                    solve_mux_input_dyn(&new_caps, &mux as &dyn DynMultiInputElement, pad)?;
-                log_caps_rejected(
-                    probe.as_deref().map(|p| p.name()),
-                    &input_caps,
-                    mux.configure_pipeline(pad, &input_caps),
-                )?
-                .reject_refixate()?;
-                // MX-2: the per-input change may shift the merged output. Emit one
-                // downstream `CapsChanged` only when it actually changed.
-                let new_output = solve_mux_output_dyn(&mux as &dyn DynMultiInputElement)?;
-                if new_output != current_output {
-                    current_output = new_output.clone();
-                    adapter
-                        .push(PipelinePacket::CapsChanged(new_output))
-                        .await?;
-                }
-                // MX-1β / M839: walk the allocation change through this boundary.
-                beta.pad_changed(
-                    &mut mux as &mut dyn DynMultiInputElement,
+                apply_pad_caps(
+                    &mut mux,
+                    &mut beta,
+                    pad,
                     slot,
-                    input_caps,
-                    &current_output,
+                    &new_caps,
+                    &probe,
+                    &mut current_output,
+                    &mut adapter,
                 )
                 .await?;
             }
@@ -5925,22 +5999,18 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
     loop {
         // An input attached mid-run joins before the next release round, as in
         // `muxer_arm`; the aggregator grows a queue for it.
-        if let Some(adds) = &pad_adds {
-            while let Some(add) = adds.try_recv() {
-                if admit_runtime_pad(
-                    &mut mux,
-                    add,
-                    &mut pad_rxs,
-                    &mut open,
-                    &mut current_output,
-                    &mut adapter,
-                )
-                .await?
-                {
-                    input_count += 1;
-                    agg.add_input();
-                }
-            }
+        let admitted = admit_queued_pads(
+            &mut mux,
+            pad_adds.as_ref(),
+            &mut pad_rxs,
+            &mut open,
+            &mut current_output,
+            &mut adapter,
+        )
+        .await?;
+        input_count += admitted;
+        for _ in 0..admitted {
+            agg.add_input();
         }
         // Release every frame now safe to emit, in global PTS order: the
         // aggregator yields the earliest only once every still-contributing input
@@ -6013,42 +6083,26 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
             else {
                 continue;
             };
-            match parked {
-                MuxerWake::Directive(Some(directive)) => {
-                    apply_mux_directive(
-                        &mut mux as &mut dyn DynMultiInputElement,
-                        &mut beta,
-                        directive,
-                        &current_output,
-                    )
-                    .await?;
+            let woken = settle_wake(
+                parked,
+                &mut mux,
+                &mut beta,
+                &mut control_open,
+                &mut pad_adds,
+                &mut pad_rxs,
+                &mut open,
+                &mut current_output,
+                &mut adapter,
+            )
+            .await?;
+            match woken {
+                WokenMuxer::Pad(slot, maybe) => (slot, maybe),
+                WokenMuxer::Admitted => {
+                    input_count += 1;
+                    agg.add_input();
                     continue;
                 }
-                MuxerWake::Directive(None) => {
-                    control_open = false;
-                    continue;
-                }
-                MuxerWake::Add(Some(add)) => {
-                    if admit_runtime_pad(
-                        &mut mux,
-                        add,
-                        &mut pad_rxs,
-                        &mut open,
-                        &mut current_output,
-                        &mut adapter,
-                    )
-                    .await?
-                    {
-                        input_count += 1;
-                        agg.add_input();
-                    }
-                    continue;
-                }
-                MuxerWake::Add(None) => {
-                    pad_adds = None;
-                    continue;
-                }
-                MuxerWake::Pad(slot, maybe) => (slot, maybe),
+                WokenMuxer::Settled => continue,
             }
         };
         next = (slot + 1) % input_count;
@@ -6068,30 +6122,15 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
                 agg.mark_ended(slot);
             }
             PipelinePacket::CapsChanged(new_caps) => {
-                // MX-1 / MX-2 / MX-1β, identical to `muxer_arm`: re-solve this
-                // input's pad, emit one downstream `CapsChanged` only when the
-                // merged output actually shifts, and walk the allocation change
-                // through the boundary.
-                let input_caps =
-                    solve_mux_input_dyn(&new_caps, &mux as &dyn DynMultiInputElement, pad)?;
-                log_caps_rejected(
-                    probe.as_deref().map(|p| p.name()),
-                    &input_caps,
-                    mux.configure_pipeline(pad, &input_caps),
-                )?
-                .reject_refixate()?;
-                let new_output = solve_mux_output_dyn(&mux as &dyn DynMultiInputElement)?;
-                if new_output != current_output {
-                    current_output = new_output.clone();
-                    adapter
-                        .push(PipelinePacket::CapsChanged(new_output))
-                        .await?;
-                }
-                beta.pad_changed(
-                    &mut mux as &mut dyn DynMultiInputElement,
+                apply_pad_caps(
+                    &mut mux,
+                    &mut beta,
+                    pad,
                     slot,
-                    input_caps,
-                    &current_output,
+                    &new_caps,
+                    &probe,
+                    &mut current_output,
+                    &mut adapter,
                 )
                 .await?;
             }
