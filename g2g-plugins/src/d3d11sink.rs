@@ -319,8 +319,7 @@ impl AsyncElement for D3D11Sink {
         let (&Dim::Fixed(w), &Dim::Fixed(h)) = (w, h) else {
             return None;
         };
-        // Even NV12 (the sink rejects odd dims): packed size is w*h*3/2.
-        let size = w as usize * h as usize * 3 / 2;
+        let size = crate::pixel::frame_byte_size(RawVideoFormat::Nv12, w, h);
         Some(AllocationParams::d3d11(
             size,
             D3D11_POOL_HEADROOM,

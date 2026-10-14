@@ -746,8 +746,8 @@ unsafe fn build_session(
 ///
 /// SAFETY: `state.session` is live; `nv12` outlives the synchronous encode.
 unsafe fn encode_into(state: &EncoderState, nv12: &[u8], pts_ns: u64) -> Result<(), G2gError> {
-    // SAFETY: make_pixel_buffer rejects an `nv12` shorter than w*h*3/2 before it
-    // copies anything.
+    // SAFETY: make_pixel_buffer rejects an `nv12` shorter than one NV12 frame
+    // before it copies anything.
     let pixel_buffer = unsafe { make_pixel_buffer(nv12, state.width, state.height)? };
     // SAFETY: the session is live per this function's contract, and the staging
     // buffer outlives the synchronous encode.
@@ -806,7 +806,7 @@ unsafe fn complete_frames(session: &VTCompressionSession) {
 /// Build a bi-planar NV12 `CVPixelBuffer` and copy `nv12` into its planes
 /// (inverse of `VtDecode::pack_nv12`).
 ///
-/// SAFETY: `nv12` is `w*h * 3/2` bytes; the created buffer is released on drop.
+/// SAFETY: `nv12` holds one NV12 frame; the created buffer is released on drop.
 unsafe fn make_pixel_buffer(
     nv12: &[u8],
     w: u32,
@@ -814,7 +814,7 @@ unsafe fn make_pixel_buffer(
 ) -> Result<CFRetained<CVPixelBuffer>, G2gError> {
     let hw = || G2gError::Hardware(HardwareError::Other);
     let (wu, hu) = (w as usize, h as usize);
-    if nv12.len() < wu * hu * 3 / 2 {
+    if nv12.len() < crate::pixel::frame_byte_size(g2g_core::RawVideoFormat::Nv12, w, h) {
         return Err(hw());
     }
     let mut pb: *mut CVPixelBuffer = ptr::null_mut();

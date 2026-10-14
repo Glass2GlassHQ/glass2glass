@@ -50,7 +50,7 @@ use alloc::vec::Vec;
 
 use crate::padprop::split_pad_name;
 use crate::paint::blend_px;
-use crate::pixel::{frame_byte_size, planar_planes};
+use crate::pixel::{chroma_420_size, frame_byte_size, planar_planes, tight_plane};
 use crate::videoscale::{axis_samples, bilerp};
 use crate::yuvmatrix::YuvRgbMatrix;
 use g2g_core::frame::Frame;
@@ -1038,7 +1038,8 @@ struct Chan {
 fn channels(format: RawVideoFormat, w: usize, h: usize) -> [Chan; 3] {
     match format {
         RawVideoFormat::Nv12 => {
-            let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+            let (base, _, ch) = tight_plane(format, 1, w, h).expect("negotiated NV12 geometry");
+            let (cw, _) = chroma_420_size(w, h);
             [
                 Chan {
                     base: 0,
@@ -1050,7 +1051,7 @@ fn channels(format: RawVideoFormat, w: usize, h: usize) -> [Chan; 3] {
                     vs: 0,
                 },
                 Chan {
-                    base: w * h,
+                    base,
                     w: cw,
                     h: ch,
                     stride: 2,
@@ -1059,7 +1060,7 @@ fn channels(format: RawVideoFormat, w: usize, h: usize) -> [Chan; 3] {
                     vs: 1,
                 },
                 Chan {
-                    base: w * h,
+                    base,
                     w: cw,
                     h: ch,
                     stride: 2,

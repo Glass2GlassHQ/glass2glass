@@ -23,7 +23,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
+use crate::pixel::{even_dims_required, frame_byte_size, planar_planes, tight_plane};
 use alloc::string::String;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
@@ -639,6 +639,10 @@ fn transform_plane(
     dst
 }
 
+/// Bytes in one interleaved U, V pair of NV12's chroma plane, which moves as a
+/// unit.
+const NV12_CHROMA_PAIR_BYTES: usize = 2;
+
 /// Flip one frame by `method`, preserving `format`. `src` is validated to hold
 /// the input frame; dims are even when the format is 4:2:0.
 fn flip(
@@ -653,14 +657,15 @@ fn flip(
             transform_plane(src, in_w, in_h, 4, method).into_boxed_slice()
         }
         RawVideoFormat::Nv12 => {
-            let luma_in = in_w * in_h;
-            let chroma_in = (in_w / 2) * (in_h / 2) * 2;
+            let (chroma_at, chroma_row_bytes, chroma_rows) =
+                tight_plane(format, 1, in_w, in_h).expect("negotiated NV12 geometry");
+            let chroma_pairs = chroma_row_bytes / NV12_CHROMA_PAIR_BYTES;
             let mut out = transform_plane(src, in_w, in_h, 1, method);
             let chroma = transform_plane(
-                &src[luma_in..luma_in + chroma_in],
-                in_w / 2,
-                in_h / 2,
-                2,
+                &src[chroma_at..chroma_at + chroma_row_bytes * chroma_rows],
+                chroma_pairs,
+                chroma_rows,
+                NV12_CHROMA_PAIR_BYTES,
                 method,
             );
             out.extend_from_slice(&chroma);

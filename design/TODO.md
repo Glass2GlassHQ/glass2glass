@@ -45,8 +45,6 @@ Codecs and parsers:
 
 Raw video and GPU:
 
-- NV12 plane geometry is derived by hand in kmssink, waylandsink, videoflip,
-  compositor, cuda, glnv12, cvnv12, and seven `w*h*3/2` sites.
 - `timeoverlay` and `analyticsoverlay` copy `paint::Canvas` blending.
 - `wgpusink` and `wgpucompositor` hand-write readback.
 

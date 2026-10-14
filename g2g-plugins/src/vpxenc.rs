@@ -164,7 +164,7 @@ impl VpxEnc {
 
     /// Encode one I420 access unit, returning the ready packets as `(data, pts_ns)`.
     fn encode(&mut self, i420: &[u8], pts_ns: u64) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
-        let expected = (self.width as usize) * (self.height as usize) * 3 / 2;
+        let expected = crate::pixel::frame_byte_size(RawVideoFormat::I420, self.width, self.height);
         if i420.len() < expected {
             return Err(G2gError::CapsMismatch);
         }

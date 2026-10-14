@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1348: NV12 and I420 plane sizes come from the shared pixel helpers.
 - M1347: `waylandsink` converts NV12 straight into the shm buffer on its worker thread.
 - M1346: the compositor scales with videoscale's sampling and clips each blit once.
 - M1345: dma-buf imports are cached and wgpu dma-buf exports recycle a ring of four buffers.

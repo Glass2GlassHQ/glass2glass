@@ -162,7 +162,9 @@ impl MjpegEnc {
         // map straight to a jpeg-encoder ColorType.
         let (data, color): (alloc::borrow::Cow<[u8]>, ColorType) = match self.format {
             RawVideoFormat::I420 => {
-                if pixels.len() < w * h * 3 / 2 {
+                if pixels.len()
+                    < crate::pixel::frame_byte_size(RawVideoFormat::I420, self.width, self.height)
+                {
                     return Err(G2gError::CapsMismatch);
                 }
                 let rgba = crate::videoconvert::convert(

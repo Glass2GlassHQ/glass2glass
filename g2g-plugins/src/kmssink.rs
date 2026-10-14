@@ -687,11 +687,9 @@ impl AsyncElement for KmsSink {
     }
 }
 
-/// Copy an `nv12` source buffer (Y plane of `width * height` followed by
-/// UV plane of `width * height / 2`) into a destination dumb buffer with
-/// the given `pitch`. The destination layout is the kernel's NV12 dumb
-/// buffer: Y plane first at offset 0, UV plane at offset `pitch * height`,
-/// both at `pitch` bytes per row.
+/// Copy a tightly packed NV12 frame into a destination dumb buffer whose rows
+/// are `pitch` bytes apart: the kernel's NV12 dumb buffer, Y plane first at
+/// offset 0, UV plane at offset `pitch * height`.
 fn copy_nv12(
     src: &[u8],
     width: u32,
@@ -699,36 +697,18 @@ fn copy_nv12(
     pitch: u32,
     dst: &mut [u8],
 ) -> Result<(), G2gError> {
-    let w = width as usize;
-    let h = height as usize;
-    let stride = pitch as usize;
-    let y_bytes = w * h;
-    let uv_rows = h / 2;
-    let uv_bytes = w * uv_rows;
-    if src.len() < y_bytes + uv_bytes {
+    if src.len() < crate::pixel::frame_byte_size(g2g_core::RawVideoFormat::Nv12, width, height) {
         return Err(G2gError::CapsMismatch);
     }
-    if dst.len() < stride * (h + uv_rows) {
-        return Err(G2gError::Hardware(HardwareError::Other));
-    }
-
-    let (y_src, uv_src) = src.split_at(y_bytes);
-
-    // Y plane: rows of `w` bytes copied into rows of `stride` bytes.
-    for row in 0..h {
-        let dst_off = row * stride;
-        let src_off = row * w;
-        dst[dst_off..dst_off + w].copy_from_slice(&y_src[src_off..src_off + w]);
-    }
-    // UV plane: same row count as half-height, same w bytes per row (one
-    // U/V pair per chroma sample = 2 bytes per chroma pair, `w/2` pairs =
-    // `w` bytes). Lives in dst starting at row `h`.
-    for row in 0..uv_rows {
-        let dst_off = (h + row) * stride;
-        let src_off = row * w;
-        dst[dst_off..dst_off + w].copy_from_slice(&uv_src[src_off..src_off + w]);
-    }
-    Ok(())
+    crate::paddedrows::unpack_tight(
+        src,
+        g2g_core::RawVideoFormat::Nv12,
+        width as usize,
+        height as usize,
+        pitch as usize,
+        dst,
+    )
+    .ok_or(G2gError::Hardware(HardwareError::Other))
 }
 
 #[cfg(test)]

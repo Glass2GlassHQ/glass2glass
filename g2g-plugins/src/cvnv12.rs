@@ -14,8 +14,8 @@ use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
     CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetIOSurface,
-    CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth, CVPixelBufferGetWidthOfPlane,
-    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
 };
 
 use g2g_core::CvPixelBufferKeepAlive;
@@ -115,8 +115,9 @@ unsafe impl Send for CvBufferOwner {}
 // SAFETY: see the `Send` justification; the owner exposes no mutation.
 unsafe impl Sync for CvBufferOwner {}
 
-/// Copy the locked bi-planar pixel buffer into a tight NV12 byte buffer
-/// (`w*h` luma + `w*(h/2)` interleaved chroma), stripping per-row padding.
+/// Copy the locked bi-planar pixel buffer into a tight NV12 byte buffer,
+/// stripping per-row padding. `None` when CoreVideo's planes are smaller than
+/// a `width` x `height` NV12 frame.
 ///
 /// SAFETY: `pb` is locked for read; plane base addresses / strides are valid for
 /// the plane dimensions CoreVideo reports.
@@ -125,21 +126,26 @@ pub(crate) unsafe fn pack_nv12(
     width: usize,
     height: usize,
 ) -> Option<Box<[u8]>> {
-    let mut out = Vec::with_capacity(width * height * 3 / 2);
-    // Plane 0: luma (w x h). Plane 1: interleaved CbCr (w x h/2 bytes/row).
+    let nv12 = g2g_core::RawVideoFormat::Nv12;
+    let mut out = Vec::with_capacity(crate::pixel::frame_byte_size(
+        nv12,
+        width as u32,
+        height as u32,
+    ));
     for plane in 0..2usize {
+        let (_, row_bytes, rows) = crate::pixel::tight_plane(nv12, plane, width, height)?;
         let base = CVPixelBufferGetBaseAddressOfPlane(pb, plane) as *const u8;
         if base.is_null() {
             return None;
         }
         let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, plane);
-        let pw = CVPixelBufferGetWidthOfPlane(pb, plane); // luma: w, chroma: w/2 (CbCr pairs)
-        let ph = CVPixelBufferGetHeightOfPlane(pb, plane); // luma: h, chroma: h/2
-                                                           // Bytes per row of valid data: luma = pw, chroma = pw * 2 (CbCr pair).
-        let row_bytes = if plane == 0 { pw } else { pw * 2 };
-        for row in 0..ph {
-            // SAFETY: row < plane height, row_bytes <= stride, base valid for the
-            // plane; the source slice stays within the locked plane.
+        if row_bytes > stride || rows > CVPixelBufferGetHeightOfPlane(pb, plane) {
+            return None;
+        }
+        for row in 0..rows {
+            // SAFETY: row < the plane height CoreVideo reports, row_bytes <=
+            // stride, base valid for the plane; the source slice stays within
+            // the locked plane.
             let src = unsafe { core::slice::from_raw_parts(base.add(row * stride), row_bytes) };
             out.extend_from_slice(src);
         }

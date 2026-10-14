@@ -264,16 +264,16 @@ impl GlState {
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
             match &self.textures {
                 Textures::Nv12 { y_tex, uv_tex, .. } => {
-                    let cw = w.div_ceil(2);
-                    let ch = h.div_ceil(2);
-                    let y_size = w * h;
-                    let uv_size = 2 * cw * ch;
-                    if bytes.len() < y_size + uv_size {
+                    let nv12 = g2g_core::RawVideoFormat::Nv12;
+                    let (uv_at, _, _) =
+                        crate::pixel::tight_plane(nv12, 1, w, h).ok_or(G2gError::CapsMismatch)?;
+                    let frame_bytes = crate::pixel::frame_byte_size(nv12, self.width, self.height);
+                    if bytes.len() < frame_bytes {
                         return Err(G2gError::CapsMismatch);
                     }
-                    let (y_plane, rest) = bytes.split_at(y_size);
-                    sub_image(gl, *y_tex, glow::RED, w, h, y_plane);
-                    sub_image(gl, *uv_tex, glow::RG, cw, ch, &rest[..uv_size]);
+                    let (cw, ch) = crate::pixel::chroma_420_size(w, h);
+                    sub_image(gl, *y_tex, glow::RED, w, h, &bytes[..uv_at]);
+                    sub_image(gl, *uv_tex, glow::RG, cw, ch, &bytes[uv_at..frame_bytes]);
                 }
                 Textures::Rgba { tex, .. } => {
                     let size = w.saturating_mul(h).saturating_mul(4);

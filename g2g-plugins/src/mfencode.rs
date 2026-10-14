@@ -972,7 +972,9 @@ fn set_output_from_available(
 fn output_buffer_size(transform: &IMFTransform, w: u32, h: u32) -> Result<u32, G2gError> {
     // SAFETY: stream-info query on the owning thread.
     let info = unsafe { transform.GetOutputStreamInfo(0) }.map_err(mf_err)?;
-    let nv12 = w.saturating_mul(h).saturating_mul(3) / 2;
+    let nv12 = RawVideoFormat::Nv12
+        .unpadded_frame_bytes(w, h)
+        .map_or(u32::MAX, |bytes| u32::try_from(bytes).unwrap_or(u32::MAX));
     Ok(info.cbSize.max(nv12))
 }
 

@@ -46,7 +46,8 @@ pub(crate) fn plane_shapes_with_stride_shift(
     all(target_os = "linux", feature = "v4l2"),
     all(target_os = "linux", feature = "pipewire"),
     all(target_os = "linux", feature = "dmabuf-wgpu"),
-    all(target_os = "linux", feature = "unixfd")
+    all(target_os = "linux", feature = "unixfd"),
+    all(target_os = "linux", feature = "kms-sink")
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PaddedPlane {
@@ -65,7 +66,8 @@ pub(crate) struct PaddedPlane {
     all(target_os = "linux", feature = "v4l2"),
     all(target_os = "linux", feature = "pipewire"),
     all(target_os = "linux", feature = "dmabuf-wgpu"),
-    all(target_os = "linux", feature = "unixfd")
+    all(target_os = "linux", feature = "unixfd"),
+    all(target_os = "linux", feature = "kms-sink")
 ))]
 pub(crate) fn padded_planes(
     format: RawVideoFormat,
@@ -139,6 +141,32 @@ pub(crate) fn pack_tight(
                 return None;
             }
             dst.extend_from_slice(&src[start..end]);
+        }
+    }
+    Some(())
+}
+
+/// Copy the tightly packed frame in `src` into `dst` with plane 0's rows
+/// `first_stride` bytes apart, the inverse of [`pack_tight`]. `None` when
+/// either buffer is short of what the geometry claims.
+#[cfg(all(target_os = "linux", feature = "kms-sink"))]
+pub(crate) fn unpack_tight(
+    src: &[u8],
+    format: RawVideoFormat,
+    w: usize,
+    h: usize,
+    first_stride: usize,
+    dst: &mut [u8],
+) -> Option<()> {
+    let mut read = 0usize;
+    for plane in padded_planes(format, w, h, 0, first_stride)? {
+        for row in 0..plane.rows {
+            let start = plane.offset.checked_add(plane.stride.checked_mul(row)?)?;
+            let end = start.checked_add(plane.row_bytes)?;
+            let next_read = read.checked_add(plane.row_bytes)?;
+            dst.get_mut(start..end)?
+                .copy_from_slice(src.get(read..next_read)?);
+            read = next_read;
         }
     }
     Some(())

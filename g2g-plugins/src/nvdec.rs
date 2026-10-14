@@ -493,8 +493,7 @@ impl NvDec {
                 // SAFETY: `f.buffer`'s plane pointers are valid CUDA device memory
                 // in its context, pinned by the buffer's keep-alive owner for the
                 // duration of this copy.
-                let bytes =
-                    unsafe { crate::cuda::download_nv12(&f.buffer, f.format.bytes_per_sample())? };
+                let bytes = unsafe { crate::cuda::download_nv12(&f.buffer, f.format)? };
                 MemoryDomain::System(SystemSlice::from_boxed(bytes))
             } else {
                 MemoryDomain::Cuda(f.buffer)

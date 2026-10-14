@@ -430,7 +430,8 @@ pub mod yuvmatrix;
     all(target_os = "linux", feature = "v4l2"),
     all(target_os = "linux", feature = "pipewire"),
     feature = "wgpu-sink",
-    all(target_os = "linux", feature = "dmabuf-wgpu")
+    all(target_os = "linux", feature = "dmabuf-wgpu"),
+    all(target_os = "linux", feature = "kms-sink")
 ))]
 mod paddedrows;
 // Sans-IO RFC 4566 SDP: the shared media-section scanner plus the RTP/AVP

@@ -396,7 +396,9 @@ impl MetalVideoSink {
     fn present_system(&mut self, nv12: &[u8]) -> Result<(), G2gError> {
         let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
         let (w, h) = (st.width as usize, st.height as usize);
-        if nv12.len() < w * h * 3 / 2 {
+        if nv12.len()
+            < crate::pixel::frame_byte_size(g2g_core::RawVideoFormat::Nv12, st.width, st.height)
+        {
             return Err(G2gError::CapsMismatch);
         }
         let region_y = region(w, h);
