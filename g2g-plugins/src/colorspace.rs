@@ -304,26 +304,32 @@ impl ColorTransform {
 }
 
 /// The transfer + primaries half of a conversion, as tables: linear light per
-/// source code, the source-to-target primaries matrix in linear light, and the
-/// linear light each target code stands for (searched to encode). Built once
-/// per negotiated colorimetry pair, so the per-pixel cost is two table reads
-/// and a 3x3 multiply.
+/// source code, the source-to-target primaries matrix in linear light, the
+/// light-dependent gains, and the target code nearest each light. Built once
+/// per negotiated colorimetry pair, so the per-pixel cost is table reads and a
+/// 3x3 multiply.
 struct LightTransform {
     source_linear: [f32; CODE_COUNT],
     target_linear: [f32; CODE_COUNT],
     gamut: [[f32; 3]; 3],
     /// The HLG tables hold scene light, so the OOTF has to run on top of them
-    /// to reach the display light everything else is in.
-    source_is_scene_light: bool,
-    target_is_scene_light: bool,
-    tone_map: Option<ToneMap>,
+    /// to reach the display light everything else is in. Indexed by scene
+    /// luminance.
+    source_ootf: Option<GainTable>,
+    /// The inverse OOTF of an HLG target, indexed by display luminance.
+    target_inverse_ootf: Option<GainTable>,
+    /// [`ToneMap::gain`] indexed by the brightest channel.
+    tone_map: Option<GainTable>,
+    /// For each light bucket, the highest target code whose light lies below
+    /// the bucket, where the search for the nearest code starts.
+    code_below: Vec<u8>,
 }
 
 impl core::fmt::Debug for LightTransform {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LightTransform")
             .field("gamut", &self.gamut)
-            .field("tone_map", &self.tone_map)
+            .field("tone_map", &self.tone_map.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -355,13 +361,26 @@ impl LightTransform {
             (Some(source_peak), None) => ToneMap::new(source_peak),
             _ => None,
         };
+        let target_linear = linear_table(&target_curve);
         Ok(Some(Box::new(Self {
             source_linear: linear_table(&source_curve),
-            target_linear: linear_table(&target_curve),
+            code_below: (0..light_bucket_count())
+                .map(|bucket| {
+                    let low = light_bucket_low(bucket);
+                    target_linear
+                        .partition_point(|&entry| entry < low)
+                        .saturating_sub(1) as u8
+                })
+                .collect(),
+            target_linear,
             gamut: gamut_matrix(source.primaries, target.primaries)?,
-            source_is_scene_light: source_curve.is_scene_light(),
-            target_is_scene_light: target_curve.is_scene_light(),
-            tone_map,
+            source_ootf: source_curve
+                .is_scene_light()
+                .then(|| GainTable::new(0.0, hlg_ootf_gain)),
+            target_inverse_ootf: target_curve
+                .is_scene_light()
+                .then(|| GainTable::new(0.0, hlg_inverse_ootf_gain)),
+            tone_map: tone_map.map(|tone_map| GainTable::new(1.0, |light| tone_map.gain(light))),
         })))
     }
 
@@ -369,13 +388,13 @@ impl LightTransform {
     fn apply(&self, r: i32, g: i32, b: i32) -> (i32, i32, i32) {
         let code = |v: i32| self.source_linear[v.clamp(0, SAMPLE_MAX) as usize];
         let mut linear = [code(r), code(g), code(b)];
-        if self.source_is_scene_light {
-            let gain = hlg_ootf_gain(linear);
+        if let Some(ootf) = &self.source_ootf {
+            let gain = ootf.gain(scene_luminance(linear));
             scale(&mut linear, gain);
         }
         if let Some(tone_map) = &self.tone_map {
-            let gain = tone_map.gain(linear);
-            scale(&mut linear, gain);
+            let brightest = linear[0].max(linear[1]).max(linear[2]);
+            scale(&mut linear, tone_map.gain(brightest));
         }
         let mixed = |row: [f32; 3]| row[0] * linear[0] + row[1] * linear[1] + row[2] * linear[2];
         let mut out = [
@@ -383,8 +402,8 @@ impl LightTransform {
             mixed(self.gamut[1]),
             mixed(self.gamut[2]),
         ];
-        if self.target_is_scene_light {
-            let gain = hlg_inverse_ootf_gain(out);
+        if let Some(inverse_ootf) = &self.target_inverse_ootf {
+            let gain = inverse_ootf.gain(scene_luminance(out));
             scale(&mut out, gain);
         }
         (
@@ -394,21 +413,73 @@ impl LightTransform {
         )
     }
 
-    /// The target code whose linear light is nearest `linear`. The table
-    /// ascends, so a partition point plus one comparison with its predecessor
-    /// picks it, and an out-of-gamut value lands on an endpoint.
+    /// The target code whose linear light is nearest `linear`, an out-of-gamut
+    /// value landing on an endpoint. The table ascends, so from the code below
+    /// the light's bucket a step or two forward finds it.
     fn encode(&self, linear: f32) -> i32 {
-        let above = self.target_linear.partition_point(|&entry| entry < linear);
-        if above == 0 {
-            return 0;
+        let mut code = self.code_below[light_bucket(linear)] as usize;
+        while code < SAMPLE_MAX as usize
+            && self.target_linear[code + 1] - linear < linear - self.target_linear[code]
+        {
+            code += 1;
         }
-        if above >= CODE_COUNT {
-            return SAMPLE_MAX;
+        code as i32
+    }
+}
+
+/// The positive light range the light-indexed tables span: a value below the
+/// floor reads the first bucket, one above the ceiling the last.
+const LIGHT_FLOOR: f32 = 1.0 / (1u32 << 24) as f32;
+const LIGHT_CEILING: f32 = 64.0;
+/// Mantissa bits a light value drops to name its bucket, leaving 128 buckets
+/// per octave.
+const LIGHT_BUCKET_SHIFT: u32 = 16;
+
+/// The bucket `light` falls in. Positive `f32`s order like their bit patterns,
+/// so the buckets are log spaced.
+fn light_bucket(light: f32) -> usize {
+    // a NaN takes the floor too
+    let light = match light >= LIGHT_FLOOR {
+        true => light.min(LIGHT_CEILING),
+        false => LIGHT_FLOOR,
+    };
+    ((light.to_bits() - LIGHT_FLOOR.to_bits()) >> LIGHT_BUCKET_SHIFT) as usize
+}
+
+fn light_bucket_count() -> usize {
+    light_bucket(LIGHT_CEILING) + 1
+}
+
+/// The smallest light in `bucket`.
+fn light_bucket_low(bucket: usize) -> f32 {
+    f32::from_bits(LIGHT_FLOOR.to_bits() + ((bucket as u32) << LIGHT_BUCKET_SHIFT))
+}
+
+/// A gain that depends on one light value, evaluated once per light bucket.
+struct GainTable {
+    gains: Vec<f32>,
+    /// The gain of a light at or below zero.
+    dark_gain: f32,
+}
+
+impl GainTable {
+    fn new(dark_gain: f32, gain: impl Fn(f64) -> f64) -> Self {
+        let middle = |bucket: usize| {
+            let (low, high) = (light_bucket_low(bucket), light_bucket_low(bucket + 1));
+            (f64::from(low) + f64::from(high)) / 2.0
+        };
+        Self {
+            gains: (0..light_bucket_count())
+                .map(|bucket| gain(middle(bucket)) as f32)
+                .collect(),
+            dark_gain,
         }
-        let (below, above) = (above - 1, above);
-        match linear - self.target_linear[below] <= self.target_linear[above] - linear {
-            true => below as i32,
-            false => above as i32,
+    }
+
+    fn gain(&self, light: f32) -> f32 {
+        match light > 0.0 {
+            true => self.gains[light_bucket(light)],
+            false => self.dark_gain,
         }
     }
 }
@@ -496,28 +567,27 @@ fn hlg_to_scene(signal: f64) -> f64 {
 
 /// The BT.2020 luma weights HLG's OOTF measures scene luminance with, which is
 /// why the OOTF is one gain for the pixel and not a per-channel curve.
-fn scene_luminance(channels: [f32; 3]) -> f64 {
+fn scene_luminance(channels: [f32; 3]) -> f32 {
     let weights = LumaCoefficients::BT2020_NCL;
-    f64::from(weights.kr * channels[0] + weights.kg() * channels[1] + weights.kb * channels[2])
+    weights.kr * channels[0] + weights.kg() * channels[1] + weights.kb * channels[2]
 }
 
-/// The gain HLG's OOTF puts on all three channels to take the pixel from scene
-/// light to display light relative to reference white.
-fn hlg_ootf_gain(scene: [f32; 3]) -> f32 {
-    let luminance = powf(scene_luminance(scene), HLG_SYSTEM_GAMMA - 1.0);
-    (luminance * HLG_DISPLAY_PEAK_NITS / REFERENCE_WHITE_NITS) as f32
+/// The gain HLG's OOTF puts on all three channels to take a pixel of scene
+/// luminance `luminance` to display light relative to reference white.
+fn hlg_ootf_gain(luminance: f64) -> f64 {
+    powf(luminance, HLG_SYSTEM_GAMMA - 1.0) * HLG_DISPLAY_PEAK_NITS / REFERENCE_WHITE_NITS
 }
 
-/// The inverse of [`hlg_ootf_gain`]. The display luminance fixes the scene
-/// luminance, since the OOTF raises the latter to `HLG_SYSTEM_GAMMA`.
-fn hlg_inverse_ootf_gain(display: [f32; 3]) -> f32 {
-    let display_nits = scene_luminance(display) * REFERENCE_WHITE_NITS;
+/// The inverse of [`hlg_ootf_gain`], for a pixel of display luminance
+/// `luminance` relative to reference white. The display luminance fixes the
+/// scene luminance, since the OOTF raises the latter to `HLG_SYSTEM_GAMMA`.
+fn hlg_inverse_ootf_gain(luminance: f64) -> f64 {
+    let display_nits = luminance * REFERENCE_WHITE_NITS;
     if display_nits <= 0.0 {
         return 0.0;
     }
-    let luminance = powf(display_nits / HLG_DISPLAY_PEAK_NITS, 1.0 / HLG_SYSTEM_GAMMA);
-    (REFERENCE_WHITE_NITS / (HLG_DISPLAY_PEAK_NITS * powf(luminance, HLG_SYSTEM_GAMMA - 1.0)))
-        as f32
+    let scene = powf(display_nits / HLG_DISPLAY_PEAK_NITS, 1.0 / HLG_SYSTEM_GAMMA);
+    REFERENCE_WHITE_NITS / (HLG_DISPLAY_PEAK_NITS * powf(scene, HLG_SYSTEM_GAMMA - 1.0))
 }
 
 /// The BT.2390 EETF that brings an HDR source's light into the SDR range, as
@@ -549,14 +619,11 @@ impl ToneMap {
         }
     }
 
-    /// The gain that puts the pixel's brightest channel on its tone-mapped
-    /// light, for all three channels, so the hue stays where it was.
-    fn gain(&self, linear: [f32; 3]) -> f32 {
-        let brightest = linear[0].max(linear[1]).max(linear[2]);
-        if brightest <= 0.0 {
-            return 1.0;
-        }
-        (self.map(f64::from(brightest)) / f64::from(brightest)) as f32
+    /// The gain that puts a pixel whose brightest channel is `brightest` on
+    /// its tone-mapped light, for all three channels, so the hue stays where it
+    /// was.
+    fn gain(&self, brightest: f64) -> f64 {
+        self.map(brightest) / brightest
     }
 
     /// One reference-white-relative light through the EETF.
@@ -1217,6 +1284,30 @@ mod tests {
             ),
             Ok(None)
         ));
+    }
+
+    /// The bucketed encode finds the same code a search of every code would.
+    #[test]
+    fn encode_picks_the_nearest_target_code() {
+        const STEPS: u32 = 4096;
+        const OVERSHOOT: f32 = 1.1;
+        for (source, target) in [
+            (Colorimetry::BT2100_PQ, Colorimetry::BT709),
+            (Colorimetry::BT709, Colorimetry::BT2100_PQ),
+            (Colorimetry::BT709, Colorimetry::BT2100_HLG),
+        ] {
+            let light = light(source, target);
+            let top = light.target_linear[SAMPLE_MAX as usize] * OVERSHOOT;
+            for step in 0..=STEPS {
+                let linear = top * step as f32 / STEPS as f32;
+                let distance = |code: usize| (light.target_linear[code] - linear).abs();
+                let got = light.encode(linear) as usize;
+                assert!(
+                    (0..CODE_COUNT).all(|code| distance(got) <= distance(code)),
+                    "{linear} encoded to {got}"
+                );
+            }
+        }
     }
 
     /// PQ's EOTF and its inverse are each other's, which is what both the code

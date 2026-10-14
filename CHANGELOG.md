@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1343: `colorspace` looks up HDR gains and target codes in tables.
 - M1342: `videoconvert` reuses its working planes, scales bit depth by table and converts P010 to NV12 directly.
 - M1341: `tensorconvert` transposes directly and passes unchanged tensors through.
 - M1340: `gaussianblur` filters in fixed point with a reused scratch.
