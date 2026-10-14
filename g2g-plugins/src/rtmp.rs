@@ -23,6 +23,11 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::flv::{
+    file_header_len, put_file_header, put_tag_header, tag_at, write_u24, FLV_FLAG_AUDIO,
+    FLV_FLAG_VIDEO, TAG_HEADER_LEN,
+};
+
 /// RTMP protocol version (the C0/S0 byte).
 const RTMP_VERSION: u8 = 3;
 /// C1/S1/C2/S2 are each 1536 bytes.
@@ -592,22 +597,14 @@ impl RtmpSession {
     /// output, writing the FLV header before the first tag.
     fn write_flv_tag(&mut self, tag_type: u8, timestamp: u32, body: &[u8]) {
         if !self.flv_header_written {
-            self.flv.extend_from_slice(b"FLV");
-            self.flv.push(1); // version
-            self.flv.push(0x05); // flags: audio + video present
-            self.flv.extend_from_slice(&9u32.to_be_bytes()); // data offset
+            put_file_header(&mut self.flv, FLV_FLAG_AUDIO | FLV_FLAG_VIDEO);
             self.flv_header_written = true;
         }
         self.flv
             .extend_from_slice(&self.flv_prev_tag_size.to_be_bytes());
-        let start = self.flv.len();
-        self.flv.push(tag_type);
-        write_u24(&mut self.flv, body.len() as u32);
-        write_u24(&mut self.flv, timestamp & 0x00FF_FFFF);
-        self.flv.push((timestamp >> 24) as u8);
-        write_u24(&mut self.flv, 0); // stream id
+        put_tag_header(&mut self.flv, tag_type, timestamp, body.len());
         self.flv.extend_from_slice(body);
-        self.flv_prev_tag_size = (self.flv.len() - start) as u32;
+        self.flv_prev_tag_size = (TAG_HEADER_LEN + body.len()) as u32;
     }
 }
 
@@ -942,35 +939,14 @@ impl FlvTagReader {
 
     fn next_tag(&mut self) -> Option<(u8, u32, Vec<u8>)> {
         if !self.header_consumed {
-            if self.buf.len() < 9 {
-                return None;
-            }
-            // The header's data-offset field gives the first tag's start.
-            let data_offset =
-                u32::from_be_bytes(self.buf[5..9].try_into().expect("4 bytes")) as usize;
-            let data_offset = data_offset.max(9);
-            if self.buf.len() < data_offset {
-                return None;
-            }
-            self.buf.drain(..data_offset);
+            let header_len = file_header_len(&self.buf)?;
+            self.buf.drain(..header_len);
             self.header_consumed = true;
         }
-        // 4-byte previous-tag-size, then an 11-byte tag header, then the body.
-        if self.buf.len() < 4 + 11 {
-            return None;
-        }
-        let tag_type = self.buf[4];
-        let data_size = be24(&self.buf, 4 + 1) as usize;
-        let total = 4 + 11 + data_size;
-        if self.buf.len() < total {
-            return None;
-        }
-        let ts_lo = be24(&self.buf, 4 + 4);
-        let ts_hi = self.buf[4 + 7] as u32;
-        let timestamp = (ts_hi << 24) | ts_lo;
-        let body = self.buf[4 + 11..total].to_vec();
-        self.buf.drain(..total);
-        Some((tag_type, timestamp, body))
+        let (tag, body) = tag_at(&self.buf, 0)?;
+        let tag_body = self.buf[body.clone()].to_vec();
+        self.buf.drain(..body.end);
+        Some((tag.tag_type, tag.timestamp_ms, tag_body))
     }
 }
 
@@ -1008,13 +984,6 @@ fn write_message(
             break;
         }
     }
-}
-
-/// Write a 24-bit big-endian integer.
-fn write_u24(out: &mut Vec<u8>, v: u32) {
-    out.push((v >> 16) as u8);
-    out.push((v >> 8) as u8);
-    out.push(v as u8);
 }
 
 fn be24(b: &[u8], at: usize) -> u32 {
@@ -1088,12 +1057,6 @@ mod tests {
     use crate::flv::{FlvCodec, FlvDemuxer, FlvTrack};
     use alloc::vec;
 
-    fn push_u24(out: &mut Vec<u8>, v: u32) {
-        out.push((v >> 16) as u8);
-        out.push((v >> 8) as u8);
-        out.push(v as u8);
-    }
-
     fn amf_string(out: &mut Vec<u8>, s: &str) {
         out.push(AMF0_STRING);
         out.extend_from_slice(&(s.len() as u16).to_be_bytes());
@@ -1108,8 +1071,8 @@ mod tests {
     /// A single `fmt 0` chunk (the whole message fits one chunk).
     fn chunk(csid: u8, msg_type: u8, msid: u32, ts: u32, payload: &[u8]) -> Vec<u8> {
         let mut c = vec![csid & 0x3F];
-        push_u24(&mut c, ts & 0x00FF_FFFF);
-        push_u24(&mut c, payload.len() as u32);
+        write_u24(&mut c, ts & 0x00FF_FFFF);
+        write_u24(&mut c, payload.len() as u32);
         c.push(msg_type);
         c.extend_from_slice(&msid.to_le_bytes());
         c.extend_from_slice(payload);
@@ -1247,8 +1210,8 @@ mod tests {
 
         let csid = 6u8;
         let mut bytes = vec![csid & 0x3F]; // fmt 0
-        push_u24(&mut bytes, 0);
-        push_u24(&mut bytes, vbody.len() as u32);
+        write_u24(&mut bytes, 0);
+        write_u24(&mut bytes, vbody.len() as u32);
         bytes.push(MSG_VIDEO);
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.extend_from_slice(&vbody[..DEFAULT_CHUNK_SIZE]); // first fragment

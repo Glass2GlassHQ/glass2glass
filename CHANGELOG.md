@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1362: `rtmp` reuses the FLV tag reader and writer from `flv`.
 - M1361: `mkvmux` and `mkvmuxn` share one settings type.
 - M1360: one `WAVEFORMATEX` writer and `wFormatTag` table serve wavsink, wavenc, wavparse and AVI, and AVI reads float, G.711 and IMA ADPCM.
 - M1359: fMP4 and `mp4audiosrc` share one `moof` walker with rounded tick conversion and composition offsets.

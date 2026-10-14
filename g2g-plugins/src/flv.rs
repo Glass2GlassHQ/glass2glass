@@ -169,9 +169,67 @@ fn audio_tag_flags(codec: FlvCodec, channels: u8, sample_rate: u32) -> u8 {
 const FLV_HEADER_MIN: usize = 9;
 /// Bytes of an FLV tag header before the body: type(1) + data size(3) +
 /// timestamp(3) + timestamp extension(1) + stream id(3).
-const TAG_HEADER_LEN: usize = 11;
+pub(crate) const TAG_HEADER_LEN: usize = 11;
 /// The `PreviousTagSize` (UI32) that prefixes every tag after the header.
 const PREV_TAG_SIZE_LEN: usize = 4;
+/// The header flags naming which tracks the file carries.
+pub(crate) const FLV_FLAG_VIDEO: u8 = 0x01;
+pub(crate) const FLV_FLAG_AUDIO: u8 = 0x04;
+/// The FLV signature, then the version byte.
+const FLV_SIGNATURE: &[u8; 3] = b"FLV";
+const FLV_VERSION: u8 = 1;
+/// The header's `DataOffset` field: where the first `PreviousTagSize` starts.
+const FLV_DATA_OFFSET_AT: usize = 5;
+/// The tag type is the low five bits of the first byte, the rest is the
+/// filter flag and reserved bits.
+const TAG_TYPE_MASK: u8 = 0x1F;
+
+/// Append the FLV file header with these presence `flags`.
+pub(crate) fn put_file_header(out: &mut Vec<u8>, flags: u8) {
+    out.extend_from_slice(FLV_SIGNATURE);
+    out.push(FLV_VERSION);
+    out.push(flags);
+    out.extend_from_slice(&(FLV_HEADER_MIN as u32).to_be_bytes());
+}
+
+/// The length of the FLV file header that opens `buf`, `None` until it is
+/// buffered. A `DataOffset` below the minimum header counts as the minimum.
+pub(crate) fn file_header_len(buf: &[u8]) -> Option<usize> {
+    let offset = buf.get(FLV_DATA_OFFSET_AT..FLV_HEADER_MIN)?;
+    let offset = u32::from_be_bytes(offset.try_into().ok()?) as usize;
+    let len = offset.max(FLV_HEADER_MIN);
+    (buf.len() >= len).then_some(len)
+}
+
+/// One FLV tag's header fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FlvTagHeader {
+    pub(crate) tag_type: u8,
+    pub(crate) timestamp_ms: u32,
+}
+
+/// The tag whose `PreviousTagSize` prefix starts at `at`: its header and the
+/// range of its body in `buf`. `None` until the whole tag is buffered.
+pub(crate) fn tag_at(buf: &[u8], at: usize) -> Option<(FlvTagHeader, core::ops::Range<usize>)> {
+    let header_at = at.checked_add(PREV_TAG_SIZE_LEN)?;
+    let body_start = header_at.checked_add(TAG_HEADER_LEN)?;
+    let header = buf.get(header_at..body_start)?;
+    let data_size = read_u24(header, 1) as usize;
+    let timestamp_ms = (u32::from(header[7]) << 24) | read_u24(header, 4);
+    let body_end = body_start.checked_add(data_size)?;
+    if body_end > buf.len() {
+        return None;
+    }
+    let tag = FlvTagHeader {
+        tag_type: header[0] & TAG_TYPE_MASK,
+        timestamp_ms,
+    };
+    Some((tag, body_start..body_end))
+}
+
+fn read_u24(buf: &[u8], at: usize) -> u32 {
+    (u32::from(buf[at]) << 16) | (u32::from(buf[at + 1]) << 8) | u32::from(buf[at + 2])
+}
 
 // AMF0 markers the `onMetaData` writer emits (the inverse of the reader subset in
 // `flvdemux::amf0`).
@@ -279,19 +337,15 @@ impl FlvDemuxer {
             if self.buf.len() < FLV_HEADER_MIN {
                 return;
             }
-            if &self.buf[0..3] != b"FLV" {
+            if &self.buf[..FLV_SIGNATURE.len()] != FLV_SIGNATURE {
                 // Not an FLV stream; the caps said otherwise, so drop the bytes
                 // rather than spin forever on a header that will never match.
                 self.buf.clear();
                 return;
             }
-            // The header's declared length (>= 9); the body follows it.
-            let data_offset =
-                u32::from_be_bytes([self.buf[5], self.buf[6], self.buf[7], self.buf[8]]) as usize;
-            let data_offset = data_offset.max(FLV_HEADER_MIN);
-            if self.buf.len() < data_offset {
+            let Some(data_offset) = file_header_len(&self.buf) else {
                 return;
-            }
+            };
             pos = data_offset;
             self.header_done = true;
         }
@@ -304,26 +358,9 @@ impl FlvDemuxer {
         let mut video_config: Option<Vec<u8>> = None;
         let mut audio_config: Option<Vec<u8>> = None;
         let mut audio_params: Option<(u8, u32)> = None;
-        loop {
-            let header = pos + PREV_TAG_SIZE_LEN;
-            if header + TAG_HEADER_LEN > self.buf.len() {
-                break;
-            }
-            let tag_type = self.buf[header] & 0x1F;
-            let data_size = ((self.buf[header + 1] as usize) << 16)
-                | ((self.buf[header + 2] as usize) << 8)
-                | self.buf[header + 3] as usize;
-            let ts_lower = ((self.buf[header + 4] as u32) << 16)
-                | ((self.buf[header + 5] as u32) << 8)
-                | self.buf[header + 6] as u32;
-            let timestamp = ((self.buf[header + 7] as u32) << 24) | ts_lower;
-
-            let body_start = header + TAG_HEADER_LEN;
-            let body_end = body_start + data_size;
-            if body_end > self.buf.len() {
-                break; // tag body not fully arrived yet
-            }
-            let body = &self.buf[body_start..body_end];
+        while let Some((tag, body_range)) = tag_at(&self.buf, pos) {
+            let (tag_type, timestamp) = (tag.tag_type, tag.timestamp_ms);
+            let body = &self.buf[body_range.clone()];
             if tag_type == TAG_SCRIPT && metadata.is_none() {
                 metadata = Some(body.to_vec());
             } else if let Some((track, config)) = sequence_header(tag_type, body) {
@@ -347,7 +384,7 @@ impl FlvDemuxer {
                 }
                 units.push(unit);
             }
-            pos = body_end;
+            pos = body_range.end;
         }
         self.buf.drain(..pos);
         self.units.append(&mut units);
@@ -367,7 +404,7 @@ impl FlvDemuxer {
 }
 
 /// Append a 3-byte big-endian integer (the FLV size / timestamp width).
-fn write_u24(out: &mut Vec<u8>, v: u32) {
+pub(crate) fn write_u24(out: &mut Vec<u8>, v: u32) {
     out.push((v >> 16) as u8);
     out.push((v >> 8) as u8);
     out.push(v as u8);
@@ -556,18 +593,14 @@ impl FlvMuxer {
         if self.header_written {
             return;
         }
-        out.extend_from_slice(b"FLV");
-        out.push(1); // version
-                     // Flags: bit 0 video present, bit 2 audio present.
         let mut flags = 0u8;
         if self.video.is_some() {
-            flags |= 0x01;
+            flags |= FLV_FLAG_VIDEO;
         }
         if self.audio.is_some() {
-            flags |= 0x04;
+            flags |= FLV_FLAG_AUDIO;
         }
-        out.push(flags);
-        out.extend_from_slice(&(FLV_HEADER_MIN as u32).to_be_bytes()); // data offset
+        put_file_header(out, flags);
         self.header_written = true;
 
         if !self.tags.is_empty() {

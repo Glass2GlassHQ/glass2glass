@@ -44,10 +44,6 @@ Core, bindings, ML:
 
 - One YUYV to I420 converter for `g2g-mcu` and the plugins.
 
-Containers:
-
-- `rtmp` reuses the FLV tag codec from `flv.rs`.
-
 Codecs and parsers:
 
 - `vulkanvideo` `submit_idr_decode_into` creates a bitstream buffer per call.
