@@ -32,7 +32,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::{
-    AnalyticsMeta, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
+    AnalyticsMeta, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
     HardwareError, OutputSink, PipelinePacket, RawVideoFormat, TensorDType, TensorLayout,
     TensorShape,
 };
@@ -176,8 +176,8 @@ impl AsyncElement for WebOrtDetect {
         };
         // Geometry may still be a placeholder at negotiation; the real dims land
         // via CapsChanged before the first frame (the browser-decode contract).
-        self.width = fixed_or_zero(width);
-        self.height = fixed_or_zero(height);
+        self.width = width.fixed().unwrap_or(0);
+        self.height = height.fixed().unwrap_or(0);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -264,8 +264,8 @@ impl AsyncElement for WebOrtDetect {
                 }
                 PipelinePacket::CapsChanged(caps) => {
                     if let Caps::RawVideo { width, height, .. } = &caps {
-                        self.width = fixed_or_zero(width);
-                        self.height = fixed_or_zero(height);
+                        self.width = width.fixed().unwrap_or(0);
+                        self.height = height.fixed().unwrap_or(0);
                     }
                     out.push(PipelinePacket::CapsChanged(caps)).await?;
                 }
@@ -280,9 +280,3 @@ impl AsyncElement for WebOrtDetect {
     }
 }
 
-fn fixed_or_zero(d: &Dim) -> u32 {
-    match d {
-        Dim::Fixed(v) => *v,
-        _ => 0,
-    }
-}
