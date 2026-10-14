@@ -18,7 +18,7 @@
 //! Threading: like `FfmpegH264Enc`, the raw `AVCodecContext` is single-owner and
 //! the element asserts `Send` under that contract.
 
-use crate::aacparse::{adts_frame, ADTS_PROFILE_AAC_LC};
+use crate::aacparse::adts_frame;
 use core::future::Future;
 use core::pin::Pin;
 
@@ -44,6 +44,8 @@ use g2g_core::{
 
 /// Default constant bitrate: 128 kbps, the usual stereo-AAC streaming target.
 const DEFAULT_BITRATE_BPS: usize = 128_000;
+// ADTS `profile` for AAC-LC: the audio object type (2) minus one
+const ADTS_PROFILE_AAC_LC: u8 = 1;
 
 /// The encoder only opens at a rate in the ADTS sampling-frequency-index table
 /// (libavcodec rejects others).

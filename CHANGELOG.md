@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1394: the AAC-LC ADTS profile constant moves to `ffmpegaacenc`, its only user, so builds without that element have no dead code.
 - M1308: one table-driven MPEG CRC-32 for PSI sections and Ogg pages.
 - M1307: ADTS framing goes through the aacparse helpers everywhere.
 - M1306: one length-prefixed to Annex-B converter refuses malformed input, and one avcC/hvcC parser keeps every parameter set.

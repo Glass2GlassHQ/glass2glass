@@ -118,9 +118,6 @@ pub(crate) fn adts_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
     adts_frame(profile, sr_index, channel_config, au)
 }
 
-/// ADTS `profile` for AAC-LC: the audio object type (2) minus one.
-pub(crate) const ADTS_PROFILE_AAC_LC: u8 = 1;
-
 /// Frame `au` behind a 7-byte ADTS header (no CRC) for `profile` (audio object
 /// type minus one), sampling-frequency index `sr_index` and `channel_config`.
 /// `None` when the frame exceeds the 13-bit ADTS frame length.
