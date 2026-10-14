@@ -384,6 +384,23 @@ fn avcc(param_sets: &[&[u8]]) -> Vec<u8> {
     mp4_box(b"avcC", &avcc_record(param_sets))
 }
 
+/// One Annex-B video access unit as the MP4 and Matroska muxers store it, and
+/// whether it is a sync sample: H.26x as AVCC length-prefixed NALUs, AV1 without
+/// temporal delimiters, VP8 / VP9 verbatim.
+pub(crate) fn video_sample(codec: VideoCodec, au: &[u8]) -> (Vec<u8>, bool) {
+    match codec {
+        VideoCodec::H264 | VideoCodec::H265 => {
+            (avcc_sample(&split_annexb(au)), au_is_keyframe(codec, au))
+        }
+        VideoCodec::Vp8 => (au.to_vec(), vp8_keyframe(au)),
+        VideoCodec::Av1 => (
+            crate::av1parse::strip_temporal_delimiters(au),
+            crate::av1parse::av1_keyframe(au),
+        ),
+        _ => (au.to_vec(), vp9_keyframe(au)),
+    }
+}
+
 /// VP8 keyframe flag: the frame tag's bit 0 (`0` = key frame). Shared by the
 /// container muxers that store VP8 frames verbatim (Matroska, MP4).
 pub(crate) fn vp8_keyframe(frame: &[u8]) -> bool {

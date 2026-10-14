@@ -46,7 +46,6 @@ Core, bindings, ML:
 
 Containers:
 
-- Shared `MkvMuxSettings` for mkvmux and mkvmuxn.
 - `rtmp` reuses the FLV tag codec from `flv.rs`.
 
 Codecs and parsers:

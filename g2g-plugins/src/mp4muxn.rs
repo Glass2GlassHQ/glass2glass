@@ -47,11 +47,9 @@ use g2g_core::{
 
 use g2g_core::time::ns_to_ticks;
 
-use crate::annexb::au_is_keyframe;
 use crate::cea::{build_cdp, parse_cc_data, CcTriple};
 use crate::fmp4mux::{
-    av1c_record, avcc_sample, parameter_sets, split_annexb, visual_sample_entry, vp8_keyframe,
-    vp9_keyframe,
+    av1c_record, parameter_sets, split_annexb, video_sample, visual_sample_entry,
 };
 use crate::mp4audiosink::esds;
 use crate::mp4box::{
@@ -649,20 +647,7 @@ impl Mp4MuxN {
     /// sync sample.
     fn sample_for(&mut self, input: usize, au: &[u8]) -> (Vec<u8>, bool) {
         match self.kinds[input] {
-            Some(PadKind::Video(codec)) => match codec {
-                VideoCodec::H264 | VideoCodec::H265 => {
-                    let nalus = split_annexb(au);
-                    let is_sync = au_is_keyframe(codec, au);
-                    (avcc_sample(&nalus), is_sync)
-                }
-                // VP8/VP9 frames are stored verbatim; keyframe from the frame header.
-                VideoCodec::Vp8 => (au.to_vec(), vp8_keyframe(au)),
-                VideoCodec::Av1 => (
-                    crate::av1parse::strip_temporal_delimiters(au),
-                    crate::av1parse::av1_keyframe(au),
-                ),
-                _ => (au.to_vec(), vp9_keyframe(au)),
-            },
+            Some(PadKind::Video(codec)) => video_sample(codec, au),
             // Audio access units are always sync samples. AAC strips its ADTS
             // header; Opus packets are stored raw.
             Some(PadKind::Audio {
