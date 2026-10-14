@@ -47,6 +47,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -702,9 +703,9 @@ fn doubled_rate(rate: &Rate) -> Rate {
 /// Nanoseconds per field at a Q16 frames-per-second rate, zero when the rate is
 /// not fixed.
 fn half_frame_period_ns(rate: &Rate) -> u64 {
-    const HALF_SECOND_NS_Q16: u64 = 500_000_000 * 65536;
+    const FIELDS_PER_FRAME: u64 = 2;
     match rate {
-        Rate::Fixed(q16) if *q16 > 0 => HALF_SECOND_NS_Q16 / *q16 as u64,
+        Rate::Fixed(q16) => framerate_q16_period_ns(*q16).map_or(0, |ns| ns / FIELDS_PER_FRAME),
         _ => 0,
     }
 }

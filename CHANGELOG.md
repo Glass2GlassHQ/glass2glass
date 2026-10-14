@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1417: compositor, wgpucompositor and deinterlace framerate math uses the core helpers.
 - M1416: `mfencode` drops three redundant interlace patterns.
 - M1415: unused gpu and dma-buf helpers are gated to the features that call them.
 - M1414: rtcp, moqtsink and mp4box read through the shared big-endian reader.

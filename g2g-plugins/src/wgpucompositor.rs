@@ -58,6 +58,9 @@ use crate::compositor::{
     paint_order, set_pad_property, CompositorPad, CompositorState, WGPU_COMPOSITOR_PROPS,
 };
 use crate::gpu::{map_for_read_async, texture_of, GpuContext, WgpuTextureKeepAlive};
+use g2g_core::caps::{
+    framerate_q16_from_fraction, framerate_q16_period_ns, framerate_q16_to_fraction,
+};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedWgpuTexture, SystemSlice};
 use g2g_core::{
@@ -448,7 +451,8 @@ impl WgpuCompositor {
     /// Set the output framerate in nominal fps. Labels the output caps; the emit
     /// cadence follows input 0 (put a `VideoRate` downstream to resample).
     pub fn with_framerate(mut self, fps: u32) -> Self {
-        self.framerate_q16 = fps << 16;
+        self.framerate_q16 =
+            framerate_q16_from_fraction(fps, 1).expect("fps fits the Q16 framerate range");
         self
     }
 
@@ -964,7 +968,7 @@ impl MultiInputElement for WgpuCompositor {
     /// which is when a zero-order-hold frame may be due.
     fn tick_interval_ns(&self) -> Option<u64> {
         match self.state.hold_enabled() {
-            true => Some(frame_period_ns(self.framerate_q16)).filter(|&ns| ns > 0),
+            true => framerate_q16_period_ns(self.framerate_q16),
             false => None,
         }
     }
@@ -1004,7 +1008,10 @@ impl MultiInputElement for WgpuCompositor {
         Some(match name {
             "width" => PropValue::Uint(self.out_w as u64),
             "height" => PropValue::Uint(self.out_h as u64),
-            "framerate" => PropValue::Fraction((self.framerate_q16 >> 16) as i32, 1),
+            "framerate" => {
+                let (num, den) = framerate_q16_to_fraction(self.framerate_q16);
+                PropValue::Fraction(num as i32, den as i32)
+            }
             "background-color" => color_value(self.background),
             "timed-output" => PropValue::Bool(self.state.hold_enabled()),
             "gpu-output" => PropValue::Bool(self.gpu_output),

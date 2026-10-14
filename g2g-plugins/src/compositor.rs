@@ -53,6 +53,9 @@ use crate::paint::blend_px;
 use crate::pixel::{chroma_420_size, frame_byte_size, planar_planes, tight_plane};
 use crate::videoscale::{axis_samples, bilerp};
 use crate::yuvmatrix::YuvRgbMatrix;
+use g2g_core::caps::{
+    framerate_q16_from_fraction, framerate_q16_period_ns, framerate_q16_to_fraction,
+};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -363,7 +366,7 @@ pub(crate) fn framerate_property(value: &PropValue) -> Result<u32, PropError> {
     if num <= 0 || den <= 0 {
         return Err(PropError::Value);
     }
-    u32::try_from(num as u64 * 65536 / den as u64).map_err(|_| PropError::Value)
+    framerate_q16_from_fraction(num as u32, den as u32).ok_or(PropError::Value)
 }
 
 /// A packed `0xAARRGGBB` colour property as the `[R, G, B, A]` the blend takes.
@@ -378,19 +381,16 @@ pub(crate) fn color_property(value: &PropValue) -> Result<[u8; 4], PropError> {
     ])
 }
 
+/// One output frame period in nanoseconds from a nominal framerate (Q16). Zero
+/// for a zero framerate (nothing to pace to).
+pub(crate) fn frame_period_ns(framerate_q16: u32) -> u64 {
+    framerate_q16_period_ns(framerate_q16).unwrap_or(0)
+}
+
 /// The inverse of [`color_property`], for `get_property`.
 pub(crate) fn color_value(rgba: [u8; 4]) -> PropValue {
     let [r, g, b, a] = rgba;
     PropValue::Uint(((a as u64) << 24) | ((r as u64) << 16) | ((g as u64) << 8) | b as u64)
-}
-
-/// One output frame period in nanoseconds from a nominal framerate (Q16). Zero
-/// for a zero framerate (nothing to pace to).
-pub(crate) fn frame_period_ns(framerate_q16: u32) -> u64 {
-    match framerate_q16 {
-        0 => 0,
-        fps => 1_000_000_000u64 * 65536 / fps as u64,
-    }
 }
 
 /// Paint order: z-order ascending, ties by input index (input 0 backmost).
@@ -708,7 +708,8 @@ impl Compositor {
     /// (`compositor ! videorate`), which repeats / drops to the target rate off
     /// the per-frame PTS the compositor stamps.
     pub fn with_framerate(mut self, fps: u32) -> Self {
-        self.framerate_q16 = fps << 16;
+        self.framerate_q16 =
+            framerate_q16_from_fraction(fps, 1).expect("fps fits the Q16 framerate range");
         self
     }
 
@@ -1214,7 +1215,7 @@ impl MultiInputElement for Compositor {
     /// which is when a zero-order-hold frame may be due.
     fn tick_interval_ns(&self) -> Option<u64> {
         match self.state.hold_enabled() {
-            true => Some(frame_period_ns(self.framerate_q16)).filter(|&ns| ns > 0),
+            true => framerate_q16_period_ns(self.framerate_q16),
             false => None,
         }
     }
@@ -1256,7 +1257,10 @@ impl MultiInputElement for Compositor {
         Some(match name {
             "width" => PropValue::Uint(self.out_w as u64),
             "height" => PropValue::Uint(self.out_h as u64),
-            "framerate" => PropValue::Fraction((self.framerate_q16 >> 16) as i32, 1),
+            "framerate" => {
+                let (num, den) = framerate_q16_to_fraction(self.framerate_q16);
+                PropValue::Fraction(num as i32, den as i32)
+            }
             "background-color" => color_value(self.background),
             "timed-output" => PropValue::Bool(self.state.hold_enabled()),
             "format" => PropValue::Str(
