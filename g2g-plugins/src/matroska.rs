@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 use g2g_core::{Chapter, SubPictureFormat, Tag, TagList, TextFormat};
 
 use crate::dvbsub::{page_id_blob, parse_page_ids, segment_span, PageIds, DEFAULT_SUBTITLING_TYPE};
+use crate::fifobuffer::FifoBuffer;
 use crate::subparse::ASS_SCRIPT_HEADER;
 use crate::vobsub::{idx_config_text, parse_idx};
 
@@ -434,7 +435,7 @@ pub struct MkvFrame {
 /// Incremental Matroska demuxer: feed bytes, drain [`MkvFrame`]s.
 #[derive(Debug)]
 pub struct MatroskaDemuxer {
-    buf: Vec<u8>,
+    buf: FifoBuffer<u8>,
     in_segment: bool,
     timestamp_scale: u64,
     /// The Segment `Info` `Duration`, scaled to nanoseconds. `None` until Info
@@ -489,7 +490,7 @@ impl Default for MatroskaDemuxer {
 impl MatroskaDemuxer {
     pub fn new() -> Self {
         Self {
-            buf: Vec::new(),
+            buf: FifoBuffer::default(),
             in_segment: false,
             timestamp_scale: DEFAULT_TIMESTAMP_SCALE,
             duration_ns: None,
@@ -555,7 +556,7 @@ impl MatroskaDemuxer {
 
     /// Consume `n` bytes from the front of `buf`, advancing the absolute position.
     fn consume(&mut self, n: usize) {
-        self.buf.drain(..n);
+        self.buf.discard(n);
         self.consumed = self.consumed.saturating_add(n as u64);
     }
 
@@ -628,10 +629,10 @@ impl MatroskaDemuxer {
     /// fully buffered.
     fn drain_elements(&mut self) {
         loop {
-            let Some((id, id_len)) = read_id(&self.buf, 0) else {
+            let Some((id, id_len)) = read_id(self.buf.as_slice(), 0) else {
                 return;
             };
-            let Some((size, size_len, unknown)) = read_size(&self.buf, id_len) else {
+            let Some((size, size_len, unknown)) = read_size(self.buf.as_slice(), id_len) else {
                 return;
             };
             let header = id_len + size_len;
@@ -673,12 +674,13 @@ impl MatroskaDemuxer {
                             return;
                         }
                         if id == ID_TIMESTAMP {
-                            self.open_cluster_ts = Some(read_uint(&self.buf[header..total]));
+                            self.open_cluster_ts =
+                                Some(read_uint(&self.buf.as_slice()[header..total]));
                         } else {
                             let ts = self.open_cluster_ts.unwrap_or(0);
                             let mut frames = parse_block_element(
                                 id,
-                                &self.buf[header..total],
+                                &self.buf.as_slice()[header..total],
                                 ts,
                                 self.timestamp_scale,
                                 &self.tracks,
@@ -725,19 +727,23 @@ impl MatroskaDemuxer {
             if self.in_segment {
                 match id {
                     ID_INFO => {
-                        if let Some(scale) = parse_timestamp_scale(&self.buf[header..total]) {
+                        if let Some(scale) =
+                            parse_timestamp_scale(&self.buf.as_slice()[header..total])
+                        {
                             self.timestamp_scale = scale;
                         }
                         // Duration is in TimestampScale ticks, so it is read
                         // after the scale it is expressed in.
-                        self.duration_ns =
-                            parse_info_duration(&self.buf[header..total], self.timestamp_scale);
-                        if let Some(title) = parse_info_title(&self.buf[header..total]) {
+                        self.duration_ns = parse_info_duration(
+                            &self.buf.as_slice()[header..total],
+                            self.timestamp_scale,
+                        );
+                        if let Some(title) = parse_info_title(&self.buf.as_slice()[header..total]) {
                             self.tags.push(Tag::Title(title));
                         }
                     }
                     ID_TRACKS => {
-                        for parsed in parse_tracks(&self.buf[header..total]) {
+                        for parsed in parse_tracks(&self.buf.as_slice()[header..total]) {
                             self.tracks.push(parsed.track);
                             if !parsed.codec_private.is_empty() {
                                 self.codec_privates
@@ -753,7 +759,7 @@ impl MatroskaDemuxer {
                         }
                     }
                     ID_TAGS => {
-                        let scopes = parse_tags(&self.buf[header..total]);
+                        let scopes = parse_tags(&self.buf.as_slice()[header..total]);
                         for tag in scopes.global {
                             self.tags.push(tag);
                         }
@@ -763,7 +769,7 @@ impl MatroskaDemuxer {
                     }
                     ID_CLUSTER => {
                         let mut frames = parse_cluster(
-                            &self.buf[header..total],
+                            &self.buf.as_slice()[header..total],
                             &self.tracks,
                             self.timestamp_scale,
                         );
@@ -772,17 +778,19 @@ impl MatroskaDemuxer {
                     }
                     ID_CHAPTERS => {
                         self.chapters
-                            .extend(parse_chapters(&self.buf[header..total]));
+                            .extend(parse_chapters(&self.buf.as_slice()[header..total]));
                     }
                     // The Cues index: time -> Cluster byte position, for indexed
                     // seeking (`cue_seek_offset`). Often trails the Clusters.
                     ID_CUES => {
-                        self.cues = parse_cues(&self.buf[header..total], self.timestamp_scale);
+                        self.cues =
+                            parse_cues(&self.buf.as_slice()[header..total], self.timestamp_scale);
                     }
                     // A SeekHead (at the Segment start) locates the Cues element,
                     // so a seek can prefetch an end-of-file Cues before reaching it.
                     ID_SEEK_HEAD => {
-                        if let Some(pos) = parse_seekhead_cues(&self.buf[header..total]) {
+                        if let Some(pos) = parse_seekhead_cues(&self.buf.as_slice()[header..total])
+                        {
                             self.cues_index_pos = Some(pos);
                         }
                     }

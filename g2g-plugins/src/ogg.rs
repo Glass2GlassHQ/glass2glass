@@ -368,49 +368,43 @@ impl OggDemuxer {
     }
 
     fn drain_pages(&mut self) {
+        // Taken out so `parse_page` can borrow `self` while reading it.
+        let mut buf = core::mem::take(&mut self.buf);
+        let consumed = self.parse_pages(&buf);
+        buf.drain(..consumed);
+        self.buf = buf;
+    }
+
+    /// Parse the whole pages in `buf`, returning how many leading bytes are
+    /// done with.
+    fn parse_pages(&mut self, buf: &[u8]) -> usize {
+        let mut at = 0usize;
         loop {
-            if !self.resync() {
-                return;
+            // Skip to the next "OggS" capture pattern, keeping a short tail that
+            // might be a split pattern when none is buffered.
+            let Some(pos) = buf[at..].windows(4).position(|w| w == CAPTURE_PATTERN) else {
+                return at.max(buf.len().saturating_sub(3));
+            };
+            at += pos;
+            let rest = &buf[at..];
+            if rest.len() < HEADER_LEN {
+                return at;
             }
-            if self.buf.len() < HEADER_LEN {
-                return;
-            }
-            let num_segments = self.buf[26] as usize;
+            let num_segments = rest[26] as usize;
             let table_end = HEADER_LEN + num_segments;
-            if self.buf.len() < table_end {
-                return;
+            if rest.len() < table_end {
+                return at;
             }
-            let body_len: usize = self.buf[HEADER_LEN..table_end]
+            let body_len: usize = rest[HEADER_LEN..table_end]
                 .iter()
                 .map(|&s| s as usize)
                 .sum();
             let total = table_end + body_len;
-            if self.buf.len() < total {
-                return;
+            if rest.len() < total {
+                return at;
             }
-            // Own the page so the borrow ends before draining / mutating self.
-            let page: Vec<u8> = self.buf[..total].to_vec();
-            self.buf.drain(..total);
-            self.parse_page(&page, table_end);
-        }
-    }
-
-    /// Drop bytes before the next "OggS" capture pattern. Returns false (and
-    /// keeps a short tail that might be a split pattern) when none is buffered.
-    fn resync(&mut self) -> bool {
-        if self.buf.starts_with(&CAPTURE_PATTERN) {
-            return true;
-        }
-        match self.buf.windows(4).position(|w| w == CAPTURE_PATTERN) {
-            Some(pos) => {
-                self.buf.drain(..pos);
-                true
-            }
-            None => {
-                let keep = self.buf.len().saturating_sub(3);
-                self.buf.drain(..keep);
-                false
-            }
+            self.parse_page(&rest[..total], table_end);
+            at += total;
         }
     }
 

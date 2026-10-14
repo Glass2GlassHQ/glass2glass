@@ -612,62 +612,58 @@ impl PsDemuxer {
     /// Consume every whole pack / packet in `buf`, resynchronizing to the next
     /// start code whenever a header does not parse.
     fn parse(&mut self) {
+        // Taken out so the packet handlers can borrow `self` while reading it.
+        let mut buf = core::mem::take(&mut self.buf);
+        let consumed = self.parse_packets(&buf);
+        buf.drain(..consumed);
+        self.buf = buf;
+    }
+
+    /// Handle the whole packs and packets in `buf`, returning how many leading
+    /// bytes are done with.
+    fn parse_packets(&mut self, buf: &[u8]) -> usize {
+        let mut at = 0usize;
         loop {
-            // Resync: drop everything before the next start code prefix, keeping
+            // Resync: skip everything before the next start code prefix, keeping
             // the last two bytes in case a prefix straddles the chunk boundary.
-            match find_start_code(&self.buf) {
-                Some(0) => {}
-                Some(pos) => {
-                    self.buf.drain(..pos);
-                }
-                None => {
-                    let keep = self.buf.len().saturating_sub(2);
-                    self.buf.drain(..keep);
-                    return;
-                }
-            }
-            let Some(&id) = self.buf.get(3) else {
-                return;
+            let Some(pos) = find_start_code(&buf[at..]) else {
+                return at.max(buf.len().saturating_sub(2));
+            };
+            at += pos;
+            let rest = &buf[at..];
+            let Some(&id) = rest.get(3) else {
+                return at;
             };
             match id {
-                PS_PACK => match pack_header_len(&self.buf) {
+                PS_PACK => match pack_header_len(rest) {
                     // Not enough bytes yet to know the pack header's length.
-                    Some(None) => return,
-                    Some(Some(len)) => {
-                        self.buf.drain(..len);
-                    }
+                    Some(None) => return at,
+                    Some(Some(len)) => at += len,
                     // Neither an MPEG-1 nor an MPEG-2 pack: skip the start code.
-                    None => {
-                        self.buf.drain(..4);
-                    }
+                    None => at += 4,
                 },
-                PS_END => {
-                    self.buf.drain(..4);
-                }
+                PS_END => at += 4,
                 // Every other PS start code is length prefixed.
                 _ => {
-                    let Some(len) = self.buf.get(4..6) else {
-                        return;
+                    let Some(len) = rest.get(4..6) else {
+                        return at;
                     };
                     let len = u16::from_be_bytes([len[0], len[1]]) as usize;
                     // A program stream always declares a packet length; a zero
                     // one would leave the packet unbounded, so treat it as a bad
                     // header and resync.
                     if len == 0 {
-                        self.buf.drain(..4);
+                        at += 4;
                         continue;
                     }
                     let total = 6 + len;
-                    if self.buf.len() < total {
-                        return;
+                    if rest.len() < total {
+                        return at;
                     }
                     if matches!(id, PS_PRIVATE_1 | 0xC0..=0xEF) {
-                        // Copied out so the payload parse does not borrow `buf`
-                        // while the reassembly below mutates `self`.
-                        let packet: Vec<u8> = self.buf[..total].to_vec();
-                        self.handle_pes(id, &packet);
+                        self.handle_pes(id, &rest[..total]);
                     }
-                    self.buf.drain(..total);
+                    at += total;
                 }
             }
         }

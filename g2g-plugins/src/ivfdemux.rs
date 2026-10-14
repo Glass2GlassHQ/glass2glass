@@ -18,6 +18,8 @@ use g2g_core::{
     PipelinePacket, Rate, VideoCodec,
 };
 
+use crate::fifobuffer::FifoBuffer;
+
 const FILE_HEADER_LEN: usize = 32;
 const FRAME_HEADER_LEN: usize = 12;
 
@@ -48,7 +50,7 @@ pub struct IvfDemux {
     /// Bytes accumulated across input chunks, consumed as whole units: the file
     /// header first, then each 12-byte-prefixed frame. A frame split across chunks
     /// stays buffered until the rest arrives.
-    buf: Vec<u8>,
+    buf: FifoBuffer<u8>,
     header: Option<IvfHeader>,
     caps_sent: bool,
     emitted: u64,
@@ -127,8 +129,8 @@ impl IvfDemux {
             if self.buf.len() < FILE_HEADER_LEN {
                 return Ok(());
             }
-            let header = Self::parse_header(&self.buf).ok_or(G2gError::CapsMismatch)?;
-            self.buf.drain(..FILE_HEADER_LEN);
+            let header = Self::parse_header(self.buf.as_slice()).ok_or(G2gError::CapsMismatch)?;
+            self.buf.discard(FILE_HEADER_LEN);
             self.header = Some(header);
         }
         let header = self.header.expect("parsed above");
@@ -148,26 +150,28 @@ impl IvfDemux {
             self.caps_sent = true;
         }
         loop {
-            if self.buf.len() < FRAME_HEADER_LEN {
+            let pending = self.buf.as_slice();
+            if pending.len() < FRAME_HEADER_LEN {
                 return Ok(());
             }
             let size =
-                u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
+                u32::from_le_bytes([pending[0], pending[1], pending[2], pending[3]]) as usize;
             let ts = u64::from_le_bytes([
-                self.buf[4],
-                self.buf[5],
-                self.buf[6],
-                self.buf[7],
-                self.buf[8],
-                self.buf[9],
-                self.buf[10],
-                self.buf[11],
+                pending[4],
+                pending[5],
+                pending[6],
+                pending[7],
+                pending[8],
+                pending[9],
+                pending[10],
+                pending[11],
             ]);
-            if self.buf.len() < FRAME_HEADER_LEN + size {
+            let end = FRAME_HEADER_LEN.saturating_add(size);
+            let Some(data) = pending.get(FRAME_HEADER_LEN..end) else {
                 return Ok(()); // partial frame; wait for the next chunk
-            }
-            let data = self.buf[FRAME_HEADER_LEN..FRAME_HEADER_LEN + size].to_vec();
-            self.buf.drain(..FRAME_HEADER_LEN + size);
+            };
+            let data = data.to_vec();
+            self.buf.discard(end);
             let pts_ns = (u128::from(ts) * u128::from(header.scale) * 1_000_000_000
                 / u128::from(header.rate)) as u64;
             let frame = Frame::new(

@@ -46,7 +46,6 @@ Core, bindings, ML:
 
 Containers:
 
-- PS, Ogg, IVF, Matroska and fMP4 demuxers drain the buffer front per unit.
 - Muxers copy each payload 3 to 5 times (mp4muxn, fmp4mux, matroska, flv, mpegts).
 - One `moov`/`moof` writer for fmp4mux, mp4muxn and mp4audiosink.
 - One `moof` parser for `fmp4` and `mp4audiosrc`.

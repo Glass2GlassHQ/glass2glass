@@ -31,6 +31,7 @@ use crate::cenc::CencTrack;
 #[cfg(feature = "hls")]
 use crate::cenc::SampleCrypt;
 use crate::demuxseek::{Admit, DemuxSeek};
+use crate::fifobuffer::FifoBuffer;
 use crate::fmp4::{
     parse_fragments, parse_header, prepend_param_sets, starts_with_param_set, Header, Sample,
 };
@@ -45,7 +46,7 @@ use crate::mp4box::next_box_len;
 /// ```
 #[derive(Debug)]
 pub struct Fmp4Demux {
-    buffer: Vec<u8>,
+    buffer: FifoBuffer<u8>,
     header: Option<Header>,
     /// A `moof` box awaiting its following `mdat` to form a complete fragment,
     /// with its byte offset in the stream (which keys the content key in force).
@@ -80,7 +81,7 @@ impl Default for Fmp4Demux {
 impl Fmp4Demux {
     pub fn new() -> Self {
         Self {
-            buffer: Vec::new(),
+            buffer: FifoBuffer::default(),
             header: None,
             pending_moof: None,
             out_codec: VideoCodec::H264,
@@ -190,17 +191,20 @@ impl Fmp4Demux {
 
     /// Process every complete top-level box now buffered, emitting access units.
     async fn drain(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
-        while let Some(total) = next_box_len(&self.buffer)? {
+        while let Some(total) = next_box_len(self.buffer.as_slice())? {
             if self.buffer.len() < total {
                 break; // wait for the rest of this box
             }
-            let box_bytes: Vec<u8> = self.buffer.drain(..total).collect();
             let box_at = self.stream_pos;
             self.stream_pos = self.stream_pos.saturating_add(total as u64);
-            let kind: [u8; 4] = box_bytes[4..8].try_into().expect("8-byte box header");
+            let kind: [u8; 4] = self.buffer.as_slice()[4..8]
+                .try_into()
+                .expect("8-byte box header");
             match &kind {
                 b"moov" => {
-                    let header = parse_header(&box_bytes)?;
+                    let header = parse_header(&self.buffer.as_slice()[..total]);
+                    self.buffer.discard(total);
+                    let header = header?;
                     // Re-reading the moov on a seek re-parses the header (for
                     // timescale / parameter sets) but does not re-announce the
                     // unchanged caps.
@@ -216,9 +220,15 @@ impl Fmp4Demux {
                     }
                     self.header = Some(header);
                 }
-                b"moof" => self.pending_moof = Some((box_at, box_bytes)),
+                b"moof" => self.pending_moof = Some((box_at, self.buffer.take_front(total))),
                 b"mdat" => {
-                    let Some((frag_at, mut frag)) = self.pending_moof.take() else {
+                    let mdat = &self.buffer.as_slice()[..total];
+                    let pending_moof = self.pending_moof.take().map(|(frag_at, mut frag)| {
+                        frag.extend_from_slice(mdat);
+                        (frag_at, frag)
+                    });
+                    self.buffer.discard(total);
+                    let Some((frag_at, frag)) = pending_moof else {
                         return Err(G2gError::CapsMismatch); // mdat without moof
                     };
                     // header must exist (moov precedes the first fragment)
@@ -229,7 +239,6 @@ impl Fmp4Demux {
                     let param_sets = header.param_sets.clone();
                     let cenc = header.cenc.clone();
 
-                    frag.extend_from_slice(&box_bytes);
                     let samples = self.parse_fragment_samples(
                         &frag,
                         frag_at,
@@ -273,7 +282,7 @@ impl Fmp4Demux {
                     }
                 }
                 // ftyp / styp / sidx / free / etc.: not needed for demux
-                _ => {}
+                _ => self.buffer.discard(total),
             }
         }
         Ok(())
