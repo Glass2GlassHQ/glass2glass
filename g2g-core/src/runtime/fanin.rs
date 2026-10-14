@@ -684,7 +684,7 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 /// Private [`MultiInputElement`] face over an erased muxer, so the generic
 /// (monomorphized) arms can drive a `&mut dyn DynMultiInputElement` graph node
 /// too. Its per-packet process future stays boxed (the element underneath is
-/// erased). The `DynRef` shape, for the fan-in trait.
+/// erased).
 struct MuxRef<'b>(&'b mut (dyn DynMultiInputElement + 'b));
 
 impl MultiInputElement for MuxRef<'_> {

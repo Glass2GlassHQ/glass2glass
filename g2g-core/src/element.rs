@@ -804,6 +804,27 @@ pub trait DynAsyncElement: ElementBound {
     ) -> BoxFuture<'s, Result<u64, G2gError>>
     where
         Self: 's;
+
+    // As `drive_transform_arm` on a borrow, so a lent element comes back when its
+    // arm ends. Only the blanket impl over `AsyncElement` can drive one.
+    #[cfg(feature = "runtime")]
+    #[doc(hidden)]
+    fn drive_transform_arm_borrowed<'s>(
+        &'s mut self,
+        _io: crate::runtime::TransformArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>> {
+        alloc::boxed::Box::pin(core::future::ready(Err(G2gError::NotConfigured)))
+    }
+
+    // As `drive_transform_arm_borrowed`, for the sink arm.
+    #[cfg(feature = "runtime")]
+    #[doc(hidden)]
+    fn drive_sink_arm_borrowed<'s>(
+        &'s mut self,
+        _io: crate::runtime::SinkArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>> {
+        alloc::boxed::Box::pin(core::future::ready(Err(G2gError::NotConfigured)))
+    }
 }
 
 /// Blanket adapter: every [`AsyncElement`] is usable as a
@@ -988,175 +1009,21 @@ impl<T: AsyncElement> DynAsyncElement for T {
     {
         Box::pin(crate::runtime::sink_arm(*self, io))
     }
-}
 
-/// Private [`AsyncElement`] face over an erased element, so the generic
-/// (monomorphized) arms can drive a `&mut dyn DynAsyncElement` graph node too.
-/// Its per-frame process future stays boxed (the element underneath is
-/// erased); a newtype rather than an impl on `&mut dyn` itself, which would
-/// make method calls ambiguous wherever both traits are imported.
-#[cfg(all(feature = "std", feature = "runtime"))]
-struct DynRef<'b>(&'b mut (dyn DynAsyncElement + 'b));
-
-#[cfg(all(feature = "std", feature = "runtime"))]
-impl<'b> AsyncElement for DynRef<'b> {
-    type ProcessFuture<'a>
-        = BoxFuture<'a, Result<(), G2gError>>
-    where
-        Self: 'a;
-
-    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        self.0.intercept_caps(upstream_caps)
-    }
-
-    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.0.configure_pipeline(absolute_caps)
-    }
-
-    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
-        self.0.configure_output(output_caps)
-    }
-
-    fn process<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-        out: &'a mut dyn OutputSink,
-    ) -> Self::ProcessFuture<'a> {
-        self.0.process(packet, out)
-    }
-
-    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        self.0.caps_constraint_as_sink()
-    }
-
-    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        self.0.caps_constraint_as_transform()
-    }
-
-    fn caps_preferences(&self) -> Option<CapsPreferences> {
-        self.0.caps_preferences()
-    }
-
-    fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
-        self.0.propose_allocation(caps)
-    }
-
-    fn configure_allocation(&mut self, params: &AllocationParams) {
-        self.0.configure_allocation(params)
-    }
-
-    fn latency(&self) -> LatencyReport {
-        self.0.latency()
-    }
-
-    fn configure_liveness(&mut self, live: bool) {
-        self.0.configure_liveness(live)
-    }
-
-    fn output_memory(&self) -> MemoryDomainKind {
-        self.0.output_memory()
-    }
-
-    fn output_domains(&self) -> DomainSet {
-        self.0.output_domains()
-    }
-
-    fn input_domains(&self) -> DomainSet {
-        self.0.input_domains()
-    }
-
-    fn output_domain_follows_input(&self) -> bool {
-        self.0.output_domain_follows_input()
-    }
-
-    #[cfg(feature = "metadata")]
-    fn meta_transform(&self) -> Option<crate::meta::Transform> {
-        self.0.meta_transform()
-    }
-
-    fn meta_requests(&self) -> crate::meta::MetaRequests {
-        self.0.meta_requests()
-    }
-
-    fn provide_clock(&self) -> Option<ClockCandidate> {
-        self.0.provide_clock()
-    }
-
-    fn set_clock_sync(&mut self, sync: ClockSync) {
-        self.0.set_clock_sync(sync)
-    }
-
-    fn take_qos(&mut self) -> Option<QosMessage> {
-        self.0.take_qos()
-    }
-
-    fn presentation_stats(&self) -> Option<PresentationStats> {
-        self.0.presentation_stats()
-    }
-
-    fn take_reconfigure(&mut self) -> Option<Reconfigure> {
-        self.0.take_reconfigure()
-    }
-
-    fn take_bitrate(&mut self) -> Option<u32> {
-        self.0.take_bitrate()
-    }
-
-    fn handles_keyframe_requests(&self) -> bool {
-        self.0.handles_keyframe_requests()
-    }
-
-    fn handles_bitrate_requests(&self) -> bool {
-        self.0.handles_bitrate_requests()
-    }
-
-    fn absorbs_orientation(&self) -> bool {
-        self.0.absorbs_orientation()
-    }
-
-    fn handles_orientation(&self) -> bool {
-        self.0.handles_orientation()
-    }
-
-    fn handles_qos(&self) -> bool {
-        self.0.handles_qos()
-    }
-
-    fn relays_qos(&self) -> bool {
-        self.0.relays_qos()
-    }
-
-    fn properties(&self) -> &'static [PropertySpec] {
-        self.0.properties()
-    }
-
-    fn metadata(&self) -> ElementMetadata {
-        self.0.metadata()
-    }
-
-    fn log_category(&self) -> &'static str {
-        self.0.log_category()
-    }
-
-    fn set_instance_name(&mut self, name: alloc::string::String) {
-        self.0.set_instance_name(name)
+    #[cfg(feature = "runtime")]
+    fn drive_transform_arm_borrowed<'s>(
+        &'s mut self,
+        io: crate::runtime::TransformArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>> {
+        Box::pin(crate::runtime::transform_arm_on(self, io))
     }
 
     #[cfg(feature = "runtime")]
-    fn set_bus(&mut self, bus: crate::bus::BusHandle) {
-        self.0.set_bus(bus)
-    }
-
-    fn set_log_category(&mut self, category: alloc::string::String) {
-        self.0.set_log_category(category)
-    }
-
-    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        self.0.set_property(name, value)
-    }
-
-    fn get_property(&self, name: &str) -> Option<PropValue> {
-        self.0.get_property(name)
+    fn drive_sink_arm_borrowed<'s>(
+        &'s mut self,
+        io: crate::runtime::SinkArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>> {
+        Box::pin(crate::runtime::sink_arm_on(self, io))
     }
 }
 
@@ -1329,7 +1196,16 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
     where
         Self: 's,
     {
-        Box::pin(crate::runtime::transform_arm(DynRef(*self), io))
+        let element: &'b mut (dyn DynAsyncElement + 'b) = *self;
+        element.drive_transform_arm_borrowed(io)
+    }
+
+    #[cfg(feature = "runtime")]
+    fn drive_transform_arm_borrowed<'s>(
+        &'s mut self,
+        io: crate::runtime::TransformArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>> {
+        (**self).drive_transform_arm_borrowed(io)
     }
 
     #[cfg(feature = "runtime")]
@@ -1340,6 +1216,15 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
     where
         Self: 's,
     {
-        Box::pin(crate::runtime::sink_arm(DynRef(*self), io))
+        let element: &'b mut (dyn DynAsyncElement + 'b) = *self;
+        element.drive_sink_arm_borrowed(io)
+    }
+
+    #[cfg(feature = "runtime")]
+    fn drive_sink_arm_borrowed<'s>(
+        &'s mut self,
+        io: crate::runtime::SinkArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>> {
+        (**self).drive_sink_arm_borrowed(io)
     }
 }

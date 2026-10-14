@@ -414,7 +414,7 @@ impl<T: MultiOutputElement> DynMultiOutputElement for T {
 /// Private [`MultiOutputElement`] face over an erased demux, so the generic
 /// (monomorphized) arm can drive a `&mut dyn DynMultiOutputElement` graph node
 /// too. Its per-packet process future stays boxed (the element underneath is
-/// erased). The `DynRef` shape, for the fan-out trait.
+/// erased).
 struct DemuxRef<'b>(&'b mut (dyn DynMultiOutputElement + 'b));
 
 impl MultiOutputElement for DemuxRef<'_> {
@@ -2328,9 +2328,8 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
                 };
                 match live.as_mut() {
                     // A mutable run keeps every transform's element reachable, so
-                    // a remove can hand it back once its arm has drained. The
-                    // element is driven through its erased handle here, which
-                    // boxes its `process` future the way a borrowing graph does.
+                    // a remove can hand it back once its arm has drained. Its
+                    // arm runs on a borrow, monomorphized as an owned arm is.
                     Some(topology) => {
                         let (done_tx, done_rx) = bounded(1);
                         topology.nodes[node.0 as usize].done = Some(Handback::Element(done_rx));
@@ -4318,6 +4317,14 @@ pub async fn transform_arm<E: AsyncElement>(
     mut elem: E,
     io: TransformArmIo,
 ) -> Result<u64, G2gError> {
+    transform_arm_on(&mut elem, io).await
+}
+
+// As `transform_arm` on a borrowed element, so the caller still has it when the arm ends.
+pub(crate) async fn transform_arm_on<E: AsyncElement>(
+    elem: &mut E,
+    io: TransformArmIo,
+) -> Result<u64, G2gError> {
     let TransformArmIo {
         in_rx,
         out_tx,
@@ -4484,7 +4491,7 @@ pub async fn transform_arm<E: AsyncElement>(
                                 elem.configure_output(&forward_caps),
                             )?;
                         }
-                        realloc_local_dyn(&mut elem as &mut dyn DynAsyncElement, &forward_caps);
+                        realloc_local_dyn(&mut *elem as &mut dyn DynAsyncElement, &forward_caps);
                         // On a Defer `forward_caps` is the incoming INPUT caps:
                         // keep the last known real output as the shape to steer
                         // future re-solves (and allocation proposals) by.
@@ -4543,10 +4550,10 @@ pub async fn transform_arm<E: AsyncElement>(
                 // calls for.
                 // M1175: a live property set / get lands here, between packets,
                 // so the element is only ever touched by its own arm.
-                drain_properties(properties.as_ref(), &mut elem as &mut dyn DynAsyncElement);
+                drain_properties(properties.as_ref(), &mut *elem as &mut dyn DynAsyncElement);
                 apply_control(
                     control.as_ref(),
-                    &mut elem as &mut dyn DynAsyncElement,
+                    &mut *elem as &mut dyn DynAsyncElement,
                     &packet,
                     &probe,
                 )?;
@@ -4592,8 +4599,16 @@ pub async fn transform_arm<E: AsyncElement>(
 /// (M1000); see [`transform_arm`].
 #[doc(hidden)]
 pub async fn sink_arm<E: AsyncElement>(mut elem: E, io: SinkArmIo) -> Result<u64, G2gError> {
+    sink_arm_on(&mut elem, io).await
+}
+
+// As `sink_arm` on a borrowed element, so the caller still has it when the arm ends.
+pub(crate) async fn sink_arm_on<E: AsyncElement>(
+    elem: &mut E,
+    io: SinkArmIo,
+) -> Result<u64, G2gError> {
     let probe = io.probe.clone();
-    let result = sink_arm_loop(&mut elem, io).await;
+    let result = sink_arm_loop(elem, io).await;
     // A paced sink's presented / dropped counters, read here (after the loop
     // ended, on any exit) so the snapshot taken once every arm joined sees a
     // settled value.

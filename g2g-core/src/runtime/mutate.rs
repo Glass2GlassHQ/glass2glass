@@ -749,17 +749,14 @@ pub(crate) struct MutationSpawn<'a, 'f, 's> {
 }
 
 /// Drive an element the mutator spliced in, handing it back through `done` when
-/// its arm ends. The element stays owned here and is driven through the erased
-/// handle, which is what makes giving it back possible.
+/// its arm ends. The element stays owned here and its arm runs on a borrow of
+/// it, which is what makes giving it back possible.
 pub(crate) async fn spliced_arm<'a>(
     mut element: Box<dyn DynAsyncElement + 'a>,
     io: TransformArmIo,
     done: Sender<Box<dyn DynAsyncElement + 'a>>,
 ) -> Result<u64, G2gError> {
-    let result = {
-        let borrowed: &mut (dyn DynAsyncElement + '_) = &mut *element;
-        Box::new(borrowed).drive_transform_arm(io).await
-    };
+    let result = element.drive_transform_arm_borrowed(io).await;
     let _ = done.try_send(element);
     result
 }
@@ -771,10 +768,7 @@ pub(crate) async fn lent_sink_arm<'a>(
     io: SinkArmIo,
     done: Sender<Box<dyn DynAsyncElement + 'a>>,
 ) -> Result<u64, G2gError> {
-    let result = {
-        let borrowed: &mut (dyn DynAsyncElement + '_) = &mut *element;
-        Box::new(borrowed).drive_sink_arm(io).await
-    };
+    let result = element.drive_sink_arm_borrowed(io).await;
     let _ = done.try_send(element);
     result
 }

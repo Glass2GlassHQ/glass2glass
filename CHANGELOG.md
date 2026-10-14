@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1285: a mutable run and `run_linear_chain` drive elements without boxing each packet's future.
 - M1284: `Gate` and `Router` process a packet without a heap allocation.
 - M1283: cloning a frame's metadata on a tee branch no longer allocates, and the tee moves the original packet into its last branch.
 - M1282: a ticking fan-in builds one sleep per tick instead of one per wait.

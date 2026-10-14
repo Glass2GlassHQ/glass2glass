@@ -48,7 +48,6 @@ Bugs:
 
 Core runtime:
 
-- Mutator runs drive every element through `DynRef` (a boxed future per packet).
 - Route the sink, transform and router loops in `runner.rs` and `fanin.rs` through
   the `graph_runner` arms.
 - One arm-IO builder for `run_graph_inner` and `run_graph_threaded_inner`.

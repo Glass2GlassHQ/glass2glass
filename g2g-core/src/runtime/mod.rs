@@ -150,6 +150,9 @@ pub use graph_runner::{
     sink_arm, transform_arm, DemuxArmIo, FaninSinkArmIo, MuxerArmIo, SinkArmIo, TransformArmIo,
 };
 
+#[cfg(feature = "std")]
+pub(crate) use graph_runner::{sink_arm_on, transform_arm_on};
+
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 #[doc(hidden)]
 pub use graph_runner::MuxerArmOwnedTickIo;
