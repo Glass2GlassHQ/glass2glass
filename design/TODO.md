@@ -229,9 +229,6 @@ Highest leverage first:
 - **Per-frame identity.** Stamp each frame with an ID carried in its metadata
   and in an RTP header extension, so a receiver can report per-frame loss,
   duplicates and glass-to-glass latency across a network hop.
-- **GstAnalytics interop convention.** Write `AnalyticsMeta` under the
-  cross-vendor GstAnalytics convention (Intel, Milestone, Collabora) and carry
-  it across `g2g-bridge` in both directions.
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
 
 ## Clock-synchronised presentation

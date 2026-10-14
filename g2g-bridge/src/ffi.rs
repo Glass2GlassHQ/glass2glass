@@ -12,12 +12,18 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 use core::slice;
 
-use g2g_core::Frame;
+use g2g_core::memory::SystemSlice;
+use g2g_core::meta::FrameMetaSet;
+use g2g_core::{Frame, MemoryDomain};
 
 use g2g_plugins::capsfilter::{normalize_gst_caps, parse_caps};
 use g2g_plugins::gstplanes::GstVideoPlanes;
 
+#[cfg(feature = "gst-analytics")]
+use crate::analytics::{G2gAnalyticsMtd, G2gAnalyticsPlan, GstAnalyticsReader, GstAnalyticsWriter};
 use crate::bridge::BridgeGraph;
+#[cfg(feature = "gst-analytics")]
+use g2g_core::meta::AnalyticsMeta;
 
 // ---- GStreamer plugin entry points ------------------------------------------
 //
@@ -144,7 +150,25 @@ pub extern "C" fn gst_plugin_glass2glass_register() {
 /// Opaque handle the C shell stores per element instance. A boxed
 /// [`BridgeGraph`]; created at `set_caps`, destroyed at `stop`.
 #[derive(Debug)]
-pub struct G2gBridge(BridgeGraph);
+pub struct G2gBridge {
+    graph: BridgeGraph,
+    #[cfg(feature = "gst-analytics")]
+    analytics_in: GstAnalyticsReader,
+    #[cfg(feature = "gst-analytics")]
+    analytics_out: GstAnalyticsWriter,
+}
+
+impl G2gBridge {
+    fn take_frame_meta(&mut self) -> FrameMetaSet {
+        #[cfg_attr(not(feature = "gst-analytics"), expect(unused_mut))]
+        let mut meta = FrameMetaSet::new();
+        #[cfg(feature = "gst-analytics")]
+        if let Some(analytics) = core::mem::take(&mut self.analytics_in).finish() {
+            meta.attach(analytics);
+        }
+        meta
+    }
+}
 
 /// An output frame lent to C: a borrowed view plus the owning boxed [`Frame`].
 /// C copies `data[..len]` into its `GstBuffer`, then calls
@@ -205,7 +229,13 @@ pub unsafe extern "C" fn g2g_bridge_create(
         None => in_caps.clone(),
     };
     match BridgeGraph::with_output_caps(fragment, &in_caps, &out_caps) {
-        Ok(g) => Box::into_raw(Box::new(G2gBridge(g))),
+        Ok(graph) => Box::into_raw(Box::new(G2gBridge {
+            graph,
+            #[cfg(feature = "gst-analytics")]
+            analytics_in: GstAnalyticsReader::default(),
+            #[cfg(feature = "gst-analytics")]
+            analytics_out: GstAnalyticsWriter::default(),
+        })),
         Err(_) => ptr::null_mut(),
     }
 }
@@ -255,16 +285,18 @@ pub unsafe extern "C" fn g2g_bridge_push_buf(
     pts_ns: u64,
 ) -> c_int {
     // SAFETY: caller contract.
-    let Some(bridge) = (unsafe { bridge.as_ref() }) else {
+    let Some(bridge) = (unsafe { bridge.as_mut() }) else {
         return 0;
     };
     // SAFETY: caller guarantees `len` readable bytes at `data`.
     let bytes = unsafe { slice::from_raw_parts(data, len) };
+    let meta = bridge.take_frame_meta();
     // The 1-in / 1-out shell pulls after every push, so the bounded feed only
     // fills under a transient stall; a short bounded retry rides it out without
     // a hard busy-loop.
     for _ in 0..1000 {
-        if bridge.0.push(bytes, pts_ns) {
+        let frame = MemoryDomain::System(SystemSlice::from_boxed(bytes.into()));
+        if bridge.graph.push_frame(frame, pts_ns, meta.clone()) {
             return 1;
         }
         std::thread::sleep(core::time::Duration::from_micros(100));
@@ -293,9 +325,10 @@ pub unsafe extern "C" fn g2g_bridge_push_dmabuf(
     pts_ns: u64,
 ) -> c_int {
     // SAFETY: caller contract.
-    let Some(bridge) = (unsafe { bridge.as_ref() }) else {
+    let Some(bridge) = (unsafe { bridge.as_mut() }) else {
         return 0;
     };
+    let meta = bridge.take_frame_meta();
     // Duplicate the fd: GStreamer retains ownership of the buffer's original, and
     // the g2g `OwnedDmaBuf` closes only this dup on drop.
     extern "C" {
@@ -309,7 +342,11 @@ pub unsafe extern "C" fn g2g_bridge_push_dmabuf(
     // SAFETY: `dup_fd` is a fresh fd this call solely owns; ownership transfers
     // to the `OwnedDmaBuf`, which closes it on drop.
     let dmabuf = unsafe { g2g_core::memory::OwnedDmaBuf::from_raw(dup_fd, stride, offset) };
-    c_int::from(bridge.0.push_dmabuf(dmabuf, pts_ns))
+    c_int::from(
+        bridge
+            .graph
+            .push_frame(MemoryDomain::DmaBuf(dmabuf), pts_ns, meta),
+    )
 }
 
 const PULL_ENDED: c_int = -1;
@@ -332,8 +369,8 @@ pub unsafe extern "C" fn g2g_bridge_pull_buf(bridge: *mut G2gBridge, out: *mut G
     let Some(bridge) = (unsafe { bridge.as_mut() }) else {
         return PULL_ENDED;
     };
-    let Some(frame) = bridge.0.pull_blocking() else {
-        return match bridge.0.shutdown() {
+    let Some(frame) = bridge.graph.pull_blocking() else {
+        return match bridge.graph.shutdown() {
             Ok(_) => PULL_ENDED,
             Err(_) => PULL_GRAPH_FAILED,
         };
@@ -393,6 +430,64 @@ pub unsafe extern "C" fn g2g_bridge_out_release(out: *mut G2gOut) {
     out.data = ptr::null();
     out.len = 0;
     out.fd = -1;
+}
+
+/// # Safety
+/// `bridge` must be a live handle, and every pointer in `mtd` null or valid for
+/// its length during this call.
+#[cfg(feature = "gst-analytics")]
+#[no_mangle]
+pub unsafe extern "C" fn g2g_bridge_in_mtd(
+    bridge: *mut G2gBridge,
+    mtd: *const G2gAnalyticsMtd,
+    frame_width: u32,
+    frame_height: u32,
+) {
+    // SAFETY: caller contract.
+    let (Some(bridge), Some(mtd)) = (unsafe { bridge.as_mut() }, unsafe { mtd.as_ref() }) else {
+        return;
+    };
+    // SAFETY: caller contract on the pointers inside `mtd`.
+    unsafe { bridge.analytics_in.read(mtd, frame_width, frame_height) };
+}
+
+/// # Safety
+/// `bridge` must be a live handle.
+#[cfg(feature = "gst-analytics")]
+#[no_mangle]
+pub unsafe extern "C" fn g2g_bridge_in_relation(
+    bridge: *mut G2gBridge,
+    from: u32,
+    to: u32,
+    kind: u32,
+) {
+    // SAFETY: caller contract.
+    if let Some(bridge) = unsafe { bridge.as_mut() } {
+        bridge.analytics_in.relate(from, to, kind);
+    }
+}
+
+/// # Safety
+/// `bridge` must be a live handle, and `out` filled by [`g2g_bridge_pull_buf`]
+/// and not yet released.
+#[cfg(feature = "gst-analytics")]
+#[no_mangle]
+pub unsafe extern "C" fn g2g_bridge_out_analytics(
+    bridge: *mut G2gBridge,
+    out: *const G2gOut,
+    frame_width: u32,
+    frame_height: u32,
+) -> G2gAnalyticsPlan {
+    // SAFETY: caller contract.
+    let Some(bridge) = (unsafe { bridge.as_mut() }) else {
+        return G2gAnalyticsPlan::default();
+    };
+    // SAFETY: caller contract.
+    let out = unsafe { out.as_ref() };
+    // SAFETY: a non-null `owner` is the `Box<Frame>` pull_buf lent.
+    let frame = out.and_then(|out| unsafe { out.owner.cast::<Frame>().as_ref() });
+    let meta = frame.and_then(|frame| frame.meta.get::<AnalyticsMeta>());
+    bridge.analytics_out.plan(meta, frame_width, frame_height)
 }
 
 /// Signal EOS, join the run thread, and free the handle. Passing null is a

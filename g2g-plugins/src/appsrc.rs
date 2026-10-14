@@ -27,6 +27,7 @@ use spin::Mutex;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedDmaBuf, SystemSlice};
+use g2g_core::meta::FrameMetaSet;
 use g2g_core::runtime::{bounded, Receiver, Sender, SourceLoop};
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
@@ -48,7 +49,11 @@ const FEED_DEPTH: usize = 16;
 /// end-of-stream marker.
 #[derive(Debug)]
 enum AppItem {
-    Frame { domain: MemoryDomain, pts_ns: u64 },
+    Frame {
+        domain: MemoryDomain,
+        pts_ns: u64,
+        meta: FrameMetaSet,
+    },
     Eos,
 }
 
@@ -93,10 +98,15 @@ impl AppSrcFeed {
     /// copy (the free callback fires when the frame is finally dropped).
     /// Returns `false` (releasing `slice`) if the feed is full or closed.
     pub fn push_slice(&self, slice: SystemSlice, pts_ns: u64) -> bool {
+        self.push_frame(MemoryDomain::System(slice), pts_ns, FrameMetaSet::new())
+    }
+
+    pub fn push_frame(&self, domain: MemoryDomain, pts_ns: u64, meta: FrameMetaSet) -> bool {
         self.tx
             .try_send(AppItem::Frame {
-                domain: MemoryDomain::System(slice),
+                domain,
                 pts_ns,
+                meta,
             })
             .is_ok()
     }
@@ -108,6 +118,7 @@ impl AppSrcFeed {
         g2g_core::runtime::block_on(self.tx.send(AppItem::Frame {
             domain: MemoryDomain::System(slice),
             pts_ns,
+            meta: FrameMetaSet::new(),
         }))
         .is_ok()
     }
@@ -120,12 +131,7 @@ impl AppSrcFeed {
     /// accept the `DmaBuf` memory domain; a system-memory consumer needs an
     /// import/download step first.
     pub fn push_dmabuf(&self, dmabuf: OwnedDmaBuf, pts_ns: u64) -> bool {
-        self.tx
-            .try_send(AppItem::Frame {
-                domain: MemoryDomain::DmaBuf(dmabuf),
-                pts_ns,
-            })
-            .is_ok()
+        self.push_frame(MemoryDomain::DmaBuf(dmabuf), pts_ns, FrameMetaSet::new())
     }
 
     /// Signal end-of-stream: the source emits a final `Eos` and `run` returns.
@@ -266,7 +272,12 @@ impl SourceLoop for AppSrc {
             let mut pushed = 0u64;
             // The loop ends when the pattern stops matching: an explicit
             // `AppItem::Eos`, or `None` once every feed handle has dropped.
-            while let Some(AppItem::Frame { domain, pts_ns }) = feed.recv().await {
+            while let Some(AppItem::Frame {
+                domain,
+                pts_ns,
+                meta,
+            }) = feed.recv().await
+            {
                 if !self.output_domains.contains(domain.kind()) {
                     return Err(G2gError::UnsupportedDomain);
                 }
@@ -278,7 +289,7 @@ impl SourceLoop for AppSrc {
                         ..FrameTiming::default()
                     },
                     sequence: self.seq,
-                    meta: Default::default(),
+                    meta,
                 };
                 self.seq += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;

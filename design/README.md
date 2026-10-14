@@ -968,6 +968,47 @@ copy is repeated in `gstwrap_host.c`, since the two crates build their C
 separately. `tools/gst-bridge-smoke.sh` compares the shell's output with GStreamer's
 own element at 37- and 38-pixel rows and at aligned sizes.
 
+With the `gst-analytics` feature the element carries analytics metadata across in
+both directions, following the GStreamer relation conventions
+(`machine-learning-analytics.md` in gst-docs). On the way in the C shell walks the
+buffer's `GstAnalyticsRelationMeta` and hands each mtd and relation to Rust as a flat
+record. `src/analytics.rs` builds an `AnalyticsMeta`, and the next pushed frame
+carries it. On the way out Rust flattens the pulled frame's `AnalyticsMeta` into
+records and the shell writes them as a new `GstAnalyticsRelationMeta`. The input
+buffer's own meta is not copied to the output, so the output carries what the
+sub-graph's frame carries.
+
+- An `ODMtd` is a `Detection`. Its pixel box is divided by the negotiated frame size,
+  and multiplied by it on the way out. An oriented box arrives as its axis-aligned
+  bounding box.
+- Labels go through `class_names`. Incoming quark strings are added to the table in
+  the order first seen. Outgoing labels use `class_names[label]`, or the decimal
+  label when there is no table or the label is past its end. An unlabelled mtd gets
+  the empty name, which goes back out as quark 0.
+- A `ClsMtd` becomes one `Classification` per class it lists, and a `Classification`
+  goes out as a one-class `ClsMtd`. `Classifies` and `Contains` are written as
+  `CONTAIN` plus the inverse `IS_PART_OF`. Only `CONTAIN` is read, as `Classifies`
+  from an `ODMtd` to a `ClsMtd` and as `Contains` otherwise.
+- A `TrackingMtd` keeps only its id. `Tracks` is `RELATE_TO` from the `ODMtd` to the
+  `TrackingMtd`. The first-seen time is written as `GST_CLOCK_TIME_NONE`, and
+  last-seen and lost are dropped.
+- A `SegmentationMtd` becomes one `Segmentation` per region. Its mask is 255 where
+  the region-id image (GRAY8 or GRAY16_LE) holds the region's id, its box is the
+  mask location, and its label and confidence come from the class at the same index
+  of the `ClsMtd` related by `N_TO_N` (or `RELATE_TO`, as in the library's own
+  example). That `ClsMtd` is not also read as a `Classification`. A `Segmentation`
+  goes out as a GRAY8 one-region mask, covered where its coverage is at least 128,
+  plus a one-class `ClsMtd` related by `N_TO_N`.
+- A `Roi` is not written, since GStreamer's counterpart is
+  `GstVideoRegionOfInterestMeta`. g2g has no keypoint type, so keypoint mtds are
+  skipped in both directions, as are other relations and mtd types.
+
+Counts and mask geometry come from whichever element wrote the meta, so a frame
+reads at most 4096 nodes, 16384 relations and 64 MiB of masks, and a mask whose stride or rows run past its buffer
+is dropped. `tests/gst_analytics.rs` pushes a buffer with all four mtd kinds through
+`appsrc ! glass2glass fragment=identity ! appsink` and checks every mtd and relation
+on the buffer that comes out.
+
 The plugin entry points are subtle. rustc exports only its own `#[no_mangle]`
 symbols from a cdylib and localizes anything pulled from a statically-linked C
 archive, so a C `GST_PLUGIN_DEFINE` descriptor is invisible to GStreamer's loader.

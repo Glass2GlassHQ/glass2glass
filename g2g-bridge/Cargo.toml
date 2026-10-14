@@ -26,6 +26,9 @@ std = ["g2g-core/std", "g2g-core/runtime", "g2g-core/multi-thread", "g2g-plugins
 # The GStreamer GObject shell (`csrc/gstglass2glass.c`, built by build.rs via
 # pkg-config + cc). Links the system gstreamer-1.0 / gstreamer-base-1.0.
 gstreamer = ["std"]
+# Carries GstAnalyticsRelationMeta across the element as `AnalyticsMeta`. Links
+# gstreamer-analytics-1.0 (1.26+) from gst-plugins-bad.
+gst-analytics = ["gstreamer", "g2g-core/metadata"]
 # Registers `wgpucompositor`, `wgpuupload` and `wgpudownload`, so a `fragment` can use them,
 # and on Linux `dmabuftowgpu` and `wgputodmabuf` for dma-buf input and output
 # (g2g-plugins compiles those two out elsewhere).

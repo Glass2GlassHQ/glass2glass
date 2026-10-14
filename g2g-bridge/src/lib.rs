@@ -45,6 +45,9 @@ mod bridge;
 #[cfg(feature = "gstreamer")]
 pub mod ffi;
 
+#[cfg(feature = "gst-analytics")]
+pub mod analytics;
+
 #[cfg(feature = "std")]
 pub use bridge::{frame_bytes, BridgeError, BridgeGraph};
 

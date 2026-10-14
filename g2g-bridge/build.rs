@@ -9,6 +9,7 @@
 fn main() {
     println!("cargo:rerun-if-changed=csrc/gstglass2glass.c");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_GSTREAMER");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_GST_ANALYTICS");
 
     if std::env::var_os("CARGO_FEATURE_GSTREAMER").is_none() {
         return;
@@ -40,6 +41,17 @@ fn main() {
         .chain(alloc.include_paths.iter())
     {
         build.include(path);
+    }
+    // 1.26 for segmentation mtds and the N_TO_N relation
+    if std::env::var_os("CARGO_FEATURE_GST_ANALYTICS").is_some() {
+        let analytics = pkg_config::Config::new()
+            .atleast_version("1.26")
+            .probe("gstreamer-analytics-1.0")
+            .expect("gstreamer-analytics-1.0 1.26+ (pkg-config) is required for `gst-analytics`");
+        for path in &analytics.include_paths {
+            build.include(path);
+        }
+        build.define("G2G_GST_ANALYTICS", None);
     }
     build.compile("gstglass2glass");
 

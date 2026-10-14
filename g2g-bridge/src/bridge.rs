@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
 use g2g_core::memory::OwnedDmaBuf;
+use g2g_core::meta::FrameMetaSet;
 use g2g_core::runtime::{parse_launch, run_graph, ParseError, RunStats};
-use g2g_core::{Frame, G2gError, PipelineClock};
+use g2g_core::{Frame, G2gError, MemoryDomain, PipelineClock};
 
 use g2g_plugins::appsink::{register_appsink_pull, AppSinkPull, Pull};
 use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
@@ -199,6 +200,12 @@ impl BridgeGraph {
     /// Non-blocking: safe to call from a GStreamer streaming thread's `chain`.
     pub fn push(&self, data: &[u8], pts_ns: u64) -> bool {
         self.feed.as_ref().is_some_and(|f| f.push(data, pts_ns))
+    }
+
+    pub fn push_frame(&self, domain: MemoryDomain, pts_ns: u64, meta: FrameMetaSet) -> bool {
+        self.feed
+            .as_ref()
+            .is_some_and(|f| f.push_frame(domain, pts_ns, meta))
     }
 
     /// Push an imported DMABUF frame into the embedded graph, zero-copy: the

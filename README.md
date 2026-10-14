@@ -167,8 +167,9 @@ parse error: unknown element: theoraenc
   tools above with `pyelement` / `pysrc` / `pyaggregator` included, and
   `--inspect pyelement module=m class=C` lists that class's own properties.
 - **Incremental migration.** `g2g-bridge` embeds a g2g sub-graph in a
-  GStreamer pipeline. `gstwrap` hosts an un-ported GStreamer element in a g2g
-  graph.
+  GStreamer pipeline, and its `gst-analytics` feature carries GstAnalytics
+  detections, classifications, tracking ids and masks across it both ways.
+  `gstwrap` hosts an un-ported GStreamer element in a g2g graph.
 
 Full guide, with the equivalence cookbook and application / element porting:
 [PORTING.md](PORTING.md). Writing an element from scratch:

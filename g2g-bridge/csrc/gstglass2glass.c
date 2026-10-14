@@ -15,6 +15,9 @@
 #include <gst/video/video.h>
 #include <string.h>
 #include <unistd.h>
+#ifdef G2G_GST_ANALYTICS
+#include <gst/analytics/analytics.h>
+#endif
 
 /* ---- Rust C-ABI core (src/ffi.rs) ---------------------------------------- */
 typedef struct G2gBridge G2gBridge;
@@ -51,6 +54,46 @@ extern int g2g_bridge_pull_buf(G2gBridge *b, G2gOut *out);
 extern void g2g_bridge_out_release(G2gOut *out);
 extern void g2g_bridge_destroy(G2gBridge *b);
 
+#ifdef G2G_GST_ANALYTICS
+/* one GstAnalyticsMtd, flattened, mirrored by the Rust `G2gAnalyticsMtd` */
+enum { G2G_MTD_DETECTION, G2G_MTD_CLASSIFICATION, G2G_MTD_TRACKING, G2G_MTD_SEGMENTATION };
+typedef struct {
+  int kind;
+  unsigned int id;
+  int x, y, w, h;
+  float confidence;
+  const char *label;
+  unsigned long long tracking_id;
+  const unsigned char *mask;
+  size_t mask_len;
+  unsigned int mask_width;
+  unsigned int mask_height;
+  int mask_stride;
+  unsigned int mask_sample_bytes;
+  const unsigned int *region_ids;
+  size_t region_count;
+} G2gAnalyticsMtd;
+typedef struct {
+  unsigned int from;
+  unsigned int to;
+  unsigned int kind;
+} G2gAnalyticsRelation;
+typedef struct {
+  const G2gAnalyticsMtd *mtds;
+  size_t mtd_count;
+  const G2gAnalyticsRelation *relations;
+  size_t relation_count;
+} G2gAnalyticsPlan;
+
+extern void g2g_bridge_in_mtd(G2gBridge *b, const G2gAnalyticsMtd *mtd, unsigned int frame_width,
+                              unsigned int frame_height);
+extern void g2g_bridge_in_relation(G2gBridge *b, unsigned int from, unsigned int to,
+                                   unsigned int kind);
+extern G2gAnalyticsPlan g2g_bridge_out_analytics(G2gBridge *b, const G2gOut *out,
+                                                 unsigned int frame_width,
+                                                 unsigned int frame_height);
+#endif
+
 /* ---- GObject type -------------------------------------------------------- */
 #define GST_TYPE_GLASS2GLASS (gst_glass2glass_get_type())
 G_DECLARE_FINAL_TYPE(GstGlass2Glass, gst_glass2glass, GST, GLASS2GLASS, GstBaseTransform)
@@ -63,6 +106,7 @@ struct _GstGlass2Glass {
   G2gBridge *bridge;   /* live between set_caps and stop */
   guint in_stride;     /* input plane-0 stride, for a dma-buf input with no video meta */
   GstVideoInfo in_info;    /* negotiated input format, for repacking system input rows */
+  gboolean have_in_info;   /* whether the input caps are raw video */
   gboolean have_in_planes; /* whether `in_planes` holds the tight layout of the input caps */
   G2gBridgePlanes in_planes;
   GstVideoInfo out_info;   /* negotiated output format, for dma-buf output sizing */
@@ -239,7 +283,8 @@ static gboolean gst_glass2glass_set_caps(GstBaseTransform *base, GstCaps *incaps
     self->bridge = NULL;
   }
 
-  gboolean have_in_info = video_info_from_caps(&self->in_info, incaps);
+  self->have_in_info = video_info_from_caps(&self->in_info, incaps);
+  gboolean have_in_info = self->have_in_info;
   self->in_stride = have_in_info ? (guint)GST_VIDEO_INFO_PLANE_STRIDE(&self->in_info, 0) : 0;
   self->have_out_info = video_info_from_caps(&self->out_info, outcaps);
 
@@ -258,11 +303,178 @@ static gboolean gst_glass2glass_set_caps(GstBaseTransform *base, GstCaps *incaps
   return self->bridge != NULL;
 }
 
+#ifdef G2G_GST_ANALYTICS
+/* ---- analytics metadata -------------------------------------------------- */
+/* bytes per region id, 0 for a mask format the bridge does not read */
+static guint mask_sample_bytes(GstVideoFormat format) {
+  switch (format) {
+    case GST_VIDEO_FORMAT_GRAY8:
+      return 1;
+    case GST_VIDEO_FORMAT_GRAY16_LE:
+      return 2;
+    default:
+      return 0;
+  }
+}
+
+static void read_segmentation(GstGlass2Glass *self, GstAnalyticsMtd *mtd, G2gAnalyticsMtd *out,
+                              guint width, guint height) {
+  guint mask_w = 0, mask_h = 0;
+  GstBuffer *mask = gst_analytics_segmentation_mtd_get_mask(mtd, &out->x, &out->y, &mask_w, &mask_h);
+  if (!mask)
+    return;
+  out->w = (gint)MIN(mask_w, (guint)G_MAXINT);
+  out->h = (gint)MIN(mask_h, (guint)G_MAXINT);
+  GstVideoMeta *vmeta = gst_buffer_get_video_meta(mask);
+  GstMapInfo map;
+  if (vmeta && mask_sample_bytes(vmeta->format) && gst_buffer_map(mask, &map, GST_MAP_READ)) {
+    if (vmeta->offset[0] <= map.size) {
+      gsize count = gst_analytics_segmentation_mtd_get_region_count(mtd);
+      guint *ids = g_new(guint, count);
+      for (gsize i = 0; i < count; i++)
+        ids[i] = gst_analytics_segmentation_mtd_get_region_id(mtd, i);
+      out->mask = map.data + vmeta->offset[0];
+      out->mask_len = map.size - vmeta->offset[0];
+      out->mask_width = vmeta->width;
+      out->mask_height = vmeta->height;
+      out->mask_stride = vmeta->stride[0];
+      out->mask_sample_bytes = mask_sample_bytes(vmeta->format);
+      out->region_ids = ids;
+      out->region_count = count;
+      g2g_bridge_in_mtd(self->bridge, out, width, height);
+      g_free(ids);
+    }
+    gst_buffer_unmap(mask, &map);
+  }
+  gst_buffer_unref(mask);
+}
+
+static void read_mtd(GstGlass2Glass *self, GstAnalyticsMtd *mtd, guint width, guint height) {
+  G2gAnalyticsMtd out = {0};
+  out.id = mtd->id;
+  GstAnalyticsMtdType type = gst_analytics_mtd_get_mtd_type(mtd);
+  if (type == gst_analytics_od_mtd_get_mtd_type()) {
+    out.kind = G2G_MTD_DETECTION;
+    if (!gst_analytics_od_mtd_get_location(mtd, &out.x, &out.y, &out.w, &out.h, &out.confidence))
+      return;
+    out.label = g_quark_to_string(gst_analytics_od_mtd_get_obj_type(mtd));
+    g2g_bridge_in_mtd(self->bridge, &out, width, height);
+  } else if (type == gst_analytics_cls_mtd_get_mtd_type()) {
+    /* one call per class, all under the mtd's id */
+    out.kind = G2G_MTD_CLASSIFICATION;
+    gsize count = gst_analytics_cls_mtd_get_length(mtd);
+    for (gsize i = 0; i < count; i++) {
+      out.confidence = gst_analytics_cls_mtd_get_level(mtd, i);
+      out.label = g_quark_to_string(gst_analytics_cls_mtd_get_quark(mtd, i));
+      g2g_bridge_in_mtd(self->bridge, &out, width, height);
+    }
+  } else if (type == gst_analytics_tracking_mtd_get_mtd_type()) {
+    guint64 tracking_id;
+    GstClockTime first_seen, last_seen;
+    gboolean lost;
+    out.kind = G2G_MTD_TRACKING;
+    if (!gst_analytics_tracking_mtd_get_info(mtd, &tracking_id, &first_seen, &last_seen, &lost))
+      return;
+    out.tracking_id = tracking_id;
+    g2g_bridge_in_mtd(self->bridge, &out, width, height);
+  } else if (type == gst_analytics_segmentation_mtd_get_mtd_type()) {
+    out.kind = G2G_MTD_SEGMENTATION;
+    read_segmentation(self, mtd, &out, width, height);
+  }
+}
+
+/* the bridge attaches what it is handed here to the next pushed frame */
+static void read_analytics(GstGlass2Glass *self, GstBuffer *in) {
+  GstAnalyticsRelationMeta *rmeta = gst_buffer_get_analytics_relation_meta(in);
+  if (!rmeta || !self->have_in_info)
+    return;
+  guint width = GST_VIDEO_INFO_WIDTH(&self->in_info);
+  guint height = GST_VIDEO_INFO_HEIGHT(&self->in_info);
+  gpointer state = NULL;
+  GstAnalyticsMtd mtd;
+  while (gst_analytics_relation_meta_iterate(rmeta, &state, GST_ANALYTICS_MTD_TYPE_ANY, &mtd)) {
+    read_mtd(self, &mtd, width, height);
+    gpointer related_state = NULL;
+    GstAnalyticsMtd related;
+    while (gst_analytics_relation_meta_get_direct_related(rmeta, mtd.id, GST_ANALYTICS_REL_TYPE_ANY,
+                                                          GST_ANALYTICS_MTD_TYPE_ANY,
+                                                          &related_state, &related))
+      g2g_bridge_in_relation(self->bridge, mtd.id, related.id,
+                             gst_analytics_relation_meta_get_relation(rmeta, mtd.id, related.id));
+  }
+}
+
+static gboolean write_segmentation(GstAnalyticsRelationMeta *rmeta, const G2gAnalyticsMtd *in,
+                                   GstAnalyticsMtd *mtd) {
+  GstBuffer *mask = gst_buffer_new_memdup(in->mask, in->mask_len);
+  gsize offsets[GST_VIDEO_MAX_PLANES] = {0};
+  gint strides[GST_VIDEO_MAX_PLANES] = {in->mask_stride};
+  gst_buffer_add_video_meta_full(mask, GST_VIDEO_FRAME_FLAG_NONE, GST_VIDEO_FORMAT_GRAY8,
+                                 in->mask_width, in->mask_height, 1, offsets, strides);
+  /* the mtd takes the mask only on success */
+  if (gst_analytics_relation_meta_add_segmentation_mtd(
+          rmeta, mask, GST_SEGMENTATION_TYPE_INSTANCE, in->region_count, (guint *)in->region_ids,
+          in->x, in->y, (guint)MAX(in->w, 0), (guint)MAX(in->h, 0), mtd))
+    return TRUE;
+  gst_buffer_unref(mask);
+  return FALSE;
+}
+
+static gboolean write_mtd(GstAnalyticsRelationMeta *rmeta, const G2gAnalyticsMtd *in,
+                          GstAnalyticsMtd *mtd) {
+  GQuark label = in->label ? g_quark_from_string(in->label) : 0;
+  switch (in->kind) {
+    case G2G_MTD_DETECTION:
+      return gst_analytics_relation_meta_add_od_mtd(rmeta, label, in->x, in->y, in->w, in->h,
+                                                    in->confidence, mtd);
+    case G2G_MTD_CLASSIFICATION:
+      return gst_analytics_relation_meta_add_one_cls_mtd(rmeta, in->confidence, label, mtd);
+    case G2G_MTD_TRACKING:
+      /* g2g does not record when an object was first seen */
+      return gst_analytics_relation_meta_add_tracking_mtd(rmeta, in->tracking_id,
+                                                          GST_CLOCK_TIME_NONE, mtd);
+    case G2G_MTD_SEGMENTATION:
+      return write_segmentation(rmeta, in, mtd);
+    default:
+      return FALSE;
+  }
+}
+
+static void write_analytics(GstBuffer *buf, const G2gAnalyticsPlan *plan) {
+  if (plan->mtd_count == 0)
+    return;
+  GstAnalyticsRelationMeta *rmeta = gst_buffer_add_analytics_relation_meta(buf);
+  if (!rmeta)
+    return;
+  GstAnalyticsMtd *written = g_new0(GstAnalyticsMtd, plan->mtd_count);
+  gboolean *ok = g_new0(gboolean, plan->mtd_count);
+  for (gsize i = 0; i < plan->mtd_count; i++)
+    ok[i] = write_mtd(rmeta, &plan->mtds[i], &written[i]);
+  for (gsize i = 0; i < plan->relation_count; i++) {
+    const G2gAnalyticsRelation *relation = &plan->relations[i];
+    if (ok[relation->from] && ok[relation->to])
+      gst_analytics_relation_meta_set_relation(rmeta, (GstAnalyticsRelTypes)relation->kind,
+                                               written[relation->from].id,
+                                               written[relation->to].id);
+  }
+  g_free(ok);
+  g_free(written);
+}
+
+size_t g2g_bridge_analytics_mtd_size(void);
+size_t g2g_bridge_analytics_mtd_size(void) { return sizeof(G2gAnalyticsMtd); }
+size_t g2g_bridge_analytics_relation_size(void);
+size_t g2g_bridge_analytics_relation_size(void) { return sizeof(G2gAnalyticsRelation); }
+#endif
+
 /* Push one input buffer into the sub-graph. A dma-buf-backed buffer is imported
  * zero-copy (the fd, not the mapped bytes); any other memory is mapped and its
  * bytes copied in, repacked into tight rows when GStreamer's rows are padded. */
 static gboolean push_input(GstGlass2Glass *self, GstBuffer *in) {
   guint64 pts = GST_BUFFER_PTS_IS_VALID(in) ? GST_BUFFER_PTS(in) : 0;
+#ifdef G2G_GST_ANALYTICS
+  read_analytics(self, in);
+#endif
   GstMemory *mem = gst_buffer_peek_memory(in, 0);
   if (mem && gst_is_dmabuf_memory(mem)) {
     int fd = gst_dmabuf_memory_get_fd(mem);
@@ -422,12 +634,22 @@ static GstFlowReturn gst_glass2glass_generate_output(GstBaseTransform *base, Gst
     return (r == -1) ? GST_FLOW_EOS : GST_FLOW_ERROR;
   }
 
+#ifdef G2G_GST_ANALYTICS
+  /* planned first: wrap_output moves a dma-buf frame off `out` */
+  G2gAnalyticsPlan plan = {0};
+  if (self->have_out_info)
+    plan = g2g_bridge_out_analytics(self->bridge, &out, GST_VIDEO_INFO_WIDTH(&self->out_info),
+                                    GST_VIDEO_INFO_HEIGHT(&self->out_info));
+#endif
   GstBuffer *result = wrap_output(self, &out);
   g2g_bridge_out_release(&out);
   if (!result) {
     gst_buffer_unref(in);
     return GST_FLOW_ERROR;
   }
+#ifdef G2G_GST_ANALYTICS
+  write_analytics(result, &plan);
+#endif
   /* Carry timestamps / flags from the input. */
   gst_buffer_copy_into(result, in, GST_BUFFER_COPY_TIMESTAMPS | GST_BUFFER_COPY_FLAGS, 0, -1);
   gst_buffer_unref(in);
@@ -506,6 +728,7 @@ static void gst_glass2glass_init(GstGlass2Glass *self) {
   self->output_caps = NULL;
   self->bridge = NULL;
   self->in_stride = 0;
+  self->have_in_info = FALSE;
   self->have_in_planes = FALSE;
   self->have_out_info = FALSE;
   self->have_out_planes = FALSE;
