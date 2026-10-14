@@ -38,8 +38,9 @@ use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType
 // a transparent `i32` alias, so a local alias matches the FFI signatures exactly.
 #[allow(non_camel_case_types)]
 type OSStatus = i32;
+use crate::videotoolbox_common::{cm_time, cm_time_invalid, cmtime_to_ns};
 use objc2_core_media::{
-    CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo, CMTime, CMTimeFlags,
+    CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo, CMTime,
     CMVideoFormatDescriptionCreateFromH264ParameterSets,
     CMVideoFormatDescriptionCreateFromHEVCParameterSets,
 };
@@ -901,32 +902,4 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
         state.session.wait_for_asynchronous_frames();
     }
     Ok(())
-}
-
-/// A `CMTime` for `pts_ns` at nanosecond timescale, valid.
-fn cm_time(pts_ns: u64) -> CMTime {
-    CMTime {
-        value: pts_ns as i64,
-        timescale: 1_000_000_000,
-        flags: CMTimeFlags::Valid,
-        epoch: 0,
-    }
-}
-
-/// An invalid `CMTime` (unknown duration / DTS).
-fn cm_time_invalid() -> CMTime {
-    CMTime {
-        value: 0,
-        timescale: 0,
-        flags: CMTimeFlags::empty(),
-        epoch: 0,
-    }
-}
-
-/// Convert a valid nanosecond-or-other-timescale `CMTime` back to nanoseconds.
-fn cmtime_to_ns(t: CMTime) -> u64 {
-    if t.timescale <= 0 || !t.flags.contains(CMTimeFlags::Valid) {
-        return 0;
-    }
-    ((t.value as i128 * 1_000_000_000) / t.timescale as i128) as u64
 }

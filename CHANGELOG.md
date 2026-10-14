@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1381: `vtdecode` and `vtencode` share one set of CMTime helpers.
 - M1380: one `cuda_driver_ffi` module declares the shared CUDA driver calls.
 - M1379: Media Foundation elements share one `mfcommon` module for errors, samples and the ProcessInput/ProcessOutput loop.
 - M1363: one bounds-checked big-endian reader replaces the per-parser copies.

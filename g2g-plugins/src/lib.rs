@@ -1102,6 +1102,8 @@ mod mfcommon;
 #[cfg(all(target_os = "windows", feature = "mf-decode"))]
 pub mod mfdecode;
 
+#[cfg(all(target_os = "macos", any(feature = "vtdecode", feature = "vtencode")))]
+mod videotoolbox_common;
 // VideoToolbox H.264 decode is macOS-only, the macOS counterpart of mfdecode.
 // The objc2 framework dependencies are target-gated, so the module only exists
 // when building for macOS with the `vtdecode` feature; enabling the feature on

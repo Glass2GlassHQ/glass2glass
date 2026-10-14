@@ -32,8 +32,9 @@ use objc2_core_foundation::CFRetained;
 // matches the FFI signatures exactly (same as VtDecode).
 #[allow(non_camel_case_types)]
 type OSStatus = i32;
+use crate::videotoolbox_common::{cm_time, cm_time_invalid, cmtime_to_ns};
 use objc2_core_media::{
-    CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMTime, CMTimeFlags,
+    CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMTime,
     CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
     CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
 };
@@ -909,38 +910,10 @@ unsafe fn set_u32(
     Ok(())
 }
 
-/// A valid `CMTime` for `pts_ns` at nanosecond timescale.
-fn cm_time(pts_ns: u64) -> CMTime {
-    CMTime {
-        value: pts_ns as i64,
-        timescale: 1_000_000_000,
-        flags: CMTimeFlags::Valid,
-        epoch: 0,
-    }
-}
-
-/// An invalid `CMTime` (unknown duration).
-fn cm_time_invalid() -> CMTime {
-    CMTime {
-        value: 0,
-        timescale: 0,
-        flags: CMTimeFlags::empty(),
-        epoch: 0,
-    }
-}
-
 /// The sample's presentation timestamp.
 ///
 /// SAFETY: `sample` is a valid `CMSampleBuffer`.
 unsafe fn sample_pts(sample: &CMSampleBuffer) -> CMTime {
     // SAFETY: `sample` is valid per this function's contract.
     unsafe { sample.presentation_time_stamp() }
-}
-
-/// Convert a valid `CMTime` to nanoseconds.
-fn cmtime_to_ns(t: CMTime) -> u64 {
-    if t.timescale <= 0 || !t.flags.contains(CMTimeFlags::Valid) {
-        return 0;
-    }
-    ((t.value as i128 * 1_000_000_000) / t.timescale as i128) as u64
 }
