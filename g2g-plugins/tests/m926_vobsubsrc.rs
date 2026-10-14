@@ -10,6 +10,13 @@
 //! same pair.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffmpeg_tool::have_ffmpeg;
+use ffprobe_tool::have_ffprobe;
+
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;
@@ -27,8 +34,8 @@ use g2g_plugins::vobsubsrc::VobSubSrc;
 
 mod vobsub_fixture;
 use vobsub_fixture::{
-    author_spanning_vobsub, author_vobsub, cues, have_ffmpeg, spanning_sample, CUE_DURATION_NS, H,
-    PALETTE, SPANNING_CUE, W,
+    author_spanning_vobsub, author_vobsub, cues, spanning_sample, CUE_DURATION_NS, H, PALETTE,
+    SPANNING_CUE, W,
 };
 
 fn temp_path(name: &str) -> PathBuf {
@@ -432,7 +439,7 @@ async fn a_corrupt_index_drops_only_the_cue_it_names() {
 /// subtitle packet times are what g2g's index read must agree with.
 #[tokio::test]
 async fn the_cue_times_match_ffmpegs_read_of_the_same_pair() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping m926 ffmpeg cross-check: no ffmpeg on PATH");
         return;
     }

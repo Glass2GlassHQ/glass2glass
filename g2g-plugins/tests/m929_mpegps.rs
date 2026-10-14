@@ -15,6 +15,13 @@
 //! `VideoCodec::Mpeg2`, and malformed input never panics.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffmpeg_tool::have_ffmpeg;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -67,7 +74,7 @@ use g2g_plugins::vobsub::parse_idx;
 use g2g_plugins::vobsubdec::VobSubDec;
 
 mod vobsub_fixture;
-use vobsub_fixture::{author_vobsub, cues, have_ffmpeg, CUE_DURATION_NS};
+use vobsub_fixture::{author_vobsub, cues, CUE_DURATION_NS};
 
 /// The VOB's video geometry: NTSC, so it differs from both the fixture `.idx`'s
 /// PAL `size:` line and `vobsubdec`'s own 720x576 default. The cue rectangles
@@ -302,7 +309,7 @@ fn the_stream_property_round_trips() {
 
 #[tokio::test]
 async fn an_mpeg1_program_stream_demuxes_video_and_audio() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: ffmpeg not on PATH");
         return;
     }
@@ -372,7 +379,7 @@ async fn an_mpeg1_program_stream_demuxes_video_and_audio() {
 
 #[tokio::test]
 async fn a_vob_demuxes_video_audio_and_subpictures() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: ffmpeg not on PATH");
         return;
     }
@@ -460,7 +467,7 @@ async fn a_vob_demuxes_video_audio_and_subpictures() {
 
 #[tokio::test]
 async fn a_demuxed_subpicture_renders_on_the_default_palette() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: ffmpeg not on PATH");
         return;
     }
@@ -552,7 +559,7 @@ async fn a_demuxed_subpicture_renders_on_the_default_palette() {
 
 #[tokio::test]
 async fn mpeg2_video_in_a_transport_stream_reaches_the_mpeg2_selection() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: ffmpeg not on PATH");
         return;
     }
@@ -627,7 +634,7 @@ async fn mpeg2_video_in_a_transport_stream_reaches_the_mpeg2_selection() {
 /// stream's subtitle track is selectable as `d.text_0`.
 #[test]
 fn named_pads_fan_a_vob_out_including_the_subpicture_track() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: ffmpeg not on PATH");
         return;
     }
@@ -679,7 +686,7 @@ fn the_file_extensions_type_a_program_stream() {
 async fn a_demuxed_program_stream_decodes_to_frames() {
     use g2g_plugins::ffmpegdec::FfmpegVideoDec;
 
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: ffmpeg not on PATH");
         return;
     }
@@ -724,7 +731,7 @@ async fn a_demuxed_program_stream_decodes_to_frames() {
 async fn a_vob_decodes_and_playbin_builds_its_graph() {
     use g2g_plugins::ffmpegdec::FfmpegVideoDec;
 
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: ffmpeg not on PATH");
         return;
     }
@@ -1261,7 +1268,7 @@ async fn the_fanout_declares_the_picture_it_holds_once_a_sequence_header_parses(
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 #[test]
 fn playbin_builds_a_subpicture_overlay_only_when_the_disc_has_one() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: ffmpeg not on PATH");
         return;
     }
@@ -1318,7 +1325,7 @@ fn playbin_builds_a_subpicture_overlay_only_when_the_disc_has_one() {
 /// a frame outside the window is the video untouched.
 #[tokio::test]
 async fn composited_frames_carry_the_cue_only_inside_its_window_and_rectangle() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: ffmpeg not on PATH");
         return;
     }
@@ -1687,7 +1694,7 @@ fn the_source_pad_advertises_every_selection() {
 /// every frame until that offset passes on the wall clock.
 #[tokio::test]
 async fn a_stream_start_segment_precedes_the_first_frame() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: ffmpeg not on PATH");
         return;
     }

@@ -1,5 +1,9 @@
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -22,10 +26,6 @@ impl PipelineClock for ZeroClock {
     fn now_ns(&self) -> u64 {
         0
     }
-}
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
 }
 
 // one test-pattern frame as ffmpeg lays it out

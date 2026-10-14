@@ -8,6 +8,10 @@
 //! reads a field-order flag, so both assume top-field-first.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -22,10 +26,6 @@ use g2g_plugins::psdemux::parse_sequence_header;
 const W: usize = 320;
 const H: usize = 240;
 const I420_BYTES: usize = W * H * 3 / 2;
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-}
 
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("g2g-m932-{}-{name}", std::process::id()))

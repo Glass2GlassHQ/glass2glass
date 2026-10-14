@@ -17,6 +17,11 @@
     all(target_os = "linux", feature = "nvenc")
 ))]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+
 mod common {
     use std::path::PathBuf;
     use std::process::Command;
@@ -104,10 +109,8 @@ mod common {
         ))
     }
 
-    pub(crate) fn have_ffmpeg() -> bool {
-        Command::new("ffmpeg").arg("-version").output().is_ok()
-            && Command::new("ffprobe").arg("-version").output().is_ok()
-    }
+    pub(crate) use crate::ffmpeg_tool::have_ffmpeg;
+    pub(crate) use crate::ffprobe_tool::have_ffprobe;
 
     /// What ffprobe reads out of a stream's colour description. `extension` picks
     /// the demuxer (`h264`, `obu`, `jpg`).
@@ -256,7 +259,7 @@ mod av1 {
             }],
             "the encoder announces the input colorimetry on its output caps"
         );
-        if !have_ffmpeg() {
+        if !have_ffmpeg() || !have_ffprobe() {
             eprintln!("skipping the bitstream probe: ffmpeg / ffprobe not on PATH");
             return;
         }
@@ -287,7 +290,7 @@ mod av1 {
             }],
             "an untagged input stays untagged on the output caps"
         );
-        if !have_ffmpeg() {
+        if !have_ffmpeg() || !have_ffprobe() {
             eprintln!("skipping the bitstream probe: ffmpeg / ffprobe not on PATH");
             return;
         }
@@ -374,7 +377,7 @@ mod mjpeg {
     /// it as out of a JPEG ffmpeg wrote itself.
     #[tokio::test]
     async fn the_encoded_file_probes_as_jfif() {
-        if !have_ffmpeg() {
+        if !have_ffmpeg() || !have_ffprobe() {
             eprintln!("skipping: ffmpeg / ffprobe not on PATH");
             return;
         }
@@ -568,7 +571,7 @@ mod nvenc {
             }],
             "the encoder announces the input colorimetry on its output caps"
         );
-        if !have_ffmpeg() {
+        if !have_ffmpeg() || !have_ffprobe() {
             eprintln!("skipping the bitstream probe: ffmpeg / ffprobe not on PATH");
             return;
         }

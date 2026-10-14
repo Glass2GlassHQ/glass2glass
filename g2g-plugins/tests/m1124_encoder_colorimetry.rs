@@ -9,6 +9,13 @@
 //! reported nothing could not pass the test.
 #![cfg(all(target_os = "linux", feature = "ffmpeg"))]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -135,11 +142,6 @@ fn temp_path(tag: &str) -> PathBuf {
     ))
 }
 
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-        && Command::new("ffprobe").arg("-version").output().is_ok()
-}
-
 /// What ffprobe reads out of an Annex-B stream's VUI colour description.
 fn probe_colour(annex_b: &[u8], tag: &str) -> ProbedColour {
     let path = temp_path(tag);
@@ -211,7 +213,7 @@ fn ffmpeg_reference(colour_args: &[&str], tag: &str) -> ProbedColour {
 /// ffmpeg's own encoder writes when asked for the same description.
 #[tokio::test]
 async fn bt709_caps_reach_the_vui_colour_description() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: ffmpeg / ffprobe not on PATH");
         return;
     }
@@ -244,7 +246,7 @@ async fn bt709_caps_reach_the_vui_colour_description() {
 /// backend tags its stream too. Skips on a host without an NVENC encoder.
 #[tokio::test]
 async fn nvenc_writes_the_vui_colour_description() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: ffmpeg / ffprobe not on PATH");
         return;
     }
@@ -272,7 +274,7 @@ async fn nvenc_writes_the_vui_colour_description() {
 /// what the caps say and invents nothing.
 #[tokio::test]
 async fn untagged_caps_write_no_colour_description() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: ffmpeg / ffprobe not on PATH");
         return;
     }

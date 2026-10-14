@@ -11,6 +11,13 @@
 //! ffmpeg's own decode of the remux.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -88,11 +95,6 @@ fn frame(data: Vec<u8>, timing: FrameTiming) -> PipelinePacket {
         timing,
         0,
     ))
-}
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-        && Command::new("ffprobe").arg("-version").output().is_ok()
 }
 
 fn temp_path(name: &str) -> PathBuf {
@@ -212,7 +214,7 @@ async fn mux_progressive(caps: &Caps, frames: &[(Vec<u8>, FrameTiming)]) -> Vec<
 /// frames arrive out of presentation order, each with a DTS ahead of its PTS.
 #[tokio::test]
 async fn demuxed_frames_carry_a_decode_timestamp() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -242,7 +244,7 @@ async fn demuxed_frames_carry_a_decode_timestamp() {
 /// the file without complaint.
 #[tokio::test]
 async fn progressive_remux_keeps_composition_times() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }

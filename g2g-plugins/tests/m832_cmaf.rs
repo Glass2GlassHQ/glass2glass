@@ -15,6 +15,13 @@
 //! ffmpeg's `-movflags cmaf` is the oracle in both directions.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -301,11 +308,6 @@ async fn demux_mp4(file: &[u8]) -> (Vec<Caps>, PortCapture) {
 
 // --- ffmpeg helpers -------------------------------------------------------
 
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-        && Command::new("ffprobe").arg("-version").output().is_ok()
-}
-
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("g2g-m832-{}-{name}", std::process::id()))
 }
@@ -590,7 +592,7 @@ async fn non_cmaf_output_keeps_its_exact_default_shape() {
 /// source it was remuxed from.
 #[tokio::test]
 async fn ffmpeg_reads_a_g2g_cmaf_track_file() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -654,7 +656,7 @@ async fn ffmpeg_reads_a_g2g_cmaf_track_file() {
 /// support buys, since a CMAF `trun` carries no per-sample duration.
 #[tokio::test]
 async fn g2g_demuxes_ffmpeg_cmaf_sample_exact() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -727,7 +729,7 @@ async fn g2g_demuxes_ffmpeg_cmaf_sample_exact() {
 /// whole.
 #[tokio::test]
 async fn fmp4demux_reads_a_cmaf_byte_stream_in_pieces() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -770,7 +772,7 @@ async fn fmp4demux_reads_a_cmaf_byte_stream_in_pieces() {
 /// units.
 #[tokio::test]
 async fn cmaf_round_trip_through_g2g_is_packet_exact() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }

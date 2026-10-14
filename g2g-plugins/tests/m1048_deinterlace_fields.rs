@@ -9,6 +9,10 @@
 //! field timestamps, the semi-planar chroma pair) are asserted directly.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -25,10 +29,6 @@ const W: usize = 320;
 const H: usize = 240;
 const FPS_Q16: u32 = 25 << 16;
 const FRAME_NS: u64 = 40_000_000;
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-}
 
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("g2g-m1048-{}-{name}", std::process::id()))

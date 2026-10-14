@@ -15,6 +15,13 @@
 //! (decoded PCM, video frame count) and differ only in the reported timeline.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -117,11 +124,6 @@ fn frame(data: Vec<u8>, timing: FrameTiming) -> PipelinePacket {
         timing,
         0,
     ))
-}
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-        && Command::new("ffprobe").arg("-version").output().is_ok()
 }
 
 fn temp_path(name: &str) -> PathBuf {
@@ -320,7 +322,7 @@ fn author_av(path: &PathBuf, vcodec: &str, acodec: &str) -> Option<Vec<u8>> {
 /// span instead, which is the M791 limit this milestone lifts.
 #[tokio::test]
 async fn progressive_opus_reports_the_exact_trimmed_duration() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -508,7 +510,7 @@ async fn assert_av_layouts_agree(vcodec: &str, acodec: &str, probe_video: &str, 
 
 #[tokio::test]
 async fn progressive_h264_aac_reads_and_decodes() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -517,7 +519,7 @@ async fn progressive_h264_aac_reads_and_decodes() {
 
 #[tokio::test]
 async fn progressive_h264_opus_reads_and_decodes() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -529,7 +531,7 @@ async fn progressive_h264_opus_reads_and_decodes() {
 /// whose samples the progressive tables would misindex.
 #[tokio::test]
 async fn progressive_h265_and_av1_read_and_decode() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -541,7 +543,7 @@ async fn progressive_h265_and_av1_read_and_decode() {
 /// byte, through the sample-table parser rather than the fragment parser.
 #[tokio::test]
 async fn g2g_demuxes_its_own_progressive_file_packet_exact() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }

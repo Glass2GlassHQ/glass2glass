@@ -10,6 +10,10 @@
 //! `Interlace::Interleaved` output caps, sticky for the rest of the stream.
 #![cfg(feature = "std")]
 
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -319,9 +323,7 @@ mod ffmpeg_latch {
     use std::path::PathBuf;
     use std::process::Command;
 
-    fn have_ffmpeg() -> bool {
-        Command::new("ffmpeg").arg("-version").output().is_ok()
-    }
+    use crate::ffmpeg_tool::have_ffmpeg;
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("g2g-m935-{}-{name}", std::process::id()))

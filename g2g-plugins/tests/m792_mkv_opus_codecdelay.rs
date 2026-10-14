@@ -31,6 +31,13 @@
 //! mapping itself matches exactly.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -115,11 +122,6 @@ fn frame(data: Vec<u8>, timing: FrameTiming) -> PipelinePacket {
         timing,
         0,
     ))
-}
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-        && Command::new("ffprobe").arg("-version").output().is_ok()
 }
 
 fn temp_path(name: &str) -> PathBuf {
@@ -406,7 +408,7 @@ async fn mkvmux_bytes(frames: &[(Vec<u8>, FrameTiming)]) -> Vec<u8> {
 /// source's samples.
 #[tokio::test]
 async fn ogg_remuxed_into_mkv_keeps_the_sources_pre_skip_and_trim() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -511,7 +513,7 @@ async fn ogg_remuxed_into_mkv_keeps_the_sources_pre_skip_and_trim() {
 #[cfg(feature = "opus")]
 #[tokio::test]
 async fn mkv_carries_the_same_trims_as_ogg_and_aligns_with_ffmpeg() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -599,7 +601,7 @@ async fn mkv_carries_the_same_trims_as_ogg_and_aligns_with_ffmpeg() {
 async fn opusenc_into_mkv_declares_the_encoders_own_lookahead() {
     use g2g_plugins::opusenc::OpusEnc;
 
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -671,7 +673,7 @@ async fn opusenc_into_mkv_declares_the_encoders_own_lookahead() {
 /// the pre-skip, output gain and channel mapping all survive a round trip.
 #[tokio::test]
 async fn mkv_round_trip_reproduces_the_codec_private_byte_for_byte() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }

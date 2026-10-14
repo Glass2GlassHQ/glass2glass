@@ -10,6 +10,13 @@
 //! samples it decodes the original chained file to.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -113,11 +120,6 @@ fn audio_caps(format: AudioFormat, channels: u8, sample_rate: u32) -> Caps {
         sample_rate,
         channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
-}
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-        && Command::new("ffprobe").arg("-version").output().is_ok()
 }
 
 /// ffmpeg's libvorbis encoder authors the Vorbis fixtures; not every ffmpeg
@@ -324,7 +326,7 @@ async fn assert_chained_remux(
 
 #[tokio::test]
 async fn chained_opus_is_written_and_ffmpeg_reads_both_links() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -333,7 +335,7 @@ async fn chained_opus_is_written_and_ffmpeg_reads_both_links() {
 
 #[tokio::test]
 async fn chained_vorbis_is_written_and_ffmpeg_reads_both_links() {
-    if !have_ffmpeg() || !have_libvorbis() {
+    if !have_ffmpeg() || !have_ffprobe() || !have_libvorbis() {
         eprintln!("skipping: no ffmpeg with libvorbis");
         return;
     }

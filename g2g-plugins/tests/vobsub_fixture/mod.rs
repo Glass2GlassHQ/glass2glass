@@ -10,7 +10,6 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
-use std::process::Command;
 
 /// Subpicture display geometry, and therefore the canvas geometry both the
 /// reference burn-in and the g2g compositing run at.
@@ -81,11 +80,6 @@ pub(crate) const SPANNING_CUE: Cue = Cue {
 /// dropped or reordered fragment change the decoded pixels.
 pub(crate) fn spanning_sample(x: u32, y: u32) -> u8 {
     1 + ((x + y) % 3) as u8
-}
-
-pub(crate) fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-        && Command::new("ffprobe").arg("-version").output().is_ok()
 }
 
 // ---- fixture authoring: SPU packets in an MPEG-PS `.sub` ----

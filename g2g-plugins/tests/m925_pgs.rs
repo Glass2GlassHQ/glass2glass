@@ -22,6 +22,10 @@
 //! indexing the object bitmap only.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;
@@ -320,14 +324,6 @@ fn crop_display_set(objects: &[CompRef]) -> Vec<u8> {
 }
 
 // ---- ffmpeg ----
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("g2g-m925-{}-{name}", std::process::id()))

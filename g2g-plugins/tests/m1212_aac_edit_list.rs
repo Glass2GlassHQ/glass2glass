@@ -6,6 +6,10 @@
 
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -18,10 +22,6 @@ impl PipelineClock for ZeroClock {
     fn now_ns(&self) -> u64 {
         0
     }
-}
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
 }
 
 fn temp_path(name: &str) -> PathBuf {

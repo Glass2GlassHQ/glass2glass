@@ -13,6 +13,9 @@
 #![cfg(feature = "std")]
 #![allow(dead_code)] // the helpers below serve whichever codec features are on
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+
 mod m1001_common;
 
 use std::path::PathBuf;
@@ -23,11 +26,6 @@ use m1001_common::EvidenceLog;
 
 /// The battery's own log name, so a local run does not inherit another's rows.
 const LOG: &str = "m1001-oracle";
-
-/// Whether the ffmpeg CLI is on this box.
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-}
 
 /// Decode `fixture` with the ffmpeg CLI into raw `pixel_format` frames.
 fn ffmpeg_decode(fixture: &str, pixel_format: &str) -> Vec<u8> {
@@ -77,6 +75,7 @@ fn record_oracle(log: &EvidenceLog, element: &str, codec: &str, db: f64, floor: 
 #[cfg(feature = "rav1d")]
 mod av1 {
     use super::*;
+    use crate::ffmpeg_tool::have_ffmpeg;
     use g2g_core::{AsyncElement, Caps, Dim, PipelinePacket, Rate, VideoCodec};
     use g2g_plugins::conformance::{i420_planes, pooled_psnr_db};
     use g2g_plugins::rav1ddec::Rav1dDec;
@@ -156,6 +155,7 @@ mod av1 {
 #[cfg(feature = "mjpeg")]
 mod mjpeg {
     use super::*;
+    use crate::ffmpeg_tool::have_ffmpeg;
     use g2g_core::{AsyncElement, Caps, Dim, Rate, VideoCodec};
     use g2g_plugins::conformance::pooled_psnr_db;
     use g2g_plugins::mjpegdec::MjpegDec;

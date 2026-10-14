@@ -16,6 +16,13 @@
 //! or title length stops at what the box really holds instead of panicking.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -126,11 +133,6 @@ fn annexb(nals: &[&[u8]]) -> Vec<u8> {
 
 mod adts_common;
 use adts_common::adts_au;
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-        && Command::new("ffprobe").arg("-version").output().is_ok()
-}
 
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("g2g-m1046-{}-{name}", std::process::id()))
@@ -360,7 +362,7 @@ async fn mkv_round_trips_chapters_through_the_bus() {
 /// element g2g wrote, with the right times and titles.
 #[tokio::test]
 async fn ffprobe_reads_the_g2g_written_mkv_chapters() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("ffmpeg/ffprobe not present; skipping the mkv chapter oracle");
         return;
     }
@@ -382,7 +384,7 @@ async fn ffprobe_reads_the_g2g_written_mkv_chapters() {
 /// `TimestampScale` ticks instead of the nanoseconds the spec stores.
 #[tokio::test]
 async fn reads_the_chapters_of_an_ffmpeg_authored_mkv() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("ffmpeg not present; skipping the reference-peer mkv read");
         return;
     }
@@ -517,7 +519,7 @@ async fn mp4_round_trips_chapters_through_the_bus() {
 /// list g2g wrote, at the right start times and titles.
 #[tokio::test]
 async fn ffprobe_reads_the_g2g_written_mp4_chapters() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("ffmpeg/ffprobe not present; skipping the mp4 chapter oracle");
         return;
     }
@@ -535,7 +537,7 @@ async fn ffprobe_reads_the_g2g_written_mp4_chapters() {
 /// times) against the layout ffmpeg really produces.
 #[tokio::test]
 async fn reads_the_chapters_of_an_ffmpeg_authored_mp4() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("ffmpeg not present; skipping the reference-peer mp4 read");
         return;
     }

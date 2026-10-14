@@ -6,6 +6,13 @@
 //! the source (a remux changes framing, never samples).
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -77,11 +84,6 @@ fn audio_caps(format: AudioFormat, channels: u8, sample_rate: u32) -> Caps {
         sample_rate,
         channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
-}
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-        && Command::new("ffprobe").arg("-version").output().is_ok()
 }
 
 /// ffmpeg's libvorbis encoder authors the Vorbis fixtures; not every ffmpeg
@@ -292,7 +294,7 @@ async fn assert_remux_matches(name: &str, encoder: &str, codec: &str, stream: &s
 
 #[tokio::test]
 async fn opus_remux_is_packet_exact_and_ffmpeg_reads_it() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -301,7 +303,7 @@ async fn opus_remux_is_packet_exact_and_ffmpeg_reads_it() {
 
 #[tokio::test]
 async fn vorbis_remux_is_packet_exact_and_ffmpeg_reads_it() {
-    if !have_ffmpeg() || !have_libvorbis() {
+    if !have_ffmpeg() || !have_ffprobe() || !have_libvorbis() {
         eprintln!("skipping: no ffmpeg with libvorbis");
         return;
     }
@@ -312,7 +314,7 @@ async fn vorbis_remux_is_packet_exact_and_ffmpeg_reads_it() {
 /// stream, `oggmux` wraps it in the `\x7fFLAC` mapping.
 #[tokio::test]
 async fn flac_from_a_native_stream_muxes_into_the_ogg_mapping() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -396,7 +398,7 @@ async fn flac_from_a_native_stream_muxes_into_the_ogg_mapping() {
 async fn opusenc_output_muxes_into_a_file_ffmpeg_plays() {
     use g2g_plugins::opusenc::OpusEnc;
 
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }

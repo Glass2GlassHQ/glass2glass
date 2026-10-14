@@ -11,6 +11,10 @@
 //! same bytes and must agree.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;
@@ -59,10 +63,6 @@ const END_NS: u64 = 5_000_000_000;
 
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("g2g-m924-{}-{name}", std::process::id()))
-}
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
 }
 
 /// Whether this ffmpeg was built with libzvbi, without which it has no teletext

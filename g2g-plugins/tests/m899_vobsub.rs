@@ -8,6 +8,13 @@
 //! comparison against g2g's decode composited by `Compositor`.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffmpeg_tool::have_ffmpeg;
+use ffprobe_tool::have_ffprobe;
+
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;
@@ -29,7 +36,7 @@ use g2g_plugins::registry::default_registry;
 use g2g_plugins::vobsubdec::VobSubDec;
 
 mod vobsub_fixture;
-use vobsub_fixture::{author_vobsub, cues, have_ffmpeg, CUE_DURATION_NS, H, W};
+use vobsub_fixture::{author_vobsub, cues, CUE_DURATION_NS, H, W};
 
 // ---- ffmpeg ----
 
@@ -225,7 +232,7 @@ fn vobsubdec_and_its_gst_alias_build_from_a_launch_line() {
 
 #[tokio::test]
 async fn ffmpeg_muxed_vobsub_cues_demux_and_decode_to_the_authored_rectangles() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping m899 vobsub decode: no ffmpeg on PATH");
         return;
     }
@@ -292,7 +299,7 @@ async fn ffmpeg_muxed_vobsub_cues_demux_and_decode_to_the_authored_rectangles() 
 
 #[tokio::test]
 async fn compositing_the_decoded_cues_matches_ffmpegs_dvdsub_burn_in() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping m899 vobsub burn-in: no ffmpeg on PATH");
         return;
     }

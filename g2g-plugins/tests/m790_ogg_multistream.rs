@@ -5,6 +5,13 @@
 //! g2g muxes ffprobe reports (and ffmpeg decodes) as the streams that went in.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -106,11 +113,6 @@ fn ogg_caps() -> Caps {
     Caps::ByteStream {
         encoding: ByteStreamEncoding::Ogg,
     }
-}
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-        && Command::new("ffprobe").arg("-version").output().is_ok()
 }
 
 /// ffmpeg's libvorbis encoder authors the Vorbis fixtures; not every ffmpeg
@@ -493,7 +495,7 @@ async fn assert_pair_round_trips(
 /// Two different mappings in one file: Opus and Ogg-FLAC side by side.
 #[tokio::test]
 async fn mixed_codec_pair_round_trips_through_ffmpeg() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -524,7 +526,7 @@ async fn mixed_codec_pair_round_trips_through_ffmpeg() {
 /// rather than codec-keyed.
 #[tokio::test]
 async fn same_codec_pair_round_trips_through_ffmpeg() {
-    if !have_ffmpeg() || !have_libvorbis() {
+    if !have_ffmpeg() || !have_ffprobe() || !have_libvorbis() {
         eprintln!("skipping: no ffmpeg with libvorbis");
         return;
     }
@@ -555,7 +557,7 @@ async fn same_codec_pair_round_trips_through_ffmpeg() {
 /// ids the `StreamCollection` announced.
 #[tokio::test]
 async fn per_stream_tags_post_under_the_collection_ids() {
-    if !have_ffmpeg() || !have_libvorbis() {
+    if !have_ffmpeg() || !have_ffprobe() || !have_libvorbis() {
         eprintln!("skipping: no ffmpeg with libvorbis");
         return;
     }
@@ -609,7 +611,7 @@ async fn per_stream_tags_post_under_the_collection_ids() {
 /// file and builds the multi-output demuxer.
 #[test]
 fn oggdemux_fans_out_from_a_launch_line() {
-    if !have_ffmpeg() || !have_libvorbis() {
+    if !have_ffmpeg() || !have_ffprobe() || !have_libvorbis() {
         eprintln!("skipping: no ffmpeg with libvorbis");
         return;
     }

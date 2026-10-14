@@ -10,6 +10,13 @@
 //! rectangles and palette colours on the video are the fixture's own.
 #![cfg(feature = "std")]
 
+#[cfg(feature = "ffmpeg")]
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+#[cfg(feature = "ffmpeg")]
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+
 use core::future::Future;
 use core::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -375,9 +382,10 @@ async fn a_decoded_vobsub_track_paints_the_video() {
 #[cfg(feature = "ffmpeg")]
 #[test]
 fn mkv_playbin_auto_plugs_a_bitmap_subtitle_track() {
-    use vobsub_fixture::have_ffmpeg;
+    use ffmpeg_tool::have_ffmpeg;
+    use ffprobe_tool::have_ffprobe;
 
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("ffmpeg not present: skipping");
         return;
     }

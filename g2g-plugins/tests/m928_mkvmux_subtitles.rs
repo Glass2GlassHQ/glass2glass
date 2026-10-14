@@ -8,6 +8,13 @@
 //! peer over the files this muxer writes.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffmpeg_tool::have_ffmpeg;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -28,7 +35,7 @@ use g2g_plugins::subparse::ASS_SCRIPT_HEADER;
 use g2g_plugins::vobsubsrc::VobSubSrc;
 
 mod vobsub_fixture;
-use vobsub_fixture::{author_vobsub, cues, have_ffmpeg, CUE_DURATION_NS, H, PALETTE, W};
+use vobsub_fixture::{author_vobsub, cues, CUE_DURATION_NS, H, PALETTE, W};
 
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -533,7 +540,7 @@ fn ffprobe(args: &[&str]) -> String {
 /// times they were authored at.
 #[tokio::test]
 async fn ffprobe_reads_the_tracks_the_single_track_muxer_wrote() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping m928 ffprobe cross-check: no ffmpeg on PATH");
         return;
     }

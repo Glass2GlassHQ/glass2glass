@@ -18,6 +18,13 @@
 //! pictures as the unchunked mux of the same access units.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -473,11 +480,6 @@ async fn demux_mp4(file: &[u8]) -> PortCapture {
 
 // --- ffmpeg helpers -------------------------------------------------------
 
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-        && Command::new("ffprobe").arg("-version").output().is_ok()
-}
-
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("g2g-m859-{}-{name}", std::process::id()))
 }
@@ -821,7 +823,7 @@ async fn prft_anchors_each_fragment_to_the_producer_wall_clock() {
 /// number of chunks, and g2g demuxes it back to the same access units.
 #[tokio::test]
 async fn ffmpeg_decodes_a_chunked_cmaf_file_identically_to_the_unchunked_mux() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
@@ -924,7 +926,7 @@ async fn ffmpeg_decodes_a_chunked_cmaf_file_identically_to_the_unchunked_mux() {
 /// `mfhd` sequence number and an advancing `tfdt`.
 #[tokio::test]
 async fn chunk_layout_matches_ffmpegs_low_latency_dash_segments() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }

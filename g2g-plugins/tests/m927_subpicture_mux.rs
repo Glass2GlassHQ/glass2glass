@@ -11,6 +11,13 @@
 //! checked against a reference muxer's bytes rather than against itself.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffmpeg_tool::have_ffmpeg;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -35,7 +42,7 @@ use g2g_plugins::vobsub::{idx_config_text, parse_idx};
 use g2g_plugins::vobsubsrc::VobSubSrc;
 
 mod vobsub_fixture;
-use vobsub_fixture::{author_vobsub, cues, have_ffmpeg, CUE_DURATION_NS, H, PALETTE, W};
+use vobsub_fixture::{author_vobsub, cues, CUE_DURATION_NS, H, PALETTE, W};
 
 #[derive(Default)]
 struct CaptureSink {
@@ -590,7 +597,7 @@ fn ffprobe(args: &[&str]) -> String {
 /// blocks and the `CodecPrivate` this muxer wrote.
 #[tokio::test]
 async fn ffmpeg_reads_the_muxed_vobsub_track() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping m927 ffmpeg cross-check: no ffmpeg on PATH");
         return;
     }
@@ -672,7 +679,7 @@ async fn ffmpeg_reads_the_muxed_vobsub_track() {
 /// descriptor and every PES payload) and handed back to ffmpeg to decode.
 #[tokio::test]
 async fn the_dvb_write_paths_match_ffmpegs_own_transport_stream() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping m927 ffmpeg cross-check: no ffmpeg on PATH");
         return;
     }
@@ -823,7 +830,7 @@ async fn the_dvb_write_paths_match_ffmpegs_own_transport_stream() {
 /// for the same pair, byte for byte.
 #[test]
 fn the_idx_codec_private_is_byte_identical_to_ffmpegs() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping m927 ffmpeg cross-check: no ffmpeg on PATH");
         return;
     }

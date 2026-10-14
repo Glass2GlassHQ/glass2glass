@@ -21,6 +21,13 @@
 //! is recorded, so the index still lands on the Clusters.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -95,11 +102,6 @@ fn vp9_caps() -> Caps {
 
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("g2g-m828-{}-{name}", std::process::id()))
-}
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-        && Command::new("ffprobe").arg("-version").output().is_ok()
 }
 
 /// Payloads of varying length across a 3 s timeline, so the default 1 s Cluster
@@ -505,7 +507,7 @@ async fn streamable_and_seekable_carry_the_same_samples() {
 /// the same pixels.
 #[tokio::test]
 async fn ffmpeg_reads_the_live_stream_from_a_pipe() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }

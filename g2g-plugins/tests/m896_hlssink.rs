@@ -15,6 +15,13 @@
 //! `HlsSink` is `std`-gated, so this file is too.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffprobe_tool::have_ffprobe;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -283,11 +290,6 @@ fn synthetic_aus(groups: usize) -> Vec<(Vec<u8>, FrameTiming)> {
 }
 
 // --- reference peers ------------------------------------------------------
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-        && Command::new("ffprobe").arg("-version").output().is_ok()
-}
 
 /// A 2 s H.264 encode in a fragmented MP4, 15-frame GOPs, as real access units.
 async fn real_access_units(dir: &Path) -> Vec<(Vec<u8>, FrameTiming)> {
@@ -653,7 +655,7 @@ fn rejects_a_container_it_cannot_segment() {
 /// real encode, one packet per access unit and no complaint.
 #[tokio::test]
 async fn ffmpeg_plays_the_published_playlists() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg on this host");
         return;
     }

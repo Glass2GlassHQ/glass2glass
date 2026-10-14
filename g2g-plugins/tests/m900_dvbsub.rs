@@ -11,6 +11,13 @@
 //! pixel-for-pixel comparison against g2g's decode composited by `Compositor`.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffmpeg_tool::have_ffmpeg;
+use ffprobe_tool::have_ffprobe;
+
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;
@@ -34,7 +41,7 @@ use g2g_plugins::registry::default_registry;
 use g2g_plugins::tsdemux::{TsDemux, TsStream};
 
 mod vobsub_fixture;
-use vobsub_fixture::{author_vobsub, cues, have_ffmpeg, H, W};
+use vobsub_fixture::{author_vobsub, cues, H, W};
 
 /// Fixture length in seconds, and therefore the reference burn-in's frame count
 /// at one frame per second.
@@ -350,7 +357,7 @@ fn dvbsubdec_builds_from_a_launch_line() {
 
 #[tokio::test]
 async fn tsdemux_selects_the_subtitling_descriptor_stream_and_forwards_its_page_ids() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping m900 tsdemux selection: no ffmpeg on PATH");
         return;
     }
@@ -403,7 +410,7 @@ async fn tsdemux_selects_the_subtitling_descriptor_stream_and_forwards_its_page_
 
 #[tokio::test]
 async fn mkvdemux_selects_the_s_dvbsub_track_and_forwards_its_codec_private() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping m900 mkvdemux selection: no ffmpeg on PATH");
         return;
     }
@@ -442,7 +449,7 @@ async fn mkvdemux_selects_the_s_dvbsub_track_and_forwards_its_codec_private() {
 
 #[tokio::test]
 async fn both_carriages_decode_to_the_same_cue_canvases() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping m900 decode: no ffmpeg on PATH");
         return;
     }
@@ -488,7 +495,7 @@ async fn both_carriages_decode_to_the_same_cue_canvases() {
 
 #[tokio::test]
 async fn compositing_the_decoded_cues_matches_ffmpegs_dvbsub_burn_in() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping m900 burn-in: no ffmpeg on PATH");
         return;
     }

@@ -13,6 +13,10 @@
 //! sequence header or libavcodec fails the whole stream on its dimensions.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+
 use core::future::Future;
 use core::pin::Pin;
 use std::path::{Path, PathBuf};
@@ -77,10 +81,6 @@ impl MultiOutputSink for PortTap {
         self.ports[port].push(packet);
         core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
-}
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
 }
 
 fn temp_path(name: &str) -> PathBuf {

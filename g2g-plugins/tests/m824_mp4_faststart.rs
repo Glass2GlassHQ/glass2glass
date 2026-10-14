@@ -9,6 +9,13 @@
 //! to decode.
 #![cfg(feature = "std")]
 
+#[path = "common/ffmpeg_tool.rs"]
+mod ffmpeg_tool;
+use ffmpeg_tool::have_ffmpeg;
+#[path = "common/ffprobe_tool.rs"]
+mod ffprobe_tool;
+use ffprobe_tool::have_ffprobe;
+
 use core::future::Future;
 use core::pin::Pin;
 use std::path::PathBuf;
@@ -108,11 +115,6 @@ fn frame(data: Vec<u8>, timing: FrameTiming) -> PipelinePacket {
         timing,
         0,
     ))
-}
-
-fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg").arg("-version").output().is_ok()
-        && Command::new("ffprobe").arg("-version").output().is_ok()
 }
 
 fn temp_path(name: &str) -> PathBuf {
@@ -319,7 +321,7 @@ async fn demux_mp4(file: &[u8]) -> (Vec<Caps>, PortCapture) {
 /// both to identical pictures and samples.
 #[tokio::test]
 async fn faststart_writes_the_moov_before_the_mdat() {
-    if !have_ffmpeg() {
+    if !have_ffmpeg() || !have_ffprobe() {
         eprintln!("skipping: no ffmpeg");
         return;
     }
