@@ -535,7 +535,7 @@ any graph that may seek backward.
 
 Trick-mode KEY_UNIT frame selection, presenting only keyframes for a fast scrub,
 works through `FrameTiming::keyframe`, a per-frame flag set by `h264parse` from
-`h264_au_is_keyframe` and by `mp4src` and `fmp4demux` from the container sync-sample
+`annexb::au_is_keyframe` and by `mp4src` and `fmp4demux` from the container sync-sample
 or `trun` keyframe flag. A `TRICKMODE` seek sets `Segment::key_units_only` in
 `from_seek`, and `SyncSink` drops non-keyframe frames under such a segment before
 scheduling them, counted by `trick_dropped()`.

@@ -57,7 +57,7 @@ impl NalCodec for H264Codec {
     }
 
     fn au_is_keyframe(au: &[u8]) -> bool {
-        crate::h264util::h264_au_is_keyframe(au)
+        crate::annexb::au_is_keyframe(Self::CODEC, au)
     }
 
     fn extract_sps_info(au: &[u8]) -> Option<SpsGeometry> {
@@ -1037,6 +1037,35 @@ mod tests {
             }
             other => panic!("expected CapsChanged from the AVCC AU, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn marks_avcc_keyframes() {
+        let mut parse = H264Parse::new();
+        parse.configure_pipeline(&h264_parse_caps()).unwrap();
+        let mut sink = RecordingSink::default();
+        let idr_slice: &[u8] = &[0x65, 0x88];
+        let non_idr_slice: &[u8] = &[0x41, 0x9A];
+        for (seq, nal) in [idr_slice, non_idr_slice].into_iter().enumerate() {
+            let mut avcc = (nal.len() as u32).to_be_bytes().to_vec();
+            avcc.extend_from_slice(nal);
+            parse
+                .process(
+                    PipelinePacket::DataFrame(frame_with_bytes(seq as u64, avcc)),
+                    &mut sink,
+                )
+                .await
+                .unwrap();
+        }
+        let keyframes: Vec<bool> = sink
+            .packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::DataFrame(f) => Some(f.timing.keyframe),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keyframes, vec![true, false]);
     }
 
     #[tokio::test]

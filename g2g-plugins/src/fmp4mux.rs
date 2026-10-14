@@ -20,6 +20,8 @@ use alloc::vec::Vec;
 
 use g2g_core::{Chapter, G2gError, TagList, VideoCodec};
 
+use crate::annexb::au_is_keyframe;
+
 /// 90 kHz media timescale, the conventional choice for video tracks.
 const TIMESCALE: u64 = 90_000;
 /// Fallback per-frame duration when the stream carries no timing: 1/30 s.
@@ -222,7 +224,7 @@ impl Fmp4Muxer {
         self.prev_pts_ns = Some(pts_ns);
         let duration = ns_to_timescale(duration_ns) as u32;
         let sample = avcc_sample(&nalus);
-        let is_sync = nalus.iter().any(|n| is_keyframe_nal(self.codec, n));
+        let is_sync = au_is_keyframe(self.codec, annexb);
 
         // Default: one access unit per fragment. CMAF mode always batches instead,
         // because a fragment there may only start at a sync sample.
@@ -331,9 +333,7 @@ fn ns_to_timescale(ns: u64) -> u64 {
 // The Annex-B split / NAL-type / parameter-set / AVCC helpers moved to the
 // ungated `annexb` module (M662, the no_std FLV muxer shares them);
 // re-exported so this module's users keep their import path.
-pub(crate) use crate::annexb::{
-    avcc_record, avcc_sample, is_keyframe_nal, parameter_sets, split_annexb,
-};
+pub(crate) use crate::annexb::{avcc_record, avcc_sample, parameter_sets, split_annexb};
 
 // box primitives (mp4_box/full_box/ftyp/MATRIX) shared across the MP4 elements.
 use crate::mp4box::{ftyp, ftyp_cmaf, full_box, mp4_box, prft, styp_cmaf, udta_with_tags, MATRIX};
@@ -659,15 +659,11 @@ mod tests {
     }
 
     #[test]
-    fn hevc_nal_type_and_keyframe_detection() {
+    fn hevc_nal_type_reads_header_bits() {
         // H.265 NAL type is bits 1..6 of byte 0. VPS=32 -> 0x40, IDR_W_RADL=19
-        // -> 0x26, a non-IRAP slice (TRAIL_R=1) -> 0x02.
+        // -> 0x26.
         assert_eq!(nalu_type(VideoCodec::H265, &[0x40, 0x01]), 32);
         assert_eq!(nalu_type(VideoCodec::H265, &[0x26, 0x01]), 19);
-        assert!(is_keyframe_nal(VideoCodec::H265, &[0x26, 0x01])); // IDR
-        assert!(!is_keyframe_nal(VideoCodec::H265, &[0x02, 0x01])); // TRAIL_R
-        assert!(is_keyframe_nal(VideoCodec::H264, &[0x65])); // IDR
-        assert!(!is_keyframe_nal(VideoCodec::H264, &[0x61])); // non-IDR slice
     }
 
     #[test]

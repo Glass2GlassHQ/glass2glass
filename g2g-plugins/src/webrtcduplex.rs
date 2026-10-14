@@ -69,8 +69,8 @@ use g2g_core::{
     ReverseChannel, VideoCodec,
 };
 
+use crate::annexb::au_is_keyframe;
 use crate::filesink::io_err;
-use crate::h264util::h264_au_is_keyframe;
 use crate::turn::TurnSet;
 use crate::webrtc_util::{add_ice_candidates, feed_datagram, select_host_ip, send_transmit};
 use crate::webrtcsink::Track;
@@ -732,7 +732,8 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                             .await?;
                         announced[port] = true;
                     }
-                    let keyframe = pad_kinds[port] == Track::Video && h264_au_is_keyframe(&data);
+                    let keyframe = pad_kinds[port] == Track::Video
+                        && au_is_keyframe(g2g_core::VideoCodec::H264, &data);
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             data.into_boxed_slice(),

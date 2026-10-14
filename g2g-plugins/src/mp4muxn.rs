@@ -45,10 +45,11 @@ use g2g_core::{
     PropertySpec, TagList, TextFormat, VideoCodec,
 };
 
+use crate::annexb::au_is_keyframe;
 use crate::cea::{build_cdp, parse_cc_data, CcTriple};
 use crate::fmp4mux::{
-    av1c_record, avcc_sample, is_keyframe_nal, parameter_sets, split_annexb, tfhd,
-    visual_sample_entry, vp8_keyframe, vp9_keyframe,
+    av1c_record, avcc_sample, parameter_sets, split_annexb, tfhd, visual_sample_entry,
+    vp8_keyframe, vp9_keyframe,
 };
 use crate::mp4audiosink::esds;
 use crate::mp4box::{ftyp, ftyp_cmaf, full_box, mp4_box, prft, styp_cmaf, udta_with_tags, MATRIX};
@@ -627,7 +628,7 @@ impl Mp4MuxN {
             Some(PadKind::Video(codec)) => match codec {
                 VideoCodec::H264 | VideoCodec::H265 => {
                     let nalus = split_annexb(au);
-                    let is_sync = nalus.iter().any(|n| is_keyframe_nal(codec, n));
+                    let is_sync = au_is_keyframe(codec, au);
                     (avcc_sample(&nalus), is_sync)
                 }
                 // VP8/VP9 frames are stored verbatim; keyframe from the frame header.

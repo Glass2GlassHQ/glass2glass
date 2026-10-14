@@ -15,6 +15,7 @@ use g2g_core::{
     AudioFormat, Chapter, ClosedCaptionFormat, G2gError, TagList, TextFormat, VideoCodec,
 };
 
+use crate::annexb::au_is_keyframe;
 use crate::cea::{parse_cdp, write_cc_data, CcTriple};
 use crate::cenc::{
     fragment_sample_crypt, parse_movie_seig, parse_sinf, CencDefaults, CencTrack, SampleCrypt,
@@ -810,7 +811,7 @@ pub(crate) fn parse_fragments_multi(
                     let (annexb, keyframe) = match &track.kind {
                         TrackKind::Video { codec, .. } => {
                             let annexb = avcc_to_annexb(bytes)?;
-                            let kf = contains_keyframe(&annexb, *codec);
+                            let kf = au_is_keyframe(*codec, &annexb);
                             (annexb, kf)
                         }
                         // Audio access units are stored verbatim; each is a sync point.
@@ -933,7 +934,7 @@ pub(crate) fn parse_fragments(
                     } else {
                         avcc_to_annexb(raw)?
                     };
-                    let keyframe = contains_keyframe(&annexb, codec);
+                    let keyframe = au_is_keyframe(codec, &annexb);
                     samples.push(Sample {
                         annexb,
                         pts_ns: timing.pts_ns,
@@ -1530,26 +1531,6 @@ fn avcc_to_annexb(avcc: &[u8]) -> Result<Vec<u8>, G2gError> {
         at += len;
     }
     Ok(out)
-}
-
-/// Whether an Annex-B access unit contains an IDR picture (the keyframe a seek
-/// snaps to). NAL boundaries are 4-byte start codes. H.264 IDR is NAL type 5;
-/// H.265 IDR is 19/20.
-pub(crate) fn contains_keyframe(annexb: &[u8], codec: VideoCodec) -> bool {
-    // AV1 units are OBU streams, not start-coded NALs: the frame headers say.
-    if codec == VideoCodec::Av1 {
-        return crate::av1parse::av1_keyframe(annexb);
-    }
-    annexb
-        .windows(4)
-        .enumerate()
-        .filter(|(_, w)| *w == [0, 0, 0, 1])
-        .any(|(at, _)| {
-            annexb.get(at + 4).is_some_and(|&b| match codec {
-                VideoCodec::H265 => matches!((b >> 1) & 0x3F, 19 | 20),
-                _ => b & 0x1F == 5,
-            })
-        })
 }
 
 fn timescale_to_ns(t: u64, timescale: u32) -> u64 {

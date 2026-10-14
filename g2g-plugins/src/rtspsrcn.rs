@@ -972,7 +972,7 @@ async fn run_session(
                 let bytes = vf.into_data().into_boxed_slice();
                 // IDR NAL => independently decodable. H.265 reports false (the
                 // helper is H.264-specific), the safe default.
-                let keyframe = crate::h264util::h264_au_is_keyframe(&bytes);
+                let keyframe = crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &bytes);
                 (VIDEO_PORT, timestamp, 0, bytes, keyframe)
             }
             // The compound packet's sender report pins this stream's RTP clock

@@ -469,7 +469,9 @@ impl SourceLoop for WebRtcWhepSrc {
                     // Video keyframe = IDR (the sink/parser cares); every Opus
                     // packet is independently decodable, so the flag is moot.
                     let keyframe = match media {
-                        Media::Video => crate::h264util::h264_au_is_keyframe(&data),
+                        Media::Video => {
+                            crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &data)
+                        }
                         Media::Audio => false,
                     };
                     seen_keyframe |= keyframe;

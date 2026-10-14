@@ -66,7 +66,7 @@ impl NalCodec for H265Codec {
     }
 
     fn au_is_keyframe(au: &[u8]) -> bool {
-        h265_au_is_keyframe(au)
+        crate::annexb::au_is_keyframe(Self::CODEC, au)
     }
 
     fn extract_sps_info(au: &[u8]) -> Option<SpsGeometry> {
@@ -142,16 +142,6 @@ fn h265_au_starts(data: &[u8]) -> Vec<usize> {
         i = begin;
     }
     starts
-}
-
-/// True if the access unit contains an IRAP (random-access) picture: a keyframe.
-/// HEVC IRAP `nal_unit_type`s are 16..=23 (BLA / IDR / CRA / reserved IRAP).
-pub(crate) fn h265_au_is_keyframe(au: &[u8]) -> bool {
-    crate::annexb::nal_units_any(au).any(|nal| {
-        nal.first()
-            .map(|b| (16..=23).contains(&((b >> 1) & 0x3F)))
-            .unwrap_or(false)
-    })
 }
 
 /// Build the WebCodecs `codec` string for an H.265 stream from its SPS

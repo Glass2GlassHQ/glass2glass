@@ -47,8 +47,6 @@ Bugs:
 - `sink_arm_loop` drops flushed frames without `pop_transit_ns`.
 - Three audio capture sources stamp `frames * (1e9 / rate)` (drifts at 44.1 kHz)
   and use unbounded queues.
-- `fmp4::contains_keyframe` ignores CRA and 3-byte start codes, and `H264Parse`
-  never sets `keyframe` on AVCC input.
 - `ffmpegaudiodec::adts_frames` checks sync with `& 0xF0`, `ffmpegaacenc::adts_wrap`
   has no 13-bit length guard.
 - `VideoTestSrc::with_shared_memory` keeps every emitted frame.
@@ -118,7 +116,6 @@ Codecs and parsers:
 - One SPS head, VUI, HRD and PTL parser for h264parse, h265parse and vulkanvideo.
 - `vulkanvideo` uses av1parse's OBU walker, LEB128 and uvlc.
 - One length-prefixed to Annex-B converter and one avcC/hvcC parser.
-- One H.26x keyframe check for all callers.
 - ffmpegaacenc and ffmpegaudiodec use the aacparse ADTS helpers.
 
 Raw video and GPU:

@@ -254,7 +254,7 @@ pub(crate) async fn push_access_unit(
     let pts = rel * 1_000_000_000 / RTP_CLOCK_HZ;
     let arrival_ns = g2g_core::metrics::monotonic_ns();
     // IDR NAL => keyframe; false (the safe default) otherwise.
-    let keyframe = crate::h264util::h264_au_is_keyframe(&au.data);
+    let keyframe = crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &au.data);
     let frame = Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(au.data.into_boxed_slice())),
         timing: FrameTiming {

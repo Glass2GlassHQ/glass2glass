@@ -48,8 +48,9 @@ use web_sys::{
     VideoDecoderConfig, VideoDecoderInit, VideoFrame, VideoFrameCopyToOptions, VideoPixelFormat,
 };
 
-use crate::h264util::{h264_au_is_keyframe, h264_codec_string};
-use crate::h265parse::{h265_au_is_keyframe, h265_codec_string};
+use crate::annexb::au_is_keyframe;
+use crate::h264util::h264_codec_string;
+use crate::h265parse::h265_codec_string;
 use crate::webutil::Inbox;
 
 /// The codecs this element has a WebCodecs `codec`-string builder for. The one
@@ -149,11 +150,7 @@ impl WebCodecsDecode {
 
         let data = js_sys::Uint8Array::new_with_length(au.len() as u32);
         data.copy_from(au);
-        let keyframe = if hevc {
-            h265_au_is_keyframe(au)
-        } else {
-            h264_au_is_keyframe(au)
-        };
+        let keyframe = au_is_keyframe(self.codec, au);
         let chunk_type = if keyframe {
             EncodedVideoChunkType::Key
         } else {

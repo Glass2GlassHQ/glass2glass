@@ -419,7 +419,10 @@ impl MultiOutputSource for LiveKitSrc {
                             if Some(d.mid) == video_mid {
                                 // Mid-GOP subscribe: drop until the first IDR.
                                 if !video_keyframed {
-                                    if !crate::h264util::h264_au_is_keyframe(&d.data) {
+                                    if !crate::annexb::au_is_keyframe(
+                                        g2g_core::VideoCodec::H264,
+                                        &d.data,
+                                    ) {
                                         continue;
                                     }
                                     video_keyframed = true;
@@ -448,8 +451,8 @@ impl MultiOutputSource for LiveKitSrc {
                 }
 
                 for (port, pts_ns, data) in frames {
-                    let keyframe =
-                        port == VIDEO_PORT && crate::h264util::h264_au_is_keyframe(&data);
+                    let keyframe = port == VIDEO_PORT
+                        && crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &data);
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             data.into_boxed_slice(),

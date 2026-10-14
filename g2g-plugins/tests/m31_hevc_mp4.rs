@@ -177,6 +177,49 @@ async fn hevc_round_trips_through_the_fmp4_container() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[tokio::test]
+async fn flush_seek_snaps_to_a_cra() {
+    use g2g_core::runtime::SeekController;
+    use g2g_core::Seek;
+
+    const CRA_NUT: u8 = 21;
+    const CRA_INDEX: usize = 2;
+    let path = temp_path("cra_seek");
+    let cra_au = annexb(&[hevc_nal(CRA_NUT, &[0x55, 0x66])]);
+    let access_units = [keyframe_au(), delta_au(1), cra_au.clone(), delta_au(3)];
+
+    let mut mux = Mp4Mux::new();
+    let narrowed = mux.intercept_caps(&hevc_caps()).expect("intercept H.265");
+    mux.configure_pipeline(&narrowed).expect("configure mux");
+    let mut cap = Capture::default();
+    for (i, au) in access_units.iter().enumerate() {
+        mux.process(PipelinePacket::DataFrame(frame(au.clone(), i)), &mut cap)
+            .await
+            .expect("mux frame");
+    }
+    mux.process(PipelinePacket::Eos, &mut cap)
+        .await
+        .expect("mux eos");
+    std::fs::write(&path, &cap.bytes).expect("write fmp4 file");
+
+    let ctl = SeekController::new();
+    // between the CRA and the frame after it
+    ctl.seek(Seek::flush_to(
+        CRA_INDEX as u64 * FRAME_DURATION_NS + FRAME_DURATION_NS / 2,
+    ));
+    let mut src = Mp4Src::new(&path).with_seek(ctl.clone());
+    let probed = src.intercept_caps().await.expect("probe");
+    src.configure_pipeline(&probed).expect("configure src");
+    let mut out = Collect::default();
+    src.run(&mut out).await.expect("demux");
+
+    assert_eq!(out.frames.len(), access_units.len() - CRA_INDEX);
+    // the resumed frame gets the parameter sets prepended
+    assert!(out.frames[0].ends_with(&cra_au), "resumed on the CRA");
+
+    let _ = std::fs::remove_file(&path);
+}
+
 /// Concatenates the ISO-BMFF byte-stream frames `Mp4Mux` forwards downstream.
 #[derive(Default)]
 struct Capture {

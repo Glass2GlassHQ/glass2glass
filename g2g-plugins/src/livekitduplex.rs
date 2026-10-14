@@ -427,7 +427,10 @@ impl MultiDuplexSession for LiveKitDuplex {
                             let pts_ns = (d.time.numer() as u128 * 1_000_000_000 / denom) as u64;
                             if Some(d.mid) == recv_video_mid {
                                 if !video_keyframed {
-                                    if !crate::h264util::h264_au_is_keyframe(&d.data) {
+                                    if !crate::annexb::au_is_keyframe(
+                                        g2g_core::VideoCodec::H264,
+                                        &d.data,
+                                    ) {
                                         continue;
                                     }
                                     video_keyframed = true;
@@ -456,7 +459,8 @@ impl MultiDuplexSession for LiveKitDuplex {
                 }
 
                 for (port, pts_ns, data) in frames {
-                    let keyframe = port == VIDEO && crate::h264util::h264_au_is_keyframe(&data);
+                    let keyframe = port == VIDEO
+                        && crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &data);
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             data.into_boxed_slice(),

@@ -118,57 +118,21 @@ fn compressed_preview(bytes: &[u8], codec: VideoCodec, w: Option<u32>, h: Option
 
 /// Best-effort frame type from the packet header ("key" if it carries a keyframe
 /// / IRAP unit, else "delta"), or `None` when the codec is not cheaply classified
-/// here. Header inspection only, never a decode.
+/// here or the packet holds no NAL unit. Header inspection only, never a decode.
 fn frame_kind(codec: VideoCodec, bytes: &[u8]) -> Option<&'static str> {
     match codec {
-        // H.264 NAL type = header & 0x1F: 5 = IDR (key), 1 = non-IDR slice (delta).
-        VideoCodec::H264 => annexb_kind(bytes, |h| match h & 0x1F {
-            5 => Some(true),
-            1 => Some(false),
-            _ => None,
-        }),
-        // H.265 NAL type = (header >> 1) & 0x3F: 16..=23 are IRAP (key), 0..=9 the
-        // trailing / leading VCL slices (delta).
-        VideoCodec::H265 => annexb_kind(bytes, |h| {
-            let t = (h >> 1) & 0x3F;
-            if (16..=23).contains(&t) {
-                Some(true)
-            } else if t <= 9 {
-                Some(false)
+        VideoCodec::H264 | VideoCodec::H265 => {
+            if crate::annexb::au_is_keyframe(codec, bytes) {
+                Some("key")
             } else {
-                None
+                crate::annexb::nal_units_any(bytes).next().map(|_| "delta")
             }
-        }),
+        }
         // VP8 frame tag: bit 0 of the first byte is the frame type (0 = key).
         VideoCodec::Vp8 => bytes
             .first()
             .map(|b| if b & 1 == 0 { "key" } else { "delta" }),
         _ => None,
-    }
-}
-
-/// Scan Annex-B NAL units, classifying by the first unit `classify` recognizes
-/// (`Some(true)` = keyframe, `Some(false)` = delta, `None` = skip, e.g. SPS / PPS
-/// / SEI). A keyframe VCL unit anywhere wins; otherwise a delta unit does.
-fn annexb_kind(bytes: &[u8], classify: impl Fn(u8) -> Option<bool>) -> Option<&'static str> {
-    let mut i = 0;
-    let mut saw_delta = false;
-    while i + 3 < bytes.len() {
-        if bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1 {
-            match classify(bytes[i + 3]) {
-                Some(true) => return Some("key"),
-                Some(false) => saw_delta = true,
-                None => {}
-            }
-            i += 3;
-        } else {
-            i += 1;
-        }
-    }
-    if saw_delta {
-        Some("delta")
-    } else {
-        None
     }
 }
 

@@ -780,7 +780,7 @@ async fn run_session(
         let bytes = vf.into_data().into_boxed_slice();
         // IDR NAL => independently-decodable unit. H.265 streams report false
         // (the helper is H.264-specific), which matches the safe default.
-        let keyframe = crate::h264util::h264_au_is_keyframe(&bytes);
+        let keyframe = crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &bytes);
 
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),

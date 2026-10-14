@@ -392,8 +392,8 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                 }
 
                 for (port, pts_ns, data) in frames {
-                    let keyframe =
-                        port == VIDEO_PORT && crate::h264util::h264_au_is_keyframe(&data);
+                    let keyframe = port == VIDEO_PORT
+                        && crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &data);
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             data.into_boxed_slice(),

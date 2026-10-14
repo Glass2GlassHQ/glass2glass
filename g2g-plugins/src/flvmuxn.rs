@@ -38,8 +38,9 @@ use g2g_core::{
     InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, VideoCodec,
 };
 
+use crate::annexb::au_is_keyframe;
 use crate::flv::{FlvCodec, FlvMuxer, FlvTrack};
-use crate::fmp4mux::{avcc_record, avcc_sample, is_keyframe_nal, parameter_sets, split_annexb};
+use crate::fmp4mux::{avcc_record, avcc_sample, parameter_sets, split_annexb};
 use crate::mp4muxn::{asc_from_adts, strip_adts};
 
 /// A track's init, captured from its first access unit: the parameter sets
@@ -190,7 +191,7 @@ impl FlvMuxN {
         let bytes = match self.kinds[input] {
             Some(FlvCodec::H264) => {
                 let nalus = split_annexb(slice);
-                let keyframe = nalus.iter().any(|n| is_keyframe_nal(VideoCodec::H264, n));
+                let keyframe = au_is_keyframe(VideoCodec::H264, slice);
                 let (dts_ms, cts_ms) = FlvMuxer::video_tag_timing(&frame.timing);
                 mux.push_video(&avcc_sample(&nalus), dts_ms, cts_ms, keyframe)
             }

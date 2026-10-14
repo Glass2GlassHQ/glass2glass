@@ -1052,8 +1052,10 @@ mod tests {
         let resumed = push_n(&mut enc, 5, 65, 1_000_000).await;
         assert!(resumed.len() >= 4, "resume encodes again");
         assert!(
-            crate::h264util::h264_au_is_keyframe(&resumed[1.min(resumed.len() - 1)])
-                || crate::h264util::h264_au_is_keyframe(&resumed[0]),
+            crate::annexb::au_is_keyframe(
+                g2g_core::VideoCodec::H264,
+                &resumed[1.min(resumed.len() - 1)]
+            ) || crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &resumed[0]),
             "resume starts on a keyframe"
         );
     }
@@ -1376,7 +1378,7 @@ mod tests {
             sink.frames.len()
         );
         assert!(
-            crate::h264util::h264_au_is_keyframe(&sink.frames[before]),
+            crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &sink.frames[before]),
             "the reopened encoder starts on an IDR"
         );
         // Skip the IDR at each window's head; compare steady-state AU sizes.

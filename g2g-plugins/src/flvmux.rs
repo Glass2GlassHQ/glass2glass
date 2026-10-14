@@ -37,7 +37,7 @@ use g2g_core::{
 };
 
 use crate::aacparse::{asc_from_adts, strip_adts};
-use crate::annexb::{avcc_record, avcc_sample, is_keyframe_nal, parameter_sets, split_annexb};
+use crate::annexb::{au_is_keyframe, avcc_record, avcc_sample, parameter_sets, split_annexb};
 use crate::flv::{FlvCodec, FlvMuxer};
 
 /// Muxes one elementary stream into an FLV byte stream.
@@ -235,8 +235,7 @@ impl AsyncElement for FlvMux {
                                     self.init_captured = true;
                                 }
                             }
-                            let keyframe =
-                                nalus.iter().any(|n| is_keyframe_nal(VideoCodec::H264, n));
+                            let keyframe = au_is_keyframe(VideoCodec::H264, au);
                             let (dts_ms, cts_ms) = FlvMuxer::video_tag_timing(&frame.timing);
                             mux.push_video(&avcc_sample(&nalus), dts_ms, cts_ms, keyframe)
                         }

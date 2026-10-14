@@ -51,10 +51,10 @@ use g2g_core::{
     TagList, TextFormat, VideoCodec,
 };
 
+use crate::annexb::au_is_keyframe;
 use crate::dvbsub::DEFAULT_PAGE_ID;
 use crate::fmp4mux::{
-    avcc_record, avcc_sample, hvcc_record, is_keyframe_nal, parameter_sets, split_annexb,
-    vp8_keyframe, vp9_keyframe,
+    avcc_record, avcc_sample, hvcc_record, parameter_sets, split_annexb, vp8_keyframe, vp9_keyframe,
 };
 use crate::matroska::{
     default_page_blob, finalize_seekable, subpicture_block, subpicture_config,
@@ -424,7 +424,7 @@ impl MkvMuxN {
             Some(PadKind::Video(codec)) => match codec {
                 VideoCodec::H264 | VideoCodec::H265 => {
                     let nalus = split_annexb(au);
-                    let is_key = nalus.iter().any(|n| is_keyframe_nal(codec, n));
+                    let is_key = au_is_keyframe(codec, au);
                     (avcc_sample(&nalus), is_key)
                 }
                 VideoCodec::Vp8 => (au.to_vec(), vp8_keyframe(au)),

@@ -143,12 +143,15 @@ pub(crate) fn h264_nal_type(nal: &[u8]) -> Option<u8> {
 /// Whether an access unit (either framing) begins a keyframe for `codec`: an
 /// H.264 IDR (NAL type 5), an H.265 IRAP picture (types 16..=23, covering
 /// BLA / IDR / CRA), an MPEG-4 Part 2 I-VOP (VOP start code 0xB6 whose
-/// vop_coding_type, the top 2 bits of the next byte, is 0), or an MPEG-1/2
-/// sync point (see [`mpeg2_start_is_sync`]). Used by the demuxer seek path
-/// (M362) to snap to a decodable resume point in a stream whose units carry no
-/// keyframe flag of their own.
-pub(crate) fn au_is_keyframe(codec: g2g_core::VideoCodec, au: &[u8]) -> bool {
-    use g2g_core::VideoCodec;
+/// vop_coding_type, the top 2 bits of the next byte, is 0), an MPEG-1/2
+/// sync point (see [`mpeg2_start_is_sync`]), or an AV1 key temporal unit (see
+/// [`av1_keyframe`](crate::av1parse::av1_keyframe)). Used by the parsers,
+/// muxers and demuxers to flag a decodable resume point in a stream whose
+/// units carry no keyframe flag of their own.
+pub(crate) fn au_is_keyframe(codec: VideoCodec, au: &[u8]) -> bool {
+    if codec == VideoCodec::Av1 {
+        return crate::av1parse::av1_keyframe(au);
+    }
     nal_units_any(au).any(|n| match (codec, n.first()) {
         (VideoCodec::H265, Some(b)) => (16..=23).contains(&((b >> 1) & 0x3F)),
         (VideoCodec::Mpeg4Part2, Some(&0xB6)) => n.get(1).is_some_and(|c| c >> 6 == 0),
@@ -462,16 +465,6 @@ pub(crate) fn nalu_type(codec: VideoCodec, nalu: &[u8]) -> u8 {
 
 fn find_nalu<'a>(codec: VideoCodec, nalus: &[&'a [u8]], ty: u8) -> Option<&'a [u8]> {
     nalus.iter().copied().find(|n| nalu_type(codec, n) == ty)
-}
-
-/// Whether a NAL begins a keyframe: H.264 IDR (type 5), H.265 any IRAP
-/// picture (types 16..=23, covering BLA/IDR/CRA).
-pub(crate) fn is_keyframe_nal(codec: VideoCodec, nalu: &[u8]) -> bool {
-    let ty = nalu_type(codec, nalu);
-    match codec {
-        VideoCodec::H265 => (16..=23).contains(&ty),
-        _ => ty == 5,
-    }
 }
 
 /// Ordered parameter-set NALUs the moov needs: H.264 SPS(7)+PPS(8), H.265
@@ -912,6 +905,48 @@ mod tests {
             vec![sei, idr],
             "parameter sets dropped, order preserved"
         );
+    }
+
+    fn annexb_au(nals: &[&[u8]]) -> Vec<u8> {
+        nals.iter()
+            .flat_map(|nal| [&[0u8, 0, 0, 1][..], nal].concat())
+            .collect()
+    }
+
+    fn avcc_au(nals: &[&[u8]]) -> Vec<u8> {
+        nals.iter()
+            .flat_map(|nal| [&(nal.len() as u32).to_be_bytes()[..], nal].concat())
+            .collect()
+    }
+
+    #[test]
+    fn h264_keyframe_is_an_idr_in_either_framing() {
+        use g2g_core::VideoCodec::H264;
+        let sps: &[u8] = &[0x67, 0x42, 0xE0, 0x1E];
+        let pps: &[u8] = &[0x68, 0xCE];
+        let idr: &[u8] = &[0x65, 0x88];
+        let non_idr: &[u8] = &[0x41, 0x9A];
+        for framing in [annexb_au, avcc_au] {
+            assert!(au_is_keyframe(H264, &framing(&[sps, pps, idr])));
+            assert!(!au_is_keyframe(H264, &framing(&[non_idr])));
+        }
+    }
+
+    #[test]
+    fn h265_keyframe_is_any_irap_in_either_framing() {
+        use g2g_core::VideoCodec::H265;
+        // nal_unit_type sits in bits 1..6 of the first header byte
+        let nal = |nal_unit_type: u8| [nal_unit_type << 1, 0x01];
+        const TRAIL_R: u8 = 1;
+        const BLA_W_LP: u8 = 16;
+        const IDR_W_RADL: u8 = 19;
+        const CRA_NUT: u8 = 21;
+        for framing in [annexb_au, avcc_au] {
+            for irap in [BLA_W_LP, IDR_W_RADL, CRA_NUT] {
+                assert!(au_is_keyframe(H265, &framing(&[&nal(irap)])), "{irap}");
+            }
+            assert!(!au_is_keyframe(H265, &framing(&[&nal(TRAIL_R)])));
+        }
     }
 
     /// MPEG-1/2 sync points: an I-picture, and the sequence / GOP headers that
