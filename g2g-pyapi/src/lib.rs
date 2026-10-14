@@ -37,7 +37,7 @@ mod pymod {
     use std::os::raw::c_int;
     use std::sync::mpsc;
     use std::thread::JoinHandle;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use g2g_core::frame::Frame;
     use g2g_core::runtime::{
@@ -412,16 +412,23 @@ mod pymod {
     #[pyclass]
     struct AppSink {
         pull: AppSinkPull,
+        // runs the timer for `pull(timeout_ms=...)`
+        timer: tokio::runtime::Runtime,
     }
 
     #[pymethods]
     impl AppSink {
         #[new]
         #[pyo3(signature = (channel="default"))]
-        fn new(channel: &str) -> Self {
-            AppSink {
+        fn new(channel: &str) -> PyResult<Self> {
+            let timer = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .map_err(|e| PyValueError::new_err(format!("build pull timer: {e}")))?;
+            Ok(AppSink {
                 pull: register_appsink_pull(channel),
-            }
+                timer,
+            })
         }
 
         /// Block for the next sample, returning a zero-copy [`FrameView`] or
@@ -433,7 +440,13 @@ mod pymod {
         fn pull(&self, py: Python<'_>, timeout_ms: Option<u64>) -> Option<FrameView> {
             let frame = py.detach(|| match timeout_ms {
                 None => block_on(self.pull.pull()),
-                Some(ms) => pull_timeout(&self.pull, ms),
+                Some(ms) => self
+                    .timer
+                    .block_on(async {
+                        tokio::time::timeout(Duration::from_millis(ms), self.pull.pull()).await
+                    })
+                    .ok()
+                    .flatten(),
             })?;
             Some(FrameView::new(frame))
         }
@@ -444,25 +457,6 @@ mod pymod {
             match self.pull.try_pull() {
                 Pull::Frame(frame) => Some(FrameView::new(frame)),
                 Pull::Empty | Pull::Ended => None,
-            }
-        }
-    }
-
-    /// Poll for a frame until one arrives or `timeout_ms` elapses. `None` on a
-    /// timeout or once the stream has ended (the caller distinguishes via the
-    /// pipeline's `is_done()`). Runs with the GIL released.
-    fn pull_timeout(pull: &AppSinkPull, timeout_ms: u64) -> Option<Frame> {
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        loop {
-            match pull.try_pull() {
-                Pull::Frame(f) => return Some(f),
-                Pull::Ended => return None,
-                Pull::Empty => {
-                    if Instant::now() >= deadline {
-                        return None;
-                    }
-                    std::thread::sleep(Duration::from_millis(1));
-                }
             }
         }
     }
@@ -527,6 +521,7 @@ p = g2g.Pipeline(
     "appsrc channel=pyc caps=video/x-raw,format=RGBA,width=2,height=2,framerate=30/1"
     " ! appsink channel=pyo"
 )
+assert sink.pull(timeout_ms=10) is None, "nothing pushed yet, so the pull times out"
 assert src.push(b"\x01" * 16, 0)
 assert src.push(b"\x02" * 16, 1000)
 src.end_of_stream()
