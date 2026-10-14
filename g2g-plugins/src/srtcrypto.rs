@@ -16,11 +16,13 @@
 //! is what mid-stream rekeying ([`crate::srtsink`]) toggles. Real-peer interop is
 //! unverified here (the sandbox blocks external peers); validated g2g <-> g2g.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use aes::{Aes128, Aes256};
 use aes_kw::Kek;
-use ctr::cipher::{KeyIvInit, StreamCipher};
+use ctr::cipher::{InnerIvInit, KeyInit, StreamCipher};
+use ctr::CtrCore;
 use hmac::Hmac;
 use sha1::Sha1;
 
@@ -64,15 +66,29 @@ impl AesKeySize {
 /// The Stream Encrypting Key, sized to the negotiated cipher.
 #[derive(Clone)]
 enum Sek {
-    Aes128([u8; 16]),
-    Aes256([u8; 32]),
+    Aes128 { key: [u8; 16], cipher: Box<Aes128> },
+    Aes256 { key: [u8; 32], cipher: Box<Aes256> },
 }
 
 impl Sek {
+    fn aes128(key: [u8; 16]) -> Self {
+        Sek::Aes128 {
+            key,
+            cipher: Box::new(Aes128::new(&key.into())),
+        }
+    }
+
+    fn aes256(key: [u8; 32]) -> Self {
+        Sek::Aes256 {
+            key,
+            cipher: Box::new(Aes256::new(&key.into())),
+        }
+    }
+
     fn as_bytes(&self) -> &[u8] {
         match self {
-            Sek::Aes128(k) => k,
-            Sek::Aes256(k) => k,
+            Sek::Aes128 { key, .. } => key,
+            Sek::Aes256 { key, .. } => key,
         }
     }
 }
@@ -97,7 +113,7 @@ impl SrtCrypto {
     /// fixed values for determinism; the sender uses [`generate`](Self::generate)).
     pub fn new(sek: [u8; 16], salt: [u8; SALT_LEN]) -> Self {
         Self {
-            sek: Sek::Aes128(sek),
+            sek: Sek::aes128(sek),
             salt,
         }
     }
@@ -105,7 +121,7 @@ impl SrtCrypto {
     /// Construct an AES-256 cipher from an explicit 32-byte key + salt.
     pub fn new_aes256(sek: [u8; 32], salt: [u8; SALT_LEN]) -> Self {
         Self {
-            sek: Sek::Aes256(sek),
+            sek: Sek::aes256(sek),
             salt,
         }
     }
@@ -119,12 +135,12 @@ impl SrtCrypto {
             AesKeySize::Aes128 => {
                 let mut k = [0u8; 16];
                 getrandom::getrandom(&mut k).expect("OS RNG for the SRT stream key");
-                Sek::Aes128(k)
+                Sek::aes128(k)
             }
             AesKeySize::Aes256 => {
                 let mut k = [0u8; 32];
                 getrandom::getrandom(&mut k).expect("OS RNG for the SRT stream key");
-                Sek::Aes256(k)
+                Sek::aes256(k)
             }
         };
         Self { sek, salt }
@@ -134,10 +150,16 @@ impl SrtCrypto {
     /// the same call both ways). The counter block is key-size independent (a
     /// 128-bit CTR block); only the key schedule differs between AES-128/256.
     pub fn process(&self, seq: u32, buf: &mut [u8]) {
-        let iv = self.counter_block(seq);
+        let iv = self.counter_block(seq).into();
         match &self.sek {
-            Sek::Aes128(k) => Aes128Ctr::new(k.into(), (&iv).into()).apply_keystream(buf),
-            Sek::Aes256(k) => Aes256Ctr::new(k.into(), (&iv).into()).apply_keystream(buf),
+            Sek::Aes128 { cipher, .. } => {
+                Aes128Ctr::from_core(CtrCore::inner_iv_init(Aes128::clone(cipher), &iv))
+                    .apply_keystream(buf)
+            }
+            Sek::Aes256 { cipher, .. } => {
+                Aes256Ctr::from_core(CtrCore::inner_iv_init(Aes256::clone(cipher), &iv))
+                    .apply_keystream(buf)
+            }
         }
     }
 
@@ -161,12 +183,16 @@ impl SrtCrypto {
     pub fn build_km(&self, passphrase: &str, kk: u8) -> Vec<u8> {
         let key_len = self.sek.as_bytes().len();
         let wrapped = match &self.sek {
-            Sek::Aes128(k) => Kek::<Aes128>::from(derive_kek::<16>(passphrase, &self.salt))
-                .wrap_vec(k)
-                .expect("AES-KW wrap of a 16-byte key always succeeds"),
-            Sek::Aes256(k) => Kek::<Aes256>::from(derive_kek::<32>(passphrase, &self.salt))
-                .wrap_vec(k)
-                .expect("AES-KW wrap of a 32-byte key always succeeds"),
+            Sek::Aes128 { key: k, .. } => {
+                Kek::<Aes128>::from(derive_kek::<16>(passphrase, &self.salt))
+                    .wrap_vec(k)
+                    .expect("AES-KW wrap of a 16-byte key always succeeds")
+            }
+            Sek::Aes256 { key: k, .. } => {
+                Kek::<Aes256>::from(derive_kek::<32>(passphrase, &self.salt))
+                    .wrap_vec(k)
+                    .expect("AES-KW wrap of a 32-byte key always succeeds")
+            }
         };
 
         let mut km = Vec::with_capacity(KM_HDR_LEN + SALT_LEN + wrapped.len());
@@ -221,13 +247,13 @@ impl SrtCrypto {
                 let v = Kek::<Aes128>::from(derive_kek::<16>(passphrase, &salt))
                     .unwrap_vec(wrapped)
                     .ok()?;
-                Sek::Aes128(v.as_slice().try_into().ok()?)
+                Sek::aes128(v.as_slice().try_into().ok()?)
             }
             32 => {
                 let v = Kek::<Aes256>::from(derive_kek::<32>(passphrase, &salt))
                     .unwrap_vec(wrapped)
                     .ok()?;
-                Sek::Aes256(v.as_slice().try_into().ok()?)
+                Sek::aes256(v.as_slice().try_into().ok()?)
             }
             _ => return None, // only AES-128 / AES-256
         };
@@ -267,6 +293,30 @@ mod tests {
             buf, plain,
             "decrypt (same op, same seq) recovers the plaintext"
         );
+    }
+
+    #[test]
+    fn cached_key_schedule_matches_a_fresh_ctr_cipher() {
+        use ctr::cipher::KeyIvInit;
+        const SRT_PAYLOAD_LEN: usize = 1316;
+        let salt = [0x5Au8; SALT_LEN];
+        let plain: Vec<u8> = (0..SRT_PAYLOAD_LEN).map(|i| i as u8).collect();
+        let aes128 = SrtCrypto::new([0x11u8; 16], salt);
+        let aes256 = SrtCrypto::new_aes256([0x22u8; 32], salt);
+        for seq in [0u32, 1, 0x7FFF_FFFF] {
+            let iv = aes128.counter_block(seq);
+            let mut expected = plain.clone();
+            Aes128Ctr::new(&[0x11u8; 16].into(), &iv.into()).apply_keystream(&mut expected);
+            let mut actual = plain.clone();
+            aes128.process(seq, &mut actual);
+            assert_eq!(actual, expected, "aes-128 seq {seq}");
+
+            let mut expected = plain.clone();
+            Aes256Ctr::new(&[0x22u8; 32].into(), &iv.into()).apply_keystream(&mut expected);
+            let mut actual = plain.clone();
+            aes256.process(seq, &mut actual);
+            assert_eq!(actual, expected, "aes-256 seq {seq}");
+        }
     }
 
     #[test]
