@@ -200,7 +200,7 @@ async fn successful_negotiation_posts_nothing() {
         }
     }
 
-    let (bus, handle) = Bus::new(4);
+    let (bus, handle) = Bus::new(BUS_CAPACITY);
     let mut src = Nv12Source;
     let mut tx = PassThrough;
     let mut snk = Nv12Sink;
@@ -211,9 +211,19 @@ async fn successful_negotiation_posts_nothing() {
         .expect("NV12 source -> NV12 sink negotiates");
 
     assert!(
-        bus.try_recv().is_none(),
+        drain(&bus)
+            .iter()
+            .all(|m| !matches!(m, BusMessage::NegotiationFailed(_))),
         "a successful negotiation posts no failure"
     );
+}
+
+/// Room for the stream-start, buffering and end-of-stream messages a run posts
+/// alongside any negotiation failure.
+const BUS_CAPACITY: usize = 32;
+
+fn drain(bus: &Bus) -> Vec<BusMessage> {
+    core::iter::from_fn(|| bus.try_recv()).collect()
 }
 
 fn nv12(w: u32, h: u32) -> Caps {
@@ -313,26 +323,29 @@ impl AsyncElement for RgbaInjector {
 }
 
 /// The mid-stream case the bus matters most for: a boundary emits a
-/// `CapsChanged` the sink can't accept. There is no synchronous return to
-/// carry the detail, so the structured failure only reaches the application
-/// through the bus. The run still drains to EOS (the rejected change never
-/// takes effect).
+/// `CapsChanged` the sink can't accept. The run fails with the opaque
+/// `CapsMismatch`, so the structured failure only reaches the application
+/// through the bus.
 #[tokio::test]
 async fn mid_stream_rejected_capschange_posts_to_bus() {
-    let (bus, handle) = Bus::new(4);
+    let (bus, handle) = Bus::new(BUS_CAPACITY);
     let mut src = Nv12Source { frames: 4 };
     let mut tx = RgbaInjector { injected: false };
     let mut snk = Nv12Sink;
     let clock = ZeroClock;
 
-    run_source_transform_sink_with_bus(&mut src, &mut tx, &mut snk, &clock, 4, &handle)
-        .await
-        .expect("stream drains despite the rejected mid-stream change");
+    let result =
+        run_source_transform_sink_with_bus(&mut src, &mut tx, &mut snk, &clock, 4, &handle).await;
+    assert_eq!(result.err(), Some(G2gError::CapsMismatch));
 
-    match bus.try_recv() {
-        Some(BusMessage::NegotiationFailed(NegotiationFailure::EmptyLink { .. })) => {}
-        other => panic!("expected mid-stream NegotiationFailed(EmptyLink), got {other:?}"),
-    }
+    let failure = drain(&bus).into_iter().find_map(|m| match m {
+        BusMessage::NegotiationFailed(f) => Some(f),
+        _ => None,
+    });
+    assert!(
+        matches!(failure, Some(NegotiationFailure::EmptyLink { .. })),
+        "expected mid-stream NegotiationFailed(EmptyLink), got {failure:?}"
+    );
 }
 
 /// `run_simple_pipeline_with_bus` routes the same structured startup failure:

@@ -218,7 +218,7 @@ impl AllocationParams {
 /// a [`AllocationParams::meta_demand`]. With nothing requested the proposal is
 /// returned untouched, so a graph that declares no requests cascades exactly as
 /// it did before.
-#[cfg(feature = "runtime")]
+#[cfg(feature = "std")]
 pub(crate) fn with_meta_demand(
     proposal: Option<AllocationParams>,
     requests: MetaRequests,

@@ -20,11 +20,9 @@ use crate::caps::{batch_alternatives, Caps, CapsSet, PassthroughFields};
 use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::graph::{NodeId, NodeKind, ValidatedGraph};
 use crate::log::{self, LogLevel, Target, CAPS_CATEGORY};
+use crate::runtime::passthrough::{couple_passthrough_derived, discover_passthrough};
 #[cfg(feature = "std")]
-use crate::runtime::passthrough::project_passthrough_derived;
-use crate::runtime::passthrough::{
-    couple_passthrough_derived, discover_passthrough, project_passthrough,
-};
+use crate::runtime::passthrough::{project_passthrough, project_passthrough_derived};
 
 /// Per-link assignment produced by the solver: one fixated `Caps` per
 /// link between adjacent elements. For an `N`-element pipeline this is
@@ -516,6 +514,7 @@ fn derived_forward(
 /// forwarded output from its declared constraint, steered by the downstream
 /// feasibility snapshot, instead of letting the element fixate greedily.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg(feature = "std")]
 pub(crate) enum ForwardResolve {
     /// Runner-derived, downstream-aware output caps to forward.
     Fixed(Caps),
@@ -665,6 +664,7 @@ fn backward_feasible(
 /// carry (a nominal rate baked into a decoder's produce set) must not be
 /// forwarded as if produced, so that case, and a previous shape no longer
 /// producible, defer to the element's own `process`.
+#[cfg(feature = "std")]
 pub(crate) fn resolve_forward_output(
     constraint: &CapsConstraint<'_>,
     input: &Caps,

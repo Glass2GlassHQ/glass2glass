@@ -889,17 +889,20 @@ impl LinkReceiver {
     /// to its *output* [`SenderSink`] as a relay target, so a QoS report seen on
     /// the downstream link is forwarded onto this (upstream) link toward the
     /// source instead of being dropped at the transform.
+    #[cfg(feature = "std")]
     pub(crate) fn qos_slot(&self) -> QosSlot {
         self.qos.clone()
     }
 
     /// A clone of this link's reverse reconfigure slot (M720), the
     /// keyframe-request analog of [`qos_slot`](Self::qos_slot).
+    #[cfg(feature = "std")]
     pub(crate) fn reconfigure_slot(&self) -> ReconfigureSlot {
         self.reconfigure.clone()
     }
 
     /// A clone of this link's reverse bitrate slot (M720).
+    #[cfg(feature = "std")]
     pub(crate) fn bitrate_slot(&self) -> BitrateSlot {
         self.bitrate.clone()
     }
@@ -1107,6 +1110,7 @@ pub struct SenderSink {
 /// Called while the runner is still wiring arms, not from inside the sink arm:
 /// the arms are polled source-first, so an advertisement made once the sink arm
 /// runs would arrive a linkful of already-rotated frames late.
+#[cfg(feature = "std")]
 pub(crate) fn advertise_orientation(in_rx: &LinkReceiver, absorbs: bool) {
     if absorbs {
         in_rx.request_reconfigure(crate::element::Reconfigure::AbsorbOrientation);
@@ -1190,6 +1194,7 @@ impl SenderSink {
     /// The arm calls this right after building the adapter, so the element's
     /// `proc` percentiles report compute and its `push_wait` percentiles report
     /// the backpressure it served.
+    #[cfg(feature = "std")]
     pub(crate) fn set_push_wait_probe(&mut self, probe: Probe) {
         self.push_wait_probe = probe;
     }
@@ -1209,6 +1214,7 @@ impl SenderSink {
     }
 
     /// Whether an `Eos` has already been enqueued through this adapter (M909).
+    #[cfg(feature = "std")]
     pub(crate) fn eos_forwarded(&self) -> bool {
         self.eos_forwarded
     }
@@ -1257,6 +1263,7 @@ impl SenderSink {
     /// [`handles_qos`](crate::element::AsyncElement::handles_qos)). The runner
     /// wires this so QoS propagates source-ward through a transform, a tee or a
     /// demux, and calls it once per input link for a muxer (M1242).
+    #[cfg(feature = "std")]
     pub(crate) fn relay_qos_to(&mut self, upstream: QosSlot, answered: bool) {
         self.upstream_qos.push(upstream);
         self.qos_answered = answered;
@@ -1266,6 +1273,7 @@ impl SenderSink {
     /// owning transform does not answer itself (`answered`), so a PLI or an
     /// orientation advertisement crosses any number of pass-through transforms
     /// to reach the encoder / the flip.
+    #[cfg(feature = "std")]
     pub(crate) fn relay_reconfigure_to(
         &mut self,
         upstream: ReconfigureSlot,
@@ -1276,6 +1284,7 @@ impl SenderSink {
     }
 
     /// Relay a downstream bitrate target onto the upstream link (M720).
+    #[cfg(feature = "std")]
     pub(crate) fn relay_bitrate_to(&mut self, upstream: BitrateSlot) {
         self.upstream_bitrate = Some(upstream);
     }

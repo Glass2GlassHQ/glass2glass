@@ -1,9 +1,7 @@
 //! M80 - the SEGMENT carrier: `PipelinePacket::Segment` propagates through a
 //! transform to a sink and broadcasts across a tee, and a sink records it so
-//! frame timestamps map to running time. `run_source_transform_sink` (the
-//! bespoke 3-element runner) does not emit an opening SEGMENT, so the first
-//! test injects one via an element to exercise forwarding; `run_graph` emits
-//! the opening SEGMENT itself (M81), exercised by the tee test.
+//! frame timestamps map to running time. The first test injects a SEGMENT via
+//! an element, behind the runner's opening one (M81), to exercise forwarding.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -89,7 +87,11 @@ async fn segment_flows_through_transform_to_sink() {
         .expect("pipeline runs");
 
     assert_eq!(stats.frames_consumed, target);
-    assert_eq!(sink.segments(), 1, "the injected SEGMENT reached the sink");
+    assert_eq!(
+        sink.segments(),
+        2,
+        "the opening and the injected SEGMENT reached the sink"
+    );
     assert_eq!(sink.last_segment(), Some(seg));
     // The sink's segment maps a timestamp to running time: base + (ts-start).
     assert_eq!(

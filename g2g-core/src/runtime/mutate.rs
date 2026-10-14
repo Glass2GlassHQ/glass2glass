@@ -37,10 +37,10 @@ use crate::runtime::channel::{
     advertise_orientation, bounded, link, LinkReceiver, LinkSender, ProducerEndpoint, Receiver,
     Sender,
 };
-use crate::runtime::coordinator::ArmDirective;
 use crate::runtime::fanin::DynSourceLoop;
 use crate::runtime::graph_runner::{
-    run_source, BranchMode, GraphCoordHandle, SinkArmIo, SourceArmIo, TransformArmIo,
+    dead_directives, run_source, BranchMode, GraphCoordHandle, SinkArmIo, SourceArmIo,
+    TransformArmIo,
 };
 use crate::runtime::join::{select2, Either};
 use crate::runtime::mutation_error::{MutationError, MutationKind};
@@ -2232,15 +2232,6 @@ fn retarget(edges: &mut [usize], from: usize, to: usize) {
 /// one mid-stream fails the run rather than negotiating.
 fn accepts_downstream(feasible: &Option<CapsSet>, caps: &crate::caps::Caps) -> bool {
     feasible.as_ref().is_some_and(|set| set.accepts(caps))
-}
-
-/// A β directive channel with no coordinator behind it: a spliced element takes
-/// no part in the allocation cascade, so its arm sees the control side closed
-/// and selects on data alone.
-fn dead_directives() -> Receiver<ArmDirective> {
-    let (tx, rx) = bounded(1);
-    drop(tx);
-    rx
 }
 
 /// Awaits the link a stopped producer (or an ended arm) left on its endpoint.

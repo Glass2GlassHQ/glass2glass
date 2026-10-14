@@ -4,34 +4,40 @@ use core::future::Future;
 
 use crate::bus::BusHandle;
 use crate::caps::Caps;
-use crate::clock::{elect_clock, ClockCandidate, ClockPriority, ClockSync, PipelineClock};
 #[cfg(feature = "std")]
-use crate::element::BoxFuture;
-use crate::element::{
-    AsyncElement, ConfigureOutcome, ElementBound, OutputSink, OutputSinkExt, PushOutcome,
-    Reconfigure,
-};
+use crate::clock::{elect_clock, PipelineClock};
+use crate::clock::{ClockCandidate, ClockPriority, ClockSync};
+#[cfg(feature = "std")]
+use crate::element::{AsyncElement, BoxFuture, OutputSinkExt, PushOutcome};
+use crate::element::{ConfigureOutcome, ElementBound, OutputSink, Reconfigure};
 use crate::error::G2gError;
 use crate::format_element::{CapsConstraint, CapsPreferences};
+#[cfg(feature = "std")]
 use crate::frame::PipelinePacket;
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
-use crate::runtime::channel::{advertise_orientation, link, ReconfigureAnswered, SenderSink};
 #[cfg(feature = "std")]
-use crate::runtime::coordinator::realloc_local_dyn;
+use crate::runtime::channel::{advertise_orientation, link, SenderSink};
+#[cfg(feature = "std")]
 use crate::runtime::coordinator::{
-    coordinator_with_recascade, log_caps_forward, log_caps_rejected,
-    negotiate_source_transform_sink, realloc_local, report_nego_failure, solve_last_link,
-    CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
+    log_caps_rejected, realloc_local_dyn, report_nego_failure, solve_last_link,
 };
+#[cfg(feature = "std")]
 use crate::runtime::instrument::ElementProbe;
+#[cfg(feature = "std")]
 use crate::runtime::join::{select2, Either, Join2};
-use crate::runtime::solver::{
-    resolve_forward_output, solve_linear, ForwardResolve, NegotiationFailure,
-};
-use crate::runtime::state::{Flow, StateController};
+#[cfg(feature = "std")]
+use crate::runtime::solver::{solve_linear, NegotiationFailure};
+#[cfg(feature = "std")]
+use crate::runtime::state::StateController;
+#[cfg(feature = "std")]
 use crate::segment::Segment;
+
+/// Startup negotiation passes before [`run_simple_pipeline`] gives up with
+/// `FixationFailed`: enough for a source, sink, source counter-proposal chain.
+#[cfg(feature = "std")]
+const MAX_FIXATION_ATTEMPTS: u32 = 3;
 
 /// Pick the most informative error from a pipeline's arm results. A closed-link
 /// `Shutdown` is usually the *consequence* of another arm erroring first (it
@@ -40,6 +46,7 @@ use crate::segment::Segment;
 ///
 /// Each result is paired with its arm's instance name, and the one that wins is
 /// logged naming that element, since `G2gError` carries no element identity.
+#[cfg(feature = "std")]
 fn substantive_error<'a, I>(results: I) -> Option<G2gError>
 where
     I: IntoIterator<Item = (&'a str, Option<&'a G2gError>)>,
@@ -67,7 +74,9 @@ use crate::graph::Graph;
 #[cfg(feature = "std")]
 use crate::runtime::channel::{bounded, Sender};
 #[cfg(feature = "std")]
-use crate::runtime::graph_runner::{broadcast, run_graph_inner, GraphNodeRef};
+use crate::runtime::graph_runner::{
+    broadcast, run_graph_inner, run_source, sink_arm_on, GraphNodeRef, SinkArmIo, SourceArmIo,
+};
 #[cfg(feature = "std")]
 use crate::runtime::join::{dynamic_join, join_all};
 #[cfg(feature = "std")]
@@ -251,10 +260,8 @@ pub trait SourceLoop: ElementBound {
 
     /// Receive the run's message bus (M1164), so a source can report out of band
     /// what a property read cannot answer for it (its restart status, say): a
-    /// source arm owns its element for the whole run. Only the graph runner
-    /// (`run_graph` and its `_with_bus` / threaded siblings) hands it out; the
-    /// linear convenience runners (`run_simple_pipeline_with_bus` and friends)
-    /// do not. Default: ignore.
+    /// source arm owns its element for the whole run. Every runner built on
+    /// the graph runner hands it out when given a bus. Default: ignore.
     fn set_bus(&mut self, _bus: BusHandle) {}
 
     /// Override this instance's log category (M845), mirroring
@@ -510,49 +517,17 @@ impl RunStats {
     }
 }
 
-/// M16 workaround #3 Phase B helper: re-solve the downstream subgraph
-/// when a forward `CapsChanged` crosses a format boundary mid-stream.
-///
-/// Today's 3-element runner has a single downstream link (boundary →
-/// sink), so the subgraph is one link and the solver's role is
-/// structural: it queries the sink's declared `CapsConstraint` (which
-/// may reject the boundary's output via `Accepts(set)` cleanly) before
-/// the sink ever sees `configure_pipeline`. The returned `Caps` is what
-/// the runner then hands to `configure_pipeline`.
-///
-/// Longer chains (4+ elements, future runner variants) will iterate
-/// the solver result to reconfigure every changed downstream link, not
-/// just the immediate next element — that's the structural unlock
-/// design/caps.md calls out.
-///
-/// Forward × reverse race (§7): an `EmptyLink` here means the sink
-/// can't take the boundary's output. The caller drops the forward
-/// `CapsChanged` and signals a reverse `Reconfigure` *into the
-/// boundary*, not past it to the source — that boundary owns the
-/// derivation and is the right place to surface the structured
-/// failure. An `Unfixable` (the boundary's caps left a ranged field
-/// like `Rate::Any` — common for decoders that don't know framerate at
-/// the pixel level) is *not* a failure: it means the sink accepted the
-/// shape, the caps just aren't fully fixated. Pass `new_caps` through
-/// unchanged.
-fn re_solve_downstream_sink<S>(new_caps: &Caps, sink: &S) -> Result<Caps, NegotiationFailure>
-where
-    S: AsyncElement + ?Sized,
-{
-    re_solve_against_sink_constraint(new_caps, &sink.caps_constraint_as_sink())
-}
-
-/// Shared core of the downstream re-solve: solve `LegacySource(new_caps)`
-/// against the sink's already-evaluated constraint. Factored out so the
-/// generic ([`re_solve_downstream_sink`]) and `Box`-erased
-/// ([`re_solve_downstream_dyn_sink`]) callers don't duplicate the
-/// `Unfixable`-is-not-a-failure handling.
-fn re_solve_against_sink_constraint(
+/// Re-solve a mid-stream `CapsChanged` against a sink's declared constraint
+/// before the sink is configured with it (M16 Phase B, per branch for fan-out
+/// FO-2). An `Unfixable` result (a ranged field like `Rate::Any` left open) is
+/// not a failure: the sink accepted the shape, so `new_caps` passes through.
+#[cfg(feature = "std")]
+pub(crate) fn re_solve_downstream_dyn_sink(
     new_caps: &Caps,
-    sink_c: &CapsConstraint<'_>,
+    sink: &dyn DynAsyncElement,
 ) -> Result<Caps, NegotiationFailure> {
     let src_c = CapsConstraint::LegacySource(new_caps.clone());
-    match solve_linear(&[&src_c, sink_c]) {
+    match solve_linear(&[&src_c, &sink.caps_constraint_as_sink()]) {
         Ok(links) => links
             .into_iter()
             .last()
@@ -562,21 +537,12 @@ fn re_solve_against_sink_constraint(
     }
 }
 
-/// Fan-out Phase C FO-2: the [`DynAsyncElement`] counterpart of
-/// [`re_solve_downstream_sink`], for `Box`-erased branch sinks.
-#[cfg(feature = "std")]
-pub(crate) fn re_solve_downstream_dyn_sink(
-    new_caps: &Caps,
-    sink: &dyn DynAsyncElement,
-) -> Result<Caps, NegotiationFailure> {
-    re_solve_against_sink_constraint(new_caps, &sink.caps_constraint_as_sink())
-}
-
 /// Drives a `source → sink` pipeline over a single bounded link.
 /// Initial Phase 1+2 negotiation runs with bounded `ReFixate` backtrack
 /// (M8 piece 5): if any element's `configure_pipeline()` returns a
 /// counter-proposal, the runner restarts negotiation with that counter
 /// as the new starting proposal, up to `MAX_FIXATION_ATTEMPTS` total.
+#[cfg(feature = "std")]
 pub async fn run_simple_pipeline<Src, Snk, Clk>(
     source: &mut Src,
     sink: &mut Snk,
@@ -600,6 +566,7 @@ where
 /// Negotiation still runs eagerly at startup (it is resource acquisition, the
 /// `READY` step); only data flow is gated. Pass the controller starting in
 /// `Paused` for the common "build prerolled, then play" shape.
+#[cfg(feature = "std")]
 pub async fn run_simple_pipeline_stateful<Src, Snk, Clk>(
     source: &mut Src,
     sink: &mut Snk,
@@ -626,6 +593,7 @@ where
 /// As [`run_simple_pipeline`], but posts a structured
 /// [`BusMessage::NegotiationFailed`](crate::BusMessage::NegotiationFailed) to
 /// `bus` on a startup or mid-stream negotiation failure (M18 item 7).
+#[cfg(feature = "std")]
 pub async fn run_simple_pipeline_with_bus<Src, Snk, Clk>(
     source: &mut Src,
     sink: &mut Snk,
@@ -641,6 +609,7 @@ where
     run_simple_pipeline_inner(source, sink, clock, link_capacity, Some(bus), None).await
 }
 
+#[cfg(feature = "std")]
 async fn run_simple_pipeline_inner<Src, Snk, Clk>(
     source: &mut Src,
     sink: &mut Snk,
@@ -763,175 +732,22 @@ where
     let (link_tx, link_rx) = link(link_capacity);
     advertise_orientation(&link_rx, AsyncElement::absorbs_orientation(sink));
 
-    let source_fut = async move {
-        let mut adapter = SenderSink::new(link_tx);
-        // M81: every stream opens with a SEGMENT, ahead of the source's data,
-        // so a sink maps frame timestamps to running time from the first frame.
-        let _ = adapter
-            .push(PipelinePacket::Segment(Segment::new()))
-            .await?;
-        let emitted = source.run(&mut adapter).await?;
-        Ok::<u64, G2gError>(emitted)
-    };
-
     // M399: measured per-element telemetry for the sink (the linear runner's one
     // interior element with a `process()`); the source's cost surfaces as fill.
     let sink_probe = ElementProbe::new(sink_name.clone());
-    let probe_for_sink = sink_probe.clone();
-
-    let bus_for_sink = bus.cloned();
-    let state_for_sink = state;
-    let sink_fut = async move {
-        let bus_for_sink = bus_for_sink;
-        let state_for_sink = state_for_sink;
-        let probe_for_sink = probe_for_sink;
-        let mut null = NullSink;
-        let mut consumed: u64 = 0;
-        let mut prerolled_self = false;
-        // M360 re-preroll: the generation this arm last prerolled at, and whether
-        // it is currently draining stale pre-seek frames (after a paused flushing
-        // seek) until the `Flush` arrives.
-        let mut preroll_gen = state_for_sink
-            .as_ref()
-            .map_or(0, |sc| sc.preroll_generation());
-        let mut flushing = false;
-        loop {
-            // Flow gate (M76/M77): below `Playing` the sink parks here, so it
-            // stops draining the link; the bounded channel fills and
-            // backpressure stalls the source. `Playing` opens the gate; `Null`
-            // ends the arm. In non-live `Paused` the gate admits exactly one
-            // buffer (this sink's preroll frame) before it holds.
-            if let Some(sc) = &state_for_sink {
-                if !sc.is_playing() && sc.flow_gate(prerolled_self, preroll_gen).await == Flow::Stop
-                {
-                    return Ok::<u64, G2gError>(consumed);
-                }
-                // M360: a `request_repreroll` (paused flushing seek) bumped the
-                // generation. Re-arm this arm's preroll and drain the stale
-                // pre-seek frames until the `Flush`, so the post-flush target
-                // becomes the new visible preroll rather than a stale buffer.
-                let gen = sc.preroll_generation();
-                if gen != preroll_gen {
-                    preroll_gen = gen;
-                    prerolled_self = false;
-                    flushing = true;
-                }
-            }
-            match link_rx.recv().await {
-                // M360: discard stale pre-seek buffers while draining toward the
-                // `Flush`; control packets fall through (the `Flush` ends drain).
-                Some(PipelinePacket::DataFrame(_)) if flushing => continue,
-                Some(PipelinePacket::Eos) => {
-                    sink.process(PipelinePacket::Eos, &mut null).await?;
-                    // M77: EOS during preroll still completes the async
-                    // `Paused` transition (idempotent; no-op once playing).
-                    if let Some(sc) = &state_for_sink {
-                        sc.notify_prerolled();
-                    }
-                    return Ok::<u64, G2gError>(consumed);
-                }
-                Some(PipelinePacket::CapsChanged(new_caps)) => {
-                    // M16 workaround #3 Phase B: re-solve the downstream
-                    // subgraph before applying. For a 2-element chain
-                    // the subgraph is one link, so the solver's role is
-                    // structural — it checks the sink's declared
-                    // `CapsConstraint::caps_constraint_as_sink()`
-                    // (which a native sink may use to reject the new
-                    // shape cleanly) before any `configure_pipeline`
-                    // call. Failure becomes a structured upstream
-                    // `Renegotiate` request instead of an opaque
-                    // `CapsMismatch`.
-                    let sink_caps = match re_solve_downstream_sink(&new_caps, &*sink) {
-                        Ok(caps) => caps,
-                        Err(failure) => {
-                            report_nego_failure(bus_for_sink.as_ref(), failure);
-                            link_rx.request_reconfigure(Reconfigure::Renegotiate);
-                            continue;
-                        }
-                    };
-                    // M8 piece 1: runner cascades mid-stream caps changes
-                    // through configure_pipeline before the element sees
-                    // the notification packet. Guarantees DataFrames with
-                    // the new caps never reach a stale element.
-                    match log_caps_rejected(
-                        Some(probe_for_sink.name()),
-                        &sink_caps,
-                        sink.configure_pipeline(&sink_caps),
-                    )? {
-                        ConfigureOutcome::Accepted => {
-                            // M18 α: element-local re-allocation under the
-                            // new caps before the sink sees the packet.
-                            realloc_local(sink, &sink_caps);
-                            sink.process(PipelinePacket::CapsChanged(sink_caps), &mut null)
-                                .await?;
-                        }
-                        // M8 piece 5: a sink that rejects new caps fires
-                        // its counter-proposal upstream as a Reconfigure
-                        // signal. The source observes it on its next push
-                        // (piece 4 wires source-side handling). The
-                        // CapsChanged packet is dropped — caps were not
-                        // accepted — and we keep draining old-caps frames
-                        // until the source emits a fresh CapsChanged.
-                        ConfigureOutcome::ReFixate(counter) => {
-                            link_rx.request_reconfigure(Reconfigure::Propose(counter));
-                        }
-                    }
-                }
-                // M360: the `Flush` ends the re-preroll drain; the next
-                // (post-flush) DataFrame becomes the new visible preroll.
-                Some(PipelinePacket::Flush) => {
-                    flushing = false;
-                    sink.process(PipelinePacket::Flush, &mut null).await?;
-                }
-                Some(packet) => {
-                    let is_buffer = matches!(packet, PipelinePacket::DataFrame(_));
-                    if is_buffer {
-                        consumed += 1;
-                    }
-                    // M399: time the data-frame `process()` and sample input fill.
-                    let timed = is_buffer.then(|| &*probe_for_sink);
-                    if let Some(p) = timed {
-                        p.record_fill(link_rx.fill_percent());
-                    }
-                    let t0 = ElementProbe::mark();
-                    sink.process(packet, &mut null).await?;
-                    if let Some(p) = timed {
-                        p.record_proc_since(t0);
-                    }
-                    // M174 upstream QoS: a sink reports a late drop or its periodic
-                    // lateness. Forward the report onto the incoming link, where
-                    // the source observes it as `PushOutcome::Qos` and skips ahead.
-                    if let Some(qos) = sink.take_qos() {
-                        link_rx.request_qos(qos);
-                    }
-                    // Keyframe-request / renegotiation a sink originates (e.g. a
-                    // WebRTC sink on a remote PLI): forward it up the same reverse
-                    // channel, where the encoder sees it as `PushOutcome::Reconfigure`.
-                    if let Some(reconf) = sink.take_reconfigure() {
-                        link_rx.request_reconfigure(reconf);
-                    }
-                    // Target bitrate (WebRTC BWE) up the same reverse channel; the
-                    // upstream encoder observes it as `PushOutcome::Bitrate`.
-                    if let Some(bps) = sink.take_bitrate() {
-                        link_rx.request_bitrate(bps);
-                    }
-                    // M77: the first buffer in non-live `Paused` is the preroll
-                    // frame; mark this arm prerolled so the gate flips from
-                    // preroll-grant to hold, and report it for aggregation.
-                    // Idempotent and a no-op while `Playing`.
-                    if is_buffer && !prerolled_self {
-                        prerolled_self = true;
-                        if let Some(sc) = &state_for_sink {
-                            sc.notify_prerolled();
-                        }
-                    }
-                }
-                None => return Ok(consumed),
-            }
-        }
+    let source_io = SourceArmIo {
+        out_tx: link_tx,
+        bus: None,
+        progress: None,
+        segment: Segment::new(),
     };
-
-    let (src_res, snk_res) = Join2::new(source_fut, sink_fut).await;
+    let sink_io = SinkArmIo {
+        bus: bus.cloned(),
+        state,
+        ..SinkArmIo::standalone(link_rx, Some(sink_probe.clone()))
+    };
+    let (src_res, snk_res) =
+        Join2::new(run_source(source, source_io), sink_arm_on(sink, sink_io)).await;
     // M81: a closed-link `Shutdown` on the source arm can be the consequence of
     // the sink arm's real error (it dropped the link), so surface the
     // substantive one rather than whichever arm we check first.
@@ -2004,7 +1820,7 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    run_linear_chain_inner(source, transforms, sink, clock, link_capacity, None).await
+    run_linear_chain_inner(source, transforms, sink, clock, link_capacity, None, None).await
 }
 
 /// As [`run_linear_chain`], but posts a structured
@@ -2024,7 +1840,16 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    run_linear_chain_inner(source, transforms, sink, clock, link_capacity, Some(bus)).await
+    run_linear_chain_inner(
+        source,
+        transforms,
+        sink,
+        clock,
+        link_capacity,
+        Some(bus),
+        None,
+    )
+    .await
 }
 
 #[cfg(feature = "std")]
@@ -2035,6 +1860,7 @@ async fn run_linear_chain_inner<Src, Snk, Clk>(
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
     bus: Option<&BusHandle>,
+    state: Option<StateController>,
 ) -> Result<RunStats, G2gError>
 where
     Src: SourceLoop,
@@ -2060,7 +1886,7 @@ where
         clock,
         link_capacity,
         bus,
-        None,
+        state,
         None,
         None,
         None,
@@ -2074,9 +1900,11 @@ where
 /// Sentinel sink for terminal elements (sinks proper): swallows pushes.
 /// Process implementations of true sinks should not emit, but the type
 /// system still requires an `&mut dyn OutputSink` parameter.
+#[cfg(feature = "std")]
 #[derive(Debug)]
 pub(crate) struct NullSink;
 
+#[cfg(feature = "std")]
 impl OutputSink for NullSink {
     fn poll_push(
         &mut self,
@@ -2100,6 +1928,7 @@ impl OutputSink for NullSink {
 /// roughly `2 * link_capacity * consumer_period`. For live video pipelines
 /// (RTSP -> decode -> display) prefer **2**; for batch / throughput-oriented
 /// workloads larger values are fine.
+#[cfg(feature = "std")]
 pub async fn run_source_transform_sink<Src, Tx, Snk, Clk>(
     source: &mut Src,
     transform: &mut Tx,
@@ -2113,7 +1942,16 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    run_source_transform_sink_inner(source, transform, sink, clock, link_capacity, None).await
+    run_linear_chain_inner(
+        source,
+        alloc::vec![transform as &mut dyn DynAsyncElement],
+        sink,
+        clock,
+        link_capacity,
+        None,
+        None,
+    )
+    .await
 }
 
 /// As [`run_source_transform_sink`], but posts a structured
@@ -2123,6 +1961,7 @@ where
 /// negotiation and the mid-stream re-solve sites (the sink's Phase-B re-solve
 /// and the transform's Caps-α `Infeasible`). The bus is opt-in to keep the
 /// common call site unchanged.
+#[cfg(feature = "std")]
 pub async fn run_source_transform_sink_with_bus<Src, Tx, Snk, Clk>(
     source: &mut Src,
     transform: &mut Tx,
@@ -2137,430 +1976,16 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    run_source_transform_sink_inner(source, transform, sink, clock, link_capacity, Some(bus)).await
-}
-
-async fn run_source_transform_sink_inner<Src, Tx, Snk, Clk>(
-    source: &mut Src,
-    transform: &mut Tx,
-    sink: &mut Snk,
-    clock: &Clk,
-    link_capacity: impl Into<LinkCapacity>,
-    bus: Option<&BusHandle>,
-) -> Result<RunStats, G2gError>
-where
-    Src: SourceLoop,
-    Tx: AsyncElement,
-    Snk: AsyncElement,
-    Clk: PipelineClock,
-{
-    let link_capacity: usize = link_capacity.into().get();
-    // M842: instance naming + lifecycle logging, as in `run_graph`; the two
-    // interior names key the probes below.
-    let mut namer = crate::log::InstanceNamer::new();
-    let source_name = namer.add(crate::log::short_type_name::<Src>(), None);
-    SourceLoop::set_instance_name(source, source_name.clone());
-    let transform_name = namer.add(crate::log::short_type_name::<Tx>(), None);
-    AsyncElement::set_instance_name(transform, transform_name.clone());
-    let sink_name = namer.add(crate::log::short_type_name::<Snk>(), None);
-    AsyncElement::set_instance_name(sink, sink_name.clone());
-    // M18 Session C: the startup negotiation loop (solver + per-link
-    // configure cascade with bounded `ReFixate` retry) is owned by the
-    // coordinator module now, since β reuses the same machinery for the
-    // mid-stream re-cascade. `sink_link` is the downstream-facing caps
-    // (transform output = sink input) that M12 allocation flows along,
-    // so it stands in for the loop's former `negotiated_caps`.
-    // M12 allocation query now runs *inside* negotiation, before the
-    // `configure_pipeline` cascade, so a transform (e.g. a hardware decoder)
-    // sizes its buffer pool from the downstream `min_buffers` at open time.
-    // The folded source-facing proposal comes back on `RunStats`.
-    let negotiation = negotiate_source_transform_sink(source, transform, sink, bus).await?;
-    let allocation = negotiation.allocation;
-
-    // Caps-α: the transform's downstream subgraph is the single sink link, so
-    // its feasibility snapshot is just the sink's accept set (the N-hop sweep
-    // in `run_linear_chain` reduces to this for one transform). A wildcard or
-    // legacy sink leaves it unconstrained, so the transform keeps forwarding
-    // greedily (Defer).
-    let downstream_feasible = match sink.caps_constraint_as_sink() {
-        CapsConstraint::Accepts(s) => Some(s.clone()),
-        _ => None,
-    };
-
-    // M12 latency query: fold the configured chain source → transform → sink.
-    let latency = LatencyReport::aggregate([
-        source.latency(),
-        AsyncElement::latency(transform),
-        AsyncElement::latency(sink),
-    ]);
-    // M1123: the fold's liveness back down to both interior elements.
-    AsyncElement::configure_liveness(transform, latency.live);
-    AsyncElement::configure_liveness(sink, latency.live);
-
-    // M12 clock distribution: elect the pipeline clock from any element that
-    // offers one (live source > provider > system fallback) and read its epoch.
-    let elected = elect_clock([
-        source.provide_clock(),
-        AsyncElement::provide_clock(transform),
-        AsyncElement::provide_clock(sink),
-    ]);
-    let (clock_priority, base_time_ns) = match &elected {
-        Some(c) => (c.priority, c.clock.now_ns()),
-        None => (ClockPriority::SystemFallback, clock.now_ns()),
-    };
-
-    // Hand the elected clock + base time to the sink so it can present each
-    // frame at its running-time deadline (PTS pacing). Only when a clock was
-    // elected; without one the sink presents as fast as backpressure allows.
-    if let Some(c) = &elected {
-        let sync = ClockSync::new(c.clock.clone(), base_time_ns).with_path_latency(latency);
-        SourceLoop::set_clock_sync(source, sync.clone());
-        AsyncElement::set_clock_sync(sink, sync);
-    }
-
-    let (link1_tx, link1_rx) = link(link_capacity);
-    let (link2_tx, link2_rx) = link(link_capacity);
-    advertise_orientation(&link2_rx, AsyncElement::absorbs_orientation(sink));
-
-    // M18 β: a single coordinator task owns the cross-element re-cascade.
-    // The sink arm reports an applied mid-stream `CapsChanged` (with its
-    // re-derived allocation proposal) out-of-band
-    // (design/caps.md); the coordinator
-    // forwards the proposal one hop upstream over `transform_ctrl_rx` to the
-    // transform's `configure_allocation`. The transform arm selects on that
-    // control receiver alongside its data link, so the directive reaches it
-    // even while it is parked on `recv().await`. When the sink arm finishes,
-    // the handle drops, the coordinator drains and closes `transform_ctrl_rx`,
-    // and the transform arm's EOS-drain unblocks.
-    let (coord, coord_handle, transform_ctrl_rx) = coordinator_with_recascade(link_capacity);
-
-    // M399: measured per-element telemetry for the two interior elements; each
-    // arm writes its own probe, the runner snapshots them once both have joined.
-    let transform_probe = ElementProbe::new(transform_name);
-    let sink_probe = ElementProbe::new(sink_name);
-    let probe_for_transform = transform_probe.clone();
-    let probe_for_sink = sink_probe.clone();
-
-    let source_fut = async move {
-        let mut adapter = SenderSink::new(link1_tx);
-        // M81: unlike `run_simple_pipeline` and `run_graph`, this bespoke
-        // 3-element runner does NOT emit an opening SEGMENT. Prepending a packet
-        // here can exactly fill a link feeding a buffering transform and trip a
-        // shutdown race in this hand-rolled data plane (a latent exact-capacity
-        // fragility, tracked separately). The opening SEGMENT lands once this
-        // runner is re-expressed as a thin builder over `run_graph` (as
-        // `run_linear_chain` already is). Use `run_graph` / `run_linear_chain`
-        // for the SEGMENT-emitting path.
-        source.run(&mut adapter).await
-    };
-
-    let bus_for_transform = bus.cloned();
-    // Caps-α: the transform's startup-solved output, tracked across applied
-    // mid-stream changes so the re-solve can keep the shape it already produces.
-    let mut transform_out_caps = negotiation.sink_link.clone();
-    let transform_fut = async move {
-        let ctrl_rx = transform_ctrl_rx;
-        let probe_for_transform = probe_for_transform;
-        let mut adapter = SenderSink::new(link2_tx);
-        // M947: the sink's backpressure is the transform's push-wait, not its work.
-        adapter.set_push_wait_probe(Some(probe_for_transform.clone()));
-        // M175: relay a QoS report from the sink (seen on the transform's output
-        // link) onto the transform's input link, so the source observes it as
-        // `PushOutcome::Qos` and sheds load. Without this the report dies at the
-        // transform (its `process` push outcome is discarded). M720 extends the
-        // same hop to keyframe requests / bitrate targets the transform does
-        // not consume itself; M997 does the same for QoS, so a decoder that
-        // sheds work itself observes the report instead of relaying it. A
-        // pyelement both observes and relays it (`relays_qos`).
-        if transform.relays_qos() {
-            adapter.relay_qos_to(link1_rx.qos_slot(), transform.handles_qos());
-        }
-        adapter.relay_reconfigure_to(
-            link1_rx.reconfigure_slot(),
-            ReconfigureAnswered {
-                keyframe: transform.handles_keyframe_requests(),
-                orientation: transform.handles_orientation(),
-            },
-        );
-        if !transform.handles_bitrate_requests() {
-            adapter.relay_bitrate_to(link1_rx.bitrate_slot());
-        }
-        // β: while the coordinator is alive, race the data link against the
-        // re-cascade control channel so a directive is applied promptly. Once
-        // control closes (coordinator gone) we degrade to data-only so the
-        // closed arm can't spin.
-        let mut control_open = true;
-        loop {
-            let packet = if control_open {
-                match select2(ctrl_rx.recv(), link1_rx.recv()).await {
-                    Either::Left(Some(directive)) => {
-                        // β: apply the sink's downstream-derived proposal to
-                        // our own output pool, then keep waiting for data.
-                        transform.configure_allocation(directive.params());
-                        continue;
-                    }
-                    Either::Left(None) => {
-                        control_open = false;
-                        continue;
-                    }
-                    Either::Right(packet) => packet,
-                }
-            } else {
-                link1_rx.recv().await
-            };
-            match packet {
-                Some(PipelinePacket::Eos) => {
-                    transform.process(PipelinePacket::Eos, &mut adapter).await?;
-                    // M909: an element whose catch-all arm forwards the packet
-                    // has already sent the sentinel; a second push races the
-                    // sink's exit on the first one and surfaces as `Shutdown`.
-                    if !adapter.eos_forwarded() {
-                        adapter.push(PipelinePacket::Eos).await?;
-                    }
-                    // β: the EOS we just forwarded will, once the sink applies
-                    // its final `CapsChanged` and the coordinator forwards the
-                    // matching re-cascade, close this control channel. Drain it
-                    // first so a tail-end proposal is applied before we exit
-                    // (in a live stream these apply inline above; this only
-                    // covers the directive still in flight at shutdown).
-                    while control_open {
-                        match ctrl_rx.recv().await {
-                            Some(directive) => {
-                                transform.configure_allocation(directive.params());
-                            }
-                            None => control_open = false,
-                        }
-                    }
-                    return Ok::<(), G2gError>(());
-                }
-                Some(PipelinePacket::CapsChanged(new_caps)) => {
-                    // Caps-α (D3): derive the forwarded output from the
-                    // transform's constraint, steered by the sink's accept set,
-                    // instead of forwarding greedily. Mirrors `run_linear_chain`;
-                    // here the downstream subgraph is the single sink link.
-                    // `Infeasible` means the sink positively rejects every
-                    // output the transform can produce: surface it loud as a
-                    // reverse reconfigure into this boundary.
-                    let (forward_caps, output_resolved) = {
-                        let constraint = transform.caps_constraint_as_transform();
-                        match resolve_forward_output(
-                            &constraint,
-                            &new_caps,
-                            downstream_feasible.as_ref(),
-                            Some(&transform_out_caps),
-                        ) {
-                            ForwardResolve::Fixed(caps) => (caps, true),
-                            ForwardResolve::Defer => (new_caps.clone(), false),
-                            ForwardResolve::Infeasible(failure) => {
-                                report_nego_failure(bus_for_transform.as_ref(), failure);
-                                link1_rx.request_reconfigure(Reconfigure::Renegotiate);
-                                continue;
-                            }
-                        }
-                    };
-                    let instance = Some(probe_for_transform.name());
-                    log_caps_forward(instance, &new_caps, &forward_caps, output_resolved);
-                    match log_caps_rejected(
-                        instance,
-                        &new_caps,
-                        transform.configure_pipeline(&new_caps),
-                    )? {
-                        ConfigureOutcome::Accepted => {
-                            // M188: a caps-driven transform re-resolves its output
-                            // target on the mid-stream change too, not just at
-                            // startup, so a videoscale/videoconvert fed by a
-                            // downstream capsfilter retargets when caps shift.
-                            // No-op for property-driven / passthrough elements.
-                            // Skipped on a Defer, where `forward_caps` is the
-                            // incoming INPUT caps, not this element's output
-                            // (the contract is output caps only).
-                            if output_resolved {
-                                log_caps_rejected(
-                                    instance,
-                                    &forward_caps,
-                                    AsyncElement::configure_output(transform, &forward_caps),
-                                )?;
-                            }
-                            // M18 α: element-local re-allocation under the
-                            // re-fixated output caps before forwarding.
-                            realloc_local(transform, &forward_caps);
-                            if output_resolved {
-                                transform_out_caps = forward_caps.clone();
-                            }
-                            transform
-                                .process(PipelinePacket::CapsChanged(forward_caps), &mut adapter)
-                                .await?;
-                        }
-                        // Mid-stream ReFixate: fire upstream via this
-                        // element's input link, drop the rejected
-                        // CapsChanged. Piece 4 will source-side react.
-                        ConfigureOutcome::ReFixate(counter) => {
-                            link1_rx.request_reconfigure(Reconfigure::Propose(counter));
-                        }
-                    }
-                }
-                Some(packet) => {
-                    // M399: time the data-frame `process()` and sample input fill.
-                    let timed = matches!(&packet, PipelinePacket::DataFrame(_))
-                        .then(|| &*probe_for_transform);
-                    if let Some(p) = timed {
-                        p.record_fill(link1_rx.fill_percent());
-                    }
-                    let t0 = ElementProbe::mark();
-                    transform.process(packet, &mut adapter).await?;
-                    if let Some(p) = timed {
-                        p.record_proc_since(t0);
-                    }
-                    // M1036: renegotiation this transform originates rather
-                    // than relays (a decoder that read a new resolution out of
-                    // the bitstream) goes up its own input link, where the
-                    // source observes it as `PushOutcome::Reconfigure`.
-                    if let Some(reconf) = transform.take_reconfigure() {
-                        link1_rx.request_reconfigure(reconf);
-                    }
-                }
-                None => return Ok(()),
-            }
-        }
-    };
-
-    let bus_for_sink = bus.cloned();
-    let sink_fut = async move {
-        let coord_handle = coord_handle;
-        let bus_for_sink = bus_for_sink;
-        let probe_for_sink = probe_for_sink;
-        let mut null = NullSink;
-        let mut consumed: u64 = 0;
-        loop {
-            match link2_rx.recv().await {
-                Some(PipelinePacket::Eos) => {
-                    sink.process(PipelinePacket::Eos, &mut null).await?;
-                    return Ok::<u64, G2gError>(consumed);
-                }
-                Some(PipelinePacket::CapsChanged(new_caps)) => {
-                    // M16 workaround #3 Phase B: re-solve the downstream
-                    // subgraph (boundary → sink) before applying. The
-                    // boundary that emitted this `CapsChanged` is the
-                    // transform; the subgraph is the one link feeding
-                    // the sink. A `NegotiationFailure` here means the
-                    // sink's declared `CapsConstraint` rejects the
-                    // boundary's output — surface it as a reverse
-                    // Reconfigure into the transform (§7 forward ×
-                    // reverse race: terminates at the boundary, does
-                    // not propagate past the source).
-                    let sink_caps = match re_solve_downstream_sink(&new_caps, &*sink) {
-                        Ok(caps) => caps,
-                        Err(failure) => {
-                            // M18 item 7: the mid-stream re-solve is the case
-                            // the bus matters most for, there is no synchronous
-                            // return to carry the detail. Post the structured
-                            // failure, then drive the reverse Reconfigure.
-                            report_nego_failure(bus_for_sink.as_ref(), failure);
-                            link2_rx.request_reconfigure(Reconfigure::Renegotiate);
-                            continue;
-                        }
-                    };
-                    match log_caps_rejected(
-                        Some(probe_for_sink.name()),
-                        &sink_caps,
-                        sink.configure_pipeline(&sink_caps),
-                    )? {
-                        ConfigureOutcome::Accepted => {
-                            // M18 α: element-local re-allocation under the
-                            // new caps before the sink sees the packet. The
-                            // returned proposal is what the sink now wants
-                            // its upstream to allocate.
-                            let proposal = realloc_local(sink, &sink_caps);
-                            // M18 β: report the applied caps change plus the
-                            // sink's re-derived proposal so the coordinator
-                            // forwards it one hop upstream to the transform's
-                            // `configure_allocation` (the single-hop cascade).
-                            coord_handle
-                                .report(CoordinatorEvent::CapsChanged {
-                                    caps: sink_caps.clone(),
-                                    proposal,
-                                })
-                                .await;
-                            sink.process(PipelinePacket::CapsChanged(sink_caps), &mut null)
-                                .await?;
-                        }
-                        ConfigureOutcome::ReFixate(counter) => {
-                            link2_rx.request_reconfigure(Reconfigure::Propose(counter));
-                        }
-                    }
-                }
-                Some(packet) => {
-                    let is_buffer = matches!(packet, PipelinePacket::DataFrame(_));
-                    if is_buffer {
-                        consumed += 1;
-                    }
-                    // M399: time the data-frame `process()` and sample input fill.
-                    let timed = is_buffer.then(|| &*probe_for_sink);
-                    if let Some(p) = timed {
-                        p.record_fill(link2_rx.fill_percent());
-                    }
-                    let t0 = ElementProbe::mark();
-                    sink.process(packet, &mut null).await?;
-                    if let Some(p) = timed {
-                        p.record_proc_since(t0);
-                    }
-                    // M175 upstream QoS: a late sink stores its report on the
-                    // link feeding it; the transform's output adapter relays it
-                    // one hop further upstream (see `relay_qos_to` above).
-                    if let Some(qos) = sink.take_qos() {
-                        link2_rx.request_qos(qos);
-                    }
-                    // Keyframe-request / renegotiation up the reverse channel; the
-                    // transform's output adapter relays it one hop toward the encoder.
-                    if let Some(reconf) = sink.take_reconfigure() {
-                        link2_rx.request_reconfigure(reconf);
-                    }
-                    if let Some(bps) = sink.take_bitrate() {
-                        link2_rx.request_bitrate(bps);
-                    }
-                }
-                None => return Ok(consumed),
-            }
-        }
-    };
-
-    // The coordinator task drains the control channel until the sink arm
-    // drops its handle. Joined as a fourth arm so it runs concurrently.
-    let coordinator_fut = coord.run();
-
-    let (src_res, (tx_res, (snk_res, coordinator_events))) = Join2::new(
-        source_fut,
-        Join2::new(transform_fut, Join2::new(sink_fut, coordinator_fut)),
+    run_linear_chain_inner(
+        source,
+        alloc::vec![transform as &mut dyn DynAsyncElement],
+        sink,
+        clock,
+        link_capacity,
+        Some(bus),
+        None,
     )
-    .await;
-    // M81: prefer a substantive error over a secondary `Shutdown`. A real error
-    // in the transform or sink closes a link, which can surface as `Shutdown` on
-    // the source arm (checked first); without this, that masks the real cause.
-    if let Some(e) = substantive_error([
-        (source_name.as_str(), src_res.as_ref().err()),
-        (transform_probe.name(), tx_res.as_ref().err()),
-        (sink_probe.name(), snk_res.as_ref().err()),
-    ]) {
-        return Err(e);
-    }
-    let emitted = src_res?;
-    tx_res?;
-    let consumed = snk_res?;
-
-    // M399: both arms have joined; snapshot the transform and sink probes in
-    // topological order (source carries no `process()` and is omitted).
-    let per_element = alloc::vec![transform_probe.snapshot(), sink_probe.snapshot()];
-    Ok(RunStats {
-        frames_emitted: emitted,
-        frames_consumed: consumed,
-        frames_dropped: 0,
-        latency,
-        allocation,
-        clock_priority,
-        base_time_ns,
-        coordinator_events,
-        per_element,
-    })
+    .await
 }
 
 #[cfg(test)]

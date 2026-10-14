@@ -627,6 +627,14 @@ impl GraphCoordHandle {
     }
 }
 
+/// A β directive channel with no coordinator behind it: an arm outside the
+/// cascade sees the control side closed and selects on data alone.
+pub(crate) fn dead_directives() -> Receiver<ArmDirective> {
+    let (tx, rx) = bounded(1);
+    drop(tx);
+    rx
+}
+
 /// Node-keyed β coordinator for the DAG (the DAG analog of the linear
 /// [`Coordinator`](crate::runtime::coordinator::Coordinator)). It owns one
 /// [`ArmDirective`] sender per interruptible arm (transforms, sinks, muxers),
@@ -4307,6 +4315,26 @@ pub struct SinkArmIo {
     pub(crate) probe: Probe,
     pub(crate) control: Option<ArmController>,
     pub(crate) properties: Option<PropertyMailbox>,
+}
+
+impl SinkArmIo {
+    /// A sink arm run outside a graph: no β coordinator, no control program, no
+    /// live properties. A caps change it cannot re-solve fails the run.
+    pub(crate) fn standalone(in_rx: LinkReceiver, probe: Probe) -> Self {
+        Self {
+            in_rx,
+            arm_rx: dead_directives(),
+            coord: GraphCoordHandle::detached(),
+            node: NodeId(0),
+            mode: BranchMode::Reconfigure,
+            bus: None,
+            state: None,
+            progress: None,
+            probe,
+            control: None,
+            properties: None,
+        }
+    }
 }
 
 /// Monomorphized over the element type by the `drive_transform_arm` blanket

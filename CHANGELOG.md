@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1320: linear runners drive the graph runner's source and sink arms, so they fail loud on a rejected mid-stream caps change and send the opening segment.
 - M1395: MP4 muxers drop the empty NAL that adjacent start codes split out, which the strict length-prefixed reader refused.
 - M1373: `webortdetect` reads fixed caps dimensions through `Dim::fixed`.
 - M1372: g2g-ml shares one RGBA-to-NCHW converter and one f32 byte codec, and a short RGBA frame in `burninfer` fails instead of panicking.

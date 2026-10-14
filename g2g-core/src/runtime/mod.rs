@@ -81,11 +81,7 @@ pub use instrument::{
 };
 pub use join::{join_all, select2, Either, Join2, JoinAll, Select2};
 pub use progress::PipelineProgress;
-pub use runner::{
-    run_simple_pipeline, run_simple_pipeline_stateful, run_simple_pipeline_with_bus,
-    run_source_transform_sink, run_source_transform_sink_with_bus, LatencyProfile, LinkCapacity,
-    RunStats, SourceLoop,
-};
+pub use runner::{LatencyProfile, LinkCapacity, RunStats, SourceLoop};
 pub use seek::{SeekController, WaitEvent};
 pub use solver::{CapsConflict, NegotiationFailure};
 pub use state::{Flow, FlowGate, PrerollGate, StateController};
@@ -102,9 +98,11 @@ pub use device::{
 #[cfg(feature = "std")]
 pub use runner::{
     run_fanout_session, run_fanout_session_observed, run_linear_chain, run_linear_chain_with_bus,
+    run_simple_pipeline, run_simple_pipeline_stateful, run_simple_pipeline_with_bus,
     run_source_fanout, run_source_fanout_observed, run_source_fanout_with_bus,
     run_source_router_dynamic, run_source_router_dynamic_observed, run_source_tee_dynamic,
-    run_source_tee_dynamic_observed, DynamicFanoutHandle,
+    run_source_tee_dynamic_observed, run_source_transform_sink, run_source_transform_sink_with_bus,
+    DynamicFanoutHandle,
 };
 
 #[cfg(feature = "std")]

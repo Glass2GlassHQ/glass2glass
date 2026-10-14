@@ -8,9 +8,11 @@
 //! runner's mid-stream forward resolve; `project_passthrough_derived` serves only
 //! the std graph runner's backward-feasibility sweep and stays `std`-gated.
 
+#[cfg(feature = "std")]
+use crate::caps::ANY_SAMPLE_RATE;
 use crate::caps::{
     intersect_channels, intersect_sample_rate, AudioFormat, Caps, CapsSet, Colorimetry, Dim,
-    Interlace, PassthroughFields, Rate, RawVideoFormat, VideoCodec, ANY_SAMPLE_RATE,
+    Interlace, PassthroughFields, Rate, RawVideoFormat, VideoCodec,
 };
 
 /// Narrow `input` by intersecting each *passthrough* field against the
@@ -248,6 +250,7 @@ pub(crate) fn couple_passthrough_derived(
 /// then imposes no upstream feasibility constraint, the status quo). Used by
 /// `backward_feasible` for the mid-stream snapshot and by
 /// `resolve_forward_output` to widen a previous output into the shape to keep.
+#[cfg(feature = "std")]
 pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option<Caps> {
     match out {
         Caps::RawVideo {
