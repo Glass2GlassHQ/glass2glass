@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use g2g_core::{Chapter, G2gError, Tag, TagList};
 
-use crate::bereader::{be_u32, be_u64};
+use crate::bereader::{be_u16, be_u32, be_u64};
 
 /// Unity 3x3 transform matrix (16.16 / 2.30 fixed point) for `tkhd`/`mvhd`.
 pub(crate) const MATRIX: [u32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000];
@@ -110,12 +110,12 @@ pub(crate) fn next_box_len(buf: &[u8]) -> Result<Option<usize>, G2gError> {
     if buf.len() < 8 {
         return Ok(None);
     }
-    let size = u32::from_be_bytes(buf[0..4].try_into().expect("4 bytes"));
+    let size = be_u32(buf, 0).expect("8 header bytes are buffered");
     let total = if size == 1 {
-        if buf.len() < 16 {
+        let Some(large_size) = be_u64(buf, 8) else {
             return Ok(None);
-        }
-        u64::from_be_bytes(buf[8..16].try_into().expect("8 bytes")) as usize
+        };
+        large_size as usize
     } else {
         size as usize
     };
@@ -143,10 +143,7 @@ pub(crate) fn boxes(data: &[u8]) -> impl Iterator<Item = (&[u8; 4], &[u8])> {
 pub(crate) fn boxes_at(data: &[u8]) -> impl Iterator<Item = (&[u8; 4], &[u8], usize)> {
     let mut i = 0usize;
     core::iter::from_fn(move || {
-        if i + 8 > data.len() {
-            return None;
-        }
-        let size = u32::from_be_bytes(data[i..i + 4].try_into().expect("4 bytes")) as usize;
+        let size = be_u32(data, i)? as usize;
         if size < 8 || i + size > data.len() {
             return None;
         }
@@ -308,10 +305,7 @@ fn ilst_numbers(kind: &[u8; 4], item: &[u8]) -> Option<Vec<Tag>> {
     if let Some((_, index_key, count_key)) =
         INT_PAIR_ATOMS.iter().find(|(atom, _, _)| kind == *atom)
     {
-        let be16 = |at: usize| -> Option<u64> {
-            let b = value.get(at..at + 2)?;
-            Some(u64::from(u16::from_be_bytes([b[0], b[1]])))
-        };
+        let be16 = |at: usize| be_u16(value, at).map(u64::from);
         let mut out = Vec::new();
         out.push(number(index_key, be16(2)?));
         match be16(4) {

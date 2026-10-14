@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1414: rtcp, moqtsink and mp4box read through the shared big-endian reader.
 - M1413: `st2110anc` reads with the shared bit reader and aacparse tests use the shared bit writer.
 - M1412: NvEnc calls the CUDA driver through the shared FFI module.
 - M1411: tsmux, tsmuxn, rtcp, dashsrc, mpd, avf and st2110audiortp tick conversions use the core time helpers, and avf audio PTS no longer drifts.

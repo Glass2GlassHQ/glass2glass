@@ -17,6 +17,8 @@ use alloc::vec::Vec;
 use g2g_core::rtp::RtpSequenceExtender;
 use g2g_core::time::ns_to_ticks;
 
+use crate::bereader::{be_u16, be_u32, be_u64};
+
 const SEQUENCE_CYCLE: u64 = 1 << u16::BITS;
 const DLSR_UNITS_PER_SECOND: u32 = 1 << 16;
 
@@ -105,6 +107,17 @@ const SDES_ITEM_CNAME: u8 = 1;
 const SDES_ITEM_MAX_LEN: usize = u8::MAX as usize;
 /// RTCP packets are a whole number of 32-bit words.
 const RTCP_WORD: usize = 4;
+const REPORT_BLOCK_LEN: usize = 24;
+// sender SSRC
+const RR_HEADER_LEN: usize = 4;
+// sender SSRC plus the sender info
+const SR_HEADER_LEN: usize = 24;
+// sender and media SSRC
+const NACK_HEADER_LEN: usize = 8;
+// a PID and its bitmask of following losses
+const NACK_FCI_LEN: usize = 4;
+// SSRC plus the four-character name
+const APP_HEADER_LEN: usize = 8;
 
 fn push_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_be_bytes());
@@ -258,113 +271,102 @@ pub fn build_nack(sender_ssrc: u32, media_ssrc: u32, missing: &[u16]) -> Vec<u8>
 pub fn parse_compound(buf: &[u8]) -> Vec<RtcpPacket> {
     let mut out = Vec::new();
     let mut off = 0;
-    while off + 4 <= buf.len() {
-        let count = (buf[off] & 0x1F) as usize;
-        let pt = buf[off + 1];
-        let words = u16::from_be_bytes([buf[off + 2], buf[off + 3]]) as usize;
-        let total = (words + 1) * 4;
-        let end = off + total;
-        if total < 4 || end > buf.len() {
+    while let (Some(&first), Some(&pt), Some(words)) =
+        (buf.get(off), buf.get(off + 1), be_u16(buf, off + 2))
+    {
+        let count = (first & 0x1F) as usize;
+        let end = off + (usize::from(words) + 1) * RTCP_WORD;
+        let Some(body) = buf.get(off + RTCP_WORD..end) else {
             break;
-        }
-        let body = &buf[off + 4..end];
-        match pt {
-            PT_RR => {
-                if body.len() >= 4 {
-                    let ssrc = be32(body, 0);
-                    let reports = parse_report_blocks(&body[4..], count);
-                    out.push(RtcpPacket::ReceiverReport { ssrc, reports });
-                }
-            }
-            PT_SR => {
-                if body.len() >= 24 {
-                    let ssrc = be32(body, 0);
-                    let ntp = u64::from_be_bytes(body[4..12].try_into().unwrap());
-                    let rtp_ts = be32(body, 12);
-                    let reports = parse_report_blocks(&body[24..], count);
-                    out.push(RtcpPacket::SenderReport {
-                        ssrc,
-                        ntp,
-                        rtp_ts,
-                        reports,
-                    });
-                }
-            }
-            PT_RTPFB if count as u8 == FMT_GENERIC_NACK => {
-                if body.len() >= 8 {
-                    let sender_ssrc = be32(body, 0);
-                    let media_ssrc = be32(body, 4);
-                    let mut missing = Vec::new();
-                    let mut p = 8;
-                    while p + 4 <= body.len() {
-                        let pid = u16::from_be_bytes([body[p], body[p + 1]]);
-                        let blp = u16::from_be_bytes([body[p + 2], body[p + 3]]);
-                        missing.push(pid);
-                        for bit in 0..16u16 {
-                            if blp & (1 << bit) != 0 {
-                                missing.push(pid.wrapping_add(bit + 1));
-                            }
-                        }
-                        p += 4;
-                    }
-                    out.push(RtcpPacket::Nack {
-                        sender_ssrc,
-                        media_ssrc,
-                        missing,
-                    });
-                }
-            }
-            PT_BYE => {
-                let mut ssrc = Vec::new();
-                for k in 0..count {
-                    if (k + 1) * 4 <= body.len() {
-                        ssrc.push(be32(body, k * 4));
-                    }
-                }
-                out.push(RtcpPacket::Bye { ssrc });
-            }
-            PT_APP => {
-                if let (Some(ssrc_bytes), Some(name), Some(data)) =
-                    (body.get(..4), body.get(4..8), body.get(8..))
-                {
-                    out.push(RtcpPacket::App {
-                        subtype: count as u8,
-                        ssrc: be32(ssrc_bytes, 0),
-                        name: [name[0], name[1], name[2], name[3]],
-                        data: data.to_vec(),
-                    });
-                }
-            }
-            _ => out.push(RtcpPacket::Other { pt }),
+        };
+        if let Some(packet) = parse_packet(pt, count, body) {
+            out.push(packet);
         }
         off = end;
     }
     out
 }
 
-fn be32(b: &[u8], at: usize) -> u32 {
-    u32::from_be_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+// None when the body is too short for its type
+fn parse_packet(pt: u8, count: usize, body: &[u8]) -> Option<RtcpPacket> {
+    let packet = match pt {
+        PT_RR => {
+            let ssrc = be_u32(body, 0)?;
+            let reports = parse_report_blocks(body.get(RR_HEADER_LEN..)?, count);
+            RtcpPacket::ReceiverReport { ssrc, reports }
+        }
+        PT_SR => {
+            let ssrc = be_u32(body, 0)?;
+            let ntp = be_u64(body, 4)?;
+            let rtp_ts = be_u32(body, 12)?;
+            let reports = parse_report_blocks(body.get(SR_HEADER_LEN..)?, count);
+            RtcpPacket::SenderReport {
+                ssrc,
+                ntp,
+                rtp_ts,
+                reports,
+            }
+        }
+        PT_RTPFB if count as u8 == FMT_GENERIC_NACK => {
+            let sender_ssrc = be_u32(body, 0)?;
+            let media_ssrc = be_u32(body, 4)?;
+            let mut missing = Vec::new();
+            for fci in body.get(NACK_HEADER_LEN..)?.as_chunks::<NACK_FCI_LEN>().0 {
+                let pid = be_u16(fci, 0)?;
+                let blp = be_u16(fci, 2)?;
+                missing.push(pid);
+                for bit in 0..16u16 {
+                    if blp & (1 << bit) != 0 {
+                        missing.push(pid.wrapping_add(bit + 1));
+                    }
+                }
+            }
+            RtcpPacket::Nack {
+                sender_ssrc,
+                media_ssrc,
+                missing,
+            }
+        }
+        PT_BYE => RtcpPacket::Bye {
+            ssrc: body
+                .as_chunks::<RTCP_WORD>()
+                .0
+                .iter()
+                .take(count)
+                .map(|word| u32::from_be_bytes(*word))
+                .collect(),
+        },
+        PT_APP => RtcpPacket::App {
+            subtype: count as u8,
+            ssrc: be_u32(body, 0)?,
+            name: body.get(4..APP_HEADER_LEN)?.try_into().ok()?,
+            data: body.get(APP_HEADER_LEN..)?.to_vec(),
+        },
+        _ => RtcpPacket::Other { pt },
+    };
+    Some(packet)
 }
 
-fn parse_report_blocks(mut b: &[u8], count: usize) -> Vec<ReportBlock> {
-    let mut out = Vec::new();
-    for _ in 0..count {
-        if b.len() < 24 {
-            break;
-        }
-        let fl_cum = be32(b, 4);
-        out.push(ReportBlock {
-            ssrc: be32(b, 0),
-            fraction_lost: (fl_cum >> 24) as u8,
-            cumulative_lost: fl_cum & 0x00FF_FFFF,
-            highest_seq: be32(b, 8),
-            jitter: be32(b, 12),
-            last_sr: be32(b, 16),
-            delay_since_last_sr: be32(b, 20),
-        });
-        b = &b[24..];
-    }
-    out
+fn parse_report_blocks(b: &[u8], count: usize) -> Vec<ReportBlock> {
+    b.as_chunks::<REPORT_BLOCK_LEN>()
+        .0
+        .iter()
+        .take(count)
+        .filter_map(|block| parse_report_block(block))
+        .collect()
+}
+
+fn parse_report_block(b: &[u8]) -> Option<ReportBlock> {
+    let fl_cum = be_u32(b, 4)?;
+    Some(ReportBlock {
+        ssrc: be_u32(b, 0)?,
+        fraction_lost: (fl_cum >> 24) as u8,
+        cumulative_lost: fl_cum & 0x00FF_FFFF,
+        highest_seq: be_u32(b, 8)?,
+        jitter: be_u32(b, 12)?,
+        last_sr: be_u32(b, 16)?,
+        delay_since_last_sr: be_u32(b, 20)?,
+    })
 }
 
 /// RFC 3550 reception statistics for one source: extended sequence tracking,

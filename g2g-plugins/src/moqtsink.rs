@@ -74,6 +74,7 @@ use g2g_core::{
 
 use g2g_core::log::LogSource;
 
+use crate::bereader::{be_u16, be_u32};
 use crate::fmp4::trun_first_sample_is_sync;
 use crate::moqt::catalog;
 use crate::moqt::coding::{MoqtError, Params, TrackName, TrackNamespace};
@@ -2052,7 +2053,7 @@ fn selection_params(entries: &[u8]) -> String {
     if let Some(avc1) = find_box(entries, b"avc1") {
         // Visual sample entry: width/height are 16-bit at payload offsets 24/26,
         // and the avcC follows the 78-byte fixed part.
-        let (Ok(width), Ok(height)) = (be16(avc1, 24), be16(avc1, 26)) else {
+        let (Some(width), Some(height)) = (be_u16(avc1, 24), be_u16(avc1, 26)) else {
             return String::new();
         };
         let Some(avcc) = avc1.get(78..).and_then(|c| find_box(c, b"avcC")) else {
@@ -2069,7 +2070,7 @@ fn selection_params(entries: &[u8]) -> String {
     }
     if let Some(mp4a) = find_box(entries, b"mp4a") {
         // Audio sample entry: channel count at 16, sample rate as 16.16 at 24.
-        let (Ok(channels), Ok(rate)) = (be16(mp4a, 16), be32(mp4a, 24)) else {
+        let (Some(channels), Some(rate)) = (be_u16(mp4a, 16), be_u32(mp4a, 24)) else {
             return String::new();
         };
         return format!(
@@ -2078,12 +2079,6 @@ fn selection_params(entries: &[u8]) -> String {
         );
     }
     String::new()
-}
-
-fn be16(data: &[u8], at: usize) -> Result<u16, G2gError> {
-    data.get(at..at + 2)
-        .map(|b| u16::from_be_bytes([b[0], b[1]]))
-        .ok_or(G2gError::CapsMismatch)
 }
 
 fn accepted_caps() -> Vec<Caps> {

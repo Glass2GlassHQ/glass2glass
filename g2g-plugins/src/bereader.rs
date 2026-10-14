@@ -14,7 +14,6 @@ pub(crate) fn be_u32(data: &[u8], at: usize) -> Option<u32> {
     be_array(data, at).map(u32::from_be_bytes)
 }
 
-#[cfg(feature = "std")]
 pub(crate) fn be_u64(data: &[u8], at: usize) -> Option<u64> {
     be_array(data, at).map(u64::from_be_bytes)
 }
