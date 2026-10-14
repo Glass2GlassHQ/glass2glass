@@ -181,19 +181,18 @@ impl St2110JxsDepacketizer {
     /// we do not implement), in which case the packet is dropped. A new timestamp
     /// arriving mid-frame discards the (incomplete) previous frame.
     pub fn depacketize(&mut self, packet: &[u8]) -> Option<St2110JxsFrame> {
-        if packet.len() < RTP_HEADER_LEN + JXS_HEADER_LEN || packet[0] & 0xC0 != 0x80 {
-            return None;
-        }
-        let marker = packet[1] & 0x80 != 0;
-        let rtp_timestamp = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+        let parsed = RtpHeader::parse(packet)?;
+        let marker = parsed.header.marker;
+        let rtp_timestamp = parsed.header.timestamp;
+        let rtp_payload = &packet[parsed.payload_offset..][..parsed.payload_len];
 
         // RFC 9134 payload header: reject slice mode (K=1), which we do not implement.
-        let hdr = &packet[RTP_HEADER_LEN..RTP_HEADER_LEN + JXS_HEADER_LEN];
+        let hdr = rtp_payload.get(..JXS_HEADER_LEN)?;
         let k = hdr[0] & 0x40 != 0;
         if k {
             return None;
         }
-        let payload = &packet[RTP_HEADER_LEN + JXS_HEADER_LEN..];
+        let payload = &rtp_payload[JXS_HEADER_LEN..];
 
         // A new frame's timestamp before the previous frame's marker means the marker
         // packet was lost: drop the stale partial rather than run two frames together.
@@ -235,6 +234,20 @@ mod tests {
     /// A deterministic pseudo-codestream of `len` distinct bytes.
     fn codestream(len: usize) -> Vec<u8> {
         (0..len).map(|i| (i * 31 + 7) as u8).collect()
+    }
+
+    #[test]
+    fn depacketizes_past_csrcs_extension_and_padding() {
+        let cs = codestream(1000);
+        let mut tx =
+            St2110JxsPacketizer::new(96, 0x4A58_5300, RTP_HEADER_LEN + JXS_HEADER_LEN + 300);
+        let mut rx = St2110JxsDepacketizer::new(cs.len());
+        let done = tx
+            .packetize(&cs, 0)
+            .iter()
+            .filter_map(|p| rx.depacketize(&crate::st2110video::with_csrc_extension_and_padding(p)))
+            .last();
+        assert_eq!(done.expect("frame completes").codestream, cs);
     }
 
     #[test]

@@ -175,17 +175,11 @@ impl St2110AudioDepacketizer {
     /// or `None` if it is too short or the payload is not a whole number of
     /// sample-frames.
     pub fn depacketize(&self, packet: &[u8]) -> Option<St2110AudioPacket> {
-        if packet.len() < RTP_HEADER_LEN {
-            return None;
-        }
-        // Only version 2 with no CSRC list / extension (what we send / -30 uses).
-        if packet[0] & 0xc0 != 0x80 {
-            return None;
-        }
-        let sequence = u16::from_be_bytes([packet[2], packet[3]]);
-        let rtp_timestamp = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+        let parsed = RtpHeader::parse(packet)?;
+        let sequence = parsed.header.sequence;
+        let rtp_timestamp = parsed.header.timestamp;
 
-        let payload = &packet[RTP_HEADER_LEN..];
+        let payload = &packet[parsed.payload_offset..][..parsed.payload_len];
         let sample_bytes = self.depth.bytes();
         let frame_bytes = sample_bytes * usize::from(self.channels);
         // A partial sample-frame is malformed; reject rather than mis-deinterleave.
@@ -251,6 +245,16 @@ mod tests {
             out.extend_from_slice(&p.samples);
         }
         assert_eq!(out, input, "L24 PCM survives the round trip, sign-extended");
+    }
+
+    #[test]
+    fn depacketizes_past_csrcs_extension_and_padding() {
+        let mut tx = St2110AudioPacketizer::new(96, 1, RATE, 2, SampleDepth::L16, FRAMES_PER_PKT);
+        let rx = St2110AudioDepacketizer::new(2, SampleDepth::L16);
+        let input = stereo(FRAMES_PER_PKT);
+        let packets = tx.packetize(&input, 0);
+        let shaped = crate::st2110video::with_csrc_extension_and_padding(&packets[0]);
+        assert_eq!(rx.depacketize(&shaped).unwrap().samples, input);
     }
 
     #[test]

@@ -266,13 +266,14 @@ impl St2110AncDepacketizer {
     /// declared Length overruns the buffer, or any ANC packet fails parity /
     /// checksum validation.
     pub fn depacketize(&self, packet: &[u8]) -> Option<St2110AncFrame> {
-        if packet.len() < RTP_HEADER_LEN + ANC_HEADER_LEN || packet[0] & 0xC0 != 0x80 {
+        let parsed = RtpHeader::parse(packet)?;
+        let seq_lo = parsed.header.sequence;
+        let rtp_timestamp = parsed.header.timestamp;
+
+        let hdr = &packet[parsed.payload_offset..][..parsed.payload_len];
+        if hdr.len() < ANC_HEADER_LEN {
             return None;
         }
-        let seq_lo = u16::from_be_bytes([packet[2], packet[3]]);
-        let rtp_timestamp = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
-
-        let hdr = &packet[RTP_HEADER_LEN..];
         let seq_hi = u16::from_be_bytes([hdr[0], hdr[1]]);
         let length = usize::from(u16::from_be_bytes([hdr[2], hdr[3]]));
         let anc_count = hdr[4];
@@ -413,6 +414,16 @@ mod tests {
 
         let mut r = BitReader::new(&bytes);
         assert_eq!(AncPacket::decode(&mut r), Some(pkt));
+    }
+
+    #[test]
+    fn depacketizes_past_csrcs_extension_and_padding() {
+        let mut tx = St2110AncPacketizer::new(100, 0xABCD);
+        let packets = vec![AncPacket::generic(0x61, 0x01, vec![0x01, 0x02, 0x03])];
+        let rtp = tx.packetize(&packets, 0, AncField::Progressive);
+        let shaped = crate::st2110video::with_csrc_extension_and_padding(&rtp);
+        let frame = St2110AncDepacketizer::new().depacketize(&shaped);
+        assert_eq!(frame.expect("valid ANC frame").packets, packets);
     }
 
     #[test]

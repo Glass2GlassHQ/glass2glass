@@ -413,14 +413,15 @@ impl St2110VideoDepacketizer {
     /// malformed (too short, wrong version, or an SRD that would write out of
     /// bounds), in which case the packet is dropped.
     pub fn depacketize(&mut self, packet: &[u8]) -> Option<St2110VideoFrame> {
-        if packet.len() < RTP_HEADER_LEN + EXT_SEQ_LEN || packet[0] & 0xC0 != 0x80 {
-            return None;
-        }
-        let marker = packet[1] & 0x80 != 0;
-        let rtp_timestamp = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+        let parsed = RtpHeader::parse(packet)?;
+        let marker = parsed.header.marker;
+        let rtp_timestamp = parsed.header.timestamp;
 
         // Payload: Extended Sequence Number, then the SRD headers, then sample data.
-        let payload = &packet[RTP_HEADER_LEN..];
+        let payload = &packet[parsed.payload_offset..][..parsed.payload_len];
+        if payload.len() < EXT_SEQ_LEN {
+            return None;
+        }
         let mut hi = EXT_SEQ_LEN; // header cursor
         let opg = self.layout.sampling.octets_per_group();
         let ppg = self.layout.sampling.pixels_per_group();
@@ -471,6 +472,25 @@ impl St2110VideoDepacketizer {
     }
 }
 
+/// `packet` as a real sender may shape it: one CSRC, a one-word RFC 8285
+/// extension and four bytes of padding around the same payload.
+#[cfg(test)]
+pub(crate) fn with_csrc_extension_and_padding(packet: &[u8]) -> Vec<u8> {
+    const PADDING_FLAG: u8 = 0x20;
+    const EXTENSION_FLAG: u8 = 0x10;
+    const ONE_CSRC: u8 = 1;
+    const CSRC: [u8; 4] = [0xC5, 0xC5, 0xC5, 0xC5];
+    const EXTENSION: [u8; 8] = [0xBE, 0xDE, 0x00, 0x01, 0x10, 0xAA, 0x00, 0x00];
+    const PADDING: [u8; 4] = [0, 0, 0, 4];
+    let mut out = packet[..RTP_HEADER_LEN].to_vec();
+    out[0] |= PADDING_FLAG | EXTENSION_FLAG | ONE_CSRC;
+    out.extend_from_slice(&CSRC);
+    out.extend_from_slice(&EXTENSION);
+    out.extend_from_slice(&packet[RTP_HEADER_LEN..]);
+    out.extend_from_slice(&PADDING);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,6 +498,20 @@ mod tests {
     /// A deterministic packed frame of `stride*height` bytes with distinct values.
     fn ramp(len: usize) -> Vec<u8> {
         (0..len).map(|i| (i * 7 + 3) as u8).collect()
+    }
+
+    #[test]
+    fn depacketizes_past_csrcs_extension_and_padding() {
+        let (w, h) = (8usize, 4usize);
+        let frame = ramp(w * 4 * h);
+        let mut tx = St2110VideoPacketizer::new(96, 0xF00D, Sampling::Rgba8, 1400);
+        let packets = tx.packetize(&frame, w, h, 0).expect("packetizes");
+        let mut rx = St2110VideoDepacketizer::new(RawVideoFormat::Rgba8, w, h).unwrap();
+        let done = packets
+            .iter()
+            .filter_map(|p| rx.depacketize(&with_csrc_extension_and_padding(p)))
+            .last();
+        assert_eq!(done.expect("frame completes").bytes, frame);
     }
 
     #[test]
