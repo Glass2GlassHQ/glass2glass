@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1425: g2g-core tests share one recording sink and one counting sink.
 - M1424: one Vulkan bitstream buffer constructor serves the one-shot and streaming decode paths.
 - M1423: the re-framing parser converts AVCC input in the framer's buffer instead of copying it twice.
 - M1422: h265parse and the Vulkan decoder share one walk of the H.265 SPS between the conformance window and the VUI.

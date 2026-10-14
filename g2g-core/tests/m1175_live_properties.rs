@@ -9,6 +9,10 @@
 //! element's own verdict comes back and that the stream is unchanged by them.
 #![cfg(all(feature = "std", feature = "runtime", feature = "multi-thread"))]
 
+#[path = "common/recording_sink.rs"]
+mod recording_sink;
+use recording_sink::mark_of;
+
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
@@ -66,13 +70,6 @@ fn frame(sequence: u64) -> PipelinePacket {
         },
         sequence,
     ))
-}
-
-fn mark_of(frame: &Frame) -> u8 {
-    match &frame.domain {
-        MemoryDomain::System(s) => s.as_slice()[0],
-        other => panic!("unexpected frame domain {other:?}"),
-    }
 }
 
 /// Emits frames until it reaches `frames` or the driver raises `stop`, then

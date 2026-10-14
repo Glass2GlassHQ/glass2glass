@@ -9,6 +9,10 @@
 //! recorded says which elements were in the stream and when.
 #![cfg(all(feature = "std", feature = "runtime", feature = "multi-thread"))]
 
+#[path = "common/recording_sink.rs"]
+mod recording_sink;
+use recording_sink::{Record, RecordingSink};
+
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
@@ -137,13 +141,6 @@ fn frame(sequence: u64, mark: u8) -> PipelinePacket {
         },
         sequence,
     ))
-}
-
-fn mark_of(frame: &Frame) -> u8 {
-    match &frame.domain {
-        MemoryDomain::System(s) => s.as_slice()[0],
-        other => panic!("unexpected frame domain {other:?}"),
-    }
 }
 
 /// Emits frames stamped `mark` until it reaches `frames` or the driver raises
@@ -494,70 +491,6 @@ impl MultiInputElement for PassMux {
     }
 }
 
-/// What a sink saw, in order: each frame's sequence and mark, the frame
-/// position of each `CapsChanged`, and how many ends of stream.
-#[derive(Default, Debug)]
-struct Record {
-    frames: Vec<(u64, u8)>,
-    caps: Vec<(usize, Caps)>,
-    eos_count: usize,
-}
-
-impl Record {
-    fn marks(&self) -> Vec<u8> {
-        self.frames.iter().map(|&(_, m)| m).collect()
-    }
-}
-
-/// Records every packet and accepts the formats in `accepts`, which is what
-/// the runner's downstream-feasibility snapshot is built from.
-struct RecordingSink {
-    record: Arc<Mutex<Record>>,
-    accepts: Vec<Caps>,
-}
-
-impl AsyncElement for RecordingSink {
-    type ProcessFuture<'a>
-        = core::future::Ready<Result<(), G2gError>>
-    where
-        Self: 'a;
-
-    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
-        if self.accepts.contains(upstream) {
-            Ok(upstream.clone())
-        } else {
-            Err(G2gError::CapsMismatch)
-        }
-    }
-    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::from_alternatives(self.accepts.clone()))
-    }
-    fn configure_pipeline(&mut self, caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if self.accepts.contains(caps) {
-            Ok(ConfigureOutcome::Accepted)
-        } else {
-            Err(G2gError::CapsMismatch)
-        }
-    }
-    fn process<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-        _out: &'a mut dyn OutputSink,
-    ) -> Self::ProcessFuture<'a> {
-        let mut record = self.record.lock().unwrap();
-        match packet {
-            PipelinePacket::DataFrame(f) => record.frames.push((f.sequence, mark_of(&f))),
-            PipelinePacket::CapsChanged(caps) => {
-                let at = record.frames.len();
-                record.caps.push((at, caps));
-            }
-            PipelinePacket::Eos => record.eos_count += 1,
-            _ => {}
-        }
-        core::future::ready(Ok(()))
-    }
-}
-
 /// Yields once, re-waking immediately, so a test task can let the run future
 /// make progress between checks.
 struct Yield(bool);
@@ -623,6 +556,7 @@ fn recording_sink(record: &Arc<Mutex<Record>>) -> GraphNode {
     GraphNode::element(RecordingSink {
         record: Arc::clone(record),
         accepts: vec![i420()],
+        pace: None,
     })
 }
 
@@ -631,6 +565,7 @@ fn sink_element(record: &Arc<Mutex<Record>>) -> Box<dyn DynAsyncElement> {
     Box::new(RecordingSink {
         record: Arc::clone(record),
         accepts: vec![i420()],
+        pace: None,
     })
 }
 

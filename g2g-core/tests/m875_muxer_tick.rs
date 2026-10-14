@@ -18,6 +18,10 @@
 //! isolates the arm's busy-path deadline check).
 #![cfg(all(feature = "std", feature = "runtime"))]
 
+#[path = "common/count_sink.rs"]
+mod count_sink;
+use count_sink::CountSink;
+
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
@@ -31,8 +35,8 @@ use g2g_core::runtime::{
     block_on, run_graph, run_muxer_sink, DynSourceLoop, GraphNodeRef, SourceLoop,
 };
 use g2g_core::{
-    AsyncClock, AsyncElement, Caps, ConfigureOutcome, Dim, DynAsyncClock, Frame, FrameTiming,
-    G2gError, Graph, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    AsyncClock, Caps, ConfigureOutcome, Dim, DynAsyncClock, Frame, FrameTiming, G2gError, Graph,
+    OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 const TICK_NS: u64 = 33_000_000;
@@ -379,38 +383,6 @@ impl MultiInputElement for ZohMux {
             }
             Ok(())
         })
-    }
-}
-
-/// Counts the merged frames that reach the end of the pipeline.
-#[derive(Default)]
-struct CountSink {
-    frames: u64,
-}
-
-impl AsyncElement for CountSink {
-    type ProcessFuture<'a>
-        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
-    where
-        Self: 'a;
-
-    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
-        Ok(upstream.clone())
-    }
-
-    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        Ok(ConfigureOutcome::Accepted)
-    }
-
-    fn process<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-        _out: &'a mut dyn OutputSink,
-    ) -> Self::ProcessFuture<'a> {
-        if matches!(packet, PipelinePacket::DataFrame(_)) {
-            self.frames += 1;
-        }
-        Box::pin(core::future::ready(Ok(())))
     }
 }
 

@@ -28,37 +28,10 @@ Highest leverage first:
 
 ## Code audit: bugs, hot paths, duplication
 
-Codecs and parsers:
-
-- `vulkanvideo` `submit_idr_decode_into` creates a bitstream buffer per call.
-- h265parse and vulkanvideo walk the H.265 SPS middle (sub-layer ordering to
-  long-term refs) separately.
-- The reframing path copies AVCC input twice (convert, then append to the framer).
-
-Audio:
-
-- `st2110audiortp` uses `AudioFormat::bytes_per_sample`.
-
-Network:
-
 - ST 2110-20 at 1080p60 cannot meet its pacing schedule: one loopback `send` costs
   about 5.5 us. Send each pacing slot with UDP GSO or `sendmmsg`.
-
-Shared helpers, sites skipped while another change owned the file:
-
-- Q16 framerate math: `rtspsrc`, `avi` gcd, `ivfdemux`, `h264parse`/`h265parse`,
-  `ffmpegdec`, `ffmpegenc`/`nvenc` `>>16`, `st2110*`, `wgpucompositor`, `sdp`, `deinterlace`.
-- ns to tick math: `tsmux`, `tsmuxn`, `tsdemux`, `rtcp`, `dashsrc`, `avf`, `st2110audiortp`.
-- `cuda.rs` and `nvenc.rs` declare CUDA driver calls outside `cuda_driver_ffi`.
-- `aacparse` and `st2110anc` keep their own MSB-first bit readers.
-- `rtcp`, `moqtsink`, `mp4box` keep big-endian reader copies.
-- Collecting test sinks: `aacparse`, `h264parse`, `h265parse`, `tensorconvert`,
-  `ivfdemux`, `sampleaesdecrypt`, `subpictureoverlay` in src, about 60 integration
-  test files, and g2g-core/tests.
-- `tests/m559_wgpu_dmabuf_export.rs` header says the element frees each handle after
-  export, it now recycles a ring of four.
-- `dmabufmap::require_readable_domain` is unused under `st2110,pipewire,std`.
-- `mfencode` has three redundant `interlace: _, ..` patterns clippy flags on Windows.
+- Clippy for `aarch64-linux-android` flags `missing_const_for_thread_local` in
+  g2g-core `runtime/parse_scope.rs`.
 
 ## Architecture guarantees (validation-first)
 

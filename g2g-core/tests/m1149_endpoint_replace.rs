@@ -15,6 +15,10 @@
 //! every case and through the thread-per-arm runner in the `threaded` module.
 #![cfg(all(feature = "std", feature = "runtime"))]
 
+#[path = "common/recording_sink.rs"]
+mod recording_sink;
+use recording_sink::mark_of;
+
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
@@ -83,13 +87,6 @@ fn frame(sequence: u64, mark: u8, pts_ns: u64) -> PipelinePacket {
         },
         sequence,
     ))
-}
-
-fn mark_of(frame: &Frame) -> u8 {
-    match &frame.domain {
-        MemoryDomain::System(s) => s.as_slice()[0],
-        other => panic!("unexpected frame domain {other:?}"),
-    }
 }
 
 /// Emits frames until the driver stops it, then `Eos`. Every frame carries this
