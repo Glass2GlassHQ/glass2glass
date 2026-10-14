@@ -244,7 +244,16 @@ pub mod gpu;
 pub mod gpudevice;
 
 // EGL displays are process-wide: a test terminating one breaks another test's GL context mid-use
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(
+    test,
+    any(
+        feature = "wgpu-sink",
+        all(
+            target_os = "linux",
+            any(feature = "cuda", feature = "vaapi", feature = "gl-sink")
+        )
+    )
+))]
 pub(crate) static EGL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 // Re-export wgpu so a downstream consumer (a viewer wiring g2g's GPU-texture
 // decode into its renderer) can name `wgpu::Texture` / build on a shared device
