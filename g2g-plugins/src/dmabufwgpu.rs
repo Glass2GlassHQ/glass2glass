@@ -26,6 +26,7 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::time::{Duration, Instant};
@@ -109,11 +110,22 @@ pub struct DmaBufImporter {
     /// carries a sync fd (see [`OwnedDmaBuf::sync_fd`]) and reused, with the
     /// device it lives on so it can be destroyed on drop.
     semaphore: Option<(vk::Semaphore, wgpu::Device)>,
+    /// Buffers already imported, by the dma-buf's inode and the imported size,
+    /// so a producer pool handing its buffers round imports each once.
+    imports: Vec<((u64, u64), wgpu::Buffer)>,
 }
+
+/// How many imported buffers a [`DmaBufImporter`] keeps. A dma-buf it has not
+/// seen once this many are held means the producer's pool changed, so the
+/// cache starts over.
+const MAX_CACHED_IMPORTS: usize = 16;
 
 impl DmaBufImporter {
     pub const fn new() -> Self {
-        Self { semaphore: None }
+        Self {
+            semaphore: None,
+            imports: Vec::new(),
+        }
     }
 
     /// Import the first `size` bytes of `dmabuf` into a `wgpu::Buffer` on `device`
@@ -132,10 +144,21 @@ impl DmaBufImporter {
         size: u64,
     ) -> Result<wgpu::Buffer, G2gError> {
         self.await_producer(device, dmabuf).await?;
+        // SAFETY: the fd is a live dma-buf owned by `dmabuf` for this call.
+        let fd = unsafe { BorrowedFd::borrow_raw(dmabuf.as_raw()) };
+        let key = (dmabuf_inode(fd)?, size);
+        if let Some((_, buffer)) = self.imports.iter().find(|(known, _)| *known == key) {
+            return Ok(buffer.clone());
+        }
         // SAFETY: `device` carries VK_EXT_external_memory_dma_buf; the fd is a
         // live dma-buf owned by `dmabuf` for this call and is duplicated before
         // Vulkan takes ownership.
-        unsafe { import_dmabuf(device, dmabuf.as_raw(), size) }
+        let buffer = unsafe { import_dmabuf(device, dmabuf.as_raw(), size)? };
+        if self.imports.len() >= MAX_CACHED_IMPORTS {
+            self.imports.clear();
+        }
+        self.imports.push((key, buffer.clone()));
+        Ok(buffer)
     }
 
     /// Cross-process GPU sync: if the producer attached a timeline semaphore
@@ -182,6 +205,14 @@ impl DmaBufImporter {
             tokio::task::yield_now().await;
         }
     }
+}
+
+/// The inode of the dma-buf behind `fd`: every fd of one buffer shares it, and
+/// it is not reused while an import holds the buffer open.
+fn dmabuf_inode(fd: BorrowedFd<'_>) -> Result<u64, G2gError> {
+    use std::os::unix::fs::MetadataExt;
+    let file = std::fs::File::from(fd.try_clone_to_owned().map_err(|_| gpu_err())?);
+    Ok(file.metadata().map_err(|_| gpu_err())?.ino())
 }
 
 impl Drop for DmaBufImporter {

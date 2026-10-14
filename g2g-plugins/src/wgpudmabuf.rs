@@ -29,12 +29,14 @@
 //!
 //! # Lifetime
 //!
-//! An exported dma-buf fd is an *independent* reference to the underlying buffer
-//! (standard dma-buf refcounting), so once the fd is exported the element frees
-//! its own Vulkan handles immediately and the buffer stays alive through the fd
-//! (and, once `DmaBufSink` sends it, through the receiver's `SCM_RIGHTS` dup).
-//! This is validated end-to-end (export -> free -> re-import on a second device ->
-//! read back) in `wgpu_dmabuf_roundtrip`.
+//! The exportable buffers form a ring of [`EXPORT_RING_SLOTS`], allocated and
+//! exported once and copied into in turn, so a consumer that caches imports by
+//! dma-buf (as [`DmaBufImporter`](crate::dmabufwgpu::DmaBufImporter) does) binds
+//! each one once. Every frame carries its own dup of the slot's fd, an
+//! independent reference to the buffer (standard dma-buf refcounting), which
+//! stays valid after the element drops the ring. A consumer holding a frame
+//! while [`EXPORT_RING_SLOTS`] newer ones are exported sees its pixels
+//! overwritten.
 //!
 //! # Synchronisation
 //!
@@ -50,9 +52,7 @@
 //! attaches the semaphore fd + value to the emitted dma-buf ([`OwnedDmaBuf::with_sync`]).
 //! A sem-aware [`DmaBufToWgpu`](crate::dmabufwgpu::DmaBufToWgpu) imports the semaphore
 //! and host-waits each value before reading, so the wait moves to the consumer and
-//! the producer pipelines ahead. The exportable copy buffers are reclaimed lazily
-//! once the timeline counter passes their value (a non-blocking poll), so nothing
-//! stalls yet no buffer is freed while its copy is still in flight. Leave the mode
+//! the producer pipelines ahead. Leave the mode
 //! off if the dma-buf may be consumed by something that does not honour the
 //! semaphore. Cross-device / cross-process timeline share is validated on the RTX
 //! 3060 (`dmabuf_timeline_probe`, `m562_dmabuf_semaphore_sync`).
@@ -86,6 +86,17 @@ use crate::wgpubuffer::{whole_word_size, PlainWgpuBuffer};
 
 fn gpu_err() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
+}
+
+/// How many exportable buffers the element copies frames into in turn.
+pub const EXPORT_RING_SLOTS: usize = 4;
+
+/// One exportable buffer of the ring and the dma-buf fd exported from its
+/// memory, which each frame gets a dup of.
+#[derive(Debug)]
+struct ExportSlot {
+    buffer: wgpu::Buffer,
+    fd: OwnedFd,
 }
 
 fn supported(format: RawVideoFormat) -> bool {
@@ -171,12 +182,11 @@ pub struct WgpuToDmaBuf {
     sync_fd: Option<SyncFd>,
     /// Monotonic timeline value; frame N signals `signal_value` = N.
     signal_value: u64,
-    /// Exportable `dst` buffers whose copy submit may still be in flight, with the
-    /// timeline value that retires them. Freed lazily once the semaphore counter
-    /// passes their value (a non-blocking poll), so the element never stalls on the
-    /// copy yet never frees a buffer the GPU is still reading (only in semaphore
-    /// mode; the poll(Wait) path frees `dst` inline).
-    pending: alloc::vec::Vec<(u64, wgpu::Buffer)>,
+    /// The exportable buffers, all `ring_size` bytes, and the slot the next
+    /// frame is copied into.
+    ring: alloc::vec::Vec<ExportSlot>,
+    ring_size: u64,
+    next_slot: usize,
 }
 
 impl Default for WgpuToDmaBuf {
@@ -199,7 +209,9 @@ impl WgpuToDmaBuf {
             semaphore: None,
             sync_fd: None,
             signal_value: 0,
-            pending: alloc::vec::Vec::new(),
+            ring: alloc::vec::Vec::new(),
+            ring_size: 0,
+            next_slot: 0,
         }
     }
 
@@ -322,24 +334,31 @@ impl WgpuToDmaBuf {
         Ok(())
     }
 
-    /// Free any pending exportable buffer whose copy submit has retired (the
-    /// timeline counter reached its signalled value). Non-blocking: the element
-    /// never stalls on the copy, it just reclaims buffers a frame or two later.
-    fn reap_retired(&mut self) {
-        let Some(sem) = self.semaphore else { return };
-        let Some(device) = self.device.as_ref() else {
-            return;
-        };
-        // SAFETY: `sem` is a live timeline semaphore on `device`; reading its
-        // counter is a non-blocking query.
-        let counter = unsafe {
+    /// The ring slot the next frame of `size` bytes is copied into, allocated
+    /// and exported on first use. A new size waits out the copies in flight and
+    /// starts a new ring.
+    fn next_export_slot(&mut self, size: u64) -> Result<&ExportSlot, G2gError> {
+        let device = self.device.as_ref().ok_or_else(gpu_err)?;
+        if size != self.ring_size {
             device
-                .as_hal::<wgpu_hal::api::Vulkan>()
-                .and_then(|hal| hal.raw_device().get_semaphore_counter_value(sem).ok())
-        };
-        let Some(counter) = counter else { return };
-        // A copy signalling `value` has retired once the counter reaches `value`.
-        self.pending.retain(|(value, _)| *value > counter);
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .map_err(|_| gpu_err())?;
+            self.ring.clear();
+            self.ring_size = size;
+            self.next_slot = 0;
+        }
+        let index = self.next_slot;
+        self.next_slot = (index + 1) % EXPORT_RING_SLOTS;
+        if index == self.ring.len() {
+            // SAFETY: `device` carries the dma-buf export extensions (checked in
+            // `adopt_device`).
+            let (buffer, fd) = unsafe { create_exportable(device, size)? };
+            self.ring.push(ExportSlot { buffer, fd });
+        }
+        Ok(&self.ring[index])
     }
 }
 
@@ -348,16 +367,16 @@ impl Drop for WgpuToDmaBuf {
         let Some(device) = self.device.as_ref() else {
             return;
         };
-        // Any in-flight copy must finish before we free its `dst` and destroy the
+        // Any in-flight copy must finish before we free its buffer and destroy the
         // semaphore it signals. A blocking poll is fine here (shutdown, not the hot
-        // path). Then the pending buffers drop (freeing their Vulkan handles; the
-        // exported dma-buf fds keep the memory alive for consumers) and the
-        // timeline semaphore is destroyed.
+        // path). Then the ring drops (freeing its Vulkan handles; the exported
+        // dma-buf fds keep the memory alive for consumers) and the timeline
+        // semaphore is destroyed.
         let _ = device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
         });
-        self.pending.clear();
+        self.ring.clear();
         if let Some(sem) = self.semaphore.take() {
             // SAFETY: the semaphore was created on this device; after the wait above
             // no submission still references it, so destroying it is legal.
@@ -471,24 +490,22 @@ impl AsyncElement for WgpuToDmaBuf {
                         None
                     };
 
+                    let slot = self.next_export_slot(size)?;
+                    let frame_fd = slot.fd.try_clone().map_err(|_| gpu_err())?;
+                    let dst = slot.buffer.clone();
                     let device = self.device.as_ref().unwrap();
                     let queue = self.queue.as_ref().unwrap();
-                    // SAFETY: `device` carries the dma-buf export extensions; `src`
-                    // is a live buffer on `device` of at least `size` bytes; `sync`,
-                    // when set, names this device's timeline semaphore.
-                    let (fd, dst) = unsafe { export_copy(device, queue, src, size, sync)? };
+                    // SAFETY: `src` and `dst` are live buffers on `device` of at
+                    // least `size` bytes; `sync`, when set, names this device's
+                    // timeline semaphore.
+                    unsafe { copy_to_export(device, queue, src, &dst, size, sync)? };
 
-                    // SAFETY: `fd` is a fresh dma-buf fd owned by this process;
-                    // OwnedDmaBuf closes it once on drop.
-                    let mut dmabuf = unsafe { OwnedDmaBuf::from_raw(fd, stride, offset) };
+                    // SAFETY: `frame_fd` is a dup of the slot's dma-buf fd owned by
+                    // this process; OwnedDmaBuf closes it once on drop.
+                    let mut dmabuf =
+                        unsafe { OwnedDmaBuf::from_raw(frame_fd.into_raw_fd(), stride, offset) };
                     if let (Some(sf), Some((_, value))) = (&self.sync_fd, sync) {
                         dmabuf = dmabuf.with_sync(sf.clone(), value);
-                    }
-                    if let Some(dst) = dst {
-                        // Keep the exportable buffer alive until its copy retires,
-                        // then free lazily (no stall). See `pending`.
-                        self.pending.push((self.signal_value, dst));
-                        self.reap_retired();
                     }
                     let mut out_frame = frame;
                     out_frame.domain = MemoryDomain::DmaBuf(dmabuf);
@@ -615,35 +632,17 @@ fn find_memory_type(
     })
 }
 
-/// Allocate an exportable `size`-byte Vulkan buffer, copy `src` into it on the
-/// GPU, and export the backing memory as a dma-buf fd.
-///
-/// Synchronisation depends on `sync`:
-/// - `None`: block on `device.poll(Wait)` until the copy finishes, then free the
-///   exportable `dst` buffer inline and return `(fd, None)`. A consumer may read
-///   the dma-buf immediately.
-/// - `Some((sem, value))`: inject a timeline signal of `value` on `sem` into the
-///   copy submit and return without waiting, handing `dst` back as `(fd, Some(dst))`
-///   so the caller keeps it alive until the copy retires (freeing it while the
-///   submit is in flight would be a GPU use-after-free). The consumer host-waits
-///   `value` on the imported semaphore before reading.
-///
-/// In both cases the exported dma-buf fd is an independent reference to the
-/// underlying memory, so freeing `dst` later does not invalidate it.
+/// Allocate an exportable `size`-byte Vulkan buffer and export its backing
+/// memory as a dma-buf fd. The exported fd is an independent reference to the
+/// memory, so it stays valid after the buffer drops.
 ///
 /// # Safety
 /// `device` must be a Vulkan-backend wgpu device carrying
-/// `VK_KHR_external_memory_fd` + `VK_EXT_external_memory_dma_buf` (and
-/// `VK_KHR_external_semaphore_fd` when `sync` is set), and `src` a live buffer on
-/// it of at least `size` bytes with `COPY_SRC` usage; `sem` (when set) is a
-/// timeline semaphore on `device`.
-unsafe fn export_copy(
+/// `VK_KHR_external_memory_fd` + `VK_EXT_external_memory_dma_buf`.
+unsafe fn create_exportable(
     device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    src: &wgpu::Buffer,
     size: u64,
-    sync: Option<(vk::Semaphore, u64)>,
-) -> Result<(i32, Option<wgpu::Buffer>), G2gError> {
+) -> Result<(wgpu::Buffer, OwnedFd), G2gError> {
     // Create the exportable Vulkan buffer + dedicated exported memory, and export
     // its fd, all through the raw device.
     let (vk_buffer, vk_memory, fd) = {
@@ -724,14 +723,14 @@ unsafe fn export_copy(
     // SAFETY: `fd` is a fresh dma-buf fd just exported and owned by this process.
     let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
-    // Wrap the exportable buffer as wgpu (which takes ownership of the raw handles
-    // and frees them on drop) and copy the input into it on the GPU.
+    // Wrap the exportable buffer as wgpu, which takes ownership of the raw
+    // handles and frees them on drop.
     // SAFETY: `vk_buffer` is bound to `vk_memory` at offset 0 for `size` bytes and
     // we relinquish the raw handles to wgpu here.
     let hal_buffer =
         unsafe { wgpu_hal::vulkan::Buffer::from_raw_managed(vk_buffer, vk_memory, 0, size) };
     // SAFETY: `hal_buffer` was produced from this device's hal.
-    let dst = unsafe {
+    let buffer = unsafe {
         device.create_buffer_from_hal::<wgpu_hal::api::Vulkan>(
             hal_buffer,
             &wgpu::BufferDescriptor {
@@ -744,22 +743,43 @@ unsafe fn export_copy(
             },
         )
     };
-    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    enc.copy_buffer_to_buffer(src, 0, &dst, 0, size);
+    Ok((buffer, owned_fd))
+}
 
-    let kept = match sync {
+/// Copy `size` bytes of `src` into the exportable `dst` on the GPU.
+///
+/// Synchronisation depends on `sync`:
+/// - `None`: block on `device.poll(Wait)` until the copy finishes, so a
+///   consumer may read the dma-buf immediately.
+/// - `Some((sem, value))`: inject a timeline signal of `value` on `sem` into the
+///   copy submit and return without waiting. The consumer host-waits `value`
+///   on the imported semaphore before reading.
+///
+/// # Safety
+/// `device` must be a Vulkan-backend wgpu device (carrying
+/// `VK_KHR_external_semaphore_fd` when `sync` is set), `src` and `dst` live
+/// buffers on it of at least `size` bytes, and `sem` (when set) a timeline
+/// semaphore on `device`.
+unsafe fn copy_to_export(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    src: &wgpu::Buffer,
+    dst: &wgpu::Buffer,
+    size: u64,
+    sync: Option<(vk::Semaphore, u64)>,
+) -> Result<(), G2gError> {
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    enc.copy_buffer_to_buffer(src, 0, dst, 0, size);
+    match sync {
         Some((sem, value)) => {
             // Zero-stall: inject a timeline signal of `value` on the copy submit so
             // the consumer can order its read after the copy on the GPU timeline,
-            // and return WITHOUT blocking. `dst` is handed back to the caller, which
-            // frees it only once the copy retires (freeing it now, mid-flight, would
-            // be a GPU use-after-free).
+            // and return WITHOUT blocking.
             // SAFETY: `queue` is this device's live Vulkan queue; `sem` is a timeline
             // semaphore on the device, signalled by the submit below.
             let hal_q = unsafe { queue.as_hal::<wgpu_hal::api::Vulkan>() }.ok_or_else(gpu_err)?;
             hal_q.add_signal_semaphore(sem, Some(value));
             queue.submit([enc.finish()]);
-            Some(dst)
         }
         None => {
             queue.submit([enc.finish()]);
@@ -770,13 +790,117 @@ unsafe fn export_copy(
                     timeout: None,
                 })
                 .map_err(|_| gpu_err())?;
-            // Drop the wgpu wrapper: wgpu frees vk_buffer + vk_memory. The exported
-            // dma-buf fd remains a valid, independent reference to the memory.
-            drop(dst);
-            None
         }
-    };
+    }
+    Ok(())
+}
 
-    // Hand the fd out (into_raw_fd; the returned i32 is owned by the caller).
-    Ok((owned_fd.into_raw_fd(), kept))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dmabufwgpu::{create_import_device, DmaBufImporter};
+    use crate::testutil::CollectSink;
+    use g2g_core::frame::Frame;
+    use g2g_core::FrameTiming;
+    use std::os::fd::BorrowedFd;
+    use std::os::unix::fs::MetadataExt;
+
+    const SIDE: u32 = 4;
+    const BYTES_PER_PIXEL: u32 = 4;
+
+    fn inode(dmabuf: &OwnedDmaBuf) -> u64 {
+        // SAFETY: the fd is owned by `dmabuf`, alive for this call.
+        let fd = unsafe { BorrowedFd::borrow_raw(dmabuf.as_raw()) };
+        std::fs::File::from(fd.try_clone_to_owned().unwrap())
+            .metadata()
+            .unwrap()
+            .ino()
+    }
+
+    /// The ring hands its slots round, and an importer binds a returning slot
+    /// from its cache.
+    #[test]
+    fn exports_cycle_the_ring_and_reimports_hit_the_cache() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut export = WgpuToDmaBuf::new();
+            let Ok((device, queue)) = export.gpu().await else {
+                std::eprintln!("skip: no Vulkan export device");
+                return;
+            };
+            let size = (SIDE * SIDE * BYTES_PER_PIXEL) as usize;
+            let src = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("export-src"),
+                size: size as u64,
+                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let caps = Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                width: Dim::Fixed(SIDE),
+                height: Dim::Fixed(SIDE),
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            };
+            export.configure_pipeline(&caps).unwrap();
+            let mut sink = CollectSink::default();
+            for _ in 0..=EXPORT_RING_SLOTS {
+                let domain = MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(
+                    &device,
+                    &queue,
+                    src.clone(),
+                    size,
+                ));
+                let frame = Frame::new(domain, FrameTiming::default(), 0);
+                export
+                    .process(PipelinePacket::DataFrame(frame), &mut sink)
+                    .await
+                    .unwrap();
+            }
+            let dmabufs: alloc::vec::Vec<&OwnedDmaBuf> = sink
+                .packets
+                .iter()
+                .filter_map(|packet| match packet {
+                    PipelinePacket::DataFrame(Frame {
+                        domain: MemoryDomain::DmaBuf(dmabuf),
+                        ..
+                    }) => Some(dmabuf),
+                    _ => None,
+                })
+                .collect();
+            let inodes: alloc::vec::Vec<u64> = dmabufs.iter().map(|d| inode(d)).collect();
+            assert_eq!(
+                inodes[0], inodes[EXPORT_RING_SLOTS],
+                "the first slot comes round"
+            );
+            let mut ring = inodes[..EXPORT_RING_SLOTS].to_vec();
+            ring.sort_unstable();
+            ring.dedup();
+            assert_eq!(ring.len(), EXPORT_RING_SLOTS, "each slot is its own buffer");
+
+            let Ok((import_device, _)) = create_import_device().await else {
+                std::eprintln!("skip: no Vulkan import device");
+                return;
+            };
+            let mut importer = DmaBufImporter::new();
+            let first = importer
+                .import(&import_device, dmabufs[0], size as u64)
+                .await;
+            let Ok(first) = first else {
+                std::eprintln!("skip: dma-buf import unsupported on this driver");
+                return;
+            };
+            let again = importer
+                .import(&import_device, dmabufs[EXPORT_RING_SLOTS], size as u64)
+                .await
+                .unwrap();
+            assert!(
+                first == again,
+                "the returning slot is served from the cache"
+            );
+        });
+    }
 }

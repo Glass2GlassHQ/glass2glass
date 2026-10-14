@@ -45,7 +45,6 @@ Codecs and parsers:
 
 Raw video and GPU:
 
-- `dmabufwgpu` and `wgpudmabuf` create Vulkan buffers per frame.
 - Compositor scaled blends divide per pixel. Share videoscale's axis tables.
 - `waylandsink` has its own NV12 to XRGB converter and three frame passes.
 - NV12 plane geometry is derived by hand in kmssink, waylandsink, videoflip,
