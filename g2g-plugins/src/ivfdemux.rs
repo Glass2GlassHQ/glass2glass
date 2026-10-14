@@ -10,6 +10,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -138,7 +139,8 @@ impl IvfDemux {
             // Frames per second = rate / scale (the IVF timebase is scale / rate
             // seconds). Emit a concrete framerate so a fixed-rate downstream can
             // fixate the caps.
-            let fps_q16 = ((u64::from(header.rate) << 16) / u64::from(header.scale)) as u32;
+            let fps_q16 = framerate_q16_from_fraction(header.rate, header.scale)
+                .ok_or(G2gError::CapsMismatch)?;
             out.push(PipelinePacket::CapsChanged(Caps::CompressedVideo {
                 codec: header.codec,
                 width: Dim::Fixed(header.width),

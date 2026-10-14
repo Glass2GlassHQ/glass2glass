@@ -26,6 +26,7 @@ use alloc::vec::Vec;
 #[cfg(any(test, all(target_arch = "wasm32", feature = "web-codecs")))]
 use alloc::string::String;
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::{Colorimetry, PropKind, PropertySpec, VideoCodec};
 
 use crate::access_unit::StartCodeRole;
@@ -391,11 +392,7 @@ fn parse_vui_framerate(
     }
     let num_units_in_tick = br.read_bits(32)?;
     let time_scale = br.read_bits(32)?;
-    if num_units_in_tick == 0 {
-        return None;
-    }
-    let q16 = ((time_scale as u64) << 16) / (num_units_in_tick as u64);
-    u32::try_from(q16).ok()
+    framerate_q16_from_fraction(time_scale, num_units_in_tick)
 }
 
 /// Skip `scaling_list_data()` (H.265 7.3.4): 4 size classes x 6 matrices (2 for

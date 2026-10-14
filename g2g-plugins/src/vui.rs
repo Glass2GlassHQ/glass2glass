@@ -1,3 +1,4 @@
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::Colorimetry;
 
 use crate::annexb::BitReader;
@@ -125,10 +126,10 @@ fn walk_h264_vui_tail(br: &mut BitReader, tail: &mut H264VuiTail) -> Option<()> 
         let num_units_in_tick = br.read_bits(32)?;
         let time_scale = br.read_bits(32)?;
         br.read_bit()?; // fixed_frame_rate_flag
-        if num_units_in_tick != 0 {
-            let q16 = (u64::from(time_scale) << 16) / (2 * u64::from(num_units_in_tick));
-            tail.framerate = u32::try_from(q16).ok();
-        }
+                        // H.264 counts field ticks, two per frame
+        tail.framerate = num_units_in_tick
+            .checked_mul(2)
+            .and_then(|frame_ticks| framerate_q16_from_fraction(time_scale, frame_ticks));
     }
     // Either HRD block sizes the pic_timing delays and sets CpbDpbDelaysPresentFlag.
     let mut pic_timing = PicTimingContext::default();

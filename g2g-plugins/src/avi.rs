@@ -24,6 +24,7 @@
 
 use alloc::vec::Vec;
 
+use g2g_core::caps::greatest_common_divisor;
 use g2g_core::{AudioFormat, G2gError, Tag, TagList, VideoCodec};
 
 use crate::riff::{
@@ -917,7 +918,7 @@ const BITMAPINFO_BIT_COUNT: u16 = 24;
 /// the fractions they are (40 ms -> 1/25).
 fn frame_rate_fraction(period_ns: u64) -> (u32, u32) {
     let period = period_ns.clamp(1, NANOS_PER_SECOND);
-    let divisor = gcd(period, NANOS_PER_SECOND);
+    let divisor = greatest_common_divisor(period, NANOS_PER_SECOND);
     (
         (period / divisor) as u32,
         (NANOS_PER_SECOND / divisor) as u32,
@@ -930,16 +931,6 @@ fn samples_per_frame(period_ns: u64, sample_rate: u32) -> u32 {
     let samples = (period_ns as u128 * sample_rate as u128 + (NANOS_PER_SECOND as u128 / 2))
         / NANOS_PER_SECOND as u128;
     u32::try_from(samples).unwrap_or(u32::MAX).max(1)
-}
-
-fn gcd(a: u64, b: u64) -> u64 {
-    let (mut a, mut b) = (a, b);
-    while b != 0 {
-        let r = a % b;
-        a = b;
-        b = r;
-    }
-    a.max(1)
 }
 
 #[cfg(test)]

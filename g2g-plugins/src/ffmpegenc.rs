@@ -72,6 +72,7 @@ use ffmpeg::Error as FfError;
 use ffmpeg::Rational;
 use ffmpeg_next as ffmpeg;
 
+use g2g_core::caps::framerate_q16_to_fraction;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ColorRange, Colorimetry, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
@@ -85,6 +86,8 @@ const DEFAULT_BITRATE_BPS: usize = 4_000_000;
 /// Default GOP length (frames between IDRs) when framerate is unknown. One IDR
 /// per ~2 seconds at 30 fps; a network sink also forces IDRs on demand (PLI).
 const DEFAULT_GOP: u32 = 60;
+
+const DEFAULT_FRAMERATE: (u32, u32) = (30, 1);
 
 /// libavcodec H.264 encoder backend. The element shape (raw video in, H.264
 /// Annex-B out) is identical; only the encoder opened changes.
@@ -316,12 +319,12 @@ impl FfmpegH264Enc {
         }
     }
 
-    /// Frames per second from the negotiated framerate, defaulting to 30 when
-    /// unspecified. The framerate is a Q16.16 fixed-point value.
-    fn fps(&self) -> u32 {
+    /// Frames per second as `(num, den)` from the negotiated framerate,
+    /// defaulting to 30/1 when unspecified.
+    fn framerate_fraction(&self) -> (u32, u32) {
         match self.framerate {
-            Rate::Fixed(q16) => (q16 >> 16).max(1),
-            _ => 30,
+            Rate::Fixed(q16) if q16 > 0 => framerate_q16_to_fraction(q16),
+            _ => DEFAULT_FRAMERATE,
         }
     }
 
@@ -367,7 +370,9 @@ impl FfmpegH264Enc {
             }
         }
 
-        let fps = self.fps();
+        let (fps_num, fps_den) = self.framerate_fraction();
+        let fps_num = i32::try_from(fps_num).map_err(|_| G2gError::CapsMismatch)?;
+        let fps_den = i32::try_from(fps_den).map_err(|_| G2gError::CapsMismatch)?;
         // Allocate the context *with* the codec so its AVClass defaults apply.
         // A codec-less `encoder::new()` leaves the generic legacy AVCodecContext
         // defaults (`qmin=2`, `qmax=31`, `max_qdiff=3`, `qcompress=0.5`,
@@ -386,8 +391,8 @@ impl FfmpegH264Enc {
         video.set_format(pixel);
         // time_base = 1/fps, so a frame's PTS is just its index; frame_rate lets
         // the encoder pace its rate control.
-        video.set_time_base(Rational::new(1, fps as i32));
-        video.set_frame_rate(Some(Rational::new(fps as i32, 1)));
+        video.set_time_base(Rational::new(fps_den, fps_num));
+        video.set_frame_rate(Some(Rational::new(fps_num, fps_den)));
         video.set_bit_rate(self.bitrate_bps);
         video.set_max_bit_rate(self.bitrate_bps);
         video.set_gop(DEFAULT_GOP);

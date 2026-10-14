@@ -871,7 +871,7 @@ pub fn framerate_q16_from_fraction(num: u32, den: u32) -> Option<u32> {
 }
 
 pub fn framerate_q16_to_fraction(q16: u32) -> (u32, u32) {
-    let divisor = greatest_common_divisor(q16, Q16_DENOMINATOR);
+    let divisor = greatest_common_divisor(u64::from(q16), u64::from(Q16_DENOMINATOR)) as u32;
     (q16 / divisor, Q16_DENOMINATOR / divisor)
 }
 
@@ -880,7 +880,7 @@ pub fn framerate_q16_period_ns(q16: u32) -> Option<u64> {
     (crate::time::NANOS_PER_SECOND << Q16_FRACTION_BITS).checked_div(u64::from(q16))
 }
 
-fn greatest_common_divisor(mut a: u32, mut b: u32) -> u32 {
+pub fn greatest_common_divisor(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
         (a, b) = (b, a % b);
     }

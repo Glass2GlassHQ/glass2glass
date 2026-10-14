@@ -229,16 +229,6 @@ impl VrxValidator {
     }
 }
 
-/// The frame period in nanoseconds for a whole-fps rate (`0` yields `0`, meaning
-/// "unknown / do not pace").
-pub fn frame_period_ns(fps: u32) -> u64 {
-    if fps == 0 {
-        0
-    } else {
-        1_000_000_000u64 / u64::from(fps)
-    }
-}
-
 // The socket-bound realization of a schedule. Needs std threads, so it is behind
 // the `st2110` feature, the schedule math above stays sans-IO in the no_std baseline.
 #[cfg(feature = "st2110")]
@@ -335,10 +325,12 @@ pub use send::PacedSender;
 mod tests {
     use super::*;
 
+    const PERIOD_50_FPS_NS: u64 = 20_000_000;
+
     #[test]
     fn linear_spreads_evenly_across_the_period() {
         // 5 packets over a 20 ms (50 fps) period: 4 gaps of 5 ms; last lands at 20 ms.
-        let period = frame_period_ns(50);
+        let period = PERIOD_50_FPS_NS;
         let p = Pacer::new(PacingProfile::Linear, 5, period);
         assert_eq!(p.interval_ns(), 5_000_000);
         assert_eq!(p.offset_ns(0), 0);
@@ -349,7 +341,7 @@ mod tests {
     fn gapped_leaves_the_blanking_interval_idle() {
         // Gapped packs into the active 1080/1125 of the period, so the interval is
         // shorter than linear (the same packets finish before the frame boundary).
-        let period = frame_period_ns(50);
+        let period = PERIOD_50_FPS_NS;
         let lin = Pacer::new(PacingProfile::Linear, 100, period);
         let gap = Pacer::new(PacingProfile::Gapped, 100, period);
         assert!(
@@ -363,7 +355,7 @@ mod tests {
     #[test]
     fn conforms_accepts_on_time_and_late_but_rejects_bunched() {
         // 5 packets over 20 ms = 4 gaps of 5 ms.
-        let p = Pacer::new(PacingProfile::Linear, 5, frame_period_ns(50));
+        let p = Pacer::new(PacingProfile::Linear, 5, PERIOD_50_FPS_NS);
         assert_eq!(p.interval_ns(), 5_000_000);
         // Exactly on schedule.
         assert!(p.conforms(&[0, 5_000_000, 10_000_000, 15_000_000, 20_000_000], 0));
@@ -377,7 +369,7 @@ mod tests {
 
     #[test]
     fn single_packet_frame_does_not_divide_by_zero() {
-        let p = Pacer::new(PacingProfile::Linear, 1, frame_period_ns(60));
+        let p = Pacer::new(PacingProfile::Linear, 1, PERIOD_50_FPS_NS);
         assert_eq!(p.offset_ns(0), 0);
         assert!(p.conforms(&[0], 0));
     }
@@ -386,7 +378,7 @@ mod tests {
     fn vrx_a_perfectly_paced_frame_conforms_with_a_tiny_buffer() {
         // A sender emitting exactly on the pacer's schedule keeps the VRX at the one
         // packet of head start, so it conforms even to a 1-packet buffer.
-        let pacer = Pacer::new(PacingProfile::Linear, 100, frame_period_ns(50));
+        let pacer = Pacer::new(PacingProfile::Linear, 100, PERIOD_50_FPS_NS);
         let offsets: alloc::vec::Vec<u64> = (0..100).map(|i| pacer.offset_ns(i)).collect();
         let vrx = VrxValidator::for_pacer(&pacer, 1);
         let report = vrx.evaluate(&offsets);
@@ -404,7 +396,7 @@ mod tests {
         // The whole frame sent at t=0 fills the buffer to the packet count, far past a
         // narrow buffer: no packet is late (they all arrive early), but the buffer
         // overruns, which is exactly the -21 non-conformance a burst causes.
-        let pacer = Pacer::new(PacingProfile::Linear, 100, frame_period_ns(50));
+        let pacer = Pacer::new(PacingProfile::Linear, 100, PERIOD_50_FPS_NS);
         let burst = alloc::vec![0u64; 100];
         let vrx = VrxValidator::for_pacer(&pacer, 8);
         let report = vrx.evaluate(&burst);
@@ -428,7 +420,7 @@ mod tests {
     fn vrx_a_late_packet_starves_the_receiver() {
         // Packets on schedule except the last, delayed well past its read deadline: the
         // receiver would starve, so the run does not conform even with a huge buffer.
-        let pacer = Pacer::new(PacingProfile::Linear, 5, frame_period_ns(50)); // 5 ms TRS
+        let pacer = Pacer::new(PacingProfile::Linear, 5, PERIOD_50_FPS_NS); // 5 ms TRS
         let mut offsets: alloc::vec::Vec<u64> = (0..5).map(|i| pacer.offset_ns(i)).collect();
         *offsets.last_mut().unwrap() += 100_000_000; // 100 ms late
         let vrx = VrxValidator::for_pacer(&pacer, 1000);

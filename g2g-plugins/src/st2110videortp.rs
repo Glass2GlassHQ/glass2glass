@@ -26,6 +26,7 @@ use alloc::vec::Vec;
 use std::net::UdpSocket;
 use std::time::Duration;
 
+use g2g_core::caps::{framerate_q16_from_fraction, framerate_q16_period_ns};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
@@ -38,19 +39,19 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110dup::spawn_rtp_receiver;
-use crate::st2110pacing::{frame_period_ns, PacedSender, Pacer, PacingProfile};
+use crate::st2110pacing::{PacedSender, Pacer, PacingProfile};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
 use crate::st2110video::{Sampling, St2110VideoDepacketizer, St2110VideoPacketizer};
 use g2g_core::caps_parse::parse_raw_format;
 
-/// The whole-fps rate from a `Caps::RawVideo` framerate (`Rate::Fixed` is fps << 16),
-/// or 0 if not fixed (do not pace).
-fn caps_fps(caps: &Caps) -> u32 {
+/// The frame period from a `Caps::RawVideo` framerate, or 0 if not fixed (do
+/// not pace).
+fn caps_frame_period_ns(caps: &Caps) -> u64 {
     match caps {
         Caps::RawVideo {
-            framerate: Rate::Fixed(q),
+            framerate: Rate::Fixed(q16),
             ..
-        } => q >> 16,
+        } => framerate_q16_period_ns(*q16).unwrap_or(0),
         _ => 0,
     }
 }
@@ -190,7 +191,7 @@ impl AsyncElement for St2110VideoSink {
         self.width = width;
         self.height = height;
         self.sampling = Some(sampling);
-        self.frame_period_ns = frame_period_ns(caps_fps(absolute_caps));
+        self.frame_period_ns = caps_frame_period_ns(absolute_caps);
         self.packetizer = Some(St2110VideoPacketizer::new(
             self.payload_type,
             self.ssrc,
@@ -488,15 +489,17 @@ impl St2110VideoSrc {
         true
     }
 
-    fn caps(&self) -> Caps {
-        Caps::RawVideo {
+    fn caps(&self) -> Result<Caps, G2gError> {
+        let framerate_q16 =
+            framerate_q16_from_fraction(self.framerate_fps, 1).ok_or(G2gError::CapsMismatch)?;
+        Ok(Caps::RawVideo {
             format: self.format,
             width: Dim::Fixed(self.width as u32),
             height: Dim::Fixed(self.height as u32),
-            framerate: Rate::Fixed(self.framerate_fps << 16),
+            framerate: Rate::Fixed(framerate_q16),
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        }
+        })
     }
 }
 
@@ -511,7 +514,7 @@ impl SourceLoop for St2110VideoSrc {
         Self: 'a;
 
     fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
-        ready(Ok(self.caps()))
+        ready(self.caps())
     }
 
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

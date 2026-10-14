@@ -69,6 +69,7 @@ use alloc::vec::Vec;
 
 use alloc::sync::Arc;
 
+use g2g_core::caps::framerate_q16_to_fraction;
 use g2g_core::memory::{CudaKeepAlive, DomainSet, MemoryDomainKind, OwnedCudaBuffer};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
@@ -79,6 +80,7 @@ use g2g_core::{
 /// Default constant target bitrate (bits/second). 4 Mbps, a 1080p30 default that
 /// matches [`crate::ffmpegenc`].
 const DEFAULT_BITRATE_BPS: u32 = 4_000_000;
+const DEFAULT_FRAMERATE: (u32, u32) = (30, 1);
 /// Default GOP: negative means infinite, so IDRs are emitted only on demand (the
 /// low-latency live model). gst-nvcodec spells the same knob `gop-size`.
 const DEFAULT_GOP_SIZE: i32 = -1;
@@ -358,11 +360,12 @@ impl NvEnc {
         }
     }
 
-    /// Frames per second from the negotiated framerate (Q16.16), defaulting to 30.
-    fn fps(&self) -> u32 {
+    /// Frames per second as `(num, den)` from the negotiated framerate,
+    /// defaulting to 30/1.
+    fn framerate_fraction(&self) -> (u32, u32) {
         match self.framerate {
-            Rate::Fixed(q16) => (q16 >> 16).max(1),
-            _ => 30,
+            Rate::Fixed(q16) if q16 > 0 => framerate_q16_to_fraction(q16),
+            _ => DEFAULT_FRAMERATE,
         }
     }
 
@@ -542,8 +545,7 @@ impl NvEnc {
         init.encode_height = self.height;
         init.dar_width = self.width;
         init.dar_height = self.height;
-        init.frame_rate_num = self.fps();
-        init.frame_rate_den = 1;
+        (init.frame_rate_num, init.frame_rate_den) = self.framerate_fraction();
         init.enable_ptd = 1; // let NVENC decide picture types (we force IDRs per-pic)
         init.tuning_info = ffi::NV_ENC_TUNING_INFO_LOW_LATENCY;
         init.encode_config = config;

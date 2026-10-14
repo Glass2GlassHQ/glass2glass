@@ -41,6 +41,7 @@ use futures_util::StreamExt;
 use retina::client::{Described, PlayOptions, Session, SessionGroup, SessionOptions, SetupOptions};
 use retina::codec::{CodecItem, FrameFormat, ParametersRef, VideoParameters};
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
@@ -956,22 +957,12 @@ pub(crate) fn caps_from_video_params(params: Option<&VideoParameters>) -> Option
 
 /// Convert retina's `(numerator, denominator)` representation of frame
 /// duration into our Q16-fps `Rate`. retina returns frame duration in
-/// seconds (eg `(1, 15)` → 1/15 s per frame → 15 fps), so the Q16 fps
-/// value is `(denominator << 16) / numerator`. We compute in `u64` to
-/// keep the shift from overflowing for large denominators (eg NTSC's
-/// `30000/1001` representation).
+/// seconds (eg `(1, 15)` → 1/15 s per frame → 15 fps), so the fps is
+/// `denominator / numerator`.
 fn rate_from_frame_rate(frame_rate: Option<(u32, u32)>) -> Rate {
-    match frame_rate {
-        Some((num, denom)) if num > 0 => {
-            let q16 = (u64::from(denom) << 16) / u64::from(num);
-            if q16 <= u64::from(u32::MAX) {
-                Rate::Fixed(q16 as u32)
-            } else {
-                Rate::Any
-            }
-        }
-        _ => Rate::Any,
-    }
+    frame_rate
+        .and_then(|(num, denom)| framerate_q16_from_fraction(denom, num))
+        .map_or(Rate::Any, Rate::Fixed)
 }
 
 #[cfg(test)]

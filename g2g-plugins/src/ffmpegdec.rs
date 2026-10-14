@@ -117,6 +117,7 @@ use ffmpeg::Error as FfError;
 use ffmpeg_next as ffmpeg;
 
 use crate::yuv::downsample_chroma_420;
+use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedCudaBuffer, SystemSlice};
 use g2g_core::meta::FrameMetaSet;
@@ -156,8 +157,6 @@ pub const AUTO_MAX_THREADS: u32 = 0;
 const MAX_DECODE_THREADS: u32 = 256;
 
 const DEFAULT_FRAMERATE_Q16: u32 = 30 << 16;
-
-const NS_PER_SECOND: u64 = 1_000_000_000;
 
 /// Pixel layout emitted on the decoder's output side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -829,13 +828,10 @@ impl FfmpegVideoDec {
             Some(Caps::CompressedVideo {
                 framerate: Rate::Fixed(q16),
                 ..
-            }) => *q16,
+            }) if *q16 > 0 => *q16,
             _ => DEFAULT_FRAMERATE_Q16,
         };
-        if q16 == 0 {
-            return NS_PER_SECOND / (DEFAULT_FRAMERATE_Q16 as u64 >> 16);
-        }
-        (NS_PER_SECOND * 65536 / u64::from(q16)).max(1)
+        framerate_q16_period_ns(q16).expect("q16 is nonzero")
     }
 
     /// Point the codec context's `skip_frame` at the state the budget asks for

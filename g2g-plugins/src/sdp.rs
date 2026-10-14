@@ -20,6 +20,7 @@ use core::num::NonZeroU8;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::{AudioFormat, Caps, Dim, Rate, VideoCodec};
 
 use crate::nalparse::NalCodec;
@@ -341,17 +342,14 @@ fn parse_q16_fps(s: &str) -> Option<u32> {
         Some((w, f)) => (w, f),
         None => (s, ""),
     };
-    let mut q16 = whole.parse::<u32>().ok()?.checked_mul(1 << 16)?;
-    // Fractional digits scaled to 1/65536: 0.97 -> (97 << 16) / 100.
-    let mut num = 0u64;
-    let mut den = 1u64;
+    let whole_q16 = framerate_q16_from_fraction(whole.parse::<u32>().ok()?, 1)?;
+    let mut num = 0u32;
+    let mut den = 1u32;
     for c in frac.chars().take(6) {
-        num = num.checked_mul(10)?.checked_add(c.to_digit(10)? as u64)?;
+        num = num.checked_mul(10)?.checked_add(c.to_digit(10)?)?;
         den = den.checked_mul(10)?;
     }
-    if den > 1 {
-        q16 = q16.checked_add(((num << 16) / den) as u32)?;
-    }
+    let q16 = whole_q16.checked_add(framerate_q16_from_fraction(num, den)?)?;
     (q16 > 0).then_some(q16)
 }
 
