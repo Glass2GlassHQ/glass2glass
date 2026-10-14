@@ -587,6 +587,7 @@ impl Mp4DemuxN {
             .tracks
             .take()
             .expect("tracks set once fragmented is known");
+        let forwarded = self.forwarded_tracks(&tracks);
         let mut off = 0usize;
         let mut consumed = 0usize; // bytes safe to drain (a pending moof is kept)
         let mut frag_start: Option<usize> = None;
@@ -607,11 +608,11 @@ impl Mp4DemuxN {
                     let end = off + size;
                     let samples = self.parse_fragments_in(
                         &self.buf[start..end],
-                        &tracks,
+                        &forwarded,
                         self.drained.saturating_add(start as u64),
                     )?;
                     self.learn_held_fragment(&samples);
-                    self.emit_samples(&tracks, samples, out).await?;
+                    self.emit_samples(&forwarded, samples, out).await?;
                     off = end;
                     consumed = off;
                 }
@@ -676,12 +677,26 @@ impl Mp4DemuxN {
         }
         // A `moof` marks a fragmented / CMAF file; its absence is the classic
         // progressive `moov`+`mdat` layout, walked from the sample tables instead.
+        let forwarded = self.forwarded_tracks(&tracks);
         let samples = if find_box(&self.buf, b"moof").is_some() {
-            self.parse_fragments_in(&self.buf, &tracks, self.drained)?
+            self.parse_fragments_in(&self.buf, &forwarded, self.drained)?
         } else {
-            parse_progressive_multi(&self.buf, &tracks)?
+            parse_progressive_multi(&self.buf, &forwarded)?
         };
-        self.emit_samples(&tracks, samples, out).await
+        self.emit_samples(&forwarded, samples, out).await
+    }
+
+    /// The tracks some port forwards, the only ones worth de-framing.
+    fn forwarded_tracks(&self, tracks: &[TrackHeader]) -> Vec<TrackHeader> {
+        tracks
+            .iter()
+            .filter(|track| {
+                self.ports
+                    .iter()
+                    .any(|port| port.track_id == track.track_id)
+            })
+            .cloned()
+            .collect()
     }
 
     /// Route a parsed sample run to its track's port, each port's opening

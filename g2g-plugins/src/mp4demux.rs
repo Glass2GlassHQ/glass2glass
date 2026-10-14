@@ -220,11 +220,7 @@ impl Mp4Demux {
             .await?;
             self.sequence += 1;
         }
-        let track_id = audio.track_id;
-        for (tid, sample) in parse_progressive_multi(&self.buffer, &tracks)? {
-            if tid != track_id {
-                continue;
-            }
+        for (_, sample) in parse_progressive_multi(&self.buffer, core::slice::from_ref(audio))? {
             // ADTS-frame the raw AAC access unit from the track's ASC, so a decoder
             // starts without the out-of-band config (like the in-band video param
             // sets); a malformed ASC leaves the raw bytes.

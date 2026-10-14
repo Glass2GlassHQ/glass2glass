@@ -1193,7 +1193,7 @@ fn parse_progressive_track(
 }
 
 /// Parse a progressive (`moov`+`mdat`, no `moof`) multi-track file: every A/V /
-/// text track's samples, keyed by `track_ID`, in track order. The progressive analog
+/// text track's samples, keyed by `track_ID`, interleaved in decode-time order. The progressive analog
 /// of [`parse_fragments_multi`] (and the multi-track form of [`parse_progressive`]),
 /// for files that carry several tracks in classic sample-table layout rather than
 /// fragments. Each track's `stbl` is walked independently against its own
@@ -1215,6 +1215,8 @@ pub(crate) fn parse_progressive_multi(
             out.push((track.track_id, s));
         }
     }
+    // Stable, so each track keeps its own sample order.
+    out.sort_by_key(|(_, sample)| sample.dts_ns);
     Ok(out)
 }
 
@@ -2428,6 +2430,8 @@ mod tests {
         assert_eq!(tracks.len(), 2);
         let samples = parse_progressive_multi(&file, &tracks).expect("progressive multi parse");
         assert_eq!(samples.len(), 4, "two video + two audio samples");
+        let order: Vec<u32> = samples.iter().map(|(id, _)| *id).collect();
+        assert_eq!(order, [1, 2, 2, 1], "interleaved by decode time");
 
         let video: Vec<_> = samples.iter().filter(|(id, _)| *id == 1).collect();
         let audio: Vec<_> = samples.iter().filter(|(id, _)| *id == 2).collect();

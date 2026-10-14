@@ -323,45 +323,50 @@ struct Emitted {
     timing: FrameTiming,
 }
 
-/// Walk a parsed file's chunks into emittable frames, reconstructing each
-/// stream's timing from its `strh`. AVI stores chunks in decode order with no
-/// presentation timestamp, so dts equals pts and a stream with B-frames is
-/// reordered by the decoder downstream.
-fn emittable(data: &[u8], file: &AviFile) -> Vec<Emitted> {
+/// Walk a parsed file's chunks of the `selected` streams into emittable frames,
+/// reconstructing each stream's timing from its `strh`. AVI stores chunks in
+/// decode order with no presentation timestamp, so dts equals pts and a stream
+/// with B-frames is reordered by the decoder downstream.
+fn emittable<'a>(
+    data: &'a [u8],
+    file: &'a AviFile,
+    selected: &'a [usize],
+) -> impl Iterator<Item = Emitted> + 'a {
     let mut positions = alloc::vec![0u64; file.streams.len()];
     let mut first = alloc::vec![true; file.streams.len()];
     let param_sets: Vec<Vec<Vec<u8>>> = file.streams.iter().map(config_param_sets).collect();
-    let mut out = Vec::with_capacity(file.chunks.len());
-    for chunk in &file.chunks {
-        let stream = &file.streams[chunk.stream];
-        if matches!(stream.kind, AviStreamKind::Unsupported) {
-            continue;
-        }
-        let bytes = data.get(chunk.body.clone()).unwrap_or_default();
-        let samples = stream.samples_in(bytes.len());
-        let (pts_ns, duration_ns) = stream.timing(positions[chunk.stream], samples);
-        positions[chunk.stream] += samples;
-        let payload = deframe(
-            stream,
-            &param_sets[chunk.stream],
-            bytes,
-            first[chunk.stream],
-        );
-        first[chunk.stream] = false;
-        out.push(Emitted {
-            stream: chunk.stream,
-            data: payload,
-            timing: FrameTiming {
-                pts_ns,
-                dts_ns: pts_ns,
-                duration_ns,
-                capture_ns: pts_ns,
-                keyframe: chunk.keyframe,
-                ..FrameTiming::default()
-            },
-        });
-    }
-    out
+    file.chunks
+        .iter()
+        .filter(move |chunk| {
+            selected.contains(&chunk.stream)
+                && !matches!(file.streams[chunk.stream].kind, AviStreamKind::Unsupported)
+        })
+        .map(move |chunk| {
+            let stream = &file.streams[chunk.stream];
+            let bytes = data.get(chunk.body.clone()).unwrap_or_default();
+            let samples = stream.samples_in(bytes.len());
+            let (pts_ns, duration_ns) = stream.timing(positions[chunk.stream], samples);
+            positions[chunk.stream] += samples;
+            let payload = deframe(
+                stream,
+                &param_sets[chunk.stream],
+                bytes,
+                first[chunk.stream],
+            );
+            first[chunk.stream] = false;
+            Emitted {
+                stream: chunk.stream,
+                data: payload,
+                timing: FrameTiming {
+                    pts_ns,
+                    dts_ns: pts_ns,
+                    duration_ns,
+                    capture_ns: pts_ns,
+                    keyframe: chunk.keyframe,
+                    ..FrameTiming::default()
+                },
+            }
+        })
 }
 
 fn frame_of(data: Vec<u8>, timing: FrameTiming, sequence: u64) -> Frame {
@@ -500,10 +505,7 @@ impl AviDemux {
         }
         let caps = real_caps(&file.streams[selected].kind).ok_or(G2gError::CapsMismatch)?;
         out.push(PipelinePacket::CapsChanged(caps)).await?;
-        for emitted in emittable(&self.buffer, &file) {
-            if emitted.stream != selected {
-                continue;
-            }
+        for emitted in emittable(&self.buffer, &file, &[selected]) {
             let frame = frame_of(emitted.data, emitted.timing, self.sequence);
             self.sequence += 1;
             out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -730,7 +732,7 @@ impl AviDemuxN {
                 .ok_or(G2gError::CapsMismatch)?;
             out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
         }
-        for emitted in emittable(&self.buffer, &file) {
+        for emitted in emittable(&self.buffer, &file, &self.ports) {
             let Some(port) = self.ports.iter().position(|s| *s == emitted.stream) else {
                 continue;
             };
