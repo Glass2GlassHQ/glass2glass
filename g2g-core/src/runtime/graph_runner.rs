@@ -2369,7 +2369,7 @@ fn plan_arms<'a>(
                 demux,
                 io: DemuxArmIo {
                     in_rx: in_rxs.pop().expect("tee input edge"),
-                    out_txs: demux_out_txs_by_port(vg, node, out_txs),
+                    out_txs: out_txs_by_port(vg, node, out_txs),
                     probe: probes[index].clone(),
                     latency: LatencyFold::publisher(latency_fold, node),
                 },
@@ -2396,7 +2396,12 @@ fn plan_arms<'a>(
             (NodeKind::FanoutSrc(_), Some(GraphNodeRef::FanoutSource(source))) => {
                 ArmPlan::FanoutSrc {
                     source,
-                    ports: fanout_src_ports(vg, node, out_txs),
+                    ports: MultiSenderSink::new(
+                        out_txs_by_port(vg, node, out_txs)
+                            .into_iter()
+                            .map(SenderSink::new)
+                            .collect(),
+                    ),
                 }
             }
             _ => return Err(G2gError::CapsMismatch),
@@ -5175,14 +5180,11 @@ fn relay_reverse(pad_rxs: &[(usize, LinkReceiver)], reverse: &[Option<ReverseCha
     }
 }
 
-/// Order a terminal fan-out source's output senders by PORT (out-edges arrive
-/// in edge order; the port is each edge's `src.index`), wrapped as the
-/// [`MultiOutputSink`] the source pushes into.
-/// Order a demux node's output senders by each out-edge's source pad index, so
+/// Order a fan-out node's output senders by each out-edge's source pad index, so
 /// `push_to(port)` reaches the branch linked to that port. Out-edges arrive in
 /// insertion order, which only matches the port order when the graph happened
 /// to be linked port-first (launch lines do, builders need not).
-fn demux_out_txs_by_port<'a>(
+fn out_txs_by_port<'a>(
     vg: &ValidatedGraph<GraphNodeRef<'a>>,
     node: NodeId,
     out_txs: Vec<LinkSender>,
@@ -5195,27 +5197,6 @@ fn demux_out_txs_by_port<'a>(
         .collect();
     indexed.sort_by_key(|(port, _)| *port);
     indexed.into_iter().map(|(_, tx)| tx).collect()
-}
-
-fn fanout_src_ports<'a>(
-    vg: &ValidatedGraph<GraphNodeRef<'a>>,
-    node: NodeId,
-    out_txs: Vec<LinkSender>,
-) -> MultiSenderSink {
-    let mut by_port: Vec<Option<SenderSink>> = (0..out_txs.len()).map(|_| None).collect();
-    for (tx, &oe) in out_txs.into_iter().zip(vg.out_edges(node)) {
-        let port = vg.edge(oe).src.index as usize;
-        if let Some(slot) = by_port.get_mut(port) {
-            *slot = Some(SenderSink::new(tx));
-        }
-    }
-    // D1 validation guarantees each declared port is linked exactly once.
-    MultiSenderSink::new(
-        by_port
-            .into_iter()
-            .map(|s| s.expect("validated: every fan-out port linked"))
-            .collect(),
-    )
 }
 
 /// Drive a terminal fan-out source (a 0-in / N-out [`MultiOutputSource`], e.g.

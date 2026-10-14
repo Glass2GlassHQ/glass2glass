@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1325: fan-out senders are ordered by port in one function.
 - M1324: the two muxer arms share pad-admit, wake and caps-change helpers.
 - M1323: one arm planner feeds the cooperative and threaded graph runners.
 - M1322: fan-in and duplex sinks use the shared sink arm.
