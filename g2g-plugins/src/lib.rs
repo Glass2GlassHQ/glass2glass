@@ -21,9 +21,7 @@ extern crate alloc;
 pub(crate) fn fuzz_block_on<F: core::future::Future>(f: F) -> F::Output {
     use core::task::{Context, Poll, Waker};
     let mut cx = Context::from_waker(Waker::noop());
-    let mut f = f;
-    // SAFETY: `f` is owned here and never moved again before it is dropped.
-    let mut f = unsafe { core::pin::Pin::new_unchecked(&mut f) };
+    let mut f = core::pin::pin!(f);
     loop {
         if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
             return v;
