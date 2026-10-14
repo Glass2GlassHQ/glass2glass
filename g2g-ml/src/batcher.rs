@@ -27,7 +27,7 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, InputAggregator, MemoryDomain,
-    MultiInputElement, OutputSink, PipelinePacket, TensorDType,
+    MultiInputElement, OutputSink, PipelinePacket,
 };
 
 /// # Example
@@ -272,21 +272,14 @@ fn slot_byte_size(slot: &Caps) -> Option<usize> {
     if dims.first() != Some(&1) || dims.contains(&0) {
         return None;
     }
-    let elem = match dtype {
-        TensorDType::F16 => 2usize,
-        TensorDType::F32 => 4,
-        TensorDType::I8 | TensorDType::U8 => 1,
-        // A dtype added since: unknown element size, cannot size the slot.
-        _ => return None,
-    };
     dims.iter()
-        .try_fold(elem, |acc, d| acc.checked_mul(*d as usize))
+        .try_fold(dtype.size(), |acc, d| acc.checked_mul(*d as usize))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::TensorLayout;
+    use g2g_core::{TensorDType, TensorLayout};
 
     fn slot(dims: &[u32]) -> Caps {
         Caps::Tensor {

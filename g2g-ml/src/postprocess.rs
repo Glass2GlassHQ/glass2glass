@@ -14,6 +14,8 @@
 use core::future::Future;
 use core::pin::Pin;
 
+use crate::tensor_bytes::{f32_le_bytes, finite_f32_from_le_bytes};
+
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -141,21 +143,11 @@ impl AsyncElement for TensorPostprocess {
                     let Some(bytes) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    if bytes.is_empty() || bytes.len() % 4 != 0 {
+                    if bytes.is_empty() {
                         return Err(G2gError::CapsMismatch);
                     }
-                    let values: Vec<f32> = bytes
-                        .as_chunks::<4>()
-                        .0
-                        .iter()
-                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                        .collect();
-                    // a model diverged to NaN/inf yields a meaningless class
-                    // (argmax would emit (0, -inf), softmax all-NaN); reject
-                    // loud rather than pass it downstream.
-                    if values.iter().any(|v| !v.is_finite()) {
-                        return Err(G2gError::CapsMismatch);
-                    }
+                    // a model diverged to NaN/inf would make argmax emit (0, -inf) and softmax all NaN
+                    let values = finite_f32_from_le_bytes(bytes)?;
 
                     let (result, new_caps) = match self.op {
                         Op::Softmax => {
@@ -181,10 +173,7 @@ impl AsyncElement for TensorPostprocess {
                             .await?;
                         self.last_caps = Some(new_caps);
                     }
-                    let mut out_bytes = Vec::with_capacity(result.len() * 4);
-                    for v in &result {
-                        out_bytes.extend_from_slice(&v.to_le_bytes());
-                    }
+                    let out_bytes = f32_le_bytes(&result);
                     let out_frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             out_bytes.into_boxed_slice(),

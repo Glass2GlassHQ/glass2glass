@@ -53,9 +53,11 @@ Core, bindings, ML:
 - `wire::encode_packet` starts at zero capacity and copies the payload twice.
 - `ElectedClock::now_ns` locks per read, `pacing::judge` clones `ClockSync` twice.
 - `BlobMeta::get` allocates a `String` per lookup.
-- Frames crossing the plugin ABI always arrive read-only.
-- Dedup in `g2g-ml`: RGBA to NCHW preprocessing, f32 byte conversion, dtype size,
-  the `only-on` gate shared with `g2g-python`.
+- Frames crossing the plugin ABI always arrive read-only. Set an exclusive flag in
+  `FfiFrame.reserved`, which needs a public uniqueness check on `SystemSlice` and a
+  writable foreign variant in g2g-core.
+- Share the `only-on` gate between `ortinfer` and `g2g-python`: it needs a small
+  type next to `frame_carries` in g2g-core.
 - One YUYV to I420 converter for `g2g-mcu` and the plugins.
 
 Containers:

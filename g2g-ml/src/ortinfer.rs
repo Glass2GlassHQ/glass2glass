@@ -36,6 +36,8 @@
 use core::future::Future;
 use core::pin::Pin;
 
+use crate::tensor_bytes::{f32_le_bytes, rgba_to_nchw};
+
 use ::ort::session::Session;
 use ::ort::value::{Tensor, TensorElementType, ValueType};
 
@@ -453,7 +455,7 @@ impl Model {
 
     /// RGBA8 -> normalized f32 NCHW RGB, then run the session.
     fn infer(&mut self, rgba: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
-        let chw = rgba_to_chw(rgba, self.width, self.height)?;
+        let chw = rgba_to_nchw(rgba, self.width, self.height)?;
         self.run_chw(chw)
     }
 
@@ -480,11 +482,7 @@ impl Model {
         let (shape, data) = value.try_extract_tensor::<f32>().map_err(ort_err)?;
 
         let dims: Vec<u32> = shape.iter().map(|d| (*d).max(0) as u32).collect();
-        let mut bytes = Vec::with_capacity(data.len() * 4);
-        for v in data {
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
-        Ok((bytes.into_boxed_slice(), dims))
+        Ok((f32_le_bytes(data).into_boxed_slice(), dims))
     }
 
     /// Feed an already-quantized u8 / i8 NCHW `[1, 3, H, W]` tensor straight to the
@@ -521,11 +519,7 @@ impl Model {
             .ok_or(G2gError::Hardware(HardwareError::Other))?;
         let (out_shape, out_data) = value.try_extract_tensor::<f32>().map_err(ort_err)?;
         let dims: Vec<u32> = out_shape.iter().map(|d| (*d).max(0) as u32).collect();
-        let mut out_bytes = Vec::with_capacity(out_data.len() * 4);
-        for v in out_data {
-            out_bytes.extend_from_slice(&v.to_le_bytes());
-        }
-        Ok((out_bytes.into_boxed_slice(), dims))
+        Ok((f32_le_bytes(out_data).into_boxed_slice(), dims))
     }
 }
 
@@ -826,25 +820,6 @@ impl g2g_core::PadTemplates for OrtInference {
 /// CPU preprocessing every RGBA-fed ORT element shares. Geometry comes from the
 /// model's declared input dims; fold with checked ops so absurd dimensions fail
 /// loud instead of overflowing the length guard or over-allocating.
-pub(crate) fn rgba_to_chw(rgba: &[u8], width: u32, height: u32) -> Result<Vec<f32>, G2gError> {
-    let plane = (width as usize)
-        .checked_mul(height as usize)
-        .ok_or(G2gError::CapsMismatch)?;
-    let needed = plane.checked_mul(4).ok_or(G2gError::CapsMismatch)?;
-    if rgba.len() < needed {
-        return Err(G2gError::CapsMismatch);
-    }
-    let chw_len = plane.checked_mul(3).ok_or(G2gError::CapsMismatch)?;
-    let mut chw = vec![0f32; chw_len];
-    for px in 0..plane {
-        let src = px * 4;
-        chw[px] = rgba[src] as f32 / 255.0;
-        chw[plane + px] = rgba[src + 1] as f32 / 255.0;
-        chw[2 * plane + px] = rgba[src + 2] as f32 / 255.0;
-    }
-    Ok(chw)
-}
-
 /// An already-normalized f32 NCHW `[1, 3, height, width]` tensor's little-endian
 /// bytes -> its values, the tensor-input path's decode.
 pub(crate) fn tensor_bytes_to_chw(

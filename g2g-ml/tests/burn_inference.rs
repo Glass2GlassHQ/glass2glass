@@ -12,7 +12,8 @@ use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, OutputSink, Rate, RawVideoFormat, TensorDType, TensorLayout,
     TensorShape,
 };
-use g2g_ml::burninfer::{gpu_available, normalize_rgba_nchw, BurnInference};
+use g2g_ml::burninfer::{gpu_available, BurnInference};
+use g2g_ml::tensor_bytes::rgba_to_nchw;
 
 const W: u32 = 2;
 const H: u32 = 2;
@@ -75,7 +76,7 @@ fn rgba_frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
 
 /// Reference `input . W + b` on the CPU for the same weights the element uses.
 fn cpu_linear(rgba: &[u8], weights: &[f32], bias: &[f32]) -> Vec<f32> {
-    let flat = normalize_rgba_nchw(rgba, W as usize, H as usize);
+    let flat = rgba_to_nchw(rgba, W, H).unwrap();
     (0..N)
         .map(|n| {
             let dot: f32 = flat

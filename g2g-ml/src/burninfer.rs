@@ -34,22 +34,9 @@ use g2g_core::{
     TensorShape,
 };
 
-type B = Wgpu;
+use crate::tensor_bytes::{f32_le_bytes, rgba_to_nchw};
 
-/// RGBA8 -> normalized f32 NCHW RGB (`value / 255`), flattened in plane order
-/// (R plane, then G, then B). Shared by the element and its test so the linear
-/// layer's input is defined in exactly one place.
-pub fn normalize_rgba_nchw(rgba: &[u8], width: usize, height: usize) -> Vec<f32> {
-    let plane = width * height;
-    let mut flat = vec![0f32; 3 * plane];
-    for px in 0..plane {
-        let src = px * 4;
-        flat[px] = rgba[src] as f32 / 255.0;
-        flat[plane + px] = rgba[src + 1] as f32 / 255.0;
-        flat[2 * plane + px] = rgba[src + 2] as f32 / 255.0;
-    }
-    flat
-}
+type B = Wgpu;
 
 /// A burn `Module` this element can drive: one forward pass from a
 /// `[1, 3, height, width]` NCHW f32 tensor of normalized RGB to `[1, N]` logits.
@@ -211,10 +198,7 @@ impl BurnInference {
     /// little-endian f32 bytes (the `OrtInference` output format).
     fn infer(&self, rgba: &[u8]) -> Result<Box<[u8]>, G2gError> {
         let (w, h) = (self.width as usize, self.height as usize);
-        if rgba.len() < w * h * 4 {
-            return Err(G2gError::CapsMismatch);
-        }
-        let flat = normalize_rgba_nchw(rgba, w, h);
+        let flat = rgba_to_nchw(rgba, self.width, self.height)?;
         let logits = match &self.model {
             Model::Linear(layer) => {
                 let weight = layer.weight_t.as_ref().ok_or(G2gError::NotConfigured)?;
@@ -237,11 +221,7 @@ impl BurnInference {
         if values.len() != self.num_outputs {
             return Err(G2gError::CapsMismatch);
         }
-        let mut bytes = Vec::with_capacity(values.len() * 4);
-        for v in values {
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
-        Ok(bytes.into_boxed_slice())
+        Ok(f32_le_bytes(&values).into_boxed_slice())
     }
 }
 

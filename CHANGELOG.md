@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1372: g2g-ml shares one RGBA-to-NCHW converter and one f32 byte codec, and a short RGBA frame in `burninfer` fails instead of panicking.
 - M1371: `wgpupreprocess` uploads frames without a padded copy, and wgpu readbacks reuse one staging buffer per element.
 - M1370: the C and Python bindings share one bus-message projection and one host-bytes frame view, and Python reports state changes.
 - M1369: `AppSink.pull(timeout_ms=...)` in the Python bindings waits on the channel instead of polling every millisecond.

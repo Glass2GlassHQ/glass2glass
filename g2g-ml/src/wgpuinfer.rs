@@ -59,6 +59,7 @@ use g2g_core::{
     OutputSink, OwnedWgpuBuffer, PipelinePacket, TensorDType, TensorLayout, TensorShape,
 };
 
+use crate::tensor_bytes::f32_le_bytes;
 use crate::wgpu_transfer::ReadbackStaging;
 use crate::wgpupreprocess::WgpuBufferOwner;
 use std::sync::Arc;
@@ -690,15 +691,6 @@ fn optional_bias(
         return Err(G2gError::CapsMismatch);
     }
     Ok(bias)
-}
-
-/// f32 slice as little-endian bytes, for `queue.write_buffer` (no bytemuck dep).
-fn f32_bytes(values: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(values.len() * 4);
-    for v in values {
-        bytes.extend_from_slice(&v.to_le_bytes());
-    }
-    bytes
 }
 
 /// GPU resources built lazily on the first frame, on the device the producer's
@@ -1761,7 +1753,7 @@ impl WgpuInference {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            queue.write_buffer(&weight_buf, 0, &f32_bytes(&self.weights));
+            queue.write_buffer(&weight_buf, 0, &f32_le_bytes(&self.weights));
 
             let bias_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("infer-bias"),
@@ -1769,7 +1761,7 @@ impl WgpuInference {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            queue.write_buffer(&bias_buf, 0, &f32_bytes(&self.bias));
+            queue.write_buffer(&bias_buf, 0, &f32_le_bytes(&self.bias));
             (Some(weight_buf), Some(bias_buf))
         } else {
             (None, None)

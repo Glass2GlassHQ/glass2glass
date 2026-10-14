@@ -17,6 +17,8 @@
 use core::future::Future;
 use core::pin::Pin;
 
+use crate::tensor_bytes::finite_f32_from_le_bytes;
+
 use g2g_core::{
     AnalyticsMeta, AsyncElement, BBox, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
     ObjectDetection, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
@@ -150,20 +152,13 @@ impl DetectionPostprocess {
     /// check instead of panicking (debug) or wrapping to a small value that
     /// would admit a bogus payload.
     fn read_f32(bytes: &[u8], channels: usize, anchors: usize) -> Result<Vec<f32>, G2gError> {
-        let expected = channels.checked_mul(anchors).and_then(|n| n.checked_mul(4));
+        let expected = channels
+            .checked_mul(anchors)
+            .and_then(|n| n.checked_mul(TensorDType::F32.size()));
         if expected != Some(bytes.len()) {
             return Err(G2gError::CapsMismatch);
         }
-        let values: Vec<f32> = bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| f32::from_le_bytes(*c))
-            .collect();
-        if values.iter().any(|v| !v.is_finite()) {
-            return Err(G2gError::CapsMismatch);
-        }
-        Ok(values)
+        finite_f32_from_le_bytes(bytes)
     }
 
     /// Decode a flat channel-major YOLOv8 output tensor `[1, 4 + C, A]` (as f32
@@ -513,6 +508,7 @@ impl g2g_core::PadTemplates for DetectionPostprocess {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tensor_bytes::f32_le_bytes;
     use g2g_core::frame::Frame;
     use g2g_core::memory::{MemoryDomain, SystemSlice};
     use g2g_core::{FrameTiming, PushOutcome, TensorLayout, TensorShape};
@@ -550,12 +546,7 @@ mod tests {
 
     /// Channel-major [1, ch, a] tensor from per-channel rows, as LE f32 bytes.
     fn tensor_frame(channels: &[[f32; 3]]) -> Frame {
-        let mut bytes = Vec::new();
-        for ch in channels {
-            for v in ch {
-                bytes.extend_from_slice(&v.to_le_bytes());
-            }
-        }
+        let bytes = f32_le_bytes(channels.as_flattened());
         Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
             timing: FrameTiming::default(),
@@ -568,12 +559,7 @@ mod tests {
     /// video frame as a `TensorMeta` the way `ortinfer attach-tensor=true`
     /// delivers it.
     fn video_frame_with_tensor(channels: &[[f32; 3]], pixels: usize) -> Frame {
-        let mut bytes = Vec::new();
-        for ch in channels {
-            for v in ch {
-                bytes.extend_from_slice(&v.to_le_bytes());
-            }
-        }
+        let bytes = f32_le_bytes(channels.as_flattened());
         let mut frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(
                 vec![7u8; pixels * 4].into_boxed_slice(),
@@ -600,13 +586,7 @@ mod tests {
 
     /// Channel-major rows as little-endian f32 bytes.
     fn tensor_bytes(channels: &[[f32; 3]]) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        for ch in channels {
-            for v in ch {
-                bytes.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-        bytes
+        f32_le_bytes(channels.as_flattened())
     }
 
     fn rgba_caps(w: u32, h: u32) -> Caps {

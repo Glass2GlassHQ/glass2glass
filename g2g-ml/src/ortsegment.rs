@@ -36,10 +36,11 @@ use g2g_core::{
 };
 
 use crate::ortinfer::{
-    f32_tensor_dims, input_geometry, input_tensor_dims, ort_err, rgba_to_chw, static_output_dims,
+    f32_tensor_dims, input_geometry, input_tensor_dims, ort_err, static_output_dims,
     tensor_bytes_to_chw,
 };
 use crate::segmentation::{decode_instances, SegmentationGeometry, SegmentationThresholds};
+use crate::tensor_bytes::rgba_to_nchw;
 
 /// A loaded segmentation session plus the geometry read off its two outputs.
 /// Separate from the element so the element exists before a model does: a launch
@@ -357,7 +358,7 @@ impl AsyncElement for OrtSegmentation {
                     let chw = if self.tensor_input {
                         tensor_bytes_to_chw(slice, width, height)?
                     } else {
-                        rgba_to_chw(slice, width, height)?
+                        rgba_to_nchw(slice, width, height)?
                     };
                     let thresholds = self.thresholds;
                     let model = self.model.as_mut().ok_or(G2gError::NotConfigured)?;

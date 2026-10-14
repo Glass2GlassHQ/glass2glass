@@ -33,6 +33,8 @@ pub mod batcher;
 // no feature gate.
 pub mod postprocess;
 
+pub mod tensor_bytes;
+
 // Dependency-free safetensors weight reader/writer (M262): import trained
 // weights at runtime into the hand-rolled inference elements without serde or
 // the safetensors crate. Architecture stays compiled; only weights load.
