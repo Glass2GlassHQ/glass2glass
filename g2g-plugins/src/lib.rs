@@ -642,6 +642,17 @@ pub mod mpegaudioparse;
     any(feature = "alsa-sink", feature = "pulse-sink")
 ))]
 mod audioworker;
+// Bounded queue and stamping loop shared by the audio capture sources.
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(feature = "alsa-src", feature = "pulse-src", feature = "pipewire")
+    ),
+    all(target_os = "windows", feature = "wasapi-src"),
+    all(target_os = "macos", feature = "coreaudio"),
+    all(target_os = "android", feature = "aaudio")
+))]
+mod audiocapture;
 // Matroska / WebM demuxer parsing core (no_std): EBML -> Tracks + Cluster frames.
 pub mod matroska;
 // Matroska / WebM demuxer element (no_std): Caps::ByteStream{Matroska} -> one

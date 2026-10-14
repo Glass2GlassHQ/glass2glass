@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1287: audio capture sources share one bounded drop-oldest capture loop with rounded timestamps and clock-sync anchoring.
 - M1286: per-category log overrides cost disabled call sites one atomic load, and sinks write outside the log locks.
 - M1285: a mutable run and `run_linear_chain` drive elements without boxing each packet's future.
 - M1284: `Gate` and `Router` process a packet without a heap allocation.

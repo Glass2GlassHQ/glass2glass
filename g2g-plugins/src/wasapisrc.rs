@@ -32,8 +32,6 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tokio::sync::mpsc;
-
 use windows::Win32::Media::Audio::{
     eCapture, eRender, IAudioCaptureClient, IAudioClient, AUDCLNT_BUFFERFLAGS_SILENT,
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -42,19 +40,23 @@ use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
-    G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec,
+    AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, ElementMetadata,
+    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
+use crate::audiocapture::{
+    capture_queue, run_capture, wait_for_device, CaptureLoopSettings, CaptureSender,
+};
 use crate::wasapipcm::{audio_config_from_format, audio_err, open_endpoint, AudioConfig};
 
 /// Shared-mode endpoint buffer span (100-ns units), 200 ms.
 const BUFFER_DURATION_HNS: i64 = 2_000_000;
+
+// WASAPI failures carry an HRESULT, not an errno, so the ready handshake reports this
+const ENDPOINT_FAILED_CODE: i32 = -1;
 
 /// # Example
 ///
@@ -74,6 +76,7 @@ pub struct WasapiSrc {
     loopback: bool,
     config: Option<AudioConfig>,
     configured: bool,
+    clock_sync: Option<ClockSync>,
 }
 
 impl WasapiSrc {
@@ -85,6 +88,7 @@ impl WasapiSrc {
             loopback: false,
             config: None,
             configured: false,
+            clock_sync: None,
         }
     }
 
@@ -152,6 +156,10 @@ impl SourceLoop for WasapiSrc {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "WASAPI audio capture",
@@ -197,57 +205,32 @@ impl SourceLoop for WasapiSrc {
                 return Err(G2gError::NotConfigured);
             }
             let config = self.config.ok_or(G2gError::NotConfigured)?;
-            let target = self.target_buffers;
             let loopback = self.loopback;
             let device = self.device.clone();
 
             // Worker captures from the endpoint and streams PCM chunks here;
             // a ready signal reports whether the endpoint opened.
-            let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-            let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Result<(), ()>>(1);
+            let (chunk_tx, chunk_rx) = capture_queue(config.block_align)?;
+            let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Result<(), i32>>(1);
             let worker = thread::Builder::new()
                 .name(String::from("g2g-wasapisrc"))
-                .spawn(move || {
-                    capture_worker(&device, config, target, loopback, chunk_tx, ready_tx)
-                })
+                .spawn(move || capture_worker(&device, config, loopback, chunk_tx, ready_tx))
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+            let stop_device = move || {
+                let _ = worker.join();
+            };
 
-            match ready_rx.recv_timeout(Duration::from_secs(5)) {
-                Ok(Ok(())) => {}
-                _ => {
-                    let _ = worker.join();
-                    return Err(G2gError::Hardware(HardwareError::Other));
-                }
+            if wait_for_device(&ready_rx).is_err() {
+                stop_device();
+                return Err(G2gError::Hardware(HardwareError::Other));
             }
-
-            let ns_per_frame = 1_000_000_000u64 / config.sample_rate as u64;
-            let mut total_frames = 0u64;
-            let mut sequence = 0u64;
-            while let Some(bytes) = chunk_rx.recv().await {
-                let frames = (bytes.len() / config.block_align) as u64;
-                let pts_ns = total_frames * ns_per_frame;
-                let duration_ns = frames * ns_per_frame;
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    timing: FrameTiming {
-                        pts_ns,
-                        dts_ns: pts_ns,
-                        duration_ns,
-                        capture_ns: pts_ns,
-                        arrival_ns: g2g_core::metrics::monotonic_ns(),
-                        keyframe: false, // audio: every buffer is independent
-                    },
-                    sequence,
-                    meta: Default::default(),
-                };
-                sequence += 1;
-                total_frames += frames;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
-            }
-
-            let _ = worker.join();
-            out.push(PipelinePacket::Eos).await?;
-            Ok(sequence)
+            let settings = CaptureLoopSettings {
+                log_category: "wasapisrc",
+                sample_rate: config.sample_rate,
+                clock_sync: self.clock_sync.clone(),
+                buffer_limit: self.target_buffers,
+            };
+            run_capture(chunk_rx, settings, out, stop_device).await
         })
     }
 }
@@ -337,37 +320,35 @@ unsafe fn read_mix_format(device: &str, loopback: bool) -> Result<AudioConfig, G
 }
 
 /// Capture worker: open + start the endpoint, then pump captured packets to
-/// `chunk_tx` until `target` buffers are sent or capture fails.
+/// `chunk_tx` until the run loop drops the queue or capture fails.
 fn capture_worker(
     device: &str,
     config: AudioConfig,
-    target: u64,
     loopback: bool,
-    chunk_tx: mpsc::UnboundedSender<Vec<u8>>,
-    ready_tx: std_mpsc::SyncSender<Result<(), ()>>,
+    chunk_tx: CaptureSender,
+    ready_tx: std_mpsc::SyncSender<Result<(), i32>>,
 ) {
     // SAFETY: COM init + capture on this worker thread, balanced below.
     let captured = unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let r = run_capture(device, config, target, loopback, &chunk_tx, &ready_tx);
+        let r = pump_endpoint(device, config, loopback, &chunk_tx, &ready_tx);
         CoUninitialize();
         r
     };
     if captured.is_err() {
         // If we never signalled ready, do so now so `run` stops waiting.
-        let _ = ready_tx.try_send(Err(()));
+        let _ = ready_tx.try_send(Err(ENDPOINT_FAILED_CODE));
     }
 }
 
 /// # Safety
 /// Must run on a COM-initialised thread.
-unsafe fn run_capture(
+unsafe fn pump_endpoint(
     device: &str,
     config: AudioConfig,
-    target: u64,
     loopback: bool,
-    chunk_tx: &mpsc::UnboundedSender<Vec<u8>>,
-    ready_tx: &std_mpsc::SyncSender<Result<(), ()>>,
+    chunk_tx: &CaptureSender,
+    ready_tx: &std_mpsc::SyncSender<Result<(), i32>>,
 ) -> Result<(), G2gError> {
     let dataflow = if loopback { eRender } else { eCapture };
     let stream_flags = if loopback {
@@ -403,8 +384,7 @@ unsafe fn run_capture(
     // truncated (the previous absolute cap stopped all captures at ~5s).
     const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
     let mut deadline = Instant::now() + IDLE_TIMEOUT;
-    let mut emitted = 0u64;
-    while emitted < target {
+    loop {
         if Instant::now() >= deadline {
             break;
         }
@@ -438,10 +418,9 @@ unsafe fn run_capture(
         if frames == 0 {
             continue;
         }
-        if chunk_tx.send(chunk).is_err() {
+        if !chunk_tx.push(chunk) {
             break; // consumer dropped
         }
-        emitted += 1;
         // Progress: the endpoint is live, so push the watchdog forward.
         deadline = Instant::now() + IDLE_TIMEOUT;
     }

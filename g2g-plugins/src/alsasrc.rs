@@ -31,7 +31,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -41,17 +40,18 @@ use alloc::vec::Vec;
 use alsa::pcm::{Access, HwParams, PCM};
 use alsa::{Direction, ValueOr};
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockCandidate, ClockPriority,
-    ClockSync, ConfigureOutcome, DriftClock, DriftObservation, ElementMetadata, FrameTiming,
-    G2gError, HardwareError, LatencyReport, MemoryDomain, MonotonicClock, OutputSink, PadTemplate,
-    PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ClockSync,
+    ConfigureOutcome, DriftClock, DriftObservation, ElementMetadata, G2gError, HardwareError,
+    LatencyReport, MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 use crate::alsapcm::{alsa_params, device_permutation, invert, permute, PcmConfig, FORMATS};
+use crate::audiocapture::{
+    capture_queue, run_capture, wait_for_device, CaptureLoopSettings, CaptureSender,
+};
 use crate::audioconvert::{audio_format_from_str, audio_format_to_str};
 
 /// Ring-buffer span, microseconds (gst `alsasrc buffer-time`).
@@ -296,14 +296,7 @@ impl SourceLoop for AlsaSrc {
                 return Err(G2gError::NotConfigured);
             }
             let cfg = alsa_params(&self.caps()?)?;
-            let frame_bytes = cfg.frame_bytes();
-            if frame_bytes == 0 {
-                return Err(G2gError::CapsMismatch);
-            }
-            let limit = self.num_buffers;
-
-            // Captured periods cross from the blocking worker to here.
-            let (audio_tx, mut audio_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            let (audio_tx, audio_rx) = capture_queue(cfg.frame_bytes())?;
             let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Result<(), i32>>(1);
             let stop = Arc::new(AtomicBool::new(false));
 
@@ -320,70 +313,23 @@ impl SourceLoop for AlsaSrc {
                 })
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
-            // The worker reports whether the device opened; a host with no ALSA
-            // capture device fails loud here rather than pushing silence.
-            let ready = ready_rx.recv_timeout(Duration::from_secs(5));
-            if !matches!(ready, Ok(Ok(()))) {
+            let stop_device = move || {
                 stop.store(true, Ordering::Relaxed);
                 let _ = worker.join();
-                let code = match ready {
-                    Ok(Err(code)) => code,
-                    _ => -1,
-                };
+            };
+            // The worker reports whether the device opened; a host with no ALSA
+            // capture device fails loud here rather than pushing silence.
+            if let Err(code) = wait_for_device(&ready_rx) {
+                stop_device();
                 return Err(G2gError::Hardware(HardwareError::Alsa(code)));
             }
-
-            let mut seq = 0u64;
-            let mut frames_total = 0u64;
-            let mut downstream_open = true;
-            let clock_sync = self.clock_sync.clone();
-            let mut anchor = CaptureAnchor::new();
-            while seq < limit {
-                let Some(bytes) = audio_rx.recv().await else {
-                    break; // worker ended
-                };
-                let n_frames = (bytes.len() / frame_bytes) as u64;
-                if n_frames == 0 {
-                    continue;
-                }
-                let elapsed_ns = frames_total * 1_000_000_000 / u64::from(cfg.rate);
-                let end_ns = (frames_total + n_frames) * 1_000_000_000 / u64::from(cfg.rate);
-                // This period finished capturing when the read returned, so its
-                // own span is the lead the anchor has to walk back.
-                let pts_ns = match &clock_sync {
-                    Some(sync) => anchor.stamp(sync, elapsed_ns, end_ns - elapsed_ns),
-                    None => elapsed_ns,
-                };
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    timing: FrameTiming {
-                        pts_ns,
-                        dts_ns: pts_ns,
-                        duration_ns: end_ns - elapsed_ns,
-                        capture_ns: pts_ns,
-                        arrival_ns: g2g_core::metrics::monotonic_ns(),
-                        keyframe: false, // audio: every buffer is independent
-                    },
-                    sequence: seq,
-                    meta: Default::default(),
-                };
-                if out.push(PipelinePacket::DataFrame(frame)).await.is_err() {
-                    downstream_open = false;
-                    break;
-                }
-                frames_total += n_frames;
-                seq += 1;
-            }
-
-            // Stop the blocking read loop and reap the worker.
-            stop.store(true, Ordering::Relaxed);
-            drop(audio_rx);
-            let _ = worker.join();
-
-            if downstream_open {
-                out.push(PipelinePacket::Eos).await?;
-            }
-            Ok(seq)
+            let settings = CaptureLoopSettings {
+                log_category: "alsasrc",
+                sample_rate: cfg.rate,
+                clock_sync: self.clock_sync.clone(),
+                buffer_limit: self.num_buffers,
+            };
+            run_capture(audio_rx, settings, out, stop_device).await
         })
     }
 }
@@ -457,7 +403,7 @@ fn worker_main(
     device: &str,
     cfg: PcmConfig,
     timing: (u32, u32),
-    audio_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    audio_tx: CaptureSender,
     stop: Arc<AtomicBool>,
     clock: Option<Arc<DriftClock>>,
     ready: std_mpsc::SyncSender<Result<(), i32>>,
@@ -507,7 +453,7 @@ fn worker_main(
             Some(p) => permute(captured, p, sample),
             None => captured.to_vec(),
         };
-        if audio_tx.send(chunk).is_err() {
+        if !audio_tx.push(chunk) {
             break; // consumer dropped
         }
     }

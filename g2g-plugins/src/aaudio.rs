@@ -18,24 +18,28 @@
 use core::ffi::c_void;
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use std::sync::Arc;
 
 use ndk::audio::{
     AudioDirection, AudioError, AudioFormat as NdkAudioFormat, AudioPerformanceMode,
     AudioSharingMode, AudioStream, AudioStreamBuilder,
 };
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
-    G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome,
+    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+
+use crate::audiocapture::{capture_queue, run_capture, CaptureLoopSettings, CaptureSender};
 
 /// Read / write timeout per AAudio call: 1 second in nanoseconds. Long enough to
 /// ride out a scheduling hiccup, short enough that a wedged device surfaces.
@@ -333,6 +337,7 @@ pub struct AAudioSrc {
     stream: Option<AudioStream>,
     caps: Option<Caps>,
     configured: bool,
+    clock_sync: Option<ClockSync>,
 }
 
 // SAFETY: same single-thread-executor contract as `AAudioSink`.
@@ -363,6 +368,7 @@ impl AAudioSrc {
             stream: None,
             caps: None,
             configured: false,
+            clock_sync: None,
         }
     }
 
@@ -429,6 +435,10 @@ impl SourceLoop for AAudioSrc {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         AAUDIOSRC_PROPS
     }
@@ -482,61 +492,74 @@ impl SourceLoop for AAudioSrc {
             };
             let bps = bytes_per_sample(format).ok_or(G2gError::CapsMismatch)?;
             let frame_bytes = bps * channels as usize;
-            let frames_per_buf = (sample_rate as u64 * CAPTURE_MS / 1000).max(1);
-            let ns_per_frame = 1_000_000_000u64 / sample_rate as u64;
-
-            let mut total_frames = 0u64;
-            let mut seq = 0u64;
-            while seq < self.target_buffers {
-                let mut buf = vec![0u8; frames_per_buf as usize * frame_bytes];
-                let got = {
-                    let stream = self.stream.as_ref().ok_or(G2gError::NotConfigured)?;
-                    // SAFETY: `buf` holds `frames_per_buf` frames; the stream is an
-                    // open input stream owned here.
-                    frames_transferred(unsafe {
-                        stream.read(
-                            buf.as_mut_ptr() as *mut c_void,
-                            frames_per_buf as i32,
-                            IO_TIMEOUT_NS,
-                        )
-                    })?
-                };
-                if got == 0 {
-                    continue;
-                }
-                buf.truncate(got as usize * frame_bytes);
-
-                let pts_ns = total_frames * ns_per_frame;
-                let duration_ns = got as u64 * ns_per_frame;
-                #[cfg(feature = "std")]
-                let arrival_ns = g2g_core::metrics::monotonic_ns();
-                #[cfg(not(feature = "std"))]
-                let arrival_ns: u64 = 0;
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
-                    timing: FrameTiming {
-                        pts_ns,
-                        dts_ns: pts_ns,
-                        duration_ns,
-                        capture_ns: pts_ns,
-                        arrival_ns,
-                        keyframe: false,
-                    },
-                    sequence: seq,
-                    meta: Default::default(),
-                };
-                total_frames += got as u64;
-                seq += 1;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
-            }
-
-            if let Some(st) = self.stream.as_ref() {
-                let _ = st.request_stop();
-            }
-            out.push(PipelinePacket::Eos).await?;
-            Ok(seq)
+            let frames_per_read = (sample_rate as u64 * CAPTURE_MS / 1000).max(1) as usize;
+            let stream = CaptureStream(self.stream.take().ok_or(G2gError::NotConfigured)?);
+            let (sender, receiver) = capture_queue(frame_bytes)?;
+            let stop = Arc::new(AtomicBool::new(false));
+            let worker_stop = Arc::clone(&stop);
+            let worker = std::thread::Builder::new()
+                .name(String::from("g2g-aaudiosrc"))
+                .spawn(move || {
+                    read_stream(stream, frames_per_read, frame_bytes, sender, worker_stop)
+                })
+                .map_err(audio_err)?;
+            let stop_device = move || {
+                stop.store(true, Ordering::Relaxed);
+                let _ = worker.join();
+            };
+            let settings = CaptureLoopSettings {
+                log_category: "aaudiosrc",
+                sample_rate,
+                clock_sync: self.clock_sync.clone(),
+                buffer_limit: self.target_buffers,
+            };
+            run_capture(receiver, settings, out, stop_device).await
         })
     }
+}
+
+// an open input stream handed to the capture thread
+struct CaptureStream(AudioStream);
+
+// SAFETY: `run` moves the stream out of the element, so only the capture thread
+// calls into it from then on, and it closes the stream there.
+unsafe impl Send for CaptureStream {}
+
+fn read_stream(
+    stream: CaptureStream,
+    frames_per_read: usize,
+    frame_bytes: usize,
+    sender: CaptureSender,
+    stop: Arc<AtomicBool>,
+) {
+    let stream = stream.0;
+    while !stop.load(Ordering::Relaxed) {
+        let mut buf = vec![0u8; frames_per_read * frame_bytes];
+        // SAFETY: `buf` holds `frames_per_read` frames; the stream is an open
+        // input stream only this thread uses.
+        let read = frames_transferred(unsafe {
+            stream.read(
+                buf.as_mut_ptr() as *mut c_void,
+                frames_per_read as i32,
+                IO_TIMEOUT_NS,
+            )
+        });
+        let frames = match read {
+            Ok(frames) => frames as usize,
+            Err(error) => {
+                sender.fail(error);
+                break;
+            }
+        };
+        if frames == 0 {
+            continue;
+        }
+        buf.truncate(frames * frame_bytes);
+        if !sender.push(buf) {
+            break;
+        }
+    }
+    let _ = stream.request_stop();
 }
 
 impl PadTemplates for AAudioSrc {

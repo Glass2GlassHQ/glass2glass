@@ -40,8 +40,6 @@ Bugs:
   `frame_mbs_only_flag`, so field-coded streams get half the height.
 - Run `cargo semver-checks` on g2g-core for M1284 (`Gate`/`Router` `ProcessFuture`
   types) and M1285 (new `DynAsyncElement` provided methods).
-- Three audio capture sources stamp `frames * (1e9 / rate)` (drifts at 44.1 kHz)
-  and use unbounded queues.
 - `ffmpegaudiodec::adts_frames` checks sync with `& 0xF0`, `ffmpegaacenc::adts_wrap`
   has no 13-bit length guard.
 - `VideoTestSrc::with_shared_memory` keeps every emitted frame.
@@ -123,7 +121,6 @@ Audio:
 
 - `pipewiresink` moves bytes one at a time under the realtime mutex and sleeps on EOS.
 - wasapisink, coreaudio and aaudio sinks block in `process`. Use `WorkerLink`.
-- One capture loop for alsasrc and pulsesrc.
 - audiobuffersplit, audioreverse, adpcm and audiomixer drain from the front.
 - The f32 transform wrapper is copied 9 times with two allocations per buffer.
 - `FirState` is direct-only, add overlap-save for long kernels.

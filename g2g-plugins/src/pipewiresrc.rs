@@ -20,18 +20,20 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockCandidate, ClockPriority,
-    ClockSync, ConfigureOutcome, DriftClock, DriftObservation, ElementMetadata, FrameTiming,
-    G2gError, HardwareError, LatencyReport, MemoryDomain, MonotonicClock, OutputSink, PadTemplate,
-    PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ClockSync,
+    ConfigureOutcome, DriftClock, DriftObservation, ElementMetadata, G2gError, HardwareError,
+    LatencyReport, MonotonicClock, OutputSink, PadTemplate, PadTemplates, PipelineClock, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 use pipewire as pw;
 use pw::spa;
+
+use crate::audiocapture::{
+    capture_queue, run_capture, wait_for_device, CaptureLoopSettings, CaptureSender,
+};
 
 use crate::audioconvert::{audio_format_from_str, audio_format_to_str};
 use crate::pwaudio::{format_pod_bytes, frame_bytes, pw_params};
@@ -48,14 +50,8 @@ enum Ctrl {
     Terminate,
 }
 
-/// Loop-thread to element messages.
-enum FromWorker {
-    /// One captured PCM buffer.
-    Buffer(Vec<u8>),
-    /// The stream went to the error state. A `target-object` the daemon cannot
-    /// resolve lands here rather than capturing some other node.
-    Failed(G2gError),
-}
+// the stream state reports no errno, a target-object the daemon cannot resolve lands here
+const STREAM_ERROR_CODE: i32 = -1;
 
 /// # Example
 ///
@@ -298,10 +294,7 @@ impl SourceLoop for PipeWireSrc {
                 // the per-callback time probe is wasted work no one reads.
                 clock: self.provide_clock.then(|| Arc::clone(&self.clock)),
             };
-            let limit = self.frame_limit;
-
-            // Captured PCM buffers cross from the loop thread to here.
-            let (audio_tx, mut audio_rx) = tokio::sync::mpsc::unbounded_channel::<FromWorker>();
+            let (audio_tx, audio_rx) = capture_queue(stride)?;
             // Control + a setup-result handshake (surface a connect failure).
             let (ctrl_tx, ctrl_rx) = pw::channel::channel::<Ctrl>();
             let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), i32>>(1);
@@ -313,92 +306,21 @@ impl SourceLoop for PipeWireSrc {
                 })
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
-            // Block briefly for the stream to connect (sync ioctl-equivalent).
-            match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-                Ok(Ok(())) => {}
-                Ok(Err(code)) => {
-                    let _ = ctrl_tx.send(Ctrl::Terminate);
-                    let _ = handle.join();
-                    return Err(G2gError::Hardware(HardwareError::PipeWire(code)));
-                }
-                Err(_) => {
-                    let _ = ctrl_tx.send(Ctrl::Terminate);
-                    let _ = handle.join();
-                    return Err(G2gError::Hardware(HardwareError::PipeWire(-1)));
-                }
-            }
-
-            let frame_dur = if rate > 0 {
-                1_000_000_000u64 / rate as u64
-            } else {
-                0
+            let stop_device = move || {
+                let _ = ctrl_tx.send(Ctrl::Terminate);
+                let _ = handle.join();
             };
-            let mut seq = 0u64;
-            let mut frames_total = 0u64; // sample frames, for PTS
-            let clock_sync = self.clock_sync.clone();
-            let mut anchor = CaptureAnchor::new();
-            let mut downstream_open = true;
-            let mut failure = None;
-
-            while seq < limit {
-                let Some(msg) = audio_rx.recv().await else {
-                    break; // worker ended
-                };
-                let bytes = match msg {
-                    FromWorker::Buffer(bytes) => bytes,
-                    FromWorker::Failed(e) => {
-                        failure = Some(e);
-                        break;
-                    }
-                };
-                if bytes.len() < stride {
-                    continue;
-                }
-                let n_frames = (bytes.len() / stride) as u64;
-                let arrival_ns = g2g_core::metrics::monotonic_ns();
-                let elapsed = if rate > 0 {
-                    frames_total * 1_000_000_000 / rate as u64
-                } else {
-                    0
-                };
-                // This buffer finished capturing when it arrived, so its own
-                // span is the lead the anchor has to walk back.
-                let pts = match &clock_sync {
-                    Some(sync) => anchor.stamp(sync, elapsed, n_frames * frame_dur),
-                    None => elapsed,
-                };
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    timing: FrameTiming {
-                        pts_ns: pts,
-                        dts_ns: pts,
-                        duration_ns: n_frames * frame_dur,
-                        capture_ns: pts,
-                        arrival_ns,
-                        keyframe: false, // audio: every buffer is independent
-                    },
-                    sequence: seq,
-                    meta: Default::default(),
-                };
-                if out.push(PipelinePacket::DataFrame(frame)).await.is_err() {
-                    downstream_open = false;
-                    break;
-                }
-                frames_total += n_frames;
-                seq += 1;
+            if let Err(code) = wait_for_device(&ready_rx) {
+                stop_device();
+                return Err(G2gError::Hardware(HardwareError::PipeWire(code)));
             }
-
-            // Stop the loop and reap the worker.
-            let _ = ctrl_tx.send(Ctrl::Terminate);
-            let _ = handle.join();
-
-            if let Some(e) = failure {
-                return Err(e);
-            }
-            if downstream_open {
-                out.push(PipelinePacket::Eos).await?;
-            }
-            Ok(seq)
+            let settings = CaptureLoopSettings {
+                log_category: "pipewiresrc",
+                sample_rate: rate,
+                clock_sync: self.clock_sync.clone(),
+                buffer_limit: self.frame_limit,
+            };
+            run_capture(audio_rx, settings, out, stop_device).await
         })
     }
 }
@@ -458,7 +380,7 @@ static PIPEWIRESRC_PROPS: &[PropertySpec] = &[
 
 fn worker_main(
     cfg: StreamCfg,
-    audio_tx: tokio::sync::mpsc::UnboundedSender<FromWorker>,
+    audio_tx: CaptureSender,
     ctrl_rx: pw::channel::Receiver<Ctrl>,
     ready: std::sync::mpsc::SyncSender<Result<(), i32>>,
 ) {
@@ -469,7 +391,7 @@ fn worker_main(
 
 fn build_and_run(
     cfg: &StreamCfg,
-    audio_tx: tokio::sync::mpsc::UnboundedSender<FromWorker>,
+    audio_tx: CaptureSender,
     ctrl_rx: pw::channel::Receiver<Ctrl>,
     ready: &std::sync::mpsc::SyncSender<Result<(), i32>>,
 ) -> Result<(), i32> {
@@ -501,8 +423,8 @@ fn build_and_run(
         // capture fails instead of waiting for buffers that never come.
         .state_changed(move |_, (), _old, new| {
             if let pw::stream::StreamState::Error(_) = new {
-                let _ = error_tx.send(FromWorker::Failed(G2gError::Hardware(
-                    HardwareError::PipeWire(-1),
+                error_tx.fail(G2gError::Hardware(HardwareError::PipeWire(
+                    STREAM_ERROR_CODE,
                 )));
             }
         })
@@ -527,7 +449,7 @@ fn build_and_run(
                 let end = (offset + size).min(slice.len());
                 if end > offset {
                     // Copy the valid region out and hand it to the async side.
-                    let _ = audio_tx.send(FromWorker::Buffer(slice[offset..end].to_vec()));
+                    audio_tx.push(slice[offset..end].to_vec());
                 }
             }
         })

@@ -24,9 +24,11 @@ use core::future::Future;
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 
-use std::collections::VecDeque;
-use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use objc2_audio_toolbox::{
     kAudioQueueProperty_CurrentDevice, AudioQueueAllocateBuffer, AudioQueueBufferRef,
@@ -40,13 +42,15 @@ use objc2_core_audio_types::{
 };
 use objc2_core_foundation::CFString;
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome,
+    ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+};
+
+use crate::audiocapture::{
+    capture_queue, run_capture, CaptureLoopSettings, CaptureReceiver, CaptureSender,
 };
 
 use alloc::boxed::Box;
@@ -62,8 +66,8 @@ const SRC_BUFFERS: usize = 8;
 const BUF_BYTES: u32 = 16 * 1024;
 /// How long to wait on the queue's callback before declaring the device wedged.
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
-/// Consecutive empty capture waits before the source surfaces a dead device.
-const MAX_IDLE_WAITS: u32 = 3;
+/// How long the capture device may deliver nothing before the source fails.
+const CAPTURE_IDLE_LIMIT: Duration = Duration::from_secs(3);
 
 fn hw() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
@@ -550,16 +554,9 @@ impl PadTemplates for CoreAudioSink {
 // Source (capture)
 // ---------------------------------------------------------------------------
 
-/// Shared with the capture callback: filled chunks the run loop drains.
-#[derive(Debug, Default)]
-struct SrcShared {
-    filled: Mutex<VecDeque<Vec<u8>>>,
-    cv: Condvar,
-}
-
 /// Capture callback: copy the delivered bytes out and re-queue the buffer.
 ///
-/// SAFETY: invoked by the queue's thread with the `*mut SrcShared` refcon
+/// SAFETY: invoked by the queue's thread with the `*mut CaptureSender` refcon
 /// passed at create, which (boxed in `SrcState`) outlives the queue.
 unsafe extern "C-unwind" fn src_callback(
     user: *mut c_void,
@@ -570,7 +567,7 @@ unsafe extern "C-unwind" fn src_callback(
     _packet_descs: *const AudioStreamPacketDescription,
 ) {
     // SAFETY: see above; the buffer is ours until re-enqueued.
-    let shared = unsafe { &*(user as *const SrcShared) };
+    let sender = unsafe { &*(user as *const CaptureSender) };
     // SAFETY: the queue hands us `buf` filled and ours until the re-enqueue
     // below, with mAudioDataByteSize valid bytes at mAudioData.
     let bytes = unsafe {
@@ -581,8 +578,7 @@ unsafe extern "C-unwind" fn src_callback(
         )
     };
     if !bytes.is_empty() {
-        shared.filled.lock().unwrap().push_back(bytes.to_vec());
-        shared.cv.notify_one();
+        sender.push(bytes.to_vec());
     }
     // SAFETY: hand the buffer back to the live queue for the next fill.
     unsafe {
@@ -592,13 +588,13 @@ unsafe extern "C-unwind" fn src_callback(
 
 struct SrcState {
     queue: AudioQueueRef,
-    shared: Box<SrcShared>,
+    sender: Box<CaptureSender>,
 }
 
 impl Drop for SrcState {
     fn drop(&mut self) {
         // SAFETY: live queue; immediate dispose stops callbacks before
-        // returning, so `shared` (dropped after this) is not used again.
+        // returning, so `sender` (dropped after this) is not used again.
         unsafe {
             AudioQueueDispose(self.queue, true);
         }
@@ -629,11 +625,52 @@ pub struct CoreAudioSrc {
     channels: u8,
     target_buffers: u64,
     state: Option<SrcState>,
+    receiver: Option<CaptureReceiver>,
     configured: bool,
+    clock_sync: Option<ClockSync>,
 }
 
 // SAFETY: same single-thread-executor contract as `CoreAudioSink`.
 unsafe impl Send for CoreAudioSrc {}
+
+// fails the capture when the device delivers nothing for CAPTURE_IDLE_LIMIT
+#[derive(Debug)]
+struct IdleWatchdog {
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<()>,
+}
+
+impl IdleWatchdog {
+    fn spawn(sender: CaptureSender) -> Result<Self, G2gError> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name(String::from("g2g-coreaudiosrc-watchdog"))
+            .spawn(move || {
+                let mut seen_frames = sender.pushed_frames();
+                let mut last_progress = Instant::now();
+                while !thread_stop.load(Ordering::Acquire) {
+                    std::thread::park_timeout(IO_TIMEOUT);
+                    let pushed_frames = sender.pushed_frames();
+                    if pushed_frames != seen_frames {
+                        seen_frames = pushed_frames;
+                        last_progress = Instant::now();
+                    } else if last_progress.elapsed() >= CAPTURE_IDLE_LIMIT {
+                        sender.fail(hw());
+                        return;
+                    }
+                }
+            })
+            .map_err(|_| hw())?;
+        Ok(Self { stop, thread })
+    }
+
+    fn stop(self) {
+        self.stop.store(true, Ordering::Release);
+        self.thread.thread().unpark();
+        let _ = self.thread.join();
+    }
+}
 
 impl CoreAudioSrc {
     /// A capture source at `sample_rate` / `channels` (S16LE), emitting
@@ -647,7 +684,9 @@ impl CoreAudioSrc {
             channels: channels.max(1),
             target_buffers,
             state: None,
+            receiver: None,
             configured: false,
+            clock_sync: None,
         }
     }
 
@@ -673,14 +712,15 @@ impl CoreAudioSrc {
         }
         let mut desc =
             asbd(AudioFormat::PcmS16Le, self.channels, self.sample_rate).ok_or_else(hw)?;
-        let mut shared = Box::new(SrcShared::default());
+        let (sender, receiver) = capture_queue(desc.mBytesPerFrame as usize)?;
+        let mut sender = Box::new(sender);
         let mut queue: AudioQueueRef = ptr::null_mut();
         // SAFETY: same contract as the sink's create call.
         let st = unsafe {
             AudioQueueNewInput(
                 NonNull::from(&mut desc),
                 Some(src_callback),
-                shared.as_mut() as *mut SrcShared as *mut c_void,
+                sender.as_mut() as *mut CaptureSender as *mut c_void,
                 None,
                 None,
                 0,
@@ -714,7 +754,8 @@ impl CoreAudioSrc {
                 return Err(hw());
             }
         }
-        self.state = Some(SrcState { queue, shared });
+        self.state = Some(SrcState { queue, sender });
+        self.receiver = Some(receiver);
         Ok(())
     }
 }
@@ -750,6 +791,10 @@ impl SourceLoop for CoreAudioSrc {
         }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
     }
 
     fn metadata(&self) -> ElementMetadata {
@@ -807,72 +852,25 @@ impl SourceLoop for CoreAudioSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let frame_bytes = 2 * self.channels as usize;
-            let ns_per_frame = 1_000_000_000u64 / self.sample_rate as u64;
-
-            let mut total_frames = 0u64;
-            let mut seq = 0u64;
-            let mut idle = 0u32;
-            while seq < self.target_buffers {
-                let chunk = {
-                    let state = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
-                    let mut filled = state.shared.filled.lock().unwrap();
-                    loop {
-                        if let Some(c) = filled.pop_front() {
-                            idle = 0;
-                            break Some(c);
-                        }
-                        let (guard, timeout) = state
-                            .shared
-                            .cv
-                            .wait_timeout(filled, IO_TIMEOUT)
-                            .map_err(|_| hw())?;
-                        filled = guard;
-                        if timeout.timed_out() && filled.is_empty() {
-                            idle += 1;
-                            break None;
-                        }
-                    }
-                };
-                let Some(chunk) = chunk else {
-                    if idle >= MAX_IDLE_WAITS {
-                        // The device delivered nothing for several deadlines:
-                        // dead capture, surface rather than hang.
-                        return Err(hw());
-                    }
-                    continue;
-                };
-                let frames = (chunk.len() / frame_bytes) as u64;
-                if frames == 0 {
-                    continue;
-                }
-                let pts_ns = total_frames * ns_per_frame;
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(chunk.into_boxed_slice())),
-                    timing: FrameTiming {
-                        pts_ns,
-                        dts_ns: pts_ns,
-                        duration_ns: frames * ns_per_frame,
-                        capture_ns: pts_ns,
-                        arrival_ns: g2g_core::metrics::monotonic_ns(),
-                        keyframe: false,
-                    },
-                    sequence: seq,
-                    meta: Default::default(),
-                };
-                total_frames += frames;
-                seq += 1;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
-            }
-
-            if let Some(st) = self.state.as_ref() {
-                // SAFETY: live queue; stop immediately, capture is done.
+            let receiver = self.receiver.take().ok_or(G2gError::NotConfigured)?;
+            let state = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
+            let watchdog = IdleWatchdog::spawn(state.sender.as_ref().clone())?;
+            let queue = state.queue;
+            let stop_device = move || {
+                watchdog.stop();
+                // SAFETY: live queue (`self.state` outlives the run); stop
+                // immediately, capture is done.
                 unsafe {
-                    AudioQueueStop(st.queue, true);
+                    AudioQueueStop(queue, true);
                 }
-            }
-            out.push(PipelinePacket::Eos).await?;
-            Ok(seq)
+            };
+            let settings = CaptureLoopSettings {
+                log_category: "coreaudiosrc",
+                sample_rate: self.sample_rate,
+                clock_sync: self.clock_sync.clone(),
+                buffer_limit: self.target_buffers,
+            };
+            run_capture(receiver, settings, out, stop_device).await
         })
     }
 }

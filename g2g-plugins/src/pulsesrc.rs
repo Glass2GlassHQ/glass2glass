@@ -24,7 +24,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -36,16 +35,16 @@ use libpulse_binding::sample::Spec;
 use libpulse_binding::stream::Direction;
 use libpulse_simple_binding::Simple;
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockSync, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, HardwareError, LatencyReport, MemoryDomain, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    ANY_CHANNELS, ANY_SAMPLE_RATE,
+    AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, ElementMetadata,
+    G2gError, HardwareError, LatencyReport, OutputSink, PadTemplate, PadTemplates, PropError,
+    PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
+use crate::audiocapture::{
+    capture_queue, run_capture, wait_for_device, CaptureLoopSettings, CaptureSender,
+};
 use crate::audioconvert::{audio_format_from_str, audio_format_to_str, sample_bytes};
 use crate::pulsepcm::{opt_name, pulse_map, pulse_spec, FORMATS};
 
@@ -391,11 +390,7 @@ impl SourceLoop for PulseSrc {
             }
             let cfg = self.stream_config()?;
             let frame_bytes = sample_bytes(self.format) * self.channels as usize;
-            let rate = u64::from(self.rate);
-            let limit = self.num_buffers;
-
-            // Recorded fragments cross from the blocking worker to here.
-            let (audio_tx, mut audio_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            let (audio_tx, audio_rx) = capture_queue(frame_bytes)?;
             let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Result<(), i32>>(1);
             let stop = Arc::new(AtomicBool::new(false));
 
@@ -405,70 +400,23 @@ impl SourceLoop for PulseSrc {
                 .spawn(move || worker_main(cfg, audio_tx, worker_stop, ready_tx))
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
-            // The worker reports whether the record stream opened; a host with
-            // no PulseAudio server fails loud here rather than pushing silence.
-            let ready = ready_rx.recv_timeout(Duration::from_secs(5));
-            if !matches!(ready, Ok(Ok(()))) {
+            let stop_device = move || {
                 stop.store(true, Ordering::Relaxed);
                 let _ = worker.join();
-                let code = match ready {
-                    Ok(Err(code)) => code,
-                    _ => -1,
-                };
+            };
+            // The worker reports whether the record stream opened; a host with
+            // no PulseAudio server fails loud here rather than pushing silence.
+            if let Err(code) = wait_for_device(&ready_rx) {
+                stop_device();
                 return Err(G2gError::Hardware(HardwareError::PulseAudio(code)));
             }
-
-            let mut seq = 0u64;
-            let mut frames_total = 0u64;
-            let mut downstream_open = true;
-            let clock_sync = self.clock_sync.clone();
-            let mut anchor = CaptureAnchor::new();
-            while seq < limit {
-                let Some(bytes) = audio_rx.recv().await else {
-                    break; // worker ended
-                };
-                let n_frames = (bytes.len() / frame_bytes) as u64;
-                if n_frames == 0 {
-                    continue;
-                }
-                let elapsed_ns = frames_total * 1_000_000_000 / rate;
-                let end_ns = (frames_total + n_frames) * 1_000_000_000 / rate;
-                // This fragment finished capturing when the read returned, so
-                // its own span is the lead the anchor has to walk back.
-                let pts_ns = match &clock_sync {
-                    Some(sync) => anchor.stamp(sync, elapsed_ns, end_ns - elapsed_ns),
-                    None => elapsed_ns,
-                };
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    timing: FrameTiming {
-                        pts_ns,
-                        dts_ns: pts_ns,
-                        duration_ns: end_ns - elapsed_ns,
-                        capture_ns: pts_ns,
-                        arrival_ns: g2g_core::metrics::monotonic_ns(),
-                        keyframe: false, // audio: every buffer is independent
-                    },
-                    sequence: seq,
-                    meta: Default::default(),
-                };
-                if out.push(PipelinePacket::DataFrame(frame)).await.is_err() {
-                    downstream_open = false;
-                    break;
-                }
-                frames_total += n_frames;
-                seq += 1;
-            }
-
-            // Stop the blocking read loop and reap the worker.
-            stop.store(true, Ordering::Relaxed);
-            drop(audio_rx);
-            let _ = worker.join();
-
-            if downstream_open {
-                out.push(PipelinePacket::Eos).await?;
-            }
-            Ok(seq)
+            let settings = CaptureLoopSettings {
+                log_category: "pulsesrc",
+                sample_rate: self.rate,
+                clock_sync: self.clock_sync.clone(),
+                buffer_limit: self.num_buffers,
+            };
+            run_capture(audio_rx, settings, out, stop_device).await
         })
     }
 }
@@ -547,7 +495,7 @@ static PULSESRC_PROPS: &[PropertySpec] = &[
 
 fn worker_main(
     cfg: StreamConfig,
-    audio_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    audio_tx: CaptureSender,
     stop: Arc<AtomicBool>,
     ready: std_mpsc::SyncSender<Result<(), i32>>,
 ) {
@@ -579,7 +527,7 @@ fn worker_main(
         if simple.read(&mut buf).is_err() {
             break;
         }
-        if audio_tx.send(buf.clone()).is_err() {
+        if !audio_tx.push(buf.clone()) {
             break; // consumer dropped
         }
     }
