@@ -973,8 +973,10 @@ mod on {
         /// The first blob tagged `header`, if any. `header` is matched in its
         /// canonical form, like the stored one.
         pub fn get(&self, header: &str) -> Option<&Blob> {
-            let header = canonical_blob_header(header);
-            self.blobs.iter().find(|b| b.header == header)
+            let stem = blob_header_stem(header);
+            self.blobs
+                .iter()
+                .find(|b| b.header.eq_ignore_ascii_case(stem))
         }
     }
 
@@ -984,12 +986,16 @@ mod on {
     /// consumer key, and the JSON key a `metasink` writes is the name an
     /// `only-on` names.
     pub fn canonical_blob_header(header: &str) -> String {
+        blob_header_stem(header).to_ascii_lowercase()
+    }
+
+    /// `header` without the `GST-` prefix and trailing `:`, case left as given.
+    fn blob_header_stem(header: &str) -> &str {
         let trimmed = header.trim().trim_end_matches(':');
-        let without_prefix = trimmed
+        trimmed
             .get(..4)
             .filter(|prefix| prefix.eq_ignore_ascii_case("gst-"))
-            .map_or(trimmed, |_| &trimmed[4..]);
-        without_prefix.to_ascii_lowercase()
+            .map_or(trimmed, |_| &trimmed[4..])
     }
 
     /// The `only-on` name for "the frame carries at least one detection".
@@ -1678,5 +1684,19 @@ mod tests {
             iou > 0.3 && iou < 0.34,
             "half-shifted overlap ~1/3 IoU: {iou}"
         );
+    }
+
+    #[test]
+    fn blob_lookup_matches_any_spelling_of_the_header() {
+        let mut blobs = BlobMeta::new();
+        blobs.push("GST-ALERT:", alloc::vec![1]);
+        for spelling in ["alert", "ALERT", "gst-alert", "GST-Alert:", " alert: "] {
+            assert_eq!(
+                blobs.get(spelling).map(|b| b.payload.as_slice()),
+                Some(&[1u8][..]),
+                "{spelling}"
+            );
+        }
+        assert!(blobs.get("alerts").is_none());
     }
 }

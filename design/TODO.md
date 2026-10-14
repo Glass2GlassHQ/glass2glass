@@ -40,8 +40,6 @@ Bugs:
 
 Core, bindings, ML:
 
-- `ElectedClock::now_ns` locks per read, `pacing::judge` clones `ClockSync` twice.
-- `BlobMeta::get` allocates a `String` per lookup.
 - Frames crossing the plugin ABI always arrive read-only. Set an exclusive flag in
   `FfiFrame.reserved`, which needs a public uniqueness check on `SystemSlice` and a
   writable foreign variant in g2g-core.

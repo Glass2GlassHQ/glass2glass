@@ -449,17 +449,19 @@ impl ElectedClock {
     }
 }
 
+// Reads go through the lock without cloning the target, so a per-frame
+// `now_ns` costs no refcount traffic.
 impl PipelineClock for ElectedClock {
     fn now_ns(&self) -> u64 {
-        self.target().now_ns()
+        self.target.lock().now_ns()
     }
 
     fn shared_ticker(&self) -> Option<Arc<dyn DynAsyncClock + Send + Sync>> {
-        self.target().shared_ticker()
+        self.target.lock().shared_ticker()
     }
 
     fn healthy(&self) -> bool {
-        self.target().healthy()
+        self.target.lock().healthy()
     }
 }
 

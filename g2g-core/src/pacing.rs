@@ -203,14 +203,33 @@ impl PresentationPacer {
         if pts_ns == FrameTiming::PTS_NONE {
             return None;
         }
-        let sync = self.clock_sync.clone()?;
         let rt = self.running_time(pts_ns)?;
-        let deadline = self
-            .presentation_anchor(&sync, rt)
-            .saturating_add(as_signed(rt))
-            .saturating_add(as_signed(sync.path_latency_min_ns()));
+        let sync = self.clock_sync.as_ref()?;
+        Some(Self::due_at(
+            sync,
+            rt,
+            &mut self.anchor_ns,
+            &mut self.anchor_pre_play,
+            &mut self.seek_reanchor,
+        ))
+    }
+
+    /// Clock time a frame at running time `rt` is due at on `sync`, latching the
+    /// anchor on first use. Takes the anchor fields apart from `self` so the
+    /// clock sync is read in place rather than cloned per frame.
+    fn due_at(
+        sync: &ClockSync,
+        rt: u64,
+        anchor_ns: &mut Option<i64>,
+        anchor_pre_play: &mut bool,
+        seek_reanchor: &mut bool,
+    ) -> u64 {
+        let deadline =
+            Self::presentation_anchor(sync, rt, anchor_ns, anchor_pre_play, seek_reanchor)
+                .saturating_add(as_signed(rt))
+                .saturating_add(as_signed(sync.path_latency_min_ns()));
         // A deadline below the clock's zero is simply already due.
-        Some(deadline.max(0) as u64)
+        deadline.max(0) as u64
     }
 
     /// Verdict for one frame: how long to hold it, or that it is not to be
@@ -223,15 +242,19 @@ impl PresentationPacer {
         if pts_ns == FrameTiming::PTS_NONE {
             return Pace::Now;
         }
-        let Some(sync) = self.clock_sync.clone() else {
+        let Some(sync) = self.clock_sync.as_ref() else {
             return Pace::Now;
         };
         let Some(running_time) = self.running_time(pts_ns) else {
             return Pace::Drop;
         };
-        let Some(deadline) = self.deadline_ns(pts_ns) else {
-            return Pace::Drop;
-        };
+        let deadline = Self::due_at(
+            sync,
+            running_time,
+            &mut self.anchor_ns,
+            &mut self.anchor_pre_play,
+            &mut self.seek_reanchor,
+        );
         self.last_deadline_ns = Some(deadline);
         let now = sync.now_ns();
         // A frame already late beyond the bound is dropped, not presented late,
@@ -344,7 +367,13 @@ impl PresentationPacer {
     ///   seek target presents immediately, ignoring the stale play-edge base.
     /// - **Otherwise** (slow start, live, or pre-`Playing` preroll): first-frame
     ///   anchor, then pace by PTS deltas.
-    fn presentation_anchor(&mut self, sync: &ClockSync, rt: u64) -> i64 {
+    fn presentation_anchor(
+        sync: &ClockSync,
+        rt: u64,
+        anchor_ns: &mut Option<i64>,
+        anchor_pre_play: &mut bool,
+        seek_reanchor: &mut bool,
+    ) -> i64 {
         // A live path anchors on the base time, stamped or eager, never on the
         // first frame (GStreamer's model). A startup stall (decoder init) then
         // makes the opening frames late, rendered immediately, instead of
@@ -356,26 +385,26 @@ impl PresentationPacer {
         }
         // Re-base a provisional preroll anchor onto the play edge once `Playing`
         // has stamped the base time.
-        if self.anchor_pre_play && sync.play_anchored() && !self.seek_reanchor {
-            self.anchor_ns = Some(as_signed(sync.base_time()));
-            self.anchor_pre_play = false;
+        if *anchor_pre_play && sync.play_anchored() && !*seek_reanchor {
+            *anchor_ns = Some(as_signed(sync.base_time()));
+            *anchor_pre_play = false;
         }
-        if let Some(a) = self.anchor_ns {
+        if let Some(a) = *anchor_ns {
             return a;
         }
         // No anchor yet: establish one. Prefer the stamped play-edge base time
         // unless a seek just flushed (then present the target now).
-        let use_play = sync.play_anchored() && !self.seek_reanchor;
+        let use_play = sync.play_anchored() && !*seek_reanchor;
         let anchor = if use_play {
             as_signed(sync.base_time())
         } else {
             as_signed(sync.now_ns()).saturating_sub(as_signed(rt))
         };
-        self.anchor_ns = Some(anchor);
+        *anchor_ns = Some(anchor);
         // Mark provisional only if anchored before `Playing` stamped, so it
         // re-bases later; a post-seek first-frame anchor is final.
-        self.anchor_pre_play = !use_play && !sync.play_anchored();
-        self.seek_reanchor = false;
+        *anchor_pre_play = !use_play && !sync.play_anchored();
+        *seek_reanchor = false;
         anchor
     }
 }
@@ -589,6 +618,16 @@ mod tests {
         assert!(p.take_qos().is_none());
     }
 
+    fn anchor_of(p: &mut PresentationPacer, sync: &ClockSync, rt: u64) -> i64 {
+        PresentationPacer::presentation_anchor(
+            sync,
+            rt,
+            &mut p.anchor_ns,
+            &mut p.anchor_pre_play,
+            &mut p.seek_reanchor,
+        )
+    }
+
     #[test]
     fn anchor_uses_the_play_edge_and_rebases_preroll() {
         let clock = Arc::new(AtomicU64::new(1_000));
@@ -599,20 +638,20 @@ mod tests {
 
         // Preroll frame consumed during `Paused` (anchor not yet stamped): the
         // pacer first-frame-anchors so it presents immediately, provisionally.
-        assert_eq!(p.presentation_anchor(&sync, 0), 1_000);
+        assert_eq!(anchor_of(&mut p, &sync, 0), 1_000);
         assert!(p.anchor_pre_play, "provisional, awaiting Playing");
 
         // Playing stamps the base time at 5_000: the next frame re-bases onto the
         // play edge, discarding the preroll-time anchor.
         anchor.stamp(5_000);
-        assert_eq!(p.presentation_anchor(&sync, 100), 5_000);
+        assert_eq!(anchor_of(&mut p, &sync, 100), 5_000);
         assert!(!p.anchor_pre_play, "re-base is final");
 
         // A seek flush forces a first-frame re-anchor (present the target now),
         // ignoring the stale play-edge base.
         clock.store(8_000, Ordering::Relaxed);
         p.flush();
-        assert_eq!(p.presentation_anchor(&sync, 200), 7_800);
+        assert_eq!(anchor_of(&mut p, &sync, 200), 7_800);
         assert!(!p.seek_reanchor, "seek re-anchor consumed");
     }
 

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1329: clock reads, pacing judgements and blob-meta lookups stop cloning or allocating per call.
 - M1328: wire encode sizes its buffer once and materializes views straight into it.
 - M1327: `TensorView::materialize` copies whole contiguous runs.
 - M1326: registry `inspect` and `describe` share one lookup, and launch reuses `maybe_prepend_parser`.
