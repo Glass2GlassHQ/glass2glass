@@ -218,14 +218,15 @@ fn parse_fragments(data: &[u8], timescale: u32) -> Result<Vec<Sample>, G2gError>
                     Some(tfhd) => tfhd_defaults(tfhd)?,
                     None => (0, 0),
                 };
-                let (sizes, durs) = parse_trun(trun, default_duration, default_size, data.len())?;
+                let trun_samples = parse_trun(trun, default_duration, default_size, data.len())?;
                 let mut t = base_time;
-                let mut tagged = Vec::with_capacity(sizes.len());
+                let mut tagged = Vec::with_capacity(trun_samples.len());
                 durations.clear();
-                for (size, dur) in sizes.iter().zip(&durs) {
-                    tagged.push((*size, timescale_to_ns(t, timescale)));
-                    durations.push(timescale_to_ns(*dur as u64, timescale));
-                    t += *dur as u64;
+                for sample in &trun_samples {
+                    tagged.push((sample.size, timescale_to_ns(t, timescale)));
+                    durations.push(timescale_to_ns(u64::from(sample.duration), timescale));
+                    // base_time and durations are untrusted
+                    t = t.saturating_add(u64::from(sample.duration));
                 }
                 pending = Some(tagged);
             }
@@ -268,5 +269,35 @@ mod tests {
     fn timescale_conversion() {
         // 48 kHz timescale: 1024 ticks is one AAC frame ~21.33 ms.
         assert_eq!(timescale_to_ns(1024, 48_000), 21_333_333);
+    }
+
+    #[test]
+    fn fragment_decode_time_saturates() {
+        use crate::mp4box::{full_box, mp4_box};
+        const TIMESCALE: u32 = 48_000;
+        const FRAME_TICKS: u32 = 1024;
+        const BASE_TIME: u64 = u64::MAX - 1;
+        let mut trun = Vec::new();
+        trun.extend_from_slice(&2u32.to_be_bytes()); // sample count
+        trun.extend_from_slice(&0u32.to_be_bytes()); // data offset
+        for _ in 0..2 {
+            trun.extend_from_slice(&FRAME_TICKS.to_be_bytes());
+            trun.extend_from_slice(&1u32.to_be_bytes()); // sample size
+        }
+        let traf = [
+            full_box(b"tfhd", 0, 0, &1u32.to_be_bytes()),
+            full_box(b"tfdt", 1, 0, &BASE_TIME.to_be_bytes()),
+            // data offset + sample duration + sample size
+            full_box(b"trun", 0, 0x301, &trun),
+        ]
+        .concat();
+        let file = [
+            mp4_box(b"moof", &mp4_box(b"traf", &traf)),
+            mp4_box(b"mdat", &[0xAA, 0xBB]),
+        ]
+        .concat();
+        let samples = parse_fragments(&file, TIMESCALE).expect("fragment parses");
+        assert_eq!(samples[0].pts_ns, timescale_to_ns(BASE_TIME, TIMESCALE));
+        assert_eq!(samples[1].pts_ns, timescale_to_ns(u64::MAX, TIMESCALE));
     }
 }

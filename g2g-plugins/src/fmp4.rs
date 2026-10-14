@@ -59,9 +59,7 @@ pub(crate) struct Sample {
     pub(crate) annexb: Vec<u8>,
     pub(crate) pts_ns: u64,
     /// When the sample decodes, which a reordered (B-frame) stream places ahead
-    /// of its `pts_ns`. Equal to it for the fragment parsers, which take their
-    /// timeline from `tfdt` + decode-order durations and leave the reorder to
-    /// the decoder.
+    /// of its `pts_ns`.
     pub(crate) dts_ns: u64,
     pub(crate) duration_ns: u64,
     /// Whether the access unit carries an IDR picture (a seek snap point).
@@ -713,10 +711,9 @@ fn deframe_wvtt(raw: &[u8]) -> Vec<u8> {
 }
 
 /// The decode state carried from a `moof` to its following `mdat`: the track id,
-/// the per-sample `(size, pts_ns)`, the per-sample `duration_ns`, the per-sample
-/// crypto for an encrypted track, and the fragment's start offset in the stream
-/// (which keys the rotating content key).
-type PendingFragment = (u32, Vec<(u32, u64)>, Vec<u64>, Vec<SampleCrypt>, u64);
+/// the per-sample timing, the per-sample crypto for an encrypted track, and the
+/// fragment's start offset in the stream (which keys the rotating content key).
+type PendingFragment = (u32, Vec<FragmentSampleTiming>, Vec<SampleCrypt>, u64);
 
 /// Walk the `moof`+`mdat` fragments of a multi-track fMP4 and split every sample
 /// out, keyed by its `track_ID`. Each `traf`'s `tfhd` names the track, so a
@@ -751,7 +748,7 @@ pub(crate) fn parse_fragments_multi(
                 let Some(track) = tracks.iter().find(|t| t.track_id == track_id) else {
                     // A fragment for a track we don't forward: hold the id so the
                     // following mdat is skipped, not mis-split into another track.
-                    pending = Some((track_id, Vec::new(), Vec::new(), Vec::new(), 0));
+                    pending = Some((track_id, Vec::new(), Vec::new(), 0));
                     continue;
                 };
                 let timescale = track.timescale;
@@ -763,46 +760,35 @@ pub(crate) fn parse_fragments_multi(
                 };
                 let trun = find_box(traf, b"trun").ok_or(G2gError::CapsMismatch)?;
                 let (default_duration, default_size) = tfhd_defaults(tfhd)?;
-                let (sizes, durs) = parse_trun(trun, default_duration, default_size, data.len())?;
+                let trun_samples = parse_trun(trun, default_duration, default_size, data.len())?;
                 // An encrypted track's per-sample IVs / subsample maps live in the
                 // fragment's aux info, addressed from the start of this `moof`.
                 let crypt = match &track.cenc {
                     Some(c) => {
                         let from_moof = data.get(box_at..).ok_or(G2gError::CapsMismatch)?;
-                        fragment_sample_crypt(traf, from_moof, c, sizes.len())?
+                        fragment_sample_crypt(traf, from_moof, c, trun_samples.len())?
                     }
                     None => Vec::new(),
                 };
-                let mut t = base_time;
-                let mut tagged = Vec::with_capacity(sizes.len());
-                let mut durations = Vec::with_capacity(sizes.len());
-                for (size, dur) in sizes.iter().zip(&durs) {
-                    tagged.push((*size, timescale_to_ns(t, timescale)));
-                    durations.push(timescale_to_ns(*dur as u64, timescale));
-                    // base_time / durations are untrusted; saturate, never overflow.
-                    t = t.saturating_add(*dur as u64);
-                }
                 pending = Some((
                     track_id,
-                    tagged,
-                    durations,
+                    fragment_sample_timings(base_time, &trun_samples, timescale),
                     crypt,
                     base_offset.saturating_add(box_at as u64),
                 ));
             }
             b"mdat" => {
-                let Some((track_id, tagged, durations, crypt, frag_at)) = pending.take() else {
+                let Some((track_id, timings, crypt, frag_at)) = pending.take() else {
                     return Err(G2gError::CapsMismatch); // mdat without moof
                 };
                 let Some(track) = tracks.iter().find(|t| t.track_id == track_id) else {
                     continue; // skipped (unforwarded track), no samples emitted
                 };
                 let mut at = 0usize;
-                for (i, (size, pts_ns)) in tagged.iter().enumerate() {
-                    let raw = payload
-                        .get(at..at + *size as usize)
-                        .ok_or(G2gError::CapsMismatch)?;
-                    at += *size as usize;
+                for (i, timing) in timings.iter().enumerate() {
+                    let size = timing.size as usize;
+                    let raw = payload.get(at..at + size).ok_or(G2gError::CapsMismatch)?;
+                    at += size;
                     // Decrypt an encrypted track's sample in place before de-framing.
                     let owned;
                     let bytes: &[u8] = match (&track.cenc, crypt.get(i)) {
@@ -846,9 +832,9 @@ pub(crate) fn parse_fragments_multi(
                         track_id,
                         Sample {
                             annexb,
-                            pts_ns: *pts_ns,
-                            dts_ns: *pts_ns,
-                            duration_ns: durations[i],
+                            pts_ns: timing.pts_ns,
+                            dts_ns: timing.dts_ns,
+                            duration_ns: timing.duration_ns,
                             keyframe,
                         },
                     ));
@@ -888,8 +874,7 @@ pub(crate) fn parse_fragments(
     mut decrypt: Option<SampleDecrypt<'_>>,
 ) -> Result<Vec<Sample>, G2gError> {
     let mut samples = Vec::new();
-    let mut pending: Option<Vec<(u32, u64)>> = None; // (size, pts_ns) per sample
-    let mut durations: Vec<u64> = Vec::new();
+    let mut pending: Option<Vec<FragmentSampleTiming>> = None;
     let mut pending_crypt: Vec<SampleCrypt> = Vec::new();
     let mut frag_at = 0u64;
 
@@ -910,36 +895,25 @@ pub(crate) fn parse_fragments(
                     Some(tfhd) => tfhd_defaults(tfhd)?,
                     None => (0, 0),
                 };
-                let (sizes, durs) = parse_trun(trun, default_duration, default_size, data.len())?;
-                let mut t = base_time;
-                let mut tagged = Vec::with_capacity(sizes.len());
-                durations.clear();
-                for (size, dur) in sizes.iter().zip(&durs) {
-                    tagged.push((*size, timescale_to_ns(t, timescale)));
-                    durations.push(timescale_to_ns(*dur as u64, timescale));
-                    // base_time and durations are untrusted; saturate the running
-                    // decode time rather than overflow.
-                    t = t.saturating_add(*dur as u64);
-                }
-                pending = Some(tagged);
+                let trun_samples = parse_trun(trun, default_duration, default_size, data.len())?;
+                pending = Some(fragment_sample_timings(base_time, &trun_samples, timescale));
                 frag_at = base_offset.saturating_add(box_at as u64);
                 pending_crypt = match cenc {
                     Some(c) => {
                         let from_moof = data.get(box_at..).ok_or(G2gError::CapsMismatch)?;
-                        fragment_sample_crypt(traf, from_moof, c, sizes.len())?
+                        fragment_sample_crypt(traf, from_moof, c, trun_samples.len())?
                     }
                     None => Vec::new(),
                 };
             }
             b"mdat" => {
-                let Some(tagged) = pending.take() else {
+                let Some(timings) = pending.take() else {
                     return Err(G2gError::CapsMismatch); // mdat without moof
                 };
                 let mut at = 0usize;
-                for (i, (size, pts_ns)) in tagged.iter().enumerate() {
-                    let raw = payload
-                        .get(at..at + *size as usize)
-                        .ok_or(G2gError::CapsMismatch)?;
+                for (i, timing) in timings.iter().enumerate() {
+                    let size = timing.size as usize;
+                    let raw = payload.get(at..at + size).ok_or(G2gError::CapsMismatch)?;
                     let annexb = if cenc.is_some() {
                         // Encrypted: decrypt the sample in place, then de-frame. A
                         // sample a `seig` group declares clear needs no key.
@@ -962,12 +936,12 @@ pub(crate) fn parse_fragments(
                     let keyframe = contains_keyframe(&annexb, codec);
                     samples.push(Sample {
                         annexb,
-                        pts_ns: *pts_ns,
-                        dts_ns: *pts_ns,
-                        duration_ns: durations[i],
+                        pts_ns: timing.pts_ns,
+                        dts_ns: timing.dts_ns,
+                        duration_ns: timing.duration_ns,
                         keyframe,
                     });
-                    at += *size as usize;
+                    at += size;
                 }
             }
             _ => {}
@@ -1422,23 +1396,30 @@ pub(crate) fn trun_first_sample_is_sync(trun: &[u8]) -> Result<bool, G2gError> {
     Ok(true)
 }
 
-/// `trun` (v0 or v1); returns (sizes, durations). A `trun` that omits the
-/// per-sample duration or size takes `default_duration` / `default_size` from its
-/// `tfhd`; a duration neither carries is `0`, but a *size* neither carries is
-/// fatal (the samples could not be split). v0 and v1 differ only in the sign of
-/// the per-sample composition-time-offset field, which this skips (PTS is taken
-/// from `tfdt` + decode-order durations and the decoder reorders), so both parse
-/// identically. Real-world muxers (ffmpeg) emit v1 whenever B-frames are present.
+// durations and offsets in track timescale ticks
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TrunSample {
+    pub(crate) size: u32,
+    pub(crate) duration: u32,
+    pub(crate) composition_offset: i64,
+}
+
+/// `trun` (v0 or v1). A `trun` that omits the per-sample duration or size takes
+/// `default_duration` / `default_size` from its `tfhd`; a duration neither
+/// carries is `0`, but a *size* neither carries is fatal (the samples could not
+/// be split). v0 and v1 differ only in the sign of the per-sample
+/// composition-time offset: unsigned in v0, signed in v1.
 pub(crate) fn parse_trun(
     trun: &[u8],
     default_duration: u32,
     default_size: u32,
     fragment_len: usize,
-) -> Result<(Vec<u32>, Vec<u32>), G2gError> {
-    match trun.first() {
-        Some(0) | Some(1) => {}
+) -> Result<Vec<TrunSample>, G2gError> {
+    let signed_offsets = match trun.first() {
+        Some(0) => false,
+        Some(1) => true,
         _ => return Err(G2gError::CapsMismatch), // unknown trun version
-    }
+    };
     let flags = be32(trun, 0)? & 0x00FF_FFFF;
     if flags & 0x200 == 0 && default_size == 0 {
         return Err(G2gError::CapsMismatch); // no sample sizes anywhere
@@ -1469,29 +1450,71 @@ pub(crate) fn parse_trun(
     if count > bound {
         return Err(G2gError::CapsMismatch);
     }
-    let mut sizes = Vec::with_capacity(count);
-    let mut durations = Vec::with_capacity(count);
+    let mut samples = Vec::with_capacity(count);
     for _ in 0..count {
         let mut duration = default_duration;
         if flags & 0x100 != 0 {
             duration = be32(trun, at)?;
             at += 4;
         }
+        let mut size = default_size;
         if flags & 0x200 != 0 {
-            sizes.push(be32(trun, at)?);
+            size = be32(trun, at)?;
             at += 4;
-        } else {
-            sizes.push(default_size);
         }
         if flags & 0x400 != 0 {
             at += 4; // per-sample flags
         }
+        let mut composition_offset = 0;
         if flags & 0x800 != 0 {
-            at += 4; // composition time offset
+            let raw = be32(trun, at)?;
+            composition_offset = if signed_offsets {
+                i64::from(raw as i32)
+            } else {
+                i64::from(raw)
+            };
+            at += 4;
         }
-        durations.push(duration);
+        samples.push(TrunSample {
+            size,
+            duration,
+            composition_offset,
+        });
     }
-    Ok((sizes, durations))
+    Ok(samples)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FragmentSampleTiming {
+    size: u32,
+    dts_ns: u64,
+    pts_ns: u64,
+    duration_ns: u64,
+}
+
+fn fragment_sample_timings(
+    base_time: u64,
+    samples: &[TrunSample],
+    timescale: u32,
+) -> Vec<FragmentSampleTiming> {
+    let mut decode_time = base_time;
+    samples
+        .iter()
+        .map(|sample| {
+            let timing = FragmentSampleTiming {
+                size: sample.size,
+                dts_ns: timescale_to_ns(decode_time, timescale),
+                pts_ns: timescale_to_ns(
+                    decode_time.saturating_add_signed(sample.composition_offset),
+                    timescale,
+                ),
+                duration_ns: timescale_to_ns(u64::from(sample.duration), timescale),
+            };
+            // base_time and durations are untrusted
+            decode_time = decode_time.saturating_add(u64::from(sample.duration));
+            timing
+        })
+        .collect()
 }
 
 /// 4-byte-length-prefixed AVCC NALUs back to Annex-B start codes.
@@ -1735,9 +1758,15 @@ mod tests {
         p.extend_from_slice(&3000u32.to_be_bytes()); // duration
         p.extend_from_slice(&77u32.to_be_bytes()); // size
         p.extend_from_slice(&0x0200_0000u32.to_be_bytes()); // sample flags
-        let (sizes, durs) = parse_trun(&p, 0, 0, 0).unwrap();
-        assert_eq!(sizes, vec![77]);
-        assert_eq!(durs, vec![3000]);
+        let samples = parse_trun(&p, 0, 0, 0).unwrap();
+        assert_eq!(
+            samples,
+            vec![TrunSample {
+                size: 77,
+                duration: 3000,
+                composition_offset: 0,
+            }]
+        );
     }
 
     #[test]
@@ -1784,26 +1813,69 @@ mod tests {
         assert_eq!(sets, vec![vps.to_vec(), sps.to_vec(), pps.to_vec()]);
     }
 
-    /// A `trun` v1 (signed composition offsets, what ffmpeg writes for B-frame
-    /// streams) parses the same as v0: the cts field is skipped either way, so
-    /// sizes and durations come out identically. Guards the version gate.
+    // ffmpeg testsrc 64x48, libx264 -bf 2 -g 6, -movflags frag_keyframe+empty_moov
+    const BFRAME_FRAGMENTED: &[u8] =
+        include_bytes!("../tests/fixtures/h264_64x48_bframes_frag.mp4");
+    // ffprobe -show_entries packet=pts,dts -of csv=p=0, in track timescale ticks
+    const BFRAME_FRAGMENTED_PTS_DTS: &str =
+        include_str!("../tests/fixtures/h264_64x48_bframes_frag.mp4.pts_dts");
+
+    fn probed_pts_dts_ns(timescale: u32) -> Vec<(u64, u64)> {
+        let ticks_ns = |ticks: &str| timescale_to_ns(ticks.parse().unwrap(), timescale);
+        BFRAME_FRAGMENTED_PTS_DTS
+            .lines()
+            .map(|line| {
+                let (pts, dts) = line.split_once(',').unwrap();
+                (ticks_ns(pts), ticks_ns(dts))
+            })
+            .collect()
+    }
+
     #[test]
-    fn parse_trun_accepts_v0_and_v1() {
-        // flags 0x301: data-offset(0x1) + sample-duration(0x100) + sample-size(0x200).
+    fn parse_fragments_applies_composition_offsets() {
+        let header = parse_header(BFRAME_FRAGMENTED).unwrap();
+        let samples = parse_fragments(
+            BFRAME_FRAGMENTED,
+            header.timescale,
+            header.codec,
+            None,
+            0,
+            None,
+        )
+        .unwrap();
+        let pts_dts: Vec<(u64, u64)> = samples.iter().map(|s| (s.pts_ns, s.dts_ns)).collect();
+        assert_eq!(pts_dts, probed_pts_dts_ns(header.timescale));
+    }
+
+    #[test]
+    fn parse_fragments_multi_applies_composition_offsets() {
+        let tracks = parse_all_tracks(BFRAME_FRAGMENTED).unwrap();
+        let samples = parse_fragments_multi(BFRAME_FRAGMENTED, &tracks, 0, None).unwrap();
+        let pts_dts: Vec<(u64, u64)> = samples.iter().map(|(_, s)| (s.pts_ns, s.dts_ns)).collect();
+        assert_eq!(pts_dts, probed_pts_dts_ns(tracks[0].timescale));
+    }
+
+    #[test]
+    fn parse_trun_reads_composition_offset_by_version() {
+        // flags 0xA01: data offset + sample size + composition offset.
+        const OFFSET_FIELD: u32 = 0xFFFF_FE00;
         let build = |version: u8| {
-            let mut t = alloc::vec![version, 0x00, 0x03, 0x01];
-            t.extend_from_slice(&2u32.to_be_bytes()); // sample count
+            let mut t = alloc::vec![version, 0x00, 0x0A, 0x01];
+            t.extend_from_slice(&1u32.to_be_bytes()); // sample count
             t.extend_from_slice(&0u32.to_be_bytes()); // data offset
-            for (dur, size) in [(33u32, 1000u32), (33, 1200)] {
-                t.extend_from_slice(&dur.to_be_bytes());
-                t.extend_from_slice(&size.to_be_bytes());
-            }
+            t.extend_from_slice(&1000u32.to_be_bytes()); // sample size
+            t.extend_from_slice(&OFFSET_FIELD.to_be_bytes());
             t
         };
         let v0 = parse_trun(&build(0), 0, 0, 0).expect("v0 parses");
         let v1 = parse_trun(&build(1), 0, 0, 0).expect("v1 parses");
-        assert_eq!(v0, (alloc::vec![1000, 1200], alloc::vec![33, 33]));
-        assert_eq!(v0, v1, "v0 and v1 parse identically (cts field is skipped)");
+        let sample = |composition_offset| TrunSample {
+            size: 1000,
+            duration: 0,
+            composition_offset,
+        };
+        assert_eq!(v0, alloc::vec![sample(i64::from(OFFSET_FIELD))]);
+        assert_eq!(v1, alloc::vec![sample(i64::from(OFFSET_FIELD as i32))]);
     }
 
     #[test]

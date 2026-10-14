@@ -38,8 +38,6 @@ Bugs:
   packet authenticates. Insert only after unprotect succeeds, and cap the count.
 - `gamma`, `videobalance` and `alpha` swallow incoming `CapsChanged`. Move them
   onto `PixelFilter`.
-- The `fmp4` fragment parsers ignore the `trun` composition offset.
-- `mp4audiosrc` adds `trun` durations unchecked.
 - ST 2110 depacketizers read the payload at offset 12 without `RtpHeader::parse`.
 - RTP timestamp rebasing in `rtprecv` and four ST 2110 receivers does not unwrap.
 - `srt.rs` trims the send buffer with a plain `>=` instead of `seq_ge`, and

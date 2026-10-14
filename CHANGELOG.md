@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1273: fragmented MP4 demuxing applies trun composition offsets, so B-frame fragments get correct PTS.
 - M1272: Vulkan Video rejects an H.264 SPS whose coded size overflows instead of panicking or wrapping.
 - M1271: ffmpegdec gets a reorder seed from High-profile SPS that carry custom scaling matrices.
 - M1276: audioconvert forwards same-format buffers untouched and converts in whole-buffer passes.
