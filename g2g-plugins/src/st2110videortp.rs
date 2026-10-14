@@ -37,8 +37,8 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::rtpjitter::RtpPtsRebase;
-use crate::st2110dup::RedundantRtpReceiver;
-use crate::st2110pacing::{frame_period_ns, pace_send, Pacer, PacingProfile};
+use crate::st2110dup::spawn_rtp_receiver;
+use crate::st2110pacing::{frame_period_ns, PacedSender, Pacer, PacingProfile};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
 use crate::st2110video::{Sampling, St2110VideoDepacketizer, St2110VideoPacketizer};
 use crate::videoconvert::raw_format_to_str;
@@ -95,7 +95,7 @@ pub struct St2110VideoSink {
     height: usize,
     sampling: Option<Sampling>,
     packetizer: Option<St2110VideoPacketizer>,
-    socket: Option<UdpSocket>,
+    sender: Option<PacedSender>,
     clock_sync: Option<ClockSync>,
     /// ST 2110-21 sender pacing profile (None = burst all packets, the default).
     pacing: Option<PacingProfile>,
@@ -133,7 +133,7 @@ impl St2110VideoSink {
             height: 0,
             sampling: None,
             packetizer: None,
-            socket: None,
+            sender: None,
             clock_sync: None,
             pacing: None,
             frame_period_ns: 0,
@@ -201,7 +201,7 @@ impl AsyncElement for St2110VideoSink {
         let sock = UdpSocket::bind(("0.0.0.0", 0)).map_err(io_err)?;
         sock.connect((self.host.as_str(), self.port))
             .map_err(io_err)?;
-        self.socket = Some(sock);
+        self.sender = Some(PacedSender::spawn(sock).map_err(io_err)?);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -309,30 +309,19 @@ impl AsyncElement for St2110VideoSink {
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let pkt = self.packetizer.as_mut().ok_or(G2gError::NotConfigured)?;
-                    let sock = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
+                    let sender = self.sender.as_ref().ok_or(G2gError::NotConfigured)?;
                     // The frame's sampling instant on the PTP timeline: base + PTS.
                     let base = self.clock_sync.as_ref().map_or(0, ClockSync::base_time);
                     let tai = base.saturating_add(frame.timing.pts_ns);
                     let packets = pkt
                         .packetize(slice, self.width, self.height, tai)
                         .ok_or(G2gError::CapsMismatch)?;
-                    match self.pacing {
-                        // ST 2110-21: spread the frame's packets across the frame
-                        // period on the async timer, so the network sees a smooth
-                        // flow instead of a burst. Needs a real framerate + a tokio
-                        // reactor (the production runner); falls back to a burst if
-                        // the period is unknown.
-                        Some(profile) if self.frame_period_ns > 0 => {
-                            let pacer = Pacer::new(profile, packets.len(), self.frame_period_ns);
-                            pace_send(sock, &packets, &pacer).await.map_err(io_err)?;
-                        }
-                        _ => {
-                            for p in packets {
-                                sock.send(&p).map_err(io_err)?;
-                            }
-                        }
-                    }
-                    Ok(())
+                    // ST 2110-21 pacing, a burst when it is off or the period unknown
+                    let pacer = self
+                        .pacing
+                        .filter(|_| self.frame_period_ns > 0)
+                        .map(|profile| Pacer::new(profile, packets.len(), self.frame_period_ns));
+                    sender.send(packets, pacer).await.map_err(io_err)
                 }
                 PipelinePacket::CapsChanged(c) => {
                     video_geometry(&c)?;
@@ -394,11 +383,6 @@ pub struct St2110VideoSrc {
     redundant_port: u16,
     socket2: Option<UdpSocket>,
 }
-
-/// Poll granularity for the redundant receiver: how often each path is checked while
-/// waiting for the next packet. Bounded so an idle path is noticed promptly without a
-/// busy loop; the whole-stream end still waits `recv_timeout_ms`.
-const REDUNDANT_POLL_MS: u64 = 20;
 
 /// Build one output `Frame` from a reassembled -20 frame's bytes and RTP timestamp,
 /// reconstructing the PTS as the media-clock offset from the first frame. Shared by
@@ -536,11 +520,8 @@ impl SourceLoop for St2110VideoSrc {
         St2110VideoDepacketizer::new(self.format, self.width, self.height)
             .ok_or(G2gError::CapsMismatch)?;
         let sock = UdpSocket::bind((self.address.as_str(), self.port)).map_err(io_err)?;
-        sock.set_read_timeout(Some(Duration::from_millis(self.recv_timeout_ms)))
-            .map_err(io_err)?;
         self.socket = Some(sock);
-        // ST 2110-7: bind the redundant ("blue") path too; the receiver sets its own
-        // (shorter) poll timeout on both sockets when the run loop starts.
+        // ST 2110-7: bind the redundant ("blue") path too.
         if self.redundant {
             let sock2 = UdpSocket::bind((self.redundant_address.as_str(), self.redundant_port))
                 .map_err(io_err)?;
@@ -556,62 +537,28 @@ impl SourceLoop for St2110VideoSrc {
             let clock = MediaClock::video();
             let mut pts_rebase = RtpPtsRebase::new();
             let mut count = 0u64;
-            let mut buf = [0u8; 65_536];
+            let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
+            let mut paths = alloc::vec![socket.try_clone().map_err(io_err)?];
+            // ST 2110-7: a packet lost on one path arrives on the other
             if self.redundant {
-                // ST 2110-7: drain both paths through the dedup, depacketizing each RTP
-                // sequence number exactly once. A packet lost on one path arrives on the
-                // other, so the frame still completes.
-                let s1 = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
-                let s2 = self.socket2.as_ref().ok_or(G2gError::NotConfigured)?;
-                let socks = [s1, s2];
-                let poll = Duration::from_millis(self.recv_timeout_ms.min(REDUNDANT_POLL_MS));
-                let idle = Duration::from_millis(self.recv_timeout_ms);
-                let mut rx = RedundantRtpReceiver::new(&socks, poll, idle).map_err(io_err)?;
-                while let Some(n) = rx.recv_novel(&mut buf).map_err(io_err)? {
-                    let Some(vframe) = depack.depacketize(&buf[..n]) else {
-                        continue;
-                    };
-                    let frame = build_frame(
-                        vframe.bytes,
-                        vframe.rtp_timestamp,
-                        &clock,
-                        &mut pts_rebase,
-                        count,
-                    );
-                    out.push(PipelinePacket::DataFrame(frame)).await?;
-                    count += 1;
-                }
-            } else {
-                let sock = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
-                loop {
-                    let n = match sock.recv_from(&mut buf) {
-                        Ok((n, _)) => n,
-                        // A gap (read timeout) ends the stream cleanly.
-                        Err(e)
-                            if matches!(
-                                e.kind(),
-                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                            ) =>
-                        {
-                            break
-                        }
-                        Err(e) => return Err(io_err(e)),
-                    };
-                    let Some(vframe) = depack.depacketize(&buf[..n]) else {
-                        continue;
-                    };
-                    // PTS = the frame's media-clock offset from the first frame (the PTP
-                    // grandmaster supplies absolute time upstream).
-                    let frame = build_frame(
-                        vframe.bytes,
-                        vframe.rtp_timestamp,
-                        &clock,
-                        &mut pts_rebase,
-                        count,
-                    );
-                    out.push(PipelinePacket::DataFrame(frame)).await?;
-                    count += 1;
-                }
+                let redundant_socket = self.socket2.as_ref().ok_or(G2gError::NotConfigured)?;
+                paths.push(redundant_socket.try_clone().map_err(io_err)?);
+            }
+            let idle = Duration::from_millis(self.recv_timeout_ms);
+            let mut frames =
+                spawn_rtp_receiver(paths, idle, move |datagram| depack.depacketize(datagram))
+                    .map_err(io_err)?;
+            while let Some(vframe) = frames.recv().await {
+                let vframe = vframe.map_err(io_err)?;
+                let frame = build_frame(
+                    vframe.bytes,
+                    vframe.rtp_timestamp,
+                    &clock,
+                    &mut pts_rebase,
+                    count,
+                );
+                out.push(PipelinePacket::DataFrame(frame)).await?;
+                count += 1;
             }
             out.push(PipelinePacket::Eos).await?;
             Ok(count)
@@ -1083,8 +1030,8 @@ mod tests {
 
     #[tokio::test]
     async fn linear_pacing_spreads_a_frame_over_its_period() {
-        // Under a tokio reactor, linear pacing sleeps between packets so a frame's
-        // packets are emitted across (most of) the frame period instead of at once.
+        // Linear pacing sleeps between packets so a frame's packets are emitted
+        // across (most of) the frame period instead of at once.
         let (w, h) = (16usize, 8usize);
         let caps = Caps::RawVideo {
             format: RawVideoFormat::Rgba8,

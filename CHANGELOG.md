@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1310: ST 2110 senders pace from a dedicated thread and the -20/-22/-30/-40 sources receive off the executor.
 - M1309: RTP and ST 2110 receivers keep PTS counting past the 32-bit timestamp wrap, share core's sequence extender, and RTCP jitter survives a timestamp wrap.
 - M1393: the FFT FIR path filters partial blocks as they arrive, so a long-kernel filter holds back only its group delay.
 - M1296: audio elements take sample width from `AudioFormat::bytes_per_sample()`, and i16 round-and-clamp is one `saturate_i16`.

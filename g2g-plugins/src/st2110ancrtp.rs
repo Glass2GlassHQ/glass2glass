@@ -42,6 +42,7 @@ use crate::cea::{build_cdp, extract_cc_data, parse_cdp, CaptionDecoder, CcSource
 use crate::filesink::io_err;
 use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110anc::{AncField, AncPacket, St2110AncDepacketizer, St2110AncPacketizer};
+use crate::st2110dup::spawn_rtp_receiver;
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
 
 /// DID / SDID of a CEA closed-caption ANC packet (SMPTE ST 334-1): DID 0x61 with
@@ -399,8 +400,6 @@ impl SourceLoop for St2110AncSrc {
 
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let sock = UdpSocket::bind((self.address.as_str(), self.port)).map_err(io_err)?;
-        sock.set_read_timeout(Some(Duration::from_millis(self.recv_timeout_ms)))
-            .map_err(io_err)?;
         self.socket = Some(sock);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -415,24 +414,13 @@ impl SourceLoop for St2110AncSrc {
             let mut last_pts = 0u64;
             let mut caps_emitted = false;
             let mut sequence = 0u64;
-            let mut buf = [0u8; 65_536];
-            loop {
-                let n = match sock.recv_from(&mut buf) {
-                    Ok((n, _)) => n,
-                    // A gap (read timeout) ends the stream cleanly.
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) =>
-                    {
-                        break
-                    }
-                    Err(e) => return Err(io_err(e)),
-                };
-                let Some(anc_frame) = depack.depacketize(&buf[..n]) else {
-                    continue;
-                };
+            let paths = alloc::vec![sock.try_clone().map_err(io_err)?];
+            let idle = Duration::from_millis(self.recv_timeout_ms);
+            let mut units =
+                spawn_rtp_receiver(paths, idle, move |datagram| depack.depacketize(datagram))
+                    .map_err(io_err)?;
+            while let Some(anc_frame) = units.recv().await {
+                let anc_frame = anc_frame.map_err(io_err)?;
                 // PTS = the packet's media-clock offset from the first packet (the
                 // PTP grandmaster supplies absolute time upstream).
                 let pts_ns = pts_rebase.pts_ns(anc_frame.rtp_timestamp, clock.rate_hz());

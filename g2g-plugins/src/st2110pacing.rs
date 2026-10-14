@@ -9,8 +9,8 @@
 //! given a frame's packet count and period it yields each packet's target emission
 //! offset (a [`Pacer`]), and it can check whether a set of actual emission offsets
 //! stays within a burst tolerance ([`Pacer::conforms`]). A sink realizes the
-//! schedule by sleeping to each offset on its async clock; the timing math lives
-//! here so it is deterministic and CI-testable without real waits.
+//! schedule with a `PacedSender` thread; the timing math lives here so it is
+//! deterministic and CI-testable without real waits.
 //!
 //! Two profiles: [`PacingProfile::Linear`] spreads packets evenly across the whole
 //! frame period (the -21 narrow-linear / "2110TPNL" shape, no burst at the frame
@@ -239,39 +239,97 @@ pub fn frame_period_ns(fps: u32) -> u64 {
     }
 }
 
-// The socket-bound realization of a schedule: sends packets on a UDP socket, sleeping
-// to each offset on the tokio timer. Needs std + tokio, so it is behind the `st2110`
-// feature; the schedule math above stays sans-IO in the no_std baseline.
+// The socket-bound realization of a schedule. Needs std threads, so it is behind
+// the `st2110` feature, the schedule math above stays sans-IO in the no_std baseline.
 #[cfg(feature = "st2110")]
 mod send {
     use super::Pacer;
     use std::io;
     use std::net::UdpSocket;
-    use std::time::Duration;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+    use std::vec::Vec;
+    use tokio::sync::oneshot;
 
-    /// Send a frame's already-built RTP `packets` on `sock`, spread across the frame
-    /// period per the `pacer`'s schedule: sleep on the tokio timer to each packet's
-    /// target offset before sending it, so the -21 profile shapes the traffic instead
-    /// of bursting. Needs a tokio reactor (the production `run_graph`); the schedule
-    /// math lives on [`Pacer`], so this only adds the waits and the socket. Shared by
-    /// the -20 video and -22 JPEG XS sinks.
-    pub async fn pace_send<T: AsRef<[u8]>>(
-        sock: &UdpSocket,
-        packets: &[T],
-        pacer: &Pacer,
+    // a sleep overshoots by the kernel timer slack, 50 us by default on Linux
+    const SPIN_MARGIN: Duration = Duration::from_micros(200);
+    const PACER_THREAD_NAME: &str = "st2110-pacer";
+    const PACER_THREAD_GONE: &str = "st2110 pacing thread exited";
+
+    struct PacedFrame {
+        packets: Vec<Vec<u8>>,
+        pacer: Option<Pacer>,
+        sent: oneshot::Sender<io::Result<()>>,
+    }
+
+    // the thread spins out each deadline, a tokio timer only fires every millisecond
+    #[derive(Debug)]
+    pub struct PacedSender {
+        frames: mpsc::Sender<PacedFrame>,
+    }
+
+    impl PacedSender {
+        pub fn spawn(socket: UdpSocket) -> io::Result<Self> {
+            let (frames, queued) = mpsc::channel::<PacedFrame>();
+            thread::Builder::new()
+                .name(PACER_THREAD_NAME.into())
+                .spawn(move || {
+                    for frame in queued {
+                        let result = send_frame(&socket, &frame.packets, frame.pacer.as_ref());
+                        // the sink stopped waiting, nobody is left to report to
+                        let _ = frame.sent.send(result);
+                    }
+                })?;
+            Ok(Self { frames })
+        }
+
+        pub async fn send(&self, packets: Vec<Vec<u8>>, pacer: Option<Pacer>) -> io::Result<()> {
+            let (sent, done) = oneshot::channel();
+            self.frames
+                .send(PacedFrame {
+                    packets,
+                    pacer,
+                    sent,
+                })
+                .map_err(|_| io::Error::other(PACER_THREAD_GONE))?;
+            done.await
+                .map_err(|_| io::Error::other(PACER_THREAD_GONE))?
+        }
+    }
+
+    fn send_frame(
+        socket: &UdpSocket,
+        packets: &[Vec<u8>],
+        pacer: Option<&Pacer>,
     ) -> io::Result<()> {
-        let base = tokio::time::Instant::now();
-        for (i, p) in packets.iter().enumerate() {
-            let deadline = base + Duration::from_nanos(pacer.offset_ns(i));
-            tokio::time::sleep_until(deadline).await;
-            sock.send(p.as_ref())?;
+        let start = Instant::now();
+        for (index, packet) in packets.iter().enumerate() {
+            if let Some(pacer) = pacer {
+                wait_until(start + Duration::from_nanos(pacer.offset_ns(index)));
+            }
+            socket.send(packet)?;
         }
         Ok(())
+    }
+
+    fn wait_until(deadline: Instant) {
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            if remaining > SPIN_MARGIN {
+                thread::sleep(remaining - SPIN_MARGIN);
+            } else {
+                std::hint::spin_loop();
+            }
+        }
     }
 }
 
 #[cfg(feature = "st2110")]
-pub use send::pace_send;
+pub use send::PacedSender;
 
 #[cfg(test)]
 mod tests {

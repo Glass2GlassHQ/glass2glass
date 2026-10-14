@@ -113,7 +113,85 @@ mod net {
     use super::SeamlessDedup;
     use std::io;
     use std::net::UdpSocket;
+    use std::thread;
     use std::time::Duration;
+    use std::vec;
+    use std::vec::Vec;
+    use tokio::sync::mpsc;
+
+    // a UDP datagram tops out at 65507 payload bytes
+    const MAX_DATAGRAM: usize = 65_536;
+    // how often each redundant path is checked while the other is idle
+    const REDUNDANT_POLL: Duration = Duration::from_millis(20);
+    // depacketized units waiting for the source loop, socket buffers absorb the rest
+    const RECEIVED_QUEUE_DEPTH: usize = 64;
+    const RECEIVE_THREAD_NAME: &str = "st2110-receive";
+
+    // the channel closes once every path has been idle for `idle`
+    pub fn spawn_rtp_receiver<T, D>(
+        paths: Vec<UdpSocket>,
+        idle: Duration,
+        depacketize: D,
+    ) -> io::Result<mpsc::Receiver<io::Result<T>>>
+    where
+        T: Send + 'static,
+        D: FnMut(&[u8]) -> Option<T> + Send + 'static,
+    {
+        let (units, received) = mpsc::channel(RECEIVED_QUEUE_DEPTH);
+        thread::Builder::new()
+            .name(RECEIVE_THREAD_NAME.into())
+            .spawn(move || {
+                if let Err(error) = receive_until_idle(&paths, idle, depacketize, &units) {
+                    // the source loop is gone when this fails, nobody to report to
+                    let _ = units.blocking_send(Err(error));
+                }
+            })?;
+        Ok(received)
+    }
+
+    fn receive_until_idle<T, D>(
+        paths: &[UdpSocket],
+        idle: Duration,
+        mut depacketize: D,
+        units: &mpsc::Sender<io::Result<T>>,
+    ) -> io::Result<()>
+    where
+        D: FnMut(&[u8]) -> Option<T>,
+    {
+        let mut buf = vec![0u8; MAX_DATAGRAM];
+        let mut forward = |datagram: &[u8]| match depacketize(datagram) {
+            Some(unit) => units.blocking_send(Ok(unit)).is_ok(),
+            None => true,
+        };
+        if let [path] = paths {
+            path.set_read_timeout(Some(idle))?;
+            loop {
+                let n = match path.recv_from(&mut buf) {
+                    Ok((n, _)) => n,
+                    Err(e) if is_timeout(&e) => return Ok(()),
+                    Err(e) => return Err(e),
+                };
+                if !forward(&buf[..n]) {
+                    return Ok(());
+                }
+            }
+        }
+        let sockets: Vec<&UdpSocket> = paths.iter().collect();
+        let mut receiver = RedundantRtpReceiver::new(&sockets, idle.min(REDUNDANT_POLL), idle)?;
+        while let Some(n) = receiver.recv_novel(&mut buf)? {
+            if !forward(&buf[..n]) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn is_timeout(error: &io::Error) -> bool {
+        matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        )
+    }
 
     /// Joins redundant ST 2110-7 RTP paths into one deduplicated packet stream.
     ///
@@ -183,11 +261,7 @@ mod net {
                             }
                         }
                         // An idle poll of this path; try the next one.
-                        Err(e)
-                            if matches!(
-                                e.kind(),
-                                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                            ) => {}
+                        Err(e) if is_timeout(&e) => {}
                         Err(e) => return Err(e),
                     }
                 }
@@ -205,7 +279,7 @@ mod net {
 }
 
 #[cfg(feature = "st2110")]
-pub use net::RedundantRtpReceiver;
+pub use net::{spawn_rtp_receiver, RedundantRtpReceiver};
 
 #[cfg(test)]
 mod tests {

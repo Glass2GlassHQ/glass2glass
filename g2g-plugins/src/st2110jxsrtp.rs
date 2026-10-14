@@ -38,8 +38,9 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::rtpjitter::RtpPtsRebase;
+use crate::st2110dup::spawn_rtp_receiver;
 use crate::st2110jxs::{St2110JxsDepacketizer, St2110JxsPacketizer};
-use crate::st2110pacing::{frame_period_ns, pace_send, Pacer, PacingProfile};
+use crate::st2110pacing::{frame_period_ns, PacedSender, Pacer, PacingProfile};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
 use crate::st2110video::Sampling;
 use g2g_core::caps_parse::parse_raw_format;
@@ -109,7 +110,7 @@ pub struct St2110JxsSink {
     /// this is informative, not a pixel layout). Defaults to the broadcast norm.
     sampling: Sampling,
     packetizer: Option<St2110JxsPacketizer>,
-    socket: Option<UdpSocket>,
+    sender: Option<PacedSender>,
     clock_sync: Option<ClockSync>,
     /// ST 2110-21 sender pacing profile (None = burst all packets, the default).
     pacing: Option<PacingProfile>,
@@ -147,7 +148,7 @@ impl St2110JxsSink {
             height: 0,
             sampling: Sampling::YCbCr422_10,
             packetizer: None,
-            socket: None,
+            sender: None,
             clock_sync: None,
             pacing: None,
             frame_period_ns: 0,
@@ -214,7 +215,7 @@ impl AsyncElement for St2110JxsSink {
         let sock = UdpSocket::bind(("0.0.0.0", 0)).map_err(io_err)?;
         sock.connect((self.host.as_str(), self.port))
             .map_err(io_err)?;
-        self.socket = Some(sock);
+        self.sender = Some(PacedSender::spawn(sock).map_err(io_err)?);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -333,27 +334,17 @@ impl AsyncElement for St2110JxsSink {
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let pkt = self.packetizer.as_mut().ok_or(G2gError::NotConfigured)?;
-                    let sock = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
+                    let sender = self.sender.as_ref().ok_or(G2gError::NotConfigured)?;
                     // The frame's sampling instant on the PTP timeline: base + PTS.
                     let base = self.clock_sync.as_ref().map_or(0, ClockSync::base_time);
                     let tai = base.saturating_add(frame.timing.pts_ns);
                     let packets = pkt.packetize(slice, tai);
-                    match self.pacing {
-                        // ST 2110-21: spread the codestream's packets across the frame
-                        // period on the async timer (needs a real framerate + a tokio
-                        // reactor); falls back to a burst if the period is unknown. The
-                        // schedule + waits are shared with the -20 sink via `pace_send`.
-                        Some(profile) if self.frame_period_ns > 0 => {
-                            let pacer = Pacer::new(profile, packets.len(), self.frame_period_ns);
-                            pace_send(sock, &packets, &pacer).await.map_err(io_err)?;
-                        }
-                        _ => {
-                            for p in &packets {
-                                sock.send(p).map_err(io_err)?;
-                            }
-                        }
-                    }
-                    Ok(())
+                    // ST 2110-21 pacing, a burst when it is off or the period unknown
+                    let pacer = self
+                        .pacing
+                        .filter(|_| self.frame_period_ns > 0)
+                        .map(|profile| Pacer::new(profile, packets.len(), self.frame_period_ns));
+                    sender.send(packets, pacer).await.map_err(io_err)
                 }
                 PipelinePacket::CapsChanged(c) => {
                     jxs_geometry(&c)?;
@@ -496,8 +487,6 @@ impl SourceLoop for St2110JxsSrc {
 
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let sock = UdpSocket::bind((self.address.as_str(), self.port)).map_err(io_err)?;
-        sock.set_read_timeout(Some(Duration::from_millis(self.recv_timeout_ms)))
-            .map_err(io_err)?;
         self.socket = Some(sock);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -509,24 +498,13 @@ impl SourceLoop for St2110JxsSrc {
             let clock = MediaClock::video();
             let mut pts_rebase = RtpPtsRebase::new();
             let mut count = 0u64;
-            let mut buf = [0u8; 65_536];
-            loop {
-                let n = match sock.recv_from(&mut buf) {
-                    Ok((n, _)) => n,
-                    // A gap (read timeout) ends the stream cleanly.
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) =>
-                    {
-                        break
-                    }
-                    Err(e) => return Err(io_err(e)),
-                };
-                let Some(jxs) = depack.depacketize(&buf[..n]) else {
-                    continue;
-                };
+            let paths = alloc::vec![sock.try_clone().map_err(io_err)?];
+            let idle = Duration::from_millis(self.recv_timeout_ms);
+            let mut units =
+                spawn_rtp_receiver(paths, idle, move |datagram| depack.depacketize(datagram))
+                    .map_err(io_err)?;
+            while let Some(jxs) = units.recv().await {
+                let jxs = jxs.map_err(io_err)?;
                 // PTS = the frame's media-clock offset from the first frame (the PTP
                 // grandmaster supplies absolute time upstream).
                 let pts_ns = pts_rebase.pts_ns(jxs.rtp_timestamp, clock.rate_hz());
@@ -759,8 +737,8 @@ mod tests {
 
     #[tokio::test]
     async fn gapped_pacing_spreads_a_codestream_over_its_period() {
-        // Under a tokio reactor, pacing sleeps between packets so a codestream's packets
-        // are emitted across (most of) the frame period instead of at once.
+        // Pacing sleeps between packets so a codestream's packets are emitted
+        // across (most of) the frame period instead of at once.
         let caps = Caps::CompressedVideo {
             codec: VideoCodec::JpegXs,
             width: Dim::Fixed(1920),

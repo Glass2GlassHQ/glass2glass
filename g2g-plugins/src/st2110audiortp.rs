@@ -38,6 +38,7 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110audio::{SampleDepth, St2110AudioDepacketizer, St2110AudioPacketizer};
+use crate::st2110dup::spawn_rtp_receiver;
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
 
 /// The supported PCM formats and their (format, channels, sample_rate). S16 rides
@@ -497,8 +498,6 @@ impl SourceLoop for St2110AudioSrc {
 
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let sock = UdpSocket::bind((self.address.as_str(), self.port)).map_err(io_err)?;
-        sock.set_read_timeout(Some(Duration::from_millis(self.recv_timeout_ms)))
-            .map_err(io_err)?;
         self.socket = Some(sock);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -511,24 +510,13 @@ impl SourceLoop for St2110AudioSrc {
             let clock = MediaClock::audio(self.sample_rate);
             let mut pts_rebase = RtpPtsRebase::new();
             let mut count = 0u64;
-            let mut buf = [0u8; 65_536];
-            loop {
-                let n = match sock.recv_from(&mut buf) {
-                    Ok((n, _)) => n,
-                    // A silence gap (read timeout) ends the stream cleanly.
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) =>
-                    {
-                        break
-                    }
-                    Err(e) => return Err(io_err(e)),
-                };
-                let Some(p) = depack.depacketize(&buf[..n]) else {
-                    continue;
-                };
+            let paths = alloc::vec![sock.try_clone().map_err(io_err)?];
+            let idle = Duration::from_millis(self.recv_timeout_ms);
+            let mut units =
+                spawn_rtp_receiver(paths, idle, move |datagram| depack.depacketize(datagram))
+                    .map_err(io_err)?;
+            while let Some(p) = units.recv().await {
+                let p = p.map_err(io_err)?;
                 // PTS = the packet's media-clock offset from the first packet, so
                 // the receiver reproduces the sender's timing without needing a
                 // shared epoch here (the PTP clock supplies absolute time upstream).
@@ -608,6 +596,33 @@ mod tests {
             sequence: 0,
             meta: Default::default(),
         })
+    }
+
+    // regression: the receive loop once blocked the executor for the whole read timeout
+    #[tokio::test(flavor = "current_thread")]
+    async fn waiting_for_packets_leaves_the_executor_free() {
+        const RECV_TIMEOUT_MS: u64 = 2_000;
+        const TICK: std::time::Duration = std::time::Duration::from_millis(10);
+        let caps = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        };
+        let mut src = St2110AudioSrc::new();
+        src.address = String::from("127.0.0.1");
+        src.port = 0;
+        src.recv_timeout_ms = RECV_TIMEOUT_MS;
+        src.configure_pipeline(&caps).expect("src binds");
+        let mut cap = Capture::default();
+        let start = std::time::Instant::now();
+        let ticked = tokio::time::timeout(TICK, src.run(&mut cap)).await;
+        assert!(ticked.is_err(), "the source is still waiting for packets");
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(RECV_TIMEOUT_MS / 2),
+            "a timer on the same thread fired while the source waited: {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

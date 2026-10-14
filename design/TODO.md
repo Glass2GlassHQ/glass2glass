@@ -121,7 +121,8 @@ Audio:
 
 Network:
 
-- ST 2110 pacing sleeps on 1 ms tokio timers, receivers block in async `run`.
+- ST 2110-20 at 1080p60 cannot meet its pacing schedule: one loopback `send` costs
+  about 5.5 us. Send each pacing slot with UDP GSO or `sendmmsg`.
 - SRT rebuilds the AES key schedule per packet.
 - `udpsink` uses `RetransmissionHistory` from rist.
 - Remote TCP sets `TCP_NODELAY` and writes length and body once.
