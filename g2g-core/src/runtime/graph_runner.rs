@@ -1286,6 +1286,35 @@ fn report_buffering(
     }
 }
 
+#[cfg(feature = "metadata")]
+fn frame_capture_unix_ns(packet: &PipelinePacket) -> Option<i64> {
+    let PipelinePacket::DataFrame(frame) = packet else {
+        return None;
+    };
+    frame
+        .meta
+        .get::<crate::meta::WallClockMeta>()
+        .map(|wall_clock| wall_clock.unix_nanos)
+}
+
+#[cfg(feature = "metadata")]
+fn post_frame_identity(
+    bus: Option<&BusHandle>,
+    probe: &Probe,
+    report: Option<crate::frame_identity::FrameIdentityStats>,
+) {
+    let (Some(bus), Some(stats)) = (bus, report) else {
+        return;
+    };
+    bus.try_post(BusMessage::FrameIdentity {
+        element: probe
+            .as_deref()
+            .map(|p| alloc::string::String::from(p.name()))
+            .unwrap_or_default(),
+        stats,
+    });
+}
+
 /// As [`run_graph`], but driven by a [`StateController`] (M78): every `Sink`
 /// arm gates on the controller, so the whole DAG (linear / fan-out / fan-in /
 /// diamond) honors `NULL → READY → PAUSED → PLAYING`. Preroll aggregates: the
@@ -4614,6 +4643,8 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
     // M839: while the coordinator lives, race the data link against the β control
     // channel; once it closes, degrade to data-only so the closed arm can't spin.
     let mut control_open = true;
+    #[cfg(feature = "metadata")]
+    let mut frame_identity = crate::frame_identity::FrameIdentityTracker::new();
     loop {
         // M78 flow gate: below `Playing` the sink parks here, so it stops
         // draining its edge and backpressure stalls the DAG upstream. Non-live
@@ -4660,6 +4691,8 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
             Some(PipelinePacket::DataFrame(_)) if flushing => continue,
             Some(PipelinePacket::Eos) => {
                 elem.process(PipelinePacket::Eos, &mut null).await?;
+                #[cfg(feature = "metadata")]
+                post_frame_identity(bus.as_ref(), &probe, frame_identity.finish());
                 // Count this sink toward preroll only if it never took a real
                 // preroll buffer (an empty stream). Without the guard a sink
                 // that already prerolled double-decrements the shared counter
@@ -4724,6 +4757,8 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
             Some(PipelinePacket::Flush) => {
                 flushing = false;
                 elem.process(PipelinePacket::Flush, &mut null).await?;
+                #[cfg(feature = "metadata")]
+                frame_identity.restart();
             }
             Some(packet) => {
                 // M203: follow the segment and publish each buffer's stream-time
@@ -4772,6 +4807,8 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                     &packet,
                     &probe,
                 )?;
+                #[cfg(feature = "metadata")]
+                let capture_unix_ns = frame_capture_unix_ns(&packet);
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut null).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {
@@ -4779,6 +4816,12 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                     // M851: the last hop of a frame's journey. A sink pushes
                     // nowhere, so the banked wait is always 0 here.
                     p.record_visit(seq, wait_ns, t0, push_wait_ns);
+                }
+                #[cfg(feature = "metadata")]
+                if let Some(capture_unix_ns) = capture_unix_ns {
+                    let present_unix_ns = crate::metrics::unix_time_ns();
+                    let report = frame_identity.observe(capture_unix_ns, present_unix_ns);
+                    post_frame_identity(bus.as_ref(), &probe, report);
                 }
                 // M175 upstream QoS: a sink reports a late drop or its periodic
                 // lateness. Store the report on this sink's input link, where

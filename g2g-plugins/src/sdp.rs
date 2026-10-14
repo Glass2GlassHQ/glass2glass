@@ -15,6 +15,8 @@
 //! Never trust the stream: an unmappable encoding, a malformed base64 parameter
 //! set, or a missing field yields `None` / no geometry rather than a guess.
 
+use core::num::NonZeroU8;
+
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -43,6 +45,7 @@ pub struct SdpSection {
     pub framerate: Option<String>,
     /// `a=ts-refclk:ptp=...` as `(grandmaster identity, domain)`.
     pub ptp: Option<(String, u8)>,
+    pub extmap: Vec<(NonZeroU8, String)>,
 }
 
 /// Scan every media section of an SDP document. Sections whose `m=` line is
@@ -115,6 +118,8 @@ fn scan_one(lines: &[&str]) -> Option<SdpSection> {
             section.framerate = Some(a.trim().to_string());
         } else if let Some(a) = line.strip_prefix("a=ts-refclk:ptp=") {
             section.ptp = parse_refclk(a);
+        } else if let Some(a) = line.strip_prefix("a=extmap:") {
+            section.extmap.extend(parse_extmap(a));
         }
     }
     Some(section)
@@ -123,6 +128,18 @@ fn scan_one(lines: &[&str]) -> Option<SdpSection> {
 /// Drop the leading `<pt> ` from an `a=rtpmap:` / `a=fmtp:` value.
 fn after_pt(s: &str) -> Option<&str> {
     s.split_once(' ').map(|(_, rest)| rest)
+}
+
+// `<id>[/<direction>] <uri> [<attributes>]`, RFC 8285 section 5
+fn parse_extmap(a: &str) -> Option<(NonZeroU8, String)> {
+    let mut fields = a.split_whitespace();
+    let id = fields
+        .next()?
+        .split('/')
+        .next()?
+        .parse::<NonZeroU8>()
+        .ok()?;
+    Some((id, fields.next()?.to_string()))
 }
 
 /// Parse `IEEE1588-2008:<gmid>:<domain>` into `(gmid, domain)`.
@@ -169,6 +186,7 @@ pub struct SdpMedia {
     /// `sprop-vps` / `sprop-sps` / `sprop-pps` (H.265). Empty when the SDP
     /// carries none.
     pub parameter_sets: Vec<u8>,
+    pub extmap: Vec<(NonZeroU8, String)>,
 }
 
 impl SdpMedia {
@@ -237,6 +255,7 @@ impl SdpMedia {
             address: s.address.clone().unwrap_or_else(|| "0.0.0.0".to_string()),
             port: s.port,
             parameter_sets,
+            extmap: s.extmap.clone(),
         })
     }
 }
@@ -501,6 +520,29 @@ mod tests {
         assert_eq!(base64_decode("aGk"), Some(alloc::vec![b'h', b'i']));
         assert_eq!(base64_decode("a"), None, "a lone sextet is truncated");
         assert_eq!(base64_decode("a b"), None, "space is outside the alphabet");
+    }
+
+    #[test]
+    fn extmap_lines_carry_their_ids_and_uris() {
+        let sdp = "v=0\r\nm=video 5004 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n\
+                   a=extmap:3 urn:ietf:params:rtp-hdrext:ntp-64\r\n\
+                   a=extmap:20/sendonly http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time\r\n\
+                   a=extmap:0 urn:ietf:params:rtp-hdrext:toffset\r\n\
+                   a=extmap:x urn:bogus\r\n";
+        let media = SdpMedia::parse(sdp).expect("an H.264 section");
+        let ids: Vec<(u8, &str)> = media
+            .extmap
+            .iter()
+            .map(|(id, uri)| (id.get(), uri.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            alloc::vec![
+                (3, g2g_core::rtp::NTP_64_URI),
+                (20, g2g_core::rtp::ABS_CAPTURE_TIME_URI)
+            ],
+            "id 0 and a non-numeric id are not RFC 8285 ids"
+        );
     }
 
     #[test]

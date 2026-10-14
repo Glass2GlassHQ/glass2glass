@@ -119,6 +119,7 @@ use ffmpeg_next as ffmpeg;
 use crate::yuv::downsample_chroma_420;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedCudaBuffer, SystemSlice};
+use g2g_core::meta::FrameMetaSet;
 use g2g_core::{
     AllocationParams, AsyncElement, BufferPool, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     CudaKeepAlive, Dim, ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace,
@@ -130,6 +131,13 @@ use g2g_core::{
 /// Cap on pending input-pts -> arrival entries, so frames the decoder drops
 /// (never echoing their pts back) can't grow the map without bound.
 const MAX_PENDING_ARRIVALS: usize = 1024;
+
+// what an output picture inherits from the access unit it decodes
+#[derive(Debug, Default)]
+struct InputStamp {
+    arrival_ns: u64,
+    meta: FrameMetaSet,
+}
 
 /// Default cap on the pictures one QoS report can put into non-reference skip
 /// mode: a second at 30 fps, long enough to absorb a stall, short enough that
@@ -392,10 +400,11 @@ struct DecodedPicture {
     width: u32,
     height: u32,
     pts_ns: u64,
-    /// Source-side wall-clock stamp threaded through from the input
-    /// frame so glass-to-glass latency survives decode. Looked up in
-    /// `pts_to_arrival` after libavcodec echoes the input pts back.
-    arrival_ns: u64,
+    /// Source-side wall-clock stamp and metadata threaded through from the
+    /// input frame so glass-to-glass latency and frame identity survive
+    /// decode. Looked up in `pts_to_input` after libavcodec echoes the input
+    /// pts back.
+    input: InputStamp,
     /// Concrete output format this picture was packed as. Equals the requested
     /// format for a fixed choice; for `Auto` it is the source's native chroma
     /// resolved at decode, so the emitted output caps match the payload.
@@ -469,11 +478,11 @@ pub struct FfmpegVideoDec {
     /// closure. Phase B will use this as the input to a runner-side
     /// downstream subgraph re-solve.
     input_caps: Option<Caps>,
-    /// Map input pts -> input arrival_ns. Survives the B-frame
+    /// Map input pts -> input arrival_ns and metadata. Survives the B-frame
     /// reordering libavcodec does internally because we key on pts,
     /// which the codec layer echoes verbatim. Bounded by
     /// [`MAX_PENDING_ARRIVALS`] so decoder-dropped frames can't leak.
-    pts_to_arrival: alloc::collections::BTreeMap<u64, u64>,
+    pts_to_input: alloc::collections::BTreeMap<u64, InputStamp>,
     /// `CUcontext` (as `u64`) of the CUDA hwdevice created for the
     /// `NvdecCuda` backend, extracted at `configure_pipeline`. `0` for the
     /// system-memory backends. Stamped onto every emitted `OwnedCudaBuffer`
@@ -571,7 +580,7 @@ impl FfmpegVideoDec {
             live: true,
             thread_delay_frames: 0,
             input_caps: None,
-            pts_to_arrival: alloc::collections::BTreeMap::new(),
+            pts_to_input: alloc::collections::BTreeMap::new(),
             cuda_context: 0,
             requested_alloc: None,
             vaapi_device: None,
@@ -871,23 +880,23 @@ impl FfmpegVideoDec {
         &mut self,
         bitstream: &[u8],
         pts_ns: u64,
-        arrival_ns: u64,
+        input: InputStamp,
         decoded: &mut Vec<DecodedPicture>,
     ) -> Result<(), G2gError> {
         let cfg = self.decode_config();
         let mut state = DecodeState {
             decoder: self.decoder.as_mut().ok_or(G2gError::NotConfigured)?,
-            pts_to_arrival: &mut self.pts_to_arrival,
+            pts_to_input: &mut self.pts_to_input,
             pack_pool: &mut self.pack_pool,
         };
-        feed_access_unit_into(&mut state, &cfg, bitstream, pts_ns, arrival_ns, decoded)
+        feed_access_unit_into(&mut state, &cfg, bitstream, pts_ns, input, decoded)
     }
 
     fn drain_frames(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
         let cfg = self.decode_config();
         let mut state = DecodeState {
             decoder: self.decoder.as_mut().ok_or(G2gError::NotConfigured)?,
-            pts_to_arrival: &mut self.pts_to_arrival,
+            pts_to_input: &mut self.pts_to_input,
             pack_pool: &mut self.pack_pool,
         };
         drain_frames_into(&mut state, &cfg, decoded)
@@ -904,11 +913,11 @@ impl FfmpegVideoDec {
 }
 
 /// The mutable state one decode step touches: the libavcodec decoder, the
-/// pts->arrival map, and the pool the pictures are packed into. Borrowed off the
+/// pts->input map, and the pool the pictures are packed into. Borrowed off the
 /// element on the sync path and off the moved bundle under `offload`.
 struct DecodeState<'a> {
     decoder: &'a mut ffmpeg::decoder::Video,
-    pts_to_arrival: &'a mut alloc::collections::BTreeMap<u64, u64>,
+    pts_to_input: &'a mut alloc::collections::BTreeMap<u64, InputStamp>,
     pack_pool: &'a mut PackPool,
 }
 
@@ -923,11 +932,11 @@ struct DecodeConfig {
 }
 
 /// State the M760 offload moves onto the blocking pool and hands back: the
-/// decoder, its pts->arrival map, the decoded pictures, and the decode result.
+/// decoder, its pts->input map, the decoded pictures, and the decode result.
 #[cfg(feature = "offload")]
 struct OffloadDecode {
     decoder: Option<ffmpeg::decoder::Video>,
-    pts_to_arrival: alloc::collections::BTreeMap<u64, u64>,
+    pts_to_input: alloc::collections::BTreeMap<u64, InputStamp>,
     pack_pool: PackPool,
     decoded: Vec<DecodedPicture>,
     result: Result<(), G2gError>,
@@ -952,7 +961,7 @@ fn feed_access_unit_into(
     cfg: &DecodeConfig,
     bitstream: &[u8],
     pts_ns: u64,
-    arrival_ns: u64,
+    input: InputStamp,
     decoded: &mut Vec<DecodedPicture>,
 ) -> Result<(), G2gError> {
     let mut packet = Packet::copy(bitstream);
@@ -961,13 +970,13 @@ fn feed_access_unit_into(
     // nanoseconds straight through.
     packet.set_pts(Some(pts_ns as i64));
     packet.set_dts(Some(pts_ns as i64));
-    if arrival_ns != 0 {
-        state.pts_to_arrival.insert(pts_ns, arrival_ns);
+    if input.arrival_ns != 0 || !input.meta.is_empty() {
+        state.pts_to_input.insert(pts_ns, input);
         // A decoder-dropped frame never echoes its pts back, so its entry
         // would linger; cap the map and evict the oldest, losing only a
         // latency sample for a frame the decoder discarded.
-        while state.pts_to_arrival.len() > MAX_PENDING_ARRIVALS {
-            state.pts_to_arrival.pop_first();
+        while state.pts_to_input.len() > MAX_PENDING_ARRIVALS {
+            state.pts_to_input.pop_first();
         }
     }
 
@@ -1055,14 +1064,14 @@ fn drain_frames_into(
                         resolved,
                     )
                 };
-                let arrival_ns = state.pts_to_arrival.remove(&pts_ns).unwrap_or(0);
+                let input = state.pts_to_input.remove(&pts_ns).unwrap_or_default();
                 decoded.push(DecodedPicture {
                     payload,
                     width,
                     height,
                     format: resolved,
                     pts_ns,
-                    arrival_ns,
+                    input,
                     interlaced,
                 });
             }
@@ -1670,10 +1679,13 @@ impl AsyncElement for FfmpegVideoDec {
                         let cfg = self.decode_config();
                         let bitstream: Vec<u8> = slice.to_vec();
                         let pts_ns = frame.timing.pts_ns;
-                        let arrival_ns = frame.timing.arrival_ns;
+                        let input = InputStamp {
+                            arrival_ns: frame.timing.arrival_ns,
+                            meta: frame.meta.clone(),
+                        };
                         let mut bundle = OffloadDecode {
                             decoder: self.decoder.take(),
-                            pts_to_arrival: core::mem::take(&mut self.pts_to_arrival),
+                            pts_to_input: core::mem::take(&mut self.pts_to_input),
                             pack_pool: core::mem::take(&mut self.pack_pool),
                             decoded: Vec::new(),
                             result: Ok(()),
@@ -1684,7 +1696,7 @@ impl AsyncElement for FfmpegVideoDec {
                                 Some(decoder) => {
                                     let mut state = DecodeState {
                                         decoder,
-                                        pts_to_arrival: &mut b.pts_to_arrival,
+                                        pts_to_input: &mut b.pts_to_input,
                                         pack_pool: &mut b.pack_pool,
                                     };
                                     feed_access_unit_into(
@@ -1692,7 +1704,7 @@ impl AsyncElement for FfmpegVideoDec {
                                         &cfg,
                                         &bitstream,
                                         pts_ns,
-                                        arrival_ns,
+                                        input,
                                         &mut b.decoded,
                                     )
                                 }
@@ -1702,7 +1714,7 @@ impl AsyncElement for FfmpegVideoDec {
                         })
                         .await;
                         self.decoder = bundle.decoder.take();
-                        self.pts_to_arrival = core::mem::take(&mut bundle.pts_to_arrival);
+                        self.pts_to_input = core::mem::take(&mut bundle.pts_to_input);
                         self.pack_pool = core::mem::take(&mut bundle.pack_pool);
                         bundle.result?;
                         decoded = bundle.decoded;
@@ -1711,7 +1723,10 @@ impl AsyncElement for FfmpegVideoDec {
                     self.feed_access_unit(
                         slice,
                         frame.timing.pts_ns,
-                        frame.timing.arrival_ns,
+                        InputStamp {
+                            arrival_ns: frame.timing.arrival_ns,
+                            meta: frame.meta.clone(),
+                        },
                         &mut decoded,
                     )?;
                 }
@@ -1751,7 +1766,7 @@ impl AsyncElement for FfmpegVideoDec {
                     if let Some(d) = self.decoder.as_mut() {
                         d.flush();
                     }
-                    self.pts_to_arrival.clear();
+                    self.pts_to_input.clear();
                     self.last_caps = None;
                     self.push_downstream(out, PipelinePacket::Flush).await?;
                     return Ok(());
@@ -1861,11 +1876,11 @@ impl AsyncElement for FfmpegVideoDec {
                         dts_ns: d.pts_ns,
                         duration_ns: 0,
                         capture_ns: d.pts_ns,
-                        arrival_ns: d.arrival_ns,
+                        arrival_ns: d.input.arrival_ns,
                         keyframe: true, // raw decoded frames are each independently presentable
                     },
                     sequence: self.emitted,
-                    meta: Default::default(),
+                    meta: d.input.meta,
                 };
                 self.emitted += 1;
                 // M997: with `qos` on the runner leaves the report here instead

@@ -392,6 +392,7 @@ pub(crate) async fn receive_interleaved(
                         if let Some(au) = depay.depacketize(&pending[start..end]) {
                             if push_access_unit(
                                 au,
+                                None,
                                 &mut ts_base,
                                 &mut seq,
                                 seq_base,

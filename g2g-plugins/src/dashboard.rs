@@ -172,6 +172,18 @@ pub fn event_value(msg: &BusMessage) -> Option<Value> {
             // the line is JSON already, so it rides as a value, not a string
             "record": serde_json::from_str::<Value>(record).unwrap_or_else(|_| json!(record)),
         }),
+        BusMessage::FrameIdentity { element, stats } => json!({
+            "kind": "frame-identity",
+            "element": element,
+            "frames": stats.frames,
+            "lost": stats.lost,
+            "duplicates": stats.duplicates,
+            "capture_unix_ns": stats.capture_unix_ns,
+            "latency_ns": stats.latency_ns,
+            "latency_min_ns": stats.latency_min_ns,
+            "latency_max_ns": stats.latency_max_ns,
+            "latency_mean_ns": stats.latency_mean_ns,
+        }),
         // Skip the large structured payloads the dashboard has no view for, and
         // anything added since.
         _ => return None,

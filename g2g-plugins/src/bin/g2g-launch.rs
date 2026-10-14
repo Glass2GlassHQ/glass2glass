@@ -18,7 +18,8 @@
 //!
 //! ```text
 //! -v, --verbose       print the pipeline with each link's negotiated caps +
-//!                     memory domain (falls back to topology if nego fails)
+//!                     memory domain (falls back to topology if nego fails),
+//!                     and each sink's frame-identity report while it runs
 //! -q, --quiet         suppress the PLAYING / Done progress lines
 //! --dot               dump the parsed pipeline as Graphviz DOT and exit
 //!                     (pipe to `dot -Tsvg`); does not run the pipeline
@@ -103,6 +104,9 @@ const LINK_CAPACITY: usize = 4;
 /// Bus depth for a run: only the tail matters here (the message naming what
 /// ended the run), and a slow reader must not stall an element posting one.
 const BUS_DEPTH: usize = 64;
+const NANOS_PER_MILLISECOND: f64 = 1.0e6;
+const BUS_DRAIN_INTERVAL: Duration = Duration::from_millis(100);
+const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy)]
 enum ArmThreads {
@@ -749,11 +753,14 @@ fn main() {
         let recorder = opts.record_on_error.as_ref().map(|_| FlightRecorder::new());
         let live = has_live_source(&graph);
         let started = Instant::now();
-        // Poll the run future with a 1s timeout so a long-running (e.g. forever, the
-        // default `videotestsrc`) pipeline prints a liveness heartbeat instead of
-        // looking hung. `timeout` only needs tokio's `time` feature (no `select!`
-        // macro). A short pipeline finishes inside the first tick, so it stays quiet.
+        // Poll the run future on a short timeout so the bus is drained before it
+        // fills, and print a liveness heartbeat once a second so a long-running
+        // (e.g. forever, the default `videotestsrc`) pipeline does not look hung.
+        // `timeout` only needs tokio's `time` feature (no `select!` macro). A
+        // pipeline shorter than a second stays quiet.
         let mut printed_status = false;
+        let mut last_status = started;
+        let mut failed: Option<String> = None;
         // the run future borrows the spawner for the whole run
         #[cfg(feature = "multi-thread")]
         let spawner = match opts.threads {
@@ -821,10 +828,12 @@ fn main() {
                 ))
             };
             loop {
-                match tokio::time::timeout(Duration::from_secs(1), &mut run).await {
+                match tokio::time::timeout(BUS_DRAIN_INTERVAL, &mut run).await {
                     Ok(r) => break r,
                     Err(_elapsed) => {
-                        if !opts.quiet {
+                        drain_bus(&bus, opts.verbose, &mut failed);
+                        if !opts.quiet && last_status.elapsed() >= STATUS_INTERVAL {
+                            last_status = Instant::now();
                             let pos = match progress.position() {
                                 Some(ns) => format!("t={:.1}s", ns as f64 / 1.0e9),
                                 None => String::from("prerolling"),
@@ -843,6 +852,7 @@ fn main() {
         if printed_status {
             eprintln!(); // move off the \r status line before the summary
         }
+        drain_bus(&bus, opts.verbose, &mut failed);
         match result {
             Ok(stats) => {
                 if !opts.quiet {
@@ -855,7 +865,7 @@ fn main() {
                 // restart can repeat: nothing presented, a pull source, and a text
                 // pipeline that did not name the element itself.
                 let replug = (!use_file && !live && progress.position().is_none())
-                    .then(|| failed_element(&bus))
+                    .then(|| failed.take())
                     .flatten()
                     .and_then(|failed| fallback_factory(&reg, &pipeline, &failed, &avoided));
                 if let Some(factory) = replug {
@@ -880,16 +890,33 @@ fn main() {
     }
 }
 
-/// The element the bus named as having ended the run, if it named one. Drains
-/// what is left on the bus, which nothing else reads on this path.
-fn failed_element(bus: &Bus) -> Option<String> {
-    let mut failed = None;
+/// Drain the bus, which nothing else reads on this path: keep the element it
+/// named as having ended the run, and under `-v` print each sink's
+/// frame-identity report.
+fn drain_bus(bus: &Bus, verbose: bool, failed: &mut Option<String>) {
     while let Some(message) = bus.try_recv() {
-        if let BusMessage::ElementError { element, .. } = message {
-            failed = Some(element);
+        match message {
+            BusMessage::ElementError { element, .. } => *failed = Some(element),
+            BusMessage::FrameIdentity { element, stats } if verbose => {
+                eprintln!("\r{}", frame_identity_line(&element, &stats));
+            }
+            _ => {}
         }
     }
-    failed
+}
+
+fn frame_identity_line(element: &str, stats: &g2g_core::FrameIdentityStats) -> String {
+    let ms = |ns: i64| ns as f64 / NANOS_PER_MILLISECOND;
+    format!(
+        "frame identity: {element} frames={} lost={} duplicates={} latency={:.1} ms (min {:.1} mean {:.1} max {:.1})",
+        stats.frames,
+        stats.lost,
+        stats.duplicates,
+        ms(stats.latency_ns),
+        ms(stats.latency_min_ns),
+        ms(stats.latency_mean_ns),
+        ms(stats.latency_max_ns),
+    )
 }
 
 /// Write the flight recorder's per-link rings into the `--record-on-error`

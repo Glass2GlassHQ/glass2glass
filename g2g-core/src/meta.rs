@@ -221,6 +221,11 @@ impl FrameMetaSet {
     pub const fn new() -> Self {
         FrameMetaSet
     }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        true
+    }
 }
 
 /// The metadata types a downstream element asks its producers to attach

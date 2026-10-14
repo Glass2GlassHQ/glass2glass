@@ -221,9 +221,13 @@ Highest leverage first:
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 
-- **Per-frame identity.** Stamp each frame with an ID carried in its metadata
-  and in an RTP header extension, so a receiver can report per-frame loss,
-  duplicates and glass-to-glass latency across a network hop.
+- **Capture time on the other RTP paths.** Write and read the
+  `abs-capture-time` and `ntp-64` header extensions on the WebRTC elements
+  (str0m's `AbsoluteCaptureTime` plus an `ntp-64` mapping) and on the RTSP
+  server ingest, taking the ids from the session's SDP.
+- **Metadata through hardware decoders.** Carry a frame's metadata through
+  `nvdec`, `vaapidec`, the Vulkan decoders and the platform decoders by PTS,
+  so a capture time reaches the sink after a hardware decode.
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
 
 ## Clock-synchronised presentation

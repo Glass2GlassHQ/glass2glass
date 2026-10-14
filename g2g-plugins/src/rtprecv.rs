@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::rtp::{CaptureTimeExtensionIds, RtpHeader};
 use g2g_core::{
     Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError,
     PropValue, Rate,
@@ -65,6 +66,7 @@ pub struct RtpRecvConfig {
     /// SPS refines them and a `CapsChanged` precedes the frame that carries the
     /// new geometry ([`SpsCapsRefiner`]). `None` leaves the stream unrefined.
     pub declared_caps: Option<Caps>,
+    pub capture_time_ids: CaptureTimeExtensionIds,
 }
 
 impl Default for RtpRecvConfig {
@@ -77,6 +79,7 @@ impl Default for RtpRecvConfig {
             fec_pt: None,
             flexfec_pt: None,
             declared_caps: None,
+            capture_time_ids: CaptureTimeExtensionIds::default(),
         }
     }
 }
@@ -204,6 +207,31 @@ pub(crate) fn get_recv_prop(cfg: &RtpRecvConfig, name: &str) -> Option<PropValue
     })
 }
 
+#[derive(Debug, Default)]
+struct CaptureTimeLatch {
+    latest: Option<(u32, i64)>,
+}
+
+impl CaptureTimeLatch {
+    fn observe(&mut self, ids: &CaptureTimeExtensionIds, packet: &[u8]) {
+        let Some(ntp) = ids.read(packet) else { return };
+        let Some(parsed) = RtpHeader::parse_header(packet) else {
+            return;
+        };
+        self.latest =
+            g2g_core::unix_nanos_from_ntp(ntp).map(|unix_ns| (parsed.header.timestamp, unix_ns));
+    }
+
+    fn take(&mut self, rtp_timestamp: u32) -> Option<i64> {
+        let (stamped, unix_ns) = self.latest?;
+        if stamped != rtp_timestamp {
+            return None;
+        }
+        self.latest = None;
+        Some(unix_ns)
+    }
+}
+
 /// Turn one depayloaded access unit into a downstream H.264 frame and push it,
 /// tracking the RTP-timestamp rebase (`ts_base`, so downstream PTS starts near
 /// zero) and the emitted sequence counter. Returns `Ok(true)` once `frame_limit`
@@ -214,6 +242,7 @@ pub(crate) fn get_recv_prop(cfg: &RtpRecvConfig, name: &str) -> Option<PropValue
 /// each RTP packet.
 pub(crate) async fn push_access_unit(
     au: AccessUnit,
+    capture_unix_ns: Option<i64>,
     ts_base: &mut Option<u32>,
     seq: &mut u64,
     seq_base: u64,
@@ -239,6 +268,16 @@ pub(crate) async fn push_access_unit(
         sequence: *seq,
         meta: Default::default(),
     };
+    #[cfg(feature = "metadata")]
+    let frame = {
+        let mut frame = frame;
+        if let Some(unix_nanos) = capture_unix_ns {
+            frame.meta.attach(g2g_core::WallClockMeta { unix_nanos });
+        }
+        frame
+    };
+    #[cfg(not(feature = "metadata"))]
+    let _ = capture_unix_ns;
     out.push(PipelinePacket::DataFrame(frame)).await?;
     *seq += 1;
     if seq.saturating_sub(seq_base) >= frame_limit {
@@ -279,6 +318,7 @@ pub async fn receive_rtp_h264(
     let mut flexfec_decoder = FlexFecDecoder::default();
     // In-band caps discovery: correct the declared geometry from the stream's SPS.
     let mut refiner = cfg.declared_caps.clone().map(SpsCapsRefiner::new);
+    let mut capture_time = CaptureTimeLatch::default();
 
     // RTCP feedback state (RTP/RTCP-muxed on this socket): the peer to report to
     // (learned from the first datagram) and report timers.
@@ -292,13 +332,25 @@ pub async fn receive_rtp_h264(
         // Drain every packet the jitter buffer will release now, turning each
         // completed access unit into a downstream frame.
         while let Some(packet) = jitter.pop(g2g_core::metrics::monotonic_ns()) {
+            capture_time.observe(&cfg.capture_time_ids, &packet);
             let Some(au) = depay.depacketize(&packet) else {
                 continue;
             };
             if let Some(caps) = refiner.as_mut().and_then(|r| r.refine(&au.data)) {
                 out.push(PipelinePacket::CapsChanged(caps)).await?;
             }
-            if push_access_unit(au, &mut ts_base, &mut seq, seq_base, frame_limit, out).await? {
+            let capture_unix_ns = capture_time.take(au.rtp_timestamp);
+            if push_access_unit(
+                au,
+                capture_unix_ns,
+                &mut ts_base,
+                &mut seq,
+                seq_base,
+                frame_limit,
+                out,
+            )
+            .await?
+            {
                 return Ok(seq - seq_base);
             }
         }

@@ -122,6 +122,9 @@ pub mod bus;
 #[cfg(feature = "runtime")]
 pub mod qos;
 
+#[cfg(feature = "runtime")]
+pub mod frame_identity;
+
 // Sink-side presentation pacing (M881): the PTS -> clock deadline, the anchor,
 // and the QoS late-drop verdict every display sink shares.
 #[cfg(feature = "runtime")]
@@ -238,7 +241,7 @@ pub use memory::{
 };
 pub use metrics::{LatencyHistogram, LatencySnapshot};
 pub use query::{AllocationParams, LatencyReport};
-pub use rtp::{RtpHeader, RtpParsed, RTP_HEADER_LEN};
+pub use rtp::{CaptureTimeExtensionIds, RtpHeader, RtpHeaderExtension, RtpParsed, RTP_HEADER_LEN};
 pub use segment::{Seek, SeekFlags, SeekType, Segment};
 pub use spsc::{Overrun, SpscFrameRing};
 // SpscCaptureSrc uses the zero-copy lend, which is not built under loom.
@@ -260,7 +263,9 @@ pub use supervise::{
 #[cfg(feature = "alloc")]
 pub use tag::{resolve_tags, split_tags, Tag, TagList};
 pub use tensor::{TensorView, MAX_TENSOR_RANK};
-pub use time::{RefNs, RtpTs, TaiNs, NTP_TO_UNIX_EPOCH_SECS};
+pub use time::{
+    ntp_from_unix_nanos, unix_nanos_from_ntp, RefNs, RtpTs, TaiNs, NTP_TO_UNIX_EPOCH_SECS,
+};
 #[cfg(feature = "alloc")]
 pub use wire::{
     decode_packet, encode_packet, raw_format_from_u8, raw_format_to_u8, WireError, WIRE_VERSION,
@@ -274,6 +279,9 @@ pub use bus::{Bus, BusHandle, BusMessage, SourceRestartReason, SourceRestartStat
 
 #[cfg(feature = "runtime")]
 pub use qos::QosTracker;
+
+#[cfg(feature = "runtime")]
+pub use frame_identity::{FrameIdentityStats, FrameIdentityTracker};
 
 #[cfg(feature = "runtime")]
 pub use pacing::{

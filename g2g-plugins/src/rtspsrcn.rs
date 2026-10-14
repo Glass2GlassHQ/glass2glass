@@ -43,7 +43,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, Caps, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink,
     MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    VideoCodec, NTP_TO_UNIX_EPOCH_SECS,
+    VideoCodec,
 };
 
 use crate::g711::{G711_CLOCK_RATE_HZ, G711_DEFAULT_CHANNELS};
@@ -450,16 +450,6 @@ fn inflate_gzip(data: &[u8]) -> Option<Vec<u8>> {
     }
     let deflate = data.get(pos..)?;
     miniz_oxide::inflate::decompress_to_vec_with_limit(deflate, MAX_INFLATED_METADATA_LEN).ok()
-}
-
-/// An RTCP sender report's 64-bit NTP timestamp as nanoseconds since the Unix
-/// epoch: seconds in the high word, a binary fraction of a second in the low.
-fn ntp_to_unix_nanos(ntp: u64) -> i64 {
-    const NANOS_PER_SEC: i64 = 1_000_000_000;
-    let secs = (ntp >> 32) as i64 - NTP_TO_UNIX_EPOCH_SECS as i64;
-    let frac_nanos = (((ntp & 0xFFFF_FFFF) * NANOS_PER_SEC as u64) >> 32) as i64;
-    secs.saturating_mul(NANOS_PER_SEC)
-        .saturating_add(frac_nanos)
 }
 
 /// The wall clock a stream's latest sender report pins its RTP clock to: an
@@ -996,10 +986,13 @@ async fn run_session(
                     .next()
                     .and_then(|p| p.as_sender_report().ok().flatten());
                 // RFC 3550 lets a sender without a wall clock report NTP zero.
-                let sr = sr.filter(|sr| sr.ntp_timestamp().0 != 0);
-                if let (Some(sr), Some(slot)) = (sr, sender_clocks.get_mut(stream_id)) {
+                let sr = sr.and_then(|sr| {
+                    Some((g2g_core::unix_nanos_from_ntp(sr.ntp_timestamp().0)?, sr))
+                });
+                if let (Some((unix_nanos, sr)), Some(slot)) = (sr, sender_clocks.get_mut(stream_id))
+                {
                     *slot = Some(SenderClock {
-                        unix_nanos: ntp_to_unix_nanos(sr.ntp_timestamp().0),
+                        unix_nanos,
                         rtp_timestamp: sr.rtp_timestamp(),
                         clock_rate_hz: demuxed.streams()[stream_id].clock_rate_hz(),
                     });
@@ -1360,12 +1353,10 @@ mod tests {
     fn a_sender_report_puts_frames_on_the_senders_wall_clock() {
         // The same instant as an NTP timestamp: seconds since 1900 in the high
         // word, the .321 as a binary fraction in the low.
-        let secs = (SPEC_EXAMPLE_NANOS / 1_000_000_000) as u64 + NTP_TO_UNIX_EPOCH_SECS;
+        let secs = (SPEC_EXAMPLE_NANOS / 1_000_000_000) as u64 + g2g_core::NTP_TO_UNIX_EPOCH_SECS;
         let frac = (321_000_000u64 << 32) / 1_000_000_000;
         let ntp = (secs << 32) | frac;
-        // The 32-bit fraction names about a quarter of a nanosecond, so the
-        // round trip is exact to one.
-        assert!((ntp_to_unix_nanos(ntp) - SPEC_EXAMPLE_NANOS).abs() <= 1);
+        assert_eq!(g2g_core::unix_nanos_from_ntp(ntp), Some(SPEC_EXAMPLE_NANOS));
 
         let clock = SenderClock {
             unix_nanos: SPEC_EXAMPLE_NANOS,

@@ -456,6 +456,45 @@ description. The output geometry is a declared hint (`with_video_size`,
 downstream decoder re-derives and corrects them. `RtspSrc` covers the RTSP case
 with its own jitter buffer ([decode.md](decode.md)).
 
+### Per-frame identity
+
+A frame's identity is its capture time, the `WallClockMeta` it carries. Over
+RTP it rides two RFC 8285 header extensions, each a 64-bit NTP time: WebRTC's
+`abs-capture-time` and RFC 6051's `ntp-64`, which GStreamer's `rtphdrextntp64`
+maps to a `timestamp/x-ntp` reference timestamp meta. A session picks the ids
+with the `abs-capture-time-id` and `ntp-64-id` properties on `udpsink` and
+`udpsrc`, or through the `a=extmap` lines of the SDP given to `udpsrc`. Either
+extension can run alone.
+
+The wire code is in `g2g-core`'s `rtp` module, so the MCU and every packetizer
+share it. `RtpHeader::write_with_extensions` writes the one-byte form when
+every id is 14 or below and the two-byte form otherwise.
+`RtpHeader::find_extension` reads both forms, and an element that overruns its
+block rejects the whole block. `CaptureTimeExtensionIds` turns the ids into
+elements on send and back into an NTP time on receive. The NTP conversion
+rounds the fraction up on write and to the nearest nanosecond on read, so a
+time crosses to and from GStreamer, which rounds down both ways, unchanged.
+
+`udpsink` stamps the first packet of each access unit, as `rtphdrextntp64`
+does by default. The time is the frame's `WallClockMeta` when it has one,
+otherwise the moment the frame entered the sender's pipeline (`arrival_ns`)
+read on the Unix clock. The shared receive loop reads the extension off each
+packet and attaches a `WallClockMeta` to the access unit with the same RTP
+timestamp. `ffmpegdec` keys each input's metadata by PTS and puts it on the
+picture that PTS decodes to, so the capture time survives a software decode.
+
+The graph runner's sink arm reports on every frame that carries a
+`WallClockMeta`, whatever the sink. A capture time already seen among the last
+64 frames is a duplicate. A step to the next capture time of at least one and a
+half frame periods counts the frames missing from it as lost, where the frame
+period is the median of the last 16 steps, and a late frame that fills a gap
+takes one loss back. Latency is the Unix clock after the sink's `process()`
+returns minus the capture time, so it needs the two hosts' clocks in sync (NTP
+or PTP). Once a second and at end of stream the arm posts
+`BusMessage::FrameIdentity` with the cumulative frame, loss and duplicate
+counts and that interval's latency minimum, mean and maximum. `g2g-launch -v`
+prints it and the tooling JSON carries it as a `frame-identity` event.
+
 ## RTMP
 
 `RtmpSrc` (`rtmpsrc.rs`, `rtmp` feature) accepts one RTMP publisher, ffmpeg or

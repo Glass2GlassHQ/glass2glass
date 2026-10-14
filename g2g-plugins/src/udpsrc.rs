@@ -37,6 +37,9 @@ use g2g_core::{
 
 use crate::bytestream::byte_frame;
 use crate::filesink::io_err;
+use crate::rtpcapturetime::{
+    get_capture_time_prop, set_capture_time_prop, ABS_CAPTURE_TIME_ID_PROPERTY, NTP_64_ID_PROPERTY,
+};
 use crate::rtpjitter::JitterConfig;
 use crate::rtprecv::RtpRecvConfig;
 use crate::sdp::SdpMedia;
@@ -177,6 +180,9 @@ impl UdpSrc {
         if media.port != 0 {
             self.bind.set_port(media.port);
         }
+        for &(id, ref uri) in &media.extmap {
+            self.recv.capture_time_ids.assign_extmap(id, uri);
+        }
         true
     }
 
@@ -279,6 +285,7 @@ impl UdpSrc {
     fn is_rtp_only(&self, name: &str) -> bool {
         matches!(name, "sdp" | "width" | "height")
             || crate::rtprecv::get_recv_prop(&self.recv, name).is_some()
+            || get_capture_time_prop(&self.recv.capture_time_ids, name).is_some()
     }
 
     /// The multicast group to join, when the bind address names one and
@@ -499,6 +506,8 @@ impl SourceLoop for UdpSrc {
             )
             .with_default("0")
             .with_range("0", "127"),
+            ABS_CAPTURE_TIME_ID_PROPERTY,
+            NTP_64_ID_PROPERTY,
         ];
         PROPS
     }
@@ -516,6 +525,9 @@ impl SourceLoop for UdpSrc {
             return r;
         }
         if let Some(r) = crate::rtprecv::set_recv_prop(&mut self.recv, name, &value) {
+            return r;
+        }
+        if let Some(r) = set_capture_time_prop(&mut self.recv.capture_time_ids, name, &value) {
             return r;
         }
         match name {
@@ -565,6 +577,9 @@ impl SourceLoop for UdpSrc {
             return Some(v);
         }
         if let Some(v) = crate::rtprecv::get_recv_prop(&self.recv, name) {
+            return Some(v);
+        }
+        if let Some(v) = get_capture_time_prop(&self.recv.capture_time_ids, name) {
             return Some(v);
         }
         match name {

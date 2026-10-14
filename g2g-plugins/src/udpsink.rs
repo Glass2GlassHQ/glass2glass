@@ -27,6 +27,7 @@ use alloc::vec::Vec;
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket as StdUdpSocket};
 
+use g2g_core::rtp::{CaptureTimeExtensionIds, RtpHeader};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
@@ -37,6 +38,10 @@ use crate::bytestream::{carried_bytestream_caps, datagram_chunk, is_packet_encod
 use crate::filesink::io_err;
 use crate::flexfec::FlexFecEncoder;
 use crate::rtcp::{self, RtcpPacket};
+use crate::rtpcapturetime::{
+    get_capture_time_prop, set_capture_time_prop, CaptureClock, ABS_CAPTURE_TIME_ID_PROPERTY,
+    NTP_64_ID_PROPERTY,
+};
 use crate::rtppay::RtpH264Packetizer;
 use crate::rtx;
 use crate::ulpfec::{FecEncoder, InterleavedFecEncoder};
@@ -258,6 +263,8 @@ pub struct UdpSink {
     retransmits_sent: u64,
     sender_reports_sent: u64,
     eos_seen: bool,
+    capture_time_ids: CaptureTimeExtensionIds,
+    capture_clock: CaptureClock,
 }
 
 impl UdpSink {
@@ -292,7 +299,14 @@ impl UdpSink {
             retransmits_sent: 0,
             sender_reports_sent: 0,
             eos_seen: false,
+            capture_time_ids: CaptureTimeExtensionIds::default(),
+            capture_clock: CaptureClock::default(),
         }
+    }
+
+    pub fn with_capture_time_extensions(mut self, ids: CaptureTimeExtensionIds) -> Self {
+        self.capture_time_ids = ids;
+        self
     }
 
     /// Set the RTP payload type (commonly 96..=127) and the synchronization
@@ -695,12 +709,17 @@ impl AsyncElement for UdpSink {
             .with_default("0")
             .with_range("0", "127"),
             PropertySpec::new("rtx-ssrc", PropKind::Uint, "SSRC of the RTX stream"),
+            ABS_CAPTURE_TIME_ID_PROPERTY,
+            NTP_64_ID_PROPERTY,
         ];
         PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         if let Some(r) = crate::netprop::set_addr_prop(&mut self.dest, "host", name, &value) {
+            return r;
+        }
+        if let Some(r) = set_capture_time_prop(&mut self.capture_time_ids, name, &value) {
             return r;
         }
         match name {
@@ -822,6 +841,9 @@ impl AsyncElement for UdpSink {
         if let Some(v) = crate::netprop::get_addr_prop(&self.dest, "host", name) {
             return Some(v);
         }
+        if let Some(v) = get_capture_time_prop(&self.capture_time_ids, name) {
+            return Some(v);
+        }
         match name {
             "payload-type" => Some(PropValue::Uint(self.payload_type as u64)),
             "ssrc" => Some(PropValue::Uint(self.ssrc as u64)),
@@ -882,9 +904,19 @@ impl AsyncElement for UdpSink {
                     }
                     let timestamp = Self::rtp_timestamp(frame.timing.pts_ns);
                     self.last_rtp_ts = timestamp;
+                    let capture_ntp = if self.capture_time_ids.is_empty() {
+                        0
+                    } else {
+                        self.capture_clock.capture_ntp(&frame)
+                    };
                     let packets = {
                         let packetizer = self.packetizer.as_mut().ok_or(G2gError::NotConfigured)?;
-                        packetizer.packetize(slice, timestamp)
+                        packetizer.packetize_with_capture_time(
+                            slice,
+                            timestamp,
+                            self.capture_time_ids,
+                            capture_ntp,
+                        )
                     };
                     self.ensure_socket()?;
                     // Generate any ULPFEC repair packets for the just-built media
@@ -920,11 +952,11 @@ impl AsyncElement for UdpSink {
                         sent += reached;
                         bytes += reached * pkt.len() as u64;
                         // SR sender counters: this SSRC's media packets and
-                        // their RTP payload octets (past the 12-byte header).
+                        // their RTP payload octets (past the header and any
+                        // header extension).
+                        let payload_len = RtpHeader::parse(pkt).map_or(0, |p| p.payload_len);
                         self.rtp_packets = self.rtp_packets.wrapping_add(1);
-                        self.rtp_octets = self
-                            .rtp_octets
-                            .wrapping_add(pkt.len().saturating_sub(12) as u32);
+                        self.rtp_octets = self.rtp_octets.wrapping_add(payload_len as u32);
                     }
                     // Repair packets follow the media they protect.
                     for repair in &fec_packets {
@@ -980,7 +1012,7 @@ impl AsyncElement for UdpSink {
                 PipelinePacket::Eos => self.eos_seen = true,
                 // A seek does not reset the RTP sequence: a receiver tracks loss
                 // by gaps, so the numbering continues across the flush.
-                PipelinePacket::Flush => {}
+                PipelinePacket::Flush => self.capture_clock.restart(),
                 // Geometry refinement lives in the in-band SPS, not in RTP.
                 PipelinePacket::CapsChanged(_) => {}
                 // Segment is control: ignored at sink.

@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 
-use g2g_core::rtp::{RtpHeader, RTP_HEADER_LEN};
+use g2g_core::rtp::{CaptureTimeExtensionIds, RtpHeader, RtpHeaderExtension, RTP_HEADER_LEN};
 
 use crate::annexb::nal_units;
 /// RFC 6184 FU-A NAL type.
@@ -48,13 +48,33 @@ impl RtpH264Packetizer {
     /// packets. Sequence numbers increment across packets and calls; the marker
     /// bit is set on the last packet of the access unit (RFC 6184 frame end).
     pub fn packetize(&mut self, access_unit: &[u8], rtp_timestamp: u32) -> Vec<Vec<u8>> {
+        self.packetize_with_capture_time(
+            access_unit,
+            rtp_timestamp,
+            CaptureTimeExtensionIds::default(),
+            0,
+        )
+    }
+
+    pub fn packetize_with_capture_time(
+        &mut self,
+        access_unit: &[u8],
+        rtp_timestamp: u32,
+        capture_time_ids: CaptureTimeExtensionIds,
+        capture_ntp: u64,
+    ) -> Vec<Vec<u8>> {
+        let capture_ntp_bytes = capture_ntp.to_be_bytes();
+        let extensions: Vec<RtpHeaderExtension<'_>> =
+            capture_time_ids.elements(&capture_ntp_bytes).collect();
         let payloads = self.payloads(access_unit);
         let count = payloads.len();
         let mut packets = Vec::with_capacity(count);
         for (i, payload) in payloads.into_iter().enumerate() {
             let marker = i + 1 == count;
+            // only the first packet, as GStreamer's ntp-64 writer does by default
+            let packet_extensions = if i == 0 { &extensions[..] } else { &[] };
             let mut packet = Vec::with_capacity(RTP_HEADER_LEN + payload.len());
-            self.write_header(&mut packet, marker, rtp_timestamp);
+            self.write_header(&mut packet, marker, rtp_timestamp, packet_extensions);
             packet.extend_from_slice(&payload);
             packets.push(packet);
             self.sequence = self.sequence.wrapping_add(1);
@@ -93,7 +113,13 @@ impl RtpH264Packetizer {
         payloads
     }
 
-    fn write_header(&self, out: &mut Vec<u8>, marker: bool, timestamp: u32) {
+    fn write_header(
+        &self,
+        out: &mut Vec<u8>,
+        marker: bool,
+        timestamp: u32,
+        extensions: &[RtpHeaderExtension<'_>],
+    ) {
         let header = RtpHeader {
             payload_type: self.payload_type,
             marker,
@@ -101,7 +127,11 @@ impl RtpH264Packetizer {
             timestamp,
             ssrc: self.ssrc,
         };
-        out.extend_from_slice(&header.to_bytes());
+        let start = out.len();
+        let len = RtpHeader::extended_header_len(extensions)
+            .expect("a capture-time element fits the two-byte form");
+        out.resize(start + len, 0);
+        header.write_with_extensions(extensions, &mut out[start..]);
     }
 }
 
@@ -209,5 +239,32 @@ mod tests {
         let next = p.packetize(&au, 3000);
         assert_eq!(seq(&next[0]), 1, "sequence continues across access units");
         assert_eq!(p.next_sequence(), 2);
+    }
+
+    #[test]
+    fn capture_time_rides_the_first_packet_and_the_frame_still_reassembles() {
+        const CAPTURE_NTP: u64 = 0xE8F0_0000_4000_0000;
+        let ids = CaptureTimeExtensionIds {
+            abs_capture_time: core::num::NonZeroU8::new(2),
+            ntp_64: core::num::NonZeroU8::new(3),
+        };
+        let body: Vec<u8> = (0..10).collect();
+        let mut nal = alloc::vec![0x65u8];
+        nal.extend_from_slice(&body);
+        let mut p = RtpH264Packetizer::new(96, 1).with_max_payload(5);
+        let packets = p.packetize_with_capture_time(&wrap(&[&nal]), 7, ids, CAPTURE_NTP);
+        assert!(packets.len() > 1);
+        assert_eq!(ids.read(&packets[0]), Some(CAPTURE_NTP));
+        assert!(
+            packets[1..].iter().all(|packet| packet[0] == 0x80),
+            "no X bit after the first"
+        );
+
+        let mut depayloader = crate::rtpdepay::RtpH264Depayloader::new();
+        let access_unit = packets
+            .iter()
+            .find_map(|packet| depayloader.depacketize(packet))
+            .expect("the marker closes the access unit");
+        assert_eq!(access_unit.data, wrap(&[&nal]));
     }
 }

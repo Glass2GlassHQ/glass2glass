@@ -127,6 +127,7 @@ impl RtspServerSrc {
                 fec_pt: None,
                 flexfec_pt: None,
                 declared_caps: None,
+                capture_time_ids: Default::default(),
             },
             max_sessions: 0,
             session_timeout_ns: DEFAULT_SESSION_TIMEOUT_SECS as u64 * 1_000_000_000,

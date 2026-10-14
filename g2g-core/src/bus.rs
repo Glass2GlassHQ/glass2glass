@@ -258,6 +258,10 @@ pub enum BusMessage {
         /// for a remove or a property set), or why it was refused.
         outcome: Result<alloc::vec::Vec<alloc::string::String>, crate::runtime::MutationError>,
     },
+    FrameIdentity {
+        element: alloc::string::String,
+        stats: crate::frame_identity::FrameIdentityStats,
+    },
 }
 
 /// What a restarting source is doing, gst `fallbacksrc`'s `status` (M1164).

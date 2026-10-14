@@ -858,6 +858,45 @@ run_source_transform_sink(src, dec, sink, &clock, LatencyProfile::Live).await?;
 
 Features: `udp-ingress ffmpeg wayland-sink`.
 
+### Per-frame loss and latency across an RTP hop
+
+The sender writes each frame's capture time into an RTP header extension and
+the receiver reads it back, so the receiving sink can tell which frames went
+missing, which arrived twice, and how long each took from capture to screen.
+Give both ends the same extension id, 1 to 255. `ntp-64-id` is RFC 6051's
+extension, the one GStreamer's `rtphdrextntp64` reads and writes.
+`abs-capture-time-id` is WebRTC's. Set either or both.
+
+```sh
+# receiver
+g2g-launch -v udpsrc port=5004 ntp-64-id=5 ! ffmpegdec ! fakesink
+# sender
+g2g-launch videotestsrc ! clocksync ! x264enc ! udpsink host=192.0.2.10 port=5004 ntp-64-id=5
+```
+
+A `udpsrc` given an SDP (`sdp=stream.sdp`) takes the ids from its `a=extmap`
+lines. Every sink of the receiving pipeline posts `BusMessage::FrameIdentity`
+once a second and at end of stream, and `-v` prints it:
+
+```text
+frame identity: FakeSink0 frames=90 lost=0 duplicates=0 latency=1.3 ms (min 0.5 mean 1.7 max 2.8)
+```
+
+`frames` counts the distinct frames that reached the sink with a capture time.
+`lost` counts the frames missing from gaps in the capture times, measured
+against the median step between recent frames, so it assumes a steady frame
+rate. `duplicates` counts frames whose capture time the sink had already seen.
+`latency` is the sink's clock after it presented the frame minus the capture
+time, for the latest frame and then the minimum, mean and maximum since the
+last report. Across two hosts it is only as good as their clock sync (NTP or
+PTP).
+
+A frame that carries a `WallClockMeta` is stamped with it. Any other frame is
+stamped on its own PTS, counted from when the first frame entered the sending
+pipeline, so a source that is not paced to real time (`videotestsrc` without
+`clocksync`) shows negative latency. Of the decoders, `ffmpegdec` carries the
+capture time through.
+
 ### Picture-in-picture: webcam over a test pattern (compositor)
 
 ```rust

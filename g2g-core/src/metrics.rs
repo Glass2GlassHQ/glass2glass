@@ -199,10 +199,21 @@ mod std_clock {
         // u64 ns holds ~584 years, comfortably more than process uptime.
         epoch.elapsed().as_nanos() as u64
     }
+
+    pub fn unix_time_ns() -> i64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        use std::time::{SystemTime, UNIX_EPOCH};
+        #[cfg(target_arch = "wasm32")]
+        use web_time::{SystemTime, UNIX_EPOCH};
+        match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(after) => i64::try_from(after.as_nanos()).unwrap_or(i64::MAX),
+            Err(before) => i64::try_from(before.duration().as_nanos()).map_or(i64::MIN, |n| -n),
+        }
+    }
 }
 
 #[cfg(feature = "std")]
-pub use std_clock::monotonic_ns;
+pub use std_clock::{monotonic_ns, unix_time_ns};
 
 #[cfg(test)]
 mod tests {

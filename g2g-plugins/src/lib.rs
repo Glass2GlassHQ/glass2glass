@@ -989,6 +989,9 @@ pub mod remotetransform;
     feature = "udp-egress",
 ))]
 mod netprop;
+// The capture-time RTP header extensions' properties and sender stamp.
+#[cfg(any(feature = "udp-ingress", feature = "udp-egress"))]
+mod rtpcapturetime;
 
 // Shared byte-stream carrier pieces (M1068, M1079): the frame shape a received
 // chunk takes, the MPEG-TS packet geometry a datagram is cut on, and the

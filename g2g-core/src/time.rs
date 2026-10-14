@@ -66,6 +66,41 @@ impl From<u64> for RefNs {
 /// reader subtracts this to reach Unix time and a writer adds it.
 pub const NTP_TO_UNIX_EPOCH_SECS: u64 = 2_208_988_800;
 
+const NANOS_PER_SECOND: u64 = 1_000_000_000;
+const NTP_FRACTION_BITS: u32 = 32;
+const NTP_FRACTION_MASK: u64 = 0xFFFF_FFFF;
+const NTP_SECONDS_PER_ERA: i64 = 1 << NTP_FRACTION_BITS;
+// RFC 4330: a clear top bit in the seconds field means the 2036-2104 era
+const NTP_ERA_ZERO_SECONDS_BIT: u64 = 1 << 31;
+
+// rounds up because GStreamer reads the fraction rounding down
+pub fn ntp_from_unix_nanos(unix_nanos: i64) -> Option<u64> {
+    let ntp_nanos =
+        i128::from(unix_nanos) + i128::from(NTP_TO_UNIX_EPOCH_SECS) * i128::from(NANOS_PER_SECOND);
+    let ntp_nanos = u128::try_from(ntp_nanos).ok()?;
+    let seconds = (ntp_nanos / u128::from(NANOS_PER_SECOND)) as u64;
+    let nanos = (ntp_nanos % u128::from(NANOS_PER_SECOND)) as u64;
+    let fraction = (nanos << NTP_FRACTION_BITS).div_ceil(NANOS_PER_SECOND);
+    Some((seconds << NTP_FRACTION_BITS) | fraction)
+}
+
+// zero is what GStreamer's ntp-64 writer sends when it has no time
+pub fn unix_nanos_from_ntp(ntp: u64) -> Option<i64> {
+    if ntp == 0 {
+        return None;
+    }
+    let ntp_seconds = ntp >> NTP_FRACTION_BITS;
+    let era_offset = if ntp_seconds & NTP_ERA_ZERO_SECONDS_BIT == 0 {
+        NTP_SECONDS_PER_ERA
+    } else {
+        0
+    };
+    let seconds = ntp_seconds as i64 + era_offset - NTP_TO_UNIX_EPOCH_SECS as i64;
+    let fraction = ntp & NTP_FRACTION_MASK;
+    let nanos = (fraction * NANOS_PER_SECOND + (1 << (NTP_FRACTION_BITS - 1))) >> NTP_FRACTION_BITS;
+    Some(seconds * NANOS_PER_SECOND as i64 + nanos as i64)
+}
+
 /// A 32-bit RTP media-clock timestamp as it appears on the wire (wraps at `2^32`).
 /// Distinct from a nanosecond time: it counts media-clock ticks, not ns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -121,6 +156,47 @@ mod tests {
             core::any::type_name::<RefNs>(),
             core::any::type_name::<TaiNs>()
         );
+    }
+
+    #[test]
+    fn ntp_round_trips_unix_nanos_exactly() {
+        // 2026-10-13T00:00:00.123456789Z
+        let unix_nanos = 1_791_849_600_123_456_789;
+        let ntp = ntp_from_unix_nanos(unix_nanos).unwrap();
+        assert_eq!(
+            ntp >> 32,
+            1_791_849_600 + NTP_TO_UNIX_EPOCH_SECS,
+            "seconds count from 1900"
+        );
+        assert_eq!(unix_nanos_from_ntp(ntp), Some(unix_nanos));
+        // A reader that rounds the fraction down, as GStreamer does, also gets
+        // the nanosecond back.
+        let fraction = ntp & 0xFFFF_FFFF;
+        assert_eq!((fraction * 1_000_000_000) >> 32, 123_456_789);
+    }
+
+    #[test]
+    fn ntp_reads_a_rounded_down_fraction_back_to_the_same_nanosecond() {
+        let nanos: u64 = 999_999_999;
+        let floored_fraction = (nanos << 32) / 1_000_000_000;
+        let ntp = (NTP_TO_UNIX_EPOCH_SECS << 32) | floored_fraction;
+        assert_eq!(unix_nanos_from_ntp(ntp), Some(nanos as i64));
+    }
+
+    #[test]
+    fn ntp_zero_is_no_time_and_the_2036_era_is_read_forward() {
+        assert_eq!(unix_nanos_from_ntp(0), None);
+        // One second past the 2036 rollover: the seconds field reads 1.
+        let rollover_unix_seconds = (1i64 << 32) - NTP_TO_UNIX_EPOCH_SECS as i64;
+        assert_eq!(
+            unix_nanos_from_ntp(1 << 32),
+            Some((rollover_unix_seconds + 1) * 1_000_000_000)
+        );
+        assert_eq!(
+            ntp_from_unix_nanos((rollover_unix_seconds + 1) * 1_000_000_000),
+            Some(1 << 32)
+        );
+        assert_eq!(ntp_from_unix_nanos(i64::MIN), None, "before 1900");
     }
 
     #[test]

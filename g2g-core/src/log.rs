@@ -719,9 +719,7 @@ pub fn timestamp_now() -> Option<u64> {
 /// Nanoseconds since the UNIX epoch, the `std` [`TimeSource`].
 #[cfg(feature = "std")]
 pub fn unix_time_source() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+    u64::try_from(crate::metrics::unix_time_ns()).unwrap_or(0)
 }
 
 /// Install (replace) the global log sink. Without one, records are dropped.
