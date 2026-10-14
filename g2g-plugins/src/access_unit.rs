@@ -84,12 +84,42 @@ impl AccessUnitFramer {
         timing: FrameTiming,
         classify: impl Fn(&[u8]) -> Option<StartCodeRole>,
     ) -> Vec<FramedAccessUnit> {
+        let boundary = self.append(bytes, timing);
+        self.frame_appended(boundary, timing, classify)
+    }
+
+    // a refused conversion leaves nothing of `bytes` buffered
+    pub(crate) fn push_converted(
+        &mut self,
+        bytes: &[u8],
+        timing: FrameTiming,
+        classify: impl Fn(&[u8]) -> Option<StartCodeRole>,
+        convert: impl FnOnce(&mut [u8]) -> Option<()>,
+    ) -> Option<Vec<FramedAccessUnit>> {
+        let boundary = self.append(bytes, timing);
+        if convert(&mut self.pending[boundary..]).is_none() {
+            self.pending.truncate(boundary);
+            return None;
+        }
+        Some(self.frame_appended(boundary, timing, classify))
+    }
+
+    // the offset in `pending` where `bytes` begin
+    fn append(&mut self, bytes: &[u8], timing: FrameTiming) -> usize {
         if self.pending.is_empty() {
             self.head_timing = timing;
         }
         let boundary = self.pending.len();
         self.pending.extend_from_slice(bytes);
+        boundary
+    }
 
+    fn frame_appended(
+        &mut self,
+        boundary: usize,
+        timing: FrameTiming,
+        classify: impl Fn(&[u8]) -> Option<StartCodeRole>,
+    ) -> Vec<FramedAccessUnit> {
         if self.pending.len() > MAX_ACCESS_UNIT_BYTES {
             return self.finish().into_iter().collect();
         }

@@ -305,6 +305,27 @@ pub(crate) fn length_prefixed_to_annexb(data: &[u8], len_size: usize) -> Option<
     (consumed == data.len()).then_some(out)
 }
 
+// a 4-byte length and a 4-byte start code are the same size, so the sample converts in place
+const _: () = assert!(ANNEX_B_START_CODE.len() == AVCC_LENGTH_SIZE);
+
+// refuses what length_prefixed_to_annexb refuses, leaving `sample` partly rewritten
+pub(crate) fn avcc_to_annexb_in_place(sample: &mut [u8]) -> Option<()> {
+    let mut at = 0usize;
+    while at < sample.len() {
+        let nal_len = crate::bereader::be_u32(sample, at)? as usize;
+        if nal_len == 0 {
+            return None;
+        }
+        let next = at.checked_add(AVCC_LENGTH_SIZE)?.checked_add(nal_len)?;
+        if next > sample.len() {
+            return None;
+        }
+        sample[at..at + AVCC_LENGTH_SIZE].copy_from_slice(&ANNEX_B_START_CODE);
+        at = next;
+    }
+    Some(())
+}
+
 /// What an `avcC` / `hvcC` decoder configuration record carries: every
 /// parameter set, in record order, and the NAL length-prefix width its samples
 /// use.
@@ -861,6 +882,32 @@ mod tests {
         assert_eq!(nals, vec![sps, idr], "the same NALs, now start-code framed");
         // Every NAL is preceded by a 4-byte start code.
         assert_eq!(&annexb[..4], &[0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn avcc_converts_in_place_and_refuses_what_the_copy_refuses() {
+        let sps: &[u8] = &[0x67, 0x42, 0xC0, 0x1E];
+        let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21, 0x0A];
+        let mut avcc = Vec::new();
+        avcc.extend_from_slice(&(sps.len() as u32).to_be_bytes());
+        avcc.extend_from_slice(sps);
+        avcc.extend_from_slice(&(idr.len() as u32).to_be_bytes());
+        avcc.extend_from_slice(idr);
+        let copied = length_prefixed_to_annexb(&avcc, AVCC_LENGTH_SIZE).expect("valid walk");
+
+        let mut in_place = avcc.clone();
+        assert_eq!(avcc_to_annexb_in_place(&mut in_place), Some(()));
+        assert_eq!(in_place, copied);
+
+        for malformed in [
+            &avcc[..avcc.len() - 1],
+            &[0, 0, 0, 0, 0x65][..],
+            &[0xFF, 0xFF, 0xFF, 0xFF, 0x65][..],
+            &[0, 0, 1][..],
+        ] {
+            assert!(length_prefixed_to_annexb(malformed, AVCC_LENGTH_SIZE).is_none());
+            assert_eq!(avcc_to_annexb_in_place(&mut malformed.to_vec()), None);
+        }
     }
 
     #[test]
