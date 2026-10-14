@@ -131,7 +131,7 @@ pub struct OrtInference {
     tensor_name: String,
     /// Name of the metadata a frame must carry to be inferred on: a blob header,
     /// or `detections` for any detection. Empty runs the model on every frame.
-    only_on: String,
+    only_on: g2g_core::OnlyOnGate,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
@@ -158,7 +158,7 @@ impl OrtInference {
             attach_tensor: false,
             #[cfg(feature = "analytics")]
             tensor_name: String::new(),
-            only_on: String::new(),
+            only_on: g2g_core::OnlyOnGate::default(),
             configured: false,
             last_caps: None,
             emitted: 0,
@@ -347,20 +347,6 @@ impl OrtInference {
     /// Count of tensor `DataFrame`s pushed downstream. Useful in tests.
     pub fn inferred_count(&self) -> u64 {
         self.emitted
-    }
-
-    /// Whether `only-on` names something this frame does not carry, so it goes
-    /// downstream with no session run at all.
-    #[cfg(feature = "analytics")]
-    fn forwards_untouched(&self, frame: &Frame) -> bool {
-        !self.only_on.is_empty() && !g2g_core::frame_carries(&frame.meta, &self.only_on)
-    }
-
-    /// Without the `analytics` feature a frame carries no metadata to test, and
-    /// `set_property` refuses a non-empty `only-on`, so every frame is inferred.
-    #[cfg(not(feature = "analytics"))]
-    fn forwards_untouched(&self, _frame: &Frame) -> bool {
-        false
     }
 
     /// Accept an already-normalized f32 NCHW `[1, 3, H, W]` tensor input
@@ -560,7 +546,7 @@ impl AsyncElement for OrtInference {
         // negotiated output caps only while this element keeps the picture on the
         // wire. Emitting the tensor as the frame makes the two disagree.
         #[cfg(feature = "analytics")]
-        if !self.only_on.is_empty() && !self.attach_tensor {
+        if self.only_on.is_set() && !self.attach_tensor {
             return Err(G2gError::CapsMismatch);
         }
         let model = self.model.as_ref().ok_or(G2gError::NotConfigured)?;
@@ -611,17 +597,7 @@ impl AsyncElement for OrtInference {
                 self.tensor_name = String::from(value.as_str().ok_or(PropError::Type)?);
                 Ok(())
             }
-            "only-on" => {
-                let name = value.as_str().ok_or(PropError::Type)?;
-                // Nothing to gate on when frames carry no metadata, and silently
-                // inferring on every frame is not what the line asked for.
-                #[cfg(not(feature = "analytics"))]
-                if !name.is_empty() {
-                    return Err(PropError::Value);
-                }
-                self.only_on = String::from(name);
-                Ok(())
-            }
+            g2g_core::OnlyOnGate::PROPERTY => self.only_on.set(&value),
             _ => Err(PropError::Unknown),
         }
     }
@@ -635,7 +611,7 @@ impl AsyncElement for OrtInference {
             "attach-tensor" => Some(PropValue::Bool(self.attach_tensor)),
             #[cfg(feature = "analytics")]
             "tensor-name" => Some(PropValue::Str(self.tensor_name.clone())),
-            "only-on" => Some(PropValue::Str(self.only_on.clone())),
+            g2g_core::OnlyOnGate::PROPERTY => Some(self.only_on.value()),
             _ => None,
         }
     }
@@ -651,7 +627,7 @@ impl AsyncElement for OrtInference {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    if self.forwards_untouched(&frame) {
+                    if self.only_on.forwards_untouched(&frame.meta) {
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                         return Ok(());
                     }
@@ -780,9 +756,7 @@ const TENSOR_NAME_PROP: PropertySpec = PropertySpec::new(
     "name the attached output is stored under, to keep several models on one frame apart",
 );
 
-const ONLY_ON_PROP: PropertySpec = PropertySpec::new(
-    "only-on",
-    PropKind::Str,
+const ONLY_ON_PROP: PropertySpec = g2g_core::OnlyOnGate::property_spec(
     "Run only on frames carrying this blob, or any detection when set to detections. Other frames pass through untouched, so this needs attach-tensor=true.",
 );
 
@@ -1005,8 +979,12 @@ mod tests {
         // sits ahead of the session, so set the flag `process` checks.
         element.configured = true;
 
-        assert!(element.forwards_untouched(&frame_carrying(OTHER)));
-        assert!(!element.forwards_untouched(&frame_carrying(GATE)));
+        assert!(element
+            .only_on
+            .forwards_untouched(&frame_carrying(OTHER).meta));
+        assert!(!element
+            .only_on
+            .forwards_untouched(&frame_carrying(GATE).meta));
 
         let mut sink = CollectSink::default();
         g2g_core::runtime::block_on(

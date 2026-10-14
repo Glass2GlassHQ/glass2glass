@@ -72,7 +72,7 @@ pub struct PyTransform {
     draw_label: bool,
     /// Name of the metadata a frame must carry for the hosted element to see it:
     /// a blob header, or `detections` for any detection. Empty runs every frame.
-    only_on: String,
+    only_on: g2g_core::OnlyOnGate,
     qos: bool,
     segment: Option<Segment>,
     sink_clock: Option<SinkClock>,
@@ -95,7 +95,7 @@ impl PyTransform {
             input: HostedInput::new(module.into(), class.into()),
             produce: None,
             draw_label: false,
-            only_on: String::new(),
+            only_on: g2g_core::OnlyOnGate::default(),
             qos: true,
             segment: None,
             sink_clock: None,
@@ -244,7 +244,7 @@ impl PyTransform {
                     self.late_dropped += 1;
                     return Ok(Vec::new());
                 }
-                if self.forwards_untouched(&frame) {
+                if self.only_on.forwards_untouched(&frame.meta) {
                     self.push_frame(frame, out).await?;
                     return Ok(Vec::new());
                 }
@@ -285,20 +285,6 @@ impl PyTransform {
             }
         }
         Ok(Vec::new())
-    }
-
-    /// Whether `only-on` names something this frame does not carry, so it goes
-    /// downstream with no Python call at all.
-    #[cfg(feature = "analytics")]
-    fn forwards_untouched(&self, frame: &Frame) -> bool {
-        !self.only_on.is_empty() && !g2g_core::frame_carries(&frame.meta, &self.only_on)
-    }
-
-    /// Without the `analytics` feature a frame carries no metadata to test, and
-    /// `set_property` refuses a non-empty `only-on`, so every frame runs.
-    #[cfg(not(feature = "analytics"))]
-    fn forwards_untouched(&self, _frame: &Frame) -> bool {
-        false
     }
 }
 
@@ -421,17 +407,7 @@ impl AsyncElement for PyTransform {
                 self.qos = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
-            "only-on" => {
-                let name = value.as_str().ok_or(PropError::Type)?;
-                // Nothing to gate on when frames carry no metadata, and silently
-                // running every frame is not what the line asked for.
-                #[cfg(not(feature = "analytics"))]
-                if !name.is_empty() {
-                    return Err(PropError::Value);
-                }
-                self.only_on = name.to_string();
-                Ok(())
-            }
+            g2g_core::OnlyOnGate::PROPERTY => self.only_on.set(&value),
             "format" => {
                 let parsed = format_from_py(value.as_str().ok_or(PropError::Type)?)
                     .ok_or(PropError::Value)?;
@@ -453,7 +429,7 @@ impl AsyncElement for PyTransform {
         match name {
             "draw-label" => Some(PropValue::Bool(self.draw_label)),
             "qos" => Some(PropValue::Bool(self.qos)),
-            "only-on" => Some(PropValue::Str(self.only_on.clone())),
+            g2g_core::OnlyOnGate::PROPERTY => Some(self.only_on.value()),
             "format" => match &self.input.accept {
                 Caps::RawVideo { format, .. } => {
                     Some(PropValue::Str(format_to_py(*format).to_string()))
@@ -506,12 +482,9 @@ static PYTRANSFORM_PROPS: &[PropertySpec] = hosted_element_props![
         "drop any frame a downstream sink's QoS report says would reach it late instead of running the hosted element on it",
     )
     .with_default("true"),
-    PropertySpec::new(
-        "only-on",
-        PropKind::Str,
+    g2g_core::OnlyOnGate::property_spec(
         "Run only on frames carrying this blob, or any detection when set to detections. Other frames pass through untouched.",
-    )
-    .with_default(""),
+    ),
     INPUT_CAPS_PROPERTY,
     PropertySpec::new(
         "output-caps",

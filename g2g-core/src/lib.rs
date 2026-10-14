@@ -210,6 +210,8 @@ pub use graph::{
 pub use link::LinkPolicy;
 pub use mediaclock::MediaClock;
 pub use meta::FrameMetaSet;
+#[cfg(feature = "alloc")]
+pub use meta::OnlyOnGate;
 #[cfg(feature = "metadata")]
 pub use meta::{
     blob_decoder, canonical_blob_header, decode_blob, frame_carries, AnalyticsMeta, AnalyticsNode,

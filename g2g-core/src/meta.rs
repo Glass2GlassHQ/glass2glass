@@ -264,6 +264,66 @@ impl MetaRequests {
     }
 }
 
+/// The `only-on` gate an element runs behind: it runs on frames carrying the
+/// named blob, or any detection for `detections`, and forwards the rest
+/// untouched. Without the `metadata` feature a frame carries nothing to test,
+/// so only an empty name is accepted.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OnlyOnGate {
+    name: alloc::string::String,
+}
+
+#[cfg(feature = "alloc")]
+impl OnlyOnGate {
+    /// The property name a launch line sets.
+    pub const PROPERTY: &'static str = "only-on";
+
+    /// The property spec, with the element's own description of what it skips.
+    pub const fn property_spec(blurb: &'static str) -> crate::property::PropertySpec {
+        crate::property::PropertySpec::new(Self::PROPERTY, crate::property::PropKind::Str, blurb)
+            .with_default("")
+    }
+
+    /// Whether a name is set, so some frames may skip the element.
+    pub fn is_set(&self) -> bool {
+        !self.name.is_empty()
+    }
+
+    /// Take the property value. A name without the `metadata` feature is a
+    /// value error: every frame would run, which is not what the line asked for.
+    pub fn set(
+        &mut self,
+        value: &crate::property::PropValue,
+    ) -> Result<(), crate::property::PropError> {
+        let name = value.as_str().ok_or(crate::property::PropError::Type)?;
+        #[cfg(not(feature = "metadata"))]
+        if !name.is_empty() {
+            return Err(crate::property::PropError::Value);
+        }
+        self.name = alloc::string::String::from(name);
+        Ok(())
+    }
+
+    /// The property value, for `get_property`.
+    pub fn value(&self) -> crate::property::PropValue {
+        crate::property::PropValue::Str(self.name.clone())
+    }
+
+    /// Whether a frame with `meta` lacks what the gate names, so it goes
+    /// downstream with no work done.
+    #[cfg(feature = "metadata")]
+    pub fn forwards_untouched(&self, meta: &FrameMetaSet) -> bool {
+        self.is_set() && !frame_carries(meta, &self.name)
+    }
+
+    /// Without the `metadata` feature no name is ever set, so every frame runs.
+    #[cfg(not(feature = "metadata"))]
+    pub fn forwards_untouched(&self, _meta: &FrameMetaSet) -> bool {
+        false
+    }
+}
+
 // ---- feature on: the real typed container + analytics graph ----
 
 #[cfg(feature = "metadata")]
