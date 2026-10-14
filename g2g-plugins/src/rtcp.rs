@@ -15,8 +15,10 @@
 use alloc::vec::Vec;
 
 use g2g_core::rtp::RtpSequenceExtender;
+use g2g_core::time::ns_to_ticks;
 
 const SEQUENCE_CYCLE: u64 = 1 << u16::BITS;
+const DLSR_UNITS_PER_SECOND: u32 = 1 << 16;
 
 /// RTCP packet types (the `PT` byte).
 pub const PT_SR: u8 = 200;
@@ -429,7 +431,7 @@ impl ReceptionStats {
         // converted to media-clock units so the subtraction stays small.
         let rel_ns = arrival_ns.saturating_sub(self.arrival0_ns);
         // wraps at 32 bits like the RTP timestamp it is compared with
-        let arrival_units = ((rel_ns as u128 * self.clock_hz as u128) / 1_000_000_000) as u32;
+        let arrival_units = ns_to_ticks(rel_ns, self.clock_hz) as u32;
         let transit = arrival_units.wrapping_sub(rtp_ts);
         if self.have_transit {
             let d = (transit.wrapping_sub(self.transit) as i32).unsigned_abs();
@@ -484,12 +486,12 @@ impl ReceptionStats {
             ((lost_interval << 8) / expected_interval) as u8
         };
 
-        // DLSR in 1/65536 s units, 0 if no SR has been received.
+        // 0 if no SR has been received
         let dlsr = if self.last_sr_arrival_ns == 0 {
             0
         } else {
             let elapsed_ns = now_ns.saturating_sub(self.last_sr_arrival_ns);
-            ((elapsed_ns as u128 * 65536) / 1_000_000_000) as u32
+            ns_to_ticks(elapsed_ns, DLSR_UNITS_PER_SECOND) as u32
         };
 
         ReportBlock {

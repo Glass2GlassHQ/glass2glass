@@ -29,6 +29,7 @@ use std::time::Duration;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
+use g2g_core::time::ns_to_ticks;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome,
     ElementMetadata, FrameTiming, G2gError, MediaClock, MemoryDomain, OutputSink, PadTemplate,
@@ -40,6 +41,8 @@ use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110audio::{SampleDepth, St2110AudioDepacketizer, St2110AudioPacketizer};
 use crate::st2110dup::spawn_rtp_receiver;
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
+
+const NANOS_PER_MICROSECOND: u64 = 1_000;
 
 /// The supported PCM formats and their (format, channels, sample_rate). S16 rides
 /// the wire as L16, F32 as L24 (see [`wire_depth`]).
@@ -134,7 +137,7 @@ fn bytes_per_sample(format: AudioFormat) -> usize {
 
 /// Sample-frames per packet for a packet time in microseconds (e.g. 1000 = 1 ms).
 fn frames_per_packet(sample_rate: u32, ptime_us: u32) -> usize {
-    ((u64::from(sample_rate) * u64::from(ptime_us)) / 1_000_000).max(1) as usize
+    ns_to_ticks(u64::from(ptime_us) * NANOS_PER_MICROSECOND, sample_rate).max(1) as usize
 }
 
 // ================================================================

@@ -35,6 +35,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::time::ns_to_ticks;
 use g2g_core::{
     resolve_tags, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
     G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket,
@@ -42,7 +43,7 @@ use g2g_core::{
 };
 
 use crate::dvbsub::DEFAULT_PAGE_ID;
-use crate::mpegts::{TsMuxer, STREAM_TYPE_H264, STREAM_TYPE_H265};
+use crate::mpegts::{TsMuxer, PES_CLOCK_HZ, STREAM_TYPE_H264, STREAM_TYPE_H265};
 use crate::tsmux::{
     is_av1, is_dvbsub, language_from_tags, service_from_tags, stream_type_for, DvbSubDecl,
     TsMuxSettings, MUX_PROPERTIES, UNDETERMINED_LANGUAGE,
@@ -539,12 +540,12 @@ impl MultiInputElement for TsMux {
                 let slice = frame
                     .domain
                     .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                let pts_90khz = (frame.timing.pts_ns as u128 * 90_000 / 1_000_000_000) as u64;
+                let pts_90khz = ns_to_ticks(frame.timing.pts_ns, PES_CLOCK_HZ);
                 // A DTS rides the PES only for reordered video (dts_ns set and
                 // distinct from the PTS); 0 is the unset sentinel, equal adds nothing.
                 let dts_90khz = (frame.timing.dts_ns != 0
                     && frame.timing.dts_ns != frame.timing.pts_ns)
-                    .then(|| (frame.timing.dts_ns as u128 * 90_000 / 1_000_000_000) as u64);
+                    .then(|| ns_to_ticks(frame.timing.dts_ns, PES_CLOCK_HZ));
                 let ts = self.mux.as_mut().expect("built above").push_au_on(
                     stream,
                     slice,

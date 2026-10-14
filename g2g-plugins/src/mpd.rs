@@ -22,6 +22,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::time::ticks_to_ns;
 use roxmltree::{Document, Node};
 
 use crate::bereader::{take_be_u16, take_be_u32, take_be_u64};
@@ -69,7 +70,7 @@ pub struct SegmentBase {
     /// Byte range of the `sidx` Segment Index box in the resource.
     pub index_range: ByteRange,
     /// `@timescale` (advisory; the `sidx` carries the authoritative one).
-    pub timescale: u64,
+    pub timescale: u32,
     /// `<Initialization range>` byte range of the init segment (the `ftyp`+`moov`
     /// at the head of the resource); `None` when no `<Initialization>` is given.
     pub init_range: Option<ByteRange>,
@@ -93,7 +94,7 @@ pub struct SidxEntry {
 pub struct Sidx {
     pub box_size: u64,
     pub first_offset: u64,
-    pub timescale: u64,
+    pub timescale: u32,
     pub entries: Vec<SidxEntry>,
 }
 
@@ -109,7 +110,7 @@ pub struct SegmentList {
     pub init_range: Option<ByteRange>,
     pub init_present: bool,
     pub duration: u64,
-    pub timescale: u64,
+    pub timescale: u32,
     pub segments: Vec<SegmentUrl>,
 }
 
@@ -145,7 +146,7 @@ pub struct SegmentTemplate {
     /// Segment duration in `timescale` units (the `@duration` profile; the
     /// `SegmentTimeline` carries its own per-entry durations instead).
     pub duration: u64,
-    pub timescale: u64,
+    pub timescale: u32,
     /// `@presentationTimeOffset` in `timescale` units: the media-timeline instant
     /// that lines up with the start of the Period. Segment times (`$Time$`,
     /// `SegmentTimeline` `@t`) are media-timeline values, so this comes off them
@@ -412,7 +413,7 @@ impl Sidx {
 impl Representation {
     /// Addressing-mode-agnostic segment timescale (>= 1). For `SegmentBase` this
     /// is the manifest `@timescale`; the authoritative one is in the `sidx`.
-    pub fn timescale(&self) -> u64 {
+    pub fn timescale(&self) -> u32 {
         match &self.source {
             SegmentSource::Template(t) => t.timescale.max(1),
             SegmentSource::List(l) => l.timescale.max(1),
@@ -512,8 +513,7 @@ impl Representation {
 /// the live edge instead of replaying the whole window. Clamps to the window
 /// front when the window is shorter than the delay. Works off segment start-time
 /// deltas, so it serves both the `@duration` window and a `SegmentTimeline`.
-pub fn live_start_offset(segs: &[ResolvedSegment], timescale: u64, delay_ns: u64) -> usize {
-    let ts = timescale.max(1) as u128;
+pub fn live_start_offset(segs: &[ResolvedSegment], timescale: u32, delay_ns: u64) -> usize {
     // Duration of segment `i`: the delta to its successor, or (for the last
     // one) the delta from its predecessor.
     let dur_ns = |i: usize| -> u64 {
@@ -524,7 +524,7 @@ pub fn live_start_offset(segs: &[ResolvedSegment], timescale: u64, delay_ns: u64
         } else {
             return 0;
         };
-        ((b.saturating_sub(a) as u128 * 1_000_000_000) / ts) as u64
+        ticks_to_ns(b.saturating_sub(a), timescale.max(1))
     };
     let mut ahead_ns = 0u64;
     let mut start = 0usize;
@@ -550,7 +550,7 @@ pub fn parse_sidx(data: &[u8]) -> Option<Sidx> {
     let version = *data.get(8)?;
     let mut p = 12usize; // skip the 3 flag bytes
     let _reference_id = take_be_u32(data, &mut p)?;
-    let timescale = take_be_u32(data, &mut p)? as u64;
+    let timescale = take_be_u32(data, &mut p)?;
     // earliest_presentation_time + first_offset: 32-bit in v0, 64-bit in v1.
     let first_offset = if version == 0 {
         let _ept = take_be_u32(data, &mut p)?;
@@ -1078,7 +1078,7 @@ mod tests {
             media: String::from("seg-$Number$.m4s"),
             start_number: 1,
             duration: 1,
-            timescale: u64::MAX,
+            timescale: u32::MAX,
             presentation_time_offset: 0,
             availability_time_offset: None,
             timeline: Vec::new(),

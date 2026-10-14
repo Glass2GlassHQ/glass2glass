@@ -51,6 +51,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::runtime::{SeekController, SourceLoop};
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
@@ -83,8 +84,8 @@ fn now_unix() -> f64 {
 }
 
 /// Convert a time in `timescale` units to nanoseconds.
-fn to_ns(time: u64, timescale: u64) -> u64 {
-    (time as u128 * 1_000_000_000 / timescale.max(1) as u128) as u64
+fn to_ns(time: u64, timescale: u32) -> u64 {
+    ticks_to_ns(time, timescale.max(1))
 }
 
 /// Resolve a segment / init URL against the base. An empty URL means the piece
@@ -164,7 +165,7 @@ async fn load_rep(
 ) -> Result<
     (
         Vec<ResolvedSegment>,
-        u64,
+        u32,
         Option<(String, Option<ByteRange>)>,
     ),
     G2gError,
@@ -372,12 +373,11 @@ impl DashSrc {
 /// target) and that segment's start time in ns. Segments are time-ordered, so
 /// the scan stops at the first start past the target. A target before the first
 /// segment clamps to it; empty input returns `(0, 0)`.
-fn segment_for_time(segs: &[ResolvedSegment], timescale: u64, target_ns: u64) -> (usize, u64) {
-    let timescale = timescale.max(1) as u128;
+fn segment_for_time(segs: &[ResolvedSegment], timescale: u32, target_ns: u64) -> (usize, u64) {
     let mut chosen = 0usize;
     let mut chosen_start = 0u64;
     for (idx, seg) in segs.iter().enumerate() {
-        let start_ns = (seg.time as u128 * 1_000_000_000 / timescale) as u64;
+        let start_ns = to_ns(seg.time, timescale);
         if start_ns <= target_ns {
             chosen = idx;
             chosen_start = start_ns;
@@ -565,9 +565,7 @@ impl SourceLoop for DashSrc {
                                 // duration (no successor to diff against).
                                 let duration_ns = match segs.get(idx + 1) {
                                     Some(n) if n.time > seg.time => {
-                                        ((n.time - seg.time) as u128 * 1_000_000_000
-                                            / timescale.max(1) as u128)
-                                            as u64
+                                        to_ns(n.time - seg.time, timescale)
                                     }
                                     _ => last_dur_ns,
                                 };

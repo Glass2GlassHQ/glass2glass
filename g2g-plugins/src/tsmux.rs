@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::time::ns_to_ticks;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
@@ -41,7 +42,7 @@ use crate::dvbsub::{parse_page_ids, PageIds, DEFAULT_PAGE_ID, DEFAULT_SUBTITLING
 use crate::mpegts::{
     TsMuxer, DEFAULT_ORIGINAL_NETWORK_ID, DEFAULT_PCR_INTERVAL_90KHZ, DEFAULT_TABLE_INTERVAL_90KHZ,
     DEFAULT_TRANSPORT_STREAM_ID, MAX_TABLES_VERSION, MUX_ES_PID, MUX_PID_RANGE, MUX_PMT_PID,
-    STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES,
+    PES_CLOCK_HZ, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES,
     STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_NAME, TAG_KEY_SERVICE_PROVIDER,
 };
 
@@ -691,12 +692,12 @@ impl AsyncElement for TsMux {
                         return Ok(());
                     }
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
-                    let pts_90khz = (frame.timing.pts_ns as u128 * 90_000 / 1_000_000_000) as u64;
+                    let pts_90khz = ns_to_ticks(frame.timing.pts_ns, PES_CLOCK_HZ);
                     // A DTS rides the PES only for reordered video (dts_ns set and
                     // distinct from the PTS); 0 is the unset sentinel, equal adds nothing.
                     let dts_90khz = (frame.timing.dts_ns != 0
                         && frame.timing.dts_ns != frame.timing.pts_ns)
-                        .then(|| (frame.timing.dts_ns as u128 * 90_000 / 1_000_000_000) as u64);
+                        .then(|| ns_to_ticks(frame.timing.dts_ns, PES_CLOCK_HZ));
                     let ts = mux.push_au(slice, Some(pts_90khz), dts_90khz, frame.timing.keyframe);
                     let out_frame = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),

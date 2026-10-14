@@ -49,6 +49,7 @@ use objc2_foundation::{NSDictionary, NSNumber, NSObject, NSObjectProtocol, NSStr
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
     HardwareError, Interlace, MemoryDomain, OutputSink, OwnedCvPixelBuffer, PipelinePacket,
@@ -709,7 +710,6 @@ impl SourceLoop for AvfAudioSrc {
                 return Err(G2gError::NotConfigured);
             }
             let frame_bytes = 2 * self.channels as usize;
-            let ns_per_frame = 1_000_000_000u64 / self.sample_rate as u64;
 
             let mut total_frames = 0u64;
             let mut seq = 0u64;
@@ -744,13 +744,14 @@ impl SourceLoop for AvfAudioSrc {
                 if frames == 0 {
                     continue;
                 }
-                let pts_ns = total_frames * ns_per_frame;
+                let pts_ns = ticks_to_ns(total_frames, self.sample_rate);
+                let end_ns = ticks_to_ns(total_frames + frames, self.sample_rate);
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(chunk.into_boxed_slice())),
                     timing: FrameTiming {
                         pts_ns,
                         dts_ns: pts_ns,
-                        duration_ns: frames * ns_per_frame,
+                        duration_ns: end_ns - pts_ns,
                         capture_ns: pts_ns,
                         arrival_ns: g2g_core::metrics::monotonic_ns(),
                         keyframe: false,

@@ -392,9 +392,10 @@ const MAX_PAT_PMT_SDT_SECTION_BYTES: usize = 1024;
 const PSI_SECTION_HEADER_LEN: usize = 3;
 const PSI_STUFFING_BYTE: u8 = 0xFF;
 
+pub(crate) const PES_CLOCK_HZ: u32 = 90_000;
 const PES_TIMESTAMP_CYCLE_90KHZ: u64 = 1 << 33;
 // sparse streams such as subtitles can go minutes between stamps
-const PES_TIMESTAMP_WRAP_TOLERANCE_90KHZ: u64 = 60 * 60 * 90_000;
+const PES_TIMESTAMP_WRAP_TOLERANCE_90KHZ: u64 = 60 * 60 * PES_CLOCK_HZ as u64;
 
 /// A reassembled PES payload: one access unit of an elementary stream.
 #[derive(Debug, Clone, PartialEq)]
