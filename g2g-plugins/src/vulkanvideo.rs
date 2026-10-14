@@ -933,82 +933,43 @@ pub struct H265ParameterSets {
     pub pps: H265Pps,
 }
 
-/// Parse `profile_tier_level(1, max_sub_layers_minus1)` (H.265 7.3.3). The
-/// general block is a fixed 96 bits (88 profile/tier/constraints + 8 level);
-/// per-sub-layer blocks follow only when `max_sub_layers_minus1 > 0`, and are
-/// advanced past without being carried (single-layer decode). `None` on
-/// truncation.
+/// Parse `profile_tier_level(1, max_sub_layers_minus1)` (H.265 7.3.3) into the
+/// fields the `Std*` profile-tier-level needs. `None` on truncation.
 fn parse_h265_ptl(br: &mut BitReader, max_sub_layers_minus1: u32) -> Option<H265ProfileTierLevel> {
-    let _general_profile_space = br.read_bits(2)?;
-    let general_tier_flag = br.read_bit()? as u8;
-    let general_profile_idc = br.read_bits(5)? as u8;
-    let _general_profile_compatibility = br.read_bits(32)?;
-    let general_progressive_source_flag = br.read_bit()? as u8;
-    let general_interlaced_source_flag = br.read_bit()? as u8;
-    let general_non_packed_constraint_flag = br.read_bit()? as u8;
-    let general_frame_only_constraint_flag = br.read_bit()? as u8;
-    // 44 bits of constraint / reserved / inbld flags (read in two chunks: the
-    // bit reader caps a single read at 32 bits).
-    br.read_bits(32)?;
-    br.read_bits(12)?;
-    let general_level_idc = br.read_bits(8)? as u8;
+    let general = crate::h265parse::read_profile_tier_level(br, max_sub_layers_minus1)?;
+    Some(h265_std_ptl(&general))
+}
 
-    let mut sub_profile_present = [false; 8];
-    let mut sub_level_present = [false; 8];
-    for i in 0..max_sub_layers_minus1 as usize {
-        sub_profile_present[i] = br.read_bit()? == 1;
-        sub_level_present[i] = br.read_bit()? == 1;
+fn h265_std_ptl(general: &crate::h265parse::GeneralProfileTierLevel) -> H265ProfileTierLevel {
+    H265ProfileTierLevel {
+        general_tier_flag: general.tier_flag,
+        general_profile_idc: general.profile_idc,
+        general_progressive_source_flag: general.progressive_source_flag(),
+        general_interlaced_source_flag: general.interlaced_source_flag(),
+        general_non_packed_constraint_flag: general.non_packed_constraint_flag(),
+        general_frame_only_constraint_flag: general.frame_only_constraint_flag(),
+        general_level_idc: general.level_idc,
     }
-    if max_sub_layers_minus1 > 0 {
-        for _ in max_sub_layers_minus1..8 {
-            br.read_bits(2)?; // reserved_zero_2bits
-        }
-    }
-    for i in 0..max_sub_layers_minus1 as usize {
-        if sub_profile_present[i] {
-            br.skip_bits(88)?; // sub_layer profile/tier block
-        }
-        if sub_level_present[i] {
-            br.skip_bits(8)?; // sub_layer_level_idc
-        }
-    }
-
-    Some(H265ProfileTierLevel {
-        general_tier_flag,
-        general_profile_idc,
-        general_progressive_source_flag,
-        general_interlaced_source_flag,
-        general_non_packed_constraint_flag,
-        general_frame_only_constraint_flag,
-        general_level_idc,
-    })
 }
 
 /// Parse an H.265 SPS RBSP (bytes after the 2-byte NAL header, de-emulated).
 /// `None` on truncation or an unsupported feature.
 pub fn parse_h265_sps(rbsp: &[u8]) -> Option<H265Sps> {
-    let mut br = BitReader::new(rbsp);
-    let sps_video_parameter_set_id = br.read_bits(4)? as u8;
-    let sps_max_sub_layers_minus1 = br.read_bits(3)? as u8;
-    let sps_temporal_id_nesting_flag = br.read_bit()? as u8;
-    let ptl = parse_h265_ptl(&mut br, sps_max_sub_layers_minus1 as u32)?;
-
-    let sps_seq_parameter_set_id = br.read_ue()? as u8;
-    let chroma_format_idc = br.read_ue()?;
-    if chroma_format_idc == 3 {
-        // separate_colour_plane_flag: 4:4:4 planar, unsupported (reject).
-        if br.read_bit()? == 1 {
-            return None;
-        }
+    let (head, mut br) = crate::h265parse::parse_h265_sps_head(rbsp)?;
+    // 4:4:4 planar is unsupported: reject rather than mis-decode.
+    if head.separate_colour_plane_flag {
+        return None;
     }
-    let pic_width_in_luma_samples = br.read_ue()?;
-    let pic_height_in_luma_samples = br.read_ue()?;
-    let conformance_window_flag = br.read_bit()?;
-    let (conf_l, conf_r, conf_t, conf_b) = if conformance_window_flag == 1 {
-        (br.read_ue()?, br.read_ue()?, br.read_ue()?, br.read_ue()?)
-    } else {
-        (0, 0, 0, 0)
-    };
+    let sps_video_parameter_set_id = head.sps_video_parameter_set_id;
+    let sps_max_sub_layers_minus1 = head.sps_max_sub_layers_minus1;
+    let sps_temporal_id_nesting_flag = u8::from(head.sps_temporal_id_nesting_flag);
+    let ptl = h265_std_ptl(&head.ptl);
+    let sps_seq_parameter_set_id = head.sps_seq_parameter_set_id as u8;
+    let chroma_format_idc = head.chroma_format_idc;
+    let pic_width_in_luma_samples = head.pic_width_in_luma_samples;
+    let pic_height_in_luma_samples = head.pic_height_in_luma_samples;
+    let conformance_window_flag = u32::from(head.conformance_window_flag);
+    let [conf_l, conf_r, conf_t, conf_b] = head.conformance_window;
     let bit_depth_luma_minus8 = br.read_ue()? as u8;
     let bit_depth_chroma_minus8 = br.read_ue()? as u8;
     let log2_max_pic_order_cnt_lsb_minus4 = br.read_ue()? as u8;

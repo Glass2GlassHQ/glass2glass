@@ -83,7 +83,8 @@ Containers:
 Codecs and parsers:
 
 - `vulkanvideo` `submit_idr_decode_into` creates a bitstream buffer per call.
-- One SPS head, VUI, HRD and PTL parser for h264parse, h265parse and vulkanvideo.
+- h265parse and vulkanvideo walk the H.265 SPS middle (sub-layer ordering to
+  long-term refs) separately.
 - `vulkanvideo` uses av1parse's OBU walker, LEB128 and uvlc.
 - One length-prefixed to Annex-B converter and one avcC/hvcC parser.
 - ffmpegaacenc and ffmpegaudiodec use the aacparse ADTS helpers.

@@ -131,10 +131,9 @@ fn with_sps_rbsp<'a, T>(
 // geometry. Gated so the always-compiled module stays warning-clean elsewhere.
 #[cfg(any(test, all(target_arch = "wasm32", feature = "web-codecs")))]
 pub(crate) fn h265_codec_string(au: &[u8]) -> Option<String> {
-    let ptl = with_sps_rbsp(
-        crate::annexb::nal_units_any(au),
-        parse_general_profile_tier_level,
-    )?;
+    let ptl = with_sps_rbsp(crate::annexb::nal_units_any(au), |rbsp| {
+        parse_h265_sps_head(rbsp).map(|(head, _)| head.ptl)
+    })?;
     let space = match ptl.profile_space {
         0 => "",
         1 => "A",
@@ -157,50 +156,81 @@ pub(crate) fn h265_codec_string(au: &[u8]) -> Option<String> {
     Some(codec)
 }
 
-/// The SPS head up to and including the general `profile_tier_level` block.
-#[cfg(any(test, all(target_arch = "wasm32", feature = "web-codecs")))]
-fn parse_general_profile_tier_level(rbsp: &[u8]) -> Option<GeneralProfileTierLevel> {
+/// The H.265 SPS fields up to the conformance window (7.3.2.2), the part every
+/// SPS consumer reads. Values are as coded, unchecked.
+// only the Vulkan decoder reads every field
+#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+#[derive(Debug, Clone)]
+pub(crate) struct H265SpsHead {
+    pub sps_video_parameter_set_id: u8,
+    pub sps_max_sub_layers_minus1: u8,
+    pub sps_temporal_id_nesting_flag: bool,
+    pub ptl: GeneralProfileTierLevel,
+    pub sps_seq_parameter_set_id: u32,
+    pub chroma_format_idc: u32,
+    pub separate_colour_plane_flag: bool,
+    pub pic_width_in_luma_samples: u32,
+    pub pic_height_in_luma_samples: u32,
+    pub conformance_window_flag: bool,
+    /// `conf_win_{left,right,top,bottom}_offset`, zero without a window.
+    pub conformance_window: [u32; 4],
+}
+
+/// Parse an SPS RBSP (the bytes after the 2-byte NAL header, emulation
+/// prevention stripped) through the conformance window, returning the reader
+/// positioned at `bit_depth_luma_minus8`. `None` on truncation.
+pub(crate) fn parse_h265_sps_head(rbsp: &[u8]) -> Option<(H265SpsHead, BitReader<'_>)> {
     let mut br = BitReader::new(rbsp);
-    let _sps_video_parameter_set_id = br.read_bits(4)?;
-    let _sps_max_sub_layers_minus1 = br.read_bits(3)?;
-    let _sps_temporal_id_nesting_flag = br.read_bit()?;
-    read_general_profile_tier_level(&mut br)
+    let sps_video_parameter_set_id = br.read_bits(4)? as u8;
+    let sps_max_sub_layers_minus1 = br.read_bits(3)? as u8;
+    let sps_temporal_id_nesting_flag = br.read_bit()? == 1;
+    let ptl = read_profile_tier_level(&mut br, u32::from(sps_max_sub_layers_minus1))?;
+    let sps_seq_parameter_set_id = br.read_ue()?;
+    let chroma_format_idc = br.read_ue()?;
+    let separate_colour_plane_flag = chroma_format_idc == 3 && br.read_bit()? == 1;
+    let pic_width_in_luma_samples = br.read_ue()?;
+    let pic_height_in_luma_samples = br.read_ue()?;
+    let conformance_window_flag = br.read_bit()? == 1;
+    let conformance_window = if conformance_window_flag {
+        [br.read_ue()?, br.read_ue()?, br.read_ue()?, br.read_ue()?]
+    } else {
+        [0; 4]
+    };
+    let head = H265SpsHead {
+        sps_video_parameter_set_id,
+        sps_max_sub_layers_minus1,
+        sps_temporal_id_nesting_flag,
+        ptl,
+        sps_seq_parameter_set_id,
+        chroma_format_idc,
+        separate_colour_plane_flag,
+        pic_width_in_luma_samples,
+        pic_height_in_luma_samples,
+        conformance_window_flag,
+        conformance_window,
+    };
+    Some((head, br))
 }
 
 /// Parse the SPS RBSP (H.265 7.3.2.2): the cropped picture dimensions from the
 /// head, then (best-effort) the framerate from the VUI `timing_info` (M663).
 /// `None` on a parse failure before the dimensions resolve.
 fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
-    let mut br = BitReader::new(rbsp);
-    let _sps_video_parameter_set_id = br.read_bits(4)?;
-    let sps_max_sub_layers_minus1 = br.read_bits(3)?;
-    let _sps_temporal_id_nesting_flag = br.read_bit()?;
-    skip_profile_tier_level(&mut br, sps_max_sub_layers_minus1)?;
-
-    let _sps_seq_parameter_set_id = br.read_ue()?;
-    let chroma_format_idc = br.read_ue()?;
-    let separate_colour_plane_flag = if chroma_format_idc == 3 {
-        br.read_bit()?
-    } else {
-        0
-    };
-    let pic_width = br.read_ue()?;
-    let pic_height = br.read_ue()?;
-
-    let conformance_window_flag = br.read_bit()?;
-    let (left, right, top, bottom) = if conformance_window_flag == 1 {
-        (br.read_ue()?, br.read_ue()?, br.read_ue()?, br.read_ue()?)
-    } else {
-        (0, 0, 0, 0)
-    };
+    let (head, mut br) = parse_h265_sps_head(rbsp)?;
+    let sps_max_sub_layers_minus1 = u32::from(head.sps_max_sub_layers_minus1);
+    let [left, right, top, bottom] = head.conformance_window;
+    let (pic_width, pic_height) = (
+        head.pic_width_in_luma_samples,
+        head.pic_height_in_luma_samples,
+    );
 
     // Crop offsets are in chroma sample units, scaled to luma by SubWidthC /
     // SubHeightC (H.265 7.4.3.2.1). ChromaArrayType 0 (monochrome or 4:4:4 with
     // separate colour planes) and 4:4:4 use 1x1.
-    let chroma_array_type = if separate_colour_plane_flag == 1 {
+    let chroma_array_type = if head.separate_colour_plane_flag {
         0
     } else {
-        chroma_format_idc
+        head.chroma_format_idc
     };
     let (sub_width_c, sub_height_c) = match chroma_array_type {
         1 => (2u32, 2u32), // 4:2:0
@@ -221,7 +251,7 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
         .log2_max_pic_order_cnt_lsb
         .map(|log2_max_pic_order_cnt_lsb| crate::poc::SpsPocParams {
             log2_max_pic_order_cnt_lsb,
-            separate_colour_plane_flag: separate_colour_plane_flag == 1,
+            separate_colour_plane_flag: head.separate_colour_plane_flag,
             ..crate::poc::SpsPocParams::default()
         });
     Some(SpsGeometry {
@@ -396,20 +426,61 @@ fn skip_scaling_list_data(br: &mut BitReader) -> Option<()> {
 const GENERAL_CONSTRAINT_BYTES: usize = 6;
 
 /// The general `profile_tier_level` fields (H.265 7.3.3), which the WebCodecs
-/// codec string is built from. Without that build the block is only crossed on
-/// the way to the geometry, so nothing reads the fields.
+/// codec string and the Vulkan `Std*` profile-tier-level are built from.
+// the WebCodecs codec string and the Vulkan decoder read these
 #[cfg_attr(
-    not(any(test, all(target_arch = "wasm32", feature = "web-codecs"))),
+    not(any(
+        test,
+        feature = "vulkan-video",
+        all(target_arch = "wasm32", feature = "web-codecs")
+    )),
     allow(dead_code)
 )]
 #[derive(Debug, Clone, Copy)]
-struct GeneralProfileTierLevel {
-    profile_space: u8,
-    tier_flag: u8,
-    profile_idc: u8,
-    compatibility_flags: u32,
-    constraint_bytes: [u8; GENERAL_CONSTRAINT_BYTES],
-    level_idc: u8,
+pub(crate) struct GeneralProfileTierLevel {
+    // only the WebCodecs codec string reads it
+    #[cfg_attr(
+        not(any(test, all(target_arch = "wasm32", feature = "web-codecs"))),
+        allow(dead_code)
+    )]
+    pub profile_space: u8,
+    pub tier_flag: u8,
+    pub profile_idc: u8,
+    // only the WebCodecs codec string reads it
+    #[cfg_attr(
+        not(any(test, all(target_arch = "wasm32", feature = "web-codecs"))),
+        allow(dead_code)
+    )]
+    pub compatibility_flags: u32,
+    /// Opens with the progressive, interlaced, non-packed and frame-only
+    /// source flags, most significant bit first.
+    pub constraint_bytes: [u8; GENERAL_CONSTRAINT_BYTES],
+    pub level_idc: u8,
+}
+
+#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+impl GeneralProfileTierLevel {
+    /// The `index`th of the four source flags that open the constraint bits.
+    fn source_flag(&self, index: u32) -> u8 {
+        const MOST_SIGNIFICANT_BIT: u32 = 7;
+        (self.constraint_bytes[0] >> (MOST_SIGNIFICANT_BIT - index)) & 1
+    }
+
+    pub(crate) fn progressive_source_flag(&self) -> u8 {
+        self.source_flag(0)
+    }
+
+    pub(crate) fn interlaced_source_flag(&self) -> u8 {
+        self.source_flag(1)
+    }
+
+    pub(crate) fn non_packed_constraint_flag(&self) -> u8 {
+        self.source_flag(2)
+    }
+
+    pub(crate) fn frame_only_constraint_flag(&self) -> u8 {
+        self.source_flag(3)
+    }
 }
 
 /// Read the general block of `profile_tier_level`: a fixed 96 bits (2 + 1 + 5
@@ -435,11 +506,15 @@ fn read_general_profile_tier_level(br: &mut BitReader) -> Option<GeneralProfileT
     })
 }
 
-/// Skip `profile_tier_level(1, max_sub_layers_minus1)` (H.265 7.3.3). The
+/// Read `profile_tier_level(1, max_sub_layers_minus1)` (H.265 7.3.3). The
 /// general block is a fixed 96 bits (88-bit profile/tier/constraints + 8-bit
-/// level); per-sub-layer blocks follow only when `max_sub_layers_minus1 > 0`.
-fn skip_profile_tier_level(br: &mut BitReader, max_sub_layers_minus1: u32) -> Option<()> {
-    read_general_profile_tier_level(br)?;
+/// level); per-sub-layer blocks follow only when `max_sub_layers_minus1 > 0`,
+/// and are advanced past without being carried. `None` on truncation.
+pub(crate) fn read_profile_tier_level(
+    br: &mut BitReader,
+    max_sub_layers_minus1: u32,
+) -> Option<GeneralProfileTierLevel> {
+    let general = read_general_profile_tier_level(br)?;
 
     let mut sub_profile_present = [false; 8];
     let mut sub_level_present = [false; 8];
@@ -460,7 +535,7 @@ fn skip_profile_tier_level(br: &mut BitReader, max_sub_layers_minus1: u32) -> Op
             br.skip_bits(8)?; // sub_layer_level_idc
         }
     }
-    Some(())
+    Some(general)
 }
 
 /// A short-term reference-picture set in canonical (explicit) form: the derived
@@ -974,7 +1049,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_profile_tier_level_advances_96_bits_for_single_layer() {
+    fn profile_tier_level_advances_96_bits_for_single_layer() {
         // 12 bytes of PTL then a ue(0) = single '1' bit. After the skip the
         // reader must sit exactly on that bit.
         let mut w = BitWriter::default();
@@ -985,7 +1060,7 @@ mod tests {
         w.align_to_byte();
         let bytes = w.into_bytes();
         let mut br = BitReader::new(&bytes);
-        skip_profile_tier_level(&mut br, 0).expect("skips the fixed 96-bit block");
+        read_profile_tier_level(&mut br, 0).expect("reads the fixed 96-bit block");
         assert_eq!(br.read_ue(), Some(0), "reader landed just past the PTL");
     }
 
