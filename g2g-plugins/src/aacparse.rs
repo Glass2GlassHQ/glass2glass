@@ -672,6 +672,7 @@ pub(crate) mod test_frames {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::annexb::BitWriter;
     use alloc::vec;
 
     use test_frames::adts_frame as build_adts;
@@ -730,28 +731,17 @@ mod tests {
     /// Pack the LATM `AudioMuxElement` bits (audioMuxVersion 0) up to and
     /// including the `AudioSpecificConfig` channel configuration.
     fn latm_mux_element(aot: u32, sr_index: u32, channel_config: u32) -> Vec<u8> {
-        let mut bits: Vec<u8> = Vec::new();
-        let mut push = |val: u32, n: u32| {
-            for k in (0..n).rev() {
-                bits.push(((val >> k) & 1) as u8);
-            }
-        };
-        push(0, 1); // useSameStreamMux = 0
-        push(0, 1); // audioMuxVersion = 0
-        push(1, 1); // allStreamsSameTimeFraming
-        push(0, 6); // numSubFrames
-        push(0, 4); // numProgram (program 0 only)
-        push(0, 3); // numLayer (layer 0 only)
-        push(aot, 5); // AudioSpecificConfig: audio object type
-        push(sr_index, 4); // sampling frequency index
-        push(channel_config, 4); // channel configuration
-        let mut bytes = vec![0u8; bits.len().div_ceil(8)];
-        for (idx, &b) in bits.iter().enumerate() {
-            if b == 1 {
-                bytes[idx / 8] |= 1 << (7 - (idx % 8));
-            }
-        }
-        bytes
+        let mut w = BitWriter::default();
+        w.write_bits(0, 1); // useSameStreamMux = 0
+        w.write_bits(0, 1); // audioMuxVersion = 0
+        w.write_bits(1, 1); // allStreamsSameTimeFraming
+        w.write_bits(0, 6); // numSubFrames
+        w.write_bits(0, 4); // numProgram (program 0 only)
+        w.write_bits(0, 3); // numLayer (layer 0 only)
+        w.write_bits(aot, 5); // AudioSpecificConfig: audio object type
+        w.write_bits(sr_index, 4); // sampling frequency index
+        w.write_bits(channel_config, 4); // channel configuration
+        w.into_bytes()
     }
 
     /// Wrap a LATM `AudioMuxElement` payload in a LOAS `AudioSyncStream` frame

@@ -687,7 +687,6 @@ impl<'a> BitReader<'a> {
     /// The current read position in bits from the start of the buffer. Used to
     /// measure the size of a variable-length syntax element (H.265 needs the bit
     /// length of a slice's inline short-term RPS for the decoder).
-    #[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
     pub(crate) fn bit_pos(&self) -> usize {
         self.bit_pos
     }

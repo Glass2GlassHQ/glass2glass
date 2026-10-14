@@ -23,8 +23,11 @@ use alloc::vec::Vec;
 use g2g_core::rtp::{RtpHeader, RTP_HEADER_LEN};
 use g2g_core::MediaClock;
 
+use crate::annexb::BitReader;
+
 /// RFC 8331 payload header length (ext-seq + length + ANC_Count + F/reserved).
 const ANC_HEADER_LEN: usize = 8;
+const WORD_ALIGN_BITS: usize = 32;
 
 /// The field a frame's ancillary data belongs to (RFC 8331 `F`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,11 +121,11 @@ impl AncPacket {
     }
 
     fn decode(r: &mut BitReader) -> Option<Self> {
-        let c = r.read(1)? != 0;
-        let line_number = r.read(11)? as u16;
-        let horizontal_offset = r.read(12)? as u16;
-        let s = r.read(1)?;
-        let stream = r.read(7)? as u8;
+        let c = r.read_bits(1)? != 0;
+        let line_number = r.read_bits(11)? as u16;
+        let horizontal_offset = r.read_bits(12)? as u16;
+        let s = r.read_bits(1)?;
+        let stream = r.read_bits(7)? as u8;
         let did = decode_word(r)?;
         let sdid = decode_word(r)?;
         let dc = decode_word(r)?;
@@ -134,11 +137,11 @@ impl AncPacket {
             sum += low9(u);
         }
         // Checksum_Word: verify inverse-parity bit and the 9-bit sum.
-        let cs = r.read(10)?;
+        let cs = r.read_bits(10)?;
         if (cs >> 9) & 1 != ((cs >> 8) & 1) ^ 1 || (cs & 0x1FF) != (sum & 0x1FF) {
             return None;
         }
-        r.align32();
+        skip_word_align(r);
         Some(Self {
             c,
             line_number,
@@ -170,7 +173,7 @@ fn encode_word(v: u8) -> u32 {
 
 /// Read one 10-bit data word, verifying its parity bits; `None` on a parity error.
 fn decode_word(r: &mut BitReader) -> Option<u8> {
-    let w = r.read(10)?;
+    let w = r.read_bits(10)?;
     let value = (w & 0xFF) as u8;
     let b8 = (w >> 8) & 1;
     let b9 = (w >> 9) & 1;
@@ -298,7 +301,7 @@ impl St2110AncDepacketizer {
 }
 
 // ================================================================
-// MSB-first bit cursors for the 10-bit-word packing.
+// MSB-first bit writer for the 10-bit-word packing.
 // ================================================================
 
 /// Appends bits MSB-first into a byte buffer.
@@ -338,7 +341,7 @@ impl BitWriter {
 
     /// Zero-pad to the next 32-bit boundary (RFC 8331 word_align).
     fn align32(&mut self) {
-        while !self.bit_len().is_multiple_of(32) {
+        while !self.bit_len().is_multiple_of(WORD_ALIGN_BITS) {
             self.write(0, 1);
         }
     }
@@ -352,37 +355,11 @@ impl BitWriter {
     }
 }
 
-/// Reads bits MSB-first from a byte slice.
-struct BitReader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    /// Read `bits` (<= 24) MSB-first, or `None` past the end.
-    fn read(&mut self, bits: usize) -> Option<u32> {
-        if self.pos + bits > self.data.len() * 8 {
-            return None;
-        }
-        let mut v = 0u32;
-        for _ in 0..bits {
-            let byte = self.data[self.pos / 8];
-            let bit = (byte >> (7 - self.pos % 8)) & 1;
-            v = (v << 1) | u32::from(bit);
-            self.pos += 1;
-        }
-        Some(v)
-    }
-
-    /// Skip padding to the next 32-bit boundary (word_align).
-    fn align32(&mut self) {
-        while !self.pos.is_multiple_of(32) && self.pos < self.data.len() * 8 {
-            self.pos += 1;
-        }
+// word_align, a last packet with its padding cut short still decodes
+fn skip_word_align(r: &mut BitReader) {
+    let misalignment = r.bit_pos() % WORD_ALIGN_BITS;
+    if misalignment != 0 {
+        let _ = r.skip_bits(WORD_ALIGN_BITS - misalignment);
     }
 }
 
