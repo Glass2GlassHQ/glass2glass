@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1292: FIR filters switch to FFT overlap-save convolution at 32 taps, as gst does.
 - M1291: the f32 audio filters decode into a reused scratch and write back in place, and `volume` forwards unity gain untouched.
 - M1290: block-cutting audio elements read from one shared FIFO buffer instead of front-draining.
 - M1289: WASAPI, Core Audio and AAudio sinks hand frames to their device thread over `WorkerLink`, and no audio sink copies a buffer before its worker.

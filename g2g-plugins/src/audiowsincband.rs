@@ -23,15 +23,6 @@ use crate::audiofx::{self, BandMode, FirWindow};
 const DEFAULT_FREQUENCY: f64 = 0.0;
 const FREQUENCY_MIN: f64 = 0.0;
 const FREQUENCY_MAX: f64 = 100_000.0;
-const DEFAULT_LENGTH: i64 = 101;
-const LENGTH_MIN: i64 = 3;
-const LENGTH_MAX: i64 = 256_000;
-
-/// A linear-phase kernel needs an odd tap count so its peak lands on one sample.
-fn to_odd(length: i64) -> usize {
-    let length = length.clamp(LENGTH_MIN, LENGTH_MAX);
-    (if length % 2 == 0 { length + 1 } else { length }) as usize
-}
 
 /// # Example
 ///
@@ -65,7 +56,7 @@ impl AudioWsincBand {
             mode: BandMode::BandPass,
             lower_frequency: DEFAULT_FREQUENCY,
             upper_frequency: DEFAULT_FREQUENCY,
-            length: to_odd(DEFAULT_LENGTH),
+            length: audiofx::odd_wsinc_length(audiofx::WSINC_DEFAULT_LENGTH),
             window: FirWindow::Hamming,
             transform: audiofx::FirTransform::default(),
             last_caps: None,
@@ -91,7 +82,7 @@ impl AudioWsincBand {
     }
 
     pub fn with_length(mut self, length: i64) -> Self {
-        self.length = to_odd(length);
+        self.length = audiofx::odd_wsinc_length(length);
         self.rebuild();
         self
     }
@@ -235,7 +226,13 @@ impl AsyncElement for AudioWsincBand {
                 self.upper_frequency =
                     audiofx::double_in_range(value, FREQUENCY_MIN, FREQUENCY_MAX)?
             }
-            "length" => self.length = to_odd(audiofx::int_in_range(value, LENGTH_MIN, LENGTH_MAX)?),
+            "length" => {
+                self.length = audiofx::odd_wsinc_length(audiofx::int_in_range(
+                    value,
+                    audiofx::WSINC_LENGTH_MIN,
+                    audiofx::WSINC_LENGTH_MAX,
+                )?)
+            }
             "window" => {
                 let s = value.as_str().ok_or(PropError::Type)?;
                 self.window = FirWindow::from_str(s).ok_or(PropError::Value)?;

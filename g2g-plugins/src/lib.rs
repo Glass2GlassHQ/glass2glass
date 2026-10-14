@@ -58,7 +58,6 @@ pub mod audiofirfilter;
 // Filter kernels the audiofx transforms share (windowed-sinc FIR, Chebyshev
 // IIR) plus their common PCM boundary.
 pub mod audiofx;
-// Front-read queue shared by the elements that cut fixed-size blocks from a stream.
 pub mod audioiirfilter;
 pub mod audioinvert;
 pub mod audiokaraoke;
@@ -67,6 +66,9 @@ pub mod audiomixmatrix;
 pub mod audiopanorama;
 pub mod audiorate;
 pub mod audioresample;
+// Radix-2 FFT shared by the FIR overlap-save path and `spectrum`.
+mod fft;
+// Front-read queue shared by the elements that cut fixed-size blocks from a stream.
 mod fifobuffer;
 // `audioreverse`: the audio half of reverse playback, the analog of `areverse`.
 pub mod audioreverse;

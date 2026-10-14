@@ -22,6 +22,8 @@ use g2g_core::{
 };
 
 pub(crate) use crate::audioconvert::{decode, encode};
+use crate::fft::FftPlan;
+use crate::fifobuffer::FifoBuffer;
 use crate::mathf;
 
 /// The sample formats the audiofx filters handle directly.
@@ -384,49 +386,219 @@ pub(crate) fn band_kernel(
     kernel
 }
 
-/// Time-domain FIR over interleaved frames, the reference's low-latency path: a
-/// per-channel history ring as long as the kernel.
+// gst audiowsinclimit and audiowsincband kernel length default and bounds
+pub(crate) const WSINC_DEFAULT_LENGTH: i64 = 101;
+pub(crate) const WSINC_LENGTH_MIN: i64 = 3;
+pub(crate) const WSINC_LENGTH_MAX: i64 = 256_000;
+
+// a linear-phase kernel needs an odd tap count so its peak lands on one sample
+pub(crate) fn odd_wsinc_length(length: i64) -> usize {
+    let length = length.clamp(WSINC_LENGTH_MIN, WSINC_LENGTH_MAX);
+    (if length % 2 == 0 { length + 1 } else { length }) as usize
+}
+
+// gst audiofxbasefirfilter switches to FFT overlap-save convolution at this kernel length
+const FFT_THRESHOLD: usize = 32;
+// gst filters 4 * kernel_length samples per FFT block
+const FFT_BLOCK_KERNELS: usize = 4;
+
+/// Time-domain FIR over interleaved frames, the reference's low-latency path.
 #[derive(Debug, Default)]
-pub(crate) struct FirState {
-    /// `taps * channels` samples, indexed `tap * channels + channel`.
-    history: Vec<f32>,
+struct DirectFir {
+    kernel: Vec<f64>,
     taps: usize,
     channels: usize,
+    // per channel, each sample stored at `pos` and `pos + taps`, so the newest `taps` are one slice
+    history: Vec<f32>,
     pos: usize,
 }
 
-impl FirState {
-    pub(crate) fn configure(&mut self, taps: usize, channels: usize) {
-        self.taps = taps.max(1);
-        self.channels = channels.max(1);
-        self.history = vec![0.0; self.taps * self.channels];
-        self.pos = 0;
+impl DirectFir {
+    fn new(kernel: Vec<f64>, channels: usize) -> Self {
+        let taps = kernel.len().max(1);
+        Self {
+            kernel,
+            taps,
+            channels,
+            history: vec![0.0; 2 * taps * channels],
+            pos: 0,
+        }
     }
 
-    pub(crate) fn reset(&mut self) {
+    fn reset(&mut self) {
         self.history.fill(0.0);
         self.pos = 0;
     }
 
-    /// Convolve `input` (interleaved, `channels`-aligned) with `kernel`,
-    /// appending one output sample per input sample.
-    pub(crate) fn run(&mut self, kernel: &[f64], input: &[f32], output: &mut Vec<f32>) {
-        if self.channels == 0 || self.taps == 0 {
+    fn run(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        if self.channels == 0 {
             return;
         }
+        let taps = self.taps;
         for frame in input.chunks_exact(self.channels) {
-            let base = self.pos * self.channels;
-            self.history[base..base + self.channels].copy_from_slice(frame);
-            for channel in 0..self.channels {
-                let mut acc = 0.0f64;
-                let mut tap = self.pos;
-                for coefficient in kernel.iter().take(self.taps) {
-                    acc += coefficient * self.history[tap * self.channels + channel] as f64;
-                    tap = if tap == 0 { self.taps - 1 } else { tap - 1 };
-                }
+            for (channel, &sample) in frame.iter().enumerate() {
+                let ring = &mut self.history[channel * 2 * taps..][..2 * taps];
+                ring[self.pos] = sample;
+                ring[self.pos + taps] = sample;
+                let newest_first = ring[self.pos + 1..=self.pos + taps].iter().rev();
+                let acc = self
+                    .kernel
+                    .iter()
+                    .zip(newest_first)
+                    .fold(0.0f64, |acc, (coefficient, &sample)| {
+                        acc + coefficient * sample as f64
+                    });
                 output.push(acc as f32);
             }
-            self.pos = (self.pos + 1) % self.taps;
+            self.pos = (self.pos + 1) % taps;
+        }
+    }
+}
+
+/// FFT overlap-save FIR, gst's path for long kernels. Output comes a block at a
+/// time, so a call can return fewer frames than it was given.
+#[derive(Debug)]
+struct FftFir {
+    plan: FftPlan,
+    kernel_re: Vec<f64>,
+    kernel_im: Vec<f64>,
+    taps: usize,
+    channels: usize,
+    // per channel, the last `taps - 1` inputs the next block overlaps
+    overlap: Vec<f64>,
+    pending: FifoBuffer<f32>,
+    re: Vec<f64>,
+    im: Vec<f64>,
+}
+
+impl FftFir {
+    fn new(kernel: &[f64], channels: usize) -> Self {
+        let taps = kernel.len();
+        let plan = FftPlan::new((FFT_BLOCK_KERNELS * taps).next_power_of_two());
+        let size = plan.size();
+        let mut kernel_re = vec![0.0; size];
+        kernel_re[..taps].copy_from_slice(kernel);
+        let mut kernel_im = vec![0.0; size];
+        plan.forward(&mut kernel_re, &mut kernel_im);
+        Self {
+            plan,
+            kernel_re,
+            kernel_im,
+            taps,
+            channels,
+            overlap: vec![0.0; (taps - 1) * channels],
+            pending: FifoBuffer::default(),
+            re: vec![0.0; size],
+            im: vec![0.0; size],
+        }
+    }
+
+    fn reset(&mut self) {
+        self.overlap.fill(0.0);
+        self.pending.clear();
+    }
+
+    // new input frames one block filters
+    fn block_frames(&self) -> usize {
+        self.plan.size() - (self.taps - 1)
+    }
+
+    fn run(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        self.pending.extend_from_slice(input);
+        let block_samples = self.block_frames() * self.channels;
+        while self.pending.len() >= block_samples {
+            self.filter_block(output);
+        }
+    }
+
+    fn flush(&mut self, output: &mut Vec<f32>) {
+        let frames = self.pending.len() / self.channels;
+        if frames == 0 {
+            return;
+        }
+        let padded = self.block_frames() * self.channels;
+        self.pending.resize(padded, 0.0);
+        let start = output.len();
+        self.filter_block(output);
+        output.truncate(start + frames * self.channels);
+    }
+
+    fn filter_block(&mut self, output: &mut Vec<f32>) {
+        let frames = self.block_frames();
+        let overlap_len = self.taps - 1;
+        let start = output.len();
+        output.resize(start + frames * self.channels, 0.0);
+        for channel in 0..self.channels {
+            let overlap = &mut self.overlap[channel * overlap_len..][..overlap_len];
+            self.re[..overlap_len].copy_from_slice(overlap);
+            let block = &self.pending.as_slice()[..frames * self.channels];
+            let new_inputs = block.iter().skip(channel).step_by(self.channels);
+            for (slot, &sample) in self.re[overlap_len..].iter_mut().zip(new_inputs) {
+                *slot = sample as f64;
+            }
+            let newest = &self.re[self.plan.size() - overlap_len..];
+            overlap.copy_from_slice(newest);
+            self.im.fill(0.0);
+            self.plan.forward(&mut self.re, &mut self.im);
+            let spectrum = self.re.iter_mut().zip(self.im.iter_mut());
+            for ((re, im), (kr, ki)) in spectrum.zip(self.kernel_re.iter().zip(&self.kernel_im)) {
+                let product_re = *re * kr - *im * ki;
+                *im = *re * ki + *im * kr;
+                *re = product_re;
+            }
+            self.plan.inverse(&mut self.re, &mut self.im);
+            let filtered = output[start..]
+                .iter_mut()
+                .skip(channel)
+                .step_by(self.channels);
+            for (slot, &value) in filtered.zip(&self.re[overlap_len..]) {
+                *slot = value as f32;
+            }
+        }
+        self.pending.discard(frames * self.channels);
+    }
+}
+
+#[derive(Debug)]
+enum FirConvolver {
+    Direct(DirectFir),
+    Fft(FftFir),
+}
+
+impl Default for FirConvolver {
+    fn default() -> Self {
+        Self::Direct(DirectFir::default())
+    }
+}
+
+impl FirConvolver {
+    fn new(kernel: Vec<f64>, channels: usize) -> Self {
+        if kernel.len() >= FFT_THRESHOLD {
+            Self::Fft(FftFir::new(&kernel, channels))
+        } else {
+            Self::Direct(DirectFir::new(kernel, channels))
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Direct(fir) => fir.reset(),
+            Self::Fft(fir) => fir.reset(),
+        }
+    }
+
+    fn run(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        match self {
+            Self::Direct(fir) => fir.run(input, output),
+            Self::Fft(fir) => fir.run(input, output),
+        }
+    }
+
+    // the input a block-based convolver still holds
+    fn flush(&mut self, output: &mut Vec<f32>) {
+        match self {
+            Self::Direct(_) => {}
+            Self::Fft(fir) => fir.flush(output),
         }
     }
 }
@@ -444,8 +616,7 @@ fn linear_phase_latency(taps: usize) -> usize {
 /// input and the sample count unchanged.
 #[derive(Debug, Default)]
 pub(crate) struct FirStream {
-    kernel: Vec<f64>,
-    state: FirState,
+    convolver: FirConvolver,
     channels: usize,
     latency: usize,
     /// output frames still to be dropped to remove the group delay.
@@ -453,6 +624,9 @@ pub(crate) struct FirStream {
     /// output frames pushed so far, the pts cursor of the stream.
     emitted_frames: u64,
     started: bool,
+    output: Vec<f32>,
+    // where the samples to push start in `output`, past the dropped group delay
+    output_start: usize,
 }
 
 impl FirStream {
@@ -467,8 +641,7 @@ impl FirStream {
     ) {
         self.latency = latency;
         self.channels = channels.max(1);
-        self.state.configure(kernel.len(), self.channels);
-        self.kernel = kernel;
+        self.convolver = FirConvolver::new(kernel, self.channels);
         self.skip = self.latency;
         self.emitted_frames = 0;
         self.started = false;
@@ -485,17 +658,15 @@ impl FirStream {
 
     /// Swap in a rebuilt kernel and its group delay together.
     pub(crate) fn set_kernel_with_latency(&mut self, kernel: Vec<f64>, latency: usize) {
-        let taps = kernel.len();
         self.latency = latency;
-        self.kernel = kernel;
-        self.state.configure(taps, self.channels);
+        self.convolver = FirConvolver::new(kernel, self.channels.max(1));
         if !self.started {
             self.skip = self.latency;
         }
     }
 
     pub(crate) fn reset(&mut self) {
-        self.state.reset();
+        self.convolver.reset();
         self.skip = self.latency;
         self.emitted_frames = 0;
         self.started = false;
@@ -515,28 +686,38 @@ impl FirStream {
         self.emitted_frames
     }
 
-    /// Filter one interleaved buffer, returning the samples to push. Early in
-    /// the stream that is shorter than the input, and can be empty.
-    pub(crate) fn run(&mut self, input: &[f32]) -> Vec<f32> {
+    /// The samples the last `run` or `drain` produced. Early in the stream that
+    /// is shorter than the input, and can be empty.
+    pub(crate) fn filtered(&self) -> &[f32] {
+        &self.output[self.output_start..]
+    }
+
+    /// Filter one interleaved buffer into [`filtered`](Self::filtered).
+    pub(crate) fn run(&mut self, input: &[f32]) {
         self.started = true;
-        let mut out = Vec::with_capacity(input.len());
-        self.state.run(&self.kernel, input, &mut out);
-        if self.skip > 0 {
-            let dropped = (self.skip * self.channels).min(out.len());
-            out.drain(..dropped);
-            self.skip -= dropped / self.channels;
-        }
-        self.emitted_frames += (out.len() / self.channels) as u64;
-        out
+        self.output.clear();
+        self.convolver.run(input, &mut self.output);
+        self.drop_group_delay();
     }
 
     /// The tail the history still holds at `Eos`, convolved against silence.
-    pub(crate) fn drain(&mut self) -> Vec<f32> {
+    pub(crate) fn drain(&mut self) {
+        self.output.clear();
+        self.output_start = 0;
         if !self.started {
-            return Vec::new();
+            return;
         }
         let silence = vec![0.0f32; self.latency * self.channels];
-        self.run(&silence)
+        self.convolver.run(&silence, &mut self.output);
+        self.convolver.flush(&mut self.output);
+        self.drop_group_delay();
+    }
+
+    fn drop_group_delay(&mut self) {
+        let dropped = (self.skip * self.channels).min(self.output.len());
+        self.skip -= dropped / self.channels;
+        self.output_start = dropped;
+        self.emitted_frames += ((self.output.len() - dropped) / self.channels) as u64;
     }
 }
 
@@ -553,6 +734,7 @@ pub(crate) struct FirTransform {
     /// Everything but pts / dts / duration is carried over from the last input.
     timing: FrameTiming,
     emitted: u64,
+    scratch: PcmScratch,
 }
 
 impl Default for FirTransform {
@@ -566,6 +748,7 @@ impl Default for FirTransform {
             start_pts_ns: 0,
             timing: FrameTiming::default(),
             emitted: 0,
+            scratch: PcmScratch::default(),
         }
     }
 }
@@ -631,18 +814,18 @@ impl FirTransform {
             self.start_pts_ns = frame.timing.pts_ns;
         }
         self.timing = frame.timing;
-        let samples = decode(src, self.format);
-        let filtered = self.stream.run(&samples);
-        Ok(self.wrap(filtered))
+        self.stream.run(self.scratch.decode(src, self.format));
+        Ok(self.wrap())
     }
 
     /// The kernel's tail at `Eos`.
     pub(crate) fn drain(&mut self) -> Option<Frame> {
-        let filtered = self.stream.drain();
-        self.wrap(filtered)
+        self.stream.drain();
+        self.wrap()
     }
 
-    fn wrap(&mut self, samples: Vec<f32>) -> Option<Frame> {
+    fn wrap(&mut self) -> Option<Frame> {
+        let samples = self.stream.filtered();
         if samples.is_empty() {
             return None;
         }
@@ -657,10 +840,11 @@ impl FirTransform {
             duration_ns: crate::audioconvert::samples_to_ns(frames, self.rate),
             ..self.timing
         };
+        let encoded = encode(samples, self.format);
         let sequence = self.emitted;
         self.emitted += 1;
         Some(Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(encode(&samples, self.format))),
+            domain: MemoryDomain::System(SystemSlice::from_boxed(encoded)),
             timing,
             sequence,
             meta: Default::default(),
@@ -1088,6 +1272,67 @@ mod tests {
             im -= tap * mathf::sin(w * i as f64);
         }
         mathf::sqrt(re * re + im * im)
+    }
+
+    const TEST_KERNEL_TAPS: usize = 101;
+    const TEST_CHANNELS: usize = 2;
+    // odd, so buffers straddle FFT block boundaries
+    const TEST_BUFFER_FRAMES: usize = 97;
+
+    fn test_signal(frames: usize) -> Vec<f32> {
+        (0..frames * TEST_CHANNELS)
+            .map(|i| ((i * 37) % 101) as f32 / 101.0 - 0.5)
+            .collect()
+    }
+
+    fn test_kernel() -> Vec<f64> {
+        limit_kernel(
+            LimitMode::LowPass,
+            1000.0,
+            48_000,
+            TEST_KERNEL_TAPS,
+            FirWindow::Hamming,
+        )
+    }
+
+    #[test]
+    fn fft_overlap_save_matches_direct_convolution() {
+        let kernel = test_kernel();
+        assert!(kernel.len() >= FFT_THRESHOLD);
+        let input = test_signal(3001);
+        let mut expected = Vec::new();
+        DirectFir::new(kernel.clone(), TEST_CHANNELS).run(&input, &mut expected);
+        let mut fft = FftFir::new(&kernel, TEST_CHANNELS);
+        let mut got = Vec::new();
+        for buffer in input.chunks(TEST_BUFFER_FRAMES * TEST_CHANNELS) {
+            fft.run(buffer, &mut got);
+        }
+        fft.flush(&mut got);
+        assert_eq!(got.len(), expected.len());
+        for (index, (fast, slow)) in got.iter().zip(&expected).enumerate() {
+            assert!(
+                (fast - slow).abs() < 1e-5,
+                "sample {index}: {fast} vs {slow}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_kernel_stream_keeps_the_sample_count() {
+        let kernel = test_kernel();
+        let latency = linear_phase_latency(kernel.len());
+        let frames = 1000;
+        let mut stream = FirStream::default();
+        stream.configure_with_latency(kernel, TEST_CHANNELS, latency);
+        let mut total = 0;
+        for buffer in test_signal(frames).chunks(TEST_BUFFER_FRAMES * TEST_CHANNELS) {
+            stream.run(buffer);
+            total += stream.filtered().len();
+        }
+        stream.drain();
+        total += stream.filtered().len();
+        assert_eq!(total, frames * TEST_CHANNELS);
+        assert_eq!(stream.emitted_frames(), frames as u64);
     }
 
     #[test]
