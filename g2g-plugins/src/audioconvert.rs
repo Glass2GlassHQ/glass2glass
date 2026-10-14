@@ -23,8 +23,8 @@
 //! S16) adds dither before rounding (tpdf by default, as in gst) and can feed
 //! the rounding error back through a noise-shaping filter, per the `dithering`
 //! / `dithering-threshold` / `noise-shaping` properties. Neither runs on a
-//! lossless conversion, so a passthrough or an equal-depth format change stays
-//! byte for byte identical.
+//! lossless conversion, and an input already in the output format, channel
+//! count and layout passes through untouched.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -400,20 +400,28 @@ impl AsyncElement for AudioConvert {
                     let out_format = self.out_format(in_format);
                     let out_channels = self.out_channels(in_channels);
                     let out_layout = self.out_layout(in_channels, out_channels);
-                    let converted = convert_pcm(
-                        slice,
-                        PcmStream {
-                            format: in_format,
-                            channels: in_channels,
-                            layout: self.input_layout,
-                        },
-                        PcmStream {
-                            format: out_format,
-                            channels: out_channels,
-                            layout: out_layout,
-                        },
-                        &mut self.quantizer,
-                    )?;
+                    let passthrough = in_format == out_format
+                        && in_channels == out_channels
+                        && self.input_layout == out_layout;
+                    let domain = if passthrough {
+                        frame.domain
+                    } else {
+                        let converted = convert_pcm(
+                            slice,
+                            PcmStream {
+                                format: in_format,
+                                channels: in_channels,
+                                layout: self.input_layout,
+                            },
+                            PcmStream {
+                                format: out_format,
+                                channels: out_channels,
+                                layout: out_layout,
+                            },
+                            &mut self.quantizer,
+                        )?;
+                        MemoryDomain::System(SystemSlice::from_boxed(converted))
+                    };
 
                     let new_caps = Caps::Audio {
                         format: out_format,
@@ -427,7 +435,7 @@ impl AsyncElement for AudioConvert {
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(converted)),
+                        domain,
                         timing: frame.timing,
                         sequence: self.emitted,
                         meta: Default::default(),
@@ -650,28 +658,31 @@ fn convert_pcm(
         None
     };
 
+    let decoded = decode(src, in_format);
+    let mixed = if in_ch == out_ch {
+        decoded
+    } else {
+        let mut mixed = Vec::with_capacity(frames * out_ch);
+        for in_samples in decoded.as_slice().chunks_exact(in_ch) {
+            mixed.extend((0..out_ch).map(|oc| {
+                match &matrix {
+                    Some(m) => m[oc * in_ch..][..in_ch]
+                        .iter()
+                        .zip(in_samples)
+                        .map(|(coef, s)| coef * s)
+                        .sum(),
+                    None => map_channel(in_samples, oc, out_ch),
+                }
+            }));
+        }
+        mixed
+    };
+
     let plan = quantizer.plan(in_format, out_format);
     quantizer.prepare(out_ch, plan);
 
     let mut dst = Vec::with_capacity(frames * out_bytes * out_ch);
-    let mut in_samples = alloc::vec![0f32; in_ch];
-    for f in 0..frames {
-        let base = f * in_frame;
-        for (c, slot) in in_samples.iter_mut().enumerate() {
-            *slot = read_sample(&src[base + c * in_bytes..], in_format);
-        }
-        for oc in 0..out_ch {
-            let v = match &matrix {
-                Some(m) => m[oc * in_ch..][..in_ch]
-                    .iter()
-                    .zip(&in_samples)
-                    .map(|(coef, s)| coef * s)
-                    .sum(),
-                None => map_channel(&in_samples, oc, out_ch),
-            };
-            quantizer.write(&mut dst, v, out_format, oc, plan);
-        }
-    }
+    quantizer.encode(&mut dst, &mixed, out_format, out_ch, plan);
     Ok(dst.into_boxed_slice())
 }
 
@@ -768,9 +779,45 @@ fn shaping_coefficients(method: NoiseShapingMethod) -> &'static [f32] {
         NoiseShapingMethod::ErrorFeedback => &[1.0],
         NoiseShapingMethod::Simple => &[-0.5, 1.0],
         NoiseShapingMethod::Medium => &[0.6149, -1.590, 1.959, -2.165, 2.033],
-        NoiseShapingMethod::High => &[
-            -0.340122, 0.876066, -1.72008, 2.61339, -3.31399, 3.27918, -2.92975, 2.08484,
-        ],
+        NoiseShapingMethod::High => &HIGH_SHAPING_COEFFICIENTS,
+    }
+}
+
+const HIGH_SHAPING_COEFFICIENTS: [f32; 8] = [
+    -0.340122, 0.876066, -1.72008, 2.61339, -3.31399, 3.27918, -2.92975, 2.08484,
+];
+const MAX_SHAPING_TAPS: usize = HIGH_SHAPING_COEFFICIENTS.len();
+
+// one channel's last rounding errors in output LSBs, a ring over `taps` slots.
+#[derive(Debug, Clone, Copy)]
+struct ErrorHistory {
+    errors: [f32; MAX_SHAPING_TAPS],
+    taps: usize,
+    oldest: usize,
+}
+
+impl ErrorHistory {
+    fn new(taps: usize) -> Self {
+        Self {
+            errors: [0.0; MAX_SHAPING_TAPS],
+            taps,
+            oldest: 0,
+        }
+    }
+
+    // `coefficients` run oldest error first, as in `shaping_coefficients`.
+    fn feedback(&self, coefficients: &[f32]) -> f32 {
+        let (newer, older) = self.errors[..self.taps].split_at(self.oldest);
+        coefficients
+            .iter()
+            .zip(older.iter().chain(newer))
+            .map(|(c, e)| c * e)
+            .sum()
+    }
+
+    fn push(&mut self, error: f32) {
+        self.errors[self.oldest] = error;
+        self.oldest = (self.oldest + 1) % self.taps;
     }
 }
 
@@ -803,8 +850,8 @@ struct Quantizer {
     threshold: u8,
     random_state: u32,
     /// Per channel, the last `shaping_coefficients().len()` rounding errors in
-    /// output LSBs, oldest first.
-    errors: Vec<Vec<f32>>,
+    /// output LSBs.
+    errors: Vec<ErrorHistory>,
     /// Per channel, the previous dither draw, for [`DitherMethod::TpdfHf`].
     previous_draw: Vec<f32>,
 }
@@ -822,11 +869,11 @@ impl Quantizer {
     /// there when the shape has not moved.
     fn prepare(&mut self, channels: usize, plan: QuantizePlan) {
         let taps = shaping_coefficients(plan.shaping).len();
-        if self.errors.len() == channels && self.errors.first().is_none_or(|e| e.len() == taps) {
+        if self.errors.len() == channels && self.errors.first().is_none_or(|e| e.taps == taps) {
             return;
         }
         self.random_state = XORSHIFT_BASE_STATE;
-        self.errors = alloc::vec![alloc::vec![0f32; taps]; channels];
+        self.errors = alloc::vec![ErrorHistory::new(taps); channels];
         self.previous_draw = alloc::vec![0f32; channels];
     }
 
@@ -884,37 +931,46 @@ impl Quantizer {
         (unit - 0.5) * 2.0 * half_width
     }
 
-    /// Encode one sample of `channel` under `plan`.
-    fn write(
+    fn encode(
         &mut self,
         dst: &mut Vec<u8>,
-        v: f32,
+        samples: &[f32],
         format: AudioFormat,
-        channel: usize,
+        channels: usize,
         plan: QuantizePlan,
     ) {
         let scale = match (plan.is_plain(), full_scale(format)) {
             (false, Some(scale)) => scale,
-            _ => return write_sample(dst, v, format),
+            _ => return encode_into(dst, samples, format),
         };
         let coefficients = shaping_coefficients(plan.shaping);
+        let codes = samples
+            .iter()
+            .zip((0..channels).cycle())
+            .map(|(v, channel)| self.quantize(*v, channel, scale, coefficients, plan.dither));
+        emit_codes(dst, codes, format);
+    }
+
+    // returns the integer code before the format's range clamp.
+    fn quantize(
+        &mut self,
+        v: f32,
+        channel: usize,
+        scale: f32,
+        coefficients: &[f32],
+        dither: DitherMethod,
+    ) -> f32 {
         // Subtracting the filtered past errors puts the quantization noise
         // through `1 - sum(coefficient * z^-k)`, which lifts it out of the band
         // the ear hears best.
-        let feedback: f32 = coefficients
-            .iter()
-            .zip(&self.errors[channel])
-            .map(|(c, e)| c * e)
-            .sum();
+        let feedback = self.errors[channel].feedback(coefficients);
         let target = v.clamp(-1.0, 1.0) * scale - feedback;
-        let dithered = target + self.draw(plan.dither, channel);
+        let dithered = target + self.draw(dither, channel);
         let quantized = round_to_integer(dithered);
         if !coefficients.is_empty() {
-            let history = &mut self.errors[channel];
-            history.remove(0);
-            history.push(quantized - dithered);
+            self.errors[channel].push(quantized - dithered);
         }
-        emit_quantized(dst, quantized, format);
+        quantized
     }
 }
 
@@ -1057,7 +1113,7 @@ fn round_away(v: f32) -> f32 {
 }
 
 /// The integer value `round_away` plus the truncating cast in
-/// [`emit_quantized`] land on, so a shaping filter can weigh the error the
+/// [`emit_codes`] land on, so a shaping filter can weigh the error the
 /// emitted sample actually makes.
 fn round_to_integer(v: f32) -> f32 {
     round_away(v) as i64 as f32
@@ -1095,62 +1151,116 @@ fn quantization_bits(format: AudioFormat) -> Option<u8> {
     }
 }
 
-/// Append an already-rounded integer sample value, clamped to the format's
+/// Append already-rounded integer sample values, each clamped to the format's
 /// code range. The clamp matters once dither pushes a full-scale sample past
 /// the top code, where `as u8` would wrap rather than saturate.
-fn emit_quantized(dst: &mut Vec<u8>, quantized: f32, format: AudioFormat) {
+fn emit_codes(dst: &mut Vec<u8>, codes: impl Iterator<Item = f32>, format: AudioFormat) {
     let Some(scale) = full_scale(format) else {
         return;
     };
     // the negative side has one more code than the positive one.
-    let q = quantized.clamp(-scale, scale - 1.0);
+    let clamped = codes.map(|q| q.clamp(-scale, scale - 1.0));
     match format {
         // u8 PCM is offset-binary: silence sits at 0x80.
-        AudioFormat::PcmU8 => dst.push((q as i32 + U8_MIDPOINT) as u8),
-        AudioFormat::PcmS16Le => dst.extend_from_slice(&(q as i16).to_le_bytes()),
+        AudioFormat::PcmU8 => dst.extend(clamped.map(|q| (q as i32 + U8_MIDPOINT) as u8)),
+        AudioFormat::PcmS16Le => {
+            clamped.for_each(|q| dst.extend_from_slice(&(q as i16).to_le_bytes()));
+        }
         // 3-byte packed, little-endian.
-        AudioFormat::PcmS24Le => dst.extend_from_slice(&(q as i32).to_le_bytes()[..3]),
+        AudioFormat::PcmS24Le => {
+            clamped.for_each(|q| dst.extend_from_slice(&(q as i32).to_le_bytes()[..3]));
+        }
         // the +0.5 in `round_away` is below the f32 quantum at this magnitude;
         // `as i32` saturates rather than wrapping at full scale.
-        AudioFormat::PcmS32Le => dst.extend_from_slice(&(q as i32).to_le_bytes()),
+        AudioFormat::PcmS32Le => {
+            clamped.for_each(|q| dst.extend_from_slice(&(q as i32).to_le_bytes()));
+        }
         _ => {}
     }
+}
+
+fn u8_to_float(bytes: [u8; 1]) -> f32 {
+    (i32::from(bytes[0]) - U8_MIDPOINT) as f32 / U8_FULL_SCALE
+}
+
+fn s16_to_float(bytes: [u8; 2]) -> f32 {
+    f32::from(i16::from_le_bytes(bytes)) / S16_FULL_SCALE
+}
+
+fn s24_to_float(bytes: [u8; 3]) -> f32 {
+    // 3-byte packed, little-endian: sign-extend from the top byte.
+    let s = bytes[0] as i32 | (bytes[1] as i32) << 8 | (bytes[2] as i8 as i32) << 16;
+    s as f32 / S24_FULL_SCALE
+}
+
+fn s32_to_float(bytes: [u8; 4]) -> f32 {
+    i32::from_le_bytes(bytes) as f32 / S32_FULL_SCALE
+}
+
+fn leading_bytes<const N: usize>(at: &[u8]) -> [u8; N] {
+    *at.first_chunk().expect("a whole sample")
 }
 
 /// Decode one sample to f32 in [-1, 1). The slice starts at the sample.
 pub(crate) fn read_sample(at: &[u8], format: AudioFormat) -> f32 {
     match format {
-        AudioFormat::PcmU8 => (i32::from(at[0]) - U8_MIDPOINT) as f32 / U8_FULL_SCALE,
-        AudioFormat::PcmS16Le => {
-            let s = i16::from_le_bytes([at[0], at[1]]);
-            s as f32 / S16_FULL_SCALE
-        }
-        AudioFormat::PcmS24Le => {
-            // 3-byte packed, little-endian: sign-extend from the top byte.
-            let s = at[0] as i32 | (at[1] as i32) << 8 | (at[2] as i8 as i32) << 16;
-            s as f32 / S24_FULL_SCALE
-        }
-        AudioFormat::PcmS32Le => {
-            let s = i32::from_le_bytes([at[0], at[1], at[2], at[3]]);
-            s as f32 / S32_FULL_SCALE
-        }
-        AudioFormat::PcmF32Le => f32::from_le_bytes([at[0], at[1], at[2], at[3]]),
+        AudioFormat::PcmU8 => u8_to_float(leading_bytes(at)),
+        AudioFormat::PcmS16Le => s16_to_float(leading_bytes(at)),
+        AudioFormat::PcmS24Le => s24_to_float(leading_bytes(at)),
+        AudioFormat::PcmS32Le => s32_to_float(leading_bytes(at)),
+        AudioFormat::PcmF32Le => f32::from_le_bytes(leading_bytes(at)),
         _ => 0.0,
     }
+}
+
+fn decode_with<const N: usize>(src: &[u8], to_float: impl Fn([u8; N]) -> f32) -> Vec<f32> {
+    src.as_chunks::<N>()
+        .0
+        .iter()
+        .map(|b| to_float(*b))
+        .collect()
+}
+
+/// Decode an interleaved PCM buffer to f32 samples in [-1, 1).
+pub(crate) fn decode(src: &[u8], format: AudioFormat) -> Vec<f32> {
+    match format {
+        AudioFormat::PcmU8 => decode_with(src, u8_to_float),
+        AudioFormat::PcmS16Le => decode_with(src, s16_to_float),
+        AudioFormat::PcmS24Le => decode_with(src, s24_to_float),
+        AudioFormat::PcmS32Le => decode_with(src, s32_to_float),
+        AudioFormat::PcmF32Le => decode_with(src, f32::from_le_bytes),
+        _ => Vec::new(),
+    }
+}
+
+fn encode_into(dst: &mut Vec<u8>, samples: &[f32], format: AudioFormat) {
+    if format == AudioFormat::PcmF32Le {
+        samples
+            .iter()
+            .for_each(|v| dst.extend_from_slice(&v.to_le_bytes()));
+        return;
+    }
+    let Some(scale) = full_scale(format) else {
+        return;
+    };
+    let codes = samples
+        .iter()
+        .map(|v| round_away(v.clamp(-1.0, 1.0) * scale));
+    emit_codes(dst, codes, format);
+}
+
+/// Encode interleaved f32 samples back into `format`.
+pub(crate) fn encode(samples: &[f32], format: AudioFormat) -> Box<[u8]> {
+    let mut out = Vec::with_capacity(samples.len() * sample_bytes(format));
+    encode_into(&mut out, samples, format);
+    out.into_boxed_slice()
 }
 
 /// Encode one f32 sample, appending its little-endian bytes. Plain rounding,
 /// no dither: the resampler and the audio filters call this, and a
 /// [`Quantizer`] is what carries the per-channel dither state.
 pub(crate) fn write_sample(dst: &mut Vec<u8>, v: f32, format: AudioFormat) {
-    if format == AudioFormat::PcmF32Le {
-        dst.extend_from_slice(&v.to_le_bytes());
-        return;
-    }
-    let Some(scale) = full_scale(format) else {
-        return;
-    };
-    emit_quantized(dst, round_away(v.clamp(-1.0, 1.0) * scale), format);
+    encode_into(dst, &[v], format);
 }
 
 #[cfg(test)]
@@ -1684,17 +1794,24 @@ mod tests {
             .iter()
             .flat_map(|v| v.to_le_bytes())
             .collect();
+        const S24_STRIDE: usize = 65_537;
         let s24: Vec<u8> = (-(1i32 << 23)..1 << 23)
-            .step_by(65_537)
+            .step_by(S24_STRIDE)
             .flat_map(s24_bytes)
             .collect();
-        let cases: [(AudioFormat, Vec<u8>); 4] = [
+        // f32 holds 24 bits, so these codes only survive by not being decoded.
+        let s32: Vec<u8> = [i32::MIN + 1, -0x0765_4321, 0x0123_4567, i32::MAX - 1]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        let cases: [(AudioFormat, Vec<u8>); 5] = [
             (AudioFormat::PcmU8, (0..=u8::MAX).collect()),
             (
                 AudioFormat::PcmS16Le,
                 (i16::MIN..=i16::MAX).flat_map(i16::to_le_bytes).collect(),
             ),
             (AudioFormat::PcmS24Le, s24),
+            (AudioFormat::PcmS32Le, s32),
             (AudioFormat::PcmF32Le, floats),
         ];
         for (format, src) in cases {

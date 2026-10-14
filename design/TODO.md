@@ -144,7 +144,6 @@ Raw video and GPU:
 
 Audio:
 
-- `audioconvert` has no passthrough, and noise shaping removes from the history front.
 - `pipewiresink` moves bytes one at a time under the realtime mutex and sleeps on EOS.
 - wasapisink, coreaudio and aaudio sinks block in `process`. Use `WorkerLink`.
 - One capture loop for alsasrc and pulsesrc.

@@ -21,7 +21,7 @@ use g2g_core::{
     PropValue,
 };
 
-use crate::audioconvert::{read_sample, sample_bytes, write_sample};
+pub(crate) use crate::audioconvert::{decode, encode};
 use crate::mathf;
 
 /// The sample formats the audiofx filters handle directly.
@@ -80,26 +80,6 @@ pub(crate) fn pad_templates(channels: u8) -> Vec<PadTemplate> {
 /// The stereo-or-any template shape the filters declare.
 pub(crate) fn default_pad_templates() -> Vec<PadTemplate> {
     pad_templates(TEMPLATE_CHANNELS)
-}
-
-/// Decode an interleaved PCM buffer to f32 samples in [-1, 1).
-pub(crate) fn decode(src: &[u8], format: AudioFormat) -> Vec<f32> {
-    let width = sample_bytes(format);
-    if width == 0 {
-        return Vec::new();
-    }
-    src.chunks_exact(width)
-        .map(|s| read_sample(s, format))
-        .collect()
-}
-
-/// Encode interleaved f32 samples back into `format`.
-pub(crate) fn encode(samples: &[f32], format: AudioFormat) -> Box<[u8]> {
-    let mut out = Vec::with_capacity(samples.len() * sample_bytes(format));
-    for &s in samples {
-        write_sample(&mut out, s, format);
-    }
-    out.into_boxed_slice()
 }
 
 /// Hold a mixed sample inside full scale. gst's `audiochannelmix` and `stereo`

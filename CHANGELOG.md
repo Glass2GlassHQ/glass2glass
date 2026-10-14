@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1276: audioconvert forwards same-format buffers untouched and converts in whole-buffer passes.
 - M1275: PCM decode and encode share one 2^(n-1) full scale, so every integer sample code survives a float round trip.
 - M1265: every hand-rolled no-op waker is `Waker::noop()`, and the runtime state waker is a safe `Wake` impl.
 - M1264: g2g-core has shared helpers for clock-tick and Q16 framerate conversion, PCM sample width, GStreamer format names and RTP sequence and timestamp unwrapping.
