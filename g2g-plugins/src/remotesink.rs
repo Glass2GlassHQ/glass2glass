@@ -110,6 +110,7 @@ impl PacketClient for TcpClient {
                     .await
                     .map_err(io_err)?,
             };
+            sock.set_nodelay(true).map_err(io_err)?;
             self.socket = Some(sock);
             Ok(())
         })

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1313: remote TCP sets `TCP_NODELAY` and writes each frame's length and body together.
 - M1312: `udpsink` answers NACKs from a sequence-indexed history shared with RIST.
 - M1311: SRT encryption keeps the expanded AES key instead of rebuilding it per packet.
 - M1310: ST 2110 senders pace from a dedicated thread and the -20/-22/-30/-40 sources receive off the executor.
