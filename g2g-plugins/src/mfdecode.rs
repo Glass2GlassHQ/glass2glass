@@ -21,8 +21,8 @@
 //!
 //! NV12 stride: the MFT's output buffer may carry per-row padding when the
 //! reported `MF_MT_DEFAULT_STRIDE` exceeds the width (hardware MFTs align rows
-//! up; the MS software decoder packs tightly). `copy_sample` strips that
-//! padding via `pack_nv12` so downstream always sees tightly-packed NV12.
+//! up; the MS software decoder packs tightly). `pack_nv12` strips that
+//! padding so downstream always sees tightly-packed NV12.
 //!
 //! DXVA / D3D11 (`with_d3d11`): opts into GPU decode. A hardware D3D11 device +
 //! DXGI manager is handed to the sync MFT (`MFT_MESSAGE_SET_D3D_MANAGER`), so
@@ -32,7 +32,6 @@
 //! default software path is unchanged (system NV12).
 
 use core::future::Future;
-use core::mem::ManuallyDrop;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
@@ -48,19 +47,20 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
 use windows::Win32::Media::MediaFoundation::{
     CLSID_MSH264DecoderMFT, CLSID_MSH265DecoderMFT, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFSample,
-    IMFTransform, MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateMemoryBuffer,
-    MFCreateSample, MFMediaType_Video, MFShutdown, MFStartup, MFVideoFormat_H264,
-    MFVideoFormat_HEVC, MFVideoFormat_NV12, MFSTARTUP_FULL, MFT_MESSAGE_COMMAND_DRAIN,
+    IMFTransform, MFCreateDXGIDeviceManager, MFCreateMediaType, MFMediaType_Video, MFShutdown,
+    MFStartup, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFSTARTUP_FULL,
     MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
-    MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
-    MF_MT_SUBTYPE, MF_VERSION,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MF_MT_DEFAULT_STRIDE,
+    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 
+use crate::mfcommon::{
+    feed_sample, make_input_sample, mf_err, output_provides_samples, pack_u32_pair, process_output,
+    read_sample_bytes, sample_time_ns, send_drain_command, unpack_u32_pair, OutputPull,
+};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -249,29 +249,17 @@ impl MfDecode {
         decoded: &mut Vec<DecodedPicture>,
     ) -> Result<(), G2gError> {
         let sample = make_input_sample(data, pts_ns)?;
-        let mut guard = 0u32;
-        // ProcessInput returns MF_E_NOTACCEPTING when the MFT must release
-        // outputs before it can take more input; drain, then retry.
-        while !self.process_input(&sample)? {
-            self.drain(decoded)?;
-            guard += 1;
-            if guard > 64 {
-                return Err(G2gError::Hardware(HardwareError::Other));
-            }
-        }
-        self.drain(decoded)
+        feed_sample(self, &sample, Self::transform, |element| {
+            element.drain(decoded)
+        })
     }
 
-    fn process_input(&self, sample: &IMFSample) -> Result<bool, G2gError> {
-        let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
-        // SAFETY: COM call on the element's owning thread; `sample` is a valid
-        // IMFSample we just allocated.
-        let r = unsafe { st.transform.ProcessInput(0, sample, 0) };
-        match r {
-            Ok(()) => Ok(true),
-            Err(e) if e.code() == MF_E_NOTACCEPTING => Ok(false),
-            Err(e) => Err(mf_err(e)),
-        }
+    fn transform(&self) -> Result<&IMFTransform, G2gError> {
+        Ok(&self
+            .state
+            .as_ref()
+            .ok_or(G2gError::NotConfigured)?
+            .transform)
     }
 
     /// Pull outputs until the MFT needs more input, renegotiating the output
@@ -289,91 +277,41 @@ impl MfDecode {
     /// Drain on end-of-stream: send the MFT a DRAIN command so it flushes
     /// reordered pictures, then collect them.
     fn drain_eos(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
-        {
-            let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
-            // SAFETY: drain message on the owning thread.
-            unsafe {
-                st.transform
-                    .ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)
-                    .map_err(mf_err)?;
-            }
-        }
+        send_drain_command(self.transform()?)?;
         self.drain(decoded)
     }
 
     fn process_output(&self) -> Result<OutputStep, G2gError> {
         let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
-        // SAFETY: every call runs on the element's owning COM thread. We supply
-        // an output sample only on the software path; the DXVA path sets
-        // `provides_samples`, so the MFT allocates a (D3D11-backed) sample and
-        // writes it into the struct, which we take ownership of below. The refs
-        // in the FFI struct are reclaimed right after ProcessOutput regardless
-        // of its result.
-        unsafe {
-            let preallocated = if st.provides_samples {
-                None
-            } else {
-                let buffer = MFCreateMemoryBuffer(st.out_size).map_err(mf_err)?;
-                let sample = MFCreateSample().map_err(mf_err)?;
-                sample.AddBuffer(&buffer).map_err(mf_err)?;
-                Some(sample)
-            };
-
-            let mut out = [MFT_OUTPUT_DATA_BUFFER {
-                dwStreamID: 0,
-                pSample: ManuallyDrop::new(preallocated),
-                dwStatus: 0,
-                pEvents: ManuallyDrop::new(None),
-            }];
-            let mut status = 0u32;
-            let r = st.transform.ProcessOutput(0, &mut out, &mut status);
-
-            // Take the output sample (ours on the software path, the MFT's on
-            // the DXVA path) and release any events.
-            let out_sample = ManuallyDrop::into_inner(core::mem::replace(
-                &mut out[0].pSample,
-                ManuallyDrop::new(None),
-            ));
-            drop(ManuallyDrop::into_inner(core::mem::replace(
-                &mut out[0].pEvents,
-                ManuallyDrop::new(None),
-            )));
-
-            match r {
-                Ok(()) => {
-                    let sample = out_sample.ok_or(G2gError::Hardware(HardwareError::Other))?;
-                    let pts_ns = sample
-                        .GetSampleTime()
-                        .map(|hns| (hns.max(0) as u64).saturating_mul(100))
-                        .unwrap_or(0);
-                    let payload = if st.device_ptr != 0 {
-                        // DXVA zero-copy (Phase 3): hand the decoded D3D11
-                        // texture downstream, keeping the sample alive so the
-                        // texture stays valid until the consumer drops it.
-                        DecodedPayload::D3D11(extract_texture(
-                            sample,
-                            st.width,
-                            st.height,
-                            st.device_ptr,
-                        )?)
-                    } else {
-                        // Software / readback path: copy to packed system NV12.
-                        DecodedPayload::System(copy_sample(
-                            &sample, st.width, st.height, st.stride,
-                        )?)
-                    };
-                    Ok(OutputStep::Frame(DecodedPicture {
-                        payload,
-                        width: st.width,
-                        height: st.height,
-                        pts_ns,
-                    }))
-                }
-                Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => Ok(OutputStep::NeedInput),
-                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => Ok(OutputStep::StreamChange),
-                Err(e) => Err(mf_err(e)),
-            }
-        }
+        // The DXVA path sets `provides_samples`, so the MFT hands back a D3D11-backed sample.
+        let sample = match process_output(&st.transform, st.provides_samples, st.out_size)? {
+            OutputPull::Sample(sample) => sample,
+            OutputPull::NeedInput => return Ok(OutputStep::NeedInput),
+            OutputPull::StreamChange => return Ok(OutputStep::StreamChange),
+        };
+        let pts_ns = sample_time_ns(&sample);
+        let payload = if st.device_ptr != 0 {
+            // DXVA zero-copy (Phase 3): hand the decoded D3D11
+            // texture downstream, keeping the sample alive so the
+            // texture stays valid until the consumer drops it.
+            DecodedPayload::D3D11(extract_texture(sample, st.width, st.height, st.device_ptr)?)
+        } else {
+            // Software / readback path: copy to packed system NV12.
+            DecodedPayload::System(read_sample_bytes(&sample, |src| {
+                pack_nv12(
+                    src,
+                    st.width as usize,
+                    st.height as usize,
+                    st.stride as usize,
+                )
+            })??)
+        };
+        Ok(OutputStep::Frame(DecodedPicture {
+            payload,
+            width: st.width,
+            height: st.height,
+            pts_ns,
+        }))
     }
 
     /// Re-pick the NV12 output type after a stream change and refresh the
@@ -688,7 +626,7 @@ fn init_decoder(
         input.SetGUID(&MF_MT_SUBTYPE, &subtype).map_err(mf_err)?;
         if width != 0 && height != 0 {
             input
-                .SetUINT64(&MF_MT_FRAME_SIZE, pack_size(width, height))
+                .SetUINT64(&MF_MT_FRAME_SIZE, pack_u32_pair(width, height))
                 .map_err(mf_err)?;
         }
         transform.SetInputType(0, &input, 0).map_err(mf_err)?;
@@ -761,13 +699,6 @@ fn create_d3d11_device_and_manager() -> Result<(ID3D11Device, IMFDXGIDeviceManag
     }
 }
 
-/// Whether the MFT allocates its own output samples (the DXVA / D3D11 path).
-fn output_provides_samples(transform: &IMFTransform) -> Result<bool, G2gError> {
-    // SAFETY: stream-info query on the owning thread.
-    let info = unsafe { transform.GetOutputStreamInfo(0) }.map_err(mf_err)?;
-    Ok(info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0)
-}
-
 /// Select the first NV12 output type the MFT offers and return its geometry
 /// and row stride. The stride (`MF_MT_DEFAULT_STRIDE`) is the source row pitch
 /// for the de-pad in [`pack_nv12`]; it is floored at `width` so a missing or
@@ -786,7 +717,7 @@ fn set_nv12_output(transform: &IMFTransform) -> Result<(u32, u32, u32), G2gError
                     unsafe { transform.SetOutputType(0, &t, 0) }.map_err(mf_err)?;
                     // SAFETY: reading the frame-size attribute off the type.
                     let size = unsafe { t.GetUINT64(&MF_MT_FRAME_SIZE) }.unwrap_or(0);
-                    let (w, h) = unpack_size(size);
+                    let (w, h) = unpack_u32_pair(size);
                     // SAFETY: reading the (optional) default-stride attribute.
                     // Absent on the packed software path; present (>= width)
                     // when a hardware MFT aligns rows up.
@@ -809,53 +740,6 @@ fn output_buffer_size(transform: &IMFTransform, w: u32, h: u32) -> Result<u32, G
     let info = unsafe { transform.GetOutputStreamInfo(0) }.map_err(mf_err)?;
     let nv12 = w.saturating_mul(h).saturating_mul(3) / 2;
     Ok(info.cbSize.max(nv12))
-}
-
-/// Wrap an access unit in an `IMFSample` backed by a copied memory buffer,
-/// stamped with the presentation time (MF uses 100-ns units).
-fn make_input_sample(data: &[u8], pts_ns: u64) -> Result<IMFSample, G2gError> {
-    let len = data.len() as u32;
-    // SAFETY: buffer allocation, locked copy, and sample assembly on the
-    // owning thread. `ptr` is valid for `len` bytes between Lock and Unlock.
-    unsafe {
-        let buffer = MFCreateMemoryBuffer(len).map_err(mf_err)?;
-        let mut ptr: *mut u8 = core::ptr::null_mut();
-        buffer.Lock(&mut ptr, None, None).map_err(mf_err)?;
-        core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
-        buffer.Unlock().map_err(mf_err)?;
-        buffer.SetCurrentLength(len).map_err(mf_err)?;
-
-        let sample = MFCreateSample().map_err(mf_err)?;
-        sample.AddBuffer(&buffer).map_err(mf_err)?;
-        sample
-            .SetSampleTime((pts_ns / 100) as i64)
-            .map_err(mf_err)?;
-        Ok(sample)
-    }
-}
-
-/// Copy the decoded pixels out of a sample into a tightly-packed NV12 buffer,
-/// stripping any per-row stride padding the MFT applied.
-fn copy_sample(
-    sample: &IMFSample,
-    width: u32,
-    height: u32,
-    stride: u32,
-) -> Result<Box<[u8]>, G2gError> {
-    // SAFETY: contiguous-buffer access on the owning thread; `ptr` is valid
-    // for `len` bytes between Lock and Unlock, where we copy it out.
-    unsafe {
-        let buffer = sample.ConvertToContiguousBuffer().map_err(mf_err)?;
-        let mut ptr: *mut u8 = core::ptr::null_mut();
-        let mut len: u32 = 0;
-        buffer
-            .Lock(&mut ptr, None, Some(&mut len))
-            .map_err(mf_err)?;
-        let src = core::slice::from_raw_parts(ptr, len as usize);
-        let packed = pack_nv12(src, width as usize, height as usize, stride as usize);
-        buffer.Unlock().map_err(mf_err)?;
-        packed
-    }
 }
 
 /// De-pad a strided NV12 source buffer into a tightly-packed
@@ -1001,29 +885,10 @@ fn fixed_or_zero(d: &Dim) -> u32 {
     }
 }
 
-/// MF packs a frame size as `(width << 32) | height` in a `UINT64` attribute.
-fn pack_size(width: u32, height: u32) -> u64 {
-    ((width as u64) << 32) | (height as u64)
-}
-
-fn unpack_size(v: u64) -> (u32, u32) {
-    ((v >> 32) as u32, (v & 0xFFFF_FFFF) as u32)
-}
-
-fn mf_err(e: windows::core::Error) -> G2gError {
-    G2gError::Hardware(HardwareError::MediaFoundation(e.code().0))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
-
-    #[test]
-    fn frame_size_packs_and_unpacks() {
-        assert_eq!(unpack_size(pack_size(1920, 1080)), (1920, 1080));
-        assert_eq!(pack_size(1280, 720), (1280u64 << 32) | 720);
-    }
 
     #[test]
     fn nv12_caps_are_fixed() {

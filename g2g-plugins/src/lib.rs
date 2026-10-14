@@ -1085,6 +1085,17 @@ pub mod moqtsink;
 #[cfg(feature = "moqt")]
 pub mod moqtsrc;
 
+#[cfg(all(
+    target_os = "windows",
+    any(
+        feature = "mf-decode",
+        feature = "mf-encode",
+        feature = "mf-aac",
+        feature = "mf-video-src"
+    )
+))]
+mod mfcommon;
+
 // Media Foundation decode is Windows-only. The `windows` dependency is
 // target-gated, so the module only exists when building for Windows with the
 // `mf-decode` feature; enabling the feature on other platforms is a no-op.

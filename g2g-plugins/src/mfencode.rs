@@ -32,7 +32,6 @@
 //! dims drains the current MFT and rebuilds it at the new geometry.
 
 use core::future::Future;
-use core::mem::ManuallyDrop;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
@@ -42,16 +41,14 @@ use windows::core::Interface;
 use windows::Win32::Media::MediaFoundation::{
     eAVEncH264VProfile_Main, CLSID_MSH264EncoderMFT, IMFActivate, IMFMediaEventGenerator,
     IMFSample, IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
-    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFShutdown,
-    MFStartup, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
-    MFVideoInterlace_Progressive, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFSTARTUP_FULL,
-    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
-    MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN,
-    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MF_EVENT_FLAG_NO_WAIT,
-    MF_E_NOTACCEPTING, MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT,
-    MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
+    MFCreateMediaType, MFMediaType_Video, MFShutdown, MFStartup, MFTEnumEx, MFVideoFormat_H264,
+    MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+    MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER,
+    MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+    MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
+    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_REGISTER_TYPE_INFO, MF_EVENT_FLAG_NO_WAIT,
+    MF_E_NO_EVENTS_AVAILABLE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
     MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
     MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
 };
@@ -62,6 +59,10 @@ use windows::Win32::System::Com::{
 
 use alloc::collections::VecDeque;
 
+use crate::mfcommon::{
+    feed_sample, make_input_sample, mf_err, mf_ticks_to_ns, output_provides_samples, pack_u32_pair,
+    process_output, read_sample_bytes, sample_time_ns, send_drain_command, OutputPull,
+};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -271,33 +272,23 @@ impl MfEncode {
             let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
             (st.duration_hns, st.async_mode)
         };
-        let sample = make_input_sample(data, pts_ns, duration_hns)?;
+        let sample = make_input_sample(data, pts_ns)?;
+        // SAFETY: setting an attribute on the sample just built, on the owning thread.
+        unsafe { sample.SetSampleDuration(duration_hns) }.map_err(mf_err)?;
         if async_mode {
             return self.feed_async(sample, encoded);
         }
-        let mut guard = 0u32;
-        // ProcessInput returns MF_E_NOTACCEPTING when the MFT must release
-        // outputs before it can take more input; drain, then retry.
-        while !self.process_input(&sample)? {
-            self.drain(encoded)?;
-            guard += 1;
-            if guard > 64 {
-                return Err(G2gError::Hardware(HardwareError::Other));
-            }
-        }
-        self.drain(encoded)
+        feed_sample(self, &sample, Self::transform, |element| {
+            element.drain(encoded)
+        })
     }
 
-    fn process_input(&self, sample: &IMFSample) -> Result<bool, G2gError> {
-        let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
-        // SAFETY: COM call on the element's owning thread; `sample` is a valid
-        // IMFSample we just allocated.
-        let r = unsafe { st.transform.ProcessInput(0, sample, 0) };
-        match r {
-            Ok(()) => Ok(true),
-            Err(e) if e.code() == MF_E_NOTACCEPTING => Ok(false),
-            Err(e) => Err(mf_err(e)),
-        }
+    fn transform(&self) -> Result<&IMFTransform, G2gError> {
+        Ok(&self
+            .state
+            .as_ref()
+            .ok_or(G2gError::NotConfigured)?
+            .transform)
     }
 
     /// Pull outputs until the MFT needs more input.
@@ -322,15 +313,7 @@ impl MfEncode {
         {
             return self.drain_eos_async(encoded);
         }
-        {
-            let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
-            // SAFETY: drain message on the owning thread.
-            unsafe {
-                st.transform
-                    .ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)
-                    .map_err(mf_err)?;
-            }
-        }
+        send_drain_command(self.transform()?)?;
         self.drain(encoded)
     }
 
@@ -436,63 +419,23 @@ impl MfEncode {
 
     fn process_output(&self) -> Result<OutputStep, G2gError> {
         let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
-        // SAFETY: every call runs on the element's owning COM thread. We
-        // pre-allocate the output sample unless the MFT provides its own; the
-        // refs in the FFI struct are reclaimed right after ProcessOutput
-        // regardless of its result.
-        unsafe {
-            let preallocated = if st.provides_samples {
-                None
-            } else {
-                let buffer = MFCreateMemoryBuffer(st.out_size).map_err(mf_err)?;
-                let sample = MFCreateSample().map_err(mf_err)?;
-                sample.AddBuffer(&buffer).map_err(mf_err)?;
-                Some(sample)
-            };
-
-            let mut out = [MFT_OUTPUT_DATA_BUFFER {
-                dwStreamID: 0,
-                pSample: ManuallyDrop::new(preallocated),
-                dwStatus: 0,
-                pEvents: ManuallyDrop::new(None),
-            }];
-            let mut status = 0u32;
-            let r = st.transform.ProcessOutput(0, &mut out, &mut status);
-
-            let out_sample = ManuallyDrop::into_inner(core::mem::replace(
-                &mut out[0].pSample,
-                ManuallyDrop::new(None),
-            ));
-            drop(ManuallyDrop::into_inner(core::mem::replace(
-                &mut out[0].pEvents,
-                ManuallyDrop::new(None),
-            )));
-
-            match r {
-                Ok(()) => {
-                    let sample = out_sample.ok_or(G2gError::Hardware(HardwareError::Other))?;
-                    let pts_ns = sample
-                        .GetSampleTime()
-                        .map(|hns| (hns.max(0) as u64).saturating_mul(100))
-                        .unwrap_or(0);
-                    let duration_ns = sample
-                        .GetSampleDuration()
-                        .map(|hns| (hns.max(0) as u64).saturating_mul(100))
-                        .unwrap_or(0);
-                    Ok(OutputStep::Frame(EncodedChunk {
-                        data: copy_sample(&sample)?,
-                        width: st.width,
-                        height: st.height,
-                        framerate: self.framerate.clone(),
-                        pts_ns,
-                        duration_ns,
-                    }))
-                }
-                Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => Ok(OutputStep::NeedInput),
-                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => Ok(OutputStep::StreamChange),
-                Err(e) => Err(mf_err(e)),
-            }
-        }
+        let sample = match process_output(&st.transform, st.provides_samples, st.out_size)? {
+            OutputPull::Sample(sample) => sample,
+            OutputPull::NeedInput => return Ok(OutputStep::NeedInput),
+            OutputPull::StreamChange => return Ok(OutputStep::StreamChange),
+        };
+        // SAFETY: reading an attribute off a valid sample on the owning thread.
+        let duration_ns = unsafe { sample.GetSampleDuration() }
+            .map(mf_ticks_to_ns)
+            .unwrap_or(0);
+        Ok(OutputStep::Frame(EncodedChunk {
+            data: read_sample_bytes(&sample, |bytes| bytes.into())?,
+            width: st.width,
+            height: st.height,
+            framerate: self.framerate.clone(),
+            pts_ns: sample_time_ns(&sample),
+            duration_ns,
+        }))
     }
 
     /// Re-pick the H.264 output type after a stream change (rare for an
@@ -924,10 +867,10 @@ fn init_encoder(
             .SetUINT32(&MF_MT_AVG_BITRATE, bitrate)
             .map_err(mf_err)?;
         output
-            .SetUINT64(&MF_MT_FRAME_SIZE, pack_size(width, height))
+            .SetUINT64(&MF_MT_FRAME_SIZE, pack_u32_pair(width, height))
             .map_err(mf_err)?;
         output
-            .SetUINT64(&MF_MT_FRAME_RATE, pack_size(num, den))
+            .SetUINT64(&MF_MT_FRAME_RATE, pack_u32_pair(num, den))
             .map_err(mf_err)?;
         output
             .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
@@ -950,10 +893,10 @@ fn init_encoder(
             .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
             .map_err(mf_err)?;
         input
-            .SetUINT64(&MF_MT_FRAME_SIZE, pack_size(width, height))
+            .SetUINT64(&MF_MT_FRAME_SIZE, pack_u32_pair(width, height))
             .map_err(mf_err)?;
         input
-            .SetUINT64(&MF_MT_FRAME_RATE, pack_size(num, den))
+            .SetUINT64(&MF_MT_FRAME_RATE, pack_u32_pair(num, den))
             .map_err(mf_err)?;
         input
             .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
@@ -1022,13 +965,6 @@ fn set_output_from_available(
     }
 }
 
-/// Whether the MFT allocates its own output samples.
-fn output_provides_samples(transform: &IMFTransform) -> Result<bool, G2gError> {
-    // SAFETY: stream-info query on the owning thread.
-    let info = unsafe { transform.GetOutputStreamInfo(0) }.map_err(mf_err)?;
-    Ok(info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0)
-}
-
 /// Output buffer bytes to allocate per `ProcessOutput`: the MFT's reported
 /// size, floored at the raw NV12 frame size so a zero/early estimate never
 /// under-allocates (an encoded frame is in practice far smaller).
@@ -1037,48 +973,6 @@ fn output_buffer_size(transform: &IMFTransform, w: u32, h: u32) -> Result<u32, G
     let info = unsafe { transform.GetOutputStreamInfo(0) }.map_err(mf_err)?;
     let nv12 = w.saturating_mul(h).saturating_mul(3) / 2;
     Ok(info.cbSize.max(nv12))
-}
-
-/// Wrap a raw NV12 picture in an `IMFSample` backed by a copied memory
-/// buffer, stamped with presentation time and duration (MF uses 100-ns
-/// units; the encoder requires the time and wants the duration).
-fn make_input_sample(data: &[u8], pts_ns: u64, duration_hns: i64) -> Result<IMFSample, G2gError> {
-    let len = data.len() as u32;
-    // SAFETY: buffer allocation, locked copy, and sample assembly on the
-    // owning thread. `ptr` is valid for `len` bytes between Lock and Unlock.
-    unsafe {
-        let buffer = MFCreateMemoryBuffer(len).map_err(mf_err)?;
-        let mut ptr: *mut u8 = core::ptr::null_mut();
-        buffer.Lock(&mut ptr, None, None).map_err(mf_err)?;
-        core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
-        buffer.Unlock().map_err(mf_err)?;
-        buffer.SetCurrentLength(len).map_err(mf_err)?;
-
-        let sample = MFCreateSample().map_err(mf_err)?;
-        sample.AddBuffer(&buffer).map_err(mf_err)?;
-        sample
-            .SetSampleTime((pts_ns / 100) as i64)
-            .map_err(mf_err)?;
-        sample.SetSampleDuration(duration_hns).map_err(mf_err)?;
-        Ok(sample)
-    }
-}
-
-/// Copy the encoded bytes out of a sample (current length, not capacity).
-fn copy_sample(sample: &IMFSample) -> Result<Box<[u8]>, G2gError> {
-    // SAFETY: contiguous-buffer access on the owning thread; `ptr` is valid
-    // for `len` bytes between Lock and Unlock, where we copy it out.
-    unsafe {
-        let buffer = sample.ConvertToContiguousBuffer().map_err(mf_err)?;
-        let mut ptr: *mut u8 = core::ptr::null_mut();
-        let mut len: u32 = 0;
-        buffer
-            .Lock(&mut ptr, None, Some(&mut len))
-            .map_err(mf_err)?;
-        let bytes: Box<[u8]> = core::slice::from_raw_parts(ptr, len as usize).into();
-        buffer.Unlock().map_err(mf_err)?;
-        Ok(bytes)
-    }
 }
 
 fn compressed_caps(codec: VideoCodec, w: u32, h: u32, framerate: Rate) -> Caps {
@@ -1143,15 +1037,6 @@ fn frame_duration_hns(num: u32, den: u32) -> i64 {
         return 0;
     }
     (10_000_000i64 * den as i64) / num as i64
-}
-
-/// MF packs both frame sizes and frame-rate ratios as `(hi << 32) | lo`.
-fn pack_size(hi: u32, lo: u32) -> u64 {
-    ((hi as u64) << 32) | (lo as u64)
-}
-
-fn mf_err(e: windows::core::Error) -> G2gError {
-    G2gError::Hardware(HardwareError::MediaFoundation(e.code().0))
 }
 
 #[cfg(test)]

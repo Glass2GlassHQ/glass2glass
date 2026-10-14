@@ -40,18 +40,16 @@ use alloc::string::{String, ToString};
 use windows::core::{GUID, PWSTR};
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFMediaSource, IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
-    MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video, MFShutdown,
-    MFStartup, MFVideoFormat_NV12, MFVideoFormat_YUY2, MFSTARTUP_FULL,
-    MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
-    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+    MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video,
+    MFVideoFormat_NV12, MFVideoFormat_YUY2, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
     MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READERF_ENDOFSTREAM,
-    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM,
 };
-use windows::Win32::System::Com::{
-    CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
-};
+use windows::Win32::System::Com::CoTaskMemFree;
 
+use crate::mfcommon::{mf_err, unpack_u32_pair, with_media_foundation};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
@@ -434,10 +432,6 @@ impl PadTemplates for MfVideoSrc {
 // COM/MF probe + capture worker
 // =================================================================
 
-fn mf_err(e: windows::core::Error) -> G2gError {
-    G2gError::Hardware(HardwareError::MediaFoundation(e.code().0))
-}
-
 /// `MfVideoSrc`'s settable properties. `device-index` / `device-path` /
 /// `num-buffers` match gst `mfvideosrc`; the symbolic link in `device-path` is
 /// what the device monitor reports as this camera's persistent id.
@@ -478,16 +472,10 @@ fn probe_device(selector: DeviceSelector, format: MfPixelFormat) -> Result<Video
     thread::Builder::new()
         .name(String::from("g2g-mfvideosrc-probe"))
         .spawn(move || {
-            // SAFETY: COM + MF init on this worker thread, balanced before exit.
-            let result = unsafe {
-                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-                let r = MFStartup(MF_VERSION, MFSTARTUP_FULL)
-                    .map_err(mf_err)
-                    .and_then(|()| open_reader(&selector, format).map(|(_, cfg)| cfg));
-                let _ = MFShutdown();
-                CoUninitialize();
-                r
-            };
+            let result = with_media_foundation(|| {
+                // SAFETY: `with_media_foundation` started COM + MF on this thread.
+                unsafe { open_reader(&selector, format) }.map(|(_, cfg)| cfg)
+            });
             let _ = tx.send(result);
         })
         .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
@@ -611,12 +599,14 @@ pub(crate) unsafe fn native_modes(link: &str) -> Result<Vec<VideoConfig>, G2gErr
             ) else {
                 continue;
             };
+            let (width, height) = unpack_u32_pair(size);
+            let (fps_num, fps_den) = unpack_u32_pair(rate);
             modes.push(VideoConfig {
                 format,
-                width: (size >> 32) as u32,
-                height: (size & 0xFFFF_FFFF) as u32,
-                fps_num: (rate >> 32) as u32,
-                fps_den: (rate & 0xFFFF_FFFF) as u32,
+                width,
+                height,
+                fps_num,
+                fps_den,
             });
         }
         Ok(modes)
@@ -681,15 +671,16 @@ unsafe fn open_reader(
             .map_err(mf_err)?;
 
         let current = reader.GetCurrentMediaType(stream).map_err(mf_err)?;
-        // FRAME_SIZE packs (width << 32) | height; FRAME_RATE packs (num << 32) | den.
-        let size = current.GetUINT64(&MF_MT_FRAME_SIZE).map_err(mf_err)?;
-        let rate = current.GetUINT64(&MF_MT_FRAME_RATE).map_err(mf_err)?;
+        let (width, height) =
+            unpack_u32_pair(current.GetUINT64(&MF_MT_FRAME_SIZE).map_err(mf_err)?);
+        let (fps_num, fps_den) =
+            unpack_u32_pair(current.GetUINT64(&MF_MT_FRAME_RATE).map_err(mf_err)?);
         let config = VideoConfig {
             format,
-            width: (size >> 32) as u32,
-            height: (size & 0xFFFF_FFFF) as u32,
-            fps_num: (rate >> 32) as u32,
-            fps_den: (rate & 0xFFFF_FFFF) as u32,
+            width,
+            height,
+            fps_num,
+            fps_den,
         };
         Ok((reader, config))
     }
@@ -722,16 +713,10 @@ fn capture_worker(
     frame_tx: mpsc::UnboundedSender<Vec<u8>>,
     ready_tx: std_mpsc::SyncSender<Result<(), i32>>,
 ) {
-    // SAFETY: COM + MF init on this worker thread, balanced below.
-    let result = unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let r = MFStartup(MF_VERSION, MFSTARTUP_FULL)
-            .map_err(mf_err)
-            .and_then(|()| run_capture(&selector, config, limit, &frame_tx, &ready_tx));
-        let _ = MFShutdown();
-        CoUninitialize();
-        r
-    };
+    let result = with_media_foundation(|| {
+        // SAFETY: `with_media_foundation` started COM + MF on this thread.
+        unsafe { run_capture(&selector, config, limit, &frame_tx, &ready_tx) }
+    });
     if let Err(G2gError::Hardware(HardwareError::MediaFoundation(code))) = result {
         // If we never signalled ready, do so now so `run` stops waiting.
         let _ = ready_tx.try_send(Err(code));

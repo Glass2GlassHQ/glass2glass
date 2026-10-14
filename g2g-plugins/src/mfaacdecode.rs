@@ -13,19 +13,16 @@
 //! under the same documented contract as `MfDecode`.
 
 use core::future::Future;
-use core::mem::ManuallyDrop;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use windows::Win32::Media::MediaFoundation::{
-    CLSID_MSAACDecMFT, IMFSample, IMFTransform, MFAudioFormat_AAC, MFAudioFormat_PCM,
-    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Audio, MFShutdown,
-    MFStartup, MFSTARTUP_FULL, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
-    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
-    MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, MF_MT_AAC_PAYLOAD_TYPE,
+    CLSID_MSAACDecMFT, IMFTransform, MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateMediaType,
+    MFMediaType_Audio, MFShutdown, MFStartup, MFSTARTUP_FULL, MFT_MESSAGE_COMMAND_FLUSH,
+    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, MF_MT_AAC_PAYLOAD_TYPE,
     MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT,
     MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
     MF_MT_USER_DATA, MF_VERSION,
@@ -34,11 +31,15 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 
+use crate::mfcommon::{
+    feed_sample, make_input_sample, mf_err, output_provides_samples, process_output,
+    read_sample_bytes, send_drain_command, OutputPull,
+};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
-    G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 const PCM_BITS: u32 = 16;
@@ -117,25 +118,17 @@ impl MfAacDecode {
         decoded: &mut Vec<Vec<u8>>,
     ) -> Result<(), G2gError> {
         let sample = make_input_sample(data, pts_ns)?;
-        let mut guard = 0u32;
-        while !self.process_input(&sample)? {
-            self.drain(decoded)?;
-            guard += 1;
-            if guard > 64 {
-                return Err(G2gError::Hardware(HardwareError::Other));
-            }
-        }
-        self.drain(decoded)
+        feed_sample(self, &sample, Self::transform, |element| {
+            element.drain(decoded)
+        })
     }
 
-    fn process_input(&self, sample: &IMFSample) -> Result<bool, G2gError> {
-        let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
-        // SAFETY: COM call on the owning thread; `sample` is valid.
-        match unsafe { st.transform.ProcessInput(0, sample, 0) } {
-            Ok(()) => Ok(true),
-            Err(e) if e.code() == MF_E_NOTACCEPTING => Ok(false),
-            Err(e) => Err(mf_err(e)),
-        }
+    fn transform(&self) -> Result<&IMFTransform, G2gError> {
+        Ok(&self
+            .state
+            .as_ref()
+            .ok_or(G2gError::NotConfigured)?
+            .transform)
     }
 
     fn drain(&mut self, decoded: &mut Vec<Vec<u8>>) -> Result<(), G2gError> {
@@ -148,64 +141,20 @@ impl MfAacDecode {
     }
 
     fn drain_eos(&mut self, decoded: &mut Vec<Vec<u8>>) -> Result<(), G2gError> {
-        {
-            let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
-            // SAFETY: drain message on the owning thread.
-            unsafe {
-                st.transform
-                    .ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)
-                    .map_err(mf_err)?;
-            }
-        }
+        send_drain_command(self.transform()?)?;
         self.drain(decoded)
     }
 
     fn process_output(&self) -> Result<Option<Vec<u8>>, G2gError> {
         let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
-        // SAFETY: every call on the owning thread. Output sample preallocated
-        // unless the MFT provides its own; FFI refs reclaimed after the call.
-        unsafe {
-            let preallocated = if st.provides_samples {
-                None
-            } else {
-                let buffer = MFCreateMemoryBuffer(st.out_size).map_err(mf_err)?;
-                let sample = MFCreateSample().map_err(mf_err)?;
-                sample.AddBuffer(&buffer).map_err(mf_err)?;
-                Some(sample)
-            };
-            let mut out = [MFT_OUTPUT_DATA_BUFFER {
-                dwStreamID: 0,
-                pSample: ManuallyDrop::new(preallocated),
-                dwStatus: 0,
-                pEvents: ManuallyDrop::new(None),
-            }];
-            let mut status = 0u32;
-            let r = st.transform.ProcessOutput(0, &mut out, &mut status);
-            let out_sample = ManuallyDrop::into_inner(core::mem::replace(
-                &mut out[0].pSample,
-                ManuallyDrop::new(None),
-            ));
-            drop(ManuallyDrop::into_inner(core::mem::replace(
-                &mut out[0].pEvents,
-                ManuallyDrop::new(None),
-            )));
-            match r {
-                Ok(()) => {
-                    let sample = out_sample.ok_or(G2gError::Hardware(HardwareError::Other))?;
-                    let pcm = copy_sample(&sample)?;
-                    if pcm.is_empty() {
-                        Ok(None)
-                    } else {
-                        Ok(Some(pcm))
-                    }
-                }
-                Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => Ok(None),
-                // The AAC decoder re-asserts its PCM output type on the first
-                // output; re-pick it and retry.
-                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => Ok(None),
-                Err(e) => Err(mf_err(e)),
-            }
-        }
+        // The first output is a stream change re-asserting the PCM type.
+        let OutputPull::Sample(sample) =
+            process_output(&st.transform, st.provides_samples, st.out_size)?
+        else {
+            return Ok(None);
+        };
+        let pcm = read_sample_bytes(&sample, <[u8]>::to_vec)?;
+        Ok((!pcm.is_empty()).then_some(pcm))
     }
 }
 
@@ -494,12 +443,6 @@ fn heaac_user_data(asc: &[u8]) -> Vec<u8> {
     d
 }
 
-fn output_provides_samples(transform: &IMFTransform) -> Result<bool, G2gError> {
-    // SAFETY: stream-info query on the owning thread.
-    let info = unsafe { transform.GetOutputStreamInfo(0) }.map_err(mf_err)?;
-    Ok(info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0)
-}
-
 fn output_buffer_size(transform: &IMFTransform, channels: u8, rate: u32) -> Result<u32, G2gError> {
     // SAFETY: stream-info query on the owning thread.
     let info = unsafe { transform.GetOutputStreamInfo(0) }.map_err(mf_err)?;
@@ -509,45 +452,6 @@ fn output_buffer_size(transform: &IMFTransform, channels: u8, rate: u32) -> Resu
         .saturating_mul(2)
         .max(8192);
     Ok(info.cbSize.max(floor.min(1 << 20)))
-}
-
-fn make_input_sample(data: &[u8], pts_ns: u64) -> Result<IMFSample, G2gError> {
-    let len = data.len() as u32;
-    // SAFETY: buffer allocation + locked copy + sample assembly on the owning
-    // thread; `ptr` valid for `len` bytes between Lock and Unlock.
-    unsafe {
-        let buffer = MFCreateMemoryBuffer(len).map_err(mf_err)?;
-        let mut ptr: *mut u8 = core::ptr::null_mut();
-        buffer.Lock(&mut ptr, None, None).map_err(mf_err)?;
-        core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
-        buffer.Unlock().map_err(mf_err)?;
-        buffer.SetCurrentLength(len).map_err(mf_err)?;
-        let sample = MFCreateSample().map_err(mf_err)?;
-        sample.AddBuffer(&buffer).map_err(mf_err)?;
-        sample
-            .SetSampleTime((pts_ns / 100) as i64)
-            .map_err(mf_err)?;
-        Ok(sample)
-    }
-}
-
-fn copy_sample(sample: &IMFSample) -> Result<Vec<u8>, G2gError> {
-    // SAFETY: contiguous-buffer access on the owning thread.
-    unsafe {
-        let buffer = sample.ConvertToContiguousBuffer().map_err(mf_err)?;
-        let mut ptr: *mut u8 = core::ptr::null_mut();
-        let mut len: u32 = 0;
-        buffer
-            .Lock(&mut ptr, None, Some(&mut len))
-            .map_err(mf_err)?;
-        let bytes = core::slice::from_raw_parts(ptr, len as usize).to_vec();
-        buffer.Unlock().map_err(mf_err)?;
-        Ok(bytes)
-    }
-}
-
-fn mf_err(e: windows::core::Error) -> G2gError {
-    G2gError::Hardware(HardwareError::MediaFoundation(e.code().0))
 }
 
 #[cfg(test)]

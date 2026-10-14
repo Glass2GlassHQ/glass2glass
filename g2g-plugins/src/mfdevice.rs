@@ -26,12 +26,10 @@ use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::Duration;
 
-use windows::Win32::Media::MediaFoundation::{MFShutdown, MFStartup, MFSTARTUP_FULL, MF_VERSION};
-use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
-
 use g2g_core::runtime::{Device, DeviceProvider};
 use g2g_core::{Caps, CapsSet, Dim, G2gError, HardwareError, Interlace, Rate};
 
+use crate::mfcommon::with_media_foundation;
 use crate::mfvideosrc::{enumerate_devices, native_modes, MfDeviceInfo, VideoConfig};
 
 /// [`Device::provider`] for everything this backend finds.
@@ -67,26 +65,16 @@ impl DeviceProvider for MfDeviceProvider {
         thread::Builder::new()
             .name(String::from("g2g-mfdevice-probe"))
             .spawn(move || {
-                // SAFETY: COM + MF init on this thread, balanced before exit.
-                let result = unsafe {
-                    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-                    let r = MFStartup(MF_VERSION, MFSTARTUP_FULL)
-                        .map_err(mf_err)
-                        .and_then(|()| probe_devices());
-                    let _ = MFShutdown();
-                    CoUninitialize();
-                    r
-                };
+                let result = with_media_foundation(|| {
+                    // SAFETY: `with_media_foundation` started COM + MF on this thread.
+                    unsafe { probe_devices() }
+                });
                 let _ = tx.send(result);
             })
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         rx.recv_timeout(PROBE_TIMEOUT)
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?
     }
-}
-
-fn mf_err(e: windows::core::Error) -> G2gError {
-    G2gError::Hardware(HardwareError::MediaFoundation(e.code().0))
 }
 
 /// # Safety
@@ -163,6 +151,7 @@ fn rate_q16(num: u32, den: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mfcommon::with_media_foundation;
     use crate::mfvideosrc::MfPixelFormat;
     use g2g_core::RawVideoFormat;
 
