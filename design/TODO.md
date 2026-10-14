@@ -123,8 +123,6 @@ Network:
 
 - ST 2110-20 at 1080p60 cannot meet its pacing schedule: one loopback `send` costs
   about 5.5 us. Send each pacing slot with UDP GSO or `sendmmsg`.
-- Dedup the LiveKit signalling helpers, `access_token`, `MediaTime` conversion,
-  and send `Transmit`s through `send_transmit`.
 - One caps de-dup type for the remote and wswire elements.
 
 Shared helpers:

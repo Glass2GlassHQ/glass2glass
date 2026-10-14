@@ -72,7 +72,9 @@ use g2g_core::{
 use crate::annexb::au_is_keyframe;
 use crate::filesink::io_err;
 use crate::turn::TurnSet;
-use crate::webrtc_util::{add_ice_candidates, feed_datagram, select_host_ip, send_transmit};
+use crate::webrtc_util::{
+    add_ice_candidates, feed_datagram, media_time_ns, select_host_ip, send_transmit,
+};
 use crate::webrtcsink::Track;
 
 /// The two tracks a duplex session offers at the handshake, in pad order: video
@@ -699,8 +701,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                             }
                         }
                         Ok(Output::Event(Event::MediaData(d))) => {
-                            let denom = d.time.denom().max(1) as u128;
-                            let pts_ns = (d.time.numer() as u128 * 1_000_000_000 / denom) as u64;
+                            let pts_ns = media_time_ns(d.time);
                             // Unknown mid, or an m-line with no output pad: skip.
                             let Some(port) =
                                 binding_of_mid(&bindings, d.mid).and_then(|b| bindings[b].out_pad)

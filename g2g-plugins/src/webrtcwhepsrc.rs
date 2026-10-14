@@ -52,8 +52,9 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
 use crate::webrtc_util::{
-    add_host_candidate, delete_resource, feed_datagram, ice_restart, post_sdp, select_host_ip,
-    send_transmit, trickle_candidates, TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT,
+    add_host_candidate, delete_resource, feed_datagram, ice_restart, media_time_ns, post_sdp,
+    select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
+    ICE_RESTART_TIMEOUT,
 };
 
 /// Minimum gap between keyframe (PLI) requests while waiting for the first one,
@@ -427,8 +428,7 @@ impl SourceLoop for WebRtcWhepSrc {
                         Ok(Output::Event(Event::MediaData(d))) => {
                             // d.time is the RTP MediaTime (90 kHz for H.264);
                             // map its rational value to nanoseconds.
-                            let denom = d.time.denom().max(1) as u128;
-                            let pts_ns = (d.time.numer() as u128 * 1_000_000_000 / denom) as u64;
+                            let pts_ns = media_time_ns(d.time);
                             media_mid = Some(d.mid);
                             frames.push((pts_ns, d.data.to_vec()));
                         }

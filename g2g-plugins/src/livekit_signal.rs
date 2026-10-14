@@ -25,6 +25,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use g2g_core::{G2gError, HardwareError};
+
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -134,6 +136,31 @@ pub fn mint_token(
     mac.update(signing_input.as_bytes());
     let sig = B64URL.encode(mac.finalize().into_bytes());
     format!("{signing_input}.{sig}")
+}
+
+// a configured token wins over minting one from the api key and secret
+pub(crate) fn access_token(
+    token: Option<&str>,
+    api_key: &str,
+    api_secret: &str,
+    identity: &str,
+    grant: &VideoGrant,
+    ttl_secs: u64,
+) -> Result<String, G2gError> {
+    if let Some(token) = token {
+        return Ok(token.to_string());
+    }
+    if api_key.is_empty() || api_secret.is_empty() {
+        std::eprintln!("livekit: no token and no api-key/api-secret set");
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Ok(mint_token(
+        api_key, api_secret, identity, grant, now, ttl_secs,
+    ))
 }
 
 /// Minimal JSON string escaping (quotes, backslash, control chars) for the two

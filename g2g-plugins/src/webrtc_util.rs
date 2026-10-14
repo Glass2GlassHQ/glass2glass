@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use tokio::net::UdpSocket;
 
+use str0m::media::MediaTime;
 use str0m::net::{Protocol, Receive, Transmit};
 use str0m::{Candidate, IceCreds, Input, Rtc};
 
@@ -582,6 +583,11 @@ pub(crate) async fn send_transmit(socket: &UdpSocket, turn: &mut TurnSet, t: &Tr
             let _ = socket.send_to(&t.contents, t.destination).await;
         }
     }
+}
+
+// str0m's RTP media time as nanoseconds, the PTS a received frame carries
+pub(crate) fn media_time_ns(time: MediaTime) -> u64 {
+    g2g_core::time::ticks_to_ns(time.numer(), time.denom())
 }
 
 /// Feed one received UDP datagram into `rtc`. A datagram from the TURN server is

@@ -45,8 +45,9 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
 use crate::webrtc_util::{
-    add_host_candidate, delete_resource, feed_datagram, ice_restart, post_sdp, select_host_ip,
-    send_transmit, trickle_candidates, TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT,
+    add_host_candidate, delete_resource, feed_datagram, ice_restart, media_time_ns, post_sdp,
+    select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
+    ICE_RESTART_TIMEOUT,
 };
 
 /// Output port for the H.264 video track.
@@ -348,8 +349,7 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
                         Ok(Output::Event(Event::MediaData(d))) => {
-                            let denom = d.time.denom().max(1) as u128;
-                            let pts_ns = (d.time.numer() as u128 * 1_000_000_000 / denom) as u64;
+                            let pts_ns = media_time_ns(d.time);
                             let port = if d.mid == video_mid {
                                 VIDEO_PORT
                             } else if d.mid == audio_mid {

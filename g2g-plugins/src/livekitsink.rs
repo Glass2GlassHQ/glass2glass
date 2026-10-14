@@ -62,10 +62,11 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::livekit_signal::{
-    candidate_from_init_json, candidate_init_json, mint_token, signal_ws_url, AddTrackRequest,
+    access_token, candidate_from_init_json, candidate_init_json, signal_ws_url, AddTrackRequest,
     SessionDescription, SignalRequest, SignalResponse, SignalTarget, TrackSource, TrackType,
     VideoGrant, VideoLayer, VideoQuality,
 };
+use crate::livekitsrc::{recv_signal, send_signal};
 use crate::webrtc_simulcast::{
     rids_high_to_low, send_simulcast, track_of, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
@@ -237,26 +238,14 @@ impl LiveKitSink {
     /// publish-only token (join `room`, `canPublish`, `canSubscribe = false` so
     /// the server makes the publisher PC primary and sends no subscriber offer).
     fn access_token(&self) -> Result<String, G2gError> {
-        if let Some(t) = &self.token {
-            return Ok(t.clone());
-        }
-        if self.api_key.is_empty() || self.api_secret.is_empty() {
-            std::eprintln!("livekit: no token and no api-key/api-secret set");
-            return Err(G2gError::Hardware(HardwareError::Other));
-        }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let grant = VideoGrant::publisher(&self.room);
-        Ok(mint_token(
+        access_token(
+            self.token.as_deref(),
             &self.api_key,
             &self.api_secret,
             &self.identity,
-            &grant,
-            now,
+            &VideoGrant::publisher(&self.room),
             TOKEN_TTL_SECS,
-        ))
+        )
     }
 
     /// Run the LiveKit join + publish handshake and spawn the session task.
@@ -530,37 +519,6 @@ impl LiveKitSink {
         }));
         self.tx = Some(tx);
         Ok(())
-    }
-}
-
-/// Send one `SignalRequest` as a binary WebSocket message.
-async fn send_signal(
-    ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
-    req: &SignalRequest,
-) -> Result<(), G2gError> {
-    ws.send(Message::Binary(req.encode())).await.map_err(|e| {
-        std::eprintln!("livekit: signal send failed: {e}");
-        G2gError::Hardware(HardwareError::Other)
-    })
-}
-
-/// Read the next server `SignalResponse`, skipping non-binary frames. `Ok(None)`
-/// on a clean close.
-async fn recv_signal(
-    ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
-) -> Result<Option<SignalResponse>, G2gError> {
-    loop {
-        match ws.next().await {
-            Some(Ok(Message::Binary(bytes))) => {
-                return Ok(SignalResponse::decode(&bytes));
-            }
-            Some(Ok(Message::Close(_))) | None => return Ok(None),
-            Some(Ok(_)) => continue,
-            Some(Err(e)) => {
-                std::eprintln!("livekit: signal recv failed: {e}");
-                return Err(G2gError::Hardware(HardwareError::Other));
-            }
-        }
     }
 }
 

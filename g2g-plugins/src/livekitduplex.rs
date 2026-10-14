@@ -48,11 +48,13 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::livekit_signal::{
-    candidate_from_init_json, mint_token, signal_ws_url, AddTrackRequest, SessionDescription,
+    access_token, candidate_from_init_json, signal_ws_url, AddTrackRequest, SessionDescription,
     SignalRequest, SignalResponse, SignalTarget, TrackSource, TrackType, VideoGrant,
 };
 use crate::livekitsrc::{answer_offer, audio_caps, recv_signal, send_signal, video_caps};
+use crate::turn::TurnSet;
 use crate::webrtc_simulcast::track_of;
+use crate::webrtc_util::{media_time_ns, send_transmit};
 use crate::webrtcsink::Track;
 
 /// Send input / recv output pad layout: 0 = video, 1 = audio.
@@ -144,34 +146,21 @@ impl LiveKitDuplex {
     }
 
     fn access_token(&self) -> Result<String, G2gError> {
-        if let Some(t) = &self.token {
-            return Ok(t.clone());
-        }
-        if self.api_key.is_empty() || self.api_secret.is_empty() {
-            std::eprintln!("livekit: no token and no api key/secret configured");
-            return Err(G2gError::Hardware(HardwareError::Other));
-        }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        // Publish AND subscribe: the full-participant grant.
-        let grant = VideoGrant {
-            room_join: true,
-            room: self.room.clone(),
-            can_publish: true,
-            can_subscribe: true,
-            can_publish_data: false,
-            room_admin: false,
-        };
-        Ok(mint_token(
+        access_token(
+            self.token.as_deref(),
             &self.api_key,
             &self.api_secret,
             &self.identity,
-            &grant,
-            now,
+            &VideoGrant {
+                room_join: true,
+                room: self.room.clone(),
+                can_publish: true,
+                can_subscribe: true,
+                can_publish_data: false,
+                room_admin: false,
+            },
             TOKEN_TTL_SECS,
-        ))
+        )
     }
 }
 
@@ -366,6 +355,8 @@ impl MultiDuplexSession for LiveKitDuplex {
 
             let mut buf = alloc::vec![0u8; 2000];
             let mut sub_buf = alloc::vec![0u8; 2000];
+            // No TURN on the LiveKit path yet; the empty set feeds direct.
+            let mut no_turn = TurnSet::empty();
             let mut received = 0u64;
             macro_rules! finish {
                 () => {{
@@ -383,7 +374,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                     match pub_rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => {
-                            let _ = pub_socket.send_to(&t.contents, t.destination).await;
+                            send_transmit(&pub_socket, &mut no_turn, &t).await;
                         }
                         Ok(Output::Event(Event::KeyframeRequest(req))) => {
                             if req.mid == send_video_mid {
@@ -411,7 +402,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                     match sub_rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => {
-                            let _ = sub_socket.send_to(&t.contents, t.destination).await;
+                            send_transmit(&sub_socket, &mut no_turn, &t).await;
                         }
                         Ok(Output::Event(Event::MediaAdded(m))) => match m.kind {
                             MediaKind::Video if recv_video_mid.is_none() => {
@@ -423,8 +414,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                             _ => {}
                         },
                         Ok(Output::Event(Event::MediaData(d))) => {
-                            let denom = d.time.denom().max(1) as u128;
-                            let pts_ns = (d.time.numer() as u128 * 1_000_000_000 / denom) as u64;
+                            let pts_ns = media_time_ns(d.time);
                             if Some(d.mid) == recv_video_mid {
                                 if !video_keyframed {
                                     if !crate::annexb::au_is_keyframe(

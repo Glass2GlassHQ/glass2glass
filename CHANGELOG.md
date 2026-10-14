@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1317: LiveKit and WebRTC elements share the signalling, token, media-time and transmit helpers.
 - M1315: ST 2110-20 builds packets and parses SRDs without per-packet allocations.
 - M1314: H.264 RTP payloading copies each NAL once, RTSP serving packetizes once per access unit, and interleaved clients get one write per AU.
 - M1313: remote TCP sets `TCP_NODELAY` and writes each frame's length and body together.

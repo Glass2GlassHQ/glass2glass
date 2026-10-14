@@ -68,7 +68,8 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
-use crate::webrtc_util::{add_ice_candidates, select_host_ip};
+use crate::turn::TurnSet;
+use crate::webrtc_util::{add_ice_candidates, select_host_ip, send_transmit};
 use crate::webrtcduplex::{SdpChannel, SignalRole};
 
 /// Bounded depth of the element->session channel in the sink: backpressures the
@@ -385,6 +386,8 @@ impl SourceLoop for WebRtcDataSrc {
             out.push(PipelinePacket::CapsChanged(caps)).await?;
 
             let mut buf = alloc::vec![0u8; 2048];
+            // no TURN on the data channel path, the empty set sends direct
+            let mut no_turn = TurnSet::empty();
             let mut sequence = 0u64;
 
             'outer: loop {
@@ -394,7 +397,7 @@ impl SourceLoop for WebRtcDataSrc {
                     match rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => {
-                            let _ = socket.send_to(&t.contents, t.destination).await;
+                            send_transmit(&socket, &mut no_turn, &t).await;
                         }
                         // A text-flagged message is the peer's end-of-stream
                         // marker (see the sink); binary messages are data.
@@ -664,6 +667,8 @@ async fn run_egress(
     linger: Duration,
 ) {
     let mut buf = alloc::vec![0u8; 2048];
+    // no TURN on the data channel path, the empty set sends direct
+    let mut no_turn = TurnSet::empty();
     let mut channel: Option<ChannelId> = None;
     // A message awaiting buffer space (str0m rejected the last write as full).
     let mut pending: Option<Vec<u8>> = None;
@@ -676,7 +681,7 @@ async fn run_egress(
             match rtc.poll_output() {
                 Ok(Output::Timeout(t)) => break t,
                 Ok(Output::Transmit(t)) => {
-                    let _ = socket.send_to(&t.contents, t.destination).await;
+                    send_transmit(&socket, &mut no_turn, &t).await;
                 }
                 Ok(Output::Event(Event::ChannelOpen(id, _))) => channel = Some(id),
                 Ok(Output::Event(Event::ChannelClose(_)))
