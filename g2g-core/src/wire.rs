@@ -105,8 +105,10 @@ struct Writer {
 }
 
 impl Writer {
-    fn new() -> Self {
-        Writer { buf: Vec::new() }
+    fn with_capacity(capacity: usize) -> Self {
+        Writer {
+            buf: Vec::with_capacity(capacity),
+        }
     }
     fn u8(&mut self, v: u8) {
         self.buf.push(v);
@@ -836,6 +838,23 @@ fn get_segment(r: &mut Reader) -> Result<Segment, WireError> {
 
 // ---- MemoryDomain (CPU only) ----
 
+/// Bytes a frame's timing takes on the wire: five `u64` stamps and the keyframe flag.
+const TIMING_LEN: usize = 5 * size_of::<u64>() + size_of::<u8>();
+
+/// Bytes a data frame's fixed fields take ahead of its payload: version and
+/// packet tag, timing, sequence, domain tag and payload length.
+const FRAME_HEADER_LEN: usize =
+    2 * size_of::<u8>() + TIMING_LEN + size_of::<u64>() + size_of::<u8>() + size_of::<u32>();
+
+/// The payload bytes `put_domain` writes for `d`, so the writer is sized once.
+fn domain_payload_len(d: &MemoryDomain) -> usize {
+    match d {
+        MemoryDomain::System(s) => s.as_slice().len(),
+        MemoryDomain::SystemView(v) => v.view().materialized_len(),
+        _ => 0,
+    }
+}
+
 fn put_domain(w: &mut Writer, d: &MemoryDomain) -> Result<(), WireError> {
     match d {
         MemoryDomain::System(s) => {
@@ -848,8 +867,8 @@ fn put_domain(w: &mut Writer, d: &MemoryDomain) -> Result<(), WireError> {
         // process costs).
         MemoryDomain::SystemView(v) => {
             w.u8(DOMAIN_SYSTEM);
-            let dense = v.materialize();
-            w.bytes(&dense);
+            w.u32(v.view().materialized_len() as u32);
+            v.view().materialize_into(v.backing(), &mut w.buf);
             Ok(())
         }
         // Everything else is a device / foreign pointer that cannot be shipped.
@@ -1220,7 +1239,11 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
 /// can cross a byte transport). The transport is expected to length-frame the
 /// returned buffer (the codec produces the body only).
 pub fn encode_packet(packet: &PipelinePacket) -> Result<Vec<u8>, WireError> {
-    let mut w = Writer::new();
+    let payload_len = match packet {
+        PipelinePacket::DataFrame(frame) => domain_payload_len(&frame.domain),
+        _ => 0,
+    };
+    let mut w = Writer::with_capacity(FRAME_HEADER_LEN + payload_len);
     w.u8(WIRE_VERSION);
     match packet {
         PipelinePacket::CapsChanged(caps) => {
@@ -1472,7 +1495,7 @@ mod tests {
         // Hand-encode a tensor caps blob whose declared rank exceeds
         // MAX_TENSOR_RANK: the decoder must reject it up front (fixed-rank
         // TensorShape, M636) instead of reading an unbounded dim list.
-        let mut w = Writer::new();
+        let mut w = Writer { buf: Vec::new() };
         w.u8(3); // Caps::Tensor tag
         w.u8(dtype_to_u8(TensorDType::F32));
         let n = (MAX_TENSOR_RANK + 1) as u32;
@@ -1487,7 +1510,7 @@ mod tests {
 
     #[test]
     fn nested_batch_caps_rejected() {
-        let mut w = Writer::new();
+        let mut w = Writer { buf: Vec::new() };
         for _ in 0..3 {
             w.u8(10);
             w.u32(1);
@@ -1642,6 +1665,27 @@ mod tests {
         match roundtrip(&PipelinePacket::DataFrame(frame)) {
             PipelinePacket::DataFrame(got) => match got.domain {
                 MemoryDomain::System(s) => assert_eq!(s.as_slice(), &[1, 2, 3, 4, 5, 6, 7, 8]),
+                other => panic!("SystemView should decode as System, got {other:?}"),
+            },
+            other => panic!("expected DataFrame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flipped_system_view_frame_encodes_in_logical_order() {
+        use crate::memory::SystemView;
+        use crate::tensor::TensorView;
+        // 2x3 u8 [[0,1,2],[3,4,5]] mirrored horizontally: [[2,1,0],[5,4,3]].
+        let backing: alloc::sync::Arc<[u8]> = Box::<[u8]>::from([0u8, 1, 2, 3, 4, 5]).into();
+        let view = TensorView::contiguous(TensorDType::U8, &[2, 3]).reversed_axis(1);
+        let frame = Frame::new(
+            MemoryDomain::SystemView(SystemView::new(backing, view)),
+            FrameTiming::default(),
+            1,
+        );
+        match roundtrip(&PipelinePacket::DataFrame(frame)) {
+            PipelinePacket::DataFrame(got) => match got.domain {
+                MemoryDomain::System(s) => assert_eq!(s.as_slice(), &[2, 1, 0, 5, 4, 3]),
                 other => panic!("SystemView should decode as System, got {other:?}"),
             },
             other => panic!("expected DataFrame, got {other:?}"),

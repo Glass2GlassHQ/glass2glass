@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1328: wire encode sizes its buffer once and materializes views straight into it.
 - M1327: `TensorView::materialize` copies whole contiguous runs.
 - M1326: registry `inspect` and `describe` share one lookup, and launch reuses `maybe_prepend_parser`.
 - M1325: fan-out senders are ordered by port in one function.

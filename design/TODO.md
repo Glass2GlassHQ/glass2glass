@@ -40,7 +40,6 @@ Bugs:
 
 Core, bindings, ML:
 
-- `wire::encode_packet` starts at zero capacity and copies the payload twice.
 - `ElectedClock::now_ns` locks per read, `pacing::judge` clones `ClockSync` twice.
 - `BlobMeta::get` allocates a `String` per lookup.
 - Frames crossing the plugin ABI always arrive read-only. Set an exclusive flag in
