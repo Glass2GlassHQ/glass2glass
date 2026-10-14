@@ -11,16 +11,14 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::vec;
-use alloc::vec::Vec;
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    RawVideoFormat,
 };
+
+use crate::videofx::{self, FilterState, PixelFilter};
 
 const FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Bgra8];
 
@@ -55,10 +53,7 @@ fn build_lut(gamma: f64) -> [u8; 256] {
 pub struct Gamma {
     gamma: f64,
     lut: [u8; 256],
-    input: Option<(RawVideoFormat, u32, u32, Rate)>,
-    configured: bool,
-    last_caps: Option<Caps>,
-    emitted: u64,
+    state: FilterState,
 }
 
 impl Default for Gamma {
@@ -73,10 +68,7 @@ impl Gamma {
         Self {
             gamma: 1.0,
             lut: build_lut(1.0),
-            input: None,
-            configured: false,
-            last_caps: None,
-            emitted: 0,
+            state: FilterState::new(),
         }
     }
 
@@ -85,22 +77,23 @@ impl Gamma {
         self.lut = build_lut(gamma);
         self
     }
+}
 
-    fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
-        let Caps::RawVideo {
-            format,
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
-            framerate,
-            ..
-        } = caps
-        else {
-            return Err(G2gError::CapsMismatch);
-        };
-        if !FORMATS.contains(format) || *w == 0 || *h == 0 {
-            return Err(G2gError::CapsMismatch);
-        }
-        Ok((*format, *w, *h, framerate.clone()))
+impl PixelFilter for Gamma {
+    const FORMATS: &'static [RawVideoFormat] = &FORMATS;
+
+    fn state(&self) -> &FilterState {
+        &self.state
+    }
+
+    fn state_mut(&mut self) -> &mut FilterState {
+        &mut self.state
+    }
+
+    fn apply(&mut self, _format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
+        let mut pixels: Box<[u8]> = src[..(w as usize) * (h as usize) * 4].into();
+        apply_gamma(&mut pixels, &self.lut);
+        pixels
     }
 }
 
@@ -117,36 +110,15 @@ impl AsyncElement for Gamma {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        for format in FORMATS {
-            let candidate = Caps::RawVideo {
-                format,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            };
-            if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
-                return Ok(narrowed);
-            }
-        }
-        Err(G2gError::CapsMismatch)
+        videofx::intercept_caps::<Self>(upstream_caps)
     }
 
-    /// Native `DerivedOutput`: gamma preserves format, geometry, and framerate.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format, .. } if FORMATS.contains(format) => {
-                CapsSet::one(input.clone())
-            }
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        videofx::same_caps_constraint::<Self>()
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.input = Some(self.accept_input(absolute_caps)?);
-        self.configured = true;
-        Ok(ConfigureOutcome::Accepted)
+        videofx::configure(self, absolute_caps)
     }
 
     fn process<'a>(
@@ -154,65 +126,7 @@ impl AsyncElement for Gamma {
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            if !self.configured {
-                return Err(G2gError::NotConfigured);
-            }
-            match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    let (format, w, h, rate) = match &self.input {
-                        Some((f, w, h, r)) => (*f, *w, *h, r.clone()),
-                        None => return Err(G2gError::NotConfigured),
-                    };
-                    let src = frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let bytes = (w as usize) * (h as usize) * 4;
-                    if src.len() < bytes {
-                        return Err(G2gError::CapsMismatch);
-                    }
-                    let mut dst = vec![0u8; bytes].into_boxed_slice();
-                    apply_gamma(&src[..bytes], &mut dst, &self.lut);
-
-                    let new_caps = Caps::RawVideo {
-                        format,
-                        width: Dim::Fixed(w),
-                        height: Dim::Fixed(h),
-                        framerate: rate,
-                        interlace: g2g_core::Interlace::Any,
-                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                    };
-                    if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                            .await?;
-                        self.last_caps = Some(new_caps);
-                    }
-                    let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(dst)),
-                        timing: frame.timing,
-                        sequence: self.emitted,
-                        meta: Default::default(),
-                    };
-                    self.emitted += 1;
-                    out.push(PipelinePacket::DataFrame(out_frame)).await?;
-                }
-                PipelinePacket::CapsChanged(c) => {
-                    self.input = Some(self.accept_input(&c)?);
-                }
-                PipelinePacket::Flush => {
-                    self.last_caps = None;
-                    out.push(PipelinePacket::Flush).await?;
-                }
-                PipelinePacket::Segment(seg) => {
-                    out.push(PipelinePacket::Segment(seg)).await?;
-                }
-                PipelinePacket::Eos => {}
-                other => {
-                    out.push(other).await?;
-                }
-            }
-            Ok(())
-        })
+        videofx::drive(self, packet, out)
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -254,33 +168,18 @@ static GAMMA_PROPS: &[PropertySpec] = &[PropertySpec::new(
 )];
 
 impl PadTemplates for Gamma {
-    fn pad_templates() -> Vec<PadTemplate> {
-        let any_geometry = |format| Caps::RawVideo {
-            format,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        };
-        let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
-        Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
+    fn pad_templates() -> alloc::vec::Vec<PadTemplate> {
+        videofx::pad_templates::<Self>()
     }
 }
 
 /// Apply the LUT to R/G/B of every packed pixel, leaving alpha (byte 3) as is.
 /// The LUT is symmetric in R/G/B, so RGBA and BGRA both map channels 0/1/2.
-fn apply_gamma(src: &[u8], dst: &mut [u8], lut: &[u8; 256]) {
-    for (s, d) in src
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .zip(dst.as_chunks_mut::<4>().0.iter_mut())
-    {
-        d[0] = lut[s[0] as usize];
-        d[1] = lut[s[1] as usize];
-        d[2] = lut[s[2] as usize];
-        d[3] = s[3];
+fn apply_gamma(pixels: &mut [u8], lut: &[u8; 256]) {
+    for px in pixels.as_chunks_mut::<4>().0 {
+        px[0] = lut[px[0] as usize];
+        px[1] = lut[px[1] as usize];
+        px[2] = lut[px[2] as usize];
     }
 }
 
@@ -326,9 +225,8 @@ mod tests {
     #[test]
     fn alpha_is_preserved() {
         let lut = build_lut(2.0);
-        let src = [10u8, 20, 30, 200];
-        let mut dst = [0u8; 4];
-        apply_gamma(&src, &mut dst, &lut);
-        assert_eq!(dst[3], 200);
+        let mut pixel = [10u8, 20, 30, 200];
+        apply_gamma(&mut pixel, &lut);
+        assert_eq!(pixel[3], 200);
     }
 }

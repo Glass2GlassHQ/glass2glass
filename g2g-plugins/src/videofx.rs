@@ -228,3 +228,44 @@ pub(crate) fn drive<'a, F: PixelFilter>(
         Ok(())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use g2g_core::AsyncElement;
+
+    use super::*;
+    use crate::alpha::Alpha;
+    use crate::gamma::Gamma;
+    use crate::testutil::{first_caps, CollectSink};
+    use crate::videobalance::VideoBalance;
+
+    const WIDTH: u32 = 4;
+    const HEIGHT: u32 = 2;
+
+    fn forwards_caps_changed<E: AsyncElement>(mut element: E) {
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(WIDTH),
+            height: Dim::Fixed(HEIGHT),
+            framerate: Rate::Any,
+            interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        element.configure_pipeline(&caps).unwrap();
+        let mut sink = CollectSink::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(element.process(PipelinePacket::CapsChanged(caps.clone()), &mut sink))
+            .unwrap();
+        assert_eq!(first_caps(&sink.packets), Some(caps));
+    }
+
+    #[test]
+    fn colour_filters_forward_caps_changed() {
+        forwards_caps_changed(Gamma::new());
+        forwards_caps_changed(VideoBalance::new());
+        forwards_caps_changed(Alpha::new());
+    }
+}

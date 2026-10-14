@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1336: `gamma`, `videobalance` and `alpha` run on the shared videofx loop and forward `CapsChanged`.
 - M1335: raw video format names and parsing come from g2g-core everywhere, so every format round-trips through the `format` property.
 - M1399: the m16 hostile caps test expects the documented fail-loud outcome, and m859 builds audio timestamps with the rounding the demuxer now uses.
 - M1398: the graph runner retries a startup ReFixate with the counter-proposal instead of failing.

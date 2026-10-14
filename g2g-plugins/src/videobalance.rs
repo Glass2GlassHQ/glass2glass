@@ -9,22 +9,22 @@
 //! Rec.601 luma axis (so luma is preserved, grey stays grey, and hue=0 is exactly
 //! the pre-hue behaviour). The
 //! `sin`/`cos` of the hue angle come from the crate's `libm`-free approximation
-//! (`mathf`), computed once per frame, not per pixel.
+//! (`mathf`). Per frame the settings fold into a contrast table and one integer
+//! 3x3 colour matrix, so each pixel is a table lookup and nine multiplies.
 
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::vec;
-use alloc::vec::Vec;
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    RawVideoFormat,
 };
+
+use crate::pixel::rgba_rb_offsets;
+use crate::videofx::{self, FilterState, PixelFilter};
 
 const FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Bgra8];
 
@@ -43,10 +43,7 @@ pub struct VideoBalance {
     contrast: f64,
     saturation: f64,
     hue: f64,
-    input: Option<(RawVideoFormat, u32, u32, Rate)>,
-    configured: bool,
-    last_caps: Option<Caps>,
-    emitted: u64,
+    state: FilterState,
 }
 
 impl Default for VideoBalance {
@@ -64,10 +61,7 @@ impl VideoBalance {
             contrast: 1.0,
             saturation: 1.0,
             hue: 0.0,
-            input: None,
-            configured: false,
-            last_caps: None,
-            emitted: 0,
+            state: FilterState::new(),
         }
     }
 
@@ -90,22 +84,24 @@ impl VideoBalance {
         self.hue = hue;
         self
     }
+}
 
-    fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
-        let Caps::RawVideo {
-            format,
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
-            framerate,
-            ..
-        } = caps
-        else {
-            return Err(G2gError::CapsMismatch);
-        };
-        if !FORMATS.contains(format) || *w == 0 || *h == 0 {
-            return Err(G2gError::CapsMismatch);
-        }
-        Ok((*format, *w, *h, framerate.clone()))
+impl PixelFilter for VideoBalance {
+    const FORMATS: &'static [RawVideoFormat] = &FORMATS;
+
+    fn state(&self) -> &FilterState {
+        &self.state
+    }
+
+    fn state_mut(&mut self) -> &mut FilterState {
+        &mut self.state
+    }
+
+    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
+        let mut pixels: Box<[u8]> = src[..(w as usize) * (h as usize) * 4].into();
+        Balance::new(self.brightness, self.contrast, self.saturation, self.hue)
+            .apply(format, &mut pixels);
+        pixels
     }
 }
 
@@ -130,38 +126,15 @@ impl AsyncElement for VideoBalance {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        for format in FORMATS {
-            let candidate = Caps::RawVideo {
-                format,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            };
-            if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
-                return Ok(narrowed);
-            }
-        }
-        Err(G2gError::CapsMismatch)
+        videofx::intercept_caps::<Self>(upstream_caps)
     }
 
-    /// Native `DerivedOutput`: a colour adjustment preserves format, geometry,
-    /// and framerate, so the output caps equal the input for any supported raw
-    /// format.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format, .. } if FORMATS.contains(format) => {
-                CapsSet::one(input.clone())
-            }
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        videofx::same_caps_constraint::<Self>()
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.input = Some(self.accept_input(absolute_caps)?);
-        self.configured = true;
-        Ok(ConfigureOutcome::Accepted)
+        videofx::configure(self, absolute_caps)
     }
 
     fn process<'a>(
@@ -169,67 +142,7 @@ impl AsyncElement for VideoBalance {
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            if !self.configured {
-                return Err(G2gError::NotConfigured);
-            }
-            match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    let (format, w, h, rate) = match &self.input {
-                        Some((f, w, h, r)) => (*f, *w, *h, r.clone()),
-                        None => return Err(G2gError::NotConfigured),
-                    };
-                    let src = frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let bytes = (w as usize) * (h as usize) * 4;
-                    if src.len() < bytes {
-                        return Err(G2gError::CapsMismatch);
-                    }
-                    let mut dst = vec![0u8; bytes].into_boxed_slice();
-                    let bal =
-                        Balance::new(self.brightness, self.contrast, self.saturation, self.hue);
-                    apply_balance(format, &src[..bytes], &mut dst, &bal);
-
-                    let new_caps = Caps::RawVideo {
-                        format,
-                        width: Dim::Fixed(w),
-                        height: Dim::Fixed(h),
-                        framerate: rate,
-                        interlace: g2g_core::Interlace::Any,
-                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                    };
-                    if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                            .await?;
-                        self.last_caps = Some(new_caps);
-                    }
-                    let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(dst)),
-                        timing: frame.timing,
-                        sequence: self.emitted,
-                        meta: Default::default(),
-                    };
-                    self.emitted += 1;
-                    out.push(PipelinePacket::DataFrame(out_frame)).await?;
-                }
-                PipelinePacket::CapsChanged(c) => {
-                    self.input = Some(self.accept_input(&c)?);
-                }
-                PipelinePacket::Flush => {
-                    self.last_caps = None;
-                    out.push(PipelinePacket::Flush).await?;
-                }
-                PipelinePacket::Segment(seg) => {
-                    out.push(PipelinePacket::Segment(seg)).await?;
-                }
-                PipelinePacket::Eos => {}
-                other => {
-                    out.push(other).await?;
-                }
-            }
-            Ok(())
-        })
+        videofx::drive(self, packet, out)
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -284,49 +197,21 @@ static VIDEOBALANCE_PROPS: &[PropertySpec] = &[
 ];
 
 impl PadTemplates for VideoBalance {
-    fn pad_templates() -> Vec<PadTemplate> {
-        let any_geometry = |format| Caps::RawVideo {
-            format,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        };
-        let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
-        Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
+    fn pad_templates() -> alloc::vec::Vec<PadTemplate> {
+        videofx::pad_templates::<Self>()
     }
 }
 
-fn clamp_u8(v: f64) -> u8 {
-    v.clamp(0.0, 255.0) as u8
-}
+/// Fractional bits of a [`Balance`] contrast-table entry.
+const LEVEL_SHIFT: u32 = 8;
+/// Fractional bits of a [`Balance`] matrix coefficient.
+const MATRIX_SHIFT: u32 = 16;
+const LEVELS: usize = 256;
+const MID_GREY: f64 = 128.0;
+const MAX_LEVEL: f64 = 255.0;
 
-/// Frame-constant balance coefficients: the raw brightness / contrast /
-/// saturation plus the precomputed sine / cosine of the hue angle, so the trig
-/// runs once per frame rather than per pixel.
-#[derive(Debug, Clone, Copy)]
-struct Balance {
-    bright: f64,
-    contrast: f64,
-    sat: f64,
-    cos_h: f64,
-    sin_h: f64,
-}
-
-impl Balance {
-    fn new(bright: f64, contrast: f64, sat: f64, hue: f64) -> Self {
-        // hue -1..1 -> angle -pi..pi, i.e. turns t = hue / 2.
-        let t = (hue * 0.5) as f32;
-        Self {
-            bright,
-            contrast,
-            sat,
-            cos_h: crate::mathf::cos_turns(t) as f64,
-            sin_h: crate::mathf::sin_turns(t) as f64,
-        }
-    }
-}
+/// Rec.601 luma weights for R, G, B.
+const LUMA_WEIGHTS: [f64; 3] = [0.299, 0.587, 0.114];
 
 /// The Rec.601 luma weights normalized to a unit rotation axis. Rotating the
 /// chroma vector about this axis preserves luma exactly: the chroma `d` already
@@ -334,46 +219,72 @@ impl Balance {
 /// `w.d` at zero and the output luma unchanged.
 const LUMA_AXIS: [f64; 3] = [0.447_179_5, 0.877_952_5, 0.170_502_5];
 
-/// Apply brightness / contrast / saturation / hue to one RGBA / BGRA pixel.
-/// Contrast scales about 128 and brightness adds `b*255`; the chroma vector
-/// `(r-luma, g-luma, b-luma)` is then rotated about the Rec.601 luma axis by the
-/// hue angle (Rodrigues, luma-preserving) and scaled by saturation before luma
-/// is added back.
-fn balance_pixel(format: RawVideoFormat, px: &[u8], bal: &Balance) -> [u8; 4] {
-    let (r_idx, b_idx) = crate::pixel::rgba_rb_offsets(format);
-    let adj = |c: u8| (c as f64 - 128.0) * bal.contrast + 128.0 + bal.bright * 255.0;
-    let r = adj(px[r_idx]);
-    let g = adj(px[1]);
-    let b = adj(px[b_idx]);
-    let luma = 0.299 * r + 0.587 * g + 0.114 * b;
-
-    // chroma about luma, rotated around the luma axis by the hue angle. Because
-    // k is parallel to the weights, k.d = 0, so Rodrigues collapses to
-    // d' = d*cos + (k x d)*sin.
-    let (dr, dg, db) = (r - luma, g - luma, b - luma);
-    let (c, s) = (bal.cos_h, bal.sin_h);
-    let [kr, kg, kb] = LUMA_AXIS;
-    let rr = dr * c + (kg * db - kb * dg) * s;
-    let rg = dg * c + (kb * dr - kr * db) * s;
-    let rb = db * c + (kr * dg - kg * dr) * s;
-
-    let mut out = [0u8; 4];
-    out[r_idx] = clamp_u8(luma + bal.sat * rr);
-    out[1] = clamp_u8(luma + bal.sat * rg);
-    out[b_idx] = clamp_u8(luma + bal.sat * rb);
-    out[3] = px[3];
-    out
+/// Frame-constant balance: brightness and contrast as a per-level table, and
+/// saturation and hue folded into one colour matrix over (R, G, B).
+#[derive(Debug, Clone)]
+struct Balance {
+    levels: [i32; LEVELS],
+    matrix: [[i64; 3]; 3],
 }
 
-/// Apply the balance to every pixel of a packed 4-channel frame.
-fn apply_balance(format: RawVideoFormat, src: &[u8], dst: &mut [u8], bal: &Balance) {
-    for (s, d) in src
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .zip(dst.as_chunks_mut::<4>().0.iter_mut())
-    {
-        d.copy_from_slice(&balance_pixel(format, s, bal));
+impl Balance {
+    /// Contrast scales about 128 and brightness adds `b*255`. The chroma vector
+    /// `(r-luma, g-luma, b-luma)` is rotated about the Rec.601 luma axis by the
+    /// hue angle (Rodrigues, luma-preserving) and scaled by saturation before
+    /// luma is added back, which is the matrix `W + sat * rot * (I - W)` with
+    /// every row of `W` the luma weights.
+    fn new(bright: f64, contrast: f64, sat: f64, hue: f64) -> Self {
+        let level_scale = (1u32 << LEVEL_SHIFT) as f64;
+        let mut levels = [0i32; LEVELS];
+        for (level, entry) in levels.iter_mut().enumerate() {
+            let adjusted = (level as f64 - MID_GREY) * contrast + MID_GREY + bright * MAX_LEVEL;
+            *entry = (adjusted * level_scale) as i32;
+        }
+
+        // hue -1..1 -> angle -pi..pi, i.e. turns t = hue / 2.
+        let turns = (hue * 0.5) as f32;
+        let cos_h = crate::mathf::cos_turns(turns) as f64;
+        let sin_h = crate::mathf::sin_turns(turns) as f64;
+        // because k is parallel to the weights, k.d = 0, so Rodrigues collapses
+        // to d' = d*cos + (k x d)*sin
+        let [kr, kg, kb] = LUMA_AXIS;
+        let cross = [[0.0, -kb, kg], [kb, 0.0, -kr], [-kg, kr, 0.0]];
+        let identity = |i: usize, j: usize| if i == j { 1.0 } else { 0.0 };
+        let matrix_scale = (1u64 << MATRIX_SHIFT) as f64;
+        let mut matrix = [[0i64; 3]; 3];
+        for (i, row) in matrix.iter_mut().enumerate() {
+            for (j, coefficient) in row.iter_mut().enumerate() {
+                let rotated_chroma: f64 = (0..3)
+                    .map(|k| {
+                        let rotation = cos_h * identity(i, k) + sin_h * cross[i][k];
+                        rotation * (identity(k, j) - LUMA_WEIGHTS[j])
+                    })
+                    .sum();
+                let value = LUMA_WEIGHTS[j] + sat * rotated_chroma;
+                *coefficient = crate::mathf::round_to_i64(value * matrix_scale);
+            }
+        }
+        Self { levels, matrix }
+    }
+
+    /// Balance every pixel of a packed 4-channel frame in place, alpha untouched.
+    fn apply(&self, format: RawVideoFormat, pixels: &mut [u8]) {
+        let (r_idx, b_idx) = rgba_rb_offsets(format);
+        let shift = LEVEL_SHIFT + MATRIX_SHIFT;
+        for px in pixels.as_chunks_mut::<4>().0 {
+            let rgb = [
+                self.levels[px[r_idx] as usize] as i64,
+                self.levels[px[1] as usize] as i64,
+                self.levels[px[b_idx] as usize] as i64,
+            ];
+            let channel = |row: &[i64; 3]| {
+                let sum = row[0] * rgb[0] + row[1] * rgb[1] + row[2] * rgb[2];
+                (sum >> shift).clamp(0, MAX_LEVEL as i64) as u8
+            };
+            px[r_idx] = channel(&self.matrix[0]);
+            px[1] = channel(&self.matrix[1]);
+            px[b_idx] = channel(&self.matrix[2]);
+        }
     }
 }
 
@@ -385,19 +296,20 @@ mod tests {
         Balance::new(bright, contrast, sat, hue)
     }
 
+    fn balance_pixel(format: RawVideoFormat, px: &[u8; 4], balance: &Balance) -> [u8; 4] {
+        let mut out = *px;
+        balance.apply(format, &mut out);
+        out
+    }
+
     #[test]
     fn identity_is_exact() {
         // brightness 0, contrast 1, saturation 1, hue 0 reproduces the input byte
         // for byte (integer values round-trip through f64 exactly; hue=0 gives an
         // exact cos=1/sin=0 so the rotation is the identity).
-        let src: Vec<u8> = (0..(4 * 4 * 4) as u8).collect();
-        let mut dst = vec![0u8; src.len()];
-        apply_balance(
-            RawVideoFormat::Rgba8,
-            &src,
-            &mut dst,
-            &bal(0.0, 1.0, 1.0, 0.0),
-        );
+        let src: alloc::vec::Vec<u8> = (0..=u8::MAX).collect();
+        let mut dst = src.clone();
+        bal(0.0, 1.0, 1.0, 0.0).apply(RawVideoFormat::Rgba8, &mut dst);
         assert_eq!(dst, src);
     }
 

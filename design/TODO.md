@@ -30,8 +30,6 @@ Highest leverage first:
 
 Bugs:
 
-- `gamma`, `videobalance` and `alpha` swallow incoming `CapsChanged`. Move them
-  onto `PixelFilter`.
 - `VideoTestSrc::with_shared_memory` keeps every emitted frame.
 
 Core, bindings, ML:

@@ -11,18 +11,15 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::vec;
-use alloc::vec::Vec;
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    RawVideoFormat,
 };
 
 use crate::pixel::rgba_rb_offsets;
+use crate::videofx::{self, FilterState, PixelFilter};
 
 const FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Bgra8];
 
@@ -54,10 +51,7 @@ pub enum AlphaMethod {
 pub struct Alpha {
     method: AlphaMethod,
     alpha: f64,
-    input: Option<(RawVideoFormat, u32, u32, Rate)>,
-    configured: bool,
-    last_caps: Option<Caps>,
-    emitted: u64,
+    state: FilterState,
 }
 
 impl Default for Alpha {
@@ -73,10 +67,7 @@ impl Alpha {
         Self {
             method: AlphaMethod::Set,
             alpha: 1.0,
-            input: None,
-            configured: false,
-            last_caps: None,
-            emitted: 0,
+            state: FilterState::new(),
         }
     }
 
@@ -89,22 +80,23 @@ impl Alpha {
         self.alpha = alpha;
         self
     }
+}
 
-    fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
-        let Caps::RawVideo {
-            format,
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
-            framerate,
-            ..
-        } = caps
-        else {
-            return Err(G2gError::CapsMismatch);
-        };
-        if !FORMATS.contains(format) || *w == 0 || *h == 0 {
-            return Err(G2gError::CapsMismatch);
-        }
-        Ok((*format, *w, *h, framerate.clone()))
+impl PixelFilter for Alpha {
+    const FORMATS: &'static [RawVideoFormat] = &FORMATS;
+
+    fn state(&self) -> &FilterState {
+        &self.state
+    }
+
+    fn state_mut(&mut self) -> &mut FilterState {
+        &mut self.state
+    }
+
+    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
+        let mut pixels: Box<[u8]> = src[..(w as usize) * (h as usize) * 4].into();
+        apply_alpha(format, &mut pixels, self.method, alpha_u8(self.alpha));
+        pixels
     }
 }
 
@@ -129,37 +121,15 @@ impl AsyncElement for Alpha {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        for format in FORMATS {
-            let candidate = Caps::RawVideo {
-                format,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            };
-            if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
-                return Ok(narrowed);
-            }
-        }
-        Err(G2gError::CapsMismatch)
+        videofx::intercept_caps::<Self>(upstream_caps)
     }
 
-    /// Native `DerivedOutput`: rewriting alpha preserves format, geometry, and
-    /// framerate, so the output caps equal the input for any supported format.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format, .. } if FORMATS.contains(format) => {
-                CapsSet::one(input.clone())
-            }
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        videofx::same_caps_constraint::<Self>()
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.input = Some(self.accept_input(absolute_caps)?);
-        self.configured = true;
-        Ok(ConfigureOutcome::Accepted)
+        videofx::configure(self, absolute_caps)
     }
 
     fn process<'a>(
@@ -167,71 +137,7 @@ impl AsyncElement for Alpha {
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            if !self.configured {
-                return Err(G2gError::NotConfigured);
-            }
-            match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    let (format, w, h, rate) = match &self.input {
-                        Some((f, w, h, r)) => (*f, *w, *h, r.clone()),
-                        None => return Err(G2gError::NotConfigured),
-                    };
-                    let src = frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let bytes = (w as usize) * (h as usize) * 4;
-                    if src.len() < bytes {
-                        return Err(G2gError::CapsMismatch);
-                    }
-                    let mut dst = vec![0u8; bytes].into_boxed_slice();
-                    apply_alpha(
-                        format,
-                        &src[..bytes],
-                        &mut dst,
-                        self.method,
-                        alpha_u8(self.alpha),
-                    );
-
-                    let new_caps = Caps::RawVideo {
-                        format,
-                        width: Dim::Fixed(w),
-                        height: Dim::Fixed(h),
-                        framerate: rate,
-                        interlace: g2g_core::Interlace::Any,
-                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                    };
-                    if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                            .await?;
-                        self.last_caps = Some(new_caps);
-                    }
-                    let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(dst)),
-                        timing: frame.timing,
-                        sequence: self.emitted,
-                        meta: Default::default(),
-                    };
-                    self.emitted += 1;
-                    out.push(PipelinePacket::DataFrame(out_frame)).await?;
-                }
-                PipelinePacket::CapsChanged(c) => {
-                    self.input = Some(self.accept_input(&c)?);
-                }
-                PipelinePacket::Flush => {
-                    self.last_caps = None;
-                    out.push(PipelinePacket::Flush).await?;
-                }
-                PipelinePacket::Segment(seg) => {
-                    out.push(PipelinePacket::Segment(seg)).await?;
-                }
-                PipelinePacket::Eos => {}
-                other => {
-                    out.push(other).await?;
-                }
-            }
-            Ok(())
-        })
+        videofx::drive(self, packet, out)
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -289,63 +195,34 @@ fn alpha_u8(alpha: f64) -> u8 {
 }
 
 impl PadTemplates for Alpha {
-    fn pad_templates() -> Vec<PadTemplate> {
-        let any_geometry = |format| Caps::RawVideo {
-            format,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        };
-        let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
-        Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
+    fn pad_templates() -> alloc::vec::Vec<PadTemplate> {
+        videofx::pad_templates::<Self>()
     }
 }
 
-/// The new alpha byte for one pixel under `method`. `set` returns the constant;
-/// the chroma keys return 0 (transparent) when the key channel dominates, else
-/// 255 (opaque).
-fn pixel_alpha(format: RawVideoFormat, px: &[u8], method: AlphaMethod, set_alpha: u8) -> u8 {
+/// A chroma key's alpha: 0 (transparent) when `key` exceeds both other colour
+/// channels by `KEY_MARGIN`, else 255 (opaque).
+fn key_alpha(key: u8, other: u8, another: u8) -> u8 {
+    let (key, other, another) = (key as i16, other as i16, another as i16);
+    if key - other > KEY_MARGIN && key - another > KEY_MARGIN {
+        0
+    } else {
+        u8::MAX
+    }
+}
+
+/// Rewrite the alpha channel of every pixel in place, colour untouched.
+fn apply_alpha(format: RawVideoFormat, pixels: &mut [u8], method: AlphaMethod, set_alpha: u8) {
+    let (r_idx, b_idx) = rgba_rb_offsets(format);
+    let pixels = pixels.as_chunks_mut::<4>().0;
     match method {
-        AlphaMethod::Set => set_alpha,
-        AlphaMethod::Green | AlphaMethod::Blue => {
-            let (r_idx, b_idx) = rgba_rb_offsets(format);
-            let r = px[r_idx] as i16;
-            let g = px[1] as i16;
-            let b = px[b_idx] as i16;
-            let keyed = match method {
-                AlphaMethod::Green => g - r > KEY_MARGIN && g - b > KEY_MARGIN,
-                AlphaMethod::Blue => b - r > KEY_MARGIN && b - g > KEY_MARGIN,
-                AlphaMethod::Set => unreachable!(),
-            };
-            if keyed {
-                0
-            } else {
-                255
-            }
-        }
-    }
-}
-
-/// Rewrite the alpha channel of every pixel, copying the colour channels through.
-fn apply_alpha(
-    format: RawVideoFormat,
-    src: &[u8],
-    dst: &mut [u8],
-    method: AlphaMethod,
-    set_alpha: u8,
-) {
-    for (s, d) in src
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .zip(dst.as_chunks_mut::<4>().0.iter_mut())
-    {
-        d[0] = s[0];
-        d[1] = s[1];
-        d[2] = s[2];
-        d[3] = pixel_alpha(format, s, method, set_alpha);
+        AlphaMethod::Set => pixels.iter_mut().for_each(|px| px[3] = set_alpha),
+        AlphaMethod::Green => pixels
+            .iter_mut()
+            .for_each(|px| px[3] = key_alpha(px[1], px[r_idx], px[b_idx])),
+        AlphaMethod::Blue => pixels
+            .iter_mut()
+            .for_each(|px| px[3] = key_alpha(px[b_idx], px[r_idx], px[1])),
     }
 }
 
@@ -353,32 +230,33 @@ fn apply_alpha(
 mod tests {
     use super::*;
 
+    fn keyed_alpha(format: RawVideoFormat, px: [u8; 4], method: AlphaMethod) -> u8 {
+        let mut pixel = px;
+        apply_alpha(format, &mut pixel, method, u8::MAX);
+        pixel[3]
+    }
+
     #[test]
     fn set_replaces_alpha_and_keeps_colour() {
         // alpha 0.5 -> round(127.5) = 128; RGB untouched.
-        let mut dst = [0u8; 4];
+        let mut pixel = [10u8, 20, 30, 255];
         apply_alpha(
             RawVideoFormat::Rgba8,
-            &[10, 20, 30, 255],
-            &mut dst,
+            &mut pixel,
             AlphaMethod::Set,
             alpha_u8(0.5),
         );
-        assert_eq!(dst, [10, 20, 30, 128]);
+        assert_eq!(pixel, [10, 20, 30, 128]);
         assert_eq!(alpha_u8(1.0), 255);
         assert_eq!(alpha_u8(0.0), 0);
     }
 
     #[test]
     fn green_key_makes_green_transparent_only() {
-        let key = |px: &[u8; 4]| pixel_alpha(RawVideoFormat::Rgba8, px, AlphaMethod::Green, 255);
-        assert_eq!(key(&[0, 255, 0, 255]), 0, "green keyed out");
-        assert_eq!(key(&[255, 0, 0, 255]), 255, "red opaque");
-        assert_eq!(
-            key(&[128, 128, 128, 255]),
-            255,
-            "grey opaque (no dominance)"
-        );
+        let key = |px: [u8; 4]| keyed_alpha(RawVideoFormat::Rgba8, px, AlphaMethod::Green);
+        assert_eq!(key([0, 255, 0, 255]), 0, "green keyed out");
+        assert_eq!(key([255, 0, 0, 255]), 255, "red opaque");
+        assert_eq!(key([128, 128, 128, 255]), 255, "grey opaque (no dominance)");
     }
 
     #[test]
@@ -387,12 +265,12 @@ mod tests {
         // not the byte that would be red in RGBA.
         let bgra_blue = [255u8, 0, 0, 255];
         assert_eq!(
-            pixel_alpha(RawVideoFormat::Bgra8, &bgra_blue, AlphaMethod::Blue, 255),
+            keyed_alpha(RawVideoFormat::Bgra8, bgra_blue, AlphaMethod::Blue),
             0
         );
         // The same bytes read as RGBA are a red pixel, untouched by a blue key.
         assert_eq!(
-            pixel_alpha(RawVideoFormat::Rgba8, &bgra_blue, AlphaMethod::Blue, 255),
+            keyed_alpha(RawVideoFormat::Rgba8, bgra_blue, AlphaMethod::Blue),
             255
         );
     }

@@ -142,7 +142,7 @@ pub(crate) fn ln(x: f64) -> f64 {
 }
 
 /// Round to the nearest integer, halves away from zero.
-fn round_to_i64(v: f64) -> i64 {
+pub(crate) fn round_to_i64(v: f64) -> i64 {
     if v >= 0.0 {
         (v + 0.5) as i64
     } else {
