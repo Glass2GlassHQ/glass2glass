@@ -40,7 +40,6 @@ Bugs:
 
 Core runtime:
 
-- One arm-IO builder for `run_graph_inner` and `run_graph_threaded_inner`.
 - Shared helpers for `muxer_arm` and `muxer_arm_pts`, one port-ordering
   function, `inspect` formatting `describe`'s `ElementDoc`, and `launch` calling
   `maybe_prepend_parser`.

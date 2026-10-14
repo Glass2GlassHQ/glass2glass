@@ -2099,6 +2099,317 @@ fn enforce_copy_policy(
     plan.check(policy).map_err(|_| G2gError::CopyBudget)
 }
 
+/// One graph node's arm with its element and every link and handle it runs on,
+/// ready to drive. The cooperative and thread-per-arm runners build the same
+/// plans and differ only in where each arm's future is built and polled.
+enum ArmPlan<'a> {
+    Source {
+        source: Box<dyn DynSourceLoop + 'a>,
+        io: SourceArmIo,
+        done: Option<Sender<Box<dyn DynSourceLoop + 'a>>>,
+    },
+    Transform {
+        element: Box<dyn DynAsyncElement + 'a>,
+        io: TransformArmIo,
+        done: Option<Sender<Box<dyn DynAsyncElement + 'a>>>,
+    },
+    Sink {
+        element: Box<dyn DynAsyncElement + 'a>,
+        io: SinkArmIo,
+        done: Option<Sender<Box<dyn DynAsyncElement + 'a>>>,
+    },
+    Demux {
+        demux: Box<dyn DynMultiOutputElement + 'a>,
+        io: DemuxArmIo,
+    },
+    Tee {
+        in_rx: LinkReceiver,
+        out_txs: Vec<LinkSender>,
+        branch_drop: bool,
+        adds: Option<Receiver<LinkSender>>,
+    },
+    FaninSink {
+        session: Box<dyn DynMultiInputElement + 'a>,
+        io: FaninSinkArmIo,
+    },
+    FanoutSrc {
+        source: Box<dyn DynMultiOutputSource + 'a>,
+        ports: MultiSenderSink,
+    },
+    Muxer {
+        muxer: Box<dyn DynMultiInputElement + 'a>,
+        parts: MuxerArmParts,
+    },
+}
+
+impl<'a> ArmPlan<'a> {
+    /// The arm's future. `drive_muxer` builds a muxer's, whose deadline ticker
+    /// the two runners hold differently (a borrow vs a shared handle).
+    fn drive<'f>(
+        self,
+        drive_muxer: impl FnOnce(
+            Box<dyn DynMultiInputElement + 'a>,
+            MuxerArmParts,
+        ) -> BoxFuture<'f, Result<u64, G2gError>>,
+    ) -> BoxFuture<'f, Result<u64, G2gError>>
+    where
+        'a: 'f,
+    {
+        match self {
+            ArmPlan::Source {
+                source,
+                io,
+                done: Some(done),
+            } => Box::pin(lent_source_arm(source, io, done)),
+            ArmPlan::Source {
+                mut source,
+                io,
+                done: None,
+            } => Box::pin(async move { run_source(&mut *source, io).await }),
+            ArmPlan::Transform {
+                element,
+                io,
+                done: Some(done),
+            } => Box::pin(spliced_arm(element, io, done)),
+            ArmPlan::Transform {
+                element,
+                io,
+                done: None,
+            } => element.drive_transform_arm(io),
+            ArmPlan::Sink {
+                element,
+                io,
+                done: Some(done),
+            } => Box::pin(lent_sink_arm(element, io, done)),
+            ArmPlan::Sink {
+                element,
+                io,
+                done: None,
+            } => element.drive_sink_arm(io),
+            ArmPlan::Demux { demux, io } => demux.drive_demux_arm(io),
+            ArmPlan::Tee {
+                in_rx,
+                out_txs,
+                branch_drop,
+                adds,
+            } => Box::pin(tee_arm(in_rx, out_txs, branch_drop, adds)),
+            ArmPlan::FaninSink { session, io } => session.drive_fanin_sink_arm(io),
+            ArmPlan::FanoutSrc { source, ports } => Box::pin(fanout_src_arm(source, ports)),
+            ArmPlan::Muxer { muxer, parts } => drive_muxer(muxer, parts),
+        }
+    }
+}
+
+/// An [`ArmPlan`] with the node kind and instance name its result is folded under.
+struct PlannedArm<'a> {
+    kind: NodeKind,
+    name: alloc::string::String,
+    plan: ArmPlan<'a>,
+}
+
+/// The negotiated run state [`plan_arms`] hands out to the arms.
+struct ArmInputs<'r, 'a> {
+    txs: &'r mut [Option<LinkSender>],
+    rxs: &'r mut [Option<LinkReceiver>],
+    arm_ctrl_rx: &'r mut [Option<Receiver<ArmDirective>>],
+    coord_handle: &'r GraphCoordHandle,
+    solution: &'r [Caps],
+    feasibility: &'r [Option<CapsSet>],
+    probes: &'r [Probe],
+    names: &'r [alloc::string::String],
+    controllers: &'r mut [Option<ArmController>],
+    live: &'r mut Option<LiveTopology<'a>>,
+    latency_fold: &'r alloc::sync::Arc<LatencyFold>,
+    bus: Option<&'r BusHandle>,
+    state: &'r Option<StateController>,
+    progress: Option<&'r PipelineProgress>,
+}
+
+/// Take each node's element and links, in topological order, and build its arm.
+fn plan_arms<'a>(
+    vg: &mut ValidatedGraph<GraphNodeRef<'a>>,
+    topo: &[NodeId],
+    inputs: ArmInputs<'_, 'a>,
+) -> Result<Vec<PlannedArm<'a>>, G2gError> {
+    let ArmInputs {
+        txs,
+        rxs,
+        arm_ctrl_rx,
+        coord_handle,
+        solution,
+        feasibility,
+        probes,
+        names,
+        controllers,
+        live,
+        latency_fold,
+        bus,
+        state,
+        progress,
+    } = inputs;
+    let mut planned = Vec::with_capacity(topo.len());
+    for &node in topo {
+        let index = node.0 as usize;
+        let kind = vg.kind(node);
+        let in_e: Vec<usize> = vg.in_edges(node).to_vec();
+        let out_e: Vec<usize> = vg.out_edges(node).to_vec();
+        let mut in_rxs: Vec<LinkReceiver> = in_e
+            .iter()
+            .map(|&e| rxs[e].take().expect("edge rx present"))
+            .collect();
+        let mut out_txs: Vec<LinkSender> = out_e
+            .iter()
+            .map(|&e| txs[e].take().expect("edge tx present"))
+            .collect();
+        let element = vg.take_element(node);
+        let properties = live
+            .as_ref()
+            .and_then(|t| t.nodes[index].properties.clone());
+        // M1149: a mutable run keeps every source, transform and sink element
+        // reachable, so a replace or remove can hand it back once its arm ends.
+        let element_done = |live: &mut Option<LiveTopology<'a>>| {
+            live.as_mut().map(|topology| {
+                let (done_tx, done_rx) = bounded(1);
+                topology.nodes[index].done = Some(Handback::Element(done_rx));
+                done_tx
+            })
+        };
+        let plan = match (kind, element) {
+            (NodeKind::Muxer(_), Some(GraphNodeRef::Muxer(muxer))) => {
+                let pads: Vec<usize> = in_e
+                    .iter()
+                    .map(|&eid| vg.edge(eid).dst.index as usize)
+                    .collect();
+                // The arm drains each input link round-robin. A single shared
+                // FIFO would let a fast input (e.g. a free-running background)
+                // monopolize the queue and starve a slower real-time input (e.g. a
+                // 30 fps camera): the camera's overlay would freeze and, worse,
+                // its EOS would never arrive, hanging the all-inputs-EOS
+                // aggregation forever. Links are indexed by pad so a muxer's
+                // `process(pad, ..)` keeps its per-input geometry straight even if
+                // pads link out of order.
+                let input_qos: Vec<QosSlot> = in_rxs.iter().map(LinkReceiver::qos_slot).collect();
+                let input_count = in_rxs.len();
+                ArmPlan::Muxer {
+                    muxer,
+                    parts: MuxerArmParts {
+                        pad_rxs: pads.into_iter().zip(in_rxs).collect(),
+                        input_qos,
+                        out_tx: out_txs.pop().expect("muxer output edge"),
+                        input_count,
+                        current_output: solution[out_e[0]].clone(),
+                        beta: mux_beta(vg, node, &in_e, out_e[0], solution, coord_handle.clone()),
+                        arm_rx: arm_ctrl_rx[index].take().expect("muxer ctrl rx"),
+                        probe: probes[index].clone(),
+                        control: controllers[index].take(),
+                        properties,
+                        pad_adds: live.as_mut().and_then(|t| t.pad_adds[index].take()),
+                    },
+                }
+            }
+            (NodeKind::Source, Some(GraphNodeRef::Source(source))) => ArmPlan::Source {
+                source,
+                io: SourceArmIo {
+                    out_tx: out_txs.pop().expect("source output edge"),
+                    bus: bus.cloned(),
+                    progress: progress.cloned(),
+                    segment: Segment::new(),
+                },
+                done: live.as_mut().map(|topology| {
+                    let (done_tx, done_rx) = bounded(1);
+                    topology.nodes[index].done = Some(Handback::Source(done_rx));
+                    done_tx
+                }),
+            },
+            (NodeKind::Transform, Some(GraphNodeRef::Element(element))) => {
+                let out_edge = out_e[0];
+                ArmPlan::Transform {
+                    element,
+                    io: TransformArmIo {
+                        in_rx: in_rxs.pop().expect("transform input edge"),
+                        out_tx: out_txs.pop().expect("transform output edge"),
+                        arm_rx: arm_ctrl_rx[index].take().expect("transform ctrl rx"),
+                        coord: coord_handle.clone(),
+                        node,
+                        out_caps: solution[out_edge].clone(),
+                        downstream_feasible: feasibility[out_edge].clone(),
+                        mode: branch_mode(vg, node),
+                        bus: bus.cloned(),
+                        probe: probes[index].clone(),
+                        control: controllers[index].take(),
+                        properties,
+                    },
+                    done: element_done(live),
+                }
+            }
+            (NodeKind::Sink, Some(GraphNodeRef::Element(element))) => {
+                let in_rx = in_rxs.pop().expect("sink input edge");
+                advertise_orientation(&in_rx, element.absorbs_orientation());
+                ArmPlan::Sink {
+                    element,
+                    io: SinkArmIo {
+                        in_rx,
+                        arm_rx: arm_ctrl_rx[index].take().expect("sink ctrl rx"),
+                        coord: coord_handle.clone(),
+                        node,
+                        mode: branch_mode(vg, node),
+                        bus: bus.cloned(),
+                        state: state.clone(),
+                        progress: progress.cloned(),
+                        probe: probes[index].clone(),
+                        control: controllers[index].take(),
+                        properties,
+                    },
+                    done: element_done(live),
+                }
+            }
+            // A tee-shaped node carrying a demux element routes per-output; a
+            // plain tee broadcasts.
+            (NodeKind::Tee(_), Some(GraphNodeRef::Demux(demux))) => ArmPlan::Demux {
+                demux,
+                io: DemuxArmIo {
+                    in_rx: in_rxs.pop().expect("tee input edge"),
+                    out_txs: demux_out_txs_by_port(vg, node, out_txs),
+                    probe: probes[index].clone(),
+                    latency: LatencyFold::publisher(latency_fold, node),
+                },
+            },
+            // Under `AllowBranchDrop` the broadcast tolerates a branch that has
+            // dropped out (closed its channel).
+            (NodeKind::Tee(_), None) => ArmPlan::Tee {
+                in_rx: in_rxs.pop().expect("tee input edge"),
+                out_txs,
+                branch_drop: vg.fanout_policy(node) == FanOutPolicy::AllowBranchDrop,
+                adds: live.as_mut().and_then(|t| t.branch_adds[index].take()),
+            },
+            (NodeKind::FaninSink(_), Some(GraphNodeRef::Muxer(session))) => {
+                let (pad_rxs, reverse) = fanin_sink_pads(vg, node, in_rxs, &*session);
+                ArmPlan::FaninSink {
+                    session,
+                    io: FaninSinkArmIo {
+                        pad_rxs,
+                        reverse,
+                        probe: probes[index].clone(),
+                    },
+                }
+            }
+            (NodeKind::FanoutSrc(_), Some(GraphNodeRef::FanoutSource(source))) => {
+                ArmPlan::FanoutSrc {
+                    source,
+                    ports: fanout_src_ports(vg, node, out_txs),
+                }
+            }
+            _ => return Err(G2gError::CapsMismatch),
+        };
+        planned.push(PlannedArm {
+            kind,
+            name: names[index].clone(),
+            plan,
+        });
+    }
+    Ok(planned)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
     graph: Graph<GraphNodeRef<'a>>,
@@ -2206,222 +2517,34 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
         install_flight_recorder(rec, &vg, &txs, &solution, &names);
     }
 
+    let planned = plan_arms(
+        &mut vg,
+        &topo,
+        ArmInputs {
+            txs: &mut txs,
+            rxs: &mut rxs,
+            arm_ctrl_rx: &mut arm_ctrl_rx,
+            coord_handle: &coord_handle,
+            solution: &solution,
+            feasibility: &feasibility,
+            probes: &probes,
+            names: &names,
+            controllers: &mut controllers,
+            live: &mut live,
+            latency_fold: &latency_fold,
+            bus,
+            state: &state,
+            progress,
+        },
+    )?;
     let mut arms: Vec<BoxFuture<'c, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
     let mut arm_kinds: Vec<NodeKind> = Vec::with_capacity(n);
-    // Arm order, not node order: a muxer contributes one forwarder arm per
-    // input pad plus its own, so an arm index cannot index `names` directly.
+    // Arm order, not node order: an arm index cannot index `names` directly.
     let mut arm_names: Vec<alloc::string::String> = Vec::with_capacity(n + 1);
-
-    for &node in &topo {
-        let kind = vg.kind(node);
-        let in_e: Vec<usize> = vg.in_edges(node).to_vec();
-        let out_e: Vec<usize> = vg.out_edges(node).to_vec();
-        let mut in_rxs: Vec<LinkReceiver> = in_e
-            .iter()
-            .map(|&e| rxs[e].take().expect("edge rx present"))
-            .collect();
-        let mut out_txs: Vec<LinkSender> = out_e
-            .iter()
-            .map(|&e| txs[e].take().expect("edge tx present"))
-            .collect();
-        let element = vg.take_element(node);
-
-        // A muxer reads its input links itself, so it is built before the
-        // single-arm match below.
-        if let NodeKind::Muxer(_) = kind {
-            let Some(GraphNodeRef::Muxer(mux)) = element else {
-                return Err(G2gError::CapsMismatch);
-            };
-            let out_tx = out_txs.pop().expect("muxer output edge");
-            let mux_out_caps = solution[out_e[0]].clone();
-            let pads: Vec<usize> = in_e
-                .iter()
-                .map(|&eid| vg.edge(eid).dst.index as usize)
-                .collect();
-            let beta = mux_beta(&vg, node, &in_e, out_e[0], &solution, coord_handle.clone());
-            let mux_ctrl = arm_ctrl_rx[node.0 as usize].take().expect("muxer ctrl rx");
-            let input_count = in_rxs.len();
-            // The arm drains each input link round-robin. A single shared FIFO
-            // would let a fast input (e.g. a free-running background) monopolize
-            // the queue and starve a slower real-time input (e.g. a 30 fps
-            // camera): the camera's overlay would freeze and, worse, its EOS would
-            // never arrive, hanging the all-inputs-EOS aggregation forever. Links
-            // are indexed by pad so a muxer's `process(pad, ..)` keeps its
-            // per-input geometry straight even if pads link out of order.
-            let input_qos: Vec<QosSlot> = in_rxs.iter().map(LinkReceiver::qos_slot).collect();
-            let pad_rxs: Vec<(usize, LinkReceiver)> = pads.into_iter().zip(in_rxs).collect();
-            // A muxer can opt into runner-level PTS-ordered delivery (the runner
-            // merges its inputs by DataFrame PTS); the default drains round-robin
-            // in arrival order. The hook picks the arm from
-            // `input_pts_ordered` and monomorphizes it over the element.
-            let mux_probe = probes[node.0 as usize].clone();
-            let mux_control = controllers[node.0 as usize].take();
-            let mux_properties = live
-                .as_ref()
-                .and_then(|t| t.nodes[node.0 as usize].properties.clone());
-            let arm: BoxFuture<'c, Result<u64, G2gError>> = mux.drive_muxer_arm(MuxerArmIo {
-                parts: MuxerArmParts {
-                    pad_rxs,
-                    input_qos,
-                    out_tx,
-                    input_count,
-                    current_output: mux_out_caps,
-                    beta,
-                    arm_rx: mux_ctrl,
-                    probe: mux_probe,
-                    control: mux_control,
-                    properties: mux_properties,
-                    pad_adds: live
-                        .as_mut()
-                        .and_then(|t| t.pad_adds[node.0 as usize].take()),
-                },
-                ticker,
-            });
-            arms.push(arm);
-            arm_kinds.push(kind);
-            arm_names.push(names[node.0 as usize].clone());
-            continue;
-        }
-
-        let arm: BoxFuture<'c, Result<u64, G2gError>> = match kind {
-            NodeKind::Source => {
-                let Some(GraphNodeRef::Source(src)) = element else {
-                    return Err(G2gError::CapsMismatch);
-                };
-                let out_tx = out_txs.pop().expect("source output edge");
-                match live.as_mut() {
-                    // M1149: a mutable run keeps the source reachable too, so a
-                    // replace can hand it back once its arm has ended.
-                    Some(topology) => {
-                        let (done_tx, done_rx) = bounded(1);
-                        topology.nodes[node.0 as usize].done = Some(Handback::Source(done_rx));
-                        let io = SourceArmIo {
-                            out_tx,
-                            bus: bus.cloned(),
-                            progress: progress.cloned(),
-                            segment: Segment::new(),
-                        };
-                        Box::pin(lent_source_arm(src, io, done_tx))
-                    }
-                    None => Box::pin(source_arm(src, out_tx, bus.cloned(), progress.cloned())),
-                }
-            }
-            NodeKind::Transform => {
-                let Some(GraphNodeRef::Element(elem)) = element else {
-                    return Err(G2gError::CapsMismatch);
-                };
-                let in_rx = in_rxs.pop().expect("transform input edge");
-                let out_tx = out_txs.pop().expect("transform output edge");
-                let out_edge = out_e[0];
-                let arm_rx = arm_ctrl_rx[node.0 as usize]
-                    .take()
-                    .expect("transform ctrl rx");
-                let out_caps = solution[out_edge].clone();
-                let downstream_feasible = feasibility[out_edge].clone();
-                let io = TransformArmIo {
-                    in_rx,
-                    out_tx,
-                    arm_rx,
-                    coord: coord_handle.clone(),
-                    node,
-                    out_caps,
-                    downstream_feasible,
-                    mode: branch_mode(&vg, node),
-                    bus: bus.cloned(),
-                    probe: probes[node.0 as usize].clone(),
-                    control: controllers[node.0 as usize].take(),
-                    properties: live
-                        .as_ref()
-                        .and_then(|t| t.nodes[node.0 as usize].properties.clone()),
-                };
-                match live.as_mut() {
-                    // A mutable run keeps every transform's element reachable, so
-                    // a remove can hand it back once its arm has drained. Its
-                    // arm runs on a borrow, monomorphized as an owned arm is.
-                    Some(topology) => {
-                        let (done_tx, done_rx) = bounded(1);
-                        topology.nodes[node.0 as usize].done = Some(Handback::Element(done_rx));
-                        Box::pin(spliced_arm(elem, io, done_tx))
-                    }
-                    None => elem.drive_transform_arm(io),
-                }
-            }
-            NodeKind::Sink => {
-                let Some(GraphNodeRef::Element(elem)) = element else {
-                    return Err(G2gError::CapsMismatch);
-                };
-                let in_rx = in_rxs.pop().expect("sink input edge");
-                let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("sink ctrl rx");
-                advertise_orientation(&in_rx, elem.absorbs_orientation());
-                let io = SinkArmIo {
-                    in_rx,
-                    arm_rx,
-                    coord: coord_handle.clone(),
-                    node,
-                    mode: branch_mode(&vg, node),
-                    bus: bus.cloned(),
-                    state: state.clone(),
-                    progress: progress.cloned(),
-                    probe: probes[node.0 as usize].clone(),
-                    control: controllers[node.0 as usize].take(),
-                    properties: live
-                        .as_ref()
-                        .and_then(|t| t.nodes[node.0 as usize].properties.clone()),
-                };
-                match live.as_mut() {
-                    // M1149: as for a transform, at the same cost.
-                    Some(topology) => {
-                        let (done_tx, done_rx) = bounded(1);
-                        topology.nodes[node.0 as usize].done = Some(Handback::Element(done_rx));
-                        Box::pin(lent_sink_arm(elem, io, done_tx))
-                    }
-                    None => elem.drive_sink_arm(io),
-                }
-            }
-            NodeKind::Tee(_) => {
-                let in_rx = in_rxs.pop().expect("tee input edge");
-                // A tee-shaped node carrying a demux element routes per-output;
-                // a plain tee broadcasts. Under `AllowBranchDrop` the broadcast
-                // tolerates a branch that has dropped out (closed its channel).
-                let branch_drop = vg.fanout_policy(node) == FanOutPolicy::AllowBranchDrop;
-                match element {
-                    Some(GraphNodeRef::Demux(demux)) => demux.drive_demux_arm(DemuxArmIo {
-                        in_rx,
-                        out_txs: demux_out_txs_by_port(&vg, node, out_txs),
-                        probe: probes[node.0 as usize].clone(),
-                        latency: LatencyFold::publisher(&latency_fold, node),
-                    }),
-                    _ => {
-                        let adds = live
-                            .as_mut()
-                            .and_then(|t| t.branch_adds[node.0 as usize].take());
-                        Box::pin(tee_arm(in_rx, out_txs, branch_drop, adds))
-                    }
-                }
-            }
-            NodeKind::FaninSink(_) => {
-                let Some(GraphNodeRef::Muxer(session)) = element else {
-                    return Err(G2gError::CapsMismatch);
-                };
-                let (pad_rxs, reverse) = fanin_sink_pads(&vg, node, in_rxs, &*session);
-                session.drive_fanin_sink_arm(FaninSinkArmIo {
-                    pad_rxs,
-                    reverse,
-                    probe: probes[node.0 as usize].clone(),
-                })
-            }
-            NodeKind::FanoutSrc(_) => {
-                let Some(GraphNodeRef::FanoutSource(source)) = element else {
-                    return Err(G2gError::CapsMismatch);
-                };
-                let sinks = fanout_src_ports(&vg, node, out_txs);
-                Box::pin(fanout_src_arm(source, sinks))
-            }
-            NodeKind::Muxer(_) => unreachable!("muxer handled above"),
-        };
-        arms.push(arm);
+    for PlannedArm { kind, name, plan } in planned {
+        arms.push(plan.drive(|mux, parts| mux.drive_muxer_arm(MuxerArmIo { parts, ticker })));
         arm_kinds.push(kind);
-        arm_names.push(names[node.0 as usize].clone());
+        arm_names.push(name);
     }
 
     // Drop the template handle so the coordinator can end once every arm's
@@ -2793,252 +2916,45 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         install_flight_recorder(rec, &vg, &txs, &solution, &names);
     }
 
+    let planned = plan_arms(
+        &mut vg,
+        &topo,
+        ArmInputs {
+            txs: &mut txs,
+            rxs: &mut rxs,
+            arm_ctrl_rx: &mut arm_ctrl_rx,
+            coord_handle: &coord_handle,
+            solution: &solution,
+            feasibility: &feasibility,
+            probes: &probes,
+            names: &names,
+            controllers: &mut controllers,
+            live: &mut live,
+            latency_fold: &latency_fold,
+            bus,
+            state: &state,
+            progress,
+        },
+    )?;
     // One `spawn_arm` handle per arm (mirrors the cooperative `arms` vec). Each
     // handle resolves on this thread once its worker thread finishes.
     let mut handles: Vec<BoxFuture<'static, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
     let mut arm_kinds: Vec<NodeKind> = Vec::with_capacity(n);
-    // Arm order, not node order: a muxer contributes one forwarder arm per
-    // input pad plus its own, so an arm index cannot index `names` directly.
     let mut arm_names: Vec<alloc::string::String> = Vec::with_capacity(n + 1);
-
-    for &node in &topo {
-        let kind = vg.kind(node);
-        let in_e: Vec<usize> = vg.in_edges(node).to_vec();
-        let out_e: Vec<usize> = vg.out_edges(node).to_vec();
-        let mut in_rxs: Vec<LinkReceiver> = in_e
-            .iter()
-            .map(|&e| rxs[e].take().expect("edge rx present"))
-            .collect();
-        let mut out_txs: Vec<LinkSender> = out_e
-            .iter()
-            .map(|&e| txs[e].take().expect("edge tx present"))
-            .collect();
-        let element = vg.take_element(node);
-
-        if let NodeKind::Muxer(_) = kind {
-            let Some(GraphNodeRef::Muxer(mux)) = element else {
-                return Err(G2gError::CapsMismatch);
-            };
-            let out_tx = out_txs.pop().expect("muxer output edge");
-            let mux_out_caps = solution[out_e[0]].clone();
-            let pads: Vec<usize> = in_e
-                .iter()
-                .map(|&eid| vg.edge(eid).dst.index as usize)
-                .collect();
-            let beta = mux_beta(&vg, node, &in_e, out_e[0], &solution, coord_handle.clone());
-            let mux_ctrl = arm_ctrl_rx[node.0 as usize].take().expect("muxer ctrl rx");
-            let input_count = in_rxs.len();
-            let input_qos: Vec<QosSlot> = in_rxs.iter().map(LinkReceiver::qos_slot).collect();
-            let pad_rxs: Vec<(usize, LinkReceiver)> = pads.into_iter().zip(in_rxs).collect();
-            let mux_probe = probes[node.0 as usize].clone();
-            let mux_ticker = ticker.clone();
-            let mux_control = controllers[node.0 as usize].take();
-            let mux_properties = live
-                .as_ref()
-                .and_then(|t| t.nodes[node.0 as usize].properties.clone());
-            let mux_pad_adds = live
-                .as_mut()
-                .and_then(|t| t.pad_adds[node.0 as usize].take());
-            let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
-                alloc::boxed::Box::new(move || -> LocalArmFuture {
+    for PlannedArm { kind, name, plan } in planned {
+        let mux_ticker = ticker.clone();
+        let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
+            alloc::boxed::Box::new(move || -> LocalArmFuture {
+                plan.drive(|mux, parts| {
                     mux.drive_muxer_arm_owned_tick(MuxerArmOwnedTickIo {
-                        parts: MuxerArmParts {
-                            pad_rxs,
-                            input_qos,
-                            out_tx,
-                            input_count,
-                            current_output: mux_out_caps,
-                            beta,
-                            arm_rx: mux_ctrl,
-                            probe: mux_probe,
-                            control: mux_control,
-                            properties: mux_properties,
-                            pad_adds: mux_pad_adds,
-                        },
+                        parts,
                         ticker: mux_ticker,
                     })
-                });
-            handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
-            arm_kinds.push(kind);
-            arm_names.push(names[node.0 as usize].clone());
-            continue;
-        }
-
-        let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> = match kind {
-            NodeKind::Source => {
-                let Some(GraphNodeRef::Source(src)) = element else {
-                    return Err(G2gError::CapsMismatch);
-                };
-                let out_tx = out_txs.pop().expect("source output edge");
-                let bus_c = bus.cloned();
-                let prog_c = progress.cloned();
-                // See the cooperative path: a mutable run keeps the source
-                // reachable so a replace can hand it back (M1149).
-                let done = live.as_mut().map(|topology| {
-                    let (done_tx, done_rx) = bounded(1);
-                    topology.nodes[node.0 as usize].done = Some(Handback::Source(done_rx));
-                    done_tx
-                });
-                alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    match done {
-                        Some(done) => {
-                            let io = SourceArmIo {
-                                out_tx,
-                                bus: bus_c,
-                                progress: prog_c,
-                                segment: Segment::new(),
-                            };
-                            Box::pin(lent_source_arm(src, io, done))
-                        }
-                        None => Box::pin(source_arm(src, out_tx, bus_c, prog_c)),
-                    }
                 })
-            }
-            NodeKind::Transform => {
-                let Some(GraphNodeRef::Element(elem)) = element else {
-                    return Err(G2gError::CapsMismatch);
-                };
-                let in_rx = in_rxs.pop().expect("transform input edge");
-                let out_tx = out_txs.pop().expect("transform output edge");
-                let out_edge = out_e[0];
-                let arm_rx = arm_ctrl_rx[node.0 as usize]
-                    .take()
-                    .expect("transform ctrl rx");
-                let out_caps = solution[out_edge].clone();
-                let downstream_feasible = feasibility[out_edge].clone();
-                let bm = branch_mode(&vg, node);
-                let bus_c = bus.cloned();
-                let probe = probes[node.0 as usize].clone();
-                let ch = coord_handle.clone();
-                let control = controllers[node.0 as usize].take();
-                let properties = live
-                    .as_ref()
-                    .and_then(|t| t.nodes[node.0 as usize].properties.clone());
-                let done = live.as_mut().map(|topology| {
-                    let (done_tx, done_rx) = bounded(1);
-                    topology.nodes[node.0 as usize].done = Some(Handback::Element(done_rx));
-                    done_tx
-                });
-                alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    let io = TransformArmIo {
-                        in_rx,
-                        out_tx,
-                        arm_rx,
-                        coord: ch,
-                        node,
-                        out_caps,
-                        downstream_feasible,
-                        mode: bm,
-                        bus: bus_c,
-                        probe,
-                        control,
-                        properties,
-                    };
-                    // See the cooperative path: a mutable run keeps the element
-                    // reachable so a remove can hand it back.
-                    match done {
-                        Some(done) => Box::pin(spliced_arm(elem, io, done)),
-                        None => elem.drive_transform_arm(io),
-                    }
-                })
-            }
-            NodeKind::Sink => {
-                let Some(GraphNodeRef::Element(elem)) = element else {
-                    return Err(G2gError::CapsMismatch);
-                };
-                let in_rx = in_rxs.pop().expect("sink input edge");
-                advertise_orientation(&in_rx, elem.absorbs_orientation());
-                let bm = branch_mode(&vg, node);
-                let bus_c = bus.cloned();
-                let state_c = state.clone();
-                let prog_c = progress.cloned();
-                let probe = probes[node.0 as usize].clone();
-                let ch = coord_handle.clone();
-                let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("sink ctrl rx");
-                let control = controllers[node.0 as usize].take();
-                let properties = live
-                    .as_ref()
-                    .and_then(|t| t.nodes[node.0 as usize].properties.clone());
-                let done = live.as_mut().map(|topology| {
-                    let (done_tx, done_rx) = bounded(1);
-                    topology.nodes[node.0 as usize].done = Some(Handback::Element(done_rx));
-                    done_tx
-                });
-                alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    let io = SinkArmIo {
-                        in_rx,
-                        arm_rx,
-                        coord: ch,
-                        node,
-                        mode: bm,
-                        bus: bus_c,
-                        state: state_c,
-                        progress: prog_c,
-                        probe,
-                        control,
-                        properties,
-                    };
-                    match done {
-                        Some(done) => Box::pin(lent_sink_arm(elem, io, done)),
-                        None => elem.drive_sink_arm(io),
-                    }
-                })
-            }
-            NodeKind::Tee(_) => {
-                let in_rx = in_rxs.pop().expect("tee input edge");
-                let branch_drop = vg.fanout_policy(node) == FanOutPolicy::AllowBranchDrop;
-                match element {
-                    Some(GraphNodeRef::Demux(demux)) => {
-                        let demux_probe = probes[node.0 as usize].clone();
-                        let out_txs = demux_out_txs_by_port(&vg, node, out_txs);
-                        let latency = LatencyFold::publisher(&latency_fold, node);
-                        alloc::boxed::Box::new(move || -> LocalArmFuture {
-                            demux.drive_demux_arm(DemuxArmIo {
-                                in_rx,
-                                out_txs,
-                                probe: demux_probe,
-                                latency,
-                            })
-                        })
-                    }
-                    _ => {
-                        let adds = live
-                            .as_mut()
-                            .and_then(|t| t.branch_adds[node.0 as usize].take());
-                        alloc::boxed::Box::new(move || -> LocalArmFuture {
-                            Box::pin(tee_arm(in_rx, out_txs, branch_drop, adds))
-                        })
-                    }
-                }
-            }
-            NodeKind::FaninSink(_) => {
-                let Some(GraphNodeRef::Muxer(session)) = element else {
-                    return Err(G2gError::CapsMismatch);
-                };
-                let (pad_rxs, reverse) = fanin_sink_pads(&vg, node, in_rxs, &*session);
-                let probe = probes[node.0 as usize].clone();
-                alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    session.drive_fanin_sink_arm(FaninSinkArmIo {
-                        pad_rxs,
-                        reverse,
-                        probe,
-                    })
-                })
-            }
-            NodeKind::FanoutSrc(_) => {
-                let Some(GraphNodeRef::FanoutSource(source)) = element else {
-                    return Err(G2gError::CapsMismatch);
-                };
-                let sinks = fanout_src_ports(&vg, node, out_txs);
-                alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(fanout_src_arm(source, sinks))
-                })
-            }
-            NodeKind::Muxer(_) => unreachable!("muxer handled above"),
-        };
+            });
         handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
         arm_kinds.push(kind);
-        arm_names.push(names[node.0 as usize].clone());
+        arm_names.push(name);
     }
 
     // Drop the template handle so the coordinator ends once every arm's clone
@@ -4215,24 +4131,6 @@ pub(crate) struct SourceArmIo {
     /// for the source a run starts with; a replacement gets one whose `base`
     /// continues the running time its predecessor reached.
     pub(crate) segment: Segment,
-}
-
-async fn source_arm<'a>(
-    mut src: Box<dyn DynSourceLoop + 'a>,
-    out_tx: LinkSender,
-    bus: Option<BusHandle>,
-    progress: Option<PipelineProgress>,
-) -> Result<u64, G2gError> {
-    run_source(
-        &mut *src,
-        SourceArmIo {
-            out_tx,
-            bus,
-            progress,
-            segment: Segment::new(),
-        },
-    )
-    .await
 }
 
 pub(crate) async fn run_source(
