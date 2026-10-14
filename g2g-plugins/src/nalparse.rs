@@ -295,7 +295,9 @@ impl<C: NalCodec> NalParse<C> {
         let access_units = if is_annexb {
             self.framer.push(bytes, frame.timing, C::unit_role)
         } else {
-            let annexb = crate::annexb::avcc_to_annexb(bytes);
+            let annexb =
+                crate::annexb::length_prefixed_to_annexb(bytes, crate::annexb::AVCC_LENGTH_SIZE)
+                    .ok_or(G2gError::CapsMismatch)?;
             self.framer.push(&annexb, frame.timing, C::unit_role)
         };
         for (au, timing) in access_units {

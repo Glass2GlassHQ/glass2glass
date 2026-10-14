@@ -58,7 +58,7 @@ use g2g_core::{
     RawVideoFormat, VideoCodec,
 };
 
-use crate::annexb::{au_is_keyframe, avcc_to_annexb};
+use crate::annexb::{au_is_keyframe, length_prefixed_to_annexb, AVCC_LENGTH_SIZE};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -582,7 +582,7 @@ unsafe fn sample_to_annexb(
     // SAFETY: VideoToolbox guarantees `total_len` bytes at `data_ptr` for the
     // contiguous block (the encoder output is a single contiguous block).
     let avcc = unsafe { core::slice::from_raw_parts(data_ptr as *const u8, total_len) };
-    let mut annexb = avcc_to_annexb(avcc);
+    let mut annexb = length_prefixed_to_annexb(avcc, AVCC_LENGTH_SIZE).ok_or_else(hw)?;
 
     // SAFETY: `sample` is valid, and `sample_pts` only reads its timestamp.
     let pts_ns = cmtime_to_ns(unsafe { sample_pts(sample) });

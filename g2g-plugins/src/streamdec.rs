@@ -54,6 +54,7 @@
 
 use alloc::vec::Vec;
 
+use crate::annexb::{length_prefixed_to_annexb, parse_avcc, parse_hvcc, prepend_param_sets};
 use crate::vulkanvideo::{
     extract_av1_sequence_header, extract_h264_parameter_sets, extract_h265_parameter_sets,
     to_std_av1_seq_header, to_std_h265_params, Av1DecodeSession, Av1DpbDecoder, Av1SequenceHeader,
@@ -170,7 +171,7 @@ pub struct VulkanStreamDecoder {
     // form (length-prefixed NALs, AVCC), reframed to Annex-B before decode. `None`
     // for a raw Annex-B / OBU elementary stream ([`Self::new`] / [`Self::new_gpu`]),
     // where samples pass through untouched. Ignored for AV1 (OBU, never reframed).
-    nal_length_size: Option<u8>,
+    nal_length_size: Option<usize>,
     // Drop last: the decoder + session (in `inner`) destroy Vulkan objects that
     // live on this device, so the VkDevice must outlive them. The device also
     // owns the wgpu device/queue a GPU-mode texture is bound to, so it must
@@ -398,14 +399,16 @@ impl VulkanStreamDecoder {
     ) -> Result<Self, VulkanVideoError> {
         let (codec, init, nal_length_size) = match config {
             CodecConfig::Avcc(b) => {
-                let (params, n) =
-                    parse_avcc_config(b).ok_or(VulkanVideoError::UnsupportedStream)?;
-                (VideoCodec::H264, params, Some(n))
+                let record = parse_avcc(b).map_err(|_| VulkanVideoError::UnsupportedStream)?;
+                let params =
+                    prepend_param_sets(&[], &record.parameter_sets, g2g_core::VideoCodec::H264);
+                (VideoCodec::H264, params, Some(record.nal_length_size))
             }
             CodecConfig::Hvcc(b) => {
-                let (params, n) =
-                    parse_hvcc_config(b).ok_or(VulkanVideoError::UnsupportedStream)?;
-                (VideoCodec::H265, params, Some(n))
+                let record = parse_hvcc(b).map_err(|_| VulkanVideoError::UnsupportedStream)?;
+                let params =
+                    prepend_param_sets(&[], &record.parameter_sets, g2g_core::VideoCodec::H265);
+                (VideoCodec::H265, params, Some(record.nal_length_size))
             }
             CodecConfig::Av1c(b) => {
                 let params = parse_av1c_config(b).ok_or(VulkanVideoError::UnsupportedStream)?;
@@ -443,7 +446,7 @@ impl VulkanStreamDecoder {
         if self.gpu_mode {
             return Err(VulkanVideoError::WrongOutputMode);
         }
-        let reframed = self.reframe(data);
+        let reframed = self.reframe(data)?;
         let input = reframed.as_deref().unwrap_or(data);
         let nv12 = match &mut self.inner {
             Inner::H264 { decoder, .. } => decoder.decode_all(input)?,
@@ -468,7 +471,7 @@ impl VulkanStreamDecoder {
         if self.gpu_mode {
             return Err(VulkanVideoError::WrongOutputMode);
         }
-        let reframed = self.reframe(data);
+        let reframed = self.reframe(data)?;
         let input = reframed.as_deref().unwrap_or(data);
         // Only the retired frames are needed here; the submitted-picture count is
         // for callers that pair a per-picture side channel (see the element).
@@ -525,7 +528,7 @@ impl VulkanStreamDecoder {
         if !self.gpu_mode {
             return Err(VulkanVideoError::WrongOutputMode);
         }
-        let reframed = self.reframe(data);
+        let reframed = self.reframe(data)?;
         let input = reframed.as_deref().unwrap_or(data);
         let textures = match &mut self.inner {
             Inner::H264 { decoder, .. } => decoder.decode_all_to_textures(input)?,
@@ -568,9 +571,13 @@ impl VulkanStreamDecoder {
     /// container's stored form, which is length-prefixed by definition. Do not try
     /// to sniff Annex-B here, a 4-byte NAL length in 256..=511 is `00 00 01 xx`,
     /// which looks exactly like an Annex-B start code and would be mis-detected.
-    fn reframe(&self, sample: &[u8]) -> Option<Vec<u8>> {
-        let n = self.nal_length_size?;
-        Some(reframe_length_prefixed(sample, n))
+    fn reframe(&self, sample: &[u8]) -> Result<Option<Vec<u8>>, VulkanVideoError> {
+        let Some(n) = self.nal_length_size else {
+            return Ok(None);
+        };
+        length_prefixed_to_annexb(sample, n)
+            .map(Some)
+            .ok_or(VulkanVideoError::UnsupportedStream)
     }
 
     /// Reset the decoder for a backward seek or large forward jump: the DPB
@@ -605,95 +612,6 @@ fn nv12_to_i420(nv12: Nv12Frame) -> Vec<u8> {
         *v = pair[1];
     }
     i420
-}
-
-/// Append `nal` to `out` in Annex-B framing (4-byte start code + NAL).
-fn push_annexb(out: &mut Vec<u8>, nal: &[u8]) {
-    out.extend_from_slice(&[0, 0, 0, 1]);
-    out.extend_from_slice(nal);
-}
-
-/// Reframe a length-prefixed (AVCC) sample to Annex-B: each NAL is preceded by an
-/// `nal_length_size`-byte big-endian length; rewrite those as start codes. Bounds
-/// checked, so a truncated final length/NAL stops the walk rather than panicking
-/// (container samples are attacker-controlled).
-fn reframe_length_prefixed(sample: &[u8], nal_length_size: u8) -> Vec<u8> {
-    let n = nal_length_size as usize;
-    let mut out = Vec::with_capacity(sample.len() + 16);
-    let mut at = 0usize;
-    while at + n <= sample.len() {
-        let mut len = 0usize;
-        for &b in &sample[at..at + n] {
-            len = (len << 8) | b as usize;
-        }
-        at += n;
-        let end = match at.checked_add(len) {
-            Some(e) if e <= sample.len() => e,
-            _ => break,
-        };
-        push_annexb(&mut out, &sample[at..end]);
-        at = end;
-    }
-    out
-}
-
-/// Parse an `avcC` (AVCDecoderConfigurationRecord) body into (Annex-B SPS+PPS
-/// blob, NAL length size). Layout: [0] version, [1..4] profile/compat/level, [4]
-/// `111111` + `lengthSizeMinusOne` (2 bits), [5] `111` + `numSPS` (5 bits), then
-/// each SPS as u16 length + NAL, then [.] numPPS, then each PPS as u16 length +
-/// NAL. Every offset is bounds checked; returns `None` on malformed input or no
-/// parameter set (so the caller falls back rather than mis-decoding).
-fn parse_avcc_config(avcc: &[u8]) -> Option<(Vec<u8>, u8)> {
-    let nal_length_size = (avcc.get(4)? & 0x03) + 1;
-    let num_sps = avcc.get(5)? & 0x1F;
-    let mut at = 6usize;
-    let mut out = Vec::new();
-    at = read_param_nals(avcc, at, num_sps as usize, &mut out)?;
-    let num_pps = *avcc.get(at)?;
-    at += 1;
-    read_param_nals(avcc, at, num_pps as usize, &mut out)?;
-    if out.is_empty() {
-        return None;
-    }
-    Some((out, nal_length_size))
-}
-
-/// Read `count` u16-length-prefixed NALs starting at `at`, appending each in
-/// Annex-B framing to `out`. Returns the offset past the last NAL, or `None` on a
-/// truncated length/NAL. Shared by the `avcC` SPS and PPS arrays.
-fn read_param_nals(buf: &[u8], mut at: usize, count: usize, out: &mut Vec<u8>) -> Option<usize> {
-    for _ in 0..count {
-        let len = u16::from_be_bytes(buf.get(at..at + 2)?.try_into().ok()?) as usize;
-        at += 2;
-        let nal = buf.get(at..at.checked_add(len)?)?;
-        push_annexb(out, nal);
-        at += len;
-    }
-    Some(at)
-}
-
-/// Parse an `hvcC` (HEVCDecoderConfigurationRecord) body into (Annex-B VPS+SPS+PPS
-/// blob, NAL length size). Fixed 22-byte prefix (version + 12-byte general PTL +
-/// descriptive fields; [21] low 2 bits = `lengthSizeMinusOne`), then [22]
-/// `numOfArrays`, then per-array: a type byte, a u16 NAL count, and that many
-/// u16-length-prefixed NALs. Bounds checked; `None` on malformed input or no
-/// parameter set.
-fn parse_hvcc_config(hvcc: &[u8]) -> Option<(Vec<u8>, u8)> {
-    let nal_length_size = (hvcc.get(21)? & 0x03) + 1;
-    let num_arrays = *hvcc.get(22)?;
-    let mut at = 23usize;
-    let mut out = Vec::new();
-    for _ in 0..num_arrays {
-        // array header byte: array_completeness | reserved | NAL_unit_type.
-        at += 1;
-        let num_nalus = u16::from_be_bytes(hvcc.get(at..at + 2)?.try_into().ok()?) as usize;
-        at += 2;
-        at = read_param_nals(hvcc, at, num_nalus, &mut out)?;
-    }
-    if out.is_empty() {
-        return None;
-    }
-    Some((out, nal_length_size))
 }
 
 /// Parse an `av1C` (AV1CodecConfigurationRecord) body into its config OBUs (the
@@ -761,105 +679,6 @@ fn av1_colorimetry(seq: &Av1SequenceHeader) -> (VideoColorRange, VideoMatrixCoef
 mod tests {
     use super::*;
     use alloc::vec;
-
-    /// Build an `avcC` body from raw SPS/PPS NALs with the given length size.
-    fn build_avcc(sps: &[&[u8]], pps: &[&[u8]], nal_length_size: u8) -> Vec<u8> {
-        let mut v = vec![1u8, 0x42, 0x00, 0x1e]; // version + profile/compat/level
-        v.push(0xFC | (nal_length_size - 1)); // 111111 + lengthSizeMinusOne
-        v.push(0xE0 | (sps.len() as u8 & 0x1F)); // 111 + numSPS
-        for s in sps {
-            v.extend_from_slice(&(s.len() as u16).to_be_bytes());
-            v.extend_from_slice(s);
-        }
-        v.push(pps.len() as u8);
-        for p in pps {
-            v.extend_from_slice(&(p.len() as u16).to_be_bytes());
-            v.extend_from_slice(p);
-        }
-        v
-    }
-
-    #[test]
-    fn reframe_avcc_sample_to_annexb() {
-        // Two length-prefixed NALs (4-byte size) -> two start-code NALs.
-        let mut sample = Vec::new();
-        sample.extend_from_slice(&3u32.to_be_bytes());
-        sample.extend_from_slice(&[0x65, 0x01, 0x02]);
-        sample.extend_from_slice(&2u32.to_be_bytes());
-        sample.extend_from_slice(&[0x41, 0x03]);
-        let out = reframe_length_prefixed(&sample, 4);
-        assert_eq!(
-            out,
-            vec![0, 0, 0, 1, 0x65, 0x01, 0x02, 0, 0, 0, 1, 0x41, 0x03]
-        );
-
-        // 2-byte length size is honoured.
-        let mut s2 = Vec::new();
-        s2.extend_from_slice(&2u16.to_be_bytes());
-        s2.extend_from_slice(&[0x65, 0x09]);
-        assert_eq!(
-            reframe_length_prefixed(&s2, 2),
-            vec![0, 0, 0, 1, 0x65, 0x09]
-        );
-    }
-
-    #[test]
-    fn reframe_stops_on_truncated_length() {
-        // A declared length longer than the buffer stops the walk (no panic), so a
-        // first valid NAL is still recovered before the truncated tail.
-        let mut sample = Vec::new();
-        sample.extend_from_slice(&2u32.to_be_bytes());
-        sample.extend_from_slice(&[0x65, 0x01]);
-        sample.extend_from_slice(&99u32.to_be_bytes()); // bogus length
-        sample.extend_from_slice(&[0x00]);
-        let out = reframe_length_prefixed(&sample, 4);
-        assert_eq!(out, vec![0, 0, 0, 1, 0x65, 0x01]);
-    }
-
-    #[test]
-    fn parse_avcc_extracts_params_and_length_size() {
-        let sps: &[u8] = &[0x67, 0x64, 0x00];
-        let pps: &[u8] = &[0x68, 0xee, 0x3c];
-        let avcc = build_avcc(&[sps], &[pps], 4);
-        let (blob, n) = parse_avcc_config(&avcc).expect("valid avcC");
-        assert_eq!(n, 4);
-        let mut want = Vec::new();
-        push_annexb(&mut want, sps);
-        push_annexb(&mut want, pps);
-        assert_eq!(blob, want);
-
-        // lengthSizeMinusOne == 1 -> 2-byte prefixes.
-        let avcc2 = build_avcc(&[sps], &[pps], 2);
-        assert_eq!(parse_avcc_config(&avcc2).unwrap().1, 2);
-
-        // Truncated record -> None (fall back, don't mis-decode).
-        assert!(parse_avcc_config(&avcc[..7]).is_none());
-    }
-
-    #[test]
-    fn parse_hvcc_extracts_all_arrays_in_order() {
-        let vps: &[u8] = &[0x40, 0x01, 0x0c];
-        let sps: &[u8] = &[0x42, 0x01, 0x01];
-        let pps: &[u8] = &[0x44, 0x01];
-        let mut hvcc = vec![0u8; 22]; // fixed prefix, indices 0..=21
-        hvcc[0] = 1;
-        hvcc[21] = 0xFC | 3; // lengthSizeMinusOne = 3 -> size 4
-        hvcc.push(3); // numArrays
-        for (ty, nal) in [(0x20u8, vps), (0x21, sps), (0x22, pps)] {
-            hvcc.push(ty);
-            hvcc.extend_from_slice(&1u16.to_be_bytes()); // one NAL
-            hvcc.extend_from_slice(&(nal.len() as u16).to_be_bytes());
-            hvcc.extend_from_slice(nal);
-        }
-        let (blob, n) = parse_hvcc_config(&hvcc).expect("valid hvcC");
-        assert_eq!(n, 4);
-        let mut want = Vec::new();
-        push_annexb(&mut want, vps);
-        push_annexb(&mut want, sps);
-        push_annexb(&mut want, pps);
-        assert_eq!(blob, want);
-        assert!(parse_hvcc_config(&hvcc[..24]).is_none());
-    }
 
     #[test]
     fn parse_av1c_extracts_config_obus() {

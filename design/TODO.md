@@ -85,7 +85,7 @@ Codecs and parsers:
 - `vulkanvideo` `submit_idr_decode_into` creates a bitstream buffer per call.
 - h265parse and vulkanvideo walk the H.265 SPS middle (sub-layer ordering to
   long-term refs) separately.
-- One length-prefixed to Annex-B converter and one avcC/hvcC parser.
+- The reframing path copies AVCC input twice (convert, then append to the framer).
 - ffmpegaacenc and ffmpegaudiodec use the aacparse ADTS helpers.
 
 Raw video and GPU:

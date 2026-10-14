@@ -280,125 +280,128 @@ pub(crate) fn to_avcc<F: Fn(&[u8]) -> bool>(au: &[u8], keep: F) -> Vec<u8> {
     out
 }
 
-/// Convert AVCC (4-byte length-prefixed NALs) to Annex-B, each NAL preceded by a
-/// 4-byte start code. The inverse of [`to_avcc`]: VideoToolbox's H.264 *encoder*
-/// emits length-prefixed NALs, but the g2g pipeline is Annex-B framed
-/// (downstream H.264 elements assume start codes), so the encoder converts on the
-/// way out. Each NAL gets a 4-byte start code (`00 00 00 01`); the parameter sets
-/// are prepended separately on keyframes (they live in the format description,
-/// not the sample).
-pub(crate) fn avcc_to_annexb(avcc: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(avcc.len() + 16);
-    for nal in avcc_nal_units(avcc) {
-        out.extend_from_slice(&[0, 0, 0, 1]);
-        out.extend_from_slice(nal);
-    }
-    out
-}
+/// The NAL length-prefix width of AVCC samples whose container declares none
+/// (`lengthSizeMinusOne = 3`, what `retina`, AVI writers and VideoToolbox emit).
+pub(crate) const AVCC_LENGTH_SIZE: usize = 4;
 
-/// [`avcc_to_annexb`] with an explicit prefix width and whole-buffer validation:
-/// `None` unless the length walk consumes `data` exactly (a truncated length, a
-/// zero-length NAL, or trailing bytes fail), so a caller can fall back to
-/// forwarding the original bytes instead of emitting a mis-framed stream. The
-/// lengths come from the container, so they are validated, not trusted.
-pub(crate) fn checked_length_prefixed_to_annexb(data: &[u8], len_size: usize) -> Option<Vec<u8>> {
-    if !(1..=4).contains(&len_size) || data.is_empty() {
+/// Rewrite length-prefixed NALs (`len_size`-byte big-endian lengths, 1..=4) as
+/// Annex-B, each NAL behind a 4-byte start code. The lengths come from the
+/// container, so `None` unless they walk `data` exactly with no empty NAL: a
+/// mis-framed sample is refused rather than truncated.
+pub(crate) fn length_prefixed_to_annexb(data: &[u8], len_size: usize) -> Option<Vec<u8>> {
+    if !(1..=4).contains(&len_size) {
         return None;
     }
-    let mut out = Vec::with_capacity(data.len() + 8);
-    let mut i = 0usize;
-    while i < data.len() {
-        let prefix = data.get(i..i.checked_add(len_size)?)?;
-        let mut len = 0usize;
-        for &b in prefix {
-            len = (len << 8) | b as usize;
-        }
-        i = i.checked_add(len_size)?;
-        let nal = data.get(i..i.checked_add(len)?)?;
+    let mut out = Vec::with_capacity(data.len() + ANNEX_B_START_CODE.len());
+    let mut consumed = 0usize;
+    for nal in length_prefixed_nal_units(data, len_size) {
         if nal.is_empty() {
             return None;
         }
-        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(&ANNEX_B_START_CODE);
         out.extend_from_slice(nal);
-        i += len;
+        consumed += len_size + nal.len();
     }
-    Some(out)
+    (consumed == data.len()).then_some(out)
 }
 
-/// Parameter-set NALUs out of an `hvcC` payload, in array order (VPS, SPS,
-/// PPS). Fixed 22-byte prefix (config version + 12-byte general PTL +
-/// descriptive fields), then `numOfArrays`, then per-array NAL lists.
-pub(crate) fn parse_hvcc(hvcc: &[u8]) -> Result<Vec<Vec<u8>>, G2gError> {
-    let num_arrays = *hvcc.get(22).ok_or(G2gError::CapsMismatch)?;
-    let mut at = 23usize;
-    let mut sets = Vec::new();
+/// What an `avcC` / `hvcC` decoder configuration record carries: every
+/// parameter set, in record order, and the NAL length-prefix width its samples
+/// use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DecoderConfigRecord {
+    pub parameter_sets: Vec<Vec<u8>>,
+    pub nal_length_size: usize,
+}
+
+/// `lengthSizeMinusOne` sits in the low 2 bits of this byte of an `avcC`.
+const AVCC_LENGTH_SIZE_BYTE: usize = 4;
+/// `numOfSequenceParameterSets` sits in the low 5 bits of this byte of an `avcC`.
+const AVCC_SPS_COUNT_BYTE: usize = 5;
+/// `lengthSizeMinusOne` sits in the low 2 bits of this byte of an `hvcC`.
+const HVCC_LENGTH_SIZE_BYTE: usize = 21;
+/// `numOfArrays` follows the fixed `hvcC` prefix (version, 12-byte general PTL,
+/// descriptive fields).
+const HVCC_ARRAY_COUNT_BYTE: usize = 22;
+
+fn record_nal_length_size(byte: u8) -> usize {
+    usize::from(byte & 0x03) + 1
+}
+
+/// Read `count` u16-length-prefixed NALs at `*at` into `sets`, advancing `*at`.
+fn read_record_nals(
+    record: &[u8],
+    at: &mut usize,
+    count: usize,
+    sets: &mut Vec<Vec<u8>>,
+) -> Result<(), G2gError> {
+    for _ in 0..count {
+        let length_bytes = record
+            .get(*at..at.saturating_add(2))
+            .ok_or(G2gError::CapsMismatch)?;
+        let len = usize::from(u16::from_be_bytes([length_bytes[0], length_bytes[1]]));
+        *at += 2;
+        let nal = record
+            .get(*at..at.saturating_add(len))
+            .ok_or(G2gError::CapsMismatch)?;
+        sets.push(nal.to_vec());
+        *at += len;
+    }
+    Ok(())
+}
+
+/// Parse an `avcC` (AVCDecoderConfigurationRecord): every SPS then every PPS.
+/// Fails on truncation or a record with no SPS or no PPS.
+pub(crate) fn parse_avcc(avcc: &[u8]) -> Result<DecoderConfigRecord, G2gError> {
+    let length_byte = *avcc
+        .get(AVCC_LENGTH_SIZE_BYTE)
+        .ok_or(G2gError::CapsMismatch)?;
+    let sps_count = usize::from(
+        avcc.get(AVCC_SPS_COUNT_BYTE)
+            .ok_or(G2gError::CapsMismatch)?
+            & 0x1F,
+    );
+    let mut at = AVCC_SPS_COUNT_BYTE + 1;
+    let mut parameter_sets = Vec::new();
+    read_record_nals(avcc, &mut at, sps_count, &mut parameter_sets)?;
+    let pps_count = usize::from(*avcc.get(at).ok_or(G2gError::CapsMismatch)?);
+    at += 1;
+    read_record_nals(avcc, &mut at, pps_count, &mut parameter_sets)?;
+    if sps_count == 0 || pps_count == 0 {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(DecoderConfigRecord {
+        parameter_sets,
+        nal_length_size: record_nal_length_size(length_byte),
+    })
+}
+
+/// Parse an `hvcC` (HEVCDecoderConfigurationRecord): every NAL of every array,
+/// in array order (VPS, SPS, PPS). Fails on truncation or an empty record.
+pub(crate) fn parse_hvcc(hvcc: &[u8]) -> Result<DecoderConfigRecord, G2gError> {
+    let length_byte = *hvcc
+        .get(HVCC_LENGTH_SIZE_BYTE)
+        .ok_or(G2gError::CapsMismatch)?;
+    let num_arrays = *hvcc
+        .get(HVCC_ARRAY_COUNT_BYTE)
+        .ok_or(G2gError::CapsMismatch)?;
+    let mut at = HVCC_ARRAY_COUNT_BYTE + 1;
+    let mut parameter_sets = Vec::new();
     for _ in 0..num_arrays {
         // array header byte: array_completeness | reserved | NAL_unit_type.
         at += 1;
-        let num_nalus = u16::from_be_bytes(
-            hvcc.get(at..at + 2)
-                .ok_or(G2gError::CapsMismatch)?
-                .try_into()
-                .expect("2 bytes"),
-        );
+        let count_bytes = hvcc.get(at..at + 2).ok_or(G2gError::CapsMismatch)?;
+        let num_nalus = usize::from(u16::from_be_bytes([count_bytes[0], count_bytes[1]]));
         at += 2;
-        for _ in 0..num_nalus {
-            let len = u16::from_be_bytes(
-                hvcc.get(at..at + 2)
-                    .ok_or(G2gError::CapsMismatch)?
-                    .try_into()
-                    .expect("2 bytes"),
-            ) as usize;
-            at += 2;
-            let nalu = hvcc.get(at..at + len).ok_or(G2gError::CapsMismatch)?;
-            sets.push(nalu.to_vec());
-            at += len;
-        }
+        read_record_nals(hvcc, &mut at, num_nalus, &mut parameter_sets)?;
     }
-    if sets.is_empty() {
+    if parameter_sets.is_empty() {
         return Err(G2gError::CapsMismatch);
     }
-    Ok(sets)
-}
-
-/// First SPS and PPS out of an `avcC` payload.
-pub(crate) fn parse_avcc(avcc: &[u8]) -> Result<(Vec<u8>, Vec<u8>), G2gError> {
-    // 5 fixed bytes, then SPS count (low 5 bits).
-    let sps_count = avcc
-        .get(5)
-        .map(|b| b & 0x1F)
-        .ok_or(G2gError::CapsMismatch)?;
-    if sps_count == 0 {
-        return Err(G2gError::CapsMismatch);
-    }
-    let sps_len = u16::from_be_bytes(
-        avcc.get(6..8)
-            .ok_or(G2gError::CapsMismatch)?
-            .try_into()
-            .expect("2 bytes"),
-    ) as usize;
-    let sps = avcc
-        .get(8..8 + sps_len)
-        .ok_or(G2gError::CapsMismatch)?
-        .to_vec();
-    let mut at = 8 + sps_len;
-    let pps_count = *avcc.get(at).ok_or(G2gError::CapsMismatch)?;
-    if pps_count == 0 {
-        return Err(G2gError::CapsMismatch);
-    }
-    at += 1;
-    let pps_len = u16::from_be_bytes(
-        avcc.get(at..at + 2)
-            .ok_or(G2gError::CapsMismatch)?
-            .try_into()
-            .expect("2 bytes"),
-    ) as usize;
-    at += 2;
-    let pps = avcc
-        .get(at..at + pps_len)
-        .ok_or(G2gError::CapsMismatch)?
-        .to_vec();
-    Ok((sps, pps))
+    Ok(DecoderConfigRecord {
+        parameter_sets,
+        nal_length_size: record_nal_length_size(length_byte),
+    })
 }
 
 /// Whether the access unit already opens with a parameter-set NAL (so the
@@ -843,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn avcc_to_annexb_prefixes_each_nal_with_a_start_code() {
+    fn length_prefixed_to_annexb_prefixes_each_nal_with_a_start_code() {
         let sps: &[u8] = &[0x67, 0x42, 0xC0, 0x1E];
         let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21, 0x0A];
         let mut avcc = Vec::new();
@@ -852,7 +855,7 @@ mod tests {
         avcc.extend_from_slice(&(idr.len() as u32).to_be_bytes());
         avcc.extend_from_slice(idr);
 
-        let annexb = avcc_to_annexb(&avcc);
+        let annexb = length_prefixed_to_annexb(&avcc, AVCC_LENGTH_SIZE).expect("valid walk");
         assert!(is_annex_b(&annexb), "output is Annex-B framed");
         let nals: Vec<&[u8]> = nal_units(&annexb).collect();
         assert_eq!(nals, vec![sps, idr], "the same NALs, now start-code framed");
@@ -901,8 +904,65 @@ mod tests {
         }
     }
 
+    /// Build an `avcC` body from raw SPS/PPS NALs with the given length size.
+    fn build_avcc(sps: &[&[u8]], pps: &[&[u8]], nal_length_size: u8) -> Vec<u8> {
+        let mut v = vec![1u8, 0x42, 0x00, 0x1e]; // version + profile/compat/level
+        v.push(0xFC | (nal_length_size - 1)); // 111111 + lengthSizeMinusOne
+        v.push(0xE0 | (sps.len() as u8 & 0x1F)); // 111 + numSPS
+        for s in sps {
+            v.extend_from_slice(&(s.len() as u16).to_be_bytes());
+            v.extend_from_slice(s);
+        }
+        v.push(pps.len() as u8);
+        for p in pps {
+            v.extend_from_slice(&(p.len() as u16).to_be_bytes());
+            v.extend_from_slice(p);
+        }
+        v
+    }
+
     #[test]
-    fn checked_length_prefixed_conversion_validates_the_whole_buffer() {
+    fn parse_avcc_keeps_every_parameter_set_and_the_length_size() {
+        let sps: &[u8] = &[0x67, 0x64, 0x00];
+        let second_sps: &[u8] = &[0x67, 0x64, 0x01];
+        let pps: &[u8] = &[0x68, 0xee, 0x3c];
+        let avcc = build_avcc(&[sps, second_sps], &[pps], 4);
+        let record = parse_avcc(&avcc).expect("valid avcC");
+        assert_eq!(record.nal_length_size, 4);
+        assert_eq!(record.parameter_sets, vec![sps, second_sps, pps]);
+
+        // lengthSizeMinusOne == 1 -> 2-byte prefixes.
+        let avcc2 = build_avcc(&[sps], &[pps], 2);
+        assert_eq!(parse_avcc(&avcc2).unwrap().nal_length_size, 2);
+
+        // Truncated record, or one without a PPS, fails.
+        assert!(parse_avcc(&avcc[..7]).is_err());
+        assert!(parse_avcc(&build_avcc(&[sps], &[], 4)).is_err());
+    }
+
+    #[test]
+    fn parse_hvcc_keeps_every_array_in_order() {
+        let vps: &[u8] = &[0x40, 0x01, 0x0c];
+        let sps: &[u8] = &[0x42, 0x01, 0x01];
+        let pps: &[u8] = &[0x44, 0x01];
+        let mut hvcc = vec![0u8; HVCC_ARRAY_COUNT_BYTE];
+        hvcc[0] = 1;
+        hvcc[HVCC_LENGTH_SIZE_BYTE] = 0xFC | 3; // lengthSizeMinusOne = 3 -> size 4
+        hvcc.push(3); // numArrays
+        for (ty, nal) in [(0x20u8, vps), (0x21, sps), (0x22, pps)] {
+            hvcc.push(ty);
+            hvcc.extend_from_slice(&1u16.to_be_bytes()); // one NAL
+            hvcc.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+            hvcc.extend_from_slice(nal);
+        }
+        let record = parse_hvcc(&hvcc).expect("valid hvcC");
+        assert_eq!(record.nal_length_size, 4);
+        assert_eq!(record.parameter_sets, vec![vps, sps, pps]);
+        assert!(parse_hvcc(&hvcc[..24]).is_err());
+    }
+
+    #[test]
+    fn length_prefixed_conversion_validates_the_whole_buffer() {
         let sps: &[u8] = &[0x67, 0x42, 0xC0, 0x1E];
         let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21, 0x0A];
         // 2-byte prefixes (a non-default lengthSizeMinusOne).
@@ -912,22 +972,22 @@ mod tests {
         avcc.extend_from_slice(&(idr.len() as u16).to_be_bytes());
         avcc.extend_from_slice(idr);
 
-        let annexb = checked_length_prefixed_to_annexb(&avcc, 2).expect("valid walk");
+        let annexb = length_prefixed_to_annexb(&avcc, 2).expect("valid walk");
         let nals: Vec<&[u8]> = nal_units(&annexb).collect();
         assert_eq!(nals, vec![sps, idr]);
 
         // Truncated length, trailing garbage, a zero-length NAL, and data that
         // is really Annex-B all fail the exact-consumption walk (the caller
         // forwards the original bytes instead of mis-framing).
-        assert!(checked_length_prefixed_to_annexb(&avcc[..avcc.len() - 1], 2).is_none());
+        assert!(length_prefixed_to_annexb(&avcc[..avcc.len() - 1], 2).is_none());
         let mut trailing = avcc.clone();
         trailing.push(0);
-        assert!(checked_length_prefixed_to_annexb(&trailing, 2).is_none());
-        assert!(checked_length_prefixed_to_annexb(&[0, 0], 2).is_none());
+        assert!(length_prefixed_to_annexb(&trailing, 2).is_none());
+        assert!(length_prefixed_to_annexb(&[0, 0], 2).is_none());
         let mut real_annexb = Vec::new();
         real_annexb.extend_from_slice(&[0, 0, 0, 1]);
         real_annexb.extend_from_slice(idr);
-        assert!(checked_length_prefixed_to_annexb(&real_annexb, 4).is_none());
+        assert!(length_prefixed_to_annexb(&real_annexb, 4).is_none());
     }
 
     #[test]

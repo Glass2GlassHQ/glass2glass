@@ -898,37 +898,25 @@ fn video_block_to_annexb(
     data: Vec<u8>,
 ) -> Vec<u8> {
     use crate::annexb::{
-        checked_length_prefixed_to_annexb, parse_avcc, prepend_param_sets, starts_with_param_set,
+        length_prefixed_to_annexb, parse_avcc, parse_hvcc, prepend_param_sets,
+        starts_with_param_set,
     };
     let Some(private) = private else {
         return data;
     };
-    // Config-record parameter sets + NAL length size: avcC keeps
-    // lengthSizeMinusOne at byte 4, hvcC at byte 21 (low 2 bits both).
-    let (vcodec, len_size_at, param_sets) = match codec {
-        MkvCodec::H264 => {
-            let Ok((sps, pps)) = parse_avcc(private) else {
-                return data;
-            };
-            (VideoCodec::H264, 4, alloc::vec![sps, pps])
-        }
-        MkvCodec::H265 => {
-            let Ok(sets) = crate::annexb::parse_hvcc(private) else {
-                return data;
-            };
-            (VideoCodec::H265, 21, sets)
-        }
+    let (vcodec, record) = match codec {
+        MkvCodec::H264 => (VideoCodec::H264, parse_avcc(private)),
+        MkvCodec::H265 => (VideoCodec::H265, parse_hvcc(private)),
         _ => return data,
     };
-    let Some(&len_byte) = private.get(len_size_at) else {
+    let Ok(record) = record else {
         return data;
     };
-    let len_size = ((len_byte & 3) + 1) as usize;
-    let Some(annexb) = checked_length_prefixed_to_annexb(&data, len_size) else {
+    let Some(annexb) = length_prefixed_to_annexb(&data, record.nal_length_size) else {
         return data;
     };
     if keyframe && !starts_with_param_set(&annexb, vcodec) {
-        return prepend_param_sets(&annexb, &param_sets, vcodec);
+        return prepend_param_sets(&annexb, &record.parameter_sets, vcodec);
     }
     annexb
 }

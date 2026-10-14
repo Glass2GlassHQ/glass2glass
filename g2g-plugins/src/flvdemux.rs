@@ -164,12 +164,10 @@ impl FlvDemux {
     fn sync_configs(&mut self) {
         if self.video_init.is_none() {
             if let Some(avcc) = self.demux.video_config() {
-                if let Ok((sps, pps)) = parse_avcc(avcc) {
-                    // lengthSizeMinusOne lives in byte 4's low two bits.
-                    let length_size = avcc.get(4).map_or(4, |b| ((b & 0x03) + 1) as usize);
+                if let Ok(record) = parse_avcc(avcc) {
                     self.video_init = Some(VideoInit {
-                        param_sets: Vec::from([sps, pps]),
-                        length_size,
+                        param_sets: record.parameter_sets,
+                        length_size: record.nal_length_size,
                     });
                 }
             }

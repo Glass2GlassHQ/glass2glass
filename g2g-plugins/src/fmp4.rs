@@ -111,12 +111,12 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
     // `sinf` (frma original format + cbcs scheme + tenc defaults).
     let (codec, param_sets, cenc) = if let Some(avc1) = find_box(entries, b"avc1") {
         let children = avc1.get(78..).ok_or(G2gError::CapsMismatch)?;
-        let (sps, pps) = parse_avcc(find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?)?;
-        (VideoCodec::H264, Vec::from([sps, pps]), None)
+        let avcc = find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
+        (VideoCodec::H264, parse_avcc(avcc)?.parameter_sets, None)
     } else if let Some(hvc1) = find_box(entries, b"hvc1").or_else(|| find_box(entries, b"hev1")) {
         let children = hvc1.get(78..).ok_or(G2gError::CapsMismatch)?;
         let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
-        (VideoCodec::H265, parse_hvcc(hvcc)?, None)
+        (VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets, None)
     } else if let Some(mp4v) = find_box(entries, b"mp4v") {
         // MPEG-4 Part 2: the mp4v visual sample entry nests an esds carrying the
         // VOL header as its DecoderSpecificInfo. Confirm objectTypeIndication
@@ -144,12 +144,11 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
         let (codec, param_sets) = match frma.get(0..4) {
             Some(b"avc1") => {
                 let avcc = find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
-                let (sps, pps) = parse_avcc(avcc)?;
-                (VideoCodec::H264, Vec::from([sps, pps]))
+                (VideoCodec::H264, parse_avcc(avcc)?.parameter_sets)
             }
             Some(b"hvc1") | Some(b"hev1") => {
                 let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
-                (VideoCodec::H265, parse_hvcc(hvcc)?)
+                (VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets)
             }
             _ => return Err(G2gError::CapsMismatch),
         };
@@ -400,12 +399,12 @@ fn parse_video_entry(
 ) -> Result<Option<(TrackKind, Option<CencDefaults>)>, G2gError> {
     let (codec, param_sets, cenc) = if let Some(avc1) = find_box(entries, b"avc1") {
         let children = avc1.get(78..).ok_or(G2gError::CapsMismatch)?;
-        let (sps, pps) = parse_avcc(find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?)?;
-        (VideoCodec::H264, Vec::from([sps, pps]), None)
+        let avcc = find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
+        (VideoCodec::H264, parse_avcc(avcc)?.parameter_sets, None)
     } else if let Some(hvc1) = find_box(entries, b"hvc1").or_else(|| find_box(entries, b"hev1")) {
         let children = hvc1.get(78..).ok_or(G2gError::CapsMismatch)?;
         let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
-        (VideoCodec::H265, parse_hvcc(hvcc)?, None)
+        (VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets, None)
     } else if let Some(mp4v) = find_box(entries, b"mp4v") {
         // MPEG-4 Part 2: the mp4v visual sample entry nests an esds carrying the
         // VOL header as its DecoderSpecificInfo. Confirm objectTypeIndication
@@ -435,12 +434,11 @@ fn parse_video_entry(
         let (codec, param_sets) = match frma.get(0..4) {
             Some(b"avc1") => {
                 let avcc = find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
-                let (sps, pps) = parse_avcc(avcc)?;
-                (VideoCodec::H264, Vec::from([sps, pps]))
+                (VideoCodec::H264, parse_avcc(avcc)?.parameter_sets)
             }
             Some(b"hvc1") | Some(b"hev1") => {
                 let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
-                (VideoCodec::H265, parse_hvcc(hvcc)?)
+                (VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets)
             }
             _ => return Err(G2gError::CapsMismatch),
         };
@@ -1520,17 +1518,8 @@ fn fragment_sample_timings(
 
 /// 4-byte-length-prefixed AVCC NALUs back to Annex-B start codes.
 fn avcc_to_annexb(avcc: &[u8]) -> Result<Vec<u8>, G2gError> {
-    let mut out = Vec::with_capacity(avcc.len());
-    let mut at = 0usize;
-    while at < avcc.len() {
-        let len = be32(avcc, at)? as usize;
-        at += 4;
-        let nalu = avcc.get(at..at + len).ok_or(G2gError::CapsMismatch)?;
-        out.extend_from_slice(&[0, 0, 0, 1]);
-        out.extend_from_slice(nalu);
-        at += len;
-    }
-    Ok(out)
+    crate::annexb::length_prefixed_to_annexb(avcc, crate::annexb::AVCC_LENGTH_SIZE)
+        .ok_or(G2gError::CapsMismatch)
 }
 
 fn timescale_to_ns(t: u64, timescale: u32) -> u64 {
@@ -1790,7 +1779,7 @@ mod tests {
             p.extend_from_slice(&(nalu.len() as u16).to_be_bytes());
             p.extend_from_slice(nalu);
         }
-        let sets = parse_hvcc(&p).unwrap();
+        let sets = parse_hvcc(&p).unwrap().parameter_sets;
         assert_eq!(sets, vec![vps.to_vec(), sps.to_vec(), pps.to_vec()]);
     }
 

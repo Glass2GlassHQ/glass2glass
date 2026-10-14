@@ -34,8 +34,8 @@ use g2g_core::{
 
 use crate::aacparse::adts_from_asc;
 use crate::annexb::{
-    checked_length_prefixed_to_annexb, is_annex_b, parse_avcc, prepend_param_sets,
-    starts_with_param_set,
+    is_annex_b, length_prefixed_to_annexb, parse_avcc, prepend_param_sets, starts_with_param_set,
+    AVCC_LENGTH_SIZE,
 };
 use crate::avi::{parse, AviFile, AviStream, AviStreamKind};
 
@@ -278,10 +278,7 @@ fn config_param_sets(stream: &AviStream) -> Vec<Vec<u8>> {
             .map(Vec::from)
             .collect();
     }
-    match parse_avcc(config) {
-        Ok((sps, pps)) => Vec::from([sps, pps]),
-        Err(_) => Vec::new(),
-    }
+    parse_avcc(config).map_or_else(|_| Vec::new(), |record| record.parameter_sets)
 }
 
 /// Re-frame one chunk's payload for the pipeline: AVCC H.264 to Annex-B with
@@ -301,9 +298,7 @@ fn deframe(stream: &AviStream, param_sets: &[Vec<u8>], data: &[u8], first: bool)
                 // from the file, so a walk that does not consume the chunk
                 // exactly leaves the original bytes rather than emitting a
                 // mis-framed stream.
-                const AVCC_LENGTH_SIZE: usize = 4;
-                checked_length_prefixed_to_annexb(data, AVCC_LENGTH_SIZE)
-                    .unwrap_or_else(|| Vec::from(data))
+                length_prefixed_to_annexb(data, AVCC_LENGTH_SIZE).unwrap_or_else(|| Vec::from(data))
             };
             if first && !param_sets.is_empty() && !starts_with_param_set(&annexb, VideoCodec::H264)
             {
