@@ -450,7 +450,11 @@ fn worker_main(
         }
         let captured = &buf[..frames * cfg.frame_bytes()];
         let chunk = match perm.as_deref() {
-            Some(p) => permute(captured, p, sample),
+            Some(p) => {
+                let mut chunk = Vec::new();
+                permute(captured, p, sample, &mut chunk);
+                chunk
+            }
             None => captured.to_vec(),
         };
         if !audio_tx.push(chunk) {

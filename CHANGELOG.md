@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1289: WASAPI, Core Audio and AAudio sinks hand frames to their device thread over `WorkerLink`, and no audio sink copies a buffer before its worker.
 - M1288: `pipewiresink` queues PCM by slice copy and drains at EOS without blocking the executor.
 - M1287: audio capture sources share one bounded drop-oldest capture loop with rounded timestamps and clock-sync anchoring.
 - M1286: per-category log overrides cost disabled call sites one atomic load, and sinks write outside the log locks.

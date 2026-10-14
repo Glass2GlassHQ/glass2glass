@@ -141,6 +141,17 @@ pub fn frame_bytes<'a>(
     }
 }
 
+// the domain check of `frame_bytes` without the mapping, for a sink that reads on another thread
+pub(crate) fn require_readable_domain(
+    frame: &g2g_core::frame::Frame,
+    element: &'static str,
+) -> Result<(), G2gError> {
+    match &frame.domain {
+        g2g_core::memory::MemoryDomain::DmaBuf(_) => Ok(()),
+        domain => domain.require_system_slice(element).map(|_| ()),
+    }
+}
+
 /// Both domains these sinks take: a system buffer, or a dma-buf they map.
 pub fn audio_input_domains() -> g2g_core::memory::DomainSet {
     g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)

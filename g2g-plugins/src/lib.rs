@@ -636,10 +636,15 @@ pub mod flactag;
 // MPEG audio frame per buffer, the framing ffmpegaudiodec takes.
 pub mod mpegaudioparse;
 // Non-blocking link to a blocking audio device worker thread, shared by the
-// ALSA and PulseAudio sinks.
-#[cfg(all(
-    target_os = "linux",
-    any(feature = "alsa-sink", feature = "pulse-sink")
+// audio render sinks.
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(feature = "alsa-sink", feature = "pulse-sink")
+    ),
+    all(target_os = "windows", feature = "wasapi-sink"),
+    all(target_os = "macos", feature = "coreaudio"),
+    all(target_os = "android", feature = "aaudio")
 ))]
 mod audioworker;
 // Bounded queue and stamping loop shared by the audio capture sources.

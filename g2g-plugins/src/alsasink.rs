@@ -41,6 +41,7 @@ use alloc::vec::Vec;
 use alsa::pcm::{Access, HwParams, PCM};
 use alsa::{Direction, ValueOr};
 
+use g2g_core::frame::Frame;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
     DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock, OutputSink, PadTemplate,
@@ -57,9 +58,11 @@ fn alsa_err(code: i32) -> G2gError {
 /// Worker command. `Samples` carries one buffer of interleaved PCM bytes in the
 /// negotiated format; `Shutdown` asks the worker to drain and stop.
 enum WorkerCmd {
-    Samples(Vec<u8>),
+    Samples(Frame),
     Shutdown,
 }
+
+const ELEMENT_NAME: &str = "AlsaSink";
 
 /// # Example
 ///
@@ -283,16 +286,12 @@ impl AsyncElement for AlsaSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let bytes = crate::dmabufmap::frame_bytes(
-                        &frame,
-                        g2g_core::log::short_type_name::<Self>(),
-                    )?;
-                    let samples = bytes.as_slice().to_vec();
+                    crate::dmabufmap::require_readable_domain(&frame, ELEMENT_NAME)?;
                     let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
                     // Awaited, not blocking: a full queue is the device's
                     // back-pressure and yields to the executor.
                     link.send(
-                        WorkerCmd::Samples(samples),
+                        WorkerCmd::Samples(frame),
                         G2gError::Hardware(HardwareError::Alsa(-1)),
                     )
                     .await?;
@@ -365,12 +364,19 @@ fn worker_main(
         }
     };
     let perm = device_permutation(&pcm, cfg.channels);
+    let mut permuted = Vec::new();
 
     let mut closing = false;
     while !closing {
         match rx.recv() {
-            Ok(WorkerCmd::Samples(bytes)) => {
-                if write_all(&pcm, cfg, perm.as_deref(), &bytes, &rendered).is_err() {
+            Ok(WorkerCmd::Samples(frame)) => {
+                let Ok(bytes) = crate::dmabufmap::frame_bytes(&frame, ELEMENT_NAME) else {
+                    break;
+                };
+                let perm = perm.as_deref();
+                let written =
+                    write_all(&pcm, cfg, perm, &mut permuted, bytes.as_slice(), &rendered);
+                if written.is_err() {
                     break;
                 }
                 // After the blocking write returns (at ~the device rate), feed
@@ -453,6 +459,7 @@ fn write_all(
     pcm: &PCM,
     cfg: PcmConfig,
     perm: Option<&[usize]>,
+    permuted: &mut Vec<u8>,
     bytes: &[u8],
     rendered: &AtomicU64,
 ) -> Result<(), G2gError> {
@@ -461,10 +468,9 @@ fn write_all(
     if frame == 0 {
         return Err(G2gError::CapsMismatch);
     }
-    let permuted;
     let buf = match perm {
         Some(p) => {
-            permuted = permute(bytes, p, sample);
+            permute(bytes, p, sample, permuted);
             &permuted[..]
         }
         None => &bytes[..bytes.len() / frame * frame],

@@ -1,5 +1,6 @@
 //! The link between a blocking audio device worker thread and the async element
-//! that feeds it, shared by `AlsaSink` and `PulseSink`.
+//! that feeds it, shared by the ALSA, PulseAudio, WASAPI, Core Audio and AAudio
+//! sinks.
 //!
 //! An audio device is a blocking API, so these sinks run it on their own thread
 //! and hand samples over a channel. Two things about that hand-off have to hold,

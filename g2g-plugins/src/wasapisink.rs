@@ -8,15 +8,16 @@
 //!
 //! WASAPI is COM and its render client is driven from one thread, so (like
 //! `D3D11Sink`) all of it lives on a dedicated worker spun up at
-//! `configure_pipeline`. The sink struct holds only `Send` handles (an mpsc
-//! sender plus a shared counter); PCM bytes cross to the worker by value.
+//! `configure_pipeline`. The sink struct holds only `Send` handles (a bounded
+//! `WorkerLink` plus a shared counter); frames cross to the worker by value.
 //!
 //! ## Pacing
 //!
 //! The worker renders in real time: it tops up the shared-mode endpoint buffer
 //! as the audio engine drains it. The source pushes faster than real time
-//! (`AudioTestSrc` emits without sleeping), so the worker queues the pending
-//! bytes and feeds them out at the device rate. On `Eos` it drains the queue
+//! (`AudioTestSrc` emits without sleeping), so the worker queues up to one
+//! endpoint buffer of pending bytes and feeds them out at the device rate,
+//! leaving the rest to back-pressure the source. On `Eos` it drains the queue
 //! and waits for the endpoint to finish playing before stopping, so the tail
 //! is not cut off.
 
@@ -25,9 +26,9 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use std::collections::VecDeque;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use alloc::boxed::Box;
@@ -41,6 +42,7 @@ use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
 
+use g2g_core::frame::Frame;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
@@ -48,12 +50,15 @@ use g2g_core::{
 };
 
 use crate::audio::pcm_params;
+use crate::audioworker::WorkerLink;
 use crate::wasapipcm::{audio_err, open_endpoint};
 
 /// Shared-mode endpoint buffer span (100-ns units), 200 ms. Large enough that
 /// the worker's top-up cadence never starves the engine, small enough that the
 /// drain-on-`Eos` wait is short.
 const BUFFER_DURATION_HNS: i64 = 2_000_000;
+
+const DEVICE_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Worker top-up cadence: roughly a quarter of the endpoint buffer.
 const TOPUP_INTERVAL: Duration = Duration::from_millis(20);
@@ -66,8 +71,15 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// negotiated format; `Shutdown` asks the worker to drain the queue, wait for
 /// playout, and stop.
 enum WorkerCmd {
-    Samples(Vec<u8>),
+    Samples(Frame),
     Shutdown,
+}
+
+const ELEMENT_NAME: &str = "WasapiSink";
+
+// what a full send or a dead worker surfaces as
+fn worker_gone() -> G2gError {
+    G2gError::Hardware(HardwareError::Other)
 }
 
 /// # Example
@@ -81,8 +93,9 @@ enum WorkerCmd {
 pub struct WasapiSink {
     /// Endpoint id to render on; empty opens the default endpoint.
     device: String,
-    cmd_tx: Option<Sender<WorkerCmd>>,
-    worker: Option<JoinHandle<()>>,
+    /// Bounded, non-blocking link to the render thread (see
+    /// [`crate::audioworker`]).
+    link: Option<WorkerLink<WorkerCmd>>,
     caps: Option<Caps>,
     frames_rendered: Arc<AtomicU64>,
 }
@@ -109,8 +122,7 @@ impl WasapiSink {
     pub fn new() -> Self {
         Self {
             device: String::new(),
-            cmd_tx: None,
-            worker: None,
+            link: None,
             caps: None,
             frames_rendered: Arc::new(AtomicU64::new(0)),
         }
@@ -128,13 +140,14 @@ impl WasapiSink {
         self.frames_rendered.load(Ordering::Relaxed)
     }
 
+    /// Tear down without waiting for playout (reconfigure / drop). The
+    /// end-of-stream drain that waits is `WorkerLink::finish`, awaited from
+    /// `process(Eos)`.
     fn shutdown(&mut self) {
-        if let Some(tx) = self.cmd_tx.take() {
-            let _ = tx.send(WorkerCmd::Shutdown);
+        if let Some(link) = self.link.as_mut() {
+            link.abort();
         }
-        if let Some(join) = self.worker.take() {
-            let _ = join.join();
-        }
+        self.link = None;
     }
 }
 
@@ -187,41 +200,33 @@ impl AsyncElement for WasapiSink {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (tag, bits, channels, rate) = pcm_params(absolute_caps)?;
 
-        if self.worker.is_some() {
+        if self.link.as_ref().is_some_and(|l| l.is_running()) {
             if self.caps.as_ref() == Some(absolute_caps) {
                 return Ok(ConfigureOutcome::Accepted);
             }
             self.shutdown();
         }
 
-        let (tx, rx) = mpsc::channel::<WorkerCmd>();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), ()>>(1);
         let rendered = Arc::clone(&self.frames_rendered);
         let format = wave_format(tag, bits, channels, rate);
         let device = self.device.clone();
 
-        let join = thread::Builder::new()
-            .name(String::from("g2g-wasapisink"))
-            .spawn(move || {
-                if let Err(e) = worker_main(&device, format, rx, rendered, ready_tx) {
-                    std::eprintln!("g2g-wasapisink worker error: {e:?}");
-                }
-            })
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        let link = WorkerLink::spawn("g2g-wasapisink", move |rx| {
+            if let Err(e) = worker_main(&device, format, rx, rendered, ready_tx) {
+                std::eprintln!("g2g-wasapisink worker error: {e:?}");
+            }
+        })?;
 
         // The worker reports whether the endpoint opened; a headless host (no
         // audio device) fails loud here rather than silently dropping audio.
-        match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        // `link`'s Drop reaps the worker, so a failed open needs no join.
+        match ready_rx.recv_timeout(DEVICE_OPEN_TIMEOUT) {
             Ok(Ok(())) => {}
-            _ => {
-                let _ = tx.send(WorkerCmd::Shutdown);
-                let _ = join.join();
-                return Err(G2gError::Hardware(HardwareError::Other));
-            }
+            _ => return Err(worker_gone()),
         }
 
-        self.cmd_tx = Some(tx);
-        self.worker = Some(join);
+        self.link = Some(link);
         self.caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
     }
@@ -264,13 +269,10 @@ impl AsyncElement for WasapiSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let slice = frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
-                    tx.send(WorkerCmd::Samples(slice.to_vec()))
-                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-                    Ok(())
+                    frame.domain.require_system_slice(ELEMENT_NAME)?;
+                    let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
+                    // a full queue is the endpoint's back-pressure and yields
+                    link.send(WorkerCmd::Samples(frame), worker_gone()).await
                 }
                 // A mid-stream format change can't be honoured on an open
                 // endpoint; only a caps identical to the configured one passes.
@@ -280,7 +282,11 @@ impl AsyncElement for WasapiSink {
                 }
                 PipelinePacket::Flush | PipelinePacket::Segment(_) => Ok(()),
                 PipelinePacket::Eos => {
-                    self.shutdown();
+                    // waits for playout while yielding, so other arms keep running
+                    if let Some(link) = self.link.as_mut() {
+                        link.finish(WorkerCmd::Shutdown, worker_gone()).await?;
+                    }
+                    self.link = None;
                     Ok(())
                 }
                 // future PipelinePacket variants: no-op (terminal sink).
@@ -413,26 +419,33 @@ fn run_render_loop(
     rx: Receiver<WorkerCmd>,
     rendered: &AtomicU64,
 ) -> Result<(), G2gError> {
-    let mut queue: VecDeque<u8> = VecDeque::new();
+    // one endpoint buffer ahead, so the rest waits in the bounded command queue
+    let queue_limit = state.buffer_frames as usize * state.block_align;
+    let mut queue: VecDeque<u8> = VecDeque::with_capacity(queue_limit);
     let mut closing = false;
     let mut drain_deadline: Option<Instant> = None;
 
+    let take = |cmd: WorkerCmd, queue: &mut VecDeque<u8>, closing: &mut bool| match cmd {
+        WorkerCmd::Samples(frame) => {
+            queue.extend(frame.domain.as_system_slice().unwrap_or_default());
+        }
+        WorkerCmd::Shutdown => *closing = true,
+    };
     loop {
-        if !closing {
+        if !closing && queue.len() < queue_limit {
             match rx.recv_timeout(TOPUP_INTERVAL) {
-                Ok(WorkerCmd::Samples(bytes)) => queue.extend(bytes),
-                Ok(WorkerCmd::Shutdown) => closing = true,
+                Ok(cmd) => take(cmd, &mut queue, &mut closing),
                 Err(RecvTimeoutError::Disconnected) => closing = true,
                 Err(RecvTimeoutError::Timeout) => {}
             }
             // Absorb whatever else is already queued so a burst from the source
             // lands in one pass.
-            while let Ok(cmd) = rx.try_recv() {
-                match cmd {
-                    WorkerCmd::Samples(bytes) => queue.extend(bytes),
-                    WorkerCmd::Shutdown => closing = true,
-                }
+            while !closing && queue.len() < queue_limit {
+                let Ok(cmd) = rx.try_recv() else { break };
+                take(cmd, &mut queue, &mut closing);
             }
+        } else if !closing {
+            thread::sleep(TOPUP_INTERVAL);
         }
 
         let wrote = top_up(state, &mut queue, rendered)?;
@@ -477,9 +490,11 @@ fn top_up(
     unsafe {
         let ptr = state.render.GetBuffer(frames).map_err(audio_err)?;
         let dst = core::slice::from_raw_parts_mut(ptr, bytes);
-        for (slot, byte) in dst.iter_mut().zip(queue.drain(..bytes)) {
-            *slot = byte;
-        }
+        let (front, back) = queue.as_slices();
+        let from_front = front.len().min(bytes);
+        dst[..from_front].copy_from_slice(&front[..from_front]);
+        dst[from_front..].copy_from_slice(&back[..bytes - from_front]);
+        queue.drain(..bytes);
         state.render.ReleaseBuffer(frames, 0).map_err(audio_err)?;
     }
     rendered.fetch_add(frames as u64, Ordering::Relaxed);

@@ -8,25 +8,28 @@
 //!   default input device (the microphone).
 //!
 //! Both wrap the safe `ndk` crate's `audio` module (`AAudioStreamBuilder` ->
-//! `AAudioStream`), drive the stream's blocking read / write synchronously, and
-//! run on the element's owning task. `AAudioStream` holds a raw pointer and is not
-//! `Send`; like the MediaCodec elements, both assert `Send` under the documented
-//! single-thread-executor contract so the multi-thread runner accepts them.
+//! `AAudioStream`) and drive the stream's blocking read / write on a dedicated
+//! thread, so the executor never blocks on the device. `AAudioStream` holds a
+//! raw pointer and is not `Send`; the source still holds it between negotiation
+//! and `run`, so it asserts `Send` under the single-thread-executor contract,
+//! like the MediaCodec elements.
 //!
 //! `aaudio` feature (implies `std`, needs `ndk/audio` = api-level-26).
 
 use core::ffi::c_void;
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 use ndk::audio::{
     AudioDirection, AudioError, AudioFormat as NdkAudioFormat, AudioPerformanceMode,
-    AudioSharingMode, AudioStream, AudioStreamBuilder,
+    AudioSharingMode, AudioStream, AudioStreamBuilder, AudioStreamState,
 };
 
+use g2g_core::frame::Frame;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome,
@@ -40,6 +43,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::audiocapture::{capture_queue, run_capture, CaptureLoopSettings, CaptureSender};
+use crate::audioworker::WorkerLink;
 
 /// Read / write timeout per AAudio call: 1 second in nanoseconds. Long enough to
 /// ride out a scheduling hiccup, short enough that a wedged device surfaces.
@@ -98,6 +102,13 @@ fn g2g_format(format: NdkAudioFormat) -> Option<AudioFormat> {
     }
 }
 
+// an open stream handed to the one thread that reads or writes it
+struct DeviceThreadStream(AudioStream);
+
+// SAFETY: the element moves the stream out to that thread, which is the only
+// caller into it from then on and closes it there.
+unsafe impl Send for DeviceThreadStream {}
+
 /// Validate that `caps` is interleaved PCM and extract `(format, channels, rate)`.
 fn pcm_params(caps: &Caps) -> Result<(AudioFormat, u8, u32), G2gError> {
     match caps {
@@ -127,18 +138,14 @@ fn pcm_params(caps: &Caps) -> Result<(AudioFormat, u8, u32), G2gError> {
 /// let sink = AAudioSink::new();
 /// ```
 pub struct AAudioSink {
-    stream: Option<AudioStream>,
+    /// Bounded, non-blocking link to the thread that owns the stream and makes
+    /// the blocking writes (see [`crate::audioworker`]).
+    link: Option<WorkerLink<SinkCommand>>,
     format: AudioFormat,
     channels: u8,
     sample_rate: u32,
-    configured: bool,
-    rendered: u64,
+    rendered: Arc<AtomicU64>,
 }
-
-// SAFETY: `AudioStream` wraps a raw `AAudioStream` pointer; the element is built
-// for a single-thread executor (every stream call lands on the owning task), so
-// the pointer is never touched from two threads. Asserted under that contract.
-unsafe impl Send for AAudioSink {}
 
 impl core::fmt::Debug for AAudioSink {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -146,8 +153,7 @@ impl core::fmt::Debug for AAudioSink {
             .field("format", &self.format)
             .field("channels", &self.channels)
             .field("sample_rate", &self.sample_rate)
-            .field("configured", &self.configured)
-            .field("rendered", &self.rendered)
+            .field("rendered", &self.rendered())
             .finish_non_exhaustive()
     }
 }
@@ -158,24 +164,35 @@ impl Default for AAudioSink {
     }
 }
 
+enum SinkCommand {
+    Samples(Frame),
+    Shutdown,
+}
+
 impl AAudioSink {
     pub fn new() -> Self {
         Self {
-            stream: None,
+            link: None,
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
-            configured: false,
-            rendered: 0,
+            rendered: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// Count of PCM frames written to the device. Useful in tests.
     pub fn rendered(&self) -> u64 {
-        self.rendered
+        self.rendered.load(Ordering::Relaxed)
     }
 
-    fn open(&mut self) -> Result<(), G2gError> {
+    fn shutdown(&mut self) {
+        if let Some(link) = self.link.as_mut() {
+            link.abort();
+        }
+        self.link = None;
+    }
+
+    fn open(&self) -> Result<AudioStream, G2gError> {
         let fmt = ndk_format(self.format).ok_or(G2gError::CapsMismatch)?;
         let stream = AudioStreamBuilder::new()
             .map_err(audio_err)?
@@ -193,41 +210,71 @@ impl AAudioSink {
             .open_stream()
             .map_err(audio_err)?;
         stream.request_start().map_err(audio_err)?;
-        self.stream = Some(stream);
-        Ok(())
+        Ok(stream)
     }
+}
 
-    /// Write a whole PCM buffer, looping over partial writes until every frame is
-    /// accepted (or the device errors / times out).
-    fn write_all(&mut self, pcm: &[u8]) -> Result<(), G2gError> {
-        let bps = bytes_per_sample(self.format).ok_or(G2gError::CapsMismatch)?;
-        let frame_bytes = bps * self.channels as usize;
-        if frame_bytes == 0 || pcm.len() < frame_bytes {
-            return Ok(());
+impl Drop for AAudioSink {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// Write a whole PCM buffer, looping over partial writes until every frame is
+/// accepted (or the device errors / times out).
+fn write_all(
+    stream: &AudioStream,
+    pcm: &[u8],
+    frame_bytes: usize,
+    rendered: &AtomicU64,
+) -> Result<(), G2gError> {
+    let total_frames = pcm.len() / frame_bytes;
+    let mut done = 0usize;
+    while done < total_frames {
+        let off = done * frame_bytes;
+        let remaining = (total_frames - done) as i32;
+        // SAFETY: `off` is frame-aligned and `remaining` frames fit within
+        // `pcm[off..]`; the stream is an open output stream only this thread uses.
+        let wrote = frames_transferred(unsafe {
+            stream.write(
+                pcm[off..].as_ptr() as *const c_void,
+                remaining,
+                IO_TIMEOUT_NS,
+            )
+        })?;
+        if wrote == 0 {
+            // Timed out with no progress: surface rather than spin.
+            return Err(G2gError::Hardware(HardwareError::Other));
         }
-        let stream = self.stream.as_ref().ok_or(G2gError::NotConfigured)?;
-        let total_frames = pcm.len() / frame_bytes;
-        let mut done = 0usize;
-        while done < total_frames {
-            let off = done * frame_bytes;
-            let remaining = (total_frames - done) as i32;
-            // SAFETY: `off` is frame-aligned and `remaining` frames fit within
-            // `pcm[off..]`; the stream is an open output stream owned here.
-            let wrote = frames_transferred(unsafe {
-                stream.write(
-                    pcm[off..].as_ptr() as *const c_void,
-                    remaining,
-                    IO_TIMEOUT_NS,
-                )
-            })?;
-            if wrote == 0 {
-                // Timed out with no progress: surface rather than spin.
-                return Err(G2gError::Hardware(HardwareError::Other));
+        done += wrote as usize;
+        rendered.fetch_add(u64::from(wrote), Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+fn render_worker(
+    stream: DeviceThreadStream,
+    commands: Receiver<SinkCommand>,
+    frame_bytes: usize,
+    rendered: Arc<AtomicU64>,
+) {
+    let stream = stream.0;
+    loop {
+        let frame = match commands.recv() {
+            Ok(SinkCommand::Samples(frame)) => frame,
+            Ok(SinkCommand::Shutdown) => {
+                // stops once what is buffered has played
+                let _ = stream.request_stop();
+                let _ = stream.wait_for_state_change(AudioStreamState::Stopping, IO_TIMEOUT_NS);
+                return;
             }
-            done += wrote as usize;
-            self.rendered += wrote as u64;
+            // the element aborted: close without playing out
+            Err(_) => return,
+        };
+        let pcm = frame.domain.as_system_slice().unwrap_or_default();
+        if write_all(&stream, pcm, frame_bytes, &rendered).is_err() {
+            return;
         }
-        Ok(())
     }
 }
 
@@ -257,11 +304,22 @@ impl AsyncElement for AAudioSink {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (format, channels, sample_rate) = pcm_params(absolute_caps)?;
+        let unchanged =
+            (format, channels, sample_rate) == (self.format, self.channels, self.sample_rate);
+        if unchanged && self.link.as_ref().is_some_and(|l| l.is_running()) {
+            return Ok(ConfigureOutcome::Accepted);
+        }
+        self.shutdown();
         self.format = format;
         self.channels = channels;
         self.sample_rate = sample_rate;
-        self.open()?;
-        self.configured = true;
+        let stream = DeviceThreadStream(self.open()?);
+        let frame_bytes =
+            bytes_per_sample(format).ok_or(G2gError::CapsMismatch)? * usize::from(channels);
+        let rendered = Arc::clone(&self.rendered);
+        self.link = Some(WorkerLink::spawn("g2g-aaudiosink", move |commands| {
+            render_worker(stream, commands, frame_bytes, rendered)
+        })?);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -271,20 +329,21 @@ impl AsyncElement for AAudioSink {
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
-            if !self.configured {
-                return Err(G2gError::NotConfigured);
-            }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let slice = frame
+                    frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    self.write_all(slice)?;
+                    let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
+                    // a full queue is the device's back-pressure and yields
+                    link.send(SinkCommand::Samples(frame), audio_err(()))
+                        .await?;
                 }
                 PipelinePacket::Eos => {
-                    if let Some(st) = self.stream.as_ref() {
-                        let _ = st.request_stop();
-                    }
+                    // waits for playout while yielding, so other arms keep running
+                    let link = self.link.as_mut().ok_or(G2gError::NotConfigured)?;
+                    link.finish(SinkCommand::Shutdown, audio_err(())).await?;
+                    self.link = None;
                 }
                 // PCM caps are fixed at configure; a mid-stream change would need a
                 // stream rebuild (not in v1). Control packets are consumed.
@@ -493,7 +552,7 @@ impl SourceLoop for AAudioSrc {
             let bps = bytes_per_sample(format).ok_or(G2gError::CapsMismatch)?;
             let frame_bytes = bps * channels as usize;
             let frames_per_read = (sample_rate as u64 * CAPTURE_MS / 1000).max(1) as usize;
-            let stream = CaptureStream(self.stream.take().ok_or(G2gError::NotConfigured)?);
+            let stream = DeviceThreadStream(self.stream.take().ok_or(G2gError::NotConfigured)?);
             let (sender, receiver) = capture_queue(frame_bytes)?;
             let stop = Arc::new(AtomicBool::new(false));
             let worker_stop = Arc::clone(&stop);
@@ -518,15 +577,8 @@ impl SourceLoop for AAudioSrc {
     }
 }
 
-// an open input stream handed to the capture thread
-struct CaptureStream(AudioStream);
-
-// SAFETY: `run` moves the stream out of the element, so only the capture thread
-// calls into it from then on, and it closes the stream there.
-unsafe impl Send for CaptureStream {}
-
 fn read_stream(
-    stream: CaptureStream,
+    stream: DeviceThreadStream,
     frames_per_read: usize,
     frame_bytes: usize,
     sender: CaptureSender,

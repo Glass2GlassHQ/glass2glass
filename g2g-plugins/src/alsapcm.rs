@@ -131,18 +131,18 @@ pub(crate) fn invert(perm: Vec<usize>) -> Vec<usize> {
     inv
 }
 
-/// Reorder interleaved frames: output channel `i` of each frame takes source
-/// channel `perm[i]`. A ragged trailing partial frame is dropped (it cannot be
-/// written as a frame anyway).
-pub(crate) fn permute(bytes: &[u8], perm: &[usize], sample: usize) -> Vec<u8> {
+/// Reorder interleaved frames into `out`, replacing its contents: output channel
+/// `i` of each frame takes source channel `perm[i]`. A ragged trailing partial
+/// frame is dropped (it cannot be written as a frame anyway).
+pub(crate) fn permute(bytes: &[u8], perm: &[usize], sample: usize, out: &mut Vec<u8>) {
     let frame = sample * perm.len();
-    let mut out = Vec::with_capacity(bytes.len());
+    out.clear();
+    out.reserve(bytes.len());
     for f in bytes.chunks_exact(frame) {
         for &s in perm {
             out.extend_from_slice(&f[s * sample..][..sample]);
         }
     }
-    out
 }
 
 #[cfg(test)]
@@ -200,7 +200,7 @@ mod tests {
         let perm = [0usize, 1, 4, 5, 2, 3];
         // one frame of s16 channel markers 0..5.
         let src: Vec<u8> = (0i16..6).flat_map(|c| c.to_le_bytes()).collect();
-        let out = permute(&src, &perm, 2);
+        let out = permuted(&src, &perm, 2);
         let got: Vec<i16> = out
             .as_chunks::<2>()
             .0
@@ -214,8 +214,15 @@ mod tests {
     fn permute_handles_three_byte_samples_and_drops_a_ragged_tail() {
         // S24 is 3 bytes: a swap of a stereo frame moves 3 bytes at a time.
         let src = [1u8, 2, 3, 4, 5, 6, 7, 8];
-        let out = permute(&src, &[1, 0], 3);
+        let mut out = alloc::vec![9u8; 12];
+        permute(&src, &[1, 0], 3, &mut out);
         assert_eq!(out, [4, 5, 6, 1, 2, 3]);
+    }
+
+    fn permuted(bytes: &[u8], perm: &[usize], sample: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        permute(bytes, perm, sample, &mut out);
+        out
     }
 
     #[test]
@@ -226,7 +233,7 @@ mod tests {
         assert_eq!(inv, [0, 1, 4, 5, 2, 3]);
         // capture-then-render round trip lands back on the original order.
         let src: Vec<u8> = (0i16..6).flat_map(|c| c.to_le_bytes()).collect();
-        let back = permute(&permute(&src, &inv, 2), &perm, 2);
+        let back = permuted(&permuted(&src, &inv, 2), &perm, 2);
         assert_eq!(back, src);
     }
 }

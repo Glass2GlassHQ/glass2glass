@@ -47,6 +47,8 @@ use libpulse_binding::stream::Direction;
 use libpulse_binding::time::MicroSeconds;
 use libpulse_simple_binding::Simple;
 
+use g2g_core::frame::Frame;
+
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
     DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock, OutputSink, PadTemplate,
@@ -82,9 +84,11 @@ fn buffer_attr(spec: &Spec) -> BufferAttr {
 /// Worker command. `Samples` carries one buffer of interleaved PCM bytes in the
 /// negotiated format; `Shutdown` asks the worker to drain and stop.
 enum WorkerCmd {
-    Samples(Vec<u8>),
+    Samples(Frame),
     Shutdown,
 }
+
+const ELEMENT_NAME: &str = "PulseSink";
 
 /// # Example
 ///
@@ -304,16 +308,12 @@ impl AsyncElement for PulseSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let payload = crate::dmabufmap::frame_bytes(
-                        &frame,
-                        g2g_core::log::short_type_name::<Self>(),
-                    )?;
-                    let samples = payload.as_slice().to_vec();
+                    crate::dmabufmap::require_readable_domain(&frame, ELEMENT_NAME)?;
                     let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
                     // Awaited, not blocking: a full queue is the device's
                     // back-pressure and yields to the executor.
                     link.send(
-                        WorkerCmd::Samples(samples),
+                        WorkerCmd::Samples(frame),
                         G2gError::Hardware(HardwareError::PulseAudio(-1)),
                     )
                     .await?;
@@ -400,8 +400,12 @@ fn worker_main(
     let mut closing = false;
     while !closing {
         match rx.recv() {
-            Ok(WorkerCmd::Samples(bytes)) => {
-                if simple.write(&bytes).is_err() {
+            Ok(WorkerCmd::Samples(frame)) => {
+                let Ok(payload) = crate::dmabufmap::frame_bytes(&frame, ELEMENT_NAME) else {
+                    break;
+                };
+                let bytes = payload.as_slice();
+                if simple.write(bytes).is_err() {
                     break;
                 }
                 written.fetch_add(bytes.len() as u64, Ordering::Relaxed);
