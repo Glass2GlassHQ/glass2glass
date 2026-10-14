@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1335: raw video format names and parsing come from g2g-core everywhere, so every format round-trips through the `format` property.
 - M1399: the m16 hostile caps test expects the documented fail-loud outcome, and m859 builds audio timestamps with the rounding the demuxer now uses.
 - M1398: the graph runner retries a startup ReFixate with the counter-proposal instead of failing.
 - M1397: the graph runner resolves allocation before configuring elements, so a decoder sizes its pool at open time on every runner.

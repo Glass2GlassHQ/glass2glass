@@ -40,7 +40,7 @@ use g2g_core::{
 };
 
 use crate::compositor::frame_period_ns;
-use crate::videoconvert::{raw_format_from_str, raw_format_to_str};
+use g2g_core::caps_parse::parse_raw_format;
 
 /// gst `rawvideoparse` defaults: I420 320x240 at 25 fps, frames tightly packed.
 const DEFAULT_FORMAT: RawVideoFormat = RawVideoFormat::I420;
@@ -493,7 +493,7 @@ impl AsyncElement for RawVideoParse {
         match name {
             "format" => {
                 let text = value.as_str().ok_or(PropError::Type)?;
-                self.format = raw_format_from_str(text).ok_or(PropError::Value)?;
+                self.format = parse_raw_format(text).ok_or(PropError::Value)?;
             }
             "width" | "height" => {
                 let pixels = value.as_uint().ok_or(PropError::Type)?;
@@ -535,7 +535,7 @@ impl AsyncElement for RawVideoParse {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "format" => Some(PropValue::Str(raw_format_to_str(self.format).into())),
+            "format" => Some(PropValue::Str(self.format.gst_name().into())),
             "width" => Some(PropValue::Uint(u64::from(self.width))),
             "height" => Some(PropValue::Uint(u64::from(self.height))),
             "framerate" => Some(PropValue::Fraction(

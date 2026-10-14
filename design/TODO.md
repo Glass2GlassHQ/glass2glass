@@ -30,8 +30,6 @@ Highest leverage first:
 
 Bugs:
 
-- `videoconvert::raw_format_to_str` panics on `Rgb8` and `raw_format_from_str`
-  accepts 5 of 15 formats. Use one GStreamer format-name table from core.
 - `gamma`, `videobalance` and `alpha` swallow incoming `CapsChanged`. Move them
   onto `PixelFilter`.
 - `VideoTestSrc::with_shared_memory` keeps every emitted frame.

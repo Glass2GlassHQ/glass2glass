@@ -41,7 +41,6 @@ use crate::st2110dup::spawn_rtp_receiver;
 use crate::st2110pacing::{frame_period_ns, PacedSender, Pacer, PacingProfile};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
 use crate::st2110video::{Sampling, St2110VideoDepacketizer, St2110VideoPacketizer};
-use crate::videoconvert::raw_format_to_str;
 use g2g_core::caps_parse::parse_raw_format;
 
 /// The whole-fps rate from a `Caps::RawVideo` framerate (`Rate::Fixed` is fps << 16),
@@ -664,7 +663,7 @@ impl St2110VideoSrc {
         match name {
             "address" => Some(PropValue::Str(self.address.clone())),
             "port" => Some(PropValue::Uint(u64::from(self.port))),
-            "format" => Some(PropValue::Str(raw_format_to_str(self.format).into())),
+            "format" => Some(PropValue::Str(self.format.gst_name().into())),
             "width" => Some(PropValue::Uint(self.width as u64)),
             "height" => Some(PropValue::Uint(self.height as u64)),
             "framerate" => Some(PropValue::Uint(u64::from(self.framerate_fps))),

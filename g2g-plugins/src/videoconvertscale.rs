@@ -561,7 +561,7 @@ impl AsyncElement for VideoConvertScale {
             "format" => {
                 let format = value
                     .as_str()
-                    .and_then(crate::videoconvert::raw_format_from_str);
+                    .and_then(g2g_core::caps_parse::parse_raw_format);
                 if format.is_some_and(|format| !self.scales(format)) {
                     return Err(PropError::Value);
                 }

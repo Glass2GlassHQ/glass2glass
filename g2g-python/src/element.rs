@@ -35,12 +35,12 @@ use g2g_core::{
     VIDEO_SINK_MAX_LATENESS_NS,
 };
 
-use crate::format::{format_from_py, format_to_py};
 use crate::hosted_input::{
     default_accept, intersect_accepted, HostedInput, CLASS_PROPERTY, CUDA_FRAMES_PROPERTY,
     INPUT_CAPS_PROPERTY, MODULE_PROPERTY,
 };
 use crate::props::{fixed_caps, hosted_element_props, HostedClassProperties};
+use g2g_core::caps_parse::parse_raw_format;
 
 const RECENT_PUSH_CAPACITY: usize = 64;
 // a run that ran long once must not drop every later frame, a dropped frame never runs to correct it
@@ -409,7 +409,7 @@ impl AsyncElement for PyTransform {
             }
             g2g_core::OnlyOnGate::PROPERTY => self.only_on.set(&value),
             "format" => {
-                let parsed = format_from_py(value.as_str().ok_or(PropError::Type)?)
+                let parsed = parse_raw_format(value.as_str().ok_or(PropError::Type)?)
                     .ok_or(PropError::Value)?;
                 let Caps::RawVideo { format, .. } = &mut self.input.accept else {
                     return Err(PropError::Value);
@@ -432,7 +432,7 @@ impl AsyncElement for PyTransform {
             g2g_core::OnlyOnGate::PROPERTY => Some(self.only_on.value()),
             "format" => match &self.input.accept {
                 Caps::RawVideo { format, .. } => {
-                    Some(PropValue::Str(format_to_py(*format).to_string()))
+                    Some(PropValue::Str(format.gst_name().to_string()))
                 }
                 _ => None,
             },

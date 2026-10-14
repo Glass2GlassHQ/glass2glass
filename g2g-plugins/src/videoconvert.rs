@@ -25,6 +25,7 @@ use crate::pixel::{
     carries_yuv, chroma_420_offsets, chroma_420_size, frame_byte_size, planar_planes, row_bytes,
 };
 use crate::yuvmatrix::YuvRgbMatrix;
+use g2g_core::caps_parse::parse_raw_format;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::{
@@ -491,7 +492,7 @@ impl AsyncElement for VideoConvert {
         match name {
             "format" => {
                 self.target = Some(
-                    raw_format_from_str(value.as_str().ok_or(PropError::Type)?)
+                    parse_raw_format(value.as_str().ok_or(PropError::Type)?)
                         .ok_or(PropError::Value)?,
                 );
                 Ok(())
@@ -506,7 +507,7 @@ impl AsyncElement for VideoConvert {
             // one once negotiated. `None` for an unconfigured auto instance.
             "format" => self
                 .out_format()
-                .map(|f| PropValue::Str(raw_format_to_str(f).into())),
+                .map(|f| PropValue::Str(f.gst_name().into())),
             _ => None,
         }
     }
@@ -516,46 +517,8 @@ impl AsyncElement for VideoConvert {
 static VIDEOCONVERT_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "format",
     PropKind::Str,
-    "output pixel format: NV12 | I420 | RGBA | BGRA | YUY2",
+    "output pixel format, by its gst name (NV12, I420, RGBA, YUY2, P010_10LE, ...)",
 )];
-
-/// Parse a pixel-format property string to a [`RawVideoFormat`]. Shared name set
-/// for the `gst-launch` DSL. GStreamer caps name formats uppercase (NV12, RGBA,
-/// YUY2); accept any case and the historical lowercase spellings as aliases so
-/// both port.
-pub(crate) fn raw_format_from_str(s: &str) -> Option<RawVideoFormat> {
-    match s.to_ascii_lowercase().as_str() {
-        "nv12" => Some(RawVideoFormat::Nv12),
-        "i420" => Some(RawVideoFormat::I420),
-        "rgba" => Some(RawVideoFormat::Rgba8),
-        "bgra" => Some(RawVideoFormat::Bgra8),
-        // `yuyv` is GStreamer's `YUY2` fourcc; accept both names.
-        "yuy2" | "yuyv" => Some(RawVideoFormat::Yuyv),
-        _ => None,
-    }
-}
-
-/// The canonical (GStreamer) property string for a [`RawVideoFormat`].
-pub(crate) fn raw_format_to_str(f: RawVideoFormat) -> &'static str {
-    match f {
-        RawVideoFormat::Nv12 => "NV12",
-        RawVideoFormat::I420 => "I420",
-        RawVideoFormat::Rgba8 => "RGBA",
-        RawVideoFormat::Bgra8 => "BGRA",
-        RawVideoFormat::Yuyv => "YUY2",
-        RawVideoFormat::I420p10 => "I420_10LE",
-        RawVideoFormat::I420p12 => "I420_12LE",
-        RawVideoFormat::I422 => "Y42B",
-        RawVideoFormat::I422p10 => "I422_10LE",
-        RawVideoFormat::I422p12 => "I422_12LE",
-        RawVideoFormat::I444 => "Y444",
-        RawVideoFormat::I444p10 => "Y444_10LE",
-        RawVideoFormat::I444p12 => "Y444_12LE",
-        RawVideoFormat::P010 => "P010_10LE",
-        // A format added since: no canonical string here, fail loud.
-        _ => unreachable!("unnamed RawVideoFormat: {f:?}"),
-    }
-}
 
 impl PadTemplates for VideoConvert {
     /// Static superset: any supported raw format in, any out (an instance
@@ -1219,6 +1182,25 @@ mod tests {
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
+    }
+
+    #[test]
+    fn format_property_round_trips_every_convertible_format() {
+        for format in FORMATS {
+            let mut convert = VideoConvert::auto();
+            convert
+                .set_property("format", PropValue::Str(format.gst_name().into()))
+                .unwrap_or_else(|_| panic!("{format:?} rejected"));
+            assert_eq!(
+                convert.get_property("format"),
+                Some(PropValue::Str(format.gst_name().into()))
+            );
+        }
+        let mut convert = VideoConvert::auto();
+        assert!(convert
+            .set_property("format", PropValue::Str("yuyv".into()))
+            .is_ok());
+        assert_eq!(convert.target(), Some(RawVideoFormat::Yuyv));
     }
 
     #[test]

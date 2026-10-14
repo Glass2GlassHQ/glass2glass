@@ -24,7 +24,8 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
-use crate::format::{format_from_py, format_to_py, frame_bytes};
+use crate::format::frame_bytes;
+use g2g_core::caps_parse::parse_raw_format;
 
 /// A Python frame source hosted as a first-class g2g source.
 #[derive(Debug)]
@@ -286,7 +287,7 @@ impl SourceLoop for PySource {
                 Ok(())
             }
             "format" => {
-                let f = format_from_py(value.as_str().ok_or(PropError::Type)?)
+                let f = parse_raw_format(value.as_str().ok_or(PropError::Type)?)
                     .ok_or(PropError::Value)?;
                 self.edit_caps(|format, _, _, _| *format = f);
                 Ok(())
@@ -330,7 +331,7 @@ impl SourceLoop for PySource {
             "class" => Some(PropValue::Str(self.class.clone())),
             "num-buffers" => Some(PropValue::Int(self.num_buffers.map_or(-1, |n| n as i64))),
             "cuda-frames" => Some(PropValue::Bool(self.cuda_frames)),
-            "format" => raw.map(|(f, _, _, _)| PropValue::Str(format_to_py(*f).to_string())),
+            "format" => raw.map(|(f, _, _, _)| PropValue::Str(f.gst_name().to_string())),
             "width" => raw.and_then(|(_, w, _, _)| match w {
                 Dim::Fixed(v) => Some(PropValue::Uint(u64::from(*v))),
                 _ => None,

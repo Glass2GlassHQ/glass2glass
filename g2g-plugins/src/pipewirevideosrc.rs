@@ -69,7 +69,7 @@ use pipewire as pw;
 use pw::spa;
 use pw::sys as pw_sys;
 
-use crate::videoconvert::{raw_format_from_str, raw_format_to_str};
+use g2g_core::caps_parse::parse_raw_format;
 
 #[cfg(feature = "portal")]
 use crate::screencastportal::{open_screen_cast, PortalRequest, PortalSourceTypes};
@@ -535,7 +535,7 @@ impl SourceLoop for PipeWireVideoSrc {
                 } else {
                     // a name outside the SPA mapping table is an error, never a
                     // silent fall back to the default format
-                    let format = raw_format_from_str(s).ok_or(PropError::Value)?;
+                    let format = parse_raw_format(s).ok_or(PropError::Value)?;
                     spa_format(format).ok_or(PropError::Value)?;
                     Some(format)
                 };
@@ -589,7 +589,7 @@ impl SourceLoop for PipeWireVideoSrc {
             "height" => Some(PropValue::Uint(self.req_height as u64)),
             "framerate" => Some(PropValue::Uint(self.req_fps as u64)),
             "format" => Some(PropValue::Str(
-                self.pin_format.map_or("", raw_format_to_str).into(),
+                self.pin_format.map_or("", RawVideoFormat::gst_name).into(),
             )),
             "io-mode" => Some(PropValue::Str(self.io_mode.as_str().into())),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),

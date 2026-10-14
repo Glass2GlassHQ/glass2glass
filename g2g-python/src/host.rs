@@ -135,7 +135,6 @@ use g2g_core::{
 };
 
 use crate::cuda_plane::{nv12_planes, produced_cuda_buffer, CudaPlane};
-use crate::format::format_to_py;
 use crate::hosted_input::HostedOutput;
 use crate::text_output::{SRC_PAD, TEXT_SRC_PAD};
 
@@ -1264,7 +1263,7 @@ fn call_system(
         JobCaps::RawVideo {
             width, height, fmt, ..
         } => {
-            let (w, h, fmt) = (*width, *height, format_to_py(*fmt));
+            let (w, h, fmt) = (*width, *height, fmt.gst_name());
             match job.kind {
                 JobKind::Batch | JobKind::StreamBatch => {
                     let list =
