@@ -598,6 +598,8 @@ pub use graphthreads::{PinnedThreadSpawner, TokioThreadSpawner};
 mod annexb;
 // RIFF chunk walking shared by the WAVE and AVI elements.
 mod riff;
+// `WAVEFORMATEX` tags and the WAVE header, shared by the WAV and AVI elements.
+mod waveformat;
 // AVI container parsing / writing (M1071), behind `avidemux` and `avimux`.
 mod avi;
 // AVI demuxer elements (M1071): one `ByteStream{Avi}` in, its streams out.

@@ -30,6 +30,7 @@ use crate::riff::{
     chunk_len, chunks, padded_len, put_chunk, put_chunk_header, read_fourcc, read_u16, read_u32,
     FourCc, CHUNK_HEADER_LEN, FOURCC_LEN, LIST_FOURCC, RIFF_FOURCC, RIFF_HEADER_LEN,
 };
+use crate::waveformat::{audio_format, sample_frame_len, wave_format_tag, WaveFormatEx};
 
 /// The form type of the first `RIFF` list.
 const AVI_FOURCC: FourCc = *b"AVI ";
@@ -83,12 +84,6 @@ const WAVEFORMAT_EXTRA_SIZE: usize = 16;
 /// takes; the extra bytes follow `cbSize`.
 const WAVEFORMAT_LEN: usize = WAVEFORMAT_EXTRA_SIZE;
 const WAVEFORMAT_EX_LEN: usize = WAVEFORMAT_EXTRA_SIZE + 2;
-
-/// `WAVEFORMATEX` `wFormatTag` values this maps.
-const WAVE_FORMAT_PCM: u16 = 0x0001;
-const WAVE_FORMAT_MP3: u16 = 0x0055;
-const WAVE_FORMAT_AAC: u16 = 0x00FF;
-const WAVE_FORMAT_AC3: u16 = 0x2000;
 
 /// One `idx1` entry: chunk id, flags, offset, length.
 const IDX1_ENTRY_LEN: usize = 16;
@@ -228,36 +223,6 @@ fn video_codec(tag: FourCc) -> Option<VideoCodec> {
         .map(|(_, codec)| *codec)
 }
 
-/// The g2g format a `(wFormatTag, wBitsPerSample)` pair names, or `None` for a
-/// payload g2g has no decoder for (ADPCM, WMA, a PCM width off the byte grid).
-fn audio_format(tag: u16, bits: u16) -> Option<AudioFormat> {
-    match (tag, bits) {
-        (WAVE_FORMAT_PCM, 8) => Some(AudioFormat::PcmU8),
-        (WAVE_FORMAT_PCM, 16) => Some(AudioFormat::PcmS16Le),
-        (WAVE_FORMAT_PCM, 24) => Some(AudioFormat::PcmS24Le),
-        (WAVE_FORMAT_PCM, 32) => Some(AudioFormat::PcmS32Le),
-        (WAVE_FORMAT_MP3, _) => Some(AudioFormat::Mp3),
-        (WAVE_FORMAT_AC3, _) => Some(AudioFormat::Ac3),
-        (WAVE_FORMAT_AAC, _) => Some(AudioFormat::Aac),
-        _ => None,
-    }
-}
-
-/// The `wFormatTag` and bit depth to write for a g2g audio format, or `None`
-/// for one AVI cannot carry.
-fn wave_format_tag(format: AudioFormat) -> Option<(u16, u16)> {
-    match format {
-        AudioFormat::PcmU8 => Some((WAVE_FORMAT_PCM, 8)),
-        AudioFormat::PcmS16Le => Some((WAVE_FORMAT_PCM, 16)),
-        AudioFormat::PcmS24Le => Some((WAVE_FORMAT_PCM, 24)),
-        AudioFormat::PcmS32Le => Some((WAVE_FORMAT_PCM, 32)),
-        AudioFormat::Mp3 => Some((WAVE_FORMAT_MP3, 0)),
-        AudioFormat::Ac3 => Some((WAVE_FORMAT_AC3, 0)),
-        AudioFormat::Aac => Some((WAVE_FORMAT_AAC, 0)),
-        _ => None,
-    }
-}
-
 /// The `biCompression` to write for a g2g video codec, or `None` for one AVI
 /// cannot carry.
 fn video_fourcc(codec: VideoCodec) -> Option<FourCc> {
@@ -265,18 +230,6 @@ fn video_fourcc(codec: VideoCodec) -> Option<FourCc> {
         .iter()
         .find(|(_, c)| *c == codec)
         .map(|(fourcc, _)| *fourcc)
-}
-
-/// Bytes one PCM sample frame occupies, `None` for a compressed format.
-fn pcm_block_align(format: AudioFormat, channels: u8) -> Option<usize> {
-    let bits = match format {
-        AudioFormat::PcmU8 => 8usize,
-        AudioFormat::PcmS16Le => 16,
-        AudioFormat::PcmS24Le => 24,
-        AudioFormat::PcmS32Le => 32,
-        _ => return None,
-    };
-    Some(bits / 8 * channels.max(1) as usize)
 }
 
 /// The stream number a `movi` chunk id names (`00dc` -> 0), or `None` when the
@@ -650,7 +603,10 @@ impl AviWriteStream {
     pub(crate) fn is_writable(&self) -> bool {
         match self {
             Self::Video { codec, .. } => video_fourcc(*codec).is_some(),
-            Self::Audio { format, .. } => wave_format_tag(*format).is_some(),
+            // the writer has no ADPCM block size to put in `nBlockAlign`
+            Self::Audio { format, .. } => {
+                *format != AudioFormat::ImaAdpcm && wave_format_tag(*format).is_some()
+            }
         }
     }
 }
@@ -835,7 +791,7 @@ impl AviWriter {
                 // A PCM stream measures itself in sample frames, so its chunks
                 // can hold any whole number of them; a compressed stream stores
                 // one frame per chunk and scales by that frame's sample count.
-                let (scale, size) = match pcm_block_align(*format, *channels) {
+                let (scale, size) = match sample_frame_len(*format, *channels) {
                     Some(align) => (1, align as u32),
                     None => (samples_per_frame(period_ns, *sample_rate), 0),
                 };
@@ -909,7 +865,7 @@ impl AviWriter {
                 if *channels == 0 || *sample_rate == 0 {
                     return Err(G2gError::CapsMismatch);
                 }
-                let pcm_align = pcm_block_align(*format, *channels);
+                let pcm_align = sample_frame_len(*format, *channels);
                 let align = pcm_align.unwrap_or(1);
                 let byte_rate = match pcm_align {
                     Some(align) => *sample_rate as usize * align,
@@ -917,13 +873,16 @@ impl AviWriter {
                     // wrote over the time its chunks covered.
                     None => self.compressed_byte_rate(stream),
                 };
-                out.extend_from_slice(&tag.to_le_bytes());
-                out.extend_from_slice(&(*channels as u16).to_le_bytes());
-                out.extend_from_slice(&sample_rate.to_le_bytes());
-                out.extend_from_slice(&(byte_rate.min(u32::MAX as usize) as u32).to_le_bytes());
-                out.extend_from_slice(&(align.min(u16::MAX as usize) as u16).to_le_bytes());
-                out.extend_from_slice(&bits.to_le_bytes());
-                out.extend_from_slice(&0u16.to_le_bytes()); // cbSize
+                let wave_format = WaveFormatEx {
+                    tag,
+                    channels: u16::from(*channels),
+                    sample_rate: *sample_rate,
+                    byte_rate: byte_rate.min(u32::MAX as usize) as u32,
+                    block_align: align.min(u16::MAX as usize) as u16,
+                    bits,
+                };
+                // AVI always writes the `cbSize` field, as ffmpeg does.
+                out = wave_format.to_bytes(Some(&[]));
             }
         }
         Ok(out)

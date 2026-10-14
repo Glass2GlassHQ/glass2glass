@@ -35,17 +35,11 @@ use g2g_core::{
 
 use g2g_mcu::adpcm::{samples_per_block_channels, BLOCK_HEADER};
 
+use crate::waveformat::{wav_header, wave_format_tag, WaveFormatEx};
+
 /// Size fields of a stream whose length is not known when the header is written.
 /// A reader takes the `data` chunk as running to the end of the file.
 const STREAMING_SIZE: u32 = u32::MAX;
-
-/// `wFormatTag` values: integer PCM, IEEE float for the 32-bit float input, and
-/// the companded / ADPCM payloads `wavparse` reads.
-const FORMAT_PCM: u16 = 1;
-const FORMAT_IEEE_FLOAT: u16 = 3;
-const FORMAT_ALAW: u16 = 6;
-const FORMAT_MULAW: u16 = 7;
-const FORMAT_IMA_ADPCM: u16 = 0x11;
 
 /// The coded payloads a WAV file can carry beside PCM.
 const CODED_FORMATS: [AudioFormat; 3] =
@@ -64,30 +58,16 @@ fn input_alternatives() -> Vec<Caps> {
     alternatives
 }
 
-/// `(wFormatTag, bits per sample)` of a format, `None` for anything WAV cannot
-/// describe in a `fmt ` chunk this way.
+/// `(wFormatTag, bits per sample)` of a format this writes, `None` for anything
+/// else.
 fn wave_format(format: AudioFormat) -> Option<(u16, u16)> {
-    match format {
-        AudioFormat::PcmU8 => Some((FORMAT_PCM, 8)),
-        AudioFormat::PcmS16Le => Some((FORMAT_PCM, 16)),
-        AudioFormat::PcmS24Le => Some((FORMAT_PCM, 24)),
-        AudioFormat::PcmS32Le => Some((FORMAT_PCM, 32)),
-        AudioFormat::PcmF32Le => Some((FORMAT_IEEE_FLOAT, 32)),
-        AudioFormat::Mulaw => Some((FORMAT_MULAW, G711_BITS)),
-        AudioFormat::Alaw => Some((FORMAT_ALAW, G711_BITS)),
-        AudioFormat::ImaAdpcm => Some((FORMAT_IMA_ADPCM, IMA_ADPCM_BITS)),
-        _ => None,
-    }
+    let writable = pcm_formats().contains(&format) || CODED_FORMATS.contains(&format);
+    writable.then(|| wave_format_tag(format)).flatten()
 }
 
-/// Bits per sample of the companded G.711 payloads and of an ADPCM nibble, the
-/// numbers their `fmt ` chunks state.
-const G711_BITS: u16 = 8;
-const IMA_ADPCM_BITS: u16 = 4;
-
-/// The RIFF/WAVE header for this stream: 44 bytes for PCM (the canonical
-/// layout), 46 for a companded payload (`cbSize` 0, as ffmpeg writes) and 48 for
-/// ADPCM (`cbSize` 2 plus the samples a block holds).
+/// The RIFF/WAVE header for this stream, every size at the streaming sentinel
+/// and the `fact` sample count, which has none, at 0. A non-PCM payload carries
+/// an empty `cbSize` extension, ADPCM one field: the samples a block holds.
 fn header(
     format: AudioFormat,
     channels: u16,
@@ -118,36 +98,29 @@ fn header(
         }
         None => sample_rate * block_align as u32,
     };
-    // The `fmt ` extension: absent for PCM, empty for G.711, one field for ADPCM.
     let extension: Vec<u8> = match samples_per_block {
-        Some(samples) => {
-            let mut bytes = Vec::from(2u16.to_le_bytes());
-            bytes.extend_from_slice(&u16::try_from(samples).ok()?.to_le_bytes());
-            bytes
-        }
-        None if tag == FORMAT_PCM || tag == FORMAT_IEEE_FLOAT => Vec::new(),
-        None => Vec::from(0u16.to_le_bytes()),
+        Some(samples) => Vec::from(u16::try_from(samples).ok()?.to_le_bytes()),
+        None => Vec::new(),
     };
-    /// The fields every `fmt ` chunk carries, before any extension.
-    const FMT_FIXED_LEN: u32 = 16;
-
-    let mut out = Vec::with_capacity(48);
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&STREAMING_SIZE.to_le_bytes());
-    out.extend_from_slice(b"WAVE");
-    out.extend_from_slice(b"fmt ");
-    out.extend_from_slice(&(FMT_FIXED_LEN + extension.len() as u32).to_le_bytes());
-    out.extend_from_slice(&tag.to_le_bytes());
-    out.extend_from_slice(&channels.to_le_bytes());
-    out.extend_from_slice(&sample_rate.to_le_bytes());
-    out.extend_from_slice(&byte_rate.to_le_bytes());
-    out.extend_from_slice(&block_align.to_le_bytes());
-    out.extend_from_slice(&bits.to_le_bytes());
-    out.extend_from_slice(&extension);
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&STREAMING_SIZE.to_le_bytes());
-    Some(out)
+    let wave_format = WaveFormatEx {
+        tag,
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits,
+    };
+    Some(wav_header(
+        &wave_format,
+        &extension,
+        STREAMING_SIZE,
+        UNKNOWN_SAMPLE_COUNT,
+        STREAMING_SIZE,
+    ))
 }
+
+/// The `fact` sample count of a stream whose length is not known up front.
+const UNKNOWN_SAMPLE_COUNT: u32 = 0;
 
 /// The WAV byte stream this element produces.
 fn wav_caps() -> Caps {

@@ -33,20 +33,12 @@ use crate::riff::{
     padded_len, read_fourcc, read_u16, read_u32, CHUNK_HEADER_LEN, FOURCC_LEN, RIFF_FOURCC,
     RIFF_HEADER_LEN,
 };
+use crate::waveformat::audio_format;
 
 /// The fields of a `fmt ` chunk this reads: tag, channels, rate, byte rate,
 /// block align, bit depth.
 const FMT_CHUNK_MIN_LEN: usize = 16;
 
-const FORMAT_PCM: u16 = 1;
-const FORMAT_IEEE_FLOAT: u16 = 3;
-const FORMAT_ALAW: u16 = 6;
-const FORMAT_MULAW: u16 = 7;
-const FORMAT_IMA_ADPCM: u16 = 0x11;
-/// Bits per sample of the companded G.711 payloads.
-const G711_BITS: u16 = 8;
-/// Bits per sample of an IMA ADPCM nibble.
-const IMA_ADPCM_BITS: u16 = 4;
 /// WAVE_FORMAT_EXTENSIBLE: the real tag sits in the chunk's extension GUID, whose
 /// first two bytes are the tag it extends.
 const FORMAT_EXTENSIBLE: u16 = 0xFFFE;
@@ -77,26 +69,14 @@ struct WaveFormat {
     byte_rate: u32,
 }
 
-/// The g2g format for a `(wFormatTag, bits per sample)` pair, `None` for an
-/// unmodeled WAV payload (64-bit float, MS ADPCM).
-fn audio_format(tag: u16, bits: u16) -> Option<AudioFormat> {
-    match (tag, bits) {
-        (FORMAT_PCM, 8) => Some(AudioFormat::PcmU8),
-        (FORMAT_PCM, 16) => Some(AudioFormat::PcmS16Le),
-        (FORMAT_PCM, 24) => Some(AudioFormat::PcmS24Le),
-        (FORMAT_PCM, 32) => Some(AudioFormat::PcmS32Le),
-        (FORMAT_IEEE_FLOAT, 32) => Some(AudioFormat::PcmF32Le),
-        (FORMAT_ALAW, G711_BITS) => Some(AudioFormat::Alaw),
-        (FORMAT_MULAW, G711_BITS) => Some(AudioFormat::Mulaw),
-        (FORMAT_IMA_ADPCM, IMA_ADPCM_BITS) => Some(AudioFormat::ImaAdpcm),
-        _ => None,
-    }
-}
+/// The coded payloads this reads beside PCM.
+const CODED_FORMATS: [AudioFormat; 3] =
+    [AudioFormat::Alaw, AudioFormat::Mulaw, AudioFormat::ImaAdpcm];
 
 /// The coded payloads a WAV file can carry, at the unknown-layout sentinels a
 /// decoder negotiates against before the `fmt ` chunk is read.
 fn coded_alternatives() -> [Caps; 3] {
-    [AudioFormat::Alaw, AudioFormat::Mulaw, AudioFormat::ImaAdpcm].map(|format| Caps::Audio {
+    CODED_FORMATS.map(|format| Caps::Audio {
         format,
         channels: ANY_CHANNELS,
         sample_rate: ANY_SAMPLE_RATE,
@@ -133,7 +113,8 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
         channel_layout = ChannelLayout::UNSPECIFIED;
     }
     Some(WaveFormat {
-        format: audio_format(tag, bits)?,
+        format: audio_format(tag, bits)
+            .filter(|format| pcm_formats().contains(format) || CODED_FORMATS.contains(format))?,
         channels: channels as u8,
         channel_layout,
         sample_rate,

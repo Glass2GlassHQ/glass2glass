@@ -21,8 +21,8 @@ use g2g_core::{
     PropValue, PropertySpec,
 };
 
-use crate::audio::WAVE_FORMAT_IEEE_FLOAT;
 use crate::filesink::{io_err, path_io_err};
+use crate::waveformat::{self, WaveFormatEx};
 use g2g_core::log::short_type_name;
 
 /// Byte offset of the RIFF running size (constant across header layouts).
@@ -73,34 +73,18 @@ impl WavSink {
 
 use crate::audio::pcm_params;
 
-/// The header with zeroed running sizes. PCM gets the canonical 44-byte form;
-/// IEEE float gets the spec-required 18-byte fmt chunk (with `cbSize`) plus a
-/// `fact` chunk, so non-PCM output is conformant, not just widely accepted.
+/// The header with zeroed running sizes, patched at `Eos`.
 fn wav_header(tag: u16, bits: u16, channels: u16, rate: u32) -> Vec<u8> {
     let block_align = channels * bits / 8;
-    let byte_rate = rate * block_align as u32;
-    let is_float = tag == WAVE_FORMAT_IEEE_FLOAT;
-    let mut h = Vec::with_capacity(if is_float { 58 } else { 44 });
-    h.extend_from_slice(b"RIFF");
-    h.extend_from_slice(&0u32.to_le_bytes()); // riff size, patched at Eos
-    h.extend_from_slice(b"WAVE");
-    h.extend_from_slice(b"fmt ");
-    h.extend_from_slice(&if is_float { 18u32 } else { 16 }.to_le_bytes());
-    h.extend_from_slice(&tag.to_le_bytes());
-    h.extend_from_slice(&channels.to_le_bytes());
-    h.extend_from_slice(&rate.to_le_bytes());
-    h.extend_from_slice(&byte_rate.to_le_bytes());
-    h.extend_from_slice(&block_align.to_le_bytes());
-    h.extend_from_slice(&bits.to_le_bytes());
-    if is_float {
-        h.extend_from_slice(&0u16.to_le_bytes()); // cbSize = 0
-        h.extend_from_slice(b"fact");
-        h.extend_from_slice(&4u32.to_le_bytes());
-        h.extend_from_slice(&0u32.to_le_bytes()); // sample count, patched at Eos
-    }
-    h.extend_from_slice(b"data");
-    h.extend_from_slice(&0u32.to_le_bytes()); // data size, patched at Eos
-    h
+    let format = WaveFormatEx {
+        tag,
+        channels,
+        sample_rate: rate,
+        byte_rate: rate * block_align as u32,
+        block_align,
+        bits,
+    };
+    waveformat::wav_header(&format, &[], 0, 0, 0)
 }
 
 impl AsyncElement for WavSink {
@@ -261,7 +245,7 @@ impl PadTemplates for WavSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::WAVE_FORMAT_PCM;
+    use crate::waveformat::{WAVE_FORMAT_IEEE_FLOAT, WAVE_FORMAT_PCM};
 
     #[test]
     fn header_is_canonical_44_bytes() {
