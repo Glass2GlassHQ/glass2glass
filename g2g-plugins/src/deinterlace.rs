@@ -351,11 +351,25 @@ fn components(format: RawVideoFormat, w: usize, h: usize) -> Vec<Component> {
 }
 
 /// A held input frame: yadif predicts from the previous and next frames, so the
-/// element keeps its own copy of three of them.
+/// element keeps three of them. The buffer is made shareable once, so a frame
+/// standing in for its neighbour is a handle share.
 #[derive(Debug)]
 struct Held {
-    data: Vec<u8>,
+    domain: MemoryDomain,
     timing: FrameTiming,
+}
+
+impl Held {
+    fn share(&self) -> Self {
+        Self {
+            domain: self.domain.share(),
+            timing: self.timing,
+        }
+    }
+
+    fn bytes(&self) -> Option<&[u8]> {
+        self.domain.as_system_slice()
+    }
 }
 
 /// # Example
@@ -396,6 +410,9 @@ pub struct Deinterlace {
     prev: Option<Held>,
     cur: Option<Held>,
     next: Option<Held>,
+    /// The frame that last left the window, whose buffer the next yadif output
+    /// is written into.
+    spare: Option<MemoryDomain>,
 }
 
 impl Default for Deinterlace {
@@ -424,6 +441,7 @@ impl Deinterlace {
             prev: None,
             cur: None,
             next: None,
+            spare: None,
         }
     }
 
@@ -576,7 +594,7 @@ impl Deinterlace {
 
     async fn emit(
         &mut self,
-        data: Vec<u8>,
+        domain: MemoryDomain,
         timing: FrameTiming,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
@@ -587,7 +605,7 @@ impl Deinterlace {
             }
         }
         let frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+            domain,
             timing,
             sequence: self.emitted,
             meta: Default::default(),
@@ -597,20 +615,33 @@ impl Deinterlace {
         Ok(())
     }
 
-    /// Run yadif over the held window for one output frame of `cur`.
-    fn yadif_current(&self, pass: FieldPass) -> Option<Vec<u8>> {
-        let (prev, cur, next) = (self.prev.as_ref()?, self.cur.as_ref()?, self.next.as_ref()?);
-        let mut dst = cur.data.clone();
+    /// Run yadif over the held window into `dst` for one output frame of
+    /// `cur`. `None` when the window is short of a frame.
+    fn yadif_current(&self, pass: FieldPass, dst: &mut [u8]) -> Option<()> {
+        let n = self.frame_bytes;
+        let prev = &self.prev.as_ref()?.bytes()?[..n];
+        let cur = &self.cur.as_ref()?.bytes()?[..n];
+        let next = &self.next.as_ref()?.bytes()?[..n];
+        dst.copy_from_slice(cur);
         for c in &self.layout {
             if self.wide_samples {
-                yadif_component::<SixteenLittleEndian>(
-                    &prev.data, &cur.data, &next.data, &mut dst, *c, pass,
-                );
+                yadif_component::<SixteenLittleEndian>(prev, cur, next, dst, *c, pass);
             } else {
-                yadif_component::<Eight>(&prev.data, &cur.data, &next.data, &mut dst, *c, pass);
+                yadif_component::<Eight>(prev, cur, next, dst, *c, pass);
             }
         }
-        Some(dst)
+        Some(())
+    }
+
+    /// A frame-sized buffer to write an output into: the spare one when it fits,
+    /// copied out only if a downstream branch still holds it.
+    fn output_buffer(&mut self) -> SystemSlice {
+        match self.spare.take() {
+            Some(MemoryDomain::System(slice)) if slice.as_slice().len() == self.frame_bytes => {
+                slice
+            }
+            _ => SystemSlice::from_boxed(vec![0u8; self.frame_bytes].into_boxed_slice()),
+        }
     }
 
     /// Emit every output frame the held yadif window is ready to produce, one
@@ -622,11 +653,12 @@ impl Deinterlace {
         };
         let (passes, count) = self.passes();
         for (index, pass) in passes[..count].iter().enumerate() {
-            let Some(data) = self.yadif_current(*pass) else {
+            let mut buffer = self.output_buffer();
+            if self.yadif_current(*pass, buffer.as_mut_slice()).is_none() {
                 return Ok(());
-            };
+            }
             let timing = self.field_timing(base, index);
-            self.emit(data, timing, out).await?;
+            self.emit(MemoryDomain::System(buffer), timing, out).await?;
         }
         Ok(())
     }
@@ -789,17 +821,17 @@ impl AsyncElement for Deinterlace {
                         // ffmpeg's window shift: the first frame stands in for its
                         // own predecessor, so nothing is emitted until a second
                         // one arrives and the element runs one frame behind.
-                        self.prev = self.cur.take();
+                        let mut domain = frame.domain;
+                        domain.make_shareable();
+                        self.spare = core::mem::replace(&mut self.prev, self.cur.take())
+                            .map(|held| held.domain);
                         self.cur = self.next.take();
                         self.next = Some(Held {
-                            data: src[..n].to_vec(),
+                            domain,
                             timing: frame.timing,
                         });
                         if self.cur.is_none() {
-                            self.cur = self.next.as_ref().map(|f| Held {
-                                data: f.data.clone(),
-                                timing: f.timing,
-                            });
+                            self.cur = self.next.as_ref().map(Held::share);
                         }
                         self.emit_yadif_window(out).await?;
                     } else {
@@ -828,7 +860,10 @@ impl AsyncElement for Deinterlace {
                                 }
                             }
                             let timing = self.field_timing(base, index);
-                            self.emit(dst, timing, out).await?;
+                            let domain = MemoryDomain::System(SystemSlice::from_boxed(
+                                dst.into_boxed_slice(),
+                            ));
+                            self.emit(domain, timing, out).await?;
                         }
                     }
                 }
@@ -857,12 +892,10 @@ impl AsyncElement for Deinterlace {
                 PipelinePacket::Eos => {
                     // ffmpeg feeds a copy of the last frame so the real one still
                     // gets a `next` to predict from: N in, N out.
-                    self.prev = self.cur.take();
+                    self.spare =
+                        core::mem::replace(&mut self.prev, self.cur.take()).map(|held| held.domain);
                     self.cur = self.next.take();
-                    self.next = self.cur.as_ref().map(|f| Held {
-                        data: f.data.clone(),
-                        timing: f.timing,
-                    });
+                    self.next = self.cur.as_ref().map(Held::share);
                     self.emit_yadif_window(out).await?;
                     self.prev = None;
                     self.cur = None;
