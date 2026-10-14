@@ -8,10 +8,14 @@
 //! peer over the files this muxer writes.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
 #[path = "common/ffmpeg_tool.rs"]
 mod ffmpeg_tool;
 #[path = "common/ffprobe_tool.rs"]
 mod ffprobe_tool;
+use collect_sink::CollectSink;
+
 use ffmpeg_tool::have_ffmpeg;
 use ffprobe_tool::have_ffprobe;
 
@@ -22,8 +26,8 @@ use g2g_core::frame::{Frame, PipelinePacket};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph, SourceLoop};
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PropValue, PropertySpec, PushOutcome, SubPictureFormat, TextFormat,
+    AsyncElement, ByteStreamEncoding, Caps, FrameTiming, MemoryDomain, PipelineClock, PropValue,
+    PropertySpec, SubPictureFormat, TextFormat,
 };
 
 use g2g_plugins::dvbsub::{page_id_blob, parse_page_ids, PageIds};
@@ -44,25 +48,7 @@ impl PipelineClock for ZeroClock {
     }
 }
 
-#[derive(Default)]
-struct CaptureSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CaptureSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl CaptureSink {
+impl CollectSink {
     fn frames(&self) -> Vec<(Vec<u8>, FrameTiming)> {
         self.packets
             .iter()
@@ -117,7 +103,7 @@ fn matroska_caps() -> Caps {
 async fn mux(mut el: MkvMux, caps: &Caps, stream: &[(Vec<u8>, FrameTiming)]) -> Vec<u8> {
     el.configure_pipeline(caps)
         .expect("matroskamux accepts the subtitle pad");
-    let mut sink = CaptureSink::default();
+    let mut sink = CollectSink::default();
     for (data, timing) in stream {
         el.process(frame(data.clone(), *timing), &mut sink)
             .await
@@ -133,7 +119,7 @@ async fn mux(mut el: MkvMux, caps: &Caps, stream: &[(Vec<u8>, FrameTiming)]) -> 
 async fn demux(mut el: MkvDemux, bytes: Vec<u8>) -> Vec<(Vec<u8>, FrameTiming)> {
     el.configure_pipeline(&matroska_caps())
         .expect("demuxer configures");
-    let mut sink = CaptureSink::default();
+    let mut sink = CollectSink::default();
     el.process(frame(bytes, FrameTiming::default()), &mut sink)
         .await
         .expect("demux");
@@ -165,7 +151,7 @@ async fn vobsub_stream(idx: &PathBuf) -> Vec<(Vec<u8>, FrameTiming)> {
         format: SubPictureFormat::VobSub,
     })
     .expect("vobsubsrc configures");
-    let mut sink = CaptureSink::default();
+    let mut sink = CollectSink::default();
     src.run(&mut sink).await.expect("read the sidecar pair");
     sink.frames()
 }

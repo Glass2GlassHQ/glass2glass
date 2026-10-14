@@ -5,38 +5,19 @@
 //! `libcamera_dmabuf`). Skips cleanly when no Vulkan adapter is present.
 #![cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 
 use ash::vk;
 
-use g2g_core::element::PushOutcome;
 use g2g_core::memory::{MemoryDomain, OwnedDmaBuf};
 use g2g_core::runtime::block_on;
-use g2g_core::{
-    AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, OutputSink, PipelinePacket, Rate,
-    RawVideoFormat,
-};
+use g2g_core::{AsyncElement, Caps, Dim, Frame, FrameTiming, PipelinePacket, Rate, RawVideoFormat};
 
 use g2g_plugins::dmabufwgpu::{DmaBufToWgpu, DmaBufWgpuBuffer};
-
-/// Collects packets the element pushes downstream.
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
 
 /// Export `size` bytes of device-local GPU memory as a dma-buf fd, so the dGPU
 /// can re-import it. `None` when no Vulkan adapter (headless CI).
@@ -159,7 +140,7 @@ fn imports_a_gpu_dmabuf_into_a_wgpu_buffer() {
         .expect("configures for RGBA caps");
 
     let frame = Frame::new(MemoryDomain::DmaBuf(dmabuf), FrameTiming::default(), 0);
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     block_on(elem.process(PipelinePacket::DataFrame(frame), &mut sink)).expect("import runs");
 
     assert_eq!(elem.imported(), 1, "one frame imported");

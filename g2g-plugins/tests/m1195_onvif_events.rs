@@ -13,13 +13,17 @@
 
 #![cfg(feature = "onvif")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::path::PathBuf;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::meta::{AnalyticsMeta, WallClockMeta};
-use g2g_core::{Caps, G2gError, MultiInputElement, OutputSink, PushOutcome, VideoCodec};
+use g2g_core::{Caps, MultiInputElement, VideoCodec};
 use g2g_plugins::onvifmetadata::{
     parse_metadata_documents, parse_utc_time, OnvifEventMessage, OnvifEventMeta,
     OnvifMetadataCombiner, OnvifMetadataParse, PropertyOperation, SimpleItem,
@@ -294,24 +298,7 @@ fn a_message_with_an_overlong_text_is_refused() {
 
 // ---- onvifmetadataparse ----
 
-#[derive(Default)]
-struct RecordingSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for RecordingSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl RecordingSink {
+impl CollectSink {
     fn take_frames(&mut self) -> Vec<Frame> {
         core::mem::take(&mut self.packets)
             .into_iter()
@@ -363,7 +350,7 @@ async fn the_parse_element_reads_an_axis_initialized_changed_pair() {
     // frame's wall clock and the message's UtcTime differ.
     const DELIVERY_DELAY_NS: i64 = 40_000_000;
     let mut parse = parse_element();
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     let documents = [
         (AXIS_PIR_INITIALIZED, PropertyOperation::Initialized),
         (AXIS_PIR_CHANGED, PropertyOperation::Changed),
@@ -403,7 +390,7 @@ async fn the_parse_element_reads_an_axis_initialized_changed_pair() {
 async fn frames_and_events_in_one_payload_both_come_out() {
     const PTS_NS: u64 = 500_000_000;
     let mut parse = parse_element();
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     parse
         .process(
             metadata_packet(fixture(FRAMES_AND_EVENT), PTS_NS, None),
@@ -433,7 +420,7 @@ async fn frames_and_events_in_one_payload_both_come_out() {
 async fn the_parse_element_drops_a_truncated_event_document() {
     let whole = fixture(HIKVISION_MOTION);
     let mut parse = parse_element();
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     parse
         .process(
             metadata_packet(whole[..whole.len() / 2].to_vec(), 0, None),
@@ -492,7 +479,7 @@ async fn the_combiner_carries_events_onto_the_video_frame_of_their_instant() {
     let wall_of = |index: u64| start_nanos + (FRAME_NS * index) as i64;
 
     let mut parse = parse_element();
-    let mut parsed = RecordingSink::default();
+    let mut parsed = CollectSink::default();
     parse
         .process(
             metadata_packet(
@@ -507,7 +494,7 @@ async fn the_combiner_carries_events_onto_the_video_frame_of_their_instant() {
     let event_frame = parsed.take_frames().pop().expect("one event frame");
 
     let mut combiner = combiner();
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     combiner
         .process(
             OnvifMetadataCombiner::METADATA,

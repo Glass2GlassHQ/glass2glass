@@ -14,7 +14,11 @@
 
 #![cfg(all(target_os = "linux", feature = "ffmpeg"))]
 
-use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
+use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
@@ -26,26 +30,7 @@ const W: usize = 320;
 const H: usize = 240;
 const FRAMES: usize = 12;
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn caps_changes(&self) -> Vec<Caps> {
         self.packets
             .iter()
@@ -92,7 +77,7 @@ async fn access_units() -> Vec<Vec<u8>> {
     parse
         .configure_pipeline(&h264_caps())
         .expect("h264parse accepts the stream");
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     parse
         .process(data_frame(FIXTURE.to_vec()), &mut sink)
         .await
@@ -117,7 +102,7 @@ async fn decode(output: OutputFormat) -> Result<(Vec<Caps>, Vec<Vec<u8>>), G2gEr
     let mut dec = FfmpegVideoDec::new().with_output_format(output);
     dec.configure_pipeline(&h264_caps())
         .expect("libavcodec opens the H.264 decoder");
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     for au in aus {
         dec.process(data_frame(au), &mut sink).await?;
     }
@@ -280,7 +265,7 @@ async fn autoplug_builds_a_p010_decoder_for_a_p010_sink() {
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     DynAsyncElement::process(dec, PipelinePacket::CapsChanged(p010), &mut sink)
         .await
         .expect("the auto-plugged decoder must accept P010 output caps");

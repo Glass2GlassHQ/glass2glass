@@ -3,13 +3,16 @@
 //! every threshold is a named constant.
 #![cfg(feature = "webrtcdsp")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use core::f64::consts::TAU;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, G2gError, MemoryDomain, OutputSink, PropError, PropValue,
-    PropertySpec, PushOutcome,
+    AsyncElement, AudioFormat, Caps, G2gError, MemoryDomain, PropError, PropValue, PropertySpec,
 };
 use g2g_plugins::gst_compat::{gst_equivalent, GstEquivalent};
 use g2g_plugins::registry::default_registry;
@@ -47,24 +50,7 @@ const MISMATCHED_RATE: u32 = 48_000;
 const UNSUPPORTED_RATE: u32 = 44_100;
 const I16_SCALE: f32 = 32768.0;
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn data_frames(&self) -> impl Iterator<Item = &Frame> {
         self.packets.iter().filter_map(|packet| match packet {
             PipelinePacket::DataFrame(frame) => Some(frame),
@@ -203,8 +189,8 @@ async fn run_pair(
     far_end: &[f32],
     near_end: &[f32],
 ) -> Vec<f32> {
-    let mut played = Collect::default();
-    let mut processed = Collect::default();
+    let mut played = CollectSink::default();
+    let mut processed = CollectSink::default();
     for (index, (far, near)) in far_end
         .chunks(CHUNK_FRAMES)
         .zip(near_end.chunks(CHUNK_FRAMES))
@@ -300,7 +286,7 @@ async fn noise_suppression_switched_on_at_runtime_lowers_the_noise() {
         .with_gain_control(false)
         .with_high_pass_filter(false);
     dsp.configure_pipeline(&caps(RATE)).expect("dsp configures");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for (index, chunk) in input.chunks(CHUNK_FRAMES).enumerate() {
         if index * CHUNK_FRAMES == half {
             dsp.set_property("noise-suppression", PropValue::Bool(true))
@@ -337,7 +323,7 @@ async fn odd_frames_come_out_complete_and_in_order() {
     let input = speech_like_far_end(ODD_TOTAL_FRAMES);
     let mut dsp = WebrtcDsp::new().with_echo_cancel(false);
     dsp.configure_pipeline(&caps(RATE)).expect("dsp configures");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for (index, chunk) in input.chunks(ODD_CHUNK_FRAMES).enumerate() {
         let pts_ns = FIRST_PTS_NS + frames_to_ns(index * ODD_CHUNK_FRAMES);
         dsp.process(frame(chunk, pts_ns), &mut out)

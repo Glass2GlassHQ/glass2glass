@@ -4,13 +4,14 @@
 //! samples each frame carries.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
-use g2g_core::{
-    AsyncElement, AudioFormat, Caps, G2gError, MemoryDomain, OutputSink, PipelineClock, PropValue,
-    PushOutcome,
-};
+use g2g_core::{AsyncElement, AudioFormat, Caps, G2gError, MemoryDomain, PipelineClock, PropValue};
 use g2g_plugins::audiorate::AudioRate;
 use g2g_plugins::registry::default_registry;
 
@@ -22,24 +23,7 @@ const BYTES_PER_FRAME: usize = 2 * CHANNELS as usize;
 const BUFFER_SAMPLES: u64 = 480;
 const BUFFER_NS: u64 = 10_000_000;
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl Collect {
+impl CollectSink {
     /// (pts, duration, payload) of every data frame pushed.
     fn frames(&self) -> Vec<(u64, u64, Vec<u8>)> {
         self.packets
@@ -106,7 +90,7 @@ async fn gap_is_filled_with_exactly_the_missing_samples() {
     element
         .configure_pipeline(&caps(AudioFormat::PcmS16Le, CHANNELS, RATE))
         .expect("s16 stereo configures");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     element
         .process(frame(0, BUFFER_SAMPLES, BYTES_PER_FRAME, 0x11), &mut out)
         .await
@@ -149,7 +133,7 @@ async fn overlapping_samples_are_dropped() {
     element
         .configure_pipeline(&caps(AudioFormat::PcmS16Le, CHANNELS, RATE))
         .expect("s16 stereo configures");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     element
         .process(frame(0, BUFFER_SAMPLES, BYTES_PER_FRAME, 0x11), &mut out)
         .await
@@ -197,7 +181,7 @@ async fn jitter_within_tolerance_is_only_restamped() {
     element
         .configure_pipeline(&caps(AudioFormat::PcmS16Le, CHANNELS, RATE))
         .expect("s16 stereo configures");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     element
         .process(frame(0, BUFFER_SAMPLES, BYTES_PER_FRAME, 0x11), &mut out)
         .await
@@ -228,7 +212,7 @@ async fn u8_silence_sits_at_the_offset_binary_midpoint() {
     element
         .configure_pipeline(&caps(AudioFormat::PcmU8, 1, U8_RATE))
         .expect("u8 mono configures");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     element
         .process(frame(0, U8_SAMPLES, 1, 0x11), &mut out)
         .await
@@ -253,7 +237,7 @@ async fn flush_restarts_the_grid() {
     element
         .configure_pipeline(&caps(AudioFormat::PcmS16Le, CHANNELS, RATE))
         .expect("s16 stereo configures");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     element
         .process(frame(0, BUFFER_SAMPLES, BYTES_PER_FRAME, 0x11), &mut out)
         .await
@@ -285,7 +269,7 @@ async fn ragged_buffer_fails_loud() {
     element
         .configure_pipeline(&caps(AudioFormat::PcmS16Le, CHANNELS, RATE))
         .expect("s16 stereo configures");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     // 3 bytes is not a whole s16 stereo sample frame (4 bytes).
     let bytes = vec![0u8; 3];
     let packet = PipelinePacket::DataFrame(Frame::new(

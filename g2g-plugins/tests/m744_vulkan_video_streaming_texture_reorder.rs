@@ -23,12 +23,16 @@
     feature = "vulkan-video"
 ))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
-    AllocationParams, AsyncElement, Caps, Dim, DomainSet, FrameTiming, G2gError, MemoryDomain,
-    MemoryDomainKind, OutputSink, PipelinePacket, PushOutcome, Rate, VideoCodec,
+    AllocationParams, AsyncElement, Caps, Dim, DomainSet, FrameTiming, MemoryDomain,
+    MemoryDomainKind, PipelinePacket, Rate, VideoCodec,
 };
 use g2g_plugins::gpu::{read_rgba_texture, texture_of};
 use g2g_plugins::vulkanvideo::{
@@ -38,25 +42,6 @@ use g2g_plugins::vulkanvideo::{
 
 const H264: &[u8] = include_bytes!("fixtures/h264_640x480_bframes.h264");
 const AV1: &[u8] = include_bytes!("fixtures/av1_640x480_showexisting.obu");
-
-#[derive(Default)]
-struct RecordingSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for RecordingSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
 
 /// Byte offsets of each Annex-B NAL payload (just past its start code).
 fn start_code_offsets(data: &[u8]) -> Vec<usize> {
@@ -194,7 +179,7 @@ fn element_streaming_output(codec: VideoCodec, aus: Vec<Vec<u8>>, gpu: bool) -> 
     dec.configure_pipeline(&in_caps)
         .expect("configure opens the decode device");
 
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     for (i, au) in aus.into_iter().enumerate() {
         block_on(dec.process(PipelinePacket::DataFrame(au_frame(au, i as u64)), &mut sink))
             .expect("decode access unit");

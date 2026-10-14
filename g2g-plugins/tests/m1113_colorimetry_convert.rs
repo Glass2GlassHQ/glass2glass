@@ -7,11 +7,14 @@
 //! that ignores the caps (bt601 and bt709 have to disagree on a saturated
 //! colour).
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, ColorRange, Colorimetry, Dim, Frame, FrameTiming, G2gError,
-    LumaCoefficients, MatrixCoefficients, MemoryDomain, OutputSink, PipelinePacket, PushOutcome,
-    Rate, RawVideoFormat,
+    AsyncElement, Caps, ColorRange, Colorimetry, Dim, Frame, FrameTiming, LumaCoefficients,
+    MatrixCoefficients, MemoryDomain, PipelinePacket, Rate, RawVideoFormat,
 };
 use g2g_plugins::videoconvert::VideoConvert;
 
@@ -20,23 +23,6 @@ use g2g_plugins::videoconvert::VideoConvert;
 /// pixel, and 4:2:0 chroma averaging adds nothing here because every fixture is
 /// a solid colour.
 const CHANNEL_TOLERANCE: i32 = 2;
-
-#[derive(Default)]
-struct CollectSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CollectSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
 
 fn raw(format: RawVideoFormat, w: u32, h: u32, colorimetry: Colorimetry) -> Caps {
     Caps::RawVideo {

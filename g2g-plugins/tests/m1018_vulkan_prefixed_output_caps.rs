@@ -18,12 +18,16 @@
     feature = "vulkan-video"
 ))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
-    AsyncElement, Caps, ColorRange, Colorimetry, Dim, FrameTiming, G2gError, MatrixCoefficients,
-    MemoryDomain, OutputSink, PipelinePacket, PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, ColorRange, Colorimetry, Dim, FrameTiming, MatrixCoefficients,
+    MemoryDomain, PipelinePacket, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::vulkanvideo::{
     extract_h264_parameter_sets, open_h264_decode_device, VulkanVideoDec, VulkanVideoError,
@@ -48,24 +52,7 @@ const STREAM_COLORIMETRY: Colorimetry = Colorimetry {
     primaries: g2g_core::ColorPrimaries::Unknown,
 };
 
-#[derive(Default)]
-struct RecordingSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for RecordingSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl RecordingSink {
+impl CollectSink {
     fn caps_changes(&self) -> Vec<&Caps> {
         self.packets
             .iter()
@@ -195,7 +182,7 @@ fn the_solved_output_caps_are_forwarded_then_refined_once() {
     };
     assert_fixture_declares_no_colour_description();
 
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     block_on(dec.process(PipelinePacket::CapsChanged(nv12_output_caps()), &mut sink))
         .expect("the decoder accepts the output caps the runner solved for it");
     assert_eq!(

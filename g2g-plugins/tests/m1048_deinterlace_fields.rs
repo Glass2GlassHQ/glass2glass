@@ -9,8 +9,12 @@
 //! field timestamps, the semi-planar chroma pair) are asserted directly.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
 #[path = "common/ffmpeg_tool.rs"]
 mod ffmpeg_tool;
+use collect_sink::CollectSink;
+
 use ffmpeg_tool::have_ffmpeg;
 
 use std::path::PathBuf;
@@ -18,7 +22,7 @@ use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::SystemSlice;
-use g2g_core::{AsyncElement, Caps, Dim, G2gError, MemoryDomain, OutputSink, PushOutcome, Rate};
+use g2g_core::{AsyncElement, Caps, Dim, MemoryDomain, Rate};
 use g2g_core::{Interlace, PropValue, RawVideoFormat};
 
 use g2g_plugins::deinterlace::{
@@ -47,24 +51,7 @@ fn ffmpeg(args: &[&str]) {
     );
 }
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn frames(&self) -> Vec<Vec<u8>> {
         self.packets
             .iter()
@@ -117,13 +104,13 @@ async fn run(
     method: DeinterlaceMethod,
     fields: DeinterlaceFields,
     field_order: FieldOrder,
-) -> Collect {
+) -> CollectSink {
     let mut element = Deinterlace::new()
         .with_method(method)
         .with_fields(fields)
         .with_field_order(field_order);
     element.configure_pipeline(&caps(format, w, h)).unwrap();
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for (i, bytes) in input.iter().enumerate() {
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
@@ -502,7 +489,7 @@ async fn linear_rebuilds_the_other_field_under_bff() {
             frame[y * w + x] = if y % 2 == 0 { 0 } else { 240 };
         }
     }
-    let luma = |out: &Collect, y: usize| out.frames()[0][y * w];
+    let luma = |out: &CollectSink, y: usize| out.frames()[0][y * w];
 
     let tff = run(
         &[frame.clone()],

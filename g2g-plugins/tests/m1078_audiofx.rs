@@ -5,13 +5,14 @@
 //! peak it left, the cancellation it achieved), not a hard-coded output buffer.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
-use g2g_core::{
-    AsyncElement, AudioFormat, Caps, G2gError, MemoryDomain, OutputSink, PipelineClock, PropValue,
-    PushOutcome,
-};
+use g2g_core::{AsyncElement, AudioFormat, Caps, MemoryDomain, PipelineClock, PropValue};
 use g2g_plugins::audiochebband::AudioChebBand;
 use g2g_plugins::audiocheblimit::AudioChebLimit;
 use g2g_plugins::audiodynamic::{AudioDynamic, DynamicCharacteristics, DynamicMode};
@@ -37,24 +38,7 @@ impl PipelineClock for ZeroClock {
     }
 }
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl Collect {
+impl CollectSink {
     /// Every data frame's samples, decoded from F32LE and concatenated.
     fn samples(&self) -> Vec<f32> {
         let mut out = Vec::new();
@@ -140,7 +124,7 @@ async fn measure_gain<E: AsyncElement>(element: &mut E, frequency: f64, channels
     element
         .configure_pipeline(&caps(channels as u8))
         .expect("f32 caps configure");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for buffer in 0..BUFFERS {
         let start = buffer * BUFFER_SAMPLES;
         let samples = sine(frequency, BUFFER_SAMPLES, channels, start);
@@ -282,7 +266,7 @@ async fn wsinclimit_keeps_the_sample_count_and_the_first_timestamp() {
     let latency = low.latency_samples();
     assert_eq!(latency, (TEST_KERNEL_TAPS as usize - 1) / 2);
 
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for buffer in 0..BUFFERS {
         let start = buffer * BUFFER_SAMPLES;
         let samples = sine(PASSBAND_TONE_HZ, BUFFER_SAMPLES, 1, start);
@@ -415,7 +399,7 @@ async fn compressor_pulls_a_full_scale_peak_onto_the_hard_knee() {
         let t = i as f64 / RATE as f64;
         samples.push((core::f64::consts::TAU * 1000.0 * t).sin() as f32);
     }
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     element
         .process(to_frame(&samples, 1, 0), &mut out)
         .await
@@ -453,7 +437,7 @@ async fn expander_squelches_a_tone_under_its_zero_crossing() {
         let t = i as f64 / RATE as f64;
         samples.push((quiet_amplitude * (core::f64::consts::TAU * 1000.0 * t).sin()) as f32);
     }
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     element
         .process(to_frame(&samples, 1, 0), &mut out)
         .await
@@ -474,7 +458,7 @@ async fn expander_squelches_a_tone_under_its_zero_crossing() {
         .iter()
         .map(|s| (*s as f64 / quiet_amplitude) as f32)
         .collect();
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     element
         .process(to_frame(&loud, 1, 0), &mut out)
         .await
@@ -493,7 +477,7 @@ async fn invert_negates_at_full_degree_and_silences_at_half() {
 
     let mut full = AudioInvert::new().with_degree(1.0);
     full.configure_pipeline(&caps(1)).expect("configures");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     full.process(to_frame(&samples, 1, 0), &mut out)
         .await
         .unwrap();
@@ -506,7 +490,7 @@ async fn invert_negates_at_full_degree_and_silences_at_half() {
 
     let mut half = AudioInvert::new().with_degree(0.5);
     half.configure_pipeline(&caps(1)).expect("configures");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     half.process(to_frame(&samples, 1, 0), &mut out)
         .await
         .unwrap();
@@ -546,7 +530,7 @@ async fn karaoke_passes_anti_phase_channels() {
         stereo.push(*sample);
         stereo.push(-*sample);
     }
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     element
         .process(to_frame(&stereo, 2, 0), &mut out)
         .await

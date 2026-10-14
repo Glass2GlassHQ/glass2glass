@@ -14,6 +14,10 @@
 
 #![cfg(all(feature = "onvif", feature = "rtsp"))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::path::PathBuf;
 
 use g2g_core::element::AsyncElement;
@@ -22,7 +26,7 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::meta::{
     AnalyticsMeta, AnalyticsNode, BBox, ObjectDetection, RelationKind, WallClockMeta,
 };
-use g2g_core::{Caps, G2gError, MultiInputElement, OutputSink, PropValue, PushOutcome, VideoCodec};
+use g2g_core::{Caps, G2gError, MultiInputElement, PropValue, PushOutcome, VideoCodec};
 use g2g_plugins::onvifmetadata::{
     parse_metadata_documents, OnvifMetadataCombiner, OnvifMetadataParse, MAX_ELEMENT_DEPTH,
     MAX_OBJECTS_PER_DOCUMENT, UNCLASSIFIED_LABEL,
@@ -391,24 +395,7 @@ fn the_object_count_bound_holds() {
 
 // ---- onvifmetadataparse ----
 
-#[derive(Default)]
-struct RecordingSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for RecordingSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl RecordingSink {
+impl CollectSink {
     fn take_frames(&mut self) -> Vec<Frame> {
         core::mem::take(&mut self.packets)
             .into_iter()
@@ -436,7 +423,7 @@ async fn run_parse(document: Vec<u8>, pts_ns: u64) -> Vec<Frame> {
     parse
         .configure_pipeline(&Caps::OnvifMetadata)
         .expect("takes ONVIF metadata caps");
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     parse
         .process(metadata_packet(document, pts_ns), &mut sink)
         .await
@@ -589,7 +576,7 @@ fn ids_per_frame(frames: &[Frame]) -> Vec<Vec<u64>> {
 #[tokio::test]
 async fn each_video_frame_gets_the_metadata_of_its_own_window() {
     let mut combiner = combiner();
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     // Four pictures 33 ms apart, each preceded by a metadata frame whose wall
     // clock falls inside it (10 ms in), the order a PTS-ordered merge delivers.
     for index in 0..4u64 {
@@ -628,7 +615,7 @@ async fn metadata_older_than_max_lateness_is_dropped() {
     combiner
         .set_property("max-lateness", PropValue::Uint(FRAME_NS))
         .expect("max-lateness is a declared property");
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
 
     // Ten frames of video first, so the stream clock has run well past the
     // start; then metadata for the very first picture, long gone.
@@ -667,7 +654,7 @@ async fn metadata_older_than_max_lateness_is_dropped() {
 #[tokio::test]
 async fn pts_stands_in_when_a_side_carries_no_wall_clock() {
     let mut combiner = combiner();
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     // The video knows its wall clock, the metadata does not (a camera that
     // sends no sender report, or a graph built by hand), so both fall back to
     // the play timeline.
@@ -707,7 +694,7 @@ async fn pts_stands_in_when_a_side_carries_no_wall_clock() {
 #[tokio::test]
 async fn the_wall_clock_takes_over_once_the_video_gets_its_first_sender_report() {
     let mut combiner = combiner();
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     // The first video frame precedes the sender report, so it carries no wall
     // clock; every later one does. The metadata track's PTS runs five pictures
     // ahead of the video's, which is the skew the wall clock exists to ignore.
@@ -753,7 +740,7 @@ async fn a_video_frame_with_no_metadata_goes_out_within_latency() {
     combiner
         .set_property("latency", PropValue::Uint(2 * FRAME_NS))
         .expect("latency is a declared property");
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
 
     // The metadata pad never produces anything. Each picture waits two frame
     // periods and then leaves on its own, so the element never stalls.
@@ -778,7 +765,7 @@ async fn a_video_frame_with_no_metadata_goes_out_within_latency() {
 #[tokio::test]
 async fn an_existing_analytics_meta_keeps_its_nodes() {
     let mut combiner = combiner();
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
 
     // A detector upstream already wrote a classified detection onto the frame.
     let mut existing = AnalyticsMeta::new();

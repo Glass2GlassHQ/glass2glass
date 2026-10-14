@@ -18,30 +18,15 @@
 
 #![cfg(all(target_os = "linux", feature = "ffmpeg"))]
 
-use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
+use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
+use g2g_core::{Caps, ConfigureOutcome, Dim, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::ffmpegdec::{Backend, FfmpegVideoDec, OutputFormat};
-
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
 
 #[tokio::test]
 #[ignore = "requires libav* and a G2G_H264_FIXTURE path"]
@@ -120,7 +105,7 @@ async fn decode_fixture_with(
         .expect("libavcodec must initialise");
     assert!(matches!(outcome, ConfigureOutcome::Accepted));
 
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
 
     // Feed the whole fixture as one packet. `H264Parse` will normally
     // deliver one *access unit* (SPS + PPS + SEI + slices for one picture)
@@ -283,7 +268,7 @@ async fn autoplug_builds_nv12_decoder_for_strict_nv12_sink() {
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     DynAsyncElement::process(dec, PipelinePacket::CapsChanged(nv12), &mut sink)
         .await
         .expect("the auto-plugged decoder must emit NV12 for a strict-NV12 sink");

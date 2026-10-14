@@ -11,14 +11,18 @@
 //! - `alertrecorder` writes a clip that decodes back through `avidemux !
 //!   mjpegdec`, covering the frames before and after the alert.
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::path::PathBuf;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    AnalyticsMeta, BBox, BlobMeta, Bus, BusMessage, Caps, Colorimetry, Dim, G2gError, Interlace,
-    ObjectDetection, OutputSink, PropValue, PushOutcome, Rate, RawVideoFormat,
+    AnalyticsMeta, BBox, BlobMeta, Bus, BusMessage, Caps, Colorimetry, Dim, Interlace,
+    ObjectDetection, PropValue, Rate, RawVideoFormat,
 };
 use g2g_plugins::analyticsalert::AnalyticsAlert;
 use g2g_plugins::metareplay::MetaReplay;
@@ -46,24 +50,7 @@ const RECORDED: &[(u64, u32, f32, f32, f32, f32, f32)] = &[
 const BLOB_HEADER: &str = "note";
 const BLOB_PAYLOAD: &[u8] = b"{\"camera\":\"north\"}";
 
-#[derive(Default)]
-struct RecordingSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for RecordingSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl RecordingSink {
+impl CollectSink {
     fn frames(&self) -> Vec<&Frame> {
         self.packets
             .iter()
@@ -144,7 +131,7 @@ async fn write_records(path: &PathBuf) -> (Vec<String>, Vec<BusMessage>) {
         Rate::Fixed(RECORD_FPS << Q16_SHIFT),
     ))
     .expect("metasink accepts the caps");
-    let mut out = RecordingSink::default();
+    let mut out = CollectSink::default();
     for index in 0..RECORDED.len() {
         sink.process(PipelinePacket::DataFrame(recorded_frame(index)), &mut out)
             .await
@@ -231,7 +218,7 @@ async fn metareplay_reattaches_what_metasink_wrote() {
         .configure_pipeline(&caps)
         .expect("metareplay reads the file");
     assert_eq!(replay.records(), RECORDED.len());
-    let mut out = RecordingSink::default();
+    let mut out = CollectSink::default();
     for row in RECORDED {
         replay
             .process(
@@ -302,7 +289,7 @@ async fn analyticsalert_fires_once_per_cooldown_and_paints_the_border() {
     // the cooldown), then a second past the first (outside it).
     let cooldown_ns = ALERT_COOLDOWN_SECONDS * 1_000_000_000;
     let times = [0, cooldown_ns / 2, cooldown_ns];
-    let mut out = RecordingSink::default();
+    let mut out = CollectSink::default();
     for pts_ns in times {
         let mut frame = black_frame(ALERT_FRAME_SIZE, ALERT_FRAME_SIZE, pts_ns);
         let mut analytics = AnalyticsMeta::new();
@@ -394,7 +381,7 @@ async fn alertrecorder_writes_a_clip_that_decodes_back() {
     recorder
         .configure_pipeline(&caps)
         .expect("the recorder accepts the caps");
-    let mut out = RecordingSink::default();
+    let mut out = CollectSink::default();
     for index in 0..CLIP_FRAMES {
         let mut frame = black_frame(
             CLIP_FRAME_SIZE,

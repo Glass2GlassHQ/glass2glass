@@ -3,14 +3,15 @@
 //! timeline, and rewrites the segment it forwards.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::segment::Segment;
-use g2g_core::{
-    AsyncElement, AudioFormat, Caps, G2gError, MemoryDomain, OutputSink, PipelineClock, PropValue,
-    PushOutcome,
-};
+use g2g_core::{AsyncElement, AudioFormat, Caps, G2gError, MemoryDomain, PipelineClock, PropValue};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::scaletempo::ScaleTempo;
 
@@ -31,24 +32,7 @@ const SLOW_RATE: f64 = 0.5;
 /// from the 880 Hz plain decimation would give.
 const PITCH_TOLERANCE: f64 = 0.05;
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl Collect {
+impl CollectSink {
     /// (pts, payload) of every data frame pushed.
     fn frames(&self) -> Vec<(u64, Vec<u8>)> {
         self.packets
@@ -167,10 +151,10 @@ fn stride_and_priming(element: &ScaleTempo) -> (u64, u64) {
 
 /// Push `TONE_SECONDS` of tone through a freshly configured element at `rate`,
 /// returning the collected output and the sample frames fed in.
-async fn stretch_tone(rate: f64) -> (ScaleTempo, Collect, u64) {
+async fn stretch_tone(rate: f64) -> (ScaleTempo, CollectSink, u64) {
     let mut element = ScaleTempo::new();
     element.configure_pipeline(&caps()).expect("s16 mono");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     element
         .process(segment_packet(rate), &mut out)
         .await
@@ -229,7 +213,7 @@ fn assert_contiguous(frames: &[(u64, Vec<u8>)], first_pts: u64) {
 async fn rate_one_passes_the_bytes_and_timestamps_through() {
     let mut element = ScaleTempo::new();
     element.configure_pipeline(&caps()).expect("s16 mono");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     // no segment: the element starts at rate 1.
     let mut sent = Vec::new();
     for buffer in 0..3u64 {
@@ -317,7 +301,7 @@ async fn double_speed_keeps_the_pitch() {
 async fn flush_drops_the_queue_and_restarts_the_timeline() {
     let mut element = ScaleTempo::new();
     element.configure_pipeline(&caps()).expect("s16 mono");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     element
         .process(segment_packet(FAST_RATE), &mut out)
         .await
@@ -371,7 +355,7 @@ async fn flush_drops_the_queue_and_restarts_the_timeline() {
 async fn ragged_buffer_fails_loud() {
     let mut element = ScaleTempo::new();
     element.configure_pipeline(&caps()).expect("s16 mono");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     // 3 bytes is not a whole s16 mono sample frame pair; one byte short of two.
     let packet = data_packet(0, vec![0u8; BYTES_PER_FRAME + 1]);
     assert_eq!(

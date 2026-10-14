@@ -6,13 +6,17 @@
 //! device, like the wgpu/Vulkan suites.
 #![cfg(all(target_os = "macos", feature = "metal-sink", feature = "vtdecode"))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, Interlace, OutputSink, PipelineClock,
-    PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, ConfigureOutcome, Dim, Interlace, PipelineClock, Rate, RawVideoFormat,
+    VideoCodec,
 };
 use g2g_plugins::metalvideosink::MetalVideoSink;
 use g2g_plugins::registry::default_registry;
@@ -21,26 +25,7 @@ use g2g_plugins::vtdecode::VtDecode;
 const H264_CLIP: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
 const FRAME_DURATION_NS: u64 = 33_333_333;
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn into_data_frames(self) -> Vec<Frame> {
         self.packets
             .into_iter()
@@ -70,7 +55,7 @@ async fn decode_fixture(cv: bool) -> Vec<Frame> {
     };
     let mut parse = g2g_plugins::h264parse::H264Parse::reframing();
     parse.configure_pipeline(&caps).expect("configure parser");
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     for (i, chunk) in H264_CLIP.chunks(4096).enumerate() {
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
@@ -105,7 +90,7 @@ async fn decode_fixture(cv: bool) -> Vec<Frame> {
     };
     let narrowed = dec.intercept_caps(&dec_caps).expect("intercept H.264");
     dec.configure_pipeline(&narrowed).expect("decoder session");
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     for au in aus {
         dec.process(PipelinePacket::DataFrame(au), &mut sink)
             .await
@@ -134,7 +119,7 @@ async fn present_and_check(frames: Vec<Frame>) -> u64 {
         sink.configure_pipeline(&narrowed).expect("metal state"),
         ConfigureOutcome::Accepted
     ));
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for f in frames {
         sink.process(PipelinePacket::DataFrame(f), &mut out)
             .await

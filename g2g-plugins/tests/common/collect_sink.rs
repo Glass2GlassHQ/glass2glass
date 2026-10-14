@@ -2,7 +2,7 @@ use g2g_core::element::{OutputSink, PushOutcome};
 use g2g_core::frame::PipelinePacket;
 use g2g_core::G2gError;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct CollectSink {
     pub(crate) packets: Vec<PipelinePacket>,
 }

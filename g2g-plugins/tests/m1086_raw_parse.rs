@@ -13,14 +13,18 @@
 //! `cargo test -p g2g-plugins --features std`.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, FrameTiming, G2gError, Interlace,
-    OutputSink, PipelineClock, PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, FrameTiming, Interlace,
+    PipelineClock, PipelinePacket, PropValue, Rate, RawVideoFormat,
 };
 use g2g_plugins::rawaudioparse::RawAudioParse;
 use g2g_plugins::rawvideoparse::RawVideoParse;
@@ -50,24 +54,7 @@ impl PipelineClock for ZeroClock {
     }
 }
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn payloads(&self) -> Vec<Vec<u8>> {
         self.packets
             .iter()
@@ -242,8 +229,8 @@ fn wav_format(file: &[u8]) -> (u8, u32) {
 }
 
 /// Push `bytes` through `element` in `CHUNK_LEN` pieces, then end the stream.
-async fn drive<E: AsyncElement>(element: &mut E, bytes: &[u8]) -> Collect {
-    let mut out = Collect::default();
+async fn drive<E: AsyncElement>(element: &mut E, bytes: &[u8]) -> CollectSink {
+    let mut out = CollectSink::default();
     for piece in bytes.chunks(CHUNK_LEN) {
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(piece.to_vec().into_boxed_slice())),

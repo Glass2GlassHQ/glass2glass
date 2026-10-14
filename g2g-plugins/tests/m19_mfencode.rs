@@ -10,12 +10,14 @@
 
 #![cfg(all(target_os = "windows", feature = "mf-encode"))]
 
-use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
+use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{
-    Caps, ConfigureOutcome, Dim, G2gError, Interlace, Rate, RawVideoFormat, VideoCodec,
-};
+use g2g_core::{Caps, ConfigureOutcome, Dim, Interlace, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::mfencode::MfEncode;
 
 const WIDTH: u32 = 320;
@@ -24,26 +26,7 @@ const FPS_Q16: u32 = 30 << 16;
 const FRAMES: usize = 10;
 const FRAME_DURATION_NS: u64 = 33_333_333;
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn caps_changes(&self) -> Vec<Caps> {
         self.packets
             .iter()
@@ -107,7 +90,7 @@ fn input_caps() -> Caps {
 
 /// Drive `MfEncode` over `FRAMES` synthetic pictures and return the collected
 /// downstream packets.
-async fn encode_frames() -> Collect {
+async fn encode_frames() -> CollectSink {
     let mut enc = MfEncode::new().with_bitrate(1_000_000);
     let narrowed = enc.intercept_caps(&input_caps()).expect("intercept NV12");
     let outcome = enc
@@ -115,7 +98,7 @@ async fn encode_frames() -> Collect {
         .expect("encoder MFT must initialise");
     assert!(matches!(outcome, ConfigureOutcome::Accepted));
 
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     for i in 0..FRAMES {
         enc.process(PipelinePacket::DataFrame(nv12_frame(i)), &mut sink)
             .await
@@ -186,7 +169,7 @@ async fn encode_decode_round_trip_recovers_all_frames() {
         .expect("decoder MFT must initialise");
     assert!(matches!(outcome, ConfigureOutcome::Accepted));
 
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     for f in encoded.data_frames() {
         let Some(slice) = f.domain.as_system_slice() else {
             unreachable!()

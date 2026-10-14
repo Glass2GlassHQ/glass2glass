@@ -12,35 +12,19 @@
 
 #![cfg(all(target_os = "android", feature = "mediacodec"))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 #[path = "common/android_binder.rs"]
 mod android_binder;
 use android_binder::start_binder_threadpool;
 
-use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
+use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat};
+use g2g_core::{Caps, ConfigureOutcome, Dim, Rate, RawVideoFormat};
 use g2g_plugins::mediacodecenc::MediaCodecEnc;
-
-/// Records every packet the encoder pushes, to inspect the encoded frames.
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
 
 /// A `w x h` NV12 frame: a diagonal luma gradient shifted by `t` (so successive
 /// frames differ and the encoder produces real inter frames), flat 128 chroma.
@@ -106,7 +90,7 @@ async fn encode_nv12_to_annexb_h264() {
         ConfigureOutcome::Accepted
     ));
 
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     let mut pts_ns = 0u64;
     for t in 0..frames_in {
         let nv12 = nv12_frame(w as usize, h as usize, t);

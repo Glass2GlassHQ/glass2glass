@@ -15,7 +15,11 @@
 
 #![cfg(all(target_os = "windows", feature = "mf-encode", feature = "mf-decode"))]
 
-use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
+use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, Dim, G2gError, Interlace, Rate, RawVideoFormat, VideoCodec};
@@ -28,26 +32,7 @@ const FPS_Q16: u32 = 30 << 16;
 const FRAMES: usize = 10;
 const FRAME_DURATION_NS: u64 = 33_333_333;
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn caps_changes(&self) -> Vec<Caps> {
         self.packets
             .iter()
@@ -122,7 +107,7 @@ async fn hevc_encode_decode_round_trip_or_skip() {
         Err(e) => panic!("unexpected encoder configure error: {e:?}"),
     }
 
-    let mut encoded = Collect::default();
+    let mut encoded = CollectSink::default();
     for i in 0..FRAMES {
         enc.process(PipelinePacket::DataFrame(nv12_frame(i)), &mut encoded)
             .await
@@ -164,7 +149,7 @@ async fn hevc_encode_decode_round_trip_or_skip() {
         Err(e) => panic!("unexpected decoder configure error: {e:?}"),
     }
 
-    let mut decoded = Collect::default();
+    let mut decoded = CollectSink::default();
     for f in encoded.data_frames() {
         let Some(slice) = f.domain.as_system_slice() else {
             unreachable!()

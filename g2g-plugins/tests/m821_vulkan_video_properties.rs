@@ -11,12 +11,16 @@
     feature = "vulkan-video"
 ))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PropError, PropValue, PropertySpec, PushOutcome, Rate, VideoCodec,
+    AsyncElement, Caps, Dim, FrameTiming, MemoryDomain, PipelinePacket, PropError, PropValue,
+    PropertySpec, Rate, VideoCodec,
 };
 use g2g_plugins::vulkanvideo::{
     extract_h264_parameter_sets, open_decode_device_at, open_h264_decode_device, Nv12Frame,
@@ -27,25 +31,6 @@ const BFRAMES: &[u8] = include_bytes!("fixtures/h264_640x480_bframes.h264");
 
 fn declares(specs: &[PropertySpec], name: &str) -> bool {
     specs.iter().any(|s| s.name == name)
-}
-
-#[derive(Default)]
-struct RecordingSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for RecordingSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
 }
 
 /// Byte offsets of each NAL payload (just past its start code).
@@ -127,18 +112,18 @@ fn h264_caps() -> Caps {
 fn drive_per_au(dec: &mut VulkanVideoDec, aus: Vec<Vec<u8>>) -> Vec<Vec<Vec<u8>>> {
     let mut per_au = Vec::new();
     for (i, au) in aus.into_iter().enumerate() {
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         block_on(dec.process(PipelinePacket::DataFrame(au_frame(au, i as u64)), &mut sink))
             .expect("decode access unit");
         per_au.push(nv12_buffers(&sink));
     }
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     block_on(dec.process(PipelinePacket::Eos, &mut sink)).expect("flush at eos");
     per_au.push(nv12_buffers(&sink));
     per_au
 }
 
-fn nv12_buffers(sink: &RecordingSink) -> Vec<Vec<u8>> {
+fn nv12_buffers(sink: &CollectSink) -> Vec<Vec<u8>> {
     sink.packets
         .iter()
         .filter_map(|p| match p {
@@ -416,7 +401,7 @@ fn construction_properties_are_refused_once_built() {
         .expect("before the first access unit");
 
     let aus = split_access_units(BFRAMES);
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     block_on(dec.process(
         PipelinePacket::DataFrame(au_frame(aus[0].clone(), 0)),
         &mut sink,

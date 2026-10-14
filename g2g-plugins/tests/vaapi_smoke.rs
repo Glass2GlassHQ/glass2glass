@@ -13,32 +13,15 @@
 
 #![cfg(all(target_os = "linux", feature = "vaapi"))]
 
-use g2g_core::element::{AsyncElement, OutputSink, PushOutcome, Reconfigure};
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
+use g2g_core::element::{AsyncElement, Reconfigure};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat};
+use g2g_core::{Caps, ConfigureOutcome, Dim, Rate, RawVideoFormat};
 use g2g_plugins::vaapidec::{H264Codec, H265Codec, VaapiCodec, VaapiDec};
-
-/// `OutputSink` that records every packet it receives. The decoder feeds it
-/// `CapsChanged` (once per geometry change) followed by `DataFrame`s.
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
 
 #[tokio::test]
 #[ignore = "requires libva-capable hardware and a G2G_H264_FIXTURE path"]
@@ -90,7 +73,7 @@ async fn decode_fixture<C: VaapiCodec>(fixture_var: &str) {
     };
     assert!(matches!(outcome, ConfigureOutcome::Accepted));
 
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
 
     let frame = Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bitstream.into_boxed_slice())),

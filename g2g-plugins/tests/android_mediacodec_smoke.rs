@@ -16,14 +16,18 @@
 
 #![cfg(all(target_os = "android", feature = "mediacodec"))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 #[path = "common/android_binder.rs"]
 mod android_binder;
 use android_binder::start_binder_threadpool;
 
-use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
+use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
+use g2g_core::{Caps, ConfigureOutcome, Dim, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::mediacodecdec::MediaCodecDec;
 
 /// Short Annex-B clips (640x480, 10 frames: parameter sets + IDR + inter frames),
@@ -32,27 +36,6 @@ use g2g_plugins::mediacodecdec::MediaCodecDec;
 /// decoders' graphic-buffer allocators reject sub-minimum dimensions.
 const H264: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
 const H265: &[u8] = include_bytes!("fixtures/h265_640x480.h265");
-
-/// `OutputSink` that records every packet the decoder pushes (CapsChanged +
-/// DataFrames), the same collector the other decode smoke tests use.
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
 
 /// Split an Annex-B byte stream into access units. A new AU begins at the first
 /// VCL NAL once the current AU already holds one, so each AU groups its leading
@@ -157,7 +140,7 @@ async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec
         .expect("configure decoder");
     assert!(matches!(outcome, ConfigureOutcome::Accepted));
 
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
 
     // M756: the graph runner hands each element its own solved OUTPUT caps as an
     // incoming `CapsChanged` before the first frame (transform_arm in

@@ -18,6 +18,10 @@
 
 #![cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 #[path = "common/android_binder.rs"]
 mod android_binder;
 use android_binder::start_binder_threadpool;
@@ -51,26 +55,6 @@ impl OutputSink for Discard {
     ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
         packet_slot.take();
         core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-/// Sink that records every packet, to inspect the emitted WgpuTexture frames.
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
     }
 }
 
@@ -298,7 +282,7 @@ async fn mediacodec_gpu_output_emits_wgpu_texture() {
         ConfigureOutcome::Accepted
     ));
 
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     let mut pts_ns = 0u64;
     for au in access_units(H264) {
         let frame = Frame {

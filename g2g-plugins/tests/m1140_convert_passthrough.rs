@@ -6,10 +6,14 @@
 //! inputs are the control: neither can be forwarded, so both still land in a
 //! fresh tight buffer.
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Colorimetry, Dim, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PushOutcome, Rate, RawVideoFormat,
+    AsyncElement, Caps, Colorimetry, Dim, Frame, FrameTiming, MemoryDomain, PipelinePacket, Rate,
+    RawVideoFormat,
 };
 use g2g_plugins::videoconvert::VideoConvert;
 
@@ -18,23 +22,6 @@ const HEIGHT: u32 = 16;
 /// Row padding for the strided control, wide enough that a tight read of the
 /// buffer would land on the wrong pixels.
 const PAD_BYTES: usize = 24;
-
-#[derive(Default)]
-struct CollectSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CollectSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
 
 fn raw(format: RawVideoFormat) -> Caps {
     Caps::RawVideo {

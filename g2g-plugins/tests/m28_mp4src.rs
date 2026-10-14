@@ -3,6 +3,10 @@
 //! recorded geometry during negotiation, and on Windows the full circle
 //! runs encode -> container -> demux -> decode through both real MFTs.
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
@@ -27,26 +31,7 @@ fn h264_caps(w: u32, h: u32) -> Caps {
     }
 }
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn frames(&self) -> Vec<&Frame> {
         self.packets
             .iter()
@@ -172,7 +157,7 @@ async fn round_trip_recovers_access_units_and_timing() {
     );
 
     src.configure_pipeline(&caps).expect("configure");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     let produced = src.run(&mut out).await.expect("demux to EOS");
     assert_eq!(produced, 3);
 
@@ -265,7 +250,7 @@ async fn sink_written_tags_round_trip_to_the_source_bus() {
     let mut src = Mp4Src::new(&path).with_bus(handle);
     let caps = src.intercept_caps().await.expect("probe");
     src.configure_pipeline(&caps).expect("configure");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     src.run(&mut out).await.expect("demux");
 
     let mut posted = None;
@@ -320,7 +305,7 @@ async fn surfaces_ilst_tags_on_the_bus() {
         .await
         .expect("probe still works with udta");
     src.configure_pipeline(&caps).expect("configure");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     src.run(&mut out).await.expect("demux");
     assert_eq!(
         out.frames().len(),
@@ -376,7 +361,7 @@ async fn flush_seek_repositions_to_keyframe() {
     let mut src = Mp4Src::new(&path).with_seek(ctl.clone());
     let caps = src.intercept_caps().await.expect("probe");
     src.configure_pipeline(&caps).expect("configure");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     let produced = src.run(&mut out).await.expect("run");
 
     assert!(
@@ -423,7 +408,7 @@ async fn flush_seek_repositions_to_keyframe() {
 /// case): the source awaits this push, so the seek is pending before the next
 /// frame is produced.
 struct ScrubSink {
-    inner: Collect,
+    inner: CollectSink,
     ctl: g2g_core::runtime::SeekController,
     target: u64,
     armed: bool,
@@ -474,7 +459,7 @@ async fn mid_stream_scrub_repositions_after_frames_flow() {
     let caps = src.intercept_caps().await.expect("probe");
     src.configure_pipeline(&caps).expect("configure");
     let mut sink = ScrubSink {
-        inner: Collect::default(),
+        inner: CollectSink::default(),
         ctl,
         target: 70_000_000,
         armed: true,
@@ -563,7 +548,7 @@ async fn segment_seek_loops_clip_gaplessly_then_shuts_down() {
     let mut src = Mp4Src::new(&path).with_seek(ctl.clone());
     let caps = src.intercept_caps().await.expect("probe");
     src.configure_pipeline(&caps).expect("configure");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
 
     let driver_ctl = ctl.clone();
     let driver = async move {
@@ -686,7 +671,7 @@ async fn encode_mux_demux_decode_full_circle() {
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     enc.configure_pipeline(&nv12).expect("encoder init");
-    let mut encoded = Collect::default();
+    let mut encoded = CollectSink::default();
     for i in 0..FRAMES {
         let mut data = vec![128u8; (W * H * 3 / 2) as usize];
         for (j, b) in data.iter_mut().take((W * H) as usize).enumerate() {
@@ -730,12 +715,12 @@ async fn encode_mux_demux_decode_full_circle() {
     let mut src = Mp4Src::new(&path);
     let caps = src.intercept_caps().await.expect("probe");
     src.configure_pipeline(&caps).expect("configure src");
-    let mut demuxed = Collect::default();
+    let mut demuxed = CollectSink::default();
     src.run(&mut demuxed).await.expect("demux");
 
     let mut dec = MfDecode::new();
     dec.configure_pipeline(&caps).expect("decoder init");
-    let mut decoded = Collect::default();
+    let mut decoded = CollectSink::default();
     for f in demuxed.frames() {
         dec.process(
             PipelinePacket::DataFrame(au_frame(

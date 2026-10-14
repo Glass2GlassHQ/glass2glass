@@ -6,34 +6,21 @@
 //! `videoconvert ! videoconvert` does, and both read the same coefficient
 //! table, so the expected pixels are computed rather than written down.
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, ColorRange, Colorimetry, Dim, Frame, FrameTiming, G2gError,
-    MatrixCoefficients, MemoryDomain, OutputSink, PipelinePacket, PropValue, PushOutcome, Rate,
-    RawVideoFormat, TransferCharacteristics,
+    MatrixCoefficients, MemoryDomain, PipelinePacket, PropValue, Rate, RawVideoFormat,
+    TransferCharacteristics,
 };
 use g2g_plugins::colorspace::Colorspace;
 use g2g_plugins::videoconvert::convert;
 
 const WIDTH: usize = 4;
 const HEIGHT: usize = 4;
-
-#[derive(Default)]
-struct CollectSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CollectSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
 
 fn raw(format: RawVideoFormat, colorimetry: Colorimetry) -> Caps {
     raw_sized(format, colorimetry, WIDTH, HEIGHT)

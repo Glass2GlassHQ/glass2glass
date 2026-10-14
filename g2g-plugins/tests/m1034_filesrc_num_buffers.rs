@@ -1,11 +1,14 @@
 //! M1034: `FileSrc` honours `num-buffers`, the GStreamer `filesrc` property that
 //! caps how many chunks a source emits before EOS.
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::path::PathBuf;
 
-use g2g_core::element::PushOutcome;
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{ByteStreamEncoding, Caps, G2gError, OutputSink, PipelinePacket, PropValue};
+use g2g_core::{ByteStreamEncoding, Caps, PipelinePacket, PropValue};
 use g2g_plugins::filesrc::FileSrc;
 
 const CHUNK_SIZE: usize = 8;
@@ -21,13 +24,7 @@ fn ts_caps() -> Caps {
     }
 }
 
-/// Collects every packet a directly-driven source pushes.
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl Collect {
+impl CollectSink {
     fn data_frames(&self) -> usize {
         self.packets
             .iter()
@@ -42,23 +39,9 @@ impl Collect {
     }
 }
 
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
 /// Writes a fixture of `FIXTURE_LEN` bytes and runs a `FileSrc` over it,
 /// applying `num_buffers` first when the caller asked for a limit.
-async fn run_over_fixture(name: &str, num_buffers: Option<i64>) -> Collect {
+async fn run_over_fixture(name: &str, num_buffers: Option<i64>) -> CollectSink {
     let path = temp_path(name);
     let payload: Vec<u8> = (0..FIXTURE_LEN).map(|i| i as u8).collect();
     std::fs::write(&path, &payload).expect("write fixture");
@@ -71,7 +54,7 @@ async fn run_over_fixture(name: &str, num_buffers: Option<i64>) -> Collect {
     let caps = src.intercept_caps().await.expect("declared caps");
     src.configure_pipeline(&caps).expect("configure");
 
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     src.run(&mut out).await.expect("run to EOS");
     let _ = std::fs::remove_file(&path);
     out

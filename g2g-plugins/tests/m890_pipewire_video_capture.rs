@@ -23,34 +23,19 @@
 
 #![cfg(all(target_os = "linux", feature = "pipewire"))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use g2g_core::frame::PipelinePacket;
 use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{AudioFormat, Caps, Dim, G2gError, OutputSink, PropValue, Rate, RawVideoFormat};
+use g2g_core::{AudioFormat, Caps, Dim, G2gError, PropValue, Rate, RawVideoFormat};
 use g2g_plugins::pipewiresrc::PipeWireSrc;
 use g2g_plugins::pipewirevideosrc::PipeWireVideoSrc;
-
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(g2g_core::PushOutcome::Accepted)
-        })
-    }
-}
 
 /// A `gst-launch-1.0 ... ! pipewiresink` publishing one node, killed on every
 /// exit path (including a panicking assertion).
@@ -194,7 +179,7 @@ async fn capture(
     }
     let advertised = src.intercept_caps().await.expect("advertised caps");
     src.configure_pipeline(&advertised).expect("configure");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     let result = tokio::time::timeout(Duration::from_secs(30), src.run(&mut out))
         .await
         .expect("capture finishes within 30s");
@@ -466,7 +451,7 @@ async fn audio_properties_drive_a_live_capture() {
     );
     src.configure_pipeline(&advertised).expect("configure");
 
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     let result = tokio::time::timeout(Duration::from_secs(30), src.run(&mut out))
         .await
         .expect("capture finishes within 30s");

@@ -7,10 +7,14 @@
 //! curve into a 256-entry table and searches it to encode, so the two agree
 //! only if the tables and the per-pixel steps are right.
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Colorimetry, Dim, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat, TransferCharacteristics,
+    AsyncElement, Caps, Colorimetry, Dim, Frame, FrameTiming, MemoryDomain, PipelinePacket,
+    PropValue, Rate, RawVideoFormat, TransferCharacteristics,
 };
 use g2g_plugins::colorspace::{Colorspace, DEFAULT_HDR_PEAK_NITS, MINIMUM_HDR_PEAK_NITS};
 
@@ -150,23 +154,6 @@ fn bt709_light(code: u8) -> f64 {
 fn expected_pq_to_bt709(code: u8, peak_nits: f64) -> i32 {
     let nits = pq_to_nits(f64::from(code) / f64::from(CODE_MAX));
     bt709_code(tone_map(nits, peak_nits))
-}
-
-#[derive(Default)]
-struct CollectSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CollectSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
 }
 
 fn raw(colorimetry: Colorimetry) -> Caps {

@@ -22,12 +22,16 @@
     feature = "vulkan-video"
 ))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
-    AsyncElement, Caps, ColorRange, Colorimetry, Dim, FrameTiming, G2gError, MatrixCoefficients,
-    MemoryDomain, OutputSink, PipelinePacket, PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, ColorRange, Colorimetry, Dim, FrameTiming, MatrixCoefficients,
+    MemoryDomain, PipelinePacket, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::vulkanvideo::{
     extract_h264_parameter_sets, open_h264_decode_device, VulkanVideoDec, VulkanVideoError,
@@ -97,25 +101,6 @@ fn assert_fixture_colour_descriptions(aus: &[Vec<u8>]) {
         ),
         "high-profile segment colour changed; update HIGH_PROFILE_COLORIMETRY"
     );
-}
-
-#[derive(Default)]
-struct RecordingSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for RecordingSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
 }
 
 /// Byte offsets of each NAL payload (just past its start code).
@@ -189,7 +174,7 @@ fn decode_frames(aus: &[Vec<u8>]) -> Vec<Vec<u8>> {
     };
     dec.configure_pipeline(&in_caps)
         .expect("configure opens the decode device");
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     for (i, au) in aus.iter().enumerate() {
         block_on(dec.process(
             PipelinePacket::DataFrame(au_frame(au.clone(), i as u64)),
@@ -235,7 +220,7 @@ fn element_rebuilds_on_same_geometry_parameter_change() {
     };
     dec.configure_pipeline(&in_caps)
         .expect("configure opens the decode device");
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     for (i, au) in aus.iter().enumerate() {
         block_on(dec.process(
             PipelinePacket::DataFrame(au_frame(au.clone(), i as u64)),

@@ -6,9 +6,12 @@
 //! too: run with `cargo test -p g2g-plugins --features std`.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use core::future::Future;
 use core::pin::Pin;
-use core::task::{Context, Poll};
 use std::time::Duration;
 
 use g2g_core::frame::Frame;
@@ -17,7 +20,7 @@ use g2g_core::runtime::{parse_launch, run_graph, run_source_transform_sink, Sour
 use g2g_core::{
     AsyncElement, Bus, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, PropValue, PushOutcome, Tag,
+    PipelinePacket, PropValue, Tag,
 };
 use g2g_plugins::capsfilter::parse_caps;
 use g2g_plugins::capssetter::CapsSetter;
@@ -34,24 +37,7 @@ impl PipelineClock for ZeroClock {
     }
 }
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl Collect {
+impl CollectSink {
     /// The payload of every data frame pushed.
     fn payloads(&self) -> Vec<Vec<u8>> {
         self.packets
@@ -201,7 +187,7 @@ async fn watchdog_reports_a_stall_with_no_packet_in_sight() {
         .with_bus(handle);
     dog.configure_pipeline(&StallingSrc::caps())
         .expect("configure");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     dog.process(byte_frame(vec![0u8; 4], 0, 0), &mut out)
         .await
         .expect("the first buffer passes");
@@ -239,9 +225,9 @@ const FRAMERATE_ONLY: &str = "video/x-raw,framerate=60/1";
 
 /// Drive `setter` with the negotiated caps and one frame, returning what
 /// downstream saw.
-async fn run_setter(setter: &mut CapsSetter, incoming: &Caps) -> Result<Collect, G2gError> {
+async fn run_setter(setter: &mut CapsSetter, incoming: &Caps) -> Result<CollectSink, G2gError> {
     setter.configure_pipeline(incoming)?;
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     setter
         .process(PipelinePacket::CapsChanged(incoming.clone()), &mut out)
         .await?;
@@ -338,7 +324,7 @@ async fn taginject_posts_its_taglist_on_the_bus() {
     let caps = parse_caps(SOURCE_CAPS).expect("source caps parse");
     inject.configure_pipeline(&caps).expect("configure");
 
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     inject
         .process(byte_frame(vec![7u8; 4], 0, 0), &mut out)
         .await
@@ -396,7 +382,7 @@ const INPUT_BUFFER_BYTES: usize = 10_000;
 
 /// Re-chunk `INPUT_BUFFERS` buffers through a freshly built element and report
 /// what came out.
-async fn run_rechunker() -> Collect {
+async fn run_rechunker() -> CollectSink {
     let mut chunker = RndBufferSize::new();
     for (name, value) in [("min", CHUNK_MIN), ("max", CHUNK_MAX), ("seed", CHUNK_SEED)] {
         chunker
@@ -408,7 +394,7 @@ async fn run_rechunker() -> Collect {
     };
     chunker.configure_pipeline(&caps).expect("configure");
 
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for sequence in 0..INPUT_BUFFERS {
         let bytes = (0..INPUT_BUFFER_BYTES)
             .map(|i| (i as u64 + sequence * INPUT_BUFFER_BYTES as u64) as u8)

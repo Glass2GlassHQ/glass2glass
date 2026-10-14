@@ -15,36 +15,21 @@
     feature = "vulkan-video"
 ))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, Dim, FrameTiming, MemoryDomain, PipelinePacket, Rate, RawVideoFormat,
+    VideoCodec,
 };
 use g2g_plugins::vulkanvideo::{open_h264_decode_device, VulkanVideoDec, VulkanVideoError};
 
 // 6 frames at 640x480 (IDR + P...), then 6 at 320x240, concatenated Annex-B.
 const CLIP: &[u8] = include_bytes!("fixtures/h264_reconfig_640x480_to_320x240.h264");
-
-#[derive(Default)]
-struct RecordingSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for RecordingSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
 
 /// Byte offsets of each NAL payload (just past its start code).
 fn start_code_offsets(data: &[u8]) -> Vec<usize> {
@@ -133,7 +118,7 @@ fn element_reconfigures_on_resolution_change() {
     let aus = split_access_units(CLIP);
     assert_eq!(aus.len(), 12, "6 frames at 640x480 + 6 at 320x240");
 
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     for (i, au) in aus.into_iter().enumerate() {
         block_on(dec.process(PipelinePacket::DataFrame(au_frame(au, i as u64)), &mut sink))
             .expect("decode access unit");

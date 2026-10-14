@@ -14,35 +14,20 @@
 
 #![cfg(all(target_os = "linux", feature = "ffmpeg"))]
 
-use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
+use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{ByteStreamEncoding, Caps, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
+use g2g_core::{ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::ffmpegdec::{FfmpegVideoDec, OutputFormat};
 use g2g_plugins::mp4demux::Mp4Demux;
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/mpeg4part2_640x480.mp4");
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn caps_changes(&self) -> Vec<Caps> {
         self.packets
             .iter()
@@ -90,7 +75,7 @@ async fn mpeg4_part2_mp4_demuxes_and_decodes() {
             encoding: ByteStreamEncoding::Mp4,
         })
         .expect("qtdemux accepts an MP4 byte stream");
-    let mut demuxed = Collect::default();
+    let mut demuxed = CollectSink::default();
     demux
         .process(data_frame(FIXTURE.to_vec()), &mut demuxed)
         .await
@@ -129,7 +114,7 @@ async fn mpeg4_part2_mp4_demuxes_and_decodes() {
     dec.configure_pipeline(&narrowed)
         .expect("libavcodec mpeg4 initialises");
 
-    let mut decoded = Collect::default();
+    let mut decoded = CollectSink::default();
     for au in access_units {
         dec.process(data_frame(au), &mut decoded)
             .await

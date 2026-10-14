@@ -6,11 +6,14 @@
 
 #![cfg(all(target_os = "linux", feature = "cuda"))]
 
-use g2g_core::element::PushOutcome;
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain, MemoryDomainKind,
-    OutputSink, PipelinePacket, Rate, RawVideoFormat,
+    PipelinePacket, Rate, RawVideoFormat,
 };
 use g2g_plugins::cuda::CudaUpload;
 
@@ -55,25 +58,6 @@ fn system_nv12_frame(seq: u64) -> Frame {
     }
 }
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
 fn skip_if_no_gpu(err: &G2gError) -> bool {
     if matches!(err, G2gError::Hardware(_)) {
         std::eprintln!("skipping m353: CUDA unavailable ({err:?})");
@@ -94,7 +78,7 @@ async fn cuda_upload_promotes_system_nv12_to_cuda() {
         Err(e) => panic!("unexpected configure error: {e:?}"),
     }
 
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     up.process(PipelinePacket::DataFrame(system_nv12_frame(0)), &mut out)
         .await
         .expect("upload a system NV12 frame");
@@ -136,7 +120,7 @@ async fn an_odd_size_nv12_frame_round_trips_through_cuda() {
         FrameTiming::default(),
         0,
     );
-    let mut uploaded = Collect::default();
+    let mut uploaded = CollectSink::default();
     up.process(PipelinePacket::DataFrame(frame), &mut uploaded)
         .await
         .expect("uploads");
@@ -145,7 +129,7 @@ async fn an_odd_size_nv12_frame_round_trips_through_cuda() {
     };
     let mut down = g2g_plugins::cuda::CudaDownload::new();
     down.configure_pipeline(&caps).expect("configures");
-    let mut downloaded = Collect::default();
+    let mut downloaded = CollectSink::default();
     down.process(PipelinePacket::DataFrame(on_gpu), &mut downloaded)
         .await
         .expect("downloads");
@@ -166,7 +150,7 @@ async fn cuda_upload_passes_through_gpu_frames() {
         Err(e) if skip_if_no_gpu(&e) => return,
         Err(e) => panic!("unexpected configure error: {e:?}"),
     }
-    let mut mid = Collect::default();
+    let mut mid = CollectSink::default();
     up.process(PipelinePacket::DataFrame(system_nv12_frame(0)), &mut mid)
         .await
         .expect("upload");
@@ -182,7 +166,7 @@ async fn cuda_upload_passes_through_gpu_frames() {
     let mut pass = CudaUpload::new();
     pass.configure_pipeline(&nv12_caps())
         .expect("second upload configures (GPU already up)");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     pass.process(PipelinePacket::DataFrame(cuda_frame), &mut out)
         .await
         .expect("pass through");
@@ -213,9 +197,9 @@ async fn system_nv12_feeds_nvenc_via_cuda_upload() {
 
     // Upload each System frame to CUDA, then feed the device-resident frame to
     // the encoder.
-    let mut aus: Vec<Vec<u8>> = Vec::new();
+    let mut encoded = CollectSink::default();
     for seq in 0..8u64 {
-        let mut mid = Collect::default();
+        let mut mid = CollectSink::default();
         up.process(PipelinePacket::DataFrame(system_nv12_frame(seq)), &mut mid)
             .await
             .expect("upload frame");
@@ -227,44 +211,25 @@ async fn system_nv12_feeds_nvenc_via_cuda_upload() {
                     "NvEnc requires CUDA input"
                 );
             }
-            let mut enc_out = CollectAus { aus: &mut aus };
-            enc.process(p, &mut enc_out).await.expect("encode frame");
+            enc.process(p, &mut encoded).await.expect("encode frame");
         }
     }
     // Flush.
-    let mut enc_out = CollectAus { aus: &mut aus };
-    enc.process(PipelinePacket::Eos, &mut enc_out)
+    enc.process(PipelinePacket::Eos, &mut encoded)
         .await
         .expect("flush encoder");
+    let aus: Vec<Vec<u8>> = encoded
+        .packets
+        .iter()
+        .filter_map(|packet| match packet {
+            PipelinePacket::DataFrame(f) => f.domain.as_system_slice().map(|s| s.to_vec()),
+            _ => None,
+        })
+        .collect();
 
     assert!(!aus.is_empty(), "encoder produced H.264 access units");
     assert!(
         aus.iter().any(|au| au.windows(3).any(|w| w == [0, 0, 1])),
         "access units carry Annex-B start codes",
     );
-}
-
-/// Sink that records the System-memory H.264 access units the encoder emits.
-#[cfg(feature = "nvenc")]
-struct CollectAus<'a> {
-    aus: &'a mut Vec<Vec<u8>>,
-}
-
-#[cfg(feature = "nvenc")]
-impl OutputSink for CollectAus<'_> {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            if let PipelinePacket::DataFrame(f) = packet {
-                if let Some(s) = f.domain.as_system_slice() {
-                    self.aus.push(s.to_vec());
-                }
-            }
-            Ok(PushOutcome::Accepted)
-        })
-    }
 }

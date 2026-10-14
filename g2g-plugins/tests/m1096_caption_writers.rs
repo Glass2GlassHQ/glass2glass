@@ -10,12 +10,14 @@
 //!   and `CcInsert::from_meta` + `CcExtract` read those captions back out (the
 //!   caption meta needs the `metadata` feature, so those tests are gated on it).
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{
-    Caps, ClosedCaptionFormat, G2gError, OutputSink, PropValue, PushOutcome, TextFormat,
-};
+use g2g_core::{Caps, ClosedCaptionFormat, PropValue, TextFormat};
 use g2g_plugins::ccconverter::CcConverter;
 use g2g_plugins::ccextract::CcExtract;
 use g2g_plugins::cea::{write_cc_data, Cc608Enc, CcTriple, CEA608_FIELD_1};
@@ -36,24 +38,7 @@ const SUBTITLE_CUES: &[(&str, u64, u64)] = &[
     ("SECOND LINE\nAND ANOTHER", 4_500_000_000, 1_250_000_000),
 ];
 
-#[derive(Default)]
-struct RecordingSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for RecordingSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl RecordingSink {
+impl CollectSink {
     /// The emitted payloads concatenated as text, the document a `filesink`
     /// downstream would have written.
     fn document(&self) -> String {
@@ -109,7 +94,7 @@ fn cue_frame(text: &str, pts_ns: u64, duration_ns: u64) -> PipelinePacket {
 /// Run every cue of [`SUBTITLE_CUES`] through `encoder` and return the document
 /// it wrote.
 async fn write_subtitle_document<E: AsyncElement>(encoder: &mut E) -> String {
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     for (text, pts, duration) in SUBTITLE_CUES {
         encoder
             .process(cue_frame(text, *pts, *duration), &mut sink)
@@ -172,7 +157,7 @@ async fn a_cue_free_stream_still_writes_the_webvtt_signature() {
     encoder
         .configure_pipeline(&utf8_caps())
         .expect("takes UTF-8 cues");
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     encoder
         .process(PipelinePacket::Eos, &mut sink)
         .await
@@ -186,7 +171,7 @@ async fn a_blank_cue_writes_no_block() {
     encoder
         .configure_pipeline(&utf8_caps())
         .expect("takes UTF-8 cues");
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     encoder
         .process(cue_frame("  \n  ", 0, 1_000_000_000), &mut sink)
         .await
@@ -259,7 +244,7 @@ async fn extract_caption_text(payloads: &[Vec<u8>]) -> Vec<String> {
             format: ClosedCaptionFormat::Cea608,
         })
         .expect("takes a raw caption track");
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     for (index, payload) in payloads.iter().enumerate() {
         extractor
             .process(
@@ -281,7 +266,7 @@ async fn extract_caption_text(payloads: &[Vec<u8>]) -> Vec<String> {
 
 /// Push every payload through `converter` and collect what it wrote.
 async fn convert_payloads(converter: &mut CcConverter, payloads: &[Vec<u8>]) -> Vec<Vec<u8>> {
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     for (index, payload) in payloads.iter().enumerate() {
         converter
             .process(
@@ -423,7 +408,7 @@ mod combiner {
     /// Feed the caption payload for each frame in, then the frame, the order a
     /// PTS-ordered merge delivers them, and take the combined frames out.
     async fn combine(combiner: &mut CcCombiner, payloads: &[Vec<u8>]) -> Vec<Frame> {
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         for (index, payload) in payloads.iter().enumerate() {
             let pts = index as u64 * FRAME_NS;
             combiner
@@ -485,7 +470,7 @@ mod combiner {
         inserter
             .configure_pipeline(CcInsert::VIDEO, &h264_caps())
             .expect("takes H.264 access units");
-        let mut inserted = RecordingSink::default();
+        let mut inserted = CollectSink::default();
         for frame in combined {
             inserter
                 .process(
@@ -501,7 +486,7 @@ mod combiner {
         extractor
             .configure_pipeline(&h264_caps())
             .expect("takes H.264 access units");
-        let mut text = RecordingSink::default();
+        let mut text = CollectSink::default();
         for frame in inserted.take_frames() {
             extractor
                 .process(PipelinePacket::DataFrame(frame), &mut text)
@@ -545,7 +530,7 @@ mod combiner {
             element
                 .set_property("input-meta-processing", PropValue::Str(nick.into()))
                 .expect("input-meta-processing is settable");
-            let mut sink = RecordingSink::default();
+            let mut sink = CollectSink::default();
             element
                 .process(
                     CcCombiner::CAPTION,
@@ -605,7 +590,7 @@ mod combiner {
         );
         frame.meta.attach(meta);
 
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         element
             .process(
                 CcCombiner::VIDEO,
@@ -633,7 +618,7 @@ mod combiner {
                 }])
             })
             .collect();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         for payload in &payloads {
             element
                 .process(

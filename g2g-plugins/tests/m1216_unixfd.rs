@@ -8,6 +8,10 @@
 //! ```
 #![cfg(all(target_os = "linux", feature = "unixfd"))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -186,23 +190,7 @@ fn shared_clock() -> ClockSync {
     ClockSync::new(Arc::new(MonotonicClock), MonotonicClock.now_ns())
 }
 
-#[derive(Debug, Default)]
-struct CollectingOutput {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CollectingOutput {
-    fn poll_push(
-        &mut self,
-        _cx: &mut Context<'_>,
-        packet: &mut Option<PipelinePacket>,
-    ) -> Poll<Result<PushOutcome, G2gError>> {
-        self.packets.extend(packet.take());
-        Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl CollectingOutput {
+impl CollectSink {
     fn frames(&self) -> Vec<&Frame> {
         self.packets
             .iter()
@@ -215,7 +203,7 @@ impl CollectingOutput {
 }
 
 async fn feed(sink: &mut UnixFdSink, caps: &Caps, packets: Vec<PipelinePacket>) {
-    let mut out = CollectingOutput::default();
+    let mut out = CollectSink::default();
     sink.process(PipelinePacket::CapsChanged(caps.clone()), &mut out)
         .await
         .expect("caps");
@@ -252,8 +240,8 @@ async fn receive_into(
     Ok((caps, count))
 }
 
-async fn receive(source: &mut UnixFdSrc) -> Result<(Caps, u64, CollectingOutput), G2gError> {
-    let mut out = CollectingOutput::default();
+async fn receive(source: &mut UnixFdSrc) -> Result<(Caps, u64, CollectSink), G2gError> {
+    let mut out = CollectSink::default();
     let (caps, count) = receive_into(source, &mut out).await?;
     Ok((caps, count, out))
 }
@@ -452,7 +440,7 @@ async fn the_sink_holds_a_buffer_until_the_client_releases_it() {
     let mut sink = UnixFdSink::new(socket.display().to_string());
     sink.configure_pipeline(&caps).expect("the sink binds");
     let client = UnixStream::connect(&socket).expect("connect");
-    let mut out = CollectingOutput::default();
+    let mut out = CollectSink::default();
 
     let first = padded_dmabuf(0);
     let first_watch = first.clone();
@@ -512,7 +500,7 @@ async fn a_sink_that_may_not_copy_refuses_system_frames() {
     sink.configure_pipeline(&caps).expect("the sink binds");
     let _client = UnixStream::connect(&socket).expect("connect");
     let result = sink
-        .process(system_frame(0), &mut CollectingOutput::default())
+        .process(system_frame(0), &mut CollectSink::default())
         .await;
     assert_eq!(result, Err(G2gError::UnsupportedDomain));
 }
@@ -542,8 +530,8 @@ async fn source_against_with<O: OutputSink>(
 
 async fn source_against(
     sink_script: impl FnOnce(&UnixStream) + Send + 'static,
-) -> Result<CollectingOutput, G2gError> {
-    let mut out = CollectingOutput::default();
+) -> Result<CollectSink, G2gError> {
+    let mut out = CollectSink::default();
     source_against_with(rgba_caps_text(), &mut out, sink_script).await?;
     Ok(out)
 }

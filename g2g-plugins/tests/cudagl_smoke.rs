@@ -30,35 +30,18 @@
 
 #![cfg(all(target_os = "linux", feature = "ffmpeg", feature = "cuda-gl"))]
 
-use g2g_core::element::PushOutcome;
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::MemoryDomain;
 use g2g_core::metrics::monotonic_ns;
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, OutputSink, Rate, RawVideoFormat,
-    SystemSlice, VideoCodec,
+    AsyncElement, Caps, ConfigureOutcome, Dim, Rate, RawVideoFormat, SystemSlice, VideoCodec,
 };
 use g2g_plugins::cudaglsink::CudaGlSink;
 use g2g_plugins::ffmpegdec::{Backend, FfmpegVideoDec};
-
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
 
 fn h264_caps() -> Caps {
     Caps::CompressedVideo {
@@ -157,7 +140,7 @@ async fn cudagl_sink_presents_nvdec_cuda_frames() {
         ConfigureOutcome::Accepted
     ));
 
-    let mut decoded = Collect::default();
+    let mut decoded = CollectSink::default();
     for (seq, au) in access_units.into_iter().enumerate() {
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
@@ -194,7 +177,7 @@ async fn cudagl_sink_presents_nvdec_cuda_frames() {
     sink.configure_pipeline(&nv12_caps(w, h))
         .expect("CudaGlSink configure (spawns GL worker)");
 
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for frame in cuda_frames {
         // Stamp arrival so the sink's glass-to-glass histogram is populated.
         let frame = Frame {

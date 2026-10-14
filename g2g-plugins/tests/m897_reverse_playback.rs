@@ -11,6 +11,10 @@
 //! repo's Annex-B H.264 clip, four IDR-led GOPs of five frames.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::path::{Path, PathBuf};
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
@@ -40,26 +44,7 @@ fn h264_caps() -> Caps {
     }
 }
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn frames(&self) -> Vec<&Frame> {
         self.packets
             .iter()
@@ -221,7 +206,7 @@ async fn fixture_mp4(name: &str) -> PathBuf {
 
 /// Run `Mp4Src` over `path` to EOS, applying `seek` (if any) before the first
 /// frame, and return everything it pushed.
-async fn run_src(path: &Path, seek: Option<Seek>) -> Collect {
+async fn run_src(path: &Path, seek: Option<Seek>) -> CollectSink {
     let ctl = SeekController::new();
     let mut src = Mp4Src::new(path).with_seek(ctl.clone());
     let caps = src.intercept_caps().await.expect("probe the file");
@@ -229,7 +214,7 @@ async fn run_src(path: &Path, seek: Option<Seek>) -> Collect {
     if let Some(s) = seek {
         ctl.seek(s);
     }
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     src.run(&mut out).await.expect("run to EOS");
     out
 }
@@ -243,10 +228,10 @@ async fn forward_pts(path: &Path) -> Vec<u64> {
 }
 
 /// Feed `packets` through a fresh `GopReverse`, returning what it emitted.
-async fn through_gop_reverse(packets: Vec<PipelinePacket>) -> Collect {
+async fn through_gop_reverse(packets: Vec<PipelinePacket>) -> CollectSink {
     let mut rev = GopReverse::new();
     rev.configure_pipeline(&h264_caps()).expect("configure");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for p in packets {
         rev.process(p, &mut out).await.expect("reverse");
     }
@@ -414,11 +399,11 @@ mod decode {
     /// Decode `packets` (which end in the source's `Eos`, draining the decoder)
     /// with a fresh software decoder. The decoder does not forward `Eos` (the
     /// runner does), so it is re-appended for the next stage.
-    async fn decode(packets: Vec<PipelinePacket>) -> Collect {
+    async fn decode(packets: Vec<PipelinePacket>) -> CollectSink {
         let mut dec = FfmpegVideoDec::new().with_output_format(OutputFormat::I420);
         let narrowed = dec.intercept_caps(&h264_caps()).expect("H.264 accepted");
         dec.configure_pipeline(&narrowed).expect("libavcodec opens");
-        let mut out = Collect::default();
+        let mut out = CollectSink::default();
         for p in packets {
             dec.process(p, &mut out).await.expect("decode");
         }
@@ -426,7 +411,7 @@ mod decode {
         out
     }
 
-    fn pixels(c: &Collect) -> BTreeMap<u64, Vec<u8>> {
+    fn pixels(c: &CollectSink) -> BTreeMap<u64, Vec<u8>> {
         c.frames()
             .iter()
             .map(|f| {

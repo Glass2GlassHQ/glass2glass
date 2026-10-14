@@ -12,14 +12,15 @@
 //! `cargo test -p g2g-plugins --features std,png,mjpeg`.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome, Rate,
-    VideoCodec,
-};
+use g2g_core::{AsyncElement, Caps, Dim, FrameTiming, PipelinePacket, Rate, VideoCodec};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::stillparse::{JpegParse, PngParse};
 use g2g_plugins::typefind::sniff_caps;
@@ -45,24 +46,7 @@ impl g2g_core::PipelineClock for ZeroClock {
     }
 }
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn payloads(&self) -> Vec<Vec<u8>> {
         self.packets
             .iter()
@@ -137,8 +121,8 @@ fn multipart_bodies(file: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /// Push `bytes` through `element` in `CHUNK_LEN` pieces, then end the stream.
-async fn drive<E: AsyncElement>(element: &mut E, bytes: &[u8]) -> Collect {
-    let mut out = Collect::default();
+async fn drive<E: AsyncElement>(element: &mut E, bytes: &[u8]) -> CollectSink {
+    let mut out = CollectSink::default();
     for piece in bytes.chunks(CHUNK_LEN) {
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(piece.to_vec().into_boxed_slice())),

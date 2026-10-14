@@ -4,29 +4,16 @@
 //! the channel count and the sample width from it) and the samples have to
 //! reach the output untouched, so a written file plays back what came in.
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Frame, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, PushOutcome,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Frame, FrameTiming, MemoryDomain,
+    PipelinePacket,
 };
 use g2g_plugins::wavenc::WavEnc;
-
-#[derive(Default)]
-struct CollectSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CollectSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
 
 fn frame(bytes: Vec<u8>) -> Frame {
     Frame {

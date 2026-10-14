@@ -6,13 +6,17 @@
 //! (System) path and re-running the m731 luma checks.
 #![cfg(all(target_os = "macos", feature = "vtdecode", feature = "vtencode"))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, Interlace, OutputSink, PipelineClock,
-    PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, ConfigureOutcome, Dim, Interlace, PipelineClock, Rate, RawVideoFormat,
+    VideoCodec,
 };
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::vtdecode::VtDecode;
@@ -22,26 +26,7 @@ const H264_CLIP: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
 const FRAME_DURATION_NS: u64 = 33_333_333;
 const FOURCC_420V: u32 = 0x3432_3076; // '420v'
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn into_data_frames(self) -> Vec<Frame> {
         self.packets
             .into_iter()
@@ -71,7 +56,7 @@ async fn access_units(es: &[u8]) -> Vec<Frame> {
     };
     let mut parse = g2g_plugins::h264parse::H264Parse::reframing();
     parse.configure_pipeline(&caps).expect("configure parser");
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     for (i, chunk) in es.chunks(4096).enumerate() {
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
@@ -92,7 +77,7 @@ async fn access_units(es: &[u8]) -> Vec<Frame> {
 
 /// Drive `el` over `frames` + Eos, collecting its output frames.
 async fn run_element<E: AsyncElement>(el: &mut E, frames: Vec<Frame>) -> Vec<Frame> {
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     for f in frames {
         el.process(PipelinePacket::DataFrame(f), &mut sink)
             .await

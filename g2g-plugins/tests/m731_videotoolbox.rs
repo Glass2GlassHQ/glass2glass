@@ -6,13 +6,14 @@
 //! `m489_vulkan_video_decode` (assertion style + conformance evidence).
 #![cfg(all(target_os = "macos", feature = "vtdecode"))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, OutputSink, PushOutcome, Rate,
-    RawVideoFormat, VideoCodec,
-};
+use g2g_core::{AsyncElement, Caps, ConfigureOutcome, Dim, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::vtdecode::VtDecode;
 
 const H264_CLIP: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
@@ -20,26 +21,7 @@ const H265_CLIP: &[u8] = include_bytes!("fixtures/h265_640x480.h265");
 
 const FRAME_DURATION_NS: u64 = 33_333_333;
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn caps_changes(&self) -> Vec<Caps> {
         self.packets
             .iter()
@@ -87,7 +69,7 @@ async fn access_units(codec: VideoCodec, es: &[u8]) -> Vec<Frame> {
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     match codec {
         VideoCodec::H265 => {
             let mut parse = g2g_plugins::h265parse::H265Parse::reframing();
@@ -105,7 +87,7 @@ async fn access_units(codec: VideoCodec, es: &[u8]) -> Vec<Frame> {
     aus
 }
 
-async fn drive<E: AsyncElement>(el: &mut E, es: &[u8], sink: &mut Collect) {
+async fn drive<E: AsyncElement>(el: &mut E, es: &[u8], sink: &mut CollectSink) {
     for (i, chunk) in es.chunks(4096).enumerate() {
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
@@ -138,7 +120,7 @@ async fn decode_fixture(mut dec: VtDecode, codec: VideoCodec, es: &[u8]) {
         .expect("VideoToolbox session must be reachable");
     assert!(matches!(outcome, ConfigureOutcome::Accepted));
 
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     for (i, mut au) in aus.into_iter().enumerate() {
         // Distinct, monotonic PTS per access unit (the parser leaves the
         // fixture's frames untimed).
@@ -287,14 +269,14 @@ mod encode {
         out
     }
 
-    async fn encode_frames(mut enc: VtEncode) -> Collect {
+    async fn encode_frames(mut enc: VtEncode) -> CollectSink {
         let narrowed = enc.intercept_caps(&input_caps()).expect("intercept NV12");
         let outcome = enc
             .configure_pipeline(&narrowed)
             .expect("VideoToolbox compression session must initialise");
         assert!(matches!(outcome, ConfigureOutcome::Accepted));
 
-        let mut sink = Collect::default();
+        let mut sink = CollectSink::default();
         for i in 0..FRAMES {
             enc.process(PipelinePacket::DataFrame(nv12_frame(i)), &mut sink)
                 .await
@@ -374,7 +356,7 @@ mod encode {
         let narrowed = dec.intercept_caps(&h_caps).expect("intercept codec");
         dec.configure_pipeline(&narrowed).expect("decoder session");
 
-        let mut sink = Collect::default();
+        let mut sink = CollectSink::default();
         for f in encoded.into_data_frames() {
             dec.process(PipelinePacket::DataFrame(f), &mut sink)
                 .await

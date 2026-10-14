@@ -2,6 +2,10 @@
 //! framerate, bounded by `num-buffers` or by the output push failing.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
@@ -18,24 +22,7 @@ const FRAMERATE: u32 = 30;
 const PERIOD_NS: u64 = 1_000_000_000 / FRAMERATE as u64;
 const FRAMES: u64 = 10;
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn timings(&self) -> Vec<FrameTiming> {
         self.packets
             .iter()
@@ -109,7 +96,7 @@ async fn bounded_run_lands_on_the_exact_frame_grid() {
     element
         .configure_pipeline(&caps(Rate::Fixed(10 << 16)))
         .expect("raw video configures");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     element.process(still(), &mut out).await.unwrap();
 
     let timings = out.timings();
@@ -158,7 +145,7 @@ async fn flush_lets_a_new_still_take_over() {
     element
         .configure_pipeline(&caps(Rate::Any))
         .expect("raw video configures");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     element.process(still(), &mut out).await.unwrap();
     element
         .process(PipelinePacket::Flush, &mut out)

@@ -11,10 +11,14 @@
 //! checked against a reference muxer's bytes rather than against itself.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
 #[path = "common/ffmpeg_tool.rs"]
 mod ffmpeg_tool;
 #[path = "common/ffprobe_tool.rs"]
 mod ffprobe_tool;
+use collect_sink::CollectSink;
+
 use ffmpeg_tool::have_ffmpeg;
 use ffprobe_tool::have_ffprobe;
 
@@ -25,8 +29,8 @@ use g2g_core::frame::{Frame, PipelinePacket};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, FrameTiming, G2gError, MemoryDomain, MultiInputElement,
-    OutputSink, PropValue, PropertySpec, PushOutcome, SubPictureFormat,
+    AsyncElement, ByteStreamEncoding, Caps, FrameTiming, MemoryDomain, MultiInputElement,
+    PropValue, PropertySpec, SubPictureFormat,
 };
 
 use g2g_plugins::dvbsub::{page_id_blob, parse_page_ids, segment_span, PageIds};
@@ -44,25 +48,7 @@ use g2g_plugins::vobsubsrc::VobSubSrc;
 mod vobsub_fixture;
 use vobsub_fixture::{author_vobsub, cues, CUE_DURATION_NS, H, PALETTE, W};
 
-#[derive(Default)]
-struct CaptureSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CaptureSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl CaptureSink {
+impl CollectSink {
     /// Every data frame's bytes and timing, in push order.
     fn frames(&self) -> Vec<(Vec<u8>, FrameTiming)> {
         self.packets
@@ -122,7 +108,7 @@ async fn mux_mkv(format: SubPictureFormat, stream: &[(Vec<u8>, FrameTiming)]) ->
     let mut mux = MkvMuxN::new(1);
     mux.configure_pipeline(0, &caps(format))
         .expect("matroskamux accepts a subpicture pad");
-    let mut sink = CaptureSink::default();
+    let mut sink = CollectSink::default();
     for (data, timing) in stream {
         mux.process(0, frame(data.clone(), *timing), &mut sink)
             .await
@@ -139,7 +125,7 @@ async fn mux_ts(stream: &[(Vec<u8>, FrameTiming)]) -> Vec<u8> {
     let mut mux = TsMux::new();
     mux.configure_pipeline(&caps(SubPictureFormat::DvbSub))
         .expect("mpegtsmux accepts a DVB subtitle pad");
-    let mut sink = CaptureSink::default();
+    let mut sink = CollectSink::default();
     for (data, timing) in stream {
         mux.process(frame(data.clone(), *timing), &mut sink)
             .await
@@ -155,7 +141,7 @@ async fn demux<E: AsyncElement>(
     bytes: Vec<u8>,
 ) -> Vec<(Vec<u8>, FrameTiming)> {
     el.configure_pipeline(&input).expect("demuxer configures");
-    let mut sink = CaptureSink::default();
+    let mut sink = CollectSink::default();
     el.process(frame(bytes, FrameTiming::default()), &mut sink)
         .await
         .expect("demux");
@@ -171,7 +157,7 @@ async fn vobsub_stream(idx: &PathBuf) -> Vec<(Vec<u8>, FrameTiming)> {
     let mut src = VobSubSrc::new(idx);
     src.configure_pipeline(&caps(SubPictureFormat::VobSub))
         .expect("vobsubsrc configures");
-    let mut sink = CaptureSink::default();
+    let mut sink = CollectSink::default();
     src.run(&mut sink).await.expect("read the sidecar pair");
     sink.frames()
 }
@@ -441,7 +427,7 @@ async fn the_fan_in_ts_muxer_declares_a_subtitle_pad_in_its_language() {
         composition: 1,
         ancillary: 1,
     };
-    let mut sink = CaptureSink::default();
+    let mut sink = CollectSink::default();
     mux.process(
         1,
         frame(page_id_blob(ids, 0x10).to_vec(), FrameTiming::default()),
@@ -513,7 +499,7 @@ async fn the_page_id_property_declares_a_stream_that_sends_no_config() {
     AsyncElement::set_property(&mut mux, "dvbsub-page-id", PropValue::Uint(5)).unwrap();
     mux.configure_pipeline(&caps(SubPictureFormat::DvbSub))
         .unwrap();
-    let mut sink = CaptureSink::default();
+    let mut sink = CollectSink::default();
     mux.process(frame(dvb_display_set(5), at(0, 0)), &mut sink)
         .await
         .unwrap();
@@ -534,7 +520,7 @@ async fn the_page_id_property_declares_a_stream_that_sends_no_config() {
     MultiInputElement::set_property(&mut mkv, "dvbsub-page-id", PropValue::Uint(5)).unwrap();
     mkv.configure_pipeline(0, &caps(SubPictureFormat::DvbSub))
         .unwrap();
-    let mut sink = CaptureSink::default();
+    let mut sink = CollectSink::default();
     mkv.process(0, frame(dvb_display_set(5), at(0, 0)), &mut sink)
         .await
         .unwrap();

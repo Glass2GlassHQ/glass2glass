@@ -5,35 +5,20 @@
 //! - `textdigest` joins the text frames of a window into one frame per window,
 //!   and flushes the window still open at EOS.
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{
-    ByteStreamEncoding, Caps, G2gError, OutputSink, PropValue, PushOutcome, TextFormat,
-};
+use g2g_core::{ByteStreamEncoding, Caps, PropValue, TextFormat};
 use g2g_plugins::textdigest::TextDigest;
 use g2g_plugins::trim::Trim;
 
 const NS_PER_SECOND: u64 = 1_000_000_000;
 
-#[derive(Default)]
-struct RecordingSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for RecordingSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl RecordingSink {
+impl CollectSink {
     fn frames(&self) -> Vec<&Frame> {
         self.packets
             .iter()
@@ -83,7 +68,7 @@ async fn trim_keeps_the_range_and_rebases_it() {
     })
     .expect("trim takes any caps");
 
-    let mut out = RecordingSink::default();
+    let mut out = CollectSink::default();
     for index in 0..TRIM_FRAMES {
         trim.process(
             PipelinePacket::DataFrame(frame(&[index as u8], index * TRIM_FRAME_PERIOD_NS)),
@@ -140,7 +125,7 @@ async fn textdigest_joins_a_window_and_flushes_at_eos() {
         .configure_pipeline(&caps)
         .expect("the digest takes UTF-8 text");
 
-    let mut out = RecordingSink::default();
+    let mut out = CollectSink::default();
     for (seconds, text) in CUES {
         digest
             .process(

@@ -14,12 +14,13 @@
 #[path = "common/ffmpeg_tool.rs"]
 mod ffmpeg_tool;
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::SystemSlice;
-use g2g_core::{
-    AsyncElement, Caps, Dim, G2gError, Interlace, MemoryDomain, OutputSink, PropValue, PushOutcome,
-    Rate, RawVideoFormat,
-};
+use g2g_core::{AsyncElement, Caps, Dim, Interlace, MemoryDomain, PropValue, Rate, RawVideoFormat};
 use g2g_plugins::capsfilter::parse_caps;
 use g2g_plugins::deinterlace::{Deinterlace, DeinterlaceMode};
 
@@ -27,25 +28,7 @@ const W: usize = 64;
 const H: usize = 32;
 const I420_BYTES: usize = W * H * 3 / 2;
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn caps_changes(&self) -> Vec<Caps> {
         self.packets
             .iter()
@@ -101,10 +84,10 @@ fn combed() -> Vec<u8> {
     f
 }
 
-async fn run_mode(mode: DeinterlaceMode, caps: &Caps, frames: &[Vec<u8>]) -> Collect {
+async fn run_mode(mode: DeinterlaceMode, caps: &Caps, frames: &[Vec<u8>]) -> CollectSink {
     let mut el = Deinterlace::new().with_mode(mode);
     el.configure_pipeline(caps).unwrap();
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for (i, b) in frames.iter().enumerate() {
         el.process(frame(b, i as u64), &mut out).await.unwrap();
     }
@@ -255,7 +238,7 @@ async fn a_mid_stream_caps_flip_switches_auto_on() {
     let mut el = Deinterlace::new().with_mode(DeinterlaceMode::Auto);
     el.configure_pipeline(&raw_caps(RawVideoFormat::I420, Interlace::Progressive))
         .unwrap();
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     let comb = combed();
     el.process(frame(&comb, 0), &mut out).await.unwrap();
     assert_eq!(out.frames(), vec![comb.clone()], "progressive: passthrough");
@@ -380,7 +363,7 @@ mod ffmpeg_latch {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
         .unwrap();
-        let mut out = Collect::default();
+        let mut out = CollectSink::default();
         for (i, au) in units.iter().enumerate() {
             dec.process(frame(au, i as u64), &mut out).await.unwrap();
         }

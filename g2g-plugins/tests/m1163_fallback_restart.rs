@@ -12,6 +12,10 @@
 //! `cargo test -p g2g-plugins --features std`.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use core::future::Future;
 use core::pin::Pin;
 use std::path::PathBuf;
@@ -26,7 +30,6 @@ use g2g_core::runtime::{
 };
 use g2g_core::{
     Caps, ConfigureOutcome, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket,
-    PushOutcome,
 };
 use g2g_plugins::fallbacksrc::{RestartSrc, RETRY_DELAY};
 use g2g_plugins::filesrc::FileSrc;
@@ -186,13 +189,7 @@ async fn restart_properties_reject_bad_values() {
     }
 }
 
-/// Records every packet the wrapper pushes.
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl Collect {
+impl CollectSink {
     fn pts(&self) -> Vec<u64> {
         self.packets
             .iter()
@@ -208,18 +205,6 @@ impl Collect {
             .iter()
             .filter(|p| matches!(p, PipelinePacket::Eos))
             .count()
-    }
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 
@@ -272,7 +257,7 @@ async fn timeline_never_goes_backwards_across_restarts() {
         retry_timeout_ns: GENEROUS_RETRY_NS,
     };
     let mut wrapper = configured(RestartSrc::new(generated_source(), rebuild, policy, None)).await;
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     let _ = tokio::time::timeout(
         RETRY_DELAY * 2 + SETTLE,
         SourceLoop::run(&mut wrapper, &mut sink),
@@ -321,7 +306,7 @@ async fn retry_budget_ends_the_stream_after_repeated_failure() {
         None,
     ))
     .await;
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     let started = Instant::now();
     let frames = SourceLoop::run(&mut wrapper, &mut sink)
         .await
@@ -387,7 +372,7 @@ async fn stalled_source_is_rebuilt_after_restart_timeout() {
         retry_timeout_ns: GENEROUS_RETRY_NS,
     };
     let mut wrapper = configured(RestartSrc::new(Box::new(StallSrc), rebuild, policy, None)).await;
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     // The first life stalls, waits out one retry delay, and its replacement
     // delivers before the run is cut.
     let _ = tokio::time::timeout(
@@ -418,7 +403,7 @@ async fn zero_restart_timeout_disables_the_stall_check() {
         retry_timeout_ns: GENEROUS_RETRY_NS,
     };
     let mut wrapper = configured(RestartSrc::new(Box::new(StallSrc), rebuild, policy, None)).await;
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     let _ = tokio::time::timeout(
         SHORT_STALL + RETRY_DELAY + SETTLE,
         SourceLoop::run(&mut wrapper, &mut sink),

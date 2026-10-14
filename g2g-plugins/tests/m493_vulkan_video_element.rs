@@ -18,12 +18,16 @@
     feature = "vulkan-video"
 ))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
-    AsyncElement, Caps, ColorRange, Colorimetry, Dim, FrameTiming, G2gError, MatrixCoefficients,
-    MemoryDomain, OutputSink, PipelinePacket, PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, ColorRange, Colorimetry, Dim, FrameTiming, MatrixCoefficients,
+    MemoryDomain, PipelinePacket, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::vulkanvideo::{
     extract_h264_parameter_sets, open_h264_decode_device, VulkanVideoDec, VulkanVideoError,
@@ -57,26 +61,6 @@ fn assert_fixture_declares_no_colour_description() {
         (CICP_UNSPECIFIED, CICP_UNSPECIFIED, CICP_UNSPECIFIED, false),
         "fixture colour description changed; update EXPECTED_COLORIMETRY"
     );
-}
-
-/// A sink that records every packet the element pushes.
-#[derive(Default)]
-struct RecordingSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for RecordingSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
 }
 
 /// Split an Annex-B elementary stream into per-picture access units: each VCL
@@ -171,7 +155,7 @@ fn element_decodes_stream_to_nv12_frames() {
     let aus = split_access_units(CLIP);
     assert_eq!(aus.len(), 10, "clip splits into 10 access units");
 
-    let mut sink = RecordingSink::default();
+    let mut sink = CollectSink::default();
     for (i, au) in aus.into_iter().enumerate() {
         block_on(dec.process(PipelinePacket::DataFrame(au_frame(au, i as u64)), &mut sink))
             .expect("decode access unit");

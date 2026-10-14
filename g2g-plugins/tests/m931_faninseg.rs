@@ -8,6 +8,10 @@
 //! segment is the one that has to reach the sink.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use core::future::Future;
 use core::pin::Pin;
 
@@ -25,25 +29,7 @@ const H: u32 = 32;
 /// a segment waits over half an hour.
 const BASE_NS: u64 = 2_267_767_267_000;
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn segments(&self) -> Vec<Segment> {
         self.packets
             .iter()
@@ -105,7 +91,7 @@ async fn a_fan_in_forwards_the_timing_inputs_segment() {
     for pad in 0..2 {
         c.configure_pipeline(pad, &rgba_caps()).expect("configure");
     }
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
 
     let seg = Segment::for_flush_seek(&Seek::flush_to(BASE_NS), None);
     c.process(0, PipelinePacket::Segment(seg), &mut sink)
@@ -152,7 +138,7 @@ async fn an_overlay_inputs_segment_is_not_forwarded() {
     for pad in 0..2 {
         c.configure_pipeline(pad, &rgba_caps()).expect("configure");
     }
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
 
     let overlay_seg = Segment::for_flush_seek(&Seek::flush_to(999_000_000_000), None);
     c.process(1, PipelinePacket::Segment(overlay_seg), &mut sink)
@@ -183,7 +169,7 @@ async fn a_later_segment_supersedes_the_runners_default() {
     for pad in 0..2 {
         c.configure_pipeline(pad, &rgba_caps()).expect("configure");
     }
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
 
     // Exactly the order a real graph delivers: the open segment, then the
     // demuxer's stream-start one.
@@ -228,7 +214,7 @@ async fn a_flush_re_arms_the_segment() {
     for pad in 0..2 {
         c.configure_pipeline(pad, &rgba_caps()).expect("configure");
     }
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
 
     let first = Segment::for_flush_seek(&Seek::flush_to(BASE_NS), None);
     c.process(0, PipelinePacket::Segment(first), &mut sink)
@@ -260,7 +246,7 @@ async fn a_segment_does_not_disturb_compositing() {
             c.configure_pipeline(pad, &rgba_caps()).expect("configure");
         }
     }
-    let (mut a, mut b) = (Collect::default(), Collect::default());
+    let (mut a, mut b) = (CollectSink::default(), CollectSink::default());
 
     let seg = Segment::for_flush_seek(&Seek::flush_to(BASE_NS), None);
     with.process(0, PipelinePacket::Segment(seg), &mut a)
@@ -493,7 +479,7 @@ mod overlay_timing {
     }
 
     /// Top-left pixel of each composited output, paired with its pts in ms.
-    fn composited(sink: &Collect) -> Vec<(u64, [u8; 4])> {
+    fn composited(sink: &CollectSink) -> Vec<(u64, [u8; 4])> {
         sink.frames()
             .iter()
             .map(|f| {
@@ -517,7 +503,7 @@ mod overlay_timing {
     #[tokio::test]
     async fn overlay_canvases_delivered_early_still_apply_at_their_own_pts() {
         let mut c = configured().await;
-        let mut sink = Collect::default();
+        let mut sink = CollectSink::default();
 
         // Input 0 opens the stream.
         c.process(0, canvas(10, 0), &mut sink).await.unwrap();
@@ -551,7 +537,7 @@ mod overlay_timing {
     #[tokio::test]
     async fn overlay_canvases_delivered_interleaved_apply_at_their_own_pts() {
         let mut c = configured().await;
-        let mut sink = Collect::default();
+        let mut sink = CollectSink::default();
 
         c.process(0, canvas(10, 0), &mut sink).await.unwrap();
         c.process(1, canvas(200, 2), &mut sink).await.unwrap();
@@ -580,7 +566,7 @@ mod overlay_timing {
     #[tokio::test]
     async fn a_future_cue_does_not_apply_early() {
         let mut c = configured().await;
-        let mut sink = Collect::default();
+        let mut sink = CollectSink::default();
         c.process(0, canvas(10, 0), &mut sink).await.unwrap();
         c.process(1, canvas(200, 900), &mut sink).await.unwrap();
         for pts in 1..=4u64 {

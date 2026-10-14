@@ -4,10 +4,13 @@
 //! on a synthetic frame and asserts the pixels that come out, so a wrong
 //! transfer function fails here rather than looking plausible on screen.
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PushOutcome, Rate, RawVideoFormat,
+    AsyncElement, Caps, Dim, Frame, FrameTiming, MemoryDomain, PipelinePacket, Rate, RawVideoFormat,
 };
 
 use g2g_plugins::aspectratiocrop::AspectRatioCrop;
@@ -18,23 +21,6 @@ use g2g_plugins::smooth::Smooth;
 use g2g_plugins::videodiff::{VideoDiff, MARK_DARK_LUMA, MARK_LIGHT_LUMA};
 use g2g_plugins::videomedian::{MedianSize, VideoMedian};
 use g2g_plugins::zebrastripe::{ZebraStripe, STRIPE_LUMA};
-
-#[derive(Default)]
-struct CollectSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CollectSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
 
 fn raw(format: RawVideoFormat, w: u32, h: u32) -> Caps {
     Caps::RawVideo {

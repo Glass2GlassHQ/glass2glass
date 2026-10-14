@@ -8,6 +8,10 @@
 //! is too: run with `cargo test -p g2g-plugins --features std`.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use core::task::{Context, Poll};
 use std::time::Duration;
 
@@ -25,24 +29,7 @@ use g2g_plugins::errorignore::ErrorIgnore;
 use g2g_plugins::fakemediasink::{FakeAudioSink, FakeVideoSink};
 use g2g_plugins::fpsdisplaysink::FpsDisplaySink;
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl Collect {
+impl CollectSink {
     /// The payload of every data frame pushed.
     fn payloads(&self) -> Vec<Vec<u8>> {
         self.packets
@@ -145,7 +132,7 @@ async fn run_corrupter(probability: f64, seed: u64) -> (Vec<u8>, u64) {
         .configure_pipeline(&byte_stream_caps())
         .expect("configure");
 
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     let stream = intact_stream();
     for sequence in 0..CORRUPT_BUFFERS {
         let start = sequence as usize * CORRUPT_BUFFER_BYTES;
@@ -217,7 +204,7 @@ const CHOP_STEP: i64 = 8;
 const CHOP_INPUT_BUFFERS: u64 = 4;
 const CHOP_INPUT_BUFFER_BYTES: usize = 101;
 
-async fn run_chopper() -> Collect {
+async fn run_chopper() -> CollectSink {
     let mut chopper = ChopMyData::new();
     for (name, value) in [
         ("min-size", CHOP_MIN),
@@ -232,7 +219,7 @@ async fn run_chopper() -> Collect {
         .configure_pipeline(&byte_stream_caps())
         .expect("configure");
 
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for sequence in 0..CHOP_INPUT_BUFFERS {
         let start = sequence as usize * CHOP_INPUT_BUFFER_BYTES;
         let bytes = (start..start + CHOP_INPUT_BUFFER_BYTES)
@@ -290,7 +277,7 @@ async fn chopmydata_pins_every_chunk_when_the_bounds_meet() {
         .configure_pipeline(&byte_stream_caps())
         .expect("configure");
 
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     let whole = CHOP_MIN as usize * 3;
     chopper
         .process(byte_frame(vec![0u8; whole], 0, 0), &mut out)
@@ -337,7 +324,7 @@ async fn checksumsink_reports_each_buffer_under_the_named_hash() {
         sink.configure_pipeline(&byte_stream_caps())
             .expect("configure");
 
-        let mut out = Collect::default();
+        let mut out = CollectSink::default();
         sink.process(
             byte_frame(DIGEST_INPUT.to_vec(), DIGEST_PTS_NS, 0),
             &mut out,
@@ -365,7 +352,7 @@ async fn checksumsink_defaults_to_sha1() {
     let mut sink = ChecksumSink::new();
     sink.configure_pipeline(&byte_stream_caps())
         .expect("configure");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     sink.process(byte_frame(DIGEST_INPUT.to_vec(), 0, 0), &mut out)
         .await
         .expect("digesting");
@@ -571,7 +558,7 @@ async fn fakevideosink_counts_what_it_swallowed() {
     sink.configure_pipeline(&raw_video_caps())
         .expect("configure");
 
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for sequence in 0..FAKE_BUFFERS {
         sink.process(
             byte_frame(vec![0u8; FAKE_BUFFER_BYTES], sequence, sequence),
@@ -601,7 +588,7 @@ async fn fakevideosink_counts_what_it_swallowed() {
 async fn fakeaudiosink_stays_quiet_by_default() {
     let mut sink = FakeAudioSink::new();
     sink.configure_pipeline(&pcm_caps()).expect("configure");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     sink.process(byte_frame(vec![0u8; FAKE_BUFFER_BYTES], 0, 0), &mut out)
         .await
         .expect("swallowing");
@@ -637,7 +624,7 @@ async fn fpsdisplaysink_reports_what_its_child_rendered() {
     sink.configure_pipeline(&raw_video_caps())
         .expect("the child accepts the caps");
 
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for sequence in 0..FPS_FRAMES {
         sink.process(
             byte_frame(vec![0u8; FAKE_BUFFER_BYTES], sequence, sequence),

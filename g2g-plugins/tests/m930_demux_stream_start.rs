@@ -13,8 +13,12 @@
 //! sequence header or libavcodec fails the whole stream on its dimensions.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
 #[path = "common/ffmpeg_tool.rs"]
 mod ffmpeg_tool;
+use collect_sink::CollectSink;
+
 use ffmpeg_tool::have_ffmpeg;
 
 use core::future::Future;
@@ -26,31 +30,13 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, G2gError, MultiOutputElement, MultiOutputSink,
-    OutputSink, PushOutcome, Segment,
+    PushOutcome, Segment,
 };
 use g2g_plugins::mkvdemux::{MkvDemux, MkvDemuxN, MkvStream};
 use g2g_plugins::psdemux::parse_sequence_header;
 use g2g_plugins::tsdemux::{TsDemux, TsDemuxN, TsStream};
 
 // ---- harness ----
-
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
 
 /// A multi-output sink recording each port's packets in order.
 struct PortTap {
@@ -182,8 +168,8 @@ fn author_ts(path: &Path, codec: &str, offset_s: &str) {
 }
 
 /// Feed a whole file to a single-output demuxer in 4 KiB chunks.
-async fn run_single(el: &mut dyn AsyncElementDyn, file: &[u8]) -> Collect {
-    let mut sink = Collect::default();
+async fn run_single(el: &mut dyn AsyncElementDyn, file: &[u8]) -> CollectSink {
+    let mut sink = CollectSink::default();
     for chunk in file.chunks(4096) {
         el.feed(data_frame(chunk.to_vec()), &mut sink).await;
     }
@@ -196,7 +182,7 @@ trait AsyncElementDyn {
     fn feed<'a>(
         &'a mut self,
         packet: PipelinePacket,
-        out: &'a mut Collect,
+        out: &'a mut CollectSink,
     ) -> Pin<Box<dyn Future<Output = ()> + 'a>>;
 }
 
@@ -204,7 +190,7 @@ impl<T: AsyncElement> AsyncElementDyn for T {
     fn feed<'a>(
         &'a mut self,
         packet: PipelinePacket,
-        out: &'a mut Collect,
+        out: &'a mut CollectSink,
     ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
         Box::pin(async move {
             self.process(packet, out).await.expect("demux a chunk");

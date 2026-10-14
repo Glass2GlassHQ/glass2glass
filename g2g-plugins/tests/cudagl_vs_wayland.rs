@@ -39,38 +39,21 @@
     feature = "wayland-sink"
 ))]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::time::Instant;
 
-use g2g_core::element::PushOutcome;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::MemoryDomain;
 use g2g_core::metrics::{monotonic_ns, LatencySnapshot};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, OutputSink, Rate, RawVideoFormat,
-    SystemSlice, VideoCodec,
+    AsyncElement, Caps, ConfigureOutcome, Dim, Rate, RawVideoFormat, SystemSlice, VideoCodec,
 };
 use g2g_plugins::cudaglsink::CudaGlSink;
 use g2g_plugins::ffmpegdec::{Backend, FfmpegVideoDec, OutputFormat};
 use g2g_plugins::waylandsink::WaylandSink;
-
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
 
 fn h264_caps() -> Caps {
     Caps::CompressedVideo {
@@ -153,7 +136,7 @@ async fn decode_all(dec: &mut FfmpegVideoDec, access_units: &[Vec<u8>]) -> (Vec<
         dec.configure_pipeline(&narrowed).expect("decoder init"),
         ConfigureOutcome::Accepted
     ));
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for (seq, au) in access_units.iter().enumerate() {
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
@@ -183,7 +166,7 @@ async fn decode_all(dec: &mut FfmpegVideoDec, access_units: &[Vec<u8>]) -> (Vec<
 /// Present every frame through `sink` (already configured), stamping arrival
 /// just before each push so the sink's histogram measures its present cost.
 async fn present_all<S: AsyncElement>(sink: &mut S, frames: Vec<Frame>) -> usize {
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     let mut n = 0;
     for frame in frames {
         let frame = Frame {

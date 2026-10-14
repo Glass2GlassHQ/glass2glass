@@ -15,10 +15,14 @@
 //! `VideoCodec::Mpeg2`, and malformed input never panics.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
 #[path = "common/ffmpeg_tool.rs"]
 mod ffmpeg_tool;
 #[path = "common/ffprobe_tool.rs"]
 mod ffprobe_tool;
+use collect_sink::CollectSink;
+
 use ffmpeg_tool::have_ffmpeg;
 use ffprobe_tool::have_ffprobe;
 
@@ -29,8 +33,8 @@ use g2g_core::frame::{Frame, PipelinePacket};
 use g2g_core::{frame::FrameTiming, memory::SystemSlice};
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain,
-    MultiInputElement, MultiOutputElement, OutputSink, PadDirection, PadTemplates, PropValue,
-    PushOutcome, Rate, SubPictureFormat, VideoCodec,
+    MultiInputElement, MultiOutputElement, PadDirection, PadTemplates, PropValue, PushOutcome,
+    Rate, SubPictureFormat, VideoCodec,
 };
 /// A multi-output sink recording each port's packets in order.
 struct PortTap {
@@ -85,25 +89,7 @@ const VOB_H: u32 = 480;
 
 // ---- harness ----
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl Collect {
+impl CollectSink {
     fn frames(&self) -> Vec<&Frame> {
         self.packets
             .iter()
@@ -166,11 +152,11 @@ fn bytes(frame: &Frame) -> Vec<u8> {
 
 /// Run the whole file through one `PsDemux` selection, in 4 KiB chunks so the
 /// packet realignment across input frames runs too.
-async fn demux(file: &[u8], stream: PsStream) -> Collect {
+async fn demux(file: &[u8], stream: PsStream) -> CollectSink {
     let mut el = PsDemux::new().with_stream(stream);
     el.configure_pipeline(&ps_caps())
         .expect("mpegpsdemux accepts a program stream");
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     for chunk in file.chunks(4096) {
         el.process(data_frame(chunk.to_vec()), &mut sink)
             .await
@@ -485,7 +471,7 @@ async fn a_demuxed_subpicture_renders_on_the_default_palette() {
         format: SubPictureFormat::VobSub,
     })
     .expect("vobsubdec accepts a subpicture pad");
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     for packet in demuxed.packets {
         if let PipelinePacket::DataFrame(f) = packet {
             let timing = f.timing;
@@ -586,7 +572,7 @@ async fn mpeg2_video_in_a_transport_stream_reaches_the_mpeg2_selection() {
         encoding: ByteStreamEncoding::MpegTs,
     })
     .expect("tsdemux accepts a transport stream");
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     for chunk in file.chunks(4096) {
         el.process(data_frame(chunk.to_vec()), &mut sink)
             .await
@@ -704,7 +690,7 @@ async fn a_demuxed_program_stream_decodes_to_frames() {
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     })
     .expect("libavcodec opens the MPEG-2 decoder");
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     for packet in demuxed.packets {
         if let PipelinePacket::DataFrame(f) = packet {
             let data = bytes(&f);
@@ -749,7 +735,7 @@ async fn a_vob_decodes_and_playbin_builds_its_graph() {
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     })
     .expect("libavcodec opens the MPEG-2 decoder");
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     for packet in demuxed.packets {
         if let PipelinePacket::DataFrame(f) = packet {
             let data = bytes(&f);
@@ -1046,7 +1032,7 @@ async fn a_stream_cut_mid_subpicture_yields_only_whole_frames() {
         format: SubPictureFormat::VobSub,
     })
     .expect("vobsubdec accepts a subpicture pad");
-    let mut sink = Collect::default();
+    let mut sink = CollectSink::default();
     for packet in demuxed.packets {
         if let PipelinePacket::DataFrame(f) = packet {
             let timing = f.timing;
@@ -1344,7 +1330,7 @@ async fn composited_frames_carry_the_cue_only_inside_its_window_and_rectangle() 
         format: SubPictureFormat::VobSub,
     })
     .expect("vobsubdec configures");
-    let mut cues = Collect::default();
+    let mut cues = CollectSink::default();
     for packet in demuxed.packets {
         if let PipelinePacket::DataFrame(f) = packet {
             let timing = f.timing;
@@ -1403,7 +1389,7 @@ async fn composited_frames_carry_the_cue_only_inside_its_window_and_rectangle() 
             0,
         ))
     };
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     comp.process(
         1,
         PipelinePacket::DataFrame(Frame::new(
@@ -1442,7 +1428,7 @@ async fn composited_frames_carry_the_cue_only_inside_its_window_and_rectangle() 
 
     // Outside the window: the clearing canvas composites to the flat video.
     let clear = canvases[canvases.len() - 1];
-    let mut out2 = Collect::default();
+    let mut out2 = CollectSink::default();
     comp.process(
         1,
         PipelinePacket::DataFrame(Frame::new(

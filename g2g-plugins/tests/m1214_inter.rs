@@ -3,16 +3,19 @@
 //! `default_registry` is `std`-gated, so this file is too.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::collections::BTreeSet;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph, RunStats, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, Colorimetry, Dim, FrameTiming, G2gError, OutputSink, PipelineClock,
-    PipelinePacket, PropValue, PropertySpec, PushOutcome, Rate, TextFormat, VideoCodec,
+    AsyncElement, Caps, Colorimetry, Dim, FrameTiming, G2gError, PipelineClock, PipelinePacket,
+    PropValue, PropertySpec, Rate, TextFormat, VideoCodec,
 };
 use g2g_plugins::appsink::{register_appsink_pull, AppSinkPull, Pull};
 use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
@@ -117,22 +120,6 @@ fn assert_subsequence_of_pushed(frames: &[Frame], pushed: &BTreeSet<u64>) {
     }
 }
 
-#[derive(Default)]
-struct CollectingOutput {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CollectingOutput {
-    fn poll_push(
-        &mut self,
-        _cx: &mut Context<'_>,
-        packet: &mut Option<PipelinePacket>,
-    ) -> Poll<Result<PushOutcome, G2gError>> {
-        self.packets.extend(packet.take());
-        Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
 fn named_sink(name: &str) -> InterSink {
     let mut sink = InterSink::new();
     sink.set_property("producer-name", PropValue::Str(name.into()))
@@ -149,12 +136,9 @@ fn named_source(name: &str) -> InterSrc {
 }
 
 async fn publish(sink: &mut InterSink, pts_ns: u64, keyframe: bool) {
-    sink.process(
-        data_frame(pts_ns, keyframe),
-        &mut CollectingOutput::default(),
-    )
-    .await
-    .expect("publishing never waits on a consumer");
+    sink.process(data_frame(pts_ns, keyframe), &mut CollectSink::default())
+        .await
+        .expect("publishing never waits on a consumer");
 }
 
 fn data_frame(pts_ns: u64, keyframe: bool) -> PipelinePacket {
@@ -316,7 +300,7 @@ async fn dropping_the_producer_ends_its_consumers() {
 }
 
 async fn run_to_end(source: &mut InterSrc) -> Vec<u64> {
-    let mut output = CollectingOutput::default();
+    let mut output = CollectSink::default();
     let emitted = source.run(&mut output).await.expect("runs");
     assert!(matches!(output.packets.last(), Some(PipelinePacket::Eos)));
     let pts: Vec<u64> = output

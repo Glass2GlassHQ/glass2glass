@@ -7,13 +7,16 @@
 //! out as a literal output.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::parse_launch;
 use g2g_core::segment::Segment;
 use g2g_core::{
-    AsyncElement, AudioFormat, Bus, BusMessage, Caps, G2gError, MemoryDomain, OutputSink,
-    PropValue, PushOutcome,
+    AsyncElement, AudioFormat, Bus, BusMessage, Caps, G2gError, MemoryDomain, PropValue,
 };
 use g2g_plugins::audiobuffersplit::AudioBufferSplit;
 use g2g_plugins::audiochannelmix::AudioChannelMix;
@@ -28,24 +31,7 @@ use g2g_plugins::stereo::Stereo;
 const RATE: u32 = 48_000;
 const NS_PER_SECOND: u64 = 1_000_000_000;
 
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-impl Collect {
+impl CollectSink {
     /// Every data frame's samples, decoded from F32LE and concatenated.
     fn samples(&self) -> Vec<f32> {
         let mut out = Vec::new();
@@ -125,8 +111,8 @@ async fn run_one<E: AsyncElement>(
     samples: &[f32],
     channels: usize,
     pts_ns: u64,
-) -> Collect {
-    let mut out = Collect::default();
+) -> CollectSink {
+    let mut out = CollectSink::default();
     element
         .process(to_frame(samples, channels, pts_ns), &mut out)
         .await
@@ -534,7 +520,7 @@ async fn audiobuffersplit_cuts_equal_buffers_with_contiguous_timestamps() {
     let frames_per_buffer = RATE as u64 * SPLIT_DURATION.0 as u64 / SPLIT_DURATION.1 as u64;
     assert_eq!(split.samples_per_buffer(), frames_per_buffer);
 
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     for index in 0..RAGGED_INPUT_BUFFERS {
         let start = (index * RAGGED_INPUT_FRAMES) as u64;
         let samples = vec![index as f32; RAGGED_INPUT_FRAMES];
@@ -678,7 +664,7 @@ async fn speed_compresses_the_segment_it_forwards() {
         position: start_ns,
         ..Segment::new()
     };
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     speed
         .process(PipelinePacket::Segment(segment), &mut out)
         .await
