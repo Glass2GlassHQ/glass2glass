@@ -10,6 +10,7 @@
 //! [`FontSystem`] scans every system font directory on construction (tens to
 //! hundreds of milliseconds), so the overlay builds one lazily on the first cue
 //! and reuses it, and the [`SwashCache`] keeps rasterized glyphs across frames.
+//! Laid-out blocks are kept too, so a cue showing over many frames is shaped once.
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -163,6 +164,79 @@ pub struct GlyphImage<'a> {
     pub color: bool,
 }
 
+/// How many laid-out blocks a [`TextShaper`] keeps: a few frames' worth of
+/// active cues plus their ruby annotations.
+const MAX_CACHED_LAYOUTS: usize = 64;
+
+/// The arguments of one [`TextShaper::layout`] call.
+type LayoutInputs<'a> = (&'a str, f32, f32, Option<f32>, &'a [StyledSpan<'a>]);
+
+/// An owned copy of [`LayoutInputs`], for the shaper's layout cache.
+#[derive(Debug)]
+struct LayoutKey {
+    text: String,
+    px: f32,
+    line_height: f32,
+    wght: Option<f32>,
+    styled: Vec<SpanFields>,
+    families: Vec<Option<String>>,
+}
+
+impl LayoutKey {
+    fn new((text, px, line_height, wght, styled): LayoutInputs<'_>) -> Self {
+        Self {
+            text: text.into(),
+            px,
+            line_height,
+            wght,
+            styled: styled.iter().map(span_fields).collect(),
+            families: styled
+                .iter()
+                .map(|span| span.family.map(String::from))
+                .collect(),
+        }
+    }
+
+    fn matches(&self, (text, px, line_height, wght, styled): LayoutInputs<'_>) -> bool {
+        self.text == text
+            && self.px == px
+            && self.line_height == line_height
+            && self.wght == wght
+            && self.styled.len() == styled.len()
+            && self
+                .styled
+                .iter()
+                .zip(styled)
+                .all(|(kept, span)| *kept == span_fields(span))
+            && self
+                .families
+                .iter()
+                .zip(styled)
+                .all(|(kept, span)| kept.as_deref() == span.family)
+    }
+}
+
+/// Every field of a [`StyledSpan`] but its borrowed family name.
+type SpanFields = (
+    usize,
+    usize,
+    Option<f32>,
+    Option<u16>,
+    Option<bool>,
+    Option<FontStretch>,
+);
+
+fn span_fields(span: &StyledSpan<'_>) -> SpanFields {
+    (
+        span.start,
+        span.end,
+        span.font_size,
+        span.weight,
+        span.italic,
+        span.stretch,
+    )
+}
+
 /// Split `text` into the `(slice, attrs)` pairs `set_rich_text` wants: the
 /// ranges `styled` names carry their own attributes over `base`, the bytes
 /// between them carry `base` itself. A range that runs backwards, is empty, or
@@ -225,6 +299,8 @@ fn styled_attrs<'text, 'attrs>(
 pub struct TextShaper {
     fonts: FontSystem,
     cache: SwashCache,
+    /// Recent [`layout`](Self::layout) results by their inputs, oldest first.
+    layouts: Vec<(LayoutKey, Arc<ShapedBlock>)>,
     /// Family name of the first explicitly loaded font, used as the requested
     /// family so an explicit `font=` stays the primary and the system faces only
     /// fill in codepoints it lacks. `None` asks for the generic sans-serif.
@@ -252,6 +328,7 @@ impl TextShaper {
         Self {
             fonts,
             cache: SwashCache::new(),
+            layouts: Vec::new(),
             primary,
         }
     }
@@ -314,6 +391,26 @@ impl TextShaper {
     /// queries the database the same way, generic names included. Line positions are
     /// relative to the block's top-left.
     pub fn layout(
+        &mut self,
+        text: &str,
+        px: f32,
+        line_height: f32,
+        wght: Option<f32>,
+        styled: &[StyledSpan<'_>],
+    ) -> Arc<ShapedBlock> {
+        let inputs = (text, px, line_height, wght, styled);
+        if let Some((_, block)) = self.layouts.iter().find(|(key, _)| key.matches(inputs)) {
+            return block.clone();
+        }
+        let block = Arc::new(self.layout_uncached(text, px, line_height, wght, styled));
+        if self.layouts.len() >= MAX_CACHED_LAYOUTS {
+            self.layouts.remove(0);
+        }
+        self.layouts.push((LayoutKey::new(inputs), block.clone()));
+        block
+    }
+
+    fn layout_uncached(
         &mut self,
         text: &str,
         px: f32,
@@ -442,5 +539,20 @@ mod tests {
         // The baseline sits inside the line box, which is what an underline is
         // measured down from.
         assert!(line.baseline > line.top && line.baseline < line.top + line.height);
+    }
+
+    #[test]
+    fn a_repeated_layout_is_served_from_the_cache() {
+        const PX: f32 = 32.0;
+        let mut shaper = TextShaper::new(&[]);
+        let first = shaper.layout("cue", PX, PX, None, &[]);
+        assert!(Arc::ptr_eq(
+            &first,
+            &shaper.layout("cue", PX, PX, None, &[])
+        ));
+        assert!(!Arc::ptr_eq(
+            &first,
+            &shaper.layout("other", PX, PX, None, &[])
+        ));
     }
 }

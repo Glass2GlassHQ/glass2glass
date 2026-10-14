@@ -45,6 +45,8 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::string::String;
+#[cfg(feature = "truetype-overlay")]
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use g2g_core::{
@@ -74,12 +76,28 @@ struct FontFace {
     /// Which face of a `.ttc` this is, which `ab_glyph` does not hand back.
     #[cfg(feature = "vello-text-overlay")]
     collection_index: u32,
+    /// Rasterized glyphs by (glyph id, `px` bits), so a cue showing over many
+    /// frames rasterizes each glyph once.
+    rasters: core::cell::RefCell<alloc::collections::BTreeMap<(u16, u32), Arc<GlyphRaster>>>,
+}
+
+/// How many rasterized glyphs one [`FontFace`] keeps before starting over.
+#[cfg(feature = "truetype-overlay")]
+const MAX_CACHED_GLYPHS: usize = 1024;
+
+/// A glyph's coverage bitmap (one byte per pixel) and its placement metrics.
+#[cfg(feature = "truetype-overlay")]
+#[derive(Debug)]
+struct GlyphRaster {
+    metrics: Metrics,
+    coverage: Vec<u8>,
 }
 
 /// One glyph's placement metrics, in the y-up convention fontdue used: `xmin` is
 /// the pen-to-left-edge offset, `ymin` the baseline-to-bottom-edge offset
 /// (negative below the baseline), `width` / `height` the coverage-bitmap size.
 #[cfg(feature = "truetype-overlay")]
+#[derive(Debug)]
 struct Metrics {
     advance_width: f32,
     xmin: i32,
@@ -115,7 +133,7 @@ struct TtfGlyph {
     x: i32,
     y: i32,
     size: (usize, usize),
-    coverage: Vec<u8>,
+    raster: Arc<GlyphRaster>,
     paint: GlyphPaint,
 }
 
@@ -446,6 +464,7 @@ impl FontFace {
             font,
             #[cfg(feature = "vello-text-overlay")]
             collection_index,
+            rasters: Default::default(),
         };
         for axis in axes {
             face.set_axis(*axis);
@@ -457,6 +476,7 @@ impl FontFace {
     /// such axis (not variable, or a different axis set).
     fn set_axis(&mut self, (tag, value): FontAxis) -> bool {
         use ab_glyph::VariableFont;
+        self.rasters.get_mut().clear();
         self.font.set_variation(&tag, value)
     }
 
@@ -507,10 +527,26 @@ impl FontFace {
         }
     }
 
+    /// Glyph `id` at `px`, rasterized on the first request.
+    fn rasterize(&self, id: ab_glyph::GlyphId, px: f32) -> Arc<GlyphRaster> {
+        let key = (id.0, px.to_bits());
+        if let Some(raster) = self.rasters.borrow().get(&key) {
+            return raster.clone();
+        }
+        let (metrics, coverage) = self.rasterize_uncached(id, px);
+        let raster = Arc::new(GlyphRaster { metrics, coverage });
+        let mut rasters = self.rasters.borrow_mut();
+        if rasters.len() >= MAX_CACHED_GLYPHS {
+            rasters.clear();
+        }
+        rasters.insert(key, raster.clone());
+        raster
+    }
+
     /// Rasterize glyph `id` at `px` to a coverage bitmap (one byte per pixel)
     /// plus its placement metrics. A glyph with no outline (space) yields an
     /// empty bitmap.
-    fn rasterize(&self, id: ab_glyph::GlyphId, px: f32) -> (Metrics, Vec<u8>) {
+    fn rasterize_uncached(&self, id: ab_glyph::GlyphId, px: f32) -> (Metrics, Vec<u8>) {
         use ab_glyph::{Font, ScaleFont};
         let advance_width = self.font.as_scaled(px).h_advance(id);
         let glyph = id.with_scale_and_position(px, ab_glyph::point(0.0, 0.0));
@@ -1423,14 +1459,15 @@ impl TextOverlay {
     /// Rasterize a glyph [`place_chain_cues`](Self::place_chain_cues) placed.
     #[cfg(feature = "truetype-overlay")]
     fn rasterize_chain_glyph(&self, glyph: &ChainGlyph) -> TtfGlyph {
-        let (m, coverage) =
+        let raster =
             self.fonts[glyph.face].rasterize(ab_glyph::GlyphId(glyph.glyph_id), glyph.font_size);
+        let m = &raster.metrics;
         TtfGlyph {
             x: glyph.x + m.xmin,
             y: glyph.y - m.ymin - m.height as i32,
             size: (m.width, m.height),
-            coverage,
             paint: glyph.paint,
+            raster,
         }
     }
 
@@ -1461,7 +1498,7 @@ impl TextOverlay {
                     g.x + shadow.offset_x,
                     g.y + shadow.offset_y,
                     g.size,
-                    &g.coverage,
+                    &g.raster.coverage,
                     shadow,
                 );
             }
@@ -1471,13 +1508,13 @@ impl TextOverlay {
                 let Some(stroke) = g.paint.stroke else {
                     continue;
                 };
-                self.blit_stroke(buf, g.x, g.y, g.size, &g.coverage, stroke);
+                self.blit_stroke(buf, g.x, g.y, g.size, &g.raster.coverage, stroke);
             }
             for (rect, color) in cue.underlines {
                 self.fill_rect(buf, rect.0, rect.1, rect.2, rect.3, color);
             }
             for g in &glyphs {
-                self.blit_coverage(buf, g.x, g.y, g.size, &g.coverage, g.paint.color);
+                self.blit_coverage(buf, g.x, g.y, g.size, &g.raster.coverage, g.paint.color);
             }
         }
     }
@@ -1490,12 +1527,14 @@ impl TextOverlay {
         glyph: &ChainGlyph,
         blur: u32,
     ) -> Option<BlurredShadowMask> {
-        let (m, raster) =
+        let raster =
             self.fonts[glyph.face].rasterize(ab_glyph::GlyphId(glyph.glyph_id), glyph.font_size);
+        let m = &raster.metrics;
         if m.width == 0 || m.height == 0 {
             return None;
         }
-        let (coverage, (width, height), pad) = blur_coverage(&raster, (m.width, m.height), blur);
+        let (coverage, (width, height), pad) =
+            blur_coverage(&raster.coverage, (m.width, m.height), blur);
         let pad = pad as i32;
         Some(BlurredShadowMask {
             coverage,
@@ -3163,6 +3202,25 @@ mod tests {
             ink(&default, w, h)
         );
         assert_ne!(bold, default, "the axis changes the rasterized glyphs");
+    }
+
+    #[test]
+    #[cfg(feature = "truetype-overlay")]
+    fn moving_an_axis_drops_the_cached_glyphs() {
+        const PX: f32 = 48.0;
+        let Some(bytes) = variable_font_bytes() else {
+            std::eprintln!("skip: no variable system font found");
+            return;
+        };
+        let mut face = FontFace::new(bytes, 0, &[]).expect("parses");
+        let id = face.glyph_id('H');
+        let regular = face.rasterize(id, PX);
+        assert!(
+            Arc::ptr_eq(&regular, &face.rasterize(id, PX)),
+            "a repeat request is served from the cache"
+        );
+        assert!(face.set_axis((*b"wght", 700.0)));
+        assert_ne!(regular.coverage, face.rasterize(id, PX).coverage);
     }
 
     #[test]

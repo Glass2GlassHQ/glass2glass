@@ -45,7 +45,6 @@ Codecs and parsers:
 
 Raw video and GPU:
 
-- `textoverlay` reshapes and re-rasterizes every cue on every frame.
 - `gaussianblur` allocates f64 scratch per frame.
 - `tensorconvert` builds a permutation per frame.
 - `videoconvert` hub path allocates i32 planes per frame, has no direct
