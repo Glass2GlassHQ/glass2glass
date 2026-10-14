@@ -28,12 +28,12 @@ use crate::flexfec::FlexFecDecoder;
 use crate::nalparse::NalCodec;
 use crate::rtcp::{self, ReceptionStats, RtcpPacket};
 use crate::rtpdepay::{AccessUnit, RtpH264Depayloader};
-use crate::rtpjitter::{JitterConfig, RtpJitterBuffer};
+use crate::rtpjitter::{JitterConfig, RtpJitterBuffer, RtpPtsRebase};
 use crate::rtx;
 use crate::ulpfec::FecDecoder;
 
 /// H.264 RTP media clock (RFC 6184): timestamps tick at 90 kHz.
-const RTP_CLOCK_HZ: u64 = 90_000;
+const RTP_CLOCK_HZ: u32 = 90_000;
 /// Receive buffer: a UDP datagram tops out at 65507 payload bytes.
 const RECV_BUF: usize = 65_536;
 /// Default receiver-report cadence.
@@ -233,7 +233,7 @@ impl CaptureTimeLatch {
 }
 
 /// Turn one depayloaded access unit into a downstream H.264 frame and push it,
-/// tracking the RTP-timestamp rebase (`ts_base`, so downstream PTS starts near
+/// tracking the RTP-timestamp rebase (`pts_rebase`, so downstream PTS starts at
 /// zero) and the emitted sequence counter. Returns `Ok(true)` once `frame_limit`
 /// access units have been emitted (after pushing `Eos`), so the caller stops.
 /// `u64::MAX` never reaches the limit, which is how "run forever" is spelled.
@@ -243,15 +243,13 @@ impl CaptureTimeLatch {
 pub(crate) async fn push_access_unit(
     au: AccessUnit,
     capture_unix_ns: Option<i64>,
-    ts_base: &mut Option<u32>,
+    pts_rebase: &mut RtpPtsRebase,
     seq: &mut u64,
     seq_base: u64,
     frame_limit: u64,
     out: &mut dyn OutputSink,
 ) -> Result<bool, G2gError> {
-    let base = *ts_base.get_or_insert(au.rtp_timestamp);
-    let rel = au.rtp_timestamp.wrapping_sub(base) as u64;
-    let pts = rel * 1_000_000_000 / RTP_CLOCK_HZ;
+    let pts = pts_rebase.pts_ns(au.rtp_timestamp, RTP_CLOCK_HZ);
     let arrival_ns = g2g_core::metrics::monotonic_ns();
     // IDR NAL => keyframe; false (the safe default) otherwise.
     let keyframe = crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &au.data);
@@ -304,12 +302,10 @@ pub async fn receive_rtp_h264(
     }
     let mut depay = RtpH264Depayloader::new();
     let mut jitter = RtpJitterBuffer::new(cfg.jitter);
-    let mut stats = ReceptionStats::new(0, RTP_CLOCK_HZ as u32);
+    let mut stats = ReceptionStats::new(0, RTP_CLOCK_HZ);
     let mut buf = vec![0u8; RECV_BUF];
     let mut seq = seq_base;
-    // RTP timestamps start at a random offset; rebase so downstream sees PTS
-    // near zero.
-    let mut ts_base: Option<u32> = None;
+    let mut pts_rebase = RtpPtsRebase::new();
     // The original media stream's SSRC, learned from the first non-RTX packet;
     // an RFC 4588 RTX resend is restamped back onto it.
     let mut media_ssrc_seen: Option<u32> = None;
@@ -343,7 +339,7 @@ pub async fn receive_rtp_h264(
             if push_access_unit(
                 au,
                 capture_unix_ns,
-                &mut ts_base,
+                &mut pts_rebase,
                 &mut seq,
                 seq_base,
                 frame_limit,

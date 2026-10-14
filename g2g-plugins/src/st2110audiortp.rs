@@ -36,6 +36,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
+use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110audio::{SampleDepth, St2110AudioDepacketizer, St2110AudioPacketizer};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
 
@@ -508,7 +509,7 @@ impl SourceLoop for St2110AudioSrc {
             let depth = wire_depth(self.format).ok_or(G2gError::CapsMismatch)?;
             let depack = St2110AudioDepacketizer::new(u16::from(self.channels), depth);
             let clock = MediaClock::audio(self.sample_rate);
-            let mut base_rtp: Option<u32> = None;
+            let mut pts_rebase = RtpPtsRebase::new();
             let mut count = 0u64;
             let mut buf = [0u8; 65_536];
             loop {
@@ -531,8 +532,7 @@ impl SourceLoop for St2110AudioSrc {
                 // PTS = the packet's media-clock offset from the first packet, so
                 // the receiver reproduces the sender's timing without needing a
                 // shared epoch here (the PTP clock supplies absolute time upstream).
-                let base = *base_rtp.get_or_insert(p.rtp_timestamp);
-                let pts_ns = clock.ticks_to_ns(u64::from(p.rtp_timestamp.wrapping_sub(base)));
+                let pts_ns = pts_rebase.pts_ns(p.rtp_timestamp, clock.rate_hz());
 
                 let bytes = samples_to_pcm(self.format, &p.samples);
                 let frame = Frame {

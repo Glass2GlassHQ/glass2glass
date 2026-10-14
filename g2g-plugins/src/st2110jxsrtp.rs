@@ -37,6 +37,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
+use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110jxs::{St2110JxsDepacketizer, St2110JxsPacketizer};
 use crate::st2110pacing::{frame_period_ns, pace_send, Pacer, PacingProfile};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
@@ -506,7 +507,7 @@ impl SourceLoop for St2110JxsSrc {
             let sock = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
             let mut depack = St2110JxsDepacketizer::new(self.max_frame_bytes);
             let clock = MediaClock::video();
-            let mut base_rtp: Option<u32> = None;
+            let mut pts_rebase = RtpPtsRebase::new();
             let mut count = 0u64;
             let mut buf = [0u8; 65_536];
             loop {
@@ -528,8 +529,7 @@ impl SourceLoop for St2110JxsSrc {
                 };
                 // PTS = the frame's media-clock offset from the first frame (the PTP
                 // grandmaster supplies absolute time upstream).
-                let base = *base_rtp.get_or_insert(jxs.rtp_timestamp);
-                let pts_ns = clock.ticks_to_ns(u64::from(jxs.rtp_timestamp.wrapping_sub(base)));
+                let pts_ns = pts_rebase.pts_ns(jxs.rtp_timestamp, clock.rate_hz());
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(
                         jxs.codestream.into_boxed_slice(),

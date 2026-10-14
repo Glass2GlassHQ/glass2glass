@@ -40,6 +40,7 @@ use g2g_core::{
 use crate::ccextract::push_cue_frames;
 use crate::cea::{build_cdp, extract_cc_data, parse_cdp, CaptionDecoder, CcSource};
 use crate::filesink::io_err;
+use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110anc::{AncField, AncPacket, St2110AncDepacketizer, St2110AncPacketizer};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
 
@@ -410,7 +411,7 @@ impl SourceLoop for St2110AncSrc {
             let depack = St2110AncDepacketizer::new();
             let mut decoder = CaptionDecoder::new(self.source);
             let clock = MediaClock::video();
-            let mut base_rtp: Option<u32> = None;
+            let mut pts_rebase = RtpPtsRebase::new();
             let mut last_pts = 0u64;
             let mut caps_emitted = false;
             let mut sequence = 0u64;
@@ -434,9 +435,7 @@ impl SourceLoop for St2110AncSrc {
                 };
                 // PTS = the packet's media-clock offset from the first packet (the
                 // PTP grandmaster supplies absolute time upstream).
-                let base = *base_rtp.get_or_insert(anc_frame.rtp_timestamp);
-                let pts_ns =
-                    clock.ticks_to_ns(u64::from(anc_frame.rtp_timestamp.wrapping_sub(base)));
+                let pts_ns = pts_rebase.pts_ns(anc_frame.rtp_timestamp, clock.rate_hz());
                 last_pts = pts_ns;
                 for anc in &anc_frame.packets {
                     // Only CEA caption ANC packets carry a CDP.

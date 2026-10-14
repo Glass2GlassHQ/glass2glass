@@ -36,6 +36,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
+use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110dup::RedundantRtpReceiver;
 use crate::st2110pacing::{frame_period_ns, pace_send, Pacer, PacingProfile};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
@@ -406,11 +407,10 @@ fn build_frame(
     bytes: Vec<u8>,
     rtp_timestamp: u32,
     clock: &MediaClock,
-    base_rtp: &mut Option<u32>,
+    pts_rebase: &mut RtpPtsRebase,
     count: u64,
 ) -> Frame {
-    let base = *base_rtp.get_or_insert(rtp_timestamp);
-    let pts_ns = clock.ticks_to_ns(u64::from(rtp_timestamp.wrapping_sub(base)));
+    let pts_ns = pts_rebase.pts_ns(rtp_timestamp, clock.rate_hz());
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
         timing: FrameTiming {
@@ -554,7 +554,7 @@ impl SourceLoop for St2110VideoSrc {
             let mut depack = St2110VideoDepacketizer::new(self.format, self.width, self.height)
                 .ok_or(G2gError::CapsMismatch)?;
             let clock = MediaClock::video();
-            let mut base_rtp: Option<u32> = None;
+            let mut pts_rebase = RtpPtsRebase::new();
             let mut count = 0u64;
             let mut buf = [0u8; 65_536];
             if self.redundant {
@@ -575,7 +575,7 @@ impl SourceLoop for St2110VideoSrc {
                         vframe.bytes,
                         vframe.rtp_timestamp,
                         &clock,
-                        &mut base_rtp,
+                        &mut pts_rebase,
                         count,
                     );
                     out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -606,7 +606,7 @@ impl SourceLoop for St2110VideoSrc {
                         vframe.bytes,
                         vframe.rtp_timestamp,
                         &clock,
-                        &mut base_rtp,
+                        &mut pts_rebase,
                         count,
                     );
                     out.push(PipelinePacket::DataFrame(frame)).await?;

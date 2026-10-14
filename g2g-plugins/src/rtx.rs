@@ -16,32 +16,7 @@
 
 use alloc::vec::Vec;
 
-/// Minimum RTP header length (no CSRCs, no extension).
-const RTP_MIN_HEADER: usize = 12;
-
-/// Offset of the RTP payload: `12 + 4*CC`, plus a 4-byte-aligned extension when
-/// the X bit is set. `None` if the packet is shorter than the header it
-/// advertises.
-pub fn rtp_payload_offset(packet: &[u8]) -> Option<usize> {
-    if packet.len() < RTP_MIN_HEADER {
-        return None;
-    }
-    let cc = (packet[0] & 0x0F) as usize;
-    let mut offset = RTP_MIN_HEADER + 4 * cc;
-    // X bit: a 4-byte extension header (profile + length in 32-bit words), then body.
-    if packet[0] & 0x10 != 0 {
-        let ext_start = offset;
-        if packet.len() < ext_start + 4 {
-            return None;
-        }
-        let words = u16::from_be_bytes([packet[ext_start + 2], packet[ext_start + 3]]) as usize;
-        offset = ext_start + 4 + 4 * words;
-    }
-    if packet.len() < offset {
-        return None;
-    }
-    Some(offset)
-}
+use g2g_core::rtp::RtpHeader;
 
 /// Wrap an original RTP packet as an RTX packet: copy the header (marker bit,
 /// timestamp, CSRCs intact), swap in the RTX payload type / SSRC / sequence
@@ -53,7 +28,7 @@ pub fn build_rtx_packet(
     rtx_ssrc: u32,
     rtx_seq: u16,
 ) -> Option<Vec<u8>> {
-    let payload_off = rtp_payload_offset(original)?;
+    let payload_off = RtpHeader::parse_header(original)?.payload_offset;
     let original_seq = u16::from_be_bytes([original[2], original[3]]);
     let mut out = Vec::with_capacity(original.len() + 2);
     out.extend_from_slice(&original[..payload_off]);
@@ -70,7 +45,7 @@ pub fn build_rtx_packet(
 /// the original payload type / SSRC / sequence number, and strip the OSN. `None`
 /// if the packet is too short to be a valid RTX packet (header + OSN).
 pub fn parse_rtx_packet(rtx: &[u8], original_pt: u8, original_ssrc: u32) -> Option<Vec<u8>> {
-    let payload_off = rtp_payload_offset(rtx)?;
+    let payload_off = RtpHeader::parse_header(rtx)?.payload_offset;
     if rtx.len() < payload_off + 2 {
         return None;
     }
@@ -113,7 +88,7 @@ mod tests {
             0xDEAD_BEEF
         );
         // OSN is the original sequence, prepended to the payload.
-        let off = rtp_payload_offset(original).unwrap();
+        let off = RtpHeader::parse_header(original).unwrap().payload_offset;
         assert_eq!(
             u16::from_be_bytes([rtx[off], rtx[off + 1]]),
             0,
@@ -126,29 +101,25 @@ mod tests {
     }
 
     #[test]
-    fn payload_offset_accounts_for_csrc_and_extension() {
-        // Base header, CC=2 (two CSRC words), no extension.
-        let mut p = alloc::vec![0x82u8, 96, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
-        p.extend_from_slice(&[0; 8]); // two CSRC identifiers
-        p.push(0xFF); // one payload byte
-        assert_eq!(rtp_payload_offset(&p), Some(12 + 8));
-
-        // X bit set, one extension word.
-        let mut e = alloc::vec![0x90u8, 96, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
-        e.extend_from_slice(&[0xBE, 0xDE, 0, 1]); // ext header: 1 word follows
-        e.extend_from_slice(&[0; 4]); // the extension word
-        e.push(0xFF);
-        assert_eq!(rtp_payload_offset(&e), Some(12 + 4 + 4));
-    }
-
-    #[test]
     fn rejects_truncated_packets() {
-        assert_eq!(rtp_payload_offset(&[0u8; 8]), None);
         assert_eq!(
-            parse_rtx_packet(&[0u8; 12], 96, 1),
+            parse_rtx_packet(&[0x80u8; 12], 96, 1),
             None,
             "no room for the OSN"
         );
-        assert_eq!(build_rtx_packet(&[0u8; 4], 97, 1, 0), None);
+        assert_eq!(build_rtx_packet(&[0x80u8; 4], 97, 1, 0), None);
+    }
+
+    #[test]
+    fn rejects_a_packet_that_is_not_rtp_version_2() {
+        const CLEAR_VERSION_BITS: u8 = 0x3F;
+        let mut pkt = RtpH264Packetizer::new(96, 0x1234_5678);
+        let mut packet = pkt.packetize(&[0u8, 0, 0, 1, 0x65, 0xAA, 0xBB], 9000)[0].clone();
+        let rtx = build_rtx_packet(&packet, 97, 0xDEAD_BEEF, 5).expect("version 2 is built");
+        packet[0] &= CLEAR_VERSION_BITS;
+        assert_eq!(build_rtx_packet(&packet, 97, 0xDEAD_BEEF, 5), None);
+        let mut rtx_version_0 = rtx;
+        rtx_version_0[0] &= CLEAR_VERSION_BITS;
+        assert_eq!(parse_rtx_packet(&rtx_version_0, 96, 0x1234_5678), None);
     }
 }

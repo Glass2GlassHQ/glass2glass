@@ -19,6 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use g2g_core::{G2gError, OutputSink, PipelinePacket, PushOutcome};
 
 use crate::rtpdepay::RtpH264Depayloader;
+use crate::rtpjitter::RtpPtsRebase;
 use crate::rtprecv::push_access_unit;
 use crate::rtspserver::{RtspEvent, RtspRequest, RtspResponder};
 
@@ -375,7 +376,7 @@ pub(crate) async fn receive_interleaved(
 ) -> Result<SessionEnd, G2gError> {
     let mut depay = RtpH264Depayloader::new();
     let mut seq = seq_base;
-    let mut ts_base: Option<u32> = None;
+    let mut pts_rebase = RtpPtsRebase::new();
     let mut buf = [0u8; CTRL_BUF];
     loop {
         // Drain every complete interleaved item currently buffered.
@@ -393,7 +394,7 @@ pub(crate) async fn receive_interleaved(
                             if push_access_unit(
                                 au,
                                 None,
-                                &mut ts_base,
+                                &mut pts_rebase,
                                 &mut seq,
                                 seq_base,
                                 frame_limit,

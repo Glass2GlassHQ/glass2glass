@@ -32,6 +32,8 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use g2g_core::rtp::RtpSequenceExtender;
+
 /// Fixed RTP header length (we generate / protect packets with no CSRC list).
 pub(crate) const RTP_HEADER: usize = 12;
 /// ULPFEC FEC header (RFC 5109 7.3) length for `L=0`.
@@ -131,9 +133,6 @@ pub(crate) type ProtectedSeqsFn = fn(&[u8]) -> Option<Vec<u16>>;
 /// format, given the survivors as `(seq, packet)`.
 pub(crate) type RecoverFn = fn(&[u8], &[(u16, &[u8])]) -> Option<Vec<u8>>;
 
-// Starting one cycle up keeps a packet reordered before the first from underflowing.
-const SEQUENCE_CYCLE: u64 = 1 << 16;
-
 #[derive(Debug)]
 struct RepairEntry {
     packet: Vec<u8>,
@@ -156,7 +155,7 @@ pub(crate) struct XorFecBuffer {
     fecs: VecDeque<RepairEntry>,
     recovered: Vec<Vec<u8>>,
     capacity: usize,
-    highest_media_sequence: Option<u64>,
+    sequence_extender: RtpSequenceExtender,
     protected_seqs: ProtectedSeqsFn,
     recover: RecoverFn,
 }
@@ -172,36 +171,21 @@ impl XorFecBuffer {
             fecs: VecDeque::new(),
             recovered: Vec::new(),
             capacity: capacity.max(16),
-            highest_media_sequence: None,
+            sequence_extender: RtpSequenceExtender::new(),
             protected_seqs,
             recover,
         }
     }
 
-    /// `seq` placed in the cycle nearest the highest media sequence seen.
-    fn extend(&self, seq: u16) -> u64 {
-        let Some(highest) = self.highest_media_sequence else {
-            return SEQUENCE_CYCLE + u64::from(seq);
-        };
-        let distance = seq.wrapping_sub(highest as u16) as i16;
-        highest.saturating_add_signed(i64::from(distance))
-    }
-
     fn insert_media(&mut self, sequence: u64, packet: Vec<u8>) {
         self.media.insert(sequence, packet);
-        if self
-            .highest_media_sequence
-            .is_none_or(|highest| sequence > highest)
-        {
-            self.highest_media_sequence = Some(sequence);
-        }
         while self.media.len() > self.capacity {
             self.media.pop_first();
         }
     }
 
     pub(crate) fn push_media(&mut self, seq: u16, packet: &[u8]) {
-        let sequence = self.extend(seq);
+        let sequence = self.sequence_extender.extend(seq);
         self.insert_media(sequence, packet.to_vec());
         self.recover_from(sequence);
     }
@@ -210,7 +194,14 @@ impl XorFecBuffer {
         let Some(seqs) = (self.protected_seqs)(packet) else {
             return;
         };
-        let protected_sequences = seqs.iter().map(|s| self.extend(*s)).collect();
+        // a bogus repair must not move the media sequence cycle
+        let protected_sequences = seqs
+            .iter()
+            .map(|s| {
+                let mut media_extender = self.sequence_extender;
+                media_extender.extend(*s)
+            })
+            .collect();
         if self.fecs.len() >= self.capacity {
             self.fecs.pop_front();
         }
@@ -268,6 +259,7 @@ impl XorFecBuffer {
             return RepairOutcome::MembersStillMissing;
         };
         self.fecs.remove(idx);
+        self.sequence_extender.extend(missing as u16);
         self.insert_media(missing, recovered.clone());
         self.recovered.push(recovered);
         RepairOutcome::Recovered { sequence: missing }

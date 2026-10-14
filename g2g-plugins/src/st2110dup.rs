@@ -20,7 +20,7 @@
 //! a sequence number older than the window is treated as already delivered (dropped)
 //! rather than reopening a closed gap.
 
-use g2g_core::rtp::RTP_HEADER_LEN;
+use g2g_core::rtp::{RtpSequenceExtender, RTP_HEADER_LEN};
 
 /// Sliding-window width (sequence numbers) the dedup remembers. 8192 covers a large
 /// inter-path skew / burst while the bitset stays tiny ([u64; 128] = 1 KiB).
@@ -32,9 +32,7 @@ const WORDS: usize = (WINDOW / 64) as usize;
 /// reconstruct one complete stream.
 #[derive(Debug)]
 pub struct SeamlessDedup {
-    /// Highest extended (wrap-resolved) sequence number seen, or `None` until the
-    /// first packet anchors the window.
-    high: Option<u64>,
+    sequence_extender: RtpSequenceExtender,
     /// Bitset of seen extended sequence numbers over `(high - WINDOW, high]`, indexed
     /// by `ext % WINDOW`.
     seen: [u64; WORDS],
@@ -50,26 +48,8 @@ impl SeamlessDedup {
     /// A fresh de-duplicator (no packets seen yet).
     pub fn new() -> Self {
         Self {
-            high: None,
+            sequence_extender: RtpSequenceExtender::new(),
             seen: [0; WORDS],
-        }
-    }
-
-    /// Extend a 16-bit RTP sequence number against the highest seen, choosing the
-    /// wrap that lands nearest (within half the sequence space).
-    fn extend(&self, seq: u16) -> u64 {
-        match self.high {
-            None => u64::from(seq),
-            Some(high) => {
-                // The signed 16-bit delta from the low bits of `high` is the
-                // nearest offset in either direction. Applying it keeps a
-                // backward step just below `high` instead of wrapping up to a
-                // huge absolute number (which the unsigned `ext > high` in
-                // `accept` would misread as a giant forward jump). Clamp at 0:
-                // a packet older than the anchor cannot have a negative sequence.
-                let delta = seq.wrapping_sub(high as u16) as i16 as i64;
-                (high as i64 + delta).max(0) as u64
-            }
         }
     }
 
@@ -87,11 +67,11 @@ impl SeamlessDedup {
             return false;
         }
         let seq = u16::from_be_bytes([packet[2], packet[3]]);
-        let ext = self.extend(seq);
+        let previous_high = self.sequence_extender.highest();
+        let ext = self.sequence_extender.extend(seq);
 
-        let Some(high) = self.high else {
+        let Some(high) = previous_high else {
             // First packet: anchor the window and mark it seen.
-            self.high = Some(ext);
             let (w, b) = self.bit(ext);
             self.seen[w] |= b;
             return true;
@@ -111,7 +91,6 @@ impl SeamlessDedup {
                     self.seen[w] &= !b;
                 }
             }
-            self.high = Some(ext);
         } else if high.saturating_sub(ext) >= WINDOW {
             // Older than the window: assume already delivered, drop.
             return false;
@@ -251,20 +230,18 @@ mod tests {
         assert!(!d.accept(&pkt(101, 2)), "its duplicate dropped");
     }
 
-    // regression: a sequence number that wraps backward (65535 right after 0)
-    // extends to a value far above `high`; the window-advance loop must not
-    // iterate that whole span (~2^64). Completing at all is the assertion, before
-    // the fix this hung. Found by fuzzing.
+    // regression: 65535 right after 0 once extended far above `high` and hung
+    // the window-advance loop. Found by fuzzing.
     #[test]
     fn backward_wrapping_sequence_does_not_hang() {
         let mut d = SeamlessDedup::new();
         assert!(d.accept(&pkt(0, 1)));
-        // seq 65535 arriving after the anchor 0 is one step *before* it, an old
-        // packet: dropped, not forwarded, and (before the fix) must not loop.
         assert!(
-            !d.accept(&pkt(65535, 2)),
-            "pre-anchor packet is old, dropped"
+            d.accept(&pkt(65535, 2)),
+            "one step before the anchor is in the window, forwarded"
         );
+        assert!(!d.accept(&pkt(65535, 3)), "its duplicate dropped");
+        assert!(d.accept(&pkt(1, 4)), "the stream continues past the anchor");
     }
 
     #[test]

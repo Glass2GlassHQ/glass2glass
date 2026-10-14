@@ -14,6 +14,10 @@
 
 use alloc::vec::Vec;
 
+use g2g_core::rtp::RtpSequenceExtender;
+
+const SEQUENCE_CYCLE: u64 = 1 << u16::BITS;
+
 /// RTCP packet types (the `PT` byte).
 pub const PT_SR: u8 = 200;
 pub const PT_RR: u8 = 201;
@@ -172,13 +176,7 @@ pub fn build_sender_report(
 /// 32 bits, fraction in the low 32), for the sender-report NTP field.
 #[cfg(feature = "std")]
 pub fn ntp_now() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let d = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = d.as_secs().wrapping_add(g2g_core::NTP_TO_UNIX_EPOCH_SECS);
-    let frac = ((d.subsec_nanos() as u64) << 32) / 1_000_000_000;
-    (secs << 32) | frac
+    g2g_core::ntp_from_unix_nanos(g2g_core::metrics::unix_time_ns()).unwrap_or(0)
 }
 
 /// Build a BYE (PT 203) for one source.
@@ -374,10 +372,8 @@ fn parse_report_blocks(mut b: &[u8], count: usize) -> Vec<ReportBlock> {
 pub struct ReceptionStats {
     source_ssrc: u32,
     clock_hz: u32,
-    inited: bool,
-    base_seq: u32,
-    cycles: u32,
-    max_seq16: u16,
+    sequence_extender: RtpSequenceExtender,
+    first_sequence: Option<u64>,
     received: u32,
     expected_prior: u32,
     received_prior: u32,
@@ -385,7 +381,7 @@ pub struct ReceptionStats {
     /// media-unit conversion stays in range.
     arrival0_ns: u64,
     have_transit: bool,
-    transit: i64,
+    transit: u32,
     /// Interarrival jitter scaled by 16 (fixed-point), per the RFC update rule.
     jitter_x16: u32,
     last_sr_mid: u32,
@@ -397,10 +393,8 @@ impl ReceptionStats {
         Self {
             source_ssrc,
             clock_hz,
-            inited: false,
-            base_seq: 0,
-            cycles: 0,
-            max_seq16: 0,
+            sequence_extender: RtpSequenceExtender::new(),
+            first_sequence: None,
             received: 0,
             expected_prior: 0,
             received_prior: 0,
@@ -422,33 +416,23 @@ impl ReceptionStats {
     /// arrival (for jitter). `ssrc` adopts the stream's source on the first
     /// packet.
     pub fn on_rtp(&mut self, ssrc: u32, seq: u16, rtp_ts: u32, arrival_ns: u64) {
-        if !self.inited {
-            self.inited = true;
+        let sequence = self.sequence_extender.extend(seq);
+        if self.first_sequence.is_none() {
+            self.first_sequence = Some(sequence);
             self.source_ssrc = ssrc;
-            self.base_seq = seq as u32;
-            self.max_seq16 = seq;
             self.arrival0_ns = arrival_ns;
-            self.received = 1;
-        } else {
-            self.received = self.received.wrapping_add(1);
-            let delta = seq.wrapping_sub(self.max_seq16) as i16;
-            if delta > 0 {
-                // Forward step; a numeric drop means the 16-bit field wrapped.
-                if seq < self.max_seq16 {
-                    self.cycles = self.cycles.wrapping_add(1);
-                }
-                self.max_seq16 = seq;
-            }
         }
+        self.received = self.received.wrapping_add(1);
 
         // Interarrival jitter (RFC 3550 6.4.1): D is the change in transit time
         // between consecutive packets; J += (|D| - J)/16. Arrival is rebased and
         // converted to media-clock units so the subtraction stays small.
         let rel_ns = arrival_ns.saturating_sub(self.arrival0_ns);
-        let arrival_units = ((rel_ns as u128 * self.clock_hz as u128) / 1_000_000_000) as i64;
-        let transit = arrival_units - rtp_ts as i64;
+        // wraps at 32 bits like the RTP timestamp it is compared with
+        let arrival_units = ((rel_ns as u128 * self.clock_hz as u128) / 1_000_000_000) as u32;
+        let transit = arrival_units.wrapping_sub(rtp_ts);
         if self.have_transit {
-            let d = (transit - self.transit).unsigned_abs() as u32;
+            let d = (transit.wrapping_sub(self.transit) as i32).unsigned_abs();
             // jitter_x16 += d - jitter_x16/16, a 1/16-gain low-pass. Saturating so
             // a crafted transit delta inflates the estimate rather than wrapping.
             let decay = self.jitter_x16.saturating_add(8) >> 4;
@@ -467,14 +451,17 @@ impl ReceptionStats {
 
     /// Extended highest sequence number received.
     pub fn extended_highest(&self) -> u32 {
-        (self.cycles << 16) | self.max_seq16 as u32
+        // the extender starts one cycle up
+        let highest = self.sequence_extender.highest().unwrap_or(SEQUENCE_CYCLE);
+        (highest - SEQUENCE_CYCLE) as u32
     }
 
-    /// Total packets expected so far (highest - base + 1).
+    /// Total packets expected so far (highest - first + 1).
     fn expected(&self) -> u32 {
-        self.extended_highest()
-            .wrapping_sub(self.base_seq)
-            .wrapping_add(1)
+        match (self.first_sequence, self.sequence_extender.highest()) {
+            (Some(first), Some(highest)) => (highest - first + 1) as u32,
+            _ => 0,
+        }
     }
 
     /// Cumulative packets lost (expected - received), clamped at 0.
@@ -573,12 +560,13 @@ mod tests {
     fn jitter_saturates_on_crafted_timestamps() {
         // Adversarial rtp timestamps drive a maximal transit delta each packet;
         // the jitter accumulator must saturate, not overflow-panic or wrap.
+        const FARTHEST_TIMESTAMP_STEP: u32 = 1 << 31;
         let ssrc = 0x1111_2222;
         let mut s = ReceptionStats::new(ssrc, 90_000);
         s.on_rtp(ssrc, 0, 0, 0);
-        s.on_rtp(ssrc, 1, u32::MAX, 1_000_000_000);
+        s.on_rtp(ssrc, 1, FARTHEST_TIMESTAMP_STEP, 1_000_000_000);
         s.on_rtp(ssrc, 2, 0, 2_000_000_000);
-        s.on_rtp(ssrc, 3, u32::MAX, 3_000_000_000);
+        s.on_rtp(ssrc, 3, FARTHEST_TIMESTAMP_STEP, 3_000_000_000);
         let block = s.report_block(4_000_000_000);
         assert!(
             block.jitter > 100_000_000,
@@ -690,5 +678,29 @@ mod tests {
             rs.report_block(0).jitter > 0,
             "irregular arrivals raise jitter"
         );
+    }
+
+    #[test]
+    fn reception_stats_count_across_the_sequence_wrap() {
+        let mut rs = ReceptionStats::new(0, 90_000);
+        for seq in [65534u16, 65535, 1] {
+            rs.on_rtp(1, seq, 0, 0);
+        }
+        assert_eq!(rs.extended_highest(), (1 << 16) | 1, "one cycle counted");
+        assert_eq!(rs.cumulative_lost(), 1, "seq 0 is the only loss");
+    }
+
+    #[test]
+    fn reception_stats_jitter_stays_low_across_the_timestamp_wrap() {
+        const TICKS_PER_FRAME: u32 = 3000;
+        const NS_PER_FRAME: u64 = 33_333_333;
+        let mut rs = ReceptionStats::new(0, 90_000);
+        let first_timestamp = u32::MAX - (TICKS_PER_FRAME - 1);
+        for i in 0..10u32 {
+            let rtp_ts = first_timestamp.wrapping_add(i * TICKS_PER_FRAME);
+            rs.on_rtp(1, i as u16, rtp_ts, u64::from(i) * NS_PER_FRAME);
+        }
+        let jitter = rs.report_block(0).jitter;
+        assert!(jitter <= 1, "paced stream has ~zero jitter, got {jitter}");
     }
 }

@@ -34,8 +34,6 @@ Bugs:
   accepts 5 of 15 formats. Use one GStreamer format-name table from core.
 - `gamma`, `videobalance` and `alpha` swallow incoming `CapsChanged`. Move them
   onto `PixelFilter`.
-- RTP timestamp rebasing in `rtprecv` and four ST 2110 receivers does not unwrap.
-  Use the core RTP extenders there and in `XorFecBuffer`, rtpjitter, st2110dup, rtcp.
 - `streamdec` and `vulkanvideo` compute the H.264 coded height without
   `frame_mbs_only_flag`, so field-coded streams get half the height.
 - Run `cargo semver-checks` on g2g-core for M1284 (`Gate`/`Router` `ProcessFuture`
@@ -132,7 +130,6 @@ Network:
 - Dedup the LiveKit signalling helpers, `access_token`, `MediaTime` conversion,
   and send `Transmit`s through `send_transmit`.
 - One caps de-dup type for the remote and wswire elements.
-- `rtcp::ntp_now` calls the core NTP converter, `rtx` uses `RtpHeader`.
 
 Shared helpers:
 

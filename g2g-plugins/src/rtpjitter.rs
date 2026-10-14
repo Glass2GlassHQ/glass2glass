@@ -22,7 +22,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 // The sequence number lives at bytes 2..4 of the fixed header.
-use g2g_core::rtp::RTP_HEADER_LEN;
+use g2g_core::rtp::{RtpSequenceExtender, RtpTimestampExtender, RTP_HEADER_LEN};
+use g2g_core::time::ticks_to_ns;
 
 /// Release policy. A packet missing a predecessor is held at most `max_hold_ns`
 /// (then the gap is declared lost), and the buffer never grows past `max_depth`
@@ -82,17 +83,12 @@ pub struct RtpJitterBuffer {
     /// Next extended sequence to release; `None` until the first packet sets the
     /// baseline.
     next: Option<u64>,
-    /// Highest extended sequence seen, for wraparound unrolling.
-    last_ext: Option<u64>,
+    sequence_extender: RtpSequenceExtender,
     /// Hold every packet `max_hold_ns` past its arrival, not only one behind a
     /// gap, so the output runs a constant delay behind the network.
     constant_delay: bool,
     stats: JitterStats,
 }
-
-// Extended-sequence base: the first packet maps to `BASE + seq`, well clear of
-// zero, so a reordered earlier packet's extended sequence stays positive.
-const SEQ_BASE: u64 = 1 << 32;
 
 impl core::fmt::Debug for RtpJitterBuffer {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -111,7 +107,7 @@ impl RtpJitterBuffer {
             config,
             packets: BTreeMap::new(),
             next: None,
-            last_ext: None,
+            sequence_extender: RtpSequenceExtender::new(),
             constant_delay: false,
             stats: JitterStats::default(),
         }
@@ -135,32 +131,6 @@ impl RtpJitterBuffer {
         self.packets.len()
     }
 
-    /// Unroll a 16-bit RTP sequence into a monotonic extended sequence, relative
-    /// to the highest one seen (RFC 3550 serial-number arithmetic). A forward
-    /// step advances the high bits; a small negative step (a reorder) maps to a
-    /// slightly lower extended value, so ordering is preserved across wrap.
-    fn extend(&mut self, seq: u16) -> u64 {
-        match self.last_ext {
-            None => {
-                let ext = SEQ_BASE + seq as u64;
-                self.last_ext = Some(ext);
-                ext
-            }
-            Some(last) => {
-                let last16 = (last & 0xFFFF) as u16;
-                // Signed 16-bit distance: forward (0..=32767) or backward
-                // (-32768..=-1). Adding it to the last extended value lands on
-                // the right side of any wrap.
-                let delta = seq.wrapping_sub(last16) as i16 as i64;
-                let ext = (last as i64 + delta) as u64;
-                if ext > last {
-                    self.last_ext = Some(ext);
-                }
-                ext
-            }
-        }
-    }
-
     /// Insert one RTP packet, stamped with arrival time `now_ns`. Malformed,
     /// duplicate, and too-late packets are counted and dropped; everything else
     /// is buffered for in-order release. The first packet sets the release
@@ -170,8 +140,8 @@ impl RtpJitterBuffer {
             return;
         }
         let seq = u16::from_be_bytes([packet[2], packet[3]]);
-        let prev_high = self.last_ext;
-        let ext = self.extend(seq);
+        let prev_high = self.sequence_extender.highest();
+        let ext = self.sequence_extender.extend(seq);
 
         match self.next {
             None => self.next = Some(ext),
@@ -276,6 +246,26 @@ impl RtpJitterBuffer {
         }
         let due = head_buf.arrival_ns + self.config.max_hold_ns;
         Some(due.saturating_sub(now_ns))
+    }
+}
+
+// PTS counted from the first RTP timestamp, the sender picks a random start
+#[derive(Debug, Default)]
+pub struct RtpPtsRebase {
+    timestamp_extender: RtpTimestampExtender,
+    first_timestamp: Option<u64>,
+}
+
+impl RtpPtsRebase {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    // a packet reordered before the first one clamps to zero
+    pub fn pts_ns(&mut self, rtp_timestamp: u32, clock_rate: u32) -> u64 {
+        let extended = self.timestamp_extender.extend(rtp_timestamp);
+        let first = *self.first_timestamp.get_or_insert(extended);
+        ticks_to_ns(extended.saturating_sub(first), clock_rate)
     }
 }
 
@@ -434,5 +424,33 @@ mod tests {
             Some(2),
             "no holding without depth"
         );
+    }
+
+    #[test]
+    fn pts_rebase_counts_across_timestamp_wraps() {
+        const CLOCK_RATE: u32 = 90_000;
+        const STEP_TICKS: u32 = 1 << 30;
+        const STEPS: u32 = 12;
+        let mut rebase = RtpPtsRebase::new();
+        let first = u32::MAX - 5;
+        assert_eq!(rebase.pts_ns(first, CLOCK_RATE), 0);
+        for step in 1..=STEPS {
+            let rtp_timestamp = first.wrapping_add(step.wrapping_mul(STEP_TICKS));
+            let ticks = u64::from(step) * u64::from(STEP_TICKS);
+            assert_eq!(
+                rebase.pts_ns(rtp_timestamp, CLOCK_RATE),
+                ticks_to_ns(ticks, CLOCK_RATE),
+                "step {step} keeps counting past the 32-bit wrap"
+            );
+        }
+    }
+
+    #[test]
+    fn pts_rebase_clamps_a_packet_reordered_before_the_first() {
+        const CLOCK_RATE: u32 = 90_000;
+        let mut rebase = RtpPtsRebase::new();
+        assert_eq!(rebase.pts_ns(10, CLOCK_RATE), 0);
+        assert_eq!(rebase.pts_ns(5, CLOCK_RATE), 0, "not 2^32 ticks ahead");
+        assert_eq!(rebase.pts_ns(10 + CLOCK_RATE, CLOCK_RATE), 1_000_000_000);
     }
 }
