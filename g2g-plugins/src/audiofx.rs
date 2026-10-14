@@ -82,6 +82,48 @@ pub(crate) fn default_pad_templates() -> Vec<PadTemplate> {
     pad_templates(TEMPLATE_CHANNELS)
 }
 
+// f32 and encoded buffers an element reuses across frames instead of allocating per frame
+#[derive(Debug, Default)]
+pub(crate) struct PcmScratch {
+    samples: Vec<f32>,
+    encoded: Vec<u8>,
+}
+
+impl PcmScratch {
+    pub(crate) fn decode(&mut self, src: &[u8], format: AudioFormat) -> &[f32] {
+        crate::audioconvert::decode_into(&mut self.samples, src, format);
+        &self.samples
+    }
+
+    // a ragged trailing partial sample is dropped, as decode and encode always did
+    pub(crate) fn transform_frame(
+        &mut self,
+        mut frame: Frame,
+        format: AudioFormat,
+        element: &'static str,
+        transform: impl FnOnce(&mut [f32]),
+    ) -> Result<Frame, G2gError> {
+        crate::audioconvert::decode_into(
+            &mut self.samples,
+            frame.domain.require_system_slice(element)?,
+            format,
+        );
+        transform(&mut self.samples);
+        self.encoded.clear();
+        crate::audioconvert::encode_into(&mut self.encoded, &self.samples, format);
+        match &mut frame.domain {
+            MemoryDomain::System(slice) if slice.as_slice().len() == self.encoded.len() => {
+                slice.as_mut_slice().copy_from_slice(&self.encoded);
+            }
+            domain => {
+                *domain =
+                    MemoryDomain::System(SystemSlice::from_boxed(self.encoded.as_slice().into()));
+            }
+        }
+        Ok(frame)
+    }
+}
+
 /// Hold a mixed sample inside full scale. gst's `audiochannelmix` and `stereo`
 /// are S16-only and clamp to the integer range; the g2g filters work in f32, so
 /// the same saturation lands at +-1.

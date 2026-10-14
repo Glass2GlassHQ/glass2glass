@@ -1218,27 +1218,33 @@ pub(crate) fn read_sample(at: &[u8], format: AudioFormat) -> f32 {
     }
 }
 
-fn decode_with<const N: usize>(src: &[u8], to_float: impl Fn([u8; N]) -> f32) -> Vec<f32> {
-    src.as_chunks::<N>()
-        .0
-        .iter()
-        .map(|b| to_float(*b))
-        .collect()
+fn decode_with<const N: usize>(dst: &mut Vec<f32>, src: &[u8], to_float: impl Fn([u8; N]) -> f32) {
+    dst.extend(src.as_chunks::<N>().0.iter().map(|b| to_float(*b)));
+}
+
+/// Decode an interleaved PCM buffer to f32 samples in [-1, 1), replacing
+/// `dst`'s contents.
+pub(crate) fn decode_into(dst: &mut Vec<f32>, src: &[u8], format: AudioFormat) {
+    dst.clear();
+    match format {
+        AudioFormat::PcmU8 => decode_with(dst, src, u8_to_float),
+        AudioFormat::PcmS16Le => decode_with(dst, src, s16_to_float),
+        AudioFormat::PcmS24Le => decode_with(dst, src, s24_to_float),
+        AudioFormat::PcmS32Le => decode_with(dst, src, s32_to_float),
+        AudioFormat::PcmF32Le => decode_with(dst, src, f32::from_le_bytes),
+        _ => {}
+    }
 }
 
 /// Decode an interleaved PCM buffer to f32 samples in [-1, 1).
 pub(crate) fn decode(src: &[u8], format: AudioFormat) -> Vec<f32> {
-    match format {
-        AudioFormat::PcmU8 => decode_with(src, u8_to_float),
-        AudioFormat::PcmS16Le => decode_with(src, s16_to_float),
-        AudioFormat::PcmS24Le => decode_with(src, s24_to_float),
-        AudioFormat::PcmS32Le => decode_with(src, s32_to_float),
-        AudioFormat::PcmF32Le => decode_with(src, f32::from_le_bytes),
-        _ => Vec::new(),
-    }
+    let mut samples = Vec::new();
+    decode_into(&mut samples, src, format);
+    samples
 }
 
-fn encode_into(dst: &mut Vec<u8>, samples: &[f32], format: AudioFormat) {
+/// Encode interleaved f32 samples into `format`, appending to `dst`.
+pub(crate) fn encode_into(dst: &mut Vec<u8>, samples: &[f32], format: AudioFormat) {
     if format == AudioFormat::PcmF32Le {
         samples
             .iter()

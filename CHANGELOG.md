@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1291: the f32 audio filters decode into a reused scratch and write back in place, and `volume` forwards unity gain untouched.
 - M1290: block-cutting audio elements read from one shared FIFO buffer instead of front-draining.
 - M1289: WASAPI, Core Audio and AAudio sinks hand frames to their device thread over `WorkerLink`, and no audio sink copies a buffer before its worker.
 - M1288: `pipewiresink` queues PCM by slice copy and drains at EOS without blocking the executor.

@@ -119,7 +119,6 @@ Raw video and GPU:
 
 Audio:
 
-- The f32 transform wrapper is copied 9 times with two allocations per buffer.
 - `FirState` is direct-only, add overlap-save for long kernels.
 - One IIR implementation for equalizer and audioiirfilter.
 - `spectrum` recomputes the window and twiddles per FFT.

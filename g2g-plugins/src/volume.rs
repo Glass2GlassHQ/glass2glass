@@ -38,6 +38,8 @@ pub struct Volume {
     emitted: u64,
 }
 
+const UNITY_GAIN: f64 = 1.0;
+
 impl Default for Volume {
     fn default() -> Self {
         Self::new()
@@ -48,7 +50,7 @@ impl Volume {
     /// Unity gain, unmuted; use the builders or properties to adjust.
     pub fn new() -> Self {
         Self {
-            volume: 1.0,
+            volume: UNITY_GAIN,
             mute: false,
             input: None,
             configured: false,
@@ -131,15 +133,21 @@ impl AsyncElement for Volume {
                     let src = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let mut dst = vec![0u8; src.len()].into_boxed_slice();
-                    apply_gain(src, &mut dst, self.volume, self.mute);
+                    let unity = self.volume == UNITY_GAIN && !self.mute;
+                    let domain = if unity {
+                        frame.domain
+                    } else {
+                        let mut dst = vec![0u8; src.len()].into_boxed_slice();
+                        apply_gain(src, &mut dst, self.volume, self.mute);
+                        MemoryDomain::System(SystemSlice::from_boxed(dst))
+                    };
 
                     if self.last_caps.as_ref() != Some(&caps) {
                         out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
                         self.last_caps = Some(caps);
                     }
                     let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(dst)),
+                        domain,
                         timing: frame.timing,
                         sequence: self.emitted,
                         meta: Default::default(),

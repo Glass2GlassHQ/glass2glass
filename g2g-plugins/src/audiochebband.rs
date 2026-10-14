@@ -15,11 +15,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
 use crate::audiofx::{self, BandMode, IirCascade};
@@ -68,6 +67,7 @@ pub struct AudioChebBand {
     caps: Option<Caps>,
     last_caps: Option<Caps>,
     emitted: u64,
+    scratch: audiofx::PcmScratch,
 }
 
 impl Default for AudioChebBand {
@@ -92,6 +92,7 @@ impl AudioChebBand {
             caps: None,
             last_caps: None,
             emitted: 0,
+            scratch: audiofx::PcmScratch::default(),
         }
     }
 
@@ -203,19 +204,20 @@ impl AsyncElement for AudioChebBand {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let caps = self.caps.clone().ok_or(G2gError::NotConfigured)?;
-                    let src = frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let mut samples = audiofx::decode(src, self.format);
-                    self.cascade.run(&mut samples);
-                    let dst = audiofx::encode(&samples, self.format);
+                    let element = g2g_core::log::short_type_name::<Self>();
+                    let cascade = &mut self.cascade;
+                    let frame =
+                        self.scratch
+                            .transform_frame(frame, self.format, element, |samples| {
+                                cascade.run(samples)
+                            })?;
 
                     if self.last_caps.as_ref() != Some(&caps) {
                         out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
                         self.last_caps = Some(caps);
                     }
                     let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(dst)),
+                        domain: frame.domain,
                         timing: frame.timing,
                         sequence: self.emitted,
                         meta: Default::default(),

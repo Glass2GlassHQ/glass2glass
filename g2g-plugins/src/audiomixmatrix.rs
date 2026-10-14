@@ -123,6 +123,7 @@ pub struct AudioMixMatrix {
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
+    scratch: audiofx::PcmScratch,
 }
 
 impl Default for AudioMixMatrix {
@@ -143,6 +144,7 @@ impl AudioMixMatrix {
             configured: false,
             last_caps: None,
             emitted: 0,
+            scratch: audiofx::PcmScratch::default(),
         }
     }
 
@@ -303,8 +305,10 @@ impl AsyncElement for AudioMixMatrix {
                     let src = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let samples = audiofx::decode(src, self.format);
-                    let mixed = self.mix(&samples, in_channels, out_channels);
+                    let mut scratch = core::mem::take(&mut self.scratch);
+                    let mixed =
+                        self.mix(scratch.decode(src, self.format), in_channels, out_channels);
+                    self.scratch = scratch;
                     let dst = audiofx::encode(&mixed, self.format);
 
                     if self.last_caps.as_ref() != Some(&output) {
