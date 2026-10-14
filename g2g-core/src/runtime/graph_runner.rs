@@ -1618,6 +1618,18 @@ async fn prepare_graph<'a>(
         (solution, feasibility)
     };
 
+    // Allocation cascade in reverse topo order: each element absorbs the
+    // proposal arriving on its output edge(s) (`configure_allocation`), then
+    // proposes from its output-link caps; the proposal is stored on its input
+    // edge(s) for its upstream to absorb. A tee joins its branch proposals
+    // (most-restrictive intersection, loud failure on a domain conflict) onto
+    // its single input; a muxer proposes its own per-pad demand onto each input
+    // edge (the boundary now crosses at startup). The source's absorbed proposal
+    // is the reported `allocation`. For a linear chain this is byte-for-byte the
+    // linear runner's sink->source fold. It runs before Phase 3 so a decoder
+    // sizes its pool from the downstream `min_buffers` when it opens.
+    let allocation = cascade_allocation(vg, topo, &solution)?;
+
     // Phase 3: configure each element with its negotiated caps. Source nodes
     // take their single output edge's caps (no input); transforms and sinks
     // take their input edge's caps.
@@ -1690,17 +1702,6 @@ async fn prepare_graph<'a>(
     // clock / allocation the linear runners do (the convenience wrappers reduce
     // to thin builders over this). Done before Phase 4 takes the elements.
     //
-    // Allocation cascade in reverse topo order: each element absorbs the
-    // proposal arriving on its output edge(s) (`configure_allocation`), then
-    // proposes from its output-link caps; the proposal is stored on its input
-    // edge(s) for its upstream to absorb. A tee joins its branch proposals
-    // (most-restrictive intersection, loud failure on a domain conflict) onto
-    // its single input; a muxer proposes its own per-pad demand onto each input
-    // edge (the boundary now crosses at startup). The source's absorbed proposal
-    // is the reported `allocation`. For a linear chain this is byte-for-byte the
-    // linear runner's sink->source fold.
-    let allocation = cascade_allocation(vg, topo, &solution)?;
-
     // Latency fold + clock election over every element node (tee is structural
     // and contributes neither).
     let mut latency_fold = LatencyFold::new(vg, topo);
@@ -3592,7 +3593,7 @@ pub async fn negotiate_graph_explained<'a>(
         .map_err(NegotiateError::Solve)?
     };
 
-    // Phase 3.5's allocation cascade, run for its effect on the elements: it is
+    // The runner's allocation cascade, run for its effect on the elements: it is
     // what settles a multi-domain producer (a decoder that can keep frames on
     // the GPU or download them) on the domain its consumer asked for. Reading
     // `output_memory` without it reports every producer's default preference, so

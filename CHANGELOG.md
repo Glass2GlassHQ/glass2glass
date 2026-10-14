@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1397: the graph runner resolves allocation before configuring elements, so a decoder sizes its pool at open time on every runner.
 - M1396: the `MultiSenderSink` doc link resolves, so the rustdoc CI step passes.
 - M1390: `sei` and `vobsub` read big-endian fields through `bereader`.
 - M1389: the fuzz `block_on` pins with `pin!`.
