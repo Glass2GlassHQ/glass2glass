@@ -3,6 +3,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll, Waker};
 
 use spin::Mutex;
@@ -245,21 +246,54 @@ impl<'a, T> Future for RecvFuture<'a, T> {
     }
 }
 
+// Every push takes each reverse signal, so an empty take reads a flag instead of locking.
+#[derive(Debug)]
+struct LatestValue<T> {
+    pending: AtomicBool,
+    value: Mutex<Option<T>>,
+}
+
+impl<T> Default for LatestValue<T> {
+    fn default() -> Self {
+        Self {
+            pending: AtomicBool::new(false),
+            value: Mutex::new(None),
+        }
+    }
+}
+
+impl<T> LatestValue<T> {
+    fn store(&self, value: T) {
+        let mut slot = self.value.lock();
+        *slot = Some(value);
+        self.pending.store(true, Ordering::Release);
+    }
+
+    fn take(&self) -> Option<T> {
+        if !self.pending.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut slot = self.value.lock();
+        self.pending.store(false, Ordering::Relaxed);
+        slot.take()
+    }
+}
+
 /// Capacity-1 latest-wins slot carrying the upstream-traveling
 /// `Reconfigure` signal of a bidirectional link. Stores overwrite any
-/// pending value; takes consume it. Cheap: one `Arc<Mutex<Option<_>>>`.
+/// pending value; takes consume it.
 #[derive(Debug, Clone, Default)]
 pub struct ReconfigureSlot {
-    inner: Arc<Mutex<Option<Reconfigure>>>,
+    inner: Arc<LatestValue<Reconfigure>>,
 }
 
 impl ReconfigureSlot {
     pub fn store(&self, value: Reconfigure) {
-        *self.inner.lock() = Some(value);
+        self.inner.store(value);
     }
 
     pub fn take(&self) -> Option<Reconfigure> {
-        self.inner.lock().take()
+        self.inner.take()
     }
 }
 
@@ -269,16 +303,16 @@ impl ReconfigureSlot {
 /// not a stream).
 #[derive(Debug, Clone, Default)]
 pub struct QosSlot {
-    inner: Arc<Mutex<Option<QosMessage>>>,
+    inner: Arc<LatestValue<QosMessage>>,
 }
 
 impl QosSlot {
     pub fn store(&self, value: QosMessage) {
-        *self.inner.lock() = Some(value);
+        self.inner.store(value);
     }
 
     pub fn take(&self) -> Option<QosMessage> {
-        self.inner.lock().take()
+        self.inner.take()
     }
 }
 
@@ -288,16 +322,16 @@ impl QosSlot {
 /// current target, not a stream).
 #[derive(Debug, Clone, Default)]
 pub struct BitrateSlot {
-    inner: Arc<Mutex<Option<u32>>>,
+    inner: Arc<LatestValue<u32>>,
 }
 
 impl BitrateSlot {
     pub fn store(&self, value: u32) {
-        *self.inner.lock() = Some(value);
+        self.inner.store(value);
     }
 
     pub fn take(&self) -> Option<u32> {
-        self.inner.lock().take()
+        self.inner.take()
     }
 }
 
@@ -657,6 +691,15 @@ fn closed_link() -> LinkSender {
 /// the consumer reads each frame's queue-residency time.
 pub(crate) type TransitRing = Arc<Mutex<VecDeque<u64>>>;
 
+#[derive(Default)]
+struct LazyNow(Option<u64>);
+
+impl LazyNow {
+    fn get(&mut self) -> u64 {
+        *self.0.get_or_insert_with(stamp_now_ns)
+    }
+}
+
 /// Monotonic send stamp for the transit ring; 0 under `no_std` (no clock).
 #[inline]
 fn stamp_now_ns() -> u64 {
@@ -740,13 +783,11 @@ impl LinkSender {
         }
     }
 
-    /// Record one packet that entered the link, if counters are installed.
-    /// `blocked_since` is the stamp taken before a blocking send, so the time
-    /// the producer spent awaiting capacity is folded in.
-    fn record_sent(&self, bytes: u64, blocked_since: Option<u64>) {
+    /// Record one packet that entered the link, if counters are installed,
+    /// with the time the producer spent awaiting capacity.
+    fn record_sent(&self, bytes: u64, blocked_ns: u64) {
         if let Some(c) = &self.counters {
-            let blocked = blocked_since.map_or(0, |t0| stamp_now_ns().saturating_sub(t0));
-            c.record_packet(bytes, blocked);
+            c.record_packet(bytes, blocked_ns);
         }
     }
 }
@@ -804,17 +845,23 @@ impl LinkReceiver {
     /// where there is no clock so the stamp is 0). Only `DataFrame`s are stamped,
     /// so callers must not pop for control packets.
     pub fn pop_transit_ns(&self) -> Option<u64> {
-        let ring = self.transit.as_ref()?;
-        let sent = ring.lock().pop_front()?;
         #[cfg(feature = "std")]
         {
-            Some(crate::metrics::monotonic_ns().saturating_sub(sent))
+            self.transit.as_ref()?;
+            self.pop_transit_at(crate::metrics::monotonic_ns())
         }
         #[cfg(not(feature = "std"))]
         {
-            let _ = sent;
+            self.transit.as_ref()?.lock().pop_front()?;
             Some(0)
         }
+    }
+
+    // As `pop_transit_ns`, with the caller's clock read.
+    #[cfg(feature = "std")]
+    pub(crate) fn pop_transit_at(&self, now_ns: u64) -> Option<u64> {
+        let sent = self.transit.as_ref()?.lock().pop_front()?;
+        Some(now_ns.saturating_sub(sent))
     }
 
     /// Latest-wins: overwrites any pending request that the producer
@@ -924,7 +971,14 @@ pub trait LinkInterceptor {
 /// runtime while the runner drives the link.
 #[derive(Clone, Default)]
 pub struct ProbeSlot {
-    inner: Arc<Mutex<Option<Arc<dyn LinkInterceptor + Send + Sync>>>>,
+    inner: Arc<ProbeCell>,
+}
+
+#[derive(Default)]
+struct ProbeCell {
+    // Read on every push, so a link with no interceptor never locks.
+    installed: AtomicBool,
+    interceptor: Mutex<Option<Arc<dyn LinkInterceptor + Send + Sync>>>,
 }
 
 impl core::fmt::Debug for ProbeSlot {
@@ -936,19 +990,26 @@ impl core::fmt::Debug for ProbeSlot {
 impl ProbeSlot {
     /// Install (or replace) the probe consulted on every push.
     pub fn install(&self, probe: Arc<dyn LinkInterceptor + Send + Sync>) {
-        *self.inner.lock() = Some(probe);
+        let mut interceptor = self.inner.interceptor.lock();
+        *interceptor = Some(probe);
+        self.inner.installed.store(true, Ordering::Release);
     }
 
     /// Remove the probe; subsequent packets pass unconditionally.
     pub fn remove(&self) {
-        *self.inner.lock() = None;
+        let mut interceptor = self.inner.interceptor.lock();
+        *interceptor = None;
+        self.inner.installed.store(false, Ordering::Release);
     }
 
     /// The verdict for `packet`: `Pass` when no interceptor is installed. Also
     /// consulted by the fan-in session adapter, which shares the tagged channel
     /// and so carries its own per-input slot.
     pub(crate) fn action(&self, packet: &PipelinePacket) -> ProbeAction {
-        match self.inner.lock().as_ref() {
+        if !self.inner.installed.load(Ordering::Acquire) {
+            return ProbeAction::Pass;
+        }
+        match self.inner.interceptor.lock().as_ref() {
             Some(probe) => probe.on_packet(packet),
             None => ProbeAction::Pass,
         }
@@ -1092,6 +1153,8 @@ enum PushPhase {
         bytes: u64,
         blocked_since: Option<u64>,
         stamped: bool,
+        // A send that never parked waited no time, so it needs no second clock read.
+        parked: bool,
     },
 }
 
@@ -1132,11 +1195,10 @@ impl SenderSink {
     }
 
     /// Charge the time this push spent awaiting capacity to the producing
-    /// element's probe. `since` is the pre-send stamp, `None` when neither the
-    /// probe nor the edge counters asked for one.
-    fn record_push_wait(&self, since: Option<u64>) {
-        if let (Some(probe), Some(t0)) = (&self.push_wait_probe, since) {
-            probe.add_push_wait(stamp_now_ns().saturating_sub(t0));
+    /// element's probe.
+    fn record_push_wait(&self, blocked_ns: u64) {
+        if let Some(probe) = &self.push_wait_probe {
+            probe.add_push_wait(blocked_ns);
         }
     }
 
@@ -1290,16 +1352,29 @@ impl SenderSink {
         bytes: u64,
         blocked_since: Option<u64>,
         stamped: bool,
+        parked: bool,
     ) -> Poll<Result<PushOutcome, G2gError>> {
         match self.link.data.poll_send(cx, packet) {
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                self.push_phase = PushPhase::Sending {
+                    bytes,
+                    blocked_since,
+                    stamped,
+                    parked: true,
+                };
+                Poll::Pending
+            }
             // Post-send check covers the "request fired while we were
             // awaiting capacity" window; the packet is already in the link
             // under old caps.
             Poll::Ready(Ok(())) => {
                 self.push_phase = PushPhase::Idle;
-                self.link.record_sent(bytes, blocked_since);
-                self.record_push_wait(blocked_since);
+                let blocked_ns = match blocked_since {
+                    Some(t0) if parked => stamp_now_ns().saturating_sub(t0),
+                    _ => 0,
+                };
+                self.link.record_sent(bytes, blocked_ns);
+                self.record_push_wait(blocked_ns);
                 Poll::Ready(Ok(self.post_send_outcome()))
             }
             Poll::Ready(Err(SendError::Closed)) => {
@@ -1347,9 +1422,10 @@ impl OutputSink for SenderSink {
             bytes,
             blocked_since,
             stamped,
+            parked,
         } = self.push_phase
         {
-            return self.poll_blocking_send(cx, packet_slot, bytes, blocked_since, stamped);
+            return self.poll_blocking_send(cx, packet_slot, bytes, blocked_since, stamped, parked);
         }
         // M1115: the mutation gate, between packets. One relaxed load while no
         // mutation is in flight; a parked producer waits here holding the packet
@@ -1428,12 +1504,14 @@ impl OutputSink for SenderSink {
         if let Some(endpoint) = &self.endpoint {
             endpoint.observe(packet);
         }
+        // One clock read serves the age, the transit stamp and the blocked stamp.
+        let mut now = LazyNow::default();
         // The frame's age as its element emits it, the number that catches an
         // element buffering frames internally. Skipped for unstamped frames.
         #[cfg(feature = "std")]
         if let (Some(probe), PipelinePacket::DataFrame(frame)) = (&self.push_wait_probe, &*packet) {
             if frame.timing.arrival_ns != 0 {
-                probe.record_age_at_emit(stamp_now_ns().saturating_sub(frame.timing.arrival_ns));
+                probe.record_age_at_emit(now.get().saturating_sub(frame.timing.arrival_ns));
             }
         }
         // Leaky links drop *data frames* under a full channel rather than
@@ -1447,13 +1525,13 @@ impl OutputSink for SenderSink {
             let taken = packet_slot.take().expect("packet checked above");
             match self.link.policy {
                 LinkPolicy::DropNewest => match self.link.data.try_send(taken) {
-                    Ok(()) => self.link.record_sent(bytes, None),
+                    Ok(()) => self.link.record_sent(bytes, 0),
                     // Channel full: drop the incoming frame.
                     Err((_dropped, SendError::Full)) => self.link.record_drop(),
                     Err((_v, SendError::Closed)) => return Poll::Ready(Err(G2gError::Shutdown)),
                 },
                 LinkPolicy::DropOldest => match self.link.data.try_send(taken) {
-                    Ok(()) => self.link.record_sent(bytes, None),
+                    Ok(()) => self.link.record_sent(bytes, 0),
                     Err((returned, SendError::Full)) => {
                         // Evict the oldest queued data frame to make room.
                         // If only control packets are queued, fall back to
@@ -1466,7 +1544,7 @@ impl OutputSink for SenderSink {
                         {
                             self.link.record_drop();
                             match self.link.data.try_send(returned) {
-                                Ok(()) => self.link.record_sent(bytes, None),
+                                Ok(()) => self.link.record_sent(bytes, 0),
                                 Err((_v, SendError::Closed)) => {
                                     return Poll::Ready(Err(G2gError::Shutdown))
                                 }
@@ -1476,17 +1554,19 @@ impl OutputSink for SenderSink {
                             }
                         } else {
                             *packet_slot = Some(returned);
-                            let blocked_since = self.wants_blocked_stamp().then(stamp_now_ns);
+                            let blocked_since = self.wants_blocked_stamp().then(|| now.get());
                             self.push_phase = PushPhase::Sending {
                                 bytes,
                                 blocked_since,
                                 stamped: false,
+                                parked: false,
                             };
                             return self.poll_blocking_send(
                                 cx,
                                 packet_slot,
                                 bytes,
                                 blocked_since,
+                                false,
                                 false,
                             );
                         }
@@ -1503,19 +1583,20 @@ impl OutputSink for SenderSink {
         let stamped = is_data && self.link.transit.is_some();
         if stamped {
             if let Some(ring) = &self.link.transit {
-                ring.lock().push_back(stamp_now_ns());
+                ring.lock().push_back(now.get());
             }
         }
         // Stamp before the blocking send so the counters carry how long the
         // producer was held up by a full link (M846), and the producing
         // element's probe can take that wait out of its `process()` timing.
-        let blocked_since = self.wants_blocked_stamp().then(stamp_now_ns);
+        let blocked_since = self.wants_blocked_stamp().then(|| now.get());
         self.push_phase = PushPhase::Sending {
             bytes,
             blocked_since,
             stamped,
+            parked: false,
         };
-        self.poll_blocking_send(cx, packet_slot, bytes, blocked_since, stamped)
+        self.poll_blocking_send(cx, packet_slot, bytes, blocked_since, stamped, false)
     }
 }
 

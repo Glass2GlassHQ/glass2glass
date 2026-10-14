@@ -1262,18 +1262,24 @@ fn buffering_bucket(percent: u8) -> u8 {
     (percent / 25).min(4)
 }
 
-/// Sample an arm's input-link fill and post a `Buffering` level when it crosses
-/// a quartile band, naming the element the link feeds so an application can tell
-/// an interior link from the one feeding a sink. `last` carries the band across
+// One sample per loop pass serves both the bus report and the probe.
+fn sample_fill(bus: Option<&BusHandle>, probe: &Probe, in_rx: &LinkReceiver) -> Option<u8> {
+    (bus.is_some() || probe.is_some()).then(|| in_rx.fill_percent())
+}
+
+/// Post a `Buffering` level when an arm's input-link fill crosses a quartile
+/// band, naming the element the link feeds so an application can tell an
+/// interior link from the one feeding a sink. `last` carries the band across
 /// loop iterations.
 fn report_buffering(
     bus: Option<&BusHandle>,
     probe: &Probe,
-    in_rx: &LinkReceiver,
+    fill: Option<u8>,
     last: &mut Option<u8>,
 ) {
-    let Some(b) = bus else { return };
-    let pct = in_rx.fill_percent();
+    let (Some(b), Some(pct)) = (bus, fill) else {
+        return;
+    };
     let bucket = buffering_bucket(pct);
     if *last != Some(bucket) {
         *last = Some(bucket);
@@ -4358,7 +4364,8 @@ pub async fn transform_arm<E: AsyncElement>(
     loop {
         // M843: interior links report their fill too, so an application can see
         // *where* a pipeline is starved or backed up, not just at the sink.
-        report_buffering(bus.as_ref(), &probe, &in_rx, &mut last_buffer_bucket);
+        let input_fill = sample_fill(bus.as_ref(), &probe, &in_rx);
+        report_buffering(bus.as_ref(), &probe, input_fill, &mut last_buffer_bucket);
         let packet = if control_open {
             match select2(arm_rx.recv(), in_rx.recv()).await {
                 Either::Left(Some(ArmDirective::Recascade(params))) => {
@@ -4520,11 +4527,13 @@ pub async fn transform_arm<E: AsyncElement>(
                     _ => None,
                 };
                 let timed = probe.as_deref().filter(|_| seq.is_some());
+                // One clock read times the frame's queue residency and its process start.
+                let t0 = timed.and_then(|_| ElementProbe::mark());
                 let mut wait_ns = 0;
                 if let Some(p) = timed {
-                    p.record_fill(in_rx.fill_percent());
+                    p.record_fill(input_fill.unwrap_or_default());
                     // Queue-residency of this frame on the input link (M684).
-                    if let Some(t) = in_rx.pop_transit_ns() {
+                    if let Some(t) = t0.and_then(|now| in_rx.pop_transit_at(now)) {
                         p.record_transit(t);
                         wait_ns = t;
                     }
@@ -4541,15 +4550,13 @@ pub async fn transform_arm<E: AsyncElement>(
                     &packet,
                     &probe,
                 )?;
-                let t0 = ElementProbe::mark();
                 elem.process(packet, &mut adapter).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {
-                    let push_wait_ns = p.record_proc_since(t0);
                     // M851: this frame's own wait + work, joined across stages
                     // by sequence id at snapshot time. M951: the push-wait the
                     // call just banked is charged to this visit too, so the
                     // journey's work segment is compute.
-                    p.record_visit(seq, wait_ns, t0, push_wait_ns);
+                    p.record_frame_processed(seq, wait_ns, t0);
                 }
                 // M1036: renegotiation a transform originates rather than
                 // relays (a decoder that read a new resolution out of the
@@ -4646,7 +4653,8 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
         // M87 buffering: sample the input link's fill and post a `Buffering`
         // report when it crosses a quartile band. The first iteration samples
         // an as-yet-unfilled link, so a `bus` always sees at least one report.
-        report_buffering(bus.as_ref(), &probe, &in_rx, &mut last_buffer_bucket);
+        let input_fill = sample_fill(bus.as_ref(), &probe, &in_rx);
+        report_buffering(bus.as_ref(), &probe, input_fill, &mut last_buffer_bucket);
         let packet = if control_open {
             match select2(arm_rx.recv(), in_rx.recv()).await {
                 // M839: a producer upstream (a muxer) settled a new pool on this
@@ -4773,11 +4781,13 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                 }
                 // M399: time the data-frame `process()` and sample input fill.
                 let timed = probe.as_deref().filter(|_| is_buffer);
+                // One clock read times the frame's queue residency and its process start.
+                let t0 = timed.and_then(|_| ElementProbe::mark());
                 let mut wait_ns = 0;
                 if let Some(p) = timed {
-                    p.record_fill(in_rx.fill_percent());
+                    p.record_fill(input_fill.unwrap_or_default());
                     // Queue-residency of this frame on the input link (M684).
-                    if let Some(t) = in_rx.pop_transit_ns() {
+                    if let Some(t) = t0.and_then(|now| in_rx.pop_transit_at(now)) {
                         p.record_transit(t);
                         wait_ns = t;
                     }
@@ -4793,13 +4803,11 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                 )?;
                 #[cfg(feature = "metadata")]
                 let capture_unix_ns = frame_capture_unix_ns(&packet);
-                let t0 = ElementProbe::mark();
                 elem.process(packet, &mut null).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {
-                    let push_wait_ns = p.record_proc_since(t0);
                     // M851: the last hop of a frame's journey. A sink pushes
                     // nowhere, so the banked wait is always 0 here.
-                    p.record_visit(seq, wait_ns, t0, push_wait_ns);
+                    p.record_frame_processed(seq, wait_ns, t0);
                 }
                 #[cfg(feature = "metadata")]
                 if let Some(capture_unix_ns) = capture_unix_ns {
@@ -4985,13 +4993,13 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
                 let timed = probe
                     .as_deref()
                     .filter(|_| matches!(&packet, PipelinePacket::DataFrame(_)));
+                let t0 = timed.and_then(|_| ElementProbe::mark());
                 if let Some(p) = timed {
                     p.record_fill(in_rx.fill_percent());
-                    if let Some(t) = in_rx.pop_transit_ns() {
+                    if let Some(t) = t0.and_then(|now| in_rx.pop_transit_at(now)) {
                         p.record_transit(t);
                     }
                 }
-                let t0 = ElementProbe::mark();
                 demux.process(packet, &mut multi).await?;
                 if let Some(p) = timed {
                     p.record_proc_since(t0);

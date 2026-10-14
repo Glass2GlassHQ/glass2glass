@@ -188,17 +188,12 @@ impl ElementProbe {
     #[inline]
     pub fn record_visit(&self, sequence: u64, wait_ns: u64, enter: Option<u64>, push_wait_ns: u64) {
         #[cfg(feature = "std")]
-        if let (Some(ring), Some(enter_ns)) = (self.journeys.as_ref(), enter) {
-            let exit_ns = crate::metrics::monotonic_ns();
-            let mut ring = ring.lock();
-            if ring.len() == JOURNEY_RING {
-                ring.pop_front();
-            }
-            ring.push_back(StageVisit {
+        if let (Some(_), Some(enter_ns)) = (self.journeys.as_ref(), enter) {
+            self.push_visit(StageVisit {
                 sequence,
                 wait_ns,
                 enter_ns,
-                exit_ns,
+                exit_ns: crate::metrics::monotonic_ns(),
                 push_wait_ns,
             });
         }
@@ -206,10 +201,25 @@ impl ElementProbe {
         let _ = (sequence, wait_ns, enter, push_wait_ns);
     }
 
-    /// Push a fully-stamped visit, so a test can build a deterministic journey
-    /// instead of racing a real clock. Its only callers are `observe`'s tests,
-    /// and that module is std-gated.
-    #[cfg(all(test, feature = "std"))]
+    // `record_proc_since` and `record_visit` on one clock read.
+    #[cfg(feature = "std")]
+    pub(crate) fn record_frame_processed(&self, sequence: u64, wait_ns: u64, start: Option<u64>) {
+        let waited = self.push_wait_accum.swap(0, Ordering::Relaxed);
+        let Some(enter_ns) = start else { return };
+        let exit_ns = crate::metrics::monotonic_ns();
+        self.proc_ns
+            .record(exit_ns.saturating_sub(enter_ns).saturating_sub(waited));
+        self.push_wait_ns.record(waited);
+        self.push_visit(StageVisit {
+            sequence,
+            wait_ns,
+            enter_ns,
+            exit_ns,
+            push_wait_ns: waited,
+        });
+    }
+
+    #[cfg(feature = "std")]
     pub(crate) fn push_visit(&self, visit: StageVisit) {
         if let Some(ring) = self.journeys.as_ref() {
             let mut ring = ring.lock();

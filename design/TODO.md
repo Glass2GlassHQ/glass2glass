@@ -48,13 +48,11 @@ Bugs:
 
 Core runtime:
 
-- Each push takes about six spin locks. Lock only when a signal flag is set.
 - `park_or_tick` builds a new boxed sleep per park.
 - Mutator runs drive every element through `DynRef` (a boxed future per packet).
 - `FrameMetaSet` clone allocates a Vec. `broadcast_drop_closed` shares for the last
   sender too and duplicates `broadcast`.
 - `Gate::process` and `Router::process` box a future per packet.
-- The transform arm samples fill twice and reads the clock about five times per frame.
 - Route the sink, transform and router loops in `runner.rs` and `fanin.rs` through
   the `graph_runner` arms.
 - One arm-IO builder for `run_graph_inner` and `run_graph_threaded_inner`.

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1281: a packet crossing a link takes no lock for an absent signal or probe and reads the clock once per step.
 - M1280: a playing sink passes its flow gate without a lock.
 - M1279: muxer inputs feed the muxer directly and report their queue time.
 - M1278: a woken arm re-polls only itself, and every sender parked on a full channel wakes when it drains.
