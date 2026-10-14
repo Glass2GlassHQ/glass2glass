@@ -43,6 +43,8 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, VideoCodec,
 };
 
+use g2g_core::rtp::RTP_HEADER_LEN;
+
 use crate::filesink::io_err;
 use crate::rtcp;
 use crate::rtppay::RtpH264Packetizer;
@@ -56,6 +58,10 @@ const DEFAULT_PAYLOAD_TYPE: u8 = 96;
 const DEFAULT_MAX_PAYLOAD: usize = 1400;
 /// TCP read buffer for RTSP control requests.
 const CTRL_BUF: usize = 8192;
+/// RFC 2326 §10.12 interleaved frame: `$`, channel, 16-bit length, then the packet.
+const INTERLEAVED_MARKER: u8 = b'$';
+const INTERLEAVED_HEADER_LEN: usize = 4;
+const RTP_SEQUENCE_RANGE: core::ops::Range<usize> = 2..4;
 /// Cap on buffered-but-unparsed control bytes. A real RTSP request (even an
 /// ANNOUNCE carrying SDP) is far smaller; the bound reaps a client that drips a
 /// never-terminating request or an oversized Content-Length (slow-loris DoS).
@@ -94,7 +100,8 @@ struct Client {
     interleaved: Option<u8>,
     /// The RTCP channel for an interleaved player: SRs out, RRs in, `$`-framed.
     rtcp_channel: Option<u8>,
-    packetizer: Option<RtpH264Packetizer>,
+    /// This player's own RTP sequence numbering, armed at PLAY.
+    next_sequence: Option<u16>,
     /// RFC 3550 sender counters for this player's RTP session.
     rtp_packets: u32,
     rtp_octets: u32,
@@ -115,7 +122,7 @@ impl Client {
             rtcp_dest: None,
             interleaved: None,
             rtcp_channel: None,
-            packetizer: None,
+            next_sequence: None,
             rtp_packets: 0,
             rtp_octets: 0,
             last_rtp_ts: 0,
@@ -125,15 +132,15 @@ impl Client {
     }
 
     /// PLAYing once SETUP gave a transport (a UDP destination or an interleaved
-    /// channel) and PLAY armed the packetizer.
+    /// channel) and PLAY armed the sequence numbering.
     fn playing(&self) -> bool {
-        self.packetizer.is_some() && (self.dest.is_some() || self.interleaved.is_some())
+        self.next_sequence.is_some() && (self.dest.is_some() || self.interleaved.is_some())
     }
 
     /// Drain whatever control bytes are readable now (non-blocking) and answer
     /// the requests they complete, advancing toward PLAY. Returns `false` if the
     /// player disconnected or tore down (the caller reaps it).
-    async fn advance(&mut self, payload_type: u8, ssrc: u32, max_payload: usize) -> bool {
+    async fn advance(&mut self) -> bool {
         let mut buf = [0u8; CTRL_BUF];
         loop {
             match self.control.try_read(&mut buf) {
@@ -148,7 +155,7 @@ impl Client {
             // on the control connection; consume the frame before request parsing
             // so the binary is not misread as a request, and count it as
             // keepalive activity.
-            if self.pending.first() == Some(&0x24) {
+            if self.pending.first() == Some(&INTERLEAVED_MARKER) {
                 if self.pending.len() < 4 {
                     break; // frame header not fully arrived
                 }
@@ -184,11 +191,7 @@ impl Client {
                     self.interleaved = Some(rtp_channel);
                     self.rtcp_channel = Some(rtcp_channel);
                 }
-                RtspEvent::Play => {
-                    self.packetizer = Some(
-                        RtpH264Packetizer::new(payload_type, ssrc).with_max_payload(max_payload),
-                    );
-                }
+                RtspEvent::Play => self.next_sequence = Some(0),
                 RtspEvent::Teardown => return false,
                 _ => {}
             }
@@ -200,39 +203,42 @@ impl Client {
         true
     }
 
-    /// Packetize `bytes` and send every RTP packet to this player over its
-    /// negotiated transport: UDP to `dest`, or `$`-framed on the control
-    /// connection for a TCP-interleaved client. Returns the packet count, or
-    /// `Err` if the send failed (the caller reaps it).
-    async fn send_frame(
+    /// Stamp this player's sequence numbers on the access unit's `packets` and
+    /// send them over its negotiated transport: UDP to `dest`, or `$`-framed on
+    /// the control connection for a TCP-interleaved client. Returns the packet
+    /// count, or `Err` if the send failed (the caller reaps it).
+    async fn send_packets(
         &mut self,
         socket: &tokio::net::UdpSocket,
-        bytes: &[u8],
+        packets: &mut [Vec<u8>],
         timestamp: u32,
     ) -> Result<u64, ()> {
-        let pkts = match self.packetizer.as_mut() {
-            Some(p) => p.packetize(bytes, timestamp),
-            None => return Ok(0),
+        let Some(first_sequence) = self.next_sequence else {
+            return Ok(0);
         };
+        for (offset, packet) in packets.iter_mut().enumerate() {
+            let sequence = first_sequence.wrapping_add(offset as u16);
+            packet[RTP_SEQUENCE_RANGE].copy_from_slice(&sequence.to_be_bytes());
+        }
+        self.next_sequence = Some(first_sequence.wrapping_add(packets.len() as u16));
         self.last_rtp_ts = timestamp;
         let mut sent = 0;
         if let Some(channel) = self.interleaved {
-            // RFC 2326 §10.12: `$` | channel | 16-bit length | RTP, on the TCP
-            // control connection. An RTP packet is always well under 64 KiB.
-            for pkt in &pkts {
-                let mut framed = Vec::with_capacity(4 + pkt.len());
-                framed.push(0x24);
-                framed.push(channel);
-                framed.extend_from_slice(&(pkt.len() as u16).to_be_bytes());
-                framed.extend_from_slice(pkt);
-                if self.control.write_all(&framed).await.is_err() {
-                    return Err(());
-                }
-                sent += 1;
+            let framed_len = packets
+                .iter()
+                .map(|packet| INTERLEAVED_HEADER_LEN + packet.len())
+                .sum();
+            let mut framed = Vec::with_capacity(framed_len);
+            for packet in packets.iter() {
+                push_interleaved(&mut framed, channel, packet);
             }
+            if self.control.write_all(&framed).await.is_err() {
+                return Err(());
+            }
+            sent = packets.len() as u64;
         } else if let Some(dest) = self.dest {
-            for pkt in &pkts {
-                if socket.send_to(pkt, dest).await.is_err() {
+            for packet in packets.iter() {
+                if socket.send_to(packet, dest).await.is_err() {
                     return Err(());
                 }
                 sent += 1;
@@ -240,11 +246,11 @@ impl Client {
         }
         // SR sender counters: media packets and their payload octets (past the
         // 12-byte RTP header).
-        for pkt in &pkts {
+        for packet in packets.iter() {
             self.rtp_packets = self.rtp_packets.wrapping_add(1);
             self.rtp_octets = self
                 .rtp_octets
-                .wrapping_add(pkt.len().saturating_sub(12) as u32);
+                .wrapping_add(packet.len().saturating_sub(RTP_HEADER_LEN) as u32);
         }
         Ok(sent)
     }
@@ -259,11 +265,8 @@ impl Client {
         packet: &[u8],
     ) -> Result<bool, ()> {
         if let Some(channel) = self.rtcp_channel {
-            let mut framed = Vec::with_capacity(4 + packet.len());
-            framed.push(0x24);
-            framed.push(channel);
-            framed.extend_from_slice(&(packet.len() as u16).to_be_bytes());
-            framed.extend_from_slice(packet);
+            let mut framed = Vec::with_capacity(INTERLEAVED_HEADER_LEN + packet.len());
+            push_interleaved(&mut framed, channel, packet);
             if self.control.write_all(&framed).await.is_err() {
                 return Err(());
             }
@@ -449,7 +452,6 @@ impl RtspServerSink {
         let mut rtcp_dest = None;
         let mut interleaved = None;
         let mut rtcp_channel = None;
-        let packetizer;
         'handshake: loop {
             let n = control.read(&mut buf).await.map_err(io_err)?;
             if n == 0 {
@@ -475,13 +477,7 @@ impl RtspServerSink {
                         interleaved = Some(rtp_channel);
                         rtcp_channel = Some(rtcp_ch);
                     }
-                    RtspEvent::Play => {
-                        packetizer = Some(
-                            RtpH264Packetizer::new(self.payload_type, self.ssrc)
-                                .with_max_payload(self.max_payload),
-                        );
-                        break 'handshake;
-                    }
+                    RtspEvent::Play => break 'handshake,
                     RtspEvent::Teardown => return Err(G2gError::Shutdown),
                     _ => {}
                 }
@@ -493,7 +489,7 @@ impl RtspServerSink {
         client.rtcp_dest = rtcp_dest;
         client.interleaved = interleaved;
         client.rtcp_channel = rtcp_channel;
-        client.packetizer = packetizer;
+        client.next_sequence = Some(0);
         self.clients.push(client);
         self.tcp = Some(listener);
         self.rtp_socket = Some(rtp_socket);
@@ -525,11 +521,10 @@ impl RtspServerSink {
     /// PLAYing clients are advanced too, so a mid-stream TEARDOWN or
     /// control-channel close is detected and keepalive requests are answered.
     async fn advance_handshakes(&mut self) {
-        let (pt, ssrc, mp) = (self.payload_type, self.ssrc, self.max_payload);
         let now = g2g_core::metrics::monotonic_ns();
         let mut i = 0;
         while i < self.clients.len() {
-            let keep = self.clients[i].advance(pt, ssrc, mp).await
+            let keep = self.clients[i].advance().await
                 && now.saturating_sub(self.clients[i].last_activity_ns) <= self.session_timeout_ns;
             if keep {
                 i += 1;
@@ -596,13 +591,20 @@ impl RtspServerSink {
     /// Broadcast one frame to every PLAYing client, reaping any whose send fails.
     async fn broadcast(&mut self, bytes: &[u8], timestamp: u32) -> Result<(), G2gError> {
         let socket = self.rtp_socket.as_ref().ok_or(G2gError::NotConfigured)?;
+        // packetized once, each player stamps its own sequence numbers
+        let mut packets = RtpH264Packetizer::new(self.payload_type, self.ssrc)
+            .with_max_payload(self.max_payload)
+            .packetize(bytes, timestamp);
         let mut i = 0;
         while i < self.clients.len() {
             if !self.clients[i].playing() {
                 i += 1;
                 continue;
             }
-            match self.clients[i].send_frame(socket, bytes, timestamp).await {
+            match self.clients[i]
+                .send_packets(socket, &mut packets, timestamp)
+                .await
+            {
                 Ok(pkts) => {
                     self.packets_sent += pkts;
                     i += 1;
@@ -834,6 +836,14 @@ impl PadTemplates for RtspServerSink {
     }
 }
 
+// an RTP packet is always well under the 64 KiB the length field holds
+fn push_interleaved(out: &mut Vec<u8>, channel: u8, packet: &[u8]) {
+    out.push(INTERLEAVED_MARKER);
+    out.push(channel);
+    out.extend_from_slice(&(packet.len() as u16).to_be_bytes());
+    out.extend_from_slice(packet);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -865,7 +875,7 @@ mod tests {
         });
         let mut reaped = false;
         for _ in 0..10_000 {
-            if !client.advance(96, 0x1234_5678, 1400).await {
+            if !client.advance().await {
                 reaped = true;
                 break;
             }
@@ -879,12 +889,12 @@ mod tests {
     async fn playing_client_is_reaped_when_control_channel_closes() {
         let (mut client, peer) = client_pair().await;
         client.dest = Some(SocketAddr::new(client.peer_ip, 5000));
-        client.packetizer = Some(RtpH264Packetizer::new(96, 0x1234_5678));
+        client.next_sequence = Some(0);
         assert!(client.playing());
         drop(peer); // peer closes the control channel mid-stream
         let mut reaped = false;
         for _ in 0..10_000 {
-            if !client.advance(96, 0x1234_5678, 1400).await {
+            if !client.advance().await {
                 reaped = true;
                 break;
             }

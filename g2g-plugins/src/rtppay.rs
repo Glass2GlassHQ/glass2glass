@@ -11,6 +11,41 @@ use g2g_core::rtp::{CaptureTimeExtensionIds, RtpHeader, RtpHeaderExtension, RTP_
 use crate::annexb::nal_units;
 /// RFC 6184 FU-A NAL type.
 const FU_A_TYPE: u8 = 28;
+const FU_A_HEADER_LEN: usize = 2;
+
+// borrows the access unit so its bytes are copied once, into the packet
+enum Payload<'a> {
+    Nal(&'a [u8]),
+    Fragment {
+        fu_indicator: u8,
+        fu_header: u8,
+        part: &'a [u8],
+    },
+}
+
+impl Payload<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Payload::Nal(nal) => nal.len(),
+            Payload::Fragment { part, .. } => FU_A_HEADER_LEN + part.len(),
+        }
+    }
+
+    fn write_to(&self, packet: &mut Vec<u8>) {
+        match self {
+            Payload::Nal(nal) => packet.extend_from_slice(nal),
+            Payload::Fragment {
+                fu_indicator,
+                fu_header,
+                part,
+            } => {
+                packet.push(*fu_indicator);
+                packet.push(*fu_header);
+                packet.extend_from_slice(part);
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RtpH264Packetizer {
@@ -75,7 +110,7 @@ impl RtpH264Packetizer {
             let packet_extensions = if i == 0 { &extensions[..] } else { &[] };
             let mut packet = Vec::with_capacity(RTP_HEADER_LEN + payload.len());
             self.write_header(&mut packet, marker, rtp_timestamp, packet_extensions);
-            packet.extend_from_slice(&payload);
+            payload.write_to(&mut packet);
             packets.push(packet);
             self.sequence = self.sequence.wrapping_add(1);
         }
@@ -84,11 +119,11 @@ impl RtpH264Packetizer {
 
     /// One RTP payload per output packet: a whole NAL when it fits, else FU-A
     /// fragments of the oversized NAL.
-    fn payloads(&self, access_unit: &[u8]) -> Vec<Vec<u8>> {
+    fn payloads<'a>(&self, access_unit: &'a [u8]) -> Vec<Payload<'a>> {
         let mut payloads = Vec::new();
         for nal in nal_units(access_unit).filter(|n| !n.is_empty()) {
             if nal.len() <= self.max_payload {
-                payloads.push(nal.to_vec());
+                payloads.push(Payload::Nal(nal));
                 continue;
             }
             // FU-A: the original NAL header byte splits into the FU indicator
@@ -97,17 +132,17 @@ impl RtpH264Packetizer {
             let fu_indicator = (header & 0xE0) | FU_A_TYPE;
             let nal_type = header & 0x1F;
             let body = &nal[1..];
-            let chunk = self.max_payload - 2;
+            let chunk = self.max_payload - FU_A_HEADER_LEN;
             let chunks = body.len().div_ceil(chunk);
             for (i, part) in body.chunks(chunk).enumerate() {
                 let start = u8::from(i == 0);
                 let end = u8::from(i + 1 == chunks);
                 let fu_header = (start << 7) | (end << 6) | nal_type;
-                let mut p = Vec::with_capacity(2 + part.len());
-                p.push(fu_indicator);
-                p.push(fu_header);
-                p.extend_from_slice(part);
-                payloads.push(p);
+                payloads.push(Payload::Fragment {
+                    fu_indicator,
+                    fu_header,
+                    part,
+                });
             }
         }
         payloads

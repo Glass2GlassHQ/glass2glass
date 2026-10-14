@@ -123,7 +123,6 @@ Network:
 
 - ST 2110-20 at 1080p60 cannot meet its pacing schedule: one loopback `send` costs
   about 5.5 us. Send each pacing slot with UDP GSO or `sendmmsg`.
-- `rtppay`, `rtspserversink` and `rtpdepay` copy each payload two or three times.
 - ST 2110-20 allocates and copies per packet.
 - Dedup the LiveKit signalling helpers, `access_token`, `MediaTime` conversion,
   and send `Transmit`s through `send_transmit`.

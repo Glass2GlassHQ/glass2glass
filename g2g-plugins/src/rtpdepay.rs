@@ -17,6 +17,7 @@ use g2g_core::rtp::RtpHeader;
 /// RFC 6184 aggregation / fragmentation NAL types.
 const STAP_A_TYPE: u8 = 24;
 const FU_A_TYPE: u8 = 28;
+const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
 
 /// One depayloaded access unit: Annex-B bytes plus the RTP timestamp shared by
 /// its packets (90 kHz for H.264).
@@ -37,9 +38,8 @@ const MAX_ASSEMBLY_BYTES: usize = 8 * 1024 * 1024;
 pub struct RtpH264Depayloader {
     /// Annex-B NALs accumulated for the access unit currently being assembled.
     au: Vec<u8>,
-    /// FU-A reassembly buffer (one NAL spanning multiple packets).
-    fu: Vec<u8>,
-    fu_active: bool,
+    /// Where the FU-A NAL being reassembled starts in `au`, while one is.
+    fragment_start: Option<usize>,
     /// Last RTP sequence number seen, for gap detection.
     last_seq: Option<u16>,
     /// RTP timestamp of the in-flight access unit.
@@ -68,8 +68,7 @@ impl RtpH264Depayloader {
         // the discontinuity. The next start-of-AU rebuilds cleanly.
         if let Some(prev) = self.last_seq {
             if seq != prev.wrapping_add(1) {
-                self.fu.clear();
-                self.fu_active = false;
+                self.fragment_start = None;
                 self.au.clear();
             }
         }
@@ -84,10 +83,14 @@ impl RtpH264Depayloader {
 
         match payload[0] & 0x1F {
             // Single NAL unit (types 1..=23): the payload is the NAL verbatim.
-            1..=23 => self.push_nal(payload),
+            1..=23 => {
+                self.abandon_fragment();
+                self.push_nal(payload);
+            }
             // STAP-A: [type 24][ (16-bit size)(NAL) ]* aggregated NALs, used
             // mostly to carry SPS+PPS in one packet.
             t if t == STAP_A_TYPE => {
+                self.abandon_fragment();
                 let mut i = 1;
                 while i + 2 <= payload.len() {
                     let size = u16::from_be_bytes([payload[i], payload[i + 1]]) as usize;
@@ -110,24 +113,22 @@ impl RtpH264Depayloader {
                 let start = fu_header & 0x80 != 0;
                 let end = fu_header & 0x40 != 0;
                 if start {
-                    self.fu.clear();
-                    self.fu.push((payload[0] & 0xE0) | (fu_header & 0x1F));
-                    self.fu_active = true;
+                    self.abandon_fragment();
+                    self.fragment_start = Some(self.au.len());
+                    self.au.extend_from_slice(&ANNEX_B_START_CODE);
+                    self.au.push((payload[0] & 0xE0) | (fu_header & 0x1F));
                 }
-                if self.fu_active {
-                    self.fu.extend_from_slice(&payload[2..]);
-                    if self.fu.len() > MAX_ASSEMBLY_BYTES {
+                if self.fragment_start.is_some() {
+                    self.au.extend_from_slice(&payload[2..]);
+                    if self.au.len() > MAX_ASSEMBLY_BYTES {
                         // A fragment run that never ends; drop the in-flight data
                         // and resync at the next start-of-AU.
-                        self.fu.clear();
-                        self.fu_active = false;
+                        self.fragment_start = None;
                         self.au.clear();
                         return None;
                     }
                     if end {
-                        let nal = core::mem::take(&mut self.fu);
-                        self.push_nal(&nal);
-                        self.fu_active = false;
+                        self.fragment_start = None;
                     }
                 }
             }
@@ -135,13 +136,26 @@ impl RtpH264Depayloader {
             _ => {}
         }
 
-        if marker && !self.au.is_empty() {
-            Some(AccessUnit {
-                data: core::mem::take(&mut self.au),
-                rtp_timestamp: self.timestamp,
-            })
-        } else {
-            None
+        if !marker {
+            return None;
+        }
+        self.abandon_fragment();
+        if self.au.is_empty() {
+            return None;
+        }
+        // the next access unit is likely about as large as this one
+        let next_capacity = self.au.len();
+        let data = core::mem::replace(&mut self.au, Vec::with_capacity(next_capacity));
+        Some(AccessUnit {
+            data,
+            rtp_timestamp: self.timestamp,
+        })
+    }
+
+    // a fragment run cut short by another NAL or the marker is incomplete, drop it
+    fn abandon_fragment(&mut self) {
+        if let Some(start) = self.fragment_start.take() {
+            self.au.truncate(start);
         }
     }
 
@@ -151,7 +165,7 @@ impl RtpH264Depayloader {
         if nal.is_empty() {
             return;
         }
-        self.au.extend_from_slice(&[0, 0, 0, 1]);
+        self.au.extend_from_slice(&ANNEX_B_START_CODE);
         self.au.extend_from_slice(nal);
         if self.au.len() > MAX_ASSEMBLY_BYTES {
             // An access unit whose marker never arrives; drop it rather than
@@ -298,5 +312,22 @@ mod tests {
             .depacketize(&fu_a_packet(101, 2, true, false, true, &[4, 5, 6]))
             .expect("resyncs and completes a new AU");
         assert_eq!(unit.data, wrap(&[&[0x65, 1, 2, 3, 4, 5, 6]]));
+    }
+
+    #[test]
+    fn fu_a_run_cut_short_by_another_nal_is_dropped() {
+        let mut d = RtpH264Depayloader::new();
+        assert!(d
+            .depacketize(&fu_a_packet(0, 9000, false, true, false, &[1, 2]))
+            .is_none());
+        let mut single = alloc::vec![0x80u8, 0x80 | 96];
+        single.extend_from_slice(&1u16.to_be_bytes());
+        single.extend_from_slice(&9000u32.to_be_bytes());
+        single.extend_from_slice(&[0, 0, 0, 0]);
+        single.extend_from_slice(&[0x41, 7]);
+        let au = d
+            .depacketize(&single)
+            .expect("the marker closes the access unit");
+        assert_eq!(au.data, wrap(&[&[0x41, 7]]), "only the complete NAL");
     }
 }
