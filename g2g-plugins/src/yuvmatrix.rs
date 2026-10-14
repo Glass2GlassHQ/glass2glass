@@ -38,6 +38,11 @@ fn round_to_i32(v: f32) -> i32 {
     }
 }
 
+/// `c . (r, g, b)` in the 8-bit fixed point of the matrix rows, rounded.
+fn fixed_point_dot(c: [i32; 3], r: i32, g: i32, b: i32) -> i32 {
+    (c[0] * r + c[1] * g + c[2] * b + FIXED_POINT_HALF) >> FIXED_POINT_SHIFT
+}
+
 /// How far the luma and chroma samples of a conversion swing, and where its
 /// black point sits.
 struct SampleSwing {
@@ -153,13 +158,17 @@ impl YuvRgbMatrix {
 
     /// 8-bit RGB -> 8-bit YUV, clamped to the sample range.
     pub(crate) fn rgb_to_yuv(&self, r: i32, g: i32, b: i32) -> (i32, i32, i32) {
-        let dot =
-            |c: [i32; 3]| (c[0] * r + c[1] * g + c[2] * b + FIXED_POINT_HALF) >> FIXED_POINT_SHIFT;
+        let dot = |c: [i32; 3]| fixed_point_dot(c, r, g, b);
         (
-            (dot(self.luma_from_rgb) + self.luma_floor).clamp(0, SAMPLE_MAX),
+            self.rgb_to_luma(r, g, b),
             (dot(self.cb_from_rgb) + CHROMA_NEUTRAL).clamp(0, SAMPLE_MAX),
             (dot(self.cr_from_rgb) + CHROMA_NEUTRAL).clamp(0, SAMPLE_MAX),
         )
+    }
+
+    /// The luma of [`rgb_to_yuv`](Self::rgb_to_yuv), without the chroma.
+    pub(crate) fn rgb_to_luma(&self, r: i32, g: i32, b: i32) -> i32 {
+        (fixed_point_dot(self.luma_from_rgb, r, g, b) + self.luma_floor).clamp(0, SAMPLE_MAX)
     }
 
     /// 8-bit YUV -> 8-bit RGB, clamped to the sample range.

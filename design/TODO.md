@@ -45,8 +45,6 @@ Codecs and parsers:
 
 Raw video and GPU:
 
-- `videoconvert` hub path allocates i32 planes per frame, has no direct
-  P010/NV12 arm, and computes U and V for every luma sample.
 - `dmabufwgpu` and `wgpudmabuf` create Vulkan buffers per frame.
 - `deinterlace` yadif copies each frame twice.
 - `colorspace` calls `powf` per pixel on HDR paths.

@@ -83,6 +83,8 @@ pub struct VideoConvert {
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
+    /// Working planes of the general conversion, reused across frames.
+    hub: HubScratch,
 }
 
 /// Format, geometry, framerate and colorimetry of the stream a convert is
@@ -109,6 +111,7 @@ impl VideoConvert {
             configured: false,
             last_caps: None,
             emitted: 0,
+            hub: HubScratch::default(),
         }
     }
 
@@ -124,6 +127,7 @@ impl VideoConvert {
             configured: false,
             last_caps: None,
             emitted: 0,
+            hub: HubScratch::default(),
         }
     }
 
@@ -402,16 +406,33 @@ impl AsyncElement for VideoConvert {
                         #[cfg(feature = "offload")]
                         let converted = {
                             let owned: Vec<u8> = src[..needed].to_vec();
-                            crate::offload::run_blocking(move || {
-                                convert_strided(
-                                    &owned, format, out_fmt, wu, hu, src_stride, &matrix,
-                                )
+                            let mut hub = core::mem::take(&mut self.hub);
+                            let (converted, hub) = crate::offload::run_blocking(move || {
+                                let converted = convert_strided(
+                                    &owned,
+                                    format,
+                                    out_fmt,
+                                    (wu, hu),
+                                    src_stride,
+                                    &matrix,
+                                    &mut hub,
+                                );
+                                (converted, hub)
                             })
-                            .await
+                            .await;
+                            self.hub = hub;
+                            converted
                         };
                         #[cfg(not(feature = "offload"))]
-                        let converted =
-                            convert_strided(src, format, out_fmt, wu, hu, src_stride, &matrix);
+                        let converted = convert_strided(
+                            src,
+                            format,
+                            out_fmt,
+                            (wu, hu),
+                            src_stride,
+                            &matrix,
+                            &mut self.hub,
+                        );
                         MemoryDomain::System(SystemSlice::from_boxed(converted))
                     };
 
@@ -558,10 +579,10 @@ pub fn convert(
         src,
         from,
         to,
-        w,
-        h,
+        (w, h),
         row_bytes(from, w),
         &YuvRgbMatrix::new(colorimetry),
+        &mut HubScratch::default(),
     )
 }
 
@@ -573,10 +594,10 @@ fn convert_strided(
     src: &[u8],
     from: RawVideoFormat,
     to: RawVideoFormat,
-    w: usize,
-    h: usize,
+    (w, h): (usize, usize),
     src_stride: usize,
     matrix: &YuvRgbMatrix,
+    hub: &mut HubScratch,
 ) -> Box<[u8]> {
     use RawVideoFormat::*;
     match (from, to) {
@@ -592,14 +613,14 @@ fn convert_strided(
             &widen_rgb(src, w, h, src_stride),
             Rgba8,
             to,
-            w,
-            h,
+            (w, h),
             w * 4,
             matrix,
+            hub,
         ),
         (Rgba8, Rgb8) => narrow_rgba(src, w, h, src_stride),
         (_, Rgb8) => narrow_rgba(
-            &convert_strided(src, from, Rgba8, w, h, src_stride, matrix),
+            &convert_strided(src, from, Rgba8, (w, h), src_stride, matrix, hub),
             w,
             h,
             w * 4,
@@ -617,10 +638,10 @@ fn convert_strided(
                 &pack_rows(src, h, src_stride, tight),
                 from,
                 to,
-                w,
-                h,
+                (w, h),
                 tight,
                 matrix,
+                hub,
             )
         }
         (Nv12, I420) => nv12_to_i420(src, w, h),
@@ -634,10 +655,11 @@ fn convert_strided(
         (Yuyv, Nv12) => yuyv_to_yuv420(src, w, h, true),
         (Yuyv, Rgba8) => yuyv_to_rgb(src, w, h, 0, 2, matrix),
         (Yuyv, Bgra8) => yuyv_to_rgb(src, w, h, 2, 0, matrix),
+        (P010, Nv12) | (Nv12, P010) => rescale_semi_planar(src, from, to, w, h, &mut hub.depth),
         // Any conversion involving a high-bit-depth / 4:2:2 / 4:4:4 format (the
         // pairs above are the fast 8-bit paths) goes through the general hub:
         // unpack to 4:4:4 YUV at a working depth, then repack to the target.
-        _ => convert_via_hub(src, from, to, w, h, matrix),
+        _ => convert_via_hub(src, from, to, w, h, matrix, hub),
     }
 }
 
@@ -679,9 +701,68 @@ fn convert_via_hub(
     w: usize,
     h: usize,
     matrix: &YuvRgbMatrix,
+    hub: &mut HubScratch,
 ) -> Box<[u8]> {
-    let (y, u, v, wd) = to_hub(src, from, w, h, matrix);
-    from_hub(&y, &u, &v, wd, to, w, h, matrix)
+    let wd = to_hub(src, from, w, h, matrix, hub);
+    from_hub(hub, wd, to, w, h, matrix)
+}
+
+/// The 4:4:4 Y, U, V planes [`to_hub`] fills and [`from_hub`] reads, and the
+/// depth table the repack scales through.
+#[derive(Debug, Default)]
+struct HubScratch {
+    y: Vec<i32>,
+    u: Vec<i32>,
+    v: Vec<i32>,
+    depth: DepthTable,
+}
+
+/// [`scale_depth`] between one pair of bit depths, as a lookup table.
+#[derive(Debug, Default)]
+struct DepthTable {
+    from: u8,
+    to: u8,
+    values: Vec<i32>,
+}
+
+impl DepthTable {
+    /// Make this the `from_d` to `to_d` table, rebuilt only when the pair changes.
+    fn set(&mut self, from_d: u8, to_d: u8) {
+        if (self.from, self.to) == (from_d, to_d) && !self.values.is_empty() {
+            return;
+        }
+        (self.from, self.to) = (from_d, to_d);
+        self.values = (0..1i32 << from_d)
+            .map(|value| scale_depth(value, from_d, to_d))
+            .collect();
+    }
+
+    /// `value` rescaled. A sample above the source depth's range (stray high
+    /// bits in a 16-bit word) takes the top value, as [`scale_depth`] clamps it.
+    fn get(&self, value: i32) -> i32 {
+        self.values[(value as usize).min(self.values.len() - 1)]
+    }
+}
+
+/// P010 to NV12 or back: one plane layout, each sample rescaled between the
+/// two depths.
+fn rescale_semi_planar(
+    src: &[u8],
+    from: RawVideoFormat,
+    to: RawVideoFormat,
+    w: usize,
+    h: usize,
+    depth: &mut DepthTable,
+) -> Box<[u8]> {
+    let (cw, ch) = chroma_420_size(w, h);
+    let samples = w * h + 2 * cw * ch;
+    let (reader, writer) = (SemiPlanar::of(from), SemiPlanar::of(to));
+    depth.set(from.bit_depth(), to.bit_depth());
+    let mut dst = vec![0u8; samples * writer.bytes_per_sample];
+    for index in 0..samples {
+        writer.write(&mut dst, index, depth.get(reader.read(src, index)));
+    }
+    dst.into_boxed_slice()
 }
 
 /// Scale one sample from `from_d`-bit to `to_d`-bit full range, rounded to nearest.
@@ -702,11 +783,14 @@ fn to_hub(
     w: usize,
     h: usize,
     matrix: &YuvRgbMatrix,
-) -> (Vec<i32>, Vec<i32>, Vec<i32>, u8) {
+    hub: &mut HubScratch,
+) -> u8 {
     let n = w * h;
-    let mut y = vec![0i32; n];
-    let mut u = vec![0i32; n];
-    let mut v = vec![0i32; n];
+    // every sample below is written, so a stale plane needs no clearing
+    hub.y.resize(n, 0);
+    hub.u.resize(n, 0);
+    hub.v.resize(n, 0);
+    let (y, u, v) = (&mut hub.y, &mut hub.u, &mut hub.v);
     match from {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => {
             let (r_off, b_off) = crate::pixel::rgba_rb_offsets(from);
@@ -719,7 +803,7 @@ fn to_hub(
                 );
                 (y[i], u[i], v[i]) = (yy, uu, vv);
             }
-            (y, u, v, 8)
+            8
         }
         RawVideoFormat::Yuyv => {
             // Packed Y0 U Y1 V: each macropixel is two luma, one shared chroma pair,
@@ -732,7 +816,7 @@ fn to_hub(
                     (y[i], u[i], v[i]) = (luma as i32, cu as i32, cv as i32);
                 }
             }
-            (y, u, v, 8)
+            8
         }
         RawVideoFormat::Nv12 | RawVideoFormat::P010 => {
             let (cw, _) = chroma_420_size(w, h);
@@ -746,7 +830,7 @@ fn to_hub(
                     v[i] = semi_planar.read(src, n + 2 * ci + 1);
                 }
             }
-            (y, u, v, from.bit_depth())
+            from.bit_depth()
         }
         // The fully-planar family: read each plane at the format's depth, replicate
         // chroma up to 4:4:4 per the subsampling.
@@ -772,7 +856,7 @@ fn to_hub(
                     v[i] = rd(planes[2].0, ci);
                 }
             }
-            (y, u, v, d)
+            d
         }
     }
 }
@@ -780,11 +864,8 @@ fn to_hub(
 /// Repack full-resolution (4:4:4) planar Y, U, V at working depth `wd` into `to`:
 /// RGB is color-converted from 8-bit YUV; the YUV targets downsample chroma by
 /// box-averaging and scale the depth.
-#[allow(clippy::too_many_arguments)]
 fn from_hub(
-    y: &[i32],
-    u: &[i32],
-    v: &[i32],
+    hub: &mut HubScratch,
     wd: u8,
     to: RawVideoFormat,
     w: usize,
@@ -792,16 +873,18 @@ fn from_hub(
     matrix: &YuvRgbMatrix,
 ) -> Box<[u8]> {
     let n = w * h;
+    let target_depth = match to {
+        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 | RawVideoFormat::Yuyv => 8,
+        f => f.bit_depth(),
+    };
+    hub.depth.set(wd, target_depth);
+    let (y, u, v, depth) = (&hub.y, &hub.u, &hub.v, &hub.depth);
     match to {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => {
             let (r_off, b_off) = crate::pixel::rgba_rb_offsets(to);
             let mut dst = vec![0u8; n * 4];
             for i in 0..n {
-                let (yy, uu, vv) = (
-                    scale_depth(y[i], wd, 8),
-                    scale_depth(u[i], wd, 8),
-                    scale_depth(v[i], wd, 8),
-                );
+                let (yy, uu, vv) = (depth.get(y[i]), depth.get(u[i]), depth.get(v[i]));
                 let (r, g, b) = matrix.yuv_to_rgb(yy, uu, vv);
                 let p = i * 4;
                 dst[p + r_off] = r as u8;
@@ -814,17 +897,16 @@ fn from_hub(
         RawVideoFormat::Nv12 | RawVideoFormat::P010 => {
             let (cw, ch) = chroma_420_size(w, h);
             let semi_planar = SemiPlanar::of(to);
-            let depth = to.bit_depth();
             let mut dst = vec![0u8; (n + 2 * cw * ch) * semi_planar.bytes_per_sample];
             for (i, &luma) in y.iter().enumerate() {
-                semi_planar.write(&mut dst, i, scale_depth(luma, wd, depth));
+                semi_planar.write(&mut dst, i, depth.get(luma));
             }
             for cy in 0..ch {
                 for cx in 0..cw {
                     let (su, sv) = avg_chroma(u, v, w, h, cx, cy, 1, 1);
                     let ci = cy * cw + cx;
-                    semi_planar.write(&mut dst, n + 2 * ci, scale_depth(su, wd, depth));
-                    semi_planar.write(&mut dst, n + 2 * ci + 1, scale_depth(sv, wd, depth));
+                    semi_planar.write(&mut dst, n + 2 * ci, depth.get(su));
+                    semi_planar.write(&mut dst, n + 2 * ci + 1, depth.get(sv));
                 }
             }
             dst.into_boxed_slice()
@@ -839,10 +921,10 @@ fn from_hub(
                     // an odd width's last group repeats the edge luma
                     let right = (left + 1).min(row * w + w - 1);
                     let group = row * stride + cx * YUYV_GROUP_BYTES;
-                    dst[group] = scale_depth(y[left], wd, 8) as u8;
-                    dst[group + 1] = scale_depth(su, wd, 8) as u8;
-                    dst[group + 2] = scale_depth(y[right], wd, 8) as u8;
-                    dst[group + 3] = scale_depth(sv, wd, 8) as u8;
+                    dst[group] = depth.get(y[left]) as u8;
+                    dst[group + 1] = depth.get(su) as u8;
+                    dst[group + 2] = depth.get(y[right]) as u8;
+                    dst[group + 3] = depth.get(sv) as u8;
                 }
             }
             dst.into_boxed_slice()
@@ -850,14 +932,13 @@ fn from_hub(
         // The fully-planar family: downsample chroma to the target subsampling
         // (averaging each block), scale to the target depth, write LE u16 if > 8.
         f => {
-            let d = f.bit_depth();
             let bps = f.bytes_per_sample();
             let (hs, vs) = f.chroma_shift().expect("planar format");
             let planes = planar_planes(f, w, h);
             let total = planes[2].0 + planes[2].1 * planes[2].2 * bps;
             let mut dst = vec![0u8; total];
             let mut wr = |off: usize, idx: usize, val: i32| {
-                let val = scale_depth(val, wd, d);
+                let val = depth.get(val);
                 if bps == 2 {
                     let b = (val as u16).to_le_bytes();
                     dst[off + idx * 2] = b[0];
@@ -1106,7 +1187,7 @@ fn rgb_to_yuv420(
                 src[p + 1] as i32,
                 src[p + b_off] as i32,
             );
-            dst[y * w + x] = matrix.rgb_to_yuv(r, g, b).0 as u8;
+            dst[y * w + x] = matrix.rgb_to_luma(r, g, b) as u8;
         }
     }
     for cy in 0..ch {
@@ -1425,6 +1506,54 @@ mod tests {
             Colorimetry::UNKNOWN,
         );
         assert_eq!(&back[..], &p010[..]);
+    }
+
+    #[test]
+    fn p010_nv12_rescale_matches_the_full_range_depth_scale() {
+        let words = |samples: &[u16]| -> Vec<u8> {
+            samples
+                .iter()
+                .flat_map(|sample| sample.to_le_bytes())
+                .collect()
+        };
+        // 2x2: 10-bit luma 0, 2, 512, 1023, then the interleaved U 4, V 1020 pair
+        let ten_bit = [0u16, 2, 512, 1023, 4, 1020];
+        let p010 = words(&ten_bit.map(|sample| sample << 6));
+        let nv12 = convert(
+            &p010,
+            RawVideoFormat::P010,
+            RawVideoFormat::Nv12,
+            2,
+            2,
+            Colorimetry::UNKNOWN,
+        );
+        let expected = ten_bit.map(|sample| scale_depth(sample as i32, 10, 8) as u8);
+        assert_eq!(&nv12[..], &expected[..]);
+        let back = convert(
+            &nv12,
+            RawVideoFormat::Nv12,
+            RawVideoFormat::P010,
+            2,
+            2,
+            Colorimetry::UNKNOWN,
+        );
+        let widened = expected.map(|sample| (scale_depth(sample as i32, 8, 10) as u16) << 6);
+        assert_eq!(&back[..], &words(&widened)[..]);
+    }
+
+    #[test]
+    fn stray_high_bits_in_a_ten_bit_word_clamp_instead_of_panicking() {
+        // 2x2 I420p10 with every sample word fully set
+        let words = [u8::MAX; 2 * 6];
+        let i420 = convert(
+            &words,
+            RawVideoFormat::I420p10,
+            RawVideoFormat::I420,
+            2,
+            2,
+            Colorimetry::UNKNOWN,
+        );
+        assert!(i420.iter().all(|&sample| sample == u8::MAX));
     }
 
     #[test]

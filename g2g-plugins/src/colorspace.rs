@@ -810,7 +810,7 @@ fn convert_yuv420(
                 for column in columns.clone() {
                     let index = row * width + column;
                     let (r, g, b) = transform.yuv_to_target_rgb(src[index] as i32, u, v);
-                    dst[index] = transform.encode.rgb_to_yuv(r, g, b).0 as u8;
+                    dst[index] = transform.encode.rgb_to_luma(r, g, b) as u8;
                     sum_r += r;
                     sum_g += g;
                     sum_b += b;
