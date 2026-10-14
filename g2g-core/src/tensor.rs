@@ -22,7 +22,7 @@
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
 #[cfg(feature = "alloc")]
-use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::caps::TensorDType;
 
@@ -159,32 +159,44 @@ impl TensorView {
     /// extents/strides don't fit the buffer it was paired with).
     #[cfg(feature = "alloc")]
     pub fn materialize(&self, backing: &[u8]) -> Box<[u8]> {
-        let elem = self.dtype.size();
-        let rank = self.rank as usize;
-        let total = self.num_elements();
-        let mut out = vec![0u8; total * elem];
-        // Row-major odometer over the logical index space: gather each element
-        // from `backing` at offset + sum(index[i] * strides[i]), last axis
-        // fastest. Bounded by `total` so it terminates even if a stride is 0.
+        let mut out = Vec::with_capacity(self.materialized_len());
+        self.materialize_into(backing, &mut out);
+        out.into_boxed_slice()
+    }
+
+    /// As [`materialize`](Self::materialize), appending the elements to `out`.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn materialize_into(&self, backing: &[u8], out: &mut Vec<u8>) {
+        if self.num_elements() == 0 {
+            return;
+        }
+        // Trailing axes laid out densely collapse into one copy per run, so a
+        // contiguous view is a single copy and a crop one copy per row.
+        let mut run_bytes = self.dtype.size();
+        let mut outer = self.rank as usize;
+        while outer > 0 && self.strides[outer - 1] == run_bytes as isize {
+            run_bytes *= self.shape[outer - 1] as usize;
+            outer -= 1;
+        }
+        let runs: usize = self.shape[..outer].iter().map(|&d| d as usize).product();
+        out.reserve(runs * run_bytes);
+        // Row-major odometer over the outer axes, carrying the source offset
+        // along instead of recomputing it per run.
         let mut index = [0u32; MAX_TENSOR_RANK];
-        let mut dst = 0usize;
-        for _ in 0..total {
-            let mut src = self.offset as isize;
-            for (idx, stride) in index[..rank].iter().zip(&self.strides[..rank]) {
-                src += *idx as isize * *stride;
-            }
-            let src = src as usize;
-            out[dst..dst + elem].copy_from_slice(&backing[src..src + elem]);
-            dst += elem;
-            for axis in (0..rank).rev() {
+        let mut src = self.offset as isize;
+        for _ in 0..runs {
+            let start = src as usize;
+            out.extend_from_slice(&backing[start..start + run_bytes]);
+            for axis in (0..outer).rev() {
                 index[axis] += 1;
+                src += self.strides[axis];
                 if index[axis] < self.shape[axis] {
                     break;
                 }
                 index[axis] = 0;
+                src -= self.strides[axis] * self.shape[axis] as isize;
             }
         }
-        out.into_boxed_slice()
     }
 }
 
@@ -192,7 +204,6 @@ impl TensorView {
 mod tests {
     use super::*;
     use alloc::sync::Arc;
-    use alloc::vec::Vec;
 
     #[test]
     fn contiguous_strides_and_materialize_roundtrip() {
@@ -273,5 +284,25 @@ mod tests {
         let v = TensorView::contiguous(TensorDType::U8, &[1, 2, 4]);
         let m = v.reversed_axis(1);
         assert_eq!(&*m.materialize(&backing), &[4, 5, 6, 7, 0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn crop_copies_one_run_per_row_from_its_offset() {
+        // 4x4 u8 0..16, cropped to the 2x2 window at row 1, column 1.
+        let backing: Vec<u8> = (0..16).collect();
+        let crop = TensorView {
+            shape: [2, 2, 0, 0, 0, 0],
+            strides: [4, 1, 0, 0, 0, 0],
+            rank: 2,
+            offset: 5,
+            dtype: TensorDType::U8,
+        };
+        assert_eq!(&*crop.materialize(&backing), &[5, 6, 9, 10]);
+    }
+
+    #[test]
+    fn empty_view_materializes_to_nothing() {
+        let v = TensorView::contiguous(TensorDType::U8, &[0, 3]);
+        assert!(v.materialize(&[]).is_empty());
     }
 }

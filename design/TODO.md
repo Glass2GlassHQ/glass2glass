@@ -40,7 +40,6 @@ Bugs:
 
 Core, bindings, ML:
 
-- `TensorView::materialize` copies one element at a time.
 - `wire::encode_packet` starts at zero capacity and copies the payload twice.
 - `ElectedClock::now_ns` locks per read, `pacing::judge` clones `ClockSync` twice.
 - `BlobMeta::get` allocates a `String` per lookup.
