@@ -6,7 +6,7 @@
 //! only the byte transport under it differs.
 
 use g2g_core::wire::WireError;
-use g2g_core::{G2gError, HardwareError};
+use g2g_core::{Caps, G2gError, HardwareError};
 
 /// Map a [`WireError`] to the pipeline error type. A device / foreign memory
 /// domain surfaces as `UnsupportedDomain` (the same error a CPU sink raises);
@@ -15,6 +15,35 @@ pub(crate) fn map_wire(e: WireError) -> G2gError {
     match e {
         WireError::UnsupportedDomain => G2gError::UnsupportedDomain,
         _ => G2gError::Hardware(HardwareError::Other),
+    }
+}
+
+// the current caps and the last ones the far side was sent
+#[derive(Debug, Default)]
+pub(crate) struct PeerCaps {
+    current: Option<Caps>,
+    sent: Option<Caps>,
+}
+
+impl PeerCaps {
+    pub(crate) fn set_current(&mut self, caps: Caps) {
+        self.current = Some(caps);
+    }
+
+    // a new connection has seen nothing yet
+    #[cfg(any(feature = "remote", feature = "remote-ws", feature = "webtransport"))]
+    pub(crate) fn forget_sent(&mut self) {
+        self.sent = None;
+    }
+
+    // the current caps when the far side does not have them, recorded as sent
+    pub(crate) fn take_unsent(&mut self) -> Option<Caps> {
+        let current = self.current.as_ref()?;
+        if self.sent.as_ref() == Some(current) {
+            return None;
+        }
+        self.sent = Some(current.clone());
+        self.sent.clone()
     }
 }
 
@@ -146,6 +175,24 @@ mod tests {
             sequence,
             meta: Default::default(),
         })
+    }
+
+    #[test]
+    fn peer_caps_are_sent_once_per_change_and_connection() {
+        let caps = |format| g2g_core::Caps::Text { format };
+        let mut peer = PeerCaps::default();
+        assert_eq!(peer.take_unsent(), None, "nothing configured yet");
+        peer.set_current(caps(g2g_core::TextFormat::Utf8));
+        assert_eq!(peer.take_unsent(), Some(caps(g2g_core::TextFormat::Utf8)));
+        peer.set_current(caps(g2g_core::TextFormat::Utf8));
+        assert_eq!(peer.take_unsent(), None, "unchanged caps are not resent");
+        peer.forget_sent();
+        assert_eq!(peer.take_unsent(), Some(caps(g2g_core::TextFormat::Utf8)));
+        peer.set_current(caps(g2g_core::TextFormat::PangoMarkup));
+        assert_eq!(
+            peer.take_unsent(),
+            Some(caps(g2g_core::TextFormat::PangoMarkup))
+        );
     }
 
     #[tokio::test]

@@ -41,7 +41,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket};
 
-use crate::remotewire::map_wire;
+use crate::remotewire::{map_wire, PeerCaps};
 use crate::webutil::Inbox;
 
 /// # Example
@@ -65,8 +65,7 @@ pub struct WsWireTransform {
     configured: bool,
     /// Caps recorded in `configure_pipeline`, sent to the peer (deduped) as the
     /// leading `CapsChanged` so its subgraph configures before the first frame.
-    configured_caps: Option<Caps>,
-    last_sent: Option<Caps>,
+    caps: PeerCaps,
     /// Whether the peer returns metadata alone (see [`crate::metaonly`]).
     meta_only: bool,
     emitted: u64,
@@ -98,8 +97,7 @@ impl WsWireTransform {
             _on_close: None,
             opened: false,
             configured: false,
-            configured_caps: None,
-            last_sent: None,
+            caps: PeerCaps::default(),
             meta_only: false,
             emitted: 0,
         }
@@ -137,12 +135,8 @@ impl WsWireTransform {
     /// Send the current caps to the peer once, deduped, so its subgraph
     /// configures before the first frame.
     async fn send_caps_if_new(&mut self) -> Result<(), G2gError> {
-        if let Some(caps) = self.configured_caps.clone() {
-            if self.last_sent.as_ref() != Some(&caps) {
-                self.send(&PipelinePacket::CapsChanged(caps.clone()))
-                    .await?;
-                self.last_sent = Some(caps);
-            }
+        if let Some(caps) = self.caps.take_unsent() {
+            self.send(&PipelinePacket::CapsChanged(caps)).await?;
         }
         Ok(())
     }
@@ -165,7 +159,7 @@ impl AsyncElement for WsWireTransform {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.configured_caps = Some(absolute_caps.clone());
+        self.caps.set_current(absolute_caps.clone());
         // Idempotent socket open: the runner re-calls configure on every
         // mid-stream CapsChanged; recreating the socket would drop the open
         // connection (and its buffered onopen), hanging the first send.
@@ -250,11 +244,8 @@ impl AsyncElement for WsWireTransform {
                     out.push(emit).await?;
                 }
                 PipelinePacket::CapsChanged(caps) => {
-                    if self.last_sent.as_ref() != Some(&caps) {
-                        self.send(&PipelinePacket::CapsChanged(caps.clone()))
-                            .await?;
-                        self.last_sent = Some(caps.clone());
-                    }
+                    self.caps.set_current(caps.clone());
+                    self.send_caps_if_new().await?;
                     out.push(PipelinePacket::CapsChanged(caps)).await?;
                 }
                 PipelinePacket::Eos => {

@@ -28,6 +28,7 @@ use g2g_core::{
 };
 
 use crate::remotesource::TransportFuture;
+use crate::remotewire::PeerCaps;
 
 /// Backoff between reconnect attempts. Short and fixed: the common case is a
 /// downstream node coming up within a second or two, not a long outage.
@@ -74,10 +75,9 @@ pub trait PacketClient: Send + 'static {
 pub struct RemoteClient<T: PacketClient> {
     transport: T,
     /// The caps the runner last handed `configure_pipeline`. Sent over the wire
-    /// (deduped against `last_sent`) before the next data frame, so the far side
-    /// always sees the current caps as an ordered `CapsChanged`.
-    configured_caps: Option<Caps>,
-    last_sent: Option<Caps>,
+    /// (deduped) before the next data frame, so the far side always sees the
+    /// current caps as an ordered `CapsChanged`.
+    caps: PeerCaps,
     configured: bool,
     sent: u64,
     /// Reconnect budget: 0 (default) = no reconnect (a failure is a hard error);
@@ -101,8 +101,7 @@ impl<T: PacketClient> RemoteClient<T> {
     pub(crate) fn from_transport(transport: T) -> Self {
         Self {
             transport,
-            configured_caps: None,
-            last_sent: None,
+            caps: PeerCaps::default(),
             configured: false,
             sent: 0,
             reconnect_attempts: 0,
@@ -134,16 +133,13 @@ impl<T: PacketClient> RemoteClient<T> {
                 if !self.transport.is_connected() {
                     self.transport.connect().await?;
                     // A new connection needs the caps re-sent as its first packet.
-                    self.last_sent = None;
+                    self.caps.forget_sent();
                 }
-                if let Some(caps) = self.configured_caps.clone() {
-                    if self.last_sent.as_ref() != Some(&caps) {
-                        self.transport
-                            .send(&PipelinePacket::CapsChanged(caps.clone()))
-                            .await?;
-                        self.sent += 1;
-                        self.last_sent = Some(caps);
-                    }
+                if let Some(caps) = self.caps.take_unsent() {
+                    self.transport
+                        .send(&PipelinePacket::CapsChanged(caps))
+                        .await?;
+                    self.sent += 1;
                 }
                 if let Some(p) = packet {
                     self.transport.send(p).await?;
@@ -156,7 +152,7 @@ impl<T: PacketClient> RemoteClient<T> {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     self.transport.reset();
-                    self.last_sent = None;
+                    self.caps.forget_sent();
                     if tries >= self.reconnect_attempts {
                         return Err(e);
                     }
@@ -191,7 +187,7 @@ impl<T: PacketClient> AsyncElement for RemoteClient<T> {
             .configure_connect(self.reconnect_attempts == 0)?;
         // The caps send is deferred to `process`; record the current caps so the
         // next send emits them if they changed.
-        self.configured_caps = Some(absolute_caps.clone());
+        self.caps.set_current(absolute_caps.clone());
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -206,14 +202,14 @@ impl<T: PacketClient> AsyncElement for RemoteClient<T> {
                 return Err(G2gError::NotConfigured);
             }
             // `deliver` (re)connects on first use, emits the current caps as an
-            // ordered leading `CapsChanged` (deduped against `last_sent`), then
+            // ordered leading `CapsChanged` (deduped), then
             // sends the packet, retrying the whole cycle on failure when reconnect
             // is enabled.
             match packet {
                 PipelinePacket::CapsChanged(caps) => {
                     // Mid-stream refinement: adopt it as the current caps and let
                     // `deliver` send it (deduped). No trailing data packet.
-                    self.configured_caps = Some(caps);
+                    self.caps.set_current(caps);
                     self.deliver(None).await?;
                 }
                 PipelinePacket::Eos => {

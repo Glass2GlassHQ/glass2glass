@@ -48,6 +48,7 @@ use g2g_core::{
 use crate::metaonly::{merge_meta, META_ONLY_PROPERTY};
 use crate::remoteclient::PacketClient;
 use crate::remotesource::TransportFuture;
+use crate::remotewire::PeerCaps;
 
 /// A [`PacketClient`] whose connection is also read back, as the remote-transform
 /// round trip needs. The client-role identity (`NAME` / `PROPERTIES`) describes
@@ -71,10 +72,9 @@ pub struct RemoteTransform<T: PacketDuplex> {
     transport: T,
     /// Whether the peer returns metadata alone (see [`META_ONLY_PROPERTY`]).
     meta_only: bool,
-    /// Caps recorded in `configure_pipeline`, sent to the peer (deduped against
-    /// `last_sent`) as the leading `CapsChanged` so its subgraph configures.
-    configured_caps: Option<Caps>,
-    last_sent: Option<Caps>,
+    /// Caps recorded in `configure_pipeline`, sent to the peer (deduped) as the
+    /// leading `CapsChanged` so its subgraph configures.
+    caps: PeerCaps,
     configured: bool,
     emitted: u64,
 }
@@ -95,8 +95,7 @@ impl<T: PacketDuplex> RemoteTransform<T> {
         Self {
             transport,
             meta_only: false,
-            configured_caps: None,
-            last_sent: None,
+            caps: PeerCaps::default(),
             configured: false,
             emitted: 0,
         }
@@ -120,14 +119,13 @@ impl<T: PacketDuplex> RemoteTransform<T> {
         self.meta_only
     }
 
-    /// Send `caps` to the peer unless it already has them, so its subgraph
-    /// configures before the first frame.
-    async fn send_caps_if_new(&mut self, caps: Caps) -> Result<(), G2gError> {
-        if self.last_sent.as_ref() != Some(&caps) {
+    /// Send the current caps to the peer unless it already has them, so its
+    /// subgraph configures before the first frame.
+    async fn send_caps_if_new(&mut self) -> Result<(), G2gError> {
+        if let Some(caps) = self.caps.take_unsent() {
             self.transport
-                .send(&PipelinePacket::CapsChanged(caps.clone()))
+                .send(&PipelinePacket::CapsChanged(caps))
                 .await?;
-            self.last_sent = Some(caps);
         }
         Ok(())
     }
@@ -152,7 +150,7 @@ impl<T: PacketDuplex> AsyncElement for RemoteTransform<T> {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         // Every transport here has an async handshake, so the connect is deferred
         // to `process`; record the caps for the leading wire CapsChanged.
-        self.configured_caps = Some(absolute_caps.clone());
+        self.caps.set_current(absolute_caps.clone());
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -171,9 +169,7 @@ impl<T: PacketDuplex> AsyncElement for RemoteTransform<T> {
                 self.transport.connect().await?;
             }
             // The peer's subgraph must see the caps before the first frame.
-            if let Some(caps) = self.configured_caps.clone() {
-                self.send_caps_if_new(caps).await?;
-            }
+            self.send_caps_if_new().await?;
 
             match packet {
                 PipelinePacket::DataFrame(frame) => {
@@ -199,7 +195,8 @@ impl<T: PacketDuplex> AsyncElement for RemoteTransform<T> {
                 PipelinePacket::CapsChanged(caps) => {
                     // Forward mid-stream refinement to the peer (deduped) and
                     // downstream. The dedup above already sent it if unchanged.
-                    self.send_caps_if_new(caps.clone()).await?;
+                    self.caps.set_current(caps.clone());
+                    self.send_caps_if_new().await?;
                     out.push(PipelinePacket::CapsChanged(caps)).await?;
                 }
                 PipelinePacket::Eos => {

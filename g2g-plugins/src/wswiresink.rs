@@ -40,7 +40,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{Event, WebSocket};
 
-use crate::remotewire::map_wire;
+use crate::remotewire::{map_wire, PeerCaps};
 use crate::webutil::Inbox;
 
 /// # Example
@@ -57,10 +57,9 @@ pub struct WsWireSink {
     _on_open: Option<Closure<dyn FnMut(Event)>>,
     opened: bool,
     configured: bool,
-    /// The caps the runner handed `configure_pipeline`, sent (deduped against
-    /// `last_sent`) as the leading wire `CapsChanged` before the first frame.
-    configured_caps: Option<Caps>,
-    last_sent: Option<Caps>,
+    /// The caps the runner handed `configure_pipeline`, sent (deduped) as the
+    /// leading wire `CapsChanged` before the first frame.
+    caps: PeerCaps,
     sent: u64,
 }
 
@@ -87,8 +86,7 @@ impl WsWireSink {
             _on_open: None,
             opened: false,
             configured: false,
-            configured_caps: None,
-            last_sent: None,
+            caps: PeerCaps::default(),
             sent: 0,
         }
     }
@@ -136,7 +134,7 @@ impl AsyncElement for WsWireSink {
         // `process`). Idempotent socket open: the runner re-calls configure on
         // every mid-stream CapsChanged, and recreating the socket would discard
         // the open connection (and its buffered `onopen`), hanging the first send.
-        self.configured_caps = Some(absolute_caps.clone());
+        self.caps.set_current(absolute_caps.clone());
         if self.configured {
             return Ok(ConfigureOutcome::Accepted);
         }
@@ -167,19 +165,14 @@ impl AsyncElement for WsWireSink {
             // Emit the current caps as the leading ordered `CapsChanged` before any
             // data, deduped so a repeated configure (or the runner-forwarded
             // mid-stream `CapsChanged` packet) sends the caps exactly once.
-            if let Some(caps) = self.configured_caps.clone() {
-                if self.last_sent.as_ref() != Some(&caps) {
-                    self.send(&PipelinePacket::CapsChanged(caps.clone()))
-                        .await?;
-                    self.last_sent = Some(caps);
-                }
+            if let Some(caps) = self.caps.take_unsent() {
+                self.send(&PipelinePacket::CapsChanged(caps)).await?;
             }
             match packet {
                 PipelinePacket::CapsChanged(caps) => {
-                    if self.last_sent.as_ref() != Some(&caps) {
-                        self.send(&PipelinePacket::CapsChanged(caps.clone()))
-                            .await?;
-                        self.last_sent = Some(caps);
+                    self.caps.set_current(caps);
+                    if let Some(caps) = self.caps.take_unsent() {
+                        self.send(&PipelinePacket::CapsChanged(caps)).await?;
                     }
                 }
                 PipelinePacket::Eos => {
