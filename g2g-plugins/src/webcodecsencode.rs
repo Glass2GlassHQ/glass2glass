@@ -161,11 +161,10 @@ impl AsyncElement for WebCodecsEncode {
                 width,
                 height,
                 framerate,
-                interlace: _,
                 ..
             } => (
-                fixed_or_zero(width),
-                fixed_or_zero(height),
+                width.fixed().unwrap_or(0),
+                height.fixed().unwrap_or(0),
                 rate_fps(framerate),
             ),
             _ => return Err(G2gError::CapsMismatch),
@@ -308,7 +307,6 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
             width,
             height,
             framerate,
-            interlace: _,
             ..
         } => CapsSet::one(Caps::CompressedVideo {
             codec: VideoCodec::H264,
@@ -349,13 +347,6 @@ fn h264_caps(w: u32, h: u32, fps: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(fps << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
-    }
-}
-
-fn fixed_or_zero(d: &Dim) -> u32 {
-    match d {
-        Dim::Fixed(v) => *v,
-        _ => 0,
     }
 }
 

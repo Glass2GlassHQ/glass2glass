@@ -436,8 +436,8 @@ impl AsyncElement for WebGpuCanvasSink {
                     height,
                     ..
                 }) => {
-                    self.width = fixed_or_zero(&width);
-                    self.height = fixed_or_zero(&height);
+                    self.width = width.fixed().unwrap_or(0);
+                    self.height = height.fixed().unwrap_or(0);
                     // Size the canvas' drawing buffer to the video so the WebGPU
                     // swap-chain texture matches (get_current_texture reads these).
                     if let Some(canvas) = &self.canvas {
@@ -526,12 +526,5 @@ fn rgba_any() -> Caps {
         framerate: Rate::Any,
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
-    }
-}
-
-fn fixed_or_zero(d: &Dim) -> u32 {
-    match d {
-        Dim::Fixed(v) => *v,
-        _ => 0,
     }
 }

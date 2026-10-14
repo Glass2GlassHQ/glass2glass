@@ -305,9 +305,11 @@ impl AsyncElement for WebCodecsDecode {
                 width,
                 height,
                 ..
-            } if SUPPORTED_CODECS.contains(codec) => {
-                (*codec, fixed_or_zero(width), fixed_or_zero(height))
-            }
+            } if SUPPORTED_CODECS.contains(codec) => (
+                *codec,
+                width.fixed().unwrap_or(0),
+                height.fixed().unwrap_or(0),
+            ),
             _ => return Err(G2gError::CapsMismatch),
         };
         self.codec = codec;
@@ -525,13 +527,6 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
-    }
-}
-
-fn fixed_or_zero(d: &Dim) -> u32 {
-    match d {
-        Dim::Fixed(v) => *v,
-        _ => 0,
     }
 }
 

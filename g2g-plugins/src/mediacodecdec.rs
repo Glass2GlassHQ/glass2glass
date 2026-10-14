@@ -573,8 +573,8 @@ impl AsyncElement for MediaCodecDec {
             } if *codec == self.codec => {
                 // Geometry is a hint for the initial MediaFormat; the codec's
                 // output format is authoritative for packing.
-                self.width = fixed_or_zero(width);
-                self.height = fixed_or_zero(height);
+                self.width = width.fixed().unwrap_or(0);
+                self.height = height.fixed().unwrap_or(0);
                 self.configured = true;
                 Ok(ConfigureOutcome::Accepted)
             }
@@ -845,12 +845,5 @@ fn derive_output_caps(codec: VideoCodec, rgba: bool, input: &Caps) -> CapsSet {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
-    }
-}
-
-fn fixed_or_zero(d: &Dim) -> u32 {
-    match d {
-        Dim::Fixed(v) => *v,
-        _ => 0,
     }
 }

@@ -209,8 +209,8 @@ impl AsyncElement for CanvasSink {
                     height,
                     ..
                 }) => {
-                    self.width = fixed_or_zero(&width);
-                    self.height = fixed_or_zero(&height);
+                    self.width = width.fixed().unwrap_or(0);
+                    self.height = height.fixed().unwrap_or(0);
                 }
                 // A non-RGBA caps change is a negotiation error for this sink.
                 PipelinePacket::CapsChanged(_) => return Err(G2gError::CapsMismatch),
@@ -281,11 +281,4 @@ fn put_image_data(ctx: &Context2d, image: &ImageData) -> Result<(), G2gError> {
         Context2d::Offscreen(ctx) => ctx.put_image_data(image, x, y),
     }
     .map_err(|_| G2gError::Hardware(HardwareError::Other))
-}
-
-fn fixed_or_zero(d: &Dim) -> u32 {
-    match d {
-        Dim::Fixed(v) => *v,
-        _ => 0,
-    }
 }

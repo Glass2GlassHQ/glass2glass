@@ -385,7 +385,7 @@ impl AsyncElement for MfDecode {
                 width,
                 height,
                 ..
-            } if *codec == self.codec => (fixed_or_zero(width), fixed_or_zero(height)),
+            } if *codec == self.codec => (width.fixed().unwrap_or(0), height.fixed().unwrap_or(0)),
             _ => return Err(G2gError::CapsMismatch),
         };
 
@@ -878,13 +878,6 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
     }
 }
 
-fn fixed_or_zero(d: &Dim) -> u32 {
-    match d {
-        Dim::Fixed(v) => *v,
-        _ => 0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -903,12 +896,6 @@ mod tests {
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }
         );
-    }
-
-    #[test]
-    fn fixed_or_zero_reads_dims() {
-        assert_eq!(fixed_or_zero(&Dim::Fixed(720)), 720);
-        assert_eq!(fixed_or_zero(&Dim::Any), 0);
     }
 
     #[test]
