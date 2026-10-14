@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1295: `audiotestsrc` plays tones at their exact frequency, sharing one phase helper with `tonegeneratesrc` and `dtmfsrc`.
 - M1294: `spectrum` precomputes its window and FFT twiddles and reuses its buffers.
 - M1293: `equalizer` runs on the shared `IirCascade`, and `audioiirfilter` keeps its history in a ring.
 - M1292: FIR filters switch to FFT overlap-save convolution at 32 taps, as gst does.

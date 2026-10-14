@@ -74,12 +74,10 @@ impl ToneGenerateSrc {
     }
 
     fn sample(&self, n: u64) -> i16 {
-        let period = DEFAULT_RATE as f64;
-        if period <= 0.0 || self.freq <= 0.0 {
+        if self.freq <= 0.0 {
             return 0;
         }
-        // wrap in f64: the f32 cast of a raw turn count loses the phase after seconds
-        let phase = ((n as f64 * self.freq / period) % 1.0) as f32;
+        let phase = crate::mathf::tone_phase_turns(n, self.freq, DEFAULT_RATE);
         let amp = (self.volume * (i16::MAX as f64)) as f32;
         (crate::mathf::sin_turns(phase) * amp) as i16
     }

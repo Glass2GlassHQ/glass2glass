@@ -119,7 +119,7 @@ Raw video and GPU:
 
 Audio:
 
-- One tone phase helper, one sample-width table, one `saturate_i16`.
+- `st2110audiortp` uses `AudioFormat::bytes_per_sample`.
 
 Network:
 

@@ -29,6 +29,12 @@ pub(crate) fn sin_turns(t: f32) -> f32 {
     sign * (16.0 * xr * (PI - xr)) / (5.0 * PI * PI - 4.0 * xr * (PI - xr))
 }
 
+// the part of a cycle a tone has turned through by sample `index`, in [0, 1)
+pub(crate) fn tone_phase_turns(index: u64, frequency_hz: f64, sample_rate: u32) -> f32 {
+    // wrap in f64: the f32 cast of a raw turn count loses the phase after seconds
+    ((index as f64 * frequency_hz / f64::from(sample_rate)) % 1.0) as f32
+}
+
 /// cos(2*pi*t): the sine a quarter turn ahead.
 pub(crate) fn cos_turns(t: f32) -> f32 {
     sin_turns(t + 0.25)

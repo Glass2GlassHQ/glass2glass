@@ -96,11 +96,12 @@ impl AudioTestSrc {
         if self.wave == Wave::WhiteNoise {
             return (noise_unit(n) * HALF) as i16;
         }
-        let period = self.sample_rate as u64 / self.tone_hz.max(1) as u64;
-        if period == 0 {
+        let tone_hz = self.tone_hz.max(1);
+        // a tone above the sample rate has no whole sample per cycle
+        if tone_hz > self.sample_rate {
             return 0;
         }
-        let phase = (n % period) as f32 / period as f32; // [0, 1)
+        let phase = crate::mathf::tone_phase_turns(n, f64::from(tone_hz), self.sample_rate);
         match self.wave {
             Wave::Silence => 0,
             Wave::Square => {
@@ -312,6 +313,25 @@ impl PadTemplates for AudioTestSrc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MEASURED_SECONDS: u64 = 10;
+
+    // cycles started within MEASURED_SECONDS, counted by rising zero crossings
+    fn measured_cycles(sample_rate: u32, tone_hz: u32) -> u64 {
+        let src = AudioTestSrc::new(sample_rate, 1, tone_hz, 1);
+        let samples = u64::from(sample_rate) * MEASURED_SECONDS;
+        let rising = (1..samples)
+            .filter(|&n| src.sample(n - 1) < 0 && src.sample(n) >= 0)
+            .count() as u64;
+        // the cycle starting at sample 0 has no earlier sample to cross from
+        rising + 1
+    }
+
+    #[test]
+    fn tones_play_at_their_exact_frequency() {
+        assert_eq!(measured_cycles(48_000, 440), 440 * MEASURED_SECONDS);
+        assert_eq!(measured_cycles(44_100, 1_000), 1_000 * MEASURED_SECONDS);
+    }
 
     #[test]
     fn sine_starts_at_zero_and_peaks_mid_half_period() {

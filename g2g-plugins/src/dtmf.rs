@@ -66,8 +66,7 @@ fn tone_amp(volume: u32) -> f32 {
 }
 
 fn dual_tone(n: u64, low: f32, high: f32, amp: f32) -> i16 {
-    // wrap in f64: the f32 cast of a raw turn count loses the phase after seconds
-    let turns = |hz: f32| ((n as f64 * hz as f64 / DTMF_RATE as f64) % 1.0) as f32;
+    let turns = |hz: f32| mathf::tone_phase_turns(n, f64::from(hz), DTMF_RATE);
     let s = mathf::sin_turns(turns(low)) + mathf::sin_turns(turns(high));
     (s * amp) as i16
 }
