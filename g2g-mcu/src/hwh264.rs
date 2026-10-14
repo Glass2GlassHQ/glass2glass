@@ -41,22 +41,13 @@ pub struct H264EncodeInfo {
 /// dimensions (4:2:0 needs even width/height) or arithmetic overflow, so a
 /// mis-sized capture fails the encode rather than feeding the peripheral a
 /// partial frame.
-pub const fn i420_len(width: u16, height: u16) -> Option<usize> {
+pub fn i420_len(width: u16, height: u16) -> Option<usize> {
     if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
         return None;
     }
-    let (w, h) = (width as usize, height as usize);
-    // luma = w*h; each chroma plane = (w/2)*(h/2); total = w*h*3/2.
-    match w.checked_mul(h) {
-        Some(luma) => match (w / 2).checked_mul(h / 2) {
-            Some(chroma) => match chroma.checked_mul(2) {
-                Some(chroma2) => luma.checked_add(chroma2),
-                None => None,
-            },
-            None => None,
-        },
-        None => None,
-    }
+    g2g_core::RawVideoFormat::I420
+        .unpadded_frame_bytes(u32::from(width), u32::from(height))
+        .and_then(|bytes| usize::try_from(bytes).ok())
 }
 
 /// One raw-frame encode on the codec peripheral (the ESP32-P4 flow: DMA the

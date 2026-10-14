@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1352: one heap-free YUYV to 4:2:0 converter serves g2g-mcu and `videoconvert`.
 - M1351: `videotestsrc` keeps only its last few shared frames.
 - M1350: `wgpusink` and `wgpucompositor` read back through the gpu helpers without blocking the runner, and the WGSL compositor samples like the CPU one.
 - M1349: `timeoverlay` and `analyticsoverlay` draw through the shared paint canvas.

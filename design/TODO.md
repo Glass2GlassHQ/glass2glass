@@ -33,7 +33,6 @@ Bugs:
 
 Core, bindings, ML:
 
-- One YUYV to I420 converter for `g2g-mcu` and the plugins.
 
 Codecs and parsers:
 
@@ -41,9 +40,6 @@ Codecs and parsers:
 - h265parse and vulkanvideo walk the H.265 SPS middle (sub-layer ordering to
   long-term refs) separately.
 - The reframing path copies AVCC input twice (convert, then append to the framer).
-
-Raw video and GPU:
-
 
 Audio:
 
@@ -65,6 +61,9 @@ Shared helpers, sites skipped while another change owned the file:
 - Collecting test sinks: `aacparse`, `h264parse`, `h265parse`, `tensorconvert`,
   `ivfdemux`, `sampleaesdecrypt`, `subpictureoverlay` in src, about 60 integration
   test files, and g2g-core/tests.
+- `tests/m559_wgpu_dmabuf_export.rs` header says the element frees each handle after
+  export, it now recycles a ring of four.
+- `dmabufmap::require_readable_domain` is unused under `st2110,pipewire,std`.
 - `mfencode` has three redundant `interlace: _, ..` patterns clippy flags on Windows.
 
 ## Architecture guarantees (validation-first)

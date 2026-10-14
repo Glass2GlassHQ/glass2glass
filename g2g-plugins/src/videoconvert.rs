@@ -1039,33 +1039,18 @@ fn yuyv_sample(src: &[u8], stride: usize, row: usize, col: usize) -> (u8, u8, u8
     (src[group + 2 * (col % 2)], src[group + 1], src[group + 3])
 }
 
-/// Packed YUYV (4:2:2, byte order Y0 U Y1 V) -> 4:2:0 YUV. The luma plane is a
-/// direct deinterleave; chroma drops to half vertical resolution by averaging
-/// the two source rows that share each output chroma sample (the one row left
-/// at an odd height stands alone). `interleaved` selects NV12 (true) vs I420
-/// (false) chroma layout.
+/// Packed YUYV (4:2:2) -> 4:2:0 YUV through the heap-free converter the MCU
+/// pipeline runs. `interleaved` selects NV12 (true) vs I420 (false) chroma
+/// layout. `src` is validated to hold the frame.
 fn yuyv_to_yuv420(src: &[u8], w: usize, h: usize, interleaved: bool) -> Box<[u8]> {
-    let stride = row_bytes(RawVideoFormat::Yuyv, w);
-    let luma = w * h;
-    let (cw, ch) = chroma_420_size(w, h);
-    let mut dst = vec![0u8; luma + 2 * cw * ch];
-    for y in 0..h {
-        for x in 0..w {
-            dst[y * w + x] = yuyv_sample(src, stride, y, x).0;
-        }
-    }
-    for cy in 0..ch {
-        let rows = [cy * 2, (cy * 2 + 1).min(h - 1)];
-        for cx in 0..cw {
-            let [(_, u0, v0), (_, u1, v1)] = rows.map(|row| yuyv_sample(src, stride, row, cx * 2));
-            let u = (u0 as u32 + u1 as u32).div_ceil(2);
-            let v = (v0 as u32 + v1 as u32).div_ceil(2);
-            let (u_at, v_at) = chroma_420_offsets(luma, cw * ch, cy * cw + cx, interleaved);
-            dst[u_at] = u as u8;
-            dst[v_at] = v as u8;
-        }
-    }
-    dst.into_boxed_slice()
+    let format = match interleaved {
+        true => RawVideoFormat::Nv12,
+        false => RawVideoFormat::I420,
+    };
+    let mut dst = vec![0u8; frame_byte_size(format, w as u32, h as u32)].into_boxed_slice();
+    g2g_mcu::videoconvert::yuyv_to_yuv420(src, w, h, interleaved, &mut dst)
+        .expect("a validated YUYV frame converts");
+    dst
 }
 
 /// Packed YUYV (4:2:2) -> packed 4-byte RGB(A) through `matrix`. Each

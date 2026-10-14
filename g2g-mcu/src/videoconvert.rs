@@ -12,12 +12,13 @@
 //!
 //! Chroma downsample is vertical 2:1 averaging: packed YUYV is already 4:2:0's
 //! horizontal chroma resolution (one U/V per 2 pixels), so only the two rows of
-//! a 2x2 block are averaged into one I420 chroma sample.
+//! a 2x2 block are averaged into one I420 chroma sample. The host converter
+//! runs the same [`yuyv_to_yuv420`].
 
 use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;
 use g2g_core::staticpool::StaticLendRing;
-use g2g_core::StaticTransform;
+use g2g_core::{RawVideoFormat, StaticTransform};
 
 use crate::hwh264::i420_len;
 use crate::lend::lend_converted;
@@ -25,63 +26,83 @@ use crate::lend::lend_converted;
 /// Byte count of one packed YUYV (YUY2) 4:2:2 frame: 2 bytes per pixel. `None`
 /// for zero or odd width (a YUYV pair covers two horizontal pixels) or
 /// overflow, so a mis-sized frame fails rather than sizing a bogus buffer.
-pub const fn yuyv_len(width: u16, height: u16) -> Option<usize> {
+pub fn yuyv_len(width: u16, height: u16) -> Option<usize> {
     if width == 0 || height == 0 || width % 2 != 0 {
         return None;
     }
-    match (width as usize).checked_mul(height as usize) {
-        Some(px) => px.checked_mul(2),
-        None => None,
-    }
+    RawVideoFormat::Yuyv
+        .unpadded_frame_bytes(u32::from(width), u32::from(height))
+        .and_then(|bytes| usize::try_from(bytes).ok())
 }
 
-/// Convert one packed YUYV frame (`src`, `width*height*2` bytes) into planar
-/// I420 (`dst`, `width*height*3/2` bytes). Both lengths are the caller's
-/// contract; all access is bounds-guarded (slice patterns + `get`), so the
-/// conversion adds no panic path to the no-alloc subset.
-fn yuyv_to_i420(width: usize, height: usize, src: &[u8], dst: &mut [u8]) {
-    let luma = width.saturating_mul(height);
-    let cw = width / 2; // chroma samples per row (one U/V per pixel pair)
-    let (y_plane, chroma) = dst.split_at_mut(luma.min(dst.len()));
-    let csize = cw.saturating_mul(height / 2);
-    let (u_plane, v_plane) = chroma.split_at_mut(csize.min(chroma.len()));
+/// Bytes in one YUYV `Y0 U Y1 V` group, two pixels.
+const YUYV_GROUP_BYTES: usize = 4;
 
-    // Y plane: the first byte of every 2-byte YUYV group, in pixel order.
-    for (yo, px) in y_plane.iter_mut().zip(src.chunks_exact(2)) {
-        if let [y, _] = px {
-            *yo = *y;
-        }
+/// Convert one packed YUYV 4:2:2 frame (`Y0 U Y1 V`, rows of `width` rounded up
+/// to whole groups) into 8-bit 4:2:0, NV12 chroma when `interleaved`, else
+/// I420. The luma plane is a direct deinterleave; each chroma sample is the
+/// rounded average of the two source rows that share it (an odd height's last
+/// row stands alone). `None` when `src` or `dst` is short of a frame. Heap-free
+/// and panic-free: every access is bounds-checked.
+pub fn yuyv_to_yuv420(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    interleaved: bool,
+    dst: &mut [u8],
+) -> Option<()> {
+    if width == 0 || height == 0 {
+        return Some(());
     }
+    let chroma_width = width.div_ceil(2);
+    let chroma_height = height.div_ceil(2);
+    let stride = chroma_width.checked_mul(YUYV_GROUP_BYTES)?;
+    let luma = width.checked_mul(height)?;
+    let chroma = chroma_width.checked_mul(chroma_height)?;
+    let src = src.get(..stride.checked_mul(height)?)?;
+    let dst = dst.get_mut(..luma.checked_add(chroma.checked_mul(2)?)?)?;
+    let (y_plane, chroma_planes) = dst.split_at_mut(luma);
 
-    // Chroma: for each 2x2 block, average the U (and V) of the two source rows.
-    // YUYV per pair is [Y0, U, Y1, V], so U is byte 1 and V byte 3 of a 4-chunk.
-    let row_bytes = width.saturating_mul(2);
-    for cby in 0..(height / 2) {
-        let top = src
-            .get(cby.saturating_mul(2).saturating_mul(row_bytes)..)
-            .map(|s| s.get(..row_bytes).unwrap_or(s));
-        let bot = src
-            .get((cby.saturating_mul(2).saturating_add(1)).saturating_mul(row_bytes)..)
-            .map(|s| s.get(..row_bytes).unwrap_or(s));
-        let (Some(top), Some(bot)) = (top, bot) else {
-            continue;
-        };
-        let base = cby.saturating_mul(cw);
-        let (Some(u_row), Some(v_row)) = (
-            u_plane.get_mut(base..base + cw),
-            v_plane.get_mut(base..base + cw),
-        ) else {
-            continue;
-        };
-        for (i, (tq, bq)) in top.chunks_exact(4).zip(bot.chunks_exact(4)).enumerate() {
-            if let (Some(uo), [_, tu, _, tv], [_, bu, _, bv]) = (u_row.get_mut(i), tq, bq) {
-                *uo = ((*tu as u16 + *bu as u16) / 2) as u8;
-                if let Some(vo) = v_row.get_mut(i) {
-                    *vo = ((*tv as u16 + *bv as u16) / 2) as u8;
+    for (y_row, src_row) in y_plane
+        .chunks_exact_mut(width)
+        .zip(src.chunks_exact(stride))
+    {
+        for (pair, group) in y_row
+            .chunks_mut(2)
+            .zip(src_row.chunks_exact(YUYV_GROUP_BYTES))
+        {
+            if let [y0, _, y1, _] = group {
+                for (out, sample) in pair.iter_mut().zip([*y0, *y1]) {
+                    *out = sample;
                 }
             }
         }
     }
+
+    for row in 0..chroma_height {
+        let top_row = row.checked_mul(2)?;
+        let bottom_row = top_row.saturating_add(1).min(height - 1);
+        let top = src.get(top_row.checked_mul(stride)?..)?;
+        let bottom = src.get(bottom_row.checked_mul(stride)?..)?;
+        let groups = top
+            .chunks_exact(YUYV_GROUP_BYTES)
+            .zip(bottom.chunks_exact(YUYV_GROUP_BYTES))
+            .take(chroma_width);
+        for (column, (top_group, bottom_group)) in groups.enumerate() {
+            let ([_, tu, _, tv], [_, bu, _, bv]) = (top_group, bottom_group) else {
+                return None;
+            };
+            let average = |a: u8, b: u8| (u16::from(a) + u16::from(b)).div_ceil(2) as u8;
+            let at = row.checked_mul(chroma_width)?.checked_add(column)?;
+            let (u_at, v_at) = match interleaved {
+                true => (at.checked_mul(2)?, at.checked_mul(2)?.checked_add(1)?),
+                false => (at, chroma.checked_add(at)?),
+            };
+            *chroma_planes.get_mut(u_at)? = average(*tu, *bu);
+            *chroma_planes.get_mut(v_at)? = average(*tv, *bv);
+        }
+    }
+    Some(())
 }
 
 /// A heap-free packed-YUYV 4:2:2 -> planar I420 4:2:0 [`StaticTransform`],
@@ -135,13 +156,17 @@ impl<const N: usize, const BYTES: usize> StaticTransform for YuyvToI420<'_, N, B
             return Err(G2gError::CapsMismatch);
         }
         let (w, h) = (self.width, self.height);
+        let mut converted = false;
         // SAFETY: the constructor established the ring-outlives-frames contract
         // (`new`: 'static; `with_ring`: caller's contract).
         let out = unsafe {
             lend_converted(self.ring, &input, self.out_len, |src, dst| {
-                yuyv_to_i420(w, h, src, dst)
+                converted = yuyv_to_yuv420(src, w, h, false, dst).is_some();
             })
         }?;
+        if !converted {
+            return Err(G2gError::CapsMismatch);
+        }
         Ok(Some(out))
     }
 }
@@ -152,5 +177,36 @@ impl<const N: usize, const BYTES: usize> core::fmt::Debug for YuyvToI420<'_, N, 
             .field("width", &self.width)
             .field("height", &self.height)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_odd_frame_keeps_its_edge_chroma_and_rounds_the_average() {
+        // 3x3: two groups a row, the second group's Y1 past the edge
+        const WIDTH: usize = 3;
+        const HEIGHT: usize = 3;
+        let src = [
+            1, 10, 2, 20, 3, 30, 0, 40, //
+            4, 11, 5, 21, 6, 31, 0, 41, //
+            7, 12, 8, 22, 9, 32, 0, 42,
+        ];
+        let mut i420 = [0u8; 9 + 2 * 4];
+        yuyv_to_yuv420(&src, WIDTH, HEIGHT, false, &mut i420).unwrap();
+        assert_eq!(
+            i420,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 31, 12, 32, 21, 41, 22, 42]
+        );
+        let mut nv12 = [0u8; 9 + 2 * 4];
+        yuyv_to_yuv420(&src, WIDTH, HEIGHT, true, &mut nv12).unwrap();
+        assert_eq!(
+            nv12,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 21, 31, 41, 12, 22, 32, 42]
+        );
+        let short = &src[..src.len() - 1];
+        assert!(yuyv_to_yuv420(short, WIDTH, HEIGHT, false, &mut i420).is_none());
     }
 }
