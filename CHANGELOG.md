@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1282: a ticking fan-in builds one sleep per tick instead of one per wait.
 - M1281: a packet crossing a link takes no lock for an absent signal or probe and reads the clock once per step.
 - M1280: a playing sink passes its flow gate without a lock.
 - M1279: muxer inputs feed the muxer directly and report their queue time.

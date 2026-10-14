@@ -625,6 +625,73 @@ fn the_pts_ordered_arm_ticks_while_it_holds_frames_back() {
     );
 }
 
+// Time stands still and a sleep never resolves, so the tick deadline never moves.
+#[derive(Debug, Default)]
+struct FrozenClock {
+    sleeps_built: AtomicUsize,
+}
+
+impl PipelineClock for FrozenClock {
+    fn now_ns(&self) -> u64 {
+        0
+    }
+
+    fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
+        Some(self)
+    }
+}
+
+impl AsyncClock for FrozenClock {
+    type SleepFuture<'a>
+        = core::future::Pending<()>
+    where
+        Self: 'a;
+
+    fn sleep_until_ns(&self, _deadline_ns: u64) -> core::future::Pending<()> {
+        self.sleeps_built.fetch_add(1, Ordering::AcqRel);
+        core::future::pending()
+    }
+}
+
+// M1282
+#[test]
+fn a_parked_arm_reuses_its_sleep_while_the_deadline_holds() {
+    const FLOOD_FRAMES: u64 = 100;
+    for pts_ordered in [false, true] {
+        let clock = FrozenClock::default();
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let mut src = FloodSrc {
+            count: FLOOD_FRAMES,
+        };
+        let mut mux = ZohMux::new(1, Some(TICK_NS), ticks.clone());
+        if pts_ordered {
+            mux = mux.pts_ordered();
+        }
+        let mut sink = CountSink::default();
+
+        let mut g: Graph<GraphNodeRef<'_>> = Graph::new();
+        let mux_node = g.add_muxer(GraphNodeRef::muxer_ref(&mut mux), 1);
+        let s = g.add_source(GraphNodeRef::source_ref(&mut src));
+        let k = g.add_sink(GraphNodeRef::element_ref(&mut sink));
+        g.link(s, mux_node.input(0)).expect("link source to pad 0");
+        g.link(mux_node.output(), k).expect("link merged output");
+        block_on(run_graph(g, &clock, 2)).expect("frozen-clock graph run");
+
+        assert_eq!(
+            ticks.load(Ordering::Acquire),
+            0,
+            "time never reached a tick"
+        );
+        assert_eq!(sink.frames, FLOOD_FRAMES);
+        assert_eq!(
+            clock.sleeps_built.load(Ordering::Acquire),
+            1,
+            "every park waited on the one sleep for the unchanged deadline \
+             (pts_ordered={pts_ordered})"
+        );
+    }
+}
+
 /// M879: the same fixtures under the thread-per-arm runner, which owns its elements
 /// (each arm moves onto its own OS thread), so the frame count comes from the run
 /// stats rather than from a borrowed sink. Reports the ticks the mux saw, the frames

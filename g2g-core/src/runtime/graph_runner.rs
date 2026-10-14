@@ -5129,6 +5129,19 @@ async fn admit_runtime_pad<E: MultiInputElement>(
     Ok(true)
 }
 
+// Round-robin from `start`, so one busy input cannot starve the others.
+fn muxer_try_recv(
+    pad_rxs: &[(usize, LinkReceiver)],
+    open: &[bool],
+    start: usize,
+) -> Option<(usize, PipelinePacket)> {
+    let count = pad_rxs.len();
+    (0..count)
+        .map(|k| (start + k) % count)
+        .filter(|&slot| open[slot])
+        .find_map(|slot| pad_rxs[slot].1.try_recv().map(|packet| (slot, packet)))
+}
+
 /// Block until some open input pad delivers a packet (or closes), scanning
 /// round-robin from `start` so the wake-up path stays fair too. Returns the
 /// pad's slot index (into `pad_rxs`) and its packet; `None` means that pad's
@@ -5293,20 +5306,12 @@ pub(crate) async fn fanin_sink_arm<E: MultiInputElement>(
     loop {
         relay_reverse(&pad_rxs, &reverse);
         // Round-robin try-drain across the input edges, then block on any.
-        let mut picked: Option<(usize, PipelinePacket)> = None;
-        for k in 0..input_count {
-            let slot = (next + k) % input_count;
-            if !open[slot] {
-                continue;
-            }
-            if let Some(pkt) = pad_rxs[slot].1.try_recv() {
-                picked = Some((slot, pkt));
-                next = (slot + 1) % input_count;
-                break;
-            }
-        }
+        let picked = muxer_try_recv(&pad_rxs, &open, next);
         let (slot, packet) = match picked {
-            Some(p) => p,
+            Some((slot, packet)) => {
+                next = (slot + 1) % input_count;
+                (slot, packet)
+            }
             None => {
                 if !open.iter().any(|&o| o) {
                     return Ok(consumed);
@@ -5549,6 +5554,8 @@ struct ArmTick<'a> {
     clock: &'a dyn DynAsyncClock,
     period_ns: u64,
     next_ns: u64,
+    // Kept across parks while its deadline holds, so a park allocates no sleep.
+    sleep: Option<(u64, crate::element::BoxFuture<'a, ()>)>,
 }
 
 impl<'a> ArmTick<'a> {
@@ -5562,6 +5569,7 @@ impl<'a> ArmTick<'a> {
             clock,
             period_ns,
             next_ns: clock.now_ns().saturating_add(period_ns),
+            sleep: None,
         })
     }
 
@@ -5605,12 +5613,18 @@ async fn park_or_tick<T, E: MultiInputElement>(
     let Some(tick) = tick else {
         return Ok(Some(park.await));
     };
-    // The sleep rides the copied clock reference, not a borrow of `tick`, so
-    // `fire` can still take it mutably below.
-    let sleep = tick.clock.sleep_until_ns(tick.next_ns);
-    match select2(park, sleep).await {
+    let deadline_ns = tick.next_ns;
+    let sleep = match &mut tick.sleep {
+        Some((sleep_deadline_ns, sleep)) if *sleep_deadline_ns == deadline_ns => sleep,
+        slot => {
+            let sleep = tick.clock.sleep_until_ns(deadline_ns);
+            &mut slot.insert((deadline_ns, sleep)).1
+        }
+    };
+    match select2(park, sleep.as_mut()).await {
         Either::Left(v) => Ok(Some(v)),
         Either::Right(()) => {
+            tick.sleep = None;
             tick.fire(mux, out).await?;
             Ok(None)
         }
@@ -5751,20 +5765,12 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
         }
         // Take one buffered packet, scanning round-robin from `next`, so no
         // single input can monopolize the muxer while others have data waiting.
-        let mut picked: Option<(usize, PipelinePacket)> = None;
-        for k in 0..input_count {
-            let slot = (next + k) % input_count;
-            if !open[slot] {
-                continue;
-            }
-            if let Some(pkt) = pad_rxs[slot].1.try_recv() {
-                picked = Some((slot, pkt));
-                next = (slot + 1) % input_count;
-                break;
-            }
-        }
+        let picked = muxer_try_recv(&pad_rxs, &open, next);
         let (slot, packet) = match picked {
-            Some(p) => p,
+            Some((slot, packet)) => {
+                next = (slot + 1) % input_count;
+                (slot, packet)
+            }
             None => {
                 if !open.iter().any(|&o| o) {
                     return Ok(0);
@@ -6015,56 +6021,73 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
         if let Some(t) = tick.as_mut() {
             t.fire_if_due(&mut mux, &mut adapter).await?;
         }
-        // Make progress: block for the next packet from any still-open input,
-        // racing the β control channel (M839) so a consumer's demand on the
-        // merged output reaches this arm while it waits, and the tick deadline so
-        // a quiet fan-in still gets its tick.
-        let park = muxer_park(
-            control_open.then_some(&arm_rx),
-            &pad_rxs,
-            &open,
-            next,
-            pad_adds.as_ref(),
-        );
-        let Some(parked) = park_or_tick(park, tick.as_mut(), &mut mux, &mut adapter).await? else {
-            continue;
-        };
-        let (slot, maybe) = match parked {
-            MuxerWake::Directive(Some(directive)) => {
-                apply_mux_directive(
-                    &mut mux as &mut dyn DynMultiInputElement,
-                    &mut beta,
-                    directive,
-                    &current_output,
-                )
-                .await?;
+        // M839: a consumer's demand on the merged output, applied here too so a
+        // busy muxer that never parks below still sees it.
+        while let Some(directive) = arm_rx.try_recv() {
+            apply_mux_directive(
+                &mut mux as &mut dyn DynMultiInputElement,
+                &mut beta,
+                directive,
+                &current_output,
+            )
+            .await?;
+        }
+        // A packet already waiting is taken without building the park below.
+        let (slot, maybe) = if let Some((slot, packet)) = muxer_try_recv(&pad_rxs, &open, next) {
+            (slot, Some(packet))
+        } else {
+            // Make progress: block for the next packet from any still-open input,
+            // racing the β control channel (M839) so a consumer's demand on the
+            // merged output reaches this arm while it waits, and the tick deadline so
+            // a quiet fan-in still gets its tick.
+            let park = muxer_park(
+                control_open.then_some(&arm_rx),
+                &pad_rxs,
+                &open,
+                next,
+                pad_adds.as_ref(),
+            );
+            let Some(parked) = park_or_tick(park, tick.as_mut(), &mut mux, &mut adapter).await?
+            else {
                 continue;
-            }
-            MuxerWake::Directive(None) => {
-                control_open = false;
-                continue;
-            }
-            MuxerWake::Add(Some(add)) => {
-                if admit_runtime_pad(
-                    &mut mux,
-                    add,
-                    &mut pad_rxs,
-                    &mut open,
-                    &mut current_output,
-                    &mut adapter,
-                )
-                .await?
-                {
-                    input_count += 1;
-                    agg.add_input();
+            };
+            match parked {
+                MuxerWake::Directive(Some(directive)) => {
+                    apply_mux_directive(
+                        &mut mux as &mut dyn DynMultiInputElement,
+                        &mut beta,
+                        directive,
+                        &current_output,
+                    )
+                    .await?;
+                    continue;
                 }
-                continue;
+                MuxerWake::Directive(None) => {
+                    control_open = false;
+                    continue;
+                }
+                MuxerWake::Add(Some(add)) => {
+                    if admit_runtime_pad(
+                        &mut mux,
+                        add,
+                        &mut pad_rxs,
+                        &mut open,
+                        &mut current_output,
+                        &mut adapter,
+                    )
+                    .await?
+                    {
+                        input_count += 1;
+                        agg.add_input();
+                    }
+                    continue;
+                }
+                MuxerWake::Add(None) => {
+                    pad_adds = None;
+                    continue;
+                }
+                MuxerWake::Pad(slot, maybe) => (slot, maybe),
             }
-            MuxerWake::Add(None) => {
-                pad_adds = None;
-                continue;
-            }
-            MuxerWake::Pad(slot, maybe) => (slot, maybe),
         };
         next = (slot + 1) % input_count;
         let pad = pad_rxs[slot].0;

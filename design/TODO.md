@@ -48,7 +48,6 @@ Bugs:
 
 Core runtime:
 
-- `park_or_tick` builds a new boxed sleep per park.
 - Mutator runs drive every element through `DynRef` (a boxed future per packet).
 - `FrameMetaSet` clone allocates a Vec. `broadcast_drop_closed` shares for the last
   sender too and duplicates `broadcast`.
