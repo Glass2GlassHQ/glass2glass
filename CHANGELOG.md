@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1277: an observed run's sink transit no longer counts a paused flushing seek's pause as queue time.
 - M1270: ST 2110 video, audio, JPEG XS and ANC depacketizers handle CSRCs, header extensions and padding.
 - M1269: srtsrc ACKs on the 10 ms SRT timer and only after the first packet, and the SRT sender trims its buffer correctly across the sequence wrap.
 - M1268: SRTP keys HMAC-SHA1 once per context, batches counter-mode blocks, and runs AES-GCM in place.

@@ -4688,7 +4688,11 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
         match packet {
             // M360: discard stale pre-seek buffers while draining toward the
             // `Flush`; control packets fall through (the `Flush` ends drain).
-            Some(PipelinePacket::DataFrame(_)) if flushing => continue,
+            Some(PipelinePacket::DataFrame(_)) if flushing => {
+                // The stamp goes too, or the next frame reads it.
+                in_rx.pop_transit_ns();
+                continue;
+            }
             Some(PipelinePacket::Eos) => {
                 elem.process(PipelinePacket::Eos, &mut null).await?;
                 #[cfg(feature = "metadata")]

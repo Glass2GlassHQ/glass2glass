@@ -38,7 +38,8 @@ Bugs:
   Use the core RTP extenders there and in `XorFecBuffer`, rtpjitter, st2110dup, rtcp.
 - `streamdec` and `vulkanvideo` compute the H.264 coded height without
   `frame_mbs_only_flag`, so field-coded streams get half the height.
-- `sink_arm_loop` drops flushed frames without `pop_transit_ns`.
+- Run `cargo semver-checks` on g2g-core for M1284 (`Gate`/`Router` `ProcessFuture`
+  types) and M1285 (new `DynAsyncElement` provided methods).
 - Three audio capture sources stamp `frames * (1e9 / rate)` (drifts at 44.1 kHz)
   and use unbounded queues.
 - `ffmpegaudiodec::adts_frames` checks sync with `& 0xF0`, `ffmpegaacenc::adts_wrap`
