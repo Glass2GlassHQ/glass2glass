@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1258: `wgpusink` presents to a non-sRGB surface format when the adapter offers one, so video no longer looks washed out from a second gamma encode.
 - M1257: `linux-full` builds the EGL `glimagesink`, so a launch line's `glimagesink` takes RGBA instead of falling back to the NV12-only `waylandsink`.
 - M1256: `decodebin` in a launch line decodes to a format the next element accepts, so `decodebin ! video/x-raw,format=I420` no longer gets an NV12 decoder.
 - M1255: `G2G_PLUGIN_FEATURE_RANK` overrides auto-plug ranks with the syntax of `GST_PLUGIN_FEATURE_RANK`.

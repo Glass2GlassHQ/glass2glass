@@ -396,6 +396,19 @@ pub(crate) fn source_geometry(absolute_caps: &Caps) -> Result<(u32, u32), G2gErr
     Ok((source.width, source.height))
 }
 
+// frames arrive gamma-encoded, an sRGB surface would encode them a second time
+fn presentable_format(
+    default: wgpu::TextureFormat,
+    supported: &[wgpu::TextureFormat],
+) -> wgpu::TextureFormat {
+    let without_srgb = default.remove_srgb_suffix();
+    if supported.contains(&without_srgb) {
+        without_srgb
+    } else {
+        default
+    }
+}
+
 /// Where a [`WgpuSink`] presents.
 enum Target {
     /// An internal texture the sink owns; readable via [`WgpuSink::read_target`].
@@ -497,9 +510,14 @@ impl WgpuSink {
     pub fn with_surface(
         ctx: GpuContext,
         surface: wgpu::Surface<'static>,
-        config: wgpu::SurfaceConfiguration,
+        mut config: wgpu::SurfaceConfiguration,
     ) -> Self {
-        let format = config.format;
+        let supported = surface.get_capabilities(&ctx.adapter).formats;
+        let format = presentable_format(config.format, &supported);
+        if format != config.format {
+            config.format = format;
+            surface.configure(&ctx.device, &config);
+        }
         Self::build(ctx, format, Target::Surface { surface, config })
     }
 
@@ -1075,6 +1093,19 @@ mod tests {
             packet_slot.take();
             core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }
+    }
+
+    #[test]
+    fn an_srgb_surface_presents_through_its_non_srgb_format() {
+        use wgpu::TextureFormat::{Bgra8Unorm, Bgra8UnormSrgb};
+        assert_eq!(
+            presentable_format(Bgra8UnormSrgb, &[Bgra8UnormSrgb, Bgra8Unorm]),
+            Bgra8Unorm
+        );
+        assert_eq!(
+            presentable_format(Bgra8UnormSrgb, &[Bgra8UnormSrgb]),
+            Bgra8UnormSrgb
+        );
     }
 
     #[tokio::test]
