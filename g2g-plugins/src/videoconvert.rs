@@ -1226,9 +1226,22 @@ fn yuv420_to_rgb(
     b_off: usize,
     matrix: &YuvRgbMatrix,
 ) -> Box<[u8]> {
+    let mut dst = vec![0u8; w * h * 4];
+    yuv420_to_rgb_into(src, (w, h), interleaved, (r_off, b_off), matrix, &mut dst);
+    dst.into_boxed_slice()
+}
+
+/// [`yuv420_to_rgb`] writing the `w * h * 4` bytes into `dst`.
+pub(crate) fn yuv420_to_rgb_into(
+    src: &[u8],
+    (w, h): (usize, usize),
+    interleaved: bool,
+    (r_off, b_off): (usize, usize),
+    matrix: &YuvRgbMatrix,
+    dst: &mut [u8],
+) {
     let luma = w * h;
     let (cw, ch) = chroma_420_size(w, h);
-    let mut dst = vec![0u8; w * h * 4];
     for y in 0..h {
         for x in 0..w {
             let (u_at, v_at) = chroma_420_offsets(luma, cw * ch, (y / 2) * cw + x / 2, interleaved);
@@ -1241,7 +1254,6 @@ fn yuv420_to_rgb(
             dst[p + 3] = 255;
         }
     }
-    dst.into_boxed_slice()
 }
 
 #[cfg(test)]

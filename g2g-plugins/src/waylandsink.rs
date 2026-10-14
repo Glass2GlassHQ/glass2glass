@@ -9,9 +9,9 @@
 //! This is the **dev sink**, not the production sink:
 //! - Latency is whatever the compositor's frame callback delivers (one
 //!   compositor refresh, typically ~16 ms at 60 Hz).
-//! - The XRGB8888 conversion runs on the same thread that drives the
-//!   pipeline; at 1080p30 the CPU cost is real (each frame is ~2 ms of
-//!   YUV→RGB on a modern x86 core).
+//! - The XRGB8888 conversion runs on the Wayland worker thread, straight
+//!   into the `wl_shm` buffer; at 1080p30 the CPU cost is real (each frame
+//!   is ~2 ms of YUV→RGB on a modern x86 core).
 //! - No GPU upload and no `zwp_linux_dmabuf_v1` zero-copy.
 //!
 //! The production sink is [`crate::kmssink::KmsSink`], which scans NV12
@@ -97,11 +97,13 @@ use smithay_client_toolkit::{
 };
 
 use crate::clock::wait_to_present;
+use crate::pixel::{frame_byte_size, rgba_rb_offsets};
+use crate::videoconvert::yuv420_to_rgb_into;
 use crate::worker_ready::Handshake;
 use crate::yuvmatrix::YuvRgbMatrix;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
-use g2g_core::memory::{DomainSet, MemoryDomainKind};
+use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, SystemSlice};
 use g2g_core::meta::Orientation;
 #[cfg(feature = "metadata")]
 use g2g_core::meta::OrientationMeta;
@@ -126,7 +128,9 @@ enum WorkerCmd {
 
 /// One converted frame on its way to the surface.
 struct QueuedFrame {
-    bytes: Vec<u8>,
+    /// The NV12 frame, converted into the shm buffer by the worker.
+    pixels: SystemSlice,
+    matrix: YuvRgbMatrix,
     /// Source-side wall-clock stamp from `FrameTiming::arrival_ns`.
     /// The worker records `monotonic_ns() - arrival_ns` into the
     /// latency histogram when the matching `frame` callback fires.
@@ -698,8 +702,15 @@ impl AsyncElement for WaylandSink {
                 PipelinePacket::DataFrame(frame) => {
                     let orientation = frame_orientation(&frame);
                     let Frame { domain, timing, .. } = frame;
-                    let slice =
-                        domain.require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    domain.require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    let MemoryDomain::System(pixels) = domain else {
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    if pixels.as_slice().len()
+                        < frame_byte_size(RawVideoFormat::Nv12, self.width, self.height)
+                    {
+                        return Err(G2gError::CapsMismatch);
+                    }
 
                     // PTS pacing: hold the frame until its running-time deadline
                     // on the elected clock, or drop it if it is already too late
@@ -723,24 +734,11 @@ impl AsyncElement for WaylandSink {
                     }
                     let t_ready = monotonic_ns();
 
-                    // M760: offload the NV12 -> XRGB8888 convert (pure CPU pixel
-                    // math, not the Wayland calls) onto tokio's blocking pool so
-                    // the cooperative runner keeps servicing sibling arms while it
-                    // runs. Own the input bytes so the closure is Send.
-                    #[cfg(feature = "offload")]
-                    let xrgb = {
-                        let (w, h) = (self.width, self.height);
-                        let matrix = self.matrix;
-                        let src: Vec<u8> = slice.to_vec();
-                        crate::offload::run_blocking(move || nv12_to_xrgb8888(&src, w, h, &matrix))
-                            .await?
-                    };
-                    #[cfg(not(feature = "offload"))]
-                    let xrgb = nv12_to_xrgb8888(slice, self.width, self.height, &self.matrix)?;
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
                     tx.send(WorkerCmd::Frame(QueuedFrame {
-                        bytes: xrgb,
+                        pixels,
+                        matrix: self.matrix,
                         arrival_ns: timing.arrival_ns,
                         orientation,
                         ack: ack_tx,
@@ -975,14 +973,15 @@ fn worker_main(
 }
 
 impl WorkerState {
-    /// Copy `bytes` into a `SlotPool` buffer, request a `frame` callback
+    /// Convert `pixels` into a `SlotPool` buffer, request a `frame` callback
     /// (so the compositor tells us when it's ready for the next one),
     /// and commit. The producer's `ack` is stashed in `pending_ack`; we
     /// signal it when the matching `frame` callback fires in
     /// `CompositorHandler::frame`.
     fn draw(&mut self, queued: QueuedFrame) {
         let QueuedFrame {
-            bytes,
+            pixels,
+            matrix,
             arrival_ns,
             orientation,
             ack,
@@ -1011,15 +1010,13 @@ impl WorkerState {
             }
         };
 
-        let needed = (self.width * self.height * 4) as usize;
-        if bytes.len() != needed {
-            // Should never happen — sink-side conversion sizes exactly,
-            // and dims are fixed at configure time. Drop quietly *and*
-            // release the producer so we don't deadlock the pipeline.
+        if nv12_to_xrgb8888(pixels.as_slice(), self.width, self.height, &matrix, canvas).is_err() {
+            // Should never happen: the sink checked the frame size, and dims
+            // are fixed at configure time. Drop quietly *and* release the
+            // producer so we don't deadlock the pipeline.
             let _ = ack.send(());
             return;
         }
-        canvas[..needed].copy_from_slice(&bytes[..needed]);
 
         let surface = self.window.wl_surface();
         if orientation != self.orientation {
@@ -1216,53 +1213,35 @@ fn buffer_transform(orientation: Orientation) -> wl_output::Transform {
 // NV12 -> XRGB8888
 // =================================================================
 
-/// Convert a packed NV12 source buffer (`width * height` Y plane
-/// followed by `width * height / 2` UV plane, interleaved as U,V,U,V)
-/// into a packed XRGB8888 buffer (`width * height * 4` bytes, little-
-/// endian per pixel: `[B, G, R, 0xFF]`). `matrix` carries the negotiated
+/// Convert a tightly packed NV12 frame into `canvas` as XRGB8888 (`[B, G, R,
+/// 0xFF]` per pixel, little-endian), through `matrix`, the negotiated
 /// colorimetry's coefficients.
-// The `col` index drives both the luma read and the subsampled-chroma pair
-// arithmetic (`col / 2`), so an iterator rewrite would not be clearer.
-#[allow(clippy::needless_range_loop)]
 fn nv12_to_xrgb8888(
     src: &[u8],
     width: u32,
     height: u32,
     matrix: &YuvRgbMatrix,
-) -> Result<Vec<u8>, G2gError> {
-    let w = width as usize;
-    let h = height as usize;
-    let y_size = w * h;
-    let uv_size = w * (h / 2);
-    if src.len() < y_size + uv_size {
+    canvas: &mut [u8],
+) -> Result<(), G2gError> {
+    let (w, h) = (width as usize, height as usize);
+    let xrgb_bytes = w * h * XRGB8888_BYTES_PER_PIXEL;
+    if src.len() < frame_byte_size(RawVideoFormat::Nv12, width, height) || canvas.len() < xrgb_bytes
+    {
         return Err(G2gError::CapsMismatch);
     }
-
-    let mut out = alloc::vec![0u8; w * h * 4];
-    let (y_plane, uv_plane) = src.split_at(y_size);
-
-    for row in 0..h {
-        let y_row = &y_plane[row * w..(row + 1) * w];
-        let uv_row = &uv_plane[(row / 2) * w..(row / 2) * w + w];
-        let dst_row_off = row * w * 4;
-        for col in 0..w {
-            let y = y_row[col] as i32;
-            // UV are subsampled 2x horizontally; pair index = col / 2.
-            let uv_pair = (col / 2) * 2;
-            let u = uv_row[uv_pair] as i32;
-            let v = uv_row[uv_pair + 1] as i32;
-
-            let (r, g, b) = matrix.yuv_to_rgb(y, u, v);
-
-            let dst = dst_row_off + col * 4;
-            out[dst] = b as u8;
-            out[dst + 1] = g as u8;
-            out[dst + 2] = r as u8;
-            out[dst + 3] = 0xFF;
-        }
-    }
-    Ok(out)
+    yuv420_to_rgb_into(
+        src,
+        (w, h),
+        true,
+        rgba_rb_offsets(RawVideoFormat::Bgra8),
+        matrix,
+        &mut canvas[..xrgb_bytes],
+    );
+    Ok(())
 }
+
+/// XRGB8888 is BGRA in memory, alpha ignored.
+const XRGB8888_BYTES_PER_PIXEL: usize = 4;
 
 #[cfg(test)]
 mod tests {
@@ -1557,11 +1536,23 @@ mod tests {
         );
     }
 
+    /// The XRGB8888 canvas `nv12_to_xrgb8888` fills from `src`.
+    fn convert(
+        src: &[u8],
+        width: u32,
+        height: u32,
+        matrix: &YuvRgbMatrix,
+    ) -> Result<Vec<u8>, G2gError> {
+        let mut canvas = alloc::vec![0u8; (width * height) as usize * XRGB8888_BYTES_PER_PIXEL];
+        nv12_to_xrgb8888(src, width, height, matrix, &mut canvas)?;
+        Ok(canvas)
+    }
+
     #[test]
     fn nv12_to_xrgb_yields_correct_byte_count() {
         // 4x2 NV12: Y=8 bytes, UV=4 bytes. Output = 4*2*4 = 32 bytes.
         let src = alloc::vec![16u8; 12];
-        let out = nv12_to_xrgb8888(&src, 4, 2, &YuvRgbMatrix::new(Colorimetry::UNKNOWN)).unwrap();
+        let out = convert(&src, 4, 2, &YuvRgbMatrix::new(Colorimetry::UNKNOWN)).unwrap();
         assert_eq!(out.len(), 32);
     }
 
@@ -1578,7 +1569,7 @@ mod tests {
         }
         src[4] = 128; // U
         src[5] = 128; // V
-        let out = nv12_to_xrgb8888(&src, 2, 2, &YuvRgbMatrix::new(Colorimetry::UNKNOWN)).unwrap();
+        let out = convert(&src, 2, 2, &YuvRgbMatrix::new(Colorimetry::UNKNOWN)).unwrap();
         for px in out.as_chunks::<4>().0 {
             assert!((125..=131).contains(&px[0]), "blue out of range: {}", px[0]);
             assert!(
@@ -1608,7 +1599,7 @@ mod tests {
         // The worker never spawns: only the table is under test, and a failed
         // worker spawn (no compositor in CI) would mask it.
         let mut sink = WaylandSink::new();
-        let convert = |sink: &WaylandSink| nv12_to_xrgb8888(&src, 2, 2, &sink.matrix).unwrap();
+        let convert = |sink: &WaylandSink| convert(&src, 2, 2, &sink.matrix).unwrap();
 
         let _ = sink.configure_pipeline(&nv12_caps(Colorimetry::UNKNOWN));
         let untagged = convert(&sink);
@@ -1619,9 +1610,32 @@ mod tests {
     }
 
     #[test]
+    fn nv12_to_xrgb_matches_videoconvert_to_bgra() {
+        const WIDTH: u32 = 4;
+        const HEIGHT: u32 = 2;
+        let src: Vec<u8> = (0..12u8).map(|i| i * 20).collect();
+        let expected = crate::videoconvert::convert(
+            &src,
+            RawVideoFormat::Nv12,
+            RawVideoFormat::Bgra8,
+            WIDTH as usize,
+            HEIGHT as usize,
+            Colorimetry::UNKNOWN,
+        );
+        let out = convert(
+            &src,
+            WIDTH,
+            HEIGHT,
+            &YuvRgbMatrix::new(Colorimetry::UNKNOWN),
+        )
+        .unwrap();
+        assert_eq!(out, expected.to_vec());
+    }
+
+    #[test]
     fn nv12_to_xrgb_rejects_truncated_source() {
         let src = alloc::vec![0u8; 8]; // Need 12 for 4x2 NV12.
-        assert!(nv12_to_xrgb8888(&src, 4, 2, &YuvRgbMatrix::new(Colorimetry::UNKNOWN)).is_err());
+        assert!(convert(&src, 4, 2, &YuvRgbMatrix::new(Colorimetry::UNKNOWN)).is_err());
     }
 
     #[test]
