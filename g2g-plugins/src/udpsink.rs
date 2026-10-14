@@ -21,7 +21,6 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -43,7 +42,7 @@ use crate::rtpcapturetime::{
     NTP_64_ID_PROPERTY,
 };
 use crate::rtppay::RtpH264Packetizer;
-use crate::rtx;
+use crate::rtx::{self, SentPackets};
 use crate::ulpfec::{FecEncoder, InterleavedFecEncoder};
 
 /// FEC mode for the sink: off, single-level ULPFEC (one repair per contiguous
@@ -231,9 +230,9 @@ pub struct UdpSink {
     /// loss recovery (independent of NACK/RTX). Single-level recovers one loss per
     /// group; interleaved / 2-D recovers a burst of consecutive losses.
     fec: FecMode,
-    /// Recently sent packets, `(sequence, bytes)`, oldest first, capped at
+    /// Recently sent packets by sequence, capped at
     /// [`retx_cap`](Self::retx_cap). Resent on a matching NACK.
-    retx_buf: VecDeque<(u16, Vec<u8>)>,
+    retx_buf: SentPackets<Vec<u8>>,
     retx_cap: usize,
     /// RFC 3550 sender reports: emit an RTCP SR at most this often (ns) on the
     /// RTP/RTCP-muxed socket, so a receiver can sync this SSRC's RTP clock to
@@ -282,7 +281,7 @@ impl UdpSink {
             rtx_seq: 0,
             fec_config: FecConfig::default(),
             fec: FecMode::None,
-            retx_buf: VecDeque::new(),
+            retx_buf: SentPackets::default(),
             retx_cap: DEFAULT_RETX_CAPACITY,
             clients: Vec::new(),
             auto_multicast: DEFAULT_AUTO_MULTICAST,
@@ -503,9 +502,7 @@ impl UdpSink {
     /// blocking, and retransmit every requested-and-still-buffered packet.
     /// Returns the number of packets resent.
     async fn service_nacks(&mut self) -> Result<u64, G2gError> {
-        // Collect requested packets first so the resend loop does not borrow the
-        // history while sending.
-        let mut to_resend: Vec<Vec<u8>> = Vec::new();
+        let mut requested: Vec<u16> = Vec::new();
         let mut rb = [0u8; 1500];
         let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
         loop {
@@ -514,13 +511,7 @@ impl UdpSink {
                 Ok(n) => {
                     for p in rtcp::parse_compound(&rb[..n]) {
                         if let RtcpPacket::Nack { missing, .. } = p {
-                            for seq in missing {
-                                if let Some((_, pkt)) =
-                                    self.retx_buf.iter().find(|(s, _)| *s == seq)
-                                {
-                                    to_resend.push(pkt.clone());
-                                }
-                            }
+                            requested.extend(missing);
                         }
                     }
                 }
@@ -528,7 +519,21 @@ impl UdpSink {
                 Err(_) => break,
             }
         }
-        for pkt in &to_resend {
+        // taken out so the resend loop can send while reading it
+        let history = core::mem::take(&mut self.retx_buf);
+        let resent = self.resend(&history, &requested).await;
+        self.retx_buf = history;
+        resent
+    }
+
+    async fn resend(
+        &mut self,
+        history: &SentPackets<Vec<u8>>,
+        requested: &[u16],
+    ) -> Result<u64, G2gError> {
+        let mut resent = 0u64;
+        for pkt in requested.iter().filter_map(|seq| history.get(*seq)) {
+            resent += 1;
             // RFC 4588: wrap the resend in an RTX packet (own sequence space),
             // else resend the original packet verbatim.
             // PT 0 means "not configured" (the property half-set state), never
@@ -542,7 +547,7 @@ impl UdpSink {
             }
             self.send_datagram(pkt).await?;
         }
-        Ok(to_resend.len() as u64)
+        Ok(resent)
     }
 }
 
@@ -970,9 +975,9 @@ impl AsyncElement for UdpSink {
                         for pkt in packets {
                             let s = u16::from_be_bytes([pkt[2], pkt[3]]);
                             if self.retx_buf.len() >= self.retx_cap {
-                                self.retx_buf.pop_front();
+                                self.retx_buf.pop_oldest();
                             }
-                            self.retx_buf.push_back((s, pkt));
+                            self.retx_buf.push(s, pkt);
                         }
                     }
                     self.packets_sent += sent;

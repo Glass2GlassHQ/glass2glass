@@ -14,6 +14,7 @@
 //! (same SSRC, distinct PT) are supported: the caller supplies the SSRC to set
 //! on the rebuilt original.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use g2g_core::rtp::RtpHeader;
@@ -57,6 +58,57 @@ pub fn parse_rtx_packet(rtx: &[u8], original_pt: u8, original_ssrc: u32) -> Opti
     out[8..12].copy_from_slice(&original_ssrc.to_be_bytes());
     out.extend_from_slice(&rtx[payload_off + 2..]);
     Some(out)
+}
+
+// packets just sent, looked up by RTP sequence number to answer a NACK
+#[derive(Debug)]
+pub struct SentPackets<T> {
+    first_sequence: u16,
+    packets: VecDeque<T>,
+}
+
+impl<T> Default for SentPackets<T> {
+    fn default() -> Self {
+        Self {
+            first_sequence: 0,
+            packets: VecDeque::new(),
+        }
+    }
+}
+
+impl<T> SentPackets<T> {
+    // a sequence that does not follow the newest one restarts the history
+    pub fn push(&mut self, sequence: u16, packet: T) {
+        let expected = self.first_sequence.wrapping_add(self.packets.len() as u16);
+        if self.packets.is_empty() || sequence != expected {
+            self.packets.clear();
+            self.first_sequence = sequence;
+        }
+        self.packets.push_back(packet);
+    }
+
+    pub fn oldest(&self) -> Option<&T> {
+        self.packets.front()
+    }
+
+    pub fn pop_oldest(&mut self) -> Option<T> {
+        let oldest = self.packets.pop_front()?;
+        self.first_sequence = self.first_sequence.wrapping_add(1);
+        Some(oldest)
+    }
+
+    pub fn len(&self) -> usize {
+        self.packets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.packets.is_empty()
+    }
+
+    pub fn get(&self, sequence: u16) -> Option<&T> {
+        self.packets
+            .get(usize::from(sequence.wrapping_sub(self.first_sequence)))
+    }
 }
 
 #[cfg(test)]
@@ -108,6 +160,24 @@ mod tests {
             "no room for the OSN"
         );
         assert_eq!(build_rtx_packet(&[0x80u8; 4], 97, 1, 0), None);
+    }
+
+    #[test]
+    fn sent_packets_are_found_by_sequence_across_the_wrap() {
+        let mut sent = SentPackets::default();
+        let first = u16::MAX - 1;
+        for offset in 0..4u16 {
+            sent.push(first.wrapping_add(offset), offset);
+        }
+        assert_eq!(sent.get(u16::MAX), Some(&1));
+        assert_eq!(sent.get(1), Some(&3));
+        assert_eq!(sent.get(2), None, "not sent yet");
+        assert_eq!(sent.pop_oldest(), Some(0));
+        assert_eq!(sent.get(first), None, "evicted");
+        assert_eq!(sent.get(0), Some(&2));
+        sent.push(100, 9);
+        assert_eq!(sent.len(), 1, "a sequence jump restarts the history");
+        assert_eq!(sent.get(100), Some(&9));
     }
 
     #[test]

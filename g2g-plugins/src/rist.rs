@@ -3,7 +3,7 @@
 //! packets, the sender's retransmission history and the receiver's NACK
 //! schedule. `RistSink` / `RistSrc` (the `rist` feature) put them on sockets.
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::BTreeMap;
 #[cfg(feature = "rist")]
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use g2g_core::rtp::{RtpHeader, RTP_HEADER_LEN};
 
 use crate::rtcp::{self, RtcpPacket};
+use crate::rtx::SentPackets;
 
 /// The APP packet name every RIST message carries.
 pub const RIST_APP_NAME: [u8; 4] = *b"RIST";
@@ -190,40 +191,35 @@ struct SentPacket {
 #[derive(Debug)]
 pub struct RetransmissionHistory {
     keep_ns: u64,
-    first_sequence: u16,
-    packets: VecDeque<SentPacket>,
+    packets: SentPackets<SentPacket>,
 }
 
 impl RetransmissionHistory {
     pub fn new(keep_ns: u64) -> Self {
         Self {
             keep_ns,
-            first_sequence: 0,
-            packets: VecDeque::new(),
+            packets: SentPackets::default(),
         }
     }
 
     /// Remember a packet just sent at `now_ns` and forget those older than the
     /// history keeps. A sequence that does not follow the last one restarts it.
     pub fn record(&mut self, header: RtpHeader, payload: &[u8], now_ns: u64) {
-        let expected = self.first_sequence.wrapping_add(self.packets.len() as u16);
-        if self.packets.is_empty() || header.sequence != expected {
-            self.packets.clear();
-            self.first_sequence = header.sequence;
-        }
-        self.packets.push_back(SentPacket {
-            sent_ns: now_ns,
-            header,
-            payload: payload.to_vec(),
-        });
+        self.packets.push(
+            header.sequence,
+            SentPacket {
+                sent_ns: now_ns,
+                header,
+                payload: payload.to_vec(),
+            },
+        );
         let oldest_kept_ns = now_ns.saturating_sub(self.keep_ns);
-        while let Some(oldest) = self.packets.front() {
+        while let Some(oldest) = self.packets.oldest() {
             let expired = oldest.sent_ns < oldest_kept_ns;
             if !expired && self.packets.len() <= MAX_HISTORY_PACKETS {
                 break;
             }
-            self.packets.pop_front();
-            self.first_sequence = self.first_sequence.wrapping_add(1);
+            self.packets.pop_oldest();
         }
     }
 
@@ -232,8 +228,8 @@ impl RetransmissionHistory {
     pub fn retransmissions(&self, ranges: &[SequenceRange]) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
         for range in ranges {
-            for index in self.indices_in(*range) {
-                let sent = &self.packets[index];
+            let sequences = (0..=range.additional).map(|offset| range.start.wrapping_add(offset));
+            for sent in sequences.filter_map(|sequence| self.packets.get(sequence)) {
                 let header = RtpHeader {
                     ssrc: retransmission_ssrc(sent.header.ssrc),
                     ..sent.header
@@ -245,17 +241,6 @@ impl RetransmissionHistory {
             }
         }
         out
-    }
-
-    /// History indices `range` covers. Its sequence numbers can wrap past
-    /// 65535, so the covered span is up to two runs of indices.
-    fn indices_in(&self, range: SequenceRange) -> impl Iterator<Item = usize> {
-        let held = self.packets.len();
-        let first = range.start.wrapping_sub(self.first_sequence) as usize;
-        let last = first + range.additional as usize;
-        let before_wrap = first..(last + 1).min(held);
-        let after_wrap = 0..(last + 1).saturating_sub(SEQUENCE_SPACE).min(held);
-        before_wrap.chain(after_wrap)
     }
 }
 
