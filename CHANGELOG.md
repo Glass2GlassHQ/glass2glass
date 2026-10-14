@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1354: the AVI writer builds the file in one pre-sized buffer, and progressive MP4 emits each sample as its own frame.
 - M1353: AVI `idx1` keyframe flags and MP4 `stsc` chunk lookups run in linear time.
 - M1332: the `only-on` gate is one core type shared by `ortinfer` and the Python host.
 - M1331: uniquely held frames cross the plugin ABI writable in place.

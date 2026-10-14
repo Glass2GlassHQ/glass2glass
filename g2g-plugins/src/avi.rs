@@ -27,8 +27,8 @@ use alloc::vec::Vec;
 use g2g_core::{AudioFormat, G2gError, Tag, TagList, VideoCodec};
 
 use crate::riff::{
-    chunks, padded_len, read_fourcc, read_u16, read_u32, FourCc, CHUNK_HEADER_LEN, LIST_FOURCC,
-    RIFF_FOURCC, RIFF_HEADER_LEN,
+    chunk_len, chunks, padded_len, put_chunk, put_chunk_header, read_fourcc, read_u16, read_u32,
+    FourCc, CHUNK_HEADER_LEN, FOURCC_LEN, LIST_FOURCC, RIFF_FOURCC, RIFF_HEADER_LEN,
 };
 
 /// The form type of the first `RIFF` list.
@@ -750,35 +750,42 @@ impl AviWriter {
     /// Serialize the file: `RIFF AVI ` + `LIST hdrl` + `LIST movi` + `idx1`.
     pub(crate) fn finish(&self) -> Result<Vec<u8>, G2gError> {
         let mut hdrl = Vec::from(HDRL_FOURCC);
-        hdrl.extend_from_slice(&riff_chunk(&AVIH_FOURCC, &self.avih()));
+        put_chunk(&mut hdrl, &AVIH_FOURCC, &self.avih());
         for stream in 0..self.streams.len() {
             let mut strl = Vec::from(STRL_FOURCC);
-            strl.extend_from_slice(&riff_chunk(&STRH_FOURCC, &self.strh(stream)?));
-            strl.extend_from_slice(&riff_chunk(&STRF_FOURCC, &self.strf(stream)?));
-            hdrl.extend_from_slice(&riff_chunk(&LIST_FOURCC, &strl));
+            put_chunk(&mut strl, &STRH_FOURCC, &self.strh(stream)?);
+            put_chunk(&mut strl, &STRF_FOURCC, &self.strf(stream)?);
+            put_chunk(&mut hdrl, &LIST_FOURCC, &strl);
         }
 
-        let mut movi = Vec::from(MOVI_FOURCC);
-        let mut idx1 = Vec::with_capacity(self.chunks.len() * IDX1_ENTRY_LEN);
+        // `push` caps `movi_len`, so none of these sums can overflow.
+        let movi_body_len = FOURCC_LEN + self.movi_len;
+        let idx1_len = self.chunks.len() * IDX1_ENTRY_LEN;
+        let riff_body_len =
+            FOURCC_LEN + chunk_len(hdrl.len()) + chunk_len(movi_body_len) + chunk_len(idx1_len);
+        let mut file = Vec::with_capacity(CHUNK_HEADER_LEN + riff_body_len);
+        put_chunk_header(&mut file, &RIFF_FOURCC, riff_body_len);
+        file.extend_from_slice(&AVI_FOURCC);
+        put_chunk(&mut file, &LIST_FOURCC, &hdrl);
+        put_chunk_header(&mut file, &LIST_FOURCC, movi_body_len);
+        // `idx1` measures from the `movi` form type.
+        let movi_form_at = file.len();
+        file.extend_from_slice(&MOVI_FOURCC);
+        let mut idx1 = Vec::with_capacity(idx1_len);
         for chunk in &self.chunks {
             let video = matches!(self.streams[chunk.stream], AviWriteStream::Video { .. });
             let id = chunk_id(chunk.stream, video);
-            // `idx1` measures from the `movi` form type, which is where this
-            // buffer starts, so the running length is the offset to record.
             idx1.extend_from_slice(&id);
             idx1.extend_from_slice(
                 &(if chunk.keyframe { AVIIF_KEYFRAME } else { 0 }).to_le_bytes(),
             );
-            idx1.extend_from_slice(&(movi.len() as u32).to_le_bytes());
+            idx1.extend_from_slice(&((file.len() - movi_form_at) as u32).to_le_bytes());
             idx1.extend_from_slice(&(chunk.data.len() as u32).to_le_bytes());
-            movi.extend_from_slice(&riff_chunk(&id, &chunk.data));
+            put_chunk(&mut file, &id, &chunk.data);
         }
-
-        let mut body = Vec::from(AVI_FOURCC);
-        body.extend_from_slice(&riff_chunk(&LIST_FOURCC, &hdrl));
-        body.extend_from_slice(&riff_chunk(&LIST_FOURCC, &movi));
-        body.extend_from_slice(&riff_chunk(&IDX1_FOURCC, &idx1));
-        Ok(riff_chunk(&RIFF_FOURCC, &body))
+        put_chunk(&mut file, &IDX1_FOURCC, &idx1);
+        debug_assert_eq!(file.len(), CHUNK_HEADER_LEN + riff_body_len);
+        Ok(file)
     }
 
     /// The main header. `dwMicroSecPerFrame` and `dwTotalFrames` describe the
@@ -974,19 +981,6 @@ fn gcd(a: u64, b: u64) -> u64 {
         b = r;
     }
     a.max(1)
-}
-
-/// A RIFF chunk: id, little-endian size, body, and the pad byte an odd size
-/// needs.
-fn riff_chunk(id: &FourCc, body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(CHUNK_HEADER_LEN + body.len() + 1);
-    out.extend_from_slice(id);
-    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    out.extend_from_slice(body);
-    if body.len() % 2 == 1 {
-        out.push(0);
-    }
-    out
 }
 
 #[cfg(test)]

@@ -46,7 +46,6 @@ Core, bindings, ML:
 
 Containers:
 
-- The AVI writer copies the file 4 to 5 times, `mp4muxn` progressive 2 times.
 - Progressive MP4 and AVI demuxers de-frame every track to emit one.
 - PS, Ogg, IVF, Matroska and fMP4 demuxers drain the buffer front per unit.
 - Muxers copy each payload 3 to 5 times (mp4muxn, fmp4mux, matroska, flv, mpegts).

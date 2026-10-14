@@ -9,6 +9,7 @@
 //! against the enclosing range instead of trusting it, and reports a body that
 //! overruns rather than indexing past it.
 
+use alloc::vec::Vec;
 use core::ops::Range;
 
 /// A four-character code: a chunk id, a `LIST` form type, or a codec tag.
@@ -27,6 +28,26 @@ pub(crate) const LIST_FOURCC: FourCc = *b"LIST";
 /// A chunk body is padded to an even length. `None` on overflow.
 pub(crate) fn padded_len(size: usize) -> Option<usize> {
     size.checked_add(size % 2)
+}
+
+/// A whole chunk's length: header, body and pad byte.
+pub(crate) fn chunk_len(body_len: usize) -> usize {
+    CHUNK_HEADER_LEN + body_len + body_len % 2
+}
+
+/// Append a chunk header declaring a `body_len` body.
+pub(crate) fn put_chunk_header(out: &mut Vec<u8>, id: &FourCc, body_len: usize) {
+    out.extend_from_slice(id);
+    out.extend_from_slice(&(body_len as u32).to_le_bytes());
+}
+
+/// Append a whole chunk: header, body and the pad byte an odd size needs.
+pub(crate) fn put_chunk(out: &mut Vec<u8>, id: &FourCc, body: &[u8]) {
+    put_chunk_header(out, id, body.len());
+    out.extend_from_slice(body);
+    if body.len() % 2 == 1 {
+        out.push(0);
+    }
 }
 
 pub(crate) fn read_u16(data: &[u8], at: usize) -> Option<u16> {

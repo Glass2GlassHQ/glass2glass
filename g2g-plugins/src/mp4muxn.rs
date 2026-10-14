@@ -999,33 +999,43 @@ impl Mp4MuxN {
             (moov_at(head_len, false), head_len)
         };
 
-        let mut file = Vec::with_capacity(head.len() + moov.len() + mdat_len as usize);
-        file.extend_from_slice(&head);
+        let mut lead = Vec::with_capacity(head.len() + moov.len() + mdat_header);
+        lead.extend_from_slice(&head);
         if self.faststart {
-            file.extend_from_slice(&moov);
+            lead.extend_from_slice(&moov);
         }
         debug_assert_eq!(
-            file.len() as u64,
+            lead.len() as u64,
             mdat_start,
             "the mdat lands where the sample tables address it"
         );
         if mdat_header == 16 {
-            file.extend_from_slice(&1u32.to_be_bytes()); // size 1: largesize follows
-            file.extend_from_slice(b"mdat");
-            file.extend_from_slice(&((payload + 16) as u64).to_be_bytes());
+            lead.extend_from_slice(&1u32.to_be_bytes()); // size 1: largesize follows
+            lead.extend_from_slice(b"mdat");
+            lead.extend_from_slice(&((payload + 16) as u64).to_be_bytes());
         } else {
-            file.extend_from_slice(&((payload + 8) as u32).to_be_bytes());
-            file.extend_from_slice(b"mdat");
+            lead.extend_from_slice(&((payload + 8) as u32).to_be_bytes());
+            lead.extend_from_slice(b"mdat");
         }
-        for s in &samples {
-            file.extend_from_slice(&s.bytes);
+        // Each sample goes out as its own frame so the file is never held twice.
+        self.emit_bytes(out, lead).await?;
+        for sample in samples {
+            self.emit_bytes(out, sample.bytes).await?;
         }
         if !self.faststart {
-            file.extend_from_slice(&moov);
+            self.emit_bytes(out, moov).await?;
         }
+        Ok(())
+    }
 
+    /// Push one untimed byte-stream frame.
+    async fn emit_bytes(
+        &mut self,
+        out: &mut dyn OutputSink,
+        bytes: Vec<u8>,
+    ) -> Result<(), G2gError> {
         let out_frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(file.into_boxed_slice())),
+            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
             FrameTiming::default(),
             self.emitted,
         );
