@@ -163,7 +163,22 @@ struct Session {
     /// (destroying the context) before `Drop` here destroys the encoder in it, a
     /// use-after-free when the producer and encoder run in separate runner arms.
     _keep_alive: Arc<dyn CudaKeepAlive>,
+    /// Input surfaces registered with NVENC, oldest first. An upstream pool hands
+    /// the same few surfaces round, so each is registered once, not every frame.
+    registrations: alloc::collections::VecDeque<InputRegistration>,
 }
+
+/// One input surface's NVENC registration and the surface it registers.
+struct InputRegistration {
+    device_pointer: u64,
+    pitch: u32,
+    buffer_format: u32,
+    handle: *mut core::ffi::c_void,
+}
+
+/// Registrations kept before the oldest is released for a new surface. Covers
+/// the decode and upload pools upstream, so a steady stream registers nothing.
+const MAX_INPUT_REGISTRATIONS: usize = 32;
 
 // SAFETY: `Session` holds raw NVENC/CUDA handles. The runner moves `NvEnc`
 // between worker tasks but drives it through `&mut self` only (never
@@ -398,6 +413,7 @@ impl NvEnc {
             output: core::ptr::null_mut(),
             // Pin the producer's context for the session's life (see field docs).
             _keep_alive: buf.keep_alive_arc(),
+            registrations: alloc::collections::VecDeque::new(),
         });
 
         // Pull the low-latency preset config (the driver fills the codec-specific
@@ -623,29 +639,13 @@ impl NvEnc {
         force_keyframe: bool,
     ) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
         let buffer_format = self.nv_buffer_format();
+        // SAFETY: forwarded from this fn's contract.
+        let registered = unsafe { self.registered_input(buf, buffer_format) }?;
         let session = self.session.as_ref().ok_or(G2gError::NotConfigured)?;
         let enc = session.encoder;
         let f = &session.funcs;
 
-        // Register the input surface (NV12 two-plane, or packed RGBA) as a CUDA
-        // device pointer. For RGBA the pitch is the full row in bytes and the
-        // single plane lives at `luma_ptr`; NVENC color converts internally.
-        // SAFETY: the NVENC param structs are plain old data (ints, pointers,
-        // reserved arrays); all-zero is a valid initial state we then version-tag.
-        let mut reg: ffi::RegisterResource = unsafe { core::mem::zeroed() };
-        reg.version = ffi::NV_ENC_REGISTER_RESOURCE_VER;
-        reg.resource_type = ffi::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR;
-        reg.width = self.width;
-        reg.height = self.height;
-        reg.pitch = buf.luma_pitch;
-        reg.resource_to_register = buf.luma_ptr as *mut core::ffi::c_void;
-        reg.buffer_format = buffer_format;
-        reg.buffer_usage = ffi::NV_ENC_INPUT_IMAGE;
-        // SAFETY: valid encoder + fully-initialized register struct.
-        nvchk(unsafe { (f.nv_enc_register_resource.ok_or(hw())?)(enc, &mut reg) })?;
-        let registered = reg.registered_resource;
-
-        // Map it to an input buffer, with explicit cleanup on any later failure.
+        // Map it to an input buffer, unmapped again on any later failure.
         // SAFETY: the NVENC param structs are plain old data (ints, pointers,
         // reserved arrays); all-zero is a valid initial state we then version-tag.
         let mut map: ffi::MapInputResource = unsafe { core::mem::zeroed() };
@@ -653,22 +653,15 @@ impl NvEnc {
         map.registered_resource = registered;
         let map_fn = f.nv_enc_map_input_resource.ok_or(hw())?;
         // SAFETY: valid encoder + registered handle.
-        if let Err(e) = nvchk(unsafe { map_fn(enc, &mut map) }) {
-            // SAFETY: `registered` is the live registration from just above.
-            unsafe { self.unregister(registered) };
-            return Err(e);
-        }
+        nvchk(unsafe { map_fn(enc, &mut map) })?;
         let mapped = map.mapped_resource;
 
         // Reuse the session's pooled output bitstream buffer (M277): created once
         // at session open, locked + copied + unlocked per frame below.
         let output = session.output;
         if output.is_null() {
-            // SAFETY: `mapped`/`registered` are the live handles from above.
-            unsafe {
-                self.unmap(mapped);
-                self.unregister(registered);
-            }
+            // SAFETY: `mapped` is the live handle from above.
+            unsafe { self.unmap(mapped) };
             return Err(hw());
         }
 
@@ -704,13 +697,10 @@ impl NvEnc {
                 // SAFETY: `output` was just produced; `mapped`/`registered` are live.
                 let bytes = unsafe { self.lock_copy(output) };
                 let ts = bytes.as_ref().map(|(_, t)| *t).unwrap_or(pts_ns);
-                // The output buffer is pooled (destroyed with the session); only
-                // the per-frame input handles are released here.
-                // SAFETY: `mapped`/`registered` are this frame's live handles.
-                unsafe {
-                    self.unmap(mapped);
-                    self.unregister(registered);
-                }
+                // The output buffer and the registration are pooled (released with
+                // the session); only the per-frame mapping is released here.
+                // SAFETY: `mapped` is this frame's live handle.
+                unsafe { self.unmap(mapped) };
                 let (data, _) = bytes?;
                 Ok(Vec::from([(data, ts)]))
             }
@@ -721,19 +711,13 @@ impl NvEnc {
                 // keep no per-frame state for this path in v1, so we cannot emit
                 // the deferred output; treat as no packet this call. This is a
                 // structural no-op for the low-latency config we initialize.
-                // SAFETY: `mapped`/`registered` are this frame's live handles.
-                unsafe {
-                    self.unmap(mapped);
-                    self.unregister(registered);
-                }
+                // SAFETY: `mapped` is this frame's live handle.
+                unsafe { self.unmap(mapped) };
                 Ok(Vec::new())
             }
             _ => {
-                // SAFETY: `mapped`/`registered` are this frame's live handles.
-                unsafe {
-                    self.unmap(mapped);
-                    self.unregister(registered);
-                }
+                // SAFETY: `mapped` is this frame's live handle.
+                unsafe { self.unmap(mapped) };
                 Err(hw())
             }
         }
@@ -780,14 +764,58 @@ impl NvEnc {
         }
     }
 
-    /// # Safety: `registered` must be a live registered resource of the session.
-    unsafe fn unregister(&self, registered: *mut core::ffi::c_void) {
-        if let Some(s) = self.session.as_ref() {
-            if let Some(unreg) = s.funcs.nv_enc_unregister_resource {
-                // SAFETY: valid encoder + registered handle; best-effort cleanup.
-                let _ = unsafe { unreg(s.encoder, registered) };
+    /// The session's registration of `buf`'s input surface, registering it (and
+    /// releasing the oldest registration once [`MAX_INPUT_REGISTRATIONS`] are
+    /// held) the first time the surface arrives. For RGBA the pitch is the full
+    /// row in bytes and the single plane lives at `luma_ptr`; NVENC color
+    /// converts internally.
+    ///
+    /// # Safety
+    /// `buf`'s pointers must be valid device memory in the current CUDA context,
+    /// and a session must be open.
+    unsafe fn registered_input(
+        &mut self,
+        buf: &OwnedCudaBuffer,
+        buffer_format: u32,
+    ) -> Result<*mut core::ffi::c_void, G2gError> {
+        let (width, height) = (self.width, self.height);
+        let session = self.session.as_mut().ok_or(G2gError::NotConfigured)?;
+        let cached = session.registrations.iter().find(|r| {
+            r.device_pointer == buf.luma_ptr
+                && r.pitch == buf.luma_pitch
+                && r.buffer_format == buffer_format
+        });
+        if let Some(registration) = cached {
+            return Ok(registration.handle);
+        }
+        if session.registrations.len() >= MAX_INPUT_REGISTRATIONS {
+            if let Some(oldest) = session.registrations.pop_front() {
+                // SAFETY: a live registration of this session, never mapped
+                // outside `encode_locked`.
+                unsafe { session.unregister(oldest.handle) };
             }
         }
+        // SAFETY: the NVENC param structs are plain old data (ints, pointers,
+        // reserved arrays); all-zero is a valid initial state we then version-tag.
+        let mut reg: ffi::RegisterResource = unsafe { core::mem::zeroed() };
+        reg.version = ffi::NV_ENC_REGISTER_RESOURCE_VER;
+        reg.resource_type = ffi::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR;
+        reg.width = width;
+        reg.height = height;
+        reg.pitch = buf.luma_pitch;
+        reg.resource_to_register = buf.luma_ptr as *mut core::ffi::c_void;
+        reg.buffer_format = buffer_format;
+        reg.buffer_usage = ffi::NV_ENC_INPUT_IMAGE;
+        let register = session.funcs.nv_enc_register_resource.ok_or(hw())?;
+        // SAFETY: valid encoder + fully-initialized register struct.
+        nvchk(unsafe { register(session.encoder, &mut reg) })?;
+        session.registrations.push_back(InputRegistration {
+            device_pointer: buf.luma_ptr,
+            pitch: buf.luma_pitch,
+            buffer_format,
+            handle: reg.registered_resource,
+        });
+        Ok(reg.registered_resource)
     }
 
     async fn emit(
@@ -811,11 +839,25 @@ impl NvEnc {
     }
 }
 
+impl Session {
+    /// # Safety: `registered` must be a live registered resource of this session.
+    unsafe fn unregister(&self, registered: *mut core::ffi::c_void) {
+        if let Some(unregister) = self.funcs.nv_enc_unregister_resource {
+            // SAFETY: valid encoder + registered handle; best-effort cleanup.
+            let _ = unsafe { unregister(self.encoder, registered) };
+        }
+    }
+}
+
 impl Drop for NvEnc {
     fn drop(&mut self) {
         if let Some(s) = self.session.take() {
             // Destroy on the session's context, best-effort.
             if let Ok(_ctx) = ContextGuard::push(s.context) {
+                for registration in &s.registrations {
+                    // SAFETY: a live registration of this session, unmapped.
+                    unsafe { s.unregister(registration.handle) };
+                }
                 // The pooled output buffer must be destroyed before the encoder.
                 if !s.output.is_null() {
                     if let Some(destroy_bs) = s.funcs.nv_enc_destroy_bitstream_buffer {

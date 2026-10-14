@@ -83,7 +83,6 @@ Containers:
 Codecs and parsers:
 
 - `vulkanvideo` `submit_idr_decode_into` creates a bitstream buffer per call.
-- NVENC registers its input surface every frame.
 - `ffmpegenc` allocates an AVFrame per frame, `ffmpegdec` offload copies the AU twice.
 - One SPS head, VUI, HRD and PTL parser for h264parse, h265parse and vulkanvideo.
 - `vulkanvideo` uses av1parse's OBU walker, LEB128 and uvlc.
