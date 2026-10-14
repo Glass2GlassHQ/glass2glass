@@ -35,7 +35,9 @@ use crate::audiocontainer::{
     container_caps, emit_pcm, mux_constraint, mux_input_alternatives, parse_constraint,
     parse_output_alternatives, PcmContainer, PcmMux, MAX_CHANNELS, MAX_SAMPLE_RATE, STREAMING_SIZE,
 };
-use crate::pcmendian::{read_fourcc, read_u16_be, read_u32_be, PcmWire};
+use crate::bereader::{be_u16, be_u32};
+use crate::pcmendian::PcmWire;
+use crate::riff::read_fourcc;
 
 /// Holds the samples until EOS so the FORM, COMM, and SSND sizes are final, and
 /// pads the sound data to an even length as EA IFF 85 requires.
@@ -150,8 +152,8 @@ fn parse_comm(body: &[u8], aifc: bool) -> Option<PcmWire> {
     if body.len() < COMM_FIXED_LEN {
         return None;
     }
-    let channels = read_u16_be(body, 0)?;
-    let bits = read_u16_be(body, 6)?;
+    let channels = be_u16(body, 0)?;
+    let bits = be_u16(body, 6)?;
     let sample_rate = ieee80_to_u32(body.get(8..18)?)?;
     if channels == 0 || channels > MAX_CHANNELS {
         return None;
@@ -290,7 +292,7 @@ impl AiffParse {
                 return Ok(());
             }
             let id = read_fourcc(&self.buf, 0).ok_or(G2gError::CapsMismatch)?;
-            let size = read_u32_be(&self.buf, 4).ok_or(G2gError::CapsMismatch)? as usize;
+            let size = be_u32(&self.buf, 4).ok_or(G2gError::CapsMismatch)? as usize;
             // SSND is the sample payload and is not buffered whole.
             if &id != b"SSND" && size > MAX_HEADER_CHUNK {
                 return Err(G2gError::CapsMismatch);
@@ -336,7 +338,7 @@ impl AiffParse {
             if self.buf.len() < SSND_PREFIX_LEN {
                 return Ok(());
             }
-            let offset = read_u32_be(&self.buf, 0).ok_or(G2gError::CapsMismatch)? as usize;
+            let offset = be_u32(&self.buf, 0).ok_or(G2gError::CapsMismatch)? as usize;
             if offset > MAX_HEADER_CHUNK {
                 return Err(G2gError::CapsMismatch);
             }
@@ -634,14 +636,14 @@ mod tests {
             &[&pcm],
         );
         let file = data_bytes(&written.packets);
-        assert_eq!(read_u32_be(&file, 4), Some((file.len() - 8) as u32));
+        assert_eq!(be_u32(&file, 4), Some((file.len() - 8) as u32));
 
         let comm = file.windows(4).position(|bytes| bytes == b"COMM").unwrap();
-        assert_eq!(read_u32_be(&file, comm + 10), Some(8));
+        assert_eq!(be_u32(&file, comm + 10), Some(8));
 
         let ssnd = file.windows(4).position(|bytes| bytes == b"SSND").unwrap();
         assert_eq!(
-            read_u32_be(&file, ssnd + 4),
+            be_u32(&file, ssnd + 4),
             Some((SSND_PREFIX_LEN + pcm.len()) as u32)
         );
     }

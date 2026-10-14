@@ -46,6 +46,7 @@ use crate::aacparse::{adts_from_asc, SAMPLE_RATES};
 use crate::annexb::{
     is_annex_b, length_prefixed_nal_units, parse_avcc, prepend_param_sets, starts_with_param_set,
 };
+use crate::bereader::{take_be_u16, take_be_u32};
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::flv::{FlvCodec, FlvDemuxer, FlvUnit};
 
@@ -626,7 +627,7 @@ fn parse_on_metadata(body: &[u8]) -> TagList {
     pos += 1;
     let _ = match marker {
         amf0::ECMA_ARRAY => {
-            let _count = read_u32_be(body, &mut pos);
+            let _count = take_be_u32(body, &mut pos);
             read_amf0_object(body, &mut pos, Some(&mut list), 0)
         }
         amf0::OBJECT => read_amf0_object(body, &mut pos, Some(&mut list), 0),
@@ -653,17 +654,17 @@ fn read_amf0_value(b: &[u8], pos: &mut usize, depth: u32) -> Option<Option<Strin
         amf0::NUMBER => advance(b, pos, 8).map(|_| None),
         amf0::BOOLEAN => advance(b, pos, 1).map(|_| None),
         amf0::STRING => {
-            let len = read_u16_be(b, pos)? as usize;
+            let len = take_be_u16(b, pos)? as usize;
             Some(Some(read_amf0_str(b, pos, len)?))
         }
         amf0::OBJECT => read_amf0_object(b, pos, None, depth + 1).map(|_| None),
         amf0::ECMA_ARRAY => {
-            let _count = read_u32_be(b, pos)?;
+            let _count = take_be_u32(b, pos)?;
             read_amf0_object(b, pos, None, depth + 1).map(|_| None)
         }
         amf0::NULL | amf0::UNDEFINED => Some(None),
         amf0::STRICT_ARRAY => {
-            let count = read_u32_be(b, pos)?;
+            let count = take_be_u32(b, pos)?;
             for _ in 0..count {
                 read_amf0_value(b, pos, depth + 1)?;
             }
@@ -671,7 +672,7 @@ fn read_amf0_value(b: &[u8], pos: &mut usize, depth: u32) -> Option<Option<Strin
         }
         amf0::DATE => advance(b, pos, 10).map(|_| None), // f64 + s16 timezone
         amf0::LONG_STRING => {
-            let len = read_u32_be(b, pos)? as usize;
+            let len = take_be_u32(b, pos)? as usize;
             advance(b, pos, len).map(|_| None)
         }
         _ => None,
@@ -690,7 +691,7 @@ fn read_amf0_object(
         return None;
     }
     loop {
-        let key_len = read_u16_be(b, pos)? as usize;
+        let key_len = take_be_u16(b, pos)? as usize;
         if key_len == 0 {
             // An empty key precedes the object-end marker.
             return if *b.get(*pos)? == amf0::OBJECT_END {
@@ -715,18 +716,6 @@ fn advance(b: &[u8], pos: &mut usize, n: usize) -> Option<()> {
     }
     *pos = new;
     Some(())
-}
-
-fn read_u16_be(b: &[u8], pos: &mut usize) -> Option<u16> {
-    let s = b.get(*pos..*pos + 2)?;
-    *pos += 2;
-    Some(u16::from_be_bytes([s[0], s[1]]))
-}
-
-fn read_u32_be(b: &[u8], pos: &mut usize) -> Option<u32> {
-    let s = b.get(*pos..*pos + 4)?;
-    *pos += 4;
-    Some(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
 }
 
 /// Read `len` bytes as a UTF-8 string (AMF0 object keys / string values are raw,

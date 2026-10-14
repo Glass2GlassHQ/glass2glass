@@ -30,18 +30,6 @@ pub(crate) struct PcmWire {
     pub big_endian: bool,
 }
 
-pub(crate) fn read_u16_be(data: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_be_bytes(data.get(at..at + 2)?.try_into().ok()?))
-}
-
-pub(crate) fn read_u32_be(data: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?))
-}
-
-pub(crate) fn read_fourcc(data: &[u8], at: usize) -> Option<[u8; 4]> {
-    data.get(at..at + 4)?.try_into().ok()
-}
-
 /// Swap each `width`-byte sample in place. `width` 1 is a no-op. Bytes past the
 /// last whole sample are left untouched.
 pub(crate) fn swap_endian(data: &mut [u8], width: usize) {

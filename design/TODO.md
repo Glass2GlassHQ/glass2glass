@@ -86,7 +86,7 @@ Shared helpers:
 - `testutil::CollectSink` in src tests, a shared sink for integration tests.
 - An `mfcommon` module for the Media Foundation helpers, one CUDA driver FFI module.
 - One Android binder threadpool test helper.
-- One BE byte reader.
+- `sei.rs` and `rtcp.rs` use the shared big-endian reader in `bereader.rs`.
 - `vtdecode`/`vtencode` `cm_time` helpers, `alertrecorder` uses `xmlutil::civil`,
   and aacparse, dvbsub, st2110anc use `annexb::BitReader`.
 

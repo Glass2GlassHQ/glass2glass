@@ -596,6 +596,8 @@ mod graphthreads;
 pub use graphthreads::{PinnedThreadSpawner, TokioThreadSpawner};
 // Annex-B NAL splitting shared by rtppay (RTP) and h264util (WebCodecs).
 mod annexb;
+// Bounds-checked big-endian field reads shared by the container parsers.
+mod bereader;
 // RIFF chunk walking shared by the WAVE and AVI elements.
 mod riff;
 // `WAVEFORMATEX` tags and the WAVE header, shared by the WAV and AVI elements.

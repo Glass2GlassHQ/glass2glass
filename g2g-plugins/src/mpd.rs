@@ -24,6 +24,7 @@ use alloc::vec::Vec;
 
 use roxmltree::{Document, Node};
 
+use crate::bereader::{take_be_u16, take_be_u32, take_be_u64};
 use crate::xmlutil::days_from_civil;
 
 /// One selectable Representation (a single quality rendition).
@@ -548,25 +549,25 @@ pub fn parse_sidx(data: &[u8]) -> Option<Sidx> {
     }
     let version = *data.get(8)?;
     let mut p = 12usize; // skip the 3 flag bytes
-    let _reference_id = read_u32(data, &mut p)?;
-    let timescale = read_u32(data, &mut p)? as u64;
+    let _reference_id = take_be_u32(data, &mut p)?;
+    let timescale = take_be_u32(data, &mut p)? as u64;
     // earliest_presentation_time + first_offset: 32-bit in v0, 64-bit in v1.
     let first_offset = if version == 0 {
-        let _ept = read_u32(data, &mut p)?;
-        read_u32(data, &mut p)? as u64
+        let _ept = take_be_u32(data, &mut p)?;
+        take_be_u32(data, &mut p)? as u64
     } else {
-        let _ept = read_u64(data, &mut p)?;
-        read_u64(data, &mut p)?
+        let _ept = take_be_u64(data, &mut p)?;
+        take_be_u64(data, &mut p)?
     };
-    let _reserved = read_u16(data, &mut p)?;
-    let reference_count = read_u16(data, &mut p)?;
+    let _reserved = take_be_u16(data, &mut p)?;
+    let reference_count = take_be_u16(data, &mut p)?;
     let mut entries = Vec::new();
     for _ in 0..reference_count {
         // reference_type(1) | referenced_size(31); subsegment_duration(32);
         // starts_with_SAP(1) | SAP_type(3) | SAP_delta_time(28).
-        let w0 = read_u32(data, &mut p)?;
-        let duration = read_u32(data, &mut p)? as u64;
-        let _sap = read_u32(data, &mut p)?;
+        let w0 = take_be_u32(data, &mut p)?;
+        let duration = take_be_u32(data, &mut p)? as u64;
+        let _sap = take_be_u32(data, &mut p)?;
         entries.push(SidxEntry {
             reference_type: (w0 >> 31) & 1 == 1,
             size: (w0 & 0x7fff_ffff) as u64,
@@ -579,24 +580,6 @@ pub fn parse_sidx(data: &[u8]) -> Option<Sidx> {
         timescale,
         entries,
     })
-}
-
-fn read_u16(d: &[u8], p: &mut usize) -> Option<u16> {
-    let v = u16::from_be_bytes(d.get(*p..*p + 2)?.try_into().ok()?);
-    *p += 2;
-    Some(v)
-}
-
-fn read_u32(d: &[u8], p: &mut usize) -> Option<u32> {
-    let v = u32::from_be_bytes(d.get(*p..*p + 4)?.try_into().ok()?);
-    *p += 4;
-    Some(v)
-}
-
-fn read_u64(d: &[u8], p: &mut usize) -> Option<u64> {
-    let v = u64::from_be_bytes(d.get(*p..*p + 8)?.try_into().ok()?);
-    *p += 8;
-    Some(v)
 }
 
 impl Period {

@@ -33,7 +33,8 @@ use crate::audiocontainer::{
     container_caps, emit_pcm, mux_constraint, mux_input_alternatives, parse_constraint,
     parse_output_alternatives, PcmContainer, PcmMux, MAX_CHANNELS, MAX_SAMPLE_RATE, STREAMING_SIZE,
 };
-use crate::pcmendian::{read_u32_be, PcmWire};
+use crate::bereader::be_u32;
+use crate::pcmendian::PcmWire;
 
 /// The six-word header every AU file opens with.
 const HEADER_LEN: usize = 24;
@@ -109,14 +110,14 @@ fn parse_header(bytes: &[u8]) -> Option<AuFormat> {
     if bytes.len() < HEADER_LEN || &bytes[..4] != MAGIC {
         return None;
     }
-    let data_offset = read_u32_be(bytes, 4)? as usize;
+    let data_offset = be_u32(bytes, 4)? as usize;
     if data_offset < HEADER_LEN || data_offset.saturating_sub(HEADER_LEN) > MAX_ANNOTATION {
         return None;
     }
-    let tag = read_u32_be(bytes, 12)?;
-    let data_size = read_u32_be(bytes, 8)?;
-    let sample_rate = read_u32_be(bytes, 16)?;
-    let channels = read_u32_be(bytes, 20)?;
+    let tag = be_u32(bytes, 12)?;
+    let data_size = be_u32(bytes, 8)?;
+    let sample_rate = be_u32(bytes, 16)?;
+    let channels = be_u32(bytes, 20)?;
     if sample_rate == 0
         || sample_rate > MAX_SAMPLE_RATE
         || channels == 0

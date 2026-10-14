@@ -24,6 +24,8 @@
 
 use alloc::vec::Vec;
 
+use crate::bereader::be_u24;
+
 use g2g_core::TagList;
 
 /// FLV tag type: an audio tag (codec-tagged audio data).
@@ -214,8 +216,8 @@ pub(crate) fn tag_at(buf: &[u8], at: usize) -> Option<(FlvTagHeader, core::ops::
     let header_at = at.checked_add(PREV_TAG_SIZE_LEN)?;
     let body_start = header_at.checked_add(TAG_HEADER_LEN)?;
     let header = buf.get(header_at..body_start)?;
-    let data_size = read_u24(header, 1) as usize;
-    let timestamp_ms = (u32::from(header[7]) << 24) | read_u24(header, 4);
+    let data_size = be_u24(header, 1)? as usize;
+    let timestamp_ms = (u32::from(header[7]) << 24) | be_u24(header, 4)?;
     let body_end = body_start.checked_add(data_size)?;
     if body_end > buf.len() {
         return None;
@@ -225,10 +227,6 @@ pub(crate) fn tag_at(buf: &[u8], at: usize) -> Option<(FlvTagHeader, core::ops::
         timestamp_ms,
     };
     Some((tag, body_start..body_end))
-}
-
-fn read_u24(buf: &[u8], at: usize) -> u32 {
-    (u32::from(buf[at]) << 16) | (u32::from(buf[at + 1]) << 8) | u32::from(buf[at + 2])
 }
 
 // AMF0 markers the `onMetaData` writer emits (the inverse of the reader subset in

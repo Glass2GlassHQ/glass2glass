@@ -7,6 +7,8 @@ use alloc::vec::Vec;
 
 use g2g_core::{Chapter, G2gError, Tag, TagList};
 
+use crate::bereader::{be_u32, be_u64};
+
 /// Unity 3x3 transform matrix (16.16 / 2.30 fixed point) for `tkhd`/`mvhd`.
 pub(crate) const MATRIX: [u32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000];
 
@@ -124,15 +126,11 @@ pub(crate) fn next_box_len(buf: &[u8]) -> Result<Option<usize>, G2gError> {
 }
 
 pub(crate) fn be32(data: &[u8], at: usize) -> Result<u32, G2gError> {
-    data.get(at..at + 4)
-        .map(|b| u32::from_be_bytes(b.try_into().expect("4 bytes")))
-        .ok_or(G2gError::CapsMismatch)
+    be_u32(data, at).ok_or(G2gError::CapsMismatch)
 }
 
 pub(crate) fn be64(data: &[u8], at: usize) -> Result<u64, G2gError> {
-    data.get(at..at + 8)
-        .map(|b| u64::from_be_bytes(b.try_into().expect("8 bytes")))
-        .ok_or(G2gError::CapsMismatch)
+    be_u64(data, at).ok_or(G2gError::CapsMismatch)
 }
 
 /// Iterate the child boxes of `data`, yielding `(fourcc, payload)`.
