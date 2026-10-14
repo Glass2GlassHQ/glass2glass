@@ -30,7 +30,6 @@ Highest leverage first:
 
 Bugs:
 
-- `VideoTestSrc::with_shared_memory` keeps every emitted frame.
 
 Core, bindings, ML:
 

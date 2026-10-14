@@ -92,11 +92,15 @@ pub struct VideoTestSrc {
     /// a test prove a downstream element aliased the source's buffer rather than
     /// copying it. Only populated in `shared` mode.
     emitted_ptrs: Vec<usize>,
-    /// Contiguous bytes of each shared frame emitted (M180), in push order. A
-    /// test verifies a downstream flip against these. Only populated in `shared`
-    /// mode; test-only bookkeeping, independent of the zero-copy claim.
+    /// Contiguous bytes of the last [`RECORDED_FRAMES`] shared frames emitted
+    /// (M180), oldest first. A test verifies a downstream flip against these.
+    /// Only populated in `shared` mode; test-only bookkeeping, independent of
+    /// the zero-copy claim.
     emitted_frames: Vec<Vec<u8>>,
 }
+
+/// How many shared frames [`VideoTestSrc::emitted_frames`] keeps.
+pub const RECORDED_FRAMES: usize = 4;
 
 impl VideoTestSrc {
     /// `framerate` is in nominal fps; stored internally as Q16 fixed-point.
@@ -180,8 +184,9 @@ impl VideoTestSrc {
         &self.emitted_ptrs
     }
 
-    /// Contiguous pre-transform bytes of each shared frame emitted (M180), in
-    /// push order. A test verifies a downstream flip's output against these.
+    /// Contiguous pre-transform bytes of the last [`RECORDED_FRAMES`] shared
+    /// frames emitted (M180), oldest first. A test verifies a downstream flip's
+    /// output against these.
     pub fn emitted_frames(&self) -> &[Vec<u8>] {
         &self.emitted_frames
     }
@@ -353,6 +358,9 @@ impl SourceLoop for VideoTestSrc {
                     // and bytes for the zero-copy / correctness assertions.
                     let mut buf = vec![0u8; bytes_per_frame].into_boxed_slice();
                     fill_pattern(self.pattern, &mut buf, self.width, seq);
+                    if self.emitted_frames.len() == RECORDED_FRAMES {
+                        self.emitted_frames.remove(0);
+                    }
                     self.emitted_frames.push(buf.to_vec());
                     let backing: Arc<[u8]> = Arc::from(buf);
                     self.emitted_ptrs.push(backing.as_ptr() as usize);
@@ -703,6 +711,25 @@ mod tests {
     // 16x16 RGBA frame (wide enough for the bar to advance between frames).
     const W: u32 = 16;
     const BYTES: usize = (W * W * 4) as usize;
+
+    #[test]
+    fn shared_mode_keeps_only_the_last_frames() {
+        const SIDE: u32 = 2;
+        const FPS: u32 = 30;
+        let frames = RECORDED_FRAMES as u64 + 2;
+        let mut src = VideoTestSrc::new(SIDE, SIDE, FPS, frames).with_shared_memory();
+        let caps = src.caps();
+        src.configure_pipeline(&caps).unwrap();
+        let mut sink = crate::testutil::CollectSink::default();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(src.run(&mut sink))
+            .unwrap();
+        assert_eq!(src.emitted_ptrs().len(), frames as usize);
+        assert_eq!(src.emitted_frames().len(), RECORDED_FRAMES);
+    }
 
     #[test]
     fn gradient_is_byte_identical_to_the_historical_output() {
