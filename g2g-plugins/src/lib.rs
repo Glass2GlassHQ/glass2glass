@@ -610,6 +610,8 @@ pub mod avimux;
 mod demuxseek;
 // MPEG-TS demuxer parsing core (no_std): PAT/PMT/PES -> elementary access units.
 pub mod mpegts;
+// The CRC-32 the MPEG-2 PSI sections and Ogg pages carry.
+pub mod mpegcrc;
 // MPEG-TS demuxer element (no_std): Caps::ByteStream{MpegTs} -> H.264, wrapping
 // the mpegts parser.
 pub mod tsdemux;

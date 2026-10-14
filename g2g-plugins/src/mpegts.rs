@@ -3163,21 +3163,9 @@ fn psi_packet(pid: u16, table_id: u8, body: &[u8], mut cc: u8, out: &mut Vec<u8>
     cc
 }
 
-/// MPEG-2 systems CRC-32 (poly 0x04C11DB7, init all-ones, no final xor, MSB
-/// first), as the PSI section trailer.
+/// The MPEG-2 systems CRC-32 a PSI section ends with.
 fn mpeg_crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        crc ^= (b as u32) << 24;
-        for _ in 0..8 {
-            crc = if crc & 0x8000_0000 != 0 {
-                (crc << 1) ^ 0x04C1_1DB7
-            } else {
-                crc << 1
-            };
-        }
-    }
-    crc
+    crate::mpegcrc::crc32_mpeg2(crate::mpegcrc::PSI_SECTION_CRC_INIT, data)
 }
 
 #[cfg(test)]
@@ -3723,12 +3711,6 @@ pub(crate) mod tests {
             None,
             "a code that is not letters is not a language"
         );
-    }
-
-    #[test]
-    fn mpeg_crc32_matches_known_vector() {
-        // The documented CRC-32/MPEG-2 check value for ASCII "123456789".
-        assert_eq!(mpeg_crc32(b"123456789"), 0x0376_E6E7);
     }
 
     #[test]

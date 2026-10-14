@@ -32,18 +32,7 @@ pub(crate) const EVENT_DURATION_SECS: u32 = 5400;
 
 /// MPEG-2 CRC-32.
 pub(crate) fn crc32_mpeg(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        crc ^= (b as u32) << 24;
-        for _ in 0..8 {
-            crc = if crc & 0x8000_0000 != 0 {
-                (crc << 1) ^ 0x04C1_1DB7
-            } else {
-                crc << 1
-            };
-        }
-    }
-    crc
+    g2g_plugins::mpegcrc::crc32_mpeg2(g2g_plugins::mpegcrc::PSI_SECTION_CRC_INIT, data)
 }
 
 /// A DVB `short_event_descriptor` (tag 0x4D) for one event.

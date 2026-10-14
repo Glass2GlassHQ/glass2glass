@@ -75,7 +75,6 @@ Containers:
 - One `moof` parser for `fmp4` and `mp4audiosrc`.
 - One WAV `fmt ` writer and `wFormatTag` table for wavsink, wavenc, wavparse, avi.
 - Shared `MkvMuxSettings` for mkvmux and mkvmuxn.
-- One table-driven MPEG CRC-32 for ogg and mpegts.
 - `rtmp` reuses the FLV tag codec from `flv.rs`.
 
 Codecs and parsers:

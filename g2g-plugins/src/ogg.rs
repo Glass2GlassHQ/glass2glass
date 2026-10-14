@@ -721,34 +721,9 @@ fn detect(packet: &[u8]) -> OggStreamInfo {
     }
 }
 
-/// The Ogg page checksum table: CRC-32 with polynomial `0x04c11db7`, zero
-/// initial value, no reflection and no final inversion (RFC 3533 §6, *not* the
-/// zlib CRC). Built at compile time.
-const CRC_TABLE: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut i = 0usize;
-    while i < 256 {
-        let mut r = (i as u32) << 24;
-        let mut bit = 0;
-        while bit < 8 {
-            r = if r & 0x8000_0000 != 0 {
-                (r << 1) ^ 0x04c1_1db7
-            } else {
-                r << 1
-            };
-            bit += 1;
-        }
-        table[i] = r;
-        i += 1;
-    }
-    table
-};
-
 /// The Ogg page checksum of `page`, whose CRC field must already be zeroed.
 fn page_crc(page: &[u8]) -> u32 {
-    page.iter().fold(0u32, |crc, &b| {
-        (crc << 8) ^ CRC_TABLE[((crc >> 24) as u8 ^ b) as usize]
-    })
+    crate::mpegcrc::crc32_mpeg2(crate::mpegcrc::OGG_PAGE_CRC_INIT, page)
 }
 
 /// Body bytes buffered before a page is flushed. Ogg allows 255 segments of up
