@@ -37,6 +37,7 @@ use g2g_core::{
 use crate::analyticsalert::ALERT_BLOB;
 use crate::appsrc::{register_appsrc, AppSrcFeed};
 use crate::clock::WallClock;
+use crate::xmlutil::civil;
 
 /// Where each clip is written. `%s` stands for the time the alert fired.
 const DEFAULT_LOCATION: &str = "alert-%s.avi";
@@ -59,12 +60,6 @@ const CLIP_LINK_CAPACITY: usize = 2;
 /// Names one clip's `appsrc` feed. Global, so two recorders (or two clips of one
 /// recorder) never claim each other's channel.
 static CLIP_SERIAL: AtomicU64 = AtomicU64::new(0);
-
-const SECONDS_PER_MINUTE: u64 = 60;
-const SECONDS_PER_HOUR: u64 = 3600;
-const SECONDS_PER_DAY: u64 = 86400;
-const DAYS_PER_ERA: u64 = 146097;
-const DAYS_FROM_0000_03_01_TO_EPOCH: u64 = 719468;
 
 /// One frame held for a clip: the bytes as a shared handle, and the stream time
 /// the clip rebases against.
@@ -528,37 +523,8 @@ static ALERTRECORDER_PROPS: &[PropertySpec] = &[
 ];
 
 /// `YYYYmmdd-HHMMSS` in UTC for a UNIX time in nanoseconds, the stamp the clip
-/// name carries. Written out here because the workspace has no calendar crate.
+/// name carries.
 fn utc_stamp(unix_ns: u64) -> String {
-    let seconds = unix_ns / 1_000_000_000;
-    let (year, month, day) = civil_from_days(seconds / SECONDS_PER_DAY);
-    let time = seconds % SECONDS_PER_DAY;
-    format!(
-        "{year:04}{month:02}{day:02}-{:02}{:02}{:02}",
-        time / SECONDS_PER_HOUR,
-        (time % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE,
-        time % SECONDS_PER_MINUTE
-    )
-}
-
-/// The civil date of a day count since 1970-01-01, by the shift-to-March
-/// era arithmetic (no lookup tables, no leap-year special cases).
-fn civil_from_days(days: u64) -> (u64, u64, u64) {
-    let shifted = days + DAYS_FROM_0000_03_01_TO_EPOCH;
-    let era = shifted / DAYS_PER_ERA;
-    let day_of_era = shifted % DAYS_PER_ERA;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    // The year starts in March in this arithmetic, so January and February
-    // belong to the next calendar year.
-    let month = if shifted_month < 10 {
-        shifted_month + 3
-    } else {
-        shifted_month - 9
-    };
-    (year + u64::from(month <= 2), month, day)
+    let (year, month, day, hour, minute, second) = civil(unix_ns / NS_PER_SECOND as u64);
+    format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
 }

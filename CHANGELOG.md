@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1384: `alertrecorder` uses `xmlutil::civil` and `dvbsub` uses `annexb::BitReader`.
 - M1383: the `fixed_or_zero` copies give way to `Dim::fixed`.
 - M1382: one Android binder threadpool helper serves the on-device tests.
 - M1381: `vtdecode` and `vtencode` share one set of CMTime helpers.

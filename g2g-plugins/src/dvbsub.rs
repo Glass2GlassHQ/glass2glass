@@ -30,6 +30,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::annexb::BitReader;
+
 /// Largest display or region edge accepted. DVB display sizes are 16-bit fields,
 /// so this bounds a crafted geometry well above the 1920x1080 real streams use.
 pub const MAX_DISPLAY_DIM: u32 = 4096;
@@ -784,30 +786,6 @@ fn draw_object(
     }
 }
 
-/// A big-endian bit reader over a coded pixel string.
-struct Bits<'a> {
-    data: &'a [u8],
-    at: usize,
-}
-
-impl Bits<'_> {
-    fn take(&mut self, n: u32) -> Option<u32> {
-        let mut v = 0u32;
-        for _ in 0..n {
-            let byte = *self.data.get(self.at / 8)?;
-            v = (v << 1) | ((byte >> (7 - self.at % 8)) & 1) as u32;
-            self.at += 1;
-        }
-        Some(v)
-    }
-
-    /// Bytes consumed, rounding the trailing stuffing bits up to the byte the
-    /// next sub-block starts on.
-    fn bytes_consumed(&self) -> usize {
-        self.at.div_ceil(8)
-    }
-}
-
 /// Decode one 2-, 4- or 8-bit pixel code string (clause 7.2.5.2) into `row`,
 /// which is the remainder of the region row from the current position. Returns
 /// the pixels written and the bytes of `data` consumed.
@@ -818,7 +796,7 @@ fn read_pixel_string(
     map: Option<&[u8]>,
     non_modifying: bool,
 ) -> (usize, usize) {
-    let mut bits = Bits { data, at: 0 };
+    let mut bits = BitReader::new(data);
     let mut written = 0usize;
     while let Some((run, code)) = match depth {
         2 => next_2bit(&mut bits),
@@ -842,65 +820,66 @@ fn read_pixel_string(
         }
         written = written.saturating_add(run);
     }
-    (written.min(row.len()), bits.bytes_consumed())
+    // Trailing stuffing bits round up to the byte the next sub-block starts on.
+    (written.min(row.len()), bits.bit_pos().div_ceil(8))
 }
 
 /// One 2-bit/pixel code string entry: a run length and its pixel code, or `None`
 /// when the string is truncated. A zero run is the end-of-string code.
-fn next_2bit(bits: &mut Bits) -> Option<(usize, u8)> {
-    let first = bits.take(2)?;
+fn next_2bit(bits: &mut BitReader) -> Option<(usize, u8)> {
+    let first = bits.read_bits(2)?;
     if first != 0 {
         return Some((1, first as u8));
     }
-    if bits.take(1)? == 1 {
-        let run = bits.take(3)? as usize + 3;
-        return Some((run, bits.take(2)? as u8));
+    if bits.read_bits(1)? == 1 {
+        let run = bits.read_bits(3)? as usize + 3;
+        return Some((run, bits.read_bits(2)? as u8));
     }
-    if bits.take(1)? == 1 {
+    if bits.read_bits(1)? == 1 {
         return Some((1, 0));
     }
-    Some(match bits.take(2)? {
+    Some(match bits.read_bits(2)? {
         0 => (0, 0),
         1 => (2, 0),
-        2 => (bits.take(4)? as usize + 12, bits.take(2)? as u8),
-        _ => (bits.take(8)? as usize + 29, bits.take(2)? as u8),
+        2 => (bits.read_bits(4)? as usize + 12, bits.read_bits(2)? as u8),
+        _ => (bits.read_bits(8)? as usize + 29, bits.read_bits(2)? as u8),
     })
 }
 
 /// One 4-bit/pixel code string entry, same contract as [`next_2bit`].
-fn next_4bit(bits: &mut Bits) -> Option<(usize, u8)> {
-    let first = bits.take(4)?;
+fn next_4bit(bits: &mut BitReader) -> Option<(usize, u8)> {
+    let first = bits.read_bits(4)?;
     if first != 0 {
         return Some((1, first as u8));
     }
-    if bits.take(1)? == 0 {
+    if bits.read_bits(1)? == 0 {
         // a zero run length here is the end-of-string code
-        let run = bits.take(3)? as usize;
+        let run = bits.read_bits(3)? as usize;
         return Some(if run == 0 { (0, 0) } else { (run + 2, 0) });
     }
-    if bits.take(1)? == 0 {
-        let run = bits.take(2)? as usize + 4;
-        return Some((run, bits.take(4)? as u8));
+    if bits.read_bits(1)? == 0 {
+        let run = bits.read_bits(2)? as usize + 4;
+        return Some((run, bits.read_bits(4)? as u8));
     }
-    Some(match bits.take(2)? {
+    Some(match bits.read_bits(2)? {
         0 => (1, 0),
         1 => (2, 0),
-        2 => (bits.take(4)? as usize + 9, bits.take(4)? as u8),
-        _ => (bits.take(8)? as usize + 25, bits.take(4)? as u8),
+        2 => (bits.read_bits(4)? as usize + 9, bits.read_bits(4)? as u8),
+        _ => (bits.read_bits(8)? as usize + 25, bits.read_bits(4)? as u8),
     })
 }
 
 /// One 8-bit/pixel code string entry, same contract as [`next_2bit`].
-fn next_8bit(bits: &mut Bits) -> Option<(usize, u8)> {
-    let first = bits.take(8)?;
+fn next_8bit(bits: &mut BitReader) -> Option<(usize, u8)> {
+    let first = bits.read_bits(8)?;
     if first != 0 {
         return Some((1, first as u8));
     }
-    if bits.take(1)? == 1 {
-        let run = bits.take(7)? as usize;
-        return Some((run, bits.take(8)? as u8));
+    if bits.read_bits(1)? == 1 {
+        let run = bits.read_bits(7)? as usize;
+        return Some((run, bits.read_bits(8)? as u8));
     }
-    Some((bits.take(7)? as usize, 0))
+    Some((bits.read_bits(7)? as usize, 0))
 }
 
 #[cfg(test)]
@@ -967,7 +946,7 @@ mod tests {
         seg(SEG_CLUT_DEFINITION, page_id, &body)
     }
 
-    /// A big-endian bit writer, the inverse of [`Bits`].
+    /// A big-endian bit writer, the inverse of [`BitReader`].
     #[derive(Default)]
     struct BitW {
         out: Vec<u8>,
