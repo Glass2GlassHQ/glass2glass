@@ -13,11 +13,13 @@
     feature = "vulkan-video"
 ))]
 
+mod leb128_common;
 use g2g_core::runtime::block_on;
 use g2g_plugins::streamdec::{
     VideoCodec, VideoColorRange, VideoMatrixCoefficients, VideoPixelLayout, VulkanStreamDecoder,
 };
 use g2g_plugins::vulkanvideo::{open_av1_decode_device, VulkanVideoError};
+use leb128_common::read_leb128;
 
 mod vulkan_ref;
 use vulkan_ref::reference_yuv;
@@ -26,21 +28,6 @@ const CLIP: &[u8] = include_bytes!("fixtures/av1_640x480.obu");
 const CLIP_FIXTURE: &str = "av1_640x480.obu";
 const W: usize = 640;
 const H: usize = 480;
-
-/// LEB128 unsigned (AV1 4.10.5). Returns (value, bytes_read).
-fn leb128(d: &[u8], mut p: usize) -> Option<(u64, usize)> {
-    let start = p;
-    let mut v = 0u64;
-    for i in 0..8 {
-        let b = *d.get(p)?;
-        p += 1;
-        v |= ((b & 0x7f) as u64) << (7 * i);
-        if b & 0x80 == 0 {
-            return Some((v, p - start));
-        }
-    }
-    None
-}
 
 /// Split a low-overhead AV1 OBU stream into one chunk per `OBU_FRAME` (type 6),
 /// each chunk being that OBU's full bytes (header + size field + payload). This
@@ -60,7 +47,7 @@ fn split_obu_frames(stream: &[u8]) -> Vec<&[u8]> {
             p += 1;
         }
         let payload_len = if has_size == 1 {
-            let (sz, n) = leb128(stream, p).expect("valid leb128 size");
+            let (sz, n) = read_leb128(stream, p).expect("valid leb128 size");
             p += n;
             sz as usize
         } else {

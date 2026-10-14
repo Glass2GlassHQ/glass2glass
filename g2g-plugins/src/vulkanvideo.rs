@@ -1755,110 +1755,7 @@ const OBU_FRAME: u8 = 6;
 // INTER / INTRA_ONLY / SWITCH are read as raw f(2) values.
 const AV1_FRAME_TYPE_KEY: u8 = 0;
 
-// Sentinels for the two "choose" syntax elements (spec 6.4.2).
-const SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
-const SELECT_INTEGER_MV: u8 = 2;
-
-/// One parsed OBU: its type, temporal / spatial id, and payload slice (past the
-/// OBU header and size field).
-#[derive(Debug, Clone, Copy)]
-struct Av1Obu<'a> {
-    obu_type: u8,
-    #[allow(dead_code)]
-    temporal_id: u8,
-    #[allow(dead_code)]
-    spatial_id: u8,
-    payload: &'a [u8],
-}
-
-/// LEB128 unsigned little-endian base-128 (AV1 spec 4.10.5). Returns the value
-/// and the position past it. `None` on truncation or an over-long (> 8 byte)
-/// encoding.
-fn read_leb128(data: &[u8], mut pos: usize) -> Option<(u64, usize)> {
-    let mut value: u64 = 0;
-    for i in 0..8u32 {
-        let b = *data.get(pos)?;
-        pos += 1;
-        value |= u64::from(b & 0x7f) << (i * 7);
-        if b & 0x80 == 0 {
-            return Some((value, pos));
-        }
-    }
-    None
-}
-
-/// Walk a low-overhead AV1 bitstream into its OBUs. Requires the size field on
-/// every OBU except a final one without it (spec permits the last OBU to omit
-/// the size, taking the remainder). Stops at the first malformed / truncated
-/// unit rather than over-reading.
-fn av1_obus(data: &[u8]) -> alloc::vec::Vec<Av1Obu<'_>> {
-    let mut out = alloc::vec::Vec::new();
-    let mut pos = 0usize;
-    while pos < data.len() {
-        let hdr = data[pos];
-        // obu_forbidden_bit (bit 7) must be 0; obu_reserved_1bit (bit 0) ignored.
-        if hdr & 0x80 != 0 {
-            break;
-        }
-        let obu_type = (hdr >> 3) & 0x0f;
-        let ext = (hdr >> 2) & 1;
-        let has_size = (hdr >> 1) & 1;
-        let mut p = pos + 1;
-        let (mut tid, mut sid) = (0u8, 0u8);
-        if ext == 1 {
-            let Some(&e) = data.get(p) else { break };
-            tid = e >> 5;
-            sid = (e >> 3) & 0x03;
-            p += 1;
-        }
-        let payload_len = if has_size == 1 {
-            let Some((sz, np)) = read_leb128(data, p) else {
-                break;
-            };
-            p = np;
-            sz as usize
-        } else {
-            data.len() - p
-        };
-        // Bounds: the payload must fit within the buffer.
-        let Some(end) = p.checked_add(payload_len) else {
-            break;
-        };
-        if end > data.len() {
-            break;
-        }
-        out.push(Av1Obu {
-            obu_type,
-            temporal_id: tid,
-            spatial_id: sid,
-            payload: &data[p..end],
-        });
-        pos = end;
-    }
-    out
-}
-
-/// Unsigned variable-length code (AV1 spec 4.10.3): a unary-coded leading-zero
-/// count then that many value bits.
-fn read_uvlc(br: &mut BitReader) -> Option<u32> {
-    let mut leading_zeros = 0u32;
-    loop {
-        let done = br.read_bit()?;
-        if done == 1 {
-            break;
-        }
-        leading_zeros += 1;
-        if leading_zeros >= 32 {
-            return Some(u32::MAX);
-        }
-    }
-    let value = if leading_zeros == 0 {
-        0
-    } else {
-        br.read_bits(leading_zeros)?
-    };
-    Some(value.saturating_add((1u32 << leading_zeros) - 1))
-}
+use crate::av1parse::{obus as av1_obus, SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS};
 
 /// Parsed AV1 color config (spec 5.5.2), the subset needed for the Std mapping.
 #[derive(Debug, Clone)]
@@ -1919,292 +1816,66 @@ pub struct Av1SequenceHeader {
     pub film_grain_params_present: bool,
 }
 
-/// Color config parse (spec 5.5.2). `br` is positioned right after
-/// `enable_restoration` in the sequence header.
-fn parse_av1_color_config(br: &mut BitReader, seq_profile: u8) -> Option<Av1ColorConfig> {
-    // Color primaries / transfer / matrix "unspecified" and the special
-    // sRGB/identity triple (spec 6.4.2).
-    const CP_BT_709: u8 = 1;
-    const CP_UNSPECIFIED: u8 = 2;
-    const TC_SRGB: u8 = 13;
-    const TC_UNSPECIFIED: u8 = 2;
-    const MC_IDENTITY: u8 = 0;
-    const MC_UNSPECIFIED: u8 = 2;
-
-    let high_bitdepth = br.read_bit()? == 1;
-    let bit_depth = if seq_profile == 2 && high_bitdepth {
-        let twelve_bit = br.read_bit()? == 1;
-        if twelve_bit {
-            12
-        } else {
-            10
-        }
-    } else if high_bitdepth {
-        10
-    } else {
-        8
-    };
-
-    let mono_chrome = if seq_profile == 1 {
-        false
-    } else {
-        br.read_bit()? == 1
-    };
-    let num_planes = if mono_chrome { 1 } else { 3 };
-
-    let color_description_present_flag = br.read_bit()? == 1;
-    let (color_primaries, transfer_characteristics, matrix_coefficients) =
-        if color_description_present_flag {
-            (
-                br.read_bits(8)? as u8,
-                br.read_bits(8)? as u8,
-                br.read_bits(8)? as u8,
-            )
-        } else {
-            (CP_UNSPECIFIED, TC_UNSPECIFIED, MC_UNSPECIFIED)
-        };
-
-    let subsampling_x;
-    let subsampling_y;
-    let mut chroma_sample_position = 0u8; // CSP_UNKNOWN
-    let color_range;
-
-    if mono_chrome {
-        color_range = br.read_bit()? == 1;
-        return Some(Av1ColorConfig {
-            bit_depth,
-            mono_chrome,
-            color_description_present_flag,
-            color_primaries,
-            transfer_characteristics,
-            matrix_coefficients,
-            color_range,
-            subsampling_x: 1,
-            subsampling_y: 1,
-            chroma_sample_position: 0,
-            separate_uv_delta_q: false,
-            num_planes,
-        });
-    } else if color_primaries == CP_BT_709
-        && transfer_characteristics == TC_SRGB
-        && matrix_coefficients == MC_IDENTITY
-    {
-        // 4:4:4 sRGB, full range, no coded color_range bit.
-        color_range = true;
-        subsampling_x = 0;
-        subsampling_y = 0;
-    } else {
-        color_range = br.read_bit()? == 1;
-        if seq_profile == 0 {
-            subsampling_x = 1;
-            subsampling_y = 1;
-        } else if seq_profile == 1 {
-            subsampling_x = 0;
-            subsampling_y = 0;
-        } else if bit_depth == 12 {
-            subsampling_x = br.read_bit()? as u8;
-            subsampling_y = if subsampling_x == 1 {
-                br.read_bit()? as u8
-            } else {
-                0
-            };
-        } else {
-            subsampling_x = 1;
-            subsampling_y = 0;
-        }
-        if subsampling_x == 1 && subsampling_y == 1 {
-            chroma_sample_position = br.read_bits(2)? as u8;
-        }
-    }
-
-    let separate_uv_delta_q = br.read_bit()? == 1;
-
-    Some(Av1ColorConfig {
-        bit_depth,
-        mono_chrome,
-        color_description_present_flag,
-        color_primaries,
-        transfer_characteristics,
-        matrix_coefficients,
-        color_range,
-        subsampling_x,
-        subsampling_y,
-        chroma_sample_position,
-        separate_uv_delta_q,
-        num_planes,
-    })
-}
-
-/// Parse a sequence header OBU payload (spec 5.5.1).
+/// Parse a sequence header OBU payload (spec 5.5.1) into the fields the Std
+/// mapping and decode session need. `None` unless the whole header parses.
 pub fn parse_av1_sequence_header(payload: &[u8]) -> Option<Av1SequenceHeader> {
-    let mut br = BitReader::new(payload);
-
-    let seq_profile = br.read_bits(3)? as u8;
-    let still_picture = br.read_bit()? == 1;
-    let reduced_still_picture_header = br.read_bit()? == 1;
-
-    let mut timing_info_present_flag = false;
-    let mut decoder_model_info_present_flag = false;
-    let mut initial_display_delay_present_flag = false;
-    let mut operating_points_cnt_minus_1 = 0u8;
-    let mut seq_level_idx0 = 0u8;
-    let mut seq_tier0 = 0u8;
-    let mut buffer_delay_length_minus_1 = 0u32;
-
-    if reduced_still_picture_header {
-        seq_level_idx0 = br.read_bits(5)? as u8;
-    } else {
-        timing_info_present_flag = br.read_bit()? == 1;
-        if timing_info_present_flag {
-            // timing_info() (spec 5.5.3).
-            br.read_bits(32)?; // num_units_in_display_tick
-            br.read_bits(32)?; // time_scale
-            let equal_picture_interval = br.read_bit()? == 1;
-            if equal_picture_interval {
-                read_uvlc(&mut br)?; // num_ticks_per_picture_minus_1
-            }
-            decoder_model_info_present_flag = br.read_bit()? == 1;
-            if decoder_model_info_present_flag {
-                // decoder_model_info() (spec 5.5.4).
-                buffer_delay_length_minus_1 = br.read_bits(5)?;
-                br.read_bits(32)?; // num_units_in_decoding_tick
-                br.read_bits(5)?; // buffer_removal_time_length_minus_1
-                br.read_bits(5)?; // frame_presentation_time_length_minus_1
-            }
-        }
-        initial_display_delay_present_flag = br.read_bit()? == 1;
-        operating_points_cnt_minus_1 = br.read_bits(5)? as u8;
-        for i in 0..=operating_points_cnt_minus_1 as u32 {
-            br.read_bits(12)?; // operating_point_idc[i]
-            let level = br.read_bits(5)?;
-            let tier = if level > 7 { br.read_bit()? } else { 0 };
-            if i == 0 {
-                seq_level_idx0 = level as u8;
-                seq_tier0 = tier as u8;
-            }
-            if decoder_model_info_present_flag {
-                let decoder_model_present = br.read_bit()? == 1;
-                if decoder_model_present {
-                    let n = buffer_delay_length_minus_1 + 1;
-                    br.read_bits(n)?; // decoder_buffer_delay
-                    br.read_bits(n)?; // encoder_buffer_delay
-                    br.read_bit()?; // low_delay_mode_flag
-                }
-            }
-            if initial_display_delay_present_flag {
-                let present = br.read_bit()? == 1;
-                if present {
-                    br.read_bits(4)?; // initial_display_delay_minus_1
-                }
-            }
-        }
-    }
-
-    let frame_width_bits_minus_1 = br.read_bits(4)? as u8;
-    let frame_height_bits_minus_1 = br.read_bits(4)? as u8;
-    let max_frame_width_minus_1 = br.read_bits(frame_width_bits_minus_1 as u32 + 1)?;
-    let max_frame_height_minus_1 = br.read_bits(frame_height_bits_minus_1 as u32 + 1)?;
-
-    let mut frame_id_numbers_present_flag = false;
-    let mut delta_frame_id_length_minus_2 = 0u8;
-    let mut additional_frame_id_length_minus_1 = 0u8;
-    if !reduced_still_picture_header {
-        frame_id_numbers_present_flag = br.read_bit()? == 1;
-    }
-    if frame_id_numbers_present_flag {
-        delta_frame_id_length_minus_2 = br.read_bits(4)? as u8;
-        additional_frame_id_length_minus_1 = br.read_bits(3)? as u8;
-    }
-
-    let use_128x128_superblock = br.read_bit()? == 1;
-    let enable_filter_intra = br.read_bit()? == 1;
-    let enable_intra_edge_filter = br.read_bit()? == 1;
-
-    let mut enable_interintra_compound = false;
-    let mut enable_masked_compound = false;
-    let mut enable_warped_motion = false;
-    let mut enable_dual_filter = false;
-    let mut enable_order_hint = false;
-    let mut enable_jnt_comp = false;
-    let mut enable_ref_frame_mvs = false;
-    let mut seq_force_screen_content_tools = SELECT_SCREEN_CONTENT_TOOLS;
-    let mut seq_force_integer_mv = SELECT_INTEGER_MV;
-    let mut order_hint_bits = 0u8;
-
-    if !reduced_still_picture_header {
-        enable_interintra_compound = br.read_bit()? == 1;
-        enable_masked_compound = br.read_bit()? == 1;
-        enable_warped_motion = br.read_bit()? == 1;
-        enable_dual_filter = br.read_bit()? == 1;
-        enable_order_hint = br.read_bit()? == 1;
-        if enable_order_hint {
-            enable_jnt_comp = br.read_bit()? == 1;
-            enable_ref_frame_mvs = br.read_bit()? == 1;
-        }
-        let seq_choose_screen_content_tools = br.read_bit()? == 1;
-        seq_force_screen_content_tools = if seq_choose_screen_content_tools {
-            SELECT_SCREEN_CONTENT_TOOLS
-        } else {
-            br.read_bit()? as u8
-        };
-        if seq_force_screen_content_tools > 0 {
-            let seq_choose_integer_mv = br.read_bit()? == 1;
-            seq_force_integer_mv = if seq_choose_integer_mv {
-                SELECT_INTEGER_MV
-            } else {
-                br.read_bit()? as u8
-            };
-        } else {
-            seq_force_integer_mv = SELECT_INTEGER_MV;
-        }
-        if enable_order_hint {
-            let order_hint_bits_minus_1 = br.read_bits(3)?;
-            order_hint_bits = (order_hint_bits_minus_1 + 1) as u8;
-        }
-    }
-
-    let enable_superres = br.read_bit()? == 1;
-    let enable_cdef = br.read_bit()? == 1;
-    let enable_restoration = br.read_bit()? == 1;
-
-    let color = parse_av1_color_config(&mut br, seq_profile)?;
-    let film_grain_params_present = br.read_bit()? == 1;
-
+    let header = crate::av1parse::parse_complete_sequence_header(payload)?;
+    let detail = header.detail?;
+    let tools = detail.tools;
+    let bit_depth = match (header.twelve_bit, header.high_bitdepth) {
+        (true, _) => 12,
+        (false, true) => 10,
+        (false, false) => 8,
+    };
+    let color = Av1ColorConfig {
+        bit_depth,
+        mono_chrome: header.monochrome,
+        color_description_present_flag: detail.color_description_present_flag,
+        color_primaries: detail.color_primaries,
+        transfer_characteristics: detail.transfer_characteristics,
+        matrix_coefficients: detail.matrix_coefficients,
+        color_range: detail.color_range,
+        subsampling_x: u8::from(header.subsampling_x),
+        subsampling_y: u8::from(header.subsampling_y),
+        chroma_sample_position: header.chroma_sample_position,
+        separate_uv_delta_q: detail.separate_uv_delta_q,
+        num_planes: if header.monochrome { 1 } else { 3 },
+    };
     Some(Av1SequenceHeader {
-        seq_profile,
-        still_picture,
-        reduced_still_picture_header,
-        timing_info_present_flag,
-        decoder_model_info_present_flag,
-        initial_display_delay_present_flag,
-        operating_points_cnt_minus_1,
-        seq_level_idx0,
-        seq_tier0,
-        frame_width_bits_minus_1,
-        frame_height_bits_minus_1,
-        max_frame_width_minus_1,
-        max_frame_height_minus_1,
-        frame_id_numbers_present_flag,
-        delta_frame_id_length_minus_2,
-        additional_frame_id_length_minus_1,
-        use_128x128_superblock,
-        enable_filter_intra,
-        enable_intra_edge_filter,
-        enable_interintra_compound,
-        enable_masked_compound,
-        enable_warped_motion,
-        enable_dual_filter,
-        enable_order_hint,
-        enable_jnt_comp,
-        enable_ref_frame_mvs,
-        seq_force_screen_content_tools,
-        seq_force_integer_mv,
-        order_hint_bits,
-        enable_superres,
-        enable_cdef,
-        enable_restoration,
+        seq_profile: header.profile,
+        still_picture: detail.still_picture,
+        reduced_still_picture_header: detail.reduced_still_picture_header,
+        timing_info_present_flag: detail.timing_info_present_flag,
+        decoder_model_info_present_flag: detail.decoder_model_info_present_flag,
+        initial_display_delay_present_flag: detail.initial_display_delay_present_flag,
+        operating_points_cnt_minus_1: detail.operating_points_cnt_minus_1,
+        seq_level_idx0: header.level,
+        seq_tier0: header.tier,
+        frame_width_bits_minus_1: detail.frame_width_bits_minus_1,
+        frame_height_bits_minus_1: detail.frame_height_bits_minus_1,
+        max_frame_width_minus_1: header.width - 1,
+        max_frame_height_minus_1: header.height - 1,
+        frame_id_numbers_present_flag: tools.frame_id_numbers_present_flag,
+        delta_frame_id_length_minus_2: tools.delta_frame_id_length_minus_2,
+        additional_frame_id_length_minus_1: tools.additional_frame_id_length_minus_1,
+        use_128x128_superblock: tools.use_128x128_superblock,
+        enable_filter_intra: tools.enable_filter_intra,
+        enable_intra_edge_filter: tools.enable_intra_edge_filter,
+        enable_interintra_compound: tools.enable_interintra_compound,
+        enable_masked_compound: tools.enable_masked_compound,
+        enable_warped_motion: tools.enable_warped_motion,
+        enable_dual_filter: tools.enable_dual_filter,
+        enable_order_hint: tools.enable_order_hint,
+        enable_jnt_comp: tools.enable_jnt_comp,
+        enable_ref_frame_mvs: tools.enable_ref_frame_mvs,
+        seq_force_screen_content_tools: tools.seq_force_screen_content_tools,
+        seq_force_integer_mv: tools.seq_force_integer_mv,
+        order_hint_bits: tools.order_hint_bits,
+        enable_superres: tools.enable_superres,
+        enable_cdef: tools.enable_cdef,
+        enable_restoration: tools.enable_restoration,
         color,
-        film_grain_params_present,
+        film_grain_params_present: detail.film_grain_params_present,
     })
 }
 
@@ -15813,12 +15484,16 @@ mod tests {
 
     #[test]
     fn av1_leb128_decodes_multi_byte_values() {
+        let read = |data: &[u8]| {
+            let mut pos = 0;
+            crate::av1parse::read_leb128(data, &mut pos).map(|value| (value, pos))
+        };
         // 0x80 0x01 => 128 (continuation on the first byte); consumed 2 bytes.
-        assert_eq!(read_leb128(&[0x80, 0x01], 0), Some((128, 2)));
+        assert_eq!(read(&[0x80, 0x01]), Some((128, 2)));
         // Single-byte value.
-        assert_eq!(read_leb128(&[0x24], 0), Some((0x24, 1)));
+        assert_eq!(read(&[0x24]), Some((0x24, 1)));
         // Truncated (continuation bit set, no next byte) => None.
-        assert_eq!(read_leb128(&[0x80], 0), None);
+        assert_eq!(read(&[0x80]), None);
     }
 
     /// The frame / frame-header OBU payloads in the fixture, in decoding order.

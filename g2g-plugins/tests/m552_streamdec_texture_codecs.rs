@@ -23,11 +23,13 @@
     feature = "vulkan-video"
 ))]
 
+mod leb128_common;
 use g2g_core::runtime::block_on;
 use g2g_plugins::streamdec::{VideoCodec, VideoPixelLayout, VulkanStreamDecoder};
 use g2g_plugins::vulkanvideo::{
     open_av1_decode_device, open_h265_decode_device, VulkanVideoDevice, VulkanVideoError,
 };
+use leb128_common::read_leb128;
 
 const H265: &[u8] = include_bytes!("fixtures/h265_640x480.h265");
 const AV1: &[u8] = include_bytes!("fixtures/av1_640x480.obu");
@@ -66,21 +68,6 @@ fn i420_to_rgba_bt601(i420: &[u8], w: usize, h: usize) -> Vec<u8> {
     out
 }
 
-/// LEB128 as used by AV1 OBU sizes.
-fn leb128(d: &[u8], mut p: usize) -> Option<(u64, usize)> {
-    let start = p;
-    let mut v = 0u64;
-    for i in 0..8 {
-        let b = *d.get(p)?;
-        p += 1;
-        v |= ((b & 0x7f) as u64) << (7 * i);
-        if b & 0x80 == 0 {
-            return Some((v, p - start));
-        }
-    }
-    None
-}
-
 /// Each AV1 `OBU_FRAME` as its own chunk (the seq header is parsed by `new_gpu`
 /// from the whole stream, so a per-frame chunk need not carry it). Mirrors m508.
 fn split_obu_frames(stream: &[u8]) -> Vec<&[u8]> {
@@ -98,7 +85,7 @@ fn split_obu_frames(stream: &[u8]) -> Vec<&[u8]> {
             p += 1;
         }
         let payload_len = if has_size == 1 {
-            let (sz, n) = leb128(stream, p).expect("valid leb128 size");
+            let (sz, n) = read_leb128(stream, p).expect("valid leb128 size");
             p += n;
             sz as usize
         } else {

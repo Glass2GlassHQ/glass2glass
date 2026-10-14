@@ -210,11 +210,67 @@ pub struct Av1SeqHeader {
     /// The `color_config` colour description as caps colorimetry, `UNKNOWN` when
     /// the header codes none (or its tail was truncated).
     pub colorimetry: g2g_core::Colorimetry,
+    /// Every other sequence-header field, which a decoder needs. `None` when the
+    /// header ends before `film_grain_params_present`.
+    pub detail: Option<Av1SeqHeaderDetail>,
 }
+
+/// The sequence-header fields beyond what caps and `av1C` carry (spec 5.5.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Av1SeqHeaderDetail {
+    pub still_picture: bool,
+    pub reduced_still_picture_header: bool,
+    pub timing_info_present_flag: bool,
+    pub decoder_model_info_present_flag: bool,
+    pub initial_display_delay_present_flag: bool,
+    pub operating_points_cnt_minus_1: u8,
+    pub frame_width_bits_minus_1: u8,
+    pub frame_height_bits_minus_1: u8,
+    pub tools: Av1SequenceTools,
+    pub color_description_present_flag: bool,
+    pub color_primaries: u8,
+    pub transfer_characteristics: u8,
+    pub matrix_coefficients: u8,
+    pub color_range: bool,
+    pub separate_uv_delta_q: bool,
+    pub film_grain_params_present: bool,
+}
+
+/// The flag block between the geometry and `color_config` (spec 5.5.1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Av1SequenceTools {
+    pub frame_id_numbers_present_flag: bool,
+    pub delta_frame_id_length_minus_2: u8,
+    pub additional_frame_id_length_minus_1: u8,
+    pub use_128x128_superblock: bool,
+    pub enable_filter_intra: bool,
+    pub enable_intra_edge_filter: bool,
+    pub enable_interintra_compound: bool,
+    pub enable_masked_compound: bool,
+    pub enable_warped_motion: bool,
+    pub enable_dual_filter: bool,
+    pub enable_order_hint: bool,
+    pub enable_jnt_comp: bool,
+    pub enable_ref_frame_mvs: bool,
+    /// [`SELECT_SCREEN_CONTENT_TOOLS`] when chosen per frame.
+    pub seq_force_screen_content_tools: u8,
+    /// [`SELECT_INTEGER_MV`] when chosen per frame.
+    pub seq_force_integer_mv: u8,
+    /// `OrderHintBits` (0 when `enable_order_hint` is clear).
+    pub order_hint_bits: u8,
+    pub enable_superres: bool,
+    pub enable_cdef: bool,
+    pub enable_restoration: bool,
+}
+
+/// `seq_force_screen_content_tools` / `seq_force_integer_mv` value for "chosen
+/// per frame" (spec 6.4.2).
+pub const SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
+pub const SELECT_INTEGER_MV: u8 = 2;
 
 /// LEB128 (unsigned, little-endian 7-bit groups) read at `*pos`, advancing it.
 /// `None` on truncation or an over-long (> 8 byte) encoding.
-fn read_leb128(data: &[u8], pos: &mut usize) -> Option<u64> {
+pub(crate) fn read_leb128(data: &[u8], pos: &mut usize) -> Option<u64> {
     let mut value = 0u64;
     for i in 0..8 {
         let byte = *data.get(*pos)?;
@@ -280,6 +336,28 @@ fn obu_ranges(data: &[u8]) -> Option<Vec<ObuRange>> {
         pos = end;
     }
     Some(out)
+}
+
+/// One OBU of a temporal unit: its type and payload (past header and size).
+// only the Vulkan decoder reads every field
+#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Obu<'a> {
+    pub obu_type: u8,
+    pub payload: &'a [u8],
+}
+
+/// The OBUs of one temporal unit, empty when its framing is malformed.
+#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+pub(crate) fn obus(data: &[u8]) -> Vec<Obu<'_>> {
+    obu_ranges(data)
+        .unwrap_or_default()
+        .iter()
+        .map(|o| Obu {
+            obu_type: o.obu_type,
+            payload: &data[o.payload..o.end],
+        })
+        .collect()
 }
 
 /// Whether a temporal unit carries a sequence-header OBU. The MP4 demuxers use
@@ -366,26 +444,35 @@ pub(crate) fn av1_keyframe(data: &[u8]) -> bool {
 }
 
 /// Parse a sequence-header OBU payload. The geometry / level prefix is
-/// required; the tail through `color_config` is best-effort for the caps parse
-/// (a truncated header keeps the 8-bit 4:2:0 defaults) and required when
-/// `strict` (the muxer's `av1C` needs real fields).
+/// required; the tail through `film_grain_params_present` is best-effort for
+/// the caps parse (a truncated header keeps the 8-bit 4:2:0 defaults) and
+/// required when `strict` (the muxer's `av1C` and a decoder need real fields).
 fn parse_sequence_header(payload: &[u8]) -> Option<Av1SeqHeader> {
     parse_sequence_header_at(payload, false)
+}
+
+/// [`parse_sequence_header`] requiring the whole header, so `detail` is set.
+#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+pub(crate) fn parse_complete_sequence_header(payload: &[u8]) -> Option<Av1SeqHeader> {
+    parse_sequence_header_at(payload, true)
 }
 
 fn parse_sequence_header_at(payload: &[u8], strict: bool) -> Option<Av1SeqHeader> {
     let mut br = BitReader::new(payload);
     let seq_profile = br.read_bits(3)? as u8;
-    let _still_picture = br.read_bit()?;
+    let still_picture = br.read_bit()? == 1;
     let reduced_still_picture_header = br.read_bit()?;
 
     let mut level = 0u8;
     let mut tier = 0u8;
+    let mut timing_info_present = 0u32;
+    let mut decoder_model_info_present = 0u32;
+    let mut initial_display_delay_present = 0u32;
+    let mut operating_points_cnt_minus_1 = 0u32;
     if reduced_still_picture_header == 1 {
         level = br.read_bits(5)? as u8;
     } else {
-        let timing_info_present = br.read_bit()?;
-        let mut decoder_model_info_present = 0u32;
+        timing_info_present = br.read_bit()?;
         let mut buffer_delay_length = 0u32;
         if timing_info_present == 1 {
             br.read_bits(32)?; // num_units_in_display_tick
@@ -401,8 +488,8 @@ fn parse_sequence_header_at(payload: &[u8], strict: bool) -> Option<Av1SeqHeader
                 br.read_bits(5)?; // frame_presentation_time_length_minus_1
             }
         }
-        let initial_display_delay_present = br.read_bit()?;
-        let operating_points_cnt_minus_1 = br.read_bits(5)?;
+        initial_display_delay_present = br.read_bit()?;
+        operating_points_cnt_minus_1 = br.read_bits(5)?;
         for i in 0..=operating_points_cnt_minus_1 {
             br.read_bits(12)?; // operating_point_idc[i]
             let seq_level_idx = br.read_bits(5)?;
@@ -428,10 +515,10 @@ fn parse_sequence_header_at(payload: &[u8], strict: bool) -> Option<Av1SeqHeader
         }
     }
 
-    let frame_width_bits = br.read_bits(4)? + 1; // frame_width_bits_minus_1 + 1
-    let frame_height_bits = br.read_bits(4)? + 1;
-    let max_frame_width = br.read_bits(frame_width_bits)? + 1;
-    let max_frame_height = br.read_bits(frame_height_bits)? + 1;
+    let frame_width_bits_minus_1 = br.read_bits(4)?;
+    let frame_height_bits_minus_1 = br.read_bits(4)?;
+    let max_frame_width = br.read_bits(frame_width_bits_minus_1 + 1)? + 1;
+    let max_frame_height = br.read_bits(frame_height_bits_minus_1 + 1)? + 1;
 
     let mut header = Av1SeqHeader {
         width: max_frame_width,
@@ -447,26 +534,53 @@ fn parse_sequence_header_at(payload: &[u8], strict: bool) -> Option<Av1SeqHeader
         subsampling_y: true,
         chroma_sample_position: 0,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        detail: None,
     };
-    match parse_color_config(&mut br, reduced_still_picture_header, seq_profile) {
-        Some(color) => {
-            header.high_bitdepth = color.high_bitdepth;
-            header.twelve_bit = color.twelve_bit;
-            header.monochrome = color.monochrome;
-            header.subsampling_x = color.subsampling_x;
-            header.subsampling_y = color.subsampling_y;
-            header.chroma_sample_position = color.chroma_sample_position;
-            header.colorimetry = color.colorimetry;
-        }
-        None if strict => return None,
+    let Some((tools, color)) =
+        parse_color_config(&mut br, reduced_still_picture_header, seq_profile)
+    else {
         // Truncated tail: the caps parse only needs the geometry.
-        None => {}
-    }
+        return (!strict).then_some(header);
+    };
+    header.high_bitdepth = color.high_bitdepth;
+    header.twelve_bit = color.twelve_bit;
+    header.monochrome = color.monochrome;
+    header.subsampling_x = color.subsampling_x;
+    header.subsampling_y = color.subsampling_y;
+    header.chroma_sample_position = color.chroma_sample_position;
+    header.colorimetry = color.colorimetry();
+    let mut read_trailer = || {
+        // the monochrome branch of color_config codes no separate_uv_delta_q
+        let separate_uv_delta_q = !color.monochrome && br.read_bit()? == 1;
+        let film_grain_params_present = br.read_bit()? == 1;
+        Some((separate_uv_delta_q, film_grain_params_present))
+    };
+    let Some((separate_uv_delta_q, film_grain_params_present)) = read_trailer() else {
+        return (!strict).then_some(header);
+    };
+    header.detail = Some(Av1SeqHeaderDetail {
+        still_picture,
+        reduced_still_picture_header: reduced_still_picture_header == 1,
+        timing_info_present_flag: timing_info_present == 1,
+        decoder_model_info_present_flag: decoder_model_info_present == 1,
+        initial_display_delay_present_flag: initial_display_delay_present == 1,
+        operating_points_cnt_minus_1: operating_points_cnt_minus_1 as u8,
+        frame_width_bits_minus_1: frame_width_bits_minus_1 as u8,
+        frame_height_bits_minus_1: frame_height_bits_minus_1 as u8,
+        tools,
+        color_description_present_flag: color.color_description_present_flag,
+        color_primaries: color.color_primaries,
+        transfer_characteristics: color.transfer_characteristics,
+        matrix_coefficients: color.matrix_coefficients,
+        color_range: color.color_range,
+        separate_uv_delta_q,
+        film_grain_params_present,
+    });
     Some(header)
 }
 
 /// What `color_config` (spec 5.5.2) codes: the sample layout the geometry parse
-/// folds into [`Av1SeqHeader`], and the colour description as caps colorimetry.
+/// folds into [`Av1SeqHeader`], and the colour description.
 struct ColorConfig {
     high_bitdepth: bool,
     twelve_bit: bool,
@@ -474,53 +588,70 @@ struct ColorConfig {
     subsampling_x: bool,
     subsampling_y: bool,
     chroma_sample_position: u8,
-    colorimetry: g2g_core::Colorimetry,
+    color_description_present_flag: bool,
+    color_primaries: u8,
+    transfer_characteristics: u8,
+    matrix_coefficients: u8,
+    color_range: bool,
 }
 
-/// Skip the flag block between the geometry and `color_config` (spec 5.5.1) and
-/// parse `color_config` (5.5.2). `None` on truncation.
+impl ColorConfig {
+    fn colorimetry(&self) -> g2g_core::Colorimetry {
+        g2g_core::Colorimetry::from_cicp(
+            self.color_primaries,
+            self.transfer_characteristics,
+            self.matrix_coefficients,
+            self.color_range,
+        )
+    }
+}
+
+/// Parse the flag block between the geometry and `color_config` (spec 5.5.1)
+/// and `color_config` itself (5.5.2) up to `separate_uv_delta_q`. `None` on
+/// truncation.
 fn parse_color_config(
     br: &mut BitReader,
     reduced_still_picture_header: u32,
     seq_profile: u8,
-) -> Option<ColorConfig> {
+) -> Option<(Av1SequenceTools, ColorConfig)> {
+    let mut tools = Av1SequenceTools {
+        seq_force_screen_content_tools: SELECT_SCREEN_CONTENT_TOOLS,
+        seq_force_integer_mv: SELECT_INTEGER_MV,
+        ..Av1SequenceTools::default()
+    };
     if reduced_still_picture_header == 0 && br.read_bit()? == 1 {
-        // frame_id_numbers_present_flag
-        br.read_bits(4)?; // delta_frame_id_length_minus_2
-        br.read_bits(3)?; // additional_frame_id_length_minus_1
+        tools.frame_id_numbers_present_flag = true;
+        tools.delta_frame_id_length_minus_2 = br.read_bits(4)? as u8;
+        tools.additional_frame_id_length_minus_1 = br.read_bits(3)? as u8;
     }
-    br.read_bit()?; // use_128x128_superblock
-    br.read_bit()?; // enable_filter_intra
-    br.read_bit()?; // enable_intra_edge_filter
+    tools.use_128x128_superblock = br.read_bit()? == 1;
+    tools.enable_filter_intra = br.read_bit()? == 1;
+    tools.enable_intra_edge_filter = br.read_bit()? == 1;
     if reduced_still_picture_header == 0 {
-        br.read_bit()?; // enable_interintra_compound
-        br.read_bit()?; // enable_masked_compound
-        br.read_bit()?; // enable_warped_motion
-        br.read_bit()?; // enable_dual_filter
-        let enable_order_hint = br.read_bit()?;
-        if enable_order_hint == 1 {
-            br.read_bit()?; // enable_jnt_comp
-            br.read_bit()?; // enable_ref_frame_mvs
+        tools.enable_interintra_compound = br.read_bit()? == 1;
+        tools.enable_masked_compound = br.read_bit()? == 1;
+        tools.enable_warped_motion = br.read_bit()? == 1;
+        tools.enable_dual_filter = br.read_bit()? == 1;
+        tools.enable_order_hint = br.read_bit()? == 1;
+        if tools.enable_order_hint {
+            tools.enable_jnt_comp = br.read_bit()? == 1;
+            tools.enable_ref_frame_mvs = br.read_bit()? == 1;
         }
-        // seq_choose_screen_content_tools -> SELECT (2), else an explicit bit.
-        let force_sct = if br.read_bit()? == 1 {
-            2
-        } else {
-            br.read_bit()?
-        };
-        if force_sct > 0 {
-            // seq_choose_integer_mv -> SELECT, else an explicit bit.
-            if br.read_bit()? == 0 {
-                br.read_bit()?; // seq_force_integer_mv
-            }
+        // seq_choose_screen_content_tools -> SELECT, else an explicit bit.
+        if br.read_bit()? == 0 {
+            tools.seq_force_screen_content_tools = br.read_bit()? as u8;
         }
-        if enable_order_hint == 1 {
-            br.read_bits(3)?; // order_hint_bits_minus_1
+        // seq_choose_integer_mv -> SELECT, else an explicit bit.
+        if tools.seq_force_screen_content_tools > 0 && br.read_bit()? == 0 {
+            tools.seq_force_integer_mv = br.read_bit()? as u8;
+        }
+        if tools.enable_order_hint {
+            tools.order_hint_bits = br.read_bits(3)? as u8 + 1; // order_hint_bits_minus_1
         }
     }
-    br.read_bit()?; // enable_superres
-    br.read_bit()?; // enable_cdef
-    br.read_bit()?; // enable_restoration
+    tools.enable_superres = br.read_bit()? == 1;
+    tools.enable_cdef = br.read_bit()? == 1;
+    tools.enable_restoration = br.read_bit()? == 1;
 
     // color_config (spec 5.5.2).
     let high_bitdepth = br.read_bit()? == 1;
@@ -535,44 +666,41 @@ fn parse_color_config(
         br.read_bit()? == 1
     };
     // Absent a color_description the three fields are CICP unspecified.
+    let color_description_present_flag = br.read_bit()? == 1;
     let (mut primaries, mut transfer, mut matrix) =
         (CICP_UNSPECIFIED, CICP_UNSPECIFIED, CICP_UNSPECIFIED);
-    if br.read_bit()? == 1 {
-        // color_description_present: primaries / transfer / matrix.
+    if color_description_present_flag {
         primaries = br.read_bits(8)?;
         transfer = br.read_bits(8)?;
         matrix = br.read_bits(8)?;
     }
+    let mut color = ColorConfig {
+        high_bitdepth,
+        twelve_bit,
+        monochrome,
+        subsampling_x: true,
+        subsampling_y: true,
+        chroma_sample_position: 0,
+        color_description_present_flag,
+        color_primaries: primaries as u8,
+        transfer_characteristics: transfer as u8,
+        matrix_coefficients: matrix as u8,
+        color_range: false,
+    };
     // CP_BT_709 / TC_SRGB / MC_IDENTITY: the RGB case with no subsampling.
     let identity_matrix = matrix == 0 && primaries == 1 && transfer == 13;
-    let colorimetry = |full_range| {
-        g2g_core::Colorimetry::from_cicp(primaries as u8, transfer as u8, matrix as u8, full_range)
-    };
     if monochrome {
-        let full_range = br.read_bit()? == 1;
-        return Some(ColorConfig {
-            high_bitdepth,
-            twelve_bit,
-            monochrome,
-            subsampling_x: true,
-            subsampling_y: true,
-            chroma_sample_position: 0,
-            colorimetry: colorimetry(full_range),
-        });
+        color.color_range = br.read_bit()? == 1;
+        return Some((tools, color));
     }
     if identity_matrix {
         // The GBR case codes no range bit: it is full by definition.
-        return Some(ColorConfig {
-            high_bitdepth,
-            twelve_bit,
-            monochrome,
-            subsampling_x: false,
-            subsampling_y: false,
-            chroma_sample_position: 0,
-            colorimetry: colorimetry(true),
-        });
+        color.color_range = true;
+        color.subsampling_x = false;
+        color.subsampling_y = false;
+        return Some((tools, color));
     }
-    let full_range = br.read_bit()? == 1; // color_range
+    color.color_range = br.read_bit()? == 1;
     let (ssx, ssy) = match seq_profile {
         0 => (true, true),
         1 => (false, false),
@@ -586,25 +714,17 @@ fn parse_color_config(
             }
         }
     };
-    let csp = if ssx && ssy {
-        br.read_bits(2)? as u8
-    } else {
-        0
-    };
-    Some(ColorConfig {
-        high_bitdepth,
-        twelve_bit,
-        monochrome,
-        subsampling_x: ssx,
-        subsampling_y: ssy,
-        chroma_sample_position: csp,
-        colorimetry: colorimetry(full_range),
-    })
+    color.subsampling_x = ssx;
+    color.subsampling_y = ssy;
+    if ssx && ssy {
+        color.chroma_sample_position = br.read_bits(2)? as u8;
+    }
+    Some((tools, color))
 }
 
 /// AV1 unsigned variable-length code (spec `uvlc()`): count leading zeros, then
 /// read that many value bits. `>= 32` leading zeros saturates with no value read.
-fn read_uvlc(br: &mut BitReader) -> Option<u32> {
+pub(crate) fn read_uvlc(br: &mut BitReader) -> Option<u32> {
     let mut leading_zeros = 0u32;
     loop {
         if br.read_bit()? == 1 {

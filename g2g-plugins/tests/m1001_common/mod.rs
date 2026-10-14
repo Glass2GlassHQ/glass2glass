@@ -6,6 +6,9 @@
 //! included per test binary via `mod m1001_common;`.
 #![allow(dead_code)] // no one battery uses every helper here
 
+#[path = "../leb128_common/mod.rs"]
+mod leb128_common;
+use leb128_common::read_leb128;
 use std::path::PathBuf;
 
 use g2g_core::conformance::Evidence;
@@ -104,21 +107,6 @@ impl Drop for EvidenceLog {
     }
 }
 
-/// LEB128 unsigned (AV1 4.10.5) at `offset`: the value and the bytes it occupied.
-fn leb128(stream: &[u8], offset: usize) -> Option<(u64, usize)> {
-    let mut value = 0u64;
-    let mut p = offset;
-    for i in 0..8 {
-        let b = *stream.get(p)?;
-        p += 1;
-        value |= ((b & 0x7f) as u64) << (7 * i);
-        if b & 0x80 == 0 {
-            return Some((value, p - offset));
-        }
-    }
-    None
-}
-
 /// Split a low-overhead AV1 OBU stream into temporal units, each starting at its
 /// temporal-delimiter OBU. This is the chunking a decoder expects: one call per
 /// temporal unit, sequence header included in the unit that carries it.
@@ -138,7 +126,7 @@ pub(crate) fn split_temporal_units(stream: &[u8]) -> Vec<&[u8]> {
             p += 1;
         }
         let payload = if has_size {
-            let (size, read) = leb128(stream, p).expect("valid leb128 obu_size");
+            let (size, read) = read_leb128(stream, p).expect("valid leb128 obu_size");
             p += read;
             size as usize
         } else {

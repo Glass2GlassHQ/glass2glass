@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1305: Vulkan AV1 uses the av1parse OBU walker and sequence-header parser.
 - M1304: one H.265 SPS head and profile_tier_level reader.
 - M1303: one H.264 SPS and VUI parser serves the parsers and Vulkan Video.
 - M1302: ffmpeg encode reuses its input frame and offload decode copies each access unit once.

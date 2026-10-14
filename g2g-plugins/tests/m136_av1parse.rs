@@ -6,8 +6,10 @@
 //! `default_registry` is `std`-gated; the graph half builds elements directly so
 //! it runs on the no_std-baseline test build too.
 
+mod leb128_common;
 use core::future::Future;
 use core::pin::Pin;
+use leb128_common::leb128;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
@@ -71,22 +73,6 @@ fn block(track: u64, rel: i16, frame: &[u8]) -> Vec<u8> {
 }
 
 // --- minimal AV1 OBU builders ---
-
-fn leb128(mut v: u64) -> Vec<u8> {
-    let mut out = Vec::new();
-    loop {
-        let mut byte = (v & 0x7f) as u8;
-        v >>= 7;
-        if v != 0 {
-            byte |= 0x80;
-        }
-        out.push(byte);
-        if v == 0 {
-            break;
-        }
-    }
-    out
-}
 
 fn bits_for(v: u32) -> u32 {
     if v == 0 {
