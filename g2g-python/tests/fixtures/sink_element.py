@@ -43,3 +43,9 @@ class EmittingSink(CountingSink):
     def g2g_process_payload(self, buffers, caps, meta):
         super().g2g_process_payload(buffers, caps, meta)
         meta.emit(b"a sink has nowhere to send this")
+
+
+class ReadOnlyProbeSink(CountingSink):
+    def g2g_process_payload(self, buffers, caps, meta):
+        self.payloads.append(("readonly", str(memoryview(buffers[0]).readonly)))
+        super().g2g_process_payload(buffers, caps, meta)

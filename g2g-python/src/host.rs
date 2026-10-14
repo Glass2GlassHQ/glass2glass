@@ -237,6 +237,7 @@ type Reply = Result<HostedOutput, G2gError>;
 struct FrameBuffer {
     ptr: *mut u8,
     len: usize,
+    readonly: bool,
     /// Outstanding buffer-protocol exports: `__getbuffer__` increments,
     /// `__releasebuffer__` decrements. The host checks this is back to 0 after
     /// each `g2g_process` call (see `process_job`): a nonzero count means the
@@ -269,7 +270,7 @@ impl FrameBuffer {
                 slf.as_ptr(),
                 slf.ptr as *mut core::ffi::c_void,
                 slf.len as ffi::Py_ssize_t,
-                0, // writable
+                c_int::from(slf.readonly),
                 flags,
             )
         };
@@ -929,8 +930,7 @@ fn propvalue_to_py(py: Python<'_>, value: &PropValue) -> PyResult<Py<PyAny>> {
 /// How a job's frames reach Python: writable CPU bytes over the buffer protocol,
 /// or GPU frames' device-pointer planes over CAI.
 enum Handoff {
-    /// One `(pointer, length)` per frame's System slice.
-    System(Vec<(*mut u8, usize)>),
+    System(Vec<SystemSpan>),
     /// Luma and interleaved chroma of a single Cuda-domain frame.
     Cuda(CudaPlane, CudaPlane),
     /// One plane pair per contributing input of a Cuda-domain batch.
@@ -938,6 +938,12 @@ enum Handoff {
     /// Nothing to hand over: a GPU source allocates its own surface and returns
     /// the planes.
     ProduceCuda,
+}
+
+struct SystemSpan {
+    ptr: *mut u8,
+    len: usize,
+    readonly: bool,
 }
 
 /// Decide how this job's frames reach Python, and reject a frame the hosted
@@ -987,14 +993,38 @@ fn handoff(py: Python<'_>, instance: &Py<PyAny>, job: &mut Job) -> Result<Handof
     }
 
     let mut spans = Vec::with_capacity(job.frames.len());
-    for frame in &mut job.frames {
+    for (index, frame) in job.frames.iter_mut().enumerate() {
+        let forwarded = frame_travels_on(&job.kind, index);
         let MemoryDomain::System(slice) = &mut frame.domain else {
             return Err(G2gError::UnsupportedDomain);
         };
-        let bytes = slice.as_mut_slice();
-        spans.push((bytes.as_mut_ptr(), bytes.len()));
+        // a frame nobody sees again is lent read-only, so a shared or lent buffer is not copied
+        let span = if forwarded {
+            let bytes = slice.as_mut_slice();
+            SystemSpan {
+                ptr: bytes.as_mut_ptr(),
+                len: bytes.len(),
+                readonly: false,
+            }
+        } else {
+            let bytes = slice.as_slice();
+            SystemSpan {
+                ptr: bytes.as_ptr().cast_mut(),
+                len: bytes.len(),
+                readonly: true,
+            }
+        };
+        spans.push(span);
     }
     Ok(Handoff::System(spans))
+}
+
+fn frame_travels_on(kind: &JobKind, index: usize) -> bool {
+    match kind {
+        JobKind::Consume => false,
+        JobKind::Batch => index == 0,
+        JobKind::Transform | JobKind::StreamBatch | JobKind::Produce | JobKind::ProduceCuda => true,
+    }
 }
 
 /// There is no readback fallback for a GPU frame: `g2g-python` links no CUDA, so
@@ -1197,18 +1227,19 @@ fn emitted_frame(emitted: Emitted, anchor_timing: FrameTiming, sequence: u64) ->
 fn call_system(
     py: Python<'_>,
     instance: &Py<PyAny>,
-    spans: &[(*mut u8, usize)],
+    spans: &[SystemSpan],
     job: &Job,
     sink: &Py<MetaSink>,
 ) -> PyResult<bool> {
     let buffers: Vec<Py<FrameBuffer>> = spans
         .iter()
-        .map(|&(ptr, len)| {
+        .map(|span| {
             Py::new(
                 py,
                 FrameBuffer {
-                    ptr,
-                    len,
+                    ptr: span.ptr,
+                    len: span.len,
+                    readonly: span.readonly,
                     exports: core::cell::Cell::new(0),
                 },
             )

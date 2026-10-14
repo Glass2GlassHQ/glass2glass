@@ -121,6 +121,20 @@ fn a_payload_reaches_the_payload_hook() {
 }
 
 #[test]
+fn a_sink_reads_the_frame_through_a_read_only_view() {
+    let location = report_path("read-only");
+    let mut sink = text_sink("ReadOnlyProbeSink", &location);
+    runtime()
+        .block_on(sink.process(
+            PipelinePacket::DataFrame(text_frame("hello")),
+            &mut NothingDownstream,
+        ))
+        .expect("the sink reads the payload");
+    let report = take_report(&location);
+    assert!(report.contains("payload=readonly True\n"), "{report}");
+}
+
+#[test]
 fn a_sink_that_emits_a_buffer_fails_the_frame() {
     let location = report_path("emitting");
     let mut sink = text_sink("EmittingSink", &location);

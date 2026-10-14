@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1368: hosted Python sinks and non-anchor batch frames get read-only views instead of a forced writable copy.
 - M1367: `g2g_bridge_push_buf` copies the buffer once instead of on every retry of a full feed.
 - M1394: the AAC-LC ADTS profile constant moves to `ffmpegaacenc`, its only user, so builds without that element have no dead code.
 - M1308: one table-driven MPEG CRC-32 for PSI sections and Ogg pages.
