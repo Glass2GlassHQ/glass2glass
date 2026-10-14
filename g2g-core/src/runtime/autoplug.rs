@@ -1402,6 +1402,26 @@ mod factory {
     /// [`Registry::register_primary_stream`].
     pub type PrimaryStreamHook = fn(location: &str, caps: &Caps) -> Option<PrimaryStream>;
 
+    const RANK_SPEC_EXCLUDED: &str = "none";
+    const RANK_SPEC_MAX: &str = "max";
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RankOverride {
+        Excluded,
+        Rank(i16),
+    }
+
+    impl RankOverride {
+        // beats any memory-domain or hardware score bonus
+        pub const MAX: Self = Self::Rank(i16::MAX);
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum RankSpecError {
+        Malformed(String),
+        UnknownFactory(String),
+    }
+
     impl core::fmt::Debug for ElementFactory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.debug_struct("ElementFactory")
@@ -1512,6 +1532,7 @@ mod factory {
         /// carries the factory; `None` (the default) leaves a domain mismatch to
         /// fail loud at negotiation, as it did before.
         domain_converter: Option<fn(MemoryDomainKind, MemoryDomainKind) -> Option<GraphNode>>,
+        rank_overridden: Vec<&'static str>,
     }
 
     impl Registry {
@@ -2306,6 +2327,49 @@ mod factory {
                 .unzip()
         }
 
+        pub fn override_rank(&mut self, name: &str, rank: RankOverride) -> bool {
+            let Some(name) = self
+                .factories
+                .iter()
+                .map(|f| f.desc.name)
+                .find(|registered| *registered == name)
+            else {
+                return false;
+            };
+            match rank {
+                RankOverride::Excluded => self.factories.retain(|f| f.desc.name != name),
+                RankOverride::Rank(rank) => self
+                    .factories
+                    .iter_mut()
+                    .filter(|f| f.desc.name == name)
+                    .for_each(|f| f.desc.capabilities.rank = rank),
+            }
+            self.rank_overridden.push(name);
+            true
+        }
+
+        // GST_PLUGIN_FEATURE_RANK syntax, minus gst's named middle ranks
+        pub fn apply_rank_spec(&mut self, spec: &str) -> Result<(), RankSpecError> {
+            for entry in spec.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+                let malformed = || RankSpecError::Malformed(entry.to_string());
+                let (name, rank) = entry.split_once(':').ok_or_else(malformed)?;
+                let rank = match rank.trim().to_ascii_lowercase().as_str() {
+                    RANK_SPEC_EXCLUDED => RankOverride::Excluded,
+                    RANK_SPEC_MAX => RankOverride::MAX,
+                    number => RankOverride::Rank(number.parse().map_err(|_| malformed())?),
+                };
+                let name = name.trim();
+                if !self.override_rank(name, rank) {
+                    return Err(RankSpecError::UnknownFactory(name.to_string()));
+                }
+            }
+            Ok(())
+        }
+
+        pub fn rank_overridden(&self, name: &str) -> bool {
+            self.rank_overridden.contains(&name)
+        }
+
         /// The names of the shortest chain that avoids every factory in
         /// `avoided`: the retry after one of them turned out not to decode the
         /// stream, where the search would otherwise pick it again. An empty
@@ -2935,9 +2999,10 @@ pub use factory::{
     declared_source_caps, AutoplugError, AutoplugParams, DecodebinError, DecodebinSelectHook,
     DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory, FallbacksrcSourceFactory,
     FanoutRebuild, FanoutSrcFactory, LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError,
-    PlaybinHook, PlaybinPort, PrimaryStream, PrimaryStreamHook, PropertyDoc, Registry,
-    RestartFanoutSourceHook, RestartPolicy, RestartSourceHook, SourceFactory, Uri, UriError,
-    UriFanout, UriFanoutHead, UriFanoutHook, UriFanoutPort, UriRebuild, UriSourceFactory,
+    PlaybinHook, PlaybinPort, PrimaryStream, PrimaryStreamHook, PropertyDoc, RankOverride,
+    RankSpecError, Registry, RestartFanoutSourceHook, RestartPolicy, RestartSourceHook,
+    SourceFactory, Uri, UriError, UriFanout, UriFanoutHead, UriFanoutHook, UriFanoutPort,
+    UriRebuild, UriSourceFactory,
 };
 
 #[cfg(test)]
@@ -3314,6 +3379,75 @@ mod tests {
             build(true),
             2,
             "provider: a parser is spliced in ahead of the decoder"
+        );
+    }
+
+    #[cfg(feature = "std")]
+    fn decoder_factory(name: &'static str) -> ElementFactory {
+        ElementFactory::new(
+            name,
+            Vec::from([
+                PadTemplate::sink(CapsSet::one(h264(Dim::Any))),
+                PadTemplate::source(CapsSet::one(raw(RawVideoFormat::Nv12))),
+            ]),
+            |_| alloc::boxed::Box::new(Dummy),
+        )
+    }
+
+    #[cfg(feature = "std")]
+    fn cpu_and_gpu_decoders() -> Registry {
+        let mut reg = Registry::new();
+        reg.register(decoder_factory("h264dec"));
+        reg.register(
+            decoder_factory("nvdec")
+                .produces(MemoryDomainKind::Cuda)
+                .hardware(),
+        );
+        reg
+    }
+
+    #[cfg(feature = "std")]
+    fn chosen_for_system_memory(reg: &Registry) -> Vec<&'static str> {
+        reg.autoplug_names_preferring(&h264(Dim::Any), &is_raw_video, 4, MemoryDomainKind::System)
+            .expect("h264 -> raw chain")
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_max_rank_beats_the_memory_domain_match() {
+        let mut reg = cpu_and_gpu_decoders();
+        assert_eq!(chosen_for_system_memory(&reg), ["h264dec"]);
+        assert!(reg.override_rank("nvdec", RankOverride::MAX));
+        assert_eq!(chosen_for_system_memory(&reg), ["nvdec"]);
+        assert!(reg.rank_overridden("nvdec"));
+        assert!(!reg.rank_overridden("h264dec"));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn an_excluded_factory_leaves_the_search() {
+        let mut reg = cpu_and_gpu_decoders();
+        assert_eq!(reg.apply_rank_spec("h264dec:none"), Ok(()));
+        assert_eq!(chosen_for_system_memory(&reg), ["nvdec"]);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_rank_spec_takes_gst_syntax_and_rejects_bad_entries() {
+        let mut reg = cpu_and_gpu_decoders();
+        assert_eq!(reg.apply_rank_spec(" h264dec:-5 , nvdec:MAX,"), Ok(()));
+        assert_eq!(chosen_for_system_memory(&reg), ["nvdec"]);
+        assert!(reg.rank_overridden("h264dec"));
+
+        let malformed = |entry: &str| Err(RankSpecError::Malformed(entry.into()));
+        assert_eq!(reg.apply_rank_spec("nvdec"), malformed("nvdec"));
+        assert_eq!(
+            reg.apply_rank_spec("nvdec:primary"),
+            malformed("nvdec:primary")
+        );
+        assert_eq!(
+            reg.apply_rank_spec("nosuchdec:max"),
+            Err(RankSpecError::UnknownFactory("nosuchdec".into()))
         );
     }
 

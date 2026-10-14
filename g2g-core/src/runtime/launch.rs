@@ -781,7 +781,7 @@ fn is_decodebin(name: &str) -> bool {
 const DECODEBIN_MAX_DEPTH: usize = 6;
 
 /// The decode chain to raw for `input`, decoding into `preferred` (the memory
-/// the element right after the macro takes).
+/// the element right after the macro takes) and into caps `consumer` accepts.
 ///
 /// The chain is returned built, not named: the caps the search chose a decoder
 /// to produce reach the element only through the factory that takes them, and a
@@ -793,11 +793,30 @@ fn autoplug_for_consumer(
     registry: &Registry,
     input: &Caps,
     preferred: MemoryDomainKind,
+    consumer: Option<&dyn DynAsyncElement>,
     avoided: &[&str],
 ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
     let raw = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
+    let consumer_constraint = consumer.map(|element| element.caps_constraint_as_transform());
+    let consumer_accepts = |c: &Caps| {
+        raw(c)
+            && consumer_constraint
+                .as_ref()
+                .is_none_or(|constraint| constraint.accepts(c))
+    };
+    let names = |target: &dyn Fn(&Caps) -> bool| {
+        registry.autoplug_names_avoiding(input, target, DECODEBIN_MAX_DEPTH, preferred, avoided)
+    };
+    let raw_names = names(&raw)?;
+    // the consumer picks only the output caps, so a pinned decoder or a demux's default stream stays
+    let use_consumer_chain = names(&consumer_accepts) == Some(raw_names);
+    let target: &dyn Fn(&Caps) -> bool = if use_consumer_chain {
+        &consumer_accepts
+    } else {
+        &raw
+    };
     let mut chain =
-        registry.autoplug_avoiding(input, &raw, DECODEBIN_MAX_DEPTH, preferred, avoided)?;
+        registry.autoplug_avoiding(input, target, DECODEBIN_MAX_DEPTH, preferred, avoided)?;
     // M421/M676: prepend the re-framing parser ahead of a real decode of an
     // elementary stream, like the boxed `decodebin` splice (the caps-identity
     // parser is invisible to the shortest-chain search, so it never appears in
@@ -904,11 +923,23 @@ fn expand_decodebin(
                         }
                         _ => MemoryDomainKind::System,
                     };
-                    let decoders =
-                        autoplug_for_consumer(registry, &chain_input, preferred, avoided)
-                            .ok_or_else(|| {
-                                ParseError::NoDecodeChain(alloc::format!("{chain_input:?}"))
-                            })?;
+                    let consumer = match items.peek() {
+                        Some(Item::Element(spec)) => registry
+                            .make_element(&spec.name)
+                            .map(|mut element| {
+                                apply_props(&mut element, &spec.name, &spec.props).map(|()| element)
+                            })
+                            .transpose()?,
+                        _ => None,
+                    };
+                    let decoders = autoplug_for_consumer(
+                        registry,
+                        &chain_input,
+                        preferred,
+                        consumer.as_deref(),
+                        avoided,
+                    )
+                    .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{chain_input:?}")))?;
                     // Built here rather than named, so each element is
                     // constructed for the caps the search chose it to produce (a
                     // multi-format decoder emits the format the consumer takes,
@@ -2975,8 +3006,9 @@ pub fn parse_launch_avoiding(
 /// connection and drops what was in flight).
 ///
 /// `None` when the failing element is unknown to the registry, when the line
-/// names it explicitly (the user asked for that element by name, so substituting
-/// another would defy them), or when it has already been barred once.
+/// names it explicitly or the application set its rank (the user asked for that
+/// element, so substituting another would defy them), or when it has already
+/// been barred once.
 pub fn fallback_factory(
     registry: &Registry,
     pipeline: &str,
@@ -2988,7 +3020,7 @@ pub fn fallback_factory(
         return None;
     }
     let named_in_line = tokenize(pipeline).iter().any(|t| t == factory);
-    (!named_in_line).then_some(factory)
+    (!named_in_line && !registry.rank_overridden(factory)).then_some(factory)
 }
 
 /// Whether any element in `graph` offers a live-source clock: a capture or

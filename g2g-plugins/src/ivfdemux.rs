@@ -95,6 +95,10 @@ impl IvfDemux {
         }
     }
 
+    pub fn stream_caps(file_prefix: &[u8]) -> Option<Caps> {
+        Self::parse_header(file_prefix).map(|header| Self::compressed(header.codec))
+    }
+
     fn parse_header(buf: &[u8]) -> Option<IvfHeader> {
         if buf.len() < FILE_HEADER_LEN || &buf[0..4] != b"DKIF" {
             return None;
@@ -206,15 +210,12 @@ impl AsyncElement for IvfDemux {
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        // Advertise a single placeholder codec at negotiation (the concrete one is
-        // unknown until the DKIF header is read); the real codec is fixed via
-        // `CapsChanged` at runtime, which the decoder reconfigures to. Advertising
-        // all three alternatives instead would fixate the output to the first and
-        // reject the others.
+        // The concrete codec is unknown until the DKIF header is read, so offer
+        // every one an IVF file can carry and let `CapsChanged` fix it at runtime.
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::Ivf,
-            } => CapsSet::one(Self::compressed(VideoCodec::Vp9)),
+            } => Self::output_alternatives(),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }

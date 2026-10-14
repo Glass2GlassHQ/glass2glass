@@ -10,15 +10,18 @@ use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::runtime::{parse_launch, run_graph, LatencyProfile};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, OutputSink,
     PropValue, PushOutcome, Rate, VideoCodec,
 };
+use g2g_plugins::clock::WallClock;
 use g2g_plugins::fmp4demux::Fmp4Demux;
 use g2g_plugins::mkvdemux::MkvDemux;
 use g2g_plugins::mkvmuxn::MkvMuxN;
 use g2g_plugins::mp4demux::Mp4Demux;
 use g2g_plugins::mp4muxn::Mp4MuxN;
+use g2g_plugins::registry::default_registry;
 
 fn av1_caps(w: u32, h: u32) -> Caps {
     Caps::CompressedVideo {
@@ -334,4 +337,28 @@ async fn av1_mkv_element_round_trips() {
     for (i, ((_, data), reference)) in sink.frames.iter().zip(&expected).enumerate() {
         assert_eq!(data, reference, "unit {i} is byte-identical");
     }
+}
+
+#[tokio::test]
+async fn av1_ivf_negotiates_into_an_av1_only_parser() {
+    let Some((ivf, frames)) = encode_ivf("launch") else {
+        eprintln!("skipping: no ffmpeg / libaom");
+        return;
+    };
+    let graph = parse_launch(
+        &default_registry(),
+        &format!(
+            "filesrc location={} ! ivfdemux ! av1parse ! fakesink",
+            ivf.display()
+        ),
+    )
+    .expect("parse");
+    let stats = run_graph(graph, &WallClock::new(), LatencyProfile::Live).await;
+    let _ = std::fs::remove_file(&ivf);
+    let stats = stats.expect("ivfdemux offers av1 to av1parse");
+    assert_eq!(
+        stats.frames_consumed,
+        frames.len() as u64,
+        "every frame reaches the sink"
+    );
 }

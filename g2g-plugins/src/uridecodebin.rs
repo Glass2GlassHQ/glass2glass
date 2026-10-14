@@ -2023,6 +2023,23 @@ pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> 
     })
 }
 
+pub fn ivf_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+    if !matches!(
+        caps,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Ivf
+        }
+    ) {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    Some(PrimaryStream {
+        demux: "ivfdemux",
+        props: Vec::new(),
+        caps: crate::ivfdemux::IvfDemux::stream_caps(&prefix)?,
+    })
+}
+
 /// The `playbin uri=X` hook for a lone-audio-stream file (M775): an elementary
 /// audio file (`.flac`) or an Ogg logical stream, which the container hooks
 /// decline and the single-stream `file://` fallback (a self-demuxing MP4 video

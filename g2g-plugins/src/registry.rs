@@ -1707,8 +1707,16 @@ pub fn default_registry() -> Registry {
     register_autoplug_candidates(&mut reg);
     register_uri_handlers(&mut reg);
 
+    // last, so the override reaches every factory registered above
+    if let Ok(spec) = std::env::var(PLUGIN_FEATURE_RANK_VARIABLE) {
+        reg.apply_rank_spec(&spec)
+            .unwrap_or_else(|error| panic!("{PLUGIN_FEATURE_RANK_VARIABLE}: {error:?}"));
+    }
+
     reg
 }
+
+const PLUGIN_FEATURE_RANK_VARIABLE: &str = "G2G_PLUGIN_FEATURE_RANK";
 
 /// Register the `uri=` scheme handlers (M196) so `uridecodebin` / `playbin` in a
 /// text pipeline can build their source from a URI. Each handler is gated to its
@@ -1760,6 +1768,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_primary_stream(crate::uridecodebin::ts_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::mp4_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::mkv_primary_stream);
+    reg.register_primary_stream(crate::uridecodebin::ivf_primary_stream);
     // `fallbacksrc` restarts (M1163): the wrapper that rebuilds a URI source when
     // it fails, stalls for `restart-timeout`, or ends under `restart-on-eos`.
     reg.register_restart_source(crate::fallbacksrc::restart_source);

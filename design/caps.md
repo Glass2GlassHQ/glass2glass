@@ -921,6 +921,16 @@ forwarded in-band ahead of the first frame as decoder extradata).
   `... ! decodebin ! wgpusink` decodes on the GPU and
   `... ! decodebin ! filesink` still decodes on the CPU.
 
+  The same consumer picks the decoder's output format (M1256). `expand_decodebin`
+  builds that element with its line properties and searches again for a chain
+  whose raw output the element's `caps_constraint_as_transform` accepts, so
+  `decodebin ! video/x-raw,format=I420` builds `ffmpegdec` for I420 rather than
+  the NV12 its template lists first. The second search is used only when it plugs
+  the same elements as the plain search to raw: the consumer chooses caps, never
+  elements, so it cannot route a demux's default video port to an audio decoder
+  or replace a pinned decoder. Otherwise the plain chain is built and a mismatch
+  fails at negotiation.
+
   Pad templates and memory domains say nothing about whether the hardware behind
   a decoder will accept a particular bitstream, and a driver that refuses one only
   says so once frames flow. Re-plugging around it takes three pieces (M1023): the
@@ -933,6 +943,16 @@ forwarded in-band ahead of the first frame as decoder extradata).
   something, which is what lets a caller retry in a loop and terminate. Only the
   auto-plug search is bounded: an element the line names explicitly is still
   built, since the user asked for it by name.
+
+  `G2G_PLUGIN_FEATURE_RANK` overrides ranks with the syntax of GStreamer's
+  `GST_PLUGIN_FEATURE_RANK` (M1255): comma-separated `factory:rank` entries, where
+  rank is an `i16`, `max`, or `none` to remove the factory. GStreamer's named
+  ranks such as `primary` are not accepted. `default_registry` applies it last
+  and panics on a bad entry or an unknown factory, so a pin to a decoder the build
+  lacks cannot quietly test another one. `max` is `i16::MAX`, which outweighs the
+  memory-domain and hardware terms of `score`. An overridden factory counts as
+  asked for by name: `fallback_factory` does not replace it, and a pinned decoder
+  whose output the next element rejects fails at negotiation.
 
   The policy sits with the caller, because only it knows whether restarting is
   safe: g2g has no dynamic re-plugging, so trying the next decoder means running

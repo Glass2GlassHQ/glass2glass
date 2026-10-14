@@ -356,6 +356,18 @@ fn only_an_auto_plugged_factory_is_ruled_out() {
 }
 
 #[test]
+fn a_rank_override_is_not_swapped_out() {
+    let mut registry = registry();
+    registry
+        .apply_rank_spec("refusingdec:max")
+        .expect("refusingdec is registered");
+    assert_eq!(
+        fallback_factory(&registry, PIPELINE, "StubDecoder0", &[]),
+        None
+    );
+}
+
+#[test]
 fn a_live_source_is_recognised_before_a_restart() {
     let mut registry = registry();
     registry.register_source(SourceFactory::new("livesrc", h264(), || {

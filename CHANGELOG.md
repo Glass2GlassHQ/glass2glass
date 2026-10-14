@@ -7,6 +7,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M1257: `linux-full` builds the EGL `glimagesink`, so a launch line's `glimagesink` takes RGBA instead of falling back to the NV12-only `waylandsink`.
+- M1256: `decodebin` in a launch line decodes to a format the next element accepts, so `decodebin ! video/x-raw,format=I420` no longer gets an NV12 decoder.
+- M1255: `G2G_PLUGIN_FEATURE_RANK` overrides auto-plug ranks with the syntax of `GST_PLUGIN_FEATURE_RANK`.
+- M1254: `ivfdemux` offers every codec an IVF file can carry at negotiation, so an AV1 file reaches `av1parse` and AV1-only decoders.
 - M1253: `mpegtsmux` gains `transport-stream-id`, `original-network-id`, `start-pid`, `pmt-start-pid` and `tables-version`.
 - M1252: `mpegtsmux` gains a `bitrate` property for constant-bitrate output padded with null packets.
 - M1251: `mpegtsmux` sets the random access indicator on keyframes, with a PCR on keyframes of the PCR stream.

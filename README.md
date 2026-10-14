@@ -811,6 +811,13 @@ factories when their feature is enabled. `autovideosink` / `autoaudiosink`
 resolve to whichever sink is built, falling back to `fakesink` so a tutorial
 line runs headless.
 
+`G2G_PLUGIN_FEATURE_RANK` steers auto-plugging with the syntax of GStreamer's
+`GST_PLUGIN_FEATURE_RANK`. `G2G_PLUGIN_FEATURE_RANK=vulkanvideodec:max` makes
+`decodebin` pick the Vulkan decoder, and `ffmpegdec:none` removes `ffmpegdec`.
+An unknown factory name panics when the registry is built. A pinned decoder is
+used even when the next element cannot take its output, so put a `videoconvert`
+after `decodebin` when pinning a GPU decoder.
+
 The ML elements live in `g2g-ml`, so an app opts in after building the
 registry: `g2g_ml::register(&mut reg)` (the `launch` feature) adds `ortinfer`,
 `wgpupreprocess`, `detectionpostprocess`, and `ortsegment` (instance
