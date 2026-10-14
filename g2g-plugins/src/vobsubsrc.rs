@@ -261,27 +261,9 @@ static VOBSUBSRC_PROPS: &[PropertySpec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::CollectSink;
     use alloc::format;
     use alloc::vec::Vec;
-    use g2g_core::PushOutcome;
-
-    #[derive(Default)]
-    struct Collect {
-        packets: Vec<PipelinePacket>,
-    }
-    impl OutputSink for Collect {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            core::task::Poll::Ready({
-                self.packets.push(packet);
-                Ok(PushOutcome::Accepted)
-            })
-        }
-    }
 
     #[test]
     fn derives_the_sub_path_from_the_idx_path() {
@@ -315,7 +297,7 @@ mod tests {
     #[tokio::test]
     async fn run_before_configure_is_an_error() {
         let mut src = VobSubSrc::new("/nonexistent.idx");
-        let mut sink = Collect::default();
+        let mut sink = CollectSink::default();
         assert!(src.run(&mut sink).await.is_err());
     }
 
@@ -326,7 +308,7 @@ mod tests {
         let mut src = VobSubSrc::new(&path);
         let caps = src.output_caps();
         src.configure_pipeline(&caps).unwrap();
-        let mut sink = Collect::default();
+        let mut sink = CollectSink::default();
         let err = src.run(&mut sink).await;
         std::fs::remove_file(&path).ok();
         assert!(matches!(err, Err(G2gError::CapsMismatch)));

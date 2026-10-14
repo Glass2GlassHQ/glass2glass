@@ -337,7 +337,7 @@ impl PadTemplates for XingMux {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::PushOutcome;
+    use crate::testutil::{data_bytes, CollectSink};
 
     use crate::audioframe::test_frames::{mp3_frame, mp3_frame_at, MP3_128K_44100_LEN};
     use crate::id3::{write_id3v2, ID3V2_VERSION_2_3};
@@ -356,27 +356,6 @@ mod tests {
     const BYTES_AT: usize = FRAMES_AT + 4;
     const TOC_AT: usize = BYTES_AT + 4;
 
-    #[derive(Default)]
-    struct RecordingSink {
-        bytes: Vec<u8>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            if let PipelinePacket::DataFrame(frame) =
-                packet_slot.take().expect("poll_push without a packet")
-            {
-                let slice = frame.domain.require_system_slice("test").expect("system");
-                self.bytes.extend_from_slice(slice);
-            }
-            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-        }
-    }
-
     fn mp3_caps() -> Caps {
         Caps::Audio {
             format: AudioFormat::Mp3,
@@ -388,7 +367,7 @@ mod tests {
 
     async fn run(input: &[u8], chunk: usize) -> Vec<u8> {
         let mut element = XingMux::new();
-        let mut out = RecordingSink::default();
+        let mut out = CollectSink::default();
         element.configure_pipeline(&mp3_caps()).expect("mp3 in");
         for piece in input.chunks(chunk) {
             let frame = Frame::new(
@@ -405,7 +384,7 @@ mod tests {
             .process(PipelinePacket::Eos, &mut out)
             .await
             .expect("eos");
-        out.bytes
+        data_bytes(&out.packets)
     }
 
     fn u32_be_at(bytes: &[u8], at: usize) -> u32 {

@@ -3,12 +3,15 @@
 //! record / playback loop (e.g. testsrc -> encode -> filesink, then
 //! filesrc -> parse -> decode).
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use core::future::Future;
 use core::pin::Pin;
 
 use std::path::PathBuf;
 
-use g2g_core::element::PushOutcome;
 use g2g_core::runtime::{run_simple_pipeline, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, HardwareError, OutputSink,
@@ -37,26 +40,6 @@ fn h264_caps() -> Caps {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
-    }
-}
-
-/// Collects every packet a directly-driven source pushes.
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        core::task::Poll::Ready({
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
     }
 }
 
@@ -150,7 +133,7 @@ async fn filesrc_chunks_file_and_emits_eos() {
     assert_eq!(caps, h264_caps());
     src.configure_pipeline(&caps).expect("configure");
 
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     let produced = src.run(&mut out).await.expect("run to EOS");
     assert_eq!(produced, 3, "20 bytes in 7-byte chunks is 3 frames");
 
@@ -203,7 +186,7 @@ async fn record_then_replay_round_trip_through_runner() {
 #[tokio::test]
 async fn filesink_fails_loud_before_configure_and_on_bad_path() {
     let mut sink = FileSink::new(temp_path("never_created"));
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     let r = sink
         .process(PipelinePacket::Eos, &mut out)
         .await
@@ -226,7 +209,7 @@ async fn filesrc_missing_file_fails_loud() {
     let mut src = FileSrc::new(temp_path("does_not_exist"), h264_caps());
     let caps = src.intercept_caps().await.expect("declared caps");
     src.configure_pipeline(&caps).expect("configure");
-    let mut out = Collect::default();
+    let mut out = CollectSink::default();
     let err = src.run(&mut out).await.expect_err("open must fail");
     assert!(
         matches!(err, G2gError::Hardware(HardwareError::Io(_))),

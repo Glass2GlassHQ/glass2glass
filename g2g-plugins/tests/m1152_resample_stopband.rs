@@ -5,10 +5,14 @@
 //! in the middle of the output band checks the same kernel is still flat where
 //! signal is meant to pass.
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, ChannelLayout, Frame, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelinePacket, PushOutcome,
+    AsyncElement, AudioFormat, Caps, ChannelLayout, Frame, FrameTiming, MemoryDomain,
+    PipelinePacket,
 };
 use g2g_plugins::audioresample::AudioResample;
 
@@ -42,23 +46,6 @@ const STOPBAND_REJECTION_DB: f64 = -120.0;
 
 /// Pass-band amplitude error allowed at 1 kHz.
 const PASSBAND_TOLERANCE_DB: f64 = 0.5;
-
-#[derive(Default)]
-struct CollectSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CollectSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
 
 fn mono_f32(rate: u32) -> Caps {
     Caps::Audio {

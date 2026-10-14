@@ -11,6 +11,10 @@
 //! pixel-for-pixel comparison against g2g's decode composited by `Compositor`.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -18,8 +22,8 @@ use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    AsyncElement, Bus, BusMessage, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement,
-    OutputSink, PushOutcome, Rate, RawVideoFormat, StreamType, SubPictureFormat,
+    AsyncElement, Bus, BusMessage, ByteStreamEncoding, Caps, Dim, MultiInputElement, Rate,
+    RawVideoFormat, StreamType, SubPictureFormat,
 };
 use g2g_plugins::compositor::{Compositor, CompositorPad};
 use g2g_plugins::conformance::persist;
@@ -122,24 +126,6 @@ fn reference_burn_in(mkv: &PathBuf, raw: &PathBuf) -> Vec<Vec<u8>> {
 
 // ---- g2g plumbing ----
 
-#[derive(Default)]
-struct CaptureSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CaptureSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
 fn data(bytes: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
@@ -197,7 +183,7 @@ async fn demux_ts(ts: &[u8]) -> (Demuxed, Vec<g2g_core::Stream>) {
             encoding: ByteStreamEncoding::MpegTs,
         })
         .expect("tsdemux accepts an MPEG-TS byte stream");
-    let mut out = CaptureSink::default();
+    let mut out = CollectSink::default();
     for chunk in ts.chunks(4096) {
         demux
             .process(data(chunk.to_vec(), 0), &mut out)
@@ -226,7 +212,7 @@ async fn demux_mkv(mkv: &[u8]) -> Demuxed {
             encoding: ByteStreamEncoding::Matroska,
         })
         .expect("mkvdemux accepts a Matroska byte stream");
-    let mut out = CaptureSink::default();
+    let mut out = CollectSink::default();
     for chunk in mkv.chunks(4096) {
         demux
             .process(data(chunk.to_vec(), 0), &mut out)
@@ -253,7 +239,7 @@ async fn decode(frames: Vec<(u64, Vec<u8>)>) -> Vec<Canvas> {
         format: SubPictureFormat::DvbSub,
     })
     .expect("dvbsubdec accepts a DVB subtitle stream");
-    let mut out = CaptureSink::default();
+    let mut out = CollectSink::default();
     for (pts_ns, bytes) in frames {
         dec.process(data(bytes, pts_ns), &mut out)
             .await
@@ -540,7 +526,7 @@ async fn compositing_the_decoded_cues_matches_ffmpegs_dvbsub_burn_in() {
         .take((W * H * 4) as usize)
         .copied()
         .collect();
-    let mut composed = CaptureSink::default();
+    let mut composed = CollectSink::default();
     let mut next = 0usize;
     for second in 0..DURATION_S as u64 {
         let now = second * 1_000_000_000;

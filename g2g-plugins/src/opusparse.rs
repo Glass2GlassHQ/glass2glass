@@ -451,6 +451,7 @@ pub fn fuzz_parse(data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{frame_with_bytes, CollectSink};
     use alloc::vec;
 
     /// Build a one-byte Opus packet whose TOC encodes `config` / `stereo`, plus
@@ -509,38 +510,6 @@ mod tests {
 
     // -- Element-level tests (drive OpusParse::process directly) -------------
 
-    use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
-    use g2g_core::{FrameTiming, MemoryDomain, PushOutcome};
-
-    #[derive(Default)]
-    struct RecordingSink {
-        packets: Vec<PipelinePacket>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            core::task::Poll::Ready({
-                self.packets.push(packet);
-                Ok(PushOutcome::Accepted)
-            })
-        }
-    }
-
-    fn frame_with_bytes(seq: u64, bytes: Vec<u8>) -> Frame {
-        Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: seq,
-            meta: Default::default(),
-        }
-    }
-
     fn opus_caps() -> Caps {
         // Sentinel pre-parse caps: format pinned, channels/rate unknown.
         Caps::Audio {
@@ -555,7 +524,7 @@ mod tests {
     async fn emits_caps_changed_before_first_data_frame() {
         let mut parse = OpusParse::new();
         parse.configure_pipeline(&opus_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let frame = frame_with_bytes(0, opus_packet(31, true, 12));
         parse
@@ -584,7 +553,7 @@ mod tests {
     async fn does_not_re_emit_caps_when_unchanged() {
         let mut parse = OpusParse::new();
         parse.configure_pipeline(&opus_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         for seq in 0..3 {
             let frame = frame_with_bytes(seq, opus_packet(9, false, 40));
@@ -610,7 +579,7 @@ mod tests {
     async fn re_emits_caps_on_channel_change() {
         let mut parse = OpusParse::new();
         parse.configure_pipeline(&opus_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         // mono then stereo.
         parse
@@ -664,7 +633,7 @@ mod tests {
     async fn opus_head_recovers_multichannel_and_locks_channel_count() {
         let mut parse = OpusParse::new();
         parse.configure_pipeline(&opus_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         // A 6-channel family-1 OpusHead: caps report 6 channels, and the header
         // is consumed (codec config, never forwarded as an audio frame).
@@ -709,7 +678,7 @@ mod tests {
     async fn opus_head_family_zero_also_sets_channels() {
         let mut parse = OpusParse::new();
         parse.configure_pipeline(&opus_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         parse
             .process(
                 PipelinePacket::DataFrame(frame_with_bytes(0, opus_head(2, 0))),

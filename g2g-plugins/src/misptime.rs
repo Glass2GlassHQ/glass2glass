@@ -582,8 +582,9 @@ impl PadTemplates for MispTimeExtract {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::CollectSink;
     use alloc::vec;
-    use g2g_core::{FrameTiming, PushOutcome};
+    use g2g_core::FrameTiming;
 
     /// The MISP SEI from a real STANAG 4609 capture, as it appears in GStreamer's
     /// `gst-plugins-bad/tests/check/elements/h264parse.c`
@@ -717,25 +718,6 @@ mod tests {
         assert_eq!(t.micros(), 1_000);
     }
 
-    #[derive(Default)]
-    struct RecordingSink {
-        packets: Vec<PipelinePacket>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            core::task::Poll::Ready({
-                self.packets.push(packet);
-                Ok(PushOutcome::Accepted)
-            })
-        }
-    }
-
     fn caps(codec: VideoCodec) -> Caps {
         Caps::CompressedVideo {
             codec,
@@ -757,7 +739,7 @@ mod tests {
         ))
     }
 
-    fn first_au(sink: &RecordingSink) -> Vec<u8> {
+    fn first_au(sink: &CollectSink) -> Vec<u8> {
         sink.packets
             .iter()
             .find_map(|p| match p {
@@ -771,7 +753,7 @@ mod tests {
     async fn insert_stamps_pts_plus_epoch_offset() {
         let mut el = MispTimeInsert::new().with_epoch_offset_us(1_700_000_000_000_000);
         el.configure_pipeline(&caps(VideoCodec::H264)).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         let au = vec![0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00];
         el.process(data_frame(au, 2_500_000), &mut sink)
             .await
@@ -783,7 +765,7 @@ mod tests {
     #[tokio::test]
     async fn insert_requires_configure() {
         let mut el = MispTimeInsert::new();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         let au = vec![0x00, 0x00, 0x00, 0x01, 0x65, 0x88];
         assert!(el.process(data_frame(au, 0), &mut sink).await.is_err());
     }
@@ -792,7 +774,7 @@ mod tests {
     async fn extract_emits_a_ts_cue_per_stamped_frame() {
         let mut el = MispTimeExtract::new();
         el.configure_pipeline(&caps(VideoCodec::H264)).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         let mut au = build_misp_time_sei(GST_REFERENCE_US, MISP_STATUS_DEFAULT, VideoCodec::H264);
         au.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x65, 0x88]);
         el.process(data_frame(au, 7_000), &mut sink).await.unwrap();
@@ -822,7 +804,7 @@ mod tests {
     async fn extract_is_silent_on_unstamped_frames() {
         let mut el = MispTimeExtract::new();
         el.configure_pipeline(&caps(VideoCodec::H264)).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         let au = vec![0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00];
         el.process(data_frame(au, 0), &mut sink).await.unwrap();
         assert!(sink.packets.is_empty());

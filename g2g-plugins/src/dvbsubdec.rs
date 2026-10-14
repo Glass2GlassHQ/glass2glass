@@ -437,24 +437,7 @@ impl PadTemplates for DvbSubDec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::PushOutcome;
-
-    #[derive(Default)]
-    struct CollectSink {
-        packets: Vec<PipelinePacket>,
-    }
-    impl OutputSink for CollectSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-
-            self.packets.push(packet);
-            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-        }
-    }
+    use crate::testutil::CollectSink;
 
     /// Wrap a segment payload in its 6-byte header.
     fn seg(kind: u8, page_id: u16, body: &[u8]) -> Vec<u8> {

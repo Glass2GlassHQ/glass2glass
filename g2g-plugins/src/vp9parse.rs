@@ -249,6 +249,7 @@ pub fn fuzz_parse(data: &[u8]) {
 mod tests {
     use super::*;
     use crate::annexb::BitWriter;
+    use crate::testutil::{frame_with_bytes, CollectSink};
     use alloc::vec;
 
     /// Build a VP9 key-frame uncompressed header for `width` x `height` at
@@ -354,38 +355,6 @@ mod tests {
 
     // -- Element-level tests (drive Vp9Parse::process directly) -------------
 
-    use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
-    use g2g_core::{FrameTiming, MemoryDomain, PushOutcome};
-
-    #[derive(Default)]
-    struct RecordingSink {
-        packets: Vec<PipelinePacket>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            core::task::Poll::Ready({
-                self.packets.push(packet);
-                Ok(PushOutcome::Accepted)
-            })
-        }
-    }
-
-    fn frame_with_bytes(seq: u64, bytes: Vec<u8>) -> Frame {
-        Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: seq,
-            meta: Default::default(),
-        }
-    }
-
     fn vp9_caps() -> Caps {
         Caps::CompressedVideo {
             codec: VideoCodec::Vp9,
@@ -400,7 +369,7 @@ mod tests {
     async fn emits_caps_changed_before_first_data_frame() {
         let mut parse = Vp9Parse::new();
         parse.configure_pipeline(&vp9_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let frame = frame_with_bytes(0, keyframe(1920, 1080, 0));
         parse
@@ -424,7 +393,7 @@ mod tests {
     async fn does_not_re_emit_caps_when_unchanged() {
         let mut parse = Vp9Parse::new();
         parse.configure_pipeline(&vp9_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         for seq in 0..3 {
             let frame = frame_with_bytes(seq, keyframe(1280, 720, 0));
@@ -450,7 +419,7 @@ mod tests {
     async fn re_emits_caps_on_resolution_change() {
         let mut parse = Vp9Parse::new();
         parse.configure_pipeline(&vp9_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         parse
             .process(

@@ -22,15 +22,17 @@
 //! indexing the object bitmap only.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::path::PathBuf;
 use std::process::Command;
 
 use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, G2gError, OutputSink, PushOutcome, SubPictureFormat,
-};
+use g2g_core::{AsyncElement, ByteStreamEncoding, Caps, SubPictureFormat};
 use g2g_plugins::conformance::persist;
 use g2g_plugins::mkvdemux::{MkvDemux, MkvStream};
 use g2g_plugins::pgsdec::PgsDec;
@@ -386,24 +388,6 @@ fn reference_canvases(sup: &PathBuf, raw: &PathBuf) -> Vec<Vec<u8>> {
 
 // ---- g2g plumbing ----
 
-#[derive(Default)]
-struct CaptureSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CaptureSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
 fn data(bytes: Vec<u8>, pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
@@ -431,7 +415,7 @@ async fn demux_and_decode(mkv: &[u8]) -> Vec<Canvas> {
             encoding: ByteStreamEncoding::Matroska,
         })
         .expect("mkvdemux accepts a Matroska byte stream");
-    let mut demuxed = CaptureSink::default();
+    let mut demuxed = CollectSink::default();
     for chunk in mkv.chunks(4096) {
         demux
             .process(data(chunk.to_vec(), 0), &mut demuxed)
@@ -448,7 +432,7 @@ async fn demux_and_decode(mkv: &[u8]) -> Vec<Canvas> {
         format: SubPictureFormat::Pgs,
     })
     .expect("pgsdec accepts a PGS stream");
-    let mut decoded = CaptureSink::default();
+    let mut decoded = CollectSink::default();
     for packet in demuxed.packets {
         dec.process(packet, &mut decoded).await.expect("decode");
     }
@@ -521,7 +505,7 @@ async fn crop_canvas(objects: &[CompRef]) -> Option<Vec<u8>> {
         format: SubPictureFormat::Pgs,
     })
     .expect("pgsdec accepts a PGS stream");
-    let mut sink = CaptureSink::default();
+    let mut sink = CollectSink::default();
     dec.process(data(crop_display_set(objects), 0), &mut sink)
         .await
         .expect("decode");

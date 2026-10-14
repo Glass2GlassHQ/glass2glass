@@ -11,6 +11,10 @@
 //! same bytes and must agree.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use core::future::Future;
 use core::pin::Pin;
 use std::path::PathBuf;
@@ -23,7 +27,7 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph,
-    OutputSink, PipelineClock, PushOutcome, Rate, RawVideoFormat, TextFormat,
+    OutputSink, PipelineClock, Rate, RawVideoFormat, TextFormat,
 };
 use g2g_plugins::conformance::persist;
 use g2g_plugins::mpegts::{TeletextService, TsMuxer, STREAM_TYPE_PRIVATE_PES};
@@ -116,24 +120,6 @@ fn ns_to_90k(ns: u64) -> u64 {
     ns * 90_000 / 1_000_000_000
 }
 
-#[derive(Default)]
-struct CaptureSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CaptureSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
 fn data(bytes: Vec<u8>) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
@@ -151,7 +137,7 @@ async fn demux_and_decode(ts: &[u8]) -> Vec<(u64, u64, String)> {
             encoding: ByteStreamEncoding::MpegTs,
         })
         .expect("tsdemux accepts an MPEG-TS byte stream");
-    let mut demuxed = CaptureSink::default();
+    let mut demuxed = CollectSink::default();
     for chunk in ts.chunks(4096) {
         demux
             .process(data(chunk.to_vec()), &mut demuxed)
@@ -170,7 +156,7 @@ async fn demux_and_decode(ts: &[u8]) -> Vec<(u64, u64, String)> {
         format: TextFormat::Teletext,
     })
     .expect("teletextdec accepts a teletext stream");
-    let mut decoded = CaptureSink::default();
+    let mut decoded = CollectSink::default();
     for packet in demuxed.packets {
         dec.process(packet, &mut decoded).await.expect("decode");
     }

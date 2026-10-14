@@ -205,15 +205,11 @@ pub fn fuzz_parse(data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{frame_with_bytes, CollectSink};
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
-    use g2g_core::{
-        AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-        PropValue, PushOutcome, Rate,
-    };
+    use g2g_core::{AsyncElement, Caps, Dim, G2gError, PipelinePacket, PropValue, Rate};
 
     use crate::annexb::{add_emulation_prevention, BitWriter};
 
@@ -442,32 +438,6 @@ mod tests {
 
     // -- Element-level tests (drive Vc1Parse::process directly) --------------
 
-    #[derive(Default)]
-    struct RecordingSink {
-        packets: Vec<PipelinePacket>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            self.packets.push(packet);
-            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-        }
-    }
-
-    fn frame_with_bytes(seq: u64, bytes: Vec<u8>) -> Frame {
-        Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: seq,
-            meta: Default::default(),
-        }
-    }
-
     fn vc1_caps() -> Caps {
         Caps::CompressedVideo {
             codec: VideoCodec::Vc1,
@@ -478,7 +448,7 @@ mod tests {
         }
     }
 
-    fn data_payloads(sink: &RecordingSink) -> Vec<Vec<u8>> {
+    fn data_payloads(sink: &CollectSink) -> Vec<Vec<u8>> {
         sink.packets
             .iter()
             .filter_map(|p| match p {
@@ -492,7 +462,7 @@ mod tests {
     async fn emits_caps_changed_then_one_frame_per_picture() {
         let mut parse = Vc1Parse::new();
         parse.configure_pipeline(&vc1_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let mut first = sequence_header(
             1280,

@@ -18,13 +18,17 @@
 //! `default_registry` is `std`-gated, so this file is too.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::path::PathBuf;
 
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{is_raw_audio, parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, PushOutcome, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    AsyncElement, AudioFormat, Caps, Frame, FrameTiming, MemoryDomain, PipelineClock,
+    PipelinePacket, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 use g2g_mcu::adpcm::samples_per_block_channels;
 use g2g_plugins::adpcm::DEFAULT_BLOCK_ALIGN;
@@ -216,23 +220,6 @@ async fn adpcm_round_trips_through_a_launch_line() {
     )
     .await;
     assert!(frames > 0, "decoded blocks reached the sink");
-}
-
-#[derive(Default)]
-struct CollectSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CollectSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        self.packets
-            .push(packet_slot.take().expect("poll_push without a packet"));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
 }
 
 /// An RTSP source that has not read the layout yet negotiates on the sentinels,

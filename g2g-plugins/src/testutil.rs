@@ -28,10 +28,14 @@ impl OutputSink for CollectSink {
 }
 
 pub(crate) fn frame(bytes: Vec<u8>) -> Frame {
+    frame_with_bytes(0, bytes)
+}
+
+pub(crate) fn frame_with_bytes(sequence: u64, bytes: Vec<u8>) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
         timing: FrameTiming::default(),
-        sequence: 0,
+        sequence,
         meta: Default::default(),
     }
 }

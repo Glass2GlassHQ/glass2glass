@@ -272,33 +272,13 @@ static ID3V2MUX_PROPS: &[PropertySpec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{PushOutcome, Tag, TagList};
+    use crate::testutil::{data_bytes, CollectSink};
+    use g2g_core::{Tag, TagList};
 
     use crate::id3::{parse_id3v1, parse_id3v2, ID3V1_LEN};
 
     /// Payload bytes standing in for the coded stream the tag rides ahead of.
     const PAYLOAD: &[u8] = b"\xff\xfb\x90\x00 audio bytes";
-
-    #[derive(Default)]
-    struct RecordingSink {
-        bytes: Vec<u8>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            if let PipelinePacket::DataFrame(frame) =
-                packet_slot.take().expect("poll_push without a packet")
-            {
-                let slice = frame.domain.require_system_slice("test").expect("system");
-                self.bytes.extend_from_slice(slice);
-            }
-            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-        }
-    }
 
     fn tags() -> TagList {
         [Tag::Title("Sine".into()), Tag::Artist("g2g".into())]
@@ -316,7 +296,7 @@ mod tests {
 
     /// Run the element over `input` cut into `chunk` byte pieces, then EOS.
     async fn run(element: &mut Id3V2Mux, input: &[u8], chunk: usize) -> Vec<u8> {
-        let mut out = RecordingSink::default();
+        let mut out = CollectSink::default();
         element
             .configure_pipeline(&Caps::ByteStream {
                 encoding: g2g_core::ByteStreamEncoding::Raw,
@@ -337,7 +317,7 @@ mod tests {
             .process(PipelinePacket::Eos, &mut out)
             .await
             .expect("eos");
-        out.bytes
+        data_bytes(&out.packets)
     }
 
     /// The written stream split into the tags the parser reads back and the

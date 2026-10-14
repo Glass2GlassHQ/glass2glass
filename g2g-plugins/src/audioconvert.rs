@@ -1267,6 +1267,7 @@ pub(crate) fn write_sample(dst: &mut Vec<u8>, v: f32, format: AudioFormat) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{data_bytes, CollectSink};
     use g2g_core::PassthroughFields;
 
     fn audio(format: AudioFormat, channels: u8, rate: u32) -> Caps {
@@ -1751,32 +1752,13 @@ mod tests {
         assert_eq!(&u8s[..], [u8::MAX, u8::MIN]);
     }
 
-    #[derive(Default)]
-    struct RecordingSink {
-        bytes: Vec<u8>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
-            if let Some(PipelinePacket::DataFrame(frame)) = packet.take() {
-                let slice = frame.domain.require_system_slice("test").unwrap();
-                self.bytes.extend_from_slice(slice);
-            }
-            core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
-        }
-    }
-
     async fn run_element_same_format(src: &[u8], format: AudioFormat) -> Vec<u8> {
         const CHANNELS: u8 = 2;
         let mut element = AudioConvert::new(format, CHANNELS);
         element
             .configure_pipeline(&audio(format, CHANNELS, DEFAULT_PCM_RATE))
             .unwrap();
-        let mut out = RecordingSink::default();
+        let mut out = CollectSink::default();
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(Box::from(src))),
             Default::default(),
@@ -1786,7 +1768,7 @@ mod tests {
             .process(PipelinePacket::DataFrame(frame), &mut out)
             .await
             .unwrap();
-        out.bytes
+        data_bytes(&out.packets)
     }
 
     #[tokio::test]

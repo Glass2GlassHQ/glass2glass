@@ -85,15 +85,11 @@ pub fn fuzz_parse(data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{frame_with_bytes, CollectSink};
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use g2g_core::frame::Frame;
-    use g2g_core::memory::SystemSlice;
-    use g2g_core::{
-        AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-        PropValue, PushOutcome, Rate,
-    };
+    use g2g_core::{AsyncElement, Caps, Dim, G2gError, PipelinePacket, PropValue, Rate};
 
     use crate::annexb::BitWriter;
 
@@ -284,32 +280,6 @@ mod tests {
 
     // -- Element-level tests (drive MpegVideoParse::process directly) --------
 
-    #[derive(Default)]
-    struct RecordingSink {
-        packets: Vec<PipelinePacket>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            self.packets.push(packet);
-            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-        }
-    }
-
-    fn frame_with_bytes(seq: u64, bytes: Vec<u8>) -> Frame {
-        Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: FrameTiming::default(),
-            sequence: seq,
-            meta: Default::default(),
-        }
-    }
-
     fn mpeg2_caps() -> Caps {
         Caps::CompressedVideo {
             codec: VideoCodec::Mpeg2,
@@ -320,7 +290,7 @@ mod tests {
         }
     }
 
-    fn data_payloads(sink: &RecordingSink) -> Vec<Vec<u8>> {
+    fn data_payloads(sink: &CollectSink) -> Vec<Vec<u8>> {
         sink.packets
             .iter()
             .filter_map(|p| match p {
@@ -334,7 +304,7 @@ mod tests {
     async fn emits_caps_changed_then_one_frame_per_picture() {
         let mut parse = MpegVideoParse::new();
         parse.configure_pipeline(&mpeg2_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let mut first = sequence_header(720, 576, ASPECT_CODE_2, FRAME_RATE_CODE_25);
         first.extend_from_slice(&sequence_extension(0, 0, 0, 0));
@@ -379,7 +349,7 @@ mod tests {
     async fn reassembles_a_picture_split_across_buffers() {
         let mut parse = MpegVideoParse::new();
         parse.configure_pipeline(&mpeg2_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let mut au = picture_header(0, 1);
         au.extend_from_slice(&slice(0xAA));
@@ -407,7 +377,7 @@ mod tests {
     async fn does_not_re_emit_unchanged_caps() {
         let mut parse = MpegVideoParse::new();
         parse.configure_pipeline(&mpeg2_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         for seq in 0..3 {
             let mut au = sequence_header(720, 576, ASPECT_CODE_2, FRAME_RATE_CODE_25);

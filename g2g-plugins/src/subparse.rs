@@ -2880,6 +2880,7 @@ impl PadTemplates for SubParse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::CollectSink;
 
     #[test]
     fn deframe_subtitle_block_per_source_format() {
@@ -3987,27 +3988,6 @@ mod tests {
 
     // -- SubParse element: drive process() directly. --------------------------
 
-    use g2g_core::PushOutcome;
-
-    #[derive(Default)]
-    struct RecordingSink {
-        packets: Vec<PipelinePacket>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            core::task::Poll::Ready({
-                self.packets.push(packet);
-                Ok(PushOutcome::Accepted)
-            })
-        }
-    }
-
     fn srt_bytes_frame(bytes: &[u8]) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
@@ -4075,7 +4055,7 @@ mod tests {
         })
         .expect("accepts TTML");
 
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         el.process(srt_bytes_frame(TTML.as_bytes()), &mut sink)
             .await
             .unwrap();
@@ -4106,7 +4086,7 @@ mod tests {
         })
         .expect("accepts SSA");
 
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         el.process(srt_bytes_frame(ASS.as_bytes()), &mut sink)
             .await
             .unwrap();
@@ -4139,7 +4119,7 @@ mod tests {
         })
         .expect("accepts SRT");
 
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         // Two chunks then EOS, exercising the byte buffer.
         let (a, b) = doc.as_bytes().split_at(25);
         el.process(srt_bytes_frame(a), &mut sink).await.unwrap();
@@ -4180,7 +4160,7 @@ mod tests {
             format: TextFormat::Srt,
         })
         .unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         el.process(
             srt_bytes_frame(b"1\n00:00:01,000 --> 00:00:02,000\nfirst\n\n2\n00:00:03,000 -->"),
@@ -4189,7 +4169,7 @@ mod tests {
         .await
         .unwrap();
 
-        let count = |sink: &RecordingSink| {
+        let count = |sink: &CollectSink| {
             sink.packets
                 .iter()
                 .filter(|p| matches!(p, PipelinePacket::DataFrame(_)))
@@ -4211,7 +4191,7 @@ mod tests {
             format: TextFormat::Srt,
         })
         .unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         let mut chunk1 = Vec::from(
             &b"1\n00:00:01,000 --> 00:00:02,000\nokay\n\n2\n00:00:03,000 --> 00:00:04,000\ncaf"[..],
@@ -4263,7 +4243,7 @@ mod tests {
             format: TextFormat::WebVtt,
         })
         .unwrap();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         el.process(srt_bytes_frame(doc.as_bytes()), &mut sink)
             .await
             .unwrap();
@@ -4308,13 +4288,13 @@ mod tests {
     fn unconfigured_element_errors() {
         // process() before configure_pipeline must fail loud, not silently buffer.
         let mut el = SubParse::new();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         let r = futures_lite_block(el.process(PipelinePacket::Eos, &mut sink));
         assert!(matches!(r, Err(G2gError::NotConfigured)));
     }
 
     /// Minimal block-on for the single-poll futures these element calls produce
-    /// (RecordingSink resolves immediately), avoiding a runtime dep in this test.
+    /// (CollectSink resolves immediately), avoiding a runtime dep in this test.
     fn futures_lite_block<F: Future>(fut: F) -> F::Output {
         use core::task::{Context, Poll, Waker};
         let mut cx = Context::from_waker(Waker::noop());

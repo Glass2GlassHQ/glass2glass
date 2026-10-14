@@ -226,27 +226,8 @@ static SUBTITLESRC_PROPS: &[PropertySpec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::CollectSink;
     use alloc::format;
-    use alloc::vec::Vec;
-    use g2g_core::PushOutcome;
-
-    #[derive(Default)]
-    struct Collect {
-        packets: Vec<PipelinePacket>,
-    }
-    impl OutputSink for Collect {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            core::task::Poll::Ready({
-                self.packets.push(packet);
-                Ok(PushOutcome::Accepted)
-            })
-        }
-    }
 
     #[test]
     fn sniffs_format_from_extension() {
@@ -290,7 +271,7 @@ mod tests {
         );
         src.configure_pipeline(&caps).unwrap();
 
-        let mut sink = Collect::default();
+        let mut sink = CollectSink::default();
         let pushed = src.run(&mut sink).await.unwrap();
         std::fs::remove_file(&path).ok();
 
@@ -313,7 +294,7 @@ mod tests {
     #[tokio::test]
     async fn run_before_configure_is_an_error() {
         let mut src = SubtitleSrc::new("/nonexistent.srt", TextFormat::Srt);
-        let mut sink = Collect::default();
+        let mut sink = CollectSink::default();
         assert!(src.run(&mut sink).await.is_err());
     }
 }

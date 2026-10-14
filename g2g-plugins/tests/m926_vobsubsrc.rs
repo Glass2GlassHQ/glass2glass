@@ -10,15 +10,16 @@
 //! same pair.
 #![cfg(feature = "std")]
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::path::PathBuf;
 use std::process::Command;
 
 use g2g_core::frame::{Frame, PipelinePacket};
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{
-    AsyncElement, Caps, G2gError, OutputSink, PropValue, PropertySpec, PushOutcome,
-    SubPictureFormat,
-};
+use g2g_core::{AsyncElement, Caps, PropValue, PropertySpec, SubPictureFormat};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::vobsub::parse_idx;
 use g2g_plugins::vobsubdec::VobSubDec;
@@ -29,24 +30,6 @@ use vobsub_fixture::{
     author_spanning_vobsub, author_vobsub, cues, have_ffmpeg, spanning_sample, CUE_DURATION_NS, H,
     PALETTE, SPANNING_CUE, W,
 };
-
-#[derive(Default)]
-struct CaptureSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CaptureSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
 
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("g2g-m926-{}-{name}", std::process::id()))
@@ -62,7 +45,7 @@ fn vobsub_caps() -> Caps {
 async fn read_sidecar(src: &mut VobSubSrc) -> Vec<Frame> {
     src.configure_pipeline(&vobsub_caps())
         .expect("vobsubsrc accepts its own caps");
-    let mut sink = CaptureSink::default();
+    let mut sink = CollectSink::default();
     let pushed = src.run(&mut sink).await.expect("read the sidecar pair");
     assert!(
         matches!(sink.packets.last(), Some(PipelinePacket::Eos)),
@@ -209,7 +192,7 @@ async fn the_cues_decode_to_the_authored_rectangles_and_colours() {
     let mut dec = VobSubDec::new();
     dec.configure_pipeline(&vobsub_caps())
         .expect("vobsubdec accepts a VobSub stream");
-    let mut decoded = CaptureSink::default();
+    let mut decoded = CollectSink::default();
     for frame in frames {
         dec.process(PipelinePacket::DataFrame(frame), &mut decoded)
             .await
@@ -316,7 +299,7 @@ async fn a_cue_spanning_several_pes_packets_reassembles_and_decodes() {
     let mut dec = VobSubDec::new();
     dec.configure_pipeline(&vobsub_caps())
         .expect("vobsubdec accepts a VobSub stream");
-    let mut decoded = CaptureSink::default();
+    let mut decoded = CollectSink::default();
     for frame in frames {
         dec.process(PipelinePacket::DataFrame(frame), &mut decoded)
             .await

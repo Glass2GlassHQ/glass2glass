@@ -321,32 +321,14 @@ impl PadTemplates for CcExtract {
 mod tests {
     use super::*;
     use crate::cea::CcTriple;
+    use crate::testutil::CollectSink;
     use alloc::vec;
-    use g2g_core::PushOutcome;
 
     // A recording sink that captures the emitted packets so a test can assert on
     // the cue frames the element produced.
-    #[derive(Default)]
-    struct RecordingSink {
-        packets: Vec<PipelinePacket>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            core::task::Poll::Ready({
-                self.packets.push(packet);
-                Ok(PushOutcome::Accepted)
-            })
-        }
-    }
 
     /// The text payload of each emitted `DataFrame`, in order.
-    fn cue_texts(sink: &RecordingSink) -> Vec<(u64, u64, alloc::string::String)> {
+    fn cue_texts(sink: &CollectSink) -> Vec<(u64, u64, alloc::string::String)> {
         sink.packets
             .iter()
             .filter_map(|p| match p {
@@ -437,7 +419,7 @@ mod tests {
         // to erase, fed as field-1 (`cc_type` 0) triples over two access units.
         let mut el = CcExtract::new();
         el.configure_pipeline(&h264_caps()).expect("accepts H.264");
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
 
         // RCL (0x14 0x20) resume caption loading; 'H','I'; EOC (0x14 0x2F) display.
         let au1 = h264_au_with_triples(&[
@@ -486,7 +468,7 @@ mod tests {
         // stream must not produce a cue.
         let mut el = CcExtract::cea708(1);
         el.configure_pipeline(&h264_caps()).expect("accepts H.264");
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         // A lone 608 pair (no 708 packet) yields nothing from the 708 decoder.
         let au = h264_au_with_triples(&[CcTriple {
             cc_type: 0,
@@ -501,7 +483,7 @@ mod tests {
     #[tokio::test]
     async fn requires_configure() {
         let mut el = CcExtract::new();
-        let mut sink = RecordingSink::default();
+        let mut sink = CollectSink::default();
         let au = h264_au_with_triples(&[CcTriple {
             cc_type: 0,
             b0: b'H',

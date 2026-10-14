@@ -311,7 +311,8 @@ static FLACTAG_PROPS: &[PropertySpec] = &[TagsProperty::SPEC];
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{PushOutcome, Tag};
+    use crate::testutil::{data_bytes, CollectSink};
+    use g2g_core::Tag;
 
     use crate::flacparse::parse_streaminfo;
     use crate::vorbiscomment::parse_comment_body;
@@ -325,27 +326,6 @@ mod tests {
     const UPSTREAM_VENDOR: &[u8] = b"reference libFLAC 1.4.3";
     /// Audio bytes standing in for the frames behind the header.
     const AUDIO: &[u8] = b"\xff\xf8\x69\x18 frame bytes";
-
-    #[derive(Default)]
-    struct RecordingSink {
-        bytes: Vec<u8>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            if let PipelinePacket::DataFrame(frame) =
-                packet_slot.take().expect("poll_push without a packet")
-            {
-                let slice = frame.domain.require_system_slice("test").expect("system");
-                self.bytes.extend_from_slice(slice);
-            }
-            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-        }
-    }
 
     fn block(kind: u8, last: bool, body: &[u8]) -> Vec<u8> {
         let mut out = Vec::from([if last { FLAC_LAST_BLOCK | kind } else { kind }]);
@@ -400,7 +380,7 @@ mod tests {
             .set_property("tags", PropValue::Str("title=Sine,artist=g2g".into()))
             .expect("a valid taglist");
         element.configure_pipeline(&flac_caps()).expect("flac in");
-        let mut out = RecordingSink::default();
+        let mut out = CollectSink::default();
         for piece in input.chunks(chunk) {
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(Vec::from(piece).into_boxed_slice())),
@@ -416,7 +396,7 @@ mod tests {
             .process(PipelinePacket::Eos, &mut out)
             .await
             .expect("eos");
-        out.bytes
+        data_bytes(&out.packets)
     }
 
     /// The rewritten block read back by this crate's own VorbisComment reader,

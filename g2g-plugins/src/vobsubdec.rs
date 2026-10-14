@@ -387,27 +387,10 @@ impl PadTemplates for VobSubDec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::PushOutcome;
+    use crate::testutil::CollectSink;
 
     /// The `.idx` text a Matroska `S_VOBSUB` `CodecPrivate` carries.
     const IDX: &[u8] = b"size: 32x16\npalette: 000000, ff0000, 00ff00, 0000ff, 000000, 000000, 000000, 000000, 000000, 000000, 000000, 000000, 000000, 000000, 000000, 000000\n";
-
-    #[derive(Default)]
-    struct CollectSink {
-        packets: Vec<PipelinePacket>,
-    }
-    impl OutputSink for CollectSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-
-            self.packets.push(packet);
-            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-        }
-    }
 
     /// A one-cue SPU: a solid `w` x `h` block of sample value 1 at (`x`, `y`),
     /// shown immediately and hidden at `stop_date` control-sequence units.

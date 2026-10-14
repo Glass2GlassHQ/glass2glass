@@ -403,33 +403,12 @@ static APEV2MUX_PROPS: &[PropertySpec] = &[TagsProperty::SPEC];
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::PushOutcome;
+    use crate::testutil::{data_bytes, CollectSink};
 
     use crate::id3::write_id3v1;
 
     /// Payload bytes standing in for the coded stream the tag rides behind.
     const PAYLOAD: &[u8] = b"\xff\xfb\x90\x00 audio bytes";
-
-    #[derive(Default)]
-    struct RecordingSink {
-        bytes: Vec<u8>,
-    }
-
-    impl OutputSink for RecordingSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            if let PipelinePacket::DataFrame(frame) =
-                packet_slot.take().expect("poll_push without a packet")
-            {
-                let slice = frame.domain.require_system_slice("test").expect("system");
-                self.bytes.extend_from_slice(slice);
-            }
-            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-        }
-    }
 
     fn u32_at(block: &[u8], at: usize) -> u32 {
         u32::from_le_bytes([block[at], block[at + 1], block[at + 2], block[at + 3]])
@@ -444,7 +423,7 @@ mod tests {
     }
 
     async fn run(element: &mut ApeV2Mux, input: &[u8], chunk: usize) -> Vec<u8> {
-        let mut out = RecordingSink::default();
+        let mut out = CollectSink::default();
         element
             .configure_pipeline(&Caps::ByteStream {
                 encoding: g2g_core::ByteStreamEncoding::Raw,
@@ -465,7 +444,7 @@ mod tests {
             .process(PipelinePacket::Eos, &mut out)
             .await
             .expect("eos");
-        out.bytes
+        data_bytes(&out.packets)
     }
 
     /// Layout asserted field by field: preamble, version, the size that counts

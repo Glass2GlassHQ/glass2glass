@@ -6,6 +6,10 @@
 //! logged about the connection, never the element's own counters alone.
 //! Self-skips without the mosquitto binaries (CI installs them).
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+use collect_sink::CollectSink;
+
 use std::io::{BufRead, BufReader};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -333,23 +337,6 @@ async fn mqttsink_publishes_each_record_to_a_mosquitto_subscriber() {
     }
 }
 
-#[derive(Default)]
-struct CollectingSink {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for CollectingSink {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        self.packets.push(packet);
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
 /// Publish `message` on the control topic through the reference client, at
 /// QoS 1 so the call returns only once the broker has it.
 async fn publish_control(port: u16, message: &'static str) {
@@ -404,7 +391,7 @@ async fn mqttsrc_emits_each_published_message_as_a_text_frame() {
         .configure_pipeline(&caps)
         .expect("mqttsrc accepts its own caps");
 
-    let mut out = CollectingSink::default();
+    let mut out = CollectSink::default();
     let publisher = async {
         wait_for_log(&log, &format!("Received SUBSCRIBE from {SOURCE_CLIENT_ID}")).await;
         for message in CONTROL_MESSAGES {

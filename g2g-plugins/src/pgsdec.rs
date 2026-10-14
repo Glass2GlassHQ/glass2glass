@@ -379,24 +379,7 @@ impl PadTemplates for PgsDec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::PushOutcome;
-
-    #[derive(Default)]
-    struct CollectSink {
-        packets: Vec<PipelinePacket>,
-    }
-    impl OutputSink for CollectSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-
-            self.packets.push(packet);
-            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-        }
-    }
+    use crate::testutil::CollectSink;
 
     fn segment(kind: u8, body: &[u8]) -> Vec<u8> {
         let mut out = Vec::from([kind]);

@@ -280,25 +280,8 @@ impl PadTemplates for TeletextDec {
 mod tests {
     use super::*;
     use crate::teletext::{encode_payload, page_config_blob, DataUnit};
+    use crate::testutil::CollectSink;
     use alloc::string::String;
-    use g2g_core::PushOutcome;
-
-    #[derive(Default)]
-    struct CollectSink {
-        packets: Vec<PipelinePacket>,
-    }
-    impl OutputSink for CollectSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-
-            self.packets.push(packet);
-            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-        }
-    }
 
     fn frame(bytes: Vec<u8>, pts_ns: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(
