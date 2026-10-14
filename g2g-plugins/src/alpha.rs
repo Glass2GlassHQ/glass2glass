@@ -93,10 +93,8 @@ impl PixelFilter for Alpha {
         &mut self.state
     }
 
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        let mut pixels: Box<[u8]> = src[..(w as usize) * (h as usize) * 4].into();
-        apply_alpha(format, &mut pixels, self.method, alpha_u8(self.alpha));
-        pixels
+    fn apply(&mut self, format: RawVideoFormat, _w: u32, _h: u32, pixels: &mut [u8]) {
+        apply_alpha(format, pixels, self.method, alpha_u8(self.alpha));
     }
 }
 

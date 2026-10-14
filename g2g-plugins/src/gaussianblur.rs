@@ -55,6 +55,8 @@ pub struct GaussianBlur {
     sigma: f64,
     /// The normalised taps and their running sums, rebuilt when `sigma` moves.
     kernel: Option<Kernel>,
+    /// The horizontally filtered frame, reused across frames.
+    scratch: Vec<f64>,
     state: FilterState,
 }
 
@@ -70,6 +72,7 @@ impl GaussianBlur {
         Self {
             sigma: DEFAULT_SIGMA,
             kernel: None,
+            scratch: Vec::new(),
             state: FilterState::new(),
         }
     }
@@ -180,10 +183,11 @@ fn ceil_to_usize(v: f64) -> usize {
     }
 }
 
-/// Convolve `src` with `kernel` along both axes. Runs horizontally into a float
-/// scratch buffer, then vertically out to bytes.
-fn blur(kernel: &Kernel, src: &[u8], w: usize, h: usize, dst: &mut [u8]) {
-    let mut scratch = vec![0.0f64; w * h * CHANNELS];
+/// Convolve `pixels` with `kernel` along both axes in place. Runs horizontally
+/// into a float scratch buffer, then vertically back to bytes.
+fn blur(kernel: &Kernel, pixels: &mut [u8], w: usize, h: usize, scratch: &mut Vec<f64>) {
+    scratch.clear();
+    scratch.resize(w * h * CHANNELS, 0.0);
     for row in 0..h {
         for column in 0..w {
             let (first_tap, last_tap, first_sample) = kernel.window(column, w);
@@ -192,7 +196,7 @@ fn blur(kernel: &Kernel, src: &[u8], w: usize, h: usize, dst: &mut [u8]) {
                 let mut dot = 0.0;
                 for tap in first_tap..last_tap {
                     let sample =
-                        src[(row * w + first_sample + tap - first_tap) * CHANNELS + channel];
+                        pixels[(row * w + first_sample + tap - first_tap) * CHANNELS + channel];
                     dot += sample as f64 * kernel.taps[tap];
                 }
                 scratch[(row * w + column) * CHANNELS + channel] = dot / gain;
@@ -210,7 +214,7 @@ fn blur(kernel: &Kernel, src: &[u8], w: usize, h: usize, dst: &mut [u8]) {
                     dot +=
                         scratch[(source_row * w + column) * CHANNELS + channel] * kernel.taps[tap];
                 }
-                dst[(row * w + column) * CHANNELS + channel] =
+                pixels[(row * w + column) * CHANNELS + channel] =
                     (dot / gain + 0.5).clamp(0.0, u8::MAX as f64) as u8;
             }
         }
@@ -228,17 +232,13 @@ impl PixelFilter for GaussianBlur {
         &mut self.state
     }
 
-    fn apply(&mut self, _format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        let bytes = (w as usize) * (h as usize) * CHANNELS;
-        let mut dst = vec![0u8; bytes].into_boxed_slice();
-        dst.copy_from_slice(&src[..bytes]);
+    fn apply(&mut self, _format: RawVideoFormat, w: u32, h: u32, pixels: &mut [u8]) {
         if self.sigma == 0.0 {
-            return dst;
+            return;
         }
         let sigma = self.sigma;
         let kernel = self.kernel.get_or_insert_with(|| Kernel::new(sigma));
-        blur(kernel, &src[..bytes], w as usize, h as usize, &mut dst);
-        dst
+        blur(kernel, pixels, w as usize, h as usize, &mut self.scratch);
     }
 }
 

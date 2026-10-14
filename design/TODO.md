@@ -45,7 +45,6 @@ Codecs and parsers:
 
 Raw video and GPU:
 
-- `PixelFilter` effects allocate and copy the frame. Apply in place.
 - `videorate` deep-copies each frame up to three times.
 - `textoverlay` reshapes and re-rasterizes every cue on every frame.
 - `gaussianblur` allocates f64 scratch per frame.

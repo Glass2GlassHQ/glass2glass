@@ -149,13 +149,9 @@ impl PixelFilter for TimestampBurn {
         &mut self.state
     }
 
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        let bytes = frame_byte_size(format, w, h);
-        let mut dst = vec![0u8; bytes].into_boxed_slice();
-        dst.copy_from_slice(&src[..bytes]);
+    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, pixels: &mut [u8]) {
         let stride = w as usize;
-        burn(&mut dst[..stride * h as usize], stride, monotonic_ns());
-        dst
+        burn(&mut pixels[..stride * h as usize], stride, monotonic_ns());
     }
 }
 

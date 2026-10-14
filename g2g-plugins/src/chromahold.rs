@@ -17,7 +17,6 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
@@ -150,15 +149,11 @@ impl PixelFilter for ChromaHold {
         &mut self.state
     }
 
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        let bytes = (w as usize) * (h as usize) * 4;
-        let mut dst = vec![0u8; bytes].into_boxed_slice();
-        dst.copy_from_slice(&src[..bytes]);
-
+    fn apply(&mut self, format: RawVideoFormat, _w: u32, _h: u32, pixels: &mut [u8]) {
         let target_hue = self.target_hue();
         let tolerance = self.tolerance as i32;
         let (r_idx, b_idx) = rgba_rb_offsets(format);
-        for px in dst.as_chunks_mut::<4>().0 {
+        for px in pixels.as_chunks_mut::<4>().0 {
             let (r, g, b) = (px[r_idx], px[1], px[b_idx]);
             let hue = rgb_to_hue(r as i32, g as i32, b as i32);
             let held = target_hue != NO_HUE && hue_distance(target_hue, hue) <= tolerance;
@@ -169,7 +164,6 @@ impl PixelFilter for ChromaHold {
                 px[b_idx] = grey;
             }
         }
-        dst
     }
 }
 

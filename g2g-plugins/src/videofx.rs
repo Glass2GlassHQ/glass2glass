@@ -47,15 +47,27 @@ pub(crate) trait PixelFilter {
     fn state_mut(&mut self) -> &mut FilterState;
 
     /// Output geometry for a `w x h` input. The default preserves it; a
-    /// cropping filter overrides.
+    /// cropping filter overrides, together with [`apply_resized`](Self::apply_resized).
     fn output_dims(&self, _format: RawVideoFormat, w: u32, h: u32) -> (u32, u32) {
         (w, h)
     }
 
-    /// Transform one whole frame. `src` is at least
-    /// [`frame_byte_size`]`(format, w, h)` bytes; the result must be a full
-    /// frame at [`output_dims`](Self::output_dims).
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]>;
+    /// Transform one whole frame in place. `pixels` is exactly
+    /// [`frame_byte_size`]`(format, w, h)` bytes, the frame's own buffer.
+    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, pixels: &mut [u8]);
+
+    /// A geometry-changing filter's whole output frame at
+    /// [`output_dims`](Self::output_dims), or `None` to run [`apply`](Self::apply)
+    /// in place instead.
+    fn apply_resized(
+        &mut self,
+        _format: RawVideoFormat,
+        _w: u32,
+        _h: u32,
+        _src: &[u8],
+    ) -> Option<Box<[u8]>> {
+        None
+    }
 
     /// Drop any inter-frame state on a flush. The default keeps none.
     fn reset(&mut self) {}
@@ -169,17 +181,25 @@ pub(crate) fn drive<'a, F: PixelFilter>(
             return Err(G2gError::NotConfigured);
         }
         match packet {
-            PipelinePacket::DataFrame(frame) => {
+            PipelinePacket::DataFrame(mut frame) => {
                 let Some((format, in_w, in_h, rate)) = filter.state().input.clone() else {
                     return Err(G2gError::NotConfigured);
                 };
+                let in_bytes = frame_byte_size(format, in_w, in_h);
                 let src = frame
                     .domain
                     .require_system_slice(g2g_core::log::short_type_name::<F>())?;
-                if src.len() < frame_byte_size(format, in_w, in_h) {
+                if src.len() < in_bytes {
                     return Err(G2gError::CapsMismatch);
                 }
-                let pixels = filter.apply(format, in_w, in_h, src);
+                if let Some(resized) = filter.apply_resized(format, in_w, in_h, &src[..in_bytes]) {
+                    frame.domain = MemoryDomain::System(SystemSlice::from_boxed(resized));
+                } else {
+                    let MemoryDomain::System(slice) = &mut frame.domain else {
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    filter.apply(format, in_w, in_h, &mut slice.as_mut_slice()[..in_bytes]);
+                }
 
                 let (out_w, out_h) = filter.output_dims(format, in_w, in_h);
                 let new_caps = Caps::RawVideo {
@@ -197,7 +217,7 @@ pub(crate) fn drive<'a, F: PixelFilter>(
                 let sequence = filter.state().emitted;
                 filter.state_mut().emitted += 1;
                 let out_frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(pixels)),
+                    domain: frame.domain,
                     timing: frame.timing,
                     sequence,
                     meta: Default::default(),
@@ -227,6 +247,20 @@ pub(crate) fn drive<'a, F: PixelFilter>(
         }
         Ok(())
     })
+}
+
+/// `filter` applied to a copy of `src`.
+#[cfg(test)]
+pub(crate) fn applied<F: PixelFilter>(
+    filter: &mut F,
+    format: RawVideoFormat,
+    w: u32,
+    h: u32,
+    src: &[u8],
+) -> Vec<u8> {
+    let mut pixels = src.to_vec();
+    filter.apply(format, w, h, &mut pixels);
+    pixels
 }
 
 #[cfg(test)]

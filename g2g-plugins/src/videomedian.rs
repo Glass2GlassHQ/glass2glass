@@ -13,7 +13,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::vec;
+use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
@@ -21,7 +21,7 @@ use g2g_core::{
     RawVideoFormat,
 };
 
-use crate::pixel::{frame_byte_size, planar_planes};
+use crate::pixel::planar_planes;
 use crate::videofx::{self, FilterState, PixelFilter};
 
 const FORMATS: [RawVideoFormat; 1] = [RawVideoFormat::I420];
@@ -71,6 +71,8 @@ pub struct VideoMedian {
     size: MedianSize,
     luma_only: bool,
     state: FilterState,
+    /// One plane of the input, read while the frame's own plane is overwritten.
+    plane_source: Vec<u8>,
 }
 
 impl Default for VideoMedian {
@@ -86,6 +88,7 @@ impl VideoMedian {
             size: MedianSize::DEFAULT,
             luma_only: DEFAULT_LUM_ONLY,
             state: FilterState::new(),
+            plane_source: Vec::new(),
         }
     }
 
@@ -100,10 +103,10 @@ impl VideoMedian {
     }
 }
 
-/// Median-filter one plane of `w x h` samples. The one-sample border is copied
-/// through, since its neighbourhood runs off the plane.
+/// Median-filter one plane of `w x h` samples from `src` into `dst`, which
+/// starts as a copy of `src`. The one-sample border is left as is, since its
+/// neighbourhood runs off the plane.
 fn median_plane(dst: &mut [u8], src: &[u8], w: usize, h: usize, size: MedianSize) {
-    dst.copy_from_slice(&src[..w * h]);
     if w < 3 || h < 3 {
         return;
     }
@@ -149,24 +152,15 @@ impl PixelFilter for VideoMedian {
         &mut self.state
     }
 
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        let bytes = frame_byte_size(format, w, h);
-        let mut dst = vec![0u8; bytes].into_boxed_slice();
-        dst.copy_from_slice(&src[..bytes]);
-
+    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, pixels: &mut [u8]) {
         let planes = planar_planes(format, w as usize, h as usize);
         let filtered = if self.luma_only { 1 } else { planes.len() };
         for &(offset, plane_w, plane_h) in &planes[..filtered] {
-            let plane = offset..offset + plane_w * plane_h;
-            median_plane(
-                &mut dst[plane.clone()],
-                &src[plane],
-                plane_w,
-                plane_h,
-                self.size,
-            );
+            let plane = &mut pixels[offset..offset + plane_w * plane_h];
+            self.plane_source.clear();
+            self.plane_source.extend_from_slice(plane);
+            median_plane(plane, &self.plane_source, plane_w, plane_h, self.size);
         }
-        dst
     }
 }
 
@@ -264,6 +258,7 @@ impl PadTemplates for VideoMedian {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     /// A 5x5 plane of `background` with one `spike` sample in the middle.
     fn speckled(w: usize, h: usize, background: u8, spike: u8) -> alloc::vec::Vec<u8> {
@@ -279,7 +274,7 @@ mod tests {
         let (w, h) = (5, 5);
         let src = speckled(w, h, BACKGROUND, SPIKE);
         for size in [MedianSize::Five, MedianSize::Nine] {
-            let mut dst = vec![0u8; w * h];
+            let mut dst = src.clone();
             median_plane(&mut dst, &src, w, h, size);
             assert_eq!(dst[(h / 2) * w + w / 2], BACKGROUND, "{size:?}");
         }
@@ -295,7 +290,7 @@ mod tests {
         let src: alloc::vec::Vec<u8> = (0..w * h)
             .map(|i| if i % w < w / 2 { DARK } else { LIGHT })
             .collect();
-        let mut dst = vec![0u8; w * h];
+        let mut dst = src.clone();
         median_plane(&mut dst, &src, w, h, MedianSize::Nine);
         assert_eq!(dst, src);
     }
@@ -308,7 +303,7 @@ mod tests {
         // a speckle on the top row has no full neighbourhood, so it stays.
         let mut src = vec![BACKGROUND; w * h];
         src[2] = SPIKE;
-        let mut dst = vec![0u8; w * h];
+        let mut dst = src.clone();
         median_plane(&mut dst, &src, w, h, MedianSize::Five);
         assert_eq!(dst[2], SPIKE);
     }

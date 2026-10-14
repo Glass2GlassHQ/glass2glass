@@ -15,7 +15,6 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
@@ -152,14 +151,10 @@ impl PixelFilter for ColorEffects {
         &mut self.state
     }
 
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        let bytes = (w as usize) * (h as usize) * 4;
-        let mut dst = vec![0u8; bytes].into_boxed_slice();
-        dst.copy_from_slice(&src[..bytes]);
+    fn apply(&mut self, format: RawVideoFormat, _w: u32, _h: u32, pixels: &mut [u8]) {
         if let Some(table) = self.preset.table() {
-            map_pixels(format, &mut dst, table, self.preset.maps_luma());
+            map_pixels(format, pixels, table, self.preset.maps_luma());
         }
-        dst
     }
 }
 

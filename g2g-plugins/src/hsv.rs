@@ -9,7 +9,6 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::{
@@ -198,17 +197,14 @@ impl PixelFilter for HsvFilter {
         &mut self.state
     }
 
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        let bytes = (w as usize) * (h as usize) * 4;
-        let mut dst = vec![0u8; bytes].into_boxed_slice();
-        dst.copy_from_slice(&src[..bytes]);
+    fn apply(&mut self, format: RawVideoFormat, _w: u32, _h: u32, pixels: &mut [u8]) {
         let (r_idx, b_idx) = rgba_rb_offsets(format);
         let hue_shift = self.hue_shift;
         let sat_mul = self.saturation_mul;
         let sat_off = self.saturation_off;
         let val_mul = self.value_mul;
         let val_off = self.value_off;
-        for px in dst.as_chunks_mut::<4>().0 {
+        for px in pixels.as_chunks_mut::<4>().0 {
             let mut hsv = rgb_to_hsv(px[r_idx], px[1], px[b_idx]);
             hsv[0] = wrap_hue(hsv[0] + hue_shift);
             hsv[1] = (sat_mul * hsv[1] + sat_off).clamp(0.0, 1.0);
@@ -218,7 +214,6 @@ impl PixelFilter for HsvFilter {
             px[1] = g;
             px[b_idx] = b;
         }
-        dst
     }
 }
 
@@ -445,16 +440,12 @@ impl PixelFilter for HsvDetector {
         &mut self.state
     }
 
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        let bytes = (w as usize) * (h as usize) * 4;
-        let mut dst = vec![0u8; bytes].into_boxed_slice();
-        dst.copy_from_slice(&src[..bytes]);
+    fn apply(&mut self, format: RawVideoFormat, _w: u32, _h: u32, pixels: &mut [u8]) {
         let (r_idx, b_idx) = rgba_rb_offsets(format);
-        for px in dst.as_chunks_mut::<4>().0 {
+        for px in pixels.as_chunks_mut::<4>().0 {
             let hsv = rgb_to_hsv(px[r_idx], px[1], px[b_idx]);
             px[3] = if self.matches(hsv) { 255 } else { 0 };
         }
-        dst
     }
 }
 
@@ -489,7 +480,7 @@ mod tests {
     fn hsvfilter_apply_shifts_red() {
         let mut f = HsvFilter::new().with_hue_shift(180.0);
         let src = [255u8, 0, 0, 255];
-        let out = f.apply(RawVideoFormat::Rgba8, 1, 1, &src);
+        let out = crate::videofx::applied(&mut f, RawVideoFormat::Rgba8, 1, 1, &src);
         assert_eq!(&out[..3], &[0, 255, 255]);
         assert_eq!(out[3], 255);
     }
@@ -505,7 +496,13 @@ mod tests {
         d.set_prop("value-var", PropValue::Double(1.0)).unwrap();
         let red = [255u8, 0, 0, 128];
         let blue = [0u8, 0, 255, 128];
-        assert_eq!(d.apply(RawVideoFormat::Rgba8, 1, 1, &red)[3], 255);
-        assert_eq!(d.apply(RawVideoFormat::Rgba8, 1, 1, &blue)[3], 0);
+        assert_eq!(
+            crate::videofx::applied(&mut d, RawVideoFormat::Rgba8, 1, 1, &red)[3],
+            255
+        );
+        assert_eq!(
+            crate::videofx::applied(&mut d, RawVideoFormat::Rgba8, 1, 1, &blue)[3],
+            0
+        );
     }
 }

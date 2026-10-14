@@ -16,7 +16,6 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
@@ -24,7 +23,7 @@ use g2g_core::{
     RawVideoFormat,
 };
 
-use crate::pixel::{bt709_luma, frame_byte_size, rgba_rb_offsets};
+use crate::pixel::{bt709_luma, rgba_rb_offsets};
 use crate::videofx::{self, FilterState, PixelFilter};
 
 const FORMATS: [RawVideoFormat; 3] = [
@@ -110,40 +109,39 @@ impl PixelFilter for ZebraStripe {
         &mut self.state
     }
 
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        let bytes = frame_byte_size(format, w, h);
-        let mut dst = vec![0u8; bytes].into_boxed_slice();
-        dst.copy_from_slice(&src[..bytes]);
-
+    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, pixels: &mut [u8]) {
         let threshold = self.luma_threshold();
         let frame = self.frame;
         self.frame = self.frame.wrapping_add(1);
 
+        let width = w as usize;
         match format {
             RawVideoFormat::I420 => {
-                let luma_plane = &mut dst[..(w as usize) * (h as usize)];
-                for (i, sample) in luma_plane.iter_mut().enumerate() {
-                    let (x, y) = ((i as u32) % w, (i as u32) / w);
-                    if *sample >= threshold && on_stripe(x, y, frame) {
-                        *sample = STRIPE_LUMA;
+                let luma_plane = &mut pixels[..width * (h as usize)];
+                for (y, row) in (0u32..).zip(luma_plane.chunks_exact_mut(width)) {
+                    for (x, sample) in (0u32..).zip(row) {
+                        if *sample >= threshold && on_stripe(x, y, frame) {
+                            *sample = STRIPE_LUMA;
+                        }
                     }
                 }
             }
             packed => {
                 let (r_idx, b_idx) = rgba_rb_offsets(packed);
-                for (i, px) in dst.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                    let (x, y) = ((i as u32) % w, (i as u32) / w);
-                    if bt709_luma(px[r_idx], px[1], px[b_idx]) >= threshold
-                        && on_stripe(x, y, frame)
-                    {
-                        px[r_idx] = STRIPE_LUMA;
-                        px[1] = STRIPE_LUMA;
-                        px[b_idx] = STRIPE_LUMA;
+                let rows = pixels.as_chunks_mut::<4>().0.chunks_exact_mut(width);
+                for (y, row) in (0u32..).zip(rows) {
+                    for (x, px) in (0u32..).zip(row) {
+                        if bt709_luma(px[r_idx], px[1], px[b_idx]) >= threshold
+                            && on_stripe(x, y, frame)
+                        {
+                            px[r_idx] = STRIPE_LUMA;
+                            px[1] = STRIPE_LUMA;
+                            px[b_idx] = STRIPE_LUMA;
+                        }
                     }
                 }
             }
         }
-        dst
     }
 
     fn reset(&mut self) {

@@ -9,7 +9,6 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::{
@@ -73,37 +72,31 @@ impl PixelFilter for RoundedCorners {
         &mut self.state
     }
 
-    fn apply(&mut self, _format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        let bytes = (w as usize) * (h as usize) * 4;
-        let mut dst = vec![0u8; bytes].into_boxed_slice();
-        dst.copy_from_slice(&src[..bytes]);
+    fn apply(&mut self, _format: RawVideoFormat, w: u32, h: u32, pixels: &mut [u8]) {
         let r = self.border_radius_px.min(w / 2).min(h / 2);
         if r == 0 {
-            return dst;
+            return;
         }
         let r2 = (r as u64) * (r as u64);
-        for y in 0..h {
-            for x in 0..w {
-                let (cx, cy) = if x < r && y < r {
-                    (r, r)
-                } else if x >= w - r && y < r {
-                    (w - r, r)
-                } else if x < r && y >= h - r {
-                    (r, h - r)
-                } else if x >= w - r && y >= h - r {
-                    (w - r, h - r)
-                } else {
-                    continue;
-                };
-                let dx = x as i64 - cx as i64;
+        // (columns, rows, circle centre) of each corner square
+        let corners = [
+            (0..r, 0..r, (r, r)),
+            (w - r..w, 0..r, (w - r, r)),
+            (0..r, h - r..h, (r, h - r)),
+            (w - r..w, h - r..h, (w - r, h - r)),
+        ];
+        for (columns, rows, (cx, cy)) in corners {
+            for y in rows {
                 let dy = y as i64 - cy as i64;
-                let dist2 = (dx * dx + dy * dy) as u64;
-                if dist2 > r2 {
-                    dst[(y as usize * w as usize + x as usize) * 4 + 3] = 0;
+                let row_start = y as usize * w as usize;
+                for x in columns.clone() {
+                    let dx = x as i64 - cx as i64;
+                    if (dx * dx + dy * dy) as u64 > r2 {
+                        pixels[(row_start + x as usize) * 4 + 3] = 0;
+                    }
                 }
             }
         }
-        dst
     }
 }
 
@@ -177,20 +170,21 @@ impl PadTemplates for RoundedCorners {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn radius_zero_is_passthrough() {
         let mut rc = RoundedCorners::new();
         let src = [10u8, 20, 30, 255];
-        let out = rc.apply(RawVideoFormat::Rgba8, 1, 1, &src);
-        assert_eq!(&*out, &src);
+        let out = videofx::applied(&mut rc, RawVideoFormat::Rgba8, 1, 1, &src);
+        assert_eq!(out, src);
     }
 
     #[test]
     fn corner_pixel_is_cleared() {
         let mut rc = RoundedCorners::new().with_border_radius_px(4);
         let src = vec![255u8; 8 * 8 * 4];
-        let out = rc.apply(RawVideoFormat::Rgba8, 8, 8, &src);
+        let out = videofx::applied(&mut rc, RawVideoFormat::Rgba8, 8, 8, &src);
         assert_eq!(out[3], 0, "top-left corner is outside the arc");
         let mid = (4 * 8 + 4) * 4 + 3;
         assert_eq!(out[mid], 255, "centre stays opaque");

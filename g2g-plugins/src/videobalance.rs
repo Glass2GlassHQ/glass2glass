@@ -97,11 +97,9 @@ impl PixelFilter for VideoBalance {
         &mut self.state
     }
 
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        let mut pixels: Box<[u8]> = src[..(w as usize) * (h as usize) * 4].into();
+    fn apply(&mut self, format: RawVideoFormat, _w: u32, _h: u32, pixels: &mut [u8]) {
         Balance::new(self.brightness, self.contrast, self.saturation, self.hue)
-            .apply(format, &mut pixels);
-        pixels
+            .apply(format, pixels);
     }
 }
 

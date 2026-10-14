@@ -90,10 +90,8 @@ impl PixelFilter for Gamma {
         &mut self.state
     }
 
-    fn apply(&mut self, _format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        let mut pixels: Box<[u8]> = src[..(w as usize) * (h as usize) * 4].into();
-        apply_gamma(&mut pixels, &self.lut);
-        pixels
+    fn apply(&mut self, _format: RawVideoFormat, _w: u32, _h: u32, pixels: &mut [u8]) {
+        apply_gamma(pixels, &self.lut);
     }
 }
 

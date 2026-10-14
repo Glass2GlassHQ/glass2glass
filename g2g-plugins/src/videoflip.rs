@@ -618,13 +618,22 @@ fn transform_plane(
     } else {
         (pw, ph)
     };
+    let (origin_x, origin_y) = src_coord(method, 0, 0, pw, ph);
+    let origin = (origin_y * pw + origin_x) as isize;
+    // every orientation is affine, so a 2x2 plane gives each output axis's step
+    let source_step = |ox: usize, oy: usize| {
+        let (x0, y0) = src_coord(method, 0, 0, 2, 2);
+        let (x, y) = src_coord(method, ox, oy, 2, 2);
+        (x as isize - x0 as isize) + (y as isize - y0 as isize) * pw as isize
+    };
+    let (step_x, step_y) = (source_step(1, 0), source_step(0, 1));
     let mut dst = vec![0u8; ow * oh * channels];
-    for oy in 0..oh {
-        for ox in 0..ow {
-            let (ix, iy) = src_coord(method, ox, oy, pw, ph);
-            let s = (iy * pw + ix) * channels;
-            let d = (oy * ow + ox) * channels;
-            dst[d..d + channels].copy_from_slice(&src[s..s + channels]);
+    for (oy, row) in dst.chunks_exact_mut(ow * channels).enumerate() {
+        let mut source = origin + oy as isize * step_y;
+        for out_px in row.chunks_exact_mut(channels) {
+            let at = source as usize * channels;
+            out_px.copy_from_slice(&src[at..at + channels]);
+            source += step_x;
         }
     }
     dst

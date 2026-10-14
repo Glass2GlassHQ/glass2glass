@@ -35,11 +35,9 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
@@ -409,11 +407,11 @@ impl OverlayCore {
         Ok(ConfigureOutcome::Accepted)
     }
 
-    /// Copy `frame`, burn `text` into the copy, and push it (emitting the output
-    /// caps first when they changed).
+    /// Burn `text` into `frame` and push it (emitting the output caps first when
+    /// they changed).
     pub(crate) async fn render(
         &mut self,
-        frame: Frame,
+        mut frame: Frame,
         text: &str,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
@@ -428,9 +426,11 @@ impl OverlayCore {
         if src.len() < bytes {
             return Err(G2gError::CapsMismatch);
         }
-        let mut dst = vec![0u8; bytes].into_boxed_slice();
-        dst.copy_from_slice(&src[..bytes]);
-        draw_text(&mut dst, w as usize, h as usize, text, &self.style);
+        let MemoryDomain::System(slice) = &mut frame.domain else {
+            return Err(G2gError::UnsupportedDomain);
+        };
+        let pixels = &mut slice.as_mut_slice()[..bytes];
+        draw_text(pixels, w as usize, h as usize, text, &self.style);
 
         let new_caps = Caps::RawVideo {
             format,
@@ -446,7 +446,7 @@ impl OverlayCore {
             self.last_caps = Some(new_caps);
         }
         let out_frame = Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(dst)),
+            domain: frame.domain,
             timing: frame.timing,
             sequence: self.emitted,
             meta: Default::default(),
@@ -992,6 +992,7 @@ fn blit_glyph(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use g2g_core::FrameTiming;
     use g2g_core::PushOutcome;
 
@@ -1163,7 +1164,7 @@ mod tests {
     fn white_frame(w: u32, h: u32, pts_ns: u64) -> Frame {
         let buf = vec![255u8; (w * h * 4) as usize].into_boxed_slice();
         Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(buf)),
+            MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(buf)),
             FrameTiming {
                 pts_ns,
                 ..FrameTiming::default()

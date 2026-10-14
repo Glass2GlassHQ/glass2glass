@@ -16,7 +16,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::vec;
+use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
@@ -24,7 +24,7 @@ use g2g_core::{
     RawVideoFormat,
 };
 
-use crate::pixel::{bt709_luma, frame_byte_size, rgba_rb_offsets};
+use crate::pixel::{bt709_luma, rgba_rb_offsets};
 use crate::videofx::{self, FilterState, PixelFilter};
 
 const FORMATS: [RawVideoFormat; 3] = [
@@ -57,7 +57,9 @@ const MARK_WIDTH: u32 = 4;
 pub struct VideoDiff {
     threshold: i32,
     /// The previous frame, kept whole so the next one can be compared to it.
-    previous: Option<Box<[u8]>>,
+    previous: Option<Vec<u8>>,
+    /// The buffer before `previous`, reused for the next copy.
+    spare: Vec<u8>,
     state: FilterState,
 }
 
@@ -73,6 +75,7 @@ impl VideoDiff {
         Self {
             threshold: DEFAULT_THRESHOLD,
             previous: None,
+            spare: Vec::new(),
             state: FilterState::new(),
         }
     }
@@ -109,42 +112,55 @@ impl PixelFilter for VideoDiff {
         &mut self.state
     }
 
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        let bytes = frame_byte_size(format, w, h);
-        let mut dst = vec![0u8; bytes].into_boxed_slice();
-        dst.copy_from_slice(&src[..bytes]);
+    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, pixels: &mut [u8]) {
+        let mut current = core::mem::take(&mut self.spare);
+        current.clear();
+        current.extend_from_slice(pixels);
 
         // A previous frame of a different size is one from before a caps change
         // and has nothing to say about this one.
-        let previous = self.previous.take().filter(|p| p.len() == bytes);
-        if let Some(previous) = &previous {
+        let width = w as usize;
+        let previous = self.previous.as_deref().filter(|p| p.len() == pixels.len());
+        if let Some(previous) = previous {
             match format {
                 RawVideoFormat::I420 => {
-                    let luma_samples = (w as usize) * (h as usize);
-                    for (i, sample) in dst[..luma_samples].iter_mut().enumerate() {
-                        if moved(previous[i], *sample, self.threshold) {
-                            *sample = mark_luma((i as u32) % w, (i as u32) / w);
+                    let luma_samples = width * (h as usize);
+                    let rows = pixels[..luma_samples]
+                        .chunks_exact_mut(width)
+                        .zip(previous.chunks_exact(width));
+                    for (y, (row, was_row)) in (0u32..).zip(rows) {
+                        for (x, (sample, &was)) in (0u32..).zip(row.iter_mut().zip(was_row)) {
+                            if moved(was, *sample, self.threshold) {
+                                *sample = mark_luma(x, y);
+                            }
                         }
                     }
                 }
                 packed => {
                     let (r_idx, b_idx) = rgba_rb_offsets(packed);
-                    let was = previous.as_chunks::<4>().0;
-                    for (i, px) in dst.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                        let before = bt709_luma(was[i][r_idx], was[i][1], was[i][b_idx]);
-                        let now = bt709_luma(px[r_idx], px[1], px[b_idx]);
-                        if moved(before, now, self.threshold) {
-                            let mark = mark_luma((i as u32) % w, (i as u32) / w);
-                            px[r_idx] = mark;
-                            px[1] = mark;
-                            px[b_idx] = mark;
+                    let rows = pixels
+                        .as_chunks_mut::<4>()
+                        .0
+                        .chunks_exact_mut(width)
+                        .zip(previous.as_chunks::<4>().0.chunks_exact(width));
+                    for (y, (row, was_row)) in (0u32..).zip(rows) {
+                        for (x, (px, was)) in (0u32..).zip(row.iter_mut().zip(was_row)) {
+                            let before = bt709_luma(was[r_idx], was[1], was[b_idx]);
+                            let now = bt709_luma(px[r_idx], px[1], px[b_idx]);
+                            if moved(before, now, self.threshold) {
+                                let mark = mark_luma(x, y);
+                                px[r_idx] = mark;
+                                px[1] = mark;
+                                px[b_idx] = mark;
+                            }
                         }
                     }
                 }
             }
         }
-        self.previous = Some(Box::from(&src[..bytes]));
-        dst
+        if let Some(older) = self.previous.replace(current) {
+            self.spare = older;
+        }
     }
 
     fn reset(&mut self) {

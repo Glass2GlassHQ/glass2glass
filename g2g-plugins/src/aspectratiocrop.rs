@@ -142,10 +142,22 @@ impl PixelFilter for AspectRatioCrop {
         cropped_dims(self.aspect, format, w, h)
     }
 
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
+    // an uncropped frame passes through as is
+    fn apply(&mut self, _format: RawVideoFormat, _w: u32, _h: u32, _pixels: &mut [u8]) {}
+
+    fn apply_resized(
+        &mut self,
+        format: RawVideoFormat,
+        w: u32,
+        h: u32,
+        src: &[u8],
+    ) -> Option<Box<[u8]>> {
         let (horizontal, vertical) = self.insets(format, w, h);
+        if (horizontal, vertical) == (0, 0) {
+            return None;
+        }
         let (out_w, out_h) = self.output_dims(format, w, h);
-        crop(
+        Some(crop(
             src,
             format,
             (w as usize, h as usize),
@@ -155,7 +167,7 @@ impl PixelFilter for AspectRatioCrop {
                 out_w as usize,
                 out_h as usize,
             ),
-        )
+        ))
     }
 }
 

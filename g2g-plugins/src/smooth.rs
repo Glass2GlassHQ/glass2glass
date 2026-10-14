@@ -14,7 +14,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::vec;
+use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
@@ -22,7 +22,7 @@ use g2g_core::{
     RawVideoFormat,
 };
 
-use crate::pixel::{frame_byte_size, planar_planes};
+use crate::pixel::planar_planes;
 use crate::videofx::{self, FilterState, PixelFilter};
 
 const FORMATS: [RawVideoFormat; 1] = [RawVideoFormat::I420];
@@ -47,6 +47,8 @@ pub struct Smooth {
     filter_size: i32,
     luma_only: bool,
     state: FilterState,
+    /// One plane of the input, read while the frame's own plane is overwritten.
+    plane_source: Vec<u8>,
 }
 
 impl Default for Smooth {
@@ -64,6 +66,7 @@ impl Smooth {
             filter_size: DEFAULT_FILTER_SIZE,
             luma_only: DEFAULT_LUMA_ONLY,
             state: FilterState::new(),
+            plane_source: Vec::new(),
         }
     }
 
@@ -126,28 +129,26 @@ impl PixelFilter for Smooth {
         &mut self.state
     }
 
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        let bytes = frame_byte_size(format, w, h);
-        let mut dst = vec![0u8; bytes].into_boxed_slice();
-        dst.copy_from_slice(&src[..bytes]);
+    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, pixels: &mut [u8]) {
         if !self.active {
-            return dst;
+            return;
         }
 
         let planes = planar_planes(format, w as usize, h as usize);
         let filtered = if self.luma_only { 1 } else { planes.len() };
         for &(offset, plane_w, plane_h) in &planes[..filtered] {
-            let plane = offset..offset + plane_w * plane_h;
+            let plane = &mut pixels[offset..offset + plane_w * plane_h];
+            self.plane_source.clear();
+            self.plane_source.extend_from_slice(plane);
             smooth_plane(
-                &mut dst[plane.clone()],
-                &src[plane],
+                plane,
+                &self.plane_source,
                 plane_w,
                 plane_h,
                 self.tolerance,
                 self.filter_size,
             );
         }
-        dst
     }
 }
 
@@ -256,6 +257,7 @@ impl PadTemplates for Smooth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn a_flat_plane_is_untouched() {

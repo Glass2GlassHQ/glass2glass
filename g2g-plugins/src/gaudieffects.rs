@@ -12,7 +12,6 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::{
@@ -28,22 +27,16 @@ const FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Bgr
 
 fn map_rgb(
     format: RawVideoFormat,
-    w: u32,
-    h: u32,
-    src: &[u8],
+    pixels: &mut [u8],
     mut f: impl FnMut(u8, u8, u8) -> (u8, u8, u8),
-) -> Box<[u8]> {
-    let bytes = (w as usize) * (h as usize) * 4;
-    let mut dst = vec![0u8; bytes].into_boxed_slice();
-    dst.copy_from_slice(&src[..bytes]);
+) {
     let (r_idx, b_idx) = rgba_rb_offsets(format);
-    for px in dst.as_chunks_mut::<4>().0 {
+    for px in pixels.as_chunks_mut::<4>().0 {
         let (r, g, b) = f(px[r_idx], px[1], px[b_idx]);
         px[r_idx] = r;
         px[1] = g;
         px[b_idx] = b;
     }
-    dst
 }
 
 fn clamp_u8(v: i32) -> u8 {
@@ -69,8 +62,8 @@ impl<T: RgbEffect> PixelFilter for T {
         RgbEffect::state_mut(self)
     }
 
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
-        map_rgb(format, w, h, src, |r, g, b| {
+    fn apply(&mut self, format: RawVideoFormat, _w: u32, _h: u32, pixels: &mut [u8]) {
+        map_rgb(format, pixels, |r, g, b| {
             (
                 self.map_channel(r),
                 self.map_channel(g),
@@ -468,9 +461,9 @@ impl PixelFilter for Exclusion {
     fn state_mut(&mut self) -> &mut FilterState {
         &mut self.state
     }
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
+    fn apply(&mut self, format: RawVideoFormat, _w: u32, _h: u32, pixels: &mut [u8]) {
         let factor = self.factor as i32;
-        map_rgb(format, w, h, src, |red, green, blue| {
+        map_rgb(format, pixels, |red, green, blue| {
             (
                 exclusion_channel(red, green, factor),
                 exclusion_channel(green, green, factor),
@@ -643,6 +636,8 @@ pixel_element!(Burn, "Burn", "Burn adjusts the colors in the video signal");
 pub struct Dilate {
     erode: bool,
     state: FilterState,
+    /// The input frame, read while the frame's own buffer is overwritten.
+    source: Vec<u8>,
 }
 
 impl Default for Dilate {
@@ -656,6 +651,7 @@ impl Dilate {
         Self {
             erode: false,
             state: FilterState::new(),
+            source: Vec::new(),
         }
     }
 
@@ -702,12 +698,12 @@ impl PixelFilter for Dilate {
     fn state_mut(&mut self) -> &mut FilterState {
         &mut self.state
     }
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, src: &[u8]) -> Box<[u8]> {
+    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, pixels: &mut [u8]) {
         let width = w as usize;
         let height = h as usize;
-        let bytes = width * height * 4;
-        let mut dst = vec![0u8; bytes].into_boxed_slice();
-        dst.copy_from_slice(&src[..bytes]);
+        self.source.clear();
+        self.source.extend_from_slice(pixels);
+        let src = &self.source;
         let (r_idx, b_idx) = rgba_rb_offsets(format);
         let erode = self.erode;
         let pix = |buf: &[u8], x: usize, y: usize| {
@@ -739,12 +735,11 @@ impl PixelFilter for Dilate {
                     consider(x - 1, y, &mut best, &mut best_l);
                 }
                 let i = (y * width + x) * 4;
-                dst[i + r_idx] = best.0;
-                dst[i + 1] = best.1;
-                dst[i + b_idx] = best.2;
+                pixels[i + r_idx] = best.0;
+                pixels[i + 1] = best.1;
+                pixels[i + b_idx] = best.2;
             }
         }
-        dst
     }
 }
 
@@ -755,8 +750,8 @@ mod tests {
     use super::*;
     use crate::videofx::PixelFilter;
 
-    fn apply<E: PixelFilter>(e: &mut E, src: &[u8], w: u32, h: u32) -> Box<[u8]> {
-        e.apply(RawVideoFormat::Rgba8, w, h, src)
+    fn apply<E: PixelFilter>(e: &mut E, src: &[u8], w: u32, h: u32) -> Vec<u8> {
+        crate::videofx::applied(e, RawVideoFormat::Rgba8, w, h, src)
     }
 
     fn pixel<E: PixelFilter>(e: &mut E, px: [u8; 4]) -> [u8; 4] {
