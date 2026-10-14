@@ -220,7 +220,7 @@ pub(crate) fn process_output(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "mf-decode", feature = "mf-encode")))]
 mod tests {
     use super::*;
 

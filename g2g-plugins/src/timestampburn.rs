@@ -26,14 +26,12 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
     PadTemplate, PadTemplates, PipelinePacket, RawVideoFormat,
 };
 
-use crate::pixel::frame_byte_size;
 use crate::videofx::{self, FilterState, PixelFilter};
 
 const FORMATS: [RawVideoFormat; 1] = [RawVideoFormat::I420];
@@ -149,7 +147,7 @@ impl PixelFilter for TimestampBurn {
         &mut self.state
     }
 
-    fn apply(&mut self, format: RawVideoFormat, w: u32, h: u32, pixels: &mut [u8]) {
+    fn apply(&mut self, _format: RawVideoFormat, w: u32, h: u32, pixels: &mut [u8]) {
         let stride = w as usize;
         burn(&mut pixels[..stride * h as usize], stride, monotonic_ns());
     }
@@ -210,6 +208,7 @@ impl PadTemplates for TimestampBurn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     const STRIDE: usize = STRIP_WIDTH_PX;
 

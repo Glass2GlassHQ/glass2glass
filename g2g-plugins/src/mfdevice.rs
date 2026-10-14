@@ -152,7 +152,6 @@ fn rate_q16(num: u32, den: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mfcommon::with_media_foundation;
     use crate::mfvideosrc::MfPixelFormat;
     use g2g_core::RawVideoFormat;
 
