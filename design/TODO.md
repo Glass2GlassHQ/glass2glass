@@ -34,8 +34,6 @@ Bugs:
   accepts 5 of 15 formats. Use one GStreamer format-name table from core.
 - `gamma`, `videobalance` and `alpha` swallow incoming `CapsChanged`. Move them
   onto `PixelFilter`.
-- `streamdec` and `vulkanvideo` compute the H.264 coded height without
-  `frame_mbs_only_flag`, so field-coded streams get half the height.
 - Run `cargo semver-checks` on g2g-core for M1284 (`Gate`/`Router` `ProcessFuture`
   types) and M1285 (new `DynAsyncElement` provided methods).
 - `ffmpegaudiodec::adts_frames` checks sync with `& 0xF0`, `ffmpegaacenc::adts_wrap`
@@ -132,7 +130,7 @@ Shared helpers:
 - `testutil::CollectSink` in src tests, a shared sink for integration tests.
 - An `mfcommon` module for the Media Foundation helpers, one CUDA driver FFI module.
 - One Android binder threadpool test helper.
-- One hex codec and base64 encoder, one BE byte reader.
+- One BE byte reader.
 - `vtdecode`/`vtencode` `cm_time` helpers, `alertrecorder` uses `xmlutil::civil`,
   and aacparse, dvbsub, st2110anc use `annexb::BitReader`.
 

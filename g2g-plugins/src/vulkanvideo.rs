@@ -436,6 +436,22 @@ pub struct H264Sps {
     pub max_num_reorder_frames: Option<u8>,
 }
 
+impl H264Sps {
+    fn fields_per_frame(&self) -> u32 {
+        2 - u32::from(self.frame_mbs_only_flag)
+    }
+
+    // a field-coded map unit is two macroblocks tall
+    pub fn coded_extent(&self) -> (u32, u32) {
+        (
+            (self.pic_width_in_mbs_minus1 + 1) * H264_MACROBLOCK_SIZE,
+            (self.pic_height_in_map_units_minus1 + 1)
+                * H264_MACROBLOCK_SIZE
+                * self.fields_per_frame(),
+        )
+    }
+}
+
 /// Parsed H.264 picture parameter set, the fields the `Std*` PPS needs.
 #[derive(Debug, Clone)]
 pub struct H264Pps {
@@ -629,13 +645,15 @@ pub fn parse_h264_sps(rbsp: &[u8]) -> Option<H264Sps> {
 
     let pic_width_in_mbs_minus1 = br.read_ue()?;
     let pic_height_in_map_units_minus1 = br.read_ue()?;
-    // callers compute the luma extent (minus1 + 1) * 16 unchecked
-    for size_in_macroblocks_minus1 in [pic_width_in_mbs_minus1, pic_height_in_map_units_minus1] {
-        size_in_macroblocks_minus1
-            .checked_add(1)?
-            .checked_mul(H264_MACROBLOCK_SIZE)?;
-    }
     let frame_mbs_only_flag = br.read_bit()?;
+    // `H264Sps::coded_extent` multiplies these out unchecked
+    pic_width_in_mbs_minus1
+        .checked_add(1)?
+        .checked_mul(H264_MACROBLOCK_SIZE)?;
+    pic_height_in_map_units_minus1
+        .checked_add(1)?
+        .checked_mul(H264_MACROBLOCK_SIZE)?
+        .checked_mul(2 - frame_mbs_only_flag)?;
     let mut mb_adaptive_frame_field_flag = 0u32;
     if frame_mbs_only_flag == 0 {
         mb_adaptive_frame_field_flag = br.read_bit()?;
@@ -7794,7 +7812,7 @@ impl VulkanVideoDevice {
 
         let ((w, h), picture) = self.session_extents(max_w, max_h);
         // a field-coded stream counts crop rows in pairs of field rows
-        let fields_per_frame = 2u32.saturating_sub(u32::from(ps.sps.frame_mbs_only_flag));
+        let fields_per_frame = ps.sps.fields_per_frame();
         let CropRectangle {
             offset: output_offset,
             extent: (out_w, out_h),
@@ -13219,8 +13237,7 @@ impl VulkanVideoPlayer {
             Some(VideoCodec::H264) => {
                 let ps = extract_h264_parameter_sets(&stream)
                     .ok_or(VulkanVideoError::UnsupportedStream)?;
-                let coded_width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
-                let coded_height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
+                let (coded_width, coded_height) = ps.sps.coded_extent();
                 let session = device.create_h264_session(&ps, coded_width, coded_height)?;
                 let (width, height) = session.output_extent;
                 let decoder = device.create_h264_dpb_decoder_gpu(&session, &ps)?;
@@ -14557,8 +14574,7 @@ impl VulkanVideoDec {
                         // non-keyframe AU), else wait for the keyframe that carries them.
                         return Ok(built);
                     };
-                    let width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
-                    let height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
+                    let (width, height) = ps.sps.coded_extent();
                     if built && self.ps_fingerprint == fp {
                         return Ok(true);
                     }
@@ -15753,6 +15769,33 @@ mod tests {
         let largest_fitting = u32::MAX / H264_MACROBLOCK_SIZE - 1;
         assert!(parse_h264_sps(&sps_rbsp(largest_fitting)).is_some());
         assert!(parse_h264_sps(&sps_rbsp(largest_fitting + 1)).is_none());
+    }
+
+    #[test]
+    fn h264_field_coded_sps_coded_extent_counts_both_fields() {
+        let width = 720;
+        let field_height = 288;
+        let mut w = BitWriter::default();
+        w.write_ue(0); // seq_parameter_set_id
+        w.write_ue(0); // log2_max_frame_num_minus4
+        w.write_ue(0); // pic_order_cnt_type
+        w.write_ue(0); // log2_max_pic_order_cnt_lsb_minus4
+        w.write_ue(1); // max_num_ref_frames
+        w.write_bit(0); // gaps_in_frame_num_value_allowed_flag
+        w.write_ue(width / H264_MACROBLOCK_SIZE - 1); // pic_width_in_mbs_minus1
+        w.write_ue(field_height / H264_MACROBLOCK_SIZE - 1); // pic_height_in_map_units_minus1
+        w.write_bit(0); // frame_mbs_only_flag
+        w.write_bit(0); // mb_adaptive_frame_field_flag
+        w.write_bit(1); // direct_8x8_inference_flag
+        w.write_bit(0); // frame_cropping_flag
+        w.write_bit(0); // vui_parameters_present_flag
+        w.write_bit(1); // rbsp_trailing_bits
+        w.align_to_byte();
+        // main profile, level 3.0
+        let mut rbsp = alloc::vec![77u8, 0, 30];
+        rbsp.extend_from_slice(&w.into_bytes());
+        let sps = parse_h264_sps(&rbsp).expect("field-coded SPS parses");
+        assert_eq!(sps.coded_extent(), (width, 2 * field_height));
     }
 
     #[test]

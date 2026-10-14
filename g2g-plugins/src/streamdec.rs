@@ -220,8 +220,7 @@ impl VulkanStreamDecoder {
             VideoCodec::H264 => {
                 let ps =
                     extract_h264_parameter_sets(init).ok_or(VulkanVideoError::UnsupportedStream)?;
-                let coded_width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
-                let coded_height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
+                let (coded_width, coded_height) = ps.sps.coded_extent();
                 let (range, coefficients) =
                     h26x_colorimetry(ps.sps.matrix_coefficients, ps.sps.video_full_range_flag);
                 let session = device.create_h264_session(&ps, coded_width, coded_height)?;
@@ -309,8 +308,7 @@ impl VulkanStreamDecoder {
             VideoCodec::H264 => {
                 let ps =
                     extract_h264_parameter_sets(init).ok_or(VulkanVideoError::UnsupportedStream)?;
-                let coded_width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
-                let coded_height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
+                let (coded_width, coded_height) = ps.sps.coded_extent();
                 let (range, coefficients) =
                     h26x_colorimetry(ps.sps.matrix_coefficients, ps.sps.video_full_range_flag);
                 let session = device.create_h264_session(&ps, coded_width, coded_height)?;

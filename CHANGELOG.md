@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1297: Vulkan decode sizes field-coded H.264 by both fields.
 - M1319: hex and base64 helpers live in one `textencoding` module.
 - M1318: remote senders share one caps de-dup type.
 - M1317: LiveKit and WebRTC elements share the signalling, token, media-time and transmit helpers.
