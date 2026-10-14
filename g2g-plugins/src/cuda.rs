@@ -42,6 +42,7 @@ use g2g_core::{
     Rate, RawVideoFormat, SystemSlice,
 };
 
+use crate::cuda_driver_ffi as ffi;
 use crate::cudadeviceid::{
     get_cuda_device_id, set_cuda_device_id, CUDA_DEVICE_ID_PROP, DEFAULT_CUDA_DEVICE_ID,
 };
@@ -750,171 +751,6 @@ fn check(code: ffi::CuResult) -> Result<(), G2gError> {
     }
 }
 
-/// Thin hand-rolled CUDA Driver API FFI: exactly the surface `CudaDownload`
-/// needs (foreign-context push/pop + a 2D device->host copy), linking
-/// `libcuda` directly. The driver `#define`s the unsuffixed `cuMemcpy2D` /
-/// `cuCtxPushCurrent` etc. to their `_v2` symbols, so we name the `_v2`
-/// exports the shared object actually provides.
-mod ffi {
-    use core::ffi::c_void;
-
-    /// `CUcontext` is an opaque handle (`struct CUctx_st *`).
-    pub(super) type CuContext = *mut c_void;
-    /// `CUresult` is a C `enum` (int-sized).
-    pub(super) type CuResult = i32;
-
-    pub(super) const CUDA_SUCCESS: CuResult = 0;
-
-    /// `CUmemorytype` values used here (`cuda.h`).
-    pub(super) const CU_MEMORYTYPE_HOST: u32 = 0x01;
-    pub(super) const CU_MEMORYTYPE_DEVICE: u32 = 0x02;
-
-    /// `CUDA_MEMCPY2D` (a.k.a. `CUDA_MEMCPY2D_v2`), field-for-field from
-    /// `cuda.h`. `size_t` -> `usize`, `CUdeviceptr` -> `u64`,
-    /// `CUmemorytype` -> `u32` (int-sized C enum), `CUarray` -> opaque
-    /// pointer.
-    #[repr(C)]
-    #[derive(Debug)]
-    pub(super) struct CudaMemcpy2D {
-        pub(super) src_x_in_bytes: usize,
-        pub(super) src_y: usize,
-        pub(super) src_memory_type: u32,
-        pub(super) src_host: *const c_void,
-        pub(super) src_device: u64,
-        pub(super) src_array: *mut c_void,
-        pub(super) src_pitch: usize,
-        pub(super) dst_x_in_bytes: usize,
-        pub(super) dst_y: usize,
-        pub(super) dst_memory_type: u32,
-        pub(super) dst_host: *mut c_void,
-        pub(super) dst_device: u64,
-        pub(super) dst_array: *mut c_void,
-        pub(super) dst_pitch: usize,
-        pub(super) width_in_bytes: usize,
-        pub(super) height: usize,
-    }
-
-    /// `CUdevice` is an int handle.
-    pub(super) type CuDevice = i32;
-
-    #[link(name = "cuda")]
-    extern "C" {
-        /// Push `ctx` onto the calling thread's current-context stack.
-        #[link_name = "cuCtxPushCurrent_v2"]
-        pub(super) fn cu_ctx_push_current(ctx: CuContext) -> CuResult;
-        /// Pop the current context, returning it through `pctx`.
-        #[link_name = "cuCtxPopCurrent_v2"]
-        pub(super) fn cu_ctx_pop_current(pctx: *mut CuContext) -> CuResult;
-        /// 2D memory copy described entirely by `*pcopy`.
-        #[link_name = "cuMemcpy2D_v2"]
-        pub(super) fn cu_memcpy_2d(pcopy: *const CudaMemcpy2D) -> CuResult;
-
-        // --- Context + device-memory lifecycle for `CudaUpload` (M353). Unlike
-        // `CudaDownload`, whose input frame carries the foreign CUcontext, an
-        // upload's System input has none, so the element creates and owns its own
-        // context and device allocations. ---
-
-        /// Initialise the CUDA driver API (flags must be 0). Idempotent.
-        #[link_name = "cuInit"]
-        pub(super) fn cu_init(flags: u32) -> CuResult;
-        /// Get a device handle by ordinal.
-        #[link_name = "cuDeviceGet"]
-        pub(super) fn cu_device_get(device: *mut CuDevice, ordinal: i32) -> CuResult;
-        /// Create a context on `dev` and leave it current on the calling thread.
-        #[link_name = "cuCtxCreate_v2"]
-        pub(super) fn cu_ctx_create(pctx: *mut CuContext, flags: u32, dev: CuDevice) -> CuResult;
-        /// Destroy a context created by [`cu_ctx_create`].
-        #[link_name = "cuCtxDestroy_v2"]
-        pub(super) fn cu_ctx_destroy(ctx: CuContext) -> CuResult;
-        /// Allocate pitched device memory (`*pitch` rows of >= `width_bytes`),
-        /// hardware-aligned so NVENC's input-resource registration accepts it.
-        #[link_name = "cuMemAllocPitch_v2"]
-        pub(super) fn cu_mem_alloc_pitch(
-            dptr: *mut u64,
-            pitch: *mut usize,
-            width_bytes: usize,
-            height: usize,
-            element_size: u32,
-        ) -> CuResult;
-        /// Free device memory from [`cu_mem_alloc`] / [`cu_mem_alloc_pitch`].
-        #[link_name = "cuMemFree_v2"]
-        pub(super) fn cu_mem_free(dptr: u64) -> CuResult;
-    }
-
-    // --- CUDA-GL interop (C3 Phase 3, step 2 / `CudaGlSink`) ---
-    //
-    // Staged ahead of its consumer (the EGL/GL windowing in step 2 phase B):
-    // the per-frame path is map -> get the mapped `cudaArray` -> `cuMemcpy2D`
-    // the NV12 plane device->array -> unmap, presenting via a fragment shader
-    // (DESIGN-C3-cuda.md §3.2, Appendix A). Signatures are verified against
-    // the CUDA Driver API docs (`CUDA_GL` / `CUDA_GRAPHICS` groups). These GL
-    // entry points live in `libcuda` itself, so no extra link is needed.
-    // `#[allow(dead_code)]` until phase B calls them; `non_snake_case` keeps
-    // the C names so they map 1:1 to the docs for the phase-B implementer.
-
-    /// `CUgraphicsResource` is an opaque handle (`struct CUgraphicsResource_st *`).
-    #[allow(dead_code)]
-    pub(super) type CuGraphicsResource = *mut c_void;
-    /// `CUarray` is an opaque handle (`struct CUarray_st *`).
-    #[allow(dead_code)]
-    pub(super) type CuArray = *mut c_void;
-    /// `CUstream`; the default stream is null.
-    #[allow(dead_code)]
-    pub(super) type CuStream = *mut c_void;
-    /// `GLuint` (OpenGL texture name).
-    #[allow(dead_code)]
-    pub(super) type GlUint = u32;
-    /// `GLenum` (OpenGL enumerant).
-    #[allow(dead_code)]
-    pub(super) type GlEnum = u32;
-
-    /// `CUmemorytype::CU_MEMORYTYPE_ARRAY`: a `cuMemcpy2D` destination that is
-    /// a mapped `CUarray` (the GL texture) rather than host/device memory.
-    #[allow(dead_code)]
-    pub(super) const CU_MEMORYTYPE_ARRAY: u32 = 0x03;
-    /// `CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD`: CUDA fully overwrites the
-    /// resource each frame (the decoder plane is its sole writer), so the
-    /// driver may skip preserving prior contents.
-    #[allow(dead_code)]
-    pub(super) const CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD: u32 = 0x02;
-    /// `GL_TEXTURE_2D` target (OpenGL spec constant).
-    #[allow(dead_code)]
-    pub(super) const GL_TEXTURE_2D: GlEnum = 0x0DE1;
-
-    #[allow(dead_code, non_snake_case)]
-    #[link(name = "cuda")]
-    extern "C" {
-        /// Register a GL texture object for CUDA access.
-        pub(super) fn cuGraphicsGLRegisterImage(
-            pCudaResource: *mut CuGraphicsResource,
-            image: GlUint,
-            target: GlEnum,
-            Flags: u32,
-        ) -> CuResult;
-        /// Unregister a previously-registered graphics resource.
-        pub(super) fn cuGraphicsUnregisterResource(resource: CuGraphicsResource) -> CuResult;
-        /// Map graphics resources for access by CUDA.
-        pub(super) fn cuGraphicsMapResources(
-            count: u32,
-            resources: *mut CuGraphicsResource,
-            hStream: CuStream,
-        ) -> CuResult;
-        /// Unmap graphics resources.
-        pub(super) fn cuGraphicsUnmapResources(
-            count: u32,
-            resources: *mut CuGraphicsResource,
-            hStream: CuStream,
-        ) -> CuResult;
-        /// Get the `CUarray` through which to access a mapped resource.
-        pub(super) fn cuGraphicsSubResourceGetMappedArray(
-            pArray: *mut CuArray,
-            resource: CuGraphicsResource,
-            arrayIndex: u32,
-            mipLevel: u32,
-        ) -> CuResult;
-    }
-}
-
 /// Per-plane extent of the NV12 -> GL-texture upload (CUDA device memory ->
 /// mapped `cudaArray`), in bytes per row and rows. Pure geometry, so it is
 /// unit-testable without a GPU.
@@ -978,20 +814,20 @@ impl CudaGlInterop {
         let mut uv_res: ffi::CuGraphicsResource = core::ptr::null_mut();
         // SAFETY: the textures are live GL_TEXTURE_2D names per the contract.
         unsafe {
-            check(ffi::cuGraphicsGLRegisterImage(
+            check(ffi::cu_graphics_gl_register_image(
                 &mut y_res,
                 y_tex,
                 ffi::GL_TEXTURE_2D,
                 ffi::CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD,
             ))?;
-            if let Err(e) = check(ffi::cuGraphicsGLRegisterImage(
+            if let Err(e) = check(ffi::cu_graphics_gl_register_image(
                 &mut uv_res,
                 uv_tex,
                 ffi::GL_TEXTURE_2D,
                 ffi::CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD,
             )) {
                 // Roll back the luma registration so we don't leak it.
-                let _ = ffi::cuGraphicsUnregisterResource(y_res);
+                let _ = ffi::cu_graphics_unregister_resource(y_res);
                 return Err(e);
             }
         }
@@ -1012,7 +848,7 @@ impl CudaGlInterop {
         // below are valid only between map and unmap, so the copies sit
         // strictly inside that window and the unmap always runs.
         unsafe {
-            check(ffi::cuGraphicsMapResources(
+            check(ffi::cu_graphics_map_resources(
                 2,
                 resources.as_mut_ptr(),
                 core::ptr::null_mut(),
@@ -1020,7 +856,7 @@ impl CudaGlInterop {
             let y_copy = copy_plane_to_array(self.y_res, buf.luma_ptr, buf.luma_pitch, &luma);
             let uv_copy =
                 copy_plane_to_array(self.uv_res, buf.chroma_ptr, buf.chroma_pitch, &chroma);
-            let unmap = check(ffi::cuGraphicsUnmapResources(
+            let unmap = check(ffi::cu_graphics_unmap_resources(
                 2,
                 resources.as_mut_ptr(),
                 core::ptr::null_mut(),
@@ -1037,8 +873,8 @@ impl Drop for CudaGlInterop {
         // SAFETY: both resources were registered in `register` and not yet
         // unregistered; best-effort cleanup, a failure here is unactionable.
         unsafe {
-            let _ = ffi::cuGraphicsUnregisterResource(self.y_res);
-            let _ = ffi::cuGraphicsUnregisterResource(self.uv_res);
+            let _ = ffi::cu_graphics_unregister_resource(self.y_res);
+            let _ = ffi::cu_graphics_unregister_resource(self.uv_res);
         }
     }
 }
@@ -1058,7 +894,7 @@ unsafe fn copy_plane_to_array(
     let mut array: ffi::CuArray = core::ptr::null_mut();
     // SAFETY: `resource` is mapped; array index 0 / mip 0 is the base image.
     unsafe {
-        check(ffi::cuGraphicsSubResourceGetMappedArray(
+        check(ffi::cu_graphics_sub_resource_get_mapped_array(
             &mut array, resource, 0, 0,
         ))?;
     }

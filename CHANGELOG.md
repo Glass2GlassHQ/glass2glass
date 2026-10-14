@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1418: `cuda.rs` calls the CUDA driver through the shared FFI module.
 - M1417: compositor, wgpucompositor and deinterlace framerate math uses the core helpers.
 - M1416: `mfencode` drops three redundant interlace patterns.
 - M1415: unused gpu and dma-buf helpers are gated to the features that call them.

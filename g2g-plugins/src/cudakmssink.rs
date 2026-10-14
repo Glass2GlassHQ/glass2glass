@@ -545,7 +545,6 @@ struct WorkerState {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn worker_main(
     device_path: PathBuf,
     width: u32,
