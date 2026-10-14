@@ -167,7 +167,7 @@ impl AudioReverse {
         let Some((format, channels, rate)) = self.input else {
             return Err(G2gError::NotConfigured);
         };
-        let bytes_per_frame = frame_bytes(format, channels);
+        let bytes_per_frame = frame_bytes(format, channels).ok_or(G2gError::CapsMismatch)?;
         if bytes_per_frame == 0 {
             return Err(G2gError::CapsMismatch);
         }
@@ -266,7 +266,8 @@ impl AsyncElement for AudioReverse {
                 PipelinePacket::DataFrame(frame) => {
                     let bytes_per_frame = self
                         .input
-                        .map_or(0, |(format, channels, _)| frame_bytes(format, channels));
+                        .and_then(|(format, channels, _)| frame_bytes(format, channels))
+                        .unwrap_or(0);
                     let bytes = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;

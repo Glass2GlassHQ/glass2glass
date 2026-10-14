@@ -39,7 +39,7 @@ use g2g_core::{
 };
 
 use crate::audioconvert::{
-    get_pcm_shape_property, pcm_formats, sample_bytes, set_pcm_shape_property, DEFAULT_PCM_FORMAT,
+    get_pcm_shape_property, pcm_formats, set_pcm_shape_property, DEFAULT_PCM_FORMAT,
     DEFAULT_PCM_RATE, PCM_SHAPE_PROPS,
 };
 
@@ -98,7 +98,7 @@ fn mono_caps(shape: PcmShape) -> Caps {
 /// sample frame is left behind.
 fn extract_channel(bytes: &[u8], shape: PcmShape, channel: usize) -> Result<Box<[u8]>, G2gError> {
     let (format, channels, _) = shape;
-    let per_sample = sample_bytes(format);
+    let per_sample = format.bytes_per_sample().ok_or(G2gError::CapsMismatch)?;
     let stride = per_sample * channels as usize;
     if stride == 0 || channel >= channels as usize {
         return Err(G2gError::CapsMismatch);

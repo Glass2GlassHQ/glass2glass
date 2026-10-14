@@ -75,15 +75,6 @@ fn hw() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
 }
 
-/// Bytes per sample for a g2g PCM format (None for compressed audio).
-fn bytes_per_sample(format: AudioFormat) -> Option<usize> {
-    match format {
-        AudioFormat::PcmS16Le => Some(2),
-        AudioFormat::PcmF32Le => Some(4),
-        _ => None,
-    }
-}
-
 /// Validate that `caps` is interleaved PCM and extract `(format, channels, rate)`.
 fn pcm_params(caps: &Caps) -> Result<(AudioFormat, u8, u32), G2gError> {
     match caps {
@@ -92,7 +83,10 @@ fn pcm_params(caps: &Caps) -> Result<(AudioFormat, u8, u32), G2gError> {
             channels,
             sample_rate,
             ..
-        } if bytes_per_sample(*format).is_some() && *channels > 0 && *sample_rate > 0 => {
+        } if asbd(*format, *channels, *sample_rate).is_some()
+            && *channels > 0
+            && *sample_rate > 0 =>
+        {
             Ok((*format, *channels, *sample_rate))
         }
         _ => Err(G2gError::CapsMismatch),

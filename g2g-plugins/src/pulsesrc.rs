@@ -45,7 +45,7 @@ use g2g_core::{
 use crate::audiocapture::{
     capture_queue, run_capture, wait_for_device, CaptureLoopSettings, CaptureSender,
 };
-use crate::audioconvert::{audio_format_from_str, audio_format_to_str, sample_bytes};
+use crate::audioconvert::{audio_format_from_str, audio_format_to_str};
 use crate::pulsepcm::{opt_name, pulse_map, pulse_spec, FORMATS};
 
 /// Server-side record buffer span, microseconds (gst `pulsesrc buffer-time`).
@@ -247,7 +247,11 @@ impl PulseSrc {
     /// apply to it.
     fn stream_config(&self) -> Result<StreamConfig, G2gError> {
         let spec = pulse_spec(&self.caps()?)?;
-        let frame_bytes = sample_bytes(self.format) * self.channels as usize;
+        let frame_bytes = self
+            .format
+            .bytes_per_sample()
+            .ok_or(G2gError::CapsMismatch)?
+            * self.channels as usize;
         if frame_bytes == 0 {
             return Err(G2gError::CapsMismatch);
         }
@@ -389,7 +393,11 @@ impl SourceLoop for PulseSrc {
                 return Err(G2gError::NotConfigured);
             }
             let cfg = self.stream_config()?;
-            let frame_bytes = sample_bytes(self.format) * self.channels as usize;
+            let frame_bytes = self
+                .format
+                .bytes_per_sample()
+                .ok_or(G2gError::CapsMismatch)?
+                * self.channels as usize;
             let (audio_tx, audio_rx) = capture_queue(frame_bytes)?;
             let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Result<(), i32>>(1);
             let stop = Arc::new(AtomicBool::new(false));

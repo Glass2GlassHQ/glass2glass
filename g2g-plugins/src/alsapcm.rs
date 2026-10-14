@@ -19,9 +19,6 @@ use alsa::pcm::{ChmapPosition, Format, PCM};
 
 use g2g_core::{AudioFormat, Caps, ChannelLayout, ChannelPosition, G2gError};
 
-#[cfg(feature = "alsa-src")]
-use crate::audioconvert::sample_bytes;
-
 /// The PCM sample formats an ALSA device is opened with, and the ALSA format
 /// each maps to. `PcmS24Le` is our 3-byte packed layout, ALSA's `S24_3LE`
 /// (not `S24LE`, which is 24 bits inside a 32-bit container).
@@ -50,7 +47,11 @@ pub(crate) struct PcmConfig {
 impl PcmConfig {
     /// Bytes in one interleaved sample frame.
     pub(crate) fn frame_bytes(&self) -> usize {
-        sample_bytes(self.format) * self.channels as usize
+        let width = self
+            .format
+            .bytes_per_sample()
+            .expect("alsa_params maps only fixed-width PCM formats");
+        width * self.channels as usize
     }
 }
 

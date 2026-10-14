@@ -71,17 +71,6 @@ fn frames_transferred(r: Result<u32, AudioError>) -> Result<u32, G2gError> {
     }
 }
 
-/// Bytes per sample for a g2g PCM format.
-fn bytes_per_sample(format: AudioFormat) -> Option<usize> {
-    match format {
-        AudioFormat::PcmS16Le => Some(2),
-        AudioFormat::PcmF32Le => Some(4),
-        // Compressed audio (or a future format) is not a PCM device format.
-        AudioFormat::Aac | AudioFormat::Opus => None,
-        _ => None,
-    }
-}
-
 /// The AAudio sample format for a g2g PCM format (None for compressed audio).
 fn ndk_format(format: AudioFormat) -> Option<NdkAudioFormat> {
     match format {
@@ -117,7 +106,7 @@ fn pcm_params(caps: &Caps) -> Result<(AudioFormat, u8, u32), G2gError> {
             channels,
             sample_rate,
             ..
-        } if bytes_per_sample(*format).is_some() && *channels > 0 && *sample_rate > 0 => {
+        } if ndk_format(*format).is_some() && *channels > 0 && *sample_rate > 0 => {
             Ok((*format, *channels, *sample_rate))
         }
         _ => Err(G2gError::CapsMismatch),
@@ -315,7 +304,7 @@ impl AsyncElement for AAudioSink {
         self.sample_rate = sample_rate;
         let stream = DeviceThreadStream(self.open()?);
         let frame_bytes =
-            bytes_per_sample(format).ok_or(G2gError::CapsMismatch)? * usize::from(channels);
+            format.bytes_per_sample().ok_or(G2gError::CapsMismatch)? * usize::from(channels);
         let rendered = Arc::clone(&self.rendered);
         self.link = Some(WorkerLink::spawn("g2g-aaudiosink", move |commands| {
             render_worker(stream, commands, frame_bytes, rendered)
@@ -549,7 +538,7 @@ impl SourceLoop for AAudioSrc {
             else {
                 return Err(G2gError::CapsMismatch);
             };
-            let bps = bytes_per_sample(format).ok_or(G2gError::CapsMismatch)?;
+            let bps = format.bytes_per_sample().ok_or(G2gError::CapsMismatch)?;
             let frame_bytes = bps * channels as usize;
             let frames_per_read = (sample_rate as u64 * CAPTURE_MS / 1000).max(1) as usize;
             let stream = DeviceThreadStream(self.stream.take().ok_or(G2gError::NotConfigured)?);

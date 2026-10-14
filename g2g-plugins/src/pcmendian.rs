@@ -19,18 +19,6 @@ pub(crate) const CARRIED: [AudioFormat; 7] = [
     AudioFormat::Alaw,
 ];
 
-/// Bytes per sample of a PCM / companded format these containers carry, `None`
-/// for a coded format they do not describe.
-pub(crate) fn sample_width(format: AudioFormat) -> Option<usize> {
-    match format {
-        AudioFormat::PcmU8 | AudioFormat::Mulaw | AudioFormat::Alaw => Some(1),
-        AudioFormat::PcmS16Le => Some(2),
-        AudioFormat::PcmS24Le => Some(3),
-        AudioFormat::PcmS32Le | AudioFormat::PcmF32Le => Some(4),
-        _ => None,
-    }
-}
-
 /// One PCM stream: the graph format it carries and how its samples sit on the
 /// wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +67,7 @@ pub(crate) fn xor_sign8(data: &mut [u8]) {
 /// `PcmU8`; G.711 bytes are the same either way. This is its own inverse, so
 /// parser and muxer both call it.
 pub(crate) fn convert_wire_layout(data: &mut [u8], format: AudioFormat, big_endian: bool) {
-    match sample_width(format) {
+    match format.bytes_per_sample() {
         Some(_) if format == AudioFormat::PcmU8 => xor_sign8(data),
         Some(width) if big_endian => swap_endian(data, width),
         _ => {}
@@ -94,7 +82,7 @@ mod tests {
     #[test]
     fn every_carried_format_has_a_width() {
         for format in CARRIED {
-            assert!(sample_width(format).is_some(), "{format:?}");
+            assert!(format.bytes_per_sample().is_some(), "{format:?}");
         }
     }
 
@@ -124,7 +112,8 @@ mod tests {
     fn wire_conversion_round_trips_every_carried_format() {
         for format in CARRIED {
             for big_endian in [false, true] {
-                let original: Vec<u8> = (0u8..sample_width(format).unwrap() as u8 * 6).collect();
+                let original: Vec<u8> =
+                    (0u8..format.bytes_per_sample().unwrap() as u8 * 6).collect();
                 let mut data = original.clone();
                 convert_wire_layout(&mut data, format, big_endian);
                 convert_wire_layout(&mut data, format, big_endian);

@@ -136,9 +136,7 @@ impl Equalizer3Bands {
             .enumerate()
         {
             let x = i16::from_le_bytes([s[0], s[1]]) as f64;
-            let x = self.cascade.filter_sample(i % ch, x);
-            let rounded = if x >= 0.0 { x + 0.5 } else { x - 0.5 };
-            let out = rounded.clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+            let out = crate::audiofx::saturate_i16(self.cascade.filter_sample(i % ch, x));
             d.copy_from_slice(&out.to_le_bytes());
         }
     }

@@ -126,6 +126,16 @@ impl PcmScratch {
     }
 }
 
+// rounds half away from zero (core has no f64::round), then clamps into the i16 range
+pub(crate) fn saturate_i16(value: f64) -> i16 {
+    let rounded = if value >= 0.0 {
+        value + 0.5
+    } else {
+        value - 0.5
+    };
+    rounded.clamp(i16::MIN as f64, i16::MAX as f64) as i16
+}
+
 /// Hold a mixed sample inside full scale. gst's `audiochannelmix` and `stereo`
 /// are S16-only and clamp to the integer range; the g2g filters work in f32, so
 /// the same saturation lands at +-1.

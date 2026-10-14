@@ -209,7 +209,7 @@ fn header(
         &[]
     };
     let comm_len = (COMM_FIXED_LEN + comm_ext.len()) as u32;
-    let frame_bytes = crate::pcmendian::sample_width(format)?.checked_mul(channels as usize)?;
+    let frame_bytes = format.bytes_per_sample()?.checked_mul(channels as usize)?;
     if frame_bytes == 0 {
         return None;
     }
@@ -528,7 +528,7 @@ impl PadTemplates for AiffMux {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pcmendian::{convert_wire_layout, sample_width, CARRIED};
+    use crate::pcmendian::{convert_wire_layout, CARRIED};
     use crate::testutil::{data_bytes, first_caps, frame, roundtrip, run, CollectSink};
     use crate::typefind::sniff;
     use alloc::vec::Vec;
@@ -547,7 +547,7 @@ mod tests {
     }
 
     fn samples(format: AudioFormat, channels: u8, frames: usize) -> Vec<u8> {
-        let n = sample_width(format).unwrap() * channels as usize * frames;
+        let n = format.bytes_per_sample().unwrap() * channels as usize * frames;
         (0..n).map(|i| i as u8).collect()
     }
 

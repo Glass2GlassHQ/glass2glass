@@ -137,8 +137,7 @@ Network:
 Shared helpers:
 
 - Move the plugins' ns to clock-rate tick and Q16 framerate math (about 30 sites)
-  onto the `time` and `caps` helpers, `sample_bytes`/`sample_width` onto
-  `AudioFormat::bytes_per_sample`, and the 7 `fixed_or_zero` copies onto `Dim::fixed`.
+  onto the `time` and `caps` helpers, and the 7 `fixed_or_zero` copies onto `Dim::fixed`.
 - Replace the `Pin::new_unchecked` polls next to the no-op wakers with `pin!`.
 - `testutil::CollectSink` in src tests, a shared sink for integration tests.
 - An `mfcommon` module for the Media Foundation helpers, one CUDA driver FFI module.

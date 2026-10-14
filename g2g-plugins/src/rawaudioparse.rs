@@ -31,7 +31,7 @@ use g2g_core::{
     PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::audioconvert::{audio_format_from_str, audio_format_to_str, sample_bytes};
+use crate::audioconvert::{audio_format_from_str, audio_format_to_str};
 
 /// gst `rawaudioparse` defaults: 16-bit PCM, 44.1 kHz, stereo.
 const DEFAULT_FORMAT: AudioFormat = AudioFormat::PcmS16Le;
@@ -140,14 +140,10 @@ impl RawAudioParse {
         self.sequence
     }
 
-    /// Bytes one sample frame occupies: one sample per channel. A-law / mu-law
-    /// samples are a single byte each.
+    /// Bytes one sample frame occupies: one sample per channel.
     fn frame_bytes(&self) -> Option<usize> {
-        let sample = match self.format {
-            AudioFormat::Alaw | AudioFormat::Mulaw => 1,
-            format => sample_bytes(format),
-        };
-        sample
+        self.format
+            .bytes_per_sample()?
             .checked_mul(usize::from(self.channels))
             .filter(|bytes| *bytes > 0)
     }

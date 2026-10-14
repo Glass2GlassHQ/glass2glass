@@ -13,8 +13,6 @@ use spa::utils::SpaTypes;
 
 use g2g_core::{AudioFormat as G2gAudioFormat, Caps, ChannelLayout, ChannelPosition, G2gError};
 
-use crate::audioconvert::sample_bytes;
-
 /// The PCM sample formats the PipeWire elements open a stream with, and the SPA
 /// format each maps to. `PcmS24Le` is our 3-byte packed layout, SPA's `S24LE`
 /// (`S24_32LE` is the 32-bit-container variant).
@@ -50,7 +48,8 @@ pub(crate) fn frame_bytes(format: AudioFormat, channels: u32) -> usize {
     FORMATS
         .iter()
         .find(|(_, spa)| *spa == format)
-        .map_or(0, |(g2g, _)| sample_bytes(*g2g))
+        .and_then(|(g2g, _)| g2g.bytes_per_sample())
+        .unwrap_or(0)
         * channels as usize
 }
 

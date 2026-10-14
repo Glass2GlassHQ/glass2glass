@@ -49,7 +49,6 @@ use g2g_core::{
 };
 
 use crate::alsapcm::{alsa_params, device_permutation, permute, PcmConfig, FORMATS};
-use crate::audioconvert::sample_bytes;
 
 fn alsa_err(code: i32) -> G2gError {
     G2gError::Hardware(HardwareError::Alsa(code))
@@ -463,7 +462,10 @@ fn write_all(
     bytes: &[u8],
     rendered: &AtomicU64,
 ) -> Result<(), G2gError> {
-    let sample = sample_bytes(cfg.format);
+    let sample = cfg
+        .format
+        .bytes_per_sample()
+        .ok_or(G2gError::CapsMismatch)?;
     let frame = sample * cfg.channels as usize;
     if frame == 0 {
         return Err(G2gError::CapsMismatch);

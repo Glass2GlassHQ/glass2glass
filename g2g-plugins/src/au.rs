@@ -375,7 +375,7 @@ impl PadTemplates for AuMux {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pcmendian::{convert_wire_layout, sample_width, CARRIED};
+    use crate::pcmendian::{convert_wire_layout, CARRIED};
     use crate::testutil::{data_bytes, roundtrip, run};
     use crate::typefind::sniff;
     use alloc::vec::Vec;
@@ -390,7 +390,7 @@ mod tests {
     }
 
     fn samples(format: AudioFormat, channels: u8, frames: usize) -> Vec<u8> {
-        let n = sample_width(format).unwrap() * channels as usize * frames;
+        let n = format.bytes_per_sample().unwrap() * channels as usize * frames;
         (0..n).map(|i| i as u8).collect()
     }
 

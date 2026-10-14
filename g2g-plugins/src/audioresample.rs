@@ -36,7 +36,7 @@ use g2g_core::{
     ANY_SAMPLE_RATE,
 };
 
-use crate::audioconvert::{pcm_formats, read_sample, sample_bytes, write_sample};
+use crate::audioconvert::{pcm_formats, read_sample, write_sample};
 
 /// `f64::floor` without `std` / libm: truncation rounds toward zero, so a
 /// negative non-integer needs one subtracted. `rel` lives in a small range
@@ -534,7 +534,7 @@ impl AudioResample {
         in_rate: u32,
         out_rate: u32,
     ) -> Result<Box<[u8]>, G2gError> {
-        let bytes = sample_bytes(in_format);
+        let bytes = in_format.bytes_per_sample().ok_or(G2gError::CapsMismatch)?;
         let ch = in_channels as usize;
         let in_frame = bytes * ch;
         if in_frame == 0 || !src.len().is_multiple_of(in_frame) {

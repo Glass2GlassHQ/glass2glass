@@ -65,17 +65,12 @@ impl EchoState {
         {
             let input = i16::from_le_bytes([s[0], s[1]]) as f64;
             let echo = self.ring[(self.pos + len - back) % len] as f64;
-            let out = clamp_i16(input + intensity * echo);
-            self.ring[self.pos % len] = clamp_i16(input + feedback * echo);
+            let out = crate::audiofx::saturate_i16(input + intensity * echo);
+            self.ring[self.pos % len] = crate::audiofx::saturate_i16(input + feedback * echo);
             self.pos = (self.pos + 1) % len;
             d.copy_from_slice(&out.to_le_bytes());
         }
     }
-}
-
-fn clamp_i16(v: f64) -> i16 {
-    let rounded = if v >= 0.0 { v + 0.5 } else { v - 0.5 };
-    rounded.clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }
 
 fn delay_frames(delay_ns: u64, sample_rate: u32) -> usize {

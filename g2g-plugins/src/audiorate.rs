@@ -27,7 +27,7 @@ use g2g_core::{
     PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
-use crate::audioconvert::{ns_to_samples, pcm_formats, sample_bytes, samples_to_ns, silence_byte};
+use crate::audioconvert::{ns_to_samples, pcm_formats, samples_to_ns, silence_byte};
 
 /// gst `audiorate`'s default `tolerance`, 40 ms in ns.
 const DEFAULT_TOLERANCE_NS: u64 = 40_000_000;
@@ -247,7 +247,9 @@ impl AsyncElement for AudioRate {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let (format, channels, rate) = self.input.ok_or(G2gError::NotConfigured)?;
-                    let bytes_per_frame = sample_bytes(format) * channels as usize;
+                    let bytes_per_frame =
+                        format.bytes_per_sample().ok_or(G2gError::CapsMismatch)?
+                            * channels as usize;
                     let len = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?

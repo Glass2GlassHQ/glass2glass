@@ -181,22 +181,9 @@ impl AudioConvert {
     }
 }
 
-/// Bytes per sample. `PcmS24Le` is 3-byte packed (no 32-bit container), the
-/// ST 2110-30 / AES67 L24 layout.
-pub(crate) fn sample_bytes(format: AudioFormat) -> usize {
-    match format {
-        AudioFormat::PcmU8 => 1,
-        AudioFormat::PcmS16Le => 2,
-        AudioFormat::PcmS24Le => 3,
-        AudioFormat::PcmF32Le | AudioFormat::PcmS32Le => 4,
-        // not reachable: only the PCM formats pass negotiation.
-        _ => 0,
-    }
-}
-
-// bytes per interleaved frame
-pub(crate) fn frame_bytes(format: AudioFormat, channels: u8) -> usize {
-    sample_bytes(format) * usize::from(channels)
+// bytes per interleaved frame, None for a coded format
+pub(crate) fn frame_bytes(format: AudioFormat, channels: u8) -> Option<usize> {
+    Some(format.bytes_per_sample()? * usize::from(channels))
 }
 
 const NS_PER_SECOND: u64 = 1_000_000_000;
@@ -639,8 +626,10 @@ fn convert_pcm(
     quantizer: &mut Quantizer,
 ) -> Result<Box<[u8]>, G2gError> {
     let (in_format, out_format) = (input.format, output.format);
-    let in_bytes = sample_bytes(in_format);
-    let out_bytes = sample_bytes(out_format);
+    let in_bytes = in_format.bytes_per_sample().ok_or(G2gError::CapsMismatch)?;
+    let out_bytes = out_format
+        .bytes_per_sample()
+        .ok_or(G2gError::CapsMismatch)?;
     let in_ch = input.channels as usize;
     let out_ch = output.channels as usize;
     let in_frame = in_bytes * in_ch;
@@ -1262,7 +1251,8 @@ pub(crate) fn encode_into(dst: &mut Vec<u8>, samples: &[f32], format: AudioForma
 
 /// Encode interleaved f32 samples back into `format`.
 pub(crate) fn encode(samples: &[f32], format: AudioFormat) -> Box<[u8]> {
-    let mut out = Vec::with_capacity(samples.len() * sample_bytes(format));
+    let width = format.bytes_per_sample().unwrap_or(0);
+    let mut out = Vec::with_capacity(samples.len() * width);
     encode_into(&mut out, samples, format);
     out.into_boxed_slice()
 }
@@ -1673,7 +1663,7 @@ mod tests {
             let packed = convert(&src, AudioFormat::PcmF32Le, 1, format, 1).unwrap();
             assert_eq!(
                 packed.len(),
-                values.len() * sample_bytes(format),
+                values.len() * format.bytes_per_sample().unwrap(),
                 "{format:?}"
             );
             let back = convert(&packed, format, 1, AudioFormat::PcmF32Le, 1).unwrap();

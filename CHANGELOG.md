@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1296: audio elements take sample width from `AudioFormat::bytes_per_sample()`, and i16 round-and-clamp is one `saturate_i16`.
 - M1295: `audiotestsrc` plays tones at their exact frequency, sharing one phase helper with `tonegeneratesrc` and `dtmfsrc`.
 - M1294: `spectrum` precomputes its window and FFT twiddles and reuses its buffers.
 - M1293: `equalizer` runs on the shared `IirCascade`, and `audioiirfilter` keeps its history in a ring.

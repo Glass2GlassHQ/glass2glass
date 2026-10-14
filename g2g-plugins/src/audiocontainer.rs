@@ -14,7 +14,7 @@ use g2g_core::{
     G2gError, MemoryDomain, OutputSink, PipelinePacket, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
-use crate::pcmendian::{convert_wire_layout, sample_width, PcmWire, CARRIED};
+use crate::pcmendian::{convert_wire_layout, PcmWire, CARRIED};
 
 /// Size fields of a stream whose length is not known when the header is written.
 pub(crate) const STREAMING_SIZE: u32 = u32::MAX;
@@ -106,7 +106,10 @@ pub(crate) async fn emit_pcm(
     sequence: &mut u64,
     out: &mut dyn OutputSink,
 ) -> Result<(), G2gError> {
-    let width = sample_width(wire.format).ok_or(G2gError::CapsMismatch)?;
+    let width = wire
+        .format
+        .bytes_per_sample()
+        .ok_or(G2gError::CapsMismatch)?;
     let frame_bytes = width
         .checked_mul(wire.channels as usize)
         .ok_or(G2gError::CapsMismatch)?;
@@ -214,7 +217,8 @@ impl PcmMux {
                     let samples = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let frame_bytes = sample_width(format)
+                    let frame_bytes = format
+                        .bytes_per_sample()
                         .and_then(|width| width.checked_mul(channels as usize))
                         .ok_or(G2gError::CapsMismatch)?;
                     if frame_bytes == 0 || samples.len() % frame_bytes != 0 {

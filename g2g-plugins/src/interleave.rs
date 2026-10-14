@@ -42,7 +42,7 @@ use g2g_core::{
 };
 
 use crate::audioconvert::{
-    get_pcm_shape_property, sample_bytes, samples_to_ns, set_pcm_shape_property, silence_byte,
+    get_pcm_shape_property, samples_to_ns, set_pcm_shape_property, silence_byte,
     DEFAULT_PCM_FORMAT, DEFAULT_PCM_RATE, PCM_SHAPE_PROPS,
 };
 
@@ -122,10 +122,9 @@ impl Interleave {
     /// delivered, or, once every pad is at `Eos`, everything left (the shorter
     /// pads drained with silence).
     fn ready_samples(&self) -> usize {
-        let per_sample = sample_bytes(self.format);
-        if per_sample == 0 {
+        let Some(per_sample) = self.format.bytes_per_sample() else {
             return 0;
-        }
+        };
         let queued_samples = |pad: usize| self.queued[pad].len() / per_sample;
         match (0..self.inputs)
             .filter(|&pad| !self.done[pad])
@@ -142,7 +141,10 @@ impl Interleave {
         if samples == 0 {
             return Ok(());
         }
-        let per_sample = sample_bytes(self.format);
+        let per_sample = self
+            .format
+            .bytes_per_sample()
+            .ok_or(G2gError::CapsMismatch)?;
         let stride = per_sample * self.inputs;
         // Silence pre-fill, so a pad that ran out (at Eos) needs no second pass.
         let mut bytes = vec![silence_byte(self.format); samples * stride].into_boxed_slice();
@@ -250,7 +252,10 @@ impl MultiInputElement for Interleave {
                     let bytes = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let per_sample = sample_bytes(self.format);
+                    let per_sample = self
+                        .format
+                        .bytes_per_sample()
+                        .ok_or(G2gError::CapsMismatch)?;
                     if per_sample == 0 || bytes.len() % per_sample != 0 {
                         return Err(G2gError::CapsMismatch);
                     }

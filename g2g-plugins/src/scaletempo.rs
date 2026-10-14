@@ -42,7 +42,7 @@ use g2g_core::{
     PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
-use crate::audioconvert::{read_sample, sample_bytes, samples_to_ns, write_sample};
+use crate::audioconvert::{read_sample, samples_to_ns, write_sample};
 
 /// gst `scaletempo`'s default `stride`, the length of one output stride.
 const DEFAULT_STRIDE_MS: u32 = 30;
@@ -356,7 +356,9 @@ impl ScaleTempo {
         if samples.is_empty() {
             return Ok(());
         }
-        let mut bytes = Vec::with_capacity(samples.len() * sample_bytes(format));
+        let mut bytes = Vec::with_capacity(
+            samples.len() * format.bytes_per_sample().ok_or(G2gError::CapsMismatch)?,
+        );
         for sample in &samples {
             write_sample(&mut bytes, *sample, format);
         }
@@ -437,7 +439,8 @@ impl AsyncElement for ScaleTempo {
             let channels = channel_count as usize;
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let bytes_per_frame = sample_bytes(format) * channels;
+                    let bytes_per_frame =
+                        format.bytes_per_sample().ok_or(G2gError::CapsMismatch)? * channels;
                     let bytes = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
@@ -466,7 +469,7 @@ impl AsyncElement for ScaleTempo {
                     if self.base_pts.is_none() {
                         self.base_pts = Some(self.map_pts(frame.timing.pts().unwrap_or(0)));
                     }
-                    let width = sample_bytes(format);
+                    let width = format.bytes_per_sample().ok_or(G2gError::CapsMismatch)?;
                     let input: Vec<f32> = bytes
                         .chunks_exact(width)
                         .map(|at| read_sample(at, format))

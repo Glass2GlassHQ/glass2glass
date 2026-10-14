@@ -287,7 +287,8 @@ impl AudioBufferSplit {
     fn effective_duration(&self) -> (u64, u64) {
         let bytes_per_frame = self
             .input
-            .map_or(0, |(format, channels, _)| frame_bytes(format, channels));
+            .and_then(|(format, channels, _)| frame_bytes(format, channels))
+            .unwrap_or(0);
         let Some((_, _, rate)) = self.input else {
             return (
                 self.duration_numerator as u64,
@@ -366,7 +367,7 @@ impl AudioBufferSplit {
         let Some((format, channels, rate)) = self.input else {
             return Err(G2gError::NotConfigured);
         };
-        let bytes_per_frame = frame_bytes(format, channels);
+        let bytes_per_frame = frame_bytes(format, channels).ok_or(G2gError::CapsMismatch)?;
         if bytes_per_frame == 0 {
             return Err(G2gError::CapsMismatch);
         }
@@ -432,7 +433,7 @@ impl AudioBufferSplit {
         let Some((format, channels, rate)) = self.input else {
             return Err(G2gError::NotConfigured);
         };
-        let bytes_per_frame = frame_bytes(format, channels);
+        let bytes_per_frame = frame_bytes(format, channels).ok_or(G2gError::CapsMismatch)?;
         let available_frames = (self.adapter.len() / bytes_per_frame.max(1)) as u64;
 
         let forced = self.current_offset.is_none();
@@ -555,7 +556,8 @@ impl AsyncElement for AudioBufferSplit {
                 PipelinePacket::DataFrame(frame) => {
                     let bytes_per_frame = self
                         .input
-                        .map_or(0, |(format, channels, _)| frame_bytes(format, channels));
+                        .and_then(|(format, channels, _)| frame_bytes(format, channels))
+                        .unwrap_or(0);
                     let bytes = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
