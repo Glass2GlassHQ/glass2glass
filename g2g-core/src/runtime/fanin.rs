@@ -120,8 +120,8 @@ pub trait DynSourceLoop: ElementBound {
 
     /// Dyn-safe mirror of [`SourceLoop::probe_output_caps`] (M480): the parse-time
     /// caps `decodebin` uses to pick a demuxer, allowed to sniff the header.
-    fn probe_output_caps(&mut self) -> Option<Caps> {
-        self.configured_output_caps()
+    fn probe_output_caps(&mut self) -> Result<Option<Caps>, G2gError> {
+        Ok(self.configured_output_caps())
     }
 
     /// Dyn-safe mirror of [`SourceLoop::properties`], for `gst-inspect` /
@@ -233,7 +233,7 @@ impl<T: SourceLoop> DynSourceLoop for T {
         SourceLoop::configured_output_caps(self)
     }
 
-    fn probe_output_caps(&mut self) -> Option<Caps> {
+    fn probe_output_caps(&mut self) -> Result<Option<Caps>, G2gError> {
         SourceLoop::probe_output_caps(self)
     }
 

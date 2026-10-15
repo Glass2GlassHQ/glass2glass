@@ -15,6 +15,11 @@ byte-stream-level analog of the codec/raw video split. A byte source declares
 it, `FileSrc::new(path, Caps::ByteStream{MpegTs})`, and the demuxer's transform
 constraint maps it to the elementary stream type.
 
+A launch `filesrc` types its file from the extension, and sniffs the header when
+the extension is unknown or `bytestream-format=auto`. When the sniff recognizes
+nothing, `probe_output_caps` returns an error and `decodebin` fails the parse
+with `ParseError::UnrecognizedContent` instead of guessing a container.
+
 ## Encoding profiles
 
 `encodebin` is the encode direction of `decodebin`, and it is a parse-time

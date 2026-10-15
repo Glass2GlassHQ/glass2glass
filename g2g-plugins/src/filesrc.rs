@@ -192,14 +192,18 @@ impl SourceLoop for FileSrc {
 
     /// Parse-time caps for `decodebin` (M480): sniff a `bytestream-format=auto`
     /// header now (reading the file), so the demuxer is picked from the real
-    /// content rather than a possibly-wrong extension. A sniff failure (unreadable
-    /// or unrecognized) leaves `auto` unresolved and returns `None`, falling back
-    /// to the declared default.
-    fn probe_output_caps(&mut self) -> Option<Caps> {
+    /// content rather than a possibly-wrong extension. Content the sniff does not
+    /// recognize is an error, an unreadable file returns `None`.
+    fn probe_output_caps(&mut self) -> Result<Option<Caps>, G2gError> {
         if self.auto_detect {
-            self.resolve_auto_caps().ok()?;
+            // an unreadable file still fails at run, naming its path
+            let Ok(header) = read_file_header(&self.path, short_type_name::<Self>()) else {
+                return Ok(None);
+            };
+            self.caps = file_caps_from_header(&header).ok_or(G2gError::CapsMismatch)?;
+            self.auto_detect = false;
         }
-        self.configured_output_caps()
+        Ok(self.configured_output_caps())
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
@@ -404,6 +408,14 @@ pub(crate) fn sniff_file_caps(
     path: &std::path::Path,
     element: &'static str,
 ) -> Result<Caps, G2gError> {
+    let header = read_file_header(path, element)?;
+    file_caps_from_header(&header).ok_or(G2gError::CapsMismatch)
+}
+
+fn read_file_header(
+    path: &std::path::Path,
+    element: &'static str,
+) -> Result<alloc::vec::Vec<u8>, G2gError> {
     let mut file = File::open(path).map_err(|e| path_io_err(element, "open", path, e))?;
     let mut header = alloc::vec![0u8; crate::typefind::SNIFF_LEN];
     let mut filled = 0;
@@ -415,7 +427,11 @@ pub(crate) fn sniff_file_caps(
         filled += n;
     }
     header.truncate(filled);
-    let caps = crate::typefind::sniff_caps(&header).ok_or(G2gError::CapsMismatch)?;
+    Ok(header)
+}
+
+fn file_caps_from_header(header: &[u8]) -> Option<Caps> {
+    let caps = crate::typefind::sniff_caps(header)?;
     // A file is seekable, so a sniffed ISO-BMFF stream is the whole-file `Mp4`
     // form (demuxed by `mp4demux`), not the streaming `IsoBmff` form (which
     // `fmp4demux` consumes for live HLS / DASH).
@@ -424,11 +440,11 @@ pub(crate) fn sniff_file_caps(
             encoding: ByteStreamEncoding::IsoBmff,
         })
     {
-        return Ok(Caps::ByteStream {
+        return Some(Caps::ByteStream {
             encoding: ByteStreamEncoding::Mp4,
         });
     }
-    Ok(caps)
+    Some(caps)
 }
 
 /// Derive the media type from a file extension (M478), so a bare launch

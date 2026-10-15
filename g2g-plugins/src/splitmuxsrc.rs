@@ -332,8 +332,8 @@ impl SourceLoop for SplitMuxSrc {
         Ok(ConfigureOutcome::Accepted)
     }
 
-    fn probe_output_caps(&mut self) -> Option<Caps> {
-        self.resolve().ok()
+    fn probe_output_caps(&mut self) -> Result<Option<Caps>, G2gError> {
+        Ok(self.resolve().ok())
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {

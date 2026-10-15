@@ -257,8 +257,8 @@ impl SourceLoop for SplitFileSrc {
 
     /// Parse-time caps for `decodebin`: read the first part now, so the demuxer
     /// is picked from what the recording actually is.
-    fn probe_output_caps(&mut self) -> Option<Caps> {
-        self.resolve_caps().ok()
+    fn probe_output_caps(&mut self) -> Result<Option<Caps>, G2gError> {
+        Ok(self.resolve_caps().ok())
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {

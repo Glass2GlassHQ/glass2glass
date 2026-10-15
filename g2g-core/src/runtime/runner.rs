@@ -234,9 +234,10 @@ pub trait SourceLoop: ElementBound {
     /// auto` source overrides it to sniff the file header now (so a mislabeled
     /// `.ts` that is really an MP4 still auto-plugs the right demuxer, the way
     /// GStreamer's runtime `typefind` would), where `configured_output_caps`
-    /// returns `None` because it may not read. Default: the no-I/O caps.
-    fn probe_output_caps(&mut self) -> Option<Caps> {
-        self.configured_output_caps()
+    /// returns `None` because it may not read. `Err` when the source read its
+    /// content and recognized no media type. Default: the no-I/O caps.
+    fn probe_output_caps(&mut self) -> Result<Option<Caps>, G2gError> {
+        Ok(self.configured_output_caps())
     }
 
     /// The runtime properties this source type exposes (M104), the GObject

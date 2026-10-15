@@ -43,9 +43,9 @@ fn auto_sniff_overrides_a_wrong_extension_at_parse_time() {
     std::fs::remove_file(&path).ok();
     assert_eq!(
         caps,
-        Some(Caps::ByteStream {
+        Ok(Some(Caps::ByteStream {
             encoding: ByteStreamEncoding::Mp4
-        }),
+        })),
         "content sniff at parse time detects MP4 despite the .ts extension"
     );
 }
@@ -63,9 +63,9 @@ fn extension_alone_is_trusted_without_auto() {
     std::fs::remove_file(&path).ok();
     assert_eq!(
         caps,
-        Some(Caps::ByteStream {
+        Ok(Some(Caps::ByteStream {
             encoding: ByteStreamEncoding::MpegTs
-        }),
+        })),
         "the .ts extension types as MPEG-TS without a content sniff"
     );
 }
@@ -81,7 +81,7 @@ fn auto_probe_on_a_missing_file_is_none() {
         .unwrap();
     assert_eq!(
         fs.probe_output_caps(),
-        None,
+        Ok(None),
         "a missing auto file resolves to no caps, not a panic"
     );
 }

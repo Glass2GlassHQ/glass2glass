@@ -191,6 +191,9 @@ pub enum ParseError {
     /// A one-element description carried `name=` or `log-category=`, which only
     /// a whole launch line can apply.
     LaunchKeyword { element: String, key: String },
+    /// A `decodebin`'s source read its content and recognized no media type
+    /// (`filesrc` with an extension it does not know and no `bytestream-format`).
+    UnrecognizedContent(String),
 }
 
 impl From<GraphError> for ParseError {
@@ -327,6 +330,10 @@ impl core::fmt::Display for ParseError {
             ParseError::LaunchKeyword { element, key } => write!(
                 f,
                 "{element}: '{key}=' is not accepted here, the running graph names the element"
+            ),
+            ParseError::UnrecognizedContent(n) => write!(
+                f,
+                "{n}: unrecognized content, no media type matches its leading bytes (name the demuxer or set bytestream-format)"
             ),
         }
     }
@@ -1706,8 +1713,8 @@ fn muxer_spec(
 /// declared caps (a fixed source, or a transform's source-pad template).
 /// `probe_output_caps` also sniffs a `bytestream-format=auto` source's header at
 /// parse time (M480), so `decodebin` picks the demuxer from the real content even
-/// when the file extension is wrong; only an unreadable / unrecognized file falls
-/// back to the declared default.
+/// when the file extension is wrong, and content it does not recognize fails the
+/// parse.
 fn resolve_upstream_caps(
     registry: &Registry,
     name: &str,
@@ -1718,7 +1725,10 @@ fn resolve_upstream_caps(
         // `probe_output_caps` may sniff the header (a `bytestream-format=auto`
         // source), so `decodebin` picks the demuxer from the real content, not a
         // mislabeled extension; it falls back to the no-I/O caps otherwise.
-        if let Some(caps) = src.probe_output_caps() {
+        let probed = src
+            .probe_output_caps()
+            .map_err(|_| ParseError::UnrecognizedContent(name.to_string()))?;
+        if let Some(caps) = probed {
             return Ok(caps);
         }
     }
