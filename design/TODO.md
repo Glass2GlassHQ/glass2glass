@@ -30,8 +30,6 @@ Highest leverage first:
 
 - ST 2110-20 at 1080p60 cannot meet its pacing schedule: one loopback `send` costs
   about 5.5 us. Send each pacing slot with UDP GSO or `sendmmsg`.
-- Clippy for `aarch64-linux-android` flags `missing_const_for_thread_local` in
-  g2g-core `runtime/parse_scope.rs`.
 
 ## Architecture guarantees (validation-first)
 

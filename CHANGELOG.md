@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1427: Android clippy no longer fails on the parse-scope thread local.
 - M1426: unused imports in `timestampburn`, `mfdevice` and the `mfcommon` tests no longer fail feature-gated builds, and the element docs are regenerated.
 - M1425: g2g-core tests share one recording sink and one counting sink.
 - M1424: one Vulkan bitstream buffer constructor serves the one-shot and streaming decode paths.

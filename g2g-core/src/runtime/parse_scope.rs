@@ -6,6 +6,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 static NEXT_PARSE_ID: AtomicU64 = AtomicU64::new(1);
 
 std::thread_local! {
+    // clippy flags this already-const initializer on android targets only
+    #[cfg_attr(target_os = "android", allow(clippy::missing_const_for_thread_local))]
     static CURRENT_PARSE_ID: Cell<u64> = const { Cell::new(0) };
 }
 
