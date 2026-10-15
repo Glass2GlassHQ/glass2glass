@@ -129,6 +129,28 @@ async fn encode_nv12_to_annexb_h264() {
     );
     assert!(!aus.is_empty(), "encoder produced no access units");
 
+    let caps_changes: Vec<&Caps> = sink
+        .packets
+        .iter()
+        .filter_map(|p| match p {
+            PipelinePacket::CapsChanged(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+    assert!(!caps_changes.is_empty(), "encoder announced no output caps");
+    for caps in &caps_changes {
+        assert!(
+            matches!(
+                caps,
+                Caps::CompressedVideo {
+                    framerate: Rate::Any,
+                    ..
+                }
+            ),
+            "the input declared no frame rate, so the output caps must not invent one, got {caps:?}"
+        );
+    }
+
     // The first key frame must carry SPS (7) + PPS (8) ahead of an IDR (5).
     let first_key = aus
         .iter()

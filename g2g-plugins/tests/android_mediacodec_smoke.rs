@@ -220,6 +220,17 @@ async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec
         !data_frames.is_empty(),
         "expected at least one decoded frame"
     );
+    let decoded_caps = caps_changes.last().unwrap();
+    assert!(
+        matches!(
+            decoded_caps,
+            Caps::RawVideo {
+                framerate: Rate::Any,
+                ..
+            }
+        ),
+        "the upstream declared no frame rate, so the decoder must not invent one, got {decoded_caps:?}"
+    );
 
     // The first CapsChanged advertises the decoded NV12 geometry; the first
     // frame's buffer must match it (Y + interleaved UV = w*h*3/2).

@@ -491,13 +491,8 @@ impl AsyncElement for MediaCodecEnc {
                 }
             }
 
-            // Never emit an `Any` rate (a downstream transform cannot fixate()
-            // it); default to 30/1 when the input caps did not declare one.
-            let framerate = match &self.framerate_caps {
-                Rate::Fixed(q) => Rate::Fixed(*q),
-                _ => Rate::Fixed(30 << 16),
-            };
-            let new_caps = compressed_caps(self.codec, self.width, self.height, &framerate);
+            let new_caps =
+                compressed_caps(self.codec, self.width, self.height, &self.framerate_caps);
             if self.last_caps.as_ref() != Some(&new_caps) {
                 out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                     .await?;
