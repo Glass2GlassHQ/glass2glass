@@ -2064,7 +2064,8 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(
         ElementFactory::of::<NvDec>("nvdec", |_| Box::new(NvDec::new()))
             .produces(g2g_core::MemoryDomainKind::Cuda)
-            .hardware(),
+            .hardware()
+            .accepting_input(NvDec::accepts_input),
     );
     // Vendor-neutral Vulkan Video hardware decode (M493; H.264 / H.265 / AV1 since
     // M517), the wgpu-texture analog of NvDec: tagged `produces(WgpuTexture)`, so a

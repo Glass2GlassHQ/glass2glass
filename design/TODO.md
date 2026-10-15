@@ -96,9 +96,6 @@ Highest leverage first:
   reference through `dav1ddec` and `rav1ddec`.
 - **HEVC through `ffmpegdec`.** 53 of 188 HEVC vectors fail through
   `decodebin`, most of them Main 10 or RExt (4:2:2, 4:4:4, 12-bit and up).
-- **`nvdec` AV1 below the hardware minimum size.** The `av1-1-b8-01-size-*`
-  vectors smaller than NVDEC accepts fail the decode. Refuse them at
-  negotiation so auto-plug takes a software decoder.
 - **AV1 film grain chroma.** Match dav1d's chroma grain on libaom's
   `-aom-params film-grain-test=1` parameters: a 320x180 clip encoded with them
   differs from dav1d in 41 to 66 chroma bytes per frame, its luma is exact.

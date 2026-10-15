@@ -285,6 +285,15 @@ loop stays on the GPU and out of libavcodec.
   context rides a separate `Arc` so in-flight frames survive the rebuild.
 - Display delay defaults to a low-latency 1, settable via `max-display-delay`
   in the range 0 to 16.
+- Auto-plug skips `NvDec` for a stream outside the size range
+  `cuvidGetDecoderCaps` reports for its codec, AV1 below 128x128 on the RTX
+  3060. The factory registers an input check (`ElementFactory::accepting_input`)
+  that the search runs after the sink template matches. The first check queries
+  device 0 through a temporary CUDA context and caches the result for the
+  process. With no CUDA device every size passes. The IVF probe reports the
+  header size so `filesrc ! decodebin` knows it when it plugs. The solver does
+  not refuse: a demuxer's placeholder caps fixate to its range minimum before the
+  real size arrives.
 - An on-hardware test on the RTX 3060 runs the full native loop, a synthesized
   CUDA NV12 surface encoded by `NvEnc` and decoded by `NvDec` back to CUDA NV12,
   asserting geometry and, via a small device-to-host copy, real luma content. It

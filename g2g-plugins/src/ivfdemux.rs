@@ -99,7 +99,17 @@ impl IvfDemux {
     }
 
     pub fn stream_caps(file_prefix: &[u8]) -> Option<Caps> {
-        Self::parse_header(file_prefix).map(|header| Self::compressed(header.codec))
+        let header = Self::parse_header(file_prefix)?;
+        let declared = Self::compressed(header.codec);
+        let header_size = Caps::CompressedVideo {
+            codec: header.codec,
+            width: Dim::Fixed(header.width),
+            height: Dim::Fixed(header.height),
+            framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        // a header size outside the declared range is not trusted
+        Some(declared.intersect(&header_size).unwrap_or(declared))
     }
 
     fn parse_header(buf: &[u8]) -> Option<IvfHeader> {

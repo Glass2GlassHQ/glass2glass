@@ -314,6 +314,71 @@ impl NvDec {
         )
     }
 
+    fn query_hardware_input_caps() -> Result<CapsSet, G2gError> {
+        // SAFETY: standard CUDA driver bring-up, each result checked before use.
+        let context = unsafe {
+            cuchk(ffi::cu_init(0))?;
+            let mut device = 0i32;
+            cuchk(ffi::cu_device_get(
+                &mut device,
+                crate::cudadeviceid::DEFAULT_CUDA_DEVICE_ID,
+            ))?;
+            let mut context: *mut core::ffi::c_void = core::ptr::null_mut();
+            cuchk(ffi::cu_ctx_create(&mut context, 0, device))?;
+            context
+        };
+        let alternatives = Self::input_codecs()
+            .into_iter()
+            .filter_map(|codec| Self::query_codec_input_caps(codec).transpose())
+            .collect::<Result<Vec<Caps>, G2gError>>();
+        // SAFETY: `context` was created above and nothing else holds it.
+        unsafe {
+            let _ = ffi::cu_ctx_destroy(context);
+        }
+        Ok(CapsSet::from_alternatives(alternatives?))
+    }
+
+    // needs a current CUDA context
+    fn query_codec_input_caps(codec: VideoCodec) -> Result<Option<Caps>, G2gError> {
+        let Some(codec_type) = Self::cuvid_codec(codec) else {
+            return Ok(None);
+        };
+        // SAFETY: plain old data, all-zero is valid before the IN fields are set.
+        let mut decode_caps: ffi::DecodeCaps = unsafe { core::mem::zeroed() };
+        decode_caps.codec_type = codec_type;
+        decode_caps.chroma_format = ffi::CUDA_VIDEO_CHROMA_FORMAT_420;
+        // SAFETY: `decode_caps` is initialized and the caller made a context current.
+        cuchk(unsafe { ffi::cuvid_get_decoder_caps(&mut decode_caps) })?;
+        if decode_caps.is_supported == 0 {
+            return Ok(None);
+        }
+        Ok(Some(Caps::CompressedVideo {
+            codec,
+            width: Dim::Range {
+                min: decode_caps.min_width as u32,
+                max: decode_caps.max_width,
+            },
+            height: Dim::Range {
+                min: decode_caps.min_height as u32,
+                max: decode_caps.max_height,
+            },
+            framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        }))
+    }
+
+    pub(crate) fn accepts_input(input: &Caps) -> bool {
+        static HARDWARE_INPUT_CAPS: std::sync::OnceLock<CapsSet> = std::sync::OnceLock::new();
+        // no CUDA device leaves the open caps for configure to fail on
+        let hardware_input_caps = HARDWARE_INPUT_CAPS.get_or_init(|| {
+            Self::query_hardware_input_caps().unwrap_or_else(|_| Self::input_caps_set())
+        });
+        hardware_input_caps
+            .alternatives()
+            .iter()
+            .any(|alternative| input.intersect(alternative).is_ok())
+    }
+
     /// The `cudaVideoCodec` value for a supported input codec.
     fn cuvid_codec(codec: VideoCodec) -> Option<i32> {
         match codec {
@@ -1158,6 +1223,7 @@ mod ffi {
     pub const CUDA_VIDEO_CODEC_H264: i32 = 4;
     pub const CUDA_VIDEO_CODEC_HEVC: i32 = 8;
     pub const CUDA_VIDEO_CODEC_AV1: i32 = 11;
+    pub const CUDA_VIDEO_CHROMA_FORMAT_420: i32 = 1;
     pub const CUDA_VIDEO_SURFACE_FORMAT_NV12: i32 = 0;
     /// 16-bit semi-planar YUV, the 10-/12-bit output surface (g2g `P010`).
     pub const CUDA_VIDEO_SURFACE_FORMAT_P016: i32 = 1;
@@ -1176,6 +1242,28 @@ mod ffi {
         pub timestamp: i64,
     }
     const _: () = assert!(core::mem::size_of::<SourceDataPacket>() == 32);
+
+    // CUVIDDECODECAPS
+    #[repr(C)]
+    pub struct DecodeCaps {
+        pub codec_type: i32,
+        pub chroma_format: i32,
+        pub bit_depth_minus8: u32,
+        pub reserved1: [u32; 3],
+        pub is_supported: u8,
+        pub num_nvdecs: u8,
+        pub output_format_mask: u16,
+        pub max_width: u32,
+        pub max_height: u32,
+        pub max_macroblock_count: u32,
+        pub min_width: u16,
+        pub min_height: u16,
+        pub is_histogram_supported: u8,
+        pub counter_bit_depth: u8,
+        pub max_histogram_bins: u16,
+        pub reserved3: [u32; 10],
+    }
+    const _: () = assert!(core::mem::size_of::<DecodeCaps>() == 88);
 
     /// `CUVIDPARSERDISPINFO` (24 bytes).
     #[repr(C)]
@@ -1358,6 +1446,8 @@ mod ffi {
         ) -> i32;
         #[link_name = "cuvidUnmapVideoFrame64"]
         pub fn cuvid_unmap_video_frame(decoder: *mut c_void, dev_ptr: u64) -> i32;
+        #[link_name = "cuvidGetDecoderCaps"]
+        pub fn cuvid_get_decoder_caps(caps: *mut DecodeCaps) -> i32;
         #[link_name = "cuvidCtxLockCreate"]
         pub fn cuvid_ctx_lock_create(lock: *mut *mut c_void, ctx: *mut c_void) -> i32;
         #[link_name = "cuvidCtxLockDestroy"]

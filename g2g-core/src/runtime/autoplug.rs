@@ -129,6 +129,8 @@ pub struct ElementDesc {
     /// search picks this among elements satisfying the same caps. See
     /// [`CapabilityDescriptor`].
     pub capabilities: CapabilityDescriptor,
+    // a limit the template cannot state, like a hardware minimum size
+    pub accepts_input: Option<fn(&Caps) -> bool>,
 }
 
 impl ElementDesc {
@@ -140,6 +142,7 @@ impl ElementDesc {
             name,
             templates,
             capabilities: CapabilityDescriptor::default(),
+            accepts_input: None,
         }
     }
 
@@ -194,11 +197,15 @@ impl ElementDesc {
         let source = self.source()?;
         let input_as_src = PadTemplate::source(CapsSet::one(input.clone()));
         match pad_link(&input_as_src, sink) {
-            Ok(_) | Err(NegotiationFailure::Unfixable { .. }) => match &source.caps {
-                PadCaps::Fixed(set) => Some(set.clone()),
-                // A wildcard source pad produces nothing concrete to advance on.
-                PadCaps::Any => None,
-            },
+            Ok(_) | Err(NegotiationFailure::Unfixable { .. })
+                if self.accepts_input.is_none_or(|accepts| accepts(input)) =>
+            {
+                match &source.caps {
+                    PadCaps::Fixed(set) => Some(set.clone()),
+                    // A wildcard source pad produces nothing concrete to advance on.
+                    PadCaps::Any => None,
+                }
+            }
             _ => None,
         }
     }
@@ -578,6 +585,11 @@ mod factory {
         /// equal score); the explicit-override knob. Builder form, default 0.
         pub fn rank(mut self, rank: i16) -> Self {
             self.desc = self.desc.with_rank(rank);
+            self
+        }
+
+        pub fn accepting_input(mut self, accepts: fn(&Caps) -> bool) -> Self {
+            self.desc.accepts_input = Some(accepts);
             self
         }
 
@@ -3135,6 +3147,35 @@ mod tests {
             indices(&chain),
             Vec::from([1usize]),
             "Cuda preference picks the GPU decoder"
+        );
+    }
+
+    #[test]
+    fn input_check_refusal_falls_back_to_the_next_decoder() {
+        const SMALLEST_ACCEPTED_WIDTH: u32 = 128;
+        fn accepts_wide_enough(input: &Caps) -> bool {
+            !matches!(
+                input,
+                Caps::CompressedVideo { width: Dim::Fixed(width), .. }
+                    if *width < SMALLEST_ACCEPTED_WIDTH
+            )
+        }
+        let mut checked_gpu_decoder = gpu_decoder();
+        checked_gpu_decoder.accepts_input = Some(accepts_wide_enough);
+        let descs = [decoder(), checked_gpu_decoder];
+        let ctx = SelectionContext {
+            preferred_memory: MemoryDomainKind::Cuda,
+            prefer_hardware: false,
+        };
+        let decoder_for = |width: u32| {
+            let chain = find_chain_with(&descs, &h264(Dim::Fixed(width)), &is_raw_video, 4, ctx)
+                .expect("reaches raw");
+            indices(&chain)
+        };
+        assert_eq!(decoder_for(SMALLEST_ACCEPTED_WIDTH), Vec::from([1usize]));
+        assert_eq!(
+            decoder_for(SMALLEST_ACCEPTED_WIDTH - 1),
+            Vec::from([0usize])
         );
     }
 
