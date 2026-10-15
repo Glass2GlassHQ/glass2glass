@@ -36,9 +36,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 // ================================================================
@@ -253,6 +253,42 @@ fn raw_geometry(caps: &Caps) -> Result<(RawVideoFormat, u32, u32), G2gError> {
     }
 }
 
+/// The codestream caps the encoder produces from raw `input`.
+fn encoded_caps(input: &Caps) -> Result<Caps, G2gError> {
+    let (_, w, h) = raw_geometry(input)?;
+    Ok(Caps::CompressedVideo {
+        codec: VideoCodec::JpegXs,
+        width: Dim::Fixed(w),
+        height: Dim::Fixed(h),
+        framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+    })
+}
+
+/// The raw caps the decoder announces for a JPEG XS `input`.
+fn decoded_caps(input: &Caps) -> Result<Caps, G2gError> {
+    match input {
+        Caps::CompressedVideo {
+            codec: VideoCodec::JpegXs,
+            width,
+            height,
+            ..
+        } => {
+            // Output format is unknown until the first codestream; advertise the
+            // broadcast-norm default and refine via CapsChanged at first frame.
+            Ok(Caps::RawVideo {
+                format: RawVideoFormat::I422p10,
+                width: width.clone(),
+                height: height.clone(),
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            })
+        }
+        _ => Err(G2gError::CapsMismatch),
+    }
+}
+
 // ================================================================
 // Encoder
 // ================================================================
@@ -348,14 +384,14 @@ impl AsyncElement for SvtJpegXsEnc {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        let (_, w, h) = raw_geometry(upstream_caps)?;
-        Ok(Caps::CompressedVideo {
-            codec: VideoCodec::JpegXs,
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
-            framerate: Rate::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        })
+        encoded_caps(upstream_caps)
+    }
+
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| {
+            encoded_caps(input)
+                .map_or_else(|_| CapsSet::from_alternatives(Vec::new()), CapsSet::one)
+        }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -679,26 +715,14 @@ impl AsyncElement for SvtJpegXsDec {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        match upstream_caps {
-            Caps::CompressedVideo {
-                codec: VideoCodec::JpegXs,
-                width,
-                height,
-                ..
-            } => {
-                // Output format is unknown until the first codestream; advertise the
-                // broadcast-norm default and refine via CapsChanged at first frame.
-                Ok(Caps::RawVideo {
-                    format: RawVideoFormat::I422p10,
-                    width: width.clone(),
-                    height: height.clone(),
-                    framerate: Rate::Any,
-                    interlace: g2g_core::Interlace::Any,
-                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                })
-            }
-            _ => Err(G2gError::CapsMismatch),
-        }
+        decoded_caps(upstream_caps)
+    }
+
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| {
+            decoded_caps(input)
+                .map_or_else(|_| CapsSet::from_alternatives(Vec::new()), CapsSet::one)
+        }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

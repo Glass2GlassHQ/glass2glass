@@ -29,7 +29,7 @@ use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::pad_template::PadTemplate;
 use g2g_core::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use g2g_core::runtime::{LaunchFactory, Registry};
-use g2g_core::{G2gError, PipelinePacket};
+use g2g_core::{CapsConstraint, G2gError, PipelinePacket};
 
 use g2g_plugin::abi::{
     caps_from_ffi, caps_into_ffi, check_against_declaration, packet_from_ffi, packet_into_ffi,
@@ -59,6 +59,20 @@ struct ElementSlot {
     properties: &'static [PropertySpec],
     metadata: ElementMetadata,
     log_category: &'static str,
+}
+
+impl ElementSlot {
+    /// What an instance emits for `input`: the first declared source caps, or
+    /// `input` itself when the element declares none (a pass-through).
+    fn output_for(&self, input: &Caps) -> Result<Caps, G2gError> {
+        if !self.sink_caps.is_empty() && !self.sink_caps.accepts(input) {
+            return Err(G2gError::CapsMismatch);
+        }
+        match self.source_caps.alternatives().first() {
+            Some(produced) => Ok(produced.clone()),
+            None => Ok(input.clone()),
+        }
+    }
 }
 
 fn slots() -> &'static Mutex<Vec<&'static ElementSlot>> {
@@ -217,13 +231,22 @@ impl AsyncElement for V2Element {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        if !self.slot.sink_caps.is_empty() && !self.slot.sink_caps.accepts(upstream_caps) {
-            return Err(G2gError::CapsMismatch);
+        self.slot.output_for(upstream_caps)
+    }
+
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        let slot = self.slot;
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            slot.output_for(input)
+                .map_or_else(|_| CapsSet::from_alternatives(Vec::new()), CapsSet::one)
+        }))
+    }
+
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        if self.slot.sink_caps.is_empty() {
+            return CapsConstraint::AcceptsAny;
         }
-        match self.slot.source_caps.alternatives().first() {
-            Some(produced) => Ok(produced.clone()),
-            None => Ok(upstream_caps.clone()),
-        }
+        CapsConstraint::Accepts(self.slot.sink_caps.clone())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

@@ -8,6 +8,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 - M1446: the ST 2110 RTP sinks declare native accept sets instead of the legacy sink bridge.
 - M1445: the audio sinks declare native accept sets instead of the legacy sink bridge, and refuse a placeholder rate or channel count at configure.
+- M1441: `svtjpegxsenc`, `svtjpegxsdec`, the SAMPLE-AES decrypter and v2 plugin elements declare native caps constraints.
 - M1440: demuxers and muxers declare their input caps as native constraints, and a muxer's default output is a native `Produces` set.
 - M1439: a source without its own caps constraint produces the caps its `intercept_caps` returns as a native `Produces` set.
 - M1438: `vulkanvideodec` also refuses an AV1 frame coded below the device minimum, and auto-plug compares H.264 at its coded size.
@@ -39,6 +40,43 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1412: NvEnc calls the CUDA driver through the shared FFI module.
 - M1411: tsmux, tsmuxn, rtcp, dashsrc, mpd, avf and st2110audiortp tick conversions use the core time helpers, and avf audio PTS no longer drifts.
 - M1410: Q16 framerate math in rtspsrc, avi, ivfdemux, the H.264/H.265 VUI, sdp, ffmpegdec, ffmpegenc, nvenc and the ST 2110 RTP elements uses the core helpers, so encoders get the exact fractional rate.
+- M1399: the m16 hostile caps test expects the documented fail-loud outcome, and m859 builds audio timestamps with the rounding the demuxer now uses.
+- M1398: the graph runner retries a startup ReFixate with the counter-proposal instead of failing.
+- M1397: the graph runner resolves allocation before configuring elements, so a decoder sizes its pool at open time on every runner.
+- M1396: the `MultiSenderSink` doc link resolves, so the rustdoc CI step passes.
+- M1395: MP4 muxers drop the empty NAL that adjacent start codes split out, which the strict length-prefixed reader refused.
+- M1394: the AAC-LC ADTS profile constant moves to `ffmpegaacenc`, its only user, so builds without that element have no dead code.
+- M1393: the FFT FIR path filters partial blocks as they arrive, so a long-kernel filter holds back only its group delay.
+- M1390: `sei` and `vobsub` read big-endian fields through `bereader`.
+- M1389: the fuzz `block_on` pins with `pin!`.
+- M1388: plugin ns to clock-tick conversions use the core time helpers and round to nearest.
+- M1387: plugin Q16 framerate math uses the core caps helpers, and an overflowing framerate property is rejected instead of wrapping.
+- M1386: integration tests share one ffmpeg and ffprobe presence check.
+- M1385: test modules share `testutil::CollectSink` and a common collecting sink for integration tests.
+- M1384: `alertrecorder` uses `xmlutil::civil` and `dvbsub` uses `annexb::BitReader`.
+- M1383: the `fixed_or_zero` copies give way to `Dim::fixed`.
+- M1382: one Android binder threadpool helper serves the on-device tests.
+- M1381: `vtdecode` and `vtencode` share one set of CMTime helpers.
+- M1380: one `cuda_driver_ffi` module declares the shared CUDA driver calls.
+- M1379: Media Foundation elements share one `mfcommon` module for errors, samples and the ProcessInput/ProcessOutput loop.
+- M1373: `webortdetect` reads fixed caps dimensions through `Dim::fixed`.
+- M1372: g2g-ml shares one RGBA-to-NCHW converter and one f32 byte codec, and a short RGBA frame in `burninfer` fails instead of panicking.
+- M1371: `wgpupreprocess` uploads frames without a padded copy, and wgpu readbacks reuse one staging buffer per element.
+- M1370: the C and Python bindings share one bus-message projection and one host-bytes frame view, and Python reports state changes.
+- M1369: `AppSink.pull(timeout_ms=...)` in the Python bindings waits on the channel instead of polling every millisecond.
+- M1368: hosted Python sinks and non-anchor batch frames get read-only views instead of a forced writable copy.
+- M1367: `g2g_bridge_push_buf` copies the buffer once instead of on every retry of a full feed.
+- M1363: one bounds-checked big-endian reader replaces the per-parser copies.
+- M1362: `rtmp` reuses the FLV tag reader and writer from `flv`.
+- M1361: `mkvmux` and `mkvmuxn` share one settings type.
+- M1360: one `WAVEFORMATEX` writer and `wFormatTag` table serve wavsink, wavenc, wavparse and AVI, and AVI reads float, G.711 and IMA ADPCM.
+- M1359: fMP4 and `mp4audiosrc` share one `moof` walker with rounded tick conversion and composition offsets.
+- M1358: `fmp4mux` and `mp4audiosink` use mp4muxn's `moov` and fragment writers, with rounded timescale conversion.
+- M1357: MP4, Matroska, FLV and MPEG-TS muxers write each payload once into a pre-sized buffer.
+- M1356: PS, Ogg, IVF, Matroska and fMP4 demuxers parse from a read offset instead of draining per unit.
+- M1355: progressive MP4 and AVI demuxers de-frame only the selected tracks, and `mp4demuxn` interleaves its output by decode time.
+- M1354: the AVI writer builds the file in one pre-sized buffer, and progressive MP4 emits each sample as its own frame.
+- M1353: AVI `idx1` keyframe flags and MP4 `stsc` chunk lookups run in linear time.
 - M1352: one heap-free YUYV to 4:2:0 converter serves g2g-mcu and `videoconvert`.
 - M1351: `videotestsrc` keeps only its last few shared frames.
 - M1350: `wgpusink` and `wgpucompositor` read back through the gpu helpers without blocking the runner, and the WGSL compositor samples like the CPU one.
@@ -57,33 +95,6 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1337: pixel filters edit the frame's own buffer instead of copying it.
 - M1336: `gamma`, `videobalance` and `alpha` run on the shared videofx loop and forward `CapsChanged`.
 - M1335: raw video format names and parsing come from g2g-core everywhere, so every format round-trips through the `format` property.
-- M1399: the m16 hostile caps test expects the documented fail-loud outcome, and m859 builds audio timestamps with the rounding the demuxer now uses.
-- M1398: the graph runner retries a startup ReFixate with the counter-proposal instead of failing.
-- M1397: the graph runner resolves allocation before configuring elements, so a decoder sizes its pool at open time on every runner.
-- M1396: the `MultiSenderSink` doc link resolves, so the rustdoc CI step passes.
-- M1390: `sei` and `vobsub` read big-endian fields through `bereader`.
-- M1389: the fuzz `block_on` pins with `pin!`.
-- M1388: plugin ns to clock-tick conversions use the core time helpers and round to nearest.
-- M1387: plugin Q16 framerate math uses the core caps helpers, and an overflowing framerate property is rejected instead of wrapping.
-- M1386: integration tests share one ffmpeg and ffprobe presence check.
-- M1385: test modules share `testutil::CollectSink` and a common collecting sink for integration tests.
-- M1384: `alertrecorder` uses `xmlutil::civil` and `dvbsub` uses `annexb::BitReader`.
-- M1383: the `fixed_or_zero` copies give way to `Dim::fixed`.
-- M1382: one Android binder threadpool helper serves the on-device tests.
-- M1381: `vtdecode` and `vtencode` share one set of CMTime helpers.
-- M1380: one `cuda_driver_ffi` module declares the shared CUDA driver calls.
-- M1379: Media Foundation elements share one `mfcommon` module for errors, samples and the ProcessInput/ProcessOutput loop.
-- M1363: one bounds-checked big-endian reader replaces the per-parser copies.
-- M1362: `rtmp` reuses the FLV tag reader and writer from `flv`.
-- M1361: `mkvmux` and `mkvmuxn` share one settings type.
-- M1360: one `WAVEFORMATEX` writer and `wFormatTag` table serve wavsink, wavenc, wavparse and AVI, and AVI reads float, G.711 and IMA ADPCM.
-- M1359: fMP4 and `mp4audiosrc` share one `moof` walker with rounded tick conversion and composition offsets.
-- M1358: `fmp4mux` and `mp4audiosink` use mp4muxn's `moov` and fragment writers, with rounded timescale conversion.
-- M1357: MP4, Matroska, FLV and MPEG-TS muxers write each payload once into a pre-sized buffer.
-- M1356: PS, Ogg, IVF, Matroska and fMP4 demuxers parse from a read offset instead of draining per unit.
-- M1355: progressive MP4 and AVI demuxers de-frame only the selected tracks, and `mp4demuxn` interleaves its output by decode time.
-- M1354: the AVI writer builds the file in one pre-sized buffer, and progressive MP4 emits each sample as its own frame.
-- M1353: AVI `idx1` keyframe flags and MP4 `stsc` chunk lookups run in linear time.
 - M1332: the `only-on` gate is one core type shared by `ortinfer` and the Python host.
 - M1331: uniquely held frames cross the plugin ABI writable in place.
 - M1330: test polls use `pin!` instead of unsafe `Pin::new_unchecked`.
@@ -97,15 +108,16 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1322: fan-in and duplex sinks use the shared sink arm.
 - M1321: fan-out runners build a graph and use the shared sink arm, so branch sinks relay QoS upstream.
 - M1320: linear runners drive the graph runner's source and sink arms, so they fail loud on a rejected mid-stream caps change and send the opening segment.
-- M1395: MP4 muxers drop the empty NAL that adjacent start codes split out, which the strict length-prefixed reader refused.
-- M1373: `webortdetect` reads fixed caps dimensions through `Dim::fixed`.
-- M1372: g2g-ml shares one RGBA-to-NCHW converter and one f32 byte codec, and a short RGBA frame in `burninfer` fails instead of panicking.
-- M1371: `wgpupreprocess` uploads frames without a padded copy, and wgpu readbacks reuse one staging buffer per element.
-- M1370: the C and Python bindings share one bus-message projection and one host-bytes frame view, and Python reports state changes.
-- M1369: `AppSink.pull(timeout_ms=...)` in the Python bindings waits on the channel instead of polling every millisecond.
-- M1368: hosted Python sinks and non-anchor batch frames get read-only views instead of a forced writable copy.
-- M1367: `g2g_bridge_push_buf` copies the buffer once instead of on every retry of a full feed.
-- M1394: the AAC-LC ADTS profile constant moves to `ffmpegaacenc`, its only user, so builds without that element have no dead code.
+- M1319: hex and base64 helpers live in one `textencoding` module.
+- M1318: remote senders share one caps de-dup type.
+- M1317: LiveKit and WebRTC elements share the signalling, token, media-time and transmit helpers.
+- M1315: ST 2110-20 builds packets and parses SRDs without per-packet allocations.
+- M1314: H.264 RTP payloading copies each NAL once, RTSP serving packetizes once per access unit, and interleaved clients get one write per AU.
+- M1313: remote TCP sets `TCP_NODELAY` and writes each frame's length and body together.
+- M1312: `udpsink` answers NACKs from a sequence-indexed history shared with RIST.
+- M1311: SRT encryption keeps the expanded AES key instead of rebuilding it per packet.
+- M1310: ST 2110 senders pace from a dedicated thread and the -20/-22/-30/-40 sources receive off the executor.
+- M1309: RTP and ST 2110 receivers keep PTS counting past the 32-bit timestamp wrap, share core's sequence extender, and RTCP jitter survives a timestamp wrap.
 - M1308: one table-driven MPEG CRC-32 for PSI sections and Ogg pages.
 - M1307: ADTS framing goes through the aacparse helpers everywhere.
 - M1306: one length-prefixed to Annex-B converter refuses malformed input, and one avcC/hvcC parser keeps every parameter set.
@@ -118,17 +130,6 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1299: one access-unit framer serves every elementary-stream parser, scanning each byte once and releasing aligned access units without holding one back.
 - M1298: slice headers are read without de-escaping the whole NAL.
 - M1297: Vulkan decode sizes field-coded H.264 by both fields.
-- M1319: hex and base64 helpers live in one `textencoding` module.
-- M1318: remote senders share one caps de-dup type.
-- M1317: LiveKit and WebRTC elements share the signalling, token, media-time and transmit helpers.
-- M1315: ST 2110-20 builds packets and parses SRDs without per-packet allocations.
-- M1314: H.264 RTP payloading copies each NAL once, RTSP serving packetizes once per access unit, and interleaved clients get one write per AU.
-- M1313: remote TCP sets `TCP_NODELAY` and writes each frame's length and body together.
-- M1312: `udpsink` answers NACKs from a sequence-indexed history shared with RIST.
-- M1311: SRT encryption keeps the expanded AES key instead of rebuilding it per packet.
-- M1310: ST 2110 senders pace from a dedicated thread and the -20/-22/-30/-40 sources receive off the executor.
-- M1309: RTP and ST 2110 receivers keep PTS counting past the 32-bit timestamp wrap, share core's sequence extender, and RTCP jitter survives a timestamp wrap.
-- M1393: the FFT FIR path filters partial blocks as they arrive, so a long-kernel filter holds back only its group delay.
 - M1296: audio elements take sample width from `AudioFormat::bytes_per_sample()`, and i16 round-and-clamp is one `saturate_i16`.
 - M1295: `audiotestsrc` plays tones at their exact frequency, sharing one phase helper with `tonegeneratesrc` and `dtmfsrc`.
 - M1294: `spectrum` precomputes its window and FFT twiddles and reuses its buffers.
@@ -149,17 +150,17 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1279: muxer inputs feed the muxer directly and report their queue time.
 - M1278: a woken arm re-polls only itself, and every sender parked on a full channel wakes when it drains.
 - M1277: an observed run's sink transit no longer counts a paused flushing seek's pause as queue time.
+- M1276: audioconvert forwards same-format buffers untouched and converts in whole-buffer passes.
+- M1275: PCM decode and encode share one 2^(n-1) full scale, so every integer sample code survives a float round trip.
+- M1274: one H.264/H.265 keyframe check serves every parser, muxer and receive source, so H264Parse flags AVCC keyframes and fMP4 seeks land on CRA pictures.
+- M1273: fragmented MP4 demuxing applies trun composition offsets, so B-frame fragments get correct PTS.
+- M1272: Vulkan Video rejects an H.264 SPS whose coded size overflows instead of panicking or wrapping.
+- M1271: ffmpegdec gets a reorder seed from High-profile SPS that carry custom scaling matrices.
 - M1270: ST 2110 video, audio, JPEG XS and ANC depacketizers handle CSRCs, header extensions and padding.
 - M1269: srtsrc ACKs on the 10 ms SRT timer and only after the first packet, and the SRT sender trims its buffer correctly across the sequence wrap.
 - M1268: SRTP keys HMAC-SHA1 once per context, batches counter-mode blocks, and runs AES-GCM in place.
 - M1267: srtpdec and dtlssrtpdec keep a new source's context only once its first packet authenticates, capped at 1024 sources.
 - M1266: ULPFEC, FlexFEC and ST 2022-1 recovery keep working after the RTP sequence wraps.
-- M1274: one H.264/H.265 keyframe check serves every parser, muxer and receive source, so H264Parse flags AVCC keyframes and fMP4 seeks land on CRA pictures.
-- M1273: fragmented MP4 demuxing applies trun composition offsets, so B-frame fragments get correct PTS.
-- M1272: Vulkan Video rejects an H.264 SPS whose coded size overflows instead of panicking or wrapping.
-- M1271: ffmpegdec gets a reorder seed from High-profile SPS that carry custom scaling matrices.
-- M1276: audioconvert forwards same-format buffers untouched and converts in whole-buffer passes.
-- M1275: PCM decode and encode share one 2^(n-1) full scale, so every integer sample code survives a float round trip.
 - M1265: every hand-rolled no-op waker is `Waker::noop()`, and the runtime state waker is a safe `Wake` impl.
 - M1264: g2g-core has shared helpers for clock-tick and Q16 framerate conversion, PCM sample width, GStreamer format names and RTP sequence and timestamp unwrapping.
 - M1263: g2g opens wgpu devices only on a fully WebGPU-compliant adapter and never starts the GL backend, so a software GL renderer gets a clean error instead of a vello panic.

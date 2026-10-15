@@ -29,8 +29,8 @@ use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, ConfigureOutcome, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, VideoCodec,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
+    MemoryDomain, OutputSink, PipelinePacket, VideoCodec,
 };
 
 use crate::annexb::{add_emulation_prevention, next_start_code, strip_emulation_prevention};
@@ -127,6 +127,20 @@ impl SampleAesDecrypt {
     }
 }
 
+/// Whether `caps` is a stream SAMPLE-AES encrypts: H.264 video or AAC audio.
+fn decryptable(caps: &Caps) -> bool {
+    matches!(
+        caps,
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            ..
+        } | Caps::Audio {
+            format: AudioFormat::Aac,
+            ..
+        }
+    )
+}
+
 impl AsyncElement for SampleAesDecrypt {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -134,17 +148,22 @@ impl AsyncElement for SampleAesDecrypt {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        match upstream_caps {
-            Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                ..
-            }
-            | Caps::Audio {
-                format: AudioFormat::Aac,
-                ..
-            } => Ok(upstream_caps.clone()),
-            _ => Err(G2gError::CapsMismatch),
+        if !decryptable(upstream_caps) {
+            return Err(G2gError::CapsMismatch);
         }
+        Ok(upstream_caps.clone())
+    }
+
+    // a caps set cannot say "AAC at any rate", so the predicate drives the pass-through
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| {
+            let outputs = if decryptable(input) {
+                alloc::vec![input.clone()]
+            } else {
+                Vec::new()
+            };
+            CapsSet::from_alternatives(outputs)
+        }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
