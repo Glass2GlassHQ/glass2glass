@@ -1782,21 +1782,10 @@ impl AsyncElement for FfmpegVideoDec {
                 }
             }
 
-            // Carry the negotiated framerate (from the input caps) into the
-            // output caps. Emitting `Rate::Any` here breaks the mid-stream
-            // forward-caps resolve downstream: a format/geometry-changing
-            // transform (videoconvert / videoscale) cannot `fixate()` an `Any`
-            // framerate, so it falls back to forwarding our caps verbatim, and a
-            // constraining capsfilter then rejects them (the decode -> scale ->
-            // fixed-format chain). A compressed stream's rate is advisory anyway
-            // (per-frame PTS carries the real timing); default to 30/1 when the
-            // container did not declare one.
+            // `Any` when the stream declared no rate, never a guess.
             let out_framerate = match &self.input_caps {
-                Some(Caps::CompressedVideo {
-                    framerate: Rate::Fixed(q),
-                    ..
-                }) => Rate::Fixed(*q),
-                _ => Rate::Fixed(30 << 16),
+                Some(Caps::CompressedVideo { framerate, .. }) => framerate.clone(),
+                _ => Rate::Any,
             };
             // The bitstream's colour description rides through decode unchanged
             // (Unknown when the input caps carry none, never a guess here).

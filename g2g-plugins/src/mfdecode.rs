@@ -469,15 +469,10 @@ impl AsyncElement for MfDecode {
                 }
             }
 
-            // A compressed stream's rate is advisory (per-frame PTS carries the
-            // real timing); never emit `Rate::Any` (a downstream transform
-            // cannot fixate() it), default 30/1 like `ffmpegdec`.
+            // `Any` when the stream declared no rate, never a guess.
             let out_framerate = match &self.input_caps {
-                Some(Caps::CompressedVideo {
-                    framerate: Rate::Fixed(q),
-                    ..
-                }) => Rate::Fixed(*q),
-                _ => Rate::Fixed(30 << 16),
+                Some(Caps::CompressedVideo { framerate, .. }) => framerate.clone(),
+                _ => Rate::Any,
             };
             for d in decoded {
                 let new_caps = nv12_caps(d.width, d.height, out_framerate.clone());
