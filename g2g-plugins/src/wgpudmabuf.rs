@@ -819,6 +819,7 @@ mod tests {
     /// from its cache.
     #[test]
     fn exports_cycle_the_ring_and_reimports_hit_the_cache() {
+        let _gpu = crate::GPU_TEST_LOCK.blocking_lock();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();

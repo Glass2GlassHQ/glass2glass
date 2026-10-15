@@ -258,6 +258,19 @@ pub mod gpudevice;
     )
 ))]
 pub(crate) static EGL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// GPU tests running in parallel crash inside the Vulkan validation layer
+#[cfg(all(
+    test,
+    any(
+        feature = "vello-overlay",
+        feature = "wgpu-sink",
+        feature = "cuda-wgpu",
+        feature = "vulkan-video",
+        feature = "mediacodec-wgpu",
+        all(target_os = "linux", feature = "dmabuf-wgpu")
+    )
+))]
+pub(crate) static GPU_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 // Re-export wgpu so a downstream consumer (a viewer wiring g2g's GPU-texture
 // decode into its renderer) can name `wgpu::Texture` / build on a shared device
 // with the EXACT wgpu version g2g's textures are bound to. A version mismatch

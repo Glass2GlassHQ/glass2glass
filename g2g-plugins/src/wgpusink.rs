@@ -1062,6 +1062,7 @@ mod tests {
 
     #[tokio::test]
     async fn offscreen_blit_reproduces_source_orientation() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping WgpuSink blit test");
             return;
@@ -1119,6 +1120,7 @@ mod tests {
     /// size leaves it alone.
     #[tokio::test]
     async fn resize_retargets_the_sink_and_the_blit_fills_the_new_size() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping WgpuSink resize test");
             return;
@@ -1255,6 +1257,7 @@ mod tests {
     /// orientation preserved.
     #[tokio::test]
     async fn system_rgba_frame_is_uploaded_and_presented() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping WgpuSink system RGBA test");
             return;
@@ -1288,6 +1291,7 @@ mod tests {
     /// by the sink's shader (a CPU `videoconvert` would be the alternative).
     #[tokio::test]
     async fn system_nv12_frame_is_converted_on_the_gpu() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping WgpuSink system NV12 test");
             return;
@@ -1315,6 +1319,7 @@ mod tests {
     /// manage.
     #[tokio::test]
     async fn nv12_shader_converts_with_the_caps_colorimetry() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping WgpuSink colorimetry test");
             return;
@@ -1367,6 +1372,7 @@ mod tests {
     /// out pixel-identical to the same bytes uploaded from system memory.
     #[tokio::test]
     async fn packed_nv12_texture_presents_without_an_upload() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         use crate::gpu::WgpuNv12Texture;
 
         let Some(ctx) = shared_ctx().await else {
@@ -1464,6 +1470,7 @@ mod tests {
     /// bound is dropped, reported on the bus, and offered upstream via `take_qos`.
     #[tokio::test]
     async fn pts_pacing_presents_on_time_and_drops_late_frames() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         use core::sync::atomic::{AtomicU64, Ordering};
         use g2g_core::clock::PlayAnchor;
         use std::time::Instant;
@@ -1545,6 +1552,7 @@ mod tests {
     #[cfg(feature = "vello-overlay")]
     #[tokio::test]
     async fn overlay_to_sink_presents_boxes_on_shared_device() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         use crate::vellooverlay::VelloAnalyticsOverlay;
         use g2g_core::memory::SystemSlice;
         use g2g_core::{AnalyticsMeta, BBox, Dim, ObjectDetection, Rate, RawVideoFormat};

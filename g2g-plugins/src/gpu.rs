@@ -822,6 +822,7 @@ mod tests {
     /// to a different device and this read-back would be a validation error.
     #[tokio::test]
     async fn from_wgpu_texture_is_usable_on_the_embedders_own_device() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         // The test needs a device g2g did not open, so it cannot take the shared
         // one, but it must still not open a device while another test is opening
         // theirs.

@@ -1418,6 +1418,7 @@ mod tests {
 
     #[tokio::test]
     async fn matches_cpu_on_opaque_overlay() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         assert_parity(
             Vec::from([
                 CompositorPad::at(0, 0),
@@ -1434,6 +1435,7 @@ mod tests {
 
     #[tokio::test]
     async fn matches_cpu_on_zorder_and_negative_offset() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         // Three overlapping pads, painted in a different order than their index,
         // one hanging off the top-left so clipping is exercised too.
         assert_parity(
@@ -1457,6 +1459,7 @@ mod tests {
 
     #[tokio::test]
     async fn matches_cpu_on_per_pad_alpha() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         assert_parity(
             Vec::from([
                 CompositorPad::at(0, 0),
@@ -1478,6 +1481,7 @@ mod tests {
 
     #[tokio::test]
     async fn matches_cpu_on_scaled_pads() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         // Up- and downscaled overlays: the shader's fixed-point bilinear must
         // land on the same samples as the CPU one.
         assert_parity(
@@ -1497,6 +1501,7 @@ mod tests {
 
     #[tokio::test]
     async fn gpu_output_texture_matches_cpu() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping GPU compositor texture test");
             return;
@@ -1526,6 +1531,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_overlay_is_reused_until_a_newer_one_lands() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping GPU compositor cadence test");
             return;
@@ -1582,6 +1588,7 @@ mod tests {
 
     #[tokio::test]
     async fn texture_overlay_matches_cpu() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         // A system-memory base with a GPU overlay bound in place: the two source
         // kinds mix on one canvas and still match the CPU element byte for byte.
         assert_texture_parity(
@@ -1601,6 +1608,7 @@ mod tests {
 
     #[tokio::test]
     async fn all_texture_inputs_match_cpu() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         // Every pad a texture, overlapping, painted out of index order, one
         // clipped off the top-left.
         assert_texture_parity(
@@ -1625,6 +1633,7 @@ mod tests {
 
     #[tokio::test]
     async fn scaled_texture_pads_match_cpu() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         // Up- and downscaled texture pads: textureLoad plus the Q16 mapping must
         // land on the same samples as the CPU bilinear.
         assert_texture_parity(
@@ -1645,6 +1654,7 @@ mod tests {
 
     #[tokio::test]
     async fn newer_texture_overlay_wins() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping GPU compositor texture cadence test");
             return;
@@ -1698,6 +1708,7 @@ mod tests {
 
     #[tokio::test]
     async fn flushed_texture_pad_is_left_out() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping GPU compositor texture flush test");
             return;
@@ -1743,6 +1754,7 @@ mod tests {
 
     #[tokio::test]
     async fn texture_geometry_mismatch_is_rejected() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping GPU compositor texture caps test");
             return;
@@ -1762,6 +1774,7 @@ mod tests {
 
     #[tokio::test]
     async fn texture_input_to_gpu_output_stays_on_the_device() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping GPU compositor texture-to-texture test");
             return;
@@ -1838,6 +1851,7 @@ mod tests {
 
     #[tokio::test]
     async fn held_frame_matches_the_cpu_compositor() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping GPU compositor hold test");
             return;
@@ -1881,6 +1895,7 @@ mod tests {
 
     #[tokio::test]
     async fn held_texture_base_picks_up_a_newer_texture_overlay() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping GPU compositor texture hold test");
             return;

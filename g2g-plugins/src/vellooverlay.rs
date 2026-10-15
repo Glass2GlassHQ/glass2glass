@@ -1256,6 +1256,7 @@ mod tests {
 
     #[tokio::test]
     async fn renders_box_onto_gpu_texture() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping Vello GPU render test");
             return;
@@ -1314,6 +1315,7 @@ mod tests {
 
     #[tokio::test]
     async fn renders_mask_fill_and_dashed_roi_onto_gpu_texture() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
         let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping Vello GPU mask render test");
             return;
