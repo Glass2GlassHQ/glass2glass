@@ -298,7 +298,7 @@ impl AsyncElement for CudaKmsSink {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        // Pass-through at negotiation; NV12 is enforced in configure_pipeline.
+        // never consulted as a sink: negotiation reads caps_constraint_as_sink
         Ok(upstream_caps.clone())
     }
 

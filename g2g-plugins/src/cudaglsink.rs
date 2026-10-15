@@ -248,8 +248,7 @@ impl AsyncElement for CudaGlSink {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        // Pass-through at negotiation; NV12 is enforced in configure_pipeline.
-        // The native decoder lands NV12 on this link via its DerivedOutput.
+        // never consulted as a sink: negotiation reads caps_constraint_as_sink
         Ok(upstream_caps.clone())
     }
 
@@ -480,7 +479,7 @@ impl FramePresenter for CudaPresenter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{Rate, VideoCodec};
+    use g2g_core::Rate;
 
     fn nv12(w: u32, h: u32) -> Caps {
         Caps::RawVideo {
@@ -491,19 +490,6 @@ mod tests {
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
-    }
-
-    #[test]
-    fn intercept_passes_through() {
-        let sink = CudaGlSink::new();
-        let h264 = Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width: Dim::Fixed(640),
-            height: Dim::Fixed(480),
-            framerate: Rate::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        };
-        assert_eq!(sink.intercept_caps(&h264), Ok(h264));
     }
 
     #[test]

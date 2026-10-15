@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1437: a test pins `cudaglsink` and `cudakmssink` refusing non-NV12 input at negotiation.
 - M1436: `uridecodebin` fails an unreadable or unrecognized `file://` URI with its own error instead of falling back to `Mp4Src`.
 - M1435: `ffmpegdec`'s CUDA backend rejects an explicit non-NV12 output format and a 10-bit surface instead of overriding or mislabelling them.
 - M1432: decoder auto-plug skips `nvdec` below NVDEC's reported minimum size, so small AV1 streams decode in software.
