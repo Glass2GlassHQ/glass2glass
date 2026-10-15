@@ -5,12 +5,14 @@
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
-use g2g_core::runtime::block_on;
+use g2g_core::runtime::{block_on, parse_launch, run_graph};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    PipelineClock, PipelinePacket, PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
+use g2g_plugins::appsink::register_appsink_pull;
 use g2g_plugins::gpu::WgpuNv12Texture;
+use g2g_plugins::registry::default_registry;
 use g2g_plugins::vulkanvideo::{open_h264_decode_device, VulkanVideoDec, VulkanVideoError};
 
 pub(crate) const H264_CLIP: &[u8] = include_bytes!("../fixtures/h264_640x480.h264");
@@ -299,4 +301,37 @@ pub(crate) fn two_plane_frame(frame: &Frame) -> &WgpuNv12Texture {
         .as_any()
         .downcast_ref::<WgpuNv12Texture>()
         .expect("a two-plane texture frame is owned by WgpuNv12Texture")
+}
+
+const LAUNCH_LINK_CAPACITY: usize = 4;
+
+struct ZeroClock;
+impl PipelineClock for ZeroClock {
+    fn now_ns(&self) -> u64 {
+        0
+    }
+}
+
+// every system frame `pipeline` hands an appsink on `channel`, panicking when the run fails
+pub(crate) fn launch_frames(pipeline: &str, channel: &str) -> Vec<Vec<u8>> {
+    let pull = register_appsink_pull(channel);
+    let line = format!("{pipeline} ! appsink channel={channel}");
+    let graph = parse_launch(&default_registry(), &line).expect("parses");
+    // the appsink holds only a few frames, so they are pulled while the graph runs
+    let run =
+        std::thread::spawn(move || block_on(run_graph(graph, &ZeroClock, LAUNCH_LINK_CAPACITY)));
+    let mut frames = Vec::new();
+    while let Some(frame) = block_on(pull.pull()) {
+        frames.push(
+            frame
+                .domain
+                .as_system_slice()
+                .expect("system frame")
+                .to_vec(),
+        );
+    }
+    run.join()
+        .expect("the graph thread finishes")
+        .unwrap_or_else(|error| panic!("{line} runs, got {error:?}"));
+    frames
 }

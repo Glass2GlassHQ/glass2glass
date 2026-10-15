@@ -74,18 +74,19 @@ is merely a missed coupling, which is sound.
 
 A plain `DerivedOutput` (a decoder that declares no mask) recovers the same
 backward coupling automatically: `discover_passthrough` probes the closure
-with two distinct concrete inputs per field and marks a field passthrough when
-the single output tracks it in both, so the solver narrows those input fields via
+with the sample and two distinct concrete inputs per field and marks a field
+passthrough when every output alternative tracks it in all three, so the solver
+narrows those input fields via
 the same `backward_field_narrow` path. A `couple_passthrough_derived` extends the
 coupling across the variant change a decoder/encoder makes (`CompressedVideo <->
 RawVideo`), coupling the geometry / framerate both carry (`format` is retargeted
 across a codec boundary, so probing never marks it passthrough). Discovery is
 conservative, a field that the closure fixes or that fails either probe stays
 non-passthrough, so a genuinely non-invertible closure falls back to the
-alternative-drop walk unchanged. (Discovery is gated on the closure being
-single-valued on the sample: a multi-valued converter, e.g. one offering
-`{passthrough, retargeted}`, has no well-defined per-field passthrough, so probing
-it is unsound and yields `NONE`.) The mid-stream `backward_feasible` snapshot now
+alternative-drop walk unchanged. A multi-valued closure couples only the fields
+all its alternatives keep: a decoder offering `Nv12 | P010` couples geometry and
+rate, while a converter offering `{passthrough, retargeted}` on the sample's own
+format never marks `format` passthrough. The mid-stream `backward_feasible` snapshot now
 recovers the same coupling: the per-edge sweep is threaded the
 element's startup-fixated input caps (from the solved edge set), which supplies the
 concrete probe a `DerivedOutput` needs and the input variant / scalar identity. The

@@ -77,9 +77,6 @@ Highest leverage first:
   on the `NV12` / `P010` texture output, which Vulkan and wgpu refuse to create
   with an odd side, for example as an even-rounded texture with the picture size
   carried beside it.
-- **`vulkanvideodec` behind a geometry capsfilter.** `vulkanvideodec !
-  video/x-raw,width=W,height=H` fails negotiation with `NoConsistentFixation`,
-  even when W x H is the stream's size.
 - **10-bit H.265 through a launch line.** `filesrc ! h265parse ! vulkanvideodec
   ! fakesink` on a Main 10 stream fails with `CapsMismatch` (the decoder API
   itself decodes it).

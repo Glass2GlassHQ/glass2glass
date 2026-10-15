@@ -410,12 +410,14 @@ enum ProbeField {
 /// invertible, but it is evaluable, so a field's behaviour is read off two
 /// concrete probes.
 ///
-/// Conservative by construction: a field is marked passthrough only when two
-/// distinct concrete probes *both* show the closure's single, same-shaped output
+/// Conservative by construction: a field is marked passthrough only when the
+/// sample and two distinct concrete probes *all* show every output alternative's
 /// field equal to the probed input field. A closure that rejects a probe, fixes
-/// the field (a retargeted decoder format), or returns multiple/ambiguous outputs
-/// yields `false` for that field, so discovery never invents coupling that is not
-/// there (a wrong `true` would narrow the input incorrectly). `sample` is a
+/// the field (a retargeted decoder format), or retargets it on any one of several
+/// output alternatives yields `false` for that field, so discovery never invents
+/// coupling that is not there (a wrong `true` would narrow the input
+/// incorrectly). A decoder offering several output formats still passes its
+/// geometry and rate through on each of them. `sample` is a
 /// representative input alternative; its geometry is concretised first so a
 /// `Range`/`Any` input field does not confuse the equality test.
 pub(crate) fn discover_passthrough(
@@ -423,16 +425,6 @@ pub(crate) fn discover_passthrough(
     sample: &Caps,
 ) -> PassthroughFields {
     let base = concrete_probe_base(sample);
-    // Soundness gate: a field is probed by *varying* it, so a closure that is
-    // multi-valued on the sample's own identity (e.g. a converter that offers
-    // `{passthrough, retargeted}` for the sample's format but is coincidentally
-    // single-valued at the probe values) would be mis-read as passthrough. Per-
-    // field equality alone can't see that, so require the closure to be single-
-    // valued on the sample's representative input before trusting any field: a
-    // genuinely ambiguous transform has no well-defined per-field passthrough.
-    if single_out(f, &base).is_none() {
-        return PassthroughFields::NONE;
-    }
     PassthroughFields {
         width: probe_field(f, &base, ProbeField::Width),
         height: probe_field(f, &base, ProbeField::Height),
@@ -474,26 +466,26 @@ fn concrete_probe_base(sample: &Caps) -> Caps {
     }
 }
 
-/// True when `f` passes `field` through: two concrete probes that differ only in
-/// `field` each produce a single output whose `field` equals the probe's.
+/// True when `f` passes `field` through: on the sample's own input and on two
+/// concrete probes that differ only in `field`, every output alternative's
+/// `field` equals the input's.
 fn probe_field(f: &dyn Fn(&Caps) -> CapsSet, base: &Caps, field: ProbeField) -> bool {
     let (Some(p0), Some(p1)) = (set_probe(base, field, false), set_probe(base, field, true)) else {
         return false;
     };
-    let (Some(o0), Some(o1)) = (single_out(f, &p0), single_out(f, &p1)) else {
-        return false;
-    };
-    field_eq(&o0, &p0, field) && field_eq(&o1, &p1, field)
+    [base, &p0, &p1]
+        .iter()
+        .all(|input| every_output_keeps_field(f, input, field))
 }
 
-/// The single output of `f(input)`, or `None` if it produced zero or several
-/// alternatives (discovery stays conservative on ambiguous closures).
-fn single_out(f: &dyn Fn(&Caps) -> CapsSet, input: &Caps) -> Option<Caps> {
-    let set = f(input);
-    match set.alternatives() {
-        [only] => Some(only.clone()),
-        _ => None,
-    }
+// a converter offering {passthrough, retargeted} keeps the field on one alternative only
+fn every_output_keeps_field(f: &dyn Fn(&Caps) -> CapsSet, input: &Caps, field: ProbeField) -> bool {
+    let outputs = f(input);
+    !outputs.is_empty()
+        && outputs
+            .alternatives()
+            .iter()
+            .all(|output| field_eq(output, input, field))
 }
 
 /// `base` with `field` set to probe value 0 (`hi = false`) or 1 (`hi = true`),
@@ -708,13 +700,14 @@ mod tests {
     }
 
     #[test]
-    fn discover_passthrough_none_for_multivalued_closure() {
+    fn discover_passthrough_multivalued_closure_retargets_format() {
         // A converter that offers {passthrough, retargeted-NV12} for an RGBA input
         // is multi-valued on its own sample, but coincidentally single-valued at
-        // the format-probe values (Nv12 / I420, neither in `from`). Per-field
-        // probing alone would mis-read `format` as passthrough and then drop the
-        // RGBA input when coupling it against an NV12 pin (the M257 startup-failure
-        // bug). The single-valued gate on the sample makes discovery bail to NONE.
+        // the format-probe values (Nv12 / I420, neither in `from`). Probing only
+        // those would mis-read `format` as passthrough and then drop the RGBA
+        // input when coupling it against an NV12 pin (the M257 startup-failure
+        // bug). The sample's NV12 alternative marks `format` retargeted, while
+        // geometry and rate, kept on both alternatives, still couple.
         let from = [RawVideoFormat::Rgba8];
         let conv = move |input: &Caps| {
             let mut alts = vec![input.clone()];
@@ -747,9 +740,48 @@ mod tests {
             interlace: crate::Interlace::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
         };
-        assert_eq!(
-            discover_passthrough(&conv, &sample),
-            PassthroughFields::NONE
+        let pt = discover_passthrough(&conv, &sample);
+        assert!(!pt.format, "the NV12 alternative retargets the format");
+        assert!(
+            pt.width && pt.height && pt.framerate,
+            "every alternative keeps geometry + rate"
         );
+    }
+
+    #[test]
+    fn discover_passthrough_couples_geometry_of_a_multi_format_decoder() {
+        // A decoder offering two output formats (the bit depth decides which)
+        // copies geometry and rate onto both, so a downstream geometry pin couples.
+        let dec = |input: &Caps| match input {
+            Caps::CompressedVideo {
+                width,
+                height,
+                framerate,
+                ..
+            } => CapsSet::from_alternatives(
+                [RawVideoFormat::Nv12, RawVideoFormat::P010]
+                    .into_iter()
+                    .map(|format| Caps::RawVideo {
+                        format,
+                        width: width.clone(),
+                        height: height.clone(),
+                        framerate: framerate.clone(),
+                        interlace: crate::Interlace::Any,
+                        colorimetry: crate::Colorimetry::UNKNOWN,
+                    })
+                    .collect(),
+            ),
+            _ => CapsSet::from_alternatives(Vec::new()),
+        };
+        let sample = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
+        };
+        let pt = discover_passthrough(&dec, &sample);
+        assert!(pt.width && pt.height && pt.framerate);
+        assert!(!pt.format, "codec -> format is retargeted, not passthrough");
     }
 }
