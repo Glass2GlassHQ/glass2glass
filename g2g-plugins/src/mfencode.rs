@@ -60,8 +60,9 @@ use windows::Win32::System::Com::{
 use alloc::collections::VecDeque;
 
 use crate::mfcommon::{
-    feed_sample, make_input_sample, mf_err, mf_ticks_to_ns, output_provides_samples, pack_u32_pair,
-    process_output, read_sample_bytes, sample_time_ns, send_drain_command, OutputPull,
+    feed_sample, make_input_sample, mf_err, mf_ticks_to_ns, ns_to_mf_ticks,
+    output_provides_samples, pack_u32_pair, process_output, read_sample_bytes, sample_time_ns,
+    send_drain_command, OutputPull,
 };
 use g2g_core::caps::framerate_q16_to_fraction;
 use g2g_core::frame::Frame;
@@ -89,9 +90,9 @@ struct EncoderState {
     width: u32,
     height: u32,
     out_size: u32,
-    /// Per-frame duration in 100-ns units, derived from the negotiated
-    /// framerate. Stamped on every input sample (the MS encoder wants a
-    /// duration alongside the mandatory sample time).
+    /// Per-frame duration in 100-ns units, derived from the configured
+    /// framerate. Stamped on an input sample that has no duration of its own,
+    /// only when the caps declared a rate.
     duration_hns: i64,
     /// True when the MFT allocates its own output samples; the MS software
     /// encoder does not, but a substituted hardware encoder MFT might.
@@ -268,16 +269,20 @@ impl MfEncode {
     fn feed(
         &mut self,
         data: &[u8],
-        pts_ns: u64,
+        timing: &FrameTiming,
         encoded: &mut Vec<EncodedChunk>,
     ) -> Result<(), G2gError> {
-        let (duration_hns, async_mode) = {
+        let (rate_duration_hns, async_mode) = {
             let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
             (st.duration_hns, st.async_mode)
         };
-        let sample = make_input_sample(data, pts_ns)?;
-        // SAFETY: setting an attribute on the sample just built, on the owning thread.
-        unsafe { sample.SetSampleDuration(duration_hns) }.map_err(mf_err)?;
+        let sample = make_input_sample(data, timing.pts_ns)?;
+        if let Some(duration_hns) =
+            sample_duration_hns(timing.duration_ns, &self.framerate, rate_duration_hns)
+        {
+            // SAFETY: setting an attribute on the sample just built, on the owning thread.
+            unsafe { sample.SetSampleDuration(duration_hns) }.map_err(mf_err)?;
+        }
         if async_mode {
             return self.feed_async(sample, encoded);
         }
@@ -551,7 +556,7 @@ impl AsyncElement for MfEncode {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    self.feed(slice, frame.timing.pts_ns, &mut encoded)?;
+                    self.feed(slice, &frame.timing, &mut encoded)?;
                 }
                 PipelinePacket::CapsChanged(c) => {
                     // The runner's pre-fixed output caps (our compressed codec)
@@ -1014,6 +1019,18 @@ fn rate_to_ratio(rate: &Rate) -> (u32, u32) {
     }
 }
 
+// the frame's own duration wins, the configured rate counts only when the caps declared one
+fn sample_duration_hns(
+    frame_duration_ns: u64,
+    framerate: &Rate,
+    rate_duration_hns: i64,
+) -> Option<i64> {
+    if frame_duration_ns > 0 {
+        return Some(ns_to_mf_ticks(frame_duration_ns));
+    }
+    matches!(framerate, Rate::Fixed(q16) if *q16 > 0).then_some(rate_duration_hns)
+}
+
 /// Per-frame duration in 100-ns units for an `fps = num/den` stream.
 fn frame_duration_hns(num: u32, den: u32) -> i64 {
     if num == 0 {
@@ -1197,5 +1214,20 @@ mod tests {
         assert_eq!(frame_duration_hns(30, 1), 333_333);
         assert_eq!(frame_duration_hns(61, 2), 327_868);
         assert_eq!(frame_duration_hns(0, 1), 0);
+    }
+
+    #[test]
+    fn sample_duration_prefers_the_frame_and_skips_an_undeclared_rate() {
+        const FRAME_DURATION_NS: u64 = 40_000_000;
+        let thirty = frame_duration_hns(30, 1);
+        assert_eq!(
+            sample_duration_hns(FRAME_DURATION_NS, &Rate::Any, thirty),
+            Some(ns_to_mf_ticks(FRAME_DURATION_NS))
+        );
+        assert_eq!(
+            sample_duration_hns(0, &Rate::Fixed(30 << 16), thirty),
+            Some(thirty)
+        );
+        assert_eq!(sample_duration_hns(0, &Rate::Any, thirty), None);
     }
 }
