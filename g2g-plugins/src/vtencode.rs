@@ -250,13 +250,7 @@ impl VtEncode {
             Some(s) => (s.width, s.height),
             None => return Err(G2gError::NotConfigured),
         };
-        // Never emit an `Any` rate (a downstream transform cannot fixate() it);
-        // default to 30/1 when the input caps did not declare one.
-        let framerate = match &self.framerate {
-            Rate::Fixed(q) => Rate::Fixed(*q),
-            _ => Rate::Fixed(30 << 16),
-        };
-        let new_caps = h264_caps(self.codec, w, h, framerate);
+        let new_caps = h264_caps(self.codec, w, h, self.framerate.clone());
         if self.last_caps.as_ref() != Some(&new_caps) {
             out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                 .await?;

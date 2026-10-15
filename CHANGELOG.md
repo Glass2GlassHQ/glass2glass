@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1451: `vtdecode` and `vtencode` keep an undeclared frame rate unknown instead of reporting 30 fps.
 - M1450: `mediacodecdec` and `mediacodecenc` keep an undeclared frame rate unknown instead of reporting 30 fps.
 - M1449: a mid-stream `videoscale ! videoconvert ! caps` chain scales to the downstream pin instead of passing its input size through.
 - M1448: `ivfdemux` reads the header rate and scale as a timestamp timebase and leaves the frame rate unknown.

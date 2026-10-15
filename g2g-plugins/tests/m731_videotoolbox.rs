@@ -141,10 +141,11 @@ async fn decode_fixture(mut dec: VtDecode, codec: VideoCodec, es: &[u8]) {
                 format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(640),
                 height: Dim::Fixed(480),
+                framerate: Rate::Any,
                 ..
             })
         ),
-        "decoded caps must be NV12 640x480, got {caps_changes:?}"
+        "decoded caps must be NV12 640x480 with the undeclared rate left unknown, got {caps_changes:?}"
     );
 
     let frames = sink.data_frames();

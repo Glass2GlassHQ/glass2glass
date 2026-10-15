@@ -506,12 +506,8 @@ impl VtDecode {
                 ..
             } => (*width, *height, *pts_ns),
         };
-        // A compressed stream's rate is advisory (per-frame PTS carries the
-        // real timing); default to 30/1 when upstream did not declare one.
-        let framerate = match &self.input_framerate {
-            Rate::Fixed(q) => Rate::Fixed(*q),
-            _ => Rate::Fixed(30 << 16),
-        };
+        // `Any` when the stream declared no rate, never a guess.
+        let framerate = self.input_framerate.clone();
         // Both '420v' and '420f' are the NV12 byte layout, so the caps are the
         // same in either mode; only the memory domain differs.
         let new_caps = nv12_caps(width, height, framerate);
