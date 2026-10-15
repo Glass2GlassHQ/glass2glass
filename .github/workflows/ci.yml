@@ -47,6 +47,22 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # a test calling a std-only helper breaks only the feature sets that lack std
+  core-features:
+    name: g2g-core lib tests per feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: test g2g-core lib under each feature alone
+        run: |
+          for f in "" alloc std runtime metadata runtime,std dyn-slot; do
+            echo "::group::features '$f'"
+            cargo test -p g2g-core --locked --lib --no-default-features --features "$f"
+            echo "::endgroup::"
+          done
+
   # g2g-core is the semver-covered surface (STABILITY.md). A breaking change
   # against the latest crates.io release must come with the version bump the
   # pre-1.0 policy requires (minor), or this fails.
@@ -612,6 +628,12 @@ jobs:
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
           mf-decode,mf-encode,mf-aac,wasapi-sink,wasapi-src,d3d11-sink,mf-video-src,wgpu-sink
+      # the runner has no render endpoint, so the tone test skips and only negotiation runs
+      - name: test g2g-plugins (wasapi sink)
+        shell: bash
+        run: |
+          cargo test -p g2g-plugins --locked --features wasapi-sink,wasapi-src --lib wasapi
+          cargo test -p g2g-plugins --locked --features wasapi-sink --test m29_wasapi
 
   # macOS platform build: VideoToolbox H.264 decode (VtDecode) plus the wgpu/burn
   # ML path on the Metal backend. The objc2 crates link the system frameworks
