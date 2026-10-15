@@ -41,10 +41,10 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use g2g_core::element::QosMessage;
 use g2g_core::{
-    AsyncElement, BusHandle, Caps, CapsSet, ClockSync, ConfigureOutcome, Dim, DomainSet, G2gError,
-    HardwareError, Interlace, MemoryDomain, MemoryDomainKind, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PresentationPacer, PropError, PropValue, PropertySpec, Rate,
-    RawVideoFormat, PACING_PROPERTIES,
+    AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim,
+    DomainSet, G2gError, HardwareError, Interlace, MemoryDomain, MemoryDomainKind, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PresentationPacer, PropError, PropValue,
+    PropertySpec, Rate, RawVideoFormat, PACING_PROPERTIES,
 };
 
 use crate::clock::wait_to_present;
@@ -477,6 +477,18 @@ fn iosurface_plane_texture(
         .ok_or(G2gError::Hardware(HardwareError::Other))
 }
 
+/// NV12 at any geometry, the one format the sink draws.
+fn nv12_any() -> Caps {
+    Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+        interlace: Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+    }
+}
+
 impl AsyncElement for MetalVideoSink {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -484,14 +496,11 @@ impl AsyncElement for MetalVideoSink {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        })
+        upstream_caps.intersect(&nv12_any())
+    }
+
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(CapsSet::one(nv12_any()))
     }
 
     /// Accepts packed System NV12 or the M735 zero-copy CvPixelBuffer domain.
@@ -608,13 +617,6 @@ impl AsyncElement for MetalVideoSink {
 impl PadTemplates for MetalVideoSink {
     /// Sink-only: NV12 at any geometry (domain is not in caps).
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::sink(CapsSet::one(Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        }))])
+        Vec::from([PadTemplate::sink(CapsSet::one(nv12_any()))])
     }
 }

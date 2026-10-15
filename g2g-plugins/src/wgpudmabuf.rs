@@ -77,11 +77,13 @@ use g2g_core::memory::{
 use g2g_core::meta::PlaneLayout;
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
 use g2g_core::{
-    g2g_error, AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, OutputSink, PipelinePacket, Rate, RawVideoFormat,
+    g2g_error, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, ElementMetadata,
+    G2gError, HardwareError, OutputSink, PipelinePacket, RawVideoFormat,
 };
 
-use crate::dmabufwgpu::{single_stride_layout, DmaBufWgpuBuffer, DMABUF_FRAME_FORMATS};
+use crate::dmabufwgpu::{
+    dmabuf_frame_caps, single_stride_layout, DmaBufWgpuBuffer, DMABUF_FRAME_FORMATS,
+};
 use crate::wgpubuffer::{whole_word_size, PlainWgpuBuffer};
 
 fn gpu_err() -> G2gError {
@@ -391,15 +393,7 @@ impl Drop for WgpuToDmaBuf {
 
 impl PadTemplates for WgpuToDmaBuf {
     fn pad_templates() -> alloc::vec::Vec<PadTemplate> {
-        let any = |format| Caps::RawVideo {
-            format,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        };
-        let set = CapsSet::from_alternatives(DMABUF_FRAME_FORMATS.map(any).to_vec());
+        let set = dmabuf_frame_caps();
         alloc::vec![PadTemplate::sink(set.clone()), PadTemplate::source(set)]
     }
 }
@@ -426,6 +420,10 @@ impl AsyncElement for WgpuToDmaBuf {
             Caps::RawVideo { format, .. } if supported(*format) => Ok(upstream_caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
+    }
+
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Identity(dmabuf_frame_caps())
     }
 
     fn input_domains(&self) -> DomainSet {
@@ -801,7 +799,7 @@ mod tests {
     use crate::dmabufwgpu::{create_import_device, DmaBufImporter};
     use crate::testutil::CollectSink;
     use g2g_core::frame::Frame;
-    use g2g_core::FrameTiming;
+    use g2g_core::{FrameTiming, Rate};
     use std::os::fd::BorrowedFd;
     use std::os::unix::fs::MetadataExt;
 

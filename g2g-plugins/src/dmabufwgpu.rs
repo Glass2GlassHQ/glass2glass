@@ -58,6 +58,19 @@ pub(crate) const DMABUF_FRAME_FORMATS: [RawVideoFormat; 6] = [
     RawVideoFormat::Yuyv,
 ];
 
+/// [`DMABUF_FRAME_FORMATS`] at any geometry.
+pub(crate) fn dmabuf_frame_caps() -> CapsSet {
+    let any = |format| Caps::RawVideo {
+        format,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+    };
+    CapsSet::from_alternatives(DMABUF_FRAME_FORMATS.map(any).to_vec())
+}
+
 fn gpu_err() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
 }
@@ -314,15 +327,7 @@ impl DmaBufToWgpu {
 
 impl PadTemplates for DmaBufToWgpu {
     fn pad_templates() -> alloc::vec::Vec<PadTemplate> {
-        let any = |format| Caps::RawVideo {
-            format,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        };
-        let set = CapsSet::from_alternatives(DMABUF_FRAME_FORMATS.map(any).to_vec());
+        let set = dmabuf_frame_caps();
         alloc::vec![PadTemplate::sink(set.clone()), PadTemplate::source(set)]
     }
 }
