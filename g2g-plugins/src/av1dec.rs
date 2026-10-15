@@ -326,7 +326,11 @@ macro_rules! av1_decoder {
                 else {
                     return Err(G2gError::CapsMismatch);
                 };
-                self.framerate = framerate.clone();
+                // the first call carries the solve's fixated placeholder rate
+                if self.configured && self.framerate != *framerate {
+                    self.framerate = framerate.clone();
+                    self.out = None;
+                }
                 self.input_colorimetry = *colorimetry;
                 self.decoder = Some(Decoder::new().map_err(|_| G2gError::CapsMismatch)?);
                 self.configured = true;

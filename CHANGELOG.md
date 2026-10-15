@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1457: `dav1ddec` and `rav1ddec` keep an undeclared frame rate unknown instead of reporting 1 fps.
 - M1456: `h264parse`, `h265parse` and `av1parse` keep an upstream-declared frame rate when the bitstream codes none.
 - M1455: `mfencode` stamps a sample with the frame's own duration, or none when neither the frame nor the caps give one.
 - M1454: `decodebin` fails a file whose content no sniff recognizes with `UnrecognizedContent` instead of assuming MPEG-TS.

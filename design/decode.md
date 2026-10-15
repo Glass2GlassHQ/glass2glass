@@ -23,6 +23,10 @@ demuxer's container rate, else `Rate::Any`. They never take it from
 `configure_pipeline`, whose caps carry the negotiation placeholder fixated to
 1 fps.
 
+The decoders skip that placeholder too. `ffmpegdec`, `dav1ddec` and `rav1ddec`
+ignore the rate in the first `configure_pipeline` call and take it from the
+runner's later calls, which carry the caps an upstream `CapsChanged` declared.
+
 ## VaapiDec (Linux VAAPI, cros-codecs)
 
 `VaapiDec<C>` (`g2g-plugins/src/vaapidec.rs`, feature `vaapi`,
