@@ -1747,6 +1747,7 @@ mod link_tests {
         );
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn an_answered_qos_report_surfaces_and_still_travels_upstream() {
         let report = QosMessage {
@@ -1809,6 +1810,7 @@ mod link_tests {
     /// The adapter of a transform that answers keyframe requests but not the
     /// orientation advertisement: the advertisement crosses toward the source,
     /// the keyframe request stops at the element.
+    #[cfg(feature = "std")]
     #[test]
     fn relay_is_decided_per_variant() {
         let (up_tx, up_rx) = link(2);
@@ -1860,6 +1862,7 @@ mod link_tests {
 
     /// The mirror case: a `videoflip`'s adapter answers the advertisement and
     /// relays a keyframe request past itself toward the encoder.
+    #[cfg(feature = "std")]
     #[test]
     fn an_answered_orientation_surfaces_while_a_keyframe_relays() {
         let (up_tx, up_rx) = link(2);

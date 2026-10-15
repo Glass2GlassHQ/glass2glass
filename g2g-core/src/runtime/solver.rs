@@ -2177,8 +2177,12 @@ fn apply_batch_demux_node<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caps::{AudioFormat, Dim, Rate, RawVideoFormat, VideoCodec};
-    use crate::caps_transform::{AudioShape, CapsTransform, FieldTransform, RawVideoShape};
+    #[cfg(feature = "std")]
+    use crate::caps::AudioFormat;
+    use crate::caps::{Dim, Rate, RawVideoFormat, VideoCodec};
+    #[cfg(feature = "std")]
+    use crate::caps_transform::AudioShape;
+    use crate::caps_transform::{CapsTransform, FieldTransform, RawVideoShape};
     use crate::runtime::passthrough::couple_passthrough;
     use alloc::boxed::Box;
     use alloc::vec;
@@ -2735,6 +2739,7 @@ mod tests {
     /// format-only converter is a `DerivedOutput` so it carries the input's
     /// concrete geometry into its output (a static `Mapping` with `Any` dims
     /// can't fixate and would `Defer`).
+    #[cfg(feature = "std")]
     #[test]
     fn resolve_forward_output_steers_defers_and_rejects() {
         // Converter: any raw input -> {same format, NV12} at the input's dims.
@@ -2831,6 +2836,7 @@ mod tests {
     /// channels=1 ! adpcmenc` regression: the WAV's stereo `fmt ` chunk lands
     /// after negotiation fixated on the mono placeholder, and deferring there
     /// forwards the converter's stereo INPUT to a mono-only encoder.
+    #[cfg(feature = "std")]
     #[test]
     fn resolve_forward_output_keeps_a_retargeted_channel_count() {
         let audio = |channels: u8, sample_rate: u32| Caps::Audio {
@@ -2860,6 +2866,7 @@ mod tests {
     /// the decoder announces its geometry before it knows the framerate, and
     /// deferring on that first event forwards the scaler's 1280x720 INPUT, which
     /// the capsfilter then rightly rejects.
+    #[cfg(feature = "std")]
     #[test]
     fn resolve_forward_output_forwards_an_unfixatable_single_output() {
         // Rescaler: any raw input -> the same format at a fixed 640x640, the
@@ -2908,6 +2915,7 @@ mod tests {
     /// wildcard sink below a chain of `DerivedOutput` elements leaves empty.
     /// Deferring forwards a letterboxing `videobox`'s INPUT, which the
     /// fixed-size consumer below it then rejects.
+    #[cfg(feature = "std")]
     #[test]
     fn resolve_forward_output_forwards_a_derived_single_output_without_a_snapshot() {
         // Letterbox: any raw input -> same format, 24 rows taller, input's rate.
@@ -2953,6 +2961,7 @@ mod tests {
     /// `filesrc ! decodebin ! videoconvert ! textoverlay` regression: the
     /// converter's mid-stream re-solve must forward RGBA (its negotiated
     /// output) at the new geometry, not its I420 input.
+    #[cfg(feature = "std")]
     #[test]
     fn resolve_forward_output_keeps_previous_shape() {
         // Converter: any raw input -> {same format, NV12} at the input's dims.
