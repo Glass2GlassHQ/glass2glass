@@ -90,9 +90,9 @@ struct EncoderState {
     width: u32,
     height: u32,
     out_size: u32,
-    /// Per-frame duration in 100-ns units, derived from the configured
-    /// framerate. Stamped on an input sample that has no duration of its own,
-    /// only when the caps declared a rate.
+    /// Per-frame duration in 100-ns units, derived from the framerate the MFT
+    /// was configured with. Stamped on an input sample that has no duration of
+    /// its own.
     duration_hns: i64,
     /// True when the MFT allocates its own output samples; the MS software
     /// encoder does not, but a substituted hardware encoder MFT might.
@@ -277,12 +277,9 @@ impl MfEncode {
             (st.duration_hns, st.async_mode)
         };
         let sample = make_input_sample(data, timing.pts_ns)?;
-        if let Some(duration_hns) =
-            sample_duration_hns(timing.duration_ns, &self.framerate, rate_duration_hns)
-        {
-            // SAFETY: setting an attribute on the sample just built, on the owning thread.
-            unsafe { sample.SetSampleDuration(duration_hns) }.map_err(mf_err)?;
-        }
+        let duration_hns = sample_duration_hns(timing.duration_ns, rate_duration_hns);
+        // SAFETY: setting an attribute on the sample just built, on the owning thread.
+        unsafe { sample.SetSampleDuration(duration_hns) }.map_err(mf_err)?;
         if async_mode {
             return self.feed_async(sample, encoded);
         }
@@ -1019,16 +1016,12 @@ fn rate_to_ratio(rate: &Rate) -> (u32, u32) {
     }
 }
 
-// the frame's own duration wins, the configured rate counts only when the caps declared one
-fn sample_duration_hns(
-    frame_duration_ns: u64,
-    framerate: &Rate,
-    rate_duration_hns: i64,
-) -> Option<i64> {
+// the MS encoder rejects a sample with no duration (MF_E_NO_SAMPLE_DURATION)
+fn sample_duration_hns(frame_duration_ns: u64, rate_duration_hns: i64) -> i64 {
     if frame_duration_ns > 0 {
-        return Some(ns_to_mf_ticks(frame_duration_ns));
+        return ns_to_mf_ticks(frame_duration_ns);
     }
-    matches!(framerate, Rate::Fixed(q16) if *q16 > 0).then_some(rate_duration_hns)
+    rate_duration_hns
 }
 
 /// Per-frame duration in 100-ns units for an `fps = num/den` stream.
@@ -1217,17 +1210,13 @@ mod tests {
     }
 
     #[test]
-    fn sample_duration_prefers_the_frame_and_skips_an_undeclared_rate() {
+    fn sample_duration_prefers_the_frame_over_the_configured_rate() {
         const FRAME_DURATION_NS: u64 = 40_000_000;
         let thirty = frame_duration_hns(30, 1);
         assert_eq!(
-            sample_duration_hns(FRAME_DURATION_NS, &Rate::Any, thirty),
-            Some(ns_to_mf_ticks(FRAME_DURATION_NS))
+            sample_duration_hns(FRAME_DURATION_NS, thirty),
+            ns_to_mf_ticks(FRAME_DURATION_NS)
         );
-        assert_eq!(
-            sample_duration_hns(0, &Rate::Fixed(30 << 16), thirty),
-            Some(thirty)
-        );
-        assert_eq!(sample_duration_hns(0, &Rate::Any, thirty), None);
+        assert_eq!(sample_duration_hns(0, thirty), thirty);
     }
 }
