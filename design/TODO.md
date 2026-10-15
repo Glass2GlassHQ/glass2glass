@@ -26,11 +26,6 @@ Highest leverage first:
    device on wasm); it would need raw `web_sys` WebGPU + hand-rolled
    onnxruntime-web bindings.
 
-## Code audit: bugs, hot paths, duplication
-
-- ST 2110-20 at 1080p60 cannot meet its pacing schedule: one loopback `send` costs
-  about 5.5 us. Send each pacing slot with UDP GSO or `sendmmsg`.
-
 ## Architecture guarantees (validation-first)
 
 - **Grow the conformance matrix.** Persist evidence from the resource-owning

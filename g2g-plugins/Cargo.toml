@@ -735,7 +735,7 @@ alsa-src = ["std", "dep:alsa"]
 # ST 2110 network elements (M597): AsyncElement sink / SourceLoop source wrapping
 # the sans-IO ST 2110-30 / -40 cores over UDP, RTP timestamps off the PTP media
 # clock. std (UdpSocket). The sans-IO cores themselves are always compiled.
-st2110 = ["std"]
+st2110 = ["std", "dep:libc"]
 # JPEG XS encode / decode (SvtJpegXsEnc / SvtJpegXsDec, M605): the ST 2110-22
 # compressed essence. Hand-rolled FFI to Intel's SVT-JPEG-XS (libSvtJpegxs, ISO/IEC
 # 21122), struct layouts asserted against SvtJpegxs*.h. build.rs links the library

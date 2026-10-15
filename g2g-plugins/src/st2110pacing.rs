@@ -262,11 +262,12 @@ mod send {
     impl PacedSender {
         pub fn spawn(socket: UdpSocket) -> io::Result<Self> {
             let (frames, queued) = mpsc::channel::<PacedFrame>();
+            let mut writer = DatagramWriter::new(socket);
             thread::Builder::new()
                 .name(PACER_THREAD_NAME.into())
                 .spawn(move || {
                     for frame in queued {
-                        let result = send_frame(&socket, &frame.packets, frame.pacer.as_ref());
+                        let result = send_frame(&mut writer, &frame.packets, frame.pacer.as_ref());
                         // the sink stopped waiting, nobody is left to report to
                         let _ = frame.sent.send(result);
                     }
@@ -289,31 +290,208 @@ mod send {
     }
 
     fn send_frame(
-        socket: &UdpSocket,
+        writer: &mut DatagramWriter,
         packets: &[Vec<u8>],
         pacer: Option<&Pacer>,
     ) -> io::Result<()> {
+        let Some(pacer) = pacer else {
+            return writer.send_all(packets);
+        };
         let start = Instant::now();
-        for (index, packet) in packets.iter().enumerate() {
-            if let Some(pacer) = pacer {
-                wait_until(start + Duration::from_nanos(pacer.offset_ns(index)));
+        let mut sent = 0;
+        while sent < packets.len() {
+            let now = wait_until(start + Duration::from_nanos(pacer.offset_ns(sent)));
+            let elapsed_ns = u64::try_from((now - start).as_nanos()).unwrap_or(u64::MAX);
+            // a slow send catches up by writing every packet already due at once
+            let mut due = sent + 1;
+            while due < packets.len() && pacer.offset_ns(due) <= elapsed_ns {
+                due += 1;
             }
-            socket.send(packet)?;
+            writer.send_all(&packets[sent..due])?;
+            sent = due;
         }
         Ok(())
     }
 
-    fn wait_until(deadline: Instant) {
+    fn wait_until(deadline: Instant) -> Instant {
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let now = Instant::now();
+            let remaining = deadline.saturating_duration_since(now);
             if remaining.is_zero() {
-                return;
+                return now;
             }
             if remaining > SPIN_MARGIN {
                 thread::sleep(remaining - SPIN_MARGIN);
             } else {
                 std::hint::spin_loop();
             }
+        }
+    }
+
+    // writes each run of equal-size packets as one UDP GSO datagram train
+    #[derive(Debug)]
+    struct DatagramWriter {
+        socket: UdpSocket,
+        segmentation: bool,
+        // UDP_SEGMENT currently set on the socket, 0 when off
+        #[cfg(target_os = "linux")]
+        segment_size: usize,
+    }
+
+    impl DatagramWriter {
+        fn new(socket: UdpSocket) -> Self {
+            Self {
+                socket,
+                segmentation: cfg!(target_os = "linux"),
+                #[cfg(target_os = "linux")]
+                segment_size: 0,
+            }
+        }
+
+        fn send_all(&mut self, packets: &[Vec<u8>]) -> io::Result<()> {
+            let mut rest = packets;
+            while !rest.is_empty() {
+                let run = if self.segmentation {
+                    segment_run(rest)
+                } else {
+                    1
+                };
+                self.send_run(&rest[..run])?;
+                rest = &rest[run..];
+            }
+            Ok(())
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        fn send_run(&mut self, run: &[Vec<u8>]) -> io::Result<()> {
+            self.send_each(run)
+        }
+
+        #[cfg(target_os = "linux")]
+        fn send_run(&mut self, run: &[Vec<u8>]) -> io::Result<()> {
+            if !self.segmentation {
+                return self.send_each(run);
+            }
+            match self.send_segmented(run) {
+                Err(error) if segmentation_unsupported(&error) => {
+                    self.set_segment_size(0)?;
+                    self.segmentation = false;
+                    self.send_each(run)
+                }
+                result => result,
+            }
+        }
+
+        fn send_each(&self, run: &[Vec<u8>]) -> io::Result<()> {
+            run.iter()
+                .try_for_each(|packet| self.socket.send(packet).map(drop))
+        }
+
+        #[cfg(target_os = "linux")]
+        fn send_segmented(&mut self, run: &[Vec<u8>]) -> io::Result<()> {
+            use std::os::fd::AsRawFd;
+            self.set_segment_size(run[0].len())?;
+            let mut iovecs = [libc::iovec {
+                iov_base: core::ptr::null_mut(),
+                iov_len: 0,
+            }; MAX_SEGMENTS];
+            for (iovec, packet) in iovecs.iter_mut().zip(run) {
+                iovec.iov_base = packet.as_ptr().cast_mut().cast();
+                iovec.iov_len = packet.len();
+            }
+            let count = libc::c_int::try_from(run.len()).map_err(io::Error::other)?;
+            // SAFETY: the first `count` iovecs point into packets borrowed for this call, and writev only reads them
+            let written = unsafe { libc::writev(self.socket.as_raw_fd(), iovecs.as_ptr(), count) };
+            if written < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+
+        #[cfg(target_os = "linux")]
+        fn set_segment_size(&mut self, size: usize) -> io::Result<()> {
+            use std::os::fd::AsRawFd;
+            if size == self.segment_size {
+                return Ok(());
+            }
+            let value = libc::c_int::try_from(size).map_err(io::Error::other)?;
+            // SAFETY: the option value is a live c_int and the length passed is its size
+            let result = unsafe {
+                libc::setsockopt(
+                    self.socket.as_raw_fd(),
+                    libc::SOL_UDP,
+                    libc::UDP_SEGMENT,
+                    (&value as *const libc::c_int).cast(),
+                    core::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            if result != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            self.segment_size = size;
+            Ok(())
+        }
+    }
+
+    // largest UDP payload of one IPv4 datagram
+    const MAX_UDP_PAYLOAD: usize = 65_507;
+    // UDP_MAX_SEGMENTS, the kernel's cap on segments per GSO write
+    const MAX_SEGMENTS: usize = 64;
+
+    // leading packets of the first one's size, plus one shorter packet as the last segment
+    fn segment_run(packets: &[Vec<u8>]) -> usize {
+        let size = packets[0].len();
+        if size == 0 {
+            return 1;
+        }
+        let limit = (MAX_UDP_PAYLOAD / size)
+            .clamp(1, MAX_SEGMENTS)
+            .min(packets.len());
+        let full = packets[..limit]
+            .iter()
+            .take_while(|packet| packet.len() == size)
+            .count();
+        let shorter_tail = full < limit && packets[full].len() < size;
+        full + usize::from(shorter_tail)
+    }
+
+    // ENOPROTOOPT before Linux 4.18, EIO without checksum offload, EINVAL past the MTU
+    #[cfg(target_os = "linux")]
+    fn segmentation_unsupported(error: &io::Error) -> bool {
+        matches!(
+            error.raw_os_error(),
+            Some(libc::ENOPROTOOPT | libc::EIO | libc::EINVAL)
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::vec;
+
+        const SEGMENT: usize = 1460;
+
+        #[test]
+        fn segment_run_takes_equal_packets_and_one_shorter_tail() {
+            let packets = vec![
+                vec![0; SEGMENT],
+                vec![0; SEGMENT],
+                vec![0; 620],
+                vec![0; SEGMENT],
+            ];
+            assert_eq!(segment_run(&packets), 3);
+        }
+
+        #[test]
+        fn segment_run_stops_before_a_longer_packet() {
+            let packets = vec![vec![0; 1000], vec![0; SEGMENT]];
+            assert_eq!(segment_run(&packets), 1);
+        }
+
+        #[test]
+        fn segment_run_fits_one_udp_datagram() {
+            let packets = vec![vec![0; SEGMENT]; MAX_SEGMENTS];
+            assert_eq!(segment_run(&packets), MAX_UDP_PAYLOAD / SEGMENT);
         }
     }
 }

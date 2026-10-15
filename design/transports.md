@@ -1008,8 +1008,14 @@ being essence-agnostic it can serve the other essences the same way.
 
 `st2110pacing` implements ST 2110-21 sender pacing: a schedule spreading a frame's
 packets across the frame period, linear or gapped, which both `St2110VideoSink` and
-the -22 `St2110JxsSink` realize over the tokio timer through a shared `pace_send`, so
-the network sees a smooth flow instead of a burst. `VrxValidator` is the full
+the -22 `St2110JxsSink` realize through a shared `PacedSender` thread, so the
+network sees a smooth flow instead of a burst. The thread sleeps and spins to each
+deadline, then writes every packet already due at once. On Linux each run of
+equal-size packets goes out as one UDP GSO write (`UDP_SEGMENT`), falling back to
+one `send` per packet when the kernel or route refuses it. The -20 packetizer RTP
+pads every packet but a frame's last to `max-packet` so a frame forms long runs.
+On loopback a GSO write costs about 0.65 us per packet against 5.5 us for `send`,
+which lets 10-bit 4:2:2 1080p60 (3608 packets) meet the gapped schedule. `VrxValidator` is the full
 per-format -21 compliance check, the leaky-bucket virtual-receive-buffer model where
 a receiver drains one packet every `TRS` after a `TR_OFFSET` head start, which over a
 run of actual emission offsets reports the peak buffer occupancy, whether a packet

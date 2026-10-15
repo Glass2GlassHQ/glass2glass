@@ -47,6 +47,8 @@ const SRD_HEADER_LEN: usize = 6;
 const SRD_CONTINUATION: u16 = 0x8000;
 /// The 15-bit line number and pixel offset fields of an SRD.
 const SRD_FIELD_MASK: u16 = 0x7FFF;
+/// RTP header `P` bit: the datagram ends in padding counted by its last byte.
+const RTP_PADDING_BIT: u8 = 0x20;
 
 /// An RFC 4175 sampling, tying a [`RawVideoFormat`] to a wire pixel group.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,7 +286,8 @@ impl St2110VideoPacketizer {
 
     /// Packetize one `width` x `height` frame (tightly packed, no row padding) at
     /// PTP/TAI sampling time `tai_ns`. Every packet shares the frame's 90 kHz RTP
-    /// timestamp; the last carries the marker bit. Returns `None` if the width is
+    /// timestamp; the last carries the marker bit, and every other packet is RTP
+    /// padded to exactly `max_packet` octets. Returns `None` if the width is
     /// not a whole number of pgroups or the buffer is too small for the geometry.
     pub fn packetize(
         &mut self,
@@ -319,8 +322,19 @@ impl St2110VideoPacketizer {
             });
             let marker = sizing.cursor.line >= height;
             let headers_end = RTP_HEADER_LEN + EXT_SEQ_LEN + run_count * SRD_HEADER_LEN;
-            let mut pkt = alloc::vec![0u8; headers_end + data_len];
+            // equal sizes let the sender batch a frame into one UDP GSO write
+            let padding = if marker {
+                0
+            } else {
+                self.max_packet - (headers_end + data_len)
+            };
+            let mut pkt = alloc::vec![0u8; headers_end + data_len + padding];
             self.write_headers(&mut pkt, rtp_ts, marker);
+            if padding > 0 {
+                pkt[0] |= RTP_PADDING_BIT;
+                *pkt.last_mut().expect("padded packet is non-empty") = u8::try_from(padding)
+                    .expect("a packet stops short by less than one SRD and pgroup");
+            }
             let mut header_at = RTP_HEADER_LEN + EXT_SEQ_LEN;
             let mut data_at = headers_end;
             for (index, run) in cursor.packet_runs(payload_budget).enumerate() {
@@ -579,10 +593,15 @@ mod tests {
         let frame = ramp(w * 4 * h);
         let tai = 1_700_000_000_000_000_000u64;
 
-        let mut tx =
-            St2110VideoPacketizer::new(96, 0xF00D, Sampling::Rgba8, RTP_HEADER_LEN + 2 + 6 + 20);
+        let max_packet = RTP_HEADER_LEN + 2 + 6 + 20;
+        let mut tx = St2110VideoPacketizer::new(96, 0xF00D, Sampling::Rgba8, max_packet);
         let packets = tx.packetize(&frame, w, h, tai).expect("packetizes");
         assert!(packets.len() > 1, "small MTU splits the frame");
+        let (_, padded) = packets.split_last().unwrap();
+        assert!(
+            padded.iter().all(|p| p.len() == max_packet),
+            "every packet but the last is padded to max_packet"
+        );
         // Only the last packet has the marker bit.
         for (i, p) in packets.iter().enumerate() {
             assert_eq!(
