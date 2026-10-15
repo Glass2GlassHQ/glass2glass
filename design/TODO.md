@@ -84,8 +84,6 @@ Highest leverage first:
 - **`VulkanVideoDec` H.264 and H.265 conformance.** 58 of 135 JVT and 104 of
   188 HEVC vectors pass, against 129 and 141 for `nvdec`. Interlaced H.264
   vectors fail with an error rather than being refused.
-- **`VulkanVideoDec` with two GPUs.** On a host with an NVIDIA and an AMD GPU
-  and no `VK_DRIVER_FILES`, an AV1 stream decodes to uniform gray.
 - **AV1 spatial layers.** `av1-1-b8-22-svc-L2T1` and `L2T2` differ from the
   reference through `dav1ddec` and `rav1ddec`.
 - **HEVC through `ffmpegdec`.** 53 of 188 HEVC vectors fail through

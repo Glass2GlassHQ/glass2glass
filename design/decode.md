@@ -575,6 +575,16 @@ output frame: `output_extent` is the picture size the caller gets, `coded_extent
 the size every picture resource is bound at, which the spec requires to stay
 inside the device's coded-extent range.
 
+Below the device's minimum coded extent only H.265 decodes correctly that way.
+H.264 there comes out wrong on RADV or loses the device on NVIDIA, and AV1
+comes out flat gray on NVIDIA, whose AV1 minimum is 128x128. Session creation
+refuses an H.264 or AV1 stream below the minimum with `UnsupportedStream`, which
+the element reports as `CapsMismatch`. Auto-plug skips `vulkanvideodec` for the
+same sizes through an input check (`ElementFactory::accepting_input`), so
+`decodebin` takes a software decoder. The check reads the decode capabilities of
+the GPU the element would open, once per process on first use, and accepts every
+input when no Vulkan video device answers.
+
 The output is the stream's crop rectangle of the coded picture: the H.264 SPS
 frame crop or the H.265 SPS conformance window, so a 1080p H.264 stream coded at
 1920x1088 comes out 1920x1080. The session computes it once from the SPS as

@@ -10,6 +10,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1436: `uridecodebin` fails an unreadable or unrecognized `file://` URI with its own error instead of falling back to `Mp4Src`.
 - M1435: `ffmpegdec`'s CUDA backend rejects an explicit non-NV12 output format and a 10-bit surface instead of overriding or mislabelling them.
 - M1434: `ffmpegdec` and `mfdecode` keep an undeclared frame rate unknown instead of reporting 30 fps.
+- M1433: `vulkanvideodec` refuses H.264 and AV1 below the GPU's minimum decode size, and auto-plug skips it there, so small AV1 streams no longer decode to gray.
 - M1432: decoder auto-plug skips `nvdec` below NVDEC's reported minimum size, so small AV1 streams decode in software.
 - M1431: auto-plug builds `ffmpegdec` in `Auto` mode unless the downstream pins a format, so 10-bit AV1 decodes through `decodebin ! videoconvert`.
 - M1430: `vulkanvideodec` announces the bit depth it decodes, so a Main 10 stream decodes through a launch line.

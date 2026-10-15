@@ -8,11 +8,12 @@ use g2g_plugins::ivfdemux::IvfDemux;
 use g2g_plugins::nvdec::NvDec;
 use g2g_plugins::registry::default_registry;
 
+#[path = "common/ivf.rs"]
+mod ivf;
+use ivf::ivf_frame_count;
+
 // AV1-TEST-VECTORS, smaller than NVDEC's minimum AV1 decode size
 const UNDERSIZED_FIXTURE: &str = "av1-1-b8-01-size-16x16.ivf";
-const IVF_FILE_HEADER_LEN: usize = 32;
-const IVF_FRAME_HEADER_LEN: usize = 12;
-const IVF_FRAME_SIZE_LEN: usize = 4;
 const AUTOPLUG_MAX_DEPTH: usize = 4;
 const LINK_CAPACITY: usize = 4;
 
@@ -21,19 +22,6 @@ impl PipelineClock for ZeroClock {
     fn now_ns(&self) -> u64 {
         0
     }
-}
-
-fn ivf_frame_count(file: &[u8]) -> u64 {
-    let mut offset = IVF_FILE_HEADER_LEN;
-    let mut frames = 0;
-    while let Some(frame_header) = file.get(offset..offset + IVF_FRAME_HEADER_LEN) {
-        let size_bytes: [u8; IVF_FRAME_SIZE_LEN] = frame_header[..IVF_FRAME_SIZE_LEN]
-            .try_into()
-            .expect("a four byte frame size");
-        offset += IVF_FRAME_HEADER_LEN + u32::from_le_bytes(size_bytes) as usize;
-        frames += 1;
-    }
-    frames
 }
 
 #[tokio::test]

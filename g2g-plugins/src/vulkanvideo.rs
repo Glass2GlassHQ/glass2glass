@@ -86,7 +86,18 @@ impl VulkanVideoCodec {
             Self::Av1 => ash::khr::video_decode_av1::NAME,
         }
     }
+
+    // below the device minimum H.264 decodes wrong or loses the device and AV1 decodes gray
+    fn smallest_decodable_extent(self, caps: &VulkanVideoDecodeCaps) -> (u32, u32) {
+        match self {
+            Self::H265 => SMALLEST_PICTURE_EXTENT,
+            Self::H264 | Self::Av1 => caps.min_coded_extent,
+        }
+    }
 }
+
+// H.265 decodes padded up to the device minimum, so any picture size works
+const SMALLEST_PICTURE_EXTENT: (u32, u32) = (1, 1);
 
 /// Decode capabilities of a Vulkan physical device for one codec profile.
 ///
@@ -6521,14 +6532,18 @@ pub async fn open_decode_device(
     open_decode_device_at(codec, None).await
 }
 
-/// [`open_decode_device`] on a chosen GPU: `device_index` indexes the adapters
-/// that support this codec's hardware decode, in Vulkan enumeration order (the
-/// `device-index` property), and `Err(NoSuchDevice)` if it is past the last one.
-/// `None` keeps the default pick (a discrete GPU when there is one).
-pub async fn open_decode_device_at(
+// the GPU `open_decode_device_at` decodes on, before its device is opened
+struct DecodeAdapter {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    caps: VulkanVideoDecodeCaps,
+    compute_family: Option<u32>,
+}
+
+async fn select_decode_adapter(
     codec: VulkanVideoCodec,
     device_index: Option<u32>,
-) -> Result<VulkanVideoDevice, VulkanVideoError> {
+) -> Result<DecodeAdapter, VulkanVideoError> {
     // Pick a Vulkan adapter that actually supports this codec's hardware decode.
     // `request_adapter(HighPerformance)` is not codec-aware: on a multi-GPU host
     // (e.g. an AMD iGPU beside an NVIDIA dGPU) it can hand back the adapter that
@@ -6541,7 +6556,7 @@ pub async fn open_decode_device_at(
     // nothing under rapid repeated opens (loader / driver churn across threads),
     // so retry with a fresh instance a couple of times before giving up.
     let mut attempt = 0u32;
-    let (instance, adapter, caps, compute_family) = loop {
+    loop {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             flags: wgpu::InstanceFlags::default(),
@@ -6603,13 +6618,34 @@ pub async fn open_decode_device_at(
                 None => candidates.iter().position(|c| c.3).unwrap_or(0),
             };
             let (adapter, caps, compute_family, _) = candidates.swap_remove(idx);
-            break (instance, adapter, caps, compute_family);
+            return Ok(DecodeAdapter {
+                instance,
+                adapter,
+                caps,
+                compute_family,
+            });
         }
         attempt += 1;
         if attempt >= 3 {
             return Err(VulkanVideoError::NoVulkanAdapter);
         }
-    };
+    }
+}
+
+/// [`open_decode_device`] on a chosen GPU: `device_index` indexes the adapters
+/// that support this codec's hardware decode, in Vulkan enumeration order (the
+/// `device-index` property), and `Err(NoSuchDevice)` if it is past the last one.
+/// `None` keeps the default pick (a discrete GPU when there is one).
+pub async fn open_decode_device_at(
+    codec: VulkanVideoCodec,
+    device_index: Option<u32>,
+) -> Result<VulkanVideoDevice, VulkanVideoError> {
+    let DecodeAdapter {
+        instance,
+        adapter,
+        caps,
+        compute_family,
+    } = select_decode_adapter(codec, device_index).await?;
 
     let decode_family = caps.decode_queue_family;
     let exts = decode_device_extensions(codec);
@@ -7141,11 +7177,25 @@ impl VulkanVideoDevice {
         }
     }
 
+    fn refuse_undecodable_extent(
+        &self,
+        codec: VulkanVideoCodec,
+        width: u32,
+        height: u32,
+    ) -> Result<(), VulkanVideoError> {
+        let (min_width, min_height) = codec.smallest_decodable_extent(&self.caps);
+        if width < min_width || height < min_height {
+            return Err(VulkanVideoError::UnsupportedStream);
+        }
+        Ok(())
+    }
+
     /// The extent every picture resource is bound at for a stream of `max_w` x
     /// `max_h`, and the picture size the stream's own crop then applies to. They differ when the
     /// stream is smaller than the device's minimum coded extent: a picture
     /// resource must stay inside the device's coded-extent range, so the picture
-    /// is decoded at the minimum and cropped on the way out.
+    /// is decoded at the minimum and cropped on the way out. Only H.265 gets here
+    /// below the minimum, the other codecs are refused first.
     fn session_extents(&self, max_w: u32, max_h: u32) -> ((u32, u32), (u32, u32)) {
         let output = (
             max_w.min(self.caps.max_coded_extent.0),
@@ -7199,8 +7249,9 @@ impl VulkanVideoDevice {
     }
 
     /// Create an H.264 decode session + parameters for `ps`, whose coded pictures
-    /// are `max_w`x`max_h` (clamped to the device's coded-extent range). The output
-    /// is the SPS frame crop of that picture, and a crop reaching outside it is
+    /// are `max_w`x`max_h` (clamped to the device's maximum coded extent). The output
+    /// is the SPS frame crop of that picture, and a crop reaching outside it or a
+    /// picture below the device's minimum coded extent is
     /// [`VulkanVideoError::UnsupportedStream`]. Session parameter creation
     /// validates the `Std*` SPS/PPS mapping.
     pub fn create_h264_session(
@@ -7209,6 +7260,7 @@ impl VulkanVideoDevice {
         max_w: u32,
         max_h: u32,
     ) -> Result<H264DecodeSession, VulkanVideoError> {
+        self.refuse_undecodable_extent(VulkanVideoCodec::H264, max_w, max_h)?;
         let prof = h264_profile();
         // H.264 decode is 8-bit here (High profile, NV12); High 10 is out of scope.
         let (picture_format, reference_format) = self.session_picture_formats(&prof.profile, 8)?;
@@ -7342,6 +7394,7 @@ impl VulkanVideoDevice {
         max_w: u32,
         max_h: u32,
     ) -> Result<H265DecodeSession, VulkanVideoError> {
+        self.refuse_undecodable_extent(VulkanVideoCodec::H265, max_w, max_h)?;
         // 10-bit HEVC (Main 10) selects the Main 10 profile + the G10X6 output
         // format; 8-bit is Main + NV12. The decoder built over this session derives
         // the same bit depth from the SPS, so its profile / DPB images match.
@@ -7476,6 +7529,7 @@ impl VulkanVideoDevice {
         max_w: u32,
         max_h: u32,
     ) -> Result<Av1DecodeSession, VulkanVideoError> {
+        self.refuse_undecodable_extent(VulkanVideoCodec::Av1, max_w, max_h)?;
         // AV1 Main profile covers 8 and 10-bit; the colour config carries the depth.
         // A 10-bit stream selects the G10X6 output format (same as HEVC Main 10).
         let bit_depth = std._color.BitDepth;
@@ -13834,6 +13888,61 @@ impl Default for VulkanVideoDec {
 }
 
 impl VulkanVideoDec {
+    fn input_caps_set() -> CapsSet {
+        CapsSet::from_alternatives(
+            VULKAN_DEC_CODECS
+                .iter()
+                .map(|&codec| Caps::CompressedVideo {
+                    codec,
+                    width: Dim::Any,
+                    height: Dim::Any,
+                    framerate: Rate::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                })
+                .collect(),
+        )
+    }
+
+    // `None` when no Vulkan video device answers for any codec
+    fn query_hardware_input_caps() -> Option<CapsSet> {
+        let mut alternatives = alloc::vec::Vec::new();
+        for codec in VULKAN_DEC_CODECS {
+            let Some(vulkan_codec) = VulkanVideoCodec::from_video_codec(codec) else {
+                continue;
+            };
+            let Ok(selected) = block_on(select_decode_adapter(vulkan_codec, None)) else {
+                continue;
+            };
+            let (min_width, min_height) = vulkan_codec.smallest_decodable_extent(&selected.caps);
+            let (max_width, max_height) = selected.caps.max_coded_extent;
+            alternatives.push(Caps::CompressedVideo {
+                codec,
+                width: Dim::Range {
+                    min: min_width,
+                    max: max_width,
+                },
+                height: Dim::Range {
+                    min: min_height,
+                    max: max_height,
+                },
+                framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            });
+        }
+        (!alternatives.is_empty()).then(|| CapsSet::from_alternatives(alternatives))
+    }
+
+    pub(crate) fn accepts_input(input: &Caps) -> bool {
+        static HARDWARE_INPUT_CAPS: std::sync::OnceLock<CapsSet> = std::sync::OnceLock::new();
+        // no Vulkan video device leaves the open caps for configure to fail on
+        let hardware_input_caps = HARDWARE_INPUT_CAPS
+            .get_or_init(|| Self::query_hardware_input_caps().unwrap_or_else(Self::input_caps_set));
+        hardware_input_caps
+            .alternatives()
+            .iter()
+            .any(|alternative| input.intersect(alternative).is_ok())
+    }
+
     pub fn new() -> Self {
         Self {
             decoder: None,
@@ -14376,18 +14485,7 @@ impl PadTemplates for VulkanVideoDec {
         };
         alloc::vec::Vec::from([
             // Any of the codecs this element decodes (H.264 / H.265 / AV1).
-            PadTemplate::sink(CapsSet::from_alternatives(
-                VULKAN_DEC_CODECS
-                    .iter()
-                    .map(|&codec| Caps::CompressedVideo {
-                        codec,
-                        width: Dim::Any,
-                        height: Dim::Any,
-                        framerate: Rate::Any,
-                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                    })
-                    .collect(),
-            )),
+            PadTemplate::sink(Self::input_caps_set()),
             // Every output the element can produce: the unconverted two planes
             // (`Nv12` 8-bit / `P010` 10-bit) in system memory or as a texture, or,
             // on the zero-copy `WgpuTexture` path, RGBA (the `.produces(WgpuTexture)`

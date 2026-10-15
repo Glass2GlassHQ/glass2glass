@@ -42,6 +42,15 @@ fn a_64x48_clip_decodes() {
     };
 
     let ps = extract_h264_parameter_sets(CLIP).expect("parse SPS+PPS");
+    let (min_width, min_height) = device.caps().min_coded_extent;
+    if WIDTH < min_width || HEIGHT < min_height {
+        // RADV reports a 64x64 minimum, and H.264 below it decodes wrong
+        assert!(matches!(
+            device.create_h264_session(&ps, WIDTH, HEIGHT),
+            Err(VulkanVideoError::UnsupportedStream)
+        ));
+        return;
+    }
     let session = device
         .create_h264_session(&ps, WIDTH, HEIGHT)
         .expect("create session");

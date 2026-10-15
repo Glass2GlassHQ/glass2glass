@@ -2066,7 +2066,8 @@ fn register_autoplug_candidates(reg: &mut Registry) {
             Box::new(crate::vulkanvideo::VulkanVideoDec::new())
         })
         .produces(g2g_core::MemoryDomainKind::WgpuTexture)
-        .hardware(),
+        .hardware()
+        .accepting_input(crate::vulkanvideo::VulkanVideoDec::accepts_input),
     );
     // Android hardware video decode via the NDK MediaCodec (M219/M302); one
     // factory per codec (the MIME is fixed at construction). Reachable from
