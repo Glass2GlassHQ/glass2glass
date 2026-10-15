@@ -717,7 +717,7 @@ impl MultiInputElement for MuxRef<'_> {
     /// `caps_constraint_as_input` below forwards the erased element's own
     /// constraint rather than routing through here.
     fn intercept_caps(&self, input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        let upstream = CapsConstraint::LegacySource(upstream_caps.clone());
+        let upstream = CapsConstraint::Produces(CapsSet::one(upstream_caps.clone()));
         let pad = self.0.caps_constraint_as_input(input);
         crate::runtime::solver::solve_linear(&[&upstream, &pad])
             .map_err(|_| G2gError::CapsMismatch)?

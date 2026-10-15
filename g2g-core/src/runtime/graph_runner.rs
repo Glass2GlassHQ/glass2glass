@@ -428,7 +428,7 @@ impl MultiOutputElement for DemuxRef<'_> {
     /// `caps_constraint_as_input` below forwards the erased element's own
     /// constraint rather than routing through here.
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        let upstream = CapsConstraint::LegacySource(upstream_caps.clone());
+        let upstream = CapsConstraint::Produces(CapsSet::one(upstream_caps.clone()));
         let own = self.0.caps_constraint_as_input();
         solve_linear(&[&upstream, &own])
             .map_err(|_| G2gError::CapsMismatch)?
@@ -4157,7 +4157,7 @@ fn solve_mux_input_dyn(
     mux: &dyn DynMultiInputElement,
     pad: usize,
 ) -> Result<Caps, G2gError> {
-    let src_c = CapsConstraint::LegacySource(new_caps.clone());
+    let src_c = CapsConstraint::Produces(CapsSet::one(new_caps.clone()));
     let mux_c = mux.caps_constraint_as_input(pad);
     let links = solve_linear(&[&src_c, &mux_c]).map_err(|_| G2gError::CapsMismatch)?;
     links.last().cloned().ok_or(G2gError::CapsMismatch)

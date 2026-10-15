@@ -8,6 +8,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 - M1446: the ST 2110 RTP sinks declare native accept sets instead of the legacy sink bridge.
 - M1445: the audio sinks declare native accept sets instead of the legacy sink bridge, and refuse a placeholder rate or channel count at configure.
+- M1443: mid-stream re-solves and `ReFixate` retries seed the solver with a native `Produces` set.
 - M1442: `wgpudmabuf` and `metalvideosink` declare native caps constraints.
 - M1441: `svtjpegxsenc`, `svtjpegxsdec`, the SAMPLE-AES decrypter and v2 plugin elements declare native caps constraints.
 - M1440: demuxers and muxers declare their input caps as native constraints, and a muxer's default output is a native `Produces` set.

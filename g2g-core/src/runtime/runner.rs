@@ -525,7 +525,7 @@ pub(crate) fn re_solve_downstream_dyn_sink(
     new_caps: &Caps,
     sink: &dyn DynAsyncElement,
 ) -> Result<Caps, NegotiationFailure> {
-    let src_c = CapsConstraint::LegacySource(new_caps.clone());
+    let src_c = CapsConstraint::Produces(CapsSet::one(new_caps.clone()));
     match solve_linear(&[&src_c, &sink.caps_constraint_as_sink()]) {
         Ok(links) => links
             .into_iter()
@@ -631,11 +631,8 @@ where
     SourceLoop::set_instance_name(source, source_name.clone());
     let sink_name = namer.add(crate::log::short_type_name::<Snk>(), None);
     AsyncElement::set_instance_name(sink, sink_name.clone());
-    // M16 step 5f: startup negotiation honors `SourceLoop::caps_constraint`
-    // so migrated native sources (e.g. `VideoTestSrc::Produces(...)`)
-    // take the native solver path. `ReFixate` retry falls back to
-    // `LegacySource(counter)` because counter-proposals are a legacy
-    // model concept and native sources don't accept them.
+    // M16 step 5f: startup negotiation honors `SourceLoop::caps_constraint`.
+    // A `ReFixate` retry negotiates the one counter-proposed caps instead.
     let mut refix_counter: Option<Caps> = None;
     let mut attempts = 0u32;
     let negotiated_caps = loop {
@@ -647,7 +644,7 @@ where
         // releases before `configure_pipeline(&fixated)` below.
         let fixated = {
             let src_c = match &refix_counter {
-                Some(c) => CapsConstraint::LegacySource(c.clone()),
+                Some(c) => CapsConstraint::Produces(CapsSet::one(c.clone())),
                 None => source.caps_constraint().await?,
             };
             let sink_c = sink.caps_constraint_as_sink();
