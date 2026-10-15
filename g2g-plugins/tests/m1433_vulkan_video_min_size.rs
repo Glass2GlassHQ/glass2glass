@@ -13,6 +13,8 @@ use g2g_plugins::vulkanvideo::{
     VulkanVideoDevice, VulkanVideoError,
 };
 
+#[path = "common/ivf.rs"]
+mod ivf;
 mod vulkan_nv12_common;
 use vulkan_nv12_common::{launch_frames, H264_CLIP};
 
@@ -96,6 +98,41 @@ fn an_av1_stream_below_the_device_minimum_fails_loudly() {
     }
 }
 
+// SVT-AV1 resize-mode=1 resize-denom=16: a 192x192 sequence whose frames after the key frame are coded at 96x96
+const HALF_CODED_AV1_FIXTURE: &str = "av1_192x192_coded_96x96.ivf";
+const HALF_CODED_FRAME_SIDE: u32 = 96;
+
+#[test]
+fn an_av1_frame_coded_below_the_device_minimum_fails_loudly() {
+    let _gpu = gpu_lock();
+    let Some(device) = usable(block_on(open_av1_decode_device())) else {
+        return;
+    };
+    let (min_width, min_height) = device.caps().min_coded_extent;
+    drop(device);
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(HALF_CODED_AV1_FIXTURE);
+    let decoded = launch_frames(
+        &format!(
+            "filesrc location={} ! ivfdemux ! vulkanvideodec",
+            path.display()
+        ),
+        "m1433_half_coded_av1",
+    );
+    if HALF_CODED_FRAME_SIDE < min_width || HALF_CODED_FRAME_SIDE < min_height {
+        assert_eq!(
+            decoded.map(|frames| frames.len()),
+            Err(G2gError::CapsMismatch),
+            "a frame coded below the minimum must fail, not decode to a flat field"
+        );
+        return;
+    }
+    let file = std::fs::read(&path).expect("the fixture is checked in");
+    let frames = decoded.expect("frames at or above the minimum decode");
+    assert_eq!(frames.len() as u64, ivf::ivf_frame_count(&file));
+}
+
 #[test]
 fn an_h264_session_below_the_device_minimum_is_refused() {
     let _gpu = gpu_lock();
@@ -123,9 +160,6 @@ fn undersized_av1_autoplugs_a_software_decoder_with_vulkanvideodec_preferred() {
     use g2g_core::runtime::{is_raw_video, parse_launch, run_graph, RankOverride};
     use g2g_core::PipelineClock;
     use g2g_plugins::registry::default_registry;
-
-    #[path = "common/ivf.rs"]
-    mod ivf;
 
     const AUTOPLUG_MAX_DEPTH: usize = 4;
     const LINK_CAPACITY: usize = 4;

@@ -579,9 +579,12 @@ Below the device's minimum coded extent only H.265 decodes correctly that way.
 H.264 there comes out wrong on RADV or loses the device on NVIDIA, and AV1
 comes out flat gray on NVIDIA, whose AV1 minimum is 128x128. Session creation
 refuses an H.264 or AV1 stream below the minimum with `UnsupportedStream`, which
-the element reports as `CapsMismatch`. Auto-plug skips `vulkanvideodec` for the
-same sizes through an input check (`ElementFactory::accepting_input`), so
-`decodebin` takes a software decoder. The check reads the decode capabilities of
+the element reports as `CapsMismatch`. An AV1 frame can be coded smaller than its
+sequence's maximum size, so the decoder also refuses each AV1 frame coded below
+the minimum. Auto-plug skips `vulkanvideodec` for the same sizes through an input
+check (`ElementFactory::accepting_input`), so `decodebin` takes a software
+decoder. The check compares an H.264 stream at its macroblock-aligned coded size,
+which is what the device minimum applies to. The check reads the decode capabilities of
 the GPU the element would open, once per process on first use, and accepts every
 input when no Vulkan video device answers.
 

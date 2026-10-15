@@ -9141,6 +9141,7 @@ impl VulkanVideoDevice {
             ref_slot: [None; AV1_NUM_REF_FRAMES],
             phys_state: alloc::vec![None; num_slots],
             seq: seq.clone(),
+            smallest_frame_extent: VulkanVideoCodec::Av1.smallest_decodable_extent(&self.caps),
         })
     }
 }
@@ -11770,6 +11771,7 @@ pub struct Av1DpbDecoder {
     /// Per physical slot, the decoded frame's reference bookkeeping (`None` = free).
     phys_state: alloc::vec::Vec<Option<Av1SlotState>>,
     seq: Av1SequenceHeader,
+    smallest_frame_extent: (u32, u32),
 }
 
 impl core::fmt::Debug for Av1DpbDecoder {
@@ -12128,6 +12130,11 @@ impl Av1DpbDecoder {
         let refs = self.ref_frames();
         let mut fh = parse_av1_frame_header(payload, &self.seq, &refs)
             .ok_or(VulkanVideoError::UnsupportedStream)?;
+        // a frame can be coded smaller than its sequence's maximum size
+        let (min_width, min_height) = self.smallest_frame_extent;
+        if fh.frame_width < min_width || fh.frame_height < min_height {
+            return Err(VulkanVideoError::UnsupportedStream);
+        }
 
         // Resolve film grain: an `update_grain == 0` frame copies its coefficients
         // from a reference frame (keeping only its own seed + apply flag). Resolve
@@ -13887,6 +13894,31 @@ impl Default for VulkanVideoDec {
     }
 }
 
+// H.264 decodes whole macroblocks, so its coded size is the picture size rounded up
+fn coded_extent_caps(input: &Caps) -> Caps {
+    let Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Fixed(width),
+        height: Dim::Fixed(height),
+        framerate,
+        colorimetry,
+    } = input
+    else {
+        return input.clone();
+    };
+    let round_up = |side: u32| {
+        side.checked_next_multiple_of(H264_MACROBLOCK_SIZE)
+            .unwrap_or(side)
+    };
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Fixed(round_up(*width)),
+        height: Dim::Fixed(round_up(*height)),
+        framerate: framerate.clone(),
+        colorimetry: *colorimetry,
+    }
+}
+
 impl VulkanVideoDec {
     fn input_caps_set() -> CapsSet {
         CapsSet::from_alternatives(
@@ -13937,10 +13969,11 @@ impl VulkanVideoDec {
         // no Vulkan video device leaves the open caps for configure to fail on
         let hardware_input_caps = HARDWARE_INPUT_CAPS
             .get_or_init(|| Self::query_hardware_input_caps().unwrap_or_else(Self::input_caps_set));
+        let coded_input = coded_extent_caps(input);
         hardware_input_caps
             .alternatives()
             .iter()
-            .any(|alternative| input.intersect(alternative).is_ok())
+            .any(|alternative| coded_input.intersect(alternative).is_ok())
     }
 
     pub fn new() -> Self {
@@ -14918,6 +14951,27 @@ static VULKANVIDEODEC_PROPS: &[PropertySpec] = &[
 mod tests {
     use super::*;
     use crate::annexb::BitWriter;
+
+    #[test]
+    fn autoplug_compares_h264_at_its_macroblock_coded_size() {
+        let compressed = |codec, width, height| Caps::CompressedVideo {
+            codec,
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        const MACROBLOCKS_PER_SIDE: u32 = 4;
+        const CROPPED_PIXELS: u32 = 4;
+        let coded_side = H264_MACROBLOCK_SIZE * MACROBLOCKS_PER_SIDE;
+        let cropped_side = coded_side - CROPPED_PIXELS;
+        assert_eq!(
+            coded_extent_caps(&compressed(VideoCodec::H264, cropped_side, cropped_side)),
+            compressed(VideoCodec::H264, coded_side, coded_side)
+        );
+        let av1 = compressed(VideoCodec::Av1, cropped_side, cropped_side);
+        assert_eq!(coded_extent_caps(&av1), av1);
+    }
 
     // A real 640x480 baseline Annex-B clip (SPS + PPS + frames). GPU-free:
     // exercises the bitstream parse + `Std*` mapping without a Vulkan device.
