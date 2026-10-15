@@ -1816,26 +1816,13 @@ fn register_uri_handlers(reg: &mut Registry) {
 /// decoder when its backend is compiled in.
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 fn ffmpegdec_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
-    // The source pad template lists NV12 before I420, so a `is_raw_video` target
-    // settles on NV12 (the layout KMS / waylandsink want); an I420-only sink drives
-    // I420. Anything that is not raw video falls back to I420.
-    ffmpegdec_pinned_output_format(out).unwrap_or(crate::ffmpegdec::OutputFormat::I420)
-}
-
-/// Autoplug output format for the **software** `ffmpegdec` (M685/M686): default
-/// to `Auto` for a loose target so the decoder keeps the source chroma and a
-/// downstream that pins 4:2:2 / 4:4:4 (a capsfilter) negotiates it. NV12 stays
-/// explicit for overlay-plane sinks. Distinct from [`ffmpegdec_output_format`],
-/// which the fixed-format hwaccel path (`ffmpegvaapidec`) keeps using.
-#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-fn ffmpegdec_sw_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
     ffmpegdec_pinned_output_format(out).unwrap_or(crate::ffmpegdec::OutputFormat::Auto)
 }
 
 /// The decoder output layout a *pinned* raw-video target demands: a downstream
 /// that fixes NV12, a non-4:2:0 chroma, or a 10-/12-bit format (M887) must get a
 /// decoder built for exactly that, or its `CapsChanged` is rejected at startup.
-/// `None` for an I420 / non-raw target, whose fallback differs per backend.
+/// `None` for an I420 / non-raw target, which gets `Auto`.
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 fn ffmpegdec_pinned_output_format(out: &Caps) -> Option<crate::ffmpegdec::OutputFormat> {
     use crate::ffmpegdec::OutputFormat;
@@ -2016,10 +2003,10 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // NV12, and the decoder must be built to emit it. Ignoring `out` here built a
     // fixed-I420 decoder under a chain promised NV12, so the runner's forward-caps
     // pre-fix (sink's NV12 accept-set) hit the decoder's `format != output_format`
-    // arm and failed startup negotiation. Default to I420 for a loose target.
+    // arm and failed startup negotiation. A loose target gets `Auto`.
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register(ElementFactory::of::<FfmpegH264Dec>("ffmpegdec", |out| {
-        Box::new(FfmpegH264Dec::new().with_output_format(ffmpegdec_sw_output_format(out)))
+        Box::new(FfmpegH264Dec::new().with_output_format(ffmpegdec_output_format(out)))
     }));
     // AAC (and other libavcodec audio codecs) -> interleaved PcmS16Le (M422), the
     // audio sibling of ffmpegdec, in the auto-plug pool so a decode chain reaches

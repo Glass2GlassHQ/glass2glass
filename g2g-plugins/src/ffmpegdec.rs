@@ -164,8 +164,7 @@ pub enum OutputFormat {
     /// Planar 4:2:0 Y / U / V (default). Byte length = `w*h + 2 * ceil(w/2) * ceil(h/2)`.
     I420,
     /// Y plane followed by interleaved U/V (NV12). Same total byte length
-    /// as I420; what KMS overlay planes (and many GPU samplers) prefer. A 10-bit
-    /// 4:2:0 source comes out as its 10-bit sibling, P010.
+    /// as I420; what KMS overlay planes (and many GPU samplers) prefer.
     Nv12,
     /// Planar 4:2:2 Y / U / V (half-width, full-height chroma). Preserves the
     /// chroma of a 4:2:2 (High 4:2:2 profile) source instead of downsampling to
@@ -252,9 +251,8 @@ impl OutputFormat {
 }
 
 /// Resolve the effective output format for a decoded frame. A fixed format is
-/// returned unchanged, except NV12 on a 10-bit 4:2:0 source resolves to P010.
-/// `Auto` maps to the source's native chroma (I420 for 4:2:0 / NV12, I422 for
-/// 4:2:2, I444 for 4:4:4), so the decode preserves it. An
+/// returned unchanged; `Auto` maps to the source's native chroma (I420 for 4:2:0
+/// / NV12, I422 for 4:2:2, I444 for 4:4:4), so the decode preserves it. An
 /// unsupported source pixel format under `Auto` is a loud `CapsMismatch`.
 fn resolve_output_format(requested: OutputFormat, src: Pixel) -> Result<OutputFormat, G2gError> {
     match requested {
@@ -274,10 +272,6 @@ fn resolve_output_format(requested: OutputFormat, src: Pixel) -> Result<OutputFo
             Pixel::P010LE => Ok(OutputFormat::P010),
             _ => Err(G2gError::CapsMismatch),
         },
-        // 8-bit NV12 cannot hold a 10-bit sample
-        OutputFormat::Nv12 if matches!(src, Pixel::YUV420P10LE | Pixel::P010LE) => {
-            Ok(OutputFormat::P010)
-        }
         other => Ok(other),
     }
 }
@@ -1353,8 +1347,9 @@ impl PadTemplates for FfmpegVideoDec {
                 SUPPORTED_CODECS.into_iter().map(any_codec).collect(),
             )),
             PadTemplate::source(CapsSet::from_alternatives(Vec::from([
-                any_geometry(RawVideoFormat::Nv12),
+                // first so a downstream taking any raw format gets an `Auto` decoder
                 any_geometry(RawVideoFormat::I420),
+                any_geometry(RawVideoFormat::Nv12),
                 // 4:2:2 / 4:4:4 chroma preserved (software backend, M685); listed
                 // so a downstream that pins one auto-plugs, and `Auto` narrows to
                 // it during negotiation.
@@ -1362,8 +1357,6 @@ impl PadTemplates for FfmpegVideoDec {
                 any_geometry(RawVideoFormat::I444),
                 // High bit depth (M887): a High 10 / Main10 stream's native
                 // planar output, plus the semi-planar P010 a 10-bit sampler pins.
-                // Listed after the 8-bit formats so an unconstrained target still
-                // settles on NV12.
                 any_geometry(RawVideoFormat::I420p10),
                 any_geometry(RawVideoFormat::I420p12),
                 any_geometry(RawVideoFormat::I422p10),
@@ -1418,9 +1411,8 @@ impl AsyncElement for FfmpegVideoDec {
     /// regression.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let out_fmt = self.output_format;
-        let outputs_cuda = self.outputs_cuda();
         CapsConstraint::DerivedOutput(alloc::boxed::Box::new(move |input: &Caps| {
-            derive_output_caps(input, out_fmt, outputs_cuda)
+            derive_output_caps(input, out_fmt)
         }))
     }
 
@@ -1852,8 +1844,7 @@ impl AsyncElement for FfmpegVideoDec {
                                 if *width == Dim::Fixed(d.width) && *height == Dim::Fixed(d.height)
                         );
                         if geometry_matches {
-                            let expected =
-                                derive_output_caps(input, self.output_format, self.outputs_cuda());
+                            let expected = derive_output_caps(input, self.output_format);
                             debug_assert!(
                                 !expected
                                     .intersect(&CapsSet::one(new_caps.clone()))
@@ -2047,7 +2038,7 @@ fn cuvid_name(codec: VideoCodec) -> &'static str {
     }
 }
 
-fn derive_output_caps(input: &Caps, out: OutputFormat, outputs_cuda: bool) -> CapsSet {
+fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
     match input {
         Caps::CompressedVideo {
             codec,
@@ -2083,11 +2074,6 @@ fn derive_output_caps(input: &Caps, out: OutputFormat, outputs_cuda: bool) -> Ca
                     mk(RawVideoFormat::I444p12),
                     // A hardware 10-bit frame arrives semi-planar, so `Auto`
                     // resolves it to P010 (the Vaapi backend's 10-bit output).
-                    mk(RawVideoFormat::P010),
-                ]),
-                // the CUDA path emits NV12 whatever the source depth
-                OutputFormat::Nv12 if !outputs_cuda => CapsSet::from_alternatives(alloc::vec![
-                    mk(RawVideoFormat::Nv12),
                     mk(RawVideoFormat::P010),
                 ]),
                 other => CapsSet::one(mk(other.raw_format())),
@@ -2831,13 +2817,9 @@ mod tests {
             resolve_output_format(Auto, Pixel::RGB24).is_err(),
             "unsupported src"
         );
-        // A fixed request passes through, except NV12 on a 10-bit source.
+        // A fixed request passes through regardless of the source.
         assert_eq!(resolve_output_format(I420, Pixel::YUV444P).unwrap(), I420);
         assert_eq!(resolve_output_format(Nv12, Pixel::YUV420P).unwrap(), Nv12);
-        assert_eq!(
-            resolve_output_format(Nv12, Pixel::YUV420P10LE).unwrap(),
-            P010
-        );
     }
 
     /// Build an 8-bit `NV12` frame: a Y plane, then interleaved U/V bytes.
@@ -3245,20 +3227,18 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
-        // NV12's 10-bit sibling P010 rides along for a 10-bit source.
-        let decoded_1080p = |format| Caps::RawVideo {
-            format,
-            width: Dim::Fixed(1920),
-            height: Dim::Fixed(1080),
-            framerate: Rate::Fixed(30 << 16),
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        };
-        let expected = [
-            decoded_1080p(RawVideoFormat::Nv12),
-            decoded_1080p(RawVideoFormat::P010),
-        ];
-        assert_eq!(f(&h264).alternatives(), &expected);
+        let out = f(&h264);
+        assert_eq!(
+            out.alternatives(),
+            &[Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Fixed(1920),
+                height: Dim::Fixed(1080),
+                framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
+            }]
+        );
 
         // VP9 (and the other supported codecs) now derive output too (M111).
         let vp9 = Caps::CompressedVideo {
@@ -3268,7 +3248,17 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
-        assert_eq!(f(&vp9).alternatives(), &expected);
+        assert_eq!(
+            f(&vp9).alternatives(),
+            &[Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Fixed(1920),
+                height: Dim::Fixed(1080),
+                framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
+            }]
+        );
         // A non-compressed input has no codec to decode → empty CapsSet.
         let raw = Caps::RawVideo {
             format: RawVideoFormat::I420,
