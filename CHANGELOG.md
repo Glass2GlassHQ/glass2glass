@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1449: a mid-stream `videoscale ! videoconvert ! caps` chain scales to the downstream pin instead of passing its input size through.
 - M1446: the ST 2110 RTP sinks declare native accept sets instead of the legacy sink bridge.
 - M1445: the audio sinks declare native accept sets instead of the legacy sink bridge, and refuse a placeholder rate or channel count at configure.
 - M1444: the solver's legacy intercept bridge (`LegacySource`, `LegacyTransform`, `LegacySink`) is gone, and an element that declares no constraint passes caps through.

@@ -17,6 +17,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::caps::{batch_alternatives, Caps, CapsSet, PassthroughFields};
+#[cfg(feature = "std")]
+use crate::caps_transform::CapsTransform;
 use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::graph::{NodeId, NodeKind, ValidatedGraph};
 use crate::log::{self, LogLevel, Target, CAPS_CATEGORY};
@@ -387,16 +389,17 @@ fn backward_feasible(
         }
         // A `DerivedFields` transform inverts on its passthrough fields: the
         // input feasibility is the downstream set with retargeted fields widened
-        // to anything the transform accepts (Dim/Rate -> Any, sample_rate ->
-        // ANY). `project_passthrough` returns `None` for a retargeted scalar with
-        // no wildcard (e.g. videoconvert's format), in which case the input
-        // feasibility isn't expressible as a single `Caps` and we impose none.
+        // to anything the transform accepts (see `derived_fields_inputs`). An
+        // input set it cannot enumerate imposes none.
         CapsConstraint::DerivedFields(t) => {
             let d = down?;
-            let mask = t.passthrough();
-            let mut alts = Vec::with_capacity(d.alternatives().len());
+            let mut alts: Vec<Caps> = Vec::new();
             for o in d.alternatives() {
-                alts.push(project_passthrough(o, mask)?);
+                for input in derived_fields_inputs(t, o)? {
+                    if !alts.contains(&input) {
+                        alts.push(input);
+                    }
+                }
             }
             Some(CapsSet::from_alternatives(alts))
         }
@@ -435,6 +438,68 @@ fn backward_feasible(
     }
 }
 
+// a retargeted format has no wildcard, so it is enumerated over the accept list
+#[cfg(feature = "std")]
+fn derived_fields_inputs(t: &CapsTransform, out: &Caps) -> Option<Vec<Caps>> {
+    let mask = t.passthrough();
+    if let Some(input) = project_passthrough(out, mask) {
+        return Some(alloc::vec![input]);
+    }
+    let template = project_passthrough(out, mask.with_format())?;
+    let inputs: Vec<Caps> = match (t, template) {
+        (
+            CapsTransform::RawVideo { accept, .. },
+            Caps::RawVideo {
+                width,
+                height,
+                framerate,
+                interlace,
+                colorimetry,
+                ..
+            },
+        ) => accept
+            .iter()
+            .map(|&format| Caps::RawVideo {
+                format,
+                width: width.clone(),
+                height: height.clone(),
+                framerate: framerate.clone(),
+                interlace,
+                colorimetry,
+            })
+            .collect(),
+        (
+            CapsTransform::Audio { accept, .. },
+            Caps::Audio {
+                channels,
+                sample_rate,
+                channel_layout,
+                ..
+            },
+        ) => accept
+            .iter()
+            .map(|&format| Caps::Audio {
+                format,
+                channels,
+                sample_rate,
+                channel_layout,
+            })
+            .collect(),
+        _ => return None,
+    };
+    // an empty accept list means every format, which has no finite enumeration
+    if inputs.is_empty() {
+        return None;
+    }
+    let out_set = CapsSet::one(out.clone());
+    Some(
+        inputs
+            .into_iter()
+            .filter(|input| !t.derive(input).intersect(&out_set).is_empty())
+            .collect(),
+    )
+}
+
 /// Caps-α: derive the forwarded output for an interior element on a
 /// mid-stream caps change (design/caps.md). `input` is
 /// the new fixated caps the element receives; `downstream_feasible` is its
@@ -447,7 +512,7 @@ fn backward_feasible(
 /// already produces when that shape is still producible from the new input:
 /// its scalar identity (format / codec / channels) carries over and only the
 /// re-derived geometry / rate changes, so a downstream the snapshot could not
-/// see (feasibility is inexpressible through a retargeting converter) is not
+/// see (feasibility cannot be enumerated through some converters) is not
 /// handed the element's *input* caps. The kept shape is forwarded only when
 /// its re-derived fields **equal the input's** (a converter's copied
 /// geometry / rate, unfixed values included); a value the input does not

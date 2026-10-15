@@ -310,10 +310,18 @@ correctly downstream-aware:
    - fixate; `configure_pipeline(in)`; element-local realloc; forward
      `CapsChanged(fixated_output)`.
 
+The backward sweep crosses a `DerivedFields` transform by keeping its
+passthrough fields from the downstream set and widening its retargeted geometry
+/ rate to `Any`. A retargeted format has no wildcard, so the sweep enumerates
+the transform's `accept` formats instead, keeping each one some shape derives
+into the downstream set. That is what lets a geometry pin below a caps-driven
+`videoconvert` reach a `videoscale` above it mid-stream. A transform with an
+empty `accept` list or a retargeted channel count imposes no feasibility.
+
 When `downstream_feasible[i]` is `None` (no backward snapshot reached this edge,
 e.g. a strict `DerivedOutput` downstream whose input the backward sweep cannot
-invert, or a retargeting converter below whose input feasibility is not
-expressible as a single `Caps`), the arm still forwards the element's output
+invert, or a retargeting converter below whose input set cannot be
+enumerated), the arm still forwards the element's output
 **when the constraint pins it to a single producible caps** (a property-driven
 `videoconvert`, an identity passthrough). An ambiguous producible set (a
 caps-driven converter with several formats) is resolved by preferring the
