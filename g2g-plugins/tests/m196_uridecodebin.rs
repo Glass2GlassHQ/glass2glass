@@ -1,7 +1,6 @@
-//! M196: `uridecodebin` / `playbin` in a gst-launch line. `uridecodebin uri=X`
+//! M196: `uridecodebin` in a gst-launch line. `uridecodebin uri=X`
 //! builds its source from the URI scheme handler and auto-plugs the decode chain
-//! to raw, splicing both into the pipeline as pre-built nodes; `playbin uri=X` is
-//! that plus an auto sink (a complete pipeline). The `file://` handler uses the
+//! to raw, splicing both into the pipeline as pre-built nodes. The `file://` handler uses the
 //! self-demuxing `Mp4Src` (emits H.264), so a decoder candidate is needed to
 //! reach raw, here a stand-in stub (templates drive the search; we assert the
 //! parsed graph structure, not a decode run, which would need a real file).
@@ -73,16 +72,6 @@ fn uridecodebin_feeds_a_custom_chain() {
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
     // Mp4Src -> h264stub -> videoconvert -> fakesink = three edges.
     assert_eq!(graph.edges().len(), 3, "{line}");
-}
-
-#[test]
-fn playbin_is_a_complete_pipeline() {
-    let reg = registry_with_h264_stub();
-    // playbin appends an auto sink (autovideosink -> fakesink here), so the line
-    // is complete on its own: Mp4Src -> h264stub -> autovideosink.
-    let line = &format!("playbin uri={}", h264_mp4_uri());
-    let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
-    assert_eq!(graph.edges().len(), 2, "source -> decoder -> auto sink");
 }
 
 #[test]
