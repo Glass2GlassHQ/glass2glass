@@ -116,6 +116,10 @@ Highest leverage first:
 
 ## Egress / transports
 
+- **ST 2110-20 10-bit to ffmpeg:** ffmpeg n8.1 opens an `St2110VideoSink`
+  `I422p10` stream from its SDP as `bitpacked` but writes no frames, even at
+  64x16. Find whether our 10-bit pgroups, the SDP, or ffmpeg is wrong. 8-bit
+  4:2:2 decodes byte-exact.
 - **RTP over QUIC (RoQ):** implement after the draft becomes an RFC with an
   assigned ALPN. Candidate peers: mengelbart/roq (Go), meetecho/imquic.
 - **`unixfdsink`:** reuse memfds from a pool for system frames, and carry a
