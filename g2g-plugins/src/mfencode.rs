@@ -74,6 +74,8 @@ use g2g_core::{
 
 /// Default target bitrate (bits/s) when the caller doesn't override it.
 const DEFAULT_BITRATE: u32 = 4_000_000;
+// the encoder types need an MF_MT_FRAME_RATE even when the caps declare none
+const ENCODER_FRAMERATE_WHEN_UNDECLARED: (u32, u32) = (30, 1);
 
 /// Live MFT plus the configured input geometry. Rebuilt (not renegotiated in
 /// place) on a mid-stream geometry change: a fresh MFT at the new dims is
@@ -626,13 +628,7 @@ impl AsyncElement for MfEncode {
             }
 
             for c in encoded {
-                // Never emit an `Any` rate (a downstream transform cannot
-                // fixate() it); default 30/1 when input caps did not declare one.
-                let framerate = match &c.framerate {
-                    Rate::Fixed(q) => Rate::Fixed(*q),
-                    _ => Rate::Fixed(30 << 16),
-                };
-                let new_caps = compressed_caps(self.codec, c.width, c.height, framerate);
+                let new_caps = compressed_caps(self.codec, c.width, c.height, c.framerate);
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     // Encode-time output must overlap the closure's
                     // derivation of the recorded input (same Phase A
@@ -1014,7 +1010,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
 fn rate_to_ratio(rate: &Rate) -> (u32, u32) {
     match rate {
         Rate::Fixed(q16) if *q16 > 0 => framerate_q16_to_fraction(*q16),
-        _ => (30, 1),
+        _ => ENCODER_FRAMERATE_WHEN_UNDECLARED,
     }
 }
 
@@ -1189,8 +1185,11 @@ mod tests {
         // 30.5 fps = (30.5 * 65536) / 65536 = 61/2
         assert_eq!(rate_to_ratio(&Rate::Fixed((61 << 16) / 2)), (61, 2));
         // open / zero rates default to 30/1
-        assert_eq!(rate_to_ratio(&Rate::Any), (30, 1));
-        assert_eq!(rate_to_ratio(&Rate::Fixed(0)), (30, 1));
+        assert_eq!(rate_to_ratio(&Rate::Any), ENCODER_FRAMERATE_WHEN_UNDECLARED);
+        assert_eq!(
+            rate_to_ratio(&Rate::Fixed(0)),
+            ENCODER_FRAMERATE_WHEN_UNDECLARED
+        );
     }
 
     #[test]
