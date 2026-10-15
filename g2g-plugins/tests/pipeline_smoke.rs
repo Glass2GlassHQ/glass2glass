@@ -122,13 +122,13 @@ async fn pipeline_tight_link_uses_backpressure() {
     assert!(snk.eos_seen());
 }
 
-/// M16 step 5g: chain `LegacySource(H264) → H264Parse (Identity native)
-/// → FakeSink (AcceptsAny)` exercises the mixed cascade with a native
-/// `Identity` transform in the middle. The parse element doesn't see
+/// M16 step 5g: chain `Produces(H264) → H264Parse (Identity)
+/// → FakeSink (AcceptsAny)` exercises an `Identity` transform in the
+/// middle. The parse element doesn't see
 /// real H.264 bytes here (no NAL data), it just needs to negotiate and
 /// pass through `Eos`.
 #[tokio::test]
-async fn h264parse_identity_negotiates_in_mixed_chain() {
+async fn h264parse_identity_negotiates_in_chain() {
     use core::future::Future;
     use core::pin::Pin;
     use g2g_core::runtime::SourceLoop;
@@ -247,10 +247,8 @@ async fn format_changing_transform_receives_input_side_caps() {
                 other => other.clone(),
             }
         }
-        // Default `caps_constraint_as_transform` returns LegacyTransform,
-        // which the solver's mixed cascade unpacks via intercept +
-        // propose_output. The chain hits the mixed path because
-        // FakeSink is AcceptsAny (native).
+        // The default `caps_constraint_as_transform` passes caps through,
+        // so the solver hands this transform the source format.
     }
 
     let mut src = VideoTestSrc::new(32, 32, 30, 5);

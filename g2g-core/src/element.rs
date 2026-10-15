@@ -6,9 +6,7 @@ use alloc::boxed::Box;
 use crate::caps::Caps;
 use crate::clock::{ClockCandidate, ClockSync};
 use crate::error::G2gError;
-use crate::format_element::{
-    legacy_sink_constraint, legacy_transform_constraint, CapsConstraint, CapsPreferences,
-};
+use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::PipelinePacket;
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
@@ -494,22 +492,18 @@ pub trait AsyncElement: ElementBound {
     }
 
     /// M16 step 5b: declare this element's negotiation-time constraint
-    /// when used as the **sink** of a chain. The default returns the
-    /// legacy bridge (`LegacySink` wrapping today's `intercept_caps`).
-    /// Migrated sinks override with `Accepts(CapsSet)` (or a more
-    /// elaborate native variant) to participate in arc consistency
-    /// and skip the dynamic intercept callback.
+    /// when used as the **sink** of a chain. The default accepts anything.
+    /// A sink that narrows what it takes overrides with `Accepts(CapsSet)`.
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        legacy_sink_constraint(self)
+        CapsConstraint::AcceptsAny
     }
 
     /// M16 step 5b: same as `caps_constraint_as_sink` but for the
-    /// **transform** role. Default returns `LegacyTransform` wrapping
-    /// today's `intercept_caps` + `propose_output_caps`. Migrated
-    /// transforms override with `Identity` / `Mapping` /
-    /// `DerivedOutput`.
+    /// **transform** role. The default passes caps through unchanged. A
+    /// transform that narrows or changes caps overrides with `Identity` /
+    /// `Mapping` / `DerivedOutput` / `DerivedFields`.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        legacy_transform_constraint(self)
+        CapsConstraint::IdentityAny
     }
 
     /// What this element is willing to pay for each alternative of the set its

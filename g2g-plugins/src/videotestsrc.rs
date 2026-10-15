@@ -281,12 +281,8 @@ impl SourceLoop for VideoTestSrc {
         core::future::ready(Ok(self.caps()))
     }
 
-    /// M16 step 5f: native `Produces` constraint. The chain is now
-    /// fully-native when paired with `AcceptsAny`-migrated sinks
-    /// (e.g. `FakeSink`, `syncsink`), exercising the all-native
-    /// arc-consistency solver path instead of the mixed cascade.
-    /// Synchronous override (no I/O), so we sidestep the default's
-    /// `async move` indirection.
+    /// M16 step 5f: native `Produces` constraint. Synchronous override
+    /// (no I/O), so we sidestep the default's `async move` indirection.
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {

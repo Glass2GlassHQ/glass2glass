@@ -173,15 +173,13 @@ impl<T: SourceLoop> DynSourceLoop for T {
         Box::pin(SourceLoop::intercept_caps(self))
     }
 
-    /// A source shape is `Produces` (native) or `LegacySource` (the migration
-    /// bridge). Any other variant means a sink / transform constraint on a source
-    /// slot, which is an element bug, so it fails loud rather than negotiating
-    /// something the source never offered.
+    /// A source shape is `Produces`. Any other variant means a sink / transform
+    /// constraint on a source slot, which is an element bug, so it fails loud
+    /// rather than negotiating something the source never offered.
     fn produced_caps<'a>(&'a mut self) -> BoxFuture<'a, Result<CapsSet, G2gError>> {
         Box::pin(async move {
             match SourceLoop::caps_constraint(self).await? {
                 CapsConstraint::Produces(set) => Ok(set),
-                CapsConstraint::LegacySource(caps) => Ok(CapsSet::one(caps)),
                 _ => Err(G2gError::CapsMismatch),
             }
         })

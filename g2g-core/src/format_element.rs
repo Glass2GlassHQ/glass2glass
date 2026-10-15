@@ -1,38 +1,24 @@
 //! M16 step 2 (design/caps.md): negotiation-time element
 //! surface.
 //!
-//! `FormatElement` is the trait the future solver (M16 step 3) consumes;
-//! `CapsConstraint` is the per-element data it walks. Both coexist with
-//! the runtime `AsyncElement` surface during migration. The
-//! `AsyncElement` → `FormatElement` adapter (the "legacy" path the
-//! design plan calls for) lands together with the solver in step 3,
-//! because its exact shape is dictated by what the solver consumes.
+//! `FormatElement` is the trait the solver consumes; `CapsConstraint` is
+//! the per-element data it walks.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::caps::{Caps, CapsSet};
 use crate::caps_transform::CapsTransform;
-use crate::element::{AsyncElement, ElementBound};
+use crate::element::ElementBound;
 use crate::error::G2gError;
 
-/// Boxed `intercept_caps`-style callback (input narrowing) for the legacy
-/// migration bridge. Deleted with the bridge.
-type InterceptFn<'a> = Box<dyn Fn(&Caps) -> Result<Caps, G2gError> + 'a>;
-/// Boxed `propose_output_caps`-style callback (forward derivation) for the
-/// legacy migration bridge. Deleted with the bridge.
-type ProposeFn<'a> = Box<dyn Fn(&Caps) -> Caps + 'a>;
-
-/// Per-element constraint surface read by the solver.
+/// Per-element constraint surface read by the solver. Element categories
+/// map cleanly:
 ///
-/// Replaces today's `intercept_caps` (the input-narrowing half) and the
-/// forward-half `propose_output_caps` hook with a single declarative
-/// shape. Element categories map cleanly:
-///
-/// | Today                                                | Tomorrow                          |
+/// | Element                                              | Constraint                        |
 /// | ---                                                  | ---                               |
-/// | Source `intercept_caps` returns its produced caps    | `Produces(set)`                   |
-/// | Sink `intercept_caps` narrows upstream               | `Accepts(set)`                    |
+/// | Source producing its caps                            | `Produces(set)`                   |
+/// | Sink narrowing what it takes from upstream           | `Accepts(set)`                    |
 /// | Identity transform                                   | `Identity(set)`                   |
 /// | Decoder reading dims from input SPS                  | `DerivedOutput(\|in\| out_set)`   |
 /// | Caps-driven transform (scale / convert / rate)       | `DerivedFields(transform)`        |
@@ -79,29 +65,6 @@ pub enum CapsConstraint<'a> {
     /// their input stay on `DerivedOutput`.
     DerivedFields(CapsTransform),
 
-    /// **Migration bridge.** Source whose
-    /// [`SourceLoop::intercept_caps`](crate::runtime::SourceLoop::intercept_caps)
-    /// has been evaluated to a single concrete `Caps`. Used by the
-    /// runner to wrap legacy elements until step 5 migrates them to
-    /// `Produces`. Deleted at the end of the migration.
-    LegacySource(Caps),
-
-    /// **Migration bridge.** Transform with the today's
-    /// `intercept_caps(upstream) -> Caps` + `propose_output_caps(input)
-    /// -> Caps` callbacks. Non-boundary transforms set
-    /// `propose_output` to clone the input. Deleted at the end of the
-    /// migration. The boxes are not `Send + Sync` because the solver
-    /// consumes them synchronously on the runner thread.
-    LegacyTransform {
-        intercept: InterceptFn<'a>,
-        propose_output: ProposeFn<'a>,
-    },
-
-    /// **Migration bridge.** Sink with today's
-    /// `intercept_caps(upstream) -> Caps` callback. Deleted at the end
-    /// of the migration.
-    LegacySink(InterceptFn<'a>),
-
     /// Sink-shape wildcard: accepts whatever upstream produces, of any
     /// media type, format, dims, or rate. Models debug / probe /
     /// passthrough sinks (`FakeSink`, `syncsink`, `identity`-as-sink)
@@ -127,12 +90,6 @@ impl core::fmt::Debug for CapsConstraint<'_> {
             Self::Mapping(v) => f.debug_tuple("Mapping").field(v).finish(),
             Self::DerivedOutput(_) => f.debug_tuple("DerivedOutput").field(&"<fn>").finish(),
             Self::DerivedFields(t) => f.debug_tuple("DerivedFields").field(t).finish(),
-            Self::LegacySource(c) => f.debug_tuple("LegacySource").field(c).finish(),
-            Self::LegacyTransform { .. } => f
-                .debug_struct("LegacyTransform")
-                .field("intercept", &"<fn>")
-                .finish_non_exhaustive(),
-            Self::LegacySink(_) => f.debug_tuple("LegacySink").field(&"<fn>").finish(),
             Self::AcceptsAny => f.write_str("AcceptsAny"),
             Self::IdentityAny => f.write_str("IdentityAny"),
         }
@@ -146,7 +103,7 @@ impl CapsConstraint<'_> {
     ///
     /// For sink / transform shapes this tests the *input* side; for the
     /// source shape it tests the *produced* side. Wildcards accept
-    /// anything; the legacy bridges defer to their wrapped callbacks.
+    /// anything.
     pub fn accepts(&self, caps: &Caps) -> bool {
         match self {
             Self::Accepts(set) | Self::Produces(set) | Self::Identity(set) => set.accepts(caps),
@@ -154,9 +111,6 @@ impl CapsConstraint<'_> {
             Self::DerivedOutput(f) => !f(caps).is_empty(),
             Self::DerivedFields(t) => !t.derive(caps).is_empty(),
             Self::AcceptsAny | Self::IdentityAny => true,
-            Self::LegacySource(produced) => produced.intersect(caps).is_ok(),
-            Self::LegacyTransform { intercept, .. } => intercept(caps).is_ok(),
-            Self::LegacySink(intercept) => intercept(caps).is_ok(),
         }
     }
 }
@@ -243,29 +197,6 @@ pub trait FormatElement: ElementBound {
         input: Option<&Caps>,
         output: Option<&Caps>,
     ) -> Result<(), G2gError>;
-}
-
-/// Bridge an `AsyncElement` transform into a `LegacyTransform`
-/// constraint. The returned constraint borrows `transform` for `'a`.
-/// Non-boundary transforms get `propose_output = clone(input)`;
-/// boundary transforms route to `AsyncElement::propose_output_caps`.
-/// Used by the runner during the migration window to feed legacy
-/// elements to the M16 solver.
-pub fn legacy_transform_constraint<'a, T: AsyncElement + ?Sized>(
-    transform: &'a T,
-) -> CapsConstraint<'a> {
-    CapsConstraint::LegacyTransform {
-        intercept: Box::new(move |upstream: &Caps| transform.intercept_caps(upstream)),
-        propose_output: Box::new(move |input: &Caps| transform.propose_output_caps(input)),
-    }
-}
-
-/// Bridge an `AsyncElement` sink into a `LegacySink` constraint. The
-/// returned constraint borrows `sink` for `'a`.
-pub fn legacy_sink_constraint<'a, S: AsyncElement + ?Sized>(sink: &'a S) -> CapsConstraint<'a> {
-    CapsConstraint::LegacySink(Box::new(move |upstream: &Caps| {
-        sink.intercept_caps(upstream)
-    }))
 }
 
 #[cfg(test)]
@@ -501,100 +432,6 @@ mod tests {
         // Wildcards take anything.
         assert!(CapsConstraint::AcceptsAny.accepts(&h264_720));
         assert!(CapsConstraint::IdentityAny.accepts(&nv12_720));
-    }
-
-    #[test]
-    fn legacy_transform_bridge_wraps_async_element() {
-        use crate::element::{AsyncElement, ConfigureOutcome, OutputSink};
-        use crate::frame::PipelinePacket;
-        use core::future::{ready, Ready};
-
-        // Minimal AsyncElement impl that narrows width to 640 and
-        // declares itself a boundary that re-formats to NV12.
-        struct FakeXform;
-        impl AsyncElement for FakeXform {
-            type ProcessFuture<'a> = Ready<Result<(), G2gError>>;
-            fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
-                match upstream.dims() {
-                    Some((_w, height, framerate)) => Ok(Caps::CompressedVideo {
-                        codec: VideoCodec::H264,
-                        width: Dim::Fixed(640),
-                        height: height.clone(),
-                        framerate: framerate.clone(),
-                        colorimetry: crate::Colorimetry::UNKNOWN,
-                    }),
-                    None => Err(G2gError::CapsMismatch),
-                }
-            }
-            fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
-                Ok(ConfigureOutcome::Accepted)
-            }
-            fn process<'a>(
-                &'a mut self,
-                _: PipelinePacket,
-                _: &'a mut dyn OutputSink,
-            ) -> Self::ProcessFuture<'a> {
-                ready(Ok(()))
-            }
-            fn is_format_boundary(&self) -> bool {
-                true
-            }
-            fn propose_output_caps(&self, input: &Caps) -> Caps {
-                match input {
-                    Caps::CompressedVideo {
-                        width,
-                        height,
-                        framerate,
-                        ..
-                    } => Caps::RawVideo {
-                        format: RawVideoFormat::Nv12,
-                        width: width.clone(),
-                        height: height.clone(),
-                        framerate: framerate.clone(),
-                        interlace: crate::Interlace::Any,
-                        colorimetry: crate::Colorimetry::UNKNOWN,
-                    },
-                    other => other.clone(),
-                }
-            }
-        }
-
-        let xf = FakeXform;
-        let c = legacy_transform_constraint(&xf);
-        let upstream = compressed(
-            VideoCodec::H264,
-            Dim::Fixed(1920),
-            Dim::Fixed(720),
-            Rate::Fixed(30 << 16),
-        );
-        match &c {
-            CapsConstraint::LegacyTransform {
-                intercept,
-                propose_output,
-            } => {
-                let narrowed = intercept(&upstream).unwrap();
-                assert_eq!(
-                    narrowed,
-                    compressed(
-                        VideoCodec::H264,
-                        Dim::Fixed(640),
-                        Dim::Fixed(720),
-                        Rate::Fixed(30 << 16)
-                    )
-                );
-                let out = propose_output(&narrowed);
-                assert_eq!(
-                    out,
-                    video(
-                        RawVideoFormat::Nv12,
-                        Dim::Fixed(640),
-                        Dim::Fixed(720),
-                        Rate::Fixed(30 << 16)
-                    )
-                );
-            }
-            _ => panic!("expected LegacyTransform"),
-        }
     }
 
     #[test]

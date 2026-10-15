@@ -44,6 +44,13 @@ pub enum CapsConstraint {
 }
 ```
 
+Every element answers with one of these. One that declares nothing passes caps
+through: a transform defaults to `IdentityAny`, a sink, demux input or muxer
+input pad to `AcceptsAny`, and a source or muxer output to `Produces` of the one
+caps its `intercept_caps` / `output_caps` returns. An element that narrows or
+changes caps declares its own constraint, since the solver never calls
+`intercept_caps`.
+
 `DerivedOutput` is opaque: the solver can only invert it by *dropping whole
 input alternatives* whose forward image can't reach the constrained output, so
 a downstream pin on a field a transform passes through (e.g. a `160x120`

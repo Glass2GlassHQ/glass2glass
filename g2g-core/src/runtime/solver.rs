@@ -73,11 +73,6 @@ pub enum NegotiationFailure {
     /// with no jointly-valid choice). Only the DAG solver's backtracking
     /// fixation returns this.
     NoConsistentFixation,
-    /// Transitional: the chain mixes `Legacy*` variants with the
-    /// native `Accepts` / `Produces` / `Identity` / `Mapping` /
-    /// `DerivedOutput` variants. Mixed handling is added once step 5
-    /// starts migrating individual elements off the legacy bridge.
-    MixedLegacyAndNative,
     /// `upstream` is a transform whose derived output (`DerivedOutput` /
     /// `DerivedFields`) is empty for the caps on its input link, so the link to
     /// `downstream` has nothing to carry: an encoder fed a pixel format it does
@@ -149,20 +144,6 @@ pub fn solve_linear_preferred<'a>(
 ) -> Result<LinkSolution, NegotiationFailure> {
     if constraints.len() < 2 {
         return Err(NegotiationFailure::Degenerate);
-    }
-
-    // Dispatch: chains made entirely of legacy bridge variants take a
-    // simple forward cascade that mirrors today's runner cascade.
-    // Chains made entirely of native variants take the arc-consistency
-    // path below. Mixed chains aren't handled yet (step 5 starts the
-    // migration).
-    let any_legacy = constraints.iter().any(|c| is_legacy(c));
-    let any_native = constraints.iter().any(|c| !is_legacy(c));
-    if any_legacy && any_native {
-        return solve_mixed_cascade(constraints);
-    }
-    if any_legacy {
-        return solve_legacy_cascade(constraints);
     }
 
     let n = constraints.len();
@@ -257,184 +238,7 @@ pub fn solve_linear_preferred<'a>(
     Ok(domains.into_iter().map(|mut d| d.remove(0)).collect())
 }
 
-fn is_legacy(c: &CapsConstraint<'_>) -> bool {
-    matches!(
-        c,
-        CapsConstraint::LegacySource(_)
-            | CapsConstraint::LegacyTransform { .. }
-            | CapsConstraint::LegacySink(_)
-    )
-}
-
-/// Forward cascade for chains of legacy bridge variants. Mirrors
-/// today's runner: source's `intercept_caps()` seeds a `Caps`; each
-/// transform's `intercept_caps(upstream)` narrows; non-boundary
-/// transforms forward the narrowed input as their output, boundary
-/// transforms call `propose_output_caps`. The sink's `intercept_caps`
-/// produces the final fixated `Caps`. Phase 2 fixate runs once at the
-/// end. Mid-stream `ReFixate` retry stays in the runner.
-fn solve_legacy_cascade(
-    constraints: &[&CapsConstraint<'_>],
-) -> Result<LinkSolution, NegotiationFailure> {
-    let n = constraints.len();
-    let n_links = n - 1;
-
-    // Endpoints must be source/sink shape.
-    let mut current = match constraints[0] {
-        CapsConstraint::LegacySource(caps) => caps.clone(),
-        _ => return Err(NegotiationFailure::EndpointShapeMismatch { index: 0 }),
-    };
-    match constraints[n - 1] {
-        CapsConstraint::LegacySink(_) => {}
-        _ => return Err(NegotiationFailure::EndpointShapeMismatch { index: n - 1 }),
-    }
-
-    let mut links: Vec<Caps> = Vec::with_capacity(n_links);
-    // Interior elements: bit-compatible with the pre-M16 inline
-    // cascade. Each transform contributes ONLY `intercept(upstream)`;
-    // `propose_output_caps` is intentionally NOT called here. In the
-    // legacy single-fixated-caps model, the same `Caps` flows through
-    // every element and the decoder's output-side caps don't appear
-    // until the mid-stream `CapsChanged` lands. The mixed/native
-    // cascade paths use `propose_output_caps` to derive per-link caps;
-    // the legacy cascade leaves that out so chains containing
-    // workaround #2 sinks (waylandsink/kmssink with their
-    // pass-through-then-defer pattern) keep working unchanged.
-    for (i, c) in constraints
-        .iter()
-        .enumerate()
-        .skip(1)
-        .take(n.saturating_sub(2))
-    {
-        match c {
-            CapsConstraint::LegacyTransform {
-                intercept,
-                propose_output: _,
-            } => {
-                current =
-                    intercept(&current).map_err(|_| NegotiationFailure::empty_link(i - 1, i))?;
-                links.push(current.clone());
-            }
-            CapsConstraint::LegacySource(_) | CapsConstraint::LegacySink(_) => {
-                return Err(NegotiationFailure::EndpointShapeMismatch { index: i });
-            }
-            _ => return Err(NegotiationFailure::MixedLegacyAndNative),
-        }
-    }
-    // Sink: cascade through its intercept, then fixate the result.
-    if let CapsConstraint::LegacySink(intercept) = constraints[n - 1] {
-        current = intercept(&current).map_err(|_| NegotiationFailure::empty_link(n - 2, n - 1))?;
-        links.push(current);
-    }
-
-    // Phase 2 fixate the final value, then propagate it to every link
-    // slot. The pre-M16 cascade fed one `fixated` Caps to every
-    // `configure_pipeline` call; honoring that exactly means upstream
-    // slots carry the final fixated caps too. Format-changing
-    // boundaries that need per-link semantics must migrate to the
-    // native solver path (one endpoint at a time) — that's where the
-    // mixed cascade kicks in and the runner gets real per-link caps.
-    let fixed_last = links
-        .last()
-        .ok_or(NegotiationFailure::Degenerate)?
-        .fixate()
-        .map_err(|_| NegotiationFailure::Unfixable {
-            upstream: n - 2,
-            downstream: n - 1,
-        })?;
-    for slot in links.iter_mut() {
-        *slot = fixed_last.clone();
-    }
-
-    Ok(links)
-}
-
-/// Unified forward cascade for chains that mix `Legacy*` and native
-/// (`Produces` / `Accepts` / `Identity` / `Mapping` / `DerivedOutput`)
-/// variants. Handles the migration window where elements move from
-/// the legacy bridge to native constraints one at a time.
-///
-/// Single forward pass: each element computes its output `CapsSet`
-/// from the upstream link's `CapsSet`. Legacy variants and
-/// `DerivedOutput` require the upstream to fixate to a single
-/// concrete `Caps` (which the typical migration chain — single-source
-/// upstream — satisfies). No backward pass: arc-consistency benefits
-/// (Identity / Mapping filtering against downstream sinks) are not
-/// applied in the mixed path. Once a chain is fully native, dispatch
-/// routes it back to the arc-consistency solver, which restores
-/// backward propagation.
-fn solve_mixed_cascade(
-    constraints: &[&CapsConstraint<'_>],
-) -> Result<LinkSolution, NegotiationFailure> {
-    let n = constraints.len();
-    let n_links = n - 1;
-
-    let starts_with_source = matches!(
-        constraints[0],
-        CapsConstraint::Produces(_) | CapsConstraint::LegacySource(_)
-    );
-    let ends_with_sink = matches!(
-        constraints[n - 1],
-        CapsConstraint::Accepts(_) | CapsConstraint::LegacySink(_) | CapsConstraint::AcceptsAny
-    );
-    if !starts_with_source {
-        return Err(NegotiationFailure::EndpointShapeMismatch { index: 0 });
-    }
-    if !ends_with_sink {
-        return Err(NegotiationFailure::EndpointShapeMismatch { index: n - 1 });
-    }
-
-    // link_sets[i] is the CapsSet on the link between element i and i+1.
-    let mut link_sets: Vec<CapsSet> = Vec::with_capacity(n_links);
-
-    // Seed link 0 from the source.
-    let seed = match constraints[0] {
-        CapsConstraint::Produces(s) => s.clone(),
-        CapsConstraint::LegacySource(c) => CapsSet::one(c.clone()),
-        _ => unreachable!("checked above"),
-    };
-    link_sets.push(seed);
-
-    // Forward-propagate through every middle element.
-    for i in 1..(n - 1) {
-        let upstream = link_sets[i - 1].clone();
-        let downstream = forward_propagate(constraints[i], &upstream, i)?;
-        link_sets.push(downstream);
-    }
-
-    // Narrow the final link against the sink endpoint.
-    let final_idx = n_links - 1;
-    let upstream = link_sets[final_idx].clone();
-    let narrowed = match constraints[n - 1] {
-        CapsConstraint::Accepts(s) => upstream.intersect(s),
-        CapsConstraint::AcceptsAny => upstream,
-        CapsConstraint::LegacySink(intercept) => {
-            let fixed = upstream.fixate().ok_or(NegotiationFailure::Unfixable {
-                upstream: n - 2,
-                downstream: n - 1,
-            })?;
-            let c = intercept(&fixed).map_err(|_| NegotiationFailure::empty_link(n - 2, n - 1))?;
-            CapsSet::one(c)
-        }
-        _ => unreachable!("checked above"),
-    };
-    if narrowed.is_empty() {
-        return Err(NegotiationFailure::empty_link(n - 2, n - 1));
-    }
-    link_sets[final_idx] = narrowed;
-
-    // Fixate every link.
-    let mut out = Vec::with_capacity(n_links);
-    for (li, s) in link_sets.iter().enumerate() {
-        let fixed = s.fixate().ok_or(NegotiationFailure::Unfixable {
-            upstream: li,
-            downstream: li + 1,
-        })?;
-        out.push(fixed);
-    }
-    Ok(out)
-}
-
+#[cfg(feature = "std")]
 fn forward_propagate(
     c: &CapsConstraint<'_>,
     upstream: &CapsSet,
@@ -465,26 +269,11 @@ fn forward_propagate(
         }
         CapsConstraint::DerivedOutput(f) => derived_forward(f.as_ref(), upstream, i),
         CapsConstraint::DerivedFields(t) => derived_forward(&|c: &Caps| t.derive(c), upstream, i),
-        CapsConstraint::LegacyTransform {
-            intercept,
-            propose_output,
-        } => {
-            let fixed = upstream.fixate().ok_or(NegotiationFailure::Unfixable {
-                upstream: i - 1,
-                downstream: i,
-            })?;
-            let input = intercept(&fixed).map_err(|_| NegotiationFailure::empty_link(i - 1, i))?;
-            Ok(CapsSet::one(propose_output(&input)))
-        }
         CapsConstraint::IdentityAny => {
             // Wildcard transform: pass upstream through unchanged.
             Ok(upstream.clone())
         }
-        CapsConstraint::Produces(_)
-        | CapsConstraint::Accepts(_)
-        | CapsConstraint::AcceptsAny
-        | CapsConstraint::LegacySource(_)
-        | CapsConstraint::LegacySink(_) => {
+        CapsConstraint::Produces(_) | CapsConstraint::Accepts(_) | CapsConstraint::AcceptsAny => {
             Err(NegotiationFailure::EndpointShapeMismatch { index: i })
         }
     }
@@ -493,6 +282,7 @@ fn forward_propagate(
 /// One forward hop of the single-caps cascade for a derived transform
 /// (`DerivedOutput` closure or `DerivedFields` declaration): the output is a
 /// function of one concrete input, so the upstream link must fixate first.
+#[cfg(feature = "std")]
 fn derived_forward(
     f: &dyn Fn(&Caps) -> CapsSet,
     upstream: &CapsSet,
@@ -521,7 +311,7 @@ pub(crate) enum ForwardResolve {
     /// The output can't be derived/fixated from the constraint, or there is
     /// no concrete downstream set to steer against. Fall back to the status
     /// quo: forward the incoming caps and let the element's own `process`
-    /// derive its output (covers `DerivedOutput` / legacy / ranged outputs).
+    /// derive its output (covers `DerivedOutput` / ranged outputs).
     Defer,
     /// The element's possible outputs positively can't satisfy what the
     /// downstream subgraph accepts. Loud: the caller drives a reverse
@@ -533,7 +323,7 @@ pub(crate) enum ForwardResolve {
 /// that the elements *downstream* of that link can still fixate to the sink,
 /// ignoring the (mid-stream-changing) upstream. `None` on a link means
 /// "downstream imposes no expressible constraint here" (an `AcceptsAny`
-/// sink, or a non-invertible `DerivedOutput` / legacy element below it).
+/// sink, or a non-invertible `DerivedOutput` element below it).
 /// Computed once at startup and snapshotted per interior arm so the
 /// mid-stream re-solve can steer an element's output without reaching the
 /// downstream elements at runtime (design/caps.md).
@@ -549,8 +339,8 @@ pub(crate) fn downstream_feasibility(constraints: &[&CapsConstraint<'_>]) -> Vec
     }
     let n_links = n - 1;
     let mut feas: Vec<Option<CapsSet>> = alloc::vec![None; n_links];
-    // Seed the sink link from the sink's accept set; a wildcard or legacy
-    // sink leaves it unconstrained.
+    // Seed the sink link from the sink's accept set; a wildcard sink leaves it
+    // unconstrained.
     feas[n_links - 1] = match constraints[n - 1] {
         CapsConstraint::Accepts(s) => Some(s.clone()),
         _ => None,
@@ -639,7 +429,7 @@ fn backward_feasible(
             }
             (!alts.is_empty()).then(|| CapsSet::from_alternatives(alts))
         }
-        // Non-invertible (legacy) or non-transform shape: impose no constraint
+        // Non-invertible or non-transform shape: impose no constraint
         // on the input link.
         _ => None,
     }
@@ -941,14 +731,6 @@ fn apply_constraint(
                     (None, None) => {}
                 }
             }
-        }
-        CapsConstraint::LegacySource(_)
-        | CapsConstraint::LegacyTransform { .. }
-        | CapsConstraint::LegacySink(_) => {
-            // Dispatch in `solve_linear` routes all-legacy chains to
-            // `solve_legacy_cascade` and rejects mixed chains, so the
-            // arc-consistency path never sees a legacy variant.
-            return Err(NegotiationFailure::MixedLegacyAndNative);
         }
     }
     Ok(())
@@ -1268,7 +1050,7 @@ impl<'c, 'a> ChainNode<'c, 'a> {
 
     /// What this element pays for carrying `input` on its input link and
     /// `output` on its output link. A constraint with no alternative list to
-    /// index (a wildcard, a derived transform, a legacy bridge) is free, so it
+    /// index (a wildcard or a derived transform) is free, so it
     /// neither steers the chain nor blocks a neighbour that does.
     fn cost(&self, input: Option<&Caps>, output: Option<&Caps>) -> u64 {
         match alternative_index(self.constraint, input, output) {
@@ -1568,9 +1350,6 @@ fn transform_pair_consistent(c: &CapsConstraint<'_>, inp: &Caps, outp: &Caps) ->
         }
         CapsConstraint::DerivedOutput(f) => f(inp).accepts(outp),
         CapsConstraint::DerivedFields(t) => t.derive(inp).accepts(outp),
-        CapsConstraint::LegacyTransform { intercept, .. } => {
-            intercept(inp).is_ok_and(|derived| derived.intersect(outp).is_ok())
-        }
         // Produce / accept shapes on a transform slot: not a cross-edge relation
         // re-checked here (arc consistency handled the forward cascade).
         _ => true,
@@ -1655,9 +1434,6 @@ fn fmt_caps_constraint(c: &CapsConstraint<'_>) -> String {
         CapsConstraint::Mapping(pairs) => alloc::format!("maps {} pair(s)", pairs.len()),
         CapsConstraint::DerivedOutput(_) => "derives output".to_string(),
         CapsConstraint::DerivedFields(_) => "derives output (coupled)".to_string(),
-        CapsConstraint::LegacySource(c) => alloc::format!("legacy source {}", c.to_gst_string()),
-        CapsConstraint::LegacyTransform { .. } => "legacy transform".to_string(),
-        CapsConstraint::LegacySink(_) => "legacy sink".to_string(),
     }
 }
 
@@ -1773,23 +1549,14 @@ fn apply_node<E>(
             NodeConstraint::Element(CapsConstraint::Produces(s)) => {
                 narrow_edge(graph, edges, out_e[0], s, node)
             }
-            // Legacy bridge: a `LegacySource` carries one fixated caps, the same
-            // as `Produces(one(caps))`.
-            NodeConstraint::Element(CapsConstraint::LegacySource(caps)) => {
-                narrow_edge(graph, edges, out_e[0], &CapsSet::one(caps.clone()), node)
-            }
             _ => Err(shape_err),
         },
         NodeKind::Sink => match nc {
             NodeConstraint::Element(CapsConstraint::Accepts(s)) => {
                 narrow_edge(graph, edges, in_e[0], s, node)
             }
-            // `AcceptsAny` and a `LegacySink` both leave the input edge to carry
-            // whatever the upstream fixates: the legacy sink's `intercept` is the
-            // terminal accept (the runner configures it with the upstream caps,
-            // as `run_muxer_sink` did), so it imposes no solver narrowing.
-            NodeConstraint::Element(CapsConstraint::AcceptsAny)
-            | NodeConstraint::Element(CapsConstraint::LegacySink(_)) => Ok(()),
+            // `AcceptsAny` leaves the input edge to carry whatever the upstream fixates.
+            NodeConstraint::Element(CapsConstraint::AcceptsAny) => Ok(()),
             _ => Err(shape_err),
         },
         NodeKind::Transform => match nc {
@@ -1837,9 +1604,6 @@ fn apply_node<E>(
                     match ports.get(port) {
                         Some(CapsConstraint::Produces(set)) => {
                             narrow_edge(graph, edges, oe, set, node)?
-                        }
-                        Some(CapsConstraint::LegacySource(caps)) => {
-                            narrow_edge(graph, edges, oe, &CapsSet::one(caps.clone()), node)?
                         }
                         _ => return Err(shape_err),
                     }
@@ -2014,41 +1778,10 @@ fn apply_transform_node<E>(
             }
             Ok(())
         }
-        // Legacy bridge: forward `intercept(input)` to the output, the same
-        // single-caps forward cascade `solve_legacy_cascade` runs (no backward
-        // coupling, like the mixed-cascade path). A still ambiguous input
-        // forwards the union over the alternatives `intercept` accepts.
-        CapsConstraint::LegacyTransform { intercept, .. } => {
-            let Some(in_set) = edges[in_e].clone() else {
-                return Ok(());
-            };
-            let empty_output = || {
-                let (up, down) = edge_endpoints(graph, out_e);
-                NegotiationFailure::empty_link(up, down)
-            };
-            if let Some(fixed_input) = fixed_single(&in_set) {
-                let out = intercept(&fixed_input).map_err(|_| empty_output())?;
-                return narrow_edge(graph, edges, out_e, &CapsSet::one(out), node);
-            }
-            let forward = |c: &Caps| intercept(c).map_or_else(|_| empty_set(), CapsSet::one);
-            let forwarded = forward_derived_union(&forward, &in_set);
-            if forwarded.is_empty() {
-                return Err(empty_output());
-            }
-            narrow_edge(graph, edges, out_e, &forwarded, node)
-        }
         _ => Err(NegotiationFailure::EndpointShapeMismatch {
             index: node.0 as usize,
         }),
     }
-}
-
-/// The single concrete caps an edge has fixated to, or `None` if it still has
-/// multiple alternatives or ranged (`Any`) fields. Used by the forward-cascade
-/// constraints (`DerivedOutput`, `LegacyTransform`) that need a concrete input.
-fn fixed_single(set: &CapsSet) -> Option<Caps> {
-    let fixed = set.fixate()?;
-    (set.alternatives().len() == 1 && set.alternatives()[0] == fixed).then_some(fixed)
 }
 
 /// Forward image of a `DerivedOutput` transform over its (possibly ambiguous)
@@ -2228,9 +1961,8 @@ fn apply_demux_node<E>(
     ports: &[CapsConstraint<'_>],
     edges: &mut [Option<CapsSet>],
 ) -> Result<(), NegotiationFailure> {
-    // The byte-stream input: an `Accepts` narrows it; `AcceptsAny` / `LegacySink`
-    // leave it to whatever the source fixates (the common case, the demux's
-    // `intercept` being the terminal accept).
+    // The byte-stream input: an `Accepts` narrows it; `AcceptsAny` leaves it to
+    // whatever the source fixates.
     if let CapsConstraint::Accepts(s) = input {
         narrow_edge(graph, edges, in_e, s, node)?;
     }
@@ -2249,7 +1981,7 @@ fn apply_demux_node<E>(
 
 /// Narrow each of a fan-in node's input edges by its pad's accept set, shared by
 /// the muxer (which also couples an output) and the terminal fan-in (which does
-/// not). `Accepts` narrows; an `AcceptsAny` / legacy pad forwards per-frame caps
+/// not). `Accepts` narrows; an `AcceptsAny` pad forwards per-frame caps
 /// without narrowing. `inputs[i]` applies to input pad `i`; D1 validation
 /// guarantees each input pad index appears exactly once.
 fn narrow_muxer_inputs<E>(
@@ -2265,7 +1997,7 @@ fn narrow_muxer_inputs<E>(
         let pad = graph.edge(eid).dst.index as usize;
         match inputs.get(pad) {
             Some(CapsConstraint::Accepts(set)) => narrow_edge(graph, edges, eid, set, node)?,
-            Some(CapsConstraint::AcceptsAny) | Some(CapsConstraint::LegacySink(_)) => {}
+            Some(CapsConstraint::AcceptsAny) => {}
             _ => return Err(shape_err),
         }
     }
@@ -2302,10 +2034,6 @@ fn apply_muxer_node<E>(
     }
     match output {
         CapsConstraint::Produces(set) => narrow_edge(graph, edges, out_edge, set, node),
-        // A legacy muxer output carries one fixated merged caps.
-        CapsConstraint::LegacySource(caps) => {
-            narrow_edge(graph, edges, out_edge, &CapsSet::one(caps.clone()), node)
-        }
         _ => Err(shape_err),
     }
 }
@@ -2876,167 +2604,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_cascade_source_to_sink() {
-        // Source produces 720p NV12; sink accepts anything (returns
-        // upstream unchanged from its intercept_caps).
-        let src_caps = fixed_video(RawVideoFormat::Nv12, 1280, 720, 30);
-        let src = CapsConstraint::LegacySource(src_caps.clone());
-        let sink = CapsConstraint::LegacySink(Box::new(|upstream: &Caps| Ok(upstream.clone())));
-        let links = solve_linear(&[&src, &sink]).unwrap();
-        assert_eq!(links, vec![src_caps]);
-    }
-
-    #[test]
-    fn legacy_cascade_with_pass_through_transform() {
-        let src_caps = fixed_video(RawVideoFormat::Nv12, 1920, 1080, 60);
-        let src = CapsConstraint::LegacySource(src_caps.clone());
-        let id = CapsConstraint::LegacyTransform {
-            intercept: Box::new(|c: &Caps| Ok(c.clone())),
-            propose_output: Box::new(|c: &Caps| c.clone()),
-        };
-        let sink = CapsConstraint::LegacySink(Box::new(|c: &Caps| Ok(c.clone())));
-        let links = solve_linear(&[&src, &id, &sink]).unwrap();
-        assert_eq!(links, vec![src_caps.clone(), src_caps]);
-    }
-
-    #[test]
-    fn legacy_cascade_with_boundary_transform() {
-        // Decoder: input H264, output NV12 at matching dims.
-        let src_caps = fixed_compressed(VideoCodec::H264, 1280, 720, 30);
-        let src = CapsConstraint::LegacySource(src_caps.clone());
-        let dec = CapsConstraint::LegacyTransform {
-            intercept: Box::new(|c: &Caps| Ok(c.clone())),
-            propose_output: Box::new(|c: &Caps| match c {
-                Caps::CompressedVideo {
-                    width,
-                    height,
-                    framerate,
-                    ..
-                } => Caps::RawVideo {
-                    format: RawVideoFormat::Nv12,
-                    width: width.clone(),
-                    height: height.clone(),
-                    framerate: framerate.clone(),
-                    interlace: crate::Interlace::Any,
-                    colorimetry: crate::Colorimetry::UNKNOWN,
-                },
-                other => other.clone(),
-            }),
-        };
-        let sink = CapsConstraint::LegacySink(Box::new(|c: &Caps| Ok(c.clone())));
-        let links = solve_linear(&[&src, &dec, &sink]).unwrap();
-        // M16 step 5e: the legacy cascade is intercept-only, mirroring
-        // the pre-M16 single-fixated-caps model exactly. The decoder's
-        // `propose_output_caps` is ignored on this path because legacy
-        // sinks (e.g. waylandsink with workaround #2) depend on
-        // receiving the upstream-side caps at `configure_pipeline`
-        // and learning the real output dims later via mid-stream
-        // `CapsChanged`. Both link slots carry the same fixated caps.
-        // Format-changing semantics arrive when an element migrates to
-        // a native variant and the chain becomes mixed.
-        let h264 = fixed_compressed(VideoCodec::H264, 1280, 720, 30);
-        assert_eq!(links, vec![h264.clone(), h264]);
-    }
-
-    #[test]
-    fn legacy_cascade_intercept_failure_returns_empty_link() {
-        let src = CapsConstraint::LegacySource(fixed_compressed(VideoCodec::H264, 1280, 720, 30));
-        let sink = CapsConstraint::LegacySink(Box::new(|_: &Caps| {
-            Err(crate::error::G2gError::CapsMismatch)
-        }));
-        assert!(matches!(
-            solve_linear(&[&src, &sink]),
-            Err(NegotiationFailure::EmptyLink {
-                upstream: 0,
-                downstream: 1,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn mixed_legacy_source_native_sink() {
-        // Migration shape: source still on legacy bridge, sink moved to
-        // native Accepts. The mixed cascade fixates link from the
-        // source and narrows against the sink's CapsSet.
-        let caps = fixed_video(RawVideoFormat::Nv12, 1280, 720, 30);
-        let src = CapsConstraint::LegacySource(caps.clone());
-        let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            RawVideoFormat::Nv12,
-            Dim::Any,
-            Dim::Any,
-            Rate::Any,
-        )));
-        let links = solve_linear(&[&src, &sink]).unwrap();
-        assert_eq!(links, vec![caps]);
-    }
-
-    #[test]
-    fn mixed_native_source_legacy_sink() {
-        // Reverse migration shape: native source, legacy sink.
-        let caps = fixed_video(RawVideoFormat::Nv12, 640, 480, 30);
-        let src = CapsConstraint::Produces(CapsSet::one(caps.clone()));
-        let sink = CapsConstraint::LegacySink(Box::new(|c: &Caps| Ok(c.clone())));
-        let links = solve_linear(&[&src, &sink]).unwrap();
-        assert_eq!(links, vec![caps]);
-    }
-
-    #[test]
-    fn mixed_native_source_legacy_transform_native_sink() {
-        // Source migrated to native, decoder still on legacy bridge,
-        // sink migrated. Exercises forward cascade through a legacy
-        // boundary transform between two native endpoints.
-        let h264 = fixed_compressed(VideoCodec::H264, 1920, 1080, 60);
-        let nv12 = fixed_video(RawVideoFormat::Nv12, 1920, 1080, 60);
-        let src = CapsConstraint::Produces(CapsSet::one(h264));
-        let dec = CapsConstraint::LegacyTransform {
-            intercept: Box::new(|c: &Caps| Ok(c.clone())),
-            propose_output: Box::new(|c: &Caps| match c {
-                Caps::CompressedVideo {
-                    width,
-                    height,
-                    framerate,
-                    ..
-                } => Caps::RawVideo {
-                    format: RawVideoFormat::Nv12,
-                    width: width.clone(),
-                    height: height.clone(),
-                    framerate: framerate.clone(),
-                    interlace: crate::Interlace::Any,
-                    colorimetry: crate::Colorimetry::UNKNOWN,
-                },
-                other => other.clone(),
-            }),
-        };
-        let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            RawVideoFormat::Nv12,
-            Dim::Any,
-            Dim::Any,
-            Rate::Any,
-        )));
-        let links = solve_linear(&[&src, &dec, &sink]).unwrap();
-        assert_eq!(
-            links,
-            vec![fixed_compressed(VideoCodec::H264, 1920, 1080, 60), nv12,]
-        );
-    }
-
-    #[test]
-    fn mixed_chain_empty_link_when_sink_rejects() {
-        let src = CapsConstraint::LegacySource(fixed_compressed(VideoCodec::H264, 1280, 720, 30));
-        let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            RawVideoFormat::Nv12,
-            Dim::Any,
-            Dim::Any,
-            Rate::Any,
-        )));
-        assert!(matches!(
-            solve_linear(&[&src, &sink]),
-            Err(NegotiationFailure::EmptyLink { .. })
-        ));
-    }
-
-    #[test]
     fn accepts_any_native_chain_passes_source_caps_through() {
         let caps = fixed_video(RawVideoFormat::Nv12, 1280, 720, 30);
         let src = CapsConstraint::Produces(CapsSet::one(caps.clone()));
@@ -3046,24 +2613,11 @@ mod tests {
     }
 
     #[test]
-    fn accepts_any_mixed_chain_passes_legacy_source_through() {
-        // Migration shape: legacy source still on the bridge, sink
-        // migrated to AcceptsAny.
-        let caps = fixed_compressed(VideoCodec::H264, 1920, 1080, 60);
-        let src = CapsConstraint::LegacySource(caps.clone());
-        let sink = CapsConstraint::AcceptsAny;
-        let links = solve_linear(&[&src, &sink]).unwrap();
-        assert_eq!(links, vec![caps]);
-    }
-
-    #[test]
     fn accepts_any_in_middle_position_is_silently_a_no_op() {
         // `AcceptsAny` in the middle of a native chain neither narrows
         // its input link nor its output link. The surrounding source
-        // and sink fully determine the link assignments — the middle
-        // element is invisible to the solver. Forward-cascade paths
-        // (mixed/legacy) do reject this via `forward_propagate` because
-        // they need an explicit output rule.
+        // and sink fully determine the link assignments: the middle
+        // element is invisible to the solver.
         let caps = fixed_video(RawVideoFormat::Nv12, 1, 1, 1);
         let src = CapsConstraint::Produces(CapsSet::one(caps.clone()));
         let mid = CapsConstraint::AcceptsAny;
@@ -3087,17 +2641,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_any_in_mixed_chain_passes_legacy_source_through() {
-        let caps = fixed_compressed(VideoCodec::H264, 1920, 1080, 60);
-        let src = CapsConstraint::LegacySource(caps.clone());
-        let mid = CapsConstraint::IdentityAny;
-        let sink = CapsConstraint::AcceptsAny;
-        let links = solve_linear(&[&src, &mid, &sink]).unwrap();
-        assert_eq!(links, vec![caps.clone(), caps]);
-    }
-
-    #[test]
-    fn identity_any_endpoint_position_rejected_in_mixed() {
+    fn identity_any_endpoint_position_rejected() {
         // IdentityAny is interior-only; using it as a source or sink
         // should fail the endpoint shape check.
         let caps = fixed_video(RawVideoFormat::Nv12, 1, 1, 1);
@@ -3889,110 +3433,6 @@ mod tests {
         let sol = solve_graph(&v, &cs).expect("wildcard muxer solves");
         // a wildcard input pad leaves each input edge at its own source caps.
         assert_eq!(sol, vec![h264, aac, merged]);
-    }
-
-    #[test]
-    fn solve_graph_accepts_legacy_bridge_constraints() {
-        // A native source/muxer feeding a `LegacySink` (the default sink bridge,
-        // e.g. m10's CollectingSink). The legacy sink imposes no narrowing, so
-        // the merged output flows through unchanged. Previously this hit
-        // EndpointShapeMismatch; now `run_muxer_sink` can build it as a graph.
-        let h264 = fixed_compressed(VideoCodec::H264, 64, 48, 30);
-        let cs: Vec<NodeConstraint> = vec![
-            NodeConstraint::Element(CapsConstraint::LegacySource(h264.clone())),
-            NodeConstraint::Element(CapsConstraint::LegacySource(h264.clone())),
-            NodeConstraint::Muxer {
-                inputs: vec![CapsConstraint::AcceptsAny, CapsConstraint::AcceptsAny],
-                output: CapsConstraint::Produces(CapsSet::one(h264.clone())),
-                follows: None,
-            },
-            NodeConstraint::Element(CapsConstraint::LegacySink(Box::new(|c: &Caps| {
-                Ok(c.clone())
-            }))),
-        ];
-        let mut g: Graph<()> = Graph::new();
-        let s0 = g.add_source(());
-        let s1 = g.add_source(());
-        let mux = g.add_muxer((), 2);
-        let sink = g.add_sink(());
-        g.link(s0, mux.input(0)).unwrap();
-        g.link(s1, mux.input(1)).unwrap();
-        g.link(mux.output(), sink).unwrap();
-        let v = g.finish().unwrap();
-
-        let sol = solve_graph(&v, &cs).expect("native muxer + legacy sink solves");
-        assert_eq!(sol, vec![h264.clone(), h264.clone(), h264]);
-    }
-
-    #[test]
-    fn solve_graph_forwards_legacy_transform() {
-        // src(LegacySource RGBA) -> LegacyTransform(RGBA->NV12) -> Accepts NV12.
-        let rgba = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
-        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
-        let cs: Vec<NodeConstraint> = vec![
-            NodeConstraint::Element(CapsConstraint::LegacySource(rgba.clone())),
-            NodeConstraint::Element(CapsConstraint::LegacyTransform {
-                intercept: Box::new({
-                    let nv12 = nv12.clone();
-                    move |_in: &Caps| Ok(nv12.clone())
-                }),
-                propose_output: Box::new(|c: &Caps| c.clone()),
-            }),
-            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(nv12.clone()))),
-        ];
-        let mut g: Graph<()> = Graph::new();
-        let src = g.add_source(());
-        let tx = g.add_transform(());
-        let sink = g.add_sink(());
-        g.link(src, tx).unwrap();
-        g.link(tx, sink).unwrap();
-        let v = g.finish().unwrap();
-
-        let sol = solve_graph(&v, &cs).expect("legacy transform forwards");
-        assert_eq!(sol, vec![rgba, nv12]);
-    }
-
-    fn legacy_passthrough_chain(
-        sink: CapsConstraint<'static>,
-    ) -> Result<Vec<Caps>, NegotiationFailure> {
-        let alternatives = vec![
-            fixed_video(RawVideoFormat::Rgba8, 64, 48, 30),
-            fixed_video(RawVideoFormat::Rgba8, 32, 24, 30),
-        ];
-        let cs: Vec<NodeConstraint> = vec![
-            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::from_alternatives(
-                alternatives,
-            ))),
-            NodeConstraint::Element(CapsConstraint::LegacyTransform {
-                intercept: Box::new(|c: &Caps| Ok(c.clone())),
-                propose_output: Box::new(|c: &Caps| c.clone()),
-            }),
-            NodeConstraint::Element(sink),
-        ];
-        let mut g: Graph<()> = Graph::new();
-        let src = g.add_source(());
-        let tx = g.add_transform(());
-        let sink = g.add_sink(());
-        g.link(src, tx).unwrap();
-        g.link(tx, sink).unwrap();
-        let v = g.finish().unwrap();
-        solve_graph(&v, &cs)
-    }
-
-    #[test]
-    fn legacy_transform_behind_source_alternatives_takes_the_preferred_one() {
-        let preferred = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
-        let sol = legacy_passthrough_chain(CapsConstraint::AcceptsAny)
-            .expect("legacy transform forwards an ambiguous input");
-        assert_eq!(sol, vec![preferred.clone(), preferred]);
-    }
-
-    #[test]
-    fn legacy_transform_output_stays_paired_with_its_input() {
-        let fallback = fixed_video(RawVideoFormat::Rgba8, 32, 24, 30);
-        let sol = legacy_passthrough_chain(CapsConstraint::Accepts(CapsSet::one(fallback.clone())))
-            .expect("the sink pin reaches the source through the legacy pair check");
-        assert_eq!(sol, vec![fallback.clone(), fallback]);
     }
 
     #[cfg(feature = "std")]

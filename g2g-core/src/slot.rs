@@ -21,13 +21,15 @@
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use arc_swap::ArcSwap;
 use spin::Mutex;
 
-use crate::caps::Caps;
+use crate::caps::{Caps, CapsSet};
 use crate::element::{AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, OutputSink};
 use crate::error::G2gError;
+use crate::format_element::CapsConstraint;
 use crate::frame::PipelinePacket;
 
 /// Shared cell holding the slot's current element. The outer `Arc` lets a
@@ -119,6 +121,28 @@ impl SwapHandle {
     }
 }
 
+/// The outputs a transform `constraint` allows for one concrete `input`, empty
+/// when it does not take that input.
+fn forward_image(constraint: &CapsConstraint<'_>, input: &Caps) -> CapsSet {
+    let input_set = CapsSet::one(input.clone());
+    match constraint {
+        CapsConstraint::Identity(set) => input_set.intersect(set),
+        CapsConstraint::IdentityAny => input_set,
+        CapsConstraint::Mapping(pairs) => pairs
+            .iter()
+            .filter(|(accepted, _)| accepted.accepts(input))
+            .fold(
+                CapsSet::from_alternatives(Vec::new()),
+                |out, (_, produced)| out.union(produced),
+            ),
+        CapsConstraint::DerivedOutput(derive) => derive(input),
+        CapsConstraint::DerivedFields(transform) => transform.derive(input),
+        CapsConstraint::Accepts(_) | CapsConstraint::Produces(_) | CapsConstraint::AcceptsAny => {
+            CapsSet::from_alternatives(Vec::new())
+        }
+    }
+}
+
 impl AsyncElement for ElementSlot {
     type ProcessFuture<'a>
         = BoxFuture<'a, Result<(), G2gError>>
@@ -127,6 +151,24 @@ impl AsyncElement for ElementSlot {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         self.inner.load().lock().intercept_caps(upstream_caps)
+    }
+
+    // the element sits behind a lock, so its constraint is evaluated per input
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        let inner = self.inner.clone();
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            let current = inner.load();
+            let element = current.lock();
+            let constraint = element.caps_constraint_as_transform();
+            forward_image(&constraint, input)
+        }))
+    }
+
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        match self.inner.load().lock().caps_constraint_as_sink() {
+            CapsConstraint::Accepts(set) => CapsConstraint::Accepts(set),
+            _ => CapsConstraint::AcceptsAny,
+        }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

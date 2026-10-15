@@ -91,9 +91,8 @@ impl AsyncElement for CapsFilter {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        // Legacy / mixed-cascade path: narrow upstream against the filter,
-        // honoring the set's preference order. The native solver uses the
-        // `Identity` constraint below instead.
+        // Narrow upstream against the filter, honoring the set's preference
+        // order. The solver uses the `Identity` constraint below instead.
         for alt in self.filter.alternatives() {
             if let Ok(narrowed) = upstream_caps.intersect(alt) {
                 return Ok(narrowed);

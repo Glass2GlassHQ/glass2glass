@@ -94,9 +94,7 @@ impl MultiInputElement for InterleaveMux {
 
     /// M18 step 1: the merged output caps are fixed at construction
     /// (`InterleaveMux::new(_, output)`). `Produces` is the native
-    /// shape for a static muxer output. Skips the legacy bridge so
-    /// the downstream sink negotiation hits the all-native solver
-    /// path.
+    /// shape for a static muxer output.
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
         Ok(CapsConstraint::Produces(CapsSet::one(self.output.clone())))
     }

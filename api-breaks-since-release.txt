@@ -10,5 +10,13 @@ constructible_struct_adds_field: field ElementDesc.accepts_input
 constructible_struct_adds_field: field QosMessage.taken_ns
 enum_variant_added: variant NodeConstraint:BatchDemux
 enum_variant_added: variant NodeConstraint:BatchMuxer
+enum_variant_missing: variant CapsConstraint::LegacySink
+enum_variant_missing: variant CapsConstraint::LegacySource
+enum_variant_missing: variant CapsConstraint::LegacyTransform
+enum_variant_missing: variant NegotiationFailure::MixedLegacyAndNative
+function_missing: function g2g_core::format_element::legacy_sink_constraint
+function_missing: function g2g_core::format_element::legacy_transform_constraint
+function_missing: function g2g_core::legacy_sink_constraint
+function_missing: function g2g_core::legacy_transform_constraint
 method_parameter_count_changed: g2g_core::QosTracker::judge_frame takes 3 parameters
 method_parameter_count_changed: g2g_core::qos::QosTracker::judge_frame takes 3 parameters

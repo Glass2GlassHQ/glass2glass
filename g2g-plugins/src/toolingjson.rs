@@ -212,7 +212,6 @@ fn failure_json(nf: &NegotiationFailure) -> Value {
         NegotiationFailure::Degenerate => json!({ "kind": "degenerate" }),
         NegotiationFailure::Cyclic => json!({ "kind": "cyclic" }),
         NegotiationFailure::NoConsistentFixation => json!({ "kind": "no-consistent-fixation" }),
-        NegotiationFailure::MixedLegacyAndNative => json!({ "kind": "mixed-legacy-and-native" }),
         _ => json!({ "kind": "other", "text": format!("{nf:?}") }),
     }
 }

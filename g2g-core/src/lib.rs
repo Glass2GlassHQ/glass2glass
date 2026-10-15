@@ -197,10 +197,7 @@ pub use element::{
 };
 pub use error::{G2gError, HardwareError};
 #[cfg(feature = "alloc")]
-pub use format_element::{
-    legacy_sink_constraint, legacy_transform_constraint, CapsConstraint, CapsPreferences,
-    FormatElement,
-};
+pub use format_element::{CapsConstraint, CapsPreferences, FormatElement};
 pub use frame::{Frame, FrameTiming, PipelinePacket};
 #[cfg(feature = "alloc")]
 pub use graph::{

@@ -492,13 +492,11 @@ pub trait MultiDuplexSession: ElementBound {
 
     /// Declare one send input pad's negotiation-time constraint, mirroring
     /// [`MultiInputElement::caps_constraint_as_input`].
-    fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_>
+    fn caps_constraint_as_input(&self, _input: usize) -> CapsConstraint<'_>
     where
         Self: Sized,
     {
-        CapsConstraint::LegacySink(alloc::boxed::Box::new(move |c: &Caps| {
-            <Self as MultiDuplexSession>::intercept_caps(self, input, c)
-        }))
+        CapsConstraint::AcceptsAny
     }
 
     /// Drive the session until the connection ends: drain `inbound` (the send-side
@@ -533,14 +531,10 @@ pub trait MultiOutputElement: ElementBound {
     ) -> Self::ProcessFuture<'a>;
 
     /// M18 step 1: declare the fan-out's input-side negotiation
-    /// constraint. Default wraps `intercept_caps(...)` as a
-    /// `LegacySink` (the fan-out narrows what it accepts from the
-    /// upstream source; downstream branches all receive the narrowed
-    /// caps via broadcast). Migrated fan-outs override to return
-    /// native variants (typically `AcceptsAny` for pass-through fan-
-    /// outs like `Router` whose output broadcasts the input verbatim,
-    /// or `Accepts(set)` for fan-outs that filter format on the input
-    /// side).
+    /// constraint. The default accepts anything, which suits a pass-through
+    /// fan-out like `Router` whose output broadcasts the input verbatim. A
+    /// fan-out that filters format on the input side overrides with
+    /// `Accepts(set)`.
     ///
     /// Phase C FO-2 (per-branch downstream re-solve) will sit on top
     /// of this: once the runner has the fan-out's negotiated input
@@ -550,9 +544,7 @@ pub trait MultiOutputElement: ElementBound {
     where
         Self: Sized,
     {
-        CapsConstraint::LegacySink(alloc::boxed::Box::new(move |c: &Caps| {
-            <Self as MultiOutputElement>::intercept_caps(self, c)
-        }))
+        CapsConstraint::AcceptsAny
     }
 
     /// The caps output port `port` carries, if this fan-out is a **demux** whose
@@ -816,23 +808,17 @@ pub trait MultiInputElement: ElementBound {
     ) -> Self::ProcessFuture<'a>;
 
     /// M18 step 1: declare this input pad's negotiation-time
-    /// constraint. Default wraps `intercept_caps(input, ...)` as a
-    /// `LegacySink` (per-pad legacy bridge). Migrated muxers override
-    /// to return native variants (typically `AcceptsAny` for
-    /// per-frame-tagged interleave muxers, or `Accepts(set)` for
-    /// per-input format-restricted muxers).
+    /// constraint. The default accepts anything, which suits a
+    /// per-frame-tagged interleave muxer. A muxer restricting a pad's
+    /// format overrides with `Accepts(set)`.
     ///
-    /// The runner calls this per-input during startup negotiation
-    /// (replacing the inline `LegacySink` construction in
-    /// `run_muxer_sink`) and during per-input mid-stream re-solve
-    /// once Phase C MX-1 lands.
-    fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_>
+    /// The runner calls this per-input during startup negotiation and
+    /// during per-input mid-stream re-solve.
+    fn caps_constraint_as_input(&self, _input: usize) -> CapsConstraint<'_>
     where
         Self: Sized,
     {
-        CapsConstraint::LegacySink(alloc::boxed::Box::new(move |c: &Caps| {
-            <Self as MultiInputElement>::intercept_caps(self, input, c)
-        }))
+        CapsConstraint::AcceptsAny
     }
 
     /// M18 step 1: declare the merged output's negotiation-time

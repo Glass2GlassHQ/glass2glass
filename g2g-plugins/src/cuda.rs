@@ -104,9 +104,9 @@ impl AsyncElement for CudaDownload {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        // Legacy / mixed-cascade path: the download keeps the caps unchanged
-        // (only the domain changes), so narrow upstream against NV12. The
-        // native solver uses the `Identity` constraint below instead.
+        // The download keeps the caps unchanged (only the domain changes), so
+        // narrow upstream against NV12. The solver uses the `Identity`
+        // constraint below instead.
         for alt in nv12_any().alternatives() {
             if let Ok(narrowed) = upstream_caps.intersect(alt) {
                 return Ok(narrowed);

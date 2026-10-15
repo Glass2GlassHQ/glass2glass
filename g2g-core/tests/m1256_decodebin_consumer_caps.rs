@@ -8,8 +8,8 @@ use g2g_core::runtime::{
     parse_launch, ElementFactory, LaunchFactory, Registry, SourceFactory, SourceLoop,
 };
 use g2g_core::{
-    AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, G2gError, Interlace, OutputSink,
-    PadTemplate, PipelinePacket, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, Interlace,
+    OutputSink, PadTemplate, PipelinePacket, Rate, RawVideoFormat, VideoCodec,
 };
 
 const PIPELINE: &str = "h264src ! decodebin ! i420sink";
@@ -76,6 +76,13 @@ impl AsyncElement for Stub {
         match &self.accepted {
             Some(accepted) => accepted.intersect(upstream),
             None => Ok(upstream.clone()),
+        }
+    }
+
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        match &self.accepted {
+            Some(accepted) => CapsConstraint::Identity(CapsSet::one(accepted.clone())),
+            None => CapsConstraint::IdentityAny,
         }
     }
 

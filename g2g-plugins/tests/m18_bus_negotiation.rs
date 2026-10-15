@@ -79,7 +79,7 @@ impl SourceLoop for RgbaSource {
     }
 }
 
-/// Pass-through transform (legacy bridge: no native constraint).
+/// Pass-through transform with no constraint of its own.
 struct PassThrough;
 
 impl AsyncElement for PassThrough {
