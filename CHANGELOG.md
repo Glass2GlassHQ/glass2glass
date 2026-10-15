@@ -7,6 +7,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M1449: a mid-stream `videoscale ! videoconvert ! caps` chain scales to the downstream pin instead of passing its input size through.
+- M1448: `ivfdemux` reads the header rate and scale as a timestamp timebase and leaves the frame rate unknown.
 - M1447: a raw AV1 `.obu` file is typed by content and `av1parse` splits it into temporal units, so `filesrc ! decodebin` plays it.
 - M1446: the ST 2110 RTP sinks declare native accept sets instead of the legacy sink bridge.
 - M1445: the audio sinks declare native accept sets instead of the legacy sink bridge, and refuse a placeholder rate or channel count at configure.
