@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1460: Windows CI runs the `mfencode` test, which now covers frames with no duration.
 - M1459: the LL-HLS test server starts publishing parts at the client's first request.
 - M1458: `mp4src` and `fmp4demux` report a constant frame rate, and the start-code parsers keep an upstream-declared one.
 - M1457: `dav1ddec` and `rav1ddec` keep an undeclared frame rate unknown instead of reporting 1 fps.

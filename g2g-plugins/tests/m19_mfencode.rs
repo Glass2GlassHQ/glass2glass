@@ -50,7 +50,7 @@ impl CollectSink {
 
 /// A synthetic packed NV12 picture: a per-frame luma gradient over a neutral
 /// chroma plane, so consecutive frames differ and the encoder has real work.
-fn nv12_frame(index: usize) -> Frame {
+fn nv12_frame(index: usize, duration_ns: u64) -> Frame {
     let w = WIDTH as usize;
     let h = HEIGHT as usize;
     let mut data = vec![128u8; w * h * 3 / 2];
@@ -64,7 +64,7 @@ fn nv12_frame(index: usize) -> Frame {
         timing: FrameTiming {
             pts_ns: index as u64 * FRAME_DURATION_NS,
             dts_ns: index as u64 * FRAME_DURATION_NS,
-            duration_ns: FRAME_DURATION_NS,
+            duration_ns,
             capture_ns: index as u64 * FRAME_DURATION_NS,
             ..FrameTiming::default()
         },
@@ -77,12 +77,12 @@ fn starts_with_annexb_start_code(data: &[u8]) -> bool {
     data.starts_with(&[0, 0, 0, 1]) || data.starts_with(&[0, 0, 1])
 }
 
-fn input_caps() -> Caps {
+fn input_caps(framerate: Rate) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Nv12,
         width: Dim::Fixed(WIDTH),
         height: Dim::Fixed(HEIGHT),
-        framerate: Rate::Fixed(FPS_Q16),
+        framerate,
         interlace: Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
@@ -90,9 +90,11 @@ fn input_caps() -> Caps {
 
 /// Drive `MfEncode` over `FRAMES` synthetic pictures and return the collected
 /// downstream packets.
-async fn encode_frames() -> CollectSink {
+async fn encode_frames(framerate: Rate, duration_ns: u64) -> CollectSink {
     let mut enc = MfEncode::new().with_bitrate(1_000_000);
-    let narrowed = enc.intercept_caps(&input_caps()).expect("intercept NV12");
+    let narrowed = enc
+        .intercept_caps(&input_caps(framerate))
+        .expect("intercept NV12");
     let outcome = enc
         .configure_pipeline(&narrowed)
         .expect("encoder MFT must initialise");
@@ -100,9 +102,12 @@ async fn encode_frames() -> CollectSink {
 
     let mut sink = CollectSink::default();
     for i in 0..FRAMES {
-        enc.process(PipelinePacket::DataFrame(nv12_frame(i)), &mut sink)
-            .await
-            .expect("process DataFrame");
+        enc.process(
+            PipelinePacket::DataFrame(nv12_frame(i, duration_ns)),
+            &mut sink,
+        )
+        .await
+        .expect("process DataFrame");
     }
     enc.process(PipelinePacket::Eos, &mut sink)
         .await
@@ -113,7 +118,7 @@ async fn encode_frames() -> CollectSink {
 
 #[tokio::test(flavor = "current_thread")]
 async fn encode_emits_h264_caps_and_annexb_access_units() {
-    let sink = encode_frames().await;
+    let sink = encode_frames(Rate::Fixed(FPS_Q16), FRAME_DURATION_NS).await;
 
     let caps_changes = sink.caps_changes();
     assert_eq!(
@@ -154,12 +159,31 @@ async fn encode_emits_h264_caps_and_annexb_access_units() {
     assert!(first.len() > 16, "IDR access unit implausibly small");
 }
 
+// the input samples then carry a time and no duration
+#[tokio::test(flavor = "current_thread")]
+async fn encodes_frames_with_no_duration_and_no_declared_rate() {
+    const NO_DURATION: u64 = 0;
+    let sink = encode_frames(Rate::Any, NO_DURATION).await;
+    assert!(
+        matches!(
+            sink.caps_changes().as_slice(),
+            [Caps::CompressedVideo {
+                framerate: Rate::Any,
+                ..
+            }]
+        ),
+        "no rate invented for the stream, got {:?}",
+        sink.caps_changes()
+    );
+    assert_eq!(sink.data_frames().len(), FRAMES, "one output per input");
+}
+
 #[cfg(feature = "mf-decode")]
 #[tokio::test(flavor = "current_thread")]
 async fn encode_decode_round_trip_recovers_all_frames() {
     use g2g_plugins::mfdecode::MfDecode;
 
-    let encoded = encode_frames().await;
+    let encoded = encode_frames(Rate::Fixed(FPS_Q16), FRAME_DURATION_NS).await;
     let h264_caps = encoded.caps_changes().pop().expect("encoder emitted caps");
 
     let mut dec = MfDecode::new();
