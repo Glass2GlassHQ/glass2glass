@@ -16,9 +16,10 @@
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::runtime::SourceLoop;
-use g2g_core::{AudioFormat, Caps, ConfigureOutcome, G2gError};
+use g2g_core::runtime::{run_simple_pipeline, SourceLoop};
+use g2g_core::{AudioFormat, Caps, ConfigureOutcome, G2gError, PipelineClock};
 use g2g_plugins::aaudio::{AAudioSink, AAudioSrc};
+use g2g_plugins::audiotestsrc::AudioTestSrc;
 
 #[derive(Default)]
 struct Discard;
@@ -132,6 +133,34 @@ async fn aaudio_sink_renders_pcm() {
         "AAudioSink wrote no frames to the device"
     );
     eprintln!(">>> M307 AAudio render validated on device.");
+}
+
+struct NullClock;
+impl PipelineClock for NullClock {
+    fn now_ns(&self) -> u64 {
+        0
+    }
+}
+
+#[tokio::test]
+async fn aaudio_sink_negotiates_through_the_runner() {
+    const SAMPLE_RATE: u32 = 48_000;
+    const CHANNELS: u8 = 2;
+    const TONE_HZ: u32 = 1_000;
+    const BUFFERS: u64 = 20;
+    const FRAMES_PER_BUFFER: u64 = SAMPLE_RATE as u64 * 10 / 1000;
+    const LINK_CAPACITY: usize = 4;
+
+    let mut src = AudioTestSrc::new(SAMPLE_RATE, CHANNELS, TONE_HZ, BUFFERS);
+    let mut sink = AAudioSink::new();
+    run_simple_pipeline(&mut src, &mut sink, &NullClock, LINK_CAPACITY)
+        .await
+        .expect("AudioTestSrc -> AAudioSink negotiates and plays");
+    assert_eq!(
+        sink.rendered(),
+        BUFFERS * FRAMES_PER_BUFFER,
+        "every produced sample frame must reach the device"
+    );
 }
 
 #[tokio::test]
