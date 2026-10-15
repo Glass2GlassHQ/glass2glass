@@ -150,6 +150,7 @@ fn strip_tds(unit: &[u8]) -> Vec<u8> {
 }
 
 const EIGHT_BIT: &str = "yuv420p";
+const CLIP_FPS: u32 = 30;
 
 /// Encode a short AV1 clip (two GOPs) to IVF with ffmpeg's libaom, or `None`
 /// when the host cannot.
@@ -158,6 +159,7 @@ fn encode_ivf(tag: &str, pixel_format: &str) -> Option<(std::path::PathBuf, Vec<
         return None;
     }
     let path = std::env::temp_dir().join(format!("g2g-m779-{tag}-{}.ivf", std::process::id()));
+    let source = format!("testsrc2=size=192x108:rate={CLIP_FPS}");
     let status = Command::new("ffmpeg")
         .args([
             "-y",
@@ -166,7 +168,7 @@ fn encode_ivf(tag: &str, pixel_format: &str) -> Option<(std::path::PathBuf, Vec<
             "-f",
             "lavfi",
             "-i",
-            "testsrc2=size=192x108:rate=30",
+            &source,
             "-frames:v",
             "16",
             "-pix_fmt",
@@ -211,14 +213,14 @@ async fn demux_mp4(bytes: &[u8]) -> FrameSink {
 
 /// Assert the demuxed track is the AV1 stream: refined caps, every temporal
 /// unit byte-identical to the TD-stripped source, keyframes at the GOP heads.
-fn assert_av1_track(sink: &FrameSink, expected: &[Vec<u8>]) {
+fn assert_av1_track(sink: &FrameSink, expected: &[Vec<u8>], framerate: Rate) {
     assert_eq!(
         sink.caps.last(),
         Some(&Caps::CompressedVideo {
             codec: VideoCodec::Av1,
             width: Dim::Fixed(192),
             height: Dim::Fixed(108),
-            framerate: Rate::Any,
+            framerate,
             colorimetry: g2g_core::Colorimetry::UNKNOWN
         }),
         "moov-refined AV1 caps"
@@ -270,7 +272,7 @@ async fn av1_mp4_round_trips() {
         .expect("eos");
 
     let expected: Vec<Vec<u8>> = frames.iter().map(|f| strip_tds(f)).collect();
-    assert_av1_track(&sink, &expected);
+    assert_av1_track(&sink, &expected, Rate::Any);
 }
 
 /// ffmpeg's own mux of the same stream demuxes to the same temporal units
@@ -296,7 +298,8 @@ async fn av1_ffmpeg_mp4_demuxes() {
 
     let expected: Vec<Vec<u8>> = frames.iter().map(|f| strip_tds(f)).collect();
     let sink = demux_mp4(&mp4).await;
-    assert_av1_track(&sink, &expected);
+    // ffmpeg writes one stts entry for the constant-rate clip
+    assert_av1_track(&sink, &expected, Rate::Fixed(CLIP_FPS << 16));
 }
 
 /// The mkv element (`matroskademux stream=av1`) round-trips the M773 mux at

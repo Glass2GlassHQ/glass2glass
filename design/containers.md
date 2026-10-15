@@ -432,7 +432,9 @@ multi-frame audio blocks demux.
 
 Matroska's Tracks element carries concrete geometry and audio parameters, so the
 demuxer refines the output caps itself via `CapsChanged` once Tracks is parsed,
-without a downstream bitstream parser. An H.264 or H.265 track's blocks are
+without a downstream bitstream parser. The frame rate is `1 s / DefaultDuration`,
+and `Rate::Any` when the track has no `DefaultDuration` or the rate falls outside
+the 1 to 240 fps placeholder the demuxer negotiated. An H.264 or H.265 track's blocks are
 converted from the container-native AVCC / HVCC length-prefixed framing,
 declared by the `avcC` / `hvcC` `CodecPrivate` whose `lengthSizeMinusOne` sets
 the prefix width, to the Annex-B framing the pipeline assumes, with the config
@@ -669,6 +671,11 @@ tail discard into a kept duration, the conversion reads the Opus TOC byte and
 applies to Opus only.
 
 ## MP4 and fMP4
+
+`mp4demux` reports a track's frame rate as `timescale / delta` when every `stts`
+entry codes the same sample delta, and `Rate::Any` when the deltas vary, the
+table is empty (a fragmented init) or the rate falls outside the 1 to 240 fps
+placeholder it negotiated.
 
 Which duration a reader reports depends on the layout, so `Mp4MuxN` writes both,
 selected by the `fragmented` property, default `true`.

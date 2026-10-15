@@ -36,6 +36,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
@@ -50,6 +51,18 @@ use g2g_core::{
 
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::matroska::{MatroskaDemuxer, MkvCodec};
+use crate::typefind::PLACEHOLDER_FRAMERATE;
+
+const NANOSECONDS_PER_SECOND: u32 = 1_000_000_000;
+
+// the track's DefaultDuration as a rate, Any when absent or outside the negotiated range
+fn default_duration_framerate(default_duration_ns: u64) -> Rate {
+    u32::try_from(default_duration_ns)
+        .ok()
+        .and_then(|duration| framerate_q16_from_fraction(NANOSECONDS_PER_SECOND, duration))
+        .and_then(|q16| PLACEHOLDER_FRAMERATE.intersect(&Rate::Fixed(q16)))
+        .unwrap_or(Rate::Any)
+}
 
 /// Which elementary stream a [`MkvDemux`] instance forwards. One output pad
 /// carries one stream; the choice is by codec because the output caps are fixed
@@ -332,10 +345,7 @@ impl MkvDemux {
                 min: 16,
                 max: 65_535,
             },
-            framerate: Rate::Range {
-                min_q16: 1 << 16,
-                max_q16: 240 << 16,
-            },
+            framerate: PLACEHOLDER_FRAMERATE,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
@@ -378,7 +388,7 @@ impl MkvDemux {
                     codec,
                     width: Dim::Fixed(track.width),
                     height: Dim::Fixed(track.height),
-                    framerate: Rate::Any,
+                    framerate: default_duration_framerate(track.default_duration_ns),
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 })
             }
@@ -1718,6 +1728,21 @@ mod tests {
         d.process(PipelinePacket::Eos, sink).await.unwrap();
     }
 
+    #[test]
+    fn default_duration_framerate_refuses_zero_and_huge_durations() {
+        const NANOSECONDS_PER_FRAME_AT_25_FPS: u64 = 40_000_000;
+        assert_eq!(
+            default_duration_framerate(NANOSECONDS_PER_FRAME_AT_25_FPS),
+            Rate::Fixed(25 << 16)
+        );
+        assert_eq!(default_duration_framerate(0), Rate::Any);
+        assert_eq!(default_duration_framerate(u64::MAX), Rate::Any);
+        assert_eq!(
+            default_duration_framerate(1),
+            Rate::Any,
+            "a rate past the negotiated range"
+        );
+    }
     #[test]
     fn forwardable_streams_carry_concrete_audio_channels() {
         // An Opus decoder is created per channel count, so the playbin audio branch

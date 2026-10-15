@@ -257,6 +257,12 @@ pub fn still_image_caps(codec: VideoCodec) -> Caps {
     placeholder_video_caps(codec, MIN_DIM)
 }
 
+// a stream's rate before its parser or demuxer reads one, fixatable unlike Rate::Any
+pub(crate) const PLACEHOLDER_FRAMERATE: Rate = Rate::Range {
+    min_q16: 1 << 16,
+    max_q16: 240 << 16,
+};
+
 fn placeholder_video_caps(codec: VideoCodec, min_dim: u32) -> Caps {
     Caps::CompressedVideo {
         codec,
@@ -268,10 +274,7 @@ fn placeholder_video_caps(codec: VideoCodec, min_dim: u32) -> Caps {
             min: min_dim,
             max: 65535,
         },
-        framerate: Rate::Range {
-            min_q16: 1 << 16,
-            max_q16: 240 << 16,
-        },
+        framerate: PLACEHOLDER_FRAMERATE,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }

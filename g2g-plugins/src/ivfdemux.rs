@@ -89,10 +89,7 @@ impl IvfDemux {
                 min: 16,
                 max: 65_535,
             },
-            framerate: Rate::Range {
-                min_q16: 1 << 16,
-                max_q16: 240 << 16,
-            },
+            framerate: crate::typefind::PLACEHOLDER_FRAMERATE,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }

@@ -34,6 +34,7 @@ use crate::fmp4::{
     parse_all_tracks, parse_header, parse_progressive, parse_progressive_multi, prepend_param_sets,
     starts_with_param_set, TrackKind,
 };
+use crate::typefind::PLACEHOLDER_FRAMERATE;
 
 /// Which track the single-output demux emits (M748): the video track (the
 /// default, so `filesrc ! qtdemux ! ...` is unchanged), the video track with its
@@ -121,12 +122,12 @@ impl Mp4Demux {
         }
     }
 
-    fn output_caps(codec: VideoCodec, width: Dim, height: Dim) -> Caps {
+    fn output_caps(codec: VideoCodec, width: Dim, height: Dim, framerate: Rate) -> Caps {
         Caps::CompressedVideo {
             codec,
             width,
             height,
-            framerate: Rate::Any,
+            framerate,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
@@ -158,10 +159,7 @@ impl Mp4Demux {
                 min: 16,
                 max: 65_535,
             },
-            framerate: Rate::Range {
-                min_q16: 1 << 16,
-                max_q16: 240 << 16,
-            },
+            framerate: PLACEHOLDER_FRAMERATE,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
@@ -250,10 +248,16 @@ impl Mp4Demux {
     async fn drain_video(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         let header = parse_header(&self.buffer)?;
         if !self.caps_sent {
+            // a rate outside the negotiated placeholder range would fail the downstream re-solve
+            let framerate = header
+                .framerate_q16
+                .and_then(|q16| PLACEHOLDER_FRAMERATE.intersect(&Rate::Fixed(q16)))
+                .unwrap_or(Rate::Any);
             let caps = Self::output_caps(
                 header.codec,
                 Dim::Fixed(header.width),
                 Dim::Fixed(header.height),
+                framerate,
             );
             out.push(PipelinePacket::CapsChanged(caps)).await?;
             self.out_codec = header.codec;

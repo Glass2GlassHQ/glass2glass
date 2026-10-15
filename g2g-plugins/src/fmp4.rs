@@ -12,6 +12,7 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::time::ticks_to_ns;
 
 use g2g_core::{
@@ -41,6 +42,8 @@ pub(crate) struct Header {
     /// reports `0` (a fragmented / live init segment whose length is unknown
     /// until the fragments arrive). Feeds the M203 `DURATION` query.
     pub(crate) duration_ns: Option<u64>,
+    // None when the stts deltas vary or the table is empty (a fragmented init)
+    pub(crate) framerate_q16: Option<u32>,
     /// Parameter-set NALUs in container order (SPS,PPS for H.264; VPS,SPS,PPS
     /// for H.265), prepended to the first sample if it carries none in-band.
     pub(crate) param_sets: Vec<Vec<u8>>,
@@ -166,9 +169,36 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
         height,
         timescale,
         duration_ns,
+        framerate_q16: constant_framerate_q16(stbl, timescale),
         param_sets,
         cenc: cenc_track(cenc, stbl)?,
     })
+}
+
+// stts: a 4-byte version/flags and a 4-byte entry count, then (count, delta) pairs
+const STTS_FIRST_ENTRY: usize = 8;
+const STTS_ENTRY_LEN: usize = 8;
+const STTS_DELTA_OFFSET: usize = 4;
+
+// timescale / delta when every sample in the stts lasts the same delta
+fn constant_framerate_q16(stbl: &[u8], timescale: u32) -> Option<u32> {
+    let stts = find_box(stbl, b"stts")?;
+    let entries = be32(stts, 4).ok()?;
+    let mut constant_delta = None;
+    for entry in 0..entries as usize {
+        let offset = entry
+            .checked_mul(STTS_ENTRY_LEN)?
+            .checked_add(STTS_FIRST_ENTRY)?;
+        let count = be32(stts, offset).ok()?;
+        let delta = be32(stts, offset.checked_add(STTS_DELTA_OFFSET)?).ok()?;
+        if count == 0 {
+            continue;
+        }
+        if *constant_delta.get_or_insert(delta) != delta {
+            return None;
+        }
+    }
+    framerate_q16_from_fraction(timescale, constant_delta?).filter(|&q16| q16 > 0)
 }
 
 /// Pair a track's `tenc` defaults with the movie-level `seig` table its `stbl`
@@ -1610,6 +1640,41 @@ mod tests {
         mp4_box(b"edts", &full_box(b"elst", version, 0, &p))
     }
 
+    fn stts_box(entry_count: u32, entries: &[(u32, u32)]) -> Vec<u8> {
+        let mut payload = entry_count.to_be_bytes().to_vec();
+        for (count, delta) in entries {
+            payload.extend_from_slice(&count.to_be_bytes());
+            payload.extend_from_slice(&delta.to_be_bytes());
+        }
+        crate::mp4box::full_box(b"stts", 0, 0, &payload)
+    }
+
+    #[test]
+    fn constant_framerate_needs_one_nonzero_sample_delta() {
+        const TIMESCALE: u32 = 1_200_000;
+        let table = |entries: &[(u32, u32)]| stts_box(entries.len() as u32, entries);
+        assert_eq!(
+            constant_framerate_q16(&table(&[(10, 50_000)]), TIMESCALE),
+            Some(24 << 16)
+        );
+        assert_eq!(
+            constant_framerate_q16(&table(&[(9, 50_000), (1, 40_000)]), TIMESCALE),
+            None,
+            "a varying delta"
+        );
+        assert_eq!(constant_framerate_q16(&table(&[(10, 0)]), TIMESCALE), None);
+        assert_eq!(
+            constant_framerate_q16(&table(&[(10, 1)]), u32::MAX),
+            None,
+            "a rate past the Q16 range"
+        );
+        assert_eq!(constant_framerate_q16(&table(&[]), TIMESCALE), None);
+        assert_eq!(
+            constant_framerate_q16(&stts_box(u32::MAX, &[(10, 50_000)]), TIMESCALE),
+            None,
+            "an entry count past the box"
+        );
+    }
     #[test]
     fn edit_media_start_reads_the_first_edit() {
         // v0: segment_duration u32, media_time i32, rate.
