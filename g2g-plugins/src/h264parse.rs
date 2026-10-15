@@ -13,7 +13,8 @@
 //!
 //! Framerate is recovered from the SPS VUI `timing_info` when present
 //! (`time_scale / (2 * num_units_in_tick)`, emitted as a Q16 `Rate::Fixed`);
-//! caps carry `Rate::Any` when the VUI omits it.
+//! when the VUI omits it, caps carry the rate an upstream `CapsChanged` declared,
+//! else `Rate::Any`.
 
 use g2g_core::{Colorimetry, PropKind, PropertySpec, VideoCodec};
 
@@ -868,6 +869,64 @@ mod tests {
         }
         assert!(matches!(sink.packets[1], PipelinePacket::DataFrame(_)));
         assert_eq!(parse.caps_changes_emitted(), 1);
+    }
+
+    fn last_caps_rate(sink: &CollectSink) -> Option<Rate> {
+        sink.packets.iter().rev().find_map(|packet| match packet {
+            PipelinePacket::CapsChanged(Caps::CompressedVideo { framerate, .. }) => {
+                Some(framerate.clone())
+            }
+            _ => None,
+        })
+    }
+
+    #[tokio::test]
+    async fn keeps_an_upstream_rate_the_sps_does_not_code() {
+        const CONTAINER_FPS: u32 = 25;
+        // what configure sees: the negotiation placeholder fixated to its minimum
+        const FIXATED_PLACEHOLDER_Q16: u32 = 1 << 16;
+        let declared = |framerate| Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(1280),
+            height: Dim::Fixed(720),
+            framerate,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        let sps_without_timing = || frame_with_bytes(0, build_test_annexb_sps(1280, 720));
+
+        let mut parse = H264Parse::new();
+        parse
+            .configure_pipeline(&declared(Rate::Fixed(FIXATED_PLACEHOLDER_Q16)))
+            .unwrap();
+        let mut sink = CollectSink::default();
+        parse
+            .process(PipelinePacket::DataFrame(sps_without_timing()), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            last_caps_rate(&sink),
+            Some(Rate::Any),
+            "a negotiated placeholder is not a rate"
+        );
+
+        let mut parse = H264Parse::new();
+        parse
+            .configure_pipeline(&declared(Rate::Fixed(FIXATED_PLACEHOLDER_Q16)))
+            .unwrap();
+        let mut sink = CollectSink::default();
+        let container_rate = Rate::Fixed(CONTAINER_FPS << 16);
+        parse
+            .process(
+                PipelinePacket::CapsChanged(declared(container_rate.clone())),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        parse
+            .process(PipelinePacket::DataFrame(sps_without_timing()), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(last_caps_rate(&sink), Some(container_rate));
     }
 
     #[tokio::test]

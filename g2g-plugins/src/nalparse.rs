@@ -267,7 +267,7 @@ impl<C: NalCodec> NalParse<C> {
             codec: C::CODEC,
             width: Dim::Fixed(info.width),
             height: Dim::Fixed(info.height),
-            framerate: info.framerate.map_or(Rate::Any, Rate::Fixed),
+            framerate: self.caps.framerate(info.framerate),
             colorimetry: info.colorimetry,
         };
         self.caps.refine(new_caps, out).await
@@ -480,6 +480,7 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
+                    self.caps.observe_upstream(&c);
                     out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
                 PipelinePacket::Flush => {

@@ -16,6 +16,13 @@ conversion need, uses a decoder `AsyncElement` that accepts
 `MemoryDomain::DmaBuf`, `MemoryDomain::Cuda` or `MemoryDomain::D3D11Texture`
 depending on backend.
 
+The parsers `h264parse`, `h265parse` and `av1parse` take the frame rate from the
+bitstream (the SPS VUI `timing_info`, `av1parse` reads none). When the bitstream
+codes none they keep the rate an upstream `CapsChanged` declared, such as a
+demuxer's container rate, else `Rate::Any`. They never take it from
+`configure_pipeline`, whose caps carry the negotiation placeholder fixated to
+1 fps.
+
 ## VaapiDec (Linux VAAPI, cros-codecs)
 
 `VaapiDec<C>` (`g2g-plugins/src/vaapidec.rs`, feature `vaapi`,

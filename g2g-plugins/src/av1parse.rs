@@ -14,8 +14,9 @@
 //! `reduced_still_picture_header`, then walks the operating-points loop (with the
 //! optional `timing_info` / `decoder_model_info` / `initial_display_delay`
 //! sub-structures) to reach the `frame_width_bits` / `frame_height_bits` sizing
-//! and the variable-width size fields. AV1 carries no framerate relevant to caps
-//! geometry here, so refined caps report `Rate::Any` (matching mkvdemux).
+//! and the variable-width size fields. The header's `timing_info` is skipped, so
+//! refined caps carry the frame rate an upstream `CapsChanged` declared, else
+//! `Rate::Any`.
 //! Frames without a sequence-header OBU forward without a caps change.
 //!
 //! The same walk reads the header's `color_config`, so the refined caps also
@@ -42,6 +43,7 @@ use g2g_core::{
     Rate, VideoCodec,
 };
 
+use crate::access_unit::CapsRefinement;
 use crate::annexb::BitReader;
 
 /// `OBU_SEQUENCE_HEADER` type, the only OBU carrying frame geometry.
@@ -62,8 +64,7 @@ const CICP_UNSPECIFIED: u32 = 2;
 #[derive(Debug, Default)]
 pub struct Av1Parse {
     configured: bool,
-    last_emitted_caps: Option<Caps>,
-    headers_emitted: u64,
+    caps: CapsRefinement,
     reframe: bool,
     framer: TemporalUnitFramer,
     reframed_sequence: u64,
@@ -85,7 +86,7 @@ impl Av1Parse {
     /// Count of `CapsChanged` packets pushed downstream, for tests asserting
     /// re-emission is suppressed when the dimensions are unchanged.
     pub fn caps_changes_emitted(&self) -> u64 {
-        self.headers_emitted
+        self.caps.changes_emitted
     }
 
     async fn refine_caps(
@@ -100,16 +101,11 @@ impl Av1Parse {
             codec: VideoCodec::Av1,
             width: Dim::Fixed(info.width),
             height: Dim::Fixed(info.height),
-            framerate: Rate::Any,
+            // the timing_info a sequence header can carry is not read
+            framerate: self.caps.framerate(None),
             colorimetry: info.colorimetry,
         };
-        if self.last_emitted_caps.as_ref() != Some(&new_caps) {
-            out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                .await?;
-            self.last_emitted_caps = Some(new_caps);
-            self.headers_emitted += 1;
-        }
-        Ok(())
+        self.caps.refine(new_caps, out).await
     }
 
     async fn emit_temporal_unit(
@@ -207,10 +203,11 @@ impl AsyncElement for Av1Parse {
                     }
                 }
                 PipelinePacket::CapsChanged(c) => {
+                    self.caps.observe_upstream(&c);
                     out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
                 PipelinePacket::Flush => {
-                    self.last_emitted_caps = None;
+                    self.caps.forget();
                     self.framer = TemporalUnitFramer::default();
                     out.push(PipelinePacket::Flush).await?;
                 }
