@@ -10,7 +10,7 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -142,12 +142,14 @@ fn serve(
     let (blocking, plain) = (counts.blocking.clone(), counts.plain.clone());
     let (segment_fetches, part_fetches) =
         (counts.segment_fetches.clone(), counts.part_fetches.clone());
-    let start = Instant::now();
+    // set by the client's first request, a slow test start would skip whole segments
+    let start = Arc::new(OnceLock::<Instant>::new());
     thread::spawn(move || {
         for conn in listener.incoming() {
             let Ok(mut stream) = conn else { break };
             let (blocking, plain) = (blocking.clone(), plain.clone());
             let (segment_fetches, part_fetches) = (segment_fetches.clone(), part_fetches.clone());
+            let start = start.clone();
             // A held playlist request must not stall a part fetch behind it.
             thread::spawn(move || {
                 let mut req = Vec::new();
@@ -164,6 +166,7 @@ fn serve(
                     Some((p, q)) => (p, q),
                     None => (target.as_str(), ""),
                 };
+                let start = *start.get_or_init(Instant::now);
                 let published = || {
                     (initial_parts + (start.elapsed().as_millis() as u64 / PART_MS) as usize)
                         .min(TOTAL_PARTS)
