@@ -187,8 +187,8 @@ pixel formats, [live.md](live.md)) has the choice settled by the
 solve like any other element:
 arc consistency drops the alternatives downstream cannot take, the fixation picks
 the highest-preference survivor, and the source reads the outcome in
-`configure_pipeline`. A source still on the legacy bridge yields the single
-`LegacySource` caps, so it negotiates exactly as before.
+`configure_pipeline`. A source that declares no set produces the one caps its
+`intercept_caps` returns.
 
 The fan-in and duplex runners read the same produce set (M955). Their branches do
 not form a chain to solve, so each is narrowed on its own: `select_branch_caps`

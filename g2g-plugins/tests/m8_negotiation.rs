@@ -13,8 +13,8 @@ use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, run_source_transform_sink, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, PushOutcome, Rate, RawVideoFormat, Reconfigure,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
+    OutputSink, PipelineClock, PipelinePacket, PushOutcome, Rate, RawVideoFormat, Reconfigure,
 };
 use g2g_plugins::identity::IdentityTransform;
 
@@ -587,6 +587,10 @@ impl AsyncElement for IntersectingRecordingSink {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         upstream_caps.intersect(&self.supported)
+    }
+
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(CapsSet::one(self.supported.clone()))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

@@ -8,6 +8,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 - M1446: the ST 2110 RTP sinks declare native accept sets instead of the legacy sink bridge.
 - M1445: the audio sinks declare native accept sets instead of the legacy sink bridge, and refuse a placeholder rate or channel count at configure.
+- M1439: a source without its own caps constraint produces the caps its `intercept_caps` returns as a native `Produces` set.
 - M1438: `vulkanvideodec` also refuses an AV1 frame coded below the device minimum, and auto-plug compares H.264 at its coded size.
 - M1437: a test pins `cudaglsink` and `cudakmssink` refusing non-NV12 input at negotiation.
 - M1436: `uridecodebin` fails an unreadable or unrecognized `file://` URI with its own error instead of falling back to `Mp4Src`.

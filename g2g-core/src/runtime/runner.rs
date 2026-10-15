@@ -3,7 +3,7 @@ use alloc::boxed::Box;
 use core::future::Future;
 
 use crate::bus::BusHandle;
-use crate::caps::Caps;
+use crate::caps::{Caps, CapsSet};
 #[cfg(feature = "std")]
 use crate::clock::{elect_clock, PipelineClock};
 use crate::clock::{ClockCandidate, ClockPriority, ClockSync};
@@ -192,15 +192,17 @@ pub trait SourceLoop: ElementBound {
     fn set_clock_sync(&mut self, _sync: ClockSync) {}
 
     /// M16 step 5f: declare this source's negotiation-time constraint.
-    /// Default: eagerly await `intercept_caps()` and wrap as a
-    /// `LegacySource(Caps)` for the solver. Migrated sources override
-    /// to return `Produces(CapsSet)` (or another native variant) and
-    /// the chain takes the native arc-consistency path when every
-    /// other element is also native.
+    /// Default: eagerly await `intercept_caps()` and produce that one caps.
+    /// A source offering alternatives (a camera's pixel formats) overrides
+    /// this to return the whole `Produces(CapsSet)`.
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        async move { Ok(CapsConstraint::LegacySource(self.intercept_caps().await?)) }
+        async move {
+            Ok(CapsConstraint::Produces(CapsSet::one(
+                self.intercept_caps().await?,
+            )))
+        }
     }
 
     /// What this source is willing to pay for each alternative of the produce
