@@ -51,7 +51,8 @@ use g2g_core::{
     PropValue, PropertySpec,
 };
 
-use crate::pwaudio::{format_pod_bytes, frame_bytes, pw_params};
+use crate::audio::pcm_caps_any_rate_and_channels;
+use crate::pwaudio::{format_pod_bytes, frame_bytes, pw_params, FORMATS};
 
 /// How often the clock-discipline trace prints, out of the once-per-quantum
 /// stream of observations.
@@ -240,12 +241,9 @@ impl AsyncElement for PipeWireSink {
         Ok(upstream_caps.clone())
     }
 
-    /// PCM only. `Caps::Audio` has no open dims, so per-rate/channel acceptance
-    /// rides the legacy intercept bridge, as in the other audio sinks.
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::LegacySink(Box::new(|c: &Caps| {
-            pw_params(c)?;
-            Ok(c.clone())
+        CapsConstraint::Accepts(pcm_caps_any_rate_and_channels(|format| {
+            FORMATS.iter().any(|(opened, _)| *opened == format)
         }))
     }
 

@@ -71,7 +71,7 @@ impl WavSink {
     }
 }
 
-use crate::audio::pcm_params;
+use crate::audio::{linear_pcm_caps, pcm_params};
 
 /// The header with zeroed running sizes, patched at `Eos`.
 fn wav_header(tag: u16, bits: u16, channels: u16, rate: u32) -> Vec<u8> {
@@ -104,13 +104,8 @@ impl AsyncElement for WavSink {
         Ok(upstream_caps.clone())
     }
 
-    /// PCM only; `Caps::Audio` has no open dims, so the legacy intercept
-    /// bridge carries the per-rate/channel acceptance.
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::LegacySink(Box::new(|c: &Caps| {
-            pcm_params(c)?;
-            Ok(c.clone())
-        }))
+        CapsConstraint::Accepts(linear_pcm_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -398,5 +393,28 @@ mod tests {
             channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(pcm_params(&f32le), Ok((3, 32, 1, 44_100)));
+    }
+
+    #[test]
+    fn sink_constraint_takes_any_pcm_layout_and_configure_refuses_placeholders() {
+        let audio = |format, channels, sample_rate| Caps::Audio {
+            format,
+            channels,
+            sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        };
+        let sink = WavSink::new(std::env::temp_dir().join("g2g-wavsink-constraint.wav"));
+        let constraint = sink.caps_constraint_as_sink();
+        assert!(constraint.accepts(&audio(AudioFormat::PcmS24Le, 6, 96_000)));
+        assert!(constraint.accepts(&audio(AudioFormat::PcmU8, 1, 8_000)));
+        assert!(!constraint.accepts(&audio(AudioFormat::Aac, 2, 48_000)));
+        assert!(!constraint.accepts(&audio(AudioFormat::Mulaw, 1, 8_000)));
+        let placeholder_rate = audio(AudioFormat::PcmS16Le, 2, g2g_core::ANY_SAMPLE_RATE);
+        let placeholder_channels = audio(AudioFormat::PcmS16Le, g2g_core::ANY_CHANNELS, 48_000);
+        assert_eq!(pcm_params(&placeholder_rate), Err(G2gError::CapsMismatch));
+        assert_eq!(
+            pcm_params(&placeholder_channels),
+            Err(G2gError::CapsMismatch)
+        );
     }
 }

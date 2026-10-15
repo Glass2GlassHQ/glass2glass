@@ -55,6 +55,7 @@ use g2g_core::{
     PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
+use crate::audio::pcm_caps_any_rate_and_channels;
 use crate::pulsepcm::{pulse_map, pulse_spec, FORMATS};
 
 /// Target server-side buffer, in playout time. Bounds it the way `AlsaSink`
@@ -196,12 +197,10 @@ impl AsyncElement for PulseSink {
         Ok(upstream_caps.clone())
     }
 
-    /// PCM only. `Caps::Audio` has no open dims, so the per-rate/channel
-    /// acceptance rides the legacy intercept bridge, as in `WasapiSink`.
+    // channel and rate bounds are left to `pulse_spec` in configure
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::LegacySink(Box::new(|c: &Caps| {
-            pulse_spec(c)?;
-            Ok(c.clone())
+        CapsConstraint::Accepts(pcm_caps_any_rate_and_channels(|format| {
+            FORMATS.iter().any(|(opened, _)| *opened == format)
         }))
     }
 

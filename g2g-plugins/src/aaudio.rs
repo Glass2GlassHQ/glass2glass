@@ -42,6 +42,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::audio::pcm_caps_any_rate_and_channels;
 use crate::audiocapture::{capture_queue, run_capture, CaptureLoopSettings, CaptureSender};
 use crate::audioworker::WorkerLink;
 
@@ -285,9 +286,8 @@ impl AsyncElement for AAudioSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::LegacySink(Box::new(|c: &Caps| {
-            pcm_params(c)?;
-            Ok(c.clone())
+        CapsConstraint::Accepts(pcm_caps_any_rate_and_channels(|format| {
+            ndk_format(format).is_some()
         }))
     }
 

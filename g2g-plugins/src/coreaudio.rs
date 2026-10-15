@@ -47,9 +47,10 @@ use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome,
     ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
+use crate::audio::pcm_caps_any_rate_and_channels;
 use crate::audiocapture::{
     capture_queue, run_capture, CaptureLoopSettings, CaptureReceiver, CaptureSender,
 };
@@ -509,9 +510,8 @@ impl AsyncElement for CoreAudioSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::LegacySink(Box::new(|c: &Caps| {
-            pcm_params(c)?;
-            Ok(c.clone())
+        CapsConstraint::Accepts(pcm_caps_any_rate_and_channels(|format| {
+            asbd(format, ANY_CHANNELS, ANY_SAMPLE_RATE).is_some()
         }))
     }
 

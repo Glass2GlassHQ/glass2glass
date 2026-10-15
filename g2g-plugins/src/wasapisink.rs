@@ -49,7 +49,7 @@ use g2g_core::{
     PropKind, PropValue, PropertySpec,
 };
 
-use crate::audio::pcm_params;
+use crate::audio::{linear_pcm_caps, pcm_params};
 use crate::audioworker::WorkerLink;
 use crate::wasapipcm::{audio_err, open_endpoint};
 
@@ -188,13 +188,8 @@ impl AsyncElement for WasapiSink {
         Ok(upstream_caps.clone())
     }
 
-    /// PCM only. `Caps::Audio` has no open dims, so the per-rate/channel
-    /// acceptance rides the legacy intercept bridge, as in `WavSink`.
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::LegacySink(Box::new(|c: &Caps| {
-            pcm_params(c)?;
-            Ok(c.clone())
-        }))
+        CapsConstraint::Accepts(linear_pcm_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

@@ -11,12 +11,15 @@ use spa::pod::serialize::PodSerializer;
 use spa::pod::{Object, Value};
 use spa::utils::SpaTypes;
 
-use g2g_core::{AudioFormat as G2gAudioFormat, Caps, ChannelLayout, ChannelPosition, G2gError};
+use g2g_core::{
+    AudioFormat as G2gAudioFormat, Caps, ChannelLayout, ChannelPosition, G2gError, ANY_CHANNELS,
+    ANY_SAMPLE_RATE,
+};
 
 /// The PCM sample formats the PipeWire elements open a stream with, and the SPA
 /// format each maps to. `PcmS24Le` is our 3-byte packed layout, SPA's `S24LE`
 /// (`S24_32LE` is the 32-bit-container variant).
-const FORMATS: [(G2gAudioFormat, AudioFormat); 5] = [
+pub(crate) const FORMATS: [(G2gAudioFormat, AudioFormat); 5] = [
     (G2gAudioFormat::PcmU8, AudioFormat::U8),
     (G2gAudioFormat::PcmS16Le, AudioFormat::S16LE),
     (G2gAudioFormat::PcmS24Le, AudioFormat::S24LE),
@@ -36,6 +39,9 @@ pub(crate) fn pw_params(caps: &Caps) -> Result<(AudioFormat, u32, u32), G2gError
     else {
         return Err(G2gError::CapsMismatch);
     };
+    if *channels == ANY_CHANNELS || *sample_rate == ANY_SAMPLE_RATE {
+        return Err(G2gError::CapsMismatch);
+    }
     let (_, fmt) = FORMATS
         .iter()
         .find(|(f, _)| f == format)

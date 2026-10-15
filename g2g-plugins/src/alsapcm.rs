@@ -17,7 +17,9 @@ use alloc::vec::Vec;
 
 use alsa::pcm::{ChmapPosition, Format, PCM};
 
-use g2g_core::{AudioFormat, Caps, ChannelLayout, ChannelPosition, G2gError};
+use g2g_core::{
+    AudioFormat, Caps, ChannelLayout, ChannelPosition, G2gError, ANY_CHANNELS, ANY_SAMPLE_RATE,
+};
 
 /// The PCM sample formats an ALSA device is opened with, and the ALSA format
 /// each maps to. `PcmS24Le` is our 3-byte packed layout, ALSA's `S24_3LE`
@@ -67,6 +69,9 @@ pub(crate) fn alsa_params(caps: &Caps) -> Result<PcmConfig, G2gError> {
     else {
         return Err(G2gError::CapsMismatch);
     };
+    if *channels == ANY_CHANNELS || *sample_rate == ANY_SAMPLE_RATE {
+        return Err(G2gError::CapsMismatch);
+    }
     let (_, fmt) = FORMATS
         .iter()
         .find(|(f, _)| f == format)

@@ -128,14 +128,9 @@ impl AsyncElement for Mp4AudioSink {
         }
     }
 
+    // compressed sample rates intersect only when equal, so no set covers every AAC rate
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::LegacySink(Box::new(|c: &Caps| match c {
-            Caps::Audio {
-                format: AudioFormat::Aac,
-                ..
-            } => Ok(c.clone()),
-            _ => Err(G2gError::CapsMismatch),
-        }))
+        CapsConstraint::AcceptsAny
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

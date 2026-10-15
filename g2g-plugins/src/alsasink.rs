@@ -49,6 +49,7 @@ use g2g_core::{
 };
 
 use crate::alsapcm::{alsa_params, device_permutation, permute, PcmConfig, FORMATS};
+use crate::audio::pcm_caps_any_rate_and_channels;
 
 fn alsa_err(code: i32) -> G2gError {
     G2gError::Hardware(HardwareError::Alsa(code))
@@ -173,12 +174,9 @@ impl AsyncElement for AlsaSink {
         Ok(upstream_caps.clone())
     }
 
-    /// PCM only. `Caps::Audio` has no open dims, so the per-rate/channel
-    /// acceptance rides the legacy intercept bridge, as in `WasapiSink`.
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::LegacySink(Box::new(|c: &Caps| {
-            alsa_params(c)?;
-            Ok(c.clone())
+        CapsConstraint::Accepts(pcm_caps_any_rate_and_channels(|format| {
+            FORMATS.iter().any(|(opened, _)| *opened == format)
         }))
     }
 
