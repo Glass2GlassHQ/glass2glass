@@ -62,6 +62,16 @@ fn caps_frame_period_ns(caps: &Caps) -> u64 {
 /// generous 4 MiB, far above a JPEG XS HD frame at typical mezzanine bitrates.
 const DEFAULT_MAX_FRAME_BYTES: usize = 4 << 20;
 
+fn any_geometry_jpeg_xs() -> Caps {
+    Caps::CompressedVideo {
+        codec: VideoCodec::JpegXs,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+    }
+}
+
 /// Extract the geometry from an absolute `Caps::CompressedVideo{JpegXs}`:
 /// returns (width, height). Errors on a non-JPEG-XS caps or a non-fixed dimension.
 fn jxs_geometry(caps: &Caps) -> Result<(u32, u32), G2gError> {
@@ -196,11 +206,9 @@ impl AsyncElement for St2110JxsSink {
         Ok(upstream_caps.clone())
     }
 
+    // fixed geometry is left to `jxs_geometry` in configure
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::LegacySink(Box::new(|c: &Caps| {
-            jxs_geometry(c)?;
-            Ok(c.clone())
-        }))
+        CapsConstraint::Accepts(CapsSet::one(any_geometry_jpeg_xs()))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -359,13 +367,7 @@ impl AsyncElement for St2110JxsSink {
 
 impl PadTemplates for St2110JxsSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::sink(CapsSet::one(Caps::CompressedVideo {
-            codec: VideoCodec::JpegXs,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        }))])
+        Vec::from([PadTemplate::sink(CapsSet::one(any_geometry_jpeg_xs()))])
     }
 }
 
@@ -533,13 +535,7 @@ impl SourceLoop for St2110JxsSrc {
 
 impl PadTemplates for St2110JxsSrc {
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::source(CapsSet::one(Caps::CompressedVideo {
-            codec: VideoCodec::JpegXs,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        }))])
+        Vec::from([PadTemplate::source(CapsSet::one(any_geometry_jpeg_xs()))])
     }
 }
 

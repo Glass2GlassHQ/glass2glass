@@ -33,9 +33,11 @@ use g2g_core::time::ns_to_ticks;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome,
     ElementMetadata, FrameTiming, G2gError, MediaClock, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS,
+    ANY_SAMPLE_RATE,
 };
 
+use crate::audio::pcm_caps_any_rate_and_channels;
 use crate::filesink::io_err;
 use crate::rtpjitter::RtpPtsRebase;
 use crate::st2110audio::{SampleDepth, St2110AudioDepacketizer, St2110AudioPacketizer};
@@ -53,7 +55,9 @@ fn audio_params(caps: &Caps) -> Result<(AudioFormat, u8, u32), G2gError> {
             channels,
             sample_rate,
             ..
-        } => Ok((*format, *channels, *sample_rate)),
+        } if *channels != ANY_CHANNELS && *sample_rate != ANY_SAMPLE_RATE => {
+            Ok((*format, *channels, *sample_rate))
+        }
         _ => Err(G2gError::CapsMismatch),
     }
 }
@@ -231,9 +235,8 @@ impl AsyncElement for St2110AudioSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::LegacySink(Box::new(|c: &Caps| {
-            audio_params(c)?;
-            Ok(c.clone())
+        CapsConstraint::Accepts(pcm_caps_any_rate_and_channels(|format| {
+            wire_depth(format).is_some()
         }))
     }
 
@@ -540,6 +543,27 @@ mod tests {
     use g2g_core::runtime::block_on;
     use g2g_core::{MonotonicClock, PushOutcome};
     use std::sync::Arc;
+
+    #[test]
+    fn sink_constraint_takes_wire_formats_and_configure_refuses_placeholders() {
+        let audio = |format, channels, sample_rate| Caps::Audio {
+            format,
+            channels,
+            sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        };
+        let sink = St2110AudioSink::new();
+        let constraint = sink.caps_constraint_as_sink();
+        assert!(constraint.accepts(&audio(AudioFormat::PcmS24Le, 8, 96_000)));
+        assert!(!constraint.accepts(&audio(AudioFormat::PcmU8, 2, 48_000)));
+        let placeholder_rate = audio(AudioFormat::PcmS16Le, 2, ANY_SAMPLE_RATE);
+        let placeholder_channels = audio(AudioFormat::PcmS16Le, ANY_CHANNELS, 48_000);
+        assert_eq!(audio_params(&placeholder_rate), Err(G2gError::CapsMismatch));
+        assert_eq!(
+            audio_params(&placeholder_channels),
+            Err(G2gError::CapsMismatch)
+        );
+    }
 
     /// Collects the samples of every DataFrame the source emits.
     #[derive(Default)]

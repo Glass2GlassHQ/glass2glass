@@ -56,6 +56,24 @@ fn caps_frame_period_ns(caps: &Caps) -> u64 {
     }
 }
 
+fn any_geometry_sampling_formats() -> CapsSet {
+    let alternatives = [
+        RawVideoFormat::Rgba8,
+        RawVideoFormat::Yuyv,
+        RawVideoFormat::I422p10,
+    ]
+    .map(|format| Caps::RawVideo {
+        format,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+    })
+    .to_vec();
+    CapsSet::from_alternatives(alternatives)
+}
+
 /// Extract the geometry from an absolute `Caps::RawVideo` with a -20-mappable
 /// format: returns (format, width, height). Errors on a non-raw caps, an unmapped
 /// format, or a non-fixed dimension.
@@ -178,11 +196,9 @@ impl AsyncElement for St2110VideoSink {
         Ok(upstream_caps.clone())
     }
 
+    // fixed geometry is left to `video_geometry` in configure
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::LegacySink(Box::new(|c: &Caps| {
-            video_geometry(c)?;
-            Ok(c.clone())
-        }))
+        CapsConstraint::Accepts(any_geometry_sampling_formats())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -335,21 +351,7 @@ impl AsyncElement for St2110VideoSink {
 
 impl PadTemplates for St2110VideoSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        let alts = [
-            RawVideoFormat::Rgba8,
-            RawVideoFormat::Yuyv,
-            RawVideoFormat::I422p10,
-        ]
-        .map(|format| Caps::RawVideo {
-            format,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        })
-        .to_vec();
-        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(alts))])
+        Vec::from([PadTemplate::sink(any_geometry_sampling_formats())])
     }
 }
 
@@ -570,21 +572,7 @@ impl SourceLoop for St2110VideoSrc {
 
 impl PadTemplates for St2110VideoSrc {
     fn pad_templates() -> Vec<PadTemplate> {
-        let alts = [
-            RawVideoFormat::Rgba8,
-            RawVideoFormat::Yuyv,
-            RawVideoFormat::I422p10,
-        ]
-        .map(|format| Caps::RawVideo {
-            format,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        })
-        .to_vec();
-        Vec::from([PadTemplate::source(CapsSet::from_alternatives(alts))])
+        Vec::from([PadTemplate::source(any_geometry_sampling_formats())])
     }
 }
 

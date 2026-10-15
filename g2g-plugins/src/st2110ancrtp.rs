@@ -50,6 +50,20 @@ use crate::st2110sdp::{St2110Essence, St2110Sdp};
 const CC_DID: u8 = 0x61;
 const CC_SDID: u8 = 0x01;
 
+fn accepted_caps() -> CapsSet {
+    let any_geometry = |codec| Caps::CompressedVideo {
+        codec,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+    };
+    CapsSet::from_alternatives(Vec::from([
+        any_geometry(VideoCodec::H264),
+        any_geometry(VideoCodec::H265),
+    ]))
+}
+
 /// Accept only compressed H.264 / H.265 (the codecs whose SEI carries captions);
 /// returns the codec.
 fn video_codec(caps: &Caps) -> Result<VideoCodec, G2gError> {
@@ -156,10 +170,7 @@ impl AsyncElement for St2110AncSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::LegacySink(Box::new(|c: &Caps| {
-            video_codec(c)?;
-            Ok(c.clone())
-        }))
+        CapsConstraint::Accepts(accepted_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -283,23 +294,7 @@ impl AsyncElement for St2110AncSink {
 
 impl PadTemplates for St2110AncSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        let h264 = Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        };
-        let h265 = Caps::CompressedVideo {
-            codec: VideoCodec::H265,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        };
-        Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
-            h264, h265,
-        ])))])
+        Vec::from([PadTemplate::sink(accepted_caps())])
     }
 }
 
