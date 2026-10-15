@@ -1517,6 +1517,10 @@ impl MultiOutputElement for TsDemuxN {
         upstream_caps.intersect(&TsDemux::input_caps())
     }
 
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(CapsSet::one(TsDemux::input_caps()))
+    }
+
     /// Declare each port's elementary-stream caps (M380), so the solver negotiates
     /// each branch against its codec at startup. `None` for an out-of-range port.
     fn port_output_caps(&self, port: usize) -> Option<Caps> {

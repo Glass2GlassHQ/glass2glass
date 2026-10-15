@@ -18,8 +18,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::meta::{AnalyticsMeta, BlobMeta, CaptionMeta, MetaRequests, RequestPolicy};
 use g2g_core::runtime::{block_on, run_graph, GraphNodeRef, SourceLoop};
 use g2g_core::{
-    AllocationParams, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph,
-    MemoryDomain, MultiInputElement, OutputSink, PipelineClock, PipelinePacket, Rate,
+    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
+    Graph, MemoryDomain, MultiInputElement, OutputSink, PipelineClock, PipelinePacket, Rate,
     RawVideoFormat,
 };
 
@@ -193,7 +193,7 @@ impl MultiInputElement for RecordingFanIn {
         CapsConstraint::AcceptsAny
     }
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
-        Ok(CapsConstraint::LegacySource(caps()))
+        Ok(CapsConstraint::Produces(CapsSet::one(caps())))
     }
     fn configure_pipeline(
         &mut self,

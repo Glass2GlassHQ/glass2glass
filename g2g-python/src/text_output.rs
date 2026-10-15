@@ -86,6 +86,11 @@ impl MultiOutputElement for PyTransformWithText {
         AsyncElement::intercept_caps(&self.transform, upstream_caps)
     }
 
+    // a batch input is checked per stream, which a caps set cannot say
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        CapsConstraint::AcceptsAny
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         AsyncElement::configure_pipeline(&mut self.transform, absolute_caps)
     }

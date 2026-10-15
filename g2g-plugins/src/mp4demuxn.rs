@@ -34,9 +34,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::StreamSelectController;
 use g2g_core::{
-    AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, LatencyReport, MemoryDomain, MultiOutputElement, MultiOutputSink,
-    PipelinePacket, Rate, Segment, Stream, StreamCollection, StreamType,
+    AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, Dim, FrameTiming, G2gError, LatencyReport, MemoryDomain, MultiOutputElement,
+    MultiOutputSink, PipelinePacket, Rate, Segment, Stream, StreamCollection, StreamType,
 };
 
 use crate::fmp4::{
@@ -448,11 +448,14 @@ impl Mp4DemuxN {
     /// `IsoBmff` form (HLS / DASH fragments) and the whole-file `Mp4` form (M479,
     /// a `filesrc` progressive `.mp4`); the parse is the same either way.
     fn accepts(caps: &Caps) -> bool {
-        matches!(
-            caps,
-            Caps::ByteStream {
-                encoding: ByteStreamEncoding::IsoBmff | ByteStreamEncoding::Mp4
-            }
+        Self::input_caps().accepts(caps)
+    }
+
+    fn input_caps() -> CapsSet {
+        CapsSet::from_alternatives(
+            [ByteStreamEncoding::IsoBmff, ByteStreamEncoding::Mp4]
+                .map(|encoding| Caps::ByteStream { encoding })
+                .to_vec(),
         )
     }
 
@@ -863,6 +866,10 @@ impl MultiOutputElement for Mp4DemuxN {
         } else {
             Err(G2gError::CapsMismatch)
         }
+    }
+
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(Self::input_caps())
     }
 
     /// Declare each port's elementary caps (M380), so the solver negotiates each

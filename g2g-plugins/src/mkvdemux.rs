@@ -1453,6 +1453,10 @@ impl MultiOutputElement for MkvDemuxN {
         upstream_caps.intersect(&MkvDemux::input_caps())
     }
 
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(CapsSet::one(MkvDemux::input_caps()))
+    }
+
     /// Declare each port's elementary-stream caps (M380), so the solver negotiates
     /// each branch against its codec at startup and a real decoder downstream of
     /// the port configures against it (geometry is a placeholder `Range`, refined

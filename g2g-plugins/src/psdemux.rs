@@ -1718,6 +1718,10 @@ impl MultiOutputElement for PsDemuxN {
         upstream_caps.intersect(&PsDemux::input_caps())
     }
 
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(CapsSet::one(PsDemux::input_caps()))
+    }
+
     /// Declare each port's elementary-stream caps, so the solver negotiates each
     /// branch against its codec at startup. `None` for an out-of-range port.
     fn port_output_caps(&self, port: usize) -> Option<Caps> {

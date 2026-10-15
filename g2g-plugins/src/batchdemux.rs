@@ -5,8 +5,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    BatchMeta, Caps, ConfigureOutcome, ElementMetadata, G2gError, MultiOutputElement,
-    MultiOutputSink, PipelinePacket,
+    BatchMeta, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
+    MultiOutputElement, MultiOutputSink, PipelinePacket,
 };
 
 /// The `streamdemux` element: one [`Caps::Batch`] frame in, each of its
@@ -55,6 +55,11 @@ impl MultiOutputElement for BatchDemux {
             Caps::Batch { .. } => Ok(upstream_caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
+    }
+
+    // a caps set cannot say "a batch of any streams", configure_pipeline checks it
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        CapsConstraint::AcceptsAny
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

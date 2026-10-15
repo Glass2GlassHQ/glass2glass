@@ -23,8 +23,9 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::{
-    Caps, ConfigureOutcome, Dim, Frame, G2gError, InputAggregator, MultiInputElement, OutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, Frame, G2gError, InputAggregator,
+    MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    Rate, RawVideoFormat,
 };
 
 use crate::props::{fixed_caps, hosted_element_props, HostedClassProperties};
@@ -168,6 +169,10 @@ impl MultiInputElement for PyAggregator {
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         upstream_caps.intersect(&self.accept)
+    }
+
+    fn caps_constraint_as_input(&self, _input: usize) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(CapsSet::one(self.accept.clone()))
     }
 
     fn configure_pipeline(

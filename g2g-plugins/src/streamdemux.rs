@@ -32,7 +32,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    Caps, ConfigureOutcome, Frame, G2gError, MultiOutputElement, MultiOutputSink, PipelinePacket,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Frame, G2gError, MultiOutputElement,
+    MultiOutputSink, PipelinePacket,
 };
 
 /// Classifier mapping a frame to the output port it belongs on.
@@ -97,6 +98,10 @@ impl MultiOutputElement for StreamDemux {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         upstream_caps.intersect(&self.input)
+    }
+
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(CapsSet::one(self.input.clone()))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

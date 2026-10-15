@@ -837,9 +837,9 @@ pub trait MultiInputElement: ElementBound {
 
     /// M18 step 1: declare the merged output's negotiation-time
     /// constraint, evaluated against the muxer's current configured
-    /// inputs. Default eagerly calls `output_caps()` and wraps as
-    /// `LegacySource`. Migrated muxers with static or input-derived
-    /// output may override with `Produces(set)` or `DerivedOutput(fn)`.
+    /// inputs. Default eagerly calls `output_caps()` and produces that one
+    /// caps. A muxer that can produce alternatives overrides with
+    /// `Produces(set)`.
     ///
     /// The runner uses this in place of `output_caps()?.fixate()` so
     /// the downstream sink sees a uniformly-shaped constraint and the
@@ -849,7 +849,7 @@ pub trait MultiInputElement: ElementBound {
     where
         Self: Sized,
     {
-        Ok(CapsConstraint::LegacySource(self.output_caps()?))
+        Ok(CapsConstraint::Produces(CapsSet::one(self.output_caps()?)))
     }
 
     /// The allocation this muxer wants on one input pad, given that pad's

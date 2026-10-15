@@ -7,8 +7,9 @@ use alloc::vec::Vec;
 
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
-    BatchMeta, BatchStream, Caps, ConfigureOutcome, ElementMetadata, Frame, FrameTiming, G2gError,
-    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, SystemSlice,
+    BatchMeta, BatchStream, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, Frame,
+    FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
+    PipelinePacket, SystemSlice,
 };
 
 /// The `streammux` element: N raw video inputs in, one [`Caps::Batch`] frame
@@ -89,6 +90,11 @@ impl MultiInputElement for BatchMux {
             Caps::RawVideo { .. } => Ok(upstream_caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
+    }
+
+    // a caps set cannot say "raw video of any format", configure_pipeline checks it
+    fn caps_constraint_as_input(&self, _input: usize) -> CapsConstraint<'_> {
+        CapsConstraint::AcceptsAny
     }
 
     fn configure_pipeline(

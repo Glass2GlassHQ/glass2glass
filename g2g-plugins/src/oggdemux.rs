@@ -1323,6 +1323,10 @@ impl MultiOutputElement for OggDemuxN {
         upstream_caps.intersect(&OggDemux::input_caps())
     }
 
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(CapsSet::one(OggDemux::input_caps()))
+    }
+
     /// Declare each port's elementary-stream caps, so the solver negotiates each
     /// branch against its codec at startup; the concrete channels / rate arrive
     /// at runtime via the port's `CapsChanged`.
