@@ -459,6 +459,51 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_variable_vop_rate_keeps_the_upstream_framerate() {
+        const UPSTREAM_FRAMERATE_Q16: u32 = 25 << 16;
+        let mut parse = Mpeg4VideoParse::new();
+        parse.configure_pipeline(&mpeg4_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        let upstream = Caps::CompressedVideo {
+            codec: VideoCodec::Mpeg4Part2,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Fixed(UPSTREAM_FRAMERATE_Q16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        parse
+            .process(PipelinePacket::CapsChanged(upstream), &mut sink)
+            .await
+            .unwrap();
+        let mut buffer = video_object_layer(
+            352,
+            288,
+            ASPECT_CODE_SQUARE,
+            TIME_INCREMENT_RESOLUTION_30,
+            None,
+        );
+        buffer.extend_from_slice(&vop(0, 0xAA));
+        parse
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, buffer)),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let refined = sink.packets.iter().find_map(|p| match p {
+            PipelinePacket::CapsChanged(Caps::CompressedVideo {
+                width: Dim::Fixed(_),
+                framerate,
+                ..
+            }) => Some(framerate.clone()),
+            _ => None,
+        });
+        assert_eq!(refined, Some(Rate::Fixed(UPSTREAM_FRAMERATE_Q16)));
+    }
+
     #[test]
     fn config_interval_reinserts_the_headers_on_a_later_keyframe() {
         let mut parse = Mpeg4VideoParse::new().with_config_interval(-1);

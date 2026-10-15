@@ -314,7 +314,7 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
             codec: C::CODEC,
             width: Dim::Fixed(info.width),
             height: Dim::Fixed(info.height),
-            framerate: info.framerate.map_or(Rate::Any, Rate::Fixed),
+            framerate: self.caps.framerate(info.framerate),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         self.caps.refine(new_caps, out).await
@@ -444,6 +444,7 @@ impl<C: StartCodeCodec> AsyncElement for StartCodeParse<C> {
             match packet {
                 PipelinePacket::DataFrame(frame) => self.accumulate(frame, out).await?,
                 PipelinePacket::CapsChanged(c) => {
+                    self.caps.observe_upstream(&c);
                     out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
                 PipelinePacket::Flush => {

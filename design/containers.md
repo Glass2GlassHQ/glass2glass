@@ -675,7 +675,11 @@ applies to Opus only.
 `mp4demux` reports a track's frame rate as `timescale / delta` when every `stts`
 entry codes the same sample delta, and `Rate::Any` when the deltas vary, the
 table is empty (a fragmented init) or the rate falls outside the 1 to 240 fps
-placeholder it negotiated.
+placeholder it negotiated. `mp4src` applies the same rule and announces it in a
+`CapsChanged` before its first sample. A fragmented file has an empty `stts`, so
+`mp4src` and `fmp4demux` read the first fragment's `tfhd`
+`default_sample_duration` instead. `fmp4demux` therefore announces its caps at
+the first `moof` rather than at the `moov`.
 
 Which duration a reader reports depends on the layout, so `Mp4MuxN` writes both,
 selected by the `fragmented` property, default `true`.

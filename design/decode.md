@@ -16,10 +16,11 @@ conversion need, uses a decoder `AsyncElement` that accepts
 `MemoryDomain::DmaBuf`, `MemoryDomain::Cuda` or `MemoryDomain::D3D11Texture`
 depending on backend.
 
-The parsers `h264parse`, `h265parse` and `av1parse` take the frame rate from the
-bitstream (the SPS VUI `timing_info`, `av1parse` reads none). When the bitstream
-codes none they keep the rate an upstream `CapsChanged` declared, such as a
-demuxer's container rate, else `Rate::Any`. They never take it from
+The parsers `h264parse`, `h265parse`, `av1parse`, `mpegvideoparse`,
+`mpeg4videoparse` and `vc1parse` take the frame rate from the bitstream (the SPS
+VUI `timing_info`, the sequence header or VOL, `av1parse` reads none). When the
+bitstream codes none they keep the rate an upstream `CapsChanged` declared, such
+as a demuxer's container rate, else `Rate::Any`. They never take it from
 `configure_pipeline`, whose caps carry the negotiation placeholder fixated to
 1 fps.
 

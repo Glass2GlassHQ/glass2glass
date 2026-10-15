@@ -7,8 +7,9 @@
 //!
 //! Bytes arrive in arbitrary chunks (whole segments, or split mid-box by a
 //! generic source), so it buffers and processes one complete top-level box at a
-//! time: `moov` yields the codec/geometry (emitted as `CapsChanged`) and the
-//! parameter sets; each `moof`+`mdat` pair yields samples. The out-of-band
+//! time: `moov` yields the codec/geometry and the parameter sets, announced as
+//! `CapsChanged` at the first `moof`, whose `tfhd` can declare the frame rate;
+//! each `moof`+`mdat` pair yields samples. The out-of-band
 //! parameter sets are prepended to the first emitted access unit so a decoder can
 //! start. Single video track; the profile `Mp4Mux` writes (see `fmp4`).
 
@@ -33,9 +34,10 @@ use crate::cenc::SampleCrypt;
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::fifobuffer::FifoBuffer;
 use crate::fmp4::{
-    parse_fragments, parse_header, prepend_param_sets, starts_with_param_set, Header, Sample,
+    fragment_framerate_q16, parse_fragments, parse_header, prepend_param_sets,
+    starts_with_param_set, Header, Sample,
 };
-use crate::mp4box::next_box_len;
+use crate::mp4box::{find_box, next_box_len};
 
 /// # Example
 ///
@@ -179,14 +181,42 @@ impl Fmp4Demux {
         }
     }
 
-    fn output_caps(codec: VideoCodec, width: Dim, height: Dim) -> Caps {
+    fn output_caps(codec: VideoCodec, width: Dim, height: Dim, framerate: Rate) -> Caps {
         Caps::CompressedVideo {
             codec,
             width,
             height,
-            framerate: Rate::Any,
+            framerate,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
+    }
+
+    // re-reading the moov on a seek does not re-announce the unchanged caps
+    async fn announce_caps(
+        &mut self,
+        moof_box: &[u8],
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        if self.caps_sent {
+            return Ok(());
+        }
+        let Some(header) = &self.header else {
+            return Ok(());
+        };
+        let framerate_q16 = header.framerate_q16.or_else(|| {
+            find_box(moof_box, b"moof")
+                .and_then(|moof| fragment_framerate_q16(moof, header.timescale))
+        });
+        let caps = Self::output_caps(
+            header.codec,
+            Dim::Fixed(header.width),
+            Dim::Fixed(header.height),
+            framerate_q16.map_or(Rate::Any, Rate::Fixed),
+        );
+        self.out_codec = header.codec;
+        out.push(PipelinePacket::CapsChanged(caps)).await?;
+        self.caps_sent = true;
+        Ok(())
     }
 
     /// Process every complete top-level box now buffered, emitting access units.
@@ -204,23 +234,13 @@ impl Fmp4Demux {
                 b"moov" => {
                     let header = parse_header(&self.buffer.as_slice()[..total]);
                     self.buffer.discard(total);
-                    let header = header?;
-                    // Re-reading the moov on a seek re-parses the header (for
-                    // timescale / parameter sets) but does not re-announce the
-                    // unchanged caps.
-                    if !self.caps_sent {
-                        let caps = Self::output_caps(
-                            header.codec,
-                            Dim::Fixed(header.width),
-                            Dim::Fixed(header.height),
-                        );
-                        out.push(PipelinePacket::CapsChanged(caps)).await?;
-                        self.out_codec = header.codec;
-                        self.caps_sent = true;
-                    }
-                    self.header = Some(header);
+                    self.header = Some(header?);
                 }
-                b"moof" => self.pending_moof = Some((box_at, self.buffer.take_front(total))),
+                b"moof" => {
+                    let moof = self.buffer.take_front(total);
+                    self.announce_caps(&moof, out).await?;
+                    self.pending_moof = Some((box_at, moof));
+                }
                 b"mdat" => {
                     let mdat = &self.buffer.as_slice()[..total];
                     let pending_moof = self.pending_moof.take().map(|(frag_at, mut frag)| {
@@ -312,7 +332,7 @@ impl AsyncElement for Fmp4Demux {
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::IsoBmff,
-            } => CapsSet::one(Self::output_caps(codec, Dim::Any, Dim::Any)),
+            } => CapsSet::one(Self::output_caps(codec, Dim::Any, Dim::Any, Rate::Any)),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -384,7 +404,7 @@ impl AsyncElement for Fmp4Demux {
 
 impl PadTemplates for Fmp4Demux {
     fn pad_templates() -> Vec<PadTemplate> {
-        let video = |codec| Self::output_caps(codec, Dim::Any, Dim::Any);
+        let video = |codec| Self::output_caps(codec, Dim::Any, Dim::Any, Rate::Any);
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
             PadTemplate::source(CapsSet::from_alternatives(Vec::from([

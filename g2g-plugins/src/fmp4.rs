@@ -201,6 +201,13 @@ fn constant_framerate_q16(stbl: &[u8], timescale: u32) -> Option<u32> {
     framerate_q16_from_fraction(timescale, constant_delta?).filter(|&q16| q16 > 0)
 }
 
+// a fragmented init leaves stts empty, so the fragment's tfhd declares the sample duration
+pub(crate) fn fragment_framerate_q16(moof: &[u8], timescale: u32) -> Option<u32> {
+    let tfhd = find_path(moof, &[b"traf", b"tfhd"])?;
+    let (default_duration, _) = tfhd_defaults(tfhd).ok()?;
+    framerate_q16_from_fraction(timescale, default_duration).filter(|&q16| q16 > 0)
+}
+
 /// Pair a track's `tenc` defaults with the movie-level `seig` table its `stbl`
 /// carries, which a fragment's `sbgp` can index instead of a `traf`-local one.
 fn cenc_track(defaults: Option<CencDefaults>, stbl: &[u8]) -> Result<Option<CencTrack>, G2gError> {

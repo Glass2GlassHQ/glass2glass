@@ -263,6 +263,13 @@ pub(crate) const PLACEHOLDER_FRAMERATE: Rate = Rate::Range {
     max_q16: 240 << 16,
 };
 
+// a rate outside the placeholder range would fail the downstream re-solve
+pub(crate) fn framerate_within_placeholder(framerate_q16: Option<u32>) -> Rate {
+    framerate_q16
+        .and_then(|q16| PLACEHOLDER_FRAMERATE.intersect(&Rate::Fixed(q16)))
+        .unwrap_or(Rate::Any)
+}
+
 fn placeholder_video_caps(codec: VideoCodec, min_dim: u32) -> Caps {
     Caps::CompressedVideo {
         codec,

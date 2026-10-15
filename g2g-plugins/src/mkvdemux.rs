@@ -51,17 +51,16 @@ use g2g_core::{
 
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::matroska::{MatroskaDemuxer, MkvCodec};
-use crate::typefind::PLACEHOLDER_FRAMERATE;
+use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
 
 const NANOSECONDS_PER_SECOND: u32 = 1_000_000_000;
 
 // the track's DefaultDuration as a rate, Any when absent or outside the negotiated range
 fn default_duration_framerate(default_duration_ns: u64) -> Rate {
-    u32::try_from(default_duration_ns)
+    let framerate_q16 = u32::try_from(default_duration_ns)
         .ok()
-        .and_then(|duration| framerate_q16_from_fraction(NANOSECONDS_PER_SECOND, duration))
-        .and_then(|q16| PLACEHOLDER_FRAMERATE.intersect(&Rate::Fixed(q16)))
-        .unwrap_or(Rate::Any)
+        .and_then(|duration| framerate_q16_from_fraction(NANOSECONDS_PER_SECOND, duration));
+    framerate_within_placeholder(framerate_q16)
 }
 
 /// Which elementary stream a [`MkvDemux`] instance forwards. One output pad

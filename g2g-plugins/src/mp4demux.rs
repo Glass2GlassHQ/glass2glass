@@ -34,7 +34,7 @@ use crate::fmp4::{
     parse_all_tracks, parse_header, parse_progressive, parse_progressive_multi, prepend_param_sets,
     starts_with_param_set, TrackKind,
 };
-use crate::typefind::PLACEHOLDER_FRAMERATE;
+use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
 
 /// Which track the single-output demux emits (M748): the video track (the
 /// default, so `filesrc ! qtdemux ! ...` is unchanged), the video track with its
@@ -248,11 +248,7 @@ impl Mp4Demux {
     async fn drain_video(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         let header = parse_header(&self.buffer)?;
         if !self.caps_sent {
-            // a rate outside the negotiated placeholder range would fail the downstream re-solve
-            let framerate = header
-                .framerate_q16
-                .and_then(|q16| PLACEHOLDER_FRAMERATE.intersect(&Rate::Fixed(q16)))
-                .unwrap_or(Rate::Any);
+            let framerate = framerate_within_placeholder(header.framerate_q16);
             let caps = Self::output_caps(
                 header.codec,
                 Dim::Fixed(header.width),

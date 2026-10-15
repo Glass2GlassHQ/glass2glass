@@ -467,12 +467,13 @@ async fn mid_stream_scrub_repositions_after_frames_flow() {
     src.run(&mut sink).await.expect("run");
 
     // First frame (idr0 at 0 ms) flows, then the scrub jumps to the keyframe near
-    // 70 ms: idr0, Flush, Segment, idr2, p3.
+    // 70 ms: caps, idr0, Flush, Segment, idr2, p3.
     let kinds: Vec<&str> = sink
         .inner
         .packets
         .iter()
         .map(|p| match p {
+            PipelinePacket::CapsChanged(_) => "caps",
             PipelinePacket::DataFrame(_) => "frame",
             PipelinePacket::Flush => "flush",
             PipelinePacket::Segment(_) => "segment",
@@ -482,7 +483,7 @@ async fn mid_stream_scrub_repositions_after_frames_flow() {
         .collect();
     assert_eq!(
         kinds,
-        ["frame", "flush", "segment", "frame", "frame", "eos"]
+        ["caps", "frame", "flush", "segment", "frame", "frame", "eos"]
     );
     let frames = sink.inner.frames();
     assert!(

@@ -35,10 +35,11 @@ use g2g_core::{
 
 use crate::filesink::path_io_err;
 use crate::fmp4::{
-    parse_all_tracks, parse_chapters, parse_fragments, parse_header, parse_progressive,
-    starts_with_param_set, Header, Sample, TrackKind,
+    fragment_framerate_q16, parse_all_tracks, parse_chapters, parse_fragments, parse_header,
+    parse_progressive, starts_with_param_set, Header, Sample, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
+use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
 use g2g_core::log::short_type_name;
 
 /// # Example
@@ -106,14 +107,8 @@ impl Mp4Src {
             codec: h.codec,
             width: Dim::Fixed(h.width),
             height: Dim::Fixed(h.height),
-            // Advisory only: per-frame PTS (from each sample's `duration_ns`)
-            // carries the real timing. Advertise a Range, not `Any`, so the caps
-            // survive fixate when nothing downstream pins the rate (same pattern
-            // as `RtspSrc`); `Any` aborts negotiation with "cannot fixate".
-            framerate: Rate::Range {
-                min_q16: 1 << 16,
-                max_q16: 240 << 16,
-            },
+            // `run` announces the file's own rate before the first sample
+            framerate: PLACEHOLDER_FRAMERATE,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
     }
@@ -244,6 +239,17 @@ impl SourceLoop for Mp4Src {
             } else {
                 parse_progressive(&data, header.timescale)?
             };
+            let framerate_q16 = header.framerate_q16.or_else(|| {
+                find_box(&data, b"moof")
+                    .and_then(|moof| fragment_framerate_q16(moof, header.timescale))
+            });
+            let mut caps_announcement = Some(Caps::CompressedVideo {
+                codec: header.codec,
+                width: Dim::Fixed(header.width),
+                height: Dim::Fixed(header.height),
+                framerate: framerate_within_placeholder(framerate_q16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            });
 
             let mut sequence = 0u64;
             // The next emitted frame is a (re)start: prepend the out-of-band
@@ -385,6 +391,9 @@ impl SourceLoop for Mp4Src {
                 };
                 sequence += 1;
                 i += 1;
+                if let Some(caps) = caps_announcement.take() {
+                    out.push(PipelinePacket::CapsChanged(caps)).await?;
+                }
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
         })
