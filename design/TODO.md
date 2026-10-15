@@ -198,6 +198,10 @@ Highest leverage first:
 
 ## Transforms and effects
 
+- **`videoscale` before `videoconvert`.** `ffmpegdec ! videoscale !
+  videoconvert ! video/x-raw,format=BGRA,width=100,height=60` fails with
+  `CapsMismatch`: `videoscale` forwards its input size instead of 100x60. The
+  reverse order works.
 - **Odd-size `videoflip`.** It refuses an odd width or height for the
   subsampled formats; mirror and rotate them with the chroma resampled, since
   the unpaired chroma column or row moves to the other edge.
