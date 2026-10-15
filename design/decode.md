@@ -660,11 +660,13 @@ own two-plane textures. The decode device requests whichever of
 `TEXTURE_FORMAT_NV12` / `TEXTURE_FORMAT_P010` the adapter offers.
 
 A stream's bit depth is only known once its parameter sets parse, long after the
-caps solve, so the source pad offers both formats and the mismatch is caught at
-decode: an `Nv12` pin on a 10-bit stream, or a `P010` pin on an 8-bit one, fails
-`ensure_decoder` with `CapsMismatch` rather than mislabelling or truncating
-samples. The unpinned system path announces the format its frames carry,
-`Nv12` or `P010`, from `Nv12Frame::bit_depth`.
+caps solve, so the source pad offers both formats and the solve picks `Nv12`
+when downstream takes either. The solved caps the runner hands the decoder
+therefore choose only two-plane against RGBA: every path announces the format
+its frames carry, `Nv12` or `P010`, from the decoded bit depth, in a
+`CapsChanged` ahead of the first frame. A downstream capsfilter pinning the other
+format refuses that `CapsChanged` with `CapsMismatch`, so samples are never
+mislabelled or truncated.
 
 The same copy backs the `VulkanTexture` output domain: the frame carries the raw
 `VkImage` handle, `VkFormat` and geometry in `OwnedVulkanTexture`, and its

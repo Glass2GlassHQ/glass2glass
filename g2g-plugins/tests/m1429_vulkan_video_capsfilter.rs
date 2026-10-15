@@ -38,11 +38,12 @@ fn a_capsfilter_on_the_stream_size_decodes_every_frame() {
         "filesrc location={}/tests/fixtures/{FIXTURE} ! h264parse ! vulkanvideodec",
         env!("CARGO_MANIFEST_DIR"),
     );
-    let unfiltered = launch_frames(&decode, "m1429_unfiltered");
+    let unfiltered = launch_frames(&decode, "m1429_unfiltered").expect("the unfiltered line runs");
     let filtered = launch_frames(
         &format!("{decode} ! video/x-raw,width={width},height={height}"),
         "m1429_filtered",
-    );
+    )
+    .expect("the filtered line runs");
     assert!(!unfiltered.is_empty(), "no frames decoded");
     assert_eq!(filtered, unfiltered);
 }

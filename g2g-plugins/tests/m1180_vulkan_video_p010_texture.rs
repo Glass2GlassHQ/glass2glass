@@ -7,8 +7,8 @@
 //! it, the `WgpuTexture` path hands out a P010 texture when the caps pin it, and
 //! the raw `VulkanTexture` domain hands out the `G10X6` image itself. Bit depth is
 //! not known when the caps solve, so both `Nv12` and `P010` are offered on the
-//! source pad and a pin the samples cannot carry (`Nv12` on a 10-bit stream,
-//! `P010` on an 8-bit one) fails the decode rather than mislabelling bytes.
+//! source pad and the first picture announces the one its samples carry, whatever
+//! the solve picked.
 //!
 //! AV1 film grain is synthesized on the CPU (the hardware reconstruction is
 //! grain-free), so a grain frame is uploaded rather than copied; with the
@@ -26,7 +26,7 @@
 
 use g2g_core::memory::MemoryDomainKind;
 use g2g_core::runtime::block_on;
-use g2g_core::{Caps, Dim, G2gError, MemoryDomain, PipelinePacket, RawVideoFormat, VideoCodec};
+use g2g_core::{Caps, Dim, MemoryDomain, PipelinePacket, RawVideoFormat, VideoCodec};
 use g2g_plugins::vulkanvideo::{
     extract_h265_parameter_sets, open_av1_decode_device, open_h264_decode_device,
     open_h265_decode_device, to_std_h265_params, VulkanImageOwner, VulkanVideoError,
@@ -87,7 +87,7 @@ fn hevc_decoder_api_frames() -> Vec<Vec<u8>> {
 }
 
 /// The system path announces `P010` and carries the 10-bit samples the decoder API
-/// produces, and a pin the bit depth cannot carry fails the decode.
+/// produces.
 fn system_p010(reference: &[Vec<u8>]) -> Vec<Vec<u8>> {
     let (_, collect, decoded) =
         decode_stream(VideoCodec::H265, HEVC_10BIT, MemoryDomainKind::System, None);
@@ -155,31 +155,48 @@ fn system_p010(reference: &[Vec<u8>]) -> Vec<Vec<u8>> {
     frames
 }
 
-/// A two-plane pin the stream's bit depth cannot carry is refused.
-fn pin_bit_depth_mismatch() {
-    let (_, _, decoded) = decode_stream(
-        VideoCodec::H265,
-        HEVC_10BIT,
-        MemoryDomainKind::System,
-        Some(raw_caps(RawVideoFormat::Nv12)),
-    );
-    assert_eq!(
-        decoded,
-        Err(G2gError::CapsMismatch),
-        "NV12 pinned on a 10-bit stream must fail, not truncate"
-    );
-
-    let (_, _, decoded) = decode_stream(
-        VideoCodec::H264,
-        H264_CLIP,
-        MemoryDomainKind::System,
-        Some(raw_caps(RawVideoFormat::P010)),
-    );
-    assert_eq!(
-        decoded,
-        Err(G2gError::CapsMismatch),
-        "P010 pinned on an 8-bit stream must fail, not mislabel"
-    );
+/// Solved two-plane caps of the other bit depth are followed by caps announcing
+/// the format the samples carry, before the first frame.
+fn solved_caps_of_the_other_bit_depth() {
+    for (codec, clip, solved, carried) in [
+        (
+            VideoCodec::H265,
+            HEVC_10BIT,
+            RawVideoFormat::Nv12,
+            RawVideoFormat::P010,
+        ),
+        (
+            VideoCodec::H264,
+            H264_CLIP,
+            RawVideoFormat::P010,
+            RawVideoFormat::Nv12,
+        ),
+    ] {
+        let (_, collect, decoded) = decode_stream(
+            codec,
+            clip,
+            MemoryDomainKind::System,
+            Some(raw_caps(solved)),
+        );
+        decoded.expect("decode under solved caps of the other bit depth");
+        let first_frame = collect
+            .packets
+            .iter()
+            .position(|p| matches!(p, PipelinePacket::DataFrame(_)))
+            .expect("the clip decoded at least one frame");
+        let announced = collect.packets[..first_frame]
+            .iter()
+            .rev()
+            .find_map(|p| match p {
+                PipelinePacket::CapsChanged(Caps::RawVideo { format, .. }) => Some(*format),
+                _ => None,
+            });
+        assert_eq!(
+            announced,
+            Some(carried),
+            "{codec:?} under {solved:?} caps must announce {carried:?}, not truncate or mislabel"
+        );
+    }
 }
 
 /// Pinning `P010` on `WgpuTexture` hands out P010 textures whose planes are the
@@ -344,7 +361,7 @@ fn two_plane_output_covers_10bit_and_film_grain() {
         Ok(features) => {
             let reference = hevc_decoder_api_frames();
             let system = system_p010(&reference);
-            pin_bit_depth_mismatch();
+            solved_caps_of_the_other_bit_depth();
             if features.contains(wgpu::Features::TEXTURE_FORMAT_P010) {
                 wgpu_p010_textures(&system);
                 vulkan_texture_g10x6(&system);

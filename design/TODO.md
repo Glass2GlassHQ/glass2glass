@@ -77,9 +77,6 @@ Highest leverage first:
   on the `NV12` / `P010` texture output, which Vulkan and wgpu refuse to create
   with an odd side, for example as an even-rounded texture with the picture size
   carried beside it.
-- **10-bit H.265 through a launch line.** `filesrc ! h265parse ! vulkanvideodec
-  ! fakesink` on a Main 10 stream fails with `CapsMismatch` (the decoder API
-  itself decodes it).
 - **`VulkanVideoDec` AV1 inter frames.** On AV1-TEST-VECTORS (2 of 242 pass)
   and the Chromium AV1 suites the keyframe decodes exactly and the first inter
   frame differs from dav1d, on both NVIDIA and RADV. 10-bit vectors fail to

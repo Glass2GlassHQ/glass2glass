@@ -312,8 +312,8 @@ impl PipelineClock for ZeroClock {
     }
 }
 
-// every system frame `pipeline` hands an appsink on `channel`, panicking when the run fails
-pub(crate) fn launch_frames(pipeline: &str, channel: &str) -> Vec<Vec<u8>> {
+// every system frame `pipeline` hands an appsink on `channel`, or the error that ended the run
+pub(crate) fn launch_frames(pipeline: &str, channel: &str) -> Result<Vec<Vec<u8>>, G2gError> {
     let pull = register_appsink_pull(channel);
     let line = format!("{pipeline} ! appsink channel={channel}");
     let graph = parse_launch(&default_registry(), &line).expect("parses");
@@ -330,8 +330,6 @@ pub(crate) fn launch_frames(pipeline: &str, channel: &str) -> Vec<Vec<u8>> {
                 .to_vec(),
         );
     }
-    run.join()
-        .expect("the graph thread finishes")
-        .unwrap_or_else(|error| panic!("{line} runs, got {error:?}"));
-    frames
+    run.join().expect("the graph thread finishes")?;
+    Ok(frames)
 }

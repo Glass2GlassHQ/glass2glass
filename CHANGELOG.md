@@ -9,6 +9,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1435: `ffmpegdec`'s CUDA backend rejects an explicit non-NV12 output format and a 10-bit surface instead of overriding or mislabelling them.
 - M1432: decoder auto-plug skips `nvdec` below NVDEC's reported minimum size, so small AV1 streams decode in software.
 - M1431: auto-plug builds `ffmpegdec` in `Auto` mode unless the downstream pins a format, so 10-bit AV1 decodes through `decodebin ! videoconvert`.
+- M1430: `vulkanvideodec` announces the bit depth it decodes, so a Main 10 stream decodes through a launch line.
 - M1429: a geometry capsfilter after a decoder offering several output formats, such as `vulkanvideodec`, now negotiates.
 - M1428: ST 2110-20 packets are padded to one size and sent as UDP GSO writes, so 1080p60 meets its pacing schedule.
 - M1427: Android clippy no longer fails on the parse-scope thread local.

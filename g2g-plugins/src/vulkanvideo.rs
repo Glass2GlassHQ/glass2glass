@@ -13446,16 +13446,6 @@ impl core::fmt::Debug for DpbDecoderKind {
 }
 
 impl DpbDecoderKind {
-    /// The stream's sample bit depth (8 or 10), from the parameter sets the
-    /// decoder was built with.
-    fn bit_depth(&self) -> u8 {
-        match self {
-            DpbDecoderKind::H264(d) => d.core.bit_depth,
-            DpbDecoderKind::H265(d) => d.core.bit_depth,
-            DpbDecoderKind::Av1(d) => d.core.bit_depth,
-        }
-    }
-
     /// Pick what the GPU-texture path emits per picture.
     fn set_texture_output(&mut self, output: TextureOutput) {
         match self {
@@ -13894,8 +13884,8 @@ impl VulkanVideoDec {
     /// first and the two-plane copy for a consumer that pins it; the raw
     /// `VulkanTexture` image and the system path are two-plane only. Which of
     /// `Nv12` / `P010` a stream actually produces is its bit depth, unknown until
-    /// the parameter sets parse, so both are offered and a pin the samples cannot
-    /// carry is refused in [`ensure_decoder`](Self::ensure_decoder).
+    /// the parameter sets parse, so both are offered and the decoded picture's
+    /// `CapsChanged` announces the one it carries.
     fn output_formats(&self) -> &'static [RawVideoFormat] {
         if self.out_domain == MemoryDomainKind::WgpuTexture {
             &[
@@ -14080,15 +14070,6 @@ impl VulkanVideoDec {
                 }
                 _ => return Err(G2gError::CapsMismatch),
             };
-
-        // The pin was solved before any bit depth was known, so refuse one these
-        // samples cannot carry rather than mislabel or truncate them.
-        if let Some(pinned) = self.out_format {
-            let carried = two_plane_raw_format(decoder.bit_depth());
-            if matches!(pinned, RawVideoFormat::Nv12 | RawVideoFormat::P010) && pinned != carried {
-                return Err(G2gError::CapsMismatch);
-            }
-        }
 
         // Flush the outgoing decoder's pipelined tail before it drops, so a
         // mid-stream reconfig does not lose the frames still in its ring (`process`
