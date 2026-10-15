@@ -108,15 +108,17 @@ downstream that pins one auto-plugs a decoder built for it.
 - `P010` is the semi-planar 10-bit layout, NV12's shape with the value in each
   16-bit word's top bits, which 10-bit samplers and overlay planes take. It is
   packed from a planar 10-bit software decode or taken verbatim from a `P010LE`
-  hardware frame.
+  hardware frame. An `Nv12` request on a 10-bit 4:2:0 source emits `P010`,
+  because auto-plug builds the decoder for NV12 whenever the downstream takes
+  any raw format.
 - `OutputFormat::Auto` emits the source's own chroma and depth, advertising the
   whole set at negotiation and fixing the concrete format per frame via
   `CapsChanged`.
 - `YUVJ*P` is accepted with the same plane layout as its studio-range sibling.
 
-Mismatches needing a real conversion, chroma upsampling or an 8-bit request from
-a 10-bit source, are rejected with `CapsMismatch` instead of silently converted.
-Put a `videoconvert` downstream, which takes the planar 10-bit and 12-bit family.
+Mismatches needing a real conversion, chroma upsampling or an 8-bit planar
+request from a 10-bit source, are rejected with `CapsMismatch` instead of
+silently converted. Put a `videoconvert` downstream, which takes the planar 10-bit and 12-bit family.
 Bit-exact against ffmpeg's own raw decode of a High 10 clip for `I420p10` and
 `P010`.
 

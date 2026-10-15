@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1431: `ffmpegdec` built for NV12 emits P010 on a 10-bit stream, so 10-bit AV1 decodes through `decodebin ! videoconvert`.
 - M1428: ST 2110-20 packets are padded to one size and sent as UDP GSO writes, so 1080p60 meets its pacing schedule.
 - M1427: Android clippy no longer fails on the parse-scope thread local.
 - M1426: unused imports in `timestampburn`, `mfdevice` and the `mfcommon` tests no longer fail feature-gated builds, and the element docs are regenerated.

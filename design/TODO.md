@@ -99,8 +99,6 @@ Highest leverage first:
 - **`nvdec` AV1 below the hardware minimum size.** The `av1-1-b8-01-size-*`
   vectors smaller than NVDEC accepts fail the decode. Refuse them at
   negotiation so auto-plug takes a software decoder.
-- **`ffmpegdec` AV1.** Every AV1 stream fails with `Hardware(Other)`, although
-  the linked ffmpeg has libdav1d.
 - **AV1 film grain chroma.** Match dav1d's chroma grain on libaom's
   `-aom-params film-grain-test=1` parameters: a 320x180 clip encoded with them
   differs from dav1d in 41 to 66 chroma bytes per frame, its luma is exact.
