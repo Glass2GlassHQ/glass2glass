@@ -21,6 +21,12 @@
 //! The same walk reads the header's `color_config`, so the refined caps also
 //! carry the stream's colorimetry (`Colorimetry::UNKNOWN` where the header codes
 //! no colour description).
+//!
+//! In re-framing mode ([`Av1Parse::reframing`], what `gst-launch` and the
+//! auto-plugged decode chains build) a byte stream that carries temporal
+//! delimiters, a raw `.obu` file read in arbitrary chunks, is split into one
+//! temporal unit per `DataFrame`. Input without delimiters (the container
+//! mappings strip them) already arrives one unit per buffer and passes through.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -28,9 +34,12 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use g2g_core::frame::Frame;
+use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    Rate, VideoCodec,
 };
 
 use crate::annexb::BitReader;
@@ -55,6 +64,9 @@ pub struct Av1Parse {
     configured: bool,
     last_emitted_caps: Option<Caps>,
     headers_emitted: u64,
+    reframe: bool,
+    framer: TemporalUnitFramer,
+    reframed_sequence: u64,
 }
 
 impl Av1Parse {
@@ -62,10 +74,59 @@ impl Av1Parse {
         Self::default()
     }
 
+    // splits a delimited byte stream into one temporal unit per frame
+    pub fn reframing() -> Self {
+        Self {
+            reframe: true,
+            ..Self::default()
+        }
+    }
+
     /// Count of `CapsChanged` packets pushed downstream, for tests asserting
     /// re-emission is suppressed when the dimensions are unchanged.
     pub fn caps_changes_emitted(&self) -> u64 {
         self.headers_emitted
+    }
+
+    async fn refine_caps(
+        &mut self,
+        temporal_unit: &[u8],
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        let Some(info) = extract_seq_header(temporal_unit) else {
+            return Ok(());
+        };
+        let new_caps = Caps::CompressedVideo {
+            codec: VideoCodec::Av1,
+            width: Dim::Fixed(info.width),
+            height: Dim::Fixed(info.height),
+            framerate: Rate::Any,
+            colorimetry: info.colorimetry,
+        };
+        if self.last_emitted_caps.as_ref() != Some(&new_caps) {
+            out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                .await?;
+            self.last_emitted_caps = Some(new_caps);
+            self.headers_emitted += 1;
+        }
+        Ok(())
+    }
+
+    async fn emit_temporal_unit(
+        &mut self,
+        temporal_unit: Vec<u8>,
+        timing: FrameTiming,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        self.refine_caps(&temporal_unit, out).await?;
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(temporal_unit.into_boxed_slice())),
+            timing,
+            self.reframed_sequence,
+        );
+        self.reframed_sequence += 1;
+        out.push(PipelinePacket::DataFrame(frame)).await?;
+        Ok(())
     }
 }
 
@@ -130,37 +191,38 @@ impl AsyncElement for Av1Parse {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    if let g2g_core::MemoryDomain::System(slice) = &frame.domain {
-                        if let Some(info) = extract_seq_header(slice.as_slice()) {
-                            let new_caps = Caps::CompressedVideo {
-                                codec: VideoCodec::Av1,
-                                width: Dim::Fixed(info.width),
-                                height: Dim::Fixed(info.height),
-                                framerate: Rate::Any,
-                                colorimetry: info.colorimetry,
-                            };
-                            if self.last_emitted_caps.as_ref() != Some(&new_caps) {
-                                out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                                    .await?;
-                                self.last_emitted_caps = Some(new_caps);
-                                self.headers_emitted += 1;
-                            }
-                        }
+                    let Some(bytes) = frame.domain.as_system_slice() else {
+                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                        return Ok(());
+                    };
+                    let delimited_input =
+                        self.reframe && (!self.framer.is_empty() || opens_temporal_unit(bytes));
+                    if !delimited_input {
+                        self.refine_caps(bytes, out).await?;
+                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                        return Ok(());
                     }
-                    out.push(PipelinePacket::DataFrame(frame)).await?;
+                    for (temporal_unit, timing) in self.framer.push(bytes, frame.timing)? {
+                        self.emit_temporal_unit(temporal_unit, timing, out).await?;
+                    }
                 }
                 PipelinePacket::CapsChanged(c) => {
                     out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
                 PipelinePacket::Flush => {
                     self.last_emitted_caps = None;
+                    self.framer = TemporalUnitFramer::default();
                     out.push(PipelinePacket::Flush).await?;
                 }
                 // Segment is control: forward unchanged.
                 PipelinePacket::Segment(seg) => {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
-                PipelinePacket::Eos => {}
+                PipelinePacket::Eos => {
+                    if let Some((temporal_unit, timing)) = self.framer.finish()? {
+                        self.emit_temporal_unit(temporal_unit, timing, out).await?;
+                    }
+                }
                 other => {
                     out.push(other).await?;
                 }
@@ -367,6 +429,167 @@ pub(crate) fn has_sequence_header(data: &[u8]) -> bool {
     obu_ranges(data).is_some_and(|obus| obus.iter().any(|o| o.obu_type == OBU_SEQUENCE_HEADER))
 }
 
+// far above any real temporal unit
+const MAX_TEMPORAL_UNIT_BYTES: usize = 16 * 1024 * 1024;
+
+// a byte-stream chunk boundary can land on a delimiter by chance
+const TEMPORAL_UNIT_ALIGNED_CONFIRMATIONS: u8 = 2;
+
+// spec 4.10.5: `leb128()` codes at most 8 bytes
+const LEB128_MAX_BYTES: usize = 8;
+
+// seq_profile 3..=7 are reserved
+const MAX_SEQ_PROFILE: u8 = 2;
+
+fn obu_type(header: u8) -> u8 {
+    (header >> 3) & 0x0F
+}
+
+fn opens_temporal_unit(data: &[u8]) -> bool {
+    data.first()
+        .is_some_and(|&header| obu_type(header) == OBU_TEMPORAL_DELIMITER)
+}
+
+// Ok(None) until all of the OBU's bytes have arrived
+fn delimited_obu_at(data: &[u8], start: usize) -> Result<Option<ObuRange>, G2gError> {
+    let Some(&header) = data.get(start) else {
+        return Ok(None);
+    };
+    let has_extension = (header >> 2) & 1 == 1;
+    let has_size = (header >> 1) & 1 == 1;
+    // the low-overhead format codes every OBU's size
+    if header & 0x80 != 0 || !has_size {
+        return Err(G2gError::CapsMismatch);
+    }
+    let size_start = start + 1 + usize::from(has_extension);
+    let mut payload = size_start;
+    let Some(size) = read_leb128(data, &mut payload) else {
+        let size_truncated = data.len().saturating_sub(size_start) < LEB128_MAX_BYTES;
+        return if size_truncated {
+            Ok(None)
+        } else {
+            Err(G2gError::CapsMismatch)
+        };
+    };
+    let size = usize::try_from(size)
+        .ok()
+        .filter(|&size| size <= MAX_TEMPORAL_UNIT_BYTES)
+        .ok_or(G2gError::CapsMismatch)?;
+    let end = payload.checked_add(size).ok_or(G2gError::CapsMismatch)?;
+    Ok((end <= data.len()).then_some(ObuRange {
+        obu_type: obu_type(header),
+        start,
+        payload,
+        end,
+    }))
+}
+
+// a raw .obu file opens on an empty temporal delimiter, then a sequence header
+pub(crate) fn opens_obu_stream(data: &[u8]) -> bool {
+    let Ok(Some(delimiter)) = delimited_obu_at(data, 0) else {
+        return false;
+    };
+    let Ok(Some(sequence_header)) = delimited_obu_at(data, delimiter.end) else {
+        return false;
+    };
+    let reserved_bits_clear =
+        data[delimiter.start] & 1 == 0 && data[sequence_header.start] & 1 == 0;
+    delimiter.obu_type == OBU_TEMPORAL_DELIMITER
+        && delimiter.payload == delimiter.end
+        && sequence_header.obu_type == OBU_SEQUENCE_HEADER
+        && reserved_bits_clear
+        && parse_complete_sequence_header(&data[sequence_header.payload..sequence_header.end])
+            .is_some_and(|header| header.profile <= MAX_SEQ_PROFILE)
+}
+
+// the last unit waits for the next delimiter unless input proved one unit per buffer
+#[derive(Debug, Default)]
+struct TemporalUnitFramer {
+    // starts on a temporal delimiter whenever it is not empty
+    pending: Vec<u8>,
+    // offset of the first OBU in `pending` not yet complete
+    walked: usize,
+    // each delimiter in `pending` and the timing of the buffer it completed in
+    unit_starts: Vec<(usize, FrameTiming)>,
+    // consecutive buffers that began on a delimiter
+    aligned_runs: u8,
+}
+
+type FramedTemporalUnit = (Vec<u8>, FrameTiming);
+
+impl TemporalUnitFramer {
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    fn push(
+        &mut self,
+        bytes: &[u8],
+        timing: FrameTiming,
+    ) -> Result<Vec<FramedTemporalUnit>, G2gError> {
+        let boundary = self.pending.len();
+        self.pending.extend_from_slice(bytes);
+        while let Some(obu) = delimited_obu_at(&self.pending, self.walked)? {
+            if obu.obu_type == OBU_TEMPORAL_DELIMITER {
+                self.unit_starts.push((obu.start, timing));
+            }
+            self.walked = obu.end;
+        }
+        // the first buffer opens a unit by construction
+        if boundary > 0 {
+            let opened_a_unit = self.unit_starts.iter().any(|&(start, _)| start == boundary);
+            self.aligned_runs = if opened_a_unit {
+                self.aligned_runs.saturating_add(1)
+            } else {
+                0
+            };
+        }
+        let aligned = self.aligned_runs >= TEMPORAL_UNIT_ALIGNED_CONFIRMATIONS
+            && self.walked == self.pending.len();
+        let complete_through = if aligned {
+            self.pending.len()
+        } else {
+            self.unit_starts.last().map_or(0, |&(start, _)| start)
+        };
+        let temporal_units = self.split_off(complete_through);
+        if self.pending.len() > MAX_TEMPORAL_UNIT_BYTES {
+            return Err(G2gError::CapsMismatch);
+        }
+        Ok(temporal_units)
+    }
+
+    fn finish(&mut self) -> Result<Option<FramedTemporalUnit>, G2gError> {
+        if self.walked != self.pending.len() {
+            return Err(G2gError::CapsMismatch);
+        }
+        Ok(self.split_off(self.pending.len()).pop())
+    }
+
+    fn split_off(&mut self, complete_through: usize) -> Vec<FramedTemporalUnit> {
+        let retained_from = self
+            .unit_starts
+            .partition_point(|&(start, _)| start < complete_through);
+        let complete_starts: Vec<(usize, FrameTiming)> =
+            self.unit_starts.drain(..retained_from).collect();
+        let retained = self.pending.split_off(complete_through);
+        let complete = core::mem::replace(&mut self.pending, retained);
+        for (start, _) in &mut self.unit_starts {
+            *start -= complete_through;
+        }
+        self.walked -= complete_through;
+        let unit_ends = complete_starts
+            .iter()
+            .skip(1)
+            .map(|&(start, _)| start)
+            .chain(core::iter::once(complete.len()));
+        complete_starts
+            .iter()
+            .zip(unit_ends)
+            .map(|(&(start, timing), end)| (complete[start..end].to_vec(), timing))
+            .collect()
+    }
+}
+
 /// Walk the OBUs of one temporal unit and parse the first sequence-header OBU.
 /// `None` if none is present or the framing is malformed.
 fn extract_seq_header(data: &[u8]) -> Option<Av1SeqHeader> {
@@ -392,7 +615,6 @@ pub(crate) fn seq_header_obu(data: &[u8]) -> Option<(Av1SeqHeader, &[u8])> {
 }
 
 /// `OBU_TEMPORAL_DELIMITER` type.
-#[cfg(feature = "std")]
 const OBU_TEMPORAL_DELIMITER: u8 = 2;
 /// `OBU_FRAME_HEADER` / `OBU_FRAME` types (the ones opening a coded frame).
 const OBU_FRAME_HEADER: u8 = 3;
@@ -452,7 +674,6 @@ fn parse_sequence_header(payload: &[u8]) -> Option<Av1SeqHeader> {
 }
 
 /// [`parse_sequence_header`] requiring the whole header, so `detail` is set.
-#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
 pub(crate) fn parse_complete_sequence_header(payload: &[u8]) -> Option<Av1SeqHeader> {
     parse_sequence_header_at(payload, true)
 }
@@ -982,6 +1203,117 @@ mod tests {
             .collect();
         assert_eq!(widths, vec![Dim::Fixed(1280), Dim::Fixed(1920)]);
         assert_eq!(parse.caps_changes_emitted(), 2);
+    }
+
+    fn delimited_unit(tag: u8, with_sequence_header: bool) -> Vec<u8> {
+        let mut unit = obu(OBU_TEMPORAL_DELIMITER, &[]);
+        if with_sequence_header {
+            unit.extend(obu(OBU_SEQUENCE_HEADER, &seq_header_payload(64, 48, 0)));
+        }
+        unit.extend(obu(OBU_FRAME, &[tag; 7]));
+        unit
+    }
+
+    fn delimited_units(count: u8) -> Vec<Vec<u8>> {
+        (0..count)
+            .map(|tag| delimited_unit(tag, tag == 0))
+            .collect()
+    }
+
+    fn data_payloads(sink: &CollectSink) -> Vec<Vec<u8>> {
+        sink.packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::DataFrame(f) => f.domain.as_system_slice().map(<[u8]>::to_vec),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn push_each(parse: &mut Av1Parse, buffers: &[Vec<u8>], sink: &mut CollectSink) {
+        for (sequence, buffer) in buffers.iter().enumerate() {
+            parse
+                .process(
+                    PipelinePacket::DataFrame(frame_with_bytes(sequence as u64, buffer.clone())),
+                    sink,
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn reframing_splits_a_chunked_obu_stream_into_temporal_units() {
+        let units = delimited_units(4);
+        let stream = units.concat();
+        // lands on no unit start
+        let chunk_len = 9;
+        let chunks: Vec<Vec<u8>> = stream.chunks(chunk_len).map(<[u8]>::to_vec).collect();
+        let mut parse = Av1Parse::reframing();
+        parse.configure_pipeline(&av1_caps()).unwrap();
+        let mut sink = CollectSink::default();
+
+        push_each(&mut parse, &chunks, &mut sink).await;
+        assert_eq!(
+            data_payloads(&sink),
+            units[..units.len() - 1],
+            "every unit but the last is out, whole"
+        );
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        assert_eq!(data_payloads(&sink), units, "Eos flushes the last one");
+        assert!(matches!(
+            sink.packets[0],
+            PipelinePacket::CapsChanged(Caps::CompressedVideo {
+                width: Dim::Fixed(64),
+                height: Dim::Fixed(48),
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn reframing_stops_holding_once_the_input_proves_unit_aligned() {
+        let units = delimited_units(4);
+        let mut parse = Av1Parse::reframing();
+        parse.configure_pipeline(&av1_caps()).unwrap();
+        let mut sink = CollectSink::default();
+
+        push_each(&mut parse, &units, &mut sink).await;
+        assert_eq!(
+            data_payloads(&sink),
+            units,
+            "a unit-per-buffer upstream is not held back a frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn reframing_passes_undelimited_units_straight_through() {
+        // the container mappings strip the delimiters
+        let units: Vec<Vec<u8>> = (0..3).map(|tag| obu(OBU_FRAME, &[tag; 7])).collect();
+        let mut parse = Av1Parse::reframing();
+        parse.configure_pipeline(&av1_caps()).unwrap();
+        let mut sink = CollectSink::default();
+
+        push_each(&mut parse, &units, &mut sink).await;
+        assert_eq!(data_payloads(&sink), units);
+    }
+
+    #[tokio::test]
+    async fn reframing_refuses_an_obu_size_past_the_cap() {
+        let mut stream = obu(OBU_TEMPORAL_DELIMITER, &[]);
+        stream.push((OBU_FRAME << 3) | 0x02);
+        stream.extend(leb128(MAX_TEMPORAL_UNIT_BYTES as u64 + 1));
+        let mut parse = Av1Parse::reframing();
+        parse.configure_pipeline(&av1_caps()).unwrap();
+        let mut sink = CollectSink::default();
+
+        let result = parse
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, stream)),
+                &mut sink,
+            )
+            .await;
+        assert_eq!(result, Err(G2gError::CapsMismatch));
     }
 
     #[tokio::test]

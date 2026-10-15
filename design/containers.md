@@ -852,6 +852,23 @@ no VC-1 decoder.
 three headers signal is surfaced as the read-only `pixel-aspect-ratio` property
 rather than in caps.
 
+## AV1 OBU streams
+
+A raw `.obu` file is AV1's low-overhead bitstream format: size-delimited OBUs,
+each temporal unit opening on a temporal delimiter. `typefind` types it as
+`CompressedVideo{Av1}` when it opens on an empty temporal delimiter followed by
+a sequence-header OBU that parses whole, since the two delimiter bytes alone
+would match unrelated data.
+
+The launch `av1parse` (`Av1Parse::reframing`), which the auto-plug chain splices
+ahead of every AV1 decoder, splits that byte stream into one temporal unit per
+buffer, holding the last unit until the next delimiter or EOS. Input whose
+buffers open on a delimiter twice in a row (IVF, MPEG-TS) counts as already
+unit-aligned and is no longer held back. Input with no delimiters at all (the
+MP4 and Matroska mappings strip them) passes through untouched. An OBU without
+a size field, or one coding a size past 16 MiB, fails the stream, as does a held
+unit growing past 16 MiB.
+
 ## deinterlace
 
 Disc content is usually interlaced, and presenting its woven frames as-is combs

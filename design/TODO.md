@@ -91,9 +91,6 @@ Highest leverage first:
 - **AV1 film grain chroma.** Match dav1d's chroma grain on libaom's
   `-aom-params film-grain-test=1` parameters: a 320x180 clip encoded with them
   differs from dav1d in 41 to 66 chroma bytes per frame, its luma is exact.
-- **Raw AV1 OBU files.** `filesrc ! decodebin` on a raw `.obu` file detects
-  MPEG-TS and fails with `CapsMismatch`, and `filesrc ! av1parse ! decodebin`
-  on the same file fails with `CapsMismatch`.
 - **`ivfdemux` frame rate.** An IVF header with rate 1200000 and scale 1, what
   `ffmpeg -c copy` writes from a raw OBU without `-r`, fails with
   `CapsMismatch`.

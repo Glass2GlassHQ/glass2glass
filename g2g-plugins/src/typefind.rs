@@ -6,9 +6,9 @@
 //! `FileSrc` (and a future HTTP source) pick that automatically instead of the
 //! caller naming it: read a header, match a magic signature, and emit the
 //! matching `Caps` ([`sniff_caps`]). Container magic yields a
-//! `Caps::ByteStream{encoding}`; a raw Annex-B H.264/H.265 elementary stream
-//! yields a `Caps::CompressedVideo{..}` (so `filesrc ! decodebin` types a bare
-//! `.264` / `.jsv` recording by content), as does a still image (PNG / WebP, one
+//! `Caps::ByteStream{encoding}`; a raw Annex-B H.264/H.265 elementary stream or
+//! AV1 OBU stream yields a `Caps::CompressedVideo{..}` (so `filesrc ! decodebin`
+//! types a bare `.264` / `.jsv` / `.obu` recording by content), as does a still image (PNG / WebP, one
 //! frame per file); a subtitle document yields a
 //! `Caps::Text{format}` (so `filesrc ! subparse` types without an explicit
 //! source). The sniff functions themselves are pure `no_std`, no allocation.
@@ -81,7 +81,7 @@ pub const SNIFF_LEN: usize = 2 * AC3_MAX_FRAME_LEN;
 
 /// Guess a media type from a stream's leading bytes, or `None` if nothing matches
 /// (a `typefind` failure). Tries container magic first (binary signatures), then a
-/// raw Annex-B video elementary stream, then a subtitle-document text sniff. Pass
+/// raw Annex-B or AV1 OBU video elementary stream, then a subtitle-document text sniff. Pass
 /// at least a few hundred bytes so MPEG-TS can be confirmed across packet
 /// boundaries (a lone `0x47` is too weak to trust).
 pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
@@ -97,6 +97,9 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
     }
     if let Some(codec) = sniff_annexb_video(header) {
         return Some(elementary_video_caps(codec));
+    }
+    if crate::av1parse::opens_obu_stream(header) {
+        return Some(elementary_video_caps(VideoCodec::Av1));
     }
     // The self-syncing audio streams last of the binary sniffs: their sync
     // patterns occur inside the formats above, so each of those claims the
@@ -236,9 +239,9 @@ fn sniff_still_image(header: &[u8]) -> Option<VideoCodec> {
     None
 }
 
-/// Caps for a raw Annex-B video elementary stream at a fixable `Range` placeholder
+/// Caps for a raw video elementary stream at a fixable `Range` placeholder
 /// geometry: never `Dim::Any` (which cannot fixate), the parser refines it from
-/// the SPS (M676). Shared by content sniffing and `FileSrc`'s extension typing so
+/// the SPS or sequence header (M676). Shared by content sniffing and `FileSrc`'s extension typing so
 /// the two never drift.
 pub fn elementary_video_caps(codec: VideoCodec) -> Caps {
     /// A coded video stream is at least one macroblock.
@@ -903,6 +906,20 @@ mod tests {
         assert_eq!(sniff_annexb_video(&[0x00, 0x00, 0x01, 0x80, 0x00]), None);
         // HEVC VPS type but temporal_id_plus1 = 0 (invalid): not accepted.
         assert_eq!(sniff_annexb_video(&[0x00, 0x00, 0x01, 0x40, 0x00]), None);
+    }
+
+    #[test]
+    fn detects_a_raw_av1_obu_stream() {
+        let obu_file = include_bytes!("../tests/fixtures/av1_321x181.obu");
+        assert_eq!(
+            sniff_caps(obu_file),
+            Some(elementary_video_caps(VideoCodec::Av1))
+        );
+        // a temporal delimiter is two bytes, too weak without the sequence header
+        let delimiter_len = 2;
+        let mut no_sequence_header = obu_file[..delimiter_len].to_vec();
+        no_sequence_header.extend_from_slice(&[0x32, 0x03, 0xAA, 0xBB, 0xCC]);
+        assert_eq!(sniff_caps(&no_sequence_header), None);
     }
 
     /// An ID3v2.3 tag of `body_len` zero bytes, the head an `.mp3` opens with.
