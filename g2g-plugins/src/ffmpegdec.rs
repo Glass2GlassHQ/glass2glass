@@ -436,7 +436,7 @@ pub struct FfmpegVideoDec {
     last_caps: Option<Caps>,
     configured: bool,
     emitted: u64,
-    output_format: OutputFormat,
+    requested_output_format: Option<OutputFormat>,
     backend: Backend,
     /// Number of internal output surfaces requested from `h264_cuvid`.
     /// `None` keeps the cuvid default (25 — throughput-oriented, adds
@@ -570,7 +570,7 @@ impl FfmpegVideoDec {
             last_caps: None,
             configured: false,
             emitted: 0,
-            output_format: OutputFormat::I420,
+            requested_output_format: None,
             backend: Backend::Software,
             cuvid_surfaces: None,
             low_delay: false,
@@ -611,12 +611,17 @@ impl FfmpegVideoDec {
     /// samplers; I420 is the default for backwards compatibility with
     /// existing tests and the documented Linux ML path.
     pub fn with_output_format(mut self, format: OutputFormat) -> Self {
-        self.output_format = format;
+        self.requested_output_format = Some(format);
         self
     }
 
     pub fn output_format(&self) -> OutputFormat {
-        self.output_format
+        match (self.backend, self.requested_output_format) {
+            // NV12 is the CUDA surface's native layout
+            (Backend::NvdecCuda, None | Some(OutputFormat::Auto)) => OutputFormat::Nv12,
+            (_, Some(requested)) => requested,
+            (_, None) => OutputFormat::I420,
+        }
     }
 
     /// Select the libavcodec backend. Defaults to [`Backend::Software`].
@@ -654,11 +659,10 @@ impl FfmpegVideoDec {
                 // `surfaces` option; pool depth is controlled via
                 // `extra_hw_frames` at open time instead. Low-delay still
                 // applies (release each picture as soon as decoded). The
-                // device frame is NV12, so force the output layout to match
-                // what we emit; an I420 request is rejected at configure.
+                // device frame is NV12, so NV12 is this backend's default
+                // output; an explicit other request is rejected at configure.
                 self.cuvid_surfaces = None;
                 self.low_delay = true;
-                self.output_format = OutputFormat::Nv12;
             }
             Backend::Vaapi => {
                 // The downloaded surface is packed by `copy_yuv` like the
@@ -900,7 +904,7 @@ impl FfmpegVideoDec {
 
     fn decode_config(&self) -> DecodeConfig {
         DecodeConfig {
-            output_format: self.output_format,
+            output_format: self.output_format(),
             backend: self.backend,
             cuda_context: self.cuda_context,
             cuda_device_id: self.cuda_device_id,
@@ -1410,7 +1414,7 @@ impl AsyncElement for FfmpegVideoDec {
     /// legacy single-fixated cascade to the per-link path without
     /// regression.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let out_fmt = self.output_format;
+        let out_fmt = self.output_format();
         CapsConstraint::DerivedOutput(alloc::boxed::Box::new(move |input: &Caps| {
             derive_output_caps(input, out_fmt)
         }))
@@ -1438,7 +1442,7 @@ impl AsyncElement for FfmpegVideoDec {
 
         // NvdecCuda needs NV12 out (the device frame's native layout); reject
         // an I420 request loud rather than silently emit mismatched caps.
-        if self.backend == Backend::NvdecCuda && self.output_format != OutputFormat::Nv12 {
+        if self.backend == Backend::NvdecCuda && self.output_format() != OutputFormat::Nv12 {
             return Err(G2gError::CapsMismatch);
         }
 
@@ -1514,7 +1518,7 @@ impl AsyncElement for FfmpegVideoDec {
                 // internal spelling `get_property` reports and the GStreamer one
                 // (`I420_10LE` / `P010_10LE`) a gst-launch line would use.
                 let name = value.as_str().ok_or(PropError::Type)?.to_ascii_lowercase();
-                self.output_format = match name.as_str() {
+                self.requested_output_format = Some(match name.as_str() {
                     "i420" => OutputFormat::I420,
                     "nv12" => OutputFormat::Nv12,
                     "i422" => OutputFormat::I422,
@@ -1528,7 +1532,7 @@ impl AsyncElement for FfmpegVideoDec {
                     "i444p12" | "y444_12le" => OutputFormat::I444p12,
                     "p010" | "p010_10le" => OutputFormat::P010,
                     _ => return Err(PropError::Value),
-                };
+                });
                 Ok(())
             }
             "backend" => {
@@ -1592,7 +1596,7 @@ impl AsyncElement for FfmpegVideoDec {
                 self.vaapi_device.clone().unwrap_or_default(),
             )),
             "output-format" => Some(PropValue::Str(
-                match self.output_format {
+                match self.output_format() {
                     OutputFormat::I420 => "i420",
                     OutputFormat::Nv12 => "nv12",
                     OutputFormat::I422 => "i422",
@@ -1747,7 +1751,7 @@ impl AsyncElement for FfmpegVideoDec {
                         // any of the three chromas it advertised; otherwise the
                         // one configured format.
                         Caps::RawVideo { format, .. }
-                            if accepts_output(self.output_format, *format) =>
+                            if accepts_output(self.output_format(), *format) =>
                         {
                             self.push_downstream(out, PipelinePacket::CapsChanged(c.clone()))
                                 .await?;
@@ -1844,7 +1848,7 @@ impl AsyncElement for FfmpegVideoDec {
                                 if *width == Dim::Fixed(d.width) && *height == Dim::Fixed(d.height)
                         );
                         if geometry_matches {
-                            let expected = derive_output_caps(input, self.output_format);
+                            let expected = derive_output_caps(input, self.output_format());
                             debug_assert!(
                                 !expected
                                     .intersect(&CapsSet::one(new_caps.clone()))
@@ -2663,6 +2667,20 @@ unsafe fn cuda_buffer_from_frame(
         // hand a downstream CUDA consumer a host or null pointer.
         return Err(G2gError::Hardware(HardwareError::Other));
     }
+    // SAFETY: reading a public field of the AVFrame we own.
+    let frames_context_ref = unsafe { (*frame.as_ptr()).hw_frames_ctx };
+    if frames_context_ref.is_null() {
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    // SAFETY: a non-null `hw_frames_ctx` holds the `AVHWFramesContext` the frame
+    // came from, kept alive by the frame's reference to it.
+    let surface_format = unsafe {
+        (*((*frames_context_ref).data as *const ffmpeg::ffi::AVHWFramesContext)).sw_format
+    };
+    // a 10-bit stream decodes to a P010 surface the NV12 buffer would misread
+    if surface_format != ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NV12 {
+        return Err(G2gError::CapsMismatch);
+    }
     // Arc, not Box: the keep-alive is shareable so a tee can fan the GPU frame
     // out to several consumers zero-copy (M213).
     let keep_alive = alloc::sync::Arc::new(CudaFrameOwner(frame));
@@ -3396,7 +3414,7 @@ mod tests {
     #[test]
     fn vaapi_backend_selectable_and_keeps_output_format() {
         // Unlike NvdecCuda, the VAAPI path downloads to system memory and packs
-        // via copy_yuv, so it honours either output layout (no forced NV12).
+        // via copy_yuv, so it honours either output layout.
         let dec = FfmpegVideoDec::new()
             .with_output_format(OutputFormat::I420)
             .with_backend(Backend::Vaapi);
@@ -3684,10 +3702,10 @@ mod tests {
     }
 
     #[test]
-    fn nvdec_cuda_backend_forces_nv12_and_low_delay() {
-        // The CUDA device frame is NV12, so the backend pins the output
-        // layout to match what it emits and enables low-delay release. It
-        // does not use the cuvid-private `surfaces` knob.
+    fn nvdec_cuda_backend_defaults_to_nv12_and_low_delay() {
+        // The CUDA device frame is NV12, so that is the backend's default
+        // output, and it enables low-delay release. It does not use the
+        // cuvid-private `surfaces` knob.
         let dec = FfmpegVideoDec::new().with_backend(Backend::NvdecCuda);
         assert_eq!(dec.backend(), Backend::NvdecCuda);
         assert_eq!(dec.output_format(), OutputFormat::Nv12);
@@ -3696,13 +3714,32 @@ mod tests {
     }
 
     #[test]
-    fn nvdec_cuda_backend_overrides_prior_i420() {
-        // with_backend after a with_output_format(I420) still lands on NV12
-        // (the backend's requirement wins), so the common build order is safe.
-        let dec = FfmpegVideoDec::new()
+    fn nvdec_cuda_backend_rejects_explicit_i420_in_either_order() {
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        let format_first = FfmpegVideoDec::new()
             .with_output_format(OutputFormat::I420)
             .with_backend(Backend::NvdecCuda);
-        assert_eq!(dec.output_format(), OutputFormat::Nv12);
+        let backend_first = FfmpegVideoDec::new()
+            .with_backend(Backend::NvdecCuda)
+            .with_output_format(OutputFormat::I420);
+        for mut dec in [format_first, backend_first] {
+            assert_eq!(dec.output_format(), OutputFormat::I420);
+            assert!(matches!(
+                dec.configure_pipeline(&h264),
+                Err(G2gError::CapsMismatch)
+            ));
+        }
+        let mut auto = FfmpegVideoDec::new()
+            .with_output_format(OutputFormat::Auto)
+            .with_backend(Backend::NvdecCuda);
+        assert_eq!(auto.output_format(), OutputFormat::Nv12);
+        assert!(auto.configure_pipeline(&h264).is_ok());
     }
 
     #[test]
