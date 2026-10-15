@@ -24,6 +24,13 @@ fn h264_any() -> Caps {
 
 /// `default_registry` plus a stub H.264 decoder candidate, so the `file://` ->
 /// `Mp4Src` (H.264) source can auto-plug to raw.
+fn h264_mp4_uri() -> String {
+    format!(
+        "file://{}/tests/fixtures/h264_64x48_bframes_frag.mp4",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
 fn registry_with_h264_stub() -> Registry {
     let mut reg = default_registry();
     let raw = Caps::RawVideo {
@@ -50,7 +57,7 @@ fn uridecodebin_expands_source_and_decode_chain() {
     let reg = registry_with_h264_stub();
     // Mp4Src (from file://) -> h264stub -> fakesink: the source + decoder are
     // spliced in as pre-built nodes, leaving two edges.
-    let line = "uridecodebin uri=file:///clip.mp4 ! fakesink";
+    let line = &format!("uridecodebin uri={} ! fakesink", h264_mp4_uri());
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
     assert_eq!(graph.edges().len(), 2, "source -> decoder -> sink");
 }
@@ -59,7 +66,10 @@ fn uridecodebin_expands_source_and_decode_chain() {
 fn uridecodebin_feeds_a_custom_chain() {
     let reg = registry_with_h264_stub();
     // The decoded output flows into a normal parser-built chain.
-    let line = "uridecodebin uri=file:///clip.mp4 ! videoconvert ! fakesink";
+    let line = &format!(
+        "uridecodebin uri={} ! videoconvert ! fakesink",
+        h264_mp4_uri()
+    );
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
     // Mp4Src -> h264stub -> videoconvert -> fakesink = three edges.
     assert_eq!(graph.edges().len(), 3, "{line}");
@@ -70,7 +80,7 @@ fn playbin_is_a_complete_pipeline() {
     let reg = registry_with_h264_stub();
     // playbin appends an auto sink (autovideosink -> fakesink here), so the line
     // is complete on its own: Mp4Src -> h264stub -> autovideosink.
-    let line = "playbin uri=file:///clip.mp4";
+    let line = &format!("playbin uri={}", h264_mp4_uri());
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
     assert_eq!(graph.edges().len(), 2, "source -> decoder -> auto sink");
 }
@@ -106,7 +116,7 @@ fn no_decoder_feature_fails_loud() {
     // Without the stub (baseline: file:// -> Mp4Src emits H.264, no decoder), the
     // chain cannot reach raw and the parse fails rather than silently dropping.
     let reg = default_registry();
-    let line = "uridecodebin uri=file:///clip.mp4 ! fakesink";
+    let line = &format!("uridecodebin uri={} ! fakesink", h264_mp4_uri());
     match parse_launch(&reg, line) {
         // Baseline build: no decoder, must fail loud.
         #[cfg(not(any(

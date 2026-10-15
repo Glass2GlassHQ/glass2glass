@@ -978,6 +978,9 @@ mod factory {
         /// The source's caps could not be decoded to the target (wraps the
         /// `decodebin` failure).
         Decode(DecodebinError),
+        Unreadable,
+        // typefind recognized none of the source's leading bytes
+        UnknownContent,
     }
 
     impl From<DecodebinError> for UriError {

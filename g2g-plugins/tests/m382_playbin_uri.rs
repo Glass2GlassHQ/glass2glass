@@ -282,15 +282,17 @@ async fn playbin_uri_without_hook_stays_single_stream() {
 
 #[tokio::test]
 async fn playbin_uri_non_matroska_falls_through() {
-    // A file the Matroska probe cannot parse: the hook declines (Ok(None)) and the
+    // An MP4 the Matroska probe cannot parse: the hook declines (Ok(None)) and the
     // single-stream playbin path takes over, so it is still a 3-node graph.
-    let (path, uri) = temp_uri("notmkv", b"this is not a matroska container");
+    let uri = format!(
+        "file://{}/tests/fixtures/h264_64x48_bframes_frag.mp4",
+        env!("CARGO_MANIFEST_DIR")
+    );
 
     let mut reg = base_registry();
     reg.register_playbin(g2g_plugins::uridecodebin::mkv_playbin);
 
     let graph = parse_launch(&reg, &format!("playbin uri={uri}")).expect("falls back to playbin");
-    std::fs::remove_file(&path).ok();
 
     assert_eq!(
         graph.node_count(),

@@ -177,26 +177,22 @@ pub fn rtsp_track_fanout(url: &str, tracks: &crate::rtspsrcn::RtspTracks) -> Opt
 /// Content, not extension: a `.h264` elementary stream or an `.mkv` is not an
 /// MP4 and used to reach `Mp4Src` anyway. `rest` is the absolute path (the
 /// `file://` authority is empty, so `file:///a/b` leaves `/a/b`).
-///
-/// An unreadable or unrecognized file falls back to `Mp4Src`, so the run fails
-/// downstream the way it did before rather than here.
 #[cfg(feature = "std")]
 pub fn file_handler() -> UriSourceFactory {
     UriSourceFactory::new("file", |uri: &Uri| {
         if uri.rest.is_empty() {
             return Err(UriError::Malformed);
         }
-        let sniffed = read_file_prefix(uri.rest, crate::typefind::SNIFF_LEN as u64)
-            .and_then(|prefix| crate::typefind::sniff_caps(&prefix));
-        match sniffed {
-            Some(Caps::ByteStream {
+        let prefix = read_file_prefix(uri.rest, crate::typefind::SNIFF_LEN as u64)
+            .ok_or(UriError::Unreadable)?;
+        match crate::typefind::sniff_caps(&prefix).ok_or(UriError::UnknownContent)? {
+            Caps::ByteStream {
                 encoding: ByteStreamEncoding::IsoBmff,
-            })
-            | None => {
+            } => {
                 let src = crate::mp4src::Mp4Src::new(uri.rest);
                 Ok((Box::new(src) as Box<dyn DynSourceLoop>, h264_any()))
             }
-            Some(caps) => {
+            caps => {
                 let src = crate::filesrc::FileSrc::new(uri.rest, caps.clone());
                 Ok((Box::new(src) as Box<dyn DynSourceLoop>, caps))
             }

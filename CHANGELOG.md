@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1436: `uridecodebin` fails an unreadable or unrecognized `file://` URI with its own error instead of falling back to `Mp4Src`.
 - M1435: `ffmpegdec`'s CUDA backend rejects an explicit non-NV12 output format and a 10-bit surface instead of overriding or mislabelling them.
 - M1432: decoder auto-plug skips `nvdec` below NVDEC's reported minimum size, so small AV1 streams decode in software.
 - M1431: auto-plug builds `ffmpegdec` in `Auto` mode unless the downstream pins a format, so 10-bit AV1 decodes through `decodebin ! videoconvert`.

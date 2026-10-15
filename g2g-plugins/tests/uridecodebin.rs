@@ -84,6 +84,28 @@ fn bad_udp_authority_is_malformed() {
     assert!(matches!(err, UriError::Malformed));
 }
 
+#[test]
+fn missing_file_is_unreadable() {
+    let missing = std::env::temp_dir().join(format!("g2g-missing-{}.mp4", std::process::id()));
+    let uri = format!("file://{}", missing.display());
+    let err = registry()
+        .build_uridecodebin(&uri, FakeSink::new(), &is_raw_video, 4)
+        .expect_err("no file to open");
+    assert!(matches!(err, UriError::Unreadable), "got {err:?}");
+}
+
+#[test]
+fn unrecognized_file_is_unknown_content() {
+    const NOT_A_MEDIA_HEADER: &[u8] = b"plain text, no container or codec signature";
+    let path = std::env::temp_dir().join(format!("g2g-unknown-{}.bin", std::process::id()));
+    std::fs::write(&path, NOT_A_MEDIA_HEADER).expect("write probe file");
+    let uri = format!("file://{}", path.display());
+    let result = registry().build_uridecodebin(&uri, FakeSink::new(), &is_raw_video, 4);
+    std::fs::remove_file(&path).expect("remove probe file");
+    let err = result.expect_err("typefind recognizes nothing");
+    assert!(matches!(err, UriError::UnknownContent), "got {err:?}");
+}
+
 // The real payoff: with an H.264 decoder registered, a udp:// URI auto-plugs
 // source -> decoder -> sink down to a raw target. Needs the ffmpeg decoder.
 #[cfg(feature = "ffmpeg")]
