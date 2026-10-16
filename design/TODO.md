@@ -338,3 +338,12 @@ unless it says otherwise.
 - D3D11 decoder surface import into `WgpuPreprocess` (bind the surface directly
   into the compute pass, the Windows counterpart of the dma-buf import).
 - Run the QNN and CoreML execution providers on Qualcomm and Apple hardware.
+- **Standalone `tracker` element.** A ByteTrack-style multi-object tracker
+  that consumes `AnalyticsMeta` detections from any detector and adds a track id
+  to each: Kalman box prediction, IoU matching, two-stage association on high
+  and low confidence boxes, a new-track confidence gate and a lost-track age.
+  Pure Rust, no dependencies, so `... ! detectionpostprocess ! tracker ! ...`
+  gives the YOLO tracking the hosted Python element gets from Ultralytics.
+- **Pose and OBB heads in `detectionpostprocess`.** Decode the `-pose`
+  keypoints and the `-obb` rotation angle into their own metadata records, and
+  carry letterbox padding offsets so boxes land right on a non-square input.
