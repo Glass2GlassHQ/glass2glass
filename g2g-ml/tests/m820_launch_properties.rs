@@ -13,7 +13,14 @@
 
 #![cfg(feature = "launch")]
 
-use g2g_core::{AsyncElement, PropError, PropValue, PropertySpec};
+#[cfg(any(
+    feature = "ort",
+    feature = "executorch",
+    feature = "analytics",
+    feature = "wgpu"
+))]
+use g2g_core::{AsyncElement, PropError};
+use g2g_core::{PropValue, PropertySpec};
 
 /// True when a spec table declares a property of this name (the half
 /// `parse_launch` reads to determine the value kind).
