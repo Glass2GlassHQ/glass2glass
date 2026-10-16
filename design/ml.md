@@ -270,6 +270,40 @@ same directory as whole archives.
 The test fixture `g2g-ml/tests/fixtures/affine_2x_plus_1.pte` is an exported
 `x * 2 + 1` model, checked in next to its generator `export_affine.py`.
 
+### whisper.cpp and llama.cpp
+
+Two elements run speech and language models rather than the `[1, 3, H, W]`
+tensor contract, each on the ggml runtime its model family ships with.
+
+`WhisperTranscribe` (`g2g-ml/src/whispertranscribe.rs`, `whisper` feature,
+launch name `whispertranscribe`) takes 16 kHz mono f32 `Caps::Audio` and emits
+one UTF-8 `Caps::Text` frame per transcribed segment, stamped with the segment's
+start and length on the input timeline: `audioconvert format=F32LE channels=1 !
+audioresample samplerate=16000 ! whispertranscribe model=ggml-tiny.en.bin`.
+Audio is gathered into `chunk-seconds` windows and each full window is
+transcribed in one whisper call, so text arrives one window late; the remainder
+is transcribed at EOS, padded to the one second whisper.cpp needs. `language`
+(whisper's names, or `auto`), `translate` and `threads` map onto whisper's full
+params. The `whisper-rs` crate builds whisper.cpp from its vendored source with
+cmake, CPU kernels only (each of its GPU flags needs that SDK at build time).
+
+`LlamaChat` (`g2g-ml/src/llamachat.rs`, `llama` feature, launch name
+`llamachat`) answers each UTF-8 text frame as one chat turn on a GGUF model and
+emits the reply as a text frame with the input's timing. Turns are independent:
+every frame starts a fresh llama context holding the `system-prompt` and that
+frame's text, so `textdigest ! llamachat` yields one answer per digest. A model
+with a chat template gets the two messages through it; one without gets them
+joined as a raw completion prompt. `max-tokens`, `context-size` (prompt plus
+reply, checked before decoding), `temperature` (`0` is greedy) with `seed`, and
+`threads` are the knobs. The `llama-cpp-2` crate builds llama.cpp from its
+vendored source with OpenMP; the backend initialises once per process and is
+shared by every element.
+
+The test models are fetched, not committed: `tools/whisper-fixture.sh` (the
+quantized tiny.en model and whisper.cpp's jfk.wav sample) and
+`tools/llama-fixture.sh` (the stories260K GGUF llama.cpp's own CI uses), into
+gitignored dirs that CI caches.
+
 ### WgpuInference
 
 `WgpuInference` (`g2g-ml/src/wgpuinfer.rs`, `wgpu` feature) is the GPU-resident

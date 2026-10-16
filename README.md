@@ -562,6 +562,8 @@ cargo clippy --workspace --all-targets
 | `OrtInference` (+ CUDA / DirectML EPs) | `ort`, `cuda`, `directml` (in `g2g-ml`) | onnxruntime |
 | `ExecutorchInference` (a `.pte` model on ExecuTorch's portable CPU kernels) | `executorch` (in `g2g-ml`) | ExecuTorch 1.5.1 static libs (`tools/executorch-build.sh`, `EXECUTORCH_RS_EXECUTORCH_LIB_DIR`) |
 | `BurnInference` (linear layer, or an ONNX topology imported by `burn-onnx` codegen) | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
+| `WhisperTranscribe` (16 kHz mono f32 in, timed text segments out, whisper.cpp) | `whisper` (in `g2g-ml`) | whisper.cpp built from source (cmake, libclang) |
+| `LlamaChat` (one chat turn per text frame on a GGUF model, llama.cpp) | `llama` (in `g2g-ml`) | llama.cpp built from source (cmake, libclang) |
 | `WgpuPreprocess` (NV12 / YUYV system bytes, a dma-buf, or a GPU texture in, NCHW tensor out) | `wgpu`, `dmabuf-wgpu`, `mediacodec-wgpu` (in `g2g-ml`) | wgpu (Vulkan for the dma-buf import) |
 | Embassy / RTOS pool + clock | `embassy`, `embassy-link` | none |
 | Browser elements | `web`, `web-codecs` | `wasm32-unknown-unknown` |
@@ -822,8 +824,8 @@ after `decodebin` when pinning a GPU decoder.
 
 The ML elements live in `g2g-ml`, so an app opts in after building the
 registry: `g2g_ml::register(&mut reg)` (the `launch` feature) adds `ortinfer`,
-`executorchinfer`, `wgpupreprocess`, `detectionpostprocess`, and `ortsegment` (instance
-segmentation), so
+`executorchinfer`, `wgpupreprocess`, `detectionpostprocess`, `ortsegment` (instance
+segmentation), `whispertranscribe` and `llamachat`, so
 `... ! ortinfer model=yolov8n.onnx ! detectionpostprocess conf-threshold=0.3 ! ...`
 parses.
 

@@ -17,14 +17,17 @@
     feature = "ort",
     feature = "executorch",
     feature = "wgpu",
-    feature = "analytics"
+    feature = "analytics",
+    feature = "whisper",
+    feature = "llama"
 ))]
 use g2g_core::runtime::LaunchFactory;
 use g2g_core::runtime::Registry;
 
 /// Register the text-constructible ML elements under their launch names:
 /// `ortinfer` (`ort`), `executorchinfer` (`executorch`), `wgpupreprocess`
-/// (`wgpu`), `detectionpostprocess` (`analytics`). Each is present only when the
+/// (`wgpu`), `detectionpostprocess` (`analytics`), `whispertranscribe`
+/// (`whisper`), `llamachat` (`llama`). Each is present only when the
 /// feature that builds the element is on, so this is a no-op in a build with none
 /// of them. `WgpuInference` is excluded: it is constructed from weight tensors and
 /// shapes, which a text line cannot express.
@@ -46,6 +49,24 @@ pub fn register(reg: &mut Registry) -> &mut Registry {
             "executorchinfer",
             // Model-less: the `model` property loads the program.
             || Box::new(crate::executorchinfer::ExecutorchInference::new()),
+        )
+        .with_experimental(),
+    );
+    #[cfg(feature = "whisper")]
+    reg.register_launch(
+        LaunchFactory::of::<crate::whispertranscribe::WhisperTranscribe>(
+            "whispertranscribe",
+            // Model-less: the `model` property loads the whisper model.
+            || Box::new(crate::whispertranscribe::WhisperTranscribe::new()),
+        )
+        .with_experimental(),
+    );
+    #[cfg(feature = "llama")]
+    reg.register_launch(
+        LaunchFactory::of::<crate::llamachat::LlamaChat>(
+            "llamachat",
+            // Model-less: the `model` property loads the GGUF.
+            || Box::new(crate::llamachat::LlamaChat::new()),
         )
         .with_experimental(),
     );

@@ -114,6 +114,15 @@ detect-overlay-live = ["ort", "analytics", "dep:g2g-plugins", "g2g-plugins/wayla
 # tests/cuda_wgpu_{scaffold,e2e}.rs can compose NvdecCuda -> CudaDownload ->
 # WgpuPreprocess -> WgpuInference. Linux + NVIDIA + a wgpu adapter.
 cuda-wgpu-e2e = ["cuda-wgpu", "g2g-plugins/cuda", "g2g-plugins/ffmpeg"]
+# whisper.cpp speech-to-text via the `whisper-rs` crate: WhisperTranscribe turns
+# 16 kHz mono f32 PCM into timed text frames from a ggml whisper model. The crate
+# builds whisper.cpp from its vendored source (cmake + a C++ toolchain, libclang
+# for the bindings), CPU kernels only here.
+whisper = ["std", "dep:whisper-rs"]
+# llama.cpp text generation via the `llama-cpp-2` crate: LlamaChat answers each
+# text frame as one chat turn on a GGUF model. Builds llama.cpp from the vendored
+# source (cmake + C++ toolchain + libclang), CPU kernels with OpenMP.
+llama = ["std", "dep:llama-cpp-2"]
 
 [dependencies]
 g2g-core = { workspace = true }
@@ -129,6 +138,12 @@ burn = { version = "0.21", optional = true, default-features = false, features =
 # reach g2g_plugins::cudawgpu. The [dev-dependencies] entry below additionally
 # pulls it (default features) for the end-to-end tests.
 g2g-plugins = { workspace = true, optional = true }
+# whisper.cpp bindings (whisper feature). No GPU features: the crate's cuda /
+# vulkan / metal flags each need that SDK at build time.
+whisper-rs = { version = "0.16.0", optional = true }
+# llama.cpp bindings (llama feature). Default features keep OpenMP and the
+# `common` helpers the chat template path uses.
+llama-cpp-2 = { version = "0.1.160", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }

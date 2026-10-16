@@ -348,6 +348,22 @@ fn register_adds_the_ml_elements_by_name() {
             .expect("executorchinfer builds bare");
         assert_eq!(e.get_property("model"), Some(PropValue::Str(String::new())));
     }
+    #[cfg(feature = "whisper")]
+    {
+        let e = reg
+            .make_element("whispertranscribe")
+            .expect("whispertranscribe builds bare");
+        assert_eq!(e.get_property("model"), Some(PropValue::Str(String::new())));
+        assert!(declares(e.properties(), "chunk-seconds"));
+    }
+    #[cfg(feature = "llama")]
+    {
+        let e = reg
+            .make_element("llamachat")
+            .expect("llamachat builds bare");
+        assert_eq!(e.get_property("model"), Some(PropValue::Str(String::new())));
+        assert!(declares(e.properties(), "system-prompt"));
+    }
     #[cfg(feature = "wgpu")]
     assert!(reg.inspect("wgpupreprocess").is_some());
     #[cfg(feature = "analytics")]

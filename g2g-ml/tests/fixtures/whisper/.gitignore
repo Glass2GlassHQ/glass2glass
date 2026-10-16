@@ -1,0 +1,4 @@
+# Fetched on demand by tools/whisper-fixture.sh; not committed (the model is
+# 32 MB, repo fixtures are KB-scale). This dir tracks only this .gitignore.
+ggml-tiny.en-q5_1.bin
+jfk.wav

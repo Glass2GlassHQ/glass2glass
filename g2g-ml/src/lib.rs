@@ -8,6 +8,9 @@
 //! - `burn`: pure-Rust, `wgpu`-backed, for embedded / Wasm / RTOS targets.
 //! - `ort`: ONNX Runtime bindings for high-performance server inference.
 //! - `executorch`: PyTorch's ExecuTorch runtime, running a `.pte` program.
+//!
+//! Two more run speech and text models rather than tensors: `whisper`
+//! (whisper.cpp transcription) and `llama` (llama.cpp text generation).
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
@@ -25,6 +28,15 @@ pub mod inference;
 // kernels, the same element as `ortinfer` on a different runtime.
 #[cfg(feature = "executorch")]
 pub mod executorchinfer;
+
+// Speech-to-text on whisper.cpp: 16 kHz mono f32 audio in, timed UTF-8 text
+// frames out.
+#[cfg(feature = "whisper")]
+pub mod whispertranscribe;
+
+// Text generation on llama.cpp: each text frame answered as one chat turn.
+#[cfg(feature = "llama")]
+pub mod llamachat;
 
 // Launch-line registration of the ML elements into a g2g-core Registry, so
 // `ortinfer model=... ! detectionpostprocess` parses. Behind `launch`, which
