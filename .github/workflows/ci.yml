@@ -468,6 +468,10 @@ jobs:
         run: |
           export EXECUTORCH_RS_EXECUTORCH_LIB_DIR="$HOME/executorch/cmake-out"
           cargo test -p g2g-ml --locked --features executorch,analytics,launch --test executorch_inference --test m820_launch_properties
+      # the execution providers that build against the stock ONNX Runtime
+      # download (tensorrt needs the CUDA download); each fails loud at load here
+      - name: test g2g-ml (ort execution providers)
+        run: cargo test -p g2g-ml --locked --features openvino,rocm,migraphx,launch --test ort_execution_providers --test m820_launch_properties
       # whisper.cpp and llama.cpp build from their vendored sources (cmake); the
       # test models are fetched (33 MB), cached by the fetch scripts' hashes
       - name: cache whisper + llama fixtures

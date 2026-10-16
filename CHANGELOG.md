@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1464: `ortinfer` takes `execution-provider=tensorrt|openvino|rocm|migraphx` behind matching features, failing loud when the provider cannot be enabled.
 - M1463: `whispertranscribe` and `llamachat` run whisper.cpp transcription and llama.cpp chat turns behind the `whisper` and `llama` features.
 - M1462: `executorchinfer` runs a `.pte` model through the ExecuTorch runtime behind the `executorch` feature.
 - M1461: `mfencode` stamps a frame that has no duration with the configured rate's period, since the MS encoder rejects a sample without one.

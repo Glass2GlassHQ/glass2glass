@@ -78,6 +78,23 @@ directml = ["ort", "ort/directml"]
 # verifiable without an NVIDIA device: the in-tree test confirms the EP wires,
 # registers, and runs (on CUDA where present, else CPU), not that CUDA executed.
 cuda = ["ort", "ort/cuda"]
+# TensorRT execution provider (NVIDIA GPU through TensorRT's graph compiler).
+# Rides on the CUDA-enabled ONNX Runtime download, so it builds wherever `cuda`
+# does; enabling it at load needs the TensorRT runtime libraries (libnvinfer),
+# else a named `execution-provider=tensorrt` fails loud.
+tensorrt = ["cuda", "ort/tensorrt"]
+# OpenVINO execution provider (Intel CPU / iGPU / NPU). The stock ONNX Runtime
+# download builds but does not carry it, so a named provider fails loud until
+# `ort` links an OpenVINO-enabled ONNX Runtime build (ORT_LIB_LOCATION).
+openvino = ["ort", "ort/openvino"]
+# ROCm execution provider (AMD GPU). `ort` ships no prebuilt ROCm binaries and
+# falls back to the stock download with a build warning, so like `openvino` a
+# named provider fails loud until `ort` links a ROCm ONNX Runtime build.
+rocm = ["ort", "ort/rocm"]
+# MIGraphX execution provider (AMD's graph compiler on ROCm). Like `openvino`:
+# builds against the stock download, registers only on a MIGraphX-enabled
+# ONNX Runtime build.
+migraphx = ["ort", "ort/migraphx"]
 # NNAPI execution provider (Android NPU / GPU / DSP via the system
 # NeuralNetworks API). Android-target only: it links the Android ONNX Runtime
 # build's NNAPI symbol, which a host ORT does not carry (unlike `cuda`, the

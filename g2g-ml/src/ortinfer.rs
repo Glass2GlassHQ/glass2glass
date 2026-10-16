@@ -34,8 +34,10 @@
 //! (NPU / GPU / DSP via NNAPI), `from_memory_with_xnnpack` (ARM-optimized CPU),
 //! and `from_memory_for_android` (NNAPI then XNNPACK then CPU, the
 //! delegate-with-fallback shape) are the same constructor pattern (M439). All EP
-//! choices are constructor variants; the element shape never changes. TensorRT /
-//! CoreML / QNN slot in the same way and remain follow-ups.
+//! choices are constructor variants; the element shape never changes. TensorRT,
+//! OpenVINO, ROCm and MIGraphX have the same constructors behind their features.
+//! A launch line names the provider instead (`execution-provider=cuda`), and
+//! that path fails the load loud when the provider cannot be enabled.
 
 use crate::inference::{
     Inference, InferenceBackend, LoadedModel, ModelGeometry, MODEL_PROP, ONLY_ON_PROP,
@@ -46,6 +48,7 @@ use crate::inference::{ATTACH_TENSOR_PROP, TENSOR_NAME_PROP};
 use crate::model_dims::{input_geometry, static_output_dims};
 use crate::tensor_bytes::f32_le_bytes;
 
+use ::ort::session::builder::SessionBuilder;
 use ::ort::session::Session;
 use ::ort::value::{Tensor, TensorElementType, ValueType};
 
@@ -73,6 +76,14 @@ pub enum ExecutionProvider {
     Cpu,
     #[cfg(feature = "cuda")]
     Cuda,
+    #[cfg(feature = "tensorrt")]
+    TensorRt,
+    #[cfg(feature = "openvino")]
+    OpenVino,
+    #[cfg(feature = "rocm")]
+    Rocm,
+    #[cfg(feature = "migraphx")]
+    MiGraphX,
 }
 
 impl ExecutionProvider {
@@ -81,6 +92,14 @@ impl ExecutionProvider {
             "cpu" => Some(Self::Cpu),
             #[cfg(feature = "cuda")]
             "cuda" => Some(Self::Cuda),
+            #[cfg(feature = "tensorrt")]
+            "tensorrt" => Some(Self::TensorRt),
+            #[cfg(feature = "openvino")]
+            "openvino" => Some(Self::OpenVino),
+            #[cfg(feature = "rocm")]
+            "rocm" => Some(Self::Rocm),
+            #[cfg(feature = "migraphx")]
+            "migraphx" => Some(Self::MiGraphX),
             _ => None,
         }
     }
@@ -90,7 +109,64 @@ impl ExecutionProvider {
             Self::Cpu => "cpu",
             #[cfg(feature = "cuda")]
             Self::Cuda => "cuda",
+            #[cfg(feature = "tensorrt")]
+            Self::TensorRt => "tensorrt",
+            #[cfg(feature = "openvino")]
+            Self::OpenVino => "openvino",
+            #[cfg(feature = "rocm")]
+            Self::Rocm => "rocm",
+            #[cfg(feature = "migraphx")]
+            Self::MiGraphX => "migraphx",
         }
+    }
+
+    /// Register the provider on `builder` directly: `with_execution_providers`
+    /// swallows a failure and leaves the session on the CPU, an order of
+    /// magnitude slower, where a named provider has to fail loud.
+    #[cfg(any(
+        feature = "cuda",
+        feature = "tensorrt",
+        feature = "openvino",
+        feature = "rocm",
+        feature = "migraphx"
+    ))]
+    fn register(self, builder: &mut SessionBuilder) -> Result<(), G2gError> {
+        use ::ort::ep::ExecutionProvider as _;
+        let registered = match self {
+            Self::Cpu => return Ok(()),
+            #[cfg(feature = "cuda")]
+            Self::Cuda => ::ort::ep::CUDA::default().register(builder),
+            #[cfg(feature = "tensorrt")]
+            Self::TensorRt => ::ort::ep::TensorRT::default().register(builder),
+            #[cfg(feature = "openvino")]
+            Self::OpenVino => ::ort::ep::OpenVINO::default().register(builder),
+            #[cfg(feature = "rocm")]
+            Self::Rocm => ::ort::ep::ROCm::default().register(builder),
+            #[cfg(feature = "migraphx")]
+            Self::MiGraphX => ::ort::ep::MIGraphX::default().register(builder),
+        };
+        registered.map_err(|error| {
+            // the caller only sees "invalid value", so name the cause here,
+            // usually a missing runtime library or an ONNX Runtime built without it
+            g2g_core::g2g_error!(
+                g2g_core::log::Target::category("OrtInference"),
+                "{} execution provider could not be enabled, check its runtime \
+                 libraries and the ONNX Runtime build: {error}",
+                self.name()
+            );
+            G2gError::Hardware(HardwareError::Other)
+        })
+    }
+
+    #[cfg(not(any(
+        feature = "cuda",
+        feature = "tensorrt",
+        feature = "openvino",
+        feature = "rocm",
+        feature = "migraphx"
+    )))]
+    fn register(self, _builder: &mut SessionBuilder) -> Result<(), G2gError> {
+        Ok(())
     }
 }
 
@@ -128,29 +204,7 @@ impl InferenceBackend for OrtBackend {
 
     fn load(&self, path: &str) -> Result<OrtModel, G2gError> {
         let mut builder = Session::builder().map_err(ort_err)?;
-        // registering directly, because `with_execution_providers` swallows a
-        // failure and leaves the session on the CPU, an order of magnitude slower
-        #[cfg(feature = "cuda")]
-        {
-            use ::ort::ep::ExecutionProvider as _;
-            match self.provider {
-                ExecutionProvider::Cpu => {}
-                ExecutionProvider::Cuda => {
-                    ::ort::ep::CUDA::default()
-                        .register(&mut builder)
-                        .map_err(|e| {
-                            // the caller only sees "invalid value", so name the cause
-                            // here, usually a missing cuDNN
-                            g2g_core::g2g_error!(
-                                g2g_core::log::Target::category("OrtInference"),
-                                "CUDA execution provider could not be enabled, \
-                             check the CUDA runtime and cuDNN are installed: {e}"
-                            );
-                            G2gError::Hardware(HardwareError::Other)
-                        })?
-                }
-            }
-        }
+        self.provider.register(&mut builder)?;
         let session = builder.commit_from_file(path).map_err(ort_err)?;
         OrtModel::load(session)
     }
@@ -209,6 +263,62 @@ impl Inference<OrtBackend> {
         let builder = Session::builder().map_err(ort_err)?;
         let mut builder = builder
             .with_execution_providers([::ort::ep::CUDA::default().build()])
+            .map_err(ort_err)?;
+        let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
+        Self::from_session(session)
+    }
+
+    /// As [`from_memory`], with the TensorRT execution provider (NVIDIA GPU
+    /// through TensorRT's graph compiler) registered ahead of the CPU fallback.
+    /// Best-effort like the CUDA path: without the TensorRT runtime libraries
+    /// the session silently runs on the CPU.
+    #[cfg(feature = "tensorrt")]
+    pub fn from_memory_with_tensorrt(model_bytes: &[u8]) -> Result<Self, G2gError> {
+        let builder = Session::builder().map_err(ort_err)?;
+        let mut builder = builder
+            .with_execution_providers([::ort::ep::TensorRT::default().build()])
+            .map_err(ort_err)?;
+        let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
+        Self::from_session(session)
+    }
+
+    /// As [`from_memory`], with the OpenVINO execution provider (Intel CPU, iGPU
+    /// or NPU) registered ahead of the CPU fallback. Best-effort like the CUDA
+    /// path: the stock ONNX Runtime download lacks OpenVINO, so without an
+    /// OpenVINO-enabled build the session silently runs on the CPU.
+    #[cfg(feature = "openvino")]
+    pub fn from_memory_with_openvino(model_bytes: &[u8]) -> Result<Self, G2gError> {
+        let builder = Session::builder().map_err(ort_err)?;
+        let mut builder = builder
+            .with_execution_providers([::ort::ep::OpenVINO::default().build()])
+            .map_err(ort_err)?;
+        let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
+        Self::from_session(session)
+    }
+
+    /// As [`from_memory`], with the ROCm execution provider (AMD GPU) registered
+    /// ahead of the CPU fallback. Best-effort like the CUDA path: `ort` has no
+    /// prebuilt ROCm binaries and falls back to the stock download, so without a
+    /// ROCm-enabled build the session silently runs on the CPU.
+    #[cfg(feature = "rocm")]
+    pub fn from_memory_with_rocm(model_bytes: &[u8]) -> Result<Self, G2gError> {
+        let builder = Session::builder().map_err(ort_err)?;
+        let mut builder = builder
+            .with_execution_providers([::ort::ep::ROCm::default().build()])
+            .map_err(ort_err)?;
+        let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
+        Self::from_session(session)
+    }
+
+    /// As [`from_memory`], with the MIGraphX execution provider (AMD's graph
+    /// compiler on ROCm) registered ahead of the CPU fallback. Best-effort like
+    /// the CUDA path: the stock ONNX Runtime download lacks MIGraphX, so without
+    /// a MIGraphX-enabled build the session silently runs on the CPU.
+    #[cfg(feature = "migraphx")]
+    pub fn from_memory_with_migraphx(model_bytes: &[u8]) -> Result<Self, G2gError> {
+        let builder = Session::builder().map_err(ort_err)?;
+        let mut builder = builder
+            .with_execution_providers([::ort::ep::MIGraphX::default().build()])
             .map_err(ort_err)?;
         let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
         Self::from_session(session)
@@ -393,7 +503,8 @@ impl LoadedModel for OrtModel {
 const PROVIDER_PROP: PropertySpec = PropertySpec::new(
     "execution-provider",
     PropKind::Str,
-    "execution provider to run the session on: cpu, or cuda when built with it",
+    "execution provider to run the session on: cpu, or one the build includes \
+     (cuda, tensorrt, openvino, rocm, migraphx)",
 );
 
 #[cfg(feature = "analytics")]

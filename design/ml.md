@@ -190,7 +190,19 @@ TensorRT, DirectML, Apple CoreML) natively. Each execution provider is a
 constructor variant on `OrtInference` that registers the EP ahead of the CPU
 fallback. Registration is best-effort, so the session keeps running on CPU when
 the device is absent. On the desktop that is `from_memory_with_cuda` and
-`from_memory_with_directml`.
+`from_memory_with_directml`, plus `from_memory_with_tensorrt`,
+`from_memory_with_openvino`, `from_memory_with_rocm` and
+`from_memory_with_migraphx` behind their features.
+
+A launch line names the provider instead: `ortinfer execution-provider=cuda`
+(also `tensorrt`, `openvino`, `rocm`, `migraphx`, each present when its feature
+is). Unlike the constructors, a named provider that cannot be enabled fails the
+model load loud, so a line that asks for the GPU never runs on the CPU
+unnoticed. `tensorrt` rides on the CUDA ONNX Runtime download and needs the
+TensorRT runtime libraries at load; `openvino`, `rocm` and `migraphx` build
+against the stock download (`ort` has no prebuilt binaries for them) but
+register only on an ONNX Runtime built with that provider, linked through
+`ORT_LIB_LOCATION`.
 
 On the Android edge there is `from_memory_with_nnapi`, the system NeuralNetworks
 API over NPU, GPU or DSP, `from_memory_with_xnnpack`, ARM-optimized CPU, and
