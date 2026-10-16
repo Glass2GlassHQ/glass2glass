@@ -13,16 +13,21 @@
 //! Behind the `launch` feature: the `Registry` and the pad templates live behind
 //! g2g-core's `runtime`, which the default `g2g-ml` build does not pull.
 
-#[cfg(any(feature = "ort", feature = "wgpu", feature = "analytics"))]
+#[cfg(any(
+    feature = "ort",
+    feature = "executorch",
+    feature = "wgpu",
+    feature = "analytics"
+))]
 use g2g_core::runtime::LaunchFactory;
 use g2g_core::runtime::Registry;
 
 /// Register the text-constructible ML elements under their launch names:
-/// `ortinfer` (`ort`), `wgpupreprocess` (`wgpu`), `detectionpostprocess`
-/// (`analytics`). Each is present only when the feature that builds the element
-/// is on, so this is a no-op in a build with none of them. `WgpuInference` is
-/// excluded: it is constructed from weight tensors and shapes, which a text line
-/// cannot express.
+/// `ortinfer` (`ort`), `executorchinfer` (`executorch`), `wgpupreprocess`
+/// (`wgpu`), `detectionpostprocess` (`analytics`). Each is present only when the
+/// feature that builds the element is on, so this is a no-op in a build with none
+/// of them. `WgpuInference` is excluded: it is constructed from weight tensors and
+/// shapes, which a text line cannot express.
 ///
 /// Returns the registry so the call can chain onto a builder expression.
 pub fn register(reg: &mut Registry) -> &mut Registry {
@@ -32,6 +37,15 @@ pub fn register(reg: &mut Registry) -> &mut Registry {
             "ortinfer",
             // Model-less: the `model` property loads the session (M820).
             || Box::new(crate::ortinfer::OrtInference::new()),
+        )
+        .with_experimental(),
+    );
+    #[cfg(feature = "executorch")]
+    reg.register_launch(
+        LaunchFactory::of::<crate::executorchinfer::ExecutorchInference>(
+            "executorchinfer",
+            // Model-less: the `model` property loads the program.
+            || Box::new(crate::executorchinfer::ExecutorchInference::new()),
         )
         .with_experimental(),
     );

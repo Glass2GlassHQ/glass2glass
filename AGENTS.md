@@ -21,7 +21,7 @@ Adding a dependency to one of the 1.86 crates means checking its MSRV, and a
 | :--- | :--- |
 | `g2g-core` | Core traits, `Frame`/`PipelinePacket`, `Caps` algebra, clock, memory domains, runtime. `no_std + alloc` baseline. |
 | `g2g-plugins` | Standard source/sink/transform elements. OS-coupled ones gated behind features. |
-| `g2g-ml` | ML inference elements (Burn / ORT) + multi-stream batching sink. |
+| `g2g-ml` | ML inference elements (Burn / ORT / ExecuTorch) + multi-stream batching sink. |
 | `g2g-bridge` | Interop layer. |
 
 ## Conventions

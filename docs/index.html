@@ -811,10 +811,10 @@
             <div class="crate-card">
                 <div class="crate-name">g2g-ml</div>
                 <div class="crate-tag">inference</div>
-                <p>ONNX Runtime (CUDA, DirectML), pure-Rust Burn on wgpu, and a GPU-resident path where pixels never leave the card. Includes segmentation and a batcher that feeds many streams to one model.</p>
+                <p>ONNX Runtime (CUDA, DirectML), PyTorch models on ExecuTorch, pure-Rust Burn on wgpu, and a GPU-resident path where pixels never leave the card. Includes segmentation and a batcher that feeds many streams to one model.</p>
                 <div class="chip-group">
                     <span class="chip-label">Elements</span>
-                    <div class="chip-row"><span class="chip">OrtInference</span><span class="chip">BurnInference</span><span class="chip">WgpuPreprocess</span><span class="chip">WgpuInference</span><span class="chip">OrtSegmentation</span><span class="chip">TensorBatcher</span></div>
+                    <div class="chip-row"><span class="chip">OrtInference</span><span class="chip">ExecutorchInference</span><span class="chip">BurnInference</span><span class="chip">WgpuPreprocess</span><span class="chip">WgpuInference</span><span class="chip">OrtSegmentation</span><span class="chip">TensorBatcher</span></div>
                 </div>
             </div>
             <div class="crate-card">
@@ -903,7 +903,7 @@
                 <p class="f-lead">Preprocess, run the model, and postprocess without the pixels leaving the GPU. The same path runs on Android.</p>
                 <div class="chip-group">
                     <span class="chip-label">Engines</span>
-                    <div class="chip-row"><span class="chip">OrtInference</span><span class="chip">BurnInference</span><span class="chip">WgpuInference</span><span class="chip">TensorBatcher</span></div>
+                    <div class="chip-row"><span class="chip">OrtInference</span><span class="chip">ExecutorchInference</span><span class="chip">BurnInference</span><span class="chip">WgpuInference</span><span class="chip">TensorBatcher</span></div>
                 </div>
                 <span class="feature-tag tag-ml">ML</span>
             </div>

@@ -1,9 +1,9 @@
 [package]
 name = "g2g-ml"
-description = "ML inference elements for glass2glass: burn (embedded/Wasm) and ort (server) backends."
+description = "ML inference elements for glass2glass: burn (embedded/Wasm), ort (server) and executorch (on-device) backends."
 license.workspace = true
 readme = "README.md"
-keywords = ["multimedia", "inference", "onnx", "gpu", "video"]
+keywords = ["multimedia", "inference", "onnx", "executorch", "video"]
 categories = ["multimedia::video", "multimedia", "science"]
 version.workspace = true
 edition.workspace = true
@@ -62,6 +62,12 @@ v4l2-dmabuf-wgpu = ["dmabuf-wgpu", "g2g-plugins/v4l2"]
 # ort's default features download the platform's ONNX Runtime binaries at
 # build time (network required on the first build).
 ort = ["std", "dep:ort"]
+# ExecuTorch 1.5.1 runtime via the `executorch` crate (ExecutorchInference runs a
+# `.pte` program on the portable CPU kernels). The crate does not build the C++
+# runtime: link it against the static libraries `tools/executorch-build.sh`
+# builds, found through EXECUTORCH_RS_EXECUTORCH_LIB_DIR (build.rs adds the
+# kernel libraries the crate leaves out).
+executorch = ["std", "dep:executorch"]
 # DirectML execution provider (Windows, any D3D12 GPU). Downloads a
 # DirectML-enabled ONNX Runtime build; registration falls back to CPU at
 # runtime when no device is available.
@@ -112,6 +118,7 @@ cuda-wgpu-e2e = ["cuda-wgpu", "g2g-plugins/cuda", "g2g-plugins/ffmpeg"]
 [dependencies]
 g2g-core = { workspace = true }
 ort = { version = "2.0.0-rc.12", optional = true }
+executorch = { version = "0.13.0", optional = true, features = ["module", "tensor-ptr"] }
 # Inline GPU preprocessing (wgpu feature, §5.1). Default features pull the
 # native backend per platform (dx12 on Windows).
 wgpu = { version = "29", optional = true }

@@ -1,8 +1,9 @@
 //! M820: the ML elements from a launch line. Each property `parse_launch` can
 //! set must (a) be declared in `properties()` so the parser knows its kind, and
 //! (b) round-trip through `set_property` / `get_property` onto the field the
-//! element acts on, with a bad value rejected. `ortinfer` additionally loads its
-//! model from the `model` property, so it is constructible before a model exists.
+//! element acts on, with a bad value rejected. `ortinfer` and `executorchinfer`
+//! additionally load their model from the `model` property, so they are
+//! constructible before a model exists.
 //!
 //! Run with:
 //!
@@ -119,6 +120,72 @@ fn ortinfer_without_a_model_fails_loud() {
         panic!("ortinfer derives its output caps");
     };
     assert!(derive(&rgba).alternatives().is_empty());
+}
+
+// checked-in `.pte` program, a `[1, 3, 4, 4]` f32 input (tests/fixtures/export_affine.py)
+#[cfg(feature = "executorch")]
+const EXECUTORCH_MODEL: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/affine_2x_plus_1.pte"
+);
+
+#[cfg(feature = "executorch")]
+#[test]
+fn executorchinfer_loads_the_model_property_in_either_order() {
+    use g2g_ml::executorchinfer::ExecutorchInference;
+
+    let mut e = ExecutorchInference::new();
+    assert!(declares(e.properties(), "model"));
+    assert!(declares(e.properties(), "tensor-input"));
+    assert!(!declares(e.properties(), "execution-provider"));
+
+    // tensor-input set *before* the model must survive the load.
+    e.set_property("tensor-input", PropValue::Bool(true))
+        .unwrap();
+    e.set_property("model", PropValue::Str(EXECUTORCH_MODEL.into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("model"),
+        Some(PropValue::Str(EXECUTORCH_MODEL.into()))
+    );
+    assert_eq!(e.get_property("tensor-input"), Some(PropValue::Bool(true)));
+    assert_eq!(
+        e.input_dims(),
+        (4, 4),
+        "geometry read from the loaded model"
+    );
+    assert_eq!(e.output_shape(), &[1, 3, 4, 4]);
+
+    // and set *after* the model it still applies.
+    let mut e = ExecutorchInference::new();
+    e.set_property("model", PropValue::Str(EXECUTORCH_MODEL.into()))
+        .unwrap();
+    assert_eq!(e.get_property("tensor-input"), Some(PropValue::Bool(false)));
+    e.set_property("tensor-input", PropValue::Bool(true))
+        .unwrap();
+    assert_eq!(e.get_property("tensor-input"), Some(PropValue::Bool(true)));
+    assert_eq!(e.input_dims(), (4, 4));
+}
+
+#[cfg(feature = "executorch")]
+#[test]
+fn executorchinfer_rejects_a_bad_model_and_a_mistyped_flag() {
+    use g2g_ml::executorchinfer::ExecutorchInference;
+
+    let mut e = ExecutorchInference::new();
+    assert_eq!(
+        e.set_property("model", PropValue::Str("/nonexistent/nope.pte".into())),
+        Err(PropError::Value),
+        "a path that does not load is a bad value"
+    );
+    assert_eq!(
+        e.set_property("tensor-input", PropValue::Str("yes".into())),
+        Err(PropError::Type)
+    );
+    assert_eq!(
+        e.set_property("execution-provider", PropValue::Str("cpu".into())),
+        Err(PropError::Unknown)
+    );
 }
 
 #[cfg(feature = "analytics")]
@@ -272,6 +339,13 @@ fn register_adds_the_ml_elements_by_name() {
     {
         assert!(reg.inspect("ortinfer").is_some());
         let e = reg.make_element("ortinfer").expect("ortinfer builds bare");
+        assert_eq!(e.get_property("model"), Some(PropValue::Str(String::new())));
+    }
+    #[cfg(feature = "executorch")]
+    {
+        let e = reg
+            .make_element("executorchinfer")
+            .expect("executorchinfer builds bare");
         assert_eq!(e.get_property("model"), Some(PropValue::Str(String::new())));
     }
     #[cfg(feature = "wgpu")]

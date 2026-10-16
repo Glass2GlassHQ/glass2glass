@@ -35,12 +35,10 @@ use g2g_core::{
     TensorDType, TensorLayout, TensorShape,
 };
 
-use crate::ortinfer::{
-    f32_tensor_dims, input_geometry, input_tensor_dims, ort_err, static_output_dims,
-    tensor_bytes_to_chw,
-};
+use crate::model_dims::{input_geometry, static_output_dims};
+use crate::ortinfer::{f32_tensor_dims, input_tensor_dims, ort_err};
 use crate::segmentation::{decode_instances, SegmentationGeometry, SegmentationThresholds};
-use crate::tensor_bytes::rgba_to_nchw;
+use crate::tensor_bytes::{rgba_to_nchw, tensor_bytes_to_chw};
 
 /// A loaded segmentation session plus the geometry read off its two outputs.
 /// Separate from the element so the element exists before a model does: a launch

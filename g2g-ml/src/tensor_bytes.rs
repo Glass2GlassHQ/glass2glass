@@ -49,6 +49,26 @@ pub fn rgba_to_nchw(rgba: &[u8], width: u32, height: u32) -> Result<Vec<f32>, G2
     Ok(nchw)
 }
 
+// little-endian f32 NCHW `[1, 3, height, width]` bytes to values, the tensor-input path's decode
+pub fn tensor_bytes_to_chw(bytes: &[u8], width: u32, height: u32) -> Result<Vec<f32>, G2gError> {
+    let plane = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(G2gError::CapsMismatch)?;
+    let n = plane
+        .checked_mul(RGB_CHANNELS)
+        .ok_or(G2gError::CapsMismatch)?;
+    let nbytes = n.checked_mul(F32_BYTES).ok_or(G2gError::CapsMismatch)?;
+    if bytes.len() < nbytes {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(bytes[..nbytes]
+        .as_chunks::<F32_BYTES>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

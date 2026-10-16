@@ -262,11 +262,13 @@ jobs:
             libopus-dev libwayland-dev libegl-dev libxkbcommon-dev libdav1d-dev nasm \
             clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
             libva-dev libdrm-dev libgbm-dev libvpx-dev libpipewire-0.3-dev \
-            mosquitto mosquitto-clients
+            mosquitto mosquitto-clients ninja-build
       # g2g-launch-py links libpython (pyo3), for the docs step below.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      # tools/executorch-build.sh installs the ExecuTorch codegen's python deps with uv
+      - uses: astral-sh/setup-uv@v6
       # docs/elements.html is generated from the registry, so it silently goes
       # stale every time an element is added. The element list is exactly the
       # elements compiled in, so this has to use the same feature set the
@@ -451,6 +453,21 @@ jobs:
         run: cargo test -p g2g-plugins --locked --features dash --test m888_dash_cmaf_chunked --test m160_dashsrc --test m836_dash_live_multiperiod
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
+      # the script pins the ExecuTorch version, so its hash keys the built libraries
+      - name: cache executorch runtime
+        uses: actions/cache@v4
+        with:
+          path: ~/executorch/cmake-out
+          key: executorch-${{ hashFiles('tools/executorch-build.sh') }}
+      # the clone and the venv are only build inputs, drop them to keep disk for the test build
+      - name: build executorch runtime
+        run: |
+          tools/executorch-build.sh ~/executorch
+          rm -rf ~/executorch/executorch ~/executorch/venv
+      - name: test g2g-ml (executorch)
+        run: |
+          export EXECUTORCH_RS_EXECUTORCH_LIB_DIR="$HOME/executorch/cmake-out"
+          cargo test -p g2g-ml --locked --features executorch,analytics,launch --test executorch_inference --test m820_launch_properties
       # dma-buf Vulkan import (M990): GPU-gated at runtime, so CI only compile-checks it.
       - name: check dmabuf-wgpu (g2g-ml + g2g-plugins)
         run: |

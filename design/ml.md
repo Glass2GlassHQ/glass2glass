@@ -127,7 +127,14 @@ selects, and owns the exportable render-target texture.
 ## Inference backends
 
 g2g avoids bundling heavy, unsafe proprietary C++ engines. The `g2g-ml` crate
-provides wrapper elements targeting two execution paradigms.
+provides wrapper elements targeting three execution paradigms.
+
+`OrtInference` and `ExecutorchInference` are one element, `Inference<B>`
+(`g2g-ml/src/inference.rs`), over two model runtimes. `Inference` does the caps
+negotiation, the RGBA or tensor input decode, the base properties and the output
+framing. The `InferenceBackend` type loads a model file and handles the runtime's
+own properties, and the `LoadedModel` it returns reports the model geometry and
+runs one `[1, 3, H, W]` input.
 
 `OrtInference` takes `only-on=`, which names a blob header, or `detections` for
 any detection, that a frame has to carry to be inferred on. A frame without it is
@@ -241,6 +248,27 @@ links. Both compile for their target. This is the heterogeneous-device story: a
 desktop NVIDIA box, a Windows D3D12 GPU, an Android phone NPU, and the Qualcomm
 and Apple NPUs all run the same element with the EP picked per platform, the
 architectural answer to MediaPipe's runtime CPU and GPU delegate switch.
+
+### ExecuTorch
+
+`ExecutorchInference` (`g2g-ml/src/executorchinfer.rs`, `executorch` feature,
+launch name `executorchinfer`) runs a `.pte` program through ExecuTorch,
+PyTorch's on-device runtime, with the portable CPU operator kernels. A model gets
+there through `torch.export` then `to_edge_transform_and_lower().to_executorch()`.
+It is the shared `Inference<B>` element, so it has the caps, the tensor-input
+mode and the properties of `ortinfer` except `execution-provider`. The model
+contract is one `forward` method with one `[1, 3, H, W]` f32, u8 or i8 input and
+one f32 output with static dims, checked when the program loads.
+
+The `executorch` crate links the ExecuTorch 1.5.1 C++ static libraries but does
+not build them. `tools/executorch-build.sh <prefix>` clones and builds them into
+`<prefix>/cmake-out`, and the build finds them through
+`EXECUTORCH_RS_EXECUTORCH_LIB_DIR`. The crate leaves the operator kernels out, so
+`g2g-ml`'s build script links `portable_kernels` and `portable_ops_lib` from the
+same directory as whole archives.
+
+The test fixture `g2g-ml/tests/fixtures/affine_2x_plus_1.pte` is an exported
+`x * 2 + 1` model, checked in next to its generator `export_affine.py`.
 
 ### WgpuInference
 

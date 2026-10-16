@@ -1,5 +1,9 @@
 //! ONNX Runtime inference element (`ort` backend, design/ml.md).
 //!
+//! `OrtInference` is the shared [`Inference`] element on [`OrtBackend`]: the
+//! element body is backend-agnostic, and this module loads and runs an ONNX
+//! session under it.
+//!
 //! M21: `OrtInference` is an `AsyncElement` transform that negotiates
 //! `Caps::RawVideo` on its input pad and `Caps::Tensor` on its output pad,
 //! exactly like any other element in the graph. Each RGBA frame is converted
@@ -13,7 +17,7 @@
 //! `WebGPUPreprocess`), fed straight to the session with no CPU normalize.
 //!
 //! The model can also be loaded after construction, through the `model` property
-//! (a file path) or [`load_model`](OrtInference::load_model), which is what lets
+//! (a file path) or [`load_model`](Inference::load_model), which is what lets
 //! a launch line say `ortinfer model=yolov8n.onnx tensor-input=true`. Until a
 //! model is loaded, negotiation and `process` fail with `NotConfigured`.
 //!
@@ -33,39 +37,31 @@
 //! choices are constructor variants; the element shape never changes. TensorRT /
 //! CoreML / QNN slot in the same way and remain follow-ups.
 
-use core::future::Future;
-use core::pin::Pin;
-
-use crate::tensor_bytes::{f32_le_bytes, rgba_to_nchw};
+use crate::inference::{
+    Inference, InferenceBackend, LoadedModel, ModelGeometry, MODEL_PROP, ONLY_ON_PROP,
+    TENSOR_INPUT_PROP,
+};
+#[cfg(feature = "analytics")]
+use crate::inference::{ATTACH_TENSOR_PROP, TENSOR_NAME_PROP};
+use crate::model_dims::{input_geometry, static_output_dims};
+use crate::tensor_bytes::f32_le_bytes;
 
 use ::ort::session::Session;
 use ::ort::value::{Tensor, TensorElementType, ValueType};
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    RawVideoFormat, TensorDType, TensorLayout, TensorShape,
+    G2gError, HardwareError, PropError, PropKind, PropValue, PropertySpec, TensorDType,
 };
 
 /// A loaded session plus the geometry read off it, the state every graph method
 /// needs. Separate from the element so the element exists before a model does:
 /// a launch line builds `ortinfer` bare and the `model` property loads this.
 #[derive(Debug)]
-struct Model {
+pub struct OrtModel {
     session: Session,
     input_name: String,
     output_name: String,
-    /// Model input geometry (static `W x H` from the `[N, 3, H, W]` input).
-    width: u32,
-    height: u32,
-    /// Static output shape (a dynamic leading batch dim coerced to 1).
-    out_shape: TensorShape,
-    /// The model's input element type: `F32` (the RGBA / f32-tensor path) or `U8`
-    /// / `I8` (a quantized model, fed an integer tensor straight through, M442 the
-    /// `TensorConvert::quantize` output). RGBA mode requires `F32`.
-    input_dtype: TensorDType,
+    geometry: ModelGeometry,
 }
 
 /// Which execution provider a text-constructed element runs the session on.
@@ -98,6 +94,20 @@ impl ExecutionProvider {
     }
 }
 
+#[derive(Debug)]
+pub struct OrtBackend {
+    /// Execution provider registered when the model loads.
+    provider: ExecutionProvider,
+}
+
+impl Default for OrtBackend {
+    fn default() -> Self {
+        Self {
+            provider: ExecutionProvider::Cpu,
+        }
+    }
+}
+
 /// # Example
 ///
 /// ```no_run
@@ -109,81 +119,14 @@ impl ExecutionProvider {
 ///     .unwrap()
 ///     .with_tensor_input();
 /// ```
-#[derive(Debug)]
-pub struct OrtInference {
-    /// `None` until a model is loaded; negotiation and `process` fail with
-    /// `NotConfigured` while it is.
-    model: Option<Model>,
-    /// Path the `model` property loaded from, for read-back.
-    model_path: Option<String>,
-    /// When set, the input pad is a preprocessed NCHW `Caps::Tensor` fed straight
-    /// to the session, not RGBA normalized on the CPU.
-    tensor_input: bool,
-    /// Execution provider registered when the model loads.
-    provider: ExecutionProvider,
-    /// When set, the video frame goes out unchanged with the model output
-    /// attached as a `TensorMeta` instead of becoming the tensor frame.
-    #[cfg(feature = "analytics")]
-    attach_tensor: bool,
-    /// Name this element's output is attached under, so a frame carrying
-    /// several models' outputs keeps them apart. Empty for a single model.
-    #[cfg(feature = "analytics")]
-    tensor_name: String,
-    /// Name of the metadata a frame must carry to be inferred on: a blob header,
-    /// or `detections` for any detection. Empty runs the model on every frame.
-    only_on: g2g_core::OnlyOnGate,
-    configured: bool,
-    last_caps: Option<Caps>,
-    emitted: u64,
-}
+pub type OrtInference = Inference<OrtBackend>;
 
-impl Default for OrtInference {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+impl InferenceBackend for OrtBackend {
+    type Model = OrtModel;
 
-impl OrtInference {
-    /// A model-less element, the text-construction path: `ortinfer
-    /// model=yolov8n.onnx` builds this and then loads the model through the
-    /// `model` property. Until one is loaded, negotiation and `process` fail with
-    /// [`G2gError::NotConfigured`].
-    pub fn new() -> Self {
-        Self {
-            model: None,
-            model_path: None,
-            tensor_input: false,
-            provider: ExecutionProvider::Cpu,
-            #[cfg(feature = "analytics")]
-            attach_tensor: false,
-            #[cfg(feature = "analytics")]
-            tensor_name: String::new(),
-            only_on: g2g_core::OnlyOnGate::default(),
-            configured: false,
-            last_caps: None,
-            emitted: 0,
-        }
-    }
+    const PROPERTIES: &'static [PropertySpec] = ORT_INFER_PROPS;
 
-    /// Build a session from in-memory ONNX model bytes and validate the v1
-    /// model contract (see module docs).
-    pub fn from_memory(model_bytes: &[u8]) -> Result<Self, G2gError> {
-        let mut builder = Session::builder().map_err(ort_err)?;
-        let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
-        Self::from_session(session)
-    }
-
-    /// As [`from_memory`], reading the model from a file.
-    pub fn from_file(path: &str) -> Result<Self, G2gError> {
-        let mut element = Self::new();
-        element.load_model(path)?;
-        Ok(element)
-    }
-
-    /// Load (or replace) the model from a file, validating the same v1 contract
-    /// the constructors do. The tensor-input mode is preserved, so `tensor-input`
-    /// and `model` can be set in either order.
-    pub fn load_model(&mut self, path: &str) -> Result<(), G2gError> {
+    fn load(&self, path: &str) -> Result<OrtModel, G2gError> {
         let mut builder = Session::builder().map_err(ort_err)?;
         // registering directly, because `with_execution_providers` swallows a
         // failure and leaves the session on the CPU, an order of magnitude slower
@@ -209,9 +152,35 @@ impl OrtInference {
             }
         }
         let session = builder.commit_from_file(path).map_err(ort_err)?;
-        self.model = Some(Model::load(session)?);
-        self.model_path = Some(path.to_owned());
-        Ok(())
+        OrtModel::load(session)
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "execution-provider" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                self.provider = ExecutionProvider::parse(name).ok_or(PropError::Value)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "execution-provider" => Some(PropValue::Str(String::from(self.provider.name()))),
+            _ => None,
+        }
+    }
+}
+
+impl Inference<OrtBackend> {
+    /// Build a session from in-memory ONNX model bytes and validate the v1
+    /// model contract (see module docs).
+    pub fn from_memory(model_bytes: &[u8]) -> Result<Self, G2gError> {
+        let mut builder = Session::builder().map_err(ort_err)?;
+        let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
+        Self::from_session(session)
     }
 
     /// As [`from_memory`], with the DirectML execution provider (D3D12 GPU,
@@ -329,88 +298,12 @@ impl OrtInference {
 
     fn from_session(session: Session) -> Result<Self, G2gError> {
         let mut element = Self::new();
-        element.model = Some(Model::load(session)?);
+        element.model = Some(OrtModel::load(session)?);
         Ok(element)
-    }
-
-    /// The model's expected input geometry, `(width, height)`; `(0, 0)` before a
-    /// model is loaded.
-    pub fn input_dims(&self) -> (u32, u32) {
-        self.model.as_ref().map_or((0, 0), |m| (m.width, m.height))
-    }
-
-    /// The model's static output tensor dims; empty before a model is loaded.
-    pub fn output_shape(&self) -> &[u32] {
-        self.model.as_ref().map_or(&[][..], |m| m.out_shape.dims())
-    }
-
-    /// Count of tensor `DataFrame`s pushed downstream. Useful in tests.
-    pub fn inferred_count(&self) -> u64 {
-        self.emitted
-    }
-
-    /// Accept an already-normalized f32 NCHW `[1, 3, H, W]` tensor input
-    /// (e.g. from `WgpuPreprocess` / `WebGPUPreprocess`) instead of RGBA,
-    /// feeding it straight to the session with no CPU normalize. The model
-    /// geometry is unchanged.
-    pub fn with_tensor_input(mut self) -> Self {
-        self.tensor_input = true;
-        self
-    }
-
-    /// Keep the video frame on the wire and attach the model output to it as a
-    /// [`TensorMeta`](g2g_core::TensorMeta) instead of emitting the tensor as
-    /// the frame. Lets `ortinfer ! detectionpostprocess ! analyticsoverlay` run
-    /// as one straight chain, since the frame that reaches the overlay is still
-    /// the picture the model saw.
-    #[cfg(feature = "analytics")]
-    pub fn with_attach_tensor(mut self) -> Self {
-        self.attach_tensor = true;
-        self
-    }
-
-    /// Name this element's output is attached under, so a second model on the
-    /// same frame does not collide with it. Only needed with more than one.
-    #[cfg(feature = "analytics")]
-    pub fn with_tensor_name(mut self, name: &str) -> Self {
-        self.tensor_name = String::from(name);
-        self
-    }
-
-    fn supported_input(&self) -> Option<Caps> {
-        let m = self.model.as_ref()?;
-        Some(if self.tensor_input {
-            Caps::Tensor {
-                // The model's own input dtype: f32, or u8 / i8 for a quantized
-                // model fed an already-quantized tensor (M442).
-                dtype: m.input_dtype,
-                shape: TensorShape::new([1, 3, m.height, m.width]),
-                layout: TensorLayout::Nchw,
-            }
-        } else {
-            Caps::RawVideo {
-                format: RawVideoFormat::Rgba8,
-                width: Dim::Fixed(m.width),
-                height: Dim::Fixed(m.height),
-                framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            }
-        })
-    }
-
-    fn output_caps(&self) -> Option<Caps> {
-        Some(Caps::Tensor {
-            dtype: TensorDType::F32,
-            shape: self.model.as_ref()?.out_shape,
-            // rank-4 outputs are channel-first by the input convention;
-            // for other ranks the layout tag is nominal.
-            layout: TensorLayout::Nchw,
-        })
     }
 }
 
-impl Model {
+impl OrtModel {
     fn load(session: Session) -> Result<Self, G2gError> {
         let [input] = session.inputs() else {
             return Err(G2gError::CapsMismatch);
@@ -426,37 +319,31 @@ impl Model {
         let (output_name, out_dims) = (output.name().to_owned(), f32_tensor_dims(output.dtype())?);
 
         let (width, height) = input_geometry(&in_dims)?;
-        let out_shape = static_output_dims(&out_dims)?;
+        let output_shape = static_output_dims(&out_dims)?;
 
         Ok(Self {
             session,
             input_name,
             output_name,
-            width,
-            height,
-            out_shape,
-            input_dtype,
+            geometry: ModelGeometry {
+                width,
+                height,
+                input_dtype,
+                output_shape,
+            },
         })
     }
+}
 
-    /// RGBA8 -> normalized f32 NCHW RGB, then run the session.
-    fn infer(&mut self, rgba: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
-        let chw = rgba_to_nchw(rgba, self.width, self.height)?;
-        self.run_chw(chw)
-    }
-
-    /// Feed an already-normalized f32 NCHW `[1, 3, H, W]` tensor straight to
-    /// the session (tensor-input mode); the bytes are the tensor's
-    /// little-endian f32 values, e.g. from a GPU preprocess step.
-    fn infer_tensor(&mut self, bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
-        let chw = tensor_bytes_to_chw(bytes, self.width, self.height)?;
-        self.run_chw(chw)
+impl LoadedModel for OrtModel {
+    fn geometry(&self) -> &ModelGeometry {
+        &self.geometry
     }
 
     /// Run the session on a `[1, 3, H, W]` f32 plane, returning the first
     /// output tensor's little-endian bytes plus its actual dims.
-    fn run_chw(&mut self, chw: Vec<f32>) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
-        let (w, h) = (self.width as i64, self.height as i64);
+    fn run_f32(&mut self, chw: Vec<f32>) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+        let (w, h) = (self.geometry.width as i64, self.geometry.height as i64);
         let tensor = Tensor::from_array((vec![1i64, 3, h, w], chw)).map_err(ort_err)?;
         let outputs = self
             .session
@@ -474,25 +361,19 @@ impl Model {
     /// Feed an already-quantized u8 / i8 NCHW `[1, 3, H, W]` tensor straight to the
     /// session (the quantized-model tensor-input path, M442): one byte per element,
     /// no normalize. The bytes are the integer tensor values (i8 reinterpreted from
-    /// the byte). Returns the (f32) output, like [`run_chw`](Self::run_chw).
-    fn infer_tensor_int(&mut self, bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
-        let (w, h) = (self.width as usize, self.height as usize);
-        let plane = w.checked_mul(h).ok_or(G2gError::CapsMismatch)?;
-        let n = plane.checked_mul(3).ok_or(G2gError::CapsMismatch)?;
-        if bytes.len() < n {
-            return Err(G2gError::CapsMismatch);
-        }
-        let (iw, ih) = (self.width as i64, self.height as i64);
+    /// the byte). Returns the (f32) output, like [`run_f32`](Self::run_f32).
+    fn run_int(&mut self, bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+        let (iw, ih) = (self.geometry.width as i64, self.geometry.height as i64);
         let shape = vec![1i64, 3, ih, iw];
-        let outputs = match self.input_dtype {
+        let outputs = match self.geometry.input_dtype {
             TensorDType::U8 => {
-                let t = Tensor::from_array((shape, bytes[..n].to_vec())).map_err(ort_err)?;
+                let t = Tensor::from_array((shape, bytes.to_vec())).map_err(ort_err)?;
                 self.session
                     .run(::ort::inputs![self.input_name.as_str() => t])
                     .map_err(ort_err)?
             }
             TensorDType::I8 => {
-                let data: Vec<i8> = bytes[..n].iter().map(|&b| b as i8).collect();
+                let data: Vec<i8> = bytes.iter().map(|&b| b as i8).collect();
                 let t = Tensor::from_array((shape, data)).map_err(ort_err)?;
                 self.session
                     .run(::ort::inputs![self.input_name.as_str() => t])
@@ -509,255 +390,10 @@ impl Model {
     }
 }
 
-impl AsyncElement for OrtInference {
-    type ProcessFuture<'a>
-        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
-    where
-        Self: 'a;
-
-    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        let supported = self.supported_input().ok_or(G2gError::NotConfigured)?;
-        upstream_caps.intersect(&supported)
-    }
-
-    /// Native `DerivedOutput`: RGBA at the model's geometry in, the model's
-    /// static tensor caps out. Non-matching input yields an empty set, so
-    /// the solver rejects it at negotiation time. With no model loaded the set
-    /// is empty for every input, so negotiation fails instead of guessing caps.
-    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        #[cfg(feature = "analytics")]
-        let attach = self.attach_tensor;
-        #[cfg(not(feature = "analytics"))]
-        let attach = false;
-        let loaded = self.supported_input().zip(self.output_caps());
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match &loaded {
-            Some((supported, out)) => match input.intersect(supported) {
-                // attach-tensor keeps the picture: identity output, the model
-                // output rides along as meta.
-                Ok(narrowed) => CapsSet::one(if attach { narrowed } else { out.clone() }),
-                Err(_) => CapsSet::from_alternatives(Vec::new()),
-            },
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
-    }
-
-    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        // A gated frame goes downstream exactly as it arrived, which matches the
-        // negotiated output caps only while this element keeps the picture on the
-        // wire. Emitting the tensor as the frame makes the two disagree.
-        #[cfg(feature = "analytics")]
-        if self.only_on.is_set() && !self.attach_tensor {
-            return Err(G2gError::CapsMismatch);
-        }
-        let model = self.model.as_ref().ok_or(G2gError::NotConfigured)?;
-        // RGBA mode normalizes to f32, so it only feeds an f32 model; a quantized
-        // (u8 / i8) model must take a pre-quantized tensor via `with_tensor_input`.
-        if !self.tensor_input && model.input_dtype != TensorDType::F32 {
-            return Err(G2gError::CapsMismatch);
-        }
-        let supported = self.supported_input().ok_or(G2gError::NotConfigured)?;
-        absolute_caps.intersect(&supported)?;
-        self.configured = true;
-        Ok(ConfigureOutcome::Accepted)
-    }
-
-    fn properties(&self) -> &'static [PropertySpec] {
-        ORT_INFER_PROPS
-    }
-
-    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        match name {
-            "model" => {
-                let path = value.as_str().ok_or(PropError::Type)?;
-                // A path that does not load (missing, not ONNX, or violating the
-                // v1 contract) is a bad value, so the launch line fails loud.
-                self.load_model(path).map_err(|_| PropError::Value)
-            }
-            "tensor-input" => {
-                self.tensor_input = value.as_bool().ok_or(PropError::Type)?;
-                Ok(())
-            }
-            "execution-provider" => {
-                let name = value.as_str().ok_or(PropError::Type)?;
-                self.provider = ExecutionProvider::parse(name).ok_or(PropError::Value)?;
-                // Set after `model=`, so rebuild the session on the new provider
-                // rather than making the launch line's property order matter.
-                if let Some(path) = self.model_path.clone() {
-                    self.load_model(&path).map_err(|_| PropError::Value)?;
-                }
-                Ok(())
-            }
-            #[cfg(feature = "analytics")]
-            "attach-tensor" => {
-                self.attach_tensor = value.as_bool().ok_or(PropError::Type)?;
-                Ok(())
-            }
-            #[cfg(feature = "analytics")]
-            "tensor-name" => {
-                self.tensor_name = String::from(value.as_str().ok_or(PropError::Type)?);
-                Ok(())
-            }
-            g2g_core::OnlyOnGate::PROPERTY => self.only_on.set(&value),
-            _ => Err(PropError::Unknown),
-        }
-    }
-
-    fn get_property(&self, name: &str) -> Option<PropValue> {
-        match name {
-            "model" => Some(PropValue::Str(self.model_path.clone().unwrap_or_default())),
-            "tensor-input" => Some(PropValue::Bool(self.tensor_input)),
-            "execution-provider" => Some(PropValue::Str(String::from(self.provider.name()))),
-            #[cfg(feature = "analytics")]
-            "attach-tensor" => Some(PropValue::Bool(self.attach_tensor)),
-            #[cfg(feature = "analytics")]
-            "tensor-name" => Some(PropValue::Str(self.tensor_name.clone())),
-            g2g_core::OnlyOnGate::PROPERTY => Some(self.only_on.value()),
-            _ => None,
-        }
-    }
-
-    fn process<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-        out: &'a mut dyn OutputSink,
-    ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            if !self.configured {
-                return Err(G2gError::NotConfigured);
-            }
-            match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    if self.only_on.forwards_untouched(&frame.meta) {
-                        out.push(PipelinePacket::DataFrame(frame)).await?;
-                        return Ok(());
-                    }
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
-                    let tensor_input = self.tensor_input;
-                    let model = self.model.as_mut().ok_or(G2gError::NotConfigured)?;
-                    let (bytes, dims) = if tensor_input {
-                        if model.input_dtype == TensorDType::F32 {
-                            model.infer_tensor(slice)?
-                        } else {
-                            model.infer_tensor_int(slice)?
-                        }
-                    } else {
-                        model.infer(slice)?
-                    };
-                    let shape = TensorShape::from_slice(&dims).ok_or(G2gError::CapsMismatch)?;
-                    #[cfg(feature = "analytics")]
-                    if self.attach_tensor {
-                        // Caps are identity here, so no CapsChanged: the frame
-                        // going out is the one that came in, carrying the model
-                        // output for a post-processor downstream.
-                        let mut frame = frame;
-                        let produced = g2g_core::NamedTensor {
-                            name: self.tensor_name.clone(),
-                            dtype: TensorDType::F32,
-                            shape,
-                            layout: TensorLayout::Nchw,
-                            data: bytes.into_vec(),
-                        };
-                        // Add to whatever an earlier inference stage already put
-                        // on this frame rather than displacing it.
-                        match frame.meta.get_mut::<g2g_core::TensorMeta>() {
-                            Some(tensors) => tensors.push(produced),
-                            None => {
-                                let mut tensors = g2g_core::TensorMeta::new();
-                                tensors.push(produced);
-                                frame.meta.attach(tensors);
-                            }
-                        }
-                        self.emitted += 1;
-                        out.push(PipelinePacket::DataFrame(frame)).await?;
-                        return Ok(());
-                    }
-                    let new_caps = Caps::Tensor {
-                        dtype: TensorDType::F32,
-                        shape,
-                        layout: TensorLayout::Nchw,
-                    };
-                    if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                            .await?;
-                        self.last_caps = Some(new_caps);
-                    }
-                    let tensor_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
-                        // inference is per-frame: the tensor inherits the
-                        // source frame's timing so latency stays traceable.
-                        timing: frame.timing,
-                        sequence: self.emitted,
-                        meta: Default::default(),
-                    };
-                    self.emitted += 1;
-                    out.push(PipelinePacket::DataFrame(tensor_frame)).await?;
-                }
-                PipelinePacket::CapsChanged(c) => {
-                    // Runner contract (the videoconvert / videoscale convention):
-                    // the transform arm calls `configure_pipeline` (input) then
-                    // `configure_output` (output) and pushes this packet carrying
-                    // the pre-fixed forward *output* caps, NOT a new input. So `c`
-                    // is our output tensor (the model's), not something to validate
-                    // against `supported_input` (a real model's output never
-                    // matches its input, so the old `c.intersect(supported_input)?`
-                    // hard-errored whenever ORT was an interior transform). Forward
-                    // it so a strict downstream sees the tensor caps before the
-                    // first frame, and record `last_caps` to suppress the data
-                    // path's duplicate emit.
-                    self.last_caps = Some(c.clone());
-                    out.push(PipelinePacket::CapsChanged(c)).await?;
-                }
-                PipelinePacket::Flush => {
-                    out.push(PipelinePacket::Flush).await?;
-                }
-                // Segment is a timing marker: forward unchanged.
-                PipelinePacket::Segment(seg) => {
-                    out.push(PipelinePacket::Segment(seg)).await?;
-                }
-                // stateless per-frame inference: nothing to drain.
-                PipelinePacket::Eos => {}
-                // PipelinePacket is non_exhaustive: forward variants added
-                // since (a metadata-carrying packet, etc.) unchanged.
-                other => {
-                    out.push(other).await?;
-                }
-            }
-            Ok(())
-        })
-    }
-}
-
-/// Settable properties: the model file to load and the input-pad mode, so a
-/// `gst-launch` line can build the element without the Rust constructors.
-const MODEL_PROP: PropertySpec =
-    PropertySpec::new("model", PropKind::Str, "path to the ONNX model file");
-const TENSOR_INPUT_PROP: PropertySpec = PropertySpec::new(
-    "tensor-input",
-    PropKind::Bool,
-    "take a preprocessed f32 NCHW tensor instead of RGBA video",
-);
 const PROVIDER_PROP: PropertySpec = PropertySpec::new(
     "execution-provider",
     PropKind::Str,
     "execution provider to run the session on: cpu, or cuda when built with it",
-);
-#[cfg(feature = "analytics")]
-const ATTACH_TENSOR_PROP: PropertySpec = PropertySpec::new(
-    "attach-tensor",
-    PropKind::Bool,
-    "forward the video frame with the model output attached as metadata, instead of emitting the tensor as the frame",
-);
-#[cfg(feature = "analytics")]
-const TENSOR_NAME_PROP: PropertySpec = PropertySpec::new(
-    "tensor-name",
-    PropKind::Str,
-    "name the attached output is stored under, to keep several models on one frame apart",
-);
-
-const ONLY_ON_PROP: PropertySpec = g2g_core::OnlyOnGate::property_spec(
-    "Run only on frames carrying this blob, or any detection when set to detections. Other frames pass through untouched, so this needs attach-tensor=true.",
 );
 
 #[cfg(feature = "analytics")]
@@ -772,62 +408,6 @@ static ORT_INFER_PROPS: &[PropertySpec] = &[
 #[cfg(not(feature = "analytics"))]
 static ORT_INFER_PROPS: &[PropertySpec] =
     &[MODEL_PROP, TENSOR_INPUT_PROP, PROVIDER_PROP, ONLY_ON_PROP];
-
-/// The RGBA input pad is the static superset (the model's geometry narrows it at
-/// instance time). No source template: the output tensor's shape is the loaded
-/// model's, so there is nothing static to advertise.
-#[cfg(feature = "launch")]
-impl g2g_core::PadTemplates for OrtInference {
-    fn pad_templates() -> Vec<g2g_core::PadTemplate> {
-        Vec::from([g2g_core::PadTemplate::sink(CapsSet::one(Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        }))])
-    }
-}
-
-/// RGBA8 at `width` x `height` -> normalized f32 NCHW RGB (`value / 255`), the
-/// CPU preprocessing every RGBA-fed ORT element shares. Geometry comes from the
-/// model's declared input dims; fold with checked ops so absurd dimensions fail
-/// loud instead of overflowing the length guard or over-allocating.
-/// An already-normalized f32 NCHW `[1, 3, height, width]` tensor's little-endian
-/// bytes -> its values, the tensor-input path's decode.
-pub(crate) fn tensor_bytes_to_chw(
-    bytes: &[u8],
-    width: u32,
-    height: u32,
-) -> Result<Vec<f32>, G2gError> {
-    let plane = (width as usize)
-        .checked_mul(height as usize)
-        .ok_or(G2gError::CapsMismatch)?;
-    let n = plane.checked_mul(3).ok_or(G2gError::CapsMismatch)?;
-    let nbytes = n.checked_mul(4).ok_or(G2gError::CapsMismatch)?;
-    if bytes.len() < nbytes {
-        return Err(G2gError::CapsMismatch);
-    }
-    Ok(bytes[..nbytes]
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|c| f32::from_le_bytes(*c))
-        .collect())
-}
-
-/// The `(width, height)` of a model input that must be `[N, 3, H, W]` with static
-/// `H` / `W`; `N` may be dynamic (the exported-with-dynamic-batch convention).
-pub(crate) fn input_geometry(dims: &[i64]) -> Result<(u32, u32), G2gError> {
-    let [n, c, h, w] = dims else {
-        return Err(G2gError::CapsMismatch);
-    };
-    if !(*n == 1 || *n == -1) || *c != 3 || *h <= 0 || *w <= 0 {
-        return Err(G2gError::CapsMismatch);
-    }
-    Ok((*w as u32, *h as u32))
-}
 
 /// Dims of an f32 tensor outlet; rejects every other value type.
 pub(crate) fn f32_tensor_dims(dtype: &ValueType) -> Result<Vec<i64>, G2gError> {
@@ -858,152 +438,8 @@ pub(crate) fn input_tensor_dims(dtype: &ValueType) -> Result<(Vec<i64>, TensorDT
     }
 }
 
-/// Resolve an output shape to static dims: a dynamic leading batch dim is
-/// the exported-with-dynamic-batch convention and becomes 1; any other
-/// dynamic dim is rejected (v1 needs static output caps for negotiation).
-pub(crate) fn static_output_dims(dims: &[i64]) -> Result<TensorShape, G2gError> {
-    let mut out = Vec::with_capacity(dims.len());
-    for (i, d) in dims.iter().enumerate() {
-        match d {
-            -1 if i == 0 => out.push(1),
-            d if *d > 0 => out.push(*d as u32),
-            _ => return Err(G2gError::CapsMismatch),
-        }
-    }
-    // A fixed-rank TensorShape carries at most MAX_TENSOR_RANK dims; a model
-    // with a deeper output cannot be described by tensor caps.
-    TensorShape::from_slice(&out).ok_or(G2gError::CapsMismatch)
-}
-
 // generic over the error's payload: builder-consuming ort calls return
 // `Error<SessionBuilder>` instead of the plain `Error<()>`.
 pub(crate) fn ort_err<T>(_e: ::ort::Error<T>) -> G2gError {
     G2gError::Hardware(HardwareError::Other)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn static_output_dims_coerces_dynamic_batch_only() {
-        assert_eq!(static_output_dims(&[1, 10]), Ok(TensorShape::new([1, 10])));
-        assert_eq!(static_output_dims(&[-1, 10]), Ok(TensorShape::new([1, 10])));
-        assert_eq!(
-            static_output_dims(&[1, -1]),
-            Err(G2gError::CapsMismatch),
-            "dynamic non-batch dims are rejected"
-        );
-        assert_eq!(static_output_dims(&[1, 0]), Err(G2gError::CapsMismatch));
-    }
-
-    /// M1178: `only-on` forwards a frame that does not carry the named blob, with
-    /// no session run, which is also why this needs no model file: without the
-    /// gate the same frame fails with `NotConfigured` (the last case below). It
-    /// is refused outright unless `attach-tensor` keeps the picture on the wire,
-    /// since a forwarded frame has to match the negotiated output caps.
-    #[cfg(feature = "analytics")]
-    #[test]
-    fn only_on_forwards_a_frame_without_the_blob() {
-        use g2g_core::{BlobMeta, Dim, FrameTiming, PropError, PushOutcome, Rate};
-
-        const GATE: &str = "alert";
-        const OTHER: &str = "embedding";
-
-        #[derive(Default)]
-        struct CollectSink {
-            packets: Vec<PipelinePacket>,
-        }
-
-        impl OutputSink for CollectSink {
-            fn poll_push(
-                &mut self,
-                _cx: &mut core::task::Context<'_>,
-                packet_slot: &mut Option<PipelinePacket>,
-            ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-                let packet = packet_slot.take().expect("poll_push without a packet");
-                self.packets.push(packet);
-                core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-            }
-        }
-
-        fn frame_carrying(header: &str) -> Frame {
-            let mut frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(
-                    vec![0u8; 4].into_boxed_slice(),
-                )),
-                timing: FrameTiming::default(),
-                sequence: 7,
-                meta: Default::default(),
-            };
-            let mut blobs = BlobMeta::new();
-            blobs.push(header, Vec::from(b"x".as_slice()));
-            frame.meta.attach(blobs);
-            frame
-        }
-
-        let mut element = OrtInference::new();
-        assert!(element.properties().iter().any(|p| p.name == "only-on"));
-        element
-            .set_property("only-on", PropValue::Str(String::from(GATE)))
-            .unwrap();
-        assert_eq!(
-            element.get_property("only-on"),
-            Some(PropValue::Str(String::from(GATE)))
-        );
-        assert_eq!(
-            element.set_property("only-on", PropValue::Bool(true)),
-            Err(PropError::Type)
-        );
-
-        // Emitting the tensor as the frame would put a forwarded picture on a
-        // pad negotiated for the model's output, so the pair is refused.
-        let rgba = Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
-            width: Dim::Fixed(1),
-            height: Dim::Fixed(1),
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        };
-        assert_eq!(
-            element.configure_pipeline(&rgba).err(),
-            Some(G2gError::CapsMismatch),
-            "only-on needs attach-tensor=true"
-        );
-        element
-            .set_property("attach-tensor", PropValue::Bool(true))
-            .unwrap();
-
-        // A session needs a model file, which this test has none of. The gate
-        // sits ahead of the session, so set the flag `process` checks.
-        element.configured = true;
-
-        assert!(element
-            .only_on
-            .forwards_untouched(&frame_carrying(OTHER).meta));
-        assert!(!element
-            .only_on
-            .forwards_untouched(&frame_carrying(GATE).meta));
-
-        let mut sink = CollectSink::default();
-        g2g_core::runtime::block_on(
-            element.process(PipelinePacket::DataFrame(frame_carrying(OTHER)), &mut sink),
-        )
-        .unwrap();
-        let [PipelinePacket::DataFrame(forwarded)] = &sink.packets[..] else {
-            panic!("the gated frame should go downstream on its own");
-        };
-        assert_eq!(forwarded.sequence, 7, "forwarded untouched, not renumbered");
-        assert!(forwarded.meta.get::<BlobMeta>().is_some(), "metadata kept");
-        assert_eq!(element.inferred_count(), 0, "no session ran");
-
-        // The frame the gate admits reaches the session, which there is none of.
-        assert_eq!(
-            g2g_core::runtime::block_on(
-                element.process(PipelinePacket::DataFrame(frame_carrying(GATE)), &mut sink)
-            ),
-            Err(G2gError::NotConfigured)
-        );
-    }
 }

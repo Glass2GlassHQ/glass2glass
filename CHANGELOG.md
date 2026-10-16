@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1462: `executorchinfer` runs a `.pte` model through the ExecuTorch runtime behind the `executorch` feature.
 - M1461: `mfencode` stamps a frame that has no duration with the configured rate's period, since the MS encoder rejects a sample without one.
 - M1460: Windows CI runs the `mfencode` test, which now covers frames with no duration.
 - M1459: the LL-HLS test server starts publishing parts at the client's first request.

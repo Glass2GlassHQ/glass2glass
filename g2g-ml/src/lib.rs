@@ -3,10 +3,11 @@
 //! Experimental (Tier 3 in `STABILITY.md`): no stability promise. Device
 //! execution providers and GPU preprocess are host-validated, not CI-run.
 //!
-//! Two backends, both implementing the same `AsyncElement` contract and
+//! Three backends, all implementing the same `AsyncElement` contract and
 //! negotiating `Caps::Tensor` on their output pads:
 //! - `burn`: pure-Rust, `wgpu`-backed, for embedded / Wasm / RTOS targets.
 //! - `ort`: ONNX Runtime bindings for high-performance server inference.
+//! - `executorch`: PyTorch's ExecuTorch runtime, running a `.pte` program.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
@@ -14,6 +15,16 @@
 // in-crate paths can't collide with the `ort` dependency crate.
 #[cfg(feature = "ort")]
 pub mod ortinfer;
+
+// The inference element body shared by every model runtime, generic over the
+// runtime that loads and runs the model.
+#[cfg(any(feature = "ort", feature = "executorch"))]
+pub mod inference;
+
+// ExecuTorch inference element: a `.pte` program on ExecuTorch's portable CPU
+// kernels, the same element as `ortinfer` on a different runtime.
+#[cfg(feature = "executorch")]
+pub mod executorchinfer;
 
 // Launch-line registration of the ML elements into a g2g-core Registry, so
 // `ortinfer model=... ! detectionpostprocess` parses. Behind `launch`, which
@@ -34,6 +45,11 @@ pub mod batcher;
 pub mod postprocess;
 
 pub mod tensor_bytes;
+
+// The dims checks a model's declared input and output must pass, shared by the
+// model runtimes.
+#[cfg(any(feature = "ort", feature = "executorch"))]
+mod model_dims;
 
 // Dependency-free safetensors weight reader/writer (M262): import trained
 // weights at runtime into the hand-rolled inference elements without serde or
