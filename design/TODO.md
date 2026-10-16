@@ -347,3 +347,10 @@ unless it says otherwise.
 - **Pose and OBB heads in `detectionpostprocess`.** Decode the `-pose`
   keypoints and the `-obb` rotation angle into their own metadata records, and
   carry letterbox padding offsets so boxes land right on a non-square input.
+- GPU builds for `whispertranscribe` and `llamachat`: forward the `cuda` and
+  `vulkan` flags of `whisper-rs` / `llama-cpp-2` as g2g-ml features, and expose
+  `n-gpu-layers` on `llamachat` once a build exists that honours it.
+- Multi-turn `llamachat`: keep the conversation across frames (a bounded
+  history with a `reset` property) instead of one fresh context per frame.
+- Benchmark `ortinfer` against a hosted `pyelement` running the same ONNX model
+  on the 3060, to show where the native path wins and by how much.
