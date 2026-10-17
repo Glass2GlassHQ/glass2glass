@@ -117,8 +117,6 @@ Highest leverage first:
   connection); revisit only with a concrete need. Egress to a real CDN stays
   user-side.
 - **WebRTC.**
-  - A forced TURN-relay run on the LiveKit elements against a real TURN
-    server.
   - A Janus VideoRoom subscriber source; a Kinesis Video Streams signaller as
     wanted.
   - FEC is blocked upstream (str0m has no FEC payload; loss recovery is

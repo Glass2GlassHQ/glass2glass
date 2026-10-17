@@ -41,6 +41,7 @@ use g2g_core::{
     VideoCodec,
 };
 use g2g_plugins::filesrc::FileSrc;
+use g2g_plugins::livekit_signal::IceTransportPolicy;
 use g2g_plugins::livekit_signal::{mint_token, VideoGrant};
 use g2g_plugins::livekitsink::LiveKitSink;
 use g2g_plugins::livekitsrc::LiveKitSrc;
@@ -343,6 +344,125 @@ async fn list_participants(
     Ok(body)
 }
 
+/// Poll the RoomService API until `identity` is listed and `accept` holds for
+/// the ListParticipants JSON, or `patience` runs out; the last body either way.
+async fn verify_publisher(
+    url: &str,
+    api_key: &str,
+    api_secret: &str,
+    room: &str,
+    identity: &str,
+    patience: Duration,
+    accept: impl Fn(&str) -> bool,
+) -> Result<String, String> {
+    let base = http_base(url);
+    let deadline = Instant::now() + patience;
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        match list_participants(&base, api_key, api_secret, room).await {
+            Ok(body) => {
+                last = body;
+                if last.contains(identity) && accept(&last) {
+                    return Ok(last);
+                }
+            }
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// Relay-only publish: `ice-transport-policy=relay` offers no host or
+/// server-reflexive candidate, so the only way the SFU connects is through a
+/// TURN allocation on the relays the JoinResponse hands out (LiveKit Cloud does;
+/// a `--dev` server does not, set `G2G_TURN_SERVER` / `G2G_TURN_USER` /
+/// `G2G_TURN_PASS` to point at a coturn then). `G2G_DEBUG=LiveKitSink:info`
+/// prints the allocation the run uses.
+#[tokio::test]
+#[ignore = "needs a LiveKit server whose JoinResponse offers TURN (or G2G_TURN_SERVER)"]
+async fn livekit_publishes_h264_over_relay_only() {
+    g2g_core::log::init_from_env();
+    let (Ok(url), Ok(api_key), Ok(api_secret)) = (
+        std::env::var("G2G_LIVEKIT_URL"),
+        std::env::var("G2G_LIVEKIT_API_KEY"),
+        std::env::var("G2G_LIVEKIT_API_SECRET"),
+    ) else {
+        eprintln!(
+            "skipping: set G2G_LIVEKIT_URL, G2G_LIVEKIT_API_KEY, G2G_LIVEKIT_API_SECRET to run"
+        );
+        return;
+    };
+    let room = std::env::var("G2G_LIVEKIT_ROOM").unwrap_or_else(|_| "g2g-relay".to_string());
+    let identity = "g2g-relay-publisher";
+    let secs: u64 = std::env::var("G2G_PUBLISH_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+    eprintln!("publishing synthetic H.264 relay-only -> {url} room={room} as {identity}");
+
+    let publisher = {
+        let (url, room, api_key, api_secret) = (
+            url.clone(),
+            room.clone(),
+            api_key.clone(),
+            api_secret.clone(),
+        );
+        async move {
+            let mut src = PacedH264Src {
+                nals: Arc::new(synthetic_h264(300)),
+                duration: Duration::from_secs(secs),
+                width: 640,
+                height: 480,
+            };
+            let mut sink = LiveKitSink::new(url, room, identity)
+                .with_api_key(api_key, api_secret)
+                .with_ice_transport_policy(IceTransportPolicy::Relay);
+            if let Ok(server) = std::env::var("G2G_TURN_SERVER") {
+                sink = sink.with_turn_server(
+                    server,
+                    std::env::var("G2G_TURN_USER").unwrap_or_default(),
+                    std::env::var("G2G_TURN_PASS").unwrap_or_default(),
+                );
+            }
+            let clock = ZeroClock;
+            let stats = run_fanin_session(vec![&mut src], &mut sink, &clock, 8).await;
+            (stats, sink.frames_sent())
+        }
+    };
+    let verifier = verify_publisher(
+        &url,
+        &api_key,
+        &api_secret,
+        &room,
+        identity,
+        Duration::from_secs(secs.min(20)),
+        |body| body.contains("TR_"),
+    );
+
+    let publisher_fut = tokio::time::timeout(Duration::from_secs(secs + 10), publisher);
+    let (pub_res, verified) = tokio::join!(publisher_fut, verifier);
+    let (stats, frames_sent) = pub_res.expect("publisher completes in time");
+    eprintln!("publisher frames handed to session = {frames_sent}");
+    assert!(
+        stats.is_ok(),
+        "relay-only session failed (no TURN allocation?): {stats:?}"
+    );
+    assert!(
+        frames_sent > 50,
+        "expected a continuous publish, only {frames_sent} access units handed over"
+    );
+    match verified {
+        Ok(body) => eprintln!(
+            "RoomService confirmed the relay-only publisher + track:\n{}",
+            &body[..body.len().min(1200)]
+        ),
+        Err(last) => panic!(
+            "RoomService never showed the relay-only publisher with a track; last response:\n{last}"
+        ),
+    }
+}
+
 #[tokio::test]
 #[ignore = "needs a LiveKit server (G2G_LIVEKIT_URL + api key/secret + room)"]
 async fn livekit_publishes_h264() {
@@ -425,39 +545,19 @@ async fn livekit_publishes_h264() {
 
     // Verifier: after the publisher has had time to connect, poll the RoomService
     // API until the participant appears with a published track (or time out).
-    let verifier = {
-        let (url, room, api_key, api_secret) = (
-            url.clone(),
-            room.clone(),
-            api_key.clone(),
-            api_secret.clone(),
-        );
-        async move {
-            let base = http_base(&url);
-            let want_tracks = 1 + has_audio as usize;
-            let deadline = Instant::now() + Duration::from_secs(9);
-            let mut last = String::new();
-            while Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                match list_participants(&base, &api_key, &api_secret, &room).await {
-                    Ok(body) => {
-                        last = body;
-                        // The participant is present once the identity and a
-                        // track SID (`TR_...`) per published track are in the
-                        // JSON (two SIDs when audio publishes alongside video).
-                        if last.contains(identity)
-                            && last.contains("\"tracks\"")
-                            && last.matches("TR_").count() >= want_tracks
-                        {
-                            return Ok(last);
-                        }
-                    }
-                    Err(e) => last = e,
-                }
-            }
-            Err(last)
-        }
-    };
+    // The participant is present once the identity and a track SID (`TR_...`)
+    // per published track are in the JSON (two SIDs when audio publishes
+    // alongside video).
+    let want_tracks = 1 + has_audio as usize;
+    let verifier = verify_publisher(
+        &url,
+        &api_key,
+        &api_secret,
+        &room,
+        identity,
+        Duration::from_secs(9),
+        move |body| body.contains("\"tracks\"") && body.matches("TR_").count() >= want_tracks,
+    );
 
     let secs: u64 = std::env::var("G2G_PUBLISH_SECS")
         .ok()
@@ -582,36 +682,15 @@ async fn livekit_publishes_simulcast() {
     // Verifier: the participant's track must list every video layer (the sink
     // announces them in AddTrackRequest, and the SFU updates them from the
     // arriving rid streams).
-    let verifier = {
-        let (url, room, api_key, api_secret) = (
-            url.clone(),
-            room.clone(),
-            api_key.clone(),
-            api_secret.clone(),
-        );
-        async move {
-            let base = http_base(&url);
-            let deadline = Instant::now() + Duration::from_secs(9);
-            let mut last = String::new();
-            while Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                match list_participants(&base, &api_key, &api_secret, &room).await {
-                    Ok(body) => {
-                        last = body;
-                        let layer_count = last.matches("\"quality\"").count();
-                        if last.contains(identity)
-                            && last.contains("TR_")
-                            && layer_count >= want_layers
-                        {
-                            return Ok(last);
-                        }
-                    }
-                    Err(e) => last = e,
-                }
-            }
-            Err(last)
-        }
-    };
+    let verifier = verify_publisher(
+        &url,
+        &api_key,
+        &api_secret,
+        &room,
+        identity,
+        Duration::from_secs(9),
+        move |body| body.contains("TR_") && body.matches("\"quality\"").count() >= want_layers,
+    );
 
     let publisher_fut = tokio::time::timeout(Duration::from_secs(secs + 10), publisher);
     let (pub_res, verified) = tokio::join!(publisher_fut, verifier);
@@ -1124,33 +1203,15 @@ mod fan_graph {
 
         // Verifier: the RoomService must list the track with both video layers
         // (the sink announces them; the SFU binds them from the arriving rids).
-        let verifier = {
-            let (url, room, api_key, api_secret) = (
-                url.clone(),
-                room.clone(),
-                api_key.clone(),
-                api_secret.clone(),
-            );
-            async move {
-                let base = http_base(&url);
-                let deadline = Instant::now() + Duration::from_secs(secs.min(20));
-                let mut last = String::new();
-                while Instant::now() < deadline {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    match list_participants(&base, &api_key, &api_secret, &room).await {
-                        Ok(body) => {
-                            last = body;
-                            let layer_count = last.matches("\"quality\"").count();
-                            if last.contains(identity) && last.contains("TR_") && layer_count >= 2 {
-                                return Ok(last);
-                            }
-                        }
-                        Err(e) => last = e,
-                    }
-                }
-                Err(last)
-            }
-        };
+        let verifier = verify_publisher(
+            &url,
+            &api_key,
+            &api_secret,
+            &room,
+            identity,
+            Duration::from_secs(secs.min(20)),
+            |body| body.contains("TR_") && body.matches("\"quality\"").count() >= 2,
+        );
 
         let publisher_fut = tokio::time::timeout(Duration::from_secs(secs + 15), publisher);
         let (pub_res, verified) = tokio::join!(publisher_fut, verifier);

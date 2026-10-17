@@ -49,15 +49,15 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::livekit_signal::{
-    access_token, candidate_from_init_json, signal_ws_url, AddTrackRequest, SessionDescription,
-    SignalRequest, SignalResponse, SignalTarget, TrackSource, TrackType, VideoGrant,
+    access_token, candidate_from_init_json, signal_ws_url, AddTrackRequest, IceSettings,
+    SessionDescription, SignalRequest, SignalResponse, SignalTarget, TrackSource, TrackType,
+    VideoGrant,
 };
 use crate::livekitsrc::{answer_offer, recv_signal, send_signal};
-use crate::turn::TurnSet;
 use crate::webrtc_codec::{
     enable_tracks, opus_caps, sink_caps_alternatives, Track, WebRtcVideoCodec,
 };
-use crate::webrtc_util::{media_time_ns, send_transmit};
+use crate::webrtc_util::{feed_datagram, media_time_ns, send_transmit, IceTransportPolicy};
 
 /// Send input / recv output pad layout: 0 = video, 1 = audio.
 const VIDEO: usize = 0;
@@ -95,6 +95,7 @@ pub struct LiveKitDuplex {
     frame_limit: u64,
     /// How long to keep draining the peer after the local send side ends.
     linger: Duration,
+    ice: IceSettings,
     log_name: LogName,
 }
 
@@ -141,6 +142,7 @@ impl LiveKitDuplex {
             reverse: (0..2).map(|_| ReverseChannel::new()).collect(),
             frame_limit: u64::MAX,
             linger: Duration::from_millis(1500),
+            ice: IceSettings::default(),
             log_name: LogName::new(),
         }
     }
@@ -157,6 +159,26 @@ impl LiveKitDuplex {
     pub fn with_api_key(mut self, key: impl Into<String>, secret: impl Into<String>) -> Self {
         self.api_key = key.into();
         self.api_secret = secret.into();
+        self
+    }
+
+    /// Explicit TURN servers (comma-separated, see `turn-server`) with long-term
+    /// credentials, overriding the JoinResponse's relays.
+    pub fn with_turn_server(
+        mut self,
+        server: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.ice.turn_server = Some(server.into());
+        self.ice.turn_user = username.into();
+        self.ice.turn_pass = password.into();
+        self
+    }
+
+    /// Offer every candidate kind, or relays only (`ice-transport-policy`).
+    pub fn with_ice_transport_policy(mut self, policy: IceTransportPolicy) -> Self {
+        self.ice.transport_policy = policy;
         self
     }
 
@@ -293,7 +315,11 @@ impl MultiDuplexSession for LiveKitDuplex {
                 .clear_codecs();
             let mut pub_rtc =
                 enable_tracks(pub_config, [send_video, Track::Audio]).build(Instant::now());
-            crate::webrtc_util::add_ice_candidates(&mut pub_rtc, &pub_socket, None).await?;
+            let mut pub_turn = self
+                .ice
+                .gather(&mut pub_rtc, &pub_socket, &join, &*self)
+                .await?;
+            let pub_local = pub_socket.local_addr().map_err(io_err)?;
             let stream_id = format!("g2g-{}", self.identity);
             let video_cid = format!("{stream_id}-video");
             let audio_cid = format!("{stream_id}-audio");
@@ -353,7 +379,11 @@ impl MultiDuplexSession for LiveKitDuplex {
                 .clear_codecs();
             let mut sub_rtc = enable_tracks(sub_config, [Track::Video(recv_video), Track::Audio])
                 .build(Instant::now());
-            crate::webrtc_util::add_ice_candidates(&mut sub_rtc, &sub_socket, None).await?;
+            let mut sub_turn = self
+                .ice
+                .gather(&mut sub_rtc, &sub_socket, &join, &*self)
+                .await?;
+            let mut refresh_at = Instant::now() + crate::turn::REFRESH_INTERVAL;
 
             // Publisher handshake completion state (the answer + TrackPublished
             // arrive interleaved with subscriber offers on the same socket, so
@@ -391,8 +421,6 @@ impl MultiDuplexSession for LiveKitDuplex {
 
             let mut buf = alloc::vec![0u8; 2000];
             let mut sub_buf = alloc::vec![0u8; 2000];
-            // No TURN on the LiveKit path yet; the empty set feeds direct.
-            let mut no_turn = TurnSet::empty();
             let mut received = 0u64;
             macro_rules! finish {
                 () => {{
@@ -410,7 +438,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                     match pub_rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => {
-                            send_transmit(&pub_socket, &mut no_turn, &t).await;
+                            send_transmit(&pub_socket, &mut pub_turn, &t).await;
                         }
                         Ok(Output::Event(Event::KeyframeRequest(req))) => {
                             if req.mid == send_video_mid {
@@ -438,7 +466,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                     match sub_rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => {
-                            send_transmit(&sub_socket, &mut no_turn, &t).await;
+                            send_transmit(&sub_socket, &mut sub_turn, &t).await;
                         }
                         Ok(Output::Event(Event::MediaAdded(m))) => match m.kind {
                             MediaKind::Video if recv_video_mid.is_none() => {
@@ -601,27 +629,16 @@ impl MultiDuplexSession for LiveKitDuplex {
                     }
                     r = pub_socket.recv_from(&mut buf) => {
                         let Ok((n, source)) = r else { finish!() };
-                        if let Ok(contents) = (&buf[..n]).try_into() {
-                            let input = Input::Receive(Instant::now(), str0m::net::Receive {
-                                proto: str0m::net::Protocol::Udp,
-                                source,
-                                destination: pub_socket.local_addr().map_err(io_err)?,
-                                contents,
-                            });
-                            let _ = pub_rtc.handle_input(input);
-                        }
+                        let _ = feed_datagram(&mut pub_rtc, &mut pub_turn, pub_local, &buf[..n], source);
                     }
                     r = sub_socket.recv_from(&mut sub_buf) => {
                         let Ok((n, source)) = r else { finish!() };
-                        if let Ok(contents) = (&sub_buf[..n]).try_into() {
-                            let input = Input::Receive(Instant::now(), str0m::net::Receive {
-                                proto: str0m::net::Protocol::Udp,
-                                source,
-                                destination: sub_local,
-                                contents,
-                            });
-                            let _ = sub_rtc.handle_input(input);
-                        }
+                        let _ = feed_datagram(&mut sub_rtc, &mut sub_turn, sub_local, &sub_buf[..n], source);
+                    }
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if !pub_turn.is_empty() || !sub_turn.is_empty() => {
+                        pub_turn.refresh_all(&pub_socket).await;
+                        sub_turn.refresh_all(&sub_socket).await;
+                        refresh_at = Instant::now() + crate::turn::REFRESH_INTERVAL;
                     }
                     _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_ping)) => {
                         let now_ms = std::time::SystemTime::now()

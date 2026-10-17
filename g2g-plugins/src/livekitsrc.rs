@@ -53,14 +53,15 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::livekit_signal::{
-    access_token, candidate_from_init_json, signal_ws_url, LiveKitSignalLog, SessionDescription,
-    SignalRequest, SignalResponse, SignalTarget, VideoGrant,
+    access_token, candidate_from_init_json, signal_ws_url, IceSettings, LiveKitSignalLog,
+    SessionDescription, SignalRequest, SignalResponse, SignalTarget, VideoGrant,
+    ICE_TRANSPORT_POLICY_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
 };
 use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
-use crate::webrtc_util::{add_ice_candidates, media_time_ns, send_transmit};
+use crate::webrtc_util::{media_time_ns, send_transmit, IceTransportPolicy};
 
 /// Output port for the video track.
 const VIDEO_PORT: usize = 0;
@@ -94,6 +95,7 @@ pub struct LiveKitSrc {
     /// Stop after this many access units across both tracks and emit EOS
     /// (`u64::MAX` = unbounded). For tests / bounded runs.
     frame_limit: u64,
+    ice: IceSettings,
     log_name: LogName,
 }
 
@@ -138,6 +140,7 @@ impl LiveKitSrc {
             token: None,
             video_codec: WebRtcVideoCodec::default(),
             frame_limit: u64::MAX,
+            ice: IceSettings::default(),
             log_name: LogName::new(),
         }
     }
@@ -146,6 +149,26 @@ impl LiveKitSrc {
     pub fn with_api_key(mut self, key: impl Into<String>, secret: impl Into<String>) -> Self {
         self.api_key = key.into();
         self.api_secret = secret.into();
+        self
+    }
+
+    /// Explicit TURN servers (comma-separated, see `turn-server`) with long-term
+    /// credentials, overriding the JoinResponse's relays.
+    pub fn with_turn_server(
+        mut self,
+        server: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.ice.turn_server = Some(server.into());
+        self.ice.turn_user = username.into();
+        self.ice.turn_pass = password.into();
+        self
+    }
+
+    /// Offer every candidate kind, or relays only (`ice-transport-policy`).
+    pub fn with_ice_transport_policy(mut self, policy: IceTransportPolicy) -> Self {
+        self.ice.transport_policy = policy;
         self
     }
 
@@ -263,6 +286,10 @@ static LIVEKITSRC_PROPS: &[PropertySpec] = &[
     )
     .with_default("-1")
     .with_range("-1", "9223372036854775807"),
+    TURN_SERVER_PROP,
+    TURN_USER_PROP,
+    TURN_PASS_PROP,
+    ICE_TRANSPORT_POLICY_PROP,
 ];
 
 impl MultiOutputSource for LiveKitSrc {
@@ -302,6 +329,9 @@ impl MultiOutputSource for LiveKitSrc {
         if name == "video-codec" {
             return set_video_codec_property(&mut self.video_codec, &value);
         }
+        if let Some(result) = self.ice.set_property(name, &value) {
+            return result;
+        }
         let v = value.as_str().ok_or(PropError::Type)?;
         match name {
             "url" => self.url = v.into(),
@@ -325,7 +355,7 @@ impl MultiOutputSource for LiveKitSrc {
             "token" => Some(PropValue::Str(self.token.clone().unwrap_or_default())),
             "video-codec" => Some(get_video_codec_property(self.video_codec)),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
-            _ => None,
+            _ => self.ice.get_property(name),
         }
     }
 
@@ -375,9 +405,8 @@ impl MultiOutputSource for LiveKitSrc {
                 .clear_codecs();
             let mut rtc = enable_tracks(config, [Track::Video(video_codec), Track::Audio])
                 .build(Instant::now());
-            // Host candidate only (rides inline in each answer SDP); the server
-            // trickles its own candidates after the offer.
-            add_ice_candidates(&mut rtc, &socket, None).await?;
+            let mut turn = self.ice.gather(&mut rtc, &socket, &join, &*self).await?;
+            let mut refresh_at = Instant::now() + crate::turn::REFRESH_INTERVAL;
 
             out.push_to(
                 VIDEO_PORT,
@@ -396,8 +425,6 @@ impl MultiOutputSource for LiveKitSrc {
             let mut next_ping = Instant::now() + ping_interval;
 
             let mut buf = alloc::vec![0u8; 2000];
-            // No TURN on the LiveKit path yet; the empty set feeds direct.
-            let mut turn = crate::turn::TurnSet::empty();
             let mut seq = 0u64;
             macro_rules! finish {
                 () => {{
@@ -519,6 +546,10 @@ impl MultiOutputSource for LiveKitSrc {
                         let _ = crate::webrtc_util::feed_datagram(
                             &mut rtc, &mut turn, local, &buf[..n], source,
                         );
+                    }
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if !turn.is_empty() => {
+                        turn.refresh_all(&socket).await;
+                        refresh_at = Instant::now() + crate::turn::REFRESH_INTERVAL;
                     }
                     _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_ping)) => {
                         let now_ms = std::time::SystemTime::now()

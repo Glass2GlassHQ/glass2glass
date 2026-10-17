@@ -487,12 +487,39 @@ impl TurnSet {
         user: &str,
         pass: &str,
     ) -> Self {
+        let entries: Vec<(String, String, String)> = servers
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|entry| {
+                let (server, entry_user, entry_pass) = split_turn_credentials(entry);
+                (
+                    server,
+                    entry_user.unwrap_or_else(|| String::from(user)),
+                    entry_pass.unwrap_or_else(|| String::from(pass)),
+                )
+            })
+            .collect();
+        Self::setup_each(
+            rtc,
+            socket,
+            entries
+                .iter()
+                .map(|(s, u, p)| (s.as_str(), u.as_str(), p.as_str())),
+        )
+        .await
+    }
+
+    /// Allocate on every `(server, username, password)` entry, credentials kept
+    /// verbatim (a signalling server's TURN username may itself contain `:`).
+    pub(crate) async fn setup_each<'a>(
+        rtc: &mut Rtc,
+        socket: &UdpSocket,
+        entries: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>,
+    ) -> Self {
         let mut set = Vec::new();
-        for entry in servers.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            let (server, entry_user, entry_pass) = split_turn_credentials(entry);
-            let user = entry_user.as_deref().unwrap_or(user);
-            let pass = entry_pass.as_deref().unwrap_or(pass);
-            if let Some(client) = setup(rtc, socket, &server, user, pass).await {
+        for (server, user, pass) in entries {
+            if let Some(client) = setup(rtc, socket, server, user, pass).await {
                 set.push(client);
             }
         }

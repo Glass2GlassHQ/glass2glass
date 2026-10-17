@@ -64,15 +64,17 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::livekit_signal::{
     access_token, candidate_from_init_json, candidate_init_json, signal_ws_url, AddTrackRequest,
-    SessionDescription, SignalRequest, SignalResponse, SignalTarget, TrackSource, TrackType,
-    VideoGrant, VideoLayer, VideoQuality,
+    IceSettings, SessionDescription, SignalRequest, SignalResponse, SignalTarget, TrackSource,
+    TrackType, VideoGrant, VideoLayer, VideoQuality, ICE_TRANSPORT_POLICY_PROP, TURN_PASS_PROP,
+    TURN_SERVER_PROP, TURN_USER_PROP,
 };
 use crate::livekitsrc::{recv_signal, send_signal};
+use crate::turn::TurnSet;
 use crate::webrtc_codec::{enable_tracks, sink_caps_alternatives, Track, WebRtcVideoCodec};
 use crate::webrtc_simulcast::{
     rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
-use crate::webrtc_util::{add_ice_candidates, feed_datagram, select_host_ip, send_transmit};
+use crate::webrtc_util::{feed_datagram, select_host_ip, send_transmit, IceTransportPolicy};
 
 /// Default bounded depth of the element->session media channel (per direction).
 const DEFAULT_QUEUE_DEPTH: usize = 256;
@@ -137,6 +139,7 @@ pub struct LiveKitSink {
     /// Set on the first frame, after the join+publish handshake spawns the task.
     tx: Option<mpsc::Sender<MediaUnit>>,
     frames_sent: u64,
+    ice: IceSettings,
     log_name: LogName,
 }
 
@@ -187,6 +190,7 @@ impl LiveKitSink {
             sinks: Vec::new(),
             tx: None,
             frames_sent: 0,
+            ice: IceSettings::default(),
             log_name: LogName::new(),
         };
         s.sinks = alloc::vec![None; s.pads.input_count()];
@@ -221,6 +225,26 @@ impl LiveKitSink {
     pub fn with_api_key(mut self, key: impl Into<String>, secret: impl Into<String>) -> Self {
         self.api_key = key.into();
         self.api_secret = secret.into();
+        self
+    }
+
+    /// Explicit TURN servers (comma-separated, see `turn-server`) with long-term
+    /// credentials, overriding the JoinResponse's relays.
+    pub fn with_turn_server(
+        mut self,
+        server: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.ice.turn_server = Some(server.into());
+        self.ice.turn_user = username.into();
+        self.ice.turn_pass = password.into();
+        self
+    }
+
+    /// Offer every candidate kind, or relays only (`ice-transport-policy`).
+    pub fn with_ice_transport_policy(mut self, policy: IceTransportPolicy) -> Self {
+        self.ice.transport_policy = policy;
         self
     }
 
@@ -318,9 +342,7 @@ impl LiveKitSink {
             .clear_codecs()
             .enable_bwe(allocator.as_ref().map(|a| Bitrate::bps(a.initial_bps())));
         let mut rtc = enable_tracks(config, self.pads.tracks()).build(Instant::now());
-        // Host candidate only for the local dev server; STUN/TURN NAT traversal
-        // toward LiveKit Cloud is a follow-up.
-        add_ice_candidates(&mut rtc, &socket, None).await?;
+        let turn = self.ice.gather(&mut rtc, &socket, &join, self).await?;
         let has_video = !video_inputs.is_empty();
         // Derived from the configured caps (not the builder shape), so the
         // bare-pad-count launch path works too (M725).
@@ -527,6 +549,7 @@ impl LiveKitSink {
             ws_read,
             ping_interval,
             rx,
+            turn,
         }));
         self.tx = Some(tx);
         Ok(())
@@ -583,6 +606,10 @@ static LIVEKIT_PROPS: &[PropertySpec] = &[
         PropKind::Uint,
         "aggregate send bitrate cap in bits/second (0 = uncapped); a cap below the simulcast layers' combined nominal rate sheds the top layer",
     ),
+    TURN_SERVER_PROP,
+    TURN_USER_PROP,
+    TURN_PASS_PROP,
+    ICE_TRANSPORT_POLICY_PROP,
 ];
 
 fn h264_any() -> Caps {
@@ -714,6 +741,9 @@ impl MultiInputElement for LiveKitSink {
             self.max_send_bitrate = value.as_uint().ok_or(PropError::Type)?;
             return Ok(());
         }
+        if let Some(result) = self.ice.set_property(name, &value) {
+            return result;
+        }
         let s = value.as_str().ok_or(PropError::Type)?;
         match name {
             "url" => self.url = s.into(),
@@ -730,6 +760,9 @@ impl MultiInputElement for LiveKitSink {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         if name == "max-send-bitrate" {
             return Some(PropValue::Uint(self.max_send_bitrate));
+        }
+        if let Some(value) = self.ice.get_property(name) {
+            return Some(value);
         }
         let v = match name {
             "url" => self.url.clone(),
@@ -763,6 +796,8 @@ struct SessionArgs {
     ws_read: WsRead,
     ping_interval: Duration,
     rx: mpsc::Receiver<MediaUnit>,
+    /// The relays the data plane routes relayed pairs through (empty = direct).
+    turn: TurnSet,
 }
 
 /// The sans-IO driving loop: owns the `Rtc`, the UDP socket, and the signalling
@@ -782,14 +817,12 @@ async fn run_session(mut a: SessionArgs) {
     let mut last_estimate: Option<u64> = None;
     let mut alloc_tick = Instant::now() + Duration::from_secs(1);
 
-    // No TURN on the LiveKit path yet (host candidates only); the empty set
-    // routes every transmit direct.
-    let mut turn = crate::turn::TurnSet::empty();
+    let mut refresh_at = Instant::now() + crate::turn::REFRESH_INTERVAL;
     loop {
         let deadline = loop {
             match a.rtc.poll_output() {
                 Ok(Output::Timeout(t)) => break t,
-                Ok(Output::Transmit(t)) => send_transmit(&a.socket, &mut turn, &t).await,
+                Ok(Output::Transmit(t)) => send_transmit(&a.socket, &mut a.turn, &t).await,
                 Ok(Output::Event(Event::IceConnectionStateChange(
                     IceConnectionState::Disconnected,
                 ))) => {
@@ -843,9 +876,13 @@ async fn run_session(mut a: SessionArgs) {
         tokio::select! {
             r = a.socket.recv_from(&mut buf) => {
                 let Ok((n, source)) = r else { return };
-                if !feed_datagram(&mut a.rtc, &mut turn, a.local, &buf[..n], source) {
+                if !feed_datagram(&mut a.rtc, &mut a.turn, a.local, &buf[..n], source) {
                     return;
                 }
+            }
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if !a.turn.is_empty() => {
+                a.turn.refresh_all(&a.socket).await;
+                refresh_at = Instant::now() + crate::turn::REFRESH_INTERVAL;
             }
             msg = a.ws_read.next() => {
                 match msg {
@@ -870,7 +907,7 @@ async fn run_session(mut a: SessionArgs) {
             unit = a.rx.recv() => {
                 let Some(unit) = unit else {
                     // Clean end: flush the pacer tail before dropping the socket.
-                    crate::webrtc_util::drain_pacer(&mut a.rtc, &a.socket, &mut turn).await;
+                    crate::webrtc_util::drain_pacer(&mut a.rtc, &a.socket, &mut a.turn).await;
                     return;
                 };
                 let mid = unit.mid;
@@ -1076,6 +1113,18 @@ mod tests {
         );
         assert_eq!(s.get_property("room"), Some(PropValue::Str("r2".into())));
         assert_eq!(s.api_key, "k");
+        s.set_property("ice-transport-policy", PropValue::Str("relay".into()))
+            .unwrap();
+        s.set_property("turn-server", PropValue::Str("turn:r:3478".into()))
+            .unwrap();
+        assert_eq!(s.ice.transport_policy, IceTransportPolicy::Relay);
+        assert_eq!(
+            s.get_property("turn-server"),
+            Some(PropValue::Str("turn:r:3478".into()))
+        );
+        assert!(LIVEKIT_PROPS
+            .iter()
+            .any(|p| p.name == "ice-transport-policy"));
         assert_eq!(
             s.set_property("nope", PropValue::Str("x".into())),
             Err(PropError::Unknown)

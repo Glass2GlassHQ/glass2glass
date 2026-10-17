@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1470: the LiveKit elements allocate on the TURN servers the JoinResponse hands out (or `turn-server`), with `ice-transport-policy=relay` forcing the media through them.
 - M1469: `janusvrsink` publishes one track into a Janus VideoRoom over the Janus WebSocket API, behind the `webrtc-janus` feature.
 - M1468: `whipserversrc` serves HTTPS from `tls-cert-file` / `tls-key-file` and answers an ICE-restart PATCH with fresh credentials instead of 501.
 - M1467: the WebRTC sink, WHEP sources and `whipserversrc` expose live connection counters (bytes, packets, NACK / PLI, RTT, loss, BWE) through `stats_handle()`.

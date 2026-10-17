@@ -26,7 +26,15 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use g2g_core::log::LogSource;
-use g2g_core::{g2g_warn, G2gError, HardwareError};
+use g2g_core::{
+    g2g_info, g2g_warn, G2gError, HardwareError, PropError, PropKind, PropValue, PropertySpec,
+};
+use str0m::Rtc;
+use tokio::net::UdpSocket;
+
+use crate::turn::TurnSet;
+use crate::webrtc_util::add_ice_candidates;
+pub use crate::webrtc_util::IceTransportPolicy;
 
 /// `G2G_DEBUG=livekit-signal:...` names the signalling helpers the three LiveKit elements share.
 pub(crate) struct LiveKitSignalLog;
@@ -519,6 +527,115 @@ impl IceServer {
     }
 }
 
+const STUN_URL_SCHEME: &str = "stun:";
+const TURN_URL_SCHEMES: [&str; 2] = ["turn:", "turns:"];
+
+pub(crate) const TURN_SERVER_PROP: PropertySpec = PropertySpec::new(
+    "turn-server",
+    PropKind::Str,
+    "TURN servers, comma-separated (host:port, turn:/turns: URI, or turn://user:pass@host); empty = the servers the JoinResponse hands out",
+);
+pub(crate) const TURN_USER_PROP: PropertySpec = PropertySpec::new(
+    "turn-user",
+    PropKind::Str,
+    "TURN long-term credential username for turn-server",
+);
+pub(crate) const TURN_PASS_PROP: PropertySpec = PropertySpec::new(
+    "turn-pass",
+    PropKind::Str,
+    "TURN long-term credential password for turn-server",
+);
+pub(crate) const ICE_TRANSPORT_POLICY_PROP: PropertySpec = PropertySpec::new(
+    "ice-transport-policy",
+    PropKind::Str,
+    "local candidates to offer: all, or relay (TURN only, so the media is forced through a relay)",
+)
+.with_default("all")
+.with_enum_values("all | relay");
+
+/// The ICE knobs the three LiveKit elements share, and the gathering they drive:
+/// host plus the JoinResponse's STUN under `all`, TURN allocations from
+/// `turn-server` or, when unset, from the JoinResponse's TURN entries.
+#[derive(Debug, Clone, Default)]
+pub struct IceSettings {
+    pub turn_server: Option<String>,
+    pub turn_user: String,
+    pub turn_pass: String,
+    pub transport_policy: IceTransportPolicy,
+}
+
+impl IceSettings {
+    /// `Some` when `name` is one of the shared ICE properties.
+    pub(crate) fn set_property(
+        &mut self,
+        name: &str,
+        value: &PropValue,
+    ) -> Option<Result<(), PropError>> {
+        let Some(text) = value.as_str() else {
+            return matches!(
+                name,
+                "turn-server" | "turn-user" | "turn-pass" | "ice-transport-policy"
+            )
+            .then_some(Err(PropError::Type));
+        };
+        match name {
+            "turn-server" => self.turn_server = (!text.is_empty()).then(|| text.into()),
+            "turn-user" => self.turn_user = text.into(),
+            "turn-pass" => self.turn_pass = text.into(),
+            "ice-transport-policy" => match IceTransportPolicy::parse(text) {
+                Some(policy) => self.transport_policy = policy,
+                None => return Some(Err(PropError::Value)),
+            },
+            _ => return None,
+        }
+        Some(Ok(()))
+    }
+
+    pub(crate) fn get_property(&self, name: &str) -> Option<PropValue> {
+        let text = match name {
+            "turn-server" => self.turn_server.clone().unwrap_or_default(),
+            "turn-user" => self.turn_user.clone(),
+            "turn-pass" => self.turn_pass.clone(),
+            "ice-transport-policy" => self.transport_policy.name().into(),
+            _ => return None,
+        };
+        Some(PropValue::Str(text))
+    }
+
+    /// Add this socket's local candidates to `rtc` per the policy and return the
+    /// TURN allocations the run loop routes relayed traffic through. `relay`
+    /// with no reachable TURN server fails the run: nothing could connect.
+    pub(crate) async fn gather(
+        &self,
+        rtc: &mut Rtc,
+        socket: &UdpSocket,
+        join: &JoinResponse,
+        log: &dyn LogSource,
+    ) -> Result<TurnSet, G2gError> {
+        if self.transport_policy == IceTransportPolicy::All {
+            add_ice_candidates(rtc, socket, join.stun_server().as_deref()).await?;
+        }
+        let turn = match self.turn_server.as_deref() {
+            Some(servers) => {
+                TurnSet::setup(rtc, socket, servers, &self.turn_user, &self.turn_pass).await
+            }
+            None => TurnSet::setup_each(rtc, socket, join.turn_entries()).await,
+        };
+        g2g_info!(
+            log,
+            "ice policy {}, {} turn allocation(s) at {:?}",
+            self.transport_policy.name(),
+            turn.relay_addrs().len(),
+            turn.relay_addrs()
+        );
+        if self.transport_policy == IceTransportPolicy::Relay && turn.is_empty() {
+            g2g_warn!(log, "relay policy but no TURN allocation succeeded");
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        Ok(turn)
+    }
+}
+
 /// The publish-relevant slice of JoinResponse.
 #[derive(Debug, Clone, Default)]
 pub struct JoinResponse {
@@ -531,6 +648,25 @@ pub struct JoinResponse {
 }
 
 impl JoinResponse {
+    /// The first STUN server offered, as the `host:port` the binding client takes.
+    pub fn stun_server(&self) -> Option<String> {
+        self.ice_servers
+            .iter()
+            .flat_map(|s| s.urls.iter())
+            .find_map(|u| u.strip_prefix(STUN_URL_SCHEME))
+            .map(|hostport| hostport.split('?').next().unwrap_or(hostport).to_string())
+    }
+
+    /// Every TURN URL offered, each with its server's credentials.
+    pub fn turn_entries(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        self.ice_servers.iter().flat_map(|s| {
+            s.urls
+                .iter()
+                .filter(|u| TURN_URL_SCHEMES.iter().any(|scheme| u.starts_with(scheme)))
+                .map(move |u| (u.as_str(), s.username.as_str(), s.credential.as_str()))
+        })
+    }
+
     fn decode(buf: &[u8]) -> Self {
         let mut jr = JoinResponse::default();
         let mut pos = 0;
@@ -728,6 +864,86 @@ pub fn signal_ws_url(base_url: &str, token: &str, auto_subscribe: bool) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_response_splits_ice_servers_into_stun_and_turn() {
+        let join = JoinResponse {
+            ice_servers: alloc::vec![
+                IceServer {
+                    urls: alloc::vec!["stun:stun.example.com:3478".into()],
+                    ..IceServer::default()
+                },
+                IceServer {
+                    urls: alloc::vec![
+                        "turn:relay.example.com:3478?transport=udp".into(),
+                        "turns:relay.example.com:443?transport=tcp".into(),
+                    ],
+                    username: "1700000000:alice".into(),
+                    credential: "s3cret/=".into(),
+                },
+            ],
+            ..JoinResponse::default()
+        };
+        assert_eq!(join.stun_server().as_deref(), Some("stun.example.com:3478"));
+        let turn: Vec<_> = join.turn_entries().collect();
+        assert_eq!(
+            turn,
+            alloc::vec![
+                (
+                    "turn:relay.example.com:3478?transport=udp",
+                    "1700000000:alice",
+                    "s3cret/="
+                ),
+                (
+                    "turns:relay.example.com:443?transport=tcp",
+                    "1700000000:alice",
+                    "s3cret/="
+                ),
+            ]
+        );
+        assert!(JoinResponse::default().stun_server().is_none());
+    }
+
+    #[test]
+    fn ice_settings_properties_round_trip() {
+        let mut ice = IceSettings::default();
+        assert_eq!(ice.set_property("url", &PropValue::Str("x".into())), None);
+        assert_eq!(
+            ice.set_property("ice-transport-policy", &PropValue::Str("relay".into())),
+            Some(Ok(()))
+        );
+        assert_eq!(ice.transport_policy, IceTransportPolicy::Relay);
+        assert_eq!(
+            ice.set_property("ice-transport-policy", &PropValue::Str("nope".into())),
+            Some(Err(PropError::Value))
+        );
+        assert_eq!(
+            ice.set_property("turn-server", &PropValue::Uint(1)),
+            Some(Err(PropError::Type))
+        );
+        ice.set_property("turn-server", &PropValue::Str("turn:r:3478".into()));
+        ice.set_property("turn-user", &PropValue::Str("u".into()));
+        ice.set_property("turn-pass", &PropValue::Str("p".into()));
+        assert_eq!(
+            ice.get_property("turn-server"),
+            Some(PropValue::Str("turn:r:3478".into()))
+        );
+        assert_eq!(
+            ice.get_property("turn-user"),
+            Some(PropValue::Str("u".into()))
+        );
+        assert_eq!(
+            ice.get_property("turn-pass"),
+            Some(PropValue::Str("p".into()))
+        );
+        assert_eq!(
+            ice.get_property("ice-transport-policy"),
+            Some(PropValue::Str("relay".into()))
+        );
+        ice.set_property("turn-server", &PropValue::Str(String::new()));
+        assert_eq!(ice.turn_server, None);
+        assert_eq!(ice.get_property("room"), None);
+    }
 
     #[test]
     fn mint_token_matches_known_hs256_vector() {

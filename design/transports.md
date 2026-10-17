@@ -243,6 +243,16 @@ offers, in one loop over one socket, routing trickle by `SignalTarget`, exposed
 as a `MultiDuplexSession` for the duplex runner. Two participants exchanging A/V
 are validated live.
 
+All three gather ICE through one `IceSettings`: under `ice-transport-policy=all`
+the host candidate plus a server-reflexive one from the JoinResponse's STUN
+entry, and a TURN allocation on each relay the JoinResponse offers (LiveKit
+Cloud hands out three per join, with per-join credentials kept verbatim since
+the username carries a `:`), or on `turn-server` when set. `relay` offers the
+relayed candidates alone and fails the run when no allocation succeeds, so a
+connected session proves the relay path; the run loops refresh the allocations
+on the TURN client's interval. Validated relay-only against LiveKit Cloud's
+TURN, the RoomService listing the publisher's track.
+
 ### ICE and NAT traversal
 
 `webrtc_util::add_ice_candidates` always adds the socket's host candidate and,

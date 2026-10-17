@@ -35,6 +35,33 @@ impl LogSource for WebRtcHttpLog {
     }
 }
 
+/// Which local candidates an element offers: every kind, or TURN relays only
+/// (`ice-transport-policy=relay`, the webrtcbin knob that forces media through
+/// a relay to prove or require that path).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IceTransportPolicy {
+    #[default]
+    All,
+    Relay,
+}
+
+impl IceTransportPolicy {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "all" => Some(Self::All),
+            "relay" => Some(Self::Relay),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Relay => "relay",
+        }
+    }
+}
+
 /// STUN magic cookie (RFC 5389).
 const STUN_MAGIC: u32 = 0x2112_A442;
 
