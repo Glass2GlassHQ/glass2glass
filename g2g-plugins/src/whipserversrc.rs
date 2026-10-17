@@ -42,7 +42,7 @@ use str0m::media::{KeyframeRequestKind, MediaKind, Mid};
 use str0m::{Candidate, Event, IceConnectionState, IceCreds, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::frame::Frame;
-use g2g_core::log::{short_type_name, LogName, LogSource};
+use g2g_core::log::{short_type_name, LogName, LogSource, Target};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     g2g_debug, g2g_info, g2g_warn, Caps, FrameTiming, G2gError, HardwareError, MemoryDomain,
@@ -1045,7 +1045,10 @@ async fn accept_connections(
                 }
             }
             Err(e) => {
-                std::eprintln!("whipserversrc: accept failed: {e}");
+                g2g_warn!(
+                    &Target::category(short_type_name::<WhipServerSrc>()),
+                    "accept failed: {e}"
+                );
                 return;
             }
         }

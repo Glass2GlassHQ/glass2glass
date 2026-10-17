@@ -54,10 +54,11 @@ use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind, Mid, Pt, Rid};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
+use g2g_core::log::{short_type_name, LogName, LogSource, Target};
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
-    MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    ReverseChannel,
+    g2g_debug, g2g_warn, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    G2gError, HardwareError, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, ReverseChannel,
 };
 
 use crate::filesink::io_err;
@@ -136,6 +137,19 @@ pub struct LiveKitSink {
     /// Set on the first frame, after the join+publish handshake spawns the task.
     tx: Option<mpsc::Sender<MediaUnit>>,
     frames_sent: u64,
+    log_name: LogName,
+}
+
+impl LogSource for LiveKitSink {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
+    }
 }
 
 impl core::fmt::Debug for LiveKitSink {
@@ -173,6 +187,7 @@ impl LiveKitSink {
             sinks: Vec::new(),
             tx: None,
             frames_sent: 0,
+            log_name: LogName::new(),
         };
         s.sinks = alloc::vec![None; s.pads.input_count()];
         s
@@ -256,7 +271,7 @@ impl LiveKitSink {
         let ws_url = signal_ws_url(&self.url, &token, false);
 
         let (ws, _resp) = connect_async(&ws_url).await.map_err(|e| {
-            std::eprintln!("livekit: WebSocket connect to {} failed: {e}", self.url);
+            g2g_warn!(self, "WebSocket connect to {} failed: {e}", self.url);
             hw()
         })?;
         let mut ws = ws;
@@ -266,7 +281,7 @@ impl LiveKitSink {
             match recv_signal(&mut ws).await? {
                 Some(SignalResponse::Join(j)) => break j,
                 Some(SignalResponse::Leave) | None => {
-                    std::eprintln!("livekit: closed before JoinResponse");
+                    g2g_warn!(self, "closed before JoinResponse");
                     return Err(hw());
                 }
                 // Ignore anything before the join (none expected).
@@ -426,18 +441,18 @@ impl LiveKitSink {
                 Some(SignalResponse::Answer(sd)) => break sd,
                 Some(SignalResponse::Trickle(t)) => stash_candidate(&mut remote_cands, t),
                 Some(SignalResponse::Leave) | None => {
-                    std::eprintln!("livekit: closed before publisher answer");
+                    g2g_warn!(self, "closed before publisher answer");
                     return Err(hw());
                 }
                 Some(_) => {}
             }
         };
         let answer = SdpAnswer::from_sdp_string(&answer.sdp).map_err(|e| {
-            std::eprintln!("livekit: publisher answer parse failed: {e:?}");
+            g2g_warn!(self, "publisher answer parse failed: {e:?}");
             hw()
         })?;
         rtc.sdp_api().accept_answer(pending, answer).map_err(|e| {
-            std::eprintln!("livekit: publisher answer rejected: {e:?}");
+            g2g_warn!(self, "publisher answer rejected: {e:?}");
             hw()
         })?;
 
@@ -579,6 +594,14 @@ impl MultiInputElement for LiveKitSink {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn set_instance_name(&mut self, name: String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
+    }
 
     /// Copies each frame's bytes into the media unit it hands the session task,
     /// so every pad takes system frames only. The allocation cascade turns that
@@ -789,7 +812,10 @@ async fn run_session(mut a: SessionArgs) {
                         (Some(bps), Some(alloc)) => {
                             last_estimate = Some(bps);
                             if alloc.update(Instant::now(), bps) {
-                                std::eprintln!("livekit: layer set changed at {bps} bps estimate");
+                                g2g_debug!(
+                                    &Target::category(short_type_name::<LiveKitSink>()),
+                                    "layer set changed at {bps} bps estimate"
+                                );
                             }
                             for (rid, target) in alloc.targets(bps) {
                                 if let Some((_, rc)) =
@@ -895,7 +921,10 @@ async fn run_session(mut a: SessionArgs) {
                 alloc_tick = Instant::now() + Duration::from_secs(1);
                 if let (Some(alloc), Some(bps)) = (a.allocator.as_mut(), last_estimate) {
                     if alloc.update(Instant::now(), bps) {
-                        std::eprintln!("livekit: layer set changed at {bps} bps estimate");
+                        g2g_debug!(
+                                    &Target::category(short_type_name::<LiveKitSink>()),
+                                    "layer set changed at {bps} bps estimate"
+                                );
                         for (rid, target) in alloc.targets(bps) {
                             if let Some((_, rc)) =
                                 a.layer_reverse.iter().find(|(r, _)| *r == Some(rid))

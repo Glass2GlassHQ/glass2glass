@@ -23,7 +23,17 @@ use str0m::net::{Protocol, Receive, Transmit};
 use str0m::{Candidate, IceCreds, Input, Rtc};
 
 use crate::turn::TurnSet;
-use g2g_core::{G2gError, HardwareError};
+use g2g_core::log::LogSource;
+use g2g_core::{g2g_debug, g2g_info, g2g_warn, G2gError, HardwareError};
+
+/// `G2G_DEBUG=webrtc-http:...` names the shared WHIP/WHEP HTTP signalling path.
+struct WebRtcHttpLog;
+
+impl LogSource for WebRtcHttpLog {
+    fn log_category(&self) -> &'static str {
+        "webrtc-http"
+    }
+}
 
 /// STUN magic cookie (RFC 5389).
 const STUN_MAGIC: u32 = 0x2112_A442;
@@ -115,7 +125,7 @@ pub(crate) async fn post_sdp(
         Err(e) => {
             log_sdp_post_error(url, &e);
             if let Some(fallback_url) = localhost_ipv4_url(url) {
-                std::eprintln!("retrying WHIP/WHEP SDP POST with {fallback_url}");
+                g2g_info!(&WebRtcHttpLog, "retrying sdp POST with {fallback_url}");
                 send_sdp(&client, &fallback_url, bearer, offer_sdp)
                     .await
                     .map_err(|e| {
@@ -130,7 +140,10 @@ pub(crate) async fn post_sdp(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        std::eprintln!("webrtc sdp POST failed for {url}: HTTP {status}: {body}");
+        g2g_warn!(
+            &WebRtcHttpLog,
+            "sdp POST failed for {url}: HTTP {status}: {body}"
+        );
         return Err(G2gError::Hardware(HardwareError::Other));
     }
     // Resolve the resource URL before consuming the response for its body:
@@ -147,7 +160,7 @@ pub(crate) async fn post_sdp(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
     let answer = resp.text().await.map_err(|e| {
-        std::eprintln!("webrtc sdp response read failed for {url}: {e}");
+        g2g_warn!(&WebRtcHttpLog, "sdp response read failed for {url}: {e}");
         G2gError::Hardware(HardwareError::Other)
     })?;
     Ok(WhipSession {
@@ -239,7 +252,10 @@ pub(crate) async fn patch_frag_with_mid_fallback(
     if outcome != TricklePatch::Failed || params.mid == "0" {
         return (outcome, body);
     }
-    std::eprintln!("webrtc trickle PATCH retrying with m-line index mid");
+    g2g_debug!(
+        &WebRtcHttpLog,
+        "trickle PATCH retrying with m-line index mid"
+    );
     let frag = build_sdpfrag(params, "0", candidates);
     patch_sdpfrag(resource, bearer, etag, frag).await
 }
@@ -271,16 +287,22 @@ pub(crate) async fn patch_sdpfrag(
                 let body = resp.text().await.ok().filter(|b| !b.is_empty());
                 (TricklePatch::Accepted, body)
             } else if status == 405 || status == 501 {
-                std::eprintln!("webrtc trickle PATCH unsupported by {resource}: HTTP {status}");
+                g2g_info!(
+                    &WebRtcHttpLog,
+                    "trickle PATCH unsupported by {resource}: HTTP {status}"
+                );
                 (TricklePatch::Unsupported, None)
             } else {
                 let body = resp.text().await.unwrap_or_default();
-                std::eprintln!("webrtc trickle PATCH to {resource} failed: HTTP {status}: {body}");
+                g2g_warn!(
+                    &WebRtcHttpLog,
+                    "trickle PATCH to {resource} failed: HTTP {status}: {body}"
+                );
                 (TricklePatch::Failed, None)
             }
         }
         Err(e) => {
-            std::eprintln!("webrtc trickle PATCH to {resource} errored: {e}");
+            g2g_warn!(&WebRtcHttpLog, "trickle PATCH to {resource} errored: {e}");
             (TricklePatch::Failed, None)
         }
     }
@@ -295,8 +317,12 @@ pub(crate) async fn delete_resource(resource: &str, bearer: Option<&str>) {
         req = req.header("Authorization", format!("Bearer {token}"));
     }
     match req.send().await {
-        Ok(resp) => std::eprintln!("webrtc DELETE {resource}: HTTP {}", resp.status().as_u16()),
-        Err(e) => std::eprintln!("webrtc DELETE {resource} errored: {e}"),
+        Ok(resp) => g2g_debug!(
+            &WebRtcHttpLog,
+            "DELETE {resource}: HTTP {}",
+            resp.status().as_u16()
+        ),
+        Err(e) => g2g_warn!(&WebRtcHttpLog, "DELETE {resource} errored: {e}"),
     }
 }
 
@@ -511,12 +537,13 @@ fn localhost_ipv4_url(url: &str) -> Option<String> {
 }
 
 fn log_sdp_post_error(url: &str, e: &reqwest::Error) {
-    std::eprintln!("webrtc sdp POST failed for {url}: {e:?}");
+    let mut line = format!("sdp POST failed for {url}: {e:?}");
     let mut source = std::error::Error::source(e);
     while let Some(e) = source {
-        std::eprintln!("  caused by: {e}");
+        line.push_str(&format!(", caused by: {e}"));
         source = e.source();
     }
+    g2g_warn!(&WebRtcHttpLog, "{line}");
 }
 
 /// Add this socket's ICE candidates to `rtc` up front: the host candidate plus a

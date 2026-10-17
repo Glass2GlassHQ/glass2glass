@@ -51,10 +51,11 @@ use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, Mid, Pt};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
+use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
-    HardwareError, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    Reconfigure,
+    g2g_warn, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    G2gError, HardwareError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Reconfigure,
 };
 
 use crate::filesink::io_err;
@@ -132,6 +133,19 @@ pub struct WebRtcSink {
     last_bitrate_sent: u64,
     frames_sent: u64,
     stats: WebRtcStatsHandle,
+    log_name: LogName,
+}
+
+impl LogSource for WebRtcSink {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
+    }
 }
 
 impl core::fmt::Debug for WebRtcSink {
@@ -165,6 +179,7 @@ impl WebRtcSink {
             last_bitrate_sent: 0,
             frames_sent: 0,
             stats: WebRtcStatsHandle::default(),
+            log_name: LogName::new(),
         }
     }
 
@@ -255,7 +270,7 @@ impl WebRtcSink {
                 None,
             );
             let (offer, pending) = api.apply().ok_or_else(|| {
-                std::eprintln!("webrtc offer creation failed");
+                g2g_warn!(self, "offer creation failed");
                 G2gError::Hardware(HardwareError::Other)
             })?;
             (offer.to_sdp_string(), pending, mid)
@@ -264,15 +279,17 @@ impl WebRtcSink {
         // WHIP: POST the offer, receive the answer SDP + resource URL, apply it.
         let session = post_sdp(&self.whip_url, self.bearer.as_deref(), offer_sdp.clone()).await?;
         let answer = SdpAnswer::from_sdp_string(&session.answer).map_err(|e| {
-            std::eprintln!(
-                "webrtc answer SDP parse failed: {e:?}\nlocal offer:\n{offer_sdp}\nremote answer:\n{}",
+            g2g_warn!(
+                self,
+                "answer SDP parse failed: {e:?}\nlocal offer:\n{offer_sdp}\nremote answer:\n{}",
                 session.answer
             );
             G2gError::Hardware(HardwareError::Other)
         })?;
         rtc.sdp_api().accept_answer(pending, answer).map_err(|e| {
-            std::eprintln!(
-                "webrtc answer SDP rejected: {e:?}\nlocal offer:\n{offer_sdp}\nremote answer:\n{}",
+            g2g_warn!(
+                self,
+                "answer SDP rejected: {e:?}\nlocal offer:\n{offer_sdp}\nremote answer:\n{}",
                 session.answer
             );
             G2gError::Hardware(HardwareError::Other)
@@ -356,6 +373,14 @@ impl AsyncElement for WebRtcSink {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn set_instance_name(&mut self, name: String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
+    }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // One track per sink instance: any carried video codec, or Opus audio.

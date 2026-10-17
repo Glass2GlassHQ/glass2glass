@@ -40,10 +40,11 @@ use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 
 use g2g_core::fanout::{DuplexInbound, MultiDuplexSession};
 use g2g_core::frame::Frame;
+use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError, HardwareError,
-    MemoryDomain, MultiOutputSink, PipelinePacket, ReverseChannel,
+    g2g_warn, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
+    HardwareError, MemoryDomain, MultiOutputSink, PipelinePacket, ReverseChannel,
 };
 
 use crate::filesink::io_err;
@@ -94,6 +95,19 @@ pub struct LiveKitDuplex {
     frame_limit: u64,
     /// How long to keep draining the peer after the local send side ends.
     linger: Duration,
+    log_name: LogName,
+}
+
+impl LogSource for LiveKitDuplex {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
+    }
 }
 
 impl core::fmt::Debug for LiveKitDuplex {
@@ -127,6 +141,7 @@ impl LiveKitDuplex {
             reverse: (0..2).map(|_| ReverseChannel::new()).collect(),
             frame_limit: u64::MAX,
             linger: Duration::from_millis(1500),
+            log_name: LogName::new(),
         }
     }
 
@@ -243,7 +258,7 @@ impl MultiDuplexSession for LiveKitDuplex {
             let token = self.access_token()?;
             let ws_url = signal_ws_url(&self.url, &token, true);
             let (mut ws, _resp) = connect_async(&ws_url).await.map_err(|e| {
-                std::eprintln!("livekit: WebSocket connect to {} failed: {e}", self.url);
+                g2g_warn!(self, "WebSocket connect to {} failed: {e}", self.url);
                 hw()
             })?;
             let join = loop {

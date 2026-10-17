@@ -25,7 +25,17 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use g2g_core::{G2gError, HardwareError};
+use g2g_core::log::LogSource;
+use g2g_core::{g2g_warn, G2gError, HardwareError};
+
+/// `G2G_DEBUG=livekit-signal:...` names the signalling helpers the three LiveKit elements share.
+pub(crate) struct LiveKitSignalLog;
+
+impl LogSource for LiveKitSignalLog {
+    fn log_category(&self) -> &'static str {
+        "livekit-signal"
+    }
+}
 
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
@@ -151,7 +161,7 @@ pub(crate) fn access_token(
         return Ok(token.to_string());
     }
     if api_key.is_empty() || api_secret.is_empty() {
-        std::eprintln!("livekit: no token and no api-key/api-secret set");
+        g2g_warn!(&LiveKitSignalLog, "no token and no api-key/api-secret set");
         return Err(G2gError::Hardware(HardwareError::Other));
     }
     let now = std::time::SystemTime::now()

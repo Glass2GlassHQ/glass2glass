@@ -44,16 +44,17 @@ use str0m::media::{KeyframeRequestKind, MediaKind, Mid};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::frame::Frame;
+use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    Caps, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink, MultiOutputSource,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    g2g_warn, Caps, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink,
+    MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
 use crate::livekit_signal::{
-    access_token, candidate_from_init_json, signal_ws_url, SessionDescription, SignalRequest,
-    SignalResponse, SignalTarget, VideoGrant,
+    access_token, candidate_from_init_json, signal_ws_url, LiveKitSignalLog, SessionDescription,
+    SignalRequest, SignalResponse, SignalTarget, VideoGrant,
 };
 use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
@@ -93,6 +94,19 @@ pub struct LiveKitSrc {
     /// Stop after this many access units across both tracks and emit EOS
     /// (`u64::MAX` = unbounded). For tests / bounded runs.
     frame_limit: u64,
+    log_name: LogName,
+}
+
+impl LogSource for LiveKitSrc {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
+    }
 }
 
 impl core::fmt::Debug for LiveKitSrc {
@@ -124,6 +138,7 @@ impl LiveKitSrc {
             token: None,
             video_codec: WebRtcVideoCodec::default(),
             frame_limit: u64::MAX,
+            log_name: LogName::new(),
         }
     }
 
@@ -177,7 +192,7 @@ pub(crate) async fn recv_signal(
             Some(Ok(Message::Close(_))) | None => return Ok(None),
             Some(Ok(_)) => continue,
             Some(Err(e)) => {
-                std::eprintln!("livekit: signal recv failed: {e}");
+                g2g_warn!(&LiveKitSignalLog, "signal recv failed: {e}");
                 return Err(G2gError::Hardware(HardwareError::Other));
             }
         }
@@ -189,7 +204,7 @@ pub(crate) async fn send_signal(
     req: &SignalRequest,
 ) -> Result<(), G2gError> {
     ws.send(Message::Binary(req.encode())).await.map_err(|e| {
-        std::eprintln!("livekit: signal send failed: {e}");
+        g2g_warn!(&LiveKitSignalLog, "signal send failed: {e}");
         G2gError::Hardware(HardwareError::Other)
     })
 }
@@ -202,11 +217,11 @@ pub(crate) async fn answer_offer(
 ) -> Result<(), G2gError> {
     let hw = || G2gError::Hardware(HardwareError::Other);
     let offer = SdpOffer::from_sdp_string(&sd.sdp).map_err(|e| {
-        std::eprintln!("livekit: subscriber offer parse failed: {e:?}");
+        g2g_warn!(&LiveKitSignalLog, "subscriber offer parse failed: {e:?}");
         hw()
     })?;
     let answer = rtc.sdp_api().accept_offer(offer).map_err(|e| {
-        std::eprintln!("livekit: subscriber offer rejected: {e:?}");
+        g2g_warn!(&LiveKitSignalLog, "subscriber offer rejected: {e:?}");
         hw()
     })?;
     send_signal(
@@ -255,6 +270,14 @@ impl MultiOutputSource for LiveKitSrc {
         = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn set_instance_name(&mut self, name: String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
+    }
 
     fn output_count(&self) -> usize {
         2
@@ -321,7 +344,7 @@ impl MultiOutputSource for LiveKitSrc {
             let token = self.access_token()?;
             let ws_url = signal_ws_url(&self.url, &token, true);
             let (mut ws, _resp) = connect_async(&ws_url).await.map_err(|e| {
-                std::eprintln!("livekit: WebSocket connect to {} failed: {e}", self.url);
+                g2g_warn!(self, "WebSocket connect to {} failed: {e}", self.url);
                 hw()
             })?;
 
@@ -330,7 +353,7 @@ impl MultiOutputSource for LiveKitSrc {
                 match recv_signal(&mut ws).await? {
                     Some(SignalResponse::Join(j)) => break j,
                     Some(SignalResponse::Leave) | None => {
-                        std::eprintln!("livekit: closed before JoinResponse");
+                        g2g_warn!(self, "closed before JoinResponse");
                         return Err(hw());
                     }
                     Some(_) => {}
@@ -486,7 +509,7 @@ impl MultiOutputSource for LiveKitSrc {
                             Some(Ok(Message::Close(_))) | None => finish!(),
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
-                                std::eprintln!("livekit: signal recv failed: {e}");
+                                g2g_warn!(self, "signal recv failed: {e}");
                                 finish!();
                             }
                         }
