@@ -192,6 +192,10 @@ webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "tokio/io-util", "de
 # std. `wss://` (LiveKit Cloud) works natively: tungstenite's native-tls is the
 # same TLS stack reqwest (the `webrtc` WHIP client) already links.
 webrtc-livekit = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/native-tls", "futures-util/sink", "dep:base64"]
+# Janus VideoRoom publisher (JanusVrSink): joins a room over the Janus WebSocket
+# API (JSON, `janus-protocol` subprotocol) and publishes one track through the
+# str0m PeerConnection. Layers on `webrtc` like the LiveKit elements.
+webrtc-janus = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/native-tls", "futures-util/sink", "dep:serde_json"]
 # ONVIF camera discovery + RTSP stream-URI resolution (OnvifSrc). Hand-rolled
 # WS-Discovery Probe (UDP multicast) and the two media SOAP calls
 # (GetProfiles / GetStreamUri) with a WS-Security UsernameToken digest header.

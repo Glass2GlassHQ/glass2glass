@@ -909,6 +909,9 @@ pub mod whipserversrc;
 // (JWT + hand-rolled protobuf), `livekitsink` the publish element, `livekitsrc`
 // the room subscriber (answers the server-offered subscriber PC). Gated behind
 // `webrtc-livekit` (implies `webrtc`, adds the WebSocket client + JWT crypto).
+// Janus VideoRoom publisher over the Janus WebSocket API.
+#[cfg(feature = "webrtc-janus")]
+pub mod janusvrsink;
 #[cfg(feature = "webrtc-livekit")]
 pub mod livekit_signal;
 #[cfg(feature = "webrtc-livekit")]

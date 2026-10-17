@@ -137,6 +137,22 @@ loopback from `WebRtcSink` in every carried codec and in Opus, and by a Chromium
 publish of `examples/whip-publisher.html` decoded through `avdec_h264` to a
 Wayland window.
 
+### Janus VideoRoom
+
+`JanusVrSink` (`janusvrsink`, feature `webrtc-janus`) is the WHIP sink's shape
+with the Janus WebSocket API as the signaller: `create` a session, `attach`
+`janus.plugin.videoroom`, `join` as a publisher (`room-id`, optional `feed-id`
+and `display-name`, `secret-key` as `apisecret`, ids as numbers unless
+`use-string-ids`), `publish` with the str0m offer, apply the answer from the
+`configured` event, then run the same sans-IO media loop with `keepalive`
+every ten seconds and server `trickle` events applied. Every local candidate
+rides in the offer (`trickle: false`), so STUN gathering happens before it.
+EOS closes the unit channel, the session task flushes the pacer, sends `leave`,
+waits briefly for `leaving: ok`, and the element's EOS returns once it has.
+Validated by a default-run test against a mock Janus (the message flow plus a
+real str0m answerer receiving the media); a live Janus run is the user-side
+check.
+
 ### Stats
 
 Every str0m element (`WebRtcSink`, `WebRtcWhepSrc`, `WebRtcWhepSessionSrc`,

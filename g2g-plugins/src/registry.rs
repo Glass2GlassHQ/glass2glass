@@ -2555,6 +2555,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "webrtcwhepsessionsrc" => "webrtc";
         "whipserversrc" => "webrtc";
         "livekitsink" => "webrtc-livekit";
+        "janusvrsink" => "webrtc-janus";
         "livekitsrc" => "webrtc-livekit";
         "httpsrc" => "http-src";
         "hlssrc" => "hls";
@@ -3373,6 +3374,12 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(feature = "webrtc")]
     reg.register_launch(LaunchFactory::new("webrtcsink", Vec::new(), || {
         Box::new(WebRtcSink::new(""))
+    }));
+    #[cfg(feature = "webrtc-janus")]
+    reg.register_launch(LaunchFactory::new("janusvrsink", Vec::new(), || {
+        Box::new(crate::janusvrsink::JanusVrSink::new(
+            crate::janusvrsink::DEFAULT_ENDPOINT,
+        ))
     }));
     // Multi-track WHIP session sink (M725): a terminal fan-in whose track kinds
     // come from each linked pad's caps (video pads group as simulcast layers in

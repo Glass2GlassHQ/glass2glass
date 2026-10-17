@@ -69,17 +69,17 @@ use crate::webrtc_util::{
 
 /// Default bounded depth of the element->session media channel. Backpressures
 /// the pipeline if the session task falls behind the encoder.
-const DEFAULT_QUEUE_DEPTH: usize = 256;
+pub(crate) const DEFAULT_QUEUE_DEPTH: usize = 256;
 
 /// Initial BWE estimate seeded into str0m before any feedback arrives. The
 /// congestion controller adapts from here as TWCC/REMB reports come in.
-const INITIAL_BITRATE_BPS: u64 = 2_000_000;
+pub(crate) const INITIAL_BITRATE_BPS: u64 = 2_000_000;
 
 /// One encoded access unit handed from the element to the session task.
 #[derive(Debug)]
-struct MediaUnit {
-    pts_ns: u64,
-    data: Vec<u8>,
+pub(crate) struct MediaUnit {
+    pub(crate) pts_ns: u64,
+    pub(crate) data: Vec<u8>,
 }
 
 /// WHIP-publishing WebRTC egress sink. See the module docs.

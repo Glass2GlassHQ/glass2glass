@@ -27,8 +27,6 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use std::collections::hash_map::RandomState;
-use std::hash::BuildHasher;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -60,8 +58,8 @@ use crate::webrtc_codec::{
 };
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
-    add_ice_candidates, feed_datagram, media_time_ns, parse_restart_answer_frag, select_host_ip,
-    send_transmit,
+    add_ice_candidates, feed_datagram, media_time_ns, parse_restart_answer_frag, random_hex_id,
+    select_host_ip, send_transmit,
 };
 
 const VIDEO_PORT: usize = 0;
@@ -276,7 +274,7 @@ impl WhipServerSrc {
                 return HttpResponse::text(Status::BadRequest, format!("offer rejected: {e:?}"));
             }
         };
-        let resource_id = random_resource_id();
+        let resource_id = random_hex_id();
         g2g_info!(
             self,
             "publisher accepted, resource {resource_id}, rtc socket {local}"
@@ -779,10 +777,6 @@ fn bind_target(host_addr: &str) -> Option<BindTarget> {
         format!("{authority}:{default_port}")
     };
     Some(BindTarget { authority, tls })
-}
-
-fn random_resource_id() -> String {
-    format!("{:016x}", RandomState::new().hash_one(Instant::now()))
 }
 
 fn entity_tag(resource_id: &str) -> String {
