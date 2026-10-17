@@ -2556,6 +2556,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "whipserversrc" => "webrtc";
         "livekitsink" => "webrtc-livekit";
         "janusvrsink" => "webrtc-janus";
+        "janusvrsrc" => "webrtc-janus";
         "livekitsrc" => "webrtc-livekit";
         "httpsrc" => "http-src";
         "hlssrc" => "hls";
@@ -3407,6 +3408,16 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
         "webrtcwhepsessionsrc",
         |_n| Box::new(crate::webrtcwhepsession::WebRtcWhepSessionSrc::new("")),
+    ));
+    // Janus VideoRoom subscriber, same two outputs.
+    #[cfg(feature = "webrtc-janus")]
+    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
+        "janusvrsrc",
+        |_n| {
+            Box::new(crate::janusvrsrc::JanusVrSrc::new(
+                crate::janusvrsrc::DEFAULT_ENDPOINT,
+            ))
+        },
     ));
     // WHIP server ingest: a publisher POSTs to `host-addr`, same two outputs.
     #[cfg(feature = "webrtc")]

@@ -641,7 +641,7 @@ jobs:
           cargo check -p g2g-plugins --locked --all-targets --features webrtc-janus
           cargo test -p g2g-plugins --locked --features webrtc --lib -- webrtc turn:: whipserversrc::
           cargo test -p g2g-plugins --locked --features webrtc-livekit --lib -- livekit
-          cargo test -p g2g-plugins --locked --features webrtc-janus --lib -- janusvrsink
+          cargo test -p g2g-plugins --locked --features webrtc-janus --lib -- janus
           cargo test -p g2g-plugins --locked --features webrtc-janus --test janusvr_loopback
           cargo test -p g2g-plugins --locked --features webrtc --test m249_duplex_session
           cargo test -p g2g-plugins --locked --features webrtc --test webrtc_loss_resilience

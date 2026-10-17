@@ -5,7 +5,8 @@
 //! Payload bytes stay in `1..=251`, so no byte run can emulate an Annex-B start
 //! code and split a NAL unit wrongly.
 
-use g2g_core::{Caps, Dim, Rate};
+use g2g_core::frame::Frame;
+use g2g_core::{Caps, Dim, MemoryDomain, PipelinePacket, Rate};
 use g2g_plugins::webrtc_codec::WebRtcVideoCodec;
 
 pub(crate) const WIDTH: u32 = 640;
@@ -201,4 +202,21 @@ pub(crate) fn synthetic_stream_sized(
 /// [`synthetic_stream_sized`] with units that span several RTP packets.
 pub(crate) fn synthetic_stream(codec: WebRtcVideoCodec, frames: usize) -> Vec<Vec<u8>> {
     synthetic_stream_sized(codec, frames, Sizes::LARGE)
+}
+
+pub(crate) fn data_frames(packets: &[PipelinePacket]) -> Vec<&Frame> {
+    packets
+        .iter()
+        .filter_map(|p| match p {
+            PipelinePacket::DataFrame(frame) => Some(frame),
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn frame_bytes(frame: &Frame) -> &[u8] {
+    match &frame.domain {
+        MemoryDomain::System(slice) => slice.as_slice(),
+        other => panic!("frame outside system memory: {other:?}"),
+    }
 }

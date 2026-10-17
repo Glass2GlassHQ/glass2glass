@@ -7,6 +7,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M1472: `whipserversrc` takes `max-publishers` concurrent publishers, each on its own video + audio pad pair with its own stats handle.
+- M1471: `janusvrsrc` subscribes to a Janus VideoRoom publisher and emits its video and Opus, and `janusvrsink` unpublishes before it leaves.
 - M1470: the LiveKit elements allocate on the TURN servers the JoinResponse hands out (or `turn-server`), with `ice-transport-policy=relay` forcing the media through them.
 - M1469: `janusvrsink` publishes one track into a Janus VideoRoom over the Janus WebSocket API, behind the `webrtc-janus` feature.
 - M1468: `whipserversrc` serves HTTPS from `tls-cert-file` / `tls-key-file` and answers an ICE-restart PATCH with fresh credentials instead of 501.
