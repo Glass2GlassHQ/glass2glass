@@ -2411,6 +2411,9 @@ fn register_aliases(reg: &mut Registry) {
     reg.register_alias("dashmp4mux", &["mp4mux"]);
     reg.register_alias("whepsrc", &["webrtcsrc"]);
     reg.register_alias("whipsink", &["webrtcsink"]);
+    // gst-plugins-rs names for the WHIP / WHEP clients.
+    reg.register_alias("whipclientsink", &["webrtcsink"]);
+    reg.register_alias("whepclientsrc", &["webrtcsrc"]);
     // gst's short AAC encoder name -> the libavcodec AAC encoder.
     reg.register_alias("aacenc", &["avenc_aac"]);
     // GStreamer's nvcodec names -> the native g2g NVENC / NVDEC elements. Resolve
@@ -2550,6 +2553,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "webrtcsink" => "webrtc";
         "webrtcsessionsink" => "webrtc";
         "webrtcwhepsessionsrc" => "webrtc";
+        "whipserversrc" => "webrtc";
         "livekitsink" => "webrtc-livekit";
         "livekitsrc" => "webrtc-livekit";
         "httpsrc" => "http-src";
@@ -3396,6 +3400,16 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
         "webrtcwhepsessionsrc",
         |_n| Box::new(crate::webrtcwhepsession::WebRtcWhepSessionSrc::new("")),
+    ));
+    // WHIP server ingest: a publisher POSTs to `host-addr`, same two outputs.
+    #[cfg(feature = "webrtc")]
+    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
+        "whipserversrc",
+        |_n| {
+            Box::new(crate::whipserversrc::WhipServerSrc::new(
+                crate::whipserversrc::DEFAULT_HOST_ADDR,
+            ))
+        },
     ));
     #[cfg(all(target_os = "linux", feature = "kms-sink"))]
     reg.register_launch(

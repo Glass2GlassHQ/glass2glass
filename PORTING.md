@@ -684,7 +684,8 @@ to hit.
   everywhere.
 - **Transport.** SRT (TSBPD/AES/key-rotation), RTP with RTCP, FEC (ULPFEC,
   FlexFEC) and RTX, RTMP ingest and egress, an RTSP server, and WebRTC
-  (WHIP/WHEP) are in. Open: RTP over QUIC (waiting on the RFC and an assigned
+  (WHIP and WHEP clients, a WHIP server, H.264 / VP8 / VP9 / H.265 / AV1 +
+  Opus) are in. Open: RTP over QUIC (waiting on the RFC and an assigned
   ALPN), several NetStreams over one RTMP connection (declined, it needs a
   runtime-arity fan-out the fixed-arity model has no room for), WebRTC FEC
   (str0m carries no FEC payload, so loss recovery is NACK/RTX only), and a run

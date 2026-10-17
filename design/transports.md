@@ -112,6 +112,24 @@ element that drains it, a factory of `None` leaving the port counted as drops.
 Backpressure on the runner's internal add channels delays the attach rather than
 failing the run.
 
+### WHIP server
+
+`WhipServerSrc` is the other end of WHIP: the element is the HTTP server and the
+SDP answerer, so a browser, OBS or a `WebRtcSink` publishes into the graph with
+no media server in between. It is a terminal `MultiOutputSource` with the WHEP
+session source's two outputs, video then Opus, and the same `video-codec`
+property. The HTTP side is hand-rolled on a tokio `TcpListener` like the
+dashboard: a task per connection parses one request and hands it to the run
+loop over a channel, since the loop owns the `Rtc`. A `POST` of an
+`application/sdp` offer gets `201` with the answer and a `Location` resource,
+`PATCH` adds trickle candidates (an ICE restart gets `501`), `DELETE` ends the
+session, and every response carries CORS headers so a page on another origin
+can publish. The host candidate is added before `accept_offer` so it rides in
+the answer, and the mids come from `MediaAdded` per the answerer rule. One
+publisher per run: a second `POST` gets `409`, and the run ends with `Eos` on
+both outputs when the publisher leaves. Validated by a default-run localhost
+loopback from `WebRtcSink` in every carried codec and in Opus.
+
 ### Signaling
 
 WHIP for egress and WHEP for ingress are the same wire move: an
@@ -256,17 +274,36 @@ freeze the drop and restore hysteresis windows.
 
 ### Codec plumbing
 
-A `Track` enum unifies the per-track facts WebRTC must agree on: the codec
-(H.264 or Opus), the m-line `MediaKind`, and the RTP clock, 90 kHz or 48 kHz.
-`media_time` maps a nanosecond PTS onto the track's RTP timestamp.
+`webrtc_codec` is the one table of what the WebRTC elements carry.
+`WebRtcVideoCodec` lists the video codecs with a str0m packetizer, H.264, VP8,
+VP9, H.265 and AV1, and maps each to its `VideoCodec`, its str0m `Codec`, the
+`RtcConfig` switch that turns it on, and its `video-codec` property name. A
+`Track` is `Video(codec)` or `Audio` (Opus) and unifies the per-track facts
+WebRTC must agree on: the codec, the m-line `MediaKind`, and the RTP clock,
+90 kHz or 48 kHz. `media_time` maps a nanosecond PTS onto the track's RTP
+timestamp, `is_keyframe` reads the codec's own header. A sending element accepts
+every carried codec on a pad (`sink_caps_alternatives`), reads the track from
+the pad's fixated caps, and enables only the codecs its pads carry
+(`enable_tracks`). Simulcast layers share one m-line, so the session sinks
+refuse layers of different codecs.
 
-H.264 crosses the boundary as Annex-B, the pipeline convention of
-[decode.md](decode.md): str0m's packetizer splits NAL units and
-its depayloader emits start-code framing. A receive-side video element
-advertises a `Dim::Range` / `Rate::Range` placeholder rather than `Dim::Any`,
-because geometry is only known from the in-band SPS and `fixate()`
-([caps.md](caps.md)) rejects `Any` at negotiation. A
-downstream `H264Parse` recovers the real dimensions.
+A receiving element cannot learn the codec from the handshake, because the graph
+fixates its caps before the handshake runs. So every source takes a
+`video-codec` property (H.264 by default) that fixes what it offers and emits,
+and a remote track in another codec goes unanswered. The duplex session goes
+further: a sendrecv m-line carries one codec both ways, so `with_video_codec`
+sets the session's one video codec and a send pad in another codec is refused.
+The LiveKit duplex runs two PeerConnections, so there the published codec
+follows the send pad and `video-codec` only picks the subscribed one.
+
+The pipeline framing is what str0m reads and writes, the convention of
+[decode.md](decode.md): Annex-B for H.264 and H.265, one raw frame for VP8 and
+VP9, one low-overhead temporal unit for AV1. The AV1 RTP payload carries no
+temporal delimiter OBU, so `pipeline_unit` puts one back on every received
+temporal unit and a received unit is byte-identical to the sent one. A receive-side video element advertises a `Dim::Range` /
+`Rate::Range` placeholder rather than `Dim::Any`, because geometry is only known
+from the in-band parameter sets and `fixate()` ([caps.md](caps.md)) rejects
+`Any` at negotiation. A downstream parser recovers the real dimensions.
 
 ### Validation status
 

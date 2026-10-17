@@ -879,6 +879,9 @@ mod turn;
 pub mod webrtc_simulcast;
 #[cfg(feature = "webrtc")]
 mod webrtc_util;
+// The video codecs the WebRTC elements carry and the `video-codec` property.
+#[cfg(feature = "webrtc")]
+pub mod webrtc_codec;
 #[cfg(all(feature = "webrtc", fuzzing))]
 pub use turn::fuzz_parse as turn_fuzz_parse;
 #[cfg(all(feature = "webrtc", fuzzing))]
@@ -895,6 +898,8 @@ pub mod webrtcsink;
 pub mod webrtcwhepsession;
 #[cfg(feature = "webrtc")]
 pub mod webrtcwhepsrc;
+#[cfg(feature = "webrtc")]
+pub mod whipserversrc;
 
 // Native LiveKit publisher + subscriber (T4): WebSocket + protobuf signaller
 // layered over the str0m engine. `livekit_signal` is the transport/protocol seam

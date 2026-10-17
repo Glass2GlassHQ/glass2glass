@@ -10,7 +10,9 @@ use alloc::vec::Vec;
 
 use str0m::media::{Mid, Rid, Simulcast, SimulcastLayer};
 
-use g2g_core::{AudioFormat, Caps, Dim, G2gError, ReverseChannel, VideoCodec};
+use g2g_core::{Caps, Dim, G2gError, ReverseChannel};
+
+use crate::webrtc_codec::{Track, WebRtcVideoCodec};
 
 /// Canonical simulcast rids, lowest to highest resolution. Matches the LiveKit /
 /// browser convention (`q` = low, `h` = mid, `f` = high), so an SFU that maps rid
@@ -48,7 +50,7 @@ pub(crate) struct SimulcastPads {
     pub(crate) video_layers: usize,
     pub(crate) has_audio: bool,
     /// Track kind per input pad, set in `configure(input, caps)`.
-    pub(crate) tracks: Vec<Option<crate::webrtcsink::Track>>,
+    pub(crate) tracks: Vec<Option<Track>>,
     /// Fixated video resolution per input pad ((0,0) for audio).
     pub(crate) dims: Vec<(u32, u32)>,
     /// Per-input reverse-signal channel (PLI / per-layer bitrate).
@@ -102,7 +104,7 @@ impl SimulcastPads {
 
     /// Record one pad's fixated caps (track kind + geometry).
     pub(crate) fn configure(&mut self, input: usize, caps: &Caps) -> Result<(), G2gError> {
-        let track = track_of(caps).ok_or(G2gError::CapsMismatch)?;
+        let track = Track::from_caps(caps).ok_or(G2gError::CapsMismatch)?;
         *self.tracks.get_mut(input).ok_or(G2gError::CapsMismatch)? = Some(track);
         if let Some(d) = self.dims.get_mut(input) {
             *d = video_dims(caps);
@@ -120,7 +122,7 @@ impl SimulcastPads {
         self.tracks
             .iter()
             .enumerate()
-            .filter(|(_, t)| **t == Some(crate::webrtcsink::Track::Video))
+            .filter(|(_, t)| t.is_some_and(Track::is_video))
             .map(|(i, _)| i)
             .collect()
     }
@@ -143,9 +145,26 @@ impl SimulcastPads {
 
     /// The audio pad's index, if audio is configured.
     pub(crate) fn audio_input(&self) -> Option<usize> {
-        self.tracks
-            .iter()
-            .position(|t| *t == Some(crate::webrtcsink::Track::Audio))
+        self.tracks.iter().position(|t| *t == Some(Track::Audio))
+    }
+
+    /// Every configured pad's track, in pad order.
+    pub(crate) fn tracks(&self) -> impl Iterator<Item = Track> + '_ {
+        self.tracks.iter().flatten().copied()
+    }
+
+    /// The codec the video layers share, `None` without video. One m-line
+    /// carries every layer, so layers of different codecs are refused.
+    pub(crate) fn video_codec(&self) -> Result<Option<WebRtcVideoCodec>, G2gError> {
+        let mut shared = None;
+        for track in self.tracks() {
+            let Track::Video(codec) = track else { continue };
+            if shared.is_some_and(|seen| seen != codec) {
+                return Err(G2gError::CapsMismatch);
+            }
+            shared = Some(codec);
+        }
+        Ok(shared)
     }
 }
 
@@ -164,21 +183,6 @@ pub(crate) fn video_dims(caps: &Caps) -> (u32, u32) {
         (w, h)
     } else {
         (0, 0)
-    }
-}
-
-/// The track kind an input's caps select (H.264 video or Opus audio).
-pub(crate) fn track_of(caps: &Caps) -> Option<crate::webrtcsink::Track> {
-    match caps {
-        Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            ..
-        } => Some(crate::webrtcsink::Track::Video),
-        Caps::Audio {
-            format: AudioFormat::Opus,
-            ..
-        } => Some(crate::webrtcsink::Track::Audio),
-        _ => None,
     }
 }
 

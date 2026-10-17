@@ -128,10 +128,16 @@ fn frame_kind(codec: VideoCodec, bytes: &[u8]) -> Option<&'static str> {
                 crate::annexb::nal_units_any(bytes).next().map(|_| "delta")
             }
         }
-        // VP8 frame tag: bit 0 of the first byte is the frame type (0 = key).
-        VideoCodec::Vp8 => bytes
-            .first()
-            .map(|b| if b & 1 == 0 { "key" } else { "delta" }),
+        VideoCodec::Vp8 => Some(if crate::vp8parse::is_keyframe(bytes) {
+            "key"
+        } else {
+            "delta"
+        }),
+        VideoCodec::Vp9 => Some(if crate::vp9parse::is_keyframe(bytes) {
+            "key"
+        } else {
+            "delta"
+        }),
         _ => None,
     }
 }

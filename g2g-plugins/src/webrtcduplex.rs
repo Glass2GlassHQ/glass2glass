@@ -64,24 +64,27 @@ use g2g_core::frame::Frame;
 use g2g_core::g2g_warn;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, ConfigureOutcome, Dim, DuplexInbound, G2gError,
-    HardwareError, MemoryDomain, MultiDuplexSession, MultiOutputSink, PipelinePacket, Rate,
-    ReverseChannel, VideoCodec,
+    Caps, CapsConstraint, ConfigureOutcome, DuplexInbound, G2gError, HardwareError, MemoryDomain,
+    MultiDuplexSession, MultiOutputSink, PipelinePacket, ReverseChannel,
 };
 
-use crate::annexb::au_is_keyframe;
 use crate::filesink::io_err;
 use crate::turn::TurnSet;
+use crate::webrtc_codec::{enable_tracks, opus_caps, Track, WebRtcVideoCodec};
 use crate::webrtc_util::{
     add_ice_candidates, feed_datagram, media_time_ns, select_host_ip, send_transmit,
 };
-use crate::webrtcsink::Track;
 
-/// The two tracks a duplex session offers at the handshake, in pad order: video
-/// on pad 0, audio on pad 1. `track_count` selects how many are active (1 = video
+/// The tracks a duplex session offers at the handshake, in pad order: video on
+/// pad 0, audio on pad 1. `track_count` selects how many are active (1 = video
 /// only); [`WebRtcDuplexSession::with_spare_tracks`] appends spare pads after
 /// them.
-const KINDS: [Track; 2] = [Track::Video, Track::Audio];
+fn active_kinds(video_codec: WebRtcVideoCodec, track_count: usize) -> Vec<Track> {
+    [Track::Video(video_codec), Track::Audio][..track_count].to_vec()
+}
+
+/// The most tracks a session offers at the handshake (video + audio).
+const MAX_ACTIVE_TRACKS: usize = 2;
 
 /// Which peer originates the SDP offer in the sendrecv handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +201,10 @@ pub struct WebRtcDuplexSession {
     /// reserved by [`Self::with_spare_tracks`]. Its length is both `input_count`
     /// and `output_count` (input i and output i share m-line i).
     pad_kinds: Vec<Track>,
+    /// The one video codec on every video m-line: a sendrecv m-line carries
+    /// one codec both ways, so the send pads must match it and the recv pads
+    /// emit it.
+    video_codec: WebRtcVideoCodec,
     stun_server: Option<String>,
     turn_server: Option<String>,
     turn_user: String,
@@ -236,14 +243,16 @@ impl WebRtcDuplexSession {
     /// audio), with the given `role` and SDP signaling channel.
     pub fn new(role: SignalRole, sig: SdpChannel, track_count: usize) -> Self {
         assert!(
-            track_count >= 1 && track_count <= KINDS.len(),
+            (1..=MAX_ACTIVE_TRACKS).contains(&track_count),
             "track_count must be 1 or 2"
         );
+        let video_codec = WebRtcVideoCodec::default();
         Self {
             role,
             sig: Some(sig),
             track_count,
-            pad_kinds: KINDS[..track_count].to_vec(),
+            pad_kinds: active_kinds(video_codec, track_count),
+            video_codec,
             stun_server: None,
             turn_server: None,
             turn_user: String::new(),
@@ -265,12 +274,25 @@ impl WebRtcDuplexSession {
     /// instead, so it needs no reserve.
     pub fn with_spare_tracks(mut self, video: usize, audio: usize) -> Self {
         self.pad_kinds
-            .extend(core::iter::repeat_n(Track::Video, video));
+            .extend(core::iter::repeat_n(Track::Video(self.video_codec), video));
         self.pad_kinds
             .extend(core::iter::repeat_n(Track::Audio, audio));
         let pads = self.pad_kinds.len();
         self.inputs.resize(pads, None);
         self.reverse.resize_with(pads, ReverseChannel::new);
+        self
+    }
+
+    /// Carry `codec` on every video m-line instead of H.264. A video send pad
+    /// configured with another codec is refused, since the m-line it would
+    /// share with the matching recv pad negotiates one codec for both ways.
+    pub fn with_video_codec(mut self, codec: WebRtcVideoCodec) -> Self {
+        self.video_codec = codec;
+        for kind in &mut self.pad_kinds {
+            if kind.is_video() {
+                *kind = Track::Video(codec);
+            }
+        }
         self
     }
 
@@ -318,36 +340,11 @@ impl WebRtcDuplexSession {
     }
 }
 
-fn video_caps() -> Caps {
-    // Geometry unknown until the in-band SPS, so a `Range` placeholder that
-    // fixates (a downstream parser recovers the real dimensions), as in the WHEP
-    // session source.
-    Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width: Dim::Range { min: 2, max: 8192 },
-        height: Dim::Range { min: 2, max: 8192 },
-        framerate: Rate::Range {
-            min_q16: 1 << 16,
-            max_q16: 240 << 16,
-        },
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-    }
-}
-
-fn audio_caps() -> Caps {
-    Caps::Audio {
-        format: AudioFormat::Opus,
-        channels: 2,
-        sample_rate: 48_000,
-        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-    }
-}
-
 /// The output caps for a given track kind.
 fn caps_for(kind: Track) -> Caps {
     match kind {
-        Track::Video => video_caps(),
-        Track::Audio => audio_caps(),
+        Track::Video(codec) => codec.caps_placeholder(),
+        Track::Audio => opus_caps(2),
     }
 }
 
@@ -403,18 +400,19 @@ fn free_in_pad(bindings: &[Binding], inputs: &[Option<Track>], kind: Track) -> O
         .find(|i| inputs[*i] == Some(kind) && !bindings.iter().any(|b| b.in_pad == Some(*i)))
 }
 
-/// The track kind an input's caps select (H.264 video or Opus audio).
-fn track_of(caps: &Caps) -> Option<Track> {
-    match caps {
-        Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            ..
-        } => Some(Track::Video),
-        Caps::Audio {
-            format: AudioFormat::Opus,
-            ..
-        } => Some(Track::Audio),
-        _ => None,
+/// The track a send pad's caps select: Opus audio, or video in the session's
+/// one codec. Video in another codec is `None`, since its m-line would have to
+/// carry that codec back as well.
+fn send_track_for(video_codec: WebRtcVideoCodec, caps: &Caps) -> Option<Track> {
+    match Track::from_caps(caps)? {
+        Track::Video(codec) if codec != video_codec => None,
+        track => Some(track),
+    }
+}
+
+impl WebRtcDuplexSession {
+    fn send_track(&self, caps: &Caps) -> Option<Track> {
+        send_track_for(self.video_codec, caps)
     }
 }
 
@@ -430,7 +428,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        match track_of(upstream_caps) {
+        match self.send_track(upstream_caps) {
             Some(_) => Ok(upstream_caps.clone()),
             None => Err(G2gError::CapsMismatch),
         }
@@ -445,7 +443,9 @@ impl MultiDuplexSession for WebRtcDuplexSession {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
-        let track = track_of(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        let track = self
+            .send_track(absolute_caps)
+            .ok_or(G2gError::CapsMismatch)?;
         *self.inputs.get_mut(input).ok_or(G2gError::CapsMismatch)? = Some(track);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -494,17 +494,17 @@ impl MultiDuplexSession for WebRtcDuplexSession {
             let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
             let local = socket.local_addr().map_err(io_err)?;
 
-            let mut rtc = RtcConfig::new()
+            let config = RtcConfig::new()
                 .set_crypto_provider(Arc::new(from_feature_flags()))
                 .clear_codecs()
-                .enable_h264(true)
-                .enable_opus(true)
                 // Congestion control so the peer's BWE estimate arrives as
                 // `Event::EgressBitrateEstimate`, routed to the video track below.
                 .enable_bwe(Some(Bitrate::bps(2_000_000)))
                 // Periodic stats surface NACK counts (loss-recovery feedback), read
                 // back via `nacks_seen`.
-                .set_stats_interval(Some(Duration::from_millis(500)))
+                .set_stats_interval(Some(Duration::from_millis(500)));
+            let video_codec = self.video_codec;
+            let mut rtc = enable_tracks(config, active_kinds(video_codec, MAX_ACTIVE_TRACKS))
                 .build(Instant::now());
             // Host (and optional reflexive / relayed) candidates ride in the
             // SDP, so they must be added before the offer/answer is generated
@@ -650,7 +650,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                         Ok(Output::Event(Event::MediaAdded(m))) => {
                             if binding_of_mid(&bindings, m.mid).is_none() {
                                 let kind = match m.kind {
-                                    MediaKind::Video => Track::Video,
+                                    MediaKind::Video => Track::Video(video_codec),
                                     MediaKind::Audio => Track::Audio,
                                 };
                                 let pad = free_out_pad(&bindings, &pad_kinds, kind).or_else(|| {
@@ -693,7 +693,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                             };
                             let rc = bindings
                                 .iter()
-                                .find(|b| b.kind == Track::Video)
+                                .find(|b| b.kind.is_video())
                                 .and_then(|b| b.in_pad)
                                 .and_then(|i| reverse.get(i));
                             if let (Some(bps), Some(rc)) = (bps, rc) {
@@ -708,7 +708,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                             else {
                                 continue;
                             };
-                            frames.push((port, pts_ns, d.data.to_vec()));
+                            frames.push((port, pts_ns, pad_kinds[port].pipeline_unit(&d.data)));
                         }
                         // Loss-recovery feedback counters (cumulative): nacks sent
                         // as a receiver (ingress) and nacks received as a sender
@@ -733,8 +733,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                             .await?;
                         announced[port] = true;
                     }
-                    let keyframe = pad_kinds[port] == Track::Video
-                        && au_is_keyframe(g2g_core::VideoCodec::H264, &data);
+                    let keyframe = pad_kinds[port].is_keyframe(&data);
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             data.into_boxed_slice(),
@@ -978,7 +977,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                             // m-line for it on its first frame.
                             Some((idx, PipelinePacket::CapsChanged(caps))) => {
                                 if idx >= inputs.len() {
-                                    match track_of(&caps) {
+                                    match send_track_for(video_codec, &caps) {
                                         Some(kind) => {
                                             inputs.resize(idx + 1, None);
                                             inputs[idx] = Some(kind);
@@ -1012,6 +1011,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::{AudioFormat, Dim, Rate, VideoCodec};
 
     fn h264_caps() -> Caps {
         Caps::CompressedVideo {
@@ -1076,11 +1076,31 @@ mod tests {
         let (a, _b) = SdpChannel::pair();
         let mut s = WebRtcDuplexSession::new(SignalRole::Answerer, a, 2);
         assert!(s.configure_input(0, &h264_caps()).is_ok());
-        assert!(s.configure_input(1, &audio_caps()).is_ok());
+        assert!(s.configure_input(1, &opus_caps(2)).is_ok());
         assert_eq!(
             s.inputs,
-            alloc::vec![Some(Track::Video), Some(Track::Audio)]
+            alloc::vec![
+                Some(Track::Video(WebRtcVideoCodec::H264)),
+                Some(Track::Audio)
+            ]
         );
+        // Video in another codec cannot share the session's video m-line.
+        let vp8 = WebRtcVideoCodec::Vp8.caps_any();
+        assert_eq!(s.intercept_caps(0, &vp8), Err(G2gError::CapsMismatch));
+        assert!(s.configure_input(0, &vp8).is_err());
+        // A session built for VP8 takes VP8 pads and announces VP8 outputs.
+        let (c, _d) = SdpChannel::pair();
+        let mut vp8_session = WebRtcDuplexSession::new(SignalRole::Answerer, c, 2)
+            .with_video_codec(WebRtcVideoCodec::Vp8)
+            .with_spare_tracks(1, 0);
+        assert!(vp8_session.configure_input(0, &vp8).is_ok());
+        assert!(matches!(
+            vp8_session.output_caps(2),
+            Ok(Caps::CompressedVideo {
+                codec: VideoCodec::Vp8,
+                ..
+            })
+        ));
         // Non-A/V caps rejected.
         let raw = Caps::RawVideo {
             format: g2g_core::RawVideoFormat::I420,

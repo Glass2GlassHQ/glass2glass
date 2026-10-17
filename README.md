@@ -533,7 +533,8 @@ cargo clippy --workspace --all-targets
 | `ShmSink` / `ShmSrc` (GStreamer's `shm` protocol: shared-memory frames + unix control socket) | `shm` | Linux |
 | `UnixFdSink` / `UnixFdSrc` (GStreamer's `unixfd` protocol: memfd / dma-buf descriptors over a unix socket) | `unixfd` | Linux |
 | `RtmpSrc` (RTMP publisher ingest) | `rtmp` | none |
-| `WebRtcSink` (WHIP egress, H.264 + Opus) / `WebRtcWhepSrc` (WHEP ingest, H.264): ICE / DTLS / SRTP, trickle ICE + ICE restart, NACK / RTX | `webrtc` | str0m (rust-crypto) + reqwest |
+| `WebRtcSink` (WHIP egress) / `WebRtcWhepSrc` (WHEP ingest), H.264 / VP8 / VP9 / H.265 / AV1 + Opus: ICE / DTLS / SRTP, trickle ICE + ICE restart, NACK / RTX | `webrtc` | str0m (rust-crypto) + reqwest |
+| `WhipServerSrc` (WHIP server ingest: a browser or `webrtcsink` publishes into the graph, CORS, trickle ICE) | `webrtc` | str0m |
 | `WebRtcDataSrc` / `WebRtcDataSink` (P2P data channels on SCTP) | `webrtc` | str0m |
 | `MoqtSink` (MoQ Transport draft-16/18 publisher: fMP4 to groups / objects over WebTransport, subgroup streams or datagrams) | `moqt` | web-transport-quinn |
 | `MoqtSrc` (MoQ Transport draft-16/18 subscriber: catalog read, stream + datagram reassembly to fMP4) | `moqt` | web-transport-quinn |

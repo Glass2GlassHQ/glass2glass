@@ -2,13 +2,13 @@
 //! **and** an audio track over a single WHIP PeerConnection, the `webrtcbin`
 //! analog for A/V-on-one-connection. Where [`crate::webrtcsink::WebRtcSink`] is
 //! one track per element (one `Rtc` per element), this owns one `Rtc` carrying
-//! both an H.264 video m-line and an Opus audio m-line, so the two share one
+//! both a video m-line (any carried codec) and an Opus audio m-line, so the two share one
 //! ICE/DTLS/SRTP session, one WHIP handshake, and one bundle.
 //!
 //! Shape: a [`MultiInputElement`] (input 0 + input 1) driven by the terminal
 //! fan-in runner [`run_fanin_session`](g2g_core::runtime::run_fanin_session) (no
 //! trailing sink, the session is the destination). Each input is negotiated
-//! independently; the session reads the track kind (H.264 video vs Opus audio)
+//! independently; the session reads the track (video codec vs Opus audio)
 //! from each input's caps, so the pad order does not matter. On the first frame
 //! it performs the WHIP handshake offering both send-only m-lines, then spawns a
 //! task that owns the `Rtc` + `UdpSocket` and routes each access unit to the
@@ -37,7 +37,7 @@ use tokio::sync::mpsc;
 
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::crypto::from_feature_flags;
-use str0m::media::{Direction, Mid, Pt, Rid};
+use str0m::media::{Direction, MediaKind, Mid, Pt, Rid};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use core::time::Duration;
@@ -45,22 +45,21 @@ use core::time::Duration;
 use str0m::bwe::{Bitrate, BweKind};
 
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
-    MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    Rate, ReverseChannel, VideoCodec,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, HardwareError, MultiInputElement,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ReverseChannel,
 };
 
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
+use crate::webrtc_codec::{enable_tracks, sink_caps_alternatives, Track, WebRtcVideoCodec};
 use crate::webrtc_simulcast::{
-    rids_high_to_low, send_simulcast, track_of, KeyframeRoutes, LayerAllocator, SimulcastPads,
+    rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
 use crate::webrtc_util::{
     add_host_candidate, drain_pacer, feed_datagram, ice_restart, post_sdp, select_host_ip,
     send_transmit, trickle_candidates, ResourceHandle, TricklePatch, TurnConfig,
     ICE_RESTART_TIMEOUT,
 };
-use crate::webrtcsink::Track;
 
 /// Default bounded depth of the element->session media channel (per direction).
 const DEFAULT_QUEUE_DEPTH: usize = 256;
@@ -125,7 +124,7 @@ impl core::fmt::Debug for WebRtcSessionSink {
 
 impl WebRtcSessionSink {
     /// Publish A/V to the given WHIP endpoint over one PeerConnection. Two input
-    /// pads: connect the H.264 video stream to one and the Opus audio stream to
+    /// pads: connect the video stream to one and the Opus audio stream to
     /// the other (either order, the track kind is read from the caps).
     pub fn new(whip_url: impl Into<String>) -> Self {
         let mut pads = SimulcastPads::new();
@@ -236,14 +235,14 @@ impl WebRtcSessionSink {
             Bitrate::bps(LayerAllocator::new(&layers, self.max_send_bitrate).initial_bps())
         });
 
-        // Enable both codecs so the single Rtc can carry video + audio.
-        let mut rtc = RtcConfig::new()
+        // Every layer rides one m-line, so the video pads must share a codec.
+        self.pads.video_codec()?;
+        // Enable each configured track's codec so one Rtc carries them all.
+        let config = RtcConfig::new()
             .set_crypto_provider(Arc::new(from_feature_flags()))
             .clear_codecs()
-            .enable_h264(true)
-            .enable_opus(true)
-            .enable_bwe(bwe_init)
-            .build(Instant::now());
+            .enable_bwe(bwe_init);
+        let mut rtc = enable_tracks(config, self.pads.tracks()).build(Instant::now());
 
         // Trickle ICE: the offer carries the host candidate only; reflexive /
         // relay candidates are gathered after the POST and trickled by PATCH.
@@ -257,7 +256,7 @@ impl WebRtcSessionSink {
             let mut api = rtc.sdp_api();
             let video_mid = has_video.then(|| {
                 api.add_media(
-                    Track::Video.media_kind(),
+                    MediaKind::Video,
                     Direction::SendOnly,
                     None,
                     None,
@@ -266,15 +265,8 @@ impl WebRtcSessionSink {
                     send_simulcast(&layers),
                 )
             });
-            let audio_mid = has_audio.then(|| {
-                api.add_media(
-                    Track::Audio.media_kind(),
-                    Direction::SendOnly,
-                    None,
-                    None,
-                    None,
-                )
-            });
+            let audio_mid = has_audio
+                .then(|| api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None));
             let (offer, pending) = api.apply().ok_or_else(hw)?;
             (offer.to_sdp_string(), pending, video_mid, audio_mid)
         };
@@ -307,9 +299,9 @@ impl WebRtcSessionSink {
         let mut routes = KeyframeRoutes::new();
         let mut layer_reverse: Vec<(Option<Rid>, ReverseChannel)> = Vec::new();
         for (li, &i) in video_inputs.iter().enumerate() {
-            if let Some(mid) = video_mid {
+            if let (Some(mid), Some(track)) = (video_mid, self.pads.tracks[i]) {
                 let rid = simulcast.then(|| Rid::from(rids[li]));
-                self.pad_wire[i] = Some((Track::Video, rid));
+                self.pad_wire[i] = Some((track, rid));
                 routes.push(mid, rid, self.pads.reverse[i].clone());
                 layer_reverse.push((rid, self.pads.reverse[i].clone()));
             }
@@ -387,31 +379,7 @@ static WEBRTCSESSION_PROPS: &[PropertySpec] = &[
 ];
 
 fn h264_any() -> Caps {
-    Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width: Dim::Any,
-        height: Dim::Any,
-        framerate: Rate::Any,
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-    }
-}
-
-fn opus_mono() -> Caps {
-    Caps::Audio {
-        format: AudioFormat::Opus,
-        channels: 1,
-        sample_rate: 48_000,
-        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-    }
-}
-
-fn opus_stereo() -> Caps {
-    Caps::Audio {
-        format: AudioFormat::Opus,
-        channels: 2,
-        sample_rate: 48_000,
-        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-    }
+    WebRtcVideoCodec::H264.caps_any()
 }
 
 impl MultiInputElement for WebRtcSessionSink {
@@ -441,18 +409,14 @@ impl MultiInputElement for WebRtcSessionSink {
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        match track_of(upstream_caps) {
+        match Track::from_caps(upstream_caps) {
             Some(_) => Ok(upstream_caps.clone()),
             None => Err(G2gError::CapsMismatch),
         }
     }
 
     fn caps_constraint_as_input(&self, _input: usize) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::from_alternatives(Vec::from([
-            h264_any(),
-            opus_stereo(),
-            opus_mono(),
-        ])))
+        CapsConstraint::Accepts(CapsSet::from_alternatives(sink_caps_alternatives()))
     }
 
     fn configure_pipeline(
@@ -716,7 +680,7 @@ async fn run_session(mut a: SessionArgs) {
                 // Pick this unit's track writer (by mid), discovering the codec's
                 // negotiated payload type on first use.
                 let (mid, pt_slot) = match unit.track {
-                    Track::Video => (a.video_mid, &mut video_pt),
+                    Track::Video(_) => (a.video_mid, &mut video_pt),
                     Track::Audio => (a.audio_mid, &mut audio_pt),
                 };
                 let Some(mid) = mid else { continue };
@@ -787,6 +751,8 @@ fn send_layer_targets(
 #[cfg(test)]
 mod simulcast_tests {
     use super::*;
+    use crate::webrtc_codec::opus_caps;
+    use g2g_core::{Dim, Rate, VideoCodec};
 
     #[test]
     fn with_simulcast_groups_layers_and_audio() {
@@ -808,7 +774,7 @@ mod simulcast_tests {
         };
         MultiInputElement::configure_pipeline(&mut s, 0, &hi).unwrap();
         MultiInputElement::configure_pipeline(&mut s, 1, &lo).unwrap();
-        MultiInputElement::configure_pipeline(&mut s, 2, &opus_stereo()).unwrap();
+        MultiInputElement::configure_pipeline(&mut s, 2, &opus_caps(2)).unwrap();
         assert!(s.all_configured());
         let layers = s.pads.layers();
         assert_eq!(layers.len(), 2);
@@ -832,6 +798,8 @@ mod simulcast_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::webrtc_codec::opus_caps;
+    use g2g_core::{Dim, Rate};
 
     #[test]
     fn two_inputs_take_video_and_audio_by_caps() {
@@ -839,10 +807,13 @@ mod tests {
         assert_eq!(s.input_count(), 2);
         // Either pad order works; the track is read from the caps.
         assert!(s.configure_pipeline(0, &h264_any()).is_ok());
-        assert!(s.configure_pipeline(1, &opus_stereo()).is_ok());
+        assert!(s.configure_pipeline(1, &opus_caps(2)).is_ok());
         assert_eq!(
             s.pads.tracks,
-            alloc::vec![Some(Track::Video), Some(Track::Audio)]
+            alloc::vec![
+                Some(Track::Video(WebRtcVideoCodec::H264)),
+                Some(Track::Audio)
+            ]
         );
         assert!(s.all_configured());
     }
@@ -892,7 +863,7 @@ mod tests {
         };
         assert_eq!(s.intercept_caps(0, &raw), Err(G2gError::CapsMismatch));
         assert!(s.intercept_caps(0, &h264_any()).is_ok());
-        assert!(s.intercept_caps(1, &opus_stereo()).is_ok());
+        assert!(s.intercept_caps(1, &opus_caps(2)).is_ok());
     }
 
     #[test]

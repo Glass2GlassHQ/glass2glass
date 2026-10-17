@@ -1,5 +1,5 @@
 //! Native WebRTC ingest source (`WebRtcWhepSrc`): subscribes to a WHEP endpoint
-//! and emits the received H.264 as Annex-B `DataFrame`s. The receive-side
+//! and emits the received video or Opus as `DataFrame`s. The receive-side
 //! inverse of [`crate::webrtcsink::WebRtcSink`], on the same sans-IO `str0m`
 //! stack (ICE / DTLS / SRTP), and distinct from the wasm-only data-channel
 //! [`crate::webrtcsrc::WebRtcSrc`].
@@ -9,10 +9,10 @@
 //! endpoint, applies the answer, then drives str0m's `poll_output` /
 //! `handle_input` loop on a tokio `UdpSocket`. Each `Event::MediaData` is a
 //! depacketized access unit, forwarded downstream with its RTP-clock PTS: for
-//! video the H.264 depayloader emits Annex-B start-code framing (exactly g2g's
-//! convention); for audio each Opus packet is forwarded as-is.
+//! video the depayloader emits the pipeline framing (Annex-B for H.264 and H.265,
+//! a raw frame for VP8 and VP9, a temporal unit for AV1); Opus packets as-is.
 //!
-//! The track is video (H.264) by default, or Opus audio via
+//! The track is video (H.264 unless `video-codec` says otherwise) by default, or Opus audio via
 //! [`WebRtcWhepSrc::audio`] / `media=audio`; one m-line per source (a
 //! `SourceLoop` has a single output pad). NAT traversal: a STUN server-reflexive
 //! candidate via `stun-server`, and a TURN relay via
@@ -37,20 +37,24 @@ use tokio::net::UdpSocket;
 
 use str0m::change::SdpAnswer;
 use str0m::crypto::from_feature_flags;
-use str0m::media::{Direction, KeyframeRequestKind, MediaKind, Mid};
+use str0m::media::{Direction, KeyframeRequestKind, Mid};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
-    FrameTiming, G2gError, HardwareError, LatencyReport, MemoryDomain, OutputSink, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
+    HardwareError, LatencyReport, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
+use crate::webrtc_codec::{
+    get_video_codec_property, opus_caps, set_video_codec_property, Track, WebRtcVideoCodec,
+    VIDEO_CODEC_PROP,
+};
 use crate::webrtc_util::{
     add_host_candidate, delete_resource, feed_datagram, ice_restart, media_time_ns, post_sdp,
     select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
@@ -64,49 +68,13 @@ const PLI_INTERVAL: Duration = Duration::from_secs(1);
 /// Which media this source subscribes to. WHEP offers one recv-only m-line, and
 /// a `SourceLoop` has one output pad, so the source carries a single track; the
 /// kind is chosen up front (video by default, audio via [`WebRtcWhepSrc::audio`]
-/// or `media=audio`). This is the receive-side mirror of the sink's `Track`.
+/// or `media=audio`), the video codec by `video-codec`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Media {
-    /// H.264 video.
+    /// Video in the configured codec.
     Video,
     /// Opus audio.
     Audio,
-}
-
-impl Media {
-    fn media_kind(self) -> MediaKind {
-        match self {
-            Media::Video => MediaKind::Video,
-            Media::Audio => MediaKind::Audio,
-        }
-    }
-
-    /// The caps this source produces for the chosen media. Video geometry is
-    /// unknown until the in-band SPS, so it is advertised as a `Range`
-    /// placeholder (a downstream H.264 parser recovers the real dimensions and
-    /// re-announces them via `CapsChanged`): negotiation fixates before any data
-    /// flows and `fixate()` rejects `Dim::Any`, so a wildcard would fail startup.
-    /// Opus is the WebRTC default stereo 48 kHz.
-    fn caps(self) -> Caps {
-        match self {
-            Media::Video => Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                width: Dim::Range { min: 2, max: 8192 },
-                height: Dim::Range { min: 2, max: 8192 },
-                framerate: Rate::Range {
-                    min_q16: 1 << 16,
-                    max_q16: 240 << 16,
-                },
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            },
-            Media::Audio => Caps::Audio {
-                format: AudioFormat::Opus,
-                channels: 2,
-                sample_rate: 48_000,
-                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-            },
-        }
-    }
 }
 
 /// WHEP-subscribing WebRTC ingest source. See the module docs.
@@ -131,8 +99,10 @@ pub struct WebRtcWhepSrc {
     turn_server: Option<String>,
     turn_user: String,
     turn_pass: String,
-    /// Which track to subscribe to (H.264 video by default, or Opus audio).
+    /// Which track to subscribe to (video by default, or Opus audio).
     media: Media,
+    /// The video codec offered and emitted when `media` is video.
+    video_codec: WebRtcVideoCodec,
     /// Stop after this many access units and emit EOS (`u64::MAX` = unbounded).
     /// The bounded path is for tests / smoke runs.
     frame_limit: u64,
@@ -160,9 +130,17 @@ impl WebRtcWhepSrc {
             turn_user: String::new(),
             turn_pass: String::new(),
             media: Media::Video,
+            video_codec: WebRtcVideoCodec::default(),
             frame_limit: u64::MAX,
             configured: false,
         }
+    }
+
+    /// Subscribe to video in `codec` instead of H.264 (the `video-codec`
+    /// property).
+    pub fn with_video_codec(mut self, codec: WebRtcVideoCodec) -> Self {
+        self.video_codec = codec;
+        self
     }
 
     /// Attach a bearer token, sent as `Authorization: Bearer <token>` on the
@@ -210,9 +188,21 @@ impl WebRtcWhepSrc {
         self
     }
 
-    /// The produced caps for the configured track (see [`Media::caps`]).
+    /// The one track this source subscribes to.
+    fn track(&self) -> Track {
+        match self.media {
+            Media::Video => Track::Video(self.video_codec),
+            Media::Audio => Track::Audio,
+        }
+    }
+
+    /// The produced caps for the configured track: a placeholder geometry for
+    /// video (see `WebRtcVideoCodec::caps_placeholder`), stereo Opus for audio.
     fn caps(&self) -> Caps {
-        self.media.caps()
+        match self.track() {
+            Track::Video(codec) => codec.caps_placeholder(),
+            Track::Audio => opus_caps(2),
+        }
     }
 }
 
@@ -248,7 +238,7 @@ impl SourceLoop for WebRtcWhepSrc {
         ElementMetadata::new(
             "WebRTC source",
             "Source/Network/WebRTC",
-            "Subscribes to a WHEP server over WebRTC and emits H.264 or Opus (str0m: ICE/DTLS/SRTP)",
+            "Subscribes to a WHEP server over WebRTC and emits video (H.264/VP8/VP9/H.265/AV1) or Opus (str0m: ICE/DTLS/SRTP)",
             "g2g",
         )
     }
@@ -305,6 +295,7 @@ impl SourceLoop for WebRtcWhepSrc {
                 };
                 Ok(())
             }
+            "video-codec" => set_video_codec_property(&mut self.video_codec, &value),
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
             _ => Err(PropError::Unknown),
         }
@@ -325,6 +316,7 @@ impl SourceLoop for WebRtcWhepSrc {
                 }
                 .into(),
             )),
+            "video-codec" => Some(get_video_codec_property(self.video_codec)),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             _ => None,
         }
@@ -346,14 +338,11 @@ impl SourceLoop for WebRtcWhepSrc {
             let local = socket.local_addr().map_err(io_err)?;
 
             let media = self.media;
+            let track = self.track();
             let config = RtcConfig::new()
                 .set_crypto_provider(alloc::sync::Arc::new(from_feature_flags()))
                 .clear_codecs();
-            let config = match media {
-                Media::Video => config.enable_h264(true),
-                Media::Audio => config.enable_opus(true),
-            };
-            let mut rtc = config.build(Instant::now());
+            let mut rtc = track.enable(config).build(Instant::now());
             // Trickle ICE: the offer carries the host candidate only; reflexive /
             // relay candidates are gathered after the POST and trickled by PATCH.
             add_host_candidate(&mut rtc, &socket)?;
@@ -362,7 +351,7 @@ impl SourceLoop for WebRtcWhepSrc {
             // it, apply the answer.
             let (offer_sdp, pending) = {
                 let mut api = rtc.sdp_api();
-                api.add_media(media.media_kind(), Direction::RecvOnly, None, None, None);
+                api.add_media(track.media_kind(), Direction::RecvOnly, None, None, None);
                 let (offer, pending) = api.apply().ok_or_else(hw)?;
                 (offer.to_sdp_string(), pending)
             };
@@ -426,11 +415,11 @@ impl SourceLoop for WebRtcWhepSrc {
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
                         Ok(Output::Event(Event::MediaData(d))) => {
-                            // d.time is the RTP MediaTime (90 kHz for H.264);
+                            // d.time is the RTP MediaTime (90 kHz for video);
                             // map its rational value to nanoseconds.
                             let pts_ns = media_time_ns(d.time);
                             media_mid = Some(d.mid);
-                            frames.push((pts_ns, d.data.to_vec()));
+                            frames.push((pts_ns, track.pipeline_unit(&d.data)));
                         }
                         Ok(Output::Event(Event::IceConnectionStateChange(state))) => match state {
                             IceConnectionState::Disconnected => {
@@ -466,14 +455,9 @@ impl SourceLoop for WebRtcWhepSrc {
                 }
 
                 for (pts_ns, data) in frames {
-                    // Video keyframe = IDR (the sink/parser cares); every Opus
-                    // packet is independently decodable, so the flag is moot.
-                    let keyframe = match media {
-                        Media::Video => {
-                            crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &data)
-                        }
-                        Media::Audio => false,
-                    };
+                    // Video keyframe (the sink/parser cares); every Opus packet
+                    // is independently decodable, so the flag is moot.
+                    let keyframe = track.is_keyframe(&data);
                     seen_keyframe |= keyframe;
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
@@ -568,8 +552,9 @@ static WEBRTCSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "media",
         PropKind::Str,
-        "track to subscribe to: video (H.264) or audio (Opus)",
+        "track to subscribe to: video or audio (Opus)",
     ),
+    VIDEO_CODEC_PROP,
     PropertySpec::new(
         "num-buffers",
         PropKind::Int,
@@ -582,6 +567,7 @@ static WEBRTCSRC_PROPS: &[PropertySpec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::{AudioFormat, VideoCodec};
 
     #[test]
     fn produces_h264_caps() {
@@ -593,6 +579,32 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn video_codec_selects_the_offered_codec_and_caps() {
+        let src = WebRtcWhepSrc::new("http://h/whep").with_video_codec(WebRtcVideoCodec::Vp9);
+        assert_eq!(src.track(), Track::Video(WebRtcVideoCodec::Vp9));
+        assert!(matches!(
+            src.caps(),
+            Caps::CompressedVideo {
+                codec: VideoCodec::Vp9,
+                ..
+            }
+        ));
+        let mut src = WebRtcWhepSrc::new("http://h/whep");
+        src.set_property("video-codec", PropValue::Str("h265".into()))
+            .unwrap();
+        assert_eq!(
+            src.get_property("video-codec"),
+            Some(PropValue::Str("h265".into()))
+        );
+        assert_eq!(
+            src.set_property("video-codec", PropValue::Str("mjpeg".into())),
+            Err(PropError::Value)
+        );
+        // Audio ignores the video codec.
+        assert_eq!(src.audio().track(), Track::Audio);
     }
 
     #[test]

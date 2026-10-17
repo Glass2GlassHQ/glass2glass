@@ -1,4 +1,4 @@
-//! Bidirectional LiveKit participant (`LiveKitDuplex`): publishes local H.264
+//! Bidirectional LiveKit participant (`LiveKitDuplex`): publishes local
 //! video + Opus audio AND subscribes to the room's remote tracks over one
 //! signalling WebSocket, the real-SFU signaller for the duplex shape (M728).
 //!
@@ -51,11 +51,12 @@ use crate::livekit_signal::{
     access_token, candidate_from_init_json, signal_ws_url, AddTrackRequest, SessionDescription,
     SignalRequest, SignalResponse, SignalTarget, TrackSource, TrackType, VideoGrant,
 };
-use crate::livekitsrc::{answer_offer, audio_caps, recv_signal, send_signal, video_caps};
+use crate::livekitsrc::{answer_offer, recv_signal, send_signal};
 use crate::turn::TurnSet;
-use crate::webrtc_simulcast::track_of;
+use crate::webrtc_codec::{
+    enable_tracks, opus_caps, sink_caps_alternatives, Track, WebRtcVideoCodec,
+};
 use crate::webrtc_util::{media_time_ns, send_transmit};
-use crate::webrtcsink::Track;
 
 /// Send input / recv output pad layout: 0 = video, 1 = audio.
 const VIDEO: usize = 0;
@@ -83,6 +84,9 @@ pub struct LiveKitDuplex {
     token: Option<String>,
     /// Track kind per send input pad, set in `configure_input`.
     inputs: Vec<Option<Track>>,
+    /// The video codec answered on the subscriber PeerConnection and emitted
+    /// on output 0.
+    video_codec: WebRtcVideoCodec,
     /// Per send-input reverse channel (remote PLI / BWE back to the source).
     reverse: Vec<ReverseChannel>,
     /// Stop after this many RECEIVED access units and emit EOS (`u64::MAX` =
@@ -119,10 +123,19 @@ impl LiveKitDuplex {
             api_secret: String::new(),
             token: None,
             inputs: alloc::vec![None; 2],
+            video_codec: WebRtcVideoCodec::default(),
             reverse: (0..2).map(|_| ReverseChannel::new()).collect(),
             frame_limit: u64::MAX,
             linger: Duration::from_millis(1500),
         }
+    }
+
+    /// Subscribe to remote video in `codec` instead of H.264. The published
+    /// video keeps the codec of its own pad's caps, the two PeerConnections
+    /// being independent.
+    pub fn with_video_codec(mut self, codec: WebRtcVideoCodec) -> Self {
+        self.video_codec = codec;
+        self
     }
 
     /// Mint the access token locally from an API key + secret.
@@ -179,17 +192,14 @@ impl MultiDuplexSession for LiveKitDuplex {
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        match track_of(upstream_caps) {
+        match Track::from_caps(upstream_caps) {
             Some(_) => Ok(upstream_caps.clone()),
             None => Err(G2gError::CapsMismatch),
         }
     }
 
     fn caps_constraint_as_input(&self, _input: usize) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::from_alternatives(Vec::from([
-            video_caps(),
-            audio_caps(),
-        ])))
+        CapsConstraint::Accepts(CapsSet::from_alternatives(sink_caps_alternatives()))
     }
 
     fn configure_input(
@@ -197,15 +207,15 @@ impl MultiDuplexSession for LiveKitDuplex {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
-        let track = track_of(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        let track = Track::from_caps(absolute_caps).ok_or(G2gError::CapsMismatch)?;
         *self.inputs.get_mut(input).ok_or(G2gError::CapsMismatch)? = Some(track);
         Ok(ConfigureOutcome::Accepted)
     }
 
     fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
         match output {
-            VIDEO => Ok(video_caps()),
-            AUDIO => Ok(audio_caps()),
+            VIDEO => Ok(self.video_codec.caps_placeholder()),
+            AUDIO => Ok(opus_caps(2)),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -253,12 +263,21 @@ impl MultiDuplexSession for LiveKitDuplex {
 
             // ---- Publisher PC (client offers, mirrors LiveKitSink). ----
             let pub_socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
-            let mut pub_rtc = RtcConfig::new()
+            // The publisher offers whatever the video send pad carries (H.264
+            // until a pad says otherwise) plus Opus.
+            let send_video = self
+                .inputs
+                .iter()
+                .flatten()
+                .copied()
+                .find(|t| t.is_video())
+                .unwrap_or(Track::Video(WebRtcVideoCodec::default()));
+            let recv_video = self.video_codec;
+            let pub_config = RtcConfig::new()
                 .set_crypto_provider(Arc::new(from_feature_flags()))
-                .clear_codecs()
-                .enable_h264(true)
-                .enable_opus(true)
-                .build(Instant::now());
+                .clear_codecs();
+            let mut pub_rtc =
+                enable_tracks(pub_config, [send_video, Track::Audio]).build(Instant::now());
             crate::webrtc_util::add_ice_candidates(&mut pub_rtc, &pub_socket, None).await?;
             let stream_id = format!("g2g-{}", self.identity);
             let video_cid = format!("{stream_id}-video");
@@ -314,11 +333,10 @@ impl MultiDuplexSession for LiveKitDuplex {
             // ---- Subscriber PC (server offers, mirrors LiveKitSrc). ----
             let sub_socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
             let sub_local = sub_socket.local_addr().map_err(io_err)?;
-            let mut sub_rtc = RtcConfig::new()
+            let sub_config = RtcConfig::new()
                 .set_crypto_provider(Arc::new(from_feature_flags()))
-                .clear_codecs()
-                .enable_h264(true)
-                .enable_opus(true)
+                .clear_codecs();
+            let mut sub_rtc = enable_tracks(sub_config, [Track::Video(recv_video), Track::Audio])
                 .build(Instant::now());
             crate::webrtc_util::add_ice_candidates(&mut sub_rtc, &sub_socket, None).await?;
 
@@ -338,9 +356,12 @@ impl MultiDuplexSession for LiveKitDuplex {
             )
             .await?;
 
-            out.push_to(VIDEO, PipelinePacket::CapsChanged(video_caps()))
-                .await?;
-            out.push_to(AUDIO, PipelinePacket::CapsChanged(audio_caps()))
+            out.push_to(
+                VIDEO,
+                PipelinePacket::CapsChanged(recv_video.caps_placeholder()),
+            )
+            .await?;
+            out.push_to(AUDIO, PipelinePacket::CapsChanged(opus_caps(2)))
                 .await?;
 
             let mut recv_video_mid: Option<Mid> = None;
@@ -417,15 +438,12 @@ impl MultiDuplexSession for LiveKitDuplex {
                             let pts_ns = media_time_ns(d.time);
                             if Some(d.mid) == recv_video_mid {
                                 if !video_keyframed {
-                                    if !crate::annexb::au_is_keyframe(
-                                        g2g_core::VideoCodec::H264,
-                                        &d.data,
-                                    ) {
+                                    if !recv_video.is_keyframe(&d.data) {
                                         continue;
                                     }
                                     video_keyframed = true;
                                 }
-                                frames.push((VIDEO, pts_ns, d.data.to_vec()));
+                                frames.push((VIDEO, pts_ns, recv_video.pipeline_unit(&d.data)));
                             } else if Some(d.mid) == recv_audio_mid {
                                 frames.push((AUDIO, pts_ns, d.data.to_vec()));
                             }
@@ -449,8 +467,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                 }
 
                 for (port, pts_ns, data) in frames {
-                    let keyframe = port == VIDEO
-                        && crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &data);
+                    let keyframe = port == VIDEO && recv_video.is_keyframe(&data);
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             data.into_boxed_slice(),
@@ -537,7 +554,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                                     continue;
                                 };
                                 let (mid, pt_slot) = match track {
-                                    Track::Video => (send_video_mid, &mut video_pt),
+                                    Track::Video(_) => (send_video_mid, &mut video_pt),
                                     Track::Audio => (send_audio_mid, &mut audio_pt),
                                 };
                                 if pt_slot.is_none() {
@@ -627,9 +644,10 @@ mod tests {
     #[test]
     fn configure_reads_track_kind_from_caps() {
         let mut d = LiveKitDuplex::new("ws://h:7880", "room", "id");
-        MultiDuplexSession::configure_input(&mut d, 1, &video_caps()).unwrap();
-        MultiDuplexSession::configure_input(&mut d, 0, &audio_caps()).unwrap();
-        assert_eq!(d.inputs[1], Some(Track::Video));
+        let h264 = WebRtcVideoCodec::H264.caps_placeholder();
+        MultiDuplexSession::configure_input(&mut d, 1, &h264).unwrap();
+        MultiDuplexSession::configure_input(&mut d, 0, &opus_caps(2)).unwrap();
+        assert_eq!(d.inputs[1], Some(Track::Video(WebRtcVideoCodec::H264)));
         assert_eq!(d.inputs[0], Some(Track::Audio));
     }
 }

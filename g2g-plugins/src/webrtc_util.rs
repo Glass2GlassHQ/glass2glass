@@ -456,7 +456,7 @@ pub(crate) async fn ice_restart(
 /// Parse a restart PATCH's 200 answer frag into the server's new ICE
 /// credentials and its candidates. Lines that fail to parse are skipped;
 /// peer-reflexive discovery still converges if the server checks first.
-fn parse_restart_answer_frag(frag: &str) -> (Option<IceCreds>, Vec<Candidate>) {
+pub(crate) fn parse_restart_answer_frag(frag: &str) -> (Option<IceCreds>, Vec<Candidate>) {
     let mut ufrag = None;
     let mut pwd = None;
     let mut candidates = Vec::new();

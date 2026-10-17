@@ -1,18 +1,18 @@
 //! Native WebRTC egress sink (`WebRtcSink`): publishes a pipeline's encoded
-//! H.264 to a WHIP server over a WebRTC PeerConnection, built on the sans-IO
+//! video (H.264, VP8, VP9, H.265 or AV1) or Opus to a WHIP server over a WebRTC PeerConnection, built on the sans-IO
 //! [`str0m`] stack (ICE / DTLS / SRTP / RTP). This is the native counterpart of
 //! the browser-only data-channel [`crate::webrtcsrc::WebRtcSrc`], and the
 //! WebRTC analog of `RtmpSink` (publish encoded media to a server endpoint).
 //!
 //! Shape, mirroring the other tokio network sinks (`UdpSink`, `SrtSink`):
-//! - `configure_pipeline` accepts `Caps::CompressedVideo { codec: H264 }`.
+//! - `configure_pipeline` accepts any carried video codec or Opus (`webrtc_codec`).
 //! - On the first `DataFrame`, the sink performs the WHIP handshake: it builds a
-//!   str0m `Rtc` offering a single send-only H.264 video m-line, POSTs the SDP
+//!   str0m `Rtc` offering a single send-only m-line in that codec, POSTs the SDP
 //!   offer to the WHIP endpoint (reqwest, `application/sdp`), applies the
 //!   answer, then spawns a background task that owns the `Rtc` + a tokio
 //!   `UdpSocket` and runs str0m's `poll_output` / `handle_input` loop.
 //! - Each subsequent access unit is handed to that task over a bounded channel;
-//!   the task feeds it to str0m's H.264 writer, which packetizes + SRTP-encrypts
+//!   the task feeds it to str0m's writer for the codec, which packetizes + SRTP-encrypts
 //!   and emits the UDP datagrams. The element itself never touches the `Rtc`
 //!   (it lives on the task), so `WebRtcSink` is naturally `Send`.
 //!
@@ -25,8 +25,8 @@
 //! server, and browser playback) is owed an on-network validation, like the
 //! other egress elements (`rtmpsink`); the sandbox blocks the required ports.
 //!
-//! H.264 framing: the sink forwards each access unit as g2g delivers it
-//! (Annex-B, the pipeline convention); str0m's H.264 packetizer splits NAL
+//! Framing: the sink forwards each access unit as g2g delivers it
+//! (Annex-B, the pipeline convention); str0m's packetizer splits NAL
 //! units for RTP. Confirming the exact framing str0m expects is part of the
 //! owed runtime validation.
 
@@ -48,18 +48,18 @@ use tokio::sync::mpsc;
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::crypto::from_feature_flags;
-use str0m::format::Codec;
-use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid, Pt};
+use str0m::media::{Direction, Mid, Pt};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    ElementMetadata, G2gError, HardwareError, OutputSink, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, Reconfigure, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
+    HardwareError, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    Reconfigure,
 };
 
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
+use crate::webrtc_codec::{sink_caps_alternatives, Track, WebRtcVideoCodec};
 use crate::webrtc_util::{
     add_host_candidate, drain_pacer, feed_datagram, ice_restart, post_sdp, select_host_ip,
     send_transmit, trickle_candidates, ResourceHandle, TricklePatch, TurnConfig,
@@ -79,55 +79,6 @@ const INITIAL_BITRATE_BPS: u64 = 2_000_000;
 struct MediaUnit {
     pts_ns: u64,
     data: Vec<u8>,
-}
-
-/// Which media this sink carries, chosen from the configured caps. WebRTC needs
-/// the codec, the m-line `MediaKind`, and the RTP clock to agree; one input pad
-/// means one track per sink (simultaneous A/V over one PeerConnection is a
-/// `MultiInputElement` follow-up).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Track {
-    /// H.264 video on a 90 kHz clock.
-    Video,
-    /// Opus audio on a 48 kHz clock.
-    Audio,
-}
-
-impl Track {
-    pub(crate) fn media_kind(self) -> MediaKind {
-        match self {
-            Track::Video => MediaKind::Video,
-            Track::Audio => MediaKind::Audio,
-        }
-    }
-
-    pub(crate) fn codec(self) -> Codec {
-        match self {
-            Track::Video => Codec::H264,
-            Track::Audio => Codec::Opus,
-        }
-    }
-
-    pub(crate) fn frequency(self) -> Frequency {
-        match self {
-            Track::Video => Frequency::NINETY_KHZ,
-            Track::Audio => Frequency::FORTY_EIGHT_KHZ,
-        }
-    }
-
-    fn rate_hz(self) -> u64 {
-        match self {
-            Track::Video => 90_000,
-            Track::Audio => 48_000,
-        }
-    }
-
-    /// Map a nanosecond PTS to this track's RTP `MediaTime`. `u128` intermediate
-    /// avoids overflow on large timestamps.
-    pub(crate) fn media_time(self, pts_ns: u64) -> MediaTime {
-        let ticks = (pts_ns as u128 * self.rate_hz() as u128 / 1_000_000_000) as u64;
-        MediaTime::new(ticks, self.frequency())
-    }
 }
 
 /// WHIP-publishing WebRTC egress sink. See the module docs.
@@ -154,8 +105,8 @@ pub struct WebRtcSink {
     turn_pass: String,
     queue_depth: usize,
     configured: bool,
-    /// The media kind, decided from the configured caps (H.264 video or Opus
-    /// audio). Defaults to video until `configure_pipeline` runs.
+    /// The track, decided from the configured caps. Defaults to H.264 video
+    /// until `configure_pipeline` runs.
     track: Track,
     /// Set on the first frame, after the WHIP handshake spawns the session task.
     tx: Option<mpsc::Sender<MediaUnit>>,
@@ -204,7 +155,7 @@ impl WebRtcSink {
             turn_pass: String::new(),
             queue_depth: DEFAULT_QUEUE_DEPTH,
             configured: false,
-            track: Track::Video,
+            track: Track::Video(WebRtcVideoCodec::default()),
             tx: None,
             resource: ResourceHandle::default(),
             keyframe_requested: Arc::new(AtomicBool::new(false)),
@@ -277,10 +228,7 @@ impl WebRtcSink {
             // `EgressBitrateEstimate`; the sink relays it to the encoder (BWE).
             .enable_bwe(Some(Bitrate::bps(INITIAL_BITRATE_BPS)))
             .clear_codecs();
-        let config = match self.track {
-            Track::Video => config.enable_h264(true),
-            Track::Audio => config.enable_opus(true),
-        };
+        let config = self.track.enable(config);
         let mut rtc = config.build(Instant::now());
 
         // Trickle ICE: the offer carries the host candidate only; reflexive /
@@ -393,38 +341,6 @@ static WEBRTCSINK_PROPS: &[PropertySpec] = &[
     ),
 ];
 
-/// The H.264 sink caps this element accepts (any geometry / framerate).
-fn h264_any() -> Caps {
-    Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width: Dim::Any,
-        height: Dim::Any,
-        framerate: Rate::Any,
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-    }
-}
-
-/// The Opus audio caps this element accepts. Stereo 48 kHz is the WebRTC /
-/// `opusenc` default; other channel counts / rates are a follow-up (the audio
-/// `Caps` has no wildcard fields, so the declared sink caps must be concrete).
-fn opus_mono() -> Caps {
-    Caps::Audio {
-        format: AudioFormat::Opus,
-        channels: 1,
-        sample_rate: 48_000,
-        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-    }
-}
-
-fn opus_stereo() -> Caps {
-    Caps::Audio {
-        format: AudioFormat::Opus,
-        channels: 2,
-        sample_rate: 48_000,
-        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-    }
-}
-
 impl AsyncElement for WebRtcSink {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -432,40 +348,18 @@ impl AsyncElement for WebRtcSink {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        // Accept H.264 video or Opus audio; one track per sink instance.
-        match upstream_caps {
-            Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                ..
-            }
-            | Caps::Audio {
-                format: AudioFormat::Opus,
-                ..
-            } => Ok(upstream_caps.clone()),
-            _ => Err(G2gError::CapsMismatch),
-        }
+        // One track per sink instance: any carried video codec, or Opus audio.
+        Track::from_caps(upstream_caps)
+            .map(|_| upstream_caps.clone())
+            .ok_or(G2gError::CapsMismatch)
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::from_alternatives(Vec::from([
-            h264_any(),
-            opus_stereo(),
-            opus_mono(),
-        ])))
+        CapsConstraint::Accepts(CapsSet::from_alternatives(sink_caps_alternatives()))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.track = match absolute_caps {
-            Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                ..
-            } => Track::Video,
-            Caps::Audio {
-                format: AudioFormat::Opus,
-                ..
-            } => Track::Audio,
-            _ => return Err(G2gError::CapsMismatch),
-        };
+        self.track = Track::from_caps(absolute_caps).ok_or(G2gError::CapsMismatch)?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -474,7 +368,7 @@ impl AsyncElement for WebRtcSink {
         ElementMetadata::new(
             "WebRTC sink",
             "Sink/Network/WebRTC",
-            "Publishes H.264 to a WHIP server over WebRTC (str0m: ICE/DTLS/SRTP)",
+            "Publishes video (H.264/VP8/VP9/H.265/AV1) or Opus to a WHIP server over WebRTC (str0m: ICE/DTLS/SRTP)",
             "g2g",
         )
     }
@@ -750,6 +644,22 @@ async fn run_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::webrtc_codec::opus_caps;
+    use g2g_core::{Dim, Rate};
+
+    fn h264_any() -> Caps {
+        WebRtcVideoCodec::H264.caps_any()
+    }
+
+    #[test]
+    fn accepts_every_carried_video_codec() {
+        for codec in WebRtcVideoCodec::ALL {
+            let mut sink = WebRtcSink::new("http://localhost:8889/s/whip");
+            assert!(sink.intercept_caps(&codec.caps_any()).is_ok());
+            assert!(sink.configure_pipeline(&codec.caps_any()).is_ok());
+            assert_eq!(sink.track, Track::Video(codec));
+        }
+    }
 
     #[test]
     fn accepts_h264_rejects_raw() {
@@ -852,18 +762,6 @@ mod tests {
     }
 
     #[test]
-    fn media_time_uses_the_track_clock() {
-        // Video: 90 kHz. 1 s -> 90000 ticks; 1/30 s -> ~3000.
-        assert_eq!(Track::Video.media_time(1_000_000_000).numer(), 90_000);
-        assert_eq!(Track::Video.media_time(33_333_333).numer(), 2_999);
-        assert_eq!(Track::Video.frequency(), Frequency::NINETY_KHZ);
-        // Audio: 48 kHz. 1 s -> 48000 ticks; 20 ms Opus frame -> 960 samples.
-        assert_eq!(Track::Audio.media_time(1_000_000_000).numer(), 48_000);
-        assert_eq!(Track::Audio.media_time(20_000_000).numer(), 960);
-        assert_eq!(Track::Audio.frequency(), Frequency::FORTY_EIGHT_KHZ);
-    }
-
-    #[test]
     fn keyframe_request_flag_surfaces_as_force_keyframe() {
         let sink = WebRtcSink::new("http://h/whip");
         // No PLI yet: nothing to forward.
@@ -894,9 +792,9 @@ mod tests {
     #[test]
     fn accepts_opus_audio() {
         let sink = WebRtcSink::new("http://h/whip");
-        assert!(sink.intercept_caps(&opus_stereo()).is_ok());
+        assert!(sink.intercept_caps(&opus_caps(2)).is_ok());
         let mut s = WebRtcSink::new("http://h/whip");
-        assert!(s.configure_pipeline(&opus_stereo()).is_ok());
+        assert!(s.configure_pipeline(&opus_caps(2)).is_ok());
         assert_eq!(s.track, Track::Audio);
     }
 }

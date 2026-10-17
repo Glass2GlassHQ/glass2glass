@@ -1,5 +1,5 @@
 //! Native LiveKit subscriber source (`LiveKitSrc`): joins a room over the
-//! LiveKit WebSocket signalling protocol and emits the subscribed H.264 video
+//! LiveKit WebSocket signalling protocol and emits the subscribed video (`video-codec`, H.264 by default)
 //! and Opus audio on two output pads, from one PeerConnection. The ingest
 //! mirror of [`crate::livekitsink::LiveKitSink`], reusing the same
 //! [`crate::livekit_signal`] seam (JWT + hand-rolled protobuf codec).
@@ -17,7 +17,7 @@
 //! start on a P slice), and a PLI is repeated once a second until it arrives,
 //! like [`crate::webrtcwhepsrc::WebRtcWhepSrc`].
 //!
-//! Shape: a [`MultiOutputSource`] (output 0 = H.264 video, output 1 = Opus
+//! Shape: a [`MultiOutputSource`] (output 0 = video, output 1 = Opus
 //! audio) driven by the terminal fan-out runner
 //! [`run_fanout_session`](g2g_core::runtime::run_fanout_session), like
 //! [`crate::webrtcwhepsession::WebRtcWhepSessionSrc`]. Host-candidate ICE (the
@@ -46,9 +46,8 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig}
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AudioFormat, Caps, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink,
-    MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    VideoCodec,
+    Caps, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink, MultiOutputSource,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
@@ -56,9 +55,13 @@ use crate::livekit_signal::{
     access_token, candidate_from_init_json, signal_ws_url, SessionDescription, SignalRequest,
     SignalResponse, SignalTarget, VideoGrant,
 };
+use crate::webrtc_codec::{
+    enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
+    WebRtcVideoCodec, VIDEO_CODEC_PROP,
+};
 use crate::webrtc_util::{add_ice_candidates, media_time_ns, send_transmit};
 
-/// Output port for the H.264 video track.
+/// Output port for the video track.
 const VIDEO_PORT: usize = 0;
 /// Output port for the Opus audio track.
 const AUDIO_PORT: usize = 1;
@@ -85,6 +88,8 @@ pub struct LiveKitSrc {
     api_key: String,
     api_secret: String,
     token: Option<String>,
+    /// The video codec answered to the server's offer and emitted on output 0.
+    video_codec: WebRtcVideoCodec,
     /// Stop after this many access units across both tracks and emit EOS
     /// (`u64::MAX` = unbounded). For tests / bounded runs.
     frame_limit: u64,
@@ -117,6 +122,7 @@ impl LiveKitSrc {
             api_key: String::new(),
             api_secret: String::new(),
             token: None,
+            video_codec: WebRtcVideoCodec::default(),
             frame_limit: u64::MAX,
         }
     }
@@ -125,6 +131,13 @@ impl LiveKitSrc {
     pub fn with_api_key(mut self, key: impl Into<String>, secret: impl Into<String>) -> Self {
         self.api_key = key.into();
         self.api_secret = secret.into();
+        self
+    }
+
+    /// Subscribe to video in `codec` instead of H.264 (the `video-codec`
+    /// property). A remote track in another codec is left unanswered.
+    pub fn with_video_codec(mut self, codec: WebRtcVideoCodec) -> Self {
+        self.video_codec = codec;
         self
     }
 
@@ -150,30 +163,6 @@ impl LiveKitSrc {
             &VideoGrant::subscriber(self.room.clone()),
             TOKEN_TTL_SECS,
         )
-    }
-}
-
-pub(crate) fn video_caps() -> Caps {
-    // Geometry is unknown until the in-band SPS, so advertise a `Range`
-    // placeholder (a downstream parser recovers the real dimensions).
-    Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width: Dim::Range { min: 2, max: 8192 },
-        height: Dim::Range { min: 2, max: 8192 },
-        framerate: Rate::Range {
-            min_q16: 1 << 16,
-            max_q16: 240 << 16,
-        },
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-    }
-}
-
-pub(crate) fn audio_caps() -> Caps {
-    Caps::Audio {
-        format: AudioFormat::Opus,
-        channels: 2,
-        sample_rate: 48_000,
-        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -251,6 +240,7 @@ static LIVEKITSRC_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "pre-minted access token (overrides api-key/secret)",
     ),
+    VIDEO_CODEC_PROP,
     PropertySpec::new(
         "num-buffers",
         PropKind::Int,
@@ -272,8 +262,8 @@ impl MultiOutputSource for LiveKitSrc {
 
     fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
         match output {
-            VIDEO_PORT => Ok(video_caps()),
-            AUDIO_PORT => Ok(audio_caps()),
+            VIDEO_PORT => Ok(self.video_codec.caps_placeholder()),
+            AUDIO_PORT => Ok(opus_caps(2)),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -285,6 +275,9 @@ impl MultiOutputSource for LiveKitSrc {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         if name == "num-buffers" {
             return crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value);
+        }
+        if name == "video-codec" {
+            return set_video_codec_property(&mut self.video_codec, &value);
         }
         let v = value.as_str().ok_or(PropError::Type)?;
         match name {
@@ -307,6 +300,7 @@ impl MultiOutputSource for LiveKitSrc {
             "api-key" => Some(PropValue::Str(self.api_key.clone())),
             "api-secret" => Some(PropValue::Str(self.api_secret.clone())),
             "token" => Some(PropValue::Str(self.token.clone().unwrap_or_default())),
+            "video-codec" => Some(get_video_codec_property(self.video_codec)),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             _ => None,
         }
@@ -352,19 +346,22 @@ impl MultiOutputSource for LiveKitSrc {
                 .await
                 .map_err(io_err)?;
             let local = socket.local_addr().map_err(io_err)?;
-            let mut rtc = RtcConfig::new()
+            let video_codec = self.video_codec;
+            let config = RtcConfig::new()
                 .set_crypto_provider(Arc::new(from_feature_flags()))
-                .clear_codecs()
-                .enable_h264(true)
-                .enable_opus(true)
+                .clear_codecs();
+            let mut rtc = enable_tracks(config, [Track::Video(video_codec), Track::Audio])
                 .build(Instant::now());
             // Host candidate only (rides inline in each answer SDP); the server
             // trickles its own candidates after the offer.
             add_ice_candidates(&mut rtc, &socket, None).await?;
 
-            out.push_to(VIDEO_PORT, PipelinePacket::CapsChanged(video_caps()))
-                .await?;
-            out.push_to(AUDIO_PORT, PipelinePacket::CapsChanged(audio_caps()))
+            out.push_to(
+                VIDEO_PORT,
+                PipelinePacket::CapsChanged(video_codec.caps_placeholder()),
+            )
+            .await?;
+            out.push_to(AUDIO_PORT, PipelinePacket::CapsChanged(opus_caps(2)))
                 .await?;
 
             // Track routing state: the first video / audio m-line the server
@@ -406,15 +403,16 @@ impl MultiOutputSource for LiveKitSrc {
                             if Some(d.mid) == video_mid {
                                 // Mid-GOP subscribe: drop until the first IDR.
                                 if !video_keyframed {
-                                    if !crate::annexb::au_is_keyframe(
-                                        g2g_core::VideoCodec::H264,
-                                        &d.data,
-                                    ) {
+                                    if !video_codec.is_keyframe(&d.data) {
                                         continue;
                                     }
                                     video_keyframed = true;
                                 }
-                                frames.push((VIDEO_PORT, pts_ns, d.data.to_vec()));
+                                frames.push((
+                                    VIDEO_PORT,
+                                    pts_ns,
+                                    video_codec.pipeline_unit(&d.data),
+                                ));
                             } else if Some(d.mid) == audio_mid {
                                 frames.push((AUDIO_PORT, pts_ns, d.data.to_vec()));
                             }
@@ -438,8 +436,7 @@ impl MultiOutputSource for LiveKitSrc {
                 }
 
                 for (port, pts_ns, data) in frames {
-                    let keyframe = port == VIDEO_PORT
-                        && crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &data);
+                    let keyframe = port == VIDEO_PORT && video_codec.is_keyframe(&data);
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             data.into_boxed_slice(),
@@ -520,6 +517,7 @@ impl MultiOutputSource for LiveKitSrc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::{AudioFormat, VideoCodec};
 
     #[test]
     fn two_outputs_video_then_audio() {

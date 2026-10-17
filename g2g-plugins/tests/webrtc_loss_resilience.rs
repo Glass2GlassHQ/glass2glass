@@ -15,6 +15,11 @@
 
 #![cfg(all(target_os = "linux", feature = "webrtc"))]
 
+mod webrtc_streams_common;
+
+use g2g_plugins::webrtc_codec::WebRtcVideoCodec;
+use webrtc_streams_common::synthetic_stream;
+
 use core::future::{ready, Future, Ready};
 use core::pin::Pin;
 use std::net::{IpAddr, SocketAddr};
@@ -52,41 +57,10 @@ fn h264_caps() -> Caps {
     }
 }
 
-/// Build a synthetic Annex-B H.264 stream of `frames` access units. Every 30th
-/// AU is a keyframe (SPS + PPS + a large IDR slice); the rest are large P slices.
-/// The slice payloads are big enough (>MTU) that str0m fragments each AU across
-/// several RTP packets, so dropping one packet damages the frame unless RTX
-/// recovers it. Payload bytes are all in `1..=251`, so they can never emulate an
-/// Annex-B start code (`00 00 01`) and split the NAL wrongly.
+/// H.264 units bigger than the MTU (see `webrtc_streams_common`), so one
+/// dropped packet damages a frame unless RTX recovers it.
 fn synthetic_h264_stream(frames: usize) -> Vec<Vec<u8>> {
-    const SC: [u8; 4] = [0, 0, 0, 1];
-    let pad = |n: usize, salt: u8| -> Vec<u8> {
-        (0..n)
-            .map(|i| (((i as u32 + salt as u32) % 251) as u8) + 1)
-            .collect::<Vec<u8>>()
-    };
-    let mut aus = Vec::with_capacity(frames);
-    for f in 0..frames {
-        let mut au = Vec::new();
-        if f % 30 == 0 {
-            // SPS (type 7), PPS (type 8), IDR slice (type 5, nal_ref_idc = 3).
-            au.extend_from_slice(&SC);
-            au.extend_from_slice(&[0x67, 0x42, 0x00, 0x1f]);
-            au.extend_from_slice(&pad(8, 1));
-            au.extend_from_slice(&SC);
-            au.extend_from_slice(&[0x68, 0xce, 0x3c, 0x80]);
-            au.extend_from_slice(&SC);
-            au.push(0x65);
-            au.extend_from_slice(&pad(4000, f as u8));
-        } else {
-            // Non-IDR slice (type 1, nal_ref_idc = 2).
-            au.extend_from_slice(&SC);
-            au.push(0x41);
-            au.extend_from_slice(&pad(1500, f as u8));
-        }
-        aus.push(au);
-    }
-    aus
+    synthetic_stream(WebRtcVideoCodec::H264, frames)
 }
 
 /// Source that paces a fixed set of H.264 access units in real time (~30 fps) for

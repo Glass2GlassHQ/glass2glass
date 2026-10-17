@@ -16,6 +16,11 @@
 
 #![cfg(all(target_os = "linux", feature = "webrtc"))]
 
+mod webrtc_streams_common;
+
+use g2g_plugins::webrtc_codec::WebRtcVideoCodec;
+use webrtc_streams_common::{synthetic_stream_sized, Sizes};
+
 use core::future::{ready, Future, Ready};
 use core::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -48,36 +53,13 @@ fn h264_caps() -> Caps {
     }
 }
 
-/// Synthetic Annex-B H.264 access units: every 30th is a keyframe (SPS + PPS +
-/// IDR slice), the rest are P slices. Payload bytes stay in `1..=251` so they can
-/// never emulate a start code.
+/// Small H.264 units (see `webrtc_streams_common`), a keyframe every 30.
 fn synthetic_h264_stream(frames: usize) -> Vec<Vec<u8>> {
-    const SC: [u8; 4] = [0, 0, 0, 1];
-    let pad = |n: usize, salt: u8| -> Vec<u8> {
-        (0..n)
-            .map(|i| (((i as u32 + salt as u32) % 251) as u8) + 1)
-            .collect()
+    const SMALL: Sizes = Sizes {
+        keyframe: 600,
+        inter: 400,
     };
-    (0..frames)
-        .map(|f| {
-            let mut au = Vec::new();
-            if f % 30 == 0 {
-                au.extend_from_slice(&SC);
-                au.extend_from_slice(&[0x67, 0x42, 0x00, 0x1f]);
-                au.extend_from_slice(&pad(8, 1));
-                au.extend_from_slice(&SC);
-                au.extend_from_slice(&[0x68, 0xce, 0x3c, 0x80]);
-                au.extend_from_slice(&SC);
-                au.push(0x65);
-                au.extend_from_slice(&pad(600, f as u8));
-            } else {
-                au.extend_from_slice(&SC);
-                au.push(0x41);
-                au.extend_from_slice(&pad(400, f as u8));
-            }
-            au
-        })
-        .collect()
+    synthetic_stream_sized(WebRtcVideoCodec::H264, frames, SMALL)
 }
 
 /// Paces `payloads` in real time for `duration`, looping.

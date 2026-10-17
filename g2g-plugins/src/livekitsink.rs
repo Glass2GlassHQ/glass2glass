@@ -1,5 +1,5 @@
 //! Native LiveKit publisher sink (`LiveKitSink`): joins a LiveKit room and
-//! publishes H.264 video (and optional Opus audio) over one str0m PeerConnection,
+//! publishes video in any carried codec (and optional Opus audio) over one str0m PeerConnection,
 //! so other room participants can subscribe. This is the T4 signaller layered
 //! over the T1 str0m engine, the way gst-plugins-rs layers a LiveKit signaller
 //! over `webrtcbin`. The WebSocket + protobuf protocol lives in
@@ -51,13 +51,13 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::crypto::from_feature_flags;
-use str0m::media::{Direction, Mid, Pt, Rid};
+use str0m::media::{Direction, MediaKind, Mid, Pt, Rid};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, ReverseChannel, VideoCodec,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
+    MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ReverseChannel,
 };
 
 use crate::filesink::io_err;
@@ -67,11 +67,11 @@ use crate::livekit_signal::{
     VideoGrant, VideoLayer, VideoQuality,
 };
 use crate::livekitsrc::{recv_signal, send_signal};
+use crate::webrtc_codec::{enable_tracks, sink_caps_alternatives, Track, WebRtcVideoCodec};
 use crate::webrtc_simulcast::{
-    rids_high_to_low, send_simulcast, track_of, KeyframeRoutes, LayerAllocator, SimulcastPads,
+    rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
 use crate::webrtc_util::{add_ice_candidates, feed_datagram, select_host_ip, send_transmit};
-use crate::webrtcsink::Track;
 
 /// Default bounded depth of the element->session media channel (per direction).
 const DEFAULT_QUEUE_DEPTH: usize = 256;
@@ -296,13 +296,13 @@ impl LiveKitSink {
         let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
         let local = socket.local_addr().map_err(io_err)?;
 
-        let mut rtc = RtcConfig::new()
+        // Every layer rides one m-line, so the video pads must share a codec.
+        self.pads.video_codec()?;
+        let config = RtcConfig::new()
             .set_crypto_provider(Arc::new(from_feature_flags()))
             .clear_codecs()
-            .enable_h264(true)
-            .enable_opus(true)
-            .enable_bwe(allocator.as_ref().map(|a| Bitrate::bps(a.initial_bps())))
-            .build(Instant::now());
+            .enable_bwe(allocator.as_ref().map(|a| Bitrate::bps(a.initial_bps())));
+        let mut rtc = enable_tracks(config, self.pads.tracks()).build(Instant::now());
         // Host candidate only for the local dev server; STUN/TURN NAT traversal
         // toward LiveKit Cloud is a follow-up.
         add_ice_candidates(&mut rtc, &socket, None).await?;
@@ -326,7 +326,7 @@ impl LiveKitSink {
             let mut api = rtc.sdp_api();
             let video_mid = has_video.then(|| {
                 api.add_media(
-                    Track::Video.media_kind(),
+                    MediaKind::Video,
                     Direction::SendOnly,
                     Some(stream_id.clone()),
                     Some(video_cid.clone()),
@@ -335,7 +335,7 @@ impl LiveKitSink {
             });
             let audio_mid = has_audio.then(|| {
                 api.add_media(
-                    Track::Audio.media_kind(),
+                    MediaKind::Audio,
                     Direction::SendOnly,
                     Some(stream_id.clone()),
                     Some(audio_cid.clone()),
@@ -472,13 +472,9 @@ impl LiveKitSink {
         // when there is only one layer); audio writes to its own mid.
         let mut routes = KeyframeRoutes::new();
         for (li, &i) in video_inputs.iter().enumerate() {
-            if let Some(mid) = video_mid {
+            if let (Some(mid), Some(track)) = (video_mid, self.pads.tracks[i]) {
                 let rid = simulcast.then(|| Rid::from(rids[li]));
-                self.sinks[i] = Some(PadSink {
-                    track: Track::Video,
-                    mid,
-                    rid,
-                });
+                self.sinks[i] = Some(PadSink { track, mid, rid });
                 routes.push(mid, rid, self.pads.reverse[i].clone());
             }
         }
@@ -575,31 +571,7 @@ static LIVEKIT_PROPS: &[PropertySpec] = &[
 ];
 
 fn h264_any() -> Caps {
-    Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width: Dim::Any,
-        height: Dim::Any,
-        framerate: Rate::Any,
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-    }
-}
-
-fn opus_mono() -> Caps {
-    Caps::Audio {
-        format: AudioFormat::Opus,
-        channels: 1,
-        sample_rate: 48_000,
-        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-    }
-}
-
-fn opus_stereo() -> Caps {
-    Caps::Audio {
-        format: AudioFormat::Opus,
-        channels: 2,
-        sample_rate: 48_000,
-        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-    }
+    WebRtcVideoCodec::H264.caps_any()
 }
 
 impl MultiInputElement for LiveKitSink {
@@ -620,18 +592,14 @@ impl MultiInputElement for LiveKitSink {
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        match track_of(upstream_caps) {
+        match Track::from_caps(upstream_caps) {
             Some(_) => Ok(upstream_caps.clone()),
             None => Err(G2gError::CapsMismatch),
         }
     }
 
     fn caps_constraint_as_input(&self, _input: usize) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::from_alternatives(Vec::from([
-            h264_any(),
-            opus_stereo(),
-            opus_mono(),
-        ])))
+        CapsConstraint::Accepts(CapsSet::from_alternatives(sink_caps_alternatives()))
     }
 
     fn configure_pipeline(
@@ -660,7 +628,7 @@ impl MultiInputElement for LiveKitSink {
         ElementMetadata::new(
             "LiveKit sink",
             "Sink/Network/WebRTC",
-            "Publishes H.264 (+ Opus) into a LiveKit room (str0m + WebSocket signalling)",
+            "Publishes video (H.264/VP8/VP9/H.265/AV1, + Opus) into a LiveKit room (str0m + WebSocket signalling)",
             "g2g",
         )
     }
@@ -881,7 +849,7 @@ async fn run_session(mut a: SessionArgs) {
                 };
                 let mid = unit.mid;
                 let pt_slot = match unit.track {
-                    Track::Video => &mut video_pt,
+                    Track::Video(_) => &mut video_pt,
                     Track::Audio => &mut audio_pt,
                 };
                 // The pt is per-m-line, so all layers on the video mid share it.
@@ -960,6 +928,8 @@ async fn run_session(mut a: SessionArgs) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::webrtc_codec::opus_caps;
+    use g2g_core::{Dim, Rate, VideoCodec};
 
     #[test]
     fn video_only_by_default_audio_opt_in() {
@@ -973,10 +943,13 @@ mod tests {
     fn configure_reads_track_kind_from_caps() {
         let mut s = LiveKitSink::new("ws://h:7880", "room", "id").with_audio();
         assert!(s.configure_pipeline(0, &h264_any()).is_ok());
-        assert!(s.configure_pipeline(1, &opus_stereo()).is_ok());
+        assert!(s.configure_pipeline(1, &opus_caps(2)).is_ok());
         assert_eq!(
             s.pads.tracks,
-            alloc::vec![Some(Track::Video), Some(Track::Audio)]
+            alloc::vec![
+                Some(Track::Video(WebRtcVideoCodec::H264)),
+                Some(Track::Audio)
+            ]
         );
         assert!(s.all_configured());
     }
@@ -1005,7 +978,10 @@ mod tests {
         assert!(s.configure_pipeline(1, &lo).is_ok());
         assert_eq!(
             s.pads.tracks,
-            alloc::vec![Some(Track::Video), Some(Track::Video)]
+            alloc::vec![
+                Some(Track::Video(WebRtcVideoCodec::H264)),
+                Some(Track::Video(WebRtcVideoCodec::H264))
+            ]
         );
         assert_eq!(s.pads.dims, alloc::vec![(640, 480), (320, 240)]);
         assert!(s.all_configured());

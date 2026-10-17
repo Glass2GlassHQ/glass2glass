@@ -182,6 +182,12 @@ pub struct Vp8KeyFrame {
     pub show_frame: bool,
 }
 
+/// Whether `packet` is a VP8 key frame with a readable header.
+#[cfg(any(feature = "webrtc", feature = "observe"))]
+pub(crate) fn is_keyframe(packet: &[u8]) -> bool {
+    parse_keyframe(packet).is_some()
+}
+
 /// Decode a VP8 key-frame header. `None` when the packet is too short, is an
 /// interframe (no dimensions), lacks the start code, or codes a zero dimension.
 fn parse_keyframe(packet: &[u8]) -> Option<Vp8KeyFrame> {

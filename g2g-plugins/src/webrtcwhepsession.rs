@@ -1,10 +1,10 @@
 //! Multi-track WebRTC ingest session (`WebRtcWhepSessionSrc`): subscribes to a
-//! WHEP endpoint and emits the received H.264 video **and** Opus audio on two
+//! WHEP endpoint and emits the received video (`video-codec`, H.264 by default) **and** Opus audio on two
 //! output pads, from one PeerConnection. The receive-side mirror of
 //! [`crate::webrtcsession::WebRtcSessionSink`], and the multi-track counterpart
 //! of the one-track [`crate::webrtcwhepsrc::WebRtcWhepSrc`].
 //!
-//! Shape: a [`MultiOutputSource`] (output 0 = H.264 video, output 1 = Opus
+//! Shape: a [`MultiOutputSource`] (output 0 = video, output 1 = Opus
 //! audio) driven by the terminal fan-out runner
 //! [`run_fanout_session`](g2g_core::runtime::run_fanout_session) (no upstream,
 //! the session generates both streams from the network). It offers two recv-only
@@ -37,20 +37,23 @@ use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AudioFormat, Caps, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink,
-    MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    VideoCodec,
+    Caps, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink, MultiOutputSource,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
+use crate::webrtc_codec::{
+    enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
+    WebRtcVideoCodec, VIDEO_CODEC_PROP,
+};
 use crate::webrtc_util::{
     add_host_candidate, delete_resource, feed_datagram, ice_restart, media_time_ns, post_sdp,
     select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
     ICE_RESTART_TIMEOUT,
 };
 
-/// Output port for the H.264 video track.
+/// Output port for the video track.
 const VIDEO_PORT: usize = 0;
 /// Output port for the Opus audio track.
 const AUDIO_PORT: usize = 1;
@@ -73,6 +76,8 @@ pub struct WebRtcWhepSessionSrc {
     turn_server: Option<String>,
     turn_user: String,
     turn_pass: String,
+    /// The video codec offered and emitted on output 0.
+    video_codec: WebRtcVideoCodec,
     /// Stop after this many access units across both tracks and emit EOS
     /// (`u64::MAX` = unbounded). For tests / bounded runs.
     frame_limit: u64,
@@ -97,8 +102,15 @@ impl WebRtcWhepSessionSrc {
             turn_server: None,
             turn_user: String::new(),
             turn_pass: String::new(),
+            video_codec: WebRtcVideoCodec::default(),
             frame_limit: u64::MAX,
         }
+    }
+
+    /// Offer video in `codec` instead of H.264 (the `video-codec` property).
+    pub fn with_video_codec(mut self, codec: WebRtcVideoCodec) -> Self {
+        self.video_codec = codec;
+        self
     }
 
     /// Attach a bearer token for the WHEP POST.
@@ -157,6 +169,7 @@ static WHEPSESSION_PROPS: &[PropertySpec] = &[
     ),
     PropertySpec::new("turn-user", PropKind::Str, "TURN long-term username"),
     PropertySpec::new("turn-pass", PropKind::Str, "TURN long-term password"),
+    VIDEO_CODEC_PROP,
     PropertySpec::new(
         "num-buffers",
         PropKind::Int,
@@ -165,31 +178,6 @@ static WHEPSESSION_PROPS: &[PropertySpec] = &[
     .with_default("-1")
     .with_range("-1", "9223372036854775807"),
 ];
-
-fn video_caps() -> Caps {
-    // Geometry is unknown until the in-band SPS, so advertise a `Range`
-    // placeholder (a downstream parser recovers the real dimensions): negotiation
-    // fixates before data flows and `fixate()` rejects `Dim::Any`.
-    Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width: Dim::Range { min: 2, max: 8192 },
-        height: Dim::Range { min: 2, max: 8192 },
-        framerate: Rate::Range {
-            min_q16: 1 << 16,
-            max_q16: 240 << 16,
-        },
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-    }
-}
-
-fn audio_caps() -> Caps {
-    Caps::Audio {
-        format: AudioFormat::Opus,
-        channels: 2,
-        sample_rate: 48_000,
-        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-    }
-}
 
 impl MultiOutputSource for WebRtcWhepSessionSrc {
     type RunFuture<'a>
@@ -203,8 +191,8 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
 
     fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
         match output {
-            VIDEO_PORT => Ok(video_caps()),
-            AUDIO_PORT => Ok(audio_caps()),
+            VIDEO_PORT => Ok(self.video_codec.caps_placeholder()),
+            AUDIO_PORT => Ok(opus_caps(2)),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -216,6 +204,9 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         if name == "num-buffers" {
             return crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value);
+        }
+        if name == "video-codec" {
+            return set_video_codec_property(&mut self.video_codec, &value);
         }
         let v = value.as_str().ok_or(PropError::Type)?;
         // The optional fields take an empty string as "unset", so a launch line
@@ -241,6 +232,7 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
             "turn-server" => Some(PropValue::Str(self.turn_server.clone().unwrap_or_default())),
             "turn-user" => Some(PropValue::Str(self.turn_user.clone())),
             "turn-pass" => Some(PropValue::Str(self.turn_pass.clone())),
+            "video-codec" => Some(get_video_codec_property(self.video_codec)),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             _ => None,
         }
@@ -262,11 +254,11 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
             let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
             let local = socket.local_addr().map_err(io_err)?;
 
-            let mut rtc = RtcConfig::new()
+            let video_codec = self.video_codec;
+            let config = RtcConfig::new()
                 .set_crypto_provider(alloc::sync::Arc::new(from_feature_flags()))
-                .clear_codecs()
-                .enable_h264(true)
-                .enable_opus(true)
+                .clear_codecs();
+            let mut rtc = enable_tracks(config, [Track::Video(video_codec), Track::Audio])
                 .build(Instant::now());
             // Trickle ICE: the offer carries the host candidate only; reflexive /
             // relay candidates are gathered after the POST and trickled by PATCH.
@@ -321,9 +313,12 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
             let mut refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
 
             // Announce each output's caps before its first frame.
-            out.push_to(VIDEO_PORT, PipelinePacket::CapsChanged(video_caps()))
-                .await?;
-            out.push_to(AUDIO_PORT, PipelinePacket::CapsChanged(audio_caps()))
+            out.push_to(
+                VIDEO_PORT,
+                PipelinePacket::CapsChanged(video_codec.caps_placeholder()),
+            )
+            .await?;
+            out.push_to(AUDIO_PORT, PipelinePacket::CapsChanged(opus_caps(2)))
                 .await?;
 
             let mut buf = alloc::vec![0u8; 2000];
@@ -357,7 +352,12 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                             } else {
                                 continue;
                             };
-                            frames.push((port, pts_ns, d.data.to_vec()));
+                            let unit = if port == VIDEO_PORT {
+                                video_codec.pipeline_unit(&d.data)
+                            } else {
+                                d.data.to_vec()
+                            };
+                            frames.push((port, pts_ns, unit));
                         }
                         Ok(Output::Event(Event::IceConnectionStateChange(state))) => match state {
                             IceConnectionState::Disconnected => {
@@ -392,8 +392,7 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                 }
 
                 for (port, pts_ns, data) in frames {
-                    let keyframe = port == VIDEO_PORT
-                        && crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &data);
+                    let keyframe = port == VIDEO_PORT && video_codec.is_keyframe(&data);
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             data.into_boxed_slice(),
@@ -438,6 +437,7 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::{AudioFormat, VideoCodec};
 
     #[test]
     fn two_outputs_video_then_audio() {
@@ -458,6 +458,24 @@ mod tests {
             })
         ));
         assert!(src.output_caps(2).is_err());
+    }
+
+    #[test]
+    fn video_codec_property_selects_the_video_output() {
+        let mut src = WebRtcWhepSessionSrc::new("http://h/whep");
+        src.set_property("video-codec", PropValue::Str("av1".into()))
+            .unwrap();
+        assert!(matches!(
+            src.output_caps(VIDEO_PORT),
+            Ok(Caps::CompressedVideo {
+                codec: VideoCodec::Av1,
+                ..
+            })
+        ));
+        assert_eq!(
+            src.get_property("video-codec"),
+            Some(PropValue::Str("av1".into()))
+        );
     }
 
     #[test]
