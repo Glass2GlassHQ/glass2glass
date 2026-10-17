@@ -50,14 +50,14 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::livekit_signal::{
     access_token, candidate_from_init_json, signal_ws_url, AddTrackRequest, IceSettings,
-    SessionDescription, SignalRequest, SignalResponse, SignalTarget, TrackSource, TrackType,
-    VideoGrant,
+    IceTransportPolicy, SessionDescription, SignalRequest, SignalResponse, SignalTarget,
+    TrackSource, TrackType, VideoGrant,
 };
 use crate::livekitsrc::{answer_offer, recv_signal, send_signal};
 use crate::webrtc_codec::{
     enable_tracks, opus_caps, sink_caps_alternatives, Track, WebRtcVideoCodec,
 };
-use crate::webrtc_util::{feed_datagram, media_time_ns, send_transmit, IceTransportPolicy};
+use crate::webrtc_util::{feed_datagram, media_time_ns, send_transmit};
 
 /// Send input / recv output pad layout: 0 = video, 1 = audio.
 const VIDEO: usize = 0;

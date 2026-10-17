@@ -49,6 +49,7 @@ const MIN_DELIVERED_PERCENT: usize = 90;
 /// Every packet the server pushed, per output port.
 struct Collector {
     packets: mpsc::UnboundedSender<(usize, PipelinePacket)>,
+    ports: usize,
 }
 
 impl MultiOutputSink for Collector {
@@ -64,7 +65,7 @@ impl MultiOutputSink for Collector {
     }
 
     fn port_count(&self) -> usize {
-        2
+        self.ports
     }
 }
 
@@ -149,7 +150,7 @@ async fn loopback(
         .unwrap();
     let server_stats = server.stats_handle();
     let (packets, mut received) = mpsc::unbounded_channel();
-    let mut collector = Collector { packets };
+    let mut collector = Collector { packets, ports: 2 };
 
     let mut ports: [Vec<PipelinePacket>; 2] = [Vec::new(), Vec::new()];
     let run: Pin<Box<dyn Future<Output = Result<u64, G2gError>> + '_>> = server.run(&mut collector);
@@ -298,7 +299,7 @@ async fn https_host_addr_serves_whip_over_tls() {
     let mut server =
         WhipServerSrc::new(format!("https://127.0.0.1:{port}")).with_tls(TLS_CERT, TLS_KEY);
     let (packets, mut received) = mpsc::unbounded_channel();
-    let mut collector = Collector { packets };
+    let mut collector = Collector { packets, ports: 2 };
     let run = server.run(&mut collector);
     let client = async {
         // both caps announcements follow the bind, so the server is listening
@@ -338,4 +339,108 @@ async fn https_host_addr_serves_whip_over_tls() {
     .expect("tls request timed out");
     assert!(text.starts_with("HTTP/1.1 415"), "{text}");
     assert!(text.contains("Access-Control-Allow-Origin: *"), "{text}");
+}
+
+const PUBLISHERS: usize = 2;
+
+/// `max-publishers=2`: two publishers land on their own pad pairs, a third POST
+/// is refused with 409 while both slots are taken, and the run ends with EOS on
+/// every pad once the last publisher leaves.
+#[tokio::test]
+async fn publishers_land_on_their_own_pad_pairs() {
+    let codec = WebRtcVideoCodec::default();
+    let interval = Duration::from_secs(1) / FPS;
+    let units = synthetic_stream(codec, VIDEO_UNITS);
+    let host_addr = format!("http://127.0.0.1:{}", free_port());
+    let whip_url = format!("{host_addr}/whip");
+    let mut server = WhipServerSrc::new(host_addr.clone());
+    server
+        .set_property("max-publishers", PropValue::Uint(PUBLISHERS as u64))
+        .unwrap();
+    let slot_stats = server.publisher_stats_handles();
+    let port_count = PUBLISHERS * 2;
+    let (packets, mut received) = mpsc::unbounded_channel();
+    let mut collector = Collector {
+        packets,
+        ports: port_count,
+    };
+
+    let run: Pin<Box<dyn Future<Output = Result<u64, G2gError>> + '_>> = server.run(&mut collector);
+    let clients = async {
+        let mut announced = Vec::new();
+        for _ in 0..port_count {
+            announced.push(received.recv().await.unwrap());
+        }
+        let first = publish(whip_url.clone(), fixed_caps(codec), &units, interval);
+        // the second publisher starts a little later so the third POST below
+        // lands while both slots are taken
+        let second = async {
+            tokio::time::sleep(interval * 4).await;
+            publish(whip_url.clone(), fixed_caps(codec), &units, interval).await
+        };
+        let refused = async {
+            tokio::time::sleep(interval * 12).await;
+            reqwest::Client::new()
+                .post(&whip_url)
+                .header("Content-Type", "application/sdp")
+                .body("v=0\r\n")
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        };
+        let (first, second, refused) = tokio::join!(first, second, refused);
+        (announced, [first, second], refused)
+    };
+    let (result, (announced, sink_stats, refused)) =
+        tokio::time::timeout(RUN_TIMEOUT, async { tokio::join!(run, clients) })
+            .await
+            .expect("loopback run timed out");
+    result.expect("server run failed");
+    assert_eq!(refused, 409);
+
+    let mut ports: Vec<Vec<PipelinePacket>> = (0..port_count).map(|_| Vec::new()).collect();
+    for (port, packet) in announced {
+        ports[port].push(packet);
+    }
+    while let Ok((port, packet)) = received.try_recv() {
+        ports[port].push(packet);
+    }
+    for slot in 0..PUBLISHERS {
+        let video = &ports[slot * 2 + VIDEO_PORT];
+        assert!(
+            matches!(
+                video.first(),
+                Some(PipelinePacket::CapsChanged(Caps::CompressedVideo { .. }))
+            ),
+            "slot {slot}: video pad did not open with video caps"
+        );
+        let frames = data_frames(video);
+        assert!(
+            frames.len() >= min_delivered(units.len()),
+            "slot {slot}: {} of {} units arrived",
+            frames.len(),
+            units.len()
+        );
+        assert_eq!(bytes(frames[0]), &units[0][..], "slot {slot}");
+        assert!(
+            data_frames(&ports[slot * 2 + AUDIO_PORT]).is_empty(),
+            "slot {slot}"
+        );
+        let stats = slot_stats[slot].snapshot();
+        assert!(
+            stats.packets_received() >= frames.len() as u64,
+            "slot {slot} counted {} packets for {} frames",
+            stats.packets_received(),
+            frames.len()
+        );
+        assert!(sink_stats[slot].packets_sent() >= frames.len() as u64);
+    }
+    for (port, packets) in ports.iter().enumerate() {
+        assert!(
+            matches!(packets.last(), Some(PipelinePacket::Eos)),
+            "port {port} did not end with EOS"
+        );
+    }
 }

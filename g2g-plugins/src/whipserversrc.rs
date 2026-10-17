@@ -62,9 +62,14 @@ use crate::webrtc_util::{
     select_host_ip, send_transmit,
 };
 
+// each publisher slot owns a pad pair: slot * PORTS_PER_PUBLISHER + VIDEO_PORT / AUDIO_PORT
 const VIDEO_PORT: usize = 0;
 const AUDIO_PORT: usize = 1;
-const OUTPUT_COUNT: usize = 2;
+const PORTS_PER_PUBLISHER: usize = 2;
+const DEFAULT_MAX_PUBLISHERS: usize = 1;
+// pad indices are u8 in the graph
+const MAX_PUBLISHERS: usize = u8::MAX as usize / PORTS_PER_PUBLISHER;
+const DATAGRAM_QUEUE_DEPTH: usize = 256;
 const PLI_INTERVAL: Duration = Duration::from_secs(1);
 pub const DEFAULT_HOST_ADDR: &str = "http://127.0.0.1:8080";
 const HTTP_SCHEME: &str = "http://";
@@ -114,7 +119,9 @@ pub struct WhipServerSrc {
     frame_limit: u64,
     tls_cert_file: Option<String>,
     tls_key_file: Option<String>,
-    stats: WebRtcStatsHandle,
+    max_publishers: usize,
+    /// One per publisher slot.
+    stats: Vec<WebRtcStatsHandle>,
     log_name: LogName,
 }
 
@@ -138,7 +145,8 @@ impl WhipServerSrc {
             frame_limit: u64::MAX,
             tls_cert_file: None,
             tls_key_file: None,
-            stats: WebRtcStatsHandle::default(),
+            max_publishers: DEFAULT_MAX_PUBLISHERS,
+            stats: alloc::vec![WebRtcStatsHandle::default()],
             log_name: LogName::new(),
         }
     }
@@ -175,8 +183,28 @@ impl WhipServerSrc {
         self
     }
 
-    /// Live counters of the publisher's connection, readable during the run.
+    /// Accept up to `n` publishers at once, each on its own pad pair (slot `i`
+    /// emits video on output `2i` and Opus on `2i + 1`). The run ends when the
+    /// last connected publisher leaves.
+    pub fn with_max_publishers(mut self, n: usize) -> Self {
+        self.set_max_publishers(n);
+        self
+    }
+
+    fn set_max_publishers(&mut self, n: usize) {
+        self.max_publishers = n.clamp(1, MAX_PUBLISHERS);
+        self.stats
+            .resize_with(self.max_publishers, WebRtcStatsHandle::default);
+    }
+
+    /// Live counters of the first publisher slot's connection, readable during
+    /// the run.
     pub fn stats_handle(&self) -> WebRtcStatsHandle {
+        self.stats[0].clone()
+    }
+
+    /// Live counters per publisher slot.
+    pub fn publisher_stats_handles(&self) -> Vec<WebRtcStatsHandle> {
         self.stats.clone()
     }
 
@@ -208,20 +236,28 @@ impl WhipServerSrc {
             .is_some_and(|presented| presented.trim() == token)
     }
 
-    async fn dispatch(&self, request: &HttpRequest, session: &mut Option<Session>) -> Dispatched {
+    async fn dispatch(
+        &self,
+        request: &HttpRequest,
+        sessions: &mut [Option<Session>],
+        datagrams: &mpsc::Sender<ReceivedDatagram>,
+    ) -> Dispatched {
         if !self.authorized(request) {
             return Dispatched::keep(HttpResponse::new(Status::Unauthorized));
         }
+        if request.method == "POST" {
+            return Dispatched::keep(self.accept_publisher(request, sessions, datagrams).await);
+        }
         let resource_id = request.path.strip_prefix(RESOURCE_PATH_PREFIX);
-        let resource = session
-            .as_mut()
-            .filter(|s| resource_id == Some(s.resource_id.as_str()));
+        let resource = sessions
+            .iter_mut()
+            .flatten()
+            .find(|s| resource_id == Some(s.resource_id.as_str()));
         match (request.method.as_str(), resource) {
-            ("POST", _) => Dispatched::keep(self.accept_publisher(request, session).await),
             ("PATCH", Some(s)) => Dispatched::keep(s.trickle(request)),
-            ("DELETE", Some(_)) => Dispatched {
+            ("DELETE", Some(s)) => Dispatched {
                 response: HttpResponse::new(Status::Ok),
-                session_ended: true,
+                ended_slot: Some(s.slot),
             },
             ("PATCH" | "DELETE", None) => Dispatched::keep(HttpResponse::new(Status::NotFound)),
             _ => Dispatched::keep(HttpResponse::new(Status::MethodNotAllowed)),
@@ -231,12 +267,17 @@ impl WhipServerSrc {
     async fn accept_publisher(
         &self,
         request: &HttpRequest,
-        session: &mut Option<Session>,
+        sessions: &mut [Option<Session>],
+        datagrams: &mpsc::Sender<ReceivedDatagram>,
     ) -> HttpResponse {
-        if session.is_some() {
-            g2g_warn!(self, "second publisher refused, one session per run");
+        let Some(slot) = sessions.iter().position(Option::is_none) else {
+            g2g_warn!(
+                self,
+                "publisher refused, all {} slot(s) taken (max-publishers)",
+                sessions.len()
+            );
             return HttpResponse::new(Status::Conflict);
-        }
+        };
         if !has_content_type(request, SDP_CONTENT_TYPE) {
             return HttpResponse::new(Status::UnsupportedMediaType);
         }
@@ -277,14 +318,17 @@ impl WhipServerSrc {
         let resource_id = random_hex_id();
         g2g_info!(
             self,
-            "publisher accepted, resource {resource_id}, rtc socket {local}"
+            "publisher accepted on slot {slot}, resource {resource_id}, rtc socket {local}"
         );
+        let socket = Arc::new(socket);
         let response = HttpResponse::new(Status::Created)
             .with_header("Location", format!("{RESOURCE_PATH_PREFIX}{resource_id}"))
             .with_header("ETag", entity_tag(&resource_id))
             .with_body(SDP_CONTENT_TYPE, answer.to_sdp_string());
-        *session = Some(Session {
+        sessions[slot] = Some(Session {
+            slot,
             rtc,
+            _receiver: spawn_receiver(socket.clone(), slot, local, datagrams.clone()),
             socket,
             local,
             remote_ufrag: parse_restart_answer_frag(&request.body)
@@ -332,10 +376,17 @@ static WHIPSERVERSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "num-buffers",
         PropKind::Int,
-        "access units across both tracks then EOS (-1 = unbounded)",
+        "access units across every pad then EOS (-1 = unbounded)",
     )
     .with_default("-1")
     .with_range("-1", "9223372036854775807"),
+    PropertySpec::new(
+        "max-publishers",
+        PropKind::Uint,
+        "publishers accepted at once, each on its own video + audio pad pair (slot i = outputs 2i, 2i+1); the run ends when the last one leaves",
+    )
+    .with_default("1")
+    .with_range("1", "127"),
 ];
 
 impl MultiOutputSource for WhipServerSrc {
@@ -345,15 +396,17 @@ impl MultiOutputSource for WhipServerSrc {
         Self: 'a;
 
     fn output_count(&self) -> usize {
-        OUTPUT_COUNT
+        self.max_publishers * PORTS_PER_PUBLISHER
     }
 
     fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
-        match output {
-            VIDEO_PORT => Ok(self.video_codec.caps_placeholder()),
-            AUDIO_PORT => Ok(opus_caps(STEREO)),
-            _ => Err(G2gError::CapsMismatch),
+        if output >= self.output_count() {
+            return Err(G2gError::CapsMismatch);
         }
+        Ok(match output % PORTS_PER_PUBLISHER {
+            VIDEO_PORT => self.video_codec.caps_placeholder(),
+            _ => opus_caps(STEREO),
+        })
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -366,6 +419,14 @@ impl MultiOutputSource for WhipServerSrc {
         }
         if name == "video-codec" {
             return set_video_codec_property(&mut self.video_codec, &value);
+        }
+        if name == "max-publishers" {
+            let n = value.as_uint().ok_or(PropError::Type)? as usize;
+            if !(1..=MAX_PUBLISHERS).contains(&n) {
+                return Err(PropError::Value);
+            }
+            self.set_max_publishers(n);
+            return Ok(());
         }
         let v = value.as_str().ok_or(PropError::Type)?;
         let optional = || (!v.is_empty()).then(|| v.into());
@@ -396,13 +457,15 @@ impl MultiOutputSource for WhipServerSrc {
             )),
             "video-codec" => Some(get_video_codec_property(self.video_codec)),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
+            "max-publishers" => Some(PropValue::Uint(self.max_publishers as u64)),
             _ => None,
         }
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
-            if crate::numbuffers::finished_at_zero_limit_multi(self.frame_limit, OUTPUT_COUNT, out)
+            let output_count = self.output_count();
+            if crate::numbuffers::finished_at_zero_limit_multi(self.frame_limit, output_count, out)
                 .await?
             {
                 return Ok(0);
@@ -424,32 +487,48 @@ impl MultiOutputSource for WhipServerSrc {
                 .map_err(io_err)?;
             g2g_info!(
                 self,
-                "listening on {} (tls {}), waiting for a WHIP publisher",
+                "listening on {} (tls {}), waiting for up to {} WHIP publisher(s)",
                 target.authority,
-                if tls.is_some() { "on" } else { "off" }
+                if tls.is_some() { "on" } else { "off" },
+                self.max_publishers
             );
             let (request_tx, mut requests) = mpsc::channel(REQUEST_QUEUE_DEPTH);
             let _accept_task =
                 AbortOnDrop(tokio::spawn(accept_connections(listener, tls, request_tx)));
 
             let video_codec = self.video_codec;
-            out.push_to(
-                VIDEO_PORT,
-                PipelinePacket::CapsChanged(video_codec.caps_placeholder()),
-            )
-            .await?;
-            out.push_to(AUDIO_PORT, PipelinePacket::CapsChanged(opus_caps(STEREO)))
-                .await?;
+            for port in 0..output_count {
+                let caps = match port % PORTS_PER_PUBLISHER {
+                    VIDEO_PORT => video_codec.caps_placeholder(),
+                    _ => opus_caps(STEREO),
+                };
+                out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
+            }
 
-            let mut session: Option<Session> = None;
-            let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
+            let mut sessions: Vec<Option<Session>> =
+                (0..self.max_publishers).map(|_| None).collect();
+            let (datagram_tx, mut datagrams) = mpsc::channel(DATAGRAM_QUEUE_DEPTH);
             let mut turn = TurnSet::empty();
             let mut seq = 0u64;
             macro_rules! finish {
                 () => {{
-                    out.push_to(VIDEO_PORT, PipelinePacket::Eos).await?;
-                    out.push_to(AUDIO_PORT, PipelinePacket::Eos).await?;
+                    for port in 0..output_count {
+                        out.push_to(port, PipelinePacket::Eos).await?;
+                    }
                     return Ok(seq);
+                }};
+            }
+            // a freed slot keeps its pads for the next publisher; the run ends
+            // with the last connected publisher
+            macro_rules! release {
+                ($slot:expr, $reason:expr) => {{
+                    let slot: usize = $slot;
+                    sessions[slot] = None;
+                    g2g_info!(self, "publisher on slot {slot} left ({})", $reason);
+                    if sessions.iter().all(Option::is_none) {
+                        g2g_info!(self, "last publisher left, ending run");
+                        finish!();
+                    }
                 }};
             }
             // a closed request channel means the accept task died
@@ -458,7 +537,9 @@ impl MultiOutputSource for WhipServerSrc {
                     let Some(pending) = $pending else {
                         return Err(hw());
                     };
-                    let dispatched = self.dispatch(&pending.request, &mut session).await;
+                    let dispatched = self
+                        .dispatch(&pending.request, &mut sessions, &datagram_tx)
+                        .await;
                     g2g_debug!(
                         self,
                         "{} {} -> {}",
@@ -467,96 +548,117 @@ impl MultiOutputSource for WhipServerSrc {
                         dispatched.response.status.code_and_reason().0
                     );
                     let _ = pending.respond.send(dispatched.response);
-                    if dispatched.session_ended {
-                        g2g_info!(self, "publisher left, ending run");
-                        finish!();
+                    if let Some(slot) = dispatched.ended_slot {
+                        release!(slot, "delete");
                     }
                 }};
             }
 
             loop {
-                let Some(s) = session.as_mut() else {
+                if sessions.iter().all(Option::is_none) {
                     answer!(requests.recv().await);
                     continue;
-                };
+                }
 
                 let mut frames: Vec<(usize, u64, Vec<u8>)> = Vec::new();
-                let deadline = loop {
-                    match s.rtc.poll_output() {
-                        Ok(Output::Timeout(t)) => break t,
-                        Ok(Output::Transmit(t)) => send_transmit(&s.socket, &mut turn, &t).await,
-                        Ok(Output::Event(Event::MediaAdded(m))) => {
-                            g2g_debug!(self, "{:?} track on mid {:?}", m.kind, m.mid);
-                            match m.kind {
-                                MediaKind::Video if s.video_mid.is_none() => {
-                                    s.video_mid = Some(m.mid)
-                                }
-                                MediaKind::Audio if s.audio_mid.is_none() => {
-                                    s.audio_mid = Some(m.mid)
-                                }
-                                _ => {}
+                let mut ended: Vec<(usize, &'static str)> = Vec::new();
+                let mut deadline: Option<Instant> = None;
+                for s in sessions.iter_mut().flatten() {
+                    let slot = s.slot;
+                    let first_port = slot * PORTS_PER_PUBLISHER;
+                    let session_deadline = loop {
+                        match s.rtc.poll_output() {
+                            Ok(Output::Timeout(t)) => break t,
+                            Ok(Output::Transmit(t)) => {
+                                send_transmit(&s.socket, &mut turn, &t).await
                             }
-                        }
-                        Ok(Output::Event(Event::MediaData(d))) => {
-                            let pts_ns = media_time_ns(d.time);
-                            if Some(d.mid) == s.video_mid {
-                                if !s.video_keyframed {
-                                    if !video_codec.is_keyframe(&d.data) {
-                                        continue;
-                                    }
-                                    g2g_debug!(self, "first video keyframe, forwarding");
-                                    s.video_keyframed = true;
-                                }
-                                frames.push((
-                                    VIDEO_PORT,
-                                    pts_ns,
-                                    video_codec.pipeline_unit(&d.data),
-                                ));
-                            } else if Some(d.mid) == s.audio_mid {
-                                frames.push((AUDIO_PORT, pts_ns, d.data.to_vec()));
-                            }
-                        }
-                        Ok(Output::Event(Event::IceConnectionStateChange(
-                            IceConnectionState::Disconnected,
-                        ))) => {
-                            g2g_info!(self, "ice disconnected, ending run");
-                            finish!()
-                        }
-                        Ok(Output::Event(Event::IceConnectionStateChange(state))) => {
-                            g2g_debug!(self, "ice {state:?}")
-                        }
-                        Ok(Output::Event(event)) => {
-                            if let Event::PeerStats(p) = &event {
+                            Ok(Output::Event(Event::MediaAdded(m))) => {
                                 g2g_debug!(
                                     self,
-                                    "peer rx {} B tx {} B rtt {:?} loss {:?}",
-                                    p.peer_bytes_rx,
-                                    p.peer_bytes_tx,
-                                    p.rtt,
-                                    p.ingress_loss_fraction
+                                    "slot {slot}: {:?} track on mid {:?}",
+                                    m.kind,
+                                    m.mid
                                 );
+                                match m.kind {
+                                    MediaKind::Video if s.video_mid.is_none() => {
+                                        s.video_mid = Some(m.mid)
+                                    }
+                                    MediaKind::Audio if s.audio_mid.is_none() => {
+                                        s.audio_mid = Some(m.mid)
+                                    }
+                                    _ => {}
+                                }
                             }
-                            self.stats.record(&event);
+                            Ok(Output::Event(Event::MediaData(d))) => {
+                                let pts_ns = media_time_ns(d.time);
+                                if Some(d.mid) == s.video_mid {
+                                    if !s.video_keyframed {
+                                        if !video_codec.is_keyframe(&d.data) {
+                                            continue;
+                                        }
+                                        g2g_debug!(
+                                            self,
+                                            "slot {slot}: first video keyframe, forwarding"
+                                        );
+                                        s.video_keyframed = true;
+                                    }
+                                    frames.push((
+                                        first_port + VIDEO_PORT,
+                                        pts_ns,
+                                        video_codec.pipeline_unit(&d.data),
+                                    ));
+                                } else if Some(d.mid) == s.audio_mid {
+                                    frames.push((first_port + AUDIO_PORT, pts_ns, d.data.to_vec()));
+                                }
+                            }
+                            Ok(Output::Event(Event::IceConnectionStateChange(
+                                IceConnectionState::Disconnected,
+                            ))) => {
+                                ended.push((slot, "ice disconnected"));
+                                break Instant::now();
+                            }
+                            Ok(Output::Event(Event::IceConnectionStateChange(state))) => {
+                                g2g_debug!(self, "slot {slot}: ice {state:?}")
+                            }
+                            Ok(Output::Event(event)) => {
+                                if let Event::PeerStats(p) = &event {
+                                    g2g_debug!(
+                                        self,
+                                        "slot {slot}: peer rx {} B tx {} B rtt {:?} loss {:?}",
+                                        p.peer_bytes_rx,
+                                        p.peer_bytes_tx,
+                                        p.rtt,
+                                        p.ingress_loss_fraction
+                                    );
+                                }
+                                self.stats[slot].record(&event);
+                            }
+                            Err(e) => {
+                                g2g_warn!(self, "slot {slot}: rtc failed: {e:?}");
+                                ended.push((slot, "rtc failed"));
+                                break Instant::now();
+                            }
                         }
-                        Err(e) => {
-                            g2g_warn!(self, "rtc failed: {e:?}, ending run");
-                            finish!()
-                        }
-                    }
-                };
+                    };
+                    deadline = Some(deadline.map_or(session_deadline, |d| d.min(session_deadline)));
 
-                if let Some(mid) = s.video_mid {
-                    if !s.video_keyframed && s.last_pli.elapsed() >= PLI_INTERVAL {
-                        s.last_pli = Instant::now();
-                        if let Some(rx) = s.rtc.direct_api().stream_rx_by_mid(mid, None) {
-                            g2g_debug!(self, "no keyframe yet, sending pli");
-                            rx.request_keyframe(KeyframeRequestKind::Pli);
+                    if let Some(mid) = s.video_mid {
+                        if !s.video_keyframed && s.last_pli.elapsed() >= PLI_INTERVAL {
+                            s.last_pli = Instant::now();
+                            if let Some(rx) = s.rtc.direct_api().stream_rx_by_mid(mid, None) {
+                                g2g_debug!(self, "slot {slot}: no keyframe yet, sending pli");
+                                rx.request_keyframe(KeyframeRequestKind::Pli);
+                            }
                         }
                     }
                 }
+                for (slot, reason) in ended {
+                    release!(slot, reason);
+                }
 
                 for (port, pts_ns, data) in frames {
-                    let keyframe = port == VIDEO_PORT && video_codec.is_keyframe(&data);
+                    let keyframe =
+                        port % PORTS_PER_PUBLISHER == VIDEO_PORT && video_codec.is_keyframe(&data);
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             data.into_boxed_slice(),
@@ -579,20 +681,40 @@ impl MultiOutputSource for WhipServerSrc {
                     }
                 }
 
-                let timeout = deadline.saturating_duration_since(Instant::now());
+                let timeout = deadline
+                    .unwrap_or_else(Instant::now)
+                    .saturating_duration_since(Instant::now());
                 tokio::select! {
-                    r = s.socket.recv_from(&mut buf) => {
-                        let Ok((n, source)) = r else {
-                            g2g_warn!(self, "rtc socket recv failed, ending run");
-                            finish!()
+                    received = datagrams.recv() => {
+                        let Some(received) = received else {
+                            return Err(hw());
                         };
-                        let _ = feed_datagram(&mut s.rtc, &mut turn, s.local, &buf[..n], source);
+                        // a datagram from a slot's earlier socket is dropped by the local check
+                        let Some(s) = sessions[received.slot].as_mut().filter(|s| s.local == received.local) else {
+                            continue;
+                        };
+                        match received.result {
+                            Ok((bytes, source)) => {
+                                let _ = feed_datagram(&mut s.rtc, &mut turn, s.local, &bytes, source);
+                            }
+                            Err(e) => {
+                                g2g_warn!(self, "slot {}: rtc socket recv failed: {e}", received.slot);
+                                release!(received.slot, "socket recv failed");
+                            }
+                        }
                     }
                     pending = requests.recv() => answer!(pending),
                     _ = tokio::time::sleep(timeout) => {
-                        if s.rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
-                            g2g_warn!(self, "rtc timeout handling failed, ending run");
-                            finish!();
+                        let now = Instant::now();
+                        let mut failed = Vec::new();
+                        for s in sessions.iter_mut().flatten() {
+                            if s.rtc.handle_input(Input::Timeout(now)).is_err() {
+                                failed.push(s.slot);
+                            }
+                        }
+                        for slot in failed {
+                            g2g_warn!(self, "slot {slot}: rtc timeout handling failed");
+                            release!(slot, "rtc failed");
                         }
                     }
                 }
@@ -601,11 +723,52 @@ impl MultiOutputSource for WhipServerSrc {
     }
 }
 
-/// One publisher's PeerConnection.
-struct Session {
-    rtc: Rtc,
-    socket: UdpSocket,
+/// One datagram from a publisher slot's socket, or the recv error that ended
+/// its receive task.
+struct ReceivedDatagram {
+    slot: usize,
     local: SocketAddr,
+    result: std::io::Result<(Vec<u8>, SocketAddr)>,
+}
+
+/// Read the slot's socket on its own task into the run loop's one channel, so
+/// the loop selects over any number of publishers.
+fn spawn_receiver(
+    socket: Arc<UdpSocket>,
+    slot: usize,
+    local: SocketAddr,
+    datagrams: mpsc::Sender<ReceivedDatagram>,
+) -> AbortOnDrop {
+    AbortOnDrop(tokio::spawn(async move {
+        let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
+        loop {
+            let result = socket
+                .recv_from(&mut buf)
+                .await
+                .map(|(n, source)| (buf[..n].to_vec(), source));
+            let failed = result.is_err();
+            let delivered = datagrams
+                .send(ReceivedDatagram {
+                    slot,
+                    local,
+                    result,
+                })
+                .await
+                .is_ok();
+            if failed || !delivered {
+                return;
+            }
+        }
+    }))
+}
+
+/// One publisher's PeerConnection, on its slot's pad pair.
+struct Session {
+    slot: usize,
+    rtc: Rtc,
+    socket: Arc<UdpSocket>,
+    local: SocketAddr,
+    _receiver: AbortOnDrop,
     resource_id: String,
     remote_ufrag: Option<String>,
     offer_sdp: String,
@@ -727,14 +890,15 @@ impl LogSource for WhipServerSrc {
 
 struct Dispatched {
     response: HttpResponse,
-    session_ended: bool,
+    /// The slot a `DELETE` ended.
+    ended_slot: Option<usize>,
 }
 
 impl Dispatched {
     fn keep(response: HttpResponse) -> Self {
         Self {
             response,
-            session_ended: false,
+            ended_slot: None,
         }
     }
 }
@@ -1092,7 +1256,44 @@ mod tests {
                 ..
             })
         ));
-        assert!(src.output_caps(OUTPUT_COUNT).is_err());
+        assert!(src.output_caps(PORTS_PER_PUBLISHER).is_err());
+    }
+
+    #[test]
+    fn max_publishers_adds_a_pad_pair_per_slot() {
+        let mut src = WhipServerSrc::new(DEFAULT_HOST_ADDR).with_max_publishers(3);
+        assert_eq!(src.output_count(), 3 * PORTS_PER_PUBLISHER);
+        assert_eq!(src.publisher_stats_handles().len(), 3);
+        assert!(matches!(
+            src.output_caps(2 * PORTS_PER_PUBLISHER + VIDEO_PORT),
+            Ok(Caps::CompressedVideo { .. })
+        ));
+        assert!(matches!(
+            src.output_caps(2 * PORTS_PER_PUBLISHER + AUDIO_PORT),
+            Ok(Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            })
+        ));
+        assert!(src.output_caps(3 * PORTS_PER_PUBLISHER).is_err());
+        src.set_property("max-publishers", PropValue::Uint(2))
+            .unwrap();
+        assert_eq!(src.get_property("max-publishers"), Some(PropValue::Uint(2)));
+        assert_eq!(src.output_count(), 2 * PORTS_PER_PUBLISHER);
+        assert_eq!(
+            src.set_property("max-publishers", PropValue::Uint(0)),
+            Err(PropError::Value)
+        );
+        assert_eq!(
+            src.set_property("max-publishers", PropValue::Uint(MAX_PUBLISHERS as u64 + 1)),
+            Err(PropError::Value)
+        );
+        let spec = WHIPSERVERSRC_PROPS
+            .iter()
+            .find(|p| p.name == "max-publishers")
+            .unwrap();
+        assert_eq!(spec.range, Some(("1", "127")));
+        assert_eq!(MAX_PUBLISHERS, 127);
     }
 
     #[test]
@@ -1147,7 +1348,7 @@ mod tests {
             .map(|&n| graph.kind(n))
             .filter(|k| matches!(k, NodeKind::FanoutSrc(_)))
             .collect();
-        assert_eq!(fanouts, [NodeKind::FanoutSrc(OUTPUT_COUNT as u8)]);
+        assert_eq!(fanouts, [NodeKind::FanoutSrc(PORTS_PER_PUBLISHER as u8)]);
     }
 
     #[test]
@@ -1226,12 +1427,13 @@ mod tests {
     #[tokio::test]
     async fn dispatch_rejects_without_a_network() {
         let src = WhipServerSrc::new(DEFAULT_HOST_ADDR).with_bearer("secret");
-        let mut session = None;
+        let mut sessions = [None];
+        let (datagrams, _) = mpsc::channel(DATAGRAM_QUEUE_DEPTH);
 
         let mut wrong_bearer = request("POST", "/whip");
         wrong_bearer.authorization = Some("Bearer guess".into());
         wrong_bearer.content_type = Some(SDP_CONTENT_TYPE.into());
-        let dispatched = src.dispatch(&wrong_bearer, &mut session).await;
+        let dispatched = src.dispatch(&wrong_bearer, &mut sessions, &datagrams).await;
         assert_eq!(dispatched.response.status, Status::Unauthorized);
 
         let authorized = |method: &str, path: &str| {
@@ -1241,26 +1443,26 @@ mod tests {
         };
         let mut not_sdp = authorized("POST", "/whip");
         not_sdp.content_type = Some("text/plain".into());
-        let dispatched = src.dispatch(&not_sdp, &mut session).await;
+        let dispatched = src.dispatch(&not_sdp, &mut sessions, &datagrams).await;
         assert_eq!(dispatched.response.status, Status::UnsupportedMediaType);
 
         let mut garbage_sdp = authorized("POST", "/whip");
         garbage_sdp.content_type = Some("application/sdp; charset=utf-8".into());
         garbage_sdp.body = "not an offer".into();
-        let dispatched = src.dispatch(&garbage_sdp, &mut session).await;
+        let dispatched = src.dispatch(&garbage_sdp, &mut sessions, &datagrams).await;
         assert_eq!(dispatched.response.status, Status::BadRequest);
-        assert!(session.is_none());
+        assert!(sessions[0].is_none());
 
         let unknown = format!("{RESOURCE_PATH_PREFIX}0123");
         for method in ["PATCH", "DELETE"] {
             let dispatched = src
-                .dispatch(&authorized(method, &unknown), &mut session)
+                .dispatch(&authorized(method, &unknown), &mut sessions, &datagrams)
                 .await;
             assert_eq!(dispatched.response.status, Status::NotFound, "{method}");
-            assert!(!dispatched.session_ended);
+            assert!(dispatched.ended_slot.is_none());
         }
         let dispatched = src
-            .dispatch(&authorized("GET", "/whip"), &mut session)
+            .dispatch(&authorized("GET", "/whip"), &mut sessions, &datagrams)
             .await;
         assert_eq!(dispatched.response.status, Status::MethodNotAllowed);
     }
@@ -1342,12 +1544,16 @@ mod tests {
     #[tokio::test]
     async fn ice_restart_patch_answers_with_new_server_credentials() {
         let src = WhipServerSrc::new(DEFAULT_HOST_ADDR);
-        let mut session = None;
+        let mut sessions = [None];
+        let (datagrams, _) = mpsc::channel(DATAGRAM_QUEUE_DEPTH);
         let (mut publisher, pending, offer_sdp) = publisher_offer().await;
         let mut post = request("POST", "/whip");
         post.content_type = Some(SDP_CONTENT_TYPE.into());
         post.body = offer_sdp;
-        let created = src.dispatch(&post, &mut session).await.response;
+        let created = src
+            .dispatch(&post, &mut sessions, &datagrams)
+            .await
+            .response;
         assert_eq!(created.status, Status::Created, "{}", created.body);
         let first_ufrag = ufrag_of(&created.body);
         publisher
@@ -1356,7 +1562,7 @@ mod tests {
             .unwrap();
         let resource = format!(
             "{RESOURCE_PATH_PREFIX}{}",
-            session.as_ref().unwrap().resource_id
+            sessions[0].as_ref().unwrap().resource_id
         );
 
         let (restart_sdp, creds) = {
@@ -1374,14 +1580,14 @@ mod tests {
             frag.push_str("\r\n");
         }
         let restarted = src
-            .dispatch(&trickle(&resource, frag), &mut session)
+            .dispatch(&trickle(&resource, frag), &mut sessions, &datagrams)
             .await
             .response;
         assert_eq!(restarted.status, Status::Ok, "{}", restarted.body);
         assert_eq!(restarted.content_type, Some(TRICKLE_CONTENT_TYPE));
         let new_ufrag = ufrag_of(&restarted.body);
         assert_ne!(new_ufrag, first_ufrag);
-        let s = session.as_mut().unwrap();
+        let s = sessions[0].as_mut().unwrap();
         assert_eq!(new_ufrag, s.rtc.direct_api().local_ice_credentials().ufrag);
         assert_eq!(s.remote_ufrag.as_deref(), Some(creds.ufrag.as_str()));
         assert!(
@@ -1395,7 +1601,9 @@ mod tests {
             "a=ice-ufrag:{}\r\na=ice-pwd:{}\r\n",
             creds.ufrag, creds.pass
         );
-        let plain = src.dispatch(&trickle(&resource, again), &mut session).await;
+        let plain = src
+            .dispatch(&trickle(&resource, again), &mut sessions, &datagrams)
+            .await;
         assert_eq!(plain.response.status, Status::NoContent);
     }
 }

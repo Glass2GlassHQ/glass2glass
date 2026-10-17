@@ -34,7 +34,6 @@ use tokio::net::UdpSocket;
 
 use crate::turn::TurnSet;
 use crate::webrtc_util::add_ice_candidates;
-pub use crate::webrtc_util::IceTransportPolicy;
 
 /// `G2G_DEBUG=livekit-signal:...` names the signalling helpers the three LiveKit elements share.
 pub(crate) struct LiveKitSignalLog;
@@ -524,6 +523,33 @@ impl IceServer {
             }
         }
         s
+    }
+}
+
+/// Which local candidates an element offers: every kind, or TURN relays only
+/// (`ice-transport-policy=relay`, the webrtcbin knob that forces media through
+/// a relay to prove or require that path).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IceTransportPolicy {
+    #[default]
+    All,
+    Relay,
+}
+
+impl IceTransportPolicy {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "all" => Some(Self::All),
+            "relay" => Some(Self::Relay),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Relay => "relay",
+        }
     }
 }
 

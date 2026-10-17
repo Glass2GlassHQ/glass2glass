@@ -130,12 +130,19 @@ candidates swapped in, which makes str0m restart its agent and mint new local
 credentials, and the `200` carries those plus the server's candidates as a
 frag. `https://` in `host-addr` serves TLS from the `tls-cert-file` /
 `tls-key-file` PEM pair over `tokio-native-tls`. The host candidate is added before `accept_offer` so it rides in
-the answer, and the mids come from `MediaAdded` per the answerer rule. One
-publisher per run: a second `POST` gets `409`, and the run ends with `Eos` on
-both outputs when the publisher leaves. Validated by a default-run localhost
-loopback from `WebRtcSink` in every carried codec and in Opus, and by a Chromium
-publish of `examples/whip-publisher.html` decoded through `avdec_h264` to a
-Wayland window.
+the answer, and the mids come from `MediaAdded` per the answerer rule.
+`max-publishers` reserves a pad pair per publisher slot up front, the
+fixed-arity answer to gst's pad per producer: slot `i` emits on outputs `2i`
+and `2i + 1`, a `POST` takes the first free slot and gets `409` when none is,
+each slot's socket is read on its own task into the run loop's one datagram
+channel, and the stats handle is per slot. A publisher leaving frees its slot
+with no `Eos` on its pads, since the next publisher reuses them, and the run
+ends with `Eos` on every pad when the last connected publisher leaves, which
+with the default of one publisher is the one-shot behaviour. Validated by a
+default-run localhost loopback from `WebRtcSink` in every carried codec and in
+Opus, by two concurrent publishers landing on their own pad pairs while a third
+is refused, and by a Chromium publish of `examples/whip-publisher.html` decoded
+through `avdec_h264` to a Wayland window.
 
 ### Janus VideoRoom
 
