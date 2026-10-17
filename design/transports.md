@@ -154,14 +154,28 @@ and `display-name`, `secret-key` as `apisecret`, ids as numbers unless
 `configured` event, then run the same sans-IO media loop with `keepalive`
 every ten seconds and server `trickle` events applied. Every local candidate
 rides in the offer (`trickle: false`), so STUN gathering happens before it.
-EOS closes the unit channel, the session task flushes the pacer, sends `leave`,
-waits briefly for `leaving: ok`, and the element's EOS returns once it has.
+EOS closes the unit channel, the session task flushes the pacer, sends
+`unpublish` then `leave`, waits briefly for `leaving: ok`, and the element's EOS
+returns once it has.
 A room whose codec list excludes the track's codec answers the m-line
 disabled, which the sink reports on the first frame instead of dropping media.
 Validated by a default-run test against a mock Janus (the message flow plus a
 real str0m answerer receiving the media) and by `tests/janus_smoke.rs`
 (ignored) against Janus 1.1.4 in docker, which lists the publisher through the
 HTTP API while it is live and not after the EOS `leave`.
+
+`JanusVrSrc` (`janusvrsrc`) is the subscriber, sharing the signalling helpers
+through `janus_signal`: `join` as `ptype: subscriber` with `streams: [{feed}]`
+(`feed-id`, or the first `publisher: true` entry of `listparticipants` when
+empty), answer the `attached` offer with `start`, answer later `updated`
+re-offers, and run the LiveKit source's media loop on two outputs, video in
+`video-codec` and Opus. An attached stream in another codec fails the run at
+once. The run ends on an `updated` with no active stream, `unpublished`,
+`leaving`, `hangup` or a socket close. Janus tells subscribers nothing when a
+publisher only `leave`s, which is why the sink's EOS sends `unpublish` first:
+that makes Janus send the all-inactive `updated`. Validated by a default-run
+mock test and by `tests/janus_smoke.rs` against Janus 1.1.4, where an unbounded
+subscriber ended by itself on the sink's EOS.
 
 ### Stats
 
