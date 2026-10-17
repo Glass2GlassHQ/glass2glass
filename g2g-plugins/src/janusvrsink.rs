@@ -287,6 +287,14 @@ impl JanusVrSink {
         rtc.sdp_api()
             .accept_answer(pending, answer)
             .map_err(|e| format!("answer rejected: {e:?}\n{answer_sdp}"))?;
+        // a room whose codec list excludes ours answers the m-line disabled
+        let direction = rtc.media(mid).map(|m| m.direction());
+        if direction != Some(Direction::SendOnly) {
+            return Err(format!(
+                "janus answered our {:?} m-line as {direction:?}: the room does not take this codec",
+                self.track.codec()
+            ));
+        }
         g2g_debug!(self, "published, rtc socket {local}");
 
         let (ws_write, ws_read) = ws.split();

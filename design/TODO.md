@@ -119,8 +119,8 @@ Highest leverage first:
 - **WebRTC.**
   - A real LiveKit Cloud / TURN-relay run (genuine remote NAT + STUN/TURN on
     the LiveKit elements).
-  - `janusvrsink` against a real Janus (docker), then a VideoRoom subscriber
-    source; a Kinesis Video Streams signaller as wanted.
+  - A Janus VideoRoom subscriber source; a Kinesis Video Streams signaller as
+    wanted.
   - FEC is blocked upstream (str0m has no FEC payload; loss recovery is
     NACK/RTX).
   - Data-channel loose ends: str0m surfaces no remote-close event, so EOS rides

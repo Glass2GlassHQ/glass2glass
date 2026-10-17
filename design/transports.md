@@ -149,9 +149,12 @@ every ten seconds and server `trickle` events applied. Every local candidate
 rides in the offer (`trickle: false`), so STUN gathering happens before it.
 EOS closes the unit channel, the session task flushes the pacer, sends `leave`,
 waits briefly for `leaving: ok`, and the element's EOS returns once it has.
+A room whose codec list excludes the track's codec answers the m-line
+disabled, which the sink reports on the first frame instead of dropping media.
 Validated by a default-run test against a mock Janus (the message flow plus a
-real str0m answerer receiving the media); a live Janus run is the user-side
-check.
+real str0m answerer receiving the media) and by `tests/janus_smoke.rs`
+(ignored) against Janus 1.1.4 in docker, which lists the publisher through the
+HTTP API while it is live and not after the EOS `leave`.
 
 ### Stats
 
