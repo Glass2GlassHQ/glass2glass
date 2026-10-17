@@ -11,6 +11,7 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::time::Duration;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use g2g_core::frame::Frame;
@@ -20,6 +21,7 @@ use g2g_core::{
     MultiOutputSource, OutputSink, PipelinePacket, PropValue, PushOutcome,
 };
 use g2g_plugins::webrtc_codec::WebRtcVideoCodec;
+use g2g_plugins::webrtc_stats::WebRtcStats;
 use g2g_plugins::webrtcsink::WebRtcSink;
 use g2g_plugins::whipserversrc::WhipServerSrc;
 use webrtc_streams_common::{fixed_caps, payload, synthetic_stream, FPS};
@@ -35,6 +37,14 @@ const OPUS_SAMPLE_RATE: u32 = 48_000;
 // let the sender's pacer flush before EOS deletes the resource
 const DRAIN_BEFORE_EOS: Duration = Duration::from_millis(500);
 const RUN_TIMEOUT: Duration = Duration::from_secs(20);
+const TLS_CERT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/whip_tls_test_cert.pem"
+);
+const TLS_KEY: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/whip_tls_test_key.pem"
+);
 const MIN_DELIVERED_PERCENT: usize = 90;
 /// Every packet the server pushed, per output port.
 struct Collector {
@@ -85,8 +95,14 @@ fn free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Publish `units` through a `WebRtcSink` at `interval`, then EOS.
-async fn publish(whip_url: String, caps: Caps, units: &[Vec<u8>], interval: Duration) {
+/// Publish `units` through a `WebRtcSink` at `interval`, then EOS. Returns the
+/// sink's final stats.
+async fn publish(
+    whip_url: String,
+    caps: Caps,
+    units: &[Vec<u8>],
+    interval: Duration,
+) -> WebRtcStats {
     let mut sink = WebRtcSink::new(whip_url);
     sink.configure_pipeline(&caps).unwrap();
     for (sequence, unit) in units.iter().enumerate() {
@@ -108,21 +124,30 @@ async fn publish(whip_url: String, caps: Caps, units: &[Vec<u8>], interval: Dura
     sink.process(PipelinePacket::Eos, &mut Discard)
         .await
         .unwrap();
+    sink.stats_handle().snapshot()
 }
 
-/// Run a server for `video_codec`, publish `units` with `caps` into it, and
-/// return what each output port received.
+/// What one loopback run produced: the packets per output port and both ends'
+/// final stats.
+struct Loopback {
+    ports: [Vec<PipelinePacket>; 2],
+    server_stats: WebRtcStats,
+    sink_stats: WebRtcStats,
+}
+
+/// Run a server for `video_codec` and publish `units` with `caps` into it.
 async fn loopback(
     video_codec: WebRtcVideoCodec,
     caps: Caps,
     units: Vec<Vec<u8>>,
     interval: Duration,
-) -> [Vec<PipelinePacket>; 2] {
+) -> Loopback {
     let host_addr = format!("http://127.0.0.1:{}", free_port());
     let mut server = WhipServerSrc::new(host_addr.clone());
     server
         .set_property("video-codec", PropValue::Str(video_codec.name().into()))
         .unwrap();
+    let server_stats = server.stats_handle();
     let (packets, mut received) = mpsc::unbounded_channel();
     let mut collector = Collector { packets };
 
@@ -134,10 +159,10 @@ async fn loopback(
         for _ in 0..2 {
             announced.push(received.recv().await.unwrap());
         }
-        publish(format!("{host_addr}/whip"), caps, &units, interval).await;
-        announced
+        let sink_stats = publish(format!("{host_addr}/whip"), caps, &units, interval).await;
+        (announced, sink_stats)
     };
-    let (result, announced) =
+    let (result, (announced, sink_stats)) =
         tokio::time::timeout(RUN_TIMEOUT, async { tokio::join!(run, client) })
             .await
             .expect("loopback run timed out");
@@ -148,7 +173,11 @@ async fn loopback(
     while let Ok((port, packet)) = received.try_recv() {
         ports[port].push(packet);
     }
-    ports
+    Loopback {
+        ports,
+        server_stats: server_stats.snapshot(),
+        sink_stats,
+    }
 }
 
 fn data_frames(packets: &[PipelinePacket]) -> Vec<&Frame> {
@@ -186,7 +215,8 @@ async fn every_video_codec_publishes_into_the_server() {
     let interval = Duration::from_secs(1) / FPS;
     for codec in WebRtcVideoCodec::ALL {
         let units = synthetic_stream(codec, VIDEO_UNITS);
-        let ports = loopback(codec, fixed_caps(codec), units.clone(), interval).await;
+        let run = loopback(codec, fixed_caps(codec), units.clone(), interval).await;
+        let ports = &run.ports;
 
         let Some(PipelinePacket::CapsChanged(Caps::CompressedVideo {
             codec: announced, ..
@@ -206,8 +236,26 @@ async fn every_video_codec_publishes_into_the_server() {
         assert_eq!(bytes(frames[0]), &units[0][..], "{codec:?}");
         assert!(frames[0].timing.keyframe, "{codec:?}");
         assert!(data_frames(&ports[AUDIO_PORT]).is_empty(), "{codec:?}");
-        assert_ends_with_eos(&ports);
+        assert_ends_with_eos(ports);
+        assert_session_counted(&run, frames.len() as u64);
     }
+}
+
+/// Both ends' stats saw the session: the server counted the packets it received
+/// and the peer bytes, the sink counted what it sent.
+fn assert_session_counted(run: &Loopback, frames_received: u64) {
+    let server = &run.server_stats;
+    let peer = server.peer.as_ref().expect("server peer stats");
+    assert!(peer.bytes_rx > 0, "{server:?}");
+    assert!(
+        server.packets_received() >= frames_received,
+        "server counted {} packets for {frames_received} frames",
+        server.packets_received()
+    );
+    assert!(server.egress.is_empty(), "{server:?}");
+    let sink = &run.sink_stats;
+    assert!(sink.packets_sent() >= frames_received, "{sink:?}");
+    assert!(sink.ingress.is_empty(), "{sink:?}");
 }
 
 #[tokio::test]
@@ -215,13 +263,14 @@ async fn opus_publishes_into_the_audio_output() {
     let packets: Vec<Vec<u8>> = (0..AUDIO_PACKETS)
         .map(|index| payload(AUDIO_PACKET_BYTES, index as u8))
         .collect();
-    let ports = loopback(
+    let run = loopback(
         WebRtcVideoCodec::default(),
         opus_caps(),
         packets.clone(),
         AUDIO_PACKET_INTERVAL,
     )
     .await;
+    let ports = &run.ports;
 
     assert!(matches!(
         ports[AUDIO_PORT].first(),
@@ -239,5 +288,54 @@ async fn opus_publishes_into_the_audio_output() {
     );
     assert_eq!(bytes(frames[0]), &packets[0][..]);
     assert!(data_frames(&ports[VIDEO_PORT]).is_empty());
-    assert_ends_with_eos(&ports);
+    assert_ends_with_eos(ports);
+    assert_session_counted(&run, frames.len() as u64);
+}
+
+#[tokio::test]
+async fn https_host_addr_serves_whip_over_tls() {
+    let port = free_port();
+    let mut server =
+        WhipServerSrc::new(format!("https://127.0.0.1:{port}")).with_tls(TLS_CERT, TLS_KEY);
+    let (packets, mut received) = mpsc::unbounded_channel();
+    let mut collector = Collector { packets };
+    let run = server.run(&mut collector);
+    let client = async {
+        // both caps announcements follow the bind, so the server is listening
+        for _ in 0..2 {
+            received.recv().await.unwrap();
+        }
+        let connector = tokio_native_tls::TlsConnector::from(
+            tokio_native_tls::native_tls::TlsConnector::builder()
+                .danger_accept_invalid_certs(true)
+                .build()
+                .unwrap(),
+        );
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let mut tls = connector
+            .connect("localhost", tcp)
+            .await
+            .expect("tls handshake");
+        tls.write_all(
+            b"POST /whip HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nv=0",
+        )
+        .await
+        .unwrap();
+        let mut response = Vec::new();
+        tls.read_to_end(&mut response).await.unwrap();
+        String::from_utf8(response).unwrap()
+    };
+    // a refused POST leaves the server waiting, so the client decides the end
+    let text = tokio::time::timeout(RUN_TIMEOUT, async {
+        tokio::select! {
+            result = run => panic!("server ended early: {result:?}"),
+            text = client => text,
+        }
+    })
+    .await
+    .expect("tls request timed out");
+    assert!(text.starts_with("HTTP/1.1 415"), "{text}");
+    assert!(text.contains("Access-Control-Allow-Origin: *"), "{text}");
 }

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1468: `whipserversrc` serves HTTPS from `tls-cert-file` / `tls-key-file` and answers an ICE-restart PATCH with fresh credentials instead of 501.
+- M1467: the WebRTC sink, WHEP sources and `whipserversrc` expose live connection counters (bytes, packets, NACK / PLI, RTT, loss, BWE) through `stats_handle()`.
 - M1466: `whipserversrc` accepts a WHIP publisher (browser, OBS or `webrtcsink`) and emits its video and Opus on two pads.
 - M1465: the WebRTC and LiveKit elements carry VP8, VP9, H.265 and AV1 as well as H.264, with a `video-codec` property on the receiving sources.
 - M1464: `ortinfer` takes `execution-provider=tensorrt|openvino|rocm|migraphx` behind matching features, failing loud when the provider cannot be enabled.

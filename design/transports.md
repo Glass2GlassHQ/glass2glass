@@ -122,15 +122,32 @@ property. The HTTP side is hand-rolled on a tokio `TcpListener` like the
 dashboard: a task per connection parses one request and hands it to the run
 loop over a channel, since the loop owns the `Rtc`. A `POST` of an
 `application/sdp` offer gets `201` with the answer and a `Location` resource,
-`PATCH` adds trickle candidates (an ICE restart gets `501`), `DELETE` ends the
-session, and every response carries CORS headers so a page on another origin
-can publish. The host candidate is added before `accept_offer` so it rides in
+`PATCH` adds trickle candidates, `DELETE` ends the session, and every response
+carries CORS headers so a page on another origin can publish. A `PATCH` whose
+`a=ice-ufrag` differs from the publisher's is an ICE restart (RFC 9725): the
+element re-runs the publisher's original offer with the new credentials and
+candidates swapped in, which makes str0m restart its agent and mint new local
+credentials, and the `200` carries those plus the server's candidates as a
+frag. `https://` in `host-addr` serves TLS from the `tls-cert-file` /
+`tls-key-file` PEM pair over `tokio-native-tls`. The host candidate is added before `accept_offer` so it rides in
 the answer, and the mids come from `MediaAdded` per the answerer rule. One
 publisher per run: a second `POST` gets `409`, and the run ends with `Eos` on
 both outputs when the publisher leaves. Validated by a default-run localhost
 loopback from `WebRtcSink` in every carried codec and in Opus, and by a Chromium
 publish of `examples/whip-publisher.html` decoded through `avdec_h264` to a
 Wayland window.
+
+### Stats
+
+Every str0m element (`WebRtcSink`, `WebRtcWhepSrc`, `WebRtcWhepSessionSrc`,
+`WhipServerSrc`) enables str0m's periodic stats and folds `PeerStats` /
+`MediaIngressStats` / `MediaEgressStats` into a `WebRtcStats` snapshot behind a
+clonable `WebRtcStatsHandle` (`webrtc_stats.rs`). The application takes the
+handle with `stats_handle()` before the run and reads `snapshot()` while the
+session is live, since the element itself is borrowed by its run future. The
+snapshot carries the peer's byte counts, RTT, loss fractions and bandwidth
+estimate, plus per-m-line (and per-layer) bytes, packets, NACK / PLI / FIR
+counts and jitter. `whipserversrc` also logs the peer counters at debug level.
 
 ### Signaling
 

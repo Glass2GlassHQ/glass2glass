@@ -60,6 +60,7 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
 use crate::webrtc_codec::{sink_caps_alternatives, Track, WebRtcVideoCodec};
+use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_host_candidate, drain_pacer, feed_datagram, ice_restart, post_sdp, select_host_ip,
     send_transmit, trickle_candidates, ResourceHandle, TricklePatch, TurnConfig,
@@ -130,6 +131,7 @@ pub struct WebRtcSink {
     /// polled every frame; the encoder need not see the same value repeatedly).
     last_bitrate_sent: u64,
     frames_sent: u64,
+    stats: WebRtcStatsHandle,
 }
 
 impl core::fmt::Debug for WebRtcSink {
@@ -162,7 +164,13 @@ impl WebRtcSink {
             bitrate_estimate: Arc::new(AtomicU64::new(0)),
             last_bitrate_sent: 0,
             frames_sent: 0,
+            stats: WebRtcStatsHandle::default(),
         }
+    }
+
+    /// Live counters of the WHIP session, readable while it runs.
+    pub fn stats_handle(&self) -> WebRtcStatsHandle {
+        self.stats.clone()
     }
 
     /// Attach a bearer token, sent as `Authorization: Bearer <token>` on the
@@ -227,6 +235,7 @@ impl WebRtcSink {
             // Congestion control: str0m runs the TWCC/REMB estimator and emits
             // `EgressBitrateEstimate`; the sink relays it to the encoder (BWE).
             .enable_bwe(Some(Bitrate::bps(INITIAL_BITRATE_BPS)))
+            .set_stats_interval(Some(STATS_INTERVAL))
             .clear_codecs();
         let config = self.track.enable(config);
         let mut rtc = config.build(Instant::now());
@@ -303,6 +312,7 @@ impl WebRtcSink {
             self.bearer.clone(),
             keyframe_requested,
             bitrate_estimate,
+            self.stats.clone(),
             rx,
         ));
         self.tx = Some(tx);
@@ -513,6 +523,7 @@ async fn run_session(
     bearer: Option<String>,
     keyframe_requested: Arc<AtomicBool>,
     bitrate_estimate: Arc<AtomicU64>,
+    stats: WebRtcStatsHandle,
     mut rx: mpsc::Receiver<MediaUnit>,
 ) {
     let mut buf = alloc::vec![0u8; 2000];
@@ -558,7 +569,7 @@ async fn run_session(
                         bitrate_estimate.store(bps, Ordering::Relaxed);
                     }
                 }
-                Ok(Output::Event(_)) => {}
+                Ok(Output::Event(event)) => stats.record(&event),
                 Err(_) => {
                     resource.delete_once(bearer.as_deref()).await;
                     return;

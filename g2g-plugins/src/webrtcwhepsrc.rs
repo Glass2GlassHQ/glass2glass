@@ -55,6 +55,7 @@ use crate::webrtc_codec::{
     get_video_codec_property, opus_caps, set_video_codec_property, Track, WebRtcVideoCodec,
     VIDEO_CODEC_PROP,
 };
+use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_host_candidate, delete_resource, feed_datagram, ice_restart, media_time_ns, post_sdp,
     select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
@@ -107,6 +108,7 @@ pub struct WebRtcWhepSrc {
     /// The bounded path is for tests / smoke runs.
     frame_limit: u64,
     configured: bool,
+    stats: WebRtcStatsHandle,
 }
 
 impl core::fmt::Debug for WebRtcWhepSrc {
@@ -133,7 +135,13 @@ impl WebRtcWhepSrc {
             video_codec: WebRtcVideoCodec::default(),
             frame_limit: u64::MAX,
             configured: false,
+            stats: WebRtcStatsHandle::default(),
         }
+    }
+
+    /// Live counters of the WHEP session, readable during the run.
+    pub fn stats_handle(&self) -> WebRtcStatsHandle {
+        self.stats.clone()
     }
 
     /// Subscribe to video in `codec` instead of H.264 (the `video-codec`
@@ -341,6 +349,7 @@ impl SourceLoop for WebRtcWhepSrc {
             let track = self.track();
             let config = RtcConfig::new()
                 .set_crypto_provider(alloc::sync::Arc::new(from_feature_flags()))
+                .set_stats_interval(Some(STATS_INTERVAL))
                 .clear_codecs();
             let mut rtc = track.enable(config).build(Instant::now());
             // Trickle ICE: the offer carries the host candidate only; reflexive /
@@ -430,7 +439,7 @@ impl SourceLoop for WebRtcWhepSrc {
                             }
                             _ => {}
                         },
-                        Ok(Output::Event(_)) => {}
+                        Ok(Output::Event(event)) => self.stats.record(&event),
                         Err(_) => finish!(),
                     }
                 };

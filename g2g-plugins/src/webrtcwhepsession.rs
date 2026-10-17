@@ -47,6 +47,7 @@ use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
+use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_host_candidate, delete_resource, feed_datagram, ice_restart, media_time_ns, post_sdp,
     select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
@@ -81,6 +82,7 @@ pub struct WebRtcWhepSessionSrc {
     /// Stop after this many access units across both tracks and emit EOS
     /// (`u64::MAX` = unbounded). For tests / bounded runs.
     frame_limit: u64,
+    stats: WebRtcStatsHandle,
 }
 
 impl core::fmt::Debug for WebRtcWhepSessionSrc {
@@ -104,7 +106,13 @@ impl WebRtcWhepSessionSrc {
             turn_pass: String::new(),
             video_codec: WebRtcVideoCodec::default(),
             frame_limit: u64::MAX,
+            stats: WebRtcStatsHandle::default(),
         }
+    }
+
+    /// Live counters of the WHEP session, readable during the run.
+    pub fn stats_handle(&self) -> WebRtcStatsHandle {
+        self.stats.clone()
     }
 
     /// Offer video in `codec` instead of H.264 (the `video-codec` property).
@@ -257,6 +265,7 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
             let video_codec = self.video_codec;
             let config = RtcConfig::new()
                 .set_crypto_provider(alloc::sync::Arc::new(from_feature_flags()))
+                .set_stats_interval(Some(STATS_INTERVAL))
                 .clear_codecs();
             let mut rtc = enable_tracks(config, [Track::Video(video_codec), Track::Audio])
                 .build(Instant::now());
@@ -368,7 +377,7 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                             }
                             _ => {}
                         },
-                        Ok(Output::Event(_)) => {}
+                        Ok(Output::Event(event)) => self.stats.record(&event),
                         Err(_) => finish!(),
                     }
                 };

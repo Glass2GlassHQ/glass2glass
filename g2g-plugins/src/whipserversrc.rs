@@ -32,15 +32,16 @@ use std::hash::BuildHasher;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_native_tls::{native_tls, TlsAcceptor};
 
 use str0m::change::SdpOffer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{KeyframeRequestKind, MediaKind, Mid};
-use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
+use str0m::{Candidate, Event, IceConnectionState, IceCreds, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
@@ -57,6 +58,7 @@ use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
+use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_ice_candidates, feed_datagram, media_time_ns, parse_restart_answer_frag, select_host_ip,
     send_transmit,
@@ -69,6 +71,8 @@ const PLI_INTERVAL: Duration = Duration::from_secs(1);
 pub const DEFAULT_HOST_ADDR: &str = "http://127.0.0.1:8080";
 const HTTP_SCHEME: &str = "http://";
 const HTTP_DEFAULT_PORT: u16 = 80;
+const HTTPS_SCHEME: &str = "https://";
+const HTTPS_DEFAULT_PORT: u16 = 443;
 const RESOURCE_PATH_PREFIX: &str = "/whip/resource/";
 const SDP_CONTENT_TYPE: &str = "application/sdp";
 const TRICKLE_CONTENT_TYPE: &str = "application/trickle-ice-sdpfrag";
@@ -110,6 +114,9 @@ pub struct WhipServerSrc {
     stun_server: Option<String>,
     video_codec: WebRtcVideoCodec,
     frame_limit: u64,
+    tls_cert_file: Option<String>,
+    tls_key_file: Option<String>,
+    stats: WebRtcStatsHandle,
     log_name: LogName,
 }
 
@@ -131,6 +138,9 @@ impl WhipServerSrc {
             stun_server: None,
             video_codec: WebRtcVideoCodec::default(),
             frame_limit: u64::MAX,
+            tls_cert_file: None,
+            tls_key_file: None,
+            stats: WebRtcStatsHandle::default(),
             log_name: LogName::new(),
         }
     }
@@ -157,6 +167,36 @@ impl WhipServerSrc {
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
         self
+    }
+
+    /// Serve HTTPS from this PEM certificate chain and PKCS#8 key (the
+    /// `host-addr` must then be an `https://` URL).
+    pub fn with_tls(mut self, cert_file: impl Into<String>, key_file: impl Into<String>) -> Self {
+        self.tls_cert_file = Some(cert_file.into());
+        self.tls_key_file = Some(key_file.into());
+        self
+    }
+
+    /// Live counters of the publisher's connection, readable during the run.
+    pub fn stats_handle(&self) -> WebRtcStatsHandle {
+        self.stats.clone()
+    }
+
+    fn tls_acceptor(&self, tls: bool) -> Result<Option<TlsAcceptor>, String> {
+        if !tls {
+            return Ok(None);
+        }
+        let (Some(cert_file), Some(key_file)) = (&self.tls_cert_file, &self.tls_key_file) else {
+            return Err("an https host-addr needs tls-cert-file and tls-key-file".to_string());
+        };
+        let cert =
+            std::fs::read(cert_file).map_err(|e| format!("tls-cert-file {cert_file}: {e}"))?;
+        let key = std::fs::read(key_file).map_err(|e| format!("tls-key-file {key_file}: {e}"))?;
+        let identity = native_tls::Identity::from_pkcs8(&cert, &key)
+            .map_err(|e| format!("tls certificate and key: {e}"))?;
+        let acceptor =
+            native_tls::TlsAcceptor::new(identity).map_err(|e| format!("tls acceptor: {e}"))?;
+        Ok(Some(TlsAcceptor::from(acceptor)))
     }
 
     fn authorized(&self, request: &HttpRequest) -> bool {
@@ -218,6 +258,7 @@ impl WhipServerSrc {
         };
         let config = RtcConfig::new()
             .set_crypto_provider(Arc::new(from_feature_flags()))
+            .set_stats_interval(Some(STATS_INTERVAL))
             .clear_codecs();
         let mut rtc = enable_tracks(config, [Track::Video(self.video_codec), Track::Audio])
             .build(Instant::now());
@@ -251,6 +292,7 @@ impl WhipServerSrc {
             remote_ufrag: parse_restart_answer_frag(&request.body)
                 .0
                 .map(|creds| creds.ufrag),
+            offer_sdp: request.body.clone(),
             resource_id,
             video_mid: None,
             audio_mid: None,
@@ -277,6 +319,16 @@ static WHIPSERVERSRC_PROPS: &[PropertySpec] = &[
         "stun-server",
         PropKind::Str,
         "STUN server host:port for a server-reflexive candidate (empty = host only)",
+    ),
+    PropertySpec::new(
+        "tls-cert-file",
+        PropKind::Str,
+        "PEM certificate chain served when host-addr is https (needs tls-key-file)",
+    ),
+    PropertySpec::new(
+        "tls-key-file",
+        PropKind::Str,
+        "PEM PKCS#8 private key matching tls-cert-file",
     ),
     VIDEO_CODEC_PROP,
     PropertySpec::new(
@@ -321,11 +373,13 @@ impl MultiOutputSource for WhipServerSrc {
         let optional = || (!v.is_empty()).then(|| v.into());
         match name {
             "host-addr" => {
-                bind_authority(v).ok_or(PropError::Value)?;
+                bind_target(v).ok_or(PropError::Value)?;
                 self.host_addr = v.into();
             }
             "auth-token" => self.bearer = optional(),
             "stun-server" => self.stun_server = optional(),
+            "tls-cert-file" => self.tls_cert_file = optional(),
+            "tls-key-file" => self.tls_key_file = optional(),
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -336,6 +390,12 @@ impl MultiOutputSource for WhipServerSrc {
             "host-addr" => Some(PropValue::Str(self.host_addr.clone())),
             "auth-token" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
             "stun-server" => Some(PropValue::Str(self.stun_server.clone().unwrap_or_default())),
+            "tls-cert-file" => Some(PropValue::Str(
+                self.tls_cert_file.clone().unwrap_or_default(),
+            )),
+            "tls-key-file" => Some(PropValue::Str(
+                self.tls_key_file.clone().unwrap_or_default(),
+            )),
             "video-codec" => Some(get_video_codec_property(self.video_codec)),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             _ => None,
@@ -350,19 +410,29 @@ impl MultiOutputSource for WhipServerSrc {
                 return Ok(0);
             }
             let hw = || G2gError::Hardware(HardwareError::Other);
-            let Some(authority) = bind_authority(&self.host_addr) else {
-                g2g_warn!(self, "host-addr {} is not an http URL", self.host_addr);
+            let Some(target) = bind_target(&self.host_addr) else {
+                g2g_warn!(self, "host-addr {} is not an http(s) URL", self.host_addr);
                 return Err(hw());
             };
-            let listener = TcpListener::bind(authority.as_str())
+            let tls = match self.tls_acceptor(target.tls) {
+                Ok(tls) => tls,
+                Err(reason) => {
+                    g2g_warn!(self, "{reason}");
+                    return Err(hw());
+                }
+            };
+            let listener = TcpListener::bind(target.authority.as_str())
                 .await
                 .map_err(io_err)?;
             g2g_info!(
                 self,
-                "listening on {authority}, waiting for a WHIP publisher"
+                "listening on {} (tls {}), waiting for a WHIP publisher",
+                target.authority,
+                if tls.is_some() { "on" } else { "off" }
             );
             let (request_tx, mut requests) = mpsc::channel(REQUEST_QUEUE_DEPTH);
-            let _accept_task = AbortOnDrop(tokio::spawn(accept_connections(listener, request_tx)));
+            let _accept_task =
+                AbortOnDrop(tokio::spawn(accept_connections(listener, tls, request_tx)));
 
             let video_codec = self.video_codec;
             out.push_to(
@@ -457,7 +527,19 @@ impl MultiOutputSource for WhipServerSrc {
                         Ok(Output::Event(Event::IceConnectionStateChange(state))) => {
                             g2g_debug!(self, "ice {state:?}")
                         }
-                        Ok(Output::Event(_)) => {}
+                        Ok(Output::Event(event)) => {
+                            if let Event::PeerStats(p) = &event {
+                                g2g_debug!(
+                                    self,
+                                    "peer rx {} B tx {} B rtt {:?} loss {:?}",
+                                    p.peer_bytes_rx,
+                                    p.peer_bytes_tx,
+                                    p.rtt,
+                                    p.ingress_loss_fraction
+                                );
+                            }
+                            self.stats.record(&event);
+                        }
                         Err(e) => {
                             g2g_warn!(self, "rtc failed: {e:?}, ending run");
                             finish!()
@@ -528,6 +610,7 @@ struct Session {
     local: SocketAddr,
     resource_id: String,
     remote_ufrag: Option<String>,
+    offer_sdp: String,
     video_mid: Option<Mid>,
     audio_mid: Option<Mid>,
     video_keyframed: bool,
@@ -548,15 +631,88 @@ impl Session {
             return HttpResponse::new(Status::PreconditionFailed);
         }
         let (creds, candidates) = parse_restart_answer_frag(&request.body);
-        let ice_restart = creds.is_some_and(|c| Some(c.ufrag) != self.remote_ufrag);
-        if ice_restart {
-            return HttpResponse::new(Status::NotImplemented);
+        let restart = creds.filter(|c| Some(&c.ufrag) != self.remote_ufrag.as_ref());
+        if let Some(creds) = restart {
+            return self.restart_ice(creds, &candidates);
         }
         for candidate in candidates {
             self.rtc.add_remote_candidate(candidate);
         }
         HttpResponse::new(Status::NoContent)
     }
+
+    /// RFC 9725 ICE restart: the publisher's new credentials and candidates
+    /// arrive as a frag, so re-run the original offer with them swapped in
+    /// (str0m restarts its agent when the remote credentials change) and
+    /// answer with our new credentials and candidates.
+    fn restart_ice(&mut self, creds: IceCreds, candidates: &[Candidate]) -> HttpResponse {
+        let offer_sdp = restart_offer(&self.offer_sdp, &creds, candidates);
+        let Ok(offer) = SdpOffer::from_sdp_string(&offer_sdp) else {
+            return HttpResponse::new(Status::BadRequest);
+        };
+        let answer = match self.rtc.sdp_api().accept_offer(offer) {
+            Ok(answer) => answer,
+            Err(e) => {
+                return HttpResponse::text(
+                    Status::InternalServerError,
+                    format!("ice restart rejected: {e:?}"),
+                )
+            }
+        };
+        let local = self.rtc.direct_api().local_ice_credentials();
+        let mut frag = format!(
+            "a=ice-ufrag:{}\r\na=ice-pwd:{}\r\n",
+            local.ufrag, local.pass
+        );
+        for line in sdp_lines(&self.offer_sdp) {
+            if line.starts_with("m=") || line.starts_with("a=mid:") {
+                frag.push_str(line);
+                frag.push_str("\r\n");
+            }
+            if line.starts_with("a=mid:") {
+                break;
+            }
+        }
+        let answer_sdp = answer.to_sdp_string();
+        for line in sdp_lines(&answer_sdp).filter(|l| l.starts_with("a=candidate:")) {
+            frag.push_str(line);
+            frag.push_str("\r\n");
+        }
+        self.offer_sdp = offer_sdp;
+        self.remote_ufrag = Some(creds.ufrag);
+        HttpResponse::new(Status::Ok).with_body(TRICKLE_CONTENT_TYPE, frag)
+    }
+}
+
+fn sdp_lines(sdp: &str) -> impl Iterator<Item = &str> {
+    sdp.lines().map(str::trim_end)
+}
+
+/// The publisher's offer with `creds` in every ice-ufrag / ice-pwd line, the old
+/// candidates dropped, and `candidates` under the first m-line.
+fn restart_offer(offer_sdp: &str, creds: &IceCreds, candidates: &[Candidate]) -> String {
+    let mut out = String::new();
+    let mut inserted = false;
+    for line in sdp_lines(offer_sdp) {
+        if line.starts_with("a=candidate:") || line == "a=end-of-candidates" {
+            continue;
+        }
+        if line.starts_with("a=ice-ufrag:") {
+            out.push_str(&format!("a=ice-ufrag:{}\r\n", creds.ufrag));
+        } else if line.starts_with("a=ice-pwd:") {
+            out.push_str(&format!("a=ice-pwd:{}\r\n", creds.pass));
+        } else {
+            out.push_str(line);
+            out.push_str("\r\n");
+        }
+        if !inserted && line.starts_with("a=mid:") {
+            for candidate in candidates {
+                out.push_str(&format!("a={}\r\n", candidate.to_sdp_string()));
+            }
+            inserted = true;
+        }
+    }
+    out
 }
 
 impl LogSource for WhipServerSrc {
@@ -593,9 +749,23 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// The `host:port` to bind from an `http://` URL, port 80 when it has none.
-fn bind_authority(host_addr: &str) -> Option<String> {
-    let rest = host_addr.strip_prefix(HTTP_SCHEME)?;
+#[derive(Debug, PartialEq, Eq)]
+struct BindTarget {
+    authority: String,
+    tls: bool,
+}
+
+/// The `host:port` to bind from an `http://` or `https://` URL, the scheme's
+/// default port when it has none.
+fn bind_target(host_addr: &str) -> Option<BindTarget> {
+    let (rest, tls, default_port) = match host_addr.strip_prefix(HTTPS_SCHEME) {
+        Some(rest) => (rest, true, HTTPS_DEFAULT_PORT),
+        None => (
+            host_addr.strip_prefix(HTTP_SCHEME)?,
+            false,
+            HTTP_DEFAULT_PORT,
+        ),
+    };
     let authority = rest.split('/').next().unwrap_or_default();
     if authority.is_empty() {
         return None;
@@ -603,11 +773,12 @@ fn bind_authority(host_addr: &str) -> Option<String> {
     let has_port = authority
         .rsplit_once(':')
         .is_some_and(|(_, port)| !port.contains(']'));
-    if has_port {
-        Some(authority.to_string())
+    let authority = if has_port {
+        authority.to_string()
     } else {
-        Some(format!("{authority}:{HTTP_DEFAULT_PORT}"))
-    }
+        format!("{authority}:{default_port}")
+    };
+    Some(BindTarget { authority, tls })
 }
 
 fn random_resource_id() -> String {
@@ -640,7 +811,6 @@ enum Status {
     PayloadTooLarge,
     UnsupportedMediaType,
     InternalServerError,
-    NotImplemented,
     ServiceUnavailable,
 }
 
@@ -659,7 +829,6 @@ impl Status {
             Status::PayloadTooLarge => (413, "Payload Too Large"),
             Status::UnsupportedMediaType => (415, "Unsupported Media Type"),
             Status::InternalServerError => (500, "Internal Server Error"),
-            Status::NotImplemented => (501, "Not Implemented"),
             Status::ServiceUnavailable => (503, "Service Unavailable"),
         }
     }
@@ -807,7 +976,7 @@ fn parse_request(buf: &[u8]) -> Result<Option<HttpRequest>, RequestError> {
     Ok(Some(request))
 }
 
-async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, RequestError> {
+async fn read_request<S: AsyncRead + Unpin>(stream: &mut S) -> Result<HttpRequest, RequestError> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; READ_CHUNK_BYTES];
     loop {
@@ -846,7 +1015,10 @@ async fn answer_request(
         .unwrap_or_else(|_| HttpResponse::new(Status::ServiceUnavailable))
 }
 
-async fn serve_connection(mut stream: TcpStream, requests: mpsc::Sender<PendingRequest>) {
+async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
+    requests: mpsc::Sender<PendingRequest>,
+) {
     let response = match read_request(&mut stream).await {
         Ok(request) => answer_request(request, &requests).await,
         Err(e) => e.response(),
@@ -855,11 +1027,28 @@ async fn serve_connection(mut stream: TcpStream, requests: mpsc::Sender<PendingR
     let _ = stream.shutdown().await;
 }
 
-async fn accept_connections(listener: TcpListener, requests: mpsc::Sender<PendingRequest>) {
+async fn accept_connections(
+    listener: TcpListener,
+    tls: Option<TlsAcceptor>,
+    requests: mpsc::Sender<PendingRequest>,
+) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                tokio::spawn(serve_connection(stream, requests.clone()));
+                let requests = requests.clone();
+                match tls.clone() {
+                    Some(acceptor) => {
+                        tokio::spawn(async move {
+                            // a failed handshake is the client's problem, nothing to answer
+                            if let Ok(stream) = acceptor.accept(stream).await {
+                                serve_connection(stream, requests).await;
+                            }
+                        });
+                    }
+                    None => {
+                        tokio::spawn(serve_connection(stream, requests));
+                    }
+                }
             }
             Err(e) => {
                 std::eprintln!("whipserversrc: accept failed: {e}");
@@ -872,7 +1061,10 @@ async fn accept_connections(listener: TcpListener, requests: mpsc::Sender<Pendin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::webrtc_util::add_host_candidate;
     use g2g_core::{AudioFormat, VideoCodec};
+    use str0m::change::{SdpAnswer, SdpPendingOffer};
+    use str0m::media::Direction;
 
     fn request(method: &str, path: &str) -> HttpRequest {
         HttpRequest {
@@ -913,6 +1105,8 @@ mod tests {
             ("host-addr", "http://0.0.0.0:8190"),
             ("auth-token", "secret"),
             ("stun-server", "stun.example.com:3478"),
+            ("tls-cert-file", "/etc/g2g/cert.pem"),
+            ("tls-key-file", "/etc/g2g/key.pem"),
             ("video-codec", "av1"),
         ] {
             src.set_property(name, PropValue::Str(value.into()))
@@ -926,7 +1120,7 @@ mod tests {
             Err(PropError::Value)
         );
         assert_eq!(
-            src.set_property("host-addr", PropValue::Str("https://h:1".into())),
+            src.set_property("host-addr", PropValue::Str("rtsp://h:1".into())),
             Err(PropError::Value)
         );
         src.set_property("auth-token", PropValue::Str(String::new()))
@@ -961,20 +1155,24 @@ mod tests {
 
     #[test]
     fn host_addr_gives_the_bind_address() {
+        let plain = |authority: &str| {
+            Some(BindTarget {
+                authority: authority.into(),
+                tls: false,
+            })
+        };
+        assert_eq!(bind_target("http://0.0.0.0:8190"), plain("0.0.0.0:8190"));
+        assert_eq!(bind_target("http://[::1]:8190/whip"), plain("[::1]:8190"));
+        assert_eq!(bind_target("http://localhost"), plain("localhost:80"));
         assert_eq!(
-            bind_authority("http://0.0.0.0:8190").as_deref(),
-            Some("0.0.0.0:8190")
+            bind_target("https://localhost"),
+            Some(BindTarget {
+                authority: "localhost:443".into(),
+                tls: true,
+            })
         );
-        assert_eq!(
-            bind_authority("http://[::1]:8190/whip").as_deref(),
-            Some("[::1]:8190")
-        );
-        assert_eq!(
-            bind_authority("http://localhost").as_deref(),
-            Some("localhost:80")
-        );
-        assert_eq!(bind_authority("rtsp://0.0.0.0:8190"), None);
-        assert_eq!(bind_authority("http://"), None);
+        assert_eq!(bind_target("rtsp://0.0.0.0:8190"), None);
+        assert_eq!(bind_target("http://"), None);
     }
 
     #[test]
@@ -1082,5 +1280,125 @@ mod tests {
         assert!(text.contains("ETag: \"ab\"\r\n"));
         assert!(text.contains("Content-Type: application/sdp\r\n"));
         assert!(text.ends_with("Content-Length: 5\r\nConnection: close\r\n\r\nv=0\r\n"));
+    }
+
+    const TLS_CERT: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/whip_tls_test_cert.pem"
+    );
+    const TLS_KEY: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/whip_tls_test_key.pem"
+    );
+
+    #[test]
+    fn https_needs_both_pem_files() {
+        let src = WhipServerSrc::new("https://127.0.0.1:1");
+        assert!(src.tls_acceptor(false).unwrap().is_none());
+        assert!(src.tls_acceptor(true).is_err());
+        assert!(src
+            .clone_with_tls(TLS_CERT, "/nonexistent/key.pem")
+            .tls_acceptor(true)
+            .is_err());
+        assert!(src
+            .clone_with_tls(TLS_CERT, TLS_KEY)
+            .tls_acceptor(true)
+            .unwrap()
+            .is_some());
+    }
+
+    impl WhipServerSrc {
+        fn clone_with_tls(&self, cert: &str, key: &str) -> Self {
+            WhipServerSrc::new(self.host_addr.clone()).with_tls(cert, key)
+        }
+    }
+
+    /// A str0m publisher with one host candidate and a sendonly video m-line.
+    async fn publisher_offer() -> (Rtc, SdpPendingOffer, String) {
+        let config = RtcConfig::new()
+            .set_crypto_provider(Arc::new(from_feature_flags()))
+            .clear_codecs();
+        let mut rtc =
+            enable_tracks(config, [Track::Video(WebRtcVideoCodec::H264)]).build(Instant::now());
+        let socket = UdpSocket::bind((select_host_ip(), 0)).await.unwrap();
+        add_host_candidate(&mut rtc, &socket).unwrap();
+        let mut api = rtc.sdp_api();
+        api.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+        let (offer, pending) = api.apply().unwrap();
+        (rtc, pending, offer.to_sdp_string())
+    }
+
+    fn ufrag_of(sdp: &str) -> String {
+        parse_restart_answer_frag(sdp)
+            .0
+            .expect("ice credentials")
+            .ufrag
+    }
+
+    fn trickle(resource: &str, body: String) -> HttpRequest {
+        let mut patch = request("PATCH", resource);
+        patch.content_type = Some(TRICKLE_CONTENT_TYPE.into());
+        patch.body = body;
+        patch
+    }
+
+    #[tokio::test]
+    async fn ice_restart_patch_answers_with_new_server_credentials() {
+        let src = WhipServerSrc::new(DEFAULT_HOST_ADDR);
+        let mut session = None;
+        let (mut publisher, pending, offer_sdp) = publisher_offer().await;
+        let mut post = request("POST", "/whip");
+        post.content_type = Some(SDP_CONTENT_TYPE.into());
+        post.body = offer_sdp;
+        let created = src.dispatch(&post, &mut session).await.response;
+        assert_eq!(created.status, Status::Created, "{}", created.body);
+        let first_ufrag = ufrag_of(&created.body);
+        publisher
+            .sdp_api()
+            .accept_answer(pending, SdpAnswer::from_sdp_string(&created.body).unwrap())
+            .unwrap();
+        let resource = format!(
+            "{RESOURCE_PATH_PREFIX}{}",
+            session.as_ref().unwrap().resource_id
+        );
+
+        let (restart_sdp, creds) = {
+            let mut api = publisher.sdp_api();
+            let creds = api.ice_restart(true);
+            let (offer, _pending) = api.apply().unwrap();
+            (offer.to_sdp_string(), creds)
+        };
+        let mut frag = format!(
+            "a=ice-ufrag:{}\r\na=ice-pwd:{}\r\n",
+            creds.ufrag, creds.pass
+        );
+        for line in sdp_lines(&restart_sdp).filter(|l| l.starts_with("a=candidate:")) {
+            frag.push_str(line);
+            frag.push_str("\r\n");
+        }
+        let restarted = src
+            .dispatch(&trickle(&resource, frag), &mut session)
+            .await
+            .response;
+        assert_eq!(restarted.status, Status::Ok, "{}", restarted.body);
+        assert_eq!(restarted.content_type, Some(TRICKLE_CONTENT_TYPE));
+        let new_ufrag = ufrag_of(&restarted.body);
+        assert_ne!(new_ufrag, first_ufrag);
+        let s = session.as_mut().unwrap();
+        assert_eq!(new_ufrag, s.rtc.direct_api().local_ice_credentials().ufrag);
+        assert_eq!(s.remote_ufrag.as_deref(), Some(creds.ufrag.as_str()));
+        assert!(
+            restarted.body.contains("a=candidate:"),
+            "{}",
+            restarted.body
+        );
+
+        // the same credentials again are a plain trickle, not another restart
+        let again = format!(
+            "a=ice-ufrag:{}\r\na=ice-pwd:{}\r\n",
+            creds.ufrag, creds.pass
+        );
+        let plain = src.dispatch(&trickle(&resource, again), &mut session).await;
+        assert_eq!(plain.response.status, Status::NoContent);
     }
 }

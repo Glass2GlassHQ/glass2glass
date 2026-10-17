@@ -882,6 +882,9 @@ mod webrtc_util;
 // The video codecs the WebRTC elements carry and the `video-codec` property.
 #[cfg(feature = "webrtc")]
 pub mod webrtc_codec;
+// Live PeerConnection counters behind a clonable handle.
+#[cfg(feature = "webrtc")]
+pub mod webrtc_stats;
 #[cfg(all(feature = "webrtc", fuzzing))]
 pub use turn::fuzz_parse as turn_fuzz_parse;
 #[cfg(all(feature = "webrtc", fuzzing))]
