@@ -43,10 +43,12 @@ use str0m::media::{KeyframeRequestKind, MediaKind, Mid};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::frame::Frame;
+use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    Caps, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink, MultiOutputSource,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    g2g_debug, g2g_info, g2g_warn, Caps, FrameTiming, G2gError, HardwareError, MemoryDomain,
+    MultiOutputSink, MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
 use crate::filesink::io_err;
@@ -108,6 +110,7 @@ pub struct WhipServerSrc {
     stun_server: Option<String>,
     video_codec: WebRtcVideoCodec,
     frame_limit: u64,
+    log_name: LogName,
 }
 
 impl core::fmt::Debug for WhipServerSrc {
@@ -128,6 +131,7 @@ impl WhipServerSrc {
             stun_server: None,
             video_codec: WebRtcVideoCodec::default(),
             frame_limit: u64::MAX,
+            log_name: LogName::new(),
         }
     }
 
@@ -192,6 +196,7 @@ impl WhipServerSrc {
         session: &mut Option<Session>,
     ) -> HttpResponse {
         if session.is_some() {
+            g2g_warn!(self, "second publisher refused, one session per run");
             return HttpResponse::new(Status::Conflict);
         }
         if !has_content_type(request, SDP_CONTENT_TYPE) {
@@ -199,7 +204,10 @@ impl WhipServerSrc {
         }
         let offer = match SdpOffer::from_sdp_string(&request.body) {
             Ok(offer) => offer,
-            Err(e) => return HttpResponse::text(Status::BadRequest, format!("bad offer: {e:?}")),
+            Err(e) => {
+                g2g_warn!(self, "unparseable offer: {e:?}");
+                return HttpResponse::text(Status::BadRequest, format!("bad offer: {e:?}"));
+            }
         };
         let socket = match UdpSocket::bind((select_host_ip(), 0)).await {
             Ok(socket) => socket,
@@ -223,10 +231,15 @@ impl WhipServerSrc {
         let answer = match rtc.sdp_api().accept_offer(offer) {
             Ok(answer) => answer,
             Err(e) => {
-                return HttpResponse::text(Status::BadRequest, format!("offer rejected: {e:?}"))
+                g2g_warn!(self, "offer rejected: {e:?}");
+                return HttpResponse::text(Status::BadRequest, format!("offer rejected: {e:?}"));
             }
         };
         let resource_id = random_resource_id();
+        g2g_info!(
+            self,
+            "publisher accepted, resource {resource_id}, rtc socket {local}"
+        );
         let response = HttpResponse::new(Status::Created)
             .with_header("Location", format!("{RESOURCE_PATH_PREFIX}{resource_id}"))
             .with_header("ETag", entity_tag(&resource_id))
@@ -338,15 +351,16 @@ impl MultiOutputSource for WhipServerSrc {
             }
             let hw = || G2gError::Hardware(HardwareError::Other);
             let Some(authority) = bind_authority(&self.host_addr) else {
-                std::eprintln!(
-                    "whipserversrc: host-addr {} is not an http URL",
-                    self.host_addr
-                );
+                g2g_warn!(self, "host-addr {} is not an http URL", self.host_addr);
                 return Err(hw());
             };
             let listener = TcpListener::bind(authority.as_str())
                 .await
                 .map_err(io_err)?;
+            g2g_info!(
+                self,
+                "listening on {authority}, waiting for a WHIP publisher"
+            );
             let (request_tx, mut requests) = mpsc::channel(REQUEST_QUEUE_DEPTH);
             let _accept_task = AbortOnDrop(tokio::spawn(accept_connections(listener, request_tx)));
 
@@ -377,8 +391,16 @@ impl MultiOutputSource for WhipServerSrc {
                         return Err(hw());
                     };
                     let dispatched = self.dispatch(&pending.request, &mut session).await;
+                    g2g_debug!(
+                        self,
+                        "{} {} -> {}",
+                        pending.request.method,
+                        pending.request.path,
+                        dispatched.response.status.code_and_reason().0
+                    );
                     let _ = pending.respond.send(dispatched.response);
                     if dispatched.session_ended {
+                        g2g_info!(self, "publisher left, ending run");
                         finish!();
                     }
                 }};
@@ -395,11 +417,18 @@ impl MultiOutputSource for WhipServerSrc {
                     match s.rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => send_transmit(&s.socket, &mut turn, &t).await,
-                        Ok(Output::Event(Event::MediaAdded(m))) => match m.kind {
-                            MediaKind::Video if s.video_mid.is_none() => s.video_mid = Some(m.mid),
-                            MediaKind::Audio if s.audio_mid.is_none() => s.audio_mid = Some(m.mid),
-                            _ => {}
-                        },
+                        Ok(Output::Event(Event::MediaAdded(m))) => {
+                            g2g_debug!(self, "{:?} track on mid {:?}", m.kind, m.mid);
+                            match m.kind {
+                                MediaKind::Video if s.video_mid.is_none() => {
+                                    s.video_mid = Some(m.mid)
+                                }
+                                MediaKind::Audio if s.audio_mid.is_none() => {
+                                    s.audio_mid = Some(m.mid)
+                                }
+                                _ => {}
+                            }
+                        }
                         Ok(Output::Event(Event::MediaData(d))) => {
                             let pts_ns = media_time_ns(d.time);
                             if Some(d.mid) == s.video_mid {
@@ -407,6 +436,7 @@ impl MultiOutputSource for WhipServerSrc {
                                     if !video_codec.is_keyframe(&d.data) {
                                         continue;
                                     }
+                                    g2g_debug!(self, "first video keyframe, forwarding");
                                     s.video_keyframed = true;
                                 }
                                 frames.push((
@@ -420,9 +450,18 @@ impl MultiOutputSource for WhipServerSrc {
                         }
                         Ok(Output::Event(Event::IceConnectionStateChange(
                             IceConnectionState::Disconnected,
-                        ))) => finish!(),
+                        ))) => {
+                            g2g_info!(self, "ice disconnected, ending run");
+                            finish!()
+                        }
+                        Ok(Output::Event(Event::IceConnectionStateChange(state))) => {
+                            g2g_debug!(self, "ice {state:?}")
+                        }
                         Ok(Output::Event(_)) => {}
-                        Err(_) => finish!(),
+                        Err(e) => {
+                            g2g_warn!(self, "rtc failed: {e:?}, ending run");
+                            finish!()
+                        }
                     }
                 };
 
@@ -430,6 +469,7 @@ impl MultiOutputSource for WhipServerSrc {
                     if !s.video_keyframed && s.last_pli.elapsed() >= PLI_INTERVAL {
                         s.last_pli = Instant::now();
                         if let Some(rx) = s.rtc.direct_api().stream_rx_by_mid(mid, None) {
+                            g2g_debug!(self, "no keyframe yet, sending pli");
                             rx.request_keyframe(KeyframeRequestKind::Pli);
                         }
                     }
@@ -462,12 +502,16 @@ impl MultiOutputSource for WhipServerSrc {
                 let timeout = deadline.saturating_duration_since(Instant::now());
                 tokio::select! {
                     r = s.socket.recv_from(&mut buf) => {
-                        let Ok((n, source)) = r else { finish!() };
+                        let Ok((n, source)) = r else {
+                            g2g_warn!(self, "rtc socket recv failed, ending run");
+                            finish!()
+                        };
                         let _ = feed_datagram(&mut s.rtc, &mut turn, s.local, &buf[..n], source);
                     }
                     pending = requests.recv() => answer!(pending),
                     _ = tokio::time::sleep(timeout) => {
                         if s.rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
+                            g2g_warn!(self, "rtc timeout handling failed, ending run");
                             finish!();
                         }
                     }
@@ -512,6 +556,18 @@ impl Session {
             self.rtc.add_remote_candidate(candidate);
         }
         HttpResponse::new(Status::NoContent)
+    }
+}
+
+impl LogSource for WhipServerSrc {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
     }
 }
 

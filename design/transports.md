@@ -128,7 +128,9 @@ can publish. The host candidate is added before `accept_offer` so it rides in
 the answer, and the mids come from `MediaAdded` per the answerer rule. One
 publisher per run: a second `POST` gets `409`, and the run ends with `Eos` on
 both outputs when the publisher leaves. Validated by a default-run localhost
-loopback from `WebRtcSink` in every carried codec and in Opus.
+loopback from `WebRtcSink` in every carried codec and in Opus, and by a Chromium
+publish of `examples/whip-publisher.html` decoded through `avdec_h264` to a
+Wayland window.
 
 ### Signaling
 
