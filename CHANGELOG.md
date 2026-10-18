@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1570: `mjpegdec` decodes a frame that carries no Huffman tables with the ITU-T T.81 Annex K defaults, as AVI motion JPEG expects.
 - M1569: a bare `decodebin` plugs `mulawdec` and `alawdec` for a mu-law or A-law AVI audio stream.
 - M1564: `avidemux` reads an AVI cut short by the end of the file up to its last complete chunk, as ffmpeg and gstreamer do.
 - M1561: `ac3parse`, `aacparse` and `mpegaudioparse` stamp each frame with its own chunk's demuxer time when frames arrive one per chunk, so the segment clip no longer drops transport-stream audio.
