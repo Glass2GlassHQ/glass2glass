@@ -553,7 +553,7 @@ cargo clippy --workspace --all-targets
 | `PipeWireVideoSrc portal=true` (screen capture via xdg-desktop-portal) | `portal` | Linux + libpipewire + a desktop portal |
 | `MfVideoSrc` (camera) | `mf-video-src` | Windows + Media Foundation |
 | `Av1Enc` (pure-Rust `rav1e`) | `av1-encode` | none |
-| `VpxEnc` (VP8 / VP9 via libvpx) | `vpx` | libvpx |
+| `VpxEnc` (VP8 / VP9 via libvpx) | `vpx` | libvpx, libclang at build |
 | `MjpegDec` / `MjpegEnc` (pure Rust) | `mjpeg`, `mjpeg-encode` | none |
 | `PngDec` / `PngEnc` (pure Rust) | `png` | none |
 | `WebPDec` (lossy + lossless, pure Rust) | `webp` | none |

@@ -663,13 +663,13 @@ dav1d = ["std", "dep:dav1d"]
 # the libdav1d path cannot. Implies std; the decoder needs alloc + threads.
 # re_rav1d's MSRV is 1.79, well under this crate's.
 rav1d = ["std", "dep:re_rav1d"]
-# VP8 / VP9 encode via libvpx through the `vpx-encode` crate (FFI), the GStreamer
+# VP8 / VP9 encode via libvpx (FFI generated in build.rs), the GStreamer
 # vp8enc/vp9enc analog. NOT pure Rust: it links the system `libvpx` and runs
-# bindgen (needs clang/LLVM) at build, so it is gated here and excluded from
+# bindgen (needs libclang) at build, so it is gated here and excluded from
 # pure-Rust / no_std builds. Cross-platform but requires libvpx installed
 # (Windows: vcpkg `libvpx`; Debian/Ubuntu: `libvpx-dev`; Fedora: `libvpx-devel`).
 # Implies std.
-vpx = ["std", "dep:vpx-encode"]
+vpx = ["std", "dep:bindgen"]
 # Motion-JPEG decode via the pure-Rust `zune-jpeg` decoder (MjpegDec,
 # CompressedVideo{Mjpeg} -> RawVideo{Rgba8}). No system deps; the MJPEG output
 # of cheap UVC webcams (pairs with v4l2src / mfvideosrc). Implies std (zune's
@@ -852,12 +852,6 @@ dav1d = { version = "0.11", optional = true }
 # dav1d-rs's safe API. default-features = false drops the NASM asm; bitdepth_8 /
 # bitdepth_16 keep 8- and 10/12-bit decode (parity with libdav1d). No system deps.
 re_rav1d = { version = "0.1", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
-# libvpx VP8/VP9 encoder wrapper (vpx feature). The `vp9` feature enables the VP9
-# codec alongside VP8. `ffi-generate` forwards to env-libvpx-sys's bindgen path so
-# the FFI is generated against the installed libvpx headers: that crate only ships
-# pre-generated bindings through 1.13.0, so without this a newer system libvpx
-# (e.g. Fedora's 1.15) fails the build. Needs clang at build time (bindgen).
-vpx-encode = { version = "0.6", optional = true, features = ["vp9", "ffi-generate"] }
 # Pure-Rust JPEG decoder (mjpeg feature). Default features keep the x86/neon SIMD
 # paths and std; no system dependency.
 zune-jpeg = { version = "0.5", optional = true }
@@ -1306,6 +1300,8 @@ web-sys = { version = "0.3", optional = true, features = [
 [build-dependencies]
 cc = "1"
 pkg-config = "0.3"
+# Generates the libvpx encoder FFI from the installed headers (vpx feature).
+bindgen = { version = "0.73", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net"] }

@@ -1,11 +1,12 @@
 //! VP8 / VP9 software encode element (VpxEnc, `vpx` feature): `RawVideo{I420}` in,
-//! `CompressedVideo{Vp8|Vp9}` out, via libvpx through the `vpx-encode` crate.
+//! `CompressedVideo{Vp8|Vp9}` out, via libvpx with FFI that bindgen generates in
+//! build.rs.
 //!
 //! The GStreamer `vp8enc` / `vp9enc` analog. Unlike the pure-Rust [`crate::av1enc`]
 //! (rav1e), this links the system `libvpx` and runs bindgen (clang) at build, so it
 //! is gated behind the `vpx` feature and left out of pure-Rust / no_std builds.
 //! Building needs libvpx installed (Windows: vcpkg `libvpx`; Debian/Ubuntu:
-//! `libvpx-dev`; Fedora: `libvpx-devel`) plus clang/LLVM for bindgen.
+//! `libvpx-dev`; Fedora: `libvpx-devel`) plus libclang for bindgen.
 //!
 //! Scope (v1): 8-bit I420, geometry fixed at configure, single-pass
 //! target-bitrate rate control. The codec (VP8/VP9) and bitrate are
@@ -16,6 +17,7 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::ffi::c_int;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
@@ -23,7 +25,10 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
-use vpx_encode::{Config, Encoder, VideoCodecId};
+#[allow(non_camel_case_types, dead_code, unreachable_pub)]
+mod ffi {
+    include!(concat!(env!("OUT_DIR"), "/vpx_ffi.rs"));
+}
 
 /// Default target bitrate (kbps) when none is set.
 const DEFAULT_BITRATE_KBPS: u32 = 1024;
@@ -49,24 +54,15 @@ pub struct VpxEnc {
     width: u32,
     height: u32,
     framerate: Rate,
-    enc: Option<Encoder>,
+    enc: Option<VpxContext>,
     emitted: u64,
     caps_sent: bool,
     configured: bool,
 }
 
-// SAFETY: `vpx_encode::Encoder` wraps a raw libvpx `vpx_codec_ctx_t` pointer and is
-// thus `!Send` by default. The `multi-thread` runner requires `Send` so it can move
-// a task between worker threads. We uphold that for `VpxEnc` by construction: the
-// libvpx context carries no thread affinity (it is a heap allocation, no TLS or
-// thread-bound handles), the runner drives a single element through `&mut self`
-// (never concurrently), and the encoder is moved between threads but never shared,
-// so there is no data race. Mirrors `MfDecode`'s contract.
-unsafe impl Send for VpxEnc {}
-
 impl core::fmt::Debug for VpxEnc {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // vpx_encode's Encoder is not Debug; report the configuration instead.
+        // The libvpx context is not Debug, report the configuration instead.
         f.debug_struct("VpxEnc")
             .field("codec", &self.codec)
             .field("bitrate_kbps", &self.bitrate_kbps)
@@ -139,26 +135,13 @@ impl VpxEnc {
         }
     }
 
-    /// The libvpx codec id for the selected codec, or `CapsMismatch` for a codec
-    /// this element does not encode.
-    fn codec_id(&self) -> Result<VideoCodecId, G2gError> {
-        match self.codec {
-            VideoCodec::Vp8 => Ok(VideoCodecId::VP8),
-            VideoCodec::Vp9 => Ok(VideoCodecId::VP9),
-            _ => Err(G2gError::CapsMismatch),
-        }
-    }
-
     fn build_encoder(&mut self) -> Result<(), G2gError> {
-        let config = Config {
-            width: self.width,
-            height: self.height,
-            timebase: [1, TIMEBASE_DEN],
-            bitrate: self.bitrate_kbps,
-            codec: self.codec_id()?,
-        };
-        let enc = Encoder::new(config).map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        self.enc = Some(enc);
+        self.enc = Some(VpxContext::new(
+            self.codec,
+            self.width,
+            self.height,
+            self.bitrate_kbps,
+        )?);
         Ok(())
     }
 
@@ -169,34 +152,25 @@ impl VpxEnc {
             return Err(G2gError::CapsMismatch);
         }
         let enc = self.enc.as_mut().ok_or(G2gError::NotConfigured)?;
-        let pts = (pts_ns / 1_000_000) as i64;
-        let packets = enc
-            .encode(pts, i420)
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        let mut out = Vec::new();
-        for frame in packets {
-            out.push((frame.data.to_vec(), (frame.pts as u64) * 1_000_000));
-        }
-        Ok(out)
+        enc.encode(i420, (pts_ns / 1_000_000) as i64)?;
+        Ok(enc.drain_packets())
     }
 
     /// Flush the encoder at EOS and return the remaining packets, consuming the
     /// libvpx context (a fresh `configure_pipeline` would rebuild it).
     fn flush(&mut self) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
-        let Some(enc) = self.enc.take() else {
+        let Some(mut enc) = self.enc.take() else {
             return Ok(Vec::new());
         };
-        let mut finish = enc
-            .finish()
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         let mut out = Vec::new();
-        while let Some(frame) = finish
-            .next()
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))?
-        {
-            out.push((frame.data.to_vec(), (frame.pts as u64) * 1_000_000));
+        loop {
+            enc.encode_end_of_stream()?;
+            let packets = enc.drain_packets();
+            if packets.is_empty() {
+                return Ok(out);
+            }
+            out.extend(packets);
         }
-        Ok(out)
     }
 
     async fn emit(
@@ -213,10 +187,8 @@ impl VpxEnc {
             out,
         )
         .await?;
-        // The `vpx-encode` 0.6 wrapper exposes neither per-frame
-        // VPX_EFLAG_FORCE_KF nor runtime vpx_codec_enc_config_set, so both
-        // signals are honored by REBUILDING the encoder (M730): a fresh libvpx
-        // context starts on a keyframe, and takes the new rate with it. The
+        // Both signals are honored by REBUILDING the encoder (M730): a fresh
+        // libvpx context starts on a keyframe, and takes the new rate with it. The
         // rebuild is cheap for the software codecs; bitrate is hysteresis-gated
         // 20% like `Av1Enc` so BWE noise cannot thrash it.
         let mut rebuild = feedback.force_keyframe;
@@ -232,6 +204,195 @@ impl VpxEnc {
             self.build_encoder()?;
         }
         Ok(())
+    }
+}
+
+// An initialized libvpx encoder context, destroyed on drop. Boxed because libvpx
+// does not document that an initialized context may move.
+struct VpxContext {
+    context: Box<ffi::vpx_codec_ctx_t>,
+    width: u32,
+    height: u32,
+}
+
+// SAFETY: libvpx keeps no thread-local or thread-bound state for a context, and
+// every call goes through `&mut self`, so moving it between threads cannot race.
+// The `multi-thread` runner needs `Send` to move the element between workers.
+unsafe impl Send for VpxContext {}
+
+// The libvpx encoder interface for `codec`, or `CapsMismatch` for a codec this
+// element does not encode.
+fn codec_interface(codec: VideoCodec) -> Result<*const ffi::vpx_codec_iface, G2gError> {
+    // SAFETY: both functions take no arguments and return a pointer to a static
+    // interface table inside libvpx.
+    let interface = unsafe {
+        match codec {
+            VideoCodec::Vp8 => ffi::vpx_codec_vp8_cx(),
+            VideoCodec::Vp9 => ffi::vpx_codec_vp9_cx(),
+            _ => return Err(G2gError::CapsMismatch),
+        }
+    };
+    if interface.is_null() {
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    Ok(interface)
+}
+
+fn check_vpx(result: ffi::vpx_codec_err_t) -> Result<(), G2gError> {
+    if result == ffi::VPX_CODEC_OK {
+        Ok(())
+    } else {
+        Err(G2gError::Hardware(HardwareError::Other))
+    }
+}
+
+// VP9 speed preset passed as VP8E_SET_CPUUSED, higher is faster.
+const VP9_CPU_USED: c_int = 6;
+const ENCODER_THREADS: u32 = 8;
+
+impl VpxContext {
+    fn new(
+        codec: VideoCodec,
+        width: u32,
+        height: u32,
+        bitrate_kbps: u32,
+    ) -> Result<Self, G2gError> {
+        let interface = codec_interface(codec)?;
+        if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        // SAFETY: `vpx_codec_enc_cfg_t` is a plain C struct of integers, rationals
+        // and pointers, for which all-zero is a valid value.
+        let mut config: ffi::vpx_codec_enc_cfg_t = unsafe { core::mem::zeroed() };
+        // SAFETY: `interface` is a non-null libvpx encoder interface and `config`
+        // is a live, writable config struct.
+        check_vpx(unsafe { ffi::vpx_codec_enc_config_default(interface, &mut config, 0) })?;
+        config.g_w = width;
+        config.g_h = height;
+        config.g_timebase.num = 1;
+        config.g_timebase.den = TIMEBASE_DEN;
+        config.rc_target_bitrate = bitrate_kbps;
+        config.g_threads = ENCODER_THREADS;
+        config.g_error_resilient = ffi::VPX_ERROR_RESILIENT_DEFAULT;
+
+        // SAFETY: `vpx_codec_ctx_t` is a plain C struct, all-zero is the
+        // uninitialized state `vpx_codec_enc_init_ver` expects.
+        let mut context: Box<ffi::vpx_codec_ctx_t> = Box::new(unsafe { core::mem::zeroed() });
+        // SAFETY: `context` and `config` are live, `interface` is non-null, and the
+        // ABI version comes from the same headers the bindings were generated from.
+        // libvpx copies `config` into the context, so it may go out of scope.
+        check_vpx(unsafe {
+            ffi::vpx_codec_enc_init_ver(
+                &mut *context,
+                interface,
+                &config,
+                0,
+                ffi::VPX_ENCODER_ABI_VERSION as c_int,
+            )
+        })?;
+        let mut encoder = Self {
+            context,
+            width,
+            height,
+        };
+        if codec == VideoCodec::Vp9 {
+            encoder.control(ffi::VP8E_SET_CPUUSED, VP9_CPU_USED)?;
+            encoder.control(ffi::VP9E_SET_ROW_MT, 1)?;
+        }
+        Ok(encoder)
+    }
+
+    fn control(
+        &mut self,
+        control_id: ffi::vp8e_enc_control_id,
+        value: c_int,
+    ) -> Result<(), G2gError> {
+        // SAFETY: the context is initialized, and both controls used here take a
+        // single `int` argument.
+        check_vpx(unsafe {
+            ffi::vpx_codec_control_(&mut *self.context, control_id as c_int, value)
+        })
+    }
+
+    // Queues one I420 frame. The caller has checked `i420` holds a full frame.
+    fn encode(&mut self, i420: &[u8], pts: i64) -> Result<(), G2gError> {
+        // SAFETY: `vpx_image_t` is a plain C struct, all-zero is valid before
+        // `vpx_img_wrap` fills it.
+        let mut image: ffi::vpx_image_t = unsafe { core::mem::zeroed() };
+        // SAFETY: `i420` holds `width * height * 3 / 2` bytes and outlives the
+        // `vpx_codec_encode` call below. libvpx only reads the wrapped pixels, so
+        // the `*mut` cast never leads to a write.
+        let wrapped = unsafe {
+            ffi::vpx_img_wrap(
+                &mut image,
+                ffi::VPX_IMG_FMT_I420,
+                self.width,
+                self.height,
+                1,
+                i420.as_ptr().cast_mut(),
+            )
+        };
+        if wrapped.is_null() {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        // SAFETY: the context is initialized and `image` wraps live pixel data.
+        check_vpx(unsafe {
+            ffi::vpx_codec_encode(
+                &mut *self.context,
+                &image,
+                pts,
+                1,
+                0,
+                ffi::VPX_DL_REALTIME as ffi::vpx_enc_deadline_t,
+            )
+        })
+    }
+
+    // A null image asks libvpx to emit the frames it is still holding.
+    fn encode_end_of_stream(&mut self) -> Result<(), G2gError> {
+        // SAFETY: the context is initialized, and a null image is the documented
+        // flush request.
+        check_vpx(unsafe {
+            ffi::vpx_codec_encode(
+                &mut *self.context,
+                core::ptr::null(),
+                -1,
+                1,
+                0,
+                ffi::VPX_DL_REALTIME as ffi::vpx_enc_deadline_t,
+            )
+        })
+    }
+
+    // Copies out every compressed frame packet as `(data, pts_ns)`.
+    fn drain_packets(&mut self) -> Vec<(Vec<u8>, u64)> {
+        let mut iterator: ffi::vpx_codec_iter_t = core::ptr::null();
+        let mut out = Vec::new();
+        loop {
+            // SAFETY: the context is initialized, and `iterator` is null on the first
+            // call and otherwise the value libvpx wrote back.
+            let packet = unsafe { ffi::vpx_codec_get_cx_data(&mut *self.context, &mut iterator) };
+            // SAFETY: a non-null packet stays valid until the next call on the context.
+            let Some(packet) = (unsafe { packet.as_ref() }) else {
+                return out;
+            };
+            if packet.kind != ffi::VPX_CODEC_CX_FRAME_PKT {
+                continue;
+            }
+            // SAFETY: `kind` says the `frame` member of the union is the active one.
+            let frame = unsafe { &packet.data.frame };
+            // SAFETY: libvpx guarantees `buf` points at `sz` bytes for a frame packet.
+            let data = unsafe { core::slice::from_raw_parts(frame.buf.cast::<u8>(), frame.sz) };
+            out.push((data.to_vec(), (frame.pts as u64) * 1_000_000));
+        }
+    }
+}
+
+impl Drop for VpxContext {
+    fn drop(&mut self) {
+        // SAFETY: the context was initialized by `vpx_codec_enc_init_ver` and is
+        // destroyed only here.
+        unsafe { ffi::vpx_codec_destroy(&mut *self.context) };
     }
 }
 
@@ -301,7 +462,7 @@ impl AsyncElement for VpxEnc {
         let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) else {
             return Err(G2gError::CapsMismatch);
         };
-        self.codec_id()?; // reject a non-VP8/VP9 selection before building libvpx
+        codec_interface(self.codec)?; // reject a non-VP8/VP9 selection before building libvpx
         self.width = *w;
         self.height = *h;
         self.framerate = framerate.clone();
