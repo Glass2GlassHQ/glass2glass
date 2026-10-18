@@ -42,7 +42,7 @@ use g2g_core::{
     PropertySpec, Rate, Seek, Segment, Tag, TagList, VideoCodec,
 };
 
-use crate::aacparse::{adts_from_asc, SAMPLE_RATES};
+use crate::aacparse::{adts_from_asc, audio_specific_config_info, is_raw_aac_config};
 use crate::annexb::{
     is_annex_b, length_prefixed_nal_units, parse_avcc, prepend_param_sets, starts_with_param_set,
 };
@@ -351,7 +351,10 @@ impl FlvDemux {
                     if !self.audio_caps_announced {
                         self.audio_caps_announced = true;
                         let params = if u.codec == FlvCodec::Aac {
-                            self.audio_asc.as_deref().and_then(asc_audio_params)
+                            self.audio_asc
+                                .as_deref()
+                                .and_then(audio_specific_config_info)
+                                .map(|info| (info.channels, info.sample_rate))
                         } else {
                             self.demux.audio_params()
                         };
@@ -365,6 +368,23 @@ impl FlvDemux {
                                 channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                             };
                             out.push(PipelinePacket::CapsChanged(caps)).await?;
+                        }
+                        // ADTS cannot carry ER AAC, ELD or USAC, so their config
+                        // leads the raw units as a frame of its own.
+                        if let Some(config) = self
+                            .audio_asc
+                            .as_ref()
+                            .filter(|asc| u.codec == FlvCodec::Aac && is_raw_aac_config(asc))
+                        {
+                            let frame = Frame::new(
+                                MemoryDomain::System(SystemSlice::from_boxed(
+                                    config.clone().into_boxed_slice(),
+                                )),
+                                FrameTiming::default(),
+                                self.emitted,
+                            );
+                            self.emitted += 1;
+                            out.push(PipelinePacket::DataFrame(frame)).await?;
                         }
                     }
                     if u.codec != FlvCodec::Aac {
@@ -588,19 +608,6 @@ pub(crate) fn flv_stream_to_str(stream: FlvStream) -> &'static str {
         FlvStream::Mp3 => "mp3",
         FlvStream::Speex => "speex",
     }
-}
-
-/// Channel count and sample rate from a 2-byte `AudioSpecificConfig`. `None`
-/// when the rate index is explicit/reserved or the channel config is "in
-/// stream", neither of which maps to concrete caps.
-fn asc_audio_params(asc: &[u8]) -> Option<(u8, u32)> {
-    if asc.len() < 2 {
-        return None;
-    }
-    let sr_index = (((asc[0] & 0x07) << 1) | (asc[1] >> 7)) as usize;
-    let channel_config = (asc[1] >> 3) & 0x0F;
-    let rate = *SAMPLE_RATES.get(sr_index)?;
-    (channel_config != 0).then_some((channel_config, rate))
 }
 
 impl PadTemplates for FlvDemux {
@@ -975,6 +982,40 @@ mod tests {
                 channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
             }],
             "concrete audio caps announced from the ASC"
+        );
+    }
+
+    #[tokio::test]
+    async fn sends_an_eld_config_ahead_of_raw_units() {
+        // AAC-ELD 48 kHz stereo, an object type ADTS has no profile for
+        let eld_config = [0xF8u8, 0xE6, 0x40, 0x00];
+        let units = [[0x7Eu8, 0x89, 0xB4], [0x56, 0x78, 0x9A]];
+        let mut audio_config_body = alloc::vec![0xAFu8, 0x00];
+        audio_config_body.extend_from_slice(&eld_config);
+        let stream = flv_stream(&[
+            tag(8, 0, &audio_config_body),
+            tag(8, 0, &aac_raw(&units[0])),
+            tag(8, 10, &aac_raw(&units[1])),
+        ]);
+
+        let mut audio = FlvDemux::new().with_stream(FlvStream::Aac);
+        audio.configure_pipeline(&FlvDemux::input_caps()).unwrap();
+        let mut asink = CaptureSink::default();
+        run_demux(&mut audio, &stream, &mut asink).await;
+        assert_eq!(
+            asink.frames,
+            alloc::vec![eld_config.to_vec(), units[0].to_vec(), units[1].to_vec()],
+            "the config leads, then each unit unframed"
+        );
+        assert_eq!(
+            asink.caps,
+            alloc::vec![Caps::Audio {
+                format: AudioFormat::Aac,
+                channels: 2,
+                sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
+            }],
+            "caps read past the escaped object type"
         );
     }
 

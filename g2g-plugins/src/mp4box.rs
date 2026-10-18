@@ -237,11 +237,12 @@ pub(crate) fn find_descriptor(data: &[u8], tag: u8) -> Option<&[u8]> {
                 break;
             }
         }
-        let payload = data.get(i..i + size)?;
+        let end = i.checked_add(size)?;
+        let payload = data.get(i..end)?;
         if t == tag {
             return Some(payload);
         }
-        i += size;
+        i = end;
     }
     None
 }

@@ -32,7 +32,7 @@ use g2g_core::{
     Stream, StreamCollection, StreamType, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
-use crate::aacparse::adts_from_asc;
+use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::annexb::{
     is_annex_b, length_prefixed_to_annexb, parse_avcc, prepend_param_sets, starts_with_param_set,
     AVCC_LENGTH_SIZE,
@@ -296,8 +296,8 @@ fn config_param_sets(stream: &AviStream) -> Vec<Vec<u8>> {
 
 /// Re-frame one chunk's payload for the pipeline: AVCC H.264 to Annex-B with
 /// the out-of-band parameter sets ahead of the first access unit, raw AAC to
-/// ADTS, everything else untouched. `first` is set only for the stream's
-/// opening chunk.
+/// ADTS where ADTS can carry its config, everything else untouched. `first` is
+/// set only for the stream's opening chunk.
 fn deframe(stream: &AviStream, param_sets: &[Vec<u8>], data: &[u8], first: bool) -> Vec<u8> {
     match &stream.kind {
         AviStreamKind::Video {
@@ -336,10 +336,23 @@ struct Emitted {
     timing: FrameTiming,
 }
 
+// the AudioSpecificConfig to send ahead of an AAC stream's units, when ADTS cannot carry it (ER AAC, ELD, USAC)
+fn raw_aac_config(stream: &AviStream) -> Option<&[u8]> {
+    let AviStreamKind::Audio {
+        format: AudioFormat::Aac,
+        ..
+    } = stream.kind
+    else {
+        return None;
+    };
+    Some(stream.codec_config.as_slice()).filter(|config| is_raw_aac_config(config))
+}
+
 /// Walk a parsed file's chunks of the `selected` streams into emittable frames,
 /// reconstructing each stream's timing from its `strh`. AVI stores chunks in
 /// decode order with no presentation timestamp, so dts equals pts and a stream
-/// with B-frames is reordered by the decoder downstream.
+/// with B-frames is reordered by the decoder downstream. A raw AAC stream's
+/// config goes out as a frame of its own ahead of its first chunk.
 fn emittable<'a>(
     data: &'a [u8],
     file: &'a AviFile,
@@ -357,7 +370,7 @@ fn emittable<'a>(
                     AviStreamKind::Unsupported { .. }
                 )
         })
-        .map(move |chunk| {
+        .flat_map(move |chunk| {
             let stream = &file.streams[chunk.stream];
             let bytes = data.get(chunk.body.clone()).unwrap_or_default();
             let samples = stream.samples_in(bytes.len());
@@ -369,8 +382,16 @@ fn emittable<'a>(
                 bytes,
                 first[chunk.stream],
             );
+            let lead_config =
+                raw_aac_config(stream)
+                    .filter(|_| first[chunk.stream])
+                    .map(|config| Emitted {
+                        stream: chunk.stream,
+                        data: Vec::from(config),
+                        timing: FrameTiming::default(),
+                    });
             first[chunk.stream] = false;
-            Emitted {
+            lead_config.into_iter().chain(core::iter::once(Emitted {
                 stream: chunk.stream,
                 data: payload,
                 timing: FrameTiming {
@@ -381,7 +402,7 @@ fn emittable<'a>(
                     keyframe: chunk.keyframe,
                     ..FrameTiming::default()
                 },
-            }
+            }))
         })
 }
 
@@ -835,7 +856,7 @@ impl MultiOutputElement for AviDemuxN {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::avi::{AviWriteStream, AviWriter};
+    use crate::avi::{AviChunk, AviWriteStream, AviWriter};
     use alloc::vec;
     use core::task::{Context, Poll};
     use g2g_core::runtime::block_on;
@@ -1016,6 +1037,49 @@ mod tests {
             assert_eq!(sink.payloads.len(), 4, "{select:?}");
             assert_eq!(sink.caps, Some(want_caps), "{select:?}");
         }
+    }
+
+    #[test]
+    fn sends_an_eld_config_ahead_of_its_raw_chunks() {
+        // AAC-ELD 48 kHz stereo, an object type ADTS has no profile for
+        let eld_config = vec![0xF8u8, 0xE6, 0x40, 0x00];
+        let units = [vec![0x7Eu8, 0x89, 0xB4], vec![0x56, 0x78, 0x9A]];
+        let data = units.concat();
+        let file = AviFile {
+            streams: vec![AviStream {
+                kind: AviStreamKind::Audio {
+                    format: AudioFormat::Aac,
+                    channels: 2,
+                    sample_rate: 48_000,
+                },
+                scale: 512,
+                rate: 48_000,
+                start: 0,
+                sample_size: 0,
+                codec_config: eld_config.clone(),
+            }],
+            chunks: vec![
+                AviChunk {
+                    stream: 0,
+                    body: 0..units[0].len(),
+                    keyframe: true,
+                },
+                AviChunk {
+                    stream: 0,
+                    body: units[0].len()..data.len(),
+                    keyframe: true,
+                },
+            ],
+            ..AviFile::default()
+        };
+        let payloads: Vec<Vec<u8>> = emittable(&data, &file, &[0])
+            .map(|emitted| emitted.data)
+            .collect();
+        assert_eq!(
+            payloads,
+            vec![eld_config, units[0].clone(), units[1].clone()],
+            "the config leads, then each chunk unframed"
+        );
     }
 
     #[test]

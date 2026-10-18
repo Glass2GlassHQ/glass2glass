@@ -505,6 +505,10 @@ impl FlvMuxer {
         self.audio_config = asc;
     }
 
+    pub(crate) fn audio_config(&self) -> &[u8] {
+        &self.audio_config
+    }
+
     /// Wrap one access unit into FLV bytes, routed to the muxer's single track:
     /// the legacy single-track entry point (video frames are flagged keyframes).
     pub fn push_au(&mut self, data: &[u8], pts_ms: u32) -> Vec<u8> {

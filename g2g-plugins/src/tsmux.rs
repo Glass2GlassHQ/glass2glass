@@ -29,15 +29,17 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
+use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::time::ns_to_ticks;
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    g2g_error, AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
     SubPictureFormat, Tag, TagList, VideoCodec,
 };
 
+use crate::aacparse::is_raw_aac_config;
 use crate::dvbsub::{parse_page_ids, PageIds, DEFAULT_PAGE_ID, DEFAULT_SUBTITLING_TYPE};
 use crate::mpegts::{
     TsMuxer, DEFAULT_ORIGINAL_NETWORK_ID, DEFAULT_PCR_INTERVAL_90KHZ, DEFAULT_TABLE_INTERVAL_90KHZ,
@@ -309,6 +311,18 @@ impl TsMuxSettings {
     }
 }
 
+// MPEG-TS carries ER AAC, ELD and USAC only as LOAS, which no muxer here writes
+pub(crate) fn reject_raw_aac(frame: &[u8], muxer: &'static str) -> Result<(), G2gError> {
+    if !is_raw_aac_config(frame) {
+        return Ok(());
+    }
+    g2g_error!(
+        Target::category(muxer),
+        "ER AAC, ELD and USAC need LOAS framing, which the MPEG-TS muxer does not write"
+    );
+    Err(G2gError::CapsMismatch)
+}
+
 /// The PMT `stream_type` for an input caps, or `None` if unsupported. Shared by
 /// the single-input [`TsMux`] and the multi-input `tsmuxn::TsMux`. KLV metadata
 /// rides a private PES (0x06) with the 'KLVA' registration descriptor
@@ -465,6 +479,8 @@ pub struct TsMux {
     dvbsub: Option<DvbSubDecl>,
     /// The `dvbsub-page-id` property, held until a DVB subtitle pad is configured.
     dvbsub_page_id: u16,
+    /// Whether the input pad carries AAC, whose frames must be ADTS.
+    carries_aac: bool,
 }
 
 impl Default for TsMux {
@@ -484,6 +500,7 @@ impl TsMux {
             tags: TagList::new(),
             dvbsub: None,
             dvbsub_page_id: DEFAULT_PAGE_ID,
+            carries_aac: false,
         }
     }
 
@@ -631,6 +648,7 @@ impl AsyncElement for TsMux {
             stream_type_for(absolute_caps, self.klv_sync).ok_or(G2gError::CapsMismatch)?;
         let mut mux = TsMuxer::new(stream_type);
         self.settings.apply(&mut mux)?;
+        self.carries_aac = stream_type == STREAM_TYPE_AAC;
         if let Some((name, provider)) = service_from_tags(&self.tags) {
             mux.set_service(&name, &provider);
         }
@@ -719,6 +737,9 @@ impl AsyncElement for TsMux {
                     if self.dvbsub.as_mut().is_some_and(|d| d.adopt(slice)) {
                         self.declare_subtitling();
                         return Ok(());
+                    }
+                    if self.carries_aac {
+                        reject_raw_aac(slice, g2g_core::log::short_type_name::<Self>())?;
                     }
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     let pts_90khz = ns_to_ticks(frame.timing.pts_ns, PES_CLOCK_HZ);

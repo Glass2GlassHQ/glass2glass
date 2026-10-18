@@ -245,16 +245,20 @@ const TRACK_ID: u32 = 1;
 
 // --- box writers -----------------------------------------------------------
 
-/// An MPEG-4 descriptor: tag, expandable size (single byte, payloads here are
-/// small), then payload.
+/// An MPEG-4 descriptor: tag, expandable size, then payload.
 fn descriptor(tag: u8, payload: &[u8]) -> Vec<u8> {
-    debug_assert!(
-        payload.len() < 128,
-        "descriptor payload exceeds single-byte size"
-    );
-    let mut d = Vec::with_capacity(2 + payload.len());
+    let len = payload.len();
+    let mut size_bytes = 1;
+    while len >> (7 * size_bytes) != 0 {
+        size_bytes += 1;
+    }
+    let mut d = Vec::with_capacity(1 + size_bytes + len);
     d.push(tag);
-    d.push(payload.len() as u8);
+    // seven size bits a byte, most significant first, the top bit set on all but the last
+    for n in (0..size_bytes).rev() {
+        let more = if n > 0 { 0x80 } else { 0 };
+        d.push(((len >> (7 * n)) & 0x7F) as u8 | more);
+    }
     d.extend_from_slice(payload);
     d
 }
@@ -298,6 +302,14 @@ mod tests {
         let pos = b.windows(2).position(|w| w == asc).expect("asc present");
         assert_eq!(b[pos - 2], 0x05, "ASC tagged as DecoderSpecificInfo");
         assert_eq!(b[pos - 1], asc.len() as u8, "ASC length byte");
+    }
+
+    #[test]
+    fn esds_sizes_a_config_past_one_size_byte() {
+        // a descriptor size past 127 takes a second size byte
+        let asc: Vec<u8> = (0..200u8).collect();
+        let b = esds(&asc);
+        assert_eq!(crate::mp4box::parse_esds(&b[8..]).expect("parses"), asc);
     }
 
     #[test]

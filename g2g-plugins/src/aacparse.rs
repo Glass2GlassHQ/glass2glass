@@ -168,6 +168,60 @@ pub(crate) fn is_raw_aac_config(config: &[u8]) -> bool {
         .is_some_and(|object_type| RAW_AAC_OBJECT_TYPES.contains(&object_type))
 }
 
+// longest AudioSpecificConfig a muxer takes from the frame leading a raw AAC stream
+const MAX_RAW_AAC_CONFIG_LEN: usize = 256;
+
+// an AAC stream's AudioSpecificConfig from its first frame: an ADTS header's, or the frame itself when it leads raw units
+pub(crate) fn muxer_audio_specific_config(
+    first_frame: &[u8],
+    muxer: &'static str,
+) -> Result<Option<Vec<u8>>, G2gError> {
+    if let Some(asc) = asc_from_adts(first_frame) {
+        return Ok(Some(asc.to_vec()));
+    }
+    if !is_raw_aac_config(first_frame) {
+        return Ok(None);
+    }
+    if first_frame.len() > MAX_RAW_AAC_CONFIG_LEN {
+        g2g_warn!(
+            g2g_core::log::Target::category(muxer),
+            "AAC config of {} bytes exceeds {MAX_RAW_AAC_CONFIG_LEN}",
+            first_frame.len()
+        );
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(Some(first_frame.to_vec()))
+}
+
+// the config a muxer captured for an AAC pad, failing loud when its stream carried neither ADTS headers nor a leading config
+#[cfg(feature = "std")]
+pub(crate) fn require_muxer_config<'a>(
+    config: Option<&'a [u8]>,
+    muxer: &'static str,
+) -> Result<&'a [u8], G2gError> {
+    config.ok_or_else(|| {
+        g2g_warn!(
+            g2g_core::log::Target::category(muxer),
+            "AAC stream has neither ADTS headers nor a leading AudioSpecificConfig"
+        );
+        G2gError::CapsMismatch
+    })
+}
+
+// whether `frame` is the config frame leading the raw access units of an AAC stream declared by `config`
+pub(crate) fn is_leading_aac_config(config: &[u8], frame: &[u8]) -> bool {
+    is_raw_aac_config(config) && frame == config
+}
+
+// the access unit a muxer stores for one frame of an AAC stream declared by `config`
+pub(crate) fn muxer_access_unit<'a>(config: &[u8], frame: &'a [u8]) -> &'a [u8] {
+    if is_raw_aac_config(config) {
+        frame
+    } else {
+        strip_adts(frame)
+    }
+}
+
 fn read_object_type(r: &mut BitReader) -> Option<u32> {
     match r.read_bits(5)? {
         AOT_ESCAPE => Some(AOT_ESCAPE + 1 + r.read_bits(6)?),
@@ -745,7 +799,6 @@ fn parse_audio_mux_element(data: &[u8]) -> Option<AacInfo> {
     parse_audio_specific_config(&mut r)
 }
 
-#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 pub(crate) fn audio_specific_config_info(config: &[u8]) -> Option<AacInfo> {
     parse_audio_specific_config(&mut BitReader::new(config))
 }

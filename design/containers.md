@@ -674,7 +674,18 @@ ADTS has no profile for ER AAC, ELD or USAC, so those access units go out raw
 with the AudioSpecificConfig ahead of them as a frame of its own. `aacparse`
 forwards that stream unchanged. `ffmpegaudiodec` reopens the AAC decoder with the
 config as extradata and presets the channel count and rate it declares, which
-libavcodec needs to output an ER AAC frame.
+libavcodec needs to output an ER AAC frame. `flvdemux` and `avidemux` send the
+same stream from the FLV sequence header and the AVI `strf` config.
+
+`Mp4MuxN`, `MkvMuxN` and both FLV muxers take an AAC stream's
+AudioSpecificConfig from its first frame: synthesised from an ADTS header, or
+the leading config frame of a raw stream, which becomes the `esds`,
+`CodecPrivate` or FLV sequence header as is (at most 256 bytes) and is never
+written as a sample. The raw units that follow are stored unchanged. ADTS frames
+are stored without their header. A fan-in muxer whose AAC pad delivers frames
+without either config fails the stream. MPEG-TS carries these object types only
+as LOAS, which `mpegtsmux` does not write, so it fails a stream that opens on
+such a config rather than write it as ADTS.
 
 ### Matroska
 
