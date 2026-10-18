@@ -228,14 +228,15 @@ fn without_huffman_tables(jpeg: &[u8]) -> Vec<u8> {
 /// both fixtures were encoded with, so it matches the frame that carries them.
 #[tokio::test]
 async fn a_frame_without_huffman_tables_decodes_with_the_default_ones() {
-    let mut decoders: Vec<fn() -> MjpegDec> = vec![MjpegDec::new];
-    #[cfg(feature = "mozjpeg")]
-    decoders
-        .push(|| MjpegDec::new().with_backend(g2g_plugins::mjpegdec::JpegDecodeBackend::Mozjpeg));
+    let decoders: &[fn() -> MjpegDec] = &[
+        MjpegDec::new,
+        #[cfg(feature = "mozjpeg")]
+        || MjpegDec::new().with_backend(g2g_plugins::mjpegdec::JpegDecodeBackend::Mozjpeg),
+    ];
     for jpeg in [RED16, GRAY16] {
         let stripped = without_huffman_tables(jpeg);
         assert!(stripped.len() < jpeg.len(), "the fixture carries a DHT");
-        for decoder in &decoders {
+        for decoder in decoders {
             for format in [RawVideoFormat::Rgba8, RawVideoFormat::I420] {
                 assert_eq!(
                     decode_with(decoder().with_output_format(format), &stripped).await,

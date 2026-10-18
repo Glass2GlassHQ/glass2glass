@@ -230,7 +230,7 @@ async fn mkvdemux_switches_its_output_to_the_selected_stream() {
     );
     assert_eq!(
         tap.frames,
-        vec![vec![0xA1u8, 0xA2, 0xA3], vec![0xB4, 0xB5]],
+        vec![adts_au(&[0xA1, 0xA2, 0xA3]), adts_au(&[0xB4, 0xB5])],
         "the AAC payloads are forwarded (the audio track), not the video",
     );
 
