@@ -28,7 +28,6 @@ const FIXTURE: &str = concat!(
 const FIXTURE_WIDTH: usize = 64;
 const FIXTURE_HEIGHT: usize = 48;
 const FIXTURE_VIDEO_FRAMES: usize = 7;
-const FIXTURE_AUDIO_SAMPLES: usize = 14 * 1024;
 /// I420 is 8-bit luma plus two quarter-size chroma planes.
 const I420_FRAME_BYTES: usize = FIXTURE_WIDTH * FIXTURE_HEIGHT * 3 / 2;
 const S16_BYTES: usize = 2;
@@ -71,6 +70,16 @@ fn ffmpeg_i420() -> Option<Vec<u8>> {
     let out = Command::new("ffmpeg")
         .args(["-v", "error", "-i", FIXTURE])
         .args(["-an", "-f", "rawvideo", "-pix_fmt", "yuv420p", "pipe:1"])
+        .output()
+        .ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+/// ffmpeg's own decode of the fixture's AAC track to the fan-out test's PCM layout.
+fn ffmpeg_pcm() -> Option<Vec<u8>> {
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-i", FIXTURE])
+        .args(["-vn", "-f", "s16le", "-ar", "44100", "-ac", "1", "pipe:1"])
         .output()
         .ok()?;
     out.status.success().then_some(out.stdout)
@@ -133,12 +142,10 @@ async fn decodebin_decodes_the_fixture_bit_exact() {
 }
 
 /// `decodebin name=d` fans the same file out to both tracks and RUNS: the video
-/// branch writes ffmpeg's pixels, the audio branch one PCM sample per coded AAC
-/// sample. The AAC decode is not compared byte for byte because ffmpeg's own
-/// decode trims the encoder priming this pipeline keeps.
+/// branch writes ffmpeg's pixels and the audio branch ffmpeg's samples.
 #[tokio::test]
 async fn decodebin_fanout_runs_both_branches() {
-    let Some(reference) = ffmpeg_i420() else {
+    let (Some(reference), Some(reference_audio)) = (ffmpeg_i420(), ffmpeg_pcm()) else {
         eprintln!("skipping: no ffmpeg");
         return;
     };
@@ -163,10 +170,8 @@ async fn decodebin_fanout_runs_both_branches() {
 
     assert_eq!(video, reference, "video branch decoded ffmpeg's pixels");
     assert_eq!(
-        audio.len() / S16_BYTES,
-        FIXTURE_AUDIO_SAMPLES,
-        "audio branch decoded every AAC frame ({} bytes)",
-        audio.len()
+        audio, reference_audio,
+        "audio branch decoded ffmpeg's samples"
     );
     let caps = observed_caps(&snapshot);
     assert!(
