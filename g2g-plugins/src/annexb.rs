@@ -772,18 +772,16 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// MSB-first bit writer, the inverse of [`BitReader`]. Test-only: the codec
-/// parsers (`h264parse`, `h265parse`, `av1parse`, `vp9parse`) and `vulkanvideo`
-/// hand-build RBSP / bitstream fragments to feed their parsers, and all wrote an
-/// identical copy of this before it was shared here.
-#[cfg(test)]
-#[derive(Default)]
+/// MSB-first bit writer, the inverse of [`BitReader`]. `aacparse` writes the
+/// AAC program config element with it, and the codec parser tests (`h264parse`,
+/// `h265parse`, `av1parse`, `vp9parse`) and `vulkanvideo` hand-build RBSP /
+/// bitstream fragments to feed their parsers.
+#[derive(Debug, Default)]
 pub(crate) struct BitWriter {
     buf: Vec<u8>,
     bit_pos: usize,
 }
 
-#[cfg(test)]
 impl BitWriter {
     pub(crate) fn write_bit(&mut self, b: u32) {
         let byte_idx = self.bit_pos / 8;
@@ -802,6 +800,7 @@ impl BitWriter {
     }
 
     /// Unsigned Exp-Golomb (`ue(v)`), the H.264/H.265 RBSP coding.
+    #[cfg(test)]
     pub(crate) fn write_ue(&mut self, v: u32) {
         let v1 = v + 1;
         let n = 31 - v1.leading_zeros();

@@ -40,7 +40,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::annexb::BitReader;
+use crate::annexb::{BitReader, BitWriter};
 
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
@@ -96,26 +96,139 @@ pub(crate) fn strip_adts(au: &[u8]) -> &[u8] {
     }
 }
 
-/// Build an ADTS-framed AAC access unit from the track's 2-byte
-/// AudioSpecificConfig and the raw access unit: a 7-byte ADTS header (no CRC)
-/// derived from the ASC's audio-object-type, sampling-frequency index, and
-/// channel configuration, then the AU. The inverse of the muxers' de-ADTS write,
-/// so the demuxed audio is self-describing. `None` when the ASC is too short, the
-/// rate index / channel config is out of range, or the frame exceeds the 13-bit
-/// ADTS length (then the AU is forwarded raw). Shared by the MP4 and FLV
+/// Build an ADTS-framed AAC access unit from the track's AudioSpecificConfig
+/// and the raw access unit: a 7-byte ADTS header (no CRC) carrying the profile,
+/// rate index and channel configuration, then the AU. A configuration of 0
+/// puts the ASC's program config element in front of the AU, as ffmpeg's ADTS
+/// muxer does. The inverse of the muxers' de-ADTS write, so the demuxed audio is
+/// self-describing. `None` when ADTS cannot carry the configuration (an object
+/// type past AAC LTP, an explicit rate, a 960-sample frame, malformed bits) or
+/// the frame exceeds the 13-bit ADTS length. Shared by the MP4 and FLV
 /// demuxers (M662).
 pub(crate) fn adts_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
-    if asc.len() < 2 {
+    let mut r = BitReader::new(asc);
+    let mut aot = r.read_bits(5)?;
+    let sr_index = r.read_bits(4)?;
+    let channel_config = r.read_bits(4)?;
+    if aot == AOT_SBR || aot == AOT_PS {
+        // explicit SBR signalling: the core rate came first, then the SBR rate and the core type
+        if r.read_bits(4)? == EXPLICIT_RATE_INDEX {
+            r.read_bits(24)?;
+        }
+        aot = r.read_bits(5)?;
+    }
+    if !(AOT_AAC_MAIN..=AOT_AAC_LTP).contains(&aot) || sr_index as usize >= SAMPLE_RATES.len() {
         return None;
     }
-    let aot = asc[0] >> 3; // audio object type (5 bits)
-    let sr_index = ((asc[0] & 0x07) << 1) | (asc[1] >> 7);
-    let channel_config = (asc[1] >> 3) & 0x0F;
-    if sr_index > 12 || channel_config == 0 {
-        return None; // reserved/explicit rate or "config in stream": not ADTS-able
+    let mut payload = Vec::new();
+    if channel_config == 0 {
+        // GASpecificConfig: frameLengthFlag, dependsOnCoreCoder, extensionFlag
+        if r.read_bits(1)? == 1 {
+            return None; // 960-sample frames
+        }
+        if r.read_bits(1)? == 1 {
+            r.read_bits(14)?;
+        }
+        if r.read_bits(1)? == 1 {
+            return None;
+        }
+        let mut w = BitWriter::default();
+        w.write_bits(ID_PCE, ELEMENT_ID_BITS);
+        copy_program_config(&mut r, Some(&mut w))?;
+        payload = w.into_bytes();
     }
-    let profile = aot.saturating_sub(1) & 0x03; // ADTS profile = AOT - 1
-    adts_frame(profile, sr_index, channel_config, au)
+    payload.extend_from_slice(au);
+    adts_frame(
+        (aot - 1) as u8,
+        sr_index as u8,
+        channel_config as u8,
+        &payload,
+    )
+}
+
+// a demuxer's AAC access unit as ADTS, failing loud on a config no decoder here takes (ER AAC, ELD, USAC)
+#[cfg(feature = "std")]
+pub(crate) fn require_adts(
+    asc: &[u8],
+    au: &[u8],
+    demuxer: &'static str,
+) -> Result<Vec<u8>, G2gError> {
+    adts_from_asc(asc, au).ok_or_else(|| {
+        g2g_warn!(
+            g2g_core::log::Target::category(demuxer),
+            "AAC config {asc:02x?} cannot be ADTS framed"
+        );
+        G2gError::CapsMismatch
+    })
+}
+
+// audio object types (ISO/IEC 14496-3 1.5.1.1)
+const AOT_AAC_MAIN: u32 = 1;
+const AOT_AAC_LTP: u32 = 4;
+const AOT_SBR: u32 = 5;
+const AOT_PS: u32 = 29;
+const EXPLICIT_RATE_INDEX: u32 = 15;
+// raw_data_block element id of a program_config_element
+const ID_PCE: u32 = 5;
+const ELEMENT_ID_BITS: u32 = 3;
+
+// a front / side / back element: is_cpe, then the tag
+const CHANNEL_ELEMENT_BITS: u32 = 5;
+const LFE_ELEMENT_BITS: u32 = 4;
+const ASSOC_DATA_ELEMENT_BITS: u32 = 4;
+const CC_ELEMENT_BITS: u32 = 5;
+
+// copies a program_config_element to `w`, each side byte aligned from its own start, and counts its channels
+fn copy_program_config(r: &mut BitReader, mut w: Option<&mut BitWriter>) -> Option<u8> {
+    let w = &mut w;
+    copy_bits(r, w, 4)?; // element_instance_tag
+    copy_bits(r, w, 2)?; // object_type
+    copy_bits(r, w, 4)?; // sampling_frequency_index
+    let front = copy_bits(r, w, 4)?;
+    let side = copy_bits(r, w, 4)?;
+    let back = copy_bits(r, w, 4)?;
+    let lfe = copy_bits(r, w, 2)?;
+    let assoc_data = copy_bits(r, w, 3)?;
+    let cc = copy_bits(r, w, 4)?;
+    // mono_mixdown, stereo_mixdown, matrix_mixdown: a present flag, then the field
+    for mixdown_bits in [4, 4, 3] {
+        if copy_bits(r, w, 1)? == 1 {
+            copy_bits(r, w, mixdown_bits)?;
+        }
+    }
+    let mut channels = lfe;
+    for _ in 0..front + side + back {
+        let is_channel_pair = copy_bits(r, w, CHANNEL_ELEMENT_BITS)? >> 4 == 1;
+        channels += if is_channel_pair { 2 } else { 1 };
+    }
+    for (count, bits) in [
+        (lfe, LFE_ELEMENT_BITS),
+        (assoc_data, ASSOC_DATA_ELEMENT_BITS),
+        (cc, CC_ELEMENT_BITS),
+    ] {
+        for _ in 0..count {
+            copy_bits(r, w, bits)?;
+        }
+    }
+    while !r.bit_pos().is_multiple_of(8) {
+        r.read_bit()?;
+    }
+    if let Some(w) = w.as_deref_mut() {
+        w.align_to_byte();
+    }
+    let comment_bytes = copy_bits(r, w, 8)?;
+    for _ in 0..comment_bytes {
+        copy_bits(r, w, 8)?;
+    }
+    u8::try_from(channels).ok().filter(|&channels| channels > 0)
+}
+
+fn copy_bits(r: &mut BitReader, w: &mut Option<&mut BitWriter>, bits: u32) -> Option<u32> {
+    let value = r.read_bits(bits)?;
+    if let Some(w) = w.as_deref_mut() {
+        w.write_bits(value, bits);
+    }
+    Some(value)
 }
 
 /// Frame `au` behind a 7-byte ADTS header (no CRC) for `profile` (audio object
@@ -493,6 +606,16 @@ impl SyncFrameHeader for AdtsHeader {
     }
 }
 
+// the channel count of the program config element a raw data block opens with
+fn pce_channels(payload: &[u8]) -> Option<u8> {
+    let mut r = BitReader::new(payload);
+    if r.read_bits(ELEMENT_ID_BITS)? != ID_PCE {
+        return None;
+    }
+    // the PCE's byte alignment counts from the raw data block start, the reader's start
+    copy_program_config(&mut r, None)
+}
+
 /// Bytes of ADTS header ahead of the payload, from byte 1 of the header:
 /// `protection_absent == 0` puts a 2-byte CRC behind the fixed fields.
 fn adts_header_len(byte1: u8) -> usize {
@@ -506,7 +629,8 @@ fn adts_header_len(byte1: u8) -> usize {
 /// Decode the ADTS header at the start of `buf`, or `None` when `buf` does not
 /// open on a usable one: too short, no `0xFFF` syncword with layer 00, a
 /// reserved sampling-frequency index, a channel configuration that does not pin
-/// a channel count, or an `aac_frame_length` shorter than its own header.
+/// a channel count (0 without a leading program config element), or an
+/// `aac_frame_length` shorter than its own header.
 pub(crate) fn adts_header(buf: &[u8]) -> Option<AdtsHeader> {
     let head = buf.get(..ADTS_HEADER_LEN)?;
     // Syncword 0xFFF (12 bits) + layer 00: byte0 all ones, byte1 high nibble all
@@ -518,14 +642,15 @@ pub(crate) fn adts_header(buf: &[u8]) -> Option<AdtsHeader> {
     let freq_index = (head[2] >> 2) & 0x0F;
     let channel_config = ((head[2] & 0x01) << 2) | (head[3] >> 6);
     let &sample_rate = SAMPLE_RATES.get(freq_index as usize)?;
+    let header_len = adts_header_len(head[1]);
     let channels = match channel_config {
         1..=6 => channel_config, // 1ch..5.1
         7 => 8,                  // 7.1
-        _ => return None,        // 0 = carried in the AOT config, not ADTS
+        // 0: a program config element opens the payload, or the layout is unknown
+        _ => pce_channels(buf.get(header_len..)?)?,
     };
     let frame_len =
         (((head[3] & 0x03) as usize) << 11) | ((head[4] as usize) << 3) | ((head[5] >> 5) as usize);
-    let header_len = adts_header_len(head[1]);
     (frame_len >= header_len).then_some(AdtsHeader {
         sample_rate,
         channels,
@@ -672,7 +797,6 @@ pub(crate) mod test_frames {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::annexb::BitWriter;
     use crate::testutil::{frame_with_bytes, CollectSink};
     use alloc::vec;
 
@@ -705,6 +829,63 @@ mod tests {
     fn rejects_reserved_sampling_index() {
         // freq_index 13 is reserved; no valid rate, so the header is skipped.
         assert!(parse_adts(&adts_frame(2, 13, 16)).is_none());
+    }
+
+    #[test]
+    fn adts_carries_the_program_config_of_a_channel_config_zero_asc() {
+        const AOT_AAC_LC: u32 = 2;
+        const RATE_INDEX_44100: u32 = 4;
+        let mut asc = BitWriter::default();
+        asc.write_bits(AOT_AAC_LC, 5);
+        asc.write_bits(RATE_INDEX_44100, 4);
+        asc.write_bits(0, 4); // channel configuration in the PCE
+        asc.write_bits(0, 3); // frameLengthFlag, dependsOnCoreCoder, extensionFlag
+        asc.write_bits(0, 4); // element_instance_tag
+        asc.write_bits(AOT_AAC_LC - 1, 2);
+        asc.write_bits(RATE_INDEX_44100, 4);
+        // one front channel pair, one LFE: three channels
+        for (count, bits) in [(1, 4), (0, 4), (0, 4), (1, 2), (0, 3), (0, 4)] {
+            asc.write_bits(count, bits);
+        }
+        asc.write_bits(0, 3); // no mixdowns
+        asc.write_bits(0b1_0000, CHANNEL_ELEMENT_BITS); // is_cpe
+        asc.write_bits(0, LFE_ELEMENT_BITS);
+        asc.align_to_byte();
+        asc.write_bits(0, 8); // no comment
+        let au = [0xAA, 0xBB];
+        let frame = adts_from_asc(&asc.into_bytes(), &au).expect("ADTS with a PCE");
+        let header = adts_header(&frame).expect("the header parses");
+        assert_eq!((header.channel_config, header.channels), (0, 3));
+        assert_eq!(header.sample_rate, SAMPLE_RATES[RATE_INDEX_44100 as usize]);
+        assert_eq!(header.frame_len, frame.len());
+        assert!(frame.ends_with(&au));
+    }
+
+    #[test]
+    fn adts_refuses_configs_it_cannot_carry() {
+        // AAC-ELD (escaped object type 39), 48 kHz stereo
+        const ELD_ASC: [u8; 4] = [0xF8, 0xE6, 0x40, 0x00];
+        // AAC LC 48 kHz, frameLengthFlag set (960-sample frames), PCE follows
+        const SHORT_FRAME_ASC: [u8; 2] = [0x11, 0x84];
+        assert!(adts_from_asc(&ELD_ASC, &[0xAA]).is_none());
+        assert!(adts_from_asc(&SHORT_FRAME_ASC, &[0xAA]).is_none());
+        #[cfg(feature = "std")]
+        assert!(require_adts(&ELD_ASC, &[0xAA], "test").is_err());
+    }
+
+    #[test]
+    fn adts_takes_the_core_profile_of_explicit_sbr() {
+        // AOT 5 (SBR), core 24 kHz index 6, stereo, SBR rate index 3, core AOT 2
+        let mut asc = BitWriter::default();
+        for (value, bits) in [(5, 5), (6, 4), (2, 4), (3, 4), (2, 5)] {
+            asc.write_bits(value, bits);
+        }
+        let frame = adts_from_asc(&asc.into_bytes(), &[0xAA]).expect("ADTS");
+        let header = adts_header(&frame).expect("the header parses");
+        const PROFILE_AAC_LC: u8 = 1;
+        assert_eq!(header.profile, PROFILE_AAC_LC);
+        assert_eq!(header.freq_index, 6);
+        assert_eq!(header.channels, 2);
     }
 
     #[test]

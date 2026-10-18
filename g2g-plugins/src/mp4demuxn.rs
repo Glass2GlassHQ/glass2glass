@@ -144,7 +144,8 @@ pub(crate) fn real_caps(kind: &TrackKind) -> Caps {
 
 // ADTS synthesis moved to the ungated `aacparse` module (M662, the no_std FLV
 // demuxer shares it); imported so this module's uses keep reading the same.
-use crate::aacparse::adts_from_asc;
+use crate::aacparse::require_adts;
+use g2g_core::log::short_type_name;
 
 /// The forwardable tracks an MP4 carries, in `moov` order (M392): one
 /// [`Mp4StreamInfo`] per A/V `trak`, carrying the negotiation caps (what a decode
@@ -790,9 +791,7 @@ impl Mp4DemuxN {
                 // / rate / channels per frame) and a decoder can start without the
                 // out-of-band config, symmetric with the in-band video param sets.
                 Some(TrackKind::Audio { config, .. }) => {
-                    if let Some(framed) = adts_from_asc(config, &data) {
-                        data = framed;
-                    }
+                    data = require_adts(config, &data, short_type_name::<Self>())?;
                 }
                 // Text cues and caption cc_data arrive already de-framed by the
                 // sample parse (the tx3g length prefix stripped, the caption atoms
@@ -963,6 +962,7 @@ impl MultiOutputElement for Mp4DemuxN {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aacparse::adts_from_asc;
     use crate::mp4muxn::Mp4MuxN;
     use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
     use g2g_core::memory::{MemoryDomain, SystemSlice};

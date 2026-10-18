@@ -22,6 +22,7 @@ use core::pin::Pin;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
+use g2g_core::log::short_type_name;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
@@ -29,7 +30,7 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, VideoCodec,
 };
 
-use crate::aacparse::adts_from_asc;
+use crate::aacparse::require_adts;
 use crate::fmp4::{
     parse_all_tracks, parse_fragments_multi, parse_progressive_multi, prepend_param_sets,
     starts_with_param_set, track_framerate_q16, TrackKind,
@@ -224,8 +225,13 @@ impl Mp4Demux {
         for (_, sample) in parse_progressive_multi(&self.buffer, core::slice::from_ref(audio))? {
             // ADTS-frame the raw AAC access unit from the track's ASC, so a decoder
             // starts without the out-of-band config (like the in-band video param
-            // sets); a malformed ASC leaves the raw bytes.
-            let data = adts_from_asc(config, &sample.annexb).unwrap_or(sample.annexb);
+            // sets); Opus packets go as they are.
+            let data = match format {
+                AudioFormat::Aac => {
+                    require_adts(config, &sample.annexb, short_type_name::<Self>())?
+                }
+                _ => sample.annexb,
+            };
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
                 timing: FrameTiming {
