@@ -54,6 +54,14 @@ pub const HS_EXT_FLAG_HSREQ: u16 = 0x0001;
 pub const HS_EXT_FLAG_KMREQ: u16 = 0x0002;
 pub const HS_EXT_FLAG_CONFIG: u16 = 0x0004;
 
+pub const FLOW_WINDOW_PACKETS: u32 = 8192;
+// libsrt keeps its own RTT estimate when an ACK carries exactly these initial values.
+pub const INITIAL_RTT_US: u32 = 100_000;
+pub const INITIAL_RTT_VARIANCE_US: u32 = INITIAL_RTT_US / 2;
+const LIGHT_ACK_CIF_LEN: usize = 4;
+// sequence, RTT, RTT variance, available buffer
+const FULL_ACK_CIF_LEN: usize = 16;
+
 /// Whether a packet is a control packet (the top bit of the first word).
 pub fn is_control(buf: &[u8]) -> bool {
     !buf.is_empty() && buf[0] & 0x80 != 0
@@ -129,8 +137,16 @@ pub enum Control {
     Keepalive,
     /// Full ACK: the acknowledged packet sequence number (everything before it
     /// is received), with the ACK sub-sequence number in the type-specific field.
+    // libsrt sets its flow window to available_buffer on every full ACK.
     Ack {
         ack_no: u32,
+        ack_seq: u32,
+        rtt_us: u32,
+        rtt_variance_us: u32,
+        available_buffer: u32,
+    },
+    // libsrt shrinks its flow window by the acknowledged span on each light ACK.
+    LightAck {
         ack_seq: u32,
     },
     /// ACKACK: confirms an ACK by its sub-sequence number.
@@ -190,7 +206,7 @@ impl Handshake {
             ext_field: SRT_MAGIC,
             init_seq,
             mtu: 1500,
-            flow_window: 8192,
+            flow_window: FLOW_WINDOW_PACKETS,
             hs_type: URQ_INDUCTION,
             srt_socket_id: socket_id,
             syn_cookie: 0,
@@ -208,13 +224,20 @@ pub fn build_control(ctrl: &Control, timestamp: u32, dst_socket_id: u32) -> Vec<
     let (ctrl_type, type_info, cif) = match ctrl {
         Control::Handshake(hs) => (CTRL_HANDSHAKE, 0, build_handshake_cif(hs)),
         Control::Keepalive => (CTRL_KEEPALIVE, 0, Vec::new()),
-        Control::Ack { ack_no, ack_seq } => {
-            // CIF: the acknowledged sequence number (the rest of the full-ACK
-            // fields - RTT, buffer, rate - are zero here; receivers tolerate it).
-            let mut cif = Vec::new();
-            cif.extend_from_slice(&ack_seq.to_be_bytes());
+        Control::Ack {
+            ack_no,
+            ack_seq,
+            rtt_us,
+            rtt_variance_us,
+            available_buffer,
+        } => {
+            let mut cif = Vec::with_capacity(FULL_ACK_CIF_LEN);
+            for word in [ack_seq, rtt_us, rtt_variance_us, available_buffer] {
+                cif.extend_from_slice(&word.to_be_bytes());
+            }
             (CTRL_ACK, *ack_no, cif)
         }
+        Control::LightAck { ack_seq } => (CTRL_ACK, 0, ack_seq.to_be_bytes().to_vec()),
         Control::AckAck { ack_no } => (CTRL_ACKACK, *ack_no, Vec::new()),
         Control::Nak { loss } => (CTRL_NAK, 0, build_nak_cif(loss)),
         Control::Shutdown => (CTRL_SHUTDOWN, 0, Vec::new()),
@@ -249,20 +272,21 @@ pub fn parse_control(buf: &[u8]) -> Option<Control> {
     let ctrl_type = ((word0 >> 16) & 0x7FFF) as u16;
     let type_info = u32::from_be_bytes(buf[4..8].try_into().ok()?);
     let cif = &buf[HEADER_LEN..];
+    // Only called where a guard has checked the CIF length.
+    let cif_word = |offset: usize| u32::from_be_bytes(cif[offset..offset + 4].try_into().unwrap());
     match ctrl_type {
         CTRL_HANDSHAKE => Some(Control::Handshake(parse_handshake_cif(cif)?)),
         CTRL_KEEPALIVE => Some(Control::Keepalive),
-        CTRL_ACK => {
-            let ack_seq = if cif.len() >= 4 {
-                u32::from_be_bytes(cif[0..4].try_into().ok()?)
-            } else {
-                0
-            };
-            Some(Control::Ack {
-                ack_no: type_info,
-                ack_seq,
-            })
-        }
+        CTRL_ACK if cif.len() == LIGHT_ACK_CIF_LEN => Some(Control::LightAck {
+            ack_seq: cif_word(0),
+        }),
+        CTRL_ACK if cif.len() >= FULL_ACK_CIF_LEN => Some(Control::Ack {
+            ack_no: type_info,
+            ack_seq: cif_word(0),
+            rtt_us: cif_word(4),
+            rtt_variance_us: cif_word(8),
+            available_buffer: cif_word(12),
+        }),
         CTRL_ACKACK => Some(Control::AckAck { ack_no: type_info }),
         CTRL_NAK => Some(Control::Nak {
             loss: parse_nak_cif(cif),
@@ -673,7 +697,7 @@ impl SrtHandshake {
             ext_field,
             init_seq: self.init_seq,
             mtu: 1500,
-            flow_window: 8192,
+            flow_window: FLOW_WINDOW_PACKETS,
             hs_type: URQ_CONCLUSION,
             srt_socket_id: self.socket_id,
             syn_cookie: self.cookie,
@@ -845,7 +869,7 @@ impl SrtSender {
                 }
                 out
             }
-            Control::Ack { ack_seq, .. } => {
+            Control::Ack { ack_seq, .. } | Control::LightAck { ack_seq } => {
                 // Everything before ack_seq is received; drop it from the buffer.
                 while self
                     .buffer
@@ -1052,6 +1076,11 @@ impl SrtReceiver {
     pub fn ack_seq(&self) -> Option<u32> {
         self.have_base.then_some(self.next_deliver)
     }
+
+    pub fn available_buffer(&self) -> u32 {
+        let held = u32::try_from(self.pending.len()).unwrap_or(u32::MAX);
+        FLOW_WINDOW_PACKETS.saturating_sub(held)
+    }
 }
 
 /// SRT live-mode congestion control: rate-based output pacing. Rather than the
@@ -1182,7 +1211,7 @@ mod tests {
             ext_field: HS_EXT_FLAG_HSREQ | HS_EXT_FLAG_CONFIG,
             init_seq: 1000,
             mtu: 1500,
-            flow_window: 8192,
+            flow_window: FLOW_WINDOW_PACKETS,
             hs_type: URQ_CONCLUSION,
             srt_socket_id: 0xDEAD_BEEF,
             syn_cookie: 0x0BAD_F00D,
@@ -1235,9 +1264,13 @@ mod tests {
                 Control::Ack {
                     ack_no: 5,
                     ack_seq: 1000,
+                    rtt_us: INITIAL_RTT_US,
+                    rtt_variance_us: INITIAL_RTT_VARIANCE_US,
+                    available_buffer: 4000,
                 },
                 "ack",
             ),
+            (Control::LightAck { ack_seq: 1000 }, "light ack"),
             (Control::AckAck { ack_no: 5 }, "ackack"),
             (Control::Keepalive, "keepalive"),
             (Control::Shutdown, "shutdown"),
@@ -1362,6 +1395,42 @@ mod tests {
         assert_eq!(sender.retransmits(), 1);
     }
 
+    // libsrt stalls after one flow window if every ACK is a 4-byte light ACK.
+    #[test]
+    fn full_ack_reports_the_free_receive_buffer_in_the_libsrt_layout() {
+        const SENT: u32 = 5;
+        const LOST: u32 = 2;
+        let mut sender = SrtSender::new(0x1234, 100, 64);
+        let mut receiver = SrtReceiver::new();
+        for i in 0..SENT {
+            let pkt = sender.send(b"p", i);
+            if i != LOST {
+                receiver.on_data(parse_data_packet(&pkt).unwrap());
+            }
+        }
+        // Packets past the gap are held until the lost one arrives.
+        receiver.take_ready();
+        let held = SENT - LOST - 1;
+        assert_eq!(receiver.available_buffer(), FLOW_WINDOW_PACKETS - held);
+
+        let ack = Control::Ack {
+            ack_no: 1,
+            ack_seq: receiver.ack_seq().unwrap(),
+            rtt_us: INITIAL_RTT_US,
+            rtt_variance_us: INITIAL_RTT_VARIANCE_US,
+            available_buffer: receiver.available_buffer(),
+        };
+        let bytes = build_control(&ack, 0, 0);
+        let cif = &bytes[HEADER_LEN..];
+        let word =
+            |index: usize| u32::from_be_bytes(cif[index * 4..index * 4 + 4].try_into().unwrap());
+        assert_eq!(cif.len(), FULL_ACK_CIF_LEN, "a full ACK, not a light one");
+        assert_eq!(word(0), 100 + LOST, "acknowledged up to the gap");
+        assert_eq!(word(1), INITIAL_RTT_US);
+        assert_eq!(word(2), INITIAL_RTT_VARIANCE_US);
+        assert_eq!(word(3), FLOW_WINDOW_PACKETS - held, "free buffer word");
+    }
+
     #[test]
     fn receiver_has_no_ack_point_before_the_first_packet() {
         let mut sender = SrtSender::new(0x1234, 100, 64);
@@ -1383,13 +1452,7 @@ mod tests {
         }
 
         // Everything before the wrap arrived, the post-wrap packets 0, 1, 2 did not.
-        sender.on_control(
-            &Control::Ack {
-                ack_no: 0,
-                ack_seq: 0,
-            },
-            0,
-        );
+        sender.on_control(&Control::LightAck { ack_seq: 0 }, 0);
         let resends = sender.on_control(
             &Control::Nak {
                 loss: vec![LAST_SEQUENCE, 0, 1, 2],

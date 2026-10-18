@@ -87,6 +87,8 @@ impl ReconnectPolicy {
 
 // log category shared by RtspSrc and RtspSrcN
 const LOG_CATEGORY: &str = "rtspsrc";
+// highest frame rate the negotiation placeholder accepts
+const MAX_PLACEHOLDER_FPS: u32 = 240;
 /// Wait before the first retry when only an attempt count was asked for.
 const DEFAULT_INITIAL_BACKOFF_MS: u64 = 250;
 /// Cap on the doubling retry backoff.
@@ -333,10 +335,7 @@ impl SourceLoop for RtspSrc {
                     codec: VideoCodec::H264,
                     width: Dim::Fixed(w),
                     height: Dim::Fixed(h),
-                    framerate: Rate::Range {
-                        min_q16: 1 << 16,
-                        max_q16: 240 << 16,
-                    },
+                    framerate: placeholder_framerate(),
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 });
             }
@@ -352,7 +351,7 @@ impl SourceLoop for RtspSrc {
                 &self.transports,
             )
             .await?;
-            let caps = stashed.caps.clone();
+            let caps = with_placeholder_framerate(stashed.caps.clone());
             self.discovered_caps = Some(caps.clone());
             self.stashed_session = Some(stashed);
             Ok(caps)
@@ -953,6 +952,33 @@ pub(crate) fn caps_from_video_params(params: Option<&VideoParameters>) -> Option
         framerate: rate_from_frame_rate(p.frame_rate()),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     })
+}
+
+pub(crate) fn placeholder_framerate() -> Rate {
+    Rate::Range {
+        min_q16: 1 << 16,
+        max_q16: MAX_PLACEHOLDER_FPS << 16,
+    }
+}
+
+// An SPS without VUI timing leaves the rate `Any`, which negotiation cannot fixate.
+pub(crate) fn with_placeholder_framerate(caps: Caps) -> Caps {
+    match caps {
+        Caps::CompressedVideo {
+            codec,
+            width,
+            height,
+            framerate: Rate::Any,
+            colorimetry,
+        } => Caps::CompressedVideo {
+            codec,
+            width,
+            height,
+            framerate: placeholder_framerate(),
+            colorimetry,
+        },
+        other => other,
+    }
 }
 
 /// Convert retina's `(numerator, denominator)` representation of frame

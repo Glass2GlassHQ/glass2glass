@@ -575,6 +575,9 @@ induction to conclusion with a listener cookie challenge), and the ARQ pair
 `SrtSender` and `SrtReceiver`. The sender buffers and resends on NAK with the
 retransmit flag, and the receiver reorders by wrap-aware sequence, NAKs gaps,
 and delivers in order, the same shape as the RTP jitter and NACK path.
+`SrtSrc` sends full ACKs that report its free receive buffer: libsrt sets its
+flow window from that field and shrinks it on every light ACK, so a caller fed
+only light ACKs stops sending after one window.
 
 Validated g2g to g2g end to end over a lossy loopback: handshake, data, and a
 dropped packet recovered via NAK. The wire format follows the SRT draft so

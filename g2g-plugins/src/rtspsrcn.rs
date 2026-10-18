@@ -42,14 +42,14 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, Caps, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink,
-    MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    VideoCodec,
+    MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, VideoCodec,
 };
 
 use crate::g711::{G711_CLOCK_RATE_HZ, G711_DEFAULT_CHANNELS};
 use crate::rtspsrc::{
-    caps_from_video_params, connect_describe, video_params_for, video_stream_index, LowerTransport,
-    ReconnectPolicy, ReconnectState,
+    caps_from_video_params, connect_describe, placeholder_framerate, video_params_for,
+    video_stream_index, with_placeholder_framerate, LowerTransport, ReconnectPolicy,
+    ReconnectState,
 };
 
 /// User-Agent sent on DESCRIBE / SETUP unless `user-agent` overrides it. Also
@@ -85,7 +85,6 @@ const MAX_INFLATED_METADATA_LEN: usize = 4 * 1024 * 1024;
 /// to pick and the real dimensions can arrive later as a `CapsChanged`.
 const MIN_PLACEHOLDER_DIM: u32 = 2;
 const MAX_PLACEHOLDER_DIM: u32 = 8192;
-const MAX_PLACEHOLDER_FPS: u32 = 240;
 
 /// Gap inserted in the emitted timeline at a reconnect boundary, so downstream
 /// sees the discontinuity as a jump rather than as overlapping timestamps.
@@ -265,7 +264,8 @@ impl RtspSrcN {
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
             };
         }
-        self.probed_video.clone().unwrap_or(Caps::CompressedVideo {
+        let probed = self.probed_video.clone().map(with_placeholder_framerate);
+        probed.unwrap_or(Caps::CompressedVideo {
             codec: VideoCodec::H264,
             width: Dim::Range {
                 min: MIN_PLACEHOLDER_DIM,
@@ -286,13 +286,6 @@ impl RtspSrcN {
             Some(Caps::Audio { format, .. }) => Some(format),
             _ => None,
         }
-    }
-}
-
-fn placeholder_framerate() -> Rate {
-    Rate::Range {
-        min_q16: 1 << 16,
-        max_q16: MAX_PLACEHOLDER_FPS << 16,
     }
 }
 
@@ -1173,6 +1166,7 @@ async fn connect_describe_setup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::Rate;
 
     #[test]
     fn video_only_has_one_output_and_audio_adds_a_second() {
