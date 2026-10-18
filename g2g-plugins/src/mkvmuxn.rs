@@ -43,6 +43,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
+use g2g_core::log::short_type_name;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter,
@@ -51,6 +52,9 @@ use g2g_core::{
     TextFormat, VideoCodec,
 };
 
+use crate::aacparse::{
+    is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config, require_muxer_config,
+};
 use crate::fmp4mux::{avcc_record, hvcc_record, parameter_sets, split_annexb, video_sample};
 use crate::matroska::{
     default_page_blob, finalize_seekable, subpicture_block, subpicture_config,
@@ -58,7 +62,6 @@ use crate::matroska::{
     MkvTrackSpec,
 };
 use crate::mkvmux::{MkvMuxSettings, MKV_MUX_PROPS};
-use crate::mp4muxn::{asc_from_adts, strip_adts};
 use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head};
 
 /// What an input pad carries, learned from its negotiated caps at configure.
@@ -292,6 +295,18 @@ impl MkvMuxN {
         )
     }
 
+    // the AudioSpecificConfig captured for an AAC pad, None before its first frame
+    fn aac_config(&self, input: usize) -> Option<&[u8]> {
+        match &self.inits[input] {
+            Some(TrackInit::Audio {
+                format: AudioFormat::Aac,
+                config,
+                ..
+            }) => Some(config),
+            _ => None,
+        }
+    }
+
     /// True once every pad has its init captured (the Tracks element, and so the
     /// track numbering, needs every track present).
     fn all_inits_ready(&self) -> bool {
@@ -299,9 +314,9 @@ impl MkvMuxN {
     }
 
     /// Capture a pad's track init from its first access unit, if not already set.
-    fn capture_init(&mut self, input: usize, au: &[u8]) {
+    fn capture_init(&mut self, input: usize, au: &[u8]) -> Result<(), G2gError> {
         if self.inits[input].is_some() {
-            return;
+            return Ok(());
         }
         match self.kinds[input] {
             Some(PadKind::Video(codec)) => {
@@ -351,14 +366,17 @@ impl MkvMuxN {
                 channels,
                 rate,
             }) => match format {
-                // AAC's AudioSpecificConfig is synthesised from the first ADTS header.
+                // AAC's AudioSpecificConfig is synthesised from the first ADTS
+                // header, or is the frame leading a raw stream.
                 AudioFormat::Aac => {
-                    if let Some(asc) = asc_from_adts(au) {
+                    if let Some(config) =
+                        muxer_audio_specific_config(au, short_type_name::<Self>())?
+                    {
                         self.inits[input] = Some(TrackInit::Audio {
                             format,
                             channels,
                             rate,
-                            config: asc.to_vec(),
+                            config,
                         });
                     }
                 }
@@ -372,7 +390,7 @@ impl MkvMuxN {
                         Some(_) => au.to_vec(),
                         // An `OpusTags` before the identification header is not
                         // the config: wait for it rather than fix a synthesized one.
-                        None if is_opus_config(au) => return,
+                        None if is_opus_config(au) => return Ok(()),
                         None => synth_opus_head(channels, rate),
                     };
                     self.inits[input] = Some(TrackInit::Audio {
@@ -388,27 +406,33 @@ impl MkvMuxN {
             // instead (see `adopt_subpicture_config`).
             Some(PadKind::Text) | Some(PadKind::SubPicture(_)) | None => {}
         }
+        Ok(())
     }
 
     /// The SimpleBlock payload for a track and whether it is a keyframe. H.26x is
     /// AVCC length-prefixed (keyframe from the NAL types); VP8/VP9 frames are
     /// stored verbatim (keyframe from the frame header). AAC strips its ADTS
-    /// header; Opus packets are stored raw. Audio frames are always sync samples.
-    /// A text cue is framed in the track's `S_TEXT/*` syntax (M898).
-    fn sample_for(&mut self, input: usize, au: &[u8]) -> (Vec<u8>, bool) {
-        match self.kinds[input] {
+    /// header or is stored raw behind its config; Opus packets are stored raw.
+    /// Audio frames are always sync samples. A text cue is framed in the track's
+    /// `S_TEXT/*` syntax (M898).
+    fn sample_for(&mut self, input: usize, au: &[u8]) -> Result<(Vec<u8>, bool), G2gError> {
+        Ok(match self.kinds[input] {
             Some(PadKind::Video(codec)) => video_sample(codec, au),
             Some(PadKind::Audio {
                 format: AudioFormat::Aac,
                 ..
-            }) => (strip_adts(au).to_vec(), true),
+            }) => {
+                let config =
+                    require_muxer_config(self.aac_config(input), short_type_name::<Self>())?;
+                (muxer_access_unit(config, au).to_vec(), true)
+            }
             Some(PadKind::Text) => (
                 self.settings.text_block(au, &mut self.text_seq[input]),
                 true,
             ),
             Some(PadKind::SubPicture(format)) => (subpicture_block(format, au), true),
             _ => (au.to_vec(), true),
-        }
+        })
     }
 
     /// Take an in-band config blob as the pad's `CodecPrivate`. `true` when the
@@ -443,7 +467,7 @@ impl MkvMuxN {
             .domain
             .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
         let pts_ns = frame.timing.pts_ns;
-        let (sample, is_key) = self.sample_for(input, slice);
+        let (sample, is_key) = self.sample_for(input, slice)?;
         let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
         let bytes = mux.push_frame_on(input, &sample, pts_ns, is_key, frame.timing.duration_ns);
 
@@ -669,11 +693,15 @@ impl MultiInputElement for MkvMuxN {
                 PipelinePacket::DataFrame(frame) => {
                     // Capture this track's init from its first AU before queueing.
                     if let Some(s) = frame.domain.as_system_slice() {
-                        self.capture_init(input, s);
-                        // An in-band Opus header is codec config, not audio: it
-                        // became the `CodecPrivate` above and must never be
-                        // written as a Block (M792).
-                        if self.is_opus_pad(input) && is_opus_config(s) {
+                        self.capture_init(input, s)?;
+                        // An in-band Opus header or a raw AAC stream's config is
+                        // codec config, not audio: it became the `CodecPrivate`
+                        // above and must never be written as a Block (M792).
+                        let opus_config = self.is_opus_pad(input) && is_opus_config(s);
+                        let aac_config = self
+                            .aac_config(input)
+                            .is_some_and(|config| is_leading_aac_config(config, s));
+                        if opus_config || aac_config {
                             return Ok(());
                         }
                         // A bitmap subtitle pad opens on its config blob (the

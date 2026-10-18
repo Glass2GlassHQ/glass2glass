@@ -165,6 +165,8 @@ Highest leverage first:
   instead of GStreamer's 'AV1G' once any demuxer reads the former (GStreamer's
   `tsdemux` activates no program for an 'AV01' stream, and ffmpeg's muxer writes
   no descriptor at all, so it identifies neither).
+- **LOAS in MPEG-TS:** write ER AAC, ELD and USAC as LOAS/LATM (stream_type
+  0x11) so `mpegtsmux` can carry them instead of failing the stream.
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.

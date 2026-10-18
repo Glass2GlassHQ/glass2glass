@@ -36,7 +36,7 @@ use g2g_core::{
     PadTemplates, PipelinePacket, Rate, TagList, VideoCodec,
 };
 
-use crate::aacparse::{asc_from_adts, strip_adts};
+use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
 use crate::annexb::{au_is_keyframe, avcc_record, avcc_sample, parameter_sets, split_annexb};
 use crate::flv::{FlvCodec, FlvMuxer};
 
@@ -223,7 +223,8 @@ impl AsyncElement for FlvMux {
                     // Capture the decoder config from the first access unit that
                     // carries it, so the sequence header precedes the media tags
                     // (M662, the FlvMuxN pattern): video parameter sets only ride
-                    // the IDR, audio config is in every ADTS header. The legacy
+                    // the IDR, audio config is in every ADTS header or leads a
+                    // raw stream as a frame of its own. The legacy
                     // Flash codecs have no sequence header, so their frames go
                     // into a tag as they arrive.
                     let flv = match codec {
@@ -245,12 +246,16 @@ impl AsyncElement for FlvMux {
                         }
                         FlvCodec::Aac => {
                             if !self.init_captured {
-                                if let Some(asc) = asc_from_adts(au) {
-                                    mux.set_audio_config(asc.to_vec());
+                                let muxer = g2g_core::log::short_type_name::<Self>();
+                                if let Some(config) = muxer_audio_specific_config(au, muxer)? {
+                                    mux.set_audio_config(config);
                                     self.init_captured = true;
                                 }
                             }
-                            mux.push_audio(strip_adts(au), pts_ms)
+                            if is_leading_aac_config(mux.audio_config(), au) {
+                                return Ok(());
+                            }
+                            mux.push_audio(muxer_access_unit(mux.audio_config(), au), pts_ms)
                         }
                         FlvCodec::Mp3 | FlvCodec::Speex => mux.push_audio(au, pts_ms),
                     };

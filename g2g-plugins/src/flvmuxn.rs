@@ -38,10 +38,13 @@ use g2g_core::{
     InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, VideoCodec,
 };
 
+use crate::aacparse::{
+    is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config, require_muxer_config,
+};
 use crate::annexb::au_is_keyframe;
 use crate::flv::{FlvCodec, FlvMuxer, FlvTrack};
 use crate::fmp4mux::{avcc_record, avcc_sample, parameter_sets, split_annexb};
-use crate::mp4muxn::{asc_from_adts, strip_adts};
+use g2g_core::log::short_type_name;
 
 /// A track's init, captured from its first access unit: the parameter sets
 /// (video) or AudioSpecificConfig (audio) the FLV sequence header needs. The
@@ -57,6 +60,15 @@ enum TrackInit {
     },
     /// A codec with no sequence header to wait for.
     None,
+}
+
+impl TrackInit {
+    fn asc(&self) -> Option<&[u8]> {
+        match self {
+            TrackInit::Audio { asc } => Some(asc),
+            _ => None,
+        }
+    }
 }
 
 /// Muxes a video + audio stream into one FLV byte stream, PTS-ordered.
@@ -120,9 +132,9 @@ impl FlvMuxN {
     }
 
     /// Capture a pad's track init from its first access unit, if not already set.
-    fn capture_init(&mut self, input: usize, au: &[u8]) {
+    fn capture_init(&mut self, input: usize, au: &[u8]) -> Result<(), G2gError> {
         if self.inits[input].is_some() {
-            return;
+            return Ok(());
         }
         match self.kinds[input] {
             Some(FlvCodec::H264) => {
@@ -134,13 +146,14 @@ impl FlvMuxN {
                 }
             }
             Some(FlvCodec::Aac) => {
-                if let Some(asc) = asc_from_adts(au) {
-                    self.inits[input] = Some(TrackInit::Audio { asc: asc.to_vec() });
+                if let Some(asc) = muxer_audio_specific_config(au, short_type_name::<Self>())? {
+                    self.inits[input] = Some(TrackInit::Audio { asc });
                 }
             }
             Some(_) => self.inits[input] = Some(TrackInit::None),
             None => {}
         }
+        Ok(())
     }
 
     /// Build the A/V muxer from the captured inits (video `avcC` record + AAC ASC).
@@ -201,9 +214,13 @@ impl FlvMuxN {
                 let (dts_ms, cts_ms) = FlvMuxer::video_tag_timing(&frame.timing);
                 mux.push_video(slice, dts_ms, cts_ms, frame.timing.keyframe)
             }
-            // AAC access units are raw frames once the ADTS header is stripped;
+            // AAC access units are raw frames once any ADTS header is stripped;
             // MP3 and Speex frames need no unwrapping.
-            Some(FlvCodec::Aac) => mux.push_audio(strip_adts(slice), pts_ms),
+            Some(FlvCodec::Aac) => {
+                let config = self.inits[input].as_ref().and_then(TrackInit::asc);
+                let config = require_muxer_config(config, short_type_name::<Self>())?;
+                mux.push_audio(muxer_access_unit(config, slice), pts_ms)
+            }
             _ => mux.push_audio(slice, pts_ms),
         };
 
@@ -308,7 +325,15 @@ impl MultiInputElement for FlvMuxN {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if let Some(s) = frame.domain.as_system_slice() {
-                        self.capture_init(input, s);
+                        self.capture_init(input, s)?;
+                        // a raw AAC stream's config became the sequence header above
+                        if self.inits[input]
+                            .as_ref()
+                            .and_then(TrackInit::asc)
+                            .is_some_and(|config| is_leading_aac_config(config, s))
+                        {
+                            return Ok(());
+                        }
                     }
                     self.agg.push(input, frame);
                 }

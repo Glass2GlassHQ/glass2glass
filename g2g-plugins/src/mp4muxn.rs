@@ -37,6 +37,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
+use g2g_core::log::short_type_name;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter,
@@ -48,6 +49,9 @@ use g2g_core::{
 use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::time::ns_to_ticks;
 
+use crate::aacparse::{
+    is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config, require_muxer_config,
+};
 use crate::cea::{build_cdp, parse_cc_data, CcTriple};
 use crate::fmp4mux::{
     av1c_record, parameter_sets, split_annexb, video_sample, visual_sample_entry,
@@ -564,6 +568,18 @@ impl Mp4MuxN {
         )
     }
 
+    // the AudioSpecificConfig captured for an AAC pad, None before its first frame
+    fn aac_config(&self, input: usize) -> Option<&[u8]> {
+        match &self.inits[input] {
+            Some(TrackInit::Audio {
+                format: AudioFormat::Aac,
+                config,
+                ..
+            }) => Some(config),
+            _ => None,
+        }
+    }
+
     /// True once every pad that will produce data has its init captured. A pad
     /// that ended without an AU is excluded (its track is simply absent).
     fn all_inits_ready(&self) -> bool {
@@ -571,9 +587,9 @@ impl Mp4MuxN {
     }
 
     /// Capture a pad's track init from its first access unit, if not already set.
-    fn capture_init(&mut self, input: usize, au: &[u8]) {
+    fn capture_init(&mut self, input: usize, au: &[u8]) -> Result<(), G2gError> {
         if self.inits[input].is_some() {
-            return;
+            return Ok(());
         }
         match self.kinds[input] {
             Some(PadKind::Video { codec, .. }) => {
@@ -623,14 +639,17 @@ impl Mp4MuxN {
                 channels,
                 rate,
             }) => match format {
-                // AAC's AudioSpecificConfig is synthesised from the first ADTS header.
+                // AAC's AudioSpecificConfig is synthesised from the first ADTS
+                // header, or is the frame leading a raw stream.
                 AudioFormat::Aac => {
-                    if let Some(asc) = asc_from_adts(au) {
+                    if let Some(config) =
+                        muxer_audio_specific_config(au, short_type_name::<Self>())?
+                    {
                         self.inits[input] = Some(TrackInit::Audio {
                             format,
                             channels,
                             rate,
-                            config: asc.to_vec(),
+                            config,
                         });
                     }
                 }
@@ -643,7 +662,7 @@ impl Mp4MuxN {
                         Some(_) => au.to_vec(),
                         // An `OpusTags` ahead of the identification header is not
                         // the config: wait rather than fix an empty one.
-                        None if is_opus_config(au) => return,
+                        None if is_opus_config(au) => return Ok(()),
                         None => Vec::new(),
                     };
                     self.inits[input] = Some(TrackInit::Audio {
@@ -662,21 +681,26 @@ impl Mp4MuxN {
             // A text track's init was fixed at configure; nothing rides the cues.
             Some(PadKind::Text) | None => {}
         }
+        Ok(())
     }
 
     /// The mdat sample bytes for a track: AVCC length-prefixed NALUs for video,
-    /// the de-ADTS'd raw AAC for audio, and the caption atoms (`cdat` / `cdt2` for
+    /// the raw AAC for audio, and the caption atoms (`cdat` / `cdt2` for
     /// 608, `ccdp` for 708) for a raw-caption track. Also returns whether it is a
     /// sync sample.
-    fn sample_for(&mut self, input: usize, au: &[u8]) -> (Vec<u8>, bool) {
-        match self.kinds[input] {
+    fn sample_for(&mut self, input: usize, au: &[u8]) -> Result<(Vec<u8>, bool), G2gError> {
+        Ok(match self.kinds[input] {
             Some(PadKind::Video { codec, .. }) => video_sample(codec, au),
             // Audio access units are always sync samples. AAC strips its ADTS
             // header; Opus packets are stored raw.
             Some(PadKind::Audio {
                 format: AudioFormat::Aac,
                 ..
-            }) => (strip_adts(au).to_vec(), true),
+            }) => {
+                let config =
+                    require_muxer_config(self.aac_config(input), short_type_name::<Self>())?;
+                (muxer_access_unit(config, au).to_vec(), true)
+            }
             // A caption frame is a cc_data triple stream; re-frame it into the
             // sample atoms the QuickTime caption entry defines.
             Some(PadKind::ClosedCaption(format)) => {
@@ -686,7 +710,7 @@ impl Mp4MuxN {
             }
             Some(PadKind::Text) => (tx3g_sample(au), true),
             _ => (au.to_vec(), true),
-        }
+        })
     }
 
     /// Buffer one access unit for its track. In per-AU mode (`fragment-duration`
@@ -703,7 +727,7 @@ impl Mp4MuxN {
             .domain
             .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
         let pts_ns = frame.timing.pts_ns;
-        let (sample, is_sync) = self.sample_for(input, au);
+        let (sample, is_sync) = self.sample_for(input, au)?;
 
         let track = &self.inits[input];
         let timescale = track
@@ -1270,10 +1294,15 @@ impl MultiInputElement for Mp4MuxN {
                 PipelinePacket::DataFrame(frame) => {
                     // Capture this track's init from its first AU before queueing.
                     if let Some(s) = frame.domain.as_system_slice() {
-                        self.capture_init(input, s);
-                        // An in-band Opus header is codec config, not audio: it
-                        // built the `dOps` above and must never reach the `mdat`.
-                        if self.is_opus_pad(input) && is_opus_config(s) {
+                        self.capture_init(input, s)?;
+                        // An in-band Opus header or a raw AAC stream's config is
+                        // codec config, not audio: it built the sample entry above
+                        // and must never reach the `mdat`.
+                        let opus_config = self.is_opus_pad(input) && is_opus_config(s);
+                        let aac_config = self
+                            .aac_config(input)
+                            .is_some_and(|config| is_leading_aac_config(config, s));
+                        if opus_config || aac_config {
                             return Ok(());
                         }
                     }
@@ -1327,11 +1356,6 @@ impl MultiInputElement for Mp4MuxN {
         })
     }
 }
-
-// The ADTS de-frame / ASC-synthesis pair moved to the ungated `aacparse`
-// module (M662, the no_std FLV muxer shares them); re-exported so this
-// module's users keep their import path.
-pub(crate) use crate::aacparse::{asc_from_adts, strip_adts};
 
 /// The metadata a `moov` carries: the file's own tags and one list per pad slot,
 /// already split by the global / per-stream merge policy (M838), plus the
@@ -2059,6 +2083,7 @@ pub(crate) fn av_fragment(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aacparse::{asc_from_adts, strip_adts};
 
     #[derive(Default)]
     struct CaptureSink {

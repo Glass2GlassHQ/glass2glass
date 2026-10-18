@@ -43,10 +43,10 @@ use g2g_core::{
 };
 
 use crate::dvbsub::DEFAULT_PAGE_ID;
-use crate::mpegts::{TsMuxer, PES_CLOCK_HZ, STREAM_TYPE_H264, STREAM_TYPE_H265};
+use crate::mpegts::{TsMuxer, PES_CLOCK_HZ, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265};
 use crate::tsmux::{
-    is_av1, is_dvbsub, language_from_tags, opus_channels, service_from_tags, stream_type_for,
-    DvbSubDecl, TsMuxSettings, MUX_PROPERTIES, UNDETERMINED_LANGUAGE,
+    is_av1, is_dvbsub, language_from_tags, opus_channels, reject_raw_aac, service_from_tags,
+    stream_type_for, DvbSubDecl, TsMuxSettings, MUX_PROPERTIES, UNDETERMINED_LANGUAGE,
 };
 
 /// Muxes N elementary streams into one MPEG-TS byte stream, in decode order.
@@ -468,6 +468,11 @@ impl MultiInputElement for TsMux {
                     if config {
                         self.declare_subtitling(input);
                         return Ok(());
+                    }
+                    if let (Some(STREAM_TYPE_AAC), Some(s)) =
+                        (self.stream_types[input], frame.domain.as_system_slice())
+                    {
+                        reject_raw_aac(s, g2g_core::log::short_type_name::<Self>())?;
                     }
                     self.agg.push(input, frame);
                 }
