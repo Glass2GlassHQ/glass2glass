@@ -229,7 +229,7 @@ async fn selection_remaps_which_stream_each_port_carries() {
     );
     assert_eq!(
         tap.frames[0],
-        vec![vec![0xA1u8, 0xA2, 0xA3], vec![0xB4, 0xB5]],
+        vec![adts_au(&[0xA1, 0xA2, 0xA3]), adts_au(&[0xB4, 0xB5])],
         "port 0 carries AAC after the swap"
     );
     assert!(

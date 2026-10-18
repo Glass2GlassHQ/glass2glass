@@ -49,6 +49,7 @@ use g2g_core::{
     StreamCollection, StreamType, SubPictureFormat, TagList, TextFormat, VideoCodec,
 };
 
+use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::matroska::{MatroskaDemuxer, MkvCodec};
 use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
@@ -901,8 +902,9 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
 /// its plain UTF-8 cue text (the source-format framing stripped, see
 /// [`crate::subparse::deframe_subtitle_block`]) so every subtitle stream forwards
 /// as `Text { Utf8 }`; an H.264 / H.265 block converts from the container's
-/// length-prefixed framing to Annex-B (see [`video_block_to_annexb`]); every
-/// other codec passes through unchanged. The cue timing rides the frame (block
+/// length-prefixed framing to Annex-B (see [`video_block_to_annexb`]); an AAC
+/// block is ADTS-framed from the track's AudioSpecificConfig; every other codec
+/// passes through unchanged. The cue timing rides the frame (block
 /// PTS + `BlockDuration`), so only the text is extracted.
 fn deframe_block(demux: &MatroskaDemuxer, f: crate::matroska::MkvFrame) -> Vec<u8> {
     match f.codec {
@@ -914,6 +916,11 @@ fn deframe_block(demux: &MatroskaDemuxer, f: crate::matroska::MkvFrame) -> Vec<u
             let private = demux.codec_private(f.track);
             video_block_to_annexb(f.codec, f.keyframe, private, f.data)
         }
+        // ER AAC, ELD and USAC have no ADTS form and go raw behind their config
+        MkvCodec::Aac => demux
+            .codec_private(f.track)
+            .and_then(|config| adts_from_asc(config, &f.data))
+            .unwrap_or(f.data),
         _ => f.data,
     }
 }
@@ -1079,7 +1086,8 @@ fn resolve_stream_id(demux: &MatroskaDemuxer, id: &str) -> Option<MkvStream> {
 /// The `OpusHead` is validated rather than trusted: a `CodecPrivate` that is not
 /// one is dropped, since a decoder would read garbage from it. A Vorbis
 /// `CodecPrivate` laces the identification, comment and setup headers, which
-/// go as three packets, the way `OggDemux` forwards them.
+/// go as three packets, the way `OggDemux` forwards them. An AAC config ADTS
+/// cannot carry (ER AAC, ELD, USAC) leads the track's raw blocks.
 fn config_headers(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Vec<Vec<u8>> {
     let Some(private) = demux.codec_private(track) else {
         return Vec::new();
@@ -1099,6 +1107,7 @@ fn config_headers(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Vec<V
         // the composition / ancillary page ids the display sets compose under
         MkvCodec::DvbSub => whole(crate::dvbsub::parse_page_ids(private).is_some()),
         MkvCodec::Vorbis => vorbis_headers(private),
+        MkvCodec::Aac => whole(is_raw_aac_config(private)),
         _ => Vec::new(),
     }
 }
@@ -2060,6 +2069,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sink.0.frames, alloc::vec![alloc::vec![0x11]]);
+    }
+
+    // one A_AAC track carrying `config` as its CodecPrivate, with one block of `access_unit`
+    fn aac_with_config(config: &[u8], access_unit: &[u8]) -> Vec<u8> {
+        let track_number = 1;
+        let track = [
+            elem(&[0xD7], &uint_body(track_number)),
+            elem(&[0x86], b"A_AAC"),
+            elem(&[0x63, 0xA2], config),
+        ]
+        .concat();
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &elem(&[0xAE], &track));
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[
+                elem(&[0xE7], &uint_body(0)),
+                elem(&[0xA3], &block(track_number, 0, access_unit)),
+            ]
+            .concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
+        [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
+    }
+
+    #[tokio::test]
+    async fn an_aac_lc_block_leaves_adts_framed() {
+        let access_unit = [0x21, 0x10, 0x05];
+        let adts = crate::aacparse::test_frames::adts_au(&access_unit);
+        let config = crate::aacparse::asc_from_adts(&adts).unwrap();
+        let mut sink = CaptureSink::default();
+        run(
+            MkvStream::Aac,
+            &aac_with_config(&config, &access_unit),
+            &mut sink,
+        )
+        .await;
+        assert_eq!(sink.frames, alloc::vec![adts]);
+    }
+
+    #[tokio::test]
+    async fn an_eld_config_leads_its_raw_blocks() {
+        // AAC-ELD 48 kHz stereo, an object type ADTS has no profile for
+        const ELD_CONFIG: [u8; 4] = [0xF8, 0xE6, 0x40, 0x00];
+        let access_unit = [0x7E, 0x89, 0xB4];
+        let mut sink = CaptureSink::default();
+        run(
+            MkvStream::Aac,
+            &aac_with_config(&ELD_CONFIG, &access_unit),
+            &mut sink,
+        )
+        .await;
+        assert_eq!(
+            sink.frames,
+            alloc::vec![ELD_CONFIG.to_vec(), access_unit.to_vec()]
+        );
     }
 
     fn subtitle_track(num: u64, codec: &[u8]) -> Vec<u8> {

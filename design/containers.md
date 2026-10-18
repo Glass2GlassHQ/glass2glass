@@ -675,8 +675,9 @@ with the AudioSpecificConfig ahead of them as a frame of its own. `aacparse`
 forwards that stream unchanged. `ffmpegaudiodec` reopens the AAC decoder with the
 config as extradata and presets the channel count and rate it declares, which
 libavcodec needs to output an ER AAC frame. USAC decodes only on libavcodec 62
-(ffmpeg 8) or later. `flvdemux` and `avidemux` send the
-same stream from the FLV sequence header and the AVI `strf` config.
+(ffmpeg 8) or later. `flvdemux`, `avidemux` and `matroskademux` send the
+same stream from the FLV sequence header, the AVI `strf` config and the
+Matroska `CodecPrivate`.
 
 `Mp4MuxN`, `MkvMuxN` and both FLV muxers take an AAC stream's
 AudioSpecificConfig from its first frame: synthesised from an ADTS header, or
