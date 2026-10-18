@@ -1420,16 +1420,20 @@ mod factory {
         pub caps: Caps,
     }
 
+    #[derive(Debug, Clone, Default)]
+    pub struct ContainerStreams {
+        // video first, decodebin takes the first one the element after it can use
+        pub streams: Vec<PrimaryStream>,
+    }
+
     /// A bare-`decodebin` primary-stream hook (M746): given the upstream file
     /// location and the container caps, sniff the container and return the
-    /// single-stream demux + stream selection for its primary decodable stream, or
-    /// `None` when the default video port is correct (the container derives its
-    /// output caps from the file, or the sniffed video codec matches the port
-    /// default), the file is unreadable, or the hook does not parse the container.
-    /// A demux whose port caps are fixed before parsing (TsDemux, M936) must name
-    /// the stream even when a video track is present. Registered via
-    /// [`Registry::register_primary_stream`].
-    pub type PrimaryStreamHook = fn(location: &str, caps: &Caps) -> Option<PrimaryStream>;
+    /// single-stream demux + stream selection for each stream it can forward, or
+    /// `None` when the file is unreadable or the hook does not parse the
+    /// container. A demux whose port caps are fixed before parsing (TsDemux,
+    /// M936) must name the stream even when a video track is present. Registered
+    /// via [`Registry::register_primary_stream`].
+    pub type PrimaryStreamHook = fn(location: &str, caps: &Caps) -> Option<ContainerStreams>;
 
     const RANK_SPEC_EXCLUDED: &str = "none";
     const RANK_SPEC_MAX: &str = "max";
@@ -1780,11 +1784,11 @@ mod factory {
             self
         }
 
-        /// The single-stream demux + decode selection for a bare `decodebin` on the
+        /// The single-stream demux selections for a bare `decodebin` on the
         /// container at `location` with `caps`, from the first hook that parses it
-        /// (M746); `None` when none applies (no video-less container to fix, an
-        /// unreadable file, or no hook registered).
-        pub fn primary_stream(&self, location: &str, caps: &Caps) -> Option<PrimaryStream> {
+        /// (M746); `None` when none applies (an unreadable file, or no hook
+        /// registered for the container).
+        pub fn container_streams(&self, location: &str, caps: &Caps) -> Option<ContainerStreams> {
             self.primary_stream
                 .iter()
                 .find_map(|hook| hook(location, caps))
@@ -2988,13 +2992,13 @@ mod factory {
 
 #[cfg(feature = "std")]
 pub use factory::{
-    declared_source_caps, AutoplugError, AutoplugParams, DecodebinError, DecodebinSelectHook,
-    DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory, FallbacksrcSourceFactory,
-    FanoutRebuild, FanoutSrcFactory, LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError,
-    PlaybinHook, PlaybinPort, PrimaryStream, PrimaryStreamHook, PropertyDoc, RankOverride,
-    RankSpecError, Registry, RestartFanoutSourceHook, RestartPolicy, RestartSourceHook,
-    SourceFactory, Uri, UriError, UriFanout, UriFanoutHead, UriFanoutHook, UriFanoutPort,
-    UriRebuild, UriSourceFactory,
+    declared_source_caps, AutoplugError, AutoplugParams, ContainerStreams, DecodebinError,
+    DecodebinSelectHook, DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory,
+    FallbacksrcSourceFactory, FanoutRebuild, FanoutSrcFactory, LaunchFactory, MuxerFactory,
+    PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream, PrimaryStreamHook,
+    PropertyDoc, RankOverride, RankSpecError, Registry, RestartFanoutSourceHook, RestartPolicy,
+    RestartSourceHook, SourceFactory, Uri, UriError, UriFanout, UriFanoutHead, UriFanoutHook,
+    UriFanoutPort, UriRebuild, UriSourceFactory,
 };
 
 #[cfg(test)]

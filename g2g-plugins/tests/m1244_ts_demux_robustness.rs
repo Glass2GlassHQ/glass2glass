@@ -444,7 +444,8 @@ fn decodebin_probes_the_pmt_at_every_packet_stride() {
         let path =
             std::env::temp_dir().join(format!("g2g-m1247-stride-{name}-{}.ts", std::process::id()));
         std::fs::write(&path, &wrapped).expect("write the transport stream");
-        let primary = ts_primary_stream(path.to_str().expect("utf8 path"), &caps);
+        let primary = ts_primary_stream(path.to_str().expect("utf8 path"), &caps)
+            .and_then(|streams| streams.streams.into_iter().next());
         std::fs::remove_file(&path).ok();
         let selection = primary.map(|primary| primary.props);
         assert_eq!(

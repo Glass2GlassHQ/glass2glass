@@ -12,7 +12,7 @@
 //!
 //! Which demuxer to plug, and which stream it should forward, comes from the
 //! registry's primary-stream hooks
-//! ([`Registry::primary_stream`]), the same probe `decodebin` uses.
+//! ([`Registry::container_streams`]), the same probe `decodebin` uses.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -229,7 +229,9 @@ pub async fn discover(reg: &Registry, uri: &str) -> Result<Discovery, DiscoverEr
     // Which demuxer parses this container, and which of its streams it should
     // forward: the same probe `decodebin` runs, so an audio-only file plugs an
     // audio port instead of failing on the default video one.
-    let primary = reg.primary_stream(&path, &sniffed);
+    let primary = reg
+        .container_streams(&path, &sniffed)
+        .and_then(|streams| streams.streams.into_iter().next());
     let demux_name = primary
         .as_ref()
         .map(|p| p.demux)

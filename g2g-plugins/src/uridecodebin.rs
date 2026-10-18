@@ -261,8 +261,8 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use g2g_core::runtime::{
-    is_raw_audio, is_raw_video, DecodebinError, GraphNode, GraphNodeRef, ParseError, PrimaryStream,
-    Registry, UriFanout, UriFanoutHead, UriFanoutPort,
+    is_raw_audio, is_raw_video, ContainerStreams, DecodebinError, GraphNode, GraphNodeRef,
+    ParseError, PrimaryStream, Registry, UriFanout, UriFanoutHead, UriFanoutPort,
 };
 #[cfg(feature = "std")]
 use g2g_core::stream::StreamType;
@@ -919,7 +919,7 @@ pub fn ps_decodebin_select(
 /// `filesrc ! decodebin` selects the demux's audio stream instead of failing on
 /// the default video port.
 #[cfg(feature = "std")]
-pub fn ps_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+pub fn ps_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
     if !matches!(
         caps,
         Caps::ByteStream {
@@ -929,20 +929,25 @@ pub fn ps_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
         return None;
     }
     let prefix = read_prefix(location)?;
-    let infos = crate::psdemux::forwardable_streams(&probe_ps(&prefix));
-    // A video stream present: the demux's default video port is right, decline.
-    if infos.is_empty() || infos.iter().any(|i| i.video) {
+    let mut infos = crate::psdemux::forwardable_streams(&probe_ps(&prefix));
+    if infos.is_empty() {
         return None;
     }
-    let audio = infos.into_iter().find(|i| !i.video)?;
-    Some(PrimaryStream {
-        demux: "mpegpsdemux",
-        props: alloc::vec![(
-            "stream".to_string(),
-            crate::psdemux::ps_stream_to_str(audio.stream).to_string(),
-        )],
-        caps: audio.caps,
-    })
+    infos.sort_by_key(|i| !i.video);
+    let streams = infos
+        .into_iter()
+        .map(|info| PrimaryStream {
+            demux: "mpegpsdemux",
+            props: stream_selection(crate::psdemux::ps_stream_to_str(info.stream)),
+            caps: info.caps,
+        })
+        .collect();
+    Some(ContainerStreams { streams })
+}
+
+#[cfg(feature = "std")]
+fn stream_selection(stream: &str) -> Vec<(alloc::string::String, alloc::string::String)> {
+    alloc::vec![("stream".to_string(), stream.to_string())]
 }
 
 /// Map a per-branch decode-chain failure to the text-parser error (the
@@ -1922,11 +1927,10 @@ pub fn ts_decodebin_select(
 /// caps from the file (its port is fixed before parsing a byte, defaulting to
 /// H.264), so a non-H.264 video stream (MPEG-2, H.265) would negotiate an
 /// H.264 decoder and fail. Sniff the PMT; decline (`None`) a non-TS file or an
-/// empty PMT, else return `tsdemux` with the `stream=<codec>` selection (the
-/// first video stream, or the first audio stream of an audio-only file) and
-/// its elementary caps for the decoder search.
+/// empty PMT, else return `tsdemux` with a `stream=<codec>` selection and the
+/// elementary caps for each stream, video first.
 #[cfg(feature = "std")]
-pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
     if !matches!(
         caps,
         Caps::ByteStream {
@@ -1936,31 +1940,34 @@ pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
         return None;
     }
     let prefix = read_prefix(location)?;
-    let infos = crate::tsdemux::forwardable_streams(&ts_tables_from_prefix(&prefix));
-    // prefer the video stream (naming its codec, the port default is h264
-    // regardless of the PMT), else the first audio stream
-    let primary = infos.iter().find(|i| i.video).or_else(|| infos.first())?;
-    Some(PrimaryStream {
-        demux: "tsdemux",
-        props: alloc::vec![(
-            "stream".to_string(),
-            crate::tsdemux::ts_stream_to_str(primary.stream).to_string(),
-        )],
-        caps: primary.caps.clone(),
-    })
+    let mut infos = crate::tsdemux::forwardable_streams(&ts_tables_from_prefix(&prefix));
+    if infos.is_empty() {
+        return None;
+    }
+    // every stream names its codec, the port default is h264 regardless of the PMT
+    infos.sort_by_key(|i| !i.video);
+    let streams = infos
+        .into_iter()
+        .map(|info| PrimaryStream {
+            demux: "tsdemux",
+            props: stream_selection(crate::tsdemux::ts_stream_to_str(info.stream)),
+            caps: info.caps,
+        })
+        .collect();
+    Some(ContainerStreams { streams })
 }
 
 /// Bare-`decodebin` primary-stream hook for MP4 (M748): the MP4 sibling of
-/// [`ts_primary_stream`]. Selects the file's actual primary stream on the
-/// single-stream [`Mp4Demux`](crate::mp4demux::Mp4Demux): the first video track
-/// with its codec named (M961: the demux port's nominal default is H.264, so a
+/// [`ts_primary_stream`]. Lists the file's streams as selections on the
+/// single-stream [`Mp4Demux`](crate::mp4demux::Mp4Demux): each video track with
+/// its codec named (M961: the demux port's nominal default is H.264, so a
 /// codec-specific decoder like `rav1ddec` against an AV1 mp4 would otherwise
-/// fail startup negotiation), else the audio track (`stream=aac`, which an
+/// fail startup negotiation), then the audio track (`stream=aac`, which an
 /// audio-only `.m4a` needs because the default video port would plug a video
-/// decoder and fail "no caps overlap"). Declines a non-MP4 file, an empty track
-/// set, or a video codec the demux cannot name.
+/// decoder and fail "no caps overlap"). A video codec the demux cannot name is
+/// left out. Declines a non-MP4 file or an empty track set.
 #[cfg(feature = "std")]
-pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
     if !matches!(
         caps,
         Caps::ByteStream {
@@ -1970,32 +1977,39 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> 
         return None;
     }
     let moov = read_mp4_moov(location)?;
-    let infos = crate::mp4demuxn::forwardable_streams(&moov);
-    let selected = infos.iter().find(|i| i.video).or_else(|| infos.first())?;
-    let stream = if selected.video {
-        let Caps::CompressedVideo { codec, .. } = selected.caps else {
-            return None;
-        };
-        crate::mp4demux::mp4_video_stream_str(codec)?
-    } else {
-        "aac"
-    };
-    Some(PrimaryStream {
-        demux: "qtdemux",
-        props: alloc::vec![("stream".to_string(), stream.to_string())],
-        caps: selected.caps.clone(),
-    })
+    let mut infos = crate::mp4demuxn::forwardable_streams(&moov);
+    if infos.is_empty() {
+        return None;
+    }
+    infos.sort_by_key(|i| !i.video);
+    let streams = infos
+        .into_iter()
+        .filter_map(|info| {
+            let stream = match info.caps {
+                Caps::CompressedVideo { codec, .. } => {
+                    crate::mp4demux::mp4_video_stream_str(codec)?
+                }
+                _ => "aac",
+            };
+            Some(PrimaryStream {
+                demux: "qtdemux",
+                props: stream_selection(stream),
+                caps: info.caps,
+            })
+        })
+        .collect();
+    Some(ContainerStreams { streams })
 }
 
 /// Bare-`decodebin` primary-stream hook for Matroska (M757): the mkv sibling of
-/// [`ts_primary_stream`]. Selects the file's actual primary stream by name
-/// (`matroskademux stream=<codec>`): the first video track when one is present
-/// (M960: the demux port's parameterless default is VP9, so a codec-specific
-/// decoder like `rav1ddec` against an AV1 webm would otherwise fail startup
-/// negotiation on the nominal caps), else the first audio track (an audio-only
-/// `.mka` would fail on the default video port). Declines when the prefix does
-/// not parse as Matroska or carries no forwardable track.
-pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+/// [`ts_primary_stream`]. Lists the file's streams as selections by name
+/// (`matroskademux stream=<codec>`), video tracks first (M960: the demux port's
+/// parameterless default is VP9, so a codec-specific decoder like `rav1ddec`
+/// against an AV1 webm would otherwise fail startup negotiation on the nominal
+/// caps, and an audio-only `.mka` would fail on the default video port).
+/// Declines when the prefix does not parse as Matroska or carries no
+/// forwardable track.
+pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
     if !matches!(
         caps,
         Caps::ByteStream {
@@ -2007,19 +2021,23 @@ pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> 
     let prefix = read_prefix(location)?;
     let mut demux = crate::matroska::MatroskaDemuxer::new();
     demux.push_data(&prefix);
-    let infos = crate::mkvdemux::forwardable_streams(&demux);
-    let selected = infos.iter().find(|i| i.video).or_else(|| infos.first())?;
-    Some(PrimaryStream {
-        demux: "matroskademux",
-        props: alloc::vec![(
-            "stream".to_string(),
-            crate::mkvdemux::mkv_stream_str(selected.stream).to_string(),
-        )],
-        caps: selected.caps.clone(),
-    })
+    let mut infos = crate::mkvdemux::forwardable_streams(&demux);
+    if infos.is_empty() {
+        return None;
+    }
+    infos.sort_by_key(|i| !i.video);
+    let streams = infos
+        .into_iter()
+        .map(|info| PrimaryStream {
+            demux: "matroskademux",
+            props: stream_selection(crate::mkvdemux::mkv_stream_str(info.stream)),
+            caps: info.caps,
+        })
+        .collect();
+    Some(ContainerStreams { streams })
 }
 
-pub fn ivf_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+pub fn ivf_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
     if !matches!(
         caps,
         Caps::ByteStream {
@@ -2029,10 +2047,13 @@ pub fn ivf_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> 
         return None;
     }
     let prefix = read_prefix(location)?;
-    Some(PrimaryStream {
+    let stream = PrimaryStream {
         demux: "ivfdemux",
         props: Vec::new(),
         caps: crate::ivfdemux::IvfDemux::stream_caps(&prefix)?,
+    };
+    Some(ContainerStreams {
+        streams: alloc::vec![stream],
     })
 }
 
@@ -2098,7 +2119,7 @@ pub fn audio_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode
 /// matching `oggdemux stream=` for the decoder search. Declines a non-Ogg file
 /// and Opus (the default port is already right).
 #[cfg(feature = "std")]
-pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
     if !matches!(
         caps,
         Caps::ByteStream {
@@ -2119,9 +2140,9 @@ pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> 
         return None;
     }
     let (stream, format) = ogg_mapping(info.codec)?;
-    Some(PrimaryStream {
+    let stream = PrimaryStream {
         demux: "oggdemux",
-        props: alloc::vec![("stream".to_string(), stream.to_string())],
+        props: stream_selection(stream),
         // Sentinel channels/rate for the decoder search (the demux refines the
         // concrete header values via CapsChanged at runtime).
         caps: Caps::Audio {
@@ -2130,6 +2151,9 @@ pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> 
             sample_rate: 0,
             channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
+    };
+    Some(ContainerStreams {
+        streams: alloc::vec![stream],
     })
 }
 
@@ -2250,10 +2274,10 @@ pub fn avi_decodebin_select(
 /// Bare-`decodebin` primary-stream hook for AVI (M1071):
 /// [`AviDemux`](crate::avidemux::AviDemux) defaults to the file's video stream,
 /// so an audio-only AVI, or one whose codec is not the nominal H.264, needs the
-/// `stream=` selection naming what the file actually carries. Declines a
-/// non-AVI file and one whose first stream has no `stream=` name.
+/// `stream=` selection naming what the file actually carries. Lists each
+/// stream with a `stream=` name, video first. Declines a non-AVI file.
 #[cfg(feature = "std")]
-pub fn avi_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+pub fn avi_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
     if !matches!(
         caps,
         Caps::ByteStream {
@@ -2263,18 +2287,27 @@ pub fn avi_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> 
         return None;
     }
     let prefix = read_prefix(location)?;
-    let infos = crate::avidemux::forwardable_streams(&prefix);
-    let selected = infos.iter().find(|i| i.video).or_else(|| infos.first())?;
-    let stream = match &selected.caps {
-        Caps::CompressedVideo { codec, .. } => crate::avidemux::video_stream_str(*codec)?,
-        Caps::Audio { format, .. } => crate::avidemux::audio_stream_str(*format)?,
-        _ => return None,
-    };
-    Some(PrimaryStream {
-        demux: "avidemux",
-        props: alloc::vec![("stream".to_string(), stream.to_string())],
-        caps: selected.caps.clone(),
-    })
+    let mut infos = crate::avidemux::forwardable_streams(&prefix);
+    if infos.is_empty() {
+        return None;
+    }
+    infos.sort_by_key(|i| !i.video);
+    let streams = infos
+        .into_iter()
+        .filter_map(|info| {
+            let stream = match &info.caps {
+                Caps::CompressedVideo { codec, .. } => crate::avidemux::video_stream_str(*codec)?,
+                Caps::Audio { format, .. } => crate::avidemux::audio_stream_str(*format)?,
+                _ => return None,
+            };
+            Some(PrimaryStream {
+                demux: "avidemux",
+                props: stream_selection(stream),
+                caps: info.caps,
+            })
+        })
+        .collect();
+    Some(ContainerStreams { streams })
 }
 
 /// Fetch a text resource synchronously on a throwaway current-thread runtime, for

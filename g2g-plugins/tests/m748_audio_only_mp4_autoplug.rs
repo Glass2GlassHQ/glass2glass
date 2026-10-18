@@ -66,9 +66,8 @@ fn audio_only_mp4_bare_decodebin_plugs_audio_decoder() {
     );
 }
 
-/// An A/V MP4 through a bare `decodebin` still plugs the VIDEO decoder (the hook
-/// declines when a video track is present, leaving the demux's default video port):
-/// the M748 change does not alter existing A/V behavior.
+/// An A/V MP4 through a bare `decodebin ! videoconvert` still plugs the VIDEO
+/// decoder: the M748 change does not alter existing A/V behavior.
 #[test]
 fn av_mp4_bare_decodebin_still_plugs_video_decoder() {
     let path = temp("av", "mp4", AV);

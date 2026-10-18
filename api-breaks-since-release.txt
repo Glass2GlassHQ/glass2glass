@@ -18,5 +18,6 @@ function_missing: function g2g_core::format_element::legacy_sink_constraint
 function_missing: function g2g_core::format_element::legacy_transform_constraint
 function_missing: function g2g_core::legacy_sink_constraint
 function_missing: function g2g_core::legacy_transform_constraint
+inherent_method_missing: Registry::primary_stream
 method_parameter_count_changed: g2g_core::QosTracker::judge_frame takes 3 parameters
 method_parameter_count_changed: g2g_core::qos::QosTracker::judge_frame takes 3 parameters

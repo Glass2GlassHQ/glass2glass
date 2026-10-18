@@ -734,11 +734,12 @@ auto-plug a video decoder and fail negotiation. `expand_decodebin` resolves this
 with a `PrimaryStreamHook` (`register_primary_stream`, a `Default`-friendly
 fn-pointer slot, cross-crate like the playbin hooks): for a file-backed container
 it sniffs a bounded prefix (`ts_primary_stream` reads the PMT via
-`forwardable_streams`) and, finding no video track, names the single-stream demux
-plus its stream-selection property (`tsdemux stream=aac`) and the audio elementary
-caps, so the search builds `filesrc ! tsdemux stream=aac ! <audio decoder> ! …`.
-The hook declines a container with a video track (the default video port is
-correct), leaving A/V behavior unchanged. A `mp4_primary_stream` sibling does the
+`forwardable_streams`) and lists, video first, the single-stream demux plus a
+stream-selection property (`tsdemux stream=aac`) and the elementary caps for each
+stream. `expand_decodebin` takes the first stream with a decode chain to caps the
+element after the `decodebin` accepts, so `decodebin ! audioconvert` on an A/V
+file builds `filesrc ! tsdemux stream=aac ! <audio decoder> ! …` and a consumer
+that takes anything gets the video. A `mp4_primary_stream` sibling does the
 same for MP4, sniffing the `moov` and naming `qtdemux stream=aac` so an audio-only
 `.m4a` / `.mp4` plugs an audio decoder too. The TS selection also covers MPEG
 audio (`stream=mp2`, PMT types 0x03/0x04), Opus (`stream=opus`, a private

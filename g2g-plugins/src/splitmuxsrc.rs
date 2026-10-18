@@ -141,7 +141,9 @@ impl Part {
             return Err(unsupported_part(path, &container));
         };
         let location = path.to_string_lossy();
-        let Some(primary) = primary_stream(&location, &container) else {
+        let Some(primary) = primary_stream(&location, &container)
+            .and_then(|streams| streams.streams.into_iter().next())
+        else {
             return Err(unsupported_part(path, &container));
         };
         let mut demux = construct();

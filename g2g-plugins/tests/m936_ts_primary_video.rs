@@ -108,7 +108,8 @@ fn sniff(tag: &str, streams: &[(u8, u16)]) -> Option<(String, String)> {
     let caps = Caps::ByteStream {
         encoding: ByteStreamEncoding::MpegTs,
     };
-    let primary = ts_primary_stream(path.to_str().expect("utf8 path"), &caps);
+    let primary = ts_primary_stream(path.to_str().expect("utf8 path"), &caps)
+        .and_then(|streams| streams.streams.into_iter().next());
     std::fs::remove_file(&path).ok();
     primary.map(|p| {
         assert_eq!(p.demux, "tsdemux");

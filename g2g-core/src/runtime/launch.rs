@@ -69,14 +69,15 @@ use alloc::vec::Vec;
 use crate::caps::{Caps, CapsSet};
 use crate::element::DynAsyncElement;
 use crate::fanout::DynMultiOutputSource;
+use crate::format_element::CapsConstraint;
 use crate::graph::{Graph, GraphError, NodeId, PadId};
 use crate::link::LinkPolicy;
 use crate::memory::MemoryDomainKind;
 use crate::property::{PropError, PropValue, PropertySpec, ValueError};
 use crate::runtime::autoplug::{
-    is_raw_audio, is_raw_video, FallbackSourceRole, FallbacksrcSourceFactory, FanoutRebuild,
-    PadKind, PadRequest, Registry, RestartPolicy, UriError, UriFanout, UriFanoutHead,
-    UriFanoutPort, UriRebuild,
+    is_raw_audio, is_raw_video, ContainerStreams, FallbackSourceRole, FallbacksrcSourceFactory,
+    FanoutRebuild, PadKind, PadRequest, PrimaryStream, Registry, RestartPolicy, UriError,
+    UriFanout, UriFanoutHead, UriFanoutPort, UriRebuild,
 };
 use crate::runtime::parse_scope::ParseScope;
 use crate::runtime::{
@@ -805,12 +806,7 @@ fn autoplug_for_consumer(
 ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
     let raw = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
     let consumer_constraint = consumer.map(|element| element.caps_constraint_as_transform());
-    let consumer_accepts = |c: &Caps| {
-        raw(c)
-            && consumer_constraint
-                .as_ref()
-                .is_none_or(|constraint| constraint.accepts(c))
-    };
+    let consumer_accepts = |c: &Caps| raw_for_consumer(c, consumer_constraint.as_ref());
     let names = |target: &dyn Fn(&Caps) -> bool| {
         registry.autoplug_names_avoiding(input, target, DECODEBIN_MAX_DEPTH, preferred, avoided)
     };
@@ -828,6 +824,40 @@ fn autoplug_for_consumer(
     // search, so it never appears in the chain.
     registry.maybe_prepend_parser(input, &mut chain);
     Some(chain)
+}
+
+fn raw_for_consumer(caps: &Caps, consumer_constraint: Option<&CapsConstraint<'_>>) -> bool {
+    (is_raw_video(caps) || is_raw_audio(caps))
+        && consumer_constraint.is_none_or(|constraint| constraint.accepts(caps))
+}
+
+// the first stream with a decode chain to caps the consumer accepts, else the first stream
+fn choose_container_stream(
+    registry: &Registry,
+    streams: ContainerStreams,
+    preferred: MemoryDomainKind,
+    consumer: Option<&dyn DynAsyncElement>,
+    avoided: &[&str],
+) -> Option<PrimaryStream> {
+    let consumer_constraint = consumer.map(|element| element.caps_constraint_as_transform());
+    let consumer_accepts = |c: &Caps| raw_for_consumer(c, consumer_constraint.as_ref());
+    let reaches_consumer = |stream: &PrimaryStream| {
+        registry
+            .autoplug_names_avoiding(
+                &stream.caps,
+                &consumer_accepts,
+                DECODEBIN_MAX_DEPTH,
+                preferred,
+                avoided,
+            )
+            .is_some()
+    };
+    let chosen = streams
+        .streams
+        .iter()
+        .position(reaches_consumer)
+        .unwrap_or(0);
+    streams.streams.into_iter().nth(chosen)
 }
 
 /// Expand every `decodebin` node into the decoder chain the registry auto-plugs
@@ -884,31 +914,6 @@ fn expand_decodebin(
                 Item::Element(spec) if is_decodebin(&spec.name) => {
                     let (pred, props) = upstream.as_ref().ok_or(ParseError::DecodebinNoUpstream)?;
                     let caps = resolve_upstream_caps(registry, pred, props)?;
-                    // M746: a single-stream demux fixes its output pad before parsing
-                    // any byte, so it defaults to a video port; on an audio-only
-                    // container the default auto-plug would pick a video decoder and
-                    // fail "no caps overlap". If a primary-stream hook sniffs the file
-                    // and names the real (audio) stream, plug that demux with its
-                    // stream selection and auto-plug the decoder from the elementary
-                    // caps instead. A hook declines a container with a video track (the
-                    // default video path is right) or one it does not parse.
-                    let location = props
-                        .iter()
-                        .find(|(k, _)| k == "location")
-                        .map(|(_, v)| v.as_str());
-                    let chain_input =
-                        match location.and_then(|loc| registry.primary_stream(loc, &caps)) {
-                            Some(primary) => {
-                                new_chain.push(Item::Element(ElementSpec {
-                                    name: primary.demux.to_string(),
-                                    props: primary.props.clone(),
-                                    instance: None,
-                                    log_category: None,
-                                }));
-                                primary.caps
-                            }
-                            None => caps,
-                        };
                     // M1018: the element right after the `decodebin` decides what
                     // memory the decoder should decode into, so a GPU-resident
                     // consumer gets a decoder that decodes into its domain rather
@@ -929,6 +934,39 @@ fn expand_decodebin(
                             })
                             .transpose()?,
                         _ => None,
+                    };
+                    // M746: a single-stream demux fixes its output pad before parsing
+                    // any byte, so it defaults to a video port; on an audio-only
+                    // container the default auto-plug would pick a video decoder and
+                    // fail "no caps overlap". If a primary-stream hook sniffs the file
+                    // and lists its streams, plug that demux with the selection of the
+                    // stream the consumer can take and auto-plug the decoder from its
+                    // elementary caps instead.
+                    let location = props
+                        .iter()
+                        .find(|(k, _)| k == "location")
+                        .map(|(_, v)| v.as_str());
+                    let chain_input = match location
+                        .and_then(|loc| registry.container_streams(loc, &caps))
+                        .and_then(|streams| {
+                            choose_container_stream(
+                                registry,
+                                streams,
+                                preferred,
+                                consumer.as_deref(),
+                                avoided,
+                            )
+                        }) {
+                        Some(primary) => {
+                            new_chain.push(Item::Element(ElementSpec {
+                                name: primary.demux.to_string(),
+                                props: primary.props.clone(),
+                                instance: None,
+                                log_category: None,
+                            }));
+                            primary.caps
+                        }
+                        None => caps,
                     };
                     let decoders = autoplug_for_consumer(
                         registry,
