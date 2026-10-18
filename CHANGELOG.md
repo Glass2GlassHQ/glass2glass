@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1567: the mp4 demuxers read QuickTime `twos`, `sowt`, `raw `, `alaw` and `ulaw` PCM and MP3 tracks, and `qtdemux stream=` names the audio track by format.
 - M1563: `qtdemux stream=aac` reads a fragmented file's audio from its fragments, and AAC with 960-sample frames leaves raw behind its AudioSpecificConfig.
 - M1561: `ac3parse`, `aacparse` and `mpegaudioparse` stamp each frame with its own chunk's demuxer time when frames arrive one per chunk, so the segment clip no longer drops transport-stream audio.
 - M1560: `tsdemux` and `mpegpsdemux` open the stream at the first DTS, so the open-GOP B frames ahead of the first I frame stay in the segment.

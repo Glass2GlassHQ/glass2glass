@@ -102,6 +102,8 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
             },
             true,
         ),
+        // PCM negotiates its real layout, as `AviDemux` does, since a lone wildcard cannot fixate
+        TrackKind::Audio { format, .. } if is_pcm(*format) => (real_caps(kind), false),
         TrackKind::Audio { format, .. } => (
             Caps::Audio {
                 format: *format,
@@ -145,6 +147,7 @@ pub(crate) fn real_caps(kind: &TrackKind) -> Caps {
 // ADTS synthesis moved to the ungated `aacparse` module (M662, the no_std FLV
 // demuxer shares it); imported so this module's uses keep reading the same.
 use crate::aacparse::{is_raw_aac_config, require_adts};
+use crate::avidemux::is_pcm;
 use g2g_core::log::short_type_name;
 
 /// The forwardable tracks an MP4 carries, in `moov` order (M392): one
@@ -832,9 +835,16 @@ impl Mp4DemuxN {
                 // audio elementary stream is self-describing (carries its profile
                 // / rate / channels per frame) and a decoder can start without the
                 // out-of-band config, symmetric with the in-band video param sets.
-                Some(TrackKind::Audio { config, .. }) => {
+                Some(TrackKind::Audio {
+                    format: AudioFormat::Aac,
+                    config,
+                    ..
+                }) => {
                     data = require_adts(config, &data, short_type_name::<Self>())?;
                 }
+                // MP3 frames carry their own headers, and the sample parse already
+                // turned PCM into the graph's byte layout
+                Some(TrackKind::Audio { .. }) => {}
                 // Text cues and caption cc_data arrive already de-framed by the
                 // sample parse (the tx3g length prefix stripped, the caption atoms
                 // unwrapped); forward the payload as is.

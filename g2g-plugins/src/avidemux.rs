@@ -163,14 +163,14 @@ fn audio_caps(format: AudioFormat, channels: u8, sample_rate: u32) -> Caps {
 const DEFAULT_PCM_SAMPLE_RATE: u32 = 48_000;
 const DEFAULT_PCM_CHANNELS: u8 = 2;
 
-fn pcm_alternatives(format: AudioFormat) -> Vec<Caps> {
+pub(crate) fn pcm_alternatives(format: AudioFormat) -> Vec<Caps> {
     Vec::from([
         audio_caps(format, DEFAULT_PCM_CHANNELS, DEFAULT_PCM_SAMPLE_RATE),
         audio_caps(format, ANY_CHANNELS, ANY_SAMPLE_RATE),
     ])
 }
 
-fn is_pcm(format: AudioFormat) -> bool {
+pub(crate) fn is_pcm(format: AudioFormat) -> bool {
     matches!(
         format,
         AudioFormat::PcmU8 | AudioFormat::PcmS16Le | AudioFormat::PcmS24Le | AudioFormat::PcmS32Le

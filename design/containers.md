@@ -679,6 +679,16 @@ libavcodec needs to output an ER AAC frame. USAC decodes only on libavcodec 62
 (ffmpeg 8) or later. `flvdemux` and `avidemux` send the
 same stream from the FLV sequence header and the AVI `strf` config.
 
+QuickTime PCM sample entries (`twos`, `sowt`, `raw `, `alaw`, `ulaw`, version
+0 or 1 sound descriptions) map through the AIFC compression table, with `twos`
+read as AIFC's big-endian `NONE` and 8-bit `raw ` as unsigned. Their `stsz`
+counts single frames, often at size 1, so the demuxers size a frame from the
+format and channel count and emit one buffer per chunk, converted to the
+graph's little-endian, unsigned 8-bit layout. The rate comes from the sound
+description. MP3 rides `.mp3` or an `mp4a` whose esds names MPEG-1 or MPEG-2
+audio, and its frames pass unchanged. `qtdemux stream=` names the audio track
+by format (`aac`, `mp3`, `pcm-s16le`, `alaw`, ...).
+
 `Mp4MuxN`, `MkvMuxN` and both FLV muxers take an AAC stream's
 AudioSpecificConfig from its first frame: synthesised from an ADTS header, or
 the leading config frame of a raw stream, which becomes the `esds`,

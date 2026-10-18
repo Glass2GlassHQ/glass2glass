@@ -66,10 +66,24 @@ pub(crate) fn mp4a_entry(object_type_indication: u8, config: &[u8]) -> Vec<u8> {
         ]
         .concat(),
     );
-    let mut mp4a = vec![0u8; 28];
-    mp4a[16..18].copy_from_slice(&CHANNELS.to_be_bytes());
+    let mut mp4a = sound_description(0);
     mp4a.extend_from_slice(&full_box(b"esds", &es));
     mp4_box(b"mp4a", &mp4a)
+}
+
+// a version 0 sound description at CHANNELS and SAMPLE_RATE, ahead of any child boxes
+fn sound_description(sample_bits: u16) -> Vec<u8> {
+    let mut entry = vec![0u8; 28];
+    entry[16..18].copy_from_slice(&CHANNELS.to_be_bytes());
+    entry[18..20].copy_from_slice(&sample_bits.to_be_bytes());
+    let rate = u16::try_from(SAMPLE_RATE).expect("the integer half of a 16.16 rate");
+    entry[24..26].copy_from_slice(&rate.to_be_bytes());
+    entry
+}
+
+// a sample entry with no child boxes, as QuickTime writes for PCM and `.mp3`
+pub(crate) fn sound_entry(fourcc: &[u8; 4], sample_bits: u16) -> Vec<u8> {
+    mp4_box(fourcc, &sound_description(sample_bits))
 }
 
 // a moov with one sound track: `sample_entry`, the rest of its sample tables, and an `mvex` when fragmented
@@ -107,6 +121,36 @@ pub(crate) fn progressive_audio_mp4(sample_entry: &[u8], units: &[Vec<u8>]) -> V
         full_box(b"stsc", &table(&[1, 1, count, 1])),
         full_box(b"stsz", &[table(&[0, count]), table(&sizes)].concat()),
         full_box(b"stco", &table(&[1, mdat_payload_offset])),
+    ]
+    .concat();
+    [ftyp, mdat, audio_moov(sample_entry, &tables, &[])].concat()
+}
+
+// QuickTime's stsz gives PCM frames this size whatever their real size
+const QUICKTIME_PCM_SAMPLE_SIZE: u32 = 1;
+
+// a QuickTime PCM file with each of `chunks` a chunk of `frame_bytes` frames, one stsz sample per frame
+pub(crate) fn quicktime_pcm_mov(
+    sample_entry: &[u8],
+    chunks: &[Vec<u8>],
+    frame_bytes: usize,
+) -> Vec<u8> {
+    let ftyp = mp4_box(b"ftyp", b"qt  \0\0\0\0qt  ");
+    let mdat = mp4_box(b"mdat", &chunks.concat());
+    let mut offset = (ftyp.len() + 8) as u32;
+    let mut stsc = vec![chunks.len() as u32];
+    let mut stco = vec![chunks.len() as u32];
+    for (index, chunk) in chunks.iter().enumerate() {
+        stsc.extend([index as u32 + 1, (chunk.len() / frame_bytes) as u32, 1]);
+        stco.push(offset);
+        offset += chunk.len() as u32;
+    }
+    let frames = (chunks.concat().len() / frame_bytes) as u32;
+    let tables = [
+        full_box(b"stts", &table(&[1, frames, 1])),
+        full_box(b"stsc", &table(&stsc)),
+        full_box(b"stsz", &table(&[QUICKTIME_PCM_SAMPLE_SIZE, frames])),
+        full_box(b"stco", &table(&stco)),
     ]
     .concat();
     [ftyp, mdat, audio_moov(sample_entry, &tables, &[])].concat()

@@ -7,19 +7,18 @@
 mod audio_mp4;
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
+#[path = "common/mp4_demux.rs"]
+mod mp4_demux;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, G2gError, MultiOutputElement,
-    MultiOutputSink, PropValue, PushOutcome,
-};
+use g2g_core::{AsyncElement, AudioFormat, ByteStreamEncoding, Caps, PropValue};
 use g2g_plugins::aacparse::AacParse;
 use g2g_plugins::mp4demux::Mp4Demux;
-use g2g_plugins::mp4demuxn::{forwardable_streams, Mp4DemuxN, Mp4Port};
 
 use audio_mp4::{access_units, progressive_eld_mp4, ELD_CONFIG};
 use collect_sink::CollectSink;
+use mp4_demux::demux_first_port;
 
 fn data_frame(data: Vec<u8>) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
@@ -87,28 +86,6 @@ async fn single_output_demux(file: Vec<u8>) -> Vec<PipelinePacket> {
     sink.packets
 }
 
-#[derive(Default)]
-struct PortCapture {
-    frames: Vec<Vec<u8>>,
-}
-
-impl MultiOutputSink for PortCapture {
-    fn poll_push_to(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        _port: usize,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        let packet = packet_slot.take().expect("poll_push without a packet");
-        self.frames.extend(frame_bytes(&[packet]));
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-
-    fn port_count(&self) -> usize {
-        1
-    }
-}
-
 #[tokio::test]
 async fn mp4demux_sends_eld_config_ahead_of_raw_units() {
     let packets = single_output_demux(progressive_eld_mp4()).await;
@@ -127,28 +104,8 @@ async fn mp4demux_sends_eld_config_ahead_of_raw_units() {
 
 #[tokio::test]
 async fn multi_output_demux_sends_eld_config_ahead_of_raw_units() {
-    let file = progressive_eld_mp4();
-    let streams = forwardable_streams(&file);
-    assert_eq!(streams.len(), 1, "one AAC track discovered");
-    let mut demux = Mp4DemuxN::new(vec![Mp4Port {
-        track_id: streams[0].track_id,
-        caps: streams[0].caps.clone(),
-    }]);
-    demux
-        .configure_pipeline(&Caps::ByteStream {
-            encoding: ByteStreamEncoding::IsoBmff,
-        })
-        .expect("configure");
-    let mut capture = PortCapture::default();
-    demux
-        .process(data_frame(file), &mut capture)
-        .await
-        .expect("demux");
-    demux
-        .process(PipelinePacket::Eos, &mut capture)
-        .await
-        .expect("eos");
-    assert_config_leads_raw_units(&capture.frames);
+    let demuxed = demux_first_port(&progressive_eld_mp4()).await;
+    assert_config_leads_raw_units(&demuxed.frames);
 }
 
 #[tokio::test]

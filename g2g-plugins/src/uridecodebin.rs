@@ -2002,10 +2002,10 @@ pub fn flv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
 /// single-stream [`Mp4Demux`](crate::mp4demux::Mp4Demux): each video track with
 /// its codec named (M961: the demux port's nominal default is H.264, so a
 /// codec-specific decoder like `rav1ddec` against an AV1 mp4 would otherwise
-/// fail startup negotiation), then the audio track (`stream=aac`, which an
-/// audio-only `.m4a` needs because the default video port would plug a video
-/// decoder and fail "no caps overlap"). A video codec the demux cannot name is
-/// left out. Declines a non-MP4 file or an empty track set.
+/// fail startup negotiation), then each audio track by format (`stream=aac`,
+/// which an audio-only `.m4a` needs because the default video port would plug
+/// a video decoder and fail "no caps overlap"). A codec the demux cannot name
+/// is left out. Declines a non-MP4 file or an empty track set.
 #[cfg(feature = "std")]
 pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
     if !matches!(
@@ -2030,7 +2030,8 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
                 Caps::CompressedVideo { codec, .. } => {
                     crate::mp4demux::mp4_video_stream_str(codec)?
                 }
-                _ => "aac",
+                Caps::Audio { format, .. } => crate::mp4demux::mp4_audio_stream_str(format)?,
+                _ => return None,
             };
             Some(PrimaryStream {
                 demux: "qtdemux",

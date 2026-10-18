@@ -29,7 +29,7 @@ const ADTS_HEADER_LEN: usize = 7;
 async fn short_frame_aac_leaves_raw_behind_its_config() {
     let units = access_units();
     let file = progressive_audio_mp4(&mp4a_entry(MPEG4_AUDIO, &SHORT_FRAME_CONFIG), &units);
-    let demuxed = demux_audio(&file).await;
+    let demuxed = demux_audio(&file, "aac").await;
     let expected: Vec<Vec<u8>> = std::iter::once(SHORT_FRAME_CONFIG.to_vec())
         .chain(units)
         .collect();
@@ -43,7 +43,7 @@ async fn short_frame_aac_leaves_raw_behind_its_config() {
 async fn fragmented_aac_track_demuxes_from_its_fragments() {
     let units = access_units();
     let file = fragmented_audio_mp4(&mp4a_entry(MPEG4_AUDIO, &SYNC_EXTENSION_CONFIG), &units);
-    let demuxed = demux_audio(&file).await;
+    let demuxed = demux_audio(&file, "aac").await;
     assert!(
         demuxed.caps.iter().any(|caps| matches!(
             caps,

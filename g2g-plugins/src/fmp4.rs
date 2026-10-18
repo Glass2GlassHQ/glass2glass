@@ -19,6 +19,7 @@ use g2g_core::{
     AudioFormat, Chapter, ClosedCaptionFormat, G2gError, Segment, TagList, TextFormat, VideoCodec,
 };
 
+use crate::aiff::audio_from_comm;
 use crate::annexb::au_is_keyframe;
 use crate::cea::{parse_cdp, write_cc_data, CcTriple};
 use crate::cenc::{
@@ -31,6 +32,7 @@ use crate::mp4box::{
     parse_esds_decoder_config, parse_ilst_tags,
 };
 use crate::opusparse::{opus_head_from_dops, parse_opus_head};
+use crate::pcmendian::convert_wire_layout;
 
 #[derive(Debug)]
 pub(crate) struct Header {
@@ -310,6 +312,8 @@ pub(crate) enum TrackKind {
         /// stream carries it: AAC's AudioSpecificConfig (`esds`), or an Opus
         /// `OpusHead` rebuilt from the `dOps` (M791). Empty when there is none.
         config: Vec<u8>,
+        /// How a PCM track stores its samples, `None` for a coded format.
+        stored_pcm: Option<StoredPcm>,
     },
     /// A timed-text subtitle track. The container carries the per-cue timing
     /// (sample PTS + duration); `format` names the elementary cue payload's syntax
@@ -325,6 +329,23 @@ pub(crate) enum TrackKind {
     /// their container atoms to the `cc_data` triple stream
     /// [`Caps::ClosedCaption`](g2g_core::Caps::ClosedCaption) carries.
     ClosedCaption { format: ClosedCaptionFormat },
+}
+
+/// How a QuickTime PCM track's stored samples differ from its graph format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoredPcm {
+    /// AIFF's layout: 8-bit samples signed, wider ones in `big_endian` order.
+    Aiff { big_endian: bool },
+    /// `raw `: unsigned 8-bit, already the graph layout.
+    Unsigned8,
+}
+
+impl StoredPcm {
+    fn to_graph(self, samples: &mut [u8], format: AudioFormat) {
+        if let StoredPcm::Aiff { big_endian } = self {
+            convert_wire_layout(samples, format, big_endian);
+        }
+    }
 }
 
 /// The on-disk timed-text sample format an MP4 text `trak` stores. Distinct from
@@ -705,6 +726,23 @@ fn parse_audio_entry(
                 channels,
                 sample_rate: timescale,
                 config,
+                stored_pcm: None,
+            },
+            None,
+        )));
+    }
+    if let Some(kind) = boxes(entries).find_map(|(fourcc, entry)| quicktime_pcm(fourcc, entry)) {
+        return kind.map(|kind| Some((kind, None)));
+    }
+    if let Some(mp3) = find_box(entries, b".mp3") {
+        let channels = sound_entry_channels(mp3)?;
+        return Ok(Some((
+            TrackKind::Audio {
+                format: AudioFormat::Mp3,
+                channels,
+                sample_rate: timescale,
+                config: Vec::new(),
+                stored_pcm: None,
             },
             None,
         )));
@@ -716,21 +754,11 @@ fn parse_audio_entry(
             let sinf = find_box(children, b"sinf").ok_or(G2gError::CapsMismatch)?;
             (enca, Some(parse_sinf(sinf)?))
         }
-        // a codec we have no reader for (ALAC, PCM, ...): skip the track
+        // a codec we have no reader for (ALAC, ...): skip the track
         (None, None) if boxes(entries).next().is_some() => return Ok(None),
         (None, None) => return Err(G2gError::CapsMismatch),
     };
-    // AudioSampleEntry: channelcount at offset 16, then 28 bytes before the esds.
-    let channels = u16::from_be_bytes(
-        entry
-            .get(16..18)
-            .ok_or(G2gError::CapsMismatch)?
-            .try_into()
-            .expect("2 bytes"),
-    ) as u8;
-    if channels == 0 {
-        return Err(G2gError::CapsMismatch);
-    }
+    let channels = sound_entry_channels(entry)?;
     let children = entry
         .get(sound_entry_children_at(entry)?..)
         .ok_or(G2gError::CapsMismatch)?;
@@ -739,7 +767,16 @@ fn parse_audio_entry(
         .or_else(|| find_path(children, &[b"wave", b"esds"]))
         .ok_or(G2gError::CapsMismatch)?;
     if MPEG_AUDIO_OBJECT_TYPES.contains(&parse_esds_decoder_config(esds)?.0) {
-        return Ok(None);
+        return Ok(Some((
+            TrackKind::Audio {
+                format: AudioFormat::Mp3,
+                channels,
+                sample_rate: timescale,
+                config: Vec::new(),
+                stored_pcm: None,
+            },
+            cenc,
+        )));
     }
     let config = parse_esds(esds)?;
     Ok(Some((
@@ -748,9 +785,72 @@ fn parse_audio_entry(
             channels,
             sample_rate: timescale,
             config,
+            stored_pcm: None,
         },
         cenc,
     )))
+}
+
+// SoundDescription fields, from the entry payload start
+const SOUND_ENTRY_VERSION: core::ops::Range<usize> = 8..10;
+const SOUND_ENTRY_CHANNELS: core::ops::Range<usize> = 16..18;
+const SOUND_ENTRY_SAMPLE_BITS: core::ops::Range<usize> = 18..20;
+// the integer half of the 16.16 sample rate
+const SOUND_ENTRY_SAMPLE_RATE: core::ops::Range<usize> = 24..26;
+// version 2 moves the real channel count, depth and rate into fields of its own
+const SOUND_ENTRY_VERSION_2: u16 = 2;
+
+fn sound_entry_u16(entry: &[u8], field: core::ops::Range<usize>) -> Result<u16, G2gError> {
+    let bytes = entry.get(field).ok_or(G2gError::CapsMismatch)?;
+    Ok(u16::from_be_bytes(bytes.try_into().expect("2 bytes")))
+}
+
+fn sound_entry_channels(entry: &[u8]) -> Result<u8, G2gError> {
+    match u8::try_from(sound_entry_u16(entry, SOUND_ENTRY_CHANNELS)?) {
+        Ok(0) | Err(_) => Err(G2gError::CapsMismatch),
+        Ok(channels) => Ok(channels),
+    }
+}
+
+// a QuickTime PCM sample entry, at its sound description's rate rather than the media timescale
+fn quicktime_pcm(fourcc: &[u8; 4], entry: &[u8]) -> Option<Result<TrackKind, G2gError>> {
+    let bits = sound_entry_u16(entry, SOUND_ENTRY_SAMPLE_BITS).ok()?;
+    let (format, stored_pcm) = quicktime_pcm_format(fourcc, bits)?;
+    let read = || {
+        if sound_entry_u16(entry, SOUND_ENTRY_VERSION)? == SOUND_ENTRY_VERSION_2 {
+            return Err(G2gError::CapsMismatch);
+        }
+        let sample_rate = u32::from(sound_entry_u16(entry, SOUND_ENTRY_SAMPLE_RATE)?);
+        if sample_rate == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        Ok(TrackKind::Audio {
+            format,
+            channels: sound_entry_channels(entry)?,
+            sample_rate,
+            config: Vec::new(),
+            stored_pcm: Some(stored_pcm),
+        })
+    };
+    Some(read())
+}
+
+// QuickTime names its PCM sample entries with AIFC's compression types, except `twos` and `raw `
+fn quicktime_pcm_format(fourcc: &[u8; 4], bits: u16) -> Option<(AudioFormat, StoredPcm)> {
+    const RAW_UNSIGNED_BITS: u16 = 8;
+    const RAW_BIG_ENDIAN_BITS: u16 = 16;
+    let aiff = |compression: [u8; 4]| {
+        let (format, big_endian) = audio_from_comm(bits, Some(compression))?;
+        Some((format, StoredPcm::Aiff { big_endian }))
+    };
+    match fourcc {
+        b"raw " if bits == RAW_UNSIGNED_BITS => Some((AudioFormat::PcmU8, StoredPcm::Unsigned8)),
+        // AIFC's `NONE` is signed big-endian
+        b"raw " if bits == RAW_BIG_ENDIAN_BITS => aiff(*b"NONE"),
+        b"twos" => aiff(*b"NONE"),
+        b"sowt" | b"alaw" | b"ulaw" => aiff(*fourcc),
+        _ => None,
+    }
 }
 
 // esds objectTypeIndication of MPEG-2 and MPEG-1 audio (MP3) in an `mp4a` entry
@@ -1124,6 +1224,15 @@ pub(crate) fn parse_fragments_multi(
                 (annexb, kf)
             }
             // Audio access units are stored verbatim; each is a sync point.
+            TrackKind::Audio {
+                format,
+                stored_pcm: Some(stored),
+                ..
+            } => {
+                let mut samples = bytes.into_owned();
+                stored.to_graph(&mut samples, *format);
+                (samples, true)
+            }
             TrackKind::Audio { .. } => (bytes.into_owned(), true),
             // A caption sample de-frames to the cc_data triple stream.
             TrackKind::ClosedCaption { format } => (deframe_cc(&bytes, *format), true),
@@ -1235,6 +1344,15 @@ enum SampleFraming {
     Tx3gText,
     WvttText,
     ClosedCaption(ClosedCaptionFormat),
+    Pcm(PcmFraming),
+}
+
+// a QuickTime PCM track stores one frame per sample, whatever size its stsz gives
+#[derive(Debug, Clone, Copy)]
+struct PcmFraming {
+    format: AudioFormat,
+    frame_bytes: usize,
+    stored: StoredPcm,
 }
 
 impl SampleFraming {
@@ -1243,6 +1361,19 @@ impl SampleFraming {
         match kind {
             TrackKind::Video { codec, .. } if length_prefixed(*codec) => SampleFraming::Video,
             TrackKind::Video { .. } => SampleFraming::PassThrough,
+            TrackKind::Audio {
+                format,
+                channels,
+                stored_pcm: Some(stored),
+                ..
+            } => match format.bytes_per_sample() {
+                Some(width) => SampleFraming::Pcm(PcmFraming {
+                    format: *format,
+                    frame_bytes: width * usize::from(*channels),
+                    stored: *stored,
+                }),
+                None => SampleFraming::PassThrough,
+            },
             TrackKind::Audio { .. } => SampleFraming::PassThrough,
             TrackKind::Text { sample, .. } => Self::of_text(*sample),
             TrackKind::ClosedCaption { format } => SampleFraming::ClosedCaption(*format),
@@ -1283,7 +1414,10 @@ fn parse_progressive_track(
     if sample_count > data.len() {
         return Err(G2gError::CapsMismatch);
     }
-    let sizes: Vec<u32> = if default_size != 0 {
+    let sizes: Vec<u32> = if let SampleFraming::Pcm(pcm) = framing {
+        let frame_bytes = u32::try_from(pcm.frame_bytes).map_err(|_| G2gError::CapsMismatch)?;
+        alloc::vec![frame_bytes; sample_count]
+    } else if default_size != 0 {
         alloc::vec![default_size; sample_count]
     } else {
         (0..sample_count)
@@ -1333,6 +1467,8 @@ fn parse_progressive_track(
     // contiguous, so offset advances by the running sample size.
     let mut sample_offsets: Vec<u64> = Vec::with_capacity(sample_count);
     let mut sample_descriptions: Vec<u32> = Vec::with_capacity(sample_count);
+    // (file offset, sample count) of each chunk
+    let mut chunks: Vec<(u64, usize)> = Vec::with_capacity(chunk_offsets.len());
     let mut si = 0usize;
     // Chunks ascend, so the stsc cursor only moves forward.
     let mut next_entry = 0usize;
@@ -1352,6 +1488,7 @@ fn parse_progressive_track(
             next_entry += 1;
         }
         let mut at = chunk_off;
+        chunks.push((chunk_off, 0));
         for _ in 0..spc {
             if si >= sample_count {
                 break 'chunks;
@@ -1360,10 +1497,16 @@ fn parse_progressive_track(
             sample_descriptions.push(description);
             at = at.saturating_add(sizes[si] as u64);
             si += 1;
+            if let Some((_, count)) = chunks.last_mut() {
+                *count += 1;
+            }
         }
     }
     if sample_offsets.len() != sample_count {
         return Err(G2gError::CapsMismatch); // stsc/stco disagree with stsz
+    }
+    if let SampleFraming::Pcm(pcm) = framing {
+        return Ok(pcm_chunk_samples(data, &chunks, &durations, timescale, pcm));
     }
 
     // stss: 1-based sync-sample numbers (ascending). Absent => every sample is a
@@ -1421,6 +1564,7 @@ fn parse_progressive_track(
             SampleFraming::Tx3gText => deframe_tx3g(raw),
             SampleFraming::WvttText => deframe_wvtt(raw),
             SampleFraming::ClosedCaption(format) => deframe_cc(raw, format),
+            SampleFraming::Pcm(_) => unreachable!("PCM tracks return per chunk above"),
         };
         samples.push(Sample {
             annexb,
@@ -1432,6 +1576,51 @@ fn parse_progressive_track(
         dts = dts.saturating_add(durations[i] as u64);
     }
     Ok(samples)
+}
+
+// one sample per chunk of PCM frames, cut at the last whole frame of a truncated file
+fn pcm_chunk_samples(
+    data: &[u8],
+    chunks: &[(u64, usize)],
+    durations: &[u32],
+    timescale: u32,
+    pcm: PcmFraming,
+) -> Vec<Sample> {
+    let mut samples = Vec::with_capacity(chunks.len());
+    let mut first_frame = 0usize;
+    let mut dts: u64 = 0;
+    for &(offset, frames) in chunks {
+        if frames == 0 {
+            continue;
+        }
+        let stored = usize::try_from(offset)
+            .ok()
+            .and_then(|offset| data.get(offset..))
+            .unwrap_or_default();
+        let whole_frames = frames.min(stored.len() / pcm.frame_bytes);
+        if whole_frames == 0 {
+            break;
+        }
+        let mut bytes = stored[..whole_frames * pcm.frame_bytes].to_vec();
+        pcm.stored.to_graph(&mut bytes, pcm.format);
+        let duration: u64 = durations[first_frame..first_frame + whole_frames]
+            .iter()
+            .map(|&ticks| u64::from(ticks))
+            .sum();
+        samples.push(Sample {
+            annexb: bytes,
+            pts_ns: ticks_to_ns(dts, timescale),
+            dts_ns: ticks_to_ns(dts, timescale),
+            duration_ns: ticks_to_ns(duration, timescale),
+            keyframe: true,
+        });
+        if whole_frames < frames {
+            break;
+        }
+        first_frame += frames;
+        dts = dts.saturating_add(duration);
+    }
+    samples
 }
 
 // stsc numbers sample descriptions from 1, and the demuxers prepend the first one's sets
@@ -2619,6 +2808,7 @@ mod tests {
                 channels,
                 sample_rate,
                 config: got,
+                ..
             } => {
                 assert_eq!(*format, AudioFormat::Aac);
                 assert_eq!(*channels, 2);
