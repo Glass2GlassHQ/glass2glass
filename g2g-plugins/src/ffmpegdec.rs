@@ -258,7 +258,11 @@ impl OutputFormat {
 fn resolve_output_format(requested: OutputFormat, src: Pixel) -> Result<OutputFormat, G2gError> {
     match requested {
         OutputFormat::Auto => match src {
-            Pixel::YUV420P | Pixel::YUVJ420P | Pixel::NV12 => Ok(OutputFormat::I420),
+            // YUVA420P (VP6 with alpha) drops its alpha plane: no raw format
+            // carries one.
+            Pixel::YUV420P | Pixel::YUVJ420P | Pixel::YUVA420P | Pixel::NV12 => {
+                Ok(OutputFormat::I420)
+            }
             Pixel::YUV422P | Pixel::YUVJ422P => Ok(OutputFormat::I422),
             Pixel::YUV444P | Pixel::YUVJ444P => Ok(OutputFormat::I444),
             // high bit depth: preserve chroma and depth (LE 2-byte samples)
@@ -1103,7 +1107,8 @@ impl FfmpegVideoDec {
     }
 
     /// Open the libavcodec decoder, optionally seeding it with `extradata`
-    /// (Annex-B parameter sets from the first access unit). libavcodec parses
+    /// (Annex-B parameter sets from the first access unit, or the dimension
+    /// byte leading a VP6 unit). libavcodec parses
     /// extradata at open and derives the reorder depth (`has_b_frames`) from the
     /// SPS, so the decoder buffers the opening GOP's leading pictures instead of
     /// emitting the first IDR early and discarding them. Called lazily on the
@@ -1677,14 +1682,19 @@ impl AsyncElement for FfmpegVideoDec {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    let codec_kind = self.codec_kind.ok_or(G2gError::NotConfigured)?;
+                    let (dimension_byte, au) =
+                        slice.split_at(vp6_dimension_byte_len(codec_kind).min(slice.len()));
                     // Open the decoder on the first access unit, seeding it with
                     // the unit's parameter sets (extradata) and its output-reorder
                     // depth so libavcodec keeps the opening GOP's leading pictures
                     // instead of dropping them (see `open_decoder`).
                     if self.decoder.is_none() {
-                        let codec_kind = self.codec_kind.ok_or(G2gError::NotConfigured)?;
-                        let au = slice;
-                        let extradata = annexb_extradata(codec_kind, au);
+                        let extradata = if dimension_byte.is_empty() {
+                            annexb_extradata(codec_kind, au)
+                        } else {
+                            Some(dimension_byte.to_vec())
+                        };
                         let reorder = match codec_kind {
                             VideoCodec::H264 => crate::h264parse::sps_reorder_frames(au),
                             _ => None,
@@ -1705,7 +1715,7 @@ impl AsyncElement for FfmpegVideoDec {
                     #[cfg(feature = "offload")]
                     {
                         let cfg = self.decode_config();
-                        let packet = Packet::copy(slice);
+                        let packet = Packet::copy(au);
                         let pts_ns = frame.timing.pts_ns;
                         let input = InputStamp {
                             arrival_ns: frame.timing.arrival_ns,
@@ -1750,7 +1760,7 @@ impl AsyncElement for FfmpegVideoDec {
                     #[cfg(not(feature = "offload"))]
                     {
                         undecodable = self.feed_access_unit(
-                            Packet::copy(slice),
+                            Packet::copy(au),
                             frame.timing.pts_ns,
                             InputStamp {
                                 arrival_ns: frame.timing.arrival_ns,
@@ -2033,6 +2043,15 @@ fn annexb_extradata(codec: VideoCodec, au: &[u8]) -> Option<Vec<u8>> {
         out.extend_from_slice(ns);
     }
     Some(out)
+}
+
+// FLV leads each VP6 unit with one byte of width and height adjustment, which
+// libavcodec reads from extradata rather than from the packet.
+fn vp6_dimension_byte_len(codec: VideoCodec) -> usize {
+    match codec {
+        VideoCodec::Vp6 { .. } => 1,
+        _ => 0,
+    }
 }
 
 fn codec_id(codec: VideoCodec) -> Id {
@@ -2420,7 +2439,8 @@ fn copy_yuv(
     let src = match frame.format() {
         // YUVJ*P is the JPEG (full) range sibling; same plane layout, so accept
         // it (range fidelity is preserved in the pixel values).
-        Pixel::YUV420P | Pixel::YUVJ420P => SourceLayout::Planar420,
+        // YUVA420P's alpha is a fourth plane after the three read here.
+        Pixel::YUV420P | Pixel::YUVJ420P | Pixel::YUVA420P => SourceLayout::Planar420,
         Pixel::NV12 => SourceLayout::SemiPlanar420,
         Pixel::YUV422P | Pixel::YUVJ422P => SourceLayout::Planar422,
         Pixel::YUV444P | Pixel::YUVJ444P => SourceLayout::Planar444,

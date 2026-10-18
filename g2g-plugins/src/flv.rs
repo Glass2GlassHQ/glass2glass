@@ -17,8 +17,8 @@
 //! `AudioSpecificConfig`) are retained as the codec-config side channel
 //! ([`FlvDemuxer::video_config`] / [`FlvDemuxer::audio_config`], M662) rather
 //! than emitted as units, so the element can convert the AVCC media frames to a
-//! self-describing elementary stream; VP6's one-byte dimension adjustment rides
-//! the same channel (it is what libavcodec wants as extradata). The `onMetaData`
+//! self-describing elementary stream. VP6's one-byte dimension adjustment stays
+//! at the front of each unit, so a remux writes it back unchanged. The `onMetaData`
 //! script tag's body is retained ([`FlvDemuxer::metadata`]) so the element can
 //! surface its AMF0 metadata via the tag system.
 
@@ -115,16 +115,19 @@ impl FlvCodec {
 }
 
 /// Bytes between a tag's first byte and the access unit, per codec. H.264 spends
-/// 4 (packet type + 24-bit composition offset); VP6 and VP6-alpha spend 1 (the
-/// dimension adjustment nibbles, which libavcodec takes as extradata; VP6-alpha's
-/// 24-bit offset to the alpha plane stays in the payload, where its decoder reads
-/// it); AAC spends 1 (the packet type); the rest none.
+/// 4 (packet type + 24-bit composition offset); AAC spends 1 (the packet type);
+/// the rest none. VP6 and VP6-alpha units start with the dimension adjustment
+/// byte, which the decoder splits off as extradata (VP6-alpha's 24-bit offset to
+/// the alpha plane follows it, where its decoder reads it).
 fn payload_offset(codec: FlvCodec) -> usize {
     match codec {
         FlvCodec::H264 => 4,
-        FlvCodec::Vp6 | FlvCodec::Vp6Alpha => 1,
         FlvCodec::Aac => 1,
-        FlvCodec::SorensonH263 | FlvCodec::Mp3 | FlvCodec::Speex => 0,
+        FlvCodec::SorensonH263
+        | FlvCodec::Vp6
+        | FlvCodec::Vp6Alpha
+        | FlvCodec::Mp3
+        | FlvCodec::Speex => 0,
     }
 }
 
@@ -368,15 +371,6 @@ impl FlvDemuxer {
                 }
             } else if let Some(unit) = parse_tag(tag_type, timestamp, body) {
                 let first = body.first().copied().unwrap_or(0);
-                // VP6's dimension-adjustment byte is the codec config libavcodec
-                // wants as extradata, so it rides the same side channel as the
-                // avcC record rather than the payload.
-                if matches!(unit.codec, FlvCodec::Vp6 | FlvCodec::Vp6Alpha)
-                    && self.video_config.is_none()
-                    && video_config.is_none()
-                {
-                    video_config = body.get(1..2).map(<[u8]>::to_vec);
-                }
                 if audio_params.is_none() && self.audio_params.is_none() {
                     audio_params = audio_tag_params(unit.codec, first);
                 }
@@ -542,7 +536,8 @@ impl FlvMuxer {
     /// `cts_ms` the signed composition-time offset (`pts - dts`), so a B-frame
     /// H.264 stream's presentation times survive the mux (the demuxer's `pts =
     /// dts + cts` inverse); an I/P stream passes 0. H.264 takes an AVCC access
-    /// unit, the other codecs their own bitstream frame.
+    /// unit, VP6 its dimension byte then the frame, the other codecs their own
+    /// bitstream frame.
     pub fn push_video(&mut self, au: &[u8], dts_ms: u32, cts_ms: i32, keyframe: bool) -> Vec<u8> {
         let mut out = Vec::new();
         self.write_header(&mut out);
@@ -551,19 +546,12 @@ impl FlvMuxer {
         let frame_type = if keyframe { 1u8 } else { 2u8 };
         // The tag body: these codec header bytes, then the access unit.
         let mut body = alloc::vec![(frame_type << 4) | codec.tag_id()];
-        match codec {
-            FlvCodec::H264 => {
-                // AVC packet type 1 (NALU), then the two's-complement 24-bit
-                // composition-time offset.
-                let cts = (cts_ms.clamp(-(1 << 23), (1 << 23) - 1) as u32) & 0x00FF_FFFF;
-                body.push(0x01);
-                body.extend_from_slice(&[(cts >> 16) as u8, (cts >> 8) as u8, cts as u8]);
-            }
-            // The dimension-adjustment byte the VP6 decoder takes as extradata.
-            FlvCodec::Vp6 | FlvCodec::Vp6Alpha => {
-                body.push(self.video_config.first().copied().unwrap_or(0))
-            }
-            _ => {}
+        if codec == FlvCodec::H264 {
+            // AVC packet type 1 (NALU), then the two's-complement 24-bit
+            // composition-time offset.
+            let cts = (cts_ms.clamp(-(1 << 23), (1 << 23) - 1) as u32) & 0x00FF_FFFF;
+            body.push(0x01);
+            body.extend_from_slice(&[(cts >> 16) as u8, (cts >> 8) as u8, cts as u8]);
         }
         self.emit_tag(&mut out, TAG_VIDEO, dts_ms, &[&body, au]);
         out
@@ -607,7 +595,7 @@ impl FlvMuxer {
         }
         // Sequence headers (AVC packet type 0 / AAC packet type 0) carry the
         // decoder config a player needs before the media frames. Only H.264 and
-        // AAC have one: VP6's config byte rides each media tag instead.
+        // AAC have one: VP6's dimension byte leads each media unit instead.
         if self.video == Some(FlvCodec::H264) && !self.video_config.is_empty() {
             let config = self.video_config.clone();
             self.emit_tag(
@@ -710,6 +698,10 @@ fn parse_tag(tag_type: u8, timestamp: u32, body: &[u8]) -> Option<FlvUnit> {
     // config, kept as the side channel by `sequence_header`, 2 an end-of-sequence
     // marker, and only 1 is a media frame.
     if matches!(codec, FlvCodec::H264 | FlvCodec::Aac) && *body.get(1)? != 1 {
+        return None;
+    }
+    // A VP6 unit without its dimension byte has nothing to decode.
+    if matches!(codec, FlvCodec::Vp6 | FlvCodec::Vp6Alpha) && body.len() < 2 {
         return None;
     }
     // The tag timestamp is the decode time; H.264's signed 24-bit composition
@@ -1108,9 +1100,9 @@ mod tests {
 
     #[test]
     fn demuxes_the_legacy_codecs_at_their_payload_offsets() {
-        // Sorenson (id 2) and MP3 (format 2) start their payload right after the
-        // first byte; VP6 (id 4) and VP6-alpha (id 5) spend one more on the
-        // dimension adjustment, and Speex (format 11) none.
+        // Sorenson (id 2), VP6 (id 4), VP6-alpha (id 5), MP3 (format 2) and
+        // Speex (format 11) start their payload right after the first byte; VP6
+        // keeps its dimension adjustment byte at the front of the unit.
         let sorenson = vec![0x12u8, 0xAA, 0xBB];
         let vp6 = vec![0x14u8, 0x22, 0xCC, 0xDD];
         let vp6a = vec![0x25u8, 0x22, 0x00, 0x00, 0x02, 0xEE];
@@ -1132,9 +1124,9 @@ mod tests {
             got,
             vec![
                 (FlvCodec::SorensonH263, vec![0xAA, 0xBB]),
-                (FlvCodec::Vp6, vec![0xCC, 0xDD]),
+                (FlvCodec::Vp6, vec![0x22, 0xCC, 0xDD]),
                 // The 24-bit alpha offset stays in the payload: its decoder reads it.
-                (FlvCodec::Vp6Alpha, vec![0x00, 0x00, 0x02, 0xEE]),
+                (FlvCodec::Vp6Alpha, vec![0x22, 0x00, 0x00, 0x02, 0xEE]),
                 (FlvCodec::Mp3, vec![0x11, 0x22]),
                 (FlvCodec::Speex, vec![0x33]),
             ]
@@ -1142,11 +1134,7 @@ mod tests {
         assert!(units[0].keyframe, "frame type 1 is a keyframe");
         assert!(!units[2].keyframe, "frame type 2 is an interframe");
         assert_eq!(units[3].track(), FlvTrack::Audio);
-        assert_eq!(
-            d.video_config(),
-            Some(&[0x22u8][..]),
-            "the VP6 adjustment byte is the video config side channel"
-        );
+        assert_eq!(d.video_config(), None, "VP6 has no sequence header");
         assert_eq!(
             d.audio_params(),
             Some((2, 44_100)),
@@ -1168,15 +1156,10 @@ mod tests {
 
     #[test]
     fn legacy_codecs_round_trip_through_the_muxer() {
-        // Each codec's mux -> demux recovers the payload byte for byte, and the
-        // VP6 adjustment travels via the config side channel.
-        for (codec, config) in [
-            (FlvCodec::SorensonH263, Vec::new()),
-            (FlvCodec::Vp6, vec![0x22u8]),
-            (FlvCodec::Vp6Alpha, vec![0x22u8]),
-        ] {
+        // Each codec's mux -> demux recovers the payload byte for byte, the
+        // leading VP6 dimension byte included.
+        for codec in [FlvCodec::SorensonH263, FlvCodec::Vp6, FlvCodec::Vp6Alpha] {
             let mut mux = FlvMuxer::new(codec);
-            mux.set_video_config(config.clone());
             let mut stream = mux.push_video(&[0xAA, 0xBB], 0, 0, true);
             stream.extend_from_slice(&mux.push_video(&[0xCC], 40, 0, false));
 
@@ -1189,7 +1172,6 @@ mod tests {
             assert!(units[0].keyframe);
             assert_eq!((units[1].data.clone(), units[1].dts_ms), (vec![0xCC], 40));
             assert!(!units[1].keyframe);
-            assert_eq!(d.video_config().unwrap_or_default(), &config[..]);
         }
 
         for (codec, channels, rate) in [

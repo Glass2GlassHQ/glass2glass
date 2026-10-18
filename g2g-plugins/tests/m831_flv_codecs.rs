@@ -464,7 +464,8 @@ async fn vp6_carriage_probes_as_vp6f_and_round_trips() {
     }
     // No ffmpeg build encodes VP6, so this proves the carriage rather than the
     // pixels: g2g writes VP6 tags, ffprobe names the codec, and the demuxer
-    // recovers the payload past the dimension-adjustment byte.
+    // recovers the payload, its leading dimension-adjustment byte included.
+    let dimension_byte_len = 1;
     let aus: Vec<Vec<u8>> = (0..10u8)
         .map(|i| (0..64u8).map(|b| b.wrapping_mul(i.max(1))).collect())
         .collect();
@@ -482,8 +483,10 @@ async fn vp6_carriage_probes_as_vp6f_and_round_trips() {
         );
         assert_eq!(
             ffprobe_packet_sizes(&out, "v:0"),
-            aus.iter().map(|a| a.len()).collect::<Vec<_>>(),
-            "ffmpeg's demuxer strips exactly the bytes g2g wrote as the header"
+            aus.iter()
+                .map(|a| a.len() - dimension_byte_len)
+                .collect::<Vec<_>>(),
+            "ffmpeg's demuxer takes the leading dimension byte as extradata"
         );
 
         let back = demux(&flv, stream).await;

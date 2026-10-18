@@ -340,7 +340,8 @@ impl FlvDemux {
                     }
                     annexb
                 }
-                // Sorenson and VP6 frames are already the codec's own bitstream.
+                // Sorenson frames are already the codec's own bitstream, and VP6
+                // frames keep their leading dimension byte for the decoder.
                 FlvCodec::SorensonH263 | FlvCodec::Vp6 | FlvCodec::Vp6Alpha => u.data,
                 FlvCodec::Aac | FlvCodec::Mp3 | FlvCodec::Speex => {
                     // Announce the concrete channel layout / sample rate once,
