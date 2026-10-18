@@ -1273,26 +1273,33 @@ fn parse_progressive_track(
     if stsc_n == 0 {
         return Err(G2gError::CapsMismatch);
     }
-    let stsc_entry = |i: usize| -> Result<(u32, u32), G2gError> {
-        Ok((be32(stsc, 8 + i * 12)?, be32(stsc, 12 + i * 12)?))
+    let stsc_entry = |i: usize| -> Result<(u32, u32, u32), G2gError> {
+        Ok((
+            be32(stsc, 8 + i * 12)?,
+            be32(stsc, 12 + i * 12)?,
+            be32(stsc, 16 + i * 12)?,
+        ))
     };
     // Place each sample at its file offset: within a chunk samples are
     // contiguous, so offset advances by the running sample size.
     let mut sample_offsets: Vec<u64> = Vec::with_capacity(sample_count);
+    let mut sample_descriptions: Vec<u32> = Vec::with_capacity(sample_count);
     let mut si = 0usize;
     // Chunks ascend, so the stsc cursor only moves forward.
     let mut next_entry = 0usize;
     let mut spc = 0u32;
+    let mut description = FIRST_SAMPLE_DESCRIPTION;
     'chunks: for (ci, &chunk_off) in chunk_offsets.iter().enumerate() {
         // The samples-per-chunk for this chunk is the last stsc entry whose
         // (1-based) first_chunk does not exceed it.
         let chunk_1based = (ci + 1) as u32;
         while next_entry < stsc_n {
-            let (first_chunk, samples_per_chunk) = stsc_entry(next_entry)?;
+            let (first_chunk, samples_per_chunk, sample_description) = stsc_entry(next_entry)?;
             if first_chunk > chunk_1based {
                 break;
             }
             spc = samples_per_chunk;
+            description = sample_description;
             next_entry += 1;
         }
         let mut at = chunk_off;
@@ -1301,6 +1308,7 @@ fn parse_progressive_track(
                 break 'chunks;
             }
             sample_offsets.push(at);
+            sample_descriptions.push(description);
             at = at.saturating_add(sizes[si] as u64);
             si += 1;
         }
@@ -1322,6 +1330,12 @@ fn parse_progressive_track(
         None => None,
     };
 
+    // a sample description switch carries its own parameter sets, so they go in-band
+    let description_param_sets = match framing {
+        SampleFraming::Video => video_entry_param_sets(stbl)?,
+        _ => Vec::new(),
+    };
+    let mut previous_description = FIRST_SAMPLE_DESCRIPTION;
     let mut samples = Vec::with_capacity(sample_count);
     let mut dts: u64 = 0;
     for i in 0..sample_count {
@@ -1342,7 +1356,18 @@ fn parse_progressive_track(
             None => true,
         };
         let annexb = match framing {
-            SampleFraming::Video => avcc_to_annexb(raw)?,
+            SampleFraming::Video => {
+                let annexb = avcc_to_annexb(raw)?;
+                let description = sample_descriptions[i];
+                let switched = description != previous_description;
+                previous_description = description;
+                match description_param_sets.get(description.wrapping_sub(1) as usize) {
+                    Some(Some((codec, sets))) if switched => {
+                        prepend_param_sets(&annexb, sets, *codec)
+                    }
+                    _ => annexb,
+                }
+            }
             SampleFraming::PassThrough => raw.to_vec(),
             SampleFraming::Tx3gText => deframe_tx3g(raw),
             SampleFraming::WvttText => deframe_wvtt(raw),
@@ -1358,6 +1383,35 @@ fn parse_progressive_track(
         dts = dts.saturating_add(durations[i] as u64);
     }
     Ok(samples)
+}
+
+// stsc numbers sample descriptions from 1, and the demuxers prepend the first one's sets
+const FIRST_SAMPLE_DESCRIPTION: u32 = 1;
+
+// one sample entry's codec and config-record parameter sets
+type EntryParamSets = (VideoCodec, Vec<Vec<u8>>);
+
+// the parameter sets of each H.264 / H.265 sample entry, in stsd order
+fn video_entry_param_sets(stbl: &[u8]) -> Result<Vec<Option<EntryParamSets>>, G2gError> {
+    let Some(entries) = find_box(stbl, b"stsd").and_then(|stsd| stsd.get(8..)) else {
+        return Ok(Vec::new());
+    };
+    boxes(entries)
+        .map(|(kind, entry)| {
+            let children = entry.get(78..).unwrap_or_default();
+            Ok(match kind {
+                b"avc1" | b"avc3" => match find_box(children, b"avcC") {
+                    Some(avcc) => Some((VideoCodec::H264, parse_avcc(avcc)?.parameter_sets)),
+                    None => None,
+                },
+                b"hvc1" | b"hev1" => match find_box(children, b"hvcC") {
+                    Some(hvcc) => Some((VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets)),
+                    None => None,
+                },
+                _ => None,
+            })
+        })
+        .collect()
 }
 
 /// Parse a progressive (`moov`+`mdat`, no `moof`) multi-track file: every A/V /

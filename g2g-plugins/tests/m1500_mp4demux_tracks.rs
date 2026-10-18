@@ -1,9 +1,11 @@
 #![cfg(feature = "std")]
 
-use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{AsyncElement, ByteStreamEncoding, Caps, G2gError, OutputSink, PushOutcome};
-use g2g_plugins::mp4demux::Mp4Demux;
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+#[path = "common/mp4_demux.rs"]
+mod mp4_demux;
+use g2g_core::Caps;
+use mp4_demux::demux;
 
 const FRAGMENTED_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -19,61 +21,7 @@ const AV_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/av_h264_aac.mp4"
 );
-const READ_CHUNK_LEN: usize = 4096;
 const BOX_HEADER_LEN: usize = 8;
-
-#[derive(Default)]
-struct Collect {
-    caps: Vec<Caps>,
-    frames: Vec<Vec<u8>>,
-}
-
-impl OutputSink for Collect {
-    fn poll_push(
-        &mut self,
-        _cx: &mut core::task::Context<'_>,
-        packet_slot: &mut Option<PipelinePacket>,
-    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-        match packet_slot.take() {
-            Some(PipelinePacket::CapsChanged(caps)) => self.caps.push(caps),
-            Some(PipelinePacket::DataFrame(frame)) => self.frames.push(
-                frame
-                    .domain
-                    .require_system_slice("test")
-                    .expect("system frame")
-                    .to_vec(),
-            ),
-            _ => {}
-        }
-        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-    }
-}
-
-async fn demux(file: &[u8]) -> Collect {
-    let mut demux = Mp4Demux::new();
-    demux
-        .configure_pipeline(&Caps::ByteStream {
-            encoding: ByteStreamEncoding::Mp4,
-        })
-        .expect("configure");
-    let mut sink = Collect::default();
-    for chunk in file.chunks(READ_CHUNK_LEN) {
-        let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(chunk.to_vec().into_boxed_slice())),
-            FrameTiming::default(),
-            0,
-        );
-        demux
-            .process(PipelinePacket::DataFrame(frame), &mut sink)
-            .await
-            .expect("demux");
-    }
-    demux
-        .process(PipelinePacket::Eos, &mut sink)
-        .await
-        .expect("eos");
-    sink
-}
 
 // (offset, size, type) of each box laid out back to back in `data`
 fn boxes(data: &[u8]) -> Vec<(usize, usize, [u8; 4])> {

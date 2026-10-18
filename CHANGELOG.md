@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1501: mp4 demuxers put a new sample description's parameter sets in-band where the track switches to it.
 - M1500: the single-output `qtdemux` reads fragmented, truncated and version 1 files, the video track behind an audio track, and VP8 / MJPEG.
 - M1481: the single-output `qtdemux` offers every mp4 video codec at negotiation, so `qtdemux ! h265parse` builds without `stream=h265`.
 - M1480: `mpegtsmux` carries Opus as a private PES with the Opus descriptors and control headers.
