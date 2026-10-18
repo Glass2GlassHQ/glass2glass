@@ -34,7 +34,9 @@ use crate::riff::{
     read_u16, read_u32, Chunk, FourCc, CHUNK_HEADER_LEN, FOURCC_LEN, LIST_FOURCC, RIFF_FOURCC,
     RIFF_HEADER_LEN,
 };
-use crate::waveformat::{audio_format, sample_frame_len, wave_format_tag, WaveFormatEx};
+use crate::waveformat::{
+    audio_format, format_tag_name, sample_frame_len, wave_format_tag, WaveFormatEx,
+};
 
 /// The form type of the first `RIFF` list.
 const AVI_FOURCC: FourCc = *b"AVI ";
@@ -279,6 +281,7 @@ fn parse_strl(data: &[u8], range: core::ops::Range<usize>) -> Option<AviStream> 
     let stream_type = read_fourcc(strh, STRH_TYPE)?;
     let kind = match stream_type {
         STREAM_TYPE_VIDEO => parse_video_format(strh, strf),
+        STREAM_TYPE_AUDIO if read_fourcc(strh, STRH_HANDLER) == Some(XAN_DPCM_HANDLER) => None,
         STREAM_TYPE_AUDIO => parse_audio_format(strf),
         _ => None,
     };
@@ -296,23 +299,36 @@ fn parse_strl(data: &[u8], range: core::ops::Range<usize>) -> Option<AviStream> 
     })
 }
 
+// Wing Commander IV audio: Xan DPCM behind a PCM format tag, told apart only by the handler
+const XAN_DPCM_HANDLER: FourCc = *b"Axan";
+
 fn unsupported_codec_name(stream_type: FourCc, strh: &[u8], strf: &[u8]) -> Option<String> {
+    let handler = read_fourcc(strh, STRH_HANDLER);
     match stream_type {
-        STREAM_TYPE_VIDEO => {
-            let compression = read_fourcc(strf, BITMAPINFO_COMPRESSION)
-                .or_else(|| read_fourcc(strh, STRH_HANDLER))?;
-            let name: String = compression
-                .iter()
-                .filter(|byte| byte.is_ascii_graphic())
-                .map(|&byte| char::from(byte))
-                .collect();
-            (!name.is_empty()).then_some(name)
+        // a numeric biCompression such as BI_RLE8 has no printable fourcc
+        STREAM_TYPE_VIDEO => [read_fourcc(strf, BITMAPINFO_COMPRESSION), handler]
+            .into_iter()
+            .flatten()
+            .find_map(|fourcc| printable_fourcc(&fourcc))
+            .or_else(|| {
+                read_u32(strf, BITMAPINFO_COMPRESSION)
+                    .map(|compression| alloc::format!("video compression {compression:#x}"))
+            }),
+        STREAM_TYPE_AUDIO if handler == Some(XAN_DPCM_HANDLER) => {
+            printable_fourcc(&XAN_DPCM_HANDLER)
         }
-        STREAM_TYPE_AUDIO => {
-            read_u16(strf, WAVEFORMAT_TAG).map(|tag| alloc::format!("audio format tag {tag:#06x}"))
-        }
+        STREAM_TYPE_AUDIO => read_u16(strf, WAVEFORMAT_TAG).map(format_tag_name),
         _ => None,
     }
+}
+
+fn printable_fourcc(fourcc: &FourCc) -> Option<String> {
+    let name: String = fourcc
+        .iter()
+        .filter(|byte| byte.is_ascii_graphic())
+        .map(|&byte| char::from(byte))
+        .collect();
+    (!name.is_empty()).then_some(name)
 }
 
 /// A video stream's geometry and codec from its `BITMAPINFOHEADER`, plus the

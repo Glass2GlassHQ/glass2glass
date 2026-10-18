@@ -146,7 +146,7 @@ pub(crate) fn real_caps(kind: &TrackKind) -> Caps {
 
 // ADTS synthesis moved to the ungated `aacparse` module (M662, the no_std FLV
 // demuxer shares it); imported so this module's uses keep reading the same.
-use crate::aacparse::{is_raw_aac_config, require_adts};
+use crate::aacparse::{is_raw_aac_config, require_adts, unframable_object_type};
 use crate::avidemux::is_pcm;
 use g2g_core::log::short_type_name;
 
@@ -170,6 +170,7 @@ pub fn forwardable_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
                         TrackKind::Text { .. } | TrackKind::ClosedCaption { .. }
                     )
                 })
+                .filter(|t| unframable_aac_object_type(&t.kind).is_none())
                 .map(|t| {
                     let (caps, video) = nego_caps(&t.kind);
                     let config = match &t.kind {
@@ -185,12 +186,50 @@ pub fn forwardable_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
         .unwrap_or_default()
 }
 
+fn unframable_aac_object_type(kind: &TrackKind) -> Option<u32> {
+    match kind {
+        TrackKind::Audio {
+            format: AudioFormat::Aac,
+            config,
+            ..
+        } => unframable_object_type(config),
+        _ => None,
+    }
+}
+
+// the streams a bare `decodebin` plugs: it has no way to take a content key, so an encrypted track is left out
+pub fn decodable_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
+    let encrypted: Vec<u32> = parse_all_tracks(data)
+        .map(|tracks| {
+            tracks
+                .iter()
+                .filter(|track| track.cenc.is_some())
+                .map(|track| track.track_id)
+                .collect()
+        })
+        .unwrap_or_default();
+    forwardable_streams(data)
+        .into_iter()
+        .filter(|stream| !encrypted.contains(&stream.track_id))
+        .collect()
+}
+
 pub fn unsupported_sample_entries(data: &[u8]) -> Vec<alloc::string::String> {
     use crate::mp4box::{be32, boxes, find_box, find_path};
-    let forwarded: Vec<u32> = forwardable_streams(data)
+    let forwarded: Vec<u32> = decodable_streams(data)
         .iter()
         .map(|stream| stream.track_id)
         .collect();
+    let unframable_aac: Vec<(u32, u32)> = parse_all_tracks(data)
+        .map(|tracks| {
+            tracks
+                .iter()
+                .filter_map(|track| {
+                    Some((track.track_id, unframable_aac_object_type(&track.kind)?))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let Some(moov) = find_box(data, b"moov") else {
         return Vec::new();
     };
@@ -202,8 +241,12 @@ pub fn unsupported_sample_entries(data: &[u8]) -> Vec<alloc::string::String> {
                 0 => TKHD_V0_TRACK_ID,
                 _ => TKHD_V1_TRACK_ID,
             };
-            if forwarded.contains(&be32(tkhd, track_id_offset).ok()?) {
+            let track_id = be32(tkhd, track_id_offset).ok()?;
+            if forwarded.contains(&track_id) {
                 return None;
+            }
+            if let Some((_, object_type)) = unframable_aac.iter().find(|(id, _)| *id == track_id) {
+                return Some(alloc::format!("mp4a audio object type {object_type}"));
             }
             let mdia = find_box(trak, b"mdia")?;
             let handler = find_box(mdia, b"hdlr")?.get(HDLR_HANDLER_TYPE)?;
@@ -212,7 +255,12 @@ pub fn unsupported_sample_entries(data: &[u8]) -> Vec<alloc::string::String> {
             }
             let stsd = find_path(mdia, &[b"minf", b"stbl", b"stsd"])?;
             let entry_type = stsd.get(STSD_FIRST_ENTRY_TYPE)?;
-            Some(entry_type.iter().map(|&byte| char::from(byte)).collect())
+            let entry: alloc::string::String =
+                entry_type.iter().map(|&byte| char::from(byte)).collect();
+            Some(match entry_type {
+                b"encv" | b"enca" => alloc::format!("{entry} (encrypted)"),
+                _ => entry,
+            })
         })
         .collect()
 }

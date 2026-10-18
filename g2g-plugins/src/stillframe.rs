@@ -323,7 +323,7 @@ pub(crate) struct JpegSegment {
 }
 
 impl JpegSegment {
-    fn body_at(&self) -> usize {
+    pub(crate) fn body_at(&self) -> usize {
         self.code_at + 1 + JPEG_SEGMENT_LENGTH
     }
 }

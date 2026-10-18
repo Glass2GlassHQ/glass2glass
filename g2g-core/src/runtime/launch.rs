@@ -67,6 +67,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::caps::{Caps, CapsSet};
+use crate::caps_transform::CapsTransform;
 use crate::element::DynAsyncElement;
 use crate::fanout::DynMultiOutputSource;
 use crate::format_element::CapsConstraint;
@@ -202,6 +203,8 @@ pub enum ParseError {
         location: String,
         codecs: Vec<String>,
     },
+    /// `source` is the decodebin's file location, else its upstream element
+    NoStreamOfKind { source: String, kind: StreamType },
 }
 
 impl From<GraphError> for ParseError {
@@ -315,6 +318,9 @@ impl core::fmt::Display for ParseError {
             }
             ParseError::NoStreamDecoder { location, codecs } => {
                 write!(f, "decodebin: no decoder for {} in {location}", codecs.join(", "))
+            }
+            ParseError::NoStreamOfKind { source, kind } => {
+                write!(f, "decodebin: {source} has no {} stream to decode", kind.name())
             }
             ParseError::NoDecodeChain(caps) => {
                 write!(f, "decodebin: no decoder chain from {caps} to raw (no decoder feature compiled in, or a container that needs a demuxer)")
@@ -812,31 +818,68 @@ const DECODEBIN_MAX_DEPTH: usize = 6;
 /// once the chosen one arrives.
 fn autoplug_for_consumer(
     registry: &Registry,
+    source: &str,
     input: &Caps,
     preferred: MemoryDomainKind,
     consumer: Option<&dyn DynAsyncElement>,
     avoided: &[&str],
-) -> Option<Vec<Box<dyn DynAsyncElement>>> {
+) -> Result<Vec<Box<dyn DynAsyncElement>>, ParseError> {
     let raw = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
     let consumer_constraint = consumer.map(|element| element.caps_constraint_as_transform());
     let consumer_accepts = |c: &Caps| raw_for_consumer(c, consumer_constraint.as_ref());
     let names = |target: &dyn Fn(&Caps) -> bool| {
         registry.autoplug_names_avoiding(input, target, DECODEBIN_MAX_DEPTH, preferred, avoided)
     };
-    let raw_names = names(&raw)?;
+    let no_decode_chain = || ParseError::NoDecodeChain(alloc::format!("{input:?}"));
+    let raw_names = names(&raw).ok_or_else(no_decode_chain)?;
     // the consumer picks only the output caps, so a pinned decoder or a demux's default stream stays
     let use_consumer_chain = names(&consumer_accepts) == Some(raw_names);
+    let consumer_kind = consumer_constraint.as_ref().and_then(consumer_stream_type);
+    if let Some(kind) = consumer_kind.filter(|_| !use_consumer_chain) {
+        let raw_of_kind = |c: &Caps| raw(c) && StreamType::of(c) == kind;
+        if names(&raw_of_kind).is_none() {
+            return Err(ParseError::NoStreamOfKind {
+                source: source.to_string(),
+                kind,
+            });
+        }
+    }
     let target: &dyn Fn(&Caps) -> bool = if use_consumer_chain {
         &consumer_accepts
     } else {
         &raw
     };
-    let mut chain =
-        registry.autoplug_avoiding(input, target, DECODEBIN_MAX_DEPTH, preferred, avoided)?;
+    let mut chain = registry
+        .autoplug_avoiding(input, target, DECODEBIN_MAX_DEPTH, preferred, avoided)
+        .ok_or_else(no_decode_chain)?;
     // M421/M676: the caps-identity parser is invisible to the shortest-chain
     // search, so it never appears in the chain.
     registry.maybe_prepend_parser(input, &mut chain);
-    Some(chain)
+    Ok(chain)
+}
+
+// the one media kind a consumer takes, `None` when it takes both or its constraint does not say
+fn consumer_stream_type(constraint: &CapsConstraint<'_>) -> Option<StreamType> {
+    let inputs: Vec<&Caps> = match constraint {
+        CapsConstraint::DerivedFields(CapsTransform::RawVideo { .. }) => {
+            return Some(StreamType::Video)
+        }
+        CapsConstraint::DerivedFields(CapsTransform::Audio { .. }) => {
+            return Some(StreamType::Audio)
+        }
+        CapsConstraint::Accepts(set) | CapsConstraint::Identity(set) => {
+            set.alternatives().iter().collect()
+        }
+        CapsConstraint::Mapping(pairs) => pairs
+            .iter()
+            .flat_map(|(input, _)| input.alternatives())
+            .collect(),
+        _ => return None,
+    };
+    let kind = StreamType::of(inputs.first()?);
+    let one_media_kind = matches!(kind, StreamType::Video | StreamType::Audio)
+        && inputs.iter().all(|caps| StreamType::of(caps) == kind);
+    one_media_kind.then_some(kind)
 }
 
 fn raw_for_consumer(caps: &Caps, consumer_constraint: Option<&CapsConstraint<'_>>) -> bool {
@@ -876,7 +919,14 @@ fn choose_container_stream(
             });
         }
         // the decoder search after this reports the missing chain
-        None => 0,
+        None => {
+            let consumer_kind = consumer_constraint.as_ref().and_then(consumer_stream_type);
+            streams
+                .streams
+                .iter()
+                .position(|stream| Some(StreamType::of(&stream.caps)) == consumer_kind)
+                .unwrap_or(0)
+        }
     };
     Ok(streams.streams.swap_remove(chosen))
 }
@@ -997,12 +1047,12 @@ fn expand_decodebin(
                     };
                     let decoders = autoplug_for_consumer(
                         registry,
+                        location.unwrap_or(pred.as_str()),
                         &chain_input,
                         preferred,
                         consumer.as_deref(),
                         avoided,
-                    )
-                    .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{chain_input:?}")))?;
+                    )?;
                     // Built here rather than named, so each element is
                     // constructed for the caps the search chose it to produce (a
                     // multi-format decoder emits the format the consumer takes,

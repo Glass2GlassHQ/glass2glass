@@ -542,6 +542,42 @@ fn sniff_mpeg4_visual(header: &[u8]) -> bool {
     sequence_opens || object_opens
 }
 
+// the codec of content g2g recognizes but cannot decode: JPEG-LS and MxPEG open like a JPEG
+pub fn unsupported_codec(header: &[u8]) -> Option<&'static str> {
+    if opens_avs_sequence(header) {
+        return Some("cavs");
+    }
+    if !header.starts_with(&JPEG_MAGIC) {
+        return None;
+    }
+    crate::stillframe::jpeg_header_segments(header).find_map(|segment| {
+        let body = header.get(segment.body_at()..)?;
+        match segment.marker {
+            JPEG_LS_FRAME_HEADER => Some("jpegls"),
+            JPEG_COMMENT if MXPEG_COMMENT_TAGS.iter().any(|tag| body.starts_with(tag)) => {
+                Some("mxpeg")
+            }
+            _ => None,
+        }
+    })
+}
+
+const JPEG_LS_FRAME_HEADER: u8 = 0xF7;
+const JPEG_COMMENT: u8 = 0xFE;
+// MxPEG carries its camera metadata and audio in JPEG comments opening with these
+const MXPEG_COMMENT_TAGS: [&[u8]; 2] = [b"MXF\0", b"MXM\0"];
+// MPEG-4 Visual opens with the same start code, but never with this profile byte after it
+const AVS_SEQUENCE_START_CODE: u8 = 0xB0;
+const AVS_JIZHUN_PROFILE: u8 = 0x20;
+
+fn opens_avs_sequence(header: &[u8]) -> bool {
+    let Some(code_at) = opening_start_code(header).and_then(|at| find_start_code(header, at))
+    else {
+        return false;
+    };
+    header.get(code_at..code_at + 2) == Some(&[AVS_SEQUENCE_START_CODE, AVS_JIZHUN_PROFILE])
+}
+
 /// Offset of the stream's first start code, past the zero bytes ahead of it, or
 /// `None` when the stream opens with anything else.
 fn opening_start_code(header: &[u8]) -> Option<usize> {

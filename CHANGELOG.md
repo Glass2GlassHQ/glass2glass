@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1577: a bare `decodebin` fails at launch naming an unsupported codec, or the missing audio or video stream, across TS, PS, FLV, MP4, Matroska, WAV and still images.
 - M1571: `avidemux` walks a `rec ` list only directly inside `movi`, so nested lists no longer overflow the stack.
 - M1570: `mjpegdec` decodes a frame that carries no Huffman tables with the ITU-T T.81 Annex K defaults, as AVI motion JPEG expects.
 - M1569: a bare `decodebin` plugs `mulawdec` and `alawdec` for a mu-law or A-law AVI audio stream.

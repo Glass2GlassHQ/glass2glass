@@ -535,6 +535,8 @@ pub struct PsDemuxer {
     sequence: Option<SequenceHeader>,
     /// Video access-unit framing, one per video stream_id.
     video: Vec<(u8, VideoReframer)>,
+    // the leading bytes of each video stream's first PES payload, which `unsupported_codecs` sniffs
+    video_heads: Vec<(u8, Vec<u8>)>,
     /// Audio frame realignment, one per audio stream / substream.
     audio: Vec<AudioAligner>,
     /// How many entries of `completed` the sequence-header scan has examined, so
@@ -581,6 +583,13 @@ impl PsDemuxer {
     /// The elementary streams seen so far, in discovery order.
     pub fn streams(&self) -> &[PsElementaryStream] {
         &self.seen
+    }
+
+    fn video_head(&self, stream_id: u8) -> Option<&[u8]> {
+        self.video_heads
+            .iter()
+            .find(|(id, _)| *id == stream_id)
+            .map(|(_, head)| head.as_slice())
     }
 
     /// The video geometry the sequence header declared, if one has been parsed.
@@ -694,6 +703,8 @@ impl PsDemuxer {
                     Some(i) => i,
                     None if self.video.len() < MAX_STREAMS => {
                         self.video.push((stream_id, VideoReframer::default()));
+                        let head = &es[..es.len().min(VIDEO_HEAD_LEN)];
+                        self.video_heads.push((stream_id, head.to_vec()));
                         self.video.len() - 1
                     }
                     None => return,
@@ -746,8 +757,11 @@ impl PsDemuxer {
                 self.record(stream_id, Some(sub));
                 self.push_spu(sub, pts, rest);
             }
-            // LPCM and DTS substreams are out of scope; anything else is not a
-            // substream this parser knows.
+            // LPCM and DTS substreams are recorded so a probe can name them, but not demuxed
+            sub if LPCM_SUBSTREAMS.contains(&sub) || DTS_SUBSTREAMS.contains(&sub) => {
+                self.record(stream_id, Some(sub));
+            }
+            // anything else is not a substream this parser knows
             _ => {}
         }
     }
@@ -1445,7 +1459,7 @@ pub struct PsStreamInfo {
 pub fn forwardable_streams(demux: &PsDemuxer) -> Vec<PsStreamInfo> {
     let mut out: Vec<PsStreamInfo> = Vec::new();
     for es in demux.streams() {
-        let Some(stream) = es.kind() else {
+        let Some(stream) = es.kind().filter(|_| unsupported_codec(demux, es).is_none()) else {
             continue;
         };
         if stream == PsStream::SubPicture || out.iter().any(|i| i.stream == stream) {
@@ -1458,6 +1472,33 @@ pub fn forwardable_streams(demux: &PsDemuxer) -> Vec<PsStreamInfo> {
         });
     }
     out
+}
+
+// the codec of each audio or video stream in a probed program stream that no `PsStream` carries
+pub fn unsupported_codecs(demux: &PsDemuxer) -> Vec<&'static str> {
+    demux
+        .streams()
+        .iter()
+        .filter_map(|es| unsupported_codec(demux, es))
+        .collect()
+}
+
+const LPCM_SUBSTREAMS: core::ops::RangeInclusive<u8> = 0xA0..=0xA7;
+const DTS_SUBSTREAMS: core::ops::RangeInclusive<u8> = 0x88..=0x8F;
+const VIDEO_STREAM_IDS: core::ops::RangeInclusive<u8> = 0xE0..=0xEF;
+// covers the AVS sequence start and profile `typefind::unsupported_codec` looks for
+const VIDEO_HEAD_LEN: usize = 16;
+
+fn unsupported_codec(demux: &PsDemuxer, es: &PsElementaryStream) -> Option<&'static str> {
+    match (es.stream_id, es.substream_id) {
+        (PS_PRIVATE_1, Some(substream)) if LPCM_SUBSTREAMS.contains(&substream) => Some("pcm_dvd"),
+        (PS_PRIVATE_1, Some(substream)) if DTS_SUBSTREAMS.contains(&substream) => Some("dts"),
+        // a video stream id names no codec, so an AVS stream there reads as MPEG-2 by default
+        (stream_id, _) if VIDEO_STREAM_IDS.contains(&stream_id) => demux
+            .video_head(stream_id)
+            .and_then(crate::typefind::unsupported_codec),
+        _ => None,
+    }
 }
 
 /// The subpicture streams a probed program stream carries, in discovery order.

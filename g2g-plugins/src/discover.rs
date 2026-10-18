@@ -299,7 +299,7 @@ pub async fn discover(reg: &Registry, uri: &str) -> Result<Discovery, DiscoverEr
         if let Some(caps) = sink.caps.take() {
             info.streams.push(DiscoveredStream {
                 id: LONE_STREAM_ID.to_string(),
-                stream_type: stream_type_of(&caps),
+                stream_type: StreamType::of(&caps),
                 caps,
                 tags: TagList::new(),
             });
@@ -399,19 +399,6 @@ fn extend(target: &mut TagList, posted: TagList) {
     }
 }
 
-/// The media kind a caps describes, for a stream the probe read off its own
-/// negotiated caps rather than a demuxer's collection.
-fn stream_type_of(caps: &Caps) -> StreamType {
-    match caps {
-        Caps::CompressedVideo { .. } | Caps::RawVideo { .. } => StreamType::Video,
-        Caps::Audio { .. } => StreamType::Audio,
-        Caps::Text { .. } | Caps::ClosedCaption { .. } | Caps::SubPicture { .. } => {
-            StreamType::Text
-        }
-        _ => StreamType::Unknown,
-    }
-}
-
 /// Render a report the way `gst-discoverer-1.0` does: the file, its duration and
 /// container, then one block per stream.
 pub fn to_text(info: &Discovery) -> String {
@@ -429,7 +416,7 @@ pub fn to_text(info: &Discovery) -> String {
         out.push_str(&format!(
             "    {} ({}): {}\n",
             stream.id,
-            stream_type_label(stream.stream_type),
+            stream.stream_type.name(),
             stream.caps.to_gst_string()
         ));
         for tag in stream.tags.tags() {
@@ -437,15 +424,6 @@ pub fn to_text(info: &Discovery) -> String {
         }
     }
     out
-}
-
-fn stream_type_label(stream_type: StreamType) -> &'static str {
-    match stream_type {
-        StreamType::Video => "video",
-        StreamType::Audio => "audio",
-        StreamType::Text => "text",
-        _ => "unknown",
-    }
 }
 
 /// `H:MM:SS.mmm`, the form `gst-discoverer-1.0` prints a duration in.

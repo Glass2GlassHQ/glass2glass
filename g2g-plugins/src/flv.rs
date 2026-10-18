@@ -685,6 +685,59 @@ fn sequence_header(tag_type: u8, body: &[u8]) -> Option<(FlvTrack, &[u8])> {
     }
 }
 
+// FLV sound formats this parser does not carry, by the codec name ffmpeg gives them
+const UNSUPPORTED_SOUND_FORMATS: [(u8, &str); 8] = [
+    (0, "pcm"),
+    (1, "adpcm_swf"),
+    (3, "pcm_s16le"),
+    (4, "nellymoser"),
+    (5, "nellymoser"),
+    (6, "nellymoser"),
+    (7, "pcm_alaw"),
+    (8, "pcm_mulaw"),
+];
+// enhanced FLV puts a fourcc after this flag instead of a codec id in the low nibble
+const VIDEO_EX_HEADER: u8 = 0x80;
+
+// the codec of each audio and video tag in an FLV prefix that this parser does not carry
+pub(crate) fn unsupported_codecs(data: &[u8]) -> Vec<alloc::string::String> {
+    let Some(mut pos) = data
+        .starts_with(FLV_SIGNATURE)
+        .then(|| file_header_len(data))
+        .flatten()
+    else {
+        return Vec::new();
+    };
+    let mut codecs = Vec::new();
+    while let Some((tag, body)) = tag_at(data, pos) {
+        pos = body.end;
+        let Some(&first) = data.get(body).and_then(<[u8]>::first) else {
+            continue;
+        };
+        let codec = match tag.tag_type {
+            TAG_VIDEO if first & VIDEO_EX_HEADER != 0 => continue,
+            TAG_VIDEO if FlvCodec::from_video_id(first & 0x0F).is_none() => {
+                alloc::format!("flv video codec id {}", first & 0x0F)
+            }
+            TAG_AUDIO if FlvCodec::from_sound_format(first >> 4).is_none() => {
+                let format = first >> 4;
+                UNSUPPORTED_SOUND_FORMATS
+                    .iter()
+                    .find(|(unsupported, _)| *unsupported == format)
+                    .map_or_else(
+                        || alloc::format!("flv sound format {format}"),
+                        |(_, name)| alloc::string::String::from(*name),
+                    )
+            }
+            _ => continue,
+        };
+        if !codecs.contains(&codec) {
+            codecs.push(codec);
+        }
+    }
+    codecs
+}
+
 /// Map one FLV tag to an access unit, or `None` for a tag this parser skips
 /// (a sequence header, an unsupported codec, or a script/metadata tag).
 fn parse_tag(tag_type: u8, timestamp: u32, body: &[u8]) -> Option<FlvUnit> {

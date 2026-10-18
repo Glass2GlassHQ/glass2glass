@@ -256,7 +256,7 @@ const PLAYBIN_PROBE_BYTES: u64 = 4 * 1024 * 1024;
 const PLAYBIN_MAX_DEPTH: usize = 6;
 
 #[cfg(feature = "std")]
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
@@ -929,8 +929,10 @@ pub fn ps_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams
         return None;
     }
     let prefix = read_prefix(location)?;
-    let mut infos = crate::psdemux::forwardable_streams(&probe_ps(&prefix));
-    if infos.is_empty() {
+    let demux = probe_ps(&prefix);
+    let mut infos = crate::psdemux::forwardable_streams(&demux);
+    let unsupported = crate::psdemux::unsupported_codecs(&demux);
+    if infos.is_empty() && unsupported.is_empty() {
         return None;
     }
     infos.sort_by_key(|i| !i.video);
@@ -944,7 +946,7 @@ pub fn ps_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams
         .collect();
     Some(ContainerStreams {
         streams,
-        unsupported: Vec::new(),
+        unsupported: unsupported.into_iter().map(String::from).collect(),
     })
 }
 
@@ -1486,7 +1488,7 @@ struct Mp4Probe {
 #[cfg(feature = "std")]
 fn mp4_probe(uri: &str) -> Option<Mp4Probe> {
     let path = file_uri_path(uri)?;
-    let moov = read_mp4_moov(path)?;
+    let moov = read_mp4_top_level_box(path, b"moov")?;
     let infos = crate::mp4demuxn::forwardable_streams(&moov);
     if infos.is_empty() {
         return None;
@@ -1611,7 +1613,7 @@ const MP4_MAX_TOP_LEVEL_BOXES: usize = 1024;
 
 // Seeks box to box so a `moov` after a large `mdat` is found without reading the `mdat`.
 #[cfg(feature = "std")]
-fn read_mp4_moov(path: &str) -> Option<Vec<u8>> {
+fn read_mp4_top_level_box(path: &str, wanted: &[u8; 4]) -> Option<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
     let file_len = file.metadata().ok()?.len();
@@ -1634,7 +1636,7 @@ fn read_mp4_moov(path: &str) -> Option<Vec<u8>> {
             return None;
         }
         let end = offset.checked_add(size).filter(|&end| end <= file_len)?;
-        if kind == b"moov" {
+        if kind == wanted {
             if size > PLAYBIN_PROBE_BYTES {
                 return None;
             }
@@ -1957,13 +1959,14 @@ pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams
         return None;
     }
     let prefix = read_prefix(location)?;
-    let mut infos = crate::tsdemux::forwardable_streams(&ts_tables_from_prefix(&prefix));
-    if infos.is_empty() {
+    let mut probed = crate::tsdemux::probe_streams(&mut ts_tables_from_prefix(&prefix));
+    if probed.forwardable.is_empty() && probed.unsupported.is_empty() {
         return None;
     }
     // every stream names its codec, the port default is h264 regardless of the PMT
-    infos.sort_by_key(|i| !i.video);
-    let streams = infos
+    probed.forwardable.sort_by_key(|i| !i.video);
+    let streams = probed
+        .forwardable
         .into_iter()
         .map(|info| PrimaryStream {
             demux: "tsdemux",
@@ -1973,7 +1976,7 @@ pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams
         .collect();
     Some(ContainerStreams {
         streams,
-        unsupported: Vec::new(),
+        unsupported: probed.unsupported.into_iter().map(String::from).collect(),
     })
 }
 
@@ -2002,12 +2005,13 @@ pub fn flv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             caps,
         })
         .collect();
-    if streams.is_empty() {
+    let unsupported = crate::flv::unsupported_codecs(&prefix);
+    if streams.is_empty() && unsupported.is_empty() {
         return None;
     }
     Some(ContainerStreams {
         streams,
-        unsupported: Vec::new(),
+        unsupported,
     })
 }
 
@@ -2030,9 +2034,21 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     ) {
         return None;
     }
-    let moov = read_mp4_moov(location)?;
-    let mut infos = crate::mp4demuxn::forwardable_streams(&moov);
-    let unsupported = crate::mp4demuxn::unsupported_sample_entries(&moov);
+    let Some(moov) = read_mp4_top_level_box(location, b"moov") else {
+        // HEIF and AVIF keep their pictures as items in a top-level `meta`, with no track
+        return read_mp4_top_level_box(location, b"meta").map(|_| ContainerStreams {
+            streams: Vec::new(),
+            unsupported: alloc::vec![String::from("HEIF image items")],
+        });
+    };
+    let mut infos = crate::mp4demuxn::decodable_streams(&moov);
+    let mut unsupported = crate::mp4demuxn::unsupported_sample_entries(&moov);
+    if crate::mp4box::find_box(&moov, b"moov")
+        .and_then(|body| crate::mp4box::find_box(body, b"cmov"))
+        .is_some()
+    {
+        unsupported.push(String::from("compressed movie header (cmov)"));
+    }
     if infos.is_empty() && unsupported.is_empty() {
         return None;
     }
@@ -2081,7 +2097,15 @@ pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     let mut demux = crate::matroska::MatroskaDemuxer::new();
     demux.push_data(&prefix);
     let mut infos = crate::mkvdemux::forwardable_streams(&demux);
-    let unsupported = demux.unmapped_codec_ids().to_vec();
+    let encoded = crate::mkvdemux::encoded_streams(&demux);
+    infos.retain(|info| !encoded.contains(&info.stream));
+    let mut unsupported = demux.unmapped_codec_ids().to_vec();
+    unsupported.extend(encoded.into_iter().map(|stream| {
+        alloc::format!(
+            "{} under a ContentEncoding (bzip2, lzo or encryption)",
+            crate::mkvdemux::mkv_stream_str(stream)
+        )
+    }));
     if infos.is_empty() && unsupported.is_empty() {
         return None;
     }
@@ -2097,6 +2121,45 @@ pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     Some(ContainerStreams {
         streams,
         unsupported,
+    })
+}
+
+// content whose codec the sniff recognizes but g2g cannot decode, whatever its container caps say
+#[cfg(feature = "std")]
+pub fn unsupported_codec_primary_stream(location: &str, _caps: &Caps) -> Option<ContainerStreams> {
+    let header = read_file_prefix(location, crate::typefind::SNIFF_LEN as u64)?;
+    let codec = crate::typefind::unsupported_codec(&header)?;
+    Some(ContainerStreams {
+        streams: Vec::new(),
+        unsupported: alloc::vec![String::from(codec)],
+    })
+}
+
+// a WAV file's `fmt ` chunk, so the decode chain plugs from its real format rather than wavparse's placeholder
+#[cfg(feature = "std")]
+pub fn wav_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
+    if !matches!(
+        caps,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Wav
+        }
+    ) {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    Some(match crate::wavparse::probe_stream(&prefix)? {
+        crate::wavparse::WavStream::Readable(caps) => ContainerStreams {
+            streams: alloc::vec![PrimaryStream {
+                demux: "wavparse",
+                props: Vec::new(),
+                caps,
+            }],
+            unsupported: Vec::new(),
+        },
+        crate::wavparse::WavStream::UnreadableTag(tag) => ContainerStreams {
+            streams: Vec::new(),
+            unsupported: alloc::vec![crate::waveformat::format_tag_name(tag)],
+        },
     })
 }
 
@@ -2231,7 +2294,7 @@ fn mp4_select(
     location: &str,
     pads: &[PadRequest],
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
-    let moov = read_mp4_moov(location)?;
+    let moov = read_mp4_top_level_box(location, b"moov")?;
     // Selection order: A/V tracks first, then subtitle (`tx3g`/`wvtt`/`stpp`)
     // tracks (M477), so a `d.text_0` request maps to the container's text track.
     // `Mp4DemuxN` forwards a `tx3g`/`wvtt` cue as `Text{Utf8}` (a `stpp` track as
