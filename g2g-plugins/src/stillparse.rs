@@ -14,6 +14,11 @@
 //! image sequence can change size). Timestamps come from the negotiated
 //! framerate, since a byte stream carries none; an upstream buffer that does
 //! carry a presentation time re-bases the counter onto it.
+//!
+//! A JPEG well short of the frame height upstream declares (a container
+//! header's) is one field of an interlaced frame, as motion JPEG in AVI stores
+//! it: the two fields go out as one buffer declared at twice the field height,
+//! which `MjpegDec` weaves into one frame.
 
 use core::future::Future;
 use core::marker::PhantomData;
@@ -54,6 +59,8 @@ pub trait StillImageFormat: Send {
     const SIGNATURE_AFTER_PADDING: Option<&'static [u8]>;
     /// `(width, height)` from one whole image's header.
     fn geometry(image: &[u8]) -> Option<(u32, u32)>;
+    // a container can store one interlaced frame as two half-height images, one per field
+    const CARRIES_FIELD_PAIRS: bool;
 }
 
 /// JPEG framing: `SOI` to `EOI`, geometry from the frame header (`SOF`).
@@ -66,6 +73,8 @@ impl StillImageFormat for Jpeg {
     const FRAME_LENGTH: FrameLength = jpeg_frame_length;
     // AVI pads each MJPEG chunk with FF bytes, and files carry trailers past EOI.
     const SIGNATURE_AFTER_PADDING: Option<&'static [u8]> = Some(&JPEG_SIGNATURE);
+    // interlaced motion JPEG in AVI
+    const CARRIES_FIELD_PAIRS: bool = true;
 
     fn geometry(image: &[u8]) -> Option<(u32, u32)> {
         jpeg_geometry(image)
@@ -81,6 +90,7 @@ impl StillImageFormat for Png {
     const LONG_NAME: &'static str = "PNG parser";
     const FRAME_LENGTH: FrameLength = png_frame_length;
     const SIGNATURE_AFTER_PADDING: Option<&'static [u8]> = None;
+    const CARRIES_FIELD_PAIRS: bool = false;
 
     fn geometry(image: &[u8]) -> Option<(u32, u32)> {
         png_geometry(image)
@@ -106,6 +116,10 @@ pub struct StillImageParse<F: StillImageFormat> {
     /// The geometry of the last image emitted, so caps are re-declared only on a
     /// real change.
     declared: Option<(u32, u32)>,
+    // the frame height upstream declares, a container header's
+    container_height: Option<u32>,
+    // the first field of an interlaced frame, held until the second arrives
+    first_field: Option<Vec<u8>>,
     /// A presentation time from upstream, applied to the next image emitted.
     pending_pts: Option<u64>,
     base_ns: u64,
@@ -134,6 +148,8 @@ impl<F: StillImageFormat> StillImageParse<F> {
             assembler: ImageAssembler::default(),
             framerate: Rate::Any,
             declared: None,
+            container_height: None,
+            first_field: None,
             pending_pts: None,
             base_ns: 0,
             since_base: 0,
@@ -162,9 +178,64 @@ impl<F: StillImageFormat> StillImageParse<F> {
         }
     }
 
-    /// Push one whole image, declaring its geometry first when it changed.
-    async fn emit(&mut self, image: Vec<u8>, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+    fn adopt_upstream_caps(&mut self, caps: &Caps) {
+        if let Caps::CompressedVideo {
+            framerate, height, ..
+        } = caps
+        {
+            self.framerate = framerate.clone();
+            self.container_height = match height {
+                Dim::Fixed(height) => Some(*height),
+                _ => None,
+            };
+        }
+    }
+
+    // the threshold ffmpeg and GStreamer use: a field image is under three quarters of the frame height
+    fn is_field(&self, image_height: u32) -> bool {
+        F::CARRIES_FIELD_PAIRS
+            && self.container_height.is_some_and(|frame_height| {
+                u64::from(image_height) * 4 < u64::from(frame_height) * 3
+            })
+    }
+
+    // an image that is one field waits for the second, then both go out as one access unit
+    async fn take_image(
+        &mut self,
+        image: Vec<u8>,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
         let (width, height) = F::geometry(&image).ok_or(G2gError::CapsMismatch)?;
+        if !self.is_field(height) {
+            self.drop_unpaired_field();
+            return self.emit(image, width, height, out).await;
+        }
+        let Some(first_field) = self.first_field.take() else {
+            self.first_field = Some(image);
+            return Ok(());
+        };
+        if F::geometry(&first_field) != Some((width, height)) {
+            return Err(G2gError::CapsMismatch);
+        }
+        let frame_height = height.checked_mul(2).ok_or(G2gError::CapsMismatch)?;
+        self.emit([first_field, image].concat(), width, frame_height, out)
+            .await
+    }
+
+    fn drop_unpaired_field(&mut self) {
+        if self.first_field.take().is_some() {
+            g2g_warn!(self, "dropping a field with no second field to pair");
+        }
+    }
+
+    /// Push one access unit, declaring its geometry first when it changed.
+    async fn emit(
+        &mut self,
+        access_unit: Vec<u8>,
+        width: u32,
+        height: u32,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
         if self.declared != Some((width, height)) {
             out.push(PipelinePacket::CapsChanged(Self::stream_caps(
                 Dim::Fixed(width),
@@ -187,7 +258,7 @@ impl<F: StillImageFormat> StillImageParse<F> {
         let pts_ns = self.base_ns + self.since_base.saturating_mul(period_ns);
         self.since_base += 1;
         let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(image.into_boxed_slice())),
+            MemoryDomain::System(SystemSlice::from_boxed(access_unit.into_boxed_slice())),
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
@@ -235,16 +306,13 @@ impl<F: StillImageFormat> AsyncElement for StillImageParse<F> {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::CompressedVideo {
-            codec, framerate, ..
-        } = absolute_caps
-        else {
+        let Caps::CompressedVideo { codec, .. } = absolute_caps else {
             return Err(G2gError::CapsMismatch);
         };
         if *codec != F::CODEC {
             return Err(G2gError::CapsMismatch);
         }
-        self.framerate = framerate.clone();
+        self.adopt_upstream_caps(absolute_caps);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -277,10 +345,11 @@ impl<F: StillImageFormat> AsyncElement for StillImageParse<F> {
                         None => self.assembler.push(slice, F::FRAME_LENGTH)?,
                     };
                     for image in images {
-                        self.emit(image, out).await?;
+                        self.take_image(image, out).await?;
                     }
                 }
                 PipelinePacket::Eos => {
+                    self.drop_unpaired_field();
                     let finished = match F::SIGNATURE_AFTER_PADDING {
                         Some(signature) => self.assembler.finish_skipping_padding(signature),
                         None => self.assembler.finish(),
@@ -292,16 +361,13 @@ impl<F: StillImageFormat> AsyncElement for StillImageParse<F> {
                 }
                 PipelinePacket::Flush => {
                     self.assembler.reset();
+                    self.first_field = None;
                     self.pending_pts = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 // The refined caps this element emits replace the upstream
                 // declaration, whose geometry is a placeholder.
-                PipelinePacket::CapsChanged(caps) => {
-                    if let Caps::CompressedVideo { framerate, .. } = &caps {
-                        self.framerate = framerate.clone();
-                    }
-                }
+                PipelinePacket::CapsChanged(caps) => self.adopt_upstream_caps(&caps),
                 other => {
                     out.push(other).await?;
                 }
@@ -615,6 +681,38 @@ mod tests {
                 "cut at {cut}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn jpeg_fields_pair_into_one_access_unit_at_the_frame_height() {
+        let frame_height = HEIGHT * 2;
+        let field = jpeg_image(WIDTH as u16, HEIGHT as u16);
+        let container_caps = StillImageParse::<Jpeg>::stream_caps(
+            Dim::Fixed(WIDTH),
+            Dim::Fixed(frame_height),
+            Rate::Fixed(FRAMERATE_FPS << 16),
+        );
+        let mut parser = JpegParse::new();
+        parser
+            .configure_pipeline(&container_caps)
+            .expect("JPEG at a fixed rate");
+        let mut sink = RecordingSink::default();
+        let avi_chunk = [field.clone(), field.clone()].concat();
+        for _ in 0..2 {
+            parser
+                .process(data_frame(&avi_chunk, 0), &mut sink)
+                .await
+                .expect("the chunk parses");
+        }
+        assert_eq!(sink.payloads(), vec![avi_chunk.clone(), avi_chunk]);
+        assert_eq!(
+            sink.caps(),
+            vec![StillImageParse::<Jpeg>::stream_caps(
+                Dim::Fixed(WIDTH),
+                Dim::Fixed(frame_height),
+                Rate::Fixed(FRAMERATE_FPS << 16)
+            )]
+        );
     }
 
     /// A baseline-JPEG shaped file: `SOI`, `SOF0` at `width` x `height`, `SOS`
