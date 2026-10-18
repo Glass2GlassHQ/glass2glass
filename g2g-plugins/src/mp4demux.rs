@@ -307,19 +307,30 @@ impl AsyncElement for Mp4Demux {
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        // ByteStream{Mp4} in -> the selected track out. Video defaults to H.264 and
-        // is refined from the moov via CapsChanged at Eos (like fmp4demux); a
-        // codec-named selection (M961) negotiates that codec up front; audio is
-        // AAC with a wildcard layout, refined the same way.
+        // ByteStream{Mp4} in -> the selected track out. Video defaults to H.264,
+        // refined from the moov via CapsChanged at Eos (like fmp4demux), but a
+        // downstream that names another codec (an `h265parse`) can pick it, so
+        // the other codecs follow the default as alternatives. A codec-named
+        // selection (M961) negotiates that codec alone; audio is AAC with a
+        // wildcard layout, refined the same way.
         let nego = match self.select {
-            StreamSelect::Video => Self::nego_caps(self.out_codec),
-            StreamSelect::VideoNamed(codec) => Self::nego_caps(codec),
-            StreamSelect::Audio => Self::audio_nego_caps(),
+            StreamSelect::Video => {
+                let mut codecs = Vec::from([self.out_codec]);
+                codecs.extend(
+                    VIDEO_STREAM_NAMES
+                        .iter()
+                        .map(|(_, codec)| *codec)
+                        .filter(|codec| *codec != self.out_codec),
+                );
+                CapsSet::from_alternatives(codecs.into_iter().map(Self::nego_caps).collect())
+            }
+            StreamSelect::VideoNamed(codec) => CapsSet::one(Self::nego_caps(codec)),
+            StreamSelect::Audio => CapsSet::one(Self::audio_nego_caps()),
         };
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::Mp4,
-            } => CapsSet::one(nego.clone()),
+            } => nego.clone(),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }

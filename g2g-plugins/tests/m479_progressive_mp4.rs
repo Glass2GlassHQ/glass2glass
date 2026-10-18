@@ -13,8 +13,8 @@
 
 #![cfg(feature = "std")]
 
-use g2g_core::runtime::parse_launch;
-use g2g_core::NodeKind;
+use g2g_core::runtime::{negotiate_graph, parse_launch};
+use g2g_core::{Caps, NodeKind, VideoCodec};
 use g2g_plugins::registry::default_registry;
 
 /// A single-output `qtdemux` (no fan-out branches) builds a linear graph whose
@@ -54,6 +54,37 @@ fn qtdemux_named_video_pad_single_branch_parses() {
             .iter()
             .any(|&n| matches!(vg.kind(n), NodeKind::Tee(_))),
         "one branch resolves to the single-output demux, not a fan-out"
+    );
+}
+
+/// The single-output demuxer defaults to H.264 but a downstream that names
+/// another codec picks it at negotiation, so an AV1 (or HEVC) file remuxes
+/// through `qtdemux ! av1parse` without a `stream=` selection.
+#[tokio::test]
+async fn qtdemux_single_output_negotiates_the_codec_downstream_names() {
+    let reg = default_registry();
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/av1_321x181_24fps.mp4"
+    );
+    let graph = parse_launch(
+        &reg,
+        &format!("filesrc location={fixture} ! qtdemux ! av1parse ! fakesink"),
+    )
+    .expect("qtdemux into av1parse parses");
+    let (_, caps, _) = negotiate_graph(graph)
+        .await
+        .expect("av1 is one of the demuxer's output alternatives");
+    assert!(
+        matches!(
+            caps[1],
+            Caps::CompressedVideo {
+                codec: VideoCodec::Av1,
+                ..
+            }
+        ),
+        "the demuxer's output edge negotiates AV1: {:?}",
+        caps[1]
     );
 }
 

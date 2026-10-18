@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1481: the single-output `qtdemux` offers every mp4 video codec at negotiation, so `qtdemux ! h265parse` builds without `stream=h265`.
 - M1480: `mpegtsmux` carries Opus as a private PES with the Opus descriptors and control headers.
 - M1479: `matroskamux` writes DocTypeVersion 4 plus MuxingApp and WritingApp.
 - M1478: `hlssink` times an fMP4 segment by its first track instead of adding every track's fragments.
