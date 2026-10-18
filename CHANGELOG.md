@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1572: `flvdemux` reads every H.264 packet as length-prefixed, so a NAL of 256 to 511 bytes is no longer mistaken for Annex-B.
 - M1571: `avidemux` walks a `rec ` list only directly inside `movi`, so nested lists no longer overflow the stack.
 - M1570: `mjpegdec` decodes a frame that carries no Huffman tables with the ITU-T T.81 Annex K defaults, as AVI motion JPEG expects.
 - M1569: a bare `decodebin` plugs `mulawdec` and `alawdec` for a mu-law or A-law AVI audio stream.

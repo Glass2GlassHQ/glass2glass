@@ -44,7 +44,7 @@ use g2g_core::{
 
 use crate::aacparse::{adts_from_asc, audio_specific_config_info, is_raw_aac_config};
 use crate::annexb::{
-    is_annex_b, length_prefixed_nal_units, parse_avcc, prepend_param_sets, starts_with_param_set,
+    length_prefixed_nal_units, parse_avcc, prepend_param_sets, starts_with_param_set,
 };
 use crate::bereader::{take_be_u16, take_be_u32};
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -280,20 +280,17 @@ impl FlvDemux {
     /// Convert one AVCC video access unit to Annex-B (honouring the `avcC`'s NAL
     /// length-prefix width) and prepend the parameter sets at the (re-)start, so
     /// the elementary stream is what the g2g pipeline assumes: start-coded, with
-    /// in-band SPS/PPS a decoder can initialize from (M662). Data already in
-    /// Annex-B passes through. An empty result means malformed AVCC lengths.
+    /// in-band SPS/PPS a decoder can initialize from (M662). An empty result
+    /// means malformed AVCC lengths.
     fn video_annexb(&mut self, data: Vec<u8>) -> Vec<u8> {
-        let mut out = if is_annex_b(&data) {
-            data
-        } else {
-            let len_size = self.video_init.as_ref().map_or(4, |i| i.length_size);
-            let mut annexb = Vec::with_capacity(data.len() + 16);
-            for nal in length_prefixed_nal_units(&data, len_size) {
-                annexb.extend_from_slice(&[0, 0, 0, 1]);
-                annexb.extend_from_slice(nal);
-            }
-            annexb
-        };
+        // FLV AVC packets are always length-prefixed: a 4-byte length of 256 to
+        // 511 starts with `00 00 01`, so sniffing for a start code misreads them.
+        let len_size = self.video_init.as_ref().map_or(4, |i| i.length_size);
+        let mut out = Vec::with_capacity(data.len() + 16);
+        for nal in length_prefixed_nal_units(&data, len_size) {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(nal);
+        }
         if out.is_empty() {
             return out;
         }
@@ -916,6 +913,31 @@ mod tests {
             asink.frames,
             alloc::vec![a0.to_vec(), a1.to_vec()],
             "audio only"
+        );
+    }
+
+    #[tokio::test]
+    async fn converts_avcc_whose_length_prefix_looks_like_a_start_code() {
+        use crate::annexb::{ANNEX_B_START_CODE, AVCC_LENGTH_SIZE, START_CODE_PREFIX};
+        // the shortest NAL whose 4-byte length prefix begins `00 00 01`
+        let mut length_prefix = [0u8; AVCC_LENGTH_SIZE];
+        length_prefix[..START_CODE_PREFIX.len()].copy_from_slice(&START_CODE_PREFIX);
+        let mut slice = alloc::vec![0x22u8; u32::from_be_bytes(length_prefix) as usize];
+        slice[0] = 0x41;
+        let mut au = length_prefix.to_vec();
+        au.extend_from_slice(&slice);
+        let stream = flv_stream(&[tag(9, 0, &avc_nalu(&au))]);
+
+        let mut video = FlvDemux::new();
+        video.configure_pipeline(&FlvDemux::input_caps()).unwrap();
+        let mut vsink = CaptureSink::default();
+        run_demux(&mut video, &stream, &mut vsink).await;
+        let mut expected = ANNEX_B_START_CODE.to_vec();
+        expected.extend_from_slice(&slice);
+        assert_eq!(
+            vsink.frames,
+            alloc::vec![expected],
+            "length prefix replaced by a start code"
         );
     }
 
