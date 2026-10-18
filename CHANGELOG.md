@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1513: `flacparse` ends a frame only at a sync that continues the frame number or closes a valid CRC-16, and drops a truncated last frame.
 - M1512: `opusdec` decodes multichannel Opus with the `OpusHead` channel mapping or the RFC 7845 defaults.
 - M1511: `mkvdemux` and `MkvDemuxN` forward only the first track of the selected codec.
 - M1510: `wavparse` stops at the end of the `data` chunk and emits whole sample frames only.

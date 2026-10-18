@@ -200,3 +200,111 @@ async fn launch_line_types_flac_and_parses() {
         stats.frames_consumed
     );
 }
+
+const SYNTH_RATE: u64 = 44_100;
+const SYNTH_BLOCK: usize = 16;
+// block size code 6 (8-bit size after the number), rate code 9 (44.1 kHz)
+const SYNTH_SIZE_AND_RATE: u8 = 0x69;
+// mono, 8-bit samples
+const SYNTH_CHANNELS_AND_DEPTH: u8 = 0x02;
+const VERBATIM_SUBFRAME: u8 = 0x02;
+
+fn flac_crc8(data: &[u8]) -> u8 {
+    data.iter().fold(0u8, |crc, &b| {
+        (0..8).fold(crc ^ b, |c, _| {
+            if c & 0x80 != 0 {
+                (c << 1) ^ 0x07
+            } else {
+                c << 1
+            }
+        })
+    })
+}
+
+fn flac_crc16(data: &[u8]) -> u16 {
+    data.iter().fold(0u16, |crc, &b| {
+        (0..8).fold(crc ^ (u16::from(b) << 8), |c, _| {
+            if c & 0x8000 != 0 {
+                (c << 1) ^ 0x8005
+            } else {
+                c << 1
+            }
+        })
+    })
+}
+
+fn frame_header(number: u8) -> Vec<u8> {
+    let mut header = vec![
+        0xFF,
+        0xF8,
+        SYNTH_SIZE_AND_RATE,
+        SYNTH_CHANNELS_AND_DEPTH,
+        number,
+        (SYNTH_BLOCK - 1) as u8,
+    ];
+    header.push(flac_crc8(&header));
+    header
+}
+
+// a mono 8-bit verbatim frame, with a valid header for frame 5 planted in its samples
+fn synth_frame(number: u8) -> Vec<u8> {
+    let mut frame = frame_header(number);
+    frame.push(VERBATIM_SUBFRAME);
+    let mut samples = vec![0x10u8; SYNTH_BLOCK];
+    let alias = frame_header(5);
+    samples[2..2 + alias.len()].copy_from_slice(&alias);
+    frame.extend_from_slice(&samples);
+    frame.extend_from_slice(&flac_crc16(&frame).to_be_bytes());
+    frame
+}
+
+fn synth_stream_header() -> Vec<u8> {
+    let mut header = b"fLaC".to_vec();
+    header.extend_from_slice(&[0x80, 0, 0, 34]);
+    let block = (SYNTH_BLOCK as u16).to_be_bytes();
+    header.extend_from_slice(&block);
+    header.extend_from_slice(&block);
+    header.extend_from_slice(&[0; 6]);
+    let bits_per_sample = 8u64;
+    let packed = (SYNTH_RATE << 44) | ((bits_per_sample - 1) << 36);
+    header.extend_from_slice(&packed.to_be_bytes());
+    header.extend_from_slice(&[0; 16]);
+    header
+}
+
+async fn parse_frames(stream: &[u8]) -> Vec<Vec<u8>> {
+    let mut parse = FlacParse::new();
+    parse
+        .configure_pipeline(&Caps::Audio {
+            format: AudioFormat::Flac,
+            channels: 0,
+            sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        })
+        .expect("configure");
+    let mut sink = CaptureSink::default();
+    parse
+        .process(chunk(stream, 0), &mut sink)
+        .await
+        .expect("parse");
+    parse
+        .process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("eos");
+    sink.frames.into_iter().skip(1).map(|(_, f)| f).collect()
+}
+
+#[tokio::test]
+async fn a_sync_aliased_in_the_samples_does_not_split_a_frame() {
+    let frames: Vec<Vec<u8>> = (0..3).map(synth_frame).collect();
+    let stream = [synth_stream_header(), frames.concat()].concat();
+    assert_eq!(parse_frames(&stream).await, frames);
+}
+
+#[tokio::test]
+async fn a_truncated_last_frame_is_dropped() {
+    let frames: Vec<Vec<u8>> = (0..2).map(synth_frame).collect();
+    let mut stream = [synth_stream_header(), frames.concat()].concat();
+    stream.truncate(stream.len() - 1);
+    assert_eq!(parse_frames(&stream).await, frames[..1]);
+}
