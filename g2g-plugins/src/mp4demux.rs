@@ -33,8 +33,8 @@ use g2g_core::{
 use crate::aacparse::{is_raw_aac_config, require_adts};
 use crate::avidemux::{is_pcm, pcm_alternatives};
 use crate::fmp4::{
-    parse_all_tracks, parse_fragments_multi, parse_progressive_multi, prepend_param_sets,
-    starts_with_param_set, track_framerate_q16, Sample, TrackHeader, TrackKind,
+    clip_stored_pcm, parse_all_tracks, parse_fragments_multi, parse_progressive_multi,
+    prepend_param_sets, starts_with_param_set, track_framerate_q16, Sample, TrackHeader, TrackKind,
 };
 use crate::mp4box::find_box;
 use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
@@ -270,16 +270,20 @@ impl Mp4Demux {
                 }
                 _ => sample.annexb,
             };
+            let timing = FrameTiming {
+                pts_ns: sample.pts_ns,
+                dts_ns: sample.pts_ns,
+                duration_ns: sample.duration_ns,
+                capture_ns: sample.pts_ns,
+                arrival_ns: g2g_core::metrics::monotonic_ns(),
+                keyframe: sample.keyframe,
+            };
+            let Some((timing, data)) = clip_stored_pcm(&audio.kind, &segment, timing, data)? else {
+                continue;
+            };
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                timing: FrameTiming {
-                    pts_ns: sample.pts_ns,
-                    dts_ns: sample.pts_ns,
-                    duration_ns: sample.duration_ns,
-                    capture_ns: sample.pts_ns,
-                    arrival_ns: g2g_core::metrics::monotonic_ns(),
-                    keyframe: sample.keyframe,
-                },
+                timing,
                 sequence: self.sequence,
                 meta: Default::default(),
             };

@@ -40,8 +40,8 @@ use g2g_core::{
 };
 
 use crate::fmp4::{
-    parse_all_tracks, parse_chapters, parse_fragments_multi, parse_progressive_multi,
-    starts_with_param_set, Sample, TrackHeader, TrackKind,
+    clip_stored_pcm, parse_all_tracks, parse_chapters, parse_fragments_multi,
+    parse_progressive_multi, starts_with_param_set, Sample, TrackHeader, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 
@@ -855,17 +855,22 @@ impl Mp4DemuxN {
                 let frame = self.next_frame(head, FrameTiming::default());
                 out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
             }
-            let frame = self.next_frame(
-                data,
-                FrameTiming {
-                    pts_ns: sample.pts_ns,
-                    dts_ns: sample.dts_ns,
-                    duration_ns: sample.duration_ns,
-                    capture_ns: sample.pts_ns,
-                    arrival_ns: g2g_core::metrics::monotonic_ns(),
-                    keyframe: sample.keyframe,
-                },
-            );
+            let timing = FrameTiming {
+                pts_ns: sample.pts_ns,
+                dts_ns: sample.dts_ns,
+                duration_ns: sample.duration_ns,
+                capture_ns: sample.pts_ns,
+                arrival_ns: g2g_core::metrics::monotonic_ns(),
+                keyframe: sample.keyframe,
+            };
+            let clipped = match kind {
+                Some(kind) => clip_stored_pcm(kind, &self.port_segment(port), timing, data)?,
+                None => Some((timing, data)),
+            };
+            let Some((timing, data)) = clipped else {
+                continue;
+            };
+            let frame = self.next_frame(data, timing);
             out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
         }
         Ok(())

@@ -17,11 +17,13 @@ use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::time::ticks_to_ns;
 
 use g2g_core::{
-    AudioFormat, Chapter, ClosedCaptionFormat, G2gError, Segment, TagList, TextFormat, VideoCodec,
+    AudioFormat, Chapter, ClosedCaptionFormat, FrameTiming, G2gError, Segment, TagList, TextFormat,
+    VideoCodec,
 };
 
 use crate::aiff::audio_from_comm;
 use crate::annexb::au_is_keyframe;
+use crate::avidemux::is_pcm;
 use crate::cea::{parse_cdp, write_cc_data, CcTriple};
 use crate::cenc::{
     fragment_sample_crypt, parse_movie_seig, parse_sinf, CencDefaults, CencTrack, SampleCrypt,
@@ -33,6 +35,7 @@ use crate::mp4box::{
     parse_esds_decoder_config, parse_ilst_tags,
 };
 use crate::opusparse::{opus_head_from_dops, parse_opus_head};
+use crate::pcmclip::clip_pcm_to_segment;
 use crate::pcmendian::convert_wire_layout;
 
 #[derive(Debug)]
@@ -446,21 +449,46 @@ impl TrackHeader {
         }
     }
 
-    // An audio edit list trims the encoder's priming off the presentation: the
-    // segment starts past it, so the decoder clips it and a remux writes it back
-    // as an edit list. Opus is left out: its pre-skip rides in the `OpusHead`,
-    // which `OpusDec` already trims. A video edit keeps its stop, which the
-    // video decoder applies.
+    // An audio edit list trims the encoder's priming and padding off the
+    // presentation: the segment starts past the one and stops before the other,
+    // so the decoder clips them and a remux writes the start back as an edit
+    // list. Opus is left out: its pre-skip rides in the `OpusHead`, which
+    // `OpusDec` already trims.
     pub(crate) fn presentation_segment(&self) -> Segment {
         match self.kind {
-            TrackKind::Audio { format, .. } if format != AudioFormat::Opus => Segment {
-                stop: None,
-                ..self.edit_segment()
-            },
+            TrackKind::Audio { format, .. } if format != AudioFormat::Opus => self.edit_segment(),
             TrackKind::Video { .. } => self.edit_segment(),
             _ => Segment::new(),
         }
     }
+}
+
+// PCM reaches no decoder, so the demuxers drop the samples outside the segment themselves
+pub(crate) fn clip_stored_pcm(
+    kind: &TrackKind,
+    segment: &Segment,
+    timing: FrameTiming,
+    data: Vec<u8>,
+) -> Result<Option<(FrameTiming, Vec<u8>)>, G2gError> {
+    let TrackKind::Audio {
+        format,
+        channels,
+        sample_rate,
+        ..
+    } = kind
+    else {
+        return Ok(Some((timing, data)));
+    };
+    let Some(sample_bytes) = format.bytes_per_sample().filter(|_| is_pcm(*format)) else {
+        return Ok(Some((timing, data)));
+    };
+    clip_pcm_to_segment(
+        segment,
+        timing,
+        data,
+        sample_bytes * usize::from(*channels),
+        *sample_rate,
+    )
 }
 
 /// Parse every forwardable (`vide` / `soun` / timed-text) track out of a `moov`

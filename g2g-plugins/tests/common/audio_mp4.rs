@@ -86,8 +86,40 @@ pub(crate) fn sound_entry(fourcc: &[u8; 4], sample_bits: u16) -> Vec<u8> {
     mp4_box(fourcc, &sound_description(sample_bits))
 }
 
+// QuickTime's default movie timescale
+pub(crate) const MOVIE_TIMESCALE: u32 = 600;
+// an elst media_rate of 1.0 in 16.16 fixed point
+const NORMAL_RATE: u32 = 0x0001_0000;
+
+// one media edit: where it starts in the media, in sample frames, and how long it runs, in movie ticks
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AudioEdit {
+    pub(crate) media_time: u32,
+    pub(crate) duration: u32,
+}
+
+// an mvhd at MOVIE_TIMESCALE and the track's one-edit edts
+fn edit_boxes(edit: AudioEdit) -> (Vec<u8>, Vec<u8>) {
+    let mut mvhd = vec![0u8; 96];
+    mvhd[8..12].copy_from_slice(&MOVIE_TIMESCALE.to_be_bytes());
+    let elst = full_box(
+        b"elst",
+        &table(&[1, edit.duration, edit.media_time, NORMAL_RATE]),
+    );
+    (full_box(b"mvhd", &mvhd), mp4_box(b"edts", &elst))
+}
+
 // a moov with one sound track: `sample_entry`, the rest of its sample tables, and an `mvex` when fragmented
 fn audio_moov(sample_entry: &[u8], sample_tables: &[u8], mvex: &[u8]) -> Vec<u8> {
+    edited_audio_moov(sample_entry, sample_tables, mvex, None)
+}
+
+fn edited_audio_moov(
+    sample_entry: &[u8],
+    sample_tables: &[u8],
+    mvex: &[u8],
+    edit: Option<AudioEdit>,
+) -> Vec<u8> {
     let mut tkhd = vec![0u8; 80];
     tkhd[8..12].copy_from_slice(&TRACK_ID.to_be_bytes());
     let mut mdhd = vec![0u8; 16];
@@ -105,8 +137,9 @@ fn audio_moov(sample_entry: &[u8], sample_tables: &[u8], mvex: &[u8]) -> Vec<u8>
         ]
         .concat(),
     );
-    let trak = mp4_box(b"trak", &[full_box(b"tkhd", &tkhd), mdia].concat());
-    mp4_box(b"moov", &[trak, mvex.to_vec()].concat())
+    let (mvhd, edts) = edit.map(edit_boxes).unwrap_or_default();
+    let trak = mp4_box(b"trak", &[full_box(b"tkhd", &tkhd), edts, mdia].concat());
+    mp4_box(b"moov", &[mvhd, trak, mvex.to_vec()].concat())
 }
 
 // a progressive file with one sound track: ftyp, mdat, then the moov indexing the mdat as one chunk
@@ -135,6 +168,16 @@ pub(crate) fn quicktime_pcm_mov(
     chunks: &[Vec<u8>],
     frame_bytes: usize,
 ) -> Vec<u8> {
+    edited_quicktime_pcm_mov(sample_entry, chunks, frame_bytes, None)
+}
+
+// as `quicktime_pcm_mov`, its track presenting only `edit` when given
+pub(crate) fn edited_quicktime_pcm_mov(
+    sample_entry: &[u8],
+    chunks: &[Vec<u8>],
+    frame_bytes: usize,
+    edit: Option<AudioEdit>,
+) -> Vec<u8> {
     let ftyp = mp4_box(b"ftyp", b"qt  \0\0\0\0qt  ");
     let mdat = mp4_box(b"mdat", &chunks.concat());
     let mut offset = (ftyp.len() + 8) as u32;
@@ -153,7 +196,12 @@ pub(crate) fn quicktime_pcm_mov(
         full_box(b"stco", &table(&stco)),
     ]
     .concat();
-    [ftyp, mdat, audio_moov(sample_entry, &tables, &[])].concat()
+    [
+        ftyp,
+        mdat,
+        edited_audio_moov(sample_entry, &tables, &[], edit),
+    ]
+    .concat()
 }
 
 // a fragmented file with one sound track: ftyp, a moov with empty sample tables, then one moof + mdat

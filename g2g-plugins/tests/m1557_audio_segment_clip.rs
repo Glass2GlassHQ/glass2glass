@@ -142,16 +142,28 @@ async fn ffmpeg_audio_decoder_clips_to_the_segment() {
 }
 
 // the first edit's media_time, in media timescale ticks
-fn elst_media_time(file: &[u8]) -> u64 {
+fn be32_after(file: &[u8], kind: &[u8; 4], offset: usize) -> u64 {
     let at = file
         .windows(4)
-        .position(|window| window == b"elst")
-        .expect("the fixture has an edit list");
-    // version and flags, entry count, then the first entry's segment duration
-    let media_time = at + 4 + 4 + 4 + 4;
-    u64::from(u32::from_be_bytes(
-        file[media_time..media_time + 4].try_into().unwrap(),
-    ))
+        .position(|window| window == kind)
+        .expect("the fixture has the box")
+        + kind.len()
+        + offset;
+    u64::from(u32::from_be_bytes(file[at..at + 4].try_into().unwrap()))
+}
+
+// version and flags, entry count, then the first entry's segment duration and media time
+fn elst_media_time(file: &[u8]) -> u64 {
+    be32_after(file, b"elst", 4 + 4 + 4)
+}
+
+fn elst_segment_duration(file: &[u8]) -> u64 {
+    be32_after(file, b"elst", 4 + 4)
+}
+
+// version and flags, creation and modification times, then the timescale
+fn mvhd_timescale(file: &[u8]) -> u64 {
+    be32_after(file, b"mvhd", 4 + 4 + 4)
 }
 
 async fn demux_audio(file: Vec<u8>) -> Vec<PipelinePacket> {
@@ -180,6 +192,8 @@ async fn demux_audio(file: Vec<u8>) -> Vec<PipelinePacket> {
 async fn mp4demux_edit_list_drops_the_aac_priming() {
     let file = fixture(EDIT_LIST_FIXTURE);
     let priming = elst_media_time(&file);
+    let edit_duration_movie_ticks = elst_segment_duration(&file);
+    let movie_timescale = mvhd_timescale(&file);
     let demuxed = demux_audio(file).await;
     let segment = demuxed
         .iter()
@@ -209,9 +223,16 @@ async fn mp4demux_edit_list_drops_the_aac_priming() {
     let rate = whole.sample_rate;
     assert_eq!(ns_to_ticks(segment.start, rate), priming);
     assert_eq!(trimmed.first_pts_ns, segment.start);
-    let priming_bytes = priming as usize * whole.channels * BYTES_PER_SAMPLE;
+    let frame_bytes = whole.channels * BYTES_PER_SAMPLE;
+    let priming_bytes = priming as usize * frame_bytes;
+    let edit_samples = edit_duration_movie_ticks * u64::from(rate) / movie_timescale;
+    let edit_end_bytes = (priming + edit_samples) as usize * frame_bytes;
     assert!(
-        trimmed.pcm == whole.pcm[priming_bytes..],
-        "the decode drops exactly the priming samples"
+        edit_end_bytes < whole.pcm.len(),
+        "the edit cuts the padding"
+    );
+    assert!(
+        trimmed.pcm == whole.pcm[priming_bytes..edit_end_bytes],
+        "the decode drops exactly the priming and padding samples"
     );
 }

@@ -759,8 +759,11 @@ the cut pictures can be references, and every video decoder drops each decoded
 picture whose pts `Segment::presents` rejects:
 before the start, or at or past the stop, the frames ffmpeg drops for the same
 edit. The intra-only decoders (`mjpegdec`, `jpegxsdec`) skip the cut units
-before decoding them. An audio track's segment takes only the start, its
-priming trim, and Opus gets none, its pre-skip being trimmed by `OpusDec`.
+before decoding them. An audio track's segment takes the same start and stop,
+trimming the encoder's priming and end padding, and Opus gets none, its
+pre-skip being trimmed by `OpusDec`. The stop is exact where ffmpeg keeps every
+packet that starts before the edit's end. Raw PCM reaches no decoder, so the
+demuxers cut its chunks to the segment themselves.
 Every audio decoder cuts its decoded PCM to the segment by sample: a frame
 that straddles the start loses the samples before it and takes the start as
 its pts, a frame that straddles the stop ends there, and a frame wholly

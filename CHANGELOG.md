@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1574: the mp4 demuxers end an audio track where its edit list ends, and cut raw PCM tracks to the edit themselves.
 - M1573: the mp4 demuxers apply every media edit of an edit list, cutting the media between edits, and skip a leading empty edit.
 - M1571: `avidemux` walks a `rec ` list only directly inside `movi`, so nested lists no longer overflow the stack.
 - M1570: `mjpegdec` decodes a frame that carries no Huffman tables with the ITU-T T.81 Annex K defaults, as AVI motion JPEG expects.
