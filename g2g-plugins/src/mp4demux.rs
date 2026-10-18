@@ -211,6 +211,10 @@ impl Mp4Demux {
             .await?;
             self.caps_sent = true;
         }
+        let segment = audio.presentation_segment();
+        if segment != Segment::new() {
+            out.push(PipelinePacket::Segment(segment)).await?;
+        }
         // Opus config leads the audio in-band (M791), the `OggDemux` convention,
         // so the decoder trims the pre-skip; AAC is self-describing once ADTS-framed,
         // except the object types ADTS cannot carry, which go raw behind their config.

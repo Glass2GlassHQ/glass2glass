@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1557: every audio decoder trims its decoded samples to the upstream segment, so an mp4 edit list drops the AAC priming as ffmpeg does.
 - M1554: an `A420` raw format carries alpha, `ffmpegdec` emits it for VP6-alpha and `videoconvert` converts it to I420 and RGBA.
 - M1553: every video decoder drops the pictures outside the upstream segment, so an mp4 edit list cuts frames whichever decoder runs.
 - M1556: the MP4, Matroska and FLV muxers store ER AAC, ELD and USAC raw behind their AudioSpecificConfig, `flvdemux` and `avidemux` send them that way, and `mpegtsmux` refuses them.

@@ -376,6 +376,22 @@ impl TrackHeader {
             ..Segment::new()
         }
     }
+
+    // An audio edit list trims the encoder's priming off the presentation: the
+    // segment starts past it, so the decoder clips it and a remux writes it back
+    // as an edit list. Opus is left out: its pre-skip rides in the `OpusHead`,
+    // which `OpusDec` already trims. A video edit keeps its stop, which the
+    // video decoder applies.
+    pub(crate) fn presentation_segment(&self) -> Segment {
+        match self.kind {
+            TrackKind::Audio { format, .. } if format != AudioFormat::Opus => Segment {
+                stop: None,
+                ..self.edit_segment()
+            },
+            TrackKind::Video { .. } => self.edit_segment(),
+            _ => Segment::new(),
+        }
+    }
 }
 
 /// Parse every forwardable (`vide` / `soun` / timed-text) track out of a `moov`

@@ -666,6 +666,8 @@ pub mod psdemux;
 // by the audio decoder's frame splitting, psdemux's frame realignment and
 // mpegaudioparse.
 mod audioframe;
+// Trims decoded PCM to the upstream segment, shared by every audio decoder.
+mod pcmclip;
 // ID3v1 / ID3v2 tag parsing and writing (no_std), shared by id3demux,
 // mpegaudioparse and id3v2mux.
 mod id3;

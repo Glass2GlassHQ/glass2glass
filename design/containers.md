@@ -725,7 +725,12 @@ video decoder drops each decoded picture whose pts `Segment::presents` rejects:
 before the start, or at or past the stop, the frames ffmpeg drops for the same
 edit. The intra-only decoders (`mjpegdec`, `jpegxsdec`) skip the cut units
 before decoding them. An audio track's segment takes only the start, its
-priming trim.
+priming trim, and Opus gets none, its pre-skip being trimmed by `OpusDec`.
+Every audio decoder cuts its decoded PCM to the segment by sample: a frame
+that straddles the start loses the samples before it and takes the start as
+its pts, a frame that straddles the stop ends there, and a frame wholly
+outside is dropped. `Segment::kept_samples` does that arithmetic for all of
+them.
 
 Which duration a reader reports depends on the layout, so `Mp4MuxN` writes both,
 selected by the `fragmented` property, default `true`.

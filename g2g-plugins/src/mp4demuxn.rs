@@ -776,30 +776,10 @@ impl Mp4DemuxN {
                     .unwrap_or_else(|| self.ports[port].caps.clone());
                 out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
                 self.announced[port] = true;
-                // An audio edit list trims the encoder's priming off the
-                // presentation: the segment starts past it, so sinks clip it and
-                // a remux writes it back as an edit list. Opus is left out: its
-                // pre-skip rides in the `OpusHead`, which `OpusDec` already trims.
-                // A video edit keeps its stop, which the video decoder applies.
-                let track = tracks.iter().find(|t| t.track_id == track_id);
-                let edit = match track {
-                    Some(
-                        t @ TrackHeader {
-                            kind: TrackKind::Audio { format, .. },
-                            ..
-                        },
-                    ) if *format != AudioFormat::Opus => Segment {
-                        stop: None,
-                        ..t.edit_segment()
-                    },
-                    Some(
-                        t @ TrackHeader {
-                            kind: TrackKind::Video { .. },
-                            ..
-                        },
-                    ) => t.edit_segment(),
-                    _ => Segment::new(),
-                };
+                let edit = tracks
+                    .iter()
+                    .find(|t| t.track_id == track_id)
+                    .map_or(Segment::new(), TrackHeader::presentation_segment);
                 if edit != self.port_edit[port] {
                     self.port_edit[port] = edit;
                     out.push_to(port, PipelinePacket::Segment(self.port_segment(port)))

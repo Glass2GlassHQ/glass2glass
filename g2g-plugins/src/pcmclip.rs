@@ -1,0 +1,34 @@
+use alloc::vec::Vec;
+use core::num::NonZeroU32;
+
+use g2g_core::time::ticks_to_ns;
+use g2g_core::{FrameTiming, G2gError, Segment};
+
+// drops the decoded samples outside the segment, `None` when none are left
+pub(crate) fn clip_pcm_to_segment(
+    segment: &Segment,
+    timing: FrameTiming,
+    mut pcm: Vec<u8>,
+    bytes_per_sample_frame: usize,
+    sample_rate: u32,
+) -> Result<Option<(FrameTiming, Vec<u8>)>, G2gError> {
+    let rate = NonZeroU32::new(sample_rate).ok_or(G2gError::CapsMismatch)?;
+    let sample_count = pcm
+        .len()
+        .checked_div(bytes_per_sample_frame)
+        .ok_or(G2gError::CapsMismatch)?;
+    let Some(kept) = segment.kept_samples(timing.pts_ns, sample_count, rate) else {
+        return Ok(None);
+    };
+    if kept.range == (0..sample_count) {
+        return Ok(Some((timing, pcm)));
+    }
+    pcm.truncate(kept.range.end * bytes_per_sample_frame);
+    pcm.drain(..kept.range.start * bytes_per_sample_frame);
+    let clipped = FrameTiming {
+        pts_ns: kept.pts_ns,
+        duration_ns: ticks_to_ns(kept.range.len() as u64, sample_rate),
+        ..timing
+    };
+    Ok(Some((clipped, pcm)))
+}

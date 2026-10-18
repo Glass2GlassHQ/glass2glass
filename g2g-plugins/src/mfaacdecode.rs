@@ -35,12 +35,13 @@ use crate::mfcommon::{
     feed_sample, make_input_sample, mf_err, output_provides_samples, process_output,
     read_sample_bytes, send_drain_command, OutputPull,
 };
+use crate::pcmclip::clip_pcm_to_segment;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Segment,
 };
 
 const PCM_BITS: u32 = 16;
@@ -73,6 +74,7 @@ pub struct MfAacDecode {
     /// Running output-sample-frame count, for monotonic PCM timing.
     out_frames: u64,
     emitted: u64,
+    segment: Segment,
 }
 
 // SAFETY: same contract as `MfDecode`: COM is MTA, the MFT is moved between
@@ -97,6 +99,7 @@ impl MfAacDecode {
             last_caps: None,
             out_frames: 0,
             emitted: 0,
+            segment: Segment::new(),
         }
     }
 
@@ -270,6 +273,7 @@ impl AsyncElement for MfAacDecode {
                     self.drain_eos(&mut decoded)?;
                 }
                 PipelinePacket::Segment(seg) => {
+                    self.segment = seg;
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 other => {
@@ -285,25 +289,36 @@ impl AsyncElement for MfAacDecode {
             };
             let frame_bytes = 2 * self.channels.max(1) as u64; // 16-bit
             for pcm in decoded {
+                let pts_ns = ticks_to_ns(self.out_frames, self.sample_rate.max(1));
+                let n_frames = pcm.len() as u64 / frame_bytes;
+                self.out_frames += n_frames;
+                let timing = FrameTiming {
+                    pts_ns,
+                    dts_ns: pts_ns,
+                    capture_ns: pts_ns,
+                    ..FrameTiming::default()
+                };
+                let Some((timing, pcm)) = clip_pcm_to_segment(
+                    &self.segment,
+                    timing,
+                    pcm,
+                    frame_bytes as usize,
+                    self.sample_rate,
+                )?
+                else {
+                    continue;
+                };
                 if self.last_caps.as_ref() != Some(&pcm_caps) {
                     out.push(PipelinePacket::CapsChanged(pcm_caps.clone()))
                         .await?;
                     self.last_caps = Some(pcm_caps.clone());
                 }
-                let pts_ns = ticks_to_ns(self.out_frames, self.sample_rate.max(1));
-                let n_frames = pcm.len() as u64 / frame_bytes;
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-                    timing: FrameTiming {
-                        pts_ns,
-                        dts_ns: pts_ns,
-                        capture_ns: pts_ns,
-                        ..FrameTiming::default()
-                    },
+                    timing,
                     sequence: self.emitted,
                     meta: Default::default(),
                 };
-                self.out_frames += n_frames;
                 self.emitted += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }

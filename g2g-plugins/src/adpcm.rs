@@ -31,7 +31,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    PropError, PropKind, PropValue, PropertySpec, Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use g2g_mcu::adpcm::{
@@ -40,6 +40,7 @@ use g2g_mcu::adpcm::{
 };
 
 use crate::fifobuffer::FifoBuffer;
+use crate::pcmclip::clip_pcm_to_segment;
 
 /// Bytes per block, the `blockalign` default: what WAV writers (ffmpeg's
 /// `adpcm_ima_wav`, GStreamer's `adpcmenc`) use.
@@ -408,6 +409,7 @@ pub struct AdpcmDec {
     last_out: Option<Caps>,
     sequence: u64,
     configured: bool,
+    segment: Segment,
 }
 
 impl Default for AdpcmDec {
@@ -427,6 +429,7 @@ impl AdpcmDec {
             last_out: None,
             sequence: 0,
             configured: false,
+            segment: Segment::new(),
         }
     }
 
@@ -491,23 +494,34 @@ impl AdpcmDec {
             decode_block_channels(self.channels.max(1) as usize, block, &mut pcm)
                 .ok_or(G2gError::CapsMismatch)?;
             self.pending.discard(self.block_align);
+            let pts_ns = self.next_pts_ns.unwrap_or(0);
+            let duration_ns = self.block_duration_ns();
+            self.next_pts_ns = Some(pts_ns + duration_ns);
+            let timing = FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                duration_ns,
+                ..FrameTiming::default()
+            };
+            let Some((timing, pcm)) = clip_pcm_to_segment(
+                &self.segment,
+                timing,
+                pcm,
+                usize::from(self.channels.max(1)) * 2,
+                self.sample_rate,
+            )?
+            else {
+                continue;
+            };
             let new_caps = self.output_caps();
             if self.last_out.as_ref() != Some(&new_caps) {
                 out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                     .await?;
                 self.last_out = Some(new_caps);
             }
-            let pts_ns = self.next_pts_ns.unwrap_or(0);
-            let duration_ns = self.block_duration_ns();
-            self.next_pts_ns = Some(pts_ns + duration_ns);
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-                FrameTiming {
-                    pts_ns,
-                    dts_ns: pts_ns,
-                    duration_ns,
-                    ..FrameTiming::default()
-                },
+                timing,
                 self.sequence,
             );
             self.sequence += 1;
@@ -641,6 +655,10 @@ impl AsyncElement for AdpcmDec {
                     }
                     _ => return Err(G2gError::CapsMismatch),
                 },
+                PipelinePacket::Segment(segment) => {
+                    self.segment = segment;
+                    out.push(PipelinePacket::Segment(segment)).await?;
+                }
                 other => {
                     out.push(other).await?;
                 }

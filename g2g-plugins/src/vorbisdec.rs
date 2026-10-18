@@ -26,8 +26,10 @@ use g2g_core::time::{ns_to_ticks, ticks_to_ns};
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    ANY_CHANNELS, ANY_SAMPLE_RATE,
+    Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
+
+use crate::pcmclip::clip_pcm_to_segment;
 
 use symphonia_codec_vorbis::VorbisDecoder;
 use symphonia_core::audio::GenericAudioBufferRef;
@@ -57,6 +59,7 @@ pub struct VorbisDec {
     samples: u64,
     sequence: u64,
     configured: bool,
+    segment: Segment,
 }
 
 impl core::fmt::Debug for VorbisDec {
@@ -88,6 +91,7 @@ impl VorbisDec {
             samples: 0,
             sequence: 0,
             configured: false,
+            segment: Segment::new(),
         }
     }
 
@@ -243,12 +247,6 @@ impl AsyncElement for VorbisDec {
                     if pcm.is_empty() {
                         return Ok(());
                     }
-                    let new_caps = self.output_caps();
-                    if self.last_out.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                            .await?;
-                        self.last_out = Some(new_caps);
-                    }
                     let channels = usize::from(self.channels.max(1));
                     let decoded = pcm.len() / channels;
                     let ns = |s: u64| ticks_to_ns(s, self.sample_rate.max(1));
@@ -275,14 +273,31 @@ impl AsyncElement for VorbisDec {
                     for s in &pcm[..keep * channels] {
                         bytes.extend_from_slice(&s.to_le_bytes());
                     }
+                    let timing = FrameTiming {
+                        pts_ns,
+                        dts_ns: pts_ns,
+                        duration_ns,
+                        ..FrameTiming::default()
+                    };
+                    let Some((timing, bytes)) = clip_pcm_to_segment(
+                        &self.segment,
+                        timing,
+                        bytes,
+                        channels * 2,
+                        self.sample_rate,
+                    )?
+                    else {
+                        return Ok(());
+                    };
+                    let new_caps = self.output_caps();
+                    if self.last_out.as_ref() != Some(&new_caps) {
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                            .await?;
+                        self.last_out = Some(new_caps);
+                    }
                     let decoded = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                        FrameTiming {
-                            pts_ns,
-                            dts_ns: pts_ns,
-                            duration_ns,
-                            ..FrameTiming::default()
-                        },
+                        timing,
                         self.sequence,
                     );
                     self.sequence += 1;
@@ -314,6 +329,10 @@ impl AsyncElement for VorbisDec {
                     }
                     _ => return Err(G2gError::CapsMismatch),
                 },
+                PipelinePacket::Segment(segment) => {
+                    self.segment = segment;
+                    out.push(PipelinePacket::Segment(segment)).await?;
+                }
                 other => {
                     out.push(other).await?;
                 }

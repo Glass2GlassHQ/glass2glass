@@ -18,6 +18,11 @@
 //!   `applied_rate` (the rate already baked into the buffers). Direction-
 //!   agnostic: it answers "how far into the asset is this?" for seeking and UI.
 
+use core::num::NonZeroU32;
+use core::ops::Range;
+
+use crate::time::{ns_to_ticks, ticks_to_ns};
+
 /// Absolute value of an `f64` without pulling in `std` (`f64::abs` is a `std`
 /// method; the `no_std` core has no libm). Used for the rate magnitude.
 fn fabs(x: f64) -> f64 {
@@ -146,6 +151,13 @@ impl Seek {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptSamples {
+    // indices of per-channel samples, not of interleaved values
+    pub range: Range<usize>,
+    pub pts_ns: u64,
+}
+
 /// A playback segment (the `GstSegment` analog, TIME format). Describes the
 /// portion of the stream currently being played, the rate, and the mapping
 /// onto the pipeline running-time clock.
@@ -197,6 +209,32 @@ impl Segment {
     pub fn presents(&self, pts_ns: u64) -> bool {
         pts_ns == crate::frame::FrameTiming::PTS_NONE
             || (pts_ns >= self.start && self.stop.is_none_or(|stop| pts_ns < stop))
+    }
+
+    // the samples of the frame at `pts_ns` that lie inside the segment, the stop exclusive
+    pub fn kept_samples(
+        &self,
+        pts_ns: u64,
+        sample_count: usize,
+        sample_rate: NonZeroU32,
+    ) -> Option<KeptSamples> {
+        if pts_ns == crate::frame::FrameTiming::PTS_NONE {
+            return (sample_count > 0).then_some(KeptSamples {
+                range: 0..sample_count,
+                pts_ns,
+            });
+        }
+        let rate = sample_rate.get();
+        let samples_until = |edge_ns: u64| {
+            let samples = ns_to_ticks(edge_ns.saturating_sub(pts_ns), rate);
+            usize::try_from(samples).map_or(sample_count, |samples| samples.min(sample_count))
+        };
+        let first = samples_until(self.start);
+        let end = self.stop.map_or(sample_count, samples_until);
+        (first < end).then(|| KeptSamples {
+            range: first..end,
+            pts_ns: pts_ns.saturating_add(ticks_to_ns(first as u64, rate)),
+        })
     }
 
     /// Map a stream timestamp to **running time** (pipeline-clock ns), or
@@ -437,6 +475,50 @@ mod tests {
         assert!(!seg.presents(5_000));
         assert!(seg.presents(crate::frame::FrameTiming::PTS_NONE));
         assert!(Segment::new().presents(u64::MAX - 1));
+    }
+
+    #[test]
+    fn kept_samples_trims_the_frames_across_the_edges() {
+        const RATE_HZ: u32 = 48_000;
+        let rate = NonZeroU32::new(RATE_HZ).unwrap();
+        let samples_ns = |samples: u64| ticks_to_ns(samples, RATE_HZ);
+        let seg = Segment {
+            start: samples_ns(1_500),
+            stop: Some(samples_ns(4_000)),
+            ..Segment::new()
+        };
+        let kept = |frame_start: u64| seg.kept_samples(samples_ns(frame_start), 1_024, rate);
+        assert_eq!(kept(0), None, "wholly before the start");
+        assert_eq!(
+            kept(1_024),
+            Some(KeptSamples {
+                range: 476..1_024,
+                pts_ns: seg.start,
+            })
+        );
+        assert_eq!(
+            kept(2_048),
+            Some(KeptSamples {
+                range: 0..1_024,
+                pts_ns: samples_ns(2_048),
+            })
+        );
+        assert_eq!(
+            kept(3_072),
+            Some(KeptSamples {
+                range: 0..928,
+                pts_ns: samples_ns(3_072),
+            })
+        );
+        assert_eq!(kept(4_000), None, "the stop is exclusive");
+        assert_eq!(
+            seg.kept_samples(crate::frame::FrameTiming::PTS_NONE, 1_024, rate),
+            Some(KeptSamples {
+                range: 0..1_024,
+                pts_ns: crate::frame::FrameTiming::PTS_NONE,
+            })
+        );
+        assert_eq!(Segment::new().kept_samples(0, 0, rate), None);
     }
 
     #[test]

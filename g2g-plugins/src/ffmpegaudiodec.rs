@@ -46,11 +46,14 @@ use ffmpeg_next as ffmpeg;
 
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, ANY_CHANNELS,
-    ANY_SAMPLE_RATE,
+    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Segment,
+    ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
+
+use crate::pcmclip::clip_pcm_to_segment;
 
 /// One decoded audio frame: interleaved `PcmS16Le` bytes plus its real layout.
 struct DecodedAudio {
@@ -77,6 +80,7 @@ pub struct FfmpegAudioDec {
     emitted: u64,
     /// Last emitted output caps, to suppress re-emitting an unchanged `CapsChanged`.
     last_out: Option<Caps>,
+    segment: Segment,
 }
 
 // SAFETY: `ffmpeg::decoder::Audio` wraps a raw `*mut AVCodecContext` and is
@@ -109,6 +113,7 @@ impl FfmpegAudioDec {
             raw_aac_config: None,
             emitted: 0,
             last_out: None,
+            segment: Segment::new(),
         }
     }
 
@@ -404,6 +409,7 @@ impl AsyncElement for FfmpegAudioDec {
                     self.drain(&mut decoded)?;
                 }
                 PipelinePacket::Segment(seg) => {
+                    self.segment = seg;
                     out.push(PipelinePacket::Segment(seg)).await?;
                     return Ok(());
                 }
@@ -413,7 +419,32 @@ impl AsyncElement for FfmpegAudioDec {
                 }
             }
 
+            let mut next_pts_ns = timing.pts_ns;
             for d in decoded {
+                let bytes_per_sample_frame = usize::from(d.channels) * 2;
+                let samples = d
+                    .pcm
+                    .len()
+                    .checked_div(bytes_per_sample_frame)
+                    .ok_or(G2gError::CapsMismatch)?;
+                // the frames one packet decodes to follow each other
+                let frame_timing = FrameTiming {
+                    pts_ns: next_pts_ns,
+                    ..timing
+                };
+                if next_pts_ns != FrameTiming::PTS_NONE {
+                    next_pts_ns = next_pts_ns.saturating_add(ticks_to_ns(samples as u64, d.rate));
+                }
+                let Some((frame_timing, pcm)) = clip_pcm_to_segment(
+                    &self.segment,
+                    frame_timing,
+                    d.pcm,
+                    bytes_per_sample_frame,
+                    d.rate,
+                )?
+                else {
+                    continue;
+                };
                 let new_caps = Caps::Audio {
                     format: AudioFormat::PcmS16Le,
                     channels: d.channels,
@@ -426,8 +457,8 @@ impl AsyncElement for FfmpegAudioDec {
                     self.last_out = Some(new_caps);
                 }
                 let out_frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(d.pcm.into_boxed_slice())),
-                    timing,
+                    domain: MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
+                    timing: frame_timing,
                     sequence: self.emitted,
                     meta: Default::default(),
                 };

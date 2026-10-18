@@ -27,11 +27,13 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, ANY_CHANNELS,
-    ANY_SAMPLE_RATE,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Segment,
+    ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use g2g_mcu::g711::Law;
+
+use crate::pcmclip::clip_pcm_to_segment;
 
 /// The clock rate RFC 3551 fixes for the PCMU / PCMA payload types, and the
 /// rate a decoder assumes when the coded caps carry the unknown-rate sentinel.
@@ -346,6 +348,7 @@ pub struct G711Dec<L: G711Law> {
     /// Last emitted output caps, to suppress an unchanged `CapsChanged`.
     last_out: Option<Caps>,
     configured: bool,
+    segment: Segment,
     law: PhantomData<L>,
 }
 
@@ -362,6 +365,7 @@ impl<L: G711Law> G711Dec<L> {
             sample_rate: G711_CLOCK_RATE_HZ,
             last_out: None,
             configured: false,
+            segment: Segment::new(),
             law: PhantomData,
         }
     }
@@ -467,6 +471,16 @@ impl<L: G711Law> AsyncElement for G711Dec<L> {
                     for &code in slice {
                         pcm.extend_from_slice(&L::LAW.decode(code).to_le_bytes());
                     }
+                    let Some((timing, pcm)) = clip_pcm_to_segment(
+                        &self.segment,
+                        frame.timing,
+                        pcm,
+                        usize::from(self.channels) * 2,
+                        self.sample_rate,
+                    )?
+                    else {
+                        return Ok(());
+                    };
                     let new_caps = self.output_caps();
                     if self.last_out.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -475,7 +489,7 @@ impl<L: G711Law> AsyncElement for G711Dec<L> {
                     }
                     let out_frame = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(pcm.into_boxed_slice())),
-                        frame.timing,
+                        timing,
                         frame.sequence,
                     );
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
@@ -501,6 +515,10 @@ impl<L: G711Law> AsyncElement for G711Dec<L> {
                     }
                     _ => return Err(G2gError::CapsMismatch),
                 },
+                PipelinePacket::Segment(segment) => {
+                    self.segment = segment;
+                    out.push(PipelinePacket::Segment(segment)).await?;
+                }
                 other => {
                     out.push(other).await?;
                 }

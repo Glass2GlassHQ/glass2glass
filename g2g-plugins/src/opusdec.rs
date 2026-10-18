@@ -60,7 +60,7 @@ use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ChannelLayout, ChannelPosition,
     ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
     PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    ANY_CHANNELS, ANY_SAMPLE_RATE,
+    Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use audiopus::ffi;
@@ -69,6 +69,7 @@ use crate::opusparse::{
     mapping_len, packet_frame_samples, packet_samples, parse_opus_head, OPUS_HEAD_FIXED,
     OPUS_RATE_HZ,
 };
+use crate::pcmclip::clip_pcm_to_segment;
 
 /// Largest Opus frame is 120 ms; at 48 kHz that is 5760 samples per channel. The
 /// decode output buffer is sized for it so any single packet fits.
@@ -280,6 +281,7 @@ pub struct OpusDec {
     /// physical stream, M830) rather than re-stating the current one, so the
     /// decoder is rebuilt even when the header is identical.
     new_segment: bool,
+    segment: Segment,
 }
 
 impl core::fmt::Debug for OpusDec {
@@ -318,6 +320,7 @@ impl OpusDec {
             next_pts_ns: None,
             prev_samples: 0,
             new_segment: false,
+            segment: Segment::new(),
         }
     }
 
@@ -564,14 +567,24 @@ impl OpusDec {
         Ok(Some((expected, pcm)))
     }
 
-    /// Push `pcm` as one output frame, preceded by a `CapsChanged` whenever the
-    /// output caps changed since the last one.
+    /// Push the part of `pcm` inside the segment as one output frame, preceded
+    /// by a `CapsChanged` whenever the output caps changed since the last one.
     async fn emit(
         &mut self,
         pcm: Vec<u8>,
         timing: FrameTiming,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
+        let Some((timing, pcm)) = clip_pcm_to_segment(
+            &self.segment,
+            timing,
+            pcm,
+            self.bytes_per_sample(),
+            OPUS_RATE_HZ,
+        )?
+        else {
+            return Ok(());
+        };
         let new_caps = self.output_caps();
         if self.last_out.as_ref() != Some(&new_caps) {
             out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -846,6 +859,7 @@ impl AsyncElement for OpusDec {
                 // physical stream): remember it for the header that follows.
                 PipelinePacket::Segment(seg) => {
                     self.new_segment = true;
+                    self.segment = seg;
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 // the runner forwards Eos after process(Eos) returns; re-emitting
