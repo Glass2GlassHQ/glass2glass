@@ -289,9 +289,10 @@ impl<C: NalCodec> NalParse<C> {
         // one is appended as-is. The framing is latched from the first frame, since
         // a mid-AU Annex-B continuation buffer (no leading start code) would
         // otherwise be misread as length-prefixed.
-        let is_annexb = *self
-            .input_is_annexb
-            .get_or_insert_with(|| crate::annexb::is_annex_b(bytes));
+        let is_annexb = *self.input_is_annexb.get_or_insert_with(|| {
+            // A raw `.h264` file may open with junk before its first start code.
+            crate::annexb::is_annex_b(bytes) || !crate::annexb::is_avcc(bytes)
+        });
         let access_units = if is_annexb {
             self.framer.push(bytes, frame.timing, C::unit_role)
         } else {

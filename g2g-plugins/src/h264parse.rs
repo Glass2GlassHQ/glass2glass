@@ -1156,6 +1156,35 @@ mod tests {
         assert_eq!(payloads[1], au1, "second AU emitted whole on EOS");
     }
 
+    #[tokio::test]
+    async fn reframing_reads_a_byte_stream_that_opens_with_junk_as_annex_b() {
+        // fate-suite's crew_cif.nal opens with these two bytes before its first
+        // start code, which made the parser take the file for length-prefixed NALs.
+        const LEADING_JUNK: [u8; 2] = [0x00, 0x1F];
+        let mut parse = H264Parse::reframing();
+        parse.configure_pipeline(&h264_parse_caps()).unwrap();
+        let mut sink = CollectSink::default();
+
+        let au0 = annexb_vcl(true, 1);
+        let au1 = annexb_vcl(true, 2);
+        let mut buf = LEADING_JUNK.to_vec();
+        buf.extend_from_slice(&au0);
+        buf.extend_from_slice(&au1);
+        parse
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, buf)),
+                &mut sink,
+            )
+            .await
+            .expect("the stream frames as Annex-B");
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let payloads = data_payloads(&sink);
+        assert_eq!(payloads.len(), 2, "both pictures come out: {payloads:?}");
+        assert_eq!(payloads[0], au0);
+        assert_eq!(payloads[1], au1);
+    }
+
     /// M1116: an upstream that hands over one access unit per buffer (RtspSrc, the
     /// depayloader, the demuxers) must not have its trailing picture held back for
     /// the next buffer's start code, which cost a frame period of latency on every

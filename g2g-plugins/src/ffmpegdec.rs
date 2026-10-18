@@ -119,12 +119,13 @@ use ffmpeg_next as ffmpeg;
 use crate::yuv::downsample_chroma_420;
 use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::frame::Frame;
+use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::{OwnedCudaBuffer, SystemSlice};
 use g2g_core::meta::FrameMetaSet;
 use g2g_core::{
-    AllocationParams, AsyncElement, BufferPool, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    CudaKeepAlive, Dim, ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace,
-    LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    g2g_warn, AllocationParams, AsyncElement, BufferPool, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, CudaKeepAlive, Dim, ElementMetadata, FrameTiming, G2gError, HardwareError,
+    Interlace, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
     PooledBuffer, PropError, PropKind, PropValue, PropertySpec, PushOutcome, QosMessage, Rate,
     RawVideoFormat, VideoCodec,
 };
@@ -534,6 +535,7 @@ pub struct FfmpegVideoDec {
     /// at rate stops paying the kernel's page-zeroing on a fresh multi-megabyte
     /// allocation per frame.
     pack_pool: PackPool,
+    log_name: LogName,
 }
 
 /// Back-compat alias from when this element decoded only H.264. The struct is
@@ -592,6 +594,7 @@ impl FfmpegVideoDec {
             skipping_nonref: false,
             qos_skipped: 0,
             pack_pool: PackPool::default(),
+            log_name: LogName::default(),
         }
     }
 
@@ -882,7 +885,7 @@ impl FfmpegVideoDec {
         pts_ns: u64,
         input: InputStamp,
         decoded: &mut Vec<DecodedPicture>,
-    ) -> Result<(), G2gError> {
+    ) -> Result<u64, G2gError> {
         let cfg = self.decode_config();
         let mut state = DecodeState {
             decoder: self.decoder.as_mut().ok_or(G2gError::NotConfigured)?,
@@ -892,7 +895,7 @@ impl FfmpegVideoDec {
         feed_access_unit_into(&mut state, &cfg, packet, pts_ns, input, decoded)
     }
 
-    fn drain_frames(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
+    fn drain_frames(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<u64, G2gError> {
         let cfg = self.decode_config();
         let mut state = DecodeState {
             decoder: self.decoder.as_mut().ok_or(G2gError::NotConfigured)?,
@@ -939,7 +942,7 @@ struct OffloadDecode {
     pts_to_input: alloc::collections::BTreeMap<u64, InputStamp>,
     pack_pool: PackPool,
     decoded: Vec<DecodedPicture>,
-    result: Result<(), G2gError>,
+    result: Result<u64, G2gError>,
 }
 
 // SAFETY: the bundle holds `!Send` libavcodec state (the decoder's raw
@@ -956,6 +959,8 @@ unsafe impl Send for OffloadDecode {}
 /// release. libavcodec buffers for B-frame reordering, so early inputs commonly
 /// yield zero outputs. Free fn (not a method) so the offload path can move the
 /// decoder + pts map into a blocking-pool closure; `feed_access_unit` delegates.
+/// Returns how many units and pictures libavcodec rejected as invalid data (a
+/// slice before its parameter sets), which are dropped as the ffmpeg CLI does.
 fn feed_access_unit_into(
     state: &mut DecodeState<'_>,
     cfg: &DecodeConfig,
@@ -963,7 +968,7 @@ fn feed_access_unit_into(
     pts_ns: u64,
     input: InputStamp,
     decoded: &mut Vec<DecodedPicture>,
-) -> Result<(), G2gError> {
+) -> Result<u64, G2gError> {
     // libavcodec uses the packet's PTS verbatim; the unit is opaque to
     // the codec layer and is echoed back on the decoded frame. We feed
     // nanoseconds straight through.
@@ -979,18 +984,20 @@ fn feed_access_unit_into(
         }
     }
 
-    state
-        .decoder
-        .send_packet(&packet)
-        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-    drain_frames_into(state, cfg, decoded)
+    let rejected = match state.decoder.send_packet(&packet) {
+        Ok(()) => 0,
+        Err(FfError::InvalidData) => 1,
+        Err(_) => return Err(G2gError::Hardware(HardwareError::Other)),
+    };
+    Ok(rejected + drain_frames_into(state, cfg, decoded)?)
 }
 
 fn drain_frames_into(
     state: &mut DecodeState<'_>,
     cfg: &DecodeConfig,
     decoded: &mut Vec<DecodedPicture>,
-) -> Result<(), G2gError> {
+) -> Result<u64, G2gError> {
+    let mut undecodable = 0;
     let format = cfg.output_format;
     let outputs_cuda = matches!(cfg.backend, Backend::NvdecCuda);
     let transfers_from_hw = matches!(cfg.backend, Backend::Vaapi);
@@ -1076,16 +1083,18 @@ fn drain_frames_into(
             }
             Err(FfError::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
                 // Need more input.
-                return Ok(());
+                return Ok(undecodable);
             }
-            Err(FfError::Eof) => return Ok(()),
+            Err(FfError::Eof) => return Ok(undecodable),
+            // A picture that failed to decode: the next one may still come out.
+            Err(FfError::InvalidData) => undecodable += 1,
             Err(_) => return Err(G2gError::Hardware(HardwareError::Other)),
         }
     }
 }
 
 impl FfmpegVideoDec {
-    fn drain_eos(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
+    fn drain_eos(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<u64, G2gError> {
         if let Some(d) = self.decoder.as_mut() {
             d.send_eof()
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
@@ -1322,6 +1331,18 @@ impl FfmpegVideoDec {
     }
 }
 
+impl LogSource for FfmpegVideoDec {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
+    }
+}
+
 impl PadTemplates for FfmpegVideoDec {
     /// Static superset for auto-plug: any supported codec in (any geometry), raw
     /// NV12 / I420 / I422 / I444 out. A constructed instance narrows the source
@@ -1500,6 +1521,14 @@ impl AsyncElement for FfmpegVideoDec {
         self.qos
     }
 
+    fn set_instance_name(&mut self, name: String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "device" => {
@@ -1642,6 +1671,7 @@ impl AsyncElement for FfmpegVideoDec {
                 return Err(G2gError::NotConfigured);
             }
             let mut decoded = Vec::new();
+            let mut undecodable = 0;
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let slice = frame
@@ -1686,7 +1716,7 @@ impl AsyncElement for FfmpegVideoDec {
                             pts_to_input: core::mem::take(&mut self.pts_to_input),
                             pack_pool: core::mem::take(&mut self.pack_pool),
                             decoded: Vec::new(),
-                            result: Ok(()),
+                            result: Ok(0),
                         };
                         bundle = crate::offload::run_blocking(move || {
                             let mut b = bundle;
@@ -1714,19 +1744,21 @@ impl AsyncElement for FfmpegVideoDec {
                         self.decoder = bundle.decoder.take();
                         self.pts_to_input = core::mem::take(&mut bundle.pts_to_input);
                         self.pack_pool = core::mem::take(&mut bundle.pack_pool);
-                        bundle.result?;
+                        undecodable = bundle.result?;
                         decoded = bundle.decoded;
                     }
                     #[cfg(not(feature = "offload"))]
-                    self.feed_access_unit(
-                        Packet::copy(slice),
-                        frame.timing.pts_ns,
-                        InputStamp {
-                            arrival_ns: frame.timing.arrival_ns,
-                            meta: frame.meta.clone(),
-                        },
-                        &mut decoded,
-                    )?;
+                    {
+                        undecodable = self.feed_access_unit(
+                            Packet::copy(slice),
+                            frame.timing.pts_ns,
+                            InputStamp {
+                                arrival_ns: frame.timing.arrival_ns,
+                                meta: frame.meta.clone(),
+                            },
+                            &mut decoded,
+                        )?;
+                    }
                 }
                 PipelinePacket::CapsChanged(c) => {
                     // Two callers:
@@ -1770,7 +1802,7 @@ impl AsyncElement for FfmpegVideoDec {
                     return Ok(());
                 }
                 PipelinePacket::Eos => {
-                    self.drain_eos(&mut decoded)?;
+                    undecodable = self.drain_eos(&mut decoded)?;
                 }
                 PipelinePacket::Segment(seg) => {
                     self.push_downstream(out, PipelinePacket::Segment(seg))
@@ -1782,6 +1814,12 @@ impl AsyncElement for FfmpegVideoDec {
                 }
             }
 
+            if undecodable > 0 {
+                g2g_warn!(
+                    self,
+                    "skipped {undecodable} access unit(s) libavcodec could not decode"
+                );
+            }
             // `Any` when the stream declared no rate, never a guess.
             let out_framerate = match &self.input_caps {
                 Some(Caps::CompressedVideo { framerate, .. }) => framerate.clone(),
@@ -3805,6 +3843,56 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
+    }
+
+    /// A stream joined mid-GOP (an HLS segment, a TS cut) opens with slices whose
+    /// parameter sets never arrived. libavcodec rejects those as invalid data and
+    /// the ffmpeg CLI moves on to the next unit, so the decoder must too.
+    #[tokio::test]
+    async fn slices_before_their_parameter_sets_are_dropped_not_fatal() {
+        const FIXTURE: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/h264_320x180.h264"
+        ));
+        const FRAME_PERIOD_NS: u64 = 33_333_333;
+        let mut starts = crate::access_unit::access_unit_starts(
+            FIXTURE,
+            true,
+            <crate::h264parse::H264Codec as crate::nalparse::NalCodec>::unit_role,
+        );
+        starts.push(FIXTURE.len());
+        let access_units: Vec<&[u8]> = starts.windows(2).map(|w| &FIXTURE[w[0]..w[1]]).collect();
+        let orphan_slice = *access_units.last().expect("the fixture has access units");
+        assert!(
+            !crate::annexb::starts_with_param_set(orphan_slice, VideoCodec::H264),
+            "the last access unit carries no parameter sets"
+        );
+
+        let mut dec = FfmpegVideoDec::new().with_output_format(OutputFormat::I420);
+        dec.configure_pipeline(&h264_caps(320, 180))
+            .expect("configure H.264 input");
+        let mut sink = crate::testutil::CollectSink::default();
+        let stream = core::iter::once(orphan_slice).chain(access_units.iter().copied());
+        for (sequence, unit) in stream.enumerate() {
+            let mut frame = crate::testutil::frame_with_bytes(sequence as u64, unit.to_vec());
+            frame.timing.pts_ns = sequence as u64 * FRAME_PERIOD_NS;
+            dec.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap_or_else(|e| panic!("access unit {sequence} decodes or is skipped: {e:?}"));
+        }
+        dec.process(PipelinePacket::Eos, &mut sink)
+            .await
+            .expect("drains");
+        let pictures = sink
+            .packets
+            .iter()
+            .filter(|p| matches!(p, PipelinePacket::DataFrame(_)))
+            .count();
+        assert_eq!(
+            pictures,
+            access_units.len(),
+            "every unit after the orphan decodes"
+        );
     }
 
     /// Regression: when a strict-NV12 downstream sink (e.g. `WaylandSink`)

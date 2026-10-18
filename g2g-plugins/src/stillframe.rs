@@ -56,6 +56,58 @@ impl ImageAssembler {
         Ok(images)
     }
 
+    /// [`Self::push`] for a format whose streams carry padding between images:
+    /// bytes before the next `signature` are dropped instead of failing the
+    /// parse.
+    pub(crate) fn push_skipping_padding(
+        &mut self,
+        bytes: &[u8],
+        frame_length: FrameLength,
+        signature: &[u8],
+    ) -> Result<Vec<Vec<u8>>, G2gError> {
+        if self.pending.len().saturating_add(bytes.len()) > MAX_ENCODED_BYTES {
+            return Err(G2gError::CapsMismatch);
+        }
+        self.pending.extend_from_slice(bytes);
+
+        let mut images = Vec::new();
+        loop {
+            self.drop_padding(signature);
+            let Some(length) = frame_length(&self.pending)? else {
+                break;
+            };
+            let rest = self.pending.split_off(length);
+            images.push(core::mem::replace(&mut self.pending, rest));
+        }
+        Ok(images)
+    }
+
+    /// End of stream for [`Self::push_skipping_padding`]: a tail shorter than
+    /// `signature` is padding, anything longer is an image that never completed.
+    pub(crate) fn finish_skipping_padding(&mut self, signature: &[u8]) -> Result<(), G2gError> {
+        if self.pending.len() < signature.len() {
+            self.pending = Vec::new();
+        }
+        self.finish()
+    }
+
+    /// Drop everything before the first `signature`, keeping a tail that could be
+    /// the start of one split across buffers.
+    fn drop_padding(&mut self, signature: &[u8]) {
+        let start = self
+            .pending
+            .windows(signature.len())
+            .position(|window| window == signature)
+            .unwrap_or_else(|| {
+                let split_tail = (1..signature.len())
+                    .rev()
+                    .find(|kept| self.pending.ends_with(&signature[..*kept]))
+                    .unwrap_or(0);
+                self.pending.len() - split_tail
+            });
+        self.pending.drain(..start);
+    }
+
     /// End of stream: bytes still held are an image that never completed.
     pub(crate) fn finish(&mut self) -> Result<(), G2gError> {
         if self.pending.is_empty() {
@@ -193,22 +245,24 @@ fn jpeg_next_marker(data: &[u8], at: usize) -> Option<usize> {
     }
 }
 
+/// The `SOI` marker every JPEG opens with.
+pub(crate) const JPEG_SIGNATURE: [u8; 2] = [JPEG_MARKER_PREFIX, JPEG_START_OF_IMAGE];
+
 /// Walk a JPEG's markers to the end of its `EOI`, so a byte stream that splits
 /// or joins files (an MJPEG dump, a `filesrc` chunking) is framed back into
 /// whole images.
 pub(crate) fn jpeg_frame_length(data: &[u8]) -> Result<Option<usize>, G2gError> {
-    const SIGNATURE: [u8; 2] = [JPEG_MARKER_PREFIX, JPEG_START_OF_IMAGE];
-    if data.len() < SIGNATURE.len() {
-        if SIGNATURE.starts_with(data) {
+    if data.len() < JPEG_SIGNATURE.len() {
+        if JPEG_SIGNATURE.starts_with(data) {
             return Ok(None);
         }
         return Err(G2gError::CapsMismatch);
     }
-    if data[..SIGNATURE.len()] != SIGNATURE {
+    if data[..JPEG_SIGNATURE.len()] != JPEG_SIGNATURE {
         return Err(G2gError::CapsMismatch);
     }
 
-    let mut offset = SIGNATURE.len();
+    let mut offset = JPEG_SIGNATURE.len();
     loop {
         if offset > MAX_ENCODED_BYTES {
             return Err(G2gError::CapsMismatch);

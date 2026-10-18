@@ -12,6 +12,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1492: a bare `decodebin` names the codec when the container's demuxer drops the stream, instead of falling through to the default H.264 port.
 - M1491: a bare `decodebin` on Ogg selects any audio bitstream it reads, so Vorbis behind Theora no longer plugs the Opus default.
 - M1490: a bare `decodebin` decodes the container stream the next element accepts, so `decodebin ! audioconvert` gets the audio track.
+- M1542: `ffmpegdec` skips access units libavcodec rejects instead of failing the stream.
+- M1541: `h264parse` and `h265parse` read a raw stream with bytes before its first start code as Annex-B.
+- M1540: `jpegparse` skips padding and trailers between JPEG images instead of failing the stream.
 - M1502: mp4 AAC with a program config element decodes, and ER AAC, ELD and USAC fail loud in the demuxer.
 - M1501: mp4 demuxers put a new sample description's parameter sets in-band where the track switches to it.
 - M1500: the single-output `qtdemux` reads fragmented, truncated and version 1 files, the video track behind an audio track, and VP8 / MJPEG.
