@@ -37,7 +37,7 @@ use crate::annexb::{
     is_annex_b, length_prefixed_to_annexb, parse_avcc, prepend_param_sets, starts_with_param_set,
     AVCC_LENGTH_SIZE,
 };
-use crate::avi::{parse, AviFile, AviStream, AviStreamKind};
+use crate::avi::{parse, parse_streams, AviFile, AviStream, AviStreamKind};
 
 /// The `stream=` names for a codec-named video selection, so a decode chain
 /// negotiates the file's real codec instead of the nominal default.
@@ -194,7 +194,7 @@ fn nego_caps(kind: &AviStreamKind) -> Option<(Caps, bool)> {
             sample_rate,
         } if is_pcm(*format) => Some((audio_caps(*format, *channels, *sample_rate), false)),
         AviStreamKind::Audio { format, .. } => Some((audio_caps(*format, 0, 0), false)),
-        AviStreamKind::Unsupported => None,
+        AviStreamKind::Unsupported { .. } => None,
     }
 }
 
@@ -225,13 +225,13 @@ pub struct AviStreamInfo {
 /// to hold the `hdrl` list (a file prefix is enough); returns empty for a
 /// non-AVI or unparseable input, which a hook reads as "decline".
 ///
-/// A prefix that stops inside `movi` still yields the streams: the header parse
-/// runs before the chunk walk, so only the chunk list is short.
+/// A prefix that stops anywhere past `hdrl` still yields the streams: only the
+/// header is read.
 pub fn forwardable_streams(data: &[u8]) -> Vec<AviStreamInfo> {
-    let Ok(file) = parse(data) else {
+    let Ok(streams) = parse_streams(data) else {
         return Vec::new();
     };
-    file.streams
+    streams
         .iter()
         .enumerate()
         .filter_map(|(stream, s)| {
@@ -241,6 +241,19 @@ pub fn forwardable_streams(data: &[u8]) -> Vec<AviStreamInfo> {
                 caps,
                 video,
             })
+        })
+        .collect()
+}
+
+pub fn unsupported_codecs(data: &[u8]) -> Vec<alloc::string::String> {
+    let Ok(streams) = parse_streams(data) else {
+        return Vec::new();
+    };
+    streams
+        .into_iter()
+        .filter_map(|stream| match stream.kind {
+            AviStreamKind::Unsupported { codec } => codec,
+            _ => None,
         })
         .collect()
 }
@@ -339,7 +352,10 @@ fn emittable<'a>(
         .iter()
         .filter(move |chunk| {
             selected.contains(&chunk.stream)
-                && !matches!(file.streams[chunk.stream].kind, AviStreamKind::Unsupported)
+                && !matches!(
+                    file.streams[chunk.stream].kind,
+                    AviStreamKind::Unsupported { .. }
+                )
         })
         .map(move |chunk| {
             let stream = &file.streams[chunk.stream];
@@ -389,7 +405,7 @@ fn stream_collection(file: &AviFile) -> Option<StreamCollection> {
             let ty = match s.kind {
                 AviStreamKind::Video { .. } => StreamType::Video,
                 AviStreamKind::Audio { .. } => StreamType::Audio,
-                AviStreamKind::Unsupported => return None,
+                AviStreamKind::Unsupported { .. } => return None,
             };
             Some(Stream::new(stream_id(index), ty, real_caps(&s.kind)?))
         })
@@ -462,7 +478,7 @@ impl AviDemux {
         let of_wanted_kind = |kind: &AviStreamKind| match kind {
             AviStreamKind::Video { .. } => want_video,
             AviStreamKind::Audio { .. } => !want_video,
-            AviStreamKind::Unsupported => false,
+            AviStreamKind::Unsupported { .. } => false,
         };
         // A named selection points at the stream carrying that codec / format,
         // so a file with two audio streams of different formats picks the one

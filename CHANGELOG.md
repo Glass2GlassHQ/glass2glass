@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1492: a bare `decodebin` names the codec when the container's demuxer drops the stream, instead of falling through to the default H.264 port.
 - M1491: a bare `decodebin` on Ogg selects any audio bitstream it reads, so Vorbis behind Theora no longer plugs the Opus default.
 - M1490: a bare `decodebin` decodes the container stream the next element accepts, so `decodebin ! audioconvert` gets the audio track.
 - M1502: mp4 AAC with a program config element decodes, and ER AAC, ELD and USAC fail loud in the demuxer.

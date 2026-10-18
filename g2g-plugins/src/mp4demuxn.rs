@@ -182,6 +182,44 @@ pub fn forwardable_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
         .unwrap_or_default()
 }
 
+pub fn unsupported_sample_entries(data: &[u8]) -> Vec<alloc::string::String> {
+    use crate::mp4box::{be32, boxes, find_box, find_path};
+    let forwarded: Vec<u32> = forwardable_streams(data)
+        .iter()
+        .map(|stream| stream.track_id)
+        .collect();
+    let Some(moov) = find_box(data, b"moov") else {
+        return Vec::new();
+    };
+    boxes(moov)
+        .filter(|(kind, _)| *kind == b"trak")
+        .filter_map(|(_, trak)| {
+            let tkhd = find_box(trak, b"tkhd")?;
+            let track_id_offset = match tkhd.first()? {
+                0 => TKHD_V0_TRACK_ID,
+                _ => TKHD_V1_TRACK_ID,
+            };
+            if forwarded.contains(&be32(tkhd, track_id_offset).ok()?) {
+                return None;
+            }
+            let mdia = find_box(trak, b"mdia")?;
+            let handler = find_box(mdia, b"hdlr")?.get(HDLR_HANDLER_TYPE)?;
+            if handler != b"vide" && handler != b"soun" {
+                return None;
+            }
+            let stsd = find_path(mdia, &[b"minf", b"stbl", b"stsd"])?;
+            let entry_type = stsd.get(STSD_FIRST_ENTRY_TYPE)?;
+            Some(entry_type.iter().map(|&byte| char::from(byte)).collect())
+        })
+        .collect()
+}
+
+// offsets into the box payloads, past the version and flags
+const TKHD_V0_TRACK_ID: usize = 12;
+const TKHD_V1_TRACK_ID: usize = 20;
+const HDLR_HANDLER_TYPE: core::ops::Range<usize> = 8..12;
+const STSD_FIRST_ENTRY_TYPE: core::ops::Range<usize> = 12..16;
+
 /// The subtitle (timed-text) tracks an MP4 carries (M412): one [`Mp4StreamInfo`]
 /// per text `trak`, in `moov` order. The read-side complement of
 /// [`forwardable_streams`] (which is A/V-only, because the `playbin` fan-out has no

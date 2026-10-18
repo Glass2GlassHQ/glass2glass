@@ -22,6 +22,7 @@
 //! `n * dwScale / dwRate` seconds, where `n` counts chunks when `dwSampleSize`
 //! is 0 and `bytes / dwSampleSize` otherwise.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::caps::greatest_common_divisor;
@@ -148,7 +149,10 @@ pub(crate) enum AviStreamKind {
         channels: u8,
         sample_rate: u32,
     },
-    Unsupported,
+    Unsupported {
+        // the fourcc or format tag of an audio or video stream g2g does not decode
+        codec: Option<String>,
+    },
 }
 
 /// One stream's `strh` timing and `strf` format.
@@ -270,12 +274,16 @@ fn parse_strl(data: &[u8], range: core::ops::Range<usize>) -> Option<AviStream> 
     if strh.len() < STRH_MIN_LEN {
         return None;
     }
-    let kind = match read_fourcc(strh, STRH_TYPE)? {
+    let stream_type = read_fourcc(strh, STRH_TYPE)?;
+    let kind = match stream_type {
         STREAM_TYPE_VIDEO => parse_video_format(strh, strf),
         STREAM_TYPE_AUDIO => parse_audio_format(strf),
         _ => None,
     };
-    let (kind, codec_config) = kind.unwrap_or((AviStreamKind::Unsupported, Vec::new()));
+    let (kind, codec_config) = kind.unwrap_or_else(|| {
+        let codec = unsupported_codec_name(stream_type, strh, strf);
+        (AviStreamKind::Unsupported { codec }, Vec::new())
+    });
     Some(AviStream {
         kind,
         scale: read_u32(strh, STRH_SCALE)?,
@@ -284,6 +292,25 @@ fn parse_strl(data: &[u8], range: core::ops::Range<usize>) -> Option<AviStream> 
         sample_size: read_u32(strh, STRH_SAMPLE_SIZE)?,
         codec_config,
     })
+}
+
+fn unsupported_codec_name(stream_type: FourCc, strh: &[u8], strf: &[u8]) -> Option<String> {
+    match stream_type {
+        STREAM_TYPE_VIDEO => {
+            let compression = read_fourcc(strf, BITMAPINFO_COMPRESSION)
+                .or_else(|| read_fourcc(strh, STRH_HANDLER))?;
+            let name: String = compression
+                .iter()
+                .filter(|byte| byte.is_ascii_graphic())
+                .map(|&byte| char::from(byte))
+                .collect();
+            (!name.is_empty()).then_some(name)
+        }
+        STREAM_TYPE_AUDIO => {
+            read_u16(strf, WAVEFORMAT_TAG).map(|tag| alloc::format!("audio format tag {tag:#06x}"))
+        }
+        _ => None,
+    }
 }
 
 /// A video stream's geometry and codec from its `BITMAPINFOHEADER`, plus the
@@ -541,6 +568,24 @@ pub(crate) fn parse(data: &[u8]) -> Result<AviFile, G2gError> {
     Ok(file)
 }
 
+// the streams alone, from a file prefix that may end anywhere past `hdrl`
+pub(crate) fn parse_streams(data: &[u8]) -> Result<Vec<AviStream>, G2gError> {
+    if read_fourcc(data, 0) != Some(RIFF_FOURCC)
+        || read_fourcc(data, CHUNK_HEADER_LEN) != Some(AVI_FOURCC)
+    {
+        return Err(G2gError::CapsMismatch);
+    }
+    let hdrl = chunks(data, RIFF_HEADER_LEN..data.len())
+        .find(|chunk| chunk.list_form(data) == Some(HDRL_FOURCC))
+        .ok_or(G2gError::CapsMismatch)?;
+    let mut file = AviFile::default();
+    parse_hdrl(data, hdrl.list_body(), &mut file)?;
+    if file.streams.is_empty() {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(file.streams)
+}
+
 /// Read the `avih` header and one stream per `LIST strl`.
 fn parse_hdrl(
     data: &[u8],
@@ -568,7 +613,7 @@ fn parse_hdrl(
             }
             file.streams
                 .push(parse_strl(data, chunk.list_body()).unwrap_or(AviStream {
-                    kind: AviStreamKind::Unsupported,
+                    kind: AviStreamKind::Unsupported { codec: None },
                     scale: 1,
                     rate: 1,
                     start: 0,

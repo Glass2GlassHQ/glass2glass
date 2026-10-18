@@ -739,7 +739,11 @@ stream-selection property (`tsdemux stream=aac`) and the elementary caps for eac
 stream. `expand_decodebin` takes the first stream with a decode chain to caps the
 element after the `decodebin` accepts, so `decodebin ! audioconvert` on an A/V
 file builds `filesrc ! tsdemux stream=aac ! <audio decoder> ! …` and a consumer
-that takes anything gets the video. A `mp4_primary_stream` sibling does the
+that takes anything gets the video. A hook also lists the container codec id of
+each audio or video stream its demuxer cannot forward (an AVI fourcc, a Matroska
+`CodecID`, an MP4 sample entry), and when no listed stream fits the consumer the
+expansion fails `NoStreamDecoder` naming them instead of plugging the demuxer's
+default port. A `mp4_primary_stream` sibling does the
 same for MP4, sniffing the `moov` and naming `qtdemux stream=aac` so an audio-only
 `.m4a` / `.mp4` plugs an audio decoder too. The TS selection also covers MPEG
 audio (`stream=mp2`, PMT types 0x03/0x04), Opus (`stream=opus`, a private

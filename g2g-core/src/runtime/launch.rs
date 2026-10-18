@@ -195,6 +195,13 @@ pub enum ParseError {
     /// A `decodebin`'s source read its content and recognized no media type
     /// (`filesrc` with an extension it does not know and no `bytestream-format`).
     UnrecognizedContent(String),
+    /// A `decodebin`'s container holds no stream the element after it can take,
+    /// and `codecs` names the streams its demuxer cannot forward (empty when the
+    /// container has no audio or video stream at all).
+    NoStreamDecoder {
+        location: String,
+        codecs: Vec<String>,
+    },
 }
 
 impl From<GraphError> for ParseError {
@@ -302,6 +309,12 @@ impl core::fmt::Display for ParseError {
             }
             ParseError::DecodebinNoUpstream => {
                 write!(f, "decodebin has no upstream element to decode; it must follow a source or element with declared caps")
+            }
+            ParseError::NoStreamDecoder { location, codecs } if codecs.is_empty() => {
+                write!(f, "decodebin: {location} has no audio or video stream to decode")
+            }
+            ParseError::NoStreamDecoder { location, codecs } => {
+                write!(f, "decodebin: no decoder for {} in {location}", codecs.join(", "))
             }
             ParseError::NoDecodeChain(caps) => {
                 write!(f, "decodebin: no decoder chain from {caps} to raw (no decoder feature compiled in, or a container that needs a demuxer)")
@@ -831,14 +844,15 @@ fn raw_for_consumer(caps: &Caps, consumer_constraint: Option<&CapsConstraint<'_>
         && consumer_constraint.is_none_or(|constraint| constraint.accepts(caps))
 }
 
-// the first stream with a decode chain to caps the consumer accepts, else the first stream
+// the first stream with a decode chain to caps the consumer accepts
 fn choose_container_stream(
     registry: &Registry,
-    streams: ContainerStreams,
+    location: &str,
+    mut streams: ContainerStreams,
     preferred: MemoryDomainKind,
     consumer: Option<&dyn DynAsyncElement>,
     avoided: &[&str],
-) -> Option<PrimaryStream> {
+) -> Result<PrimaryStream, ParseError> {
     let consumer_constraint = consumer.map(|element| element.caps_constraint_as_transform());
     let consumer_accepts = |c: &Caps| raw_for_consumer(c, consumer_constraint.as_ref());
     let reaches_consumer = |stream: &PrimaryStream| {
@@ -852,12 +866,19 @@ fn choose_container_stream(
             )
             .is_some()
     };
-    let chosen = streams
-        .streams
-        .iter()
-        .position(reaches_consumer)
-        .unwrap_or(0);
-    streams.streams.into_iter().nth(chosen)
+    let chosen = match streams.streams.iter().position(reaches_consumer) {
+        Some(index) => index,
+        // a dropped stream may be the one the consumer wanted, so name it rather than plug another
+        None if streams.streams.is_empty() || !streams.unsupported.is_empty() => {
+            return Err(ParseError::NoStreamDecoder {
+                location: location.to_string(),
+                codecs: streams.unsupported,
+            });
+        }
+        // the decoder search after this reports the missing chain
+        None => 0,
+    };
+    Ok(streams.streams.swap_remove(chosen))
 }
 
 /// Expand every `decodebin` node into the decoder chain the registry auto-plugs
@@ -946,17 +967,23 @@ fn expand_decodebin(
                         .iter()
                         .find(|(k, _)| k == "location")
                         .map(|(_, v)| v.as_str());
-                    let chain_input = match location
-                        .and_then(|loc| registry.container_streams(loc, &caps))
-                        .and_then(|streams| {
-                            choose_container_stream(
-                                registry,
-                                streams,
-                                preferred,
-                                consumer.as_deref(),
-                                avoided,
-                            )
-                        }) {
+                    let primary = match location {
+                        Some(location) => registry
+                            .container_streams(location, &caps)
+                            .map(|streams| {
+                                choose_container_stream(
+                                    registry,
+                                    location,
+                                    streams,
+                                    preferred,
+                                    consumer.as_deref(),
+                                    avoided,
+                                )
+                            })
+                            .transpose()?,
+                        None => None,
+                    };
+                    let chain_input = match primary {
                         Some(primary) => {
                             new_chain.push(Item::Element(ElementSpec {
                                 name: primary.demux.to_string(),

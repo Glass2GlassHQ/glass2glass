@@ -1424,6 +1424,8 @@ mod factory {
     pub struct ContainerStreams {
         // video first, decodebin takes the first one the element after it can use
         pub streams: Vec<PrimaryStream>,
+        // the container's codec id for each audio or video stream the demux drops
+        pub unsupported: Vec<String>,
     }
 
     /// A bare-`decodebin` primary-stream hook (M746): given the upstream file

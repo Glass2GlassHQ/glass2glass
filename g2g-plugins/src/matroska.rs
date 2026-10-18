@@ -455,6 +455,8 @@ pub struct MatroskaDemuxer {
     /// for the same reason as `codec_privates`. Only tracks that declare one are
     /// stored; their blocks are decoded before they are queued.
     compressions: Vec<(u64, MkvCompression)>,
+    // the `CodecID` of each audio or video track whose codec is `MkvCodec::Other`
+    unmapped_codec_ids: Vec<String>,
     tags: TagList,
     /// Per-track tags from `Targets`-scoped `Tag` elements: the `TagTrackUID`
     /// each names and that element's tags. One entry per scoped `Tag` element,
@@ -503,6 +505,7 @@ impl MatroskaDemuxer {
             tracks: Vec::new(),
             codec_privates: Vec::new(),
             compressions: Vec::new(),
+            unmapped_codec_ids: Vec::new(),
             tags: TagList::new(),
             track_tags: Vec::new(),
             track_entry_tags: Vec::new(),
@@ -584,6 +587,10 @@ impl MatroskaDemuxer {
             .iter()
             .find(|(n, _)| *n == track)
             .map(|(_, p)| p.as_slice())
+    }
+
+    pub fn unmapped_codec_ids(&self) -> &[String] {
+        &self.unmapped_codec_ids
     }
 
     /// The stream metadata from the Segment's `Tags` element and the `Info`
@@ -761,6 +768,9 @@ impl MatroskaDemuxer {
                             }
                             if let Some(c) = parsed.compression {
                                 self.compressions.push((parsed.track.number, c));
+                            }
+                            if let Some(codec_id) = parsed.unmapped_codec_id {
+                                self.unmapped_codec_ids.push(codec_id);
                             }
                         }
                     }
@@ -1126,6 +1136,7 @@ struct ParsedTrack {
     /// The track's `ContentEncoding`, kept beside `track` so `MkvTrack` stays
     /// `Copy` (the header-stripping settings are owned bytes).
     compression: Option<MkvCompression>,
+    unmapped_codec_id: Option<String>,
 }
 
 fn parse_tracks(body: &[u8]) -> Vec<ParsedTrack> {
@@ -1215,11 +1226,13 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
     if let Some(lang) = language_bcp47.or(language) {
         tags.push(Tag::Language(String::from(lang)));
     }
+    let codec = MkvCodec::from_codec_id(codec_id);
     Some(ParsedTrack {
+        unmapped_codec_id: unmapped_av_codec_id(codec, codec_id),
         track: MkvTrack {
             number,
             uid,
-            codec: MkvCodec::from_codec_id(codec_id),
+            codec,
             width,
             height,
             channels,
@@ -1232,6 +1245,19 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
         compression,
     })
 }
+
+fn unmapped_av_codec_id(codec: MkvCodec, codec_id: &[u8]) -> Option<String> {
+    if codec != MkvCodec::Other {
+        return None;
+    }
+    let codec_id = bounded_string(codec_id)?.trim_end_matches('\0');
+    let audio_or_video =
+        codec_id.starts_with(AUDIO_CODEC_ID_PREFIX) || codec_id.starts_with(VIDEO_CODEC_ID_PREFIX);
+    audio_or_video.then(|| String::from(codec_id))
+}
+
+const AUDIO_CODEC_ID_PREFIX: &str = "A_";
+const VIDEO_CODEC_ID_PREFIX: &str = "V_";
 
 /// Parse one Cluster's body, appending its frames. The Cluster `Timestamp`
 /// precedes its blocks (spec-mandated), so it is set before any block is decoded.

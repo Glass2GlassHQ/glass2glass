@@ -942,7 +942,10 @@ pub fn ps_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams
             caps: info.caps,
         })
         .collect();
-    Some(ContainerStreams { streams })
+    Some(ContainerStreams {
+        streams,
+        unsupported: Vec::new(),
+    })
 }
 
 #[cfg(feature = "std")]
@@ -1954,7 +1957,10 @@ pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams
             caps: info.caps,
         })
         .collect();
-    Some(ContainerStreams { streams })
+    Some(ContainerStreams {
+        streams,
+        unsupported: Vec::new(),
+    })
 }
 
 /// Bare-`decodebin` primary-stream hook for MP4 (M748): the MP4 sibling of
@@ -1978,7 +1984,8 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     }
     let moov = read_mp4_moov(location)?;
     let mut infos = crate::mp4demuxn::forwardable_streams(&moov);
-    if infos.is_empty() {
+    let unsupported = crate::mp4demuxn::unsupported_sample_entries(&moov);
+    if infos.is_empty() && unsupported.is_empty() {
         return None;
     }
     infos.sort_by_key(|i| !i.video);
@@ -1998,7 +2005,10 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             })
         })
         .collect();
-    Some(ContainerStreams { streams })
+    Some(ContainerStreams {
+        streams,
+        unsupported,
+    })
 }
 
 /// Bare-`decodebin` primary-stream hook for Matroska (M757): the mkv sibling of
@@ -2022,7 +2032,8 @@ pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     let mut demux = crate::matroska::MatroskaDemuxer::new();
     demux.push_data(&prefix);
     let mut infos = crate::mkvdemux::forwardable_streams(&demux);
-    if infos.is_empty() {
+    let unsupported = demux.unmapped_codec_ids().to_vec();
+    if infos.is_empty() && unsupported.is_empty() {
         return None;
     }
     infos.sort_by_key(|i| !i.video);
@@ -2034,7 +2045,10 @@ pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             caps: info.caps,
         })
         .collect();
-    Some(ContainerStreams { streams })
+    Some(ContainerStreams {
+        streams,
+        unsupported,
+    })
 }
 
 pub fn ivf_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
@@ -2054,6 +2068,7 @@ pub fn ivf_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     };
     Some(ContainerStreams {
         streams: alloc::vec![stream],
+        unsupported: Vec::new(),
     })
 }
 
@@ -2155,7 +2170,10 @@ pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     if streams.is_empty() {
         return None;
     }
-    Some(ContainerStreams { streams })
+    Some(ContainerStreams {
+        streams,
+        unsupported: Vec::new(),
+    })
 }
 
 /// Probe an MP4 file and build an [`Mp4DemuxN`](crate::mp4demuxn::Mp4DemuxN) with
@@ -2289,7 +2307,8 @@ pub fn avi_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     }
     let prefix = read_prefix(location)?;
     let mut infos = crate::avidemux::forwardable_streams(&prefix);
-    if infos.is_empty() {
+    let unsupported = crate::avidemux::unsupported_codecs(&prefix);
+    if infos.is_empty() && unsupported.is_empty() {
         return None;
     }
     infos.sort_by_key(|i| !i.video);
@@ -2308,7 +2327,10 @@ pub fn avi_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             })
         })
         .collect();
-    Some(ContainerStreams { streams })
+    Some(ContainerStreams {
+        streams,
+        unsupported,
+    })
 }
 
 /// Fetch a text resource synchronously on a throwaway current-thread runtime, for
