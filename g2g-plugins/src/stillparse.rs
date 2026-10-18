@@ -35,6 +35,7 @@ use g2g_core::{
 use crate::compositor::frame_period_ns;
 use crate::stillframe::{
     jpeg_frame_length, jpeg_geometry, png_frame_length, png_geometry, FrameLength, ImageAssembler,
+    JPEG_SIGNATURE,
 };
 
 /// One still-image format's framing and header geometry, the two things the
@@ -47,6 +48,10 @@ pub trait StillImageFormat: Send {
     const LONG_NAME: &'static str;
     /// Length of the complete image at the start of a buffer.
     const FRAME_LENGTH: FrameLength;
+    /// The bytes every image opens with, for a format whose streams carry
+    /// padding between images that the parser skips. `None` fails the parse on
+    /// any byte outside an image.
+    const SIGNATURE_AFTER_PADDING: Option<&'static [u8]>;
     /// `(width, height)` from one whole image's header.
     fn geometry(image: &[u8]) -> Option<(u32, u32)>;
 }
@@ -59,6 +64,8 @@ impl StillImageFormat for Jpeg {
     const CODEC: VideoCodec = VideoCodec::Mjpeg;
     const LONG_NAME: &'static str = "JPEG parser";
     const FRAME_LENGTH: FrameLength = jpeg_frame_length;
+    // AVI pads each MJPEG chunk with FF bytes, and files carry trailers past EOI.
+    const SIGNATURE_AFTER_PADDING: Option<&'static [u8]> = Some(&JPEG_SIGNATURE);
 
     fn geometry(image: &[u8]) -> Option<(u32, u32)> {
         jpeg_geometry(image)
@@ -73,6 +80,7 @@ impl StillImageFormat for Png {
     const CODEC: VideoCodec = VideoCodec::Png;
     const LONG_NAME: &'static str = "PNG parser";
     const FRAME_LENGTH: FrameLength = png_frame_length;
+    const SIGNATURE_AFTER_PADDING: Option<&'static [u8]> = None;
 
     fn geometry(image: &[u8]) -> Option<(u32, u32)> {
         png_geometry(image)
@@ -260,13 +268,24 @@ impl<F: StillImageFormat> AsyncElement for StillImageParse<F> {
                     if let Some(pts) = frame.timing.pts().filter(|pts| *pts != 0) {
                         self.pending_pts = Some(pts);
                     }
-                    let images = self.assembler.push(slice, F::FRAME_LENGTH)?;
+                    let images = match F::SIGNATURE_AFTER_PADDING {
+                        Some(signature) => self.assembler.push_skipping_padding(
+                            slice,
+                            F::FRAME_LENGTH,
+                            signature,
+                        )?,
+                        None => self.assembler.push(slice, F::FRAME_LENGTH)?,
+                    };
                     for image in images {
                         self.emit(image, out).await?;
                     }
                 }
                 PipelinePacket::Eos => {
-                    if let Err(e) = self.assembler.finish() {
+                    let finished = match F::SIGNATURE_AFTER_PADDING {
+                        Some(signature) => self.assembler.finish_skipping_padding(signature),
+                        None => self.assembler.finish(),
+                    };
+                    if let Err(e) = finished {
                         g2g_warn!(self, "stream ends inside an image");
                         return Err(e);
                     }
@@ -415,6 +434,16 @@ mod tests {
         }
     }
 
+    fn jpeg_caps() -> Caps {
+        Caps::CompressedVideo {
+            codec: VideoCodec::Mjpeg,
+            width: Dim::Fixed(WIDTH),
+            height: Dim::Fixed(HEIGHT),
+            framerate: Rate::Fixed(FRAMERATE_FPS << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        }
+    }
+
     fn parser() -> PngParse {
         let mut parser = PngParse::new();
         parser
@@ -532,13 +561,7 @@ mod tests {
         let image = jpeg_image(WIDTH as u16, HEIGHT as u16);
         let mut parser = JpegParse::new();
         parser
-            .configure_pipeline(&Caps::CompressedVideo {
-                codec: VideoCodec::Mjpeg,
-                width: Dim::Fixed(WIDTH),
-                height: Dim::Fixed(HEIGHT),
-                framerate: Rate::Fixed(FRAMERATE_FPS << 16),
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            })
+            .configure_pipeline(&jpeg_caps())
             .expect("JPEG at a fixed rate");
         let mut sink = RecordingSink::default();
         let mut stream = image.clone();
@@ -556,6 +579,42 @@ mod tests {
                 Rate::Fixed(FRAMERATE_FPS << 16)
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn a_jpeg_stream_skips_padding_between_and_after_images() {
+        // AVI's FF padding after each image, then a text trailer past the last EOI.
+        const AVI_PADDING: [u8; 2] = [0xFF, 0xFF];
+        const TRAILER: &[u8] = b"821242";
+        let image = jpeg_image(WIDTH as u16, HEIGHT as u16);
+        let mut stream = image.clone();
+        stream.extend_from_slice(&AVI_PADDING);
+        stream.extend_from_slice(&image);
+        stream.extend_from_slice(&AVI_PADDING);
+        stream.extend_from_slice(TRAILER);
+        // Every split point, so a signature cut in half across buffers is kept.
+        for cut in 0..stream.len() {
+            let mut parser = JpegParse::new();
+            parser
+                .configure_pipeline(&jpeg_caps())
+                .expect("JPEG at a fixed rate");
+            let mut sink = RecordingSink::default();
+            for piece in [&stream[..cut], &stream[cut..]] {
+                parser
+                    .process(data_frame(piece, 0), &mut sink)
+                    .await
+                    .expect("padding is skipped");
+            }
+            parser
+                .process(PipelinePacket::Eos, &mut sink)
+                .await
+                .expect("a trailer is not an unfinished image");
+            assert_eq!(
+                sink.payloads(),
+                vec![image.clone(), image.clone()],
+                "cut at {cut}"
+            );
+        }
     }
 
     /// A baseline-JPEG shaped file: `SOI`, `SOF0` at `width` x `height`, `SOS`
