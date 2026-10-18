@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1584: typefind finds an ADTS, AC-3, MP3 or MPEG-PS stream that starts after leading bytes, as in a file cut mid-frame or padded.
 - M1583: typefind recognizes an MPEG-1/2 video elementary stream, so `decodebin` decodes `.m2v` files.
 - M1582: the mp4 demuxers read a truncated QuickTime PCM track up to the cut instead of refusing its frame count.
 - M1581: `avidemux` reads the H.264 framing from the stream's `avcC`, and `h264parse` takes a buffer that walks as length-prefixed NALs for one.

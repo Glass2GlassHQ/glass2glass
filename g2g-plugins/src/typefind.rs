@@ -123,7 +123,79 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
     if let Some(format) = sniff_mpeg_audio(header) {
         return Some(elementary_audio_caps(format));
     }
-    sniff_text(header).map(|format| Caps::Text { format })
+    if let Some(format) = sniff_text(header) {
+        return Some(Caps::Text { format });
+    }
+    sniff_behind_leading_bytes(header)
+}
+
+// a stream cut mid-frame or padded out has bytes ahead of its first whole frame or pack
+fn sniff_behind_leading_bytes(header: &[u8]) -> Option<Caps> {
+    let start = crate::id3::id3v2_len(header).unwrap_or(0);
+    let rest = header.get(start..)?;
+    (0..rest.len().min(SNIFF_LEN)).find_map(|skip| sniff_resumed_stream(&rest[skip..]))
+}
+
+fn sniff_resumed_stream(data: &[u8]) -> Option<Caps> {
+    if opens_program_stream(data) {
+        return Some(Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegPs,
+        });
+    }
+    if chained_frames(
+        data,
+        adts_header,
+        |h| h.frame_len,
+        |a, b| a.same_configuration(b),
+    )
+    .is_some()
+    {
+        return Some(elementary_audio_caps(AudioFormat::Aac));
+    }
+    if chained_frames(data, ac3_header, |h| h.frame_len, |a, b| a.same_stream(b)).is_some() {
+        return Some(elementary_audio_caps(AudioFormat::Ac3));
+    }
+    chained_frames(data, mpa_header, |h| h.frame_len, |a, b| a.same_stream(b))
+        .and_then(|first| mpeg_audio_format(&first))
+        .map(elementary_audio_caps)
+}
+
+// texture and video payloads hit two chained audio headers by chance, gst's MP3 typefind asks for five
+const RESUMED_STREAM_FRAMES: usize = 5;
+
+// the first header when frames of one stream chain for RESUMED_STREAM_FRAMES, or until the window ends
+fn chained_frames<H>(
+    data: &[u8],
+    header: impl Fn(&[u8]) -> Option<H>,
+    frame_len: impl Fn(&H) -> usize,
+    same_stream: impl Fn(&H, &H) -> bool,
+) -> Option<H> {
+    let first = header(data)?;
+    let mut at = frame_len(&first);
+    let mut frames = 1;
+    while frames < RESUMED_STREAM_FRAMES {
+        let rest = data.get(at..).unwrap_or_default();
+        if rest.len() < frame_len(&first) {
+            break;
+        }
+        let next = header(rest).filter(|next| same_stream(&first, next))?;
+        at += frame_len(&next);
+        frames += 1;
+    }
+    (frames > 1).then_some(first)
+}
+
+// a valid pack header with another program stream start code right behind it
+fn opens_program_stream(data: &[u8]) -> bool {
+    const LOWEST_SYSTEM_START_CODE: u8 = 0xB9;
+    if !data.starts_with(&PS_PACK_MAGIC) {
+        return false;
+    }
+    let Some(Some(pack_len)) = crate::psdemux::pack_header_len(data) else {
+        return false;
+    };
+    data.get(pack_len..pack_len + PS_PACK_MAGIC.len())
+        .is_some_and(|next| next[..3] == PS_PACK_MAGIC[..3] && next[3] >= LOWEST_SYSTEM_START_CODE)
 }
 
 /// Caps for a compressed audio elementary stream at the channels/rate
@@ -1322,5 +1394,67 @@ mod tests {
         assert_eq!(sniff_caps(&stuffed), mpeg2);
         let sequence_header_only = &stream[..12];
         assert_eq!(sniff_caps(sequence_header_only), None);
+    }
+
+    // an MPEG-2 pack header with no stuffing
+    const PS_PACK: [u8; 14] = [
+        0x00, 0x00, 0x01, 0xBA, 0x44, 0x00, 0x04, 0x00, 0x04, 0x01, 0x01, 0x89, 0xC3, 0xF8,
+    ];
+
+    #[test]
+    fn finds_a_stream_cut_ahead_of_its_first_frame() {
+        let cut_frame = [0x81, 0x49, 0x8D, 0xDF, 0x45];
+        let aac = [&cut_frame[..], &adts_stream(2)].concat();
+        assert_eq!(
+            sniff_caps(&aac),
+            Some(elementary_audio_caps(AudioFormat::Aac))
+        );
+        let ac3 = [&cut_frame[..], &ac3_stream(2)].concat();
+        assert_eq!(
+            sniff_caps(&ac3),
+            Some(elementary_audio_caps(AudioFormat::Ac3))
+        );
+        let ps = [&cut_frame[..], &PS_PACK, &PS_PACK].concat();
+        assert_eq!(
+            sniff_caps(&ps),
+            Some(Caps::ByteStream {
+                encoding: ByteStreamEncoding::MpegPs
+            })
+        );
+    }
+
+    #[test]
+    fn skips_frames_that_stop_chaining_before_the_window_ends() {
+        let cut_frame = [0x81, 0x49, 0x8D, 0xDF, 0x45];
+        let unrelated = vec![0x55; adts_stream(1).len()];
+        let aac = [&cut_frame[..], &adts_stream(2), &unrelated].concat();
+        assert_eq!(sniff_caps(&aac), None);
+        let long = [
+            &cut_frame[..],
+            &adts_stream(RESUMED_STREAM_FRAMES),
+            &unrelated,
+        ]
+        .concat();
+        assert_eq!(
+            sniff_caps(&long),
+            Some(elementary_audio_caps(AudioFormat::Aac))
+        );
+    }
+
+    #[test]
+    fn finds_mpeg_audio_behind_padding_after_an_id3v2_tag() {
+        let padded = [id3v2_tag(16), vec![0; 64], mp3_stream(2)].concat();
+        assert_eq!(
+            sniff_caps(&padded),
+            Some(elementary_audio_caps(AudioFormat::Mp3))
+        );
+    }
+
+    #[test]
+    fn leading_bytes_need_a_confirmed_stream() {
+        let lone_frame = [vec![0; 64], mp3_stream(1)].concat();
+        assert_eq!(sniff_caps(&lone_frame), None);
+        let lone_pack = [&[0x12; 8][..], &PS_PACK].concat();
+        assert_eq!(sniff_caps(&lone_pack), None);
     }
 }

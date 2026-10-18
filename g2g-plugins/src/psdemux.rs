@@ -918,7 +918,7 @@ fn find_start_code(buf: &[u8]) -> Option<usize> {
 /// The length is only reported once every byte it covers is present: the
 /// stuffing count is read from the header itself, so a truncated pack would
 /// otherwise name a length past the end of the buffer.
-fn pack_header_len(buf: &[u8]) -> Option<Option<usize>> {
+pub(crate) fn pack_header_len(buf: &[u8]) -> Option<Option<usize>> {
     let Some(&b) = buf.get(4) else {
         return Some(None);
     };

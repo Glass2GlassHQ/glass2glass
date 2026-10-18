@@ -784,7 +784,13 @@ port.
   file's header (`typefind::sniff_caps`, M1025) rather than assuming one: an
   ISO-BMFF file becomes a self-demuxing `Mp4Src`, anything else the sniff
   recognises a `FileSrc` declaring those caps, so an elementary stream or a
-  non-MP4 container reaches the decode chain its content needs.
+  non-MP4 container reaches the decode chain its content needs. When nothing
+  matches at the first byte, the sniff scans the header for an ADTS, AC-3,
+  MPEG audio or MPEG-PS stream that starts later (a file cut mid-frame, or
+  padded after its ID3v2 tag). An audio stream found there needs five frame
+  headers in a row, or headers that chain to the end of the header buffer, as
+  gst's MP3 typefind asks. A program stream needs a second start code behind
+  its pack header.
 
 - **playbin (multi-stream front door)** (`std`). Beyond the
   single-stream expansion, g2g's `playbin` can split a container into *all* its
