@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1522: `mp4mux` text and audio samples with no decode timestamp decode when they present, so a first cue keeps its start time in a fragmented file.
 - M1513: `flacparse` ends a frame only at a sync that continues the frame number or closes a valid CRC-16, and drops a truncated last frame.
 - M1512: `opusdec` decodes multichannel Opus with the `OpusHead` channel mapping or the RFC 7845 defaults.
 - M1511: `mkvdemux` and `MkvDemuxN` forward only the first track of the selected codec.

@@ -763,11 +763,13 @@ impl Mp4MuxN {
         }
 
         // A zero `dts_ns` means upstream is not timing decode order, except on a
-        // track's first sample, where it is also where a reordered stream really
-        // starts. A DTS past the PTS is not expressible in `ctts` version 0, so
-        // such a sample decodes when it presents.
+        // video track's first sample, where it is also where a reordered stream
+        // really starts (audio and text never reorder, so their first sample
+        // decodes when it presents). A DTS past the PTS is not expressible in
+        // `ctts` version 0, so such a sample decodes when it presents.
+        let reorders = matches!(self.kinds[input], Some(PadKind::Video { .. }));
         let dts_ns = match frame.timing.dts_ns {
-            d if d <= pts_ns && (d > 0 || first_sample) => d,
+            d if d <= pts_ns && (d > 0 || (first_sample && reorders)) => d,
             _ => pts_ns,
         };
         let timed = TimedSample {
