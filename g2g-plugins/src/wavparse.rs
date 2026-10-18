@@ -10,9 +10,10 @@
 //! declared size. Sizes come from the file, so they are read with checked
 //! arithmetic and a chunk that overruns fails the parse.
 //!
-//! `data` is the last chunk this reads: its samples run to end of stream, which
-//! is what a size of `0xFFFFFFFF` (the streaming sentinel `wavenc` writes) means
-//! anyway.
+//! `data` is the last chunk this reads: its samples end at its declared size,
+//! and run to end of stream for a size of `0xFFFFFFFF` (the streaming sentinel
+//! `wavenc` writes). PCM leaves in whole sample frames, so a chunk boundary in
+//! the input never splits a sample.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -33,7 +34,7 @@ use crate::riff::{
     padded_len, read_fourcc, read_u16, read_u32, CHUNK_HEADER_LEN, FOURCC_LEN, RIFF_FOURCC,
     RIFF_HEADER_LEN,
 };
-use crate::waveformat::audio_format;
+use crate::waveformat::{audio_format, sample_frame_len};
 
 /// The fields of a `fmt ` chunk this reads: tag, channels, rate, byte rate,
 /// block align, bit depth.
@@ -144,6 +145,8 @@ pub struct WavParse {
     /// True once the `data` chunk header has been consumed: everything after it
     /// is samples.
     in_data: bool,
+    // None when the data chunk size is the streaming sentinel
+    data_remaining: Option<usize>,
     emitted: u64,
 }
 
@@ -223,6 +226,7 @@ impl WavParse {
                 self.buf.drain(..CHUNK_HEADER_LEN);
                 let format = self.format.ok_or(G2gError::CapsMismatch)?;
                 self.post_duration(size, format);
+                self.data_remaining = (size != UNKNOWN_DATA_LEN).then_some(size);
                 out.push(PipelinePacket::CapsChanged(Caps::Audio {
                     format: format.format,
                     channels: format.channels,
@@ -251,10 +255,29 @@ impl WavParse {
             }
             self.buf.drain(..total);
         }
-        if self.buf.is_empty() {
+        let format = self.format.ok_or(G2gError::CapsMismatch)?;
+        // Coded payloads have no fixed frame width.
+        let frame_len = sample_frame_len(format.format, format.channels).unwrap_or(1);
+        if self
+            .data_remaining
+            .is_some_and(|remaining| remaining < frame_len)
+        {
+            // Past the end of the `data` chunk.
+            self.buf.clear();
             return Ok(());
         }
-        let samples = core::mem::take(&mut self.buf);
+        let available = self
+            .data_remaining
+            .map_or(self.buf.len(), |remaining| remaining.min(self.buf.len()));
+        let whole_frames = available - available % frame_len;
+        if whole_frames == 0 {
+            return Ok(());
+        }
+        let rest = self.buf.split_off(whole_frames);
+        let samples = core::mem::replace(&mut self.buf, rest);
+        if let Some(remaining) = &mut self.data_remaining {
+            *remaining -= whole_frames;
+        }
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(samples.into_boxed_slice())),
             FrameTiming::default(),
