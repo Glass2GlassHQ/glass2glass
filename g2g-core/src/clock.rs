@@ -940,6 +940,57 @@ mod tests {
         assert_eq!(sync.base_time(), 100);
         assert!(!sync.play_anchored());
     }
+
+    struct Ticker;
+
+    impl PipelineClock for Ticker {
+        fn now_ns(&self) -> u64 {
+            0
+        }
+
+        fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
+            Some(self)
+        }
+
+        fn shared_ticker(&self) -> Option<Arc<dyn DynAsyncClock + Send + Sync>> {
+            Some(Arc::new(Ticker))
+        }
+    }
+
+    impl AsyncClock for Ticker {
+        type SleepFuture<'a> = core::future::Ready<()>;
+
+        fn sleep_until_ns<'a>(&'a self, _deadline_ns: u64) -> Self::SleepFuture<'a> {
+            core::future::ready(())
+        }
+    }
+
+    #[test]
+    fn a_clock_that_declares_no_health_is_healthy() {
+        assert!(Fixed(0).healthy());
+    }
+
+    #[test]
+    fn shared_and_elected_handles_keep_the_ticker() {
+        let shared = Arc::new(Ticker);
+        assert!(PipelineClock::as_ticker(&shared).is_some());
+        assert!(PipelineClock::shared_ticker(&shared).is_some());
+        assert!(ElectedClock::new(shared).shared_ticker().is_some());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn monotonic_clock_advances_with_wall_time() {
+        extern crate std;
+        let pause = std::time::Duration::from_millis(1);
+        let before = MonotonicClock.now_ns();
+        std::thread::sleep(pause);
+        let after = MonotonicClock.now_ns();
+        assert!(
+            after >= before + pause.as_nanos() as u64,
+            "{before} -> {after}"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "runtime"))]
@@ -1238,6 +1289,64 @@ mod drift_tests {
         assert!(
             reader_view < now as i64,
             "slow master must lag the reference"
+        );
+    }
+
+    #[test]
+    fn a_sample_exactly_at_the_gate_is_folded() {
+        const GATE: u64 = 1_000_000;
+        let drift = DriftClock::with_gate(Arc::new(Tick::default()), GATE);
+        let master = master_at(BASE);
+        for _ in 0..DriftClock::MIN_SAMPLES_TO_GATE {
+            drift.observe(BASE, master);
+        }
+        assert_eq!(drift.slope(), 1.0, "one local time gives no rate to fit");
+        let (later, on_fit) = (BASE + PERIOD, master + PERIOD);
+        assert_eq!(
+            drift.observe(later, on_fit + GATE + 1),
+            DriftObservation::Rejected
+        );
+        assert_eq!(
+            drift.observe(later, on_fit + GATE),
+            DriftObservation::Folded
+        );
+    }
+
+    #[test]
+    fn the_fit_projects_along_the_fitted_rate() {
+        const SLOPE: u64 = 2;
+        const SAMPLES: u64 = 4;
+        let drift = DriftClock::new(Arc::new(Tick::default()));
+        for i in 0..SAMPLES {
+            let local = BASE + i * PERIOD;
+            drift.observe(local, SLOPE * local);
+        }
+        assert_eq!(drift.observations(), SAMPLES as usize);
+        assert_eq!(drift.slope(), SLOPE as f64);
+        let ahead = BASE + SAMPLES * PERIOD;
+        let projected = drift.project_ns(ahead);
+        assert!(
+            projected.abs_diff(SLOPE * ahead) <= 1,
+            "{projected} vs {}",
+            SLOPE * ahead
+        );
+    }
+
+    // a PTP servo fits TAI nanoseconds, where an f64 resolves only 256 ns
+    #[test]
+    fn fits_the_rate_at_a_tai_scale_timeline_to_a_part_per_billion() {
+        const TAI_NOW: u64 = 1_700_000_000_000_000_000;
+        const SYNC_INTERVAL: u64 = 125_000_000;
+        const OFFSET: u64 = 37_000_000_000;
+        let drift = DriftClock::new(Arc::new(Tick::default()));
+        for i in 0..DriftClock::DEFAULT_WINDOW as u64 {
+            let local = TAI_NOW + i * SYNC_INTERVAL;
+            drift.observe(local, local + OFFSET);
+        }
+        assert!(
+            (drift.slope() - 1.0).abs() < 1e-9,
+            "an offset-only master has no drift, fitted {}",
+            drift.slope()
         );
     }
 }

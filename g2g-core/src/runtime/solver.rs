@@ -4016,4 +4016,670 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn linear_failures_name_the_elements_that_disagree() {
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let i420 = fixed_video(RawVideoFormat::I420, 64, 48, 30);
+        let both = CapsSet::from_alternatives(vec![nv12.clone(), i420.clone()]);
+        let only = |caps: &Caps| CapsSet::one(caps.clone());
+        let produces = |caps: &Caps| CapsConstraint::Produces(CapsSet::one(caps.clone()));
+        let accepts = |caps: &Caps| CapsConstraint::Accepts(CapsSet::one(caps.clone()));
+        let derives = |caps: Option<Caps>| {
+            CapsConstraint::DerivedOutput(Box::new(move |_: &Caps| {
+                CapsSet::from_alternatives(caps.iter().cloned().collect())
+            }))
+        };
+        let nv12_only_passthrough = CapsConstraint::DerivedFields(CapsTransform::RawVideo {
+            accept: vec![RawVideoFormat::Nv12],
+            produce: Vec::new(),
+            shapes: vec![RawVideoShape::PASSTHROUGH],
+        });
+        let passthrough = CapsConstraint::DerivedFields(CapsTransform::RawVideo {
+            accept: Vec::new(),
+            produce: Vec::new(),
+            shapes: vec![RawVideoShape::PASSTHROUGH],
+        });
+        let open_geometry = video(RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any);
+
+        let cases: Vec<(&str, Vec<CapsConstraint>, NegotiationFailure)> = vec![
+            (
+                "the last element produces",
+                vec![
+                    produces(&nv12),
+                    CapsConstraint::IdentityAny,
+                    produces(&nv12),
+                ],
+                NegotiationFailure::EndpointShapeMismatch { index: 2 },
+            ),
+            (
+                "an open geometry cannot fixate",
+                vec![produces(&open_geometry), CapsConstraint::AcceptsAny],
+                NegotiationFailure::Unfixable {
+                    upstream: 0,
+                    downstream: 1,
+                },
+            ),
+            (
+                "an identity rejects its input",
+                vec![
+                    produces(&nv12),
+                    CapsConstraint::Identity(only(&i420)),
+                    CapsConstraint::AcceptsAny,
+                ],
+                NegotiationFailure::empty_link(0, 1),
+            ),
+            (
+                "an identity cannot feed its sink",
+                vec![
+                    CapsConstraint::Produces(both.clone()),
+                    CapsConstraint::Identity(only(&nv12)),
+                    accepts(&i420),
+                ],
+                NegotiationFailure::empty_link(1, 2),
+            ),
+            (
+                "an identity's two sides never meet",
+                vec![
+                    produces(&nv12),
+                    CapsConstraint::Identity(both.clone()),
+                    accepts(&i420),
+                ],
+                NegotiationFailure::empty_link(0, 2),
+            ),
+            (
+                "no mapping row takes the input",
+                vec![
+                    produces(&nv12),
+                    CapsConstraint::Mapping(vec![(only(&i420), only(&nv12))]),
+                    CapsConstraint::AcceptsAny,
+                ],
+                NegotiationFailure::empty_link(0, 2),
+            ),
+            (
+                "a derived output is empty",
+                vec![produces(&nv12), derives(None), CapsConstraint::AcceptsAny],
+                NegotiationFailure::empty_link(1, 2),
+            ),
+            (
+                "a derived output misses the sink",
+                vec![produces(&nv12), derives(Some(nv12.clone())), accepts(&i420)],
+                NegotiationFailure::empty_link(1, 2),
+            ),
+            (
+                "a declared transform refuses its input",
+                vec![
+                    produces(&i420),
+                    nv12_only_passthrough,
+                    CapsConstraint::AcceptsAny,
+                ],
+                NegotiationFailure::empty_link(1, 2),
+            ),
+            (
+                "a declared transform misses the sink",
+                vec![produces(&nv12), passthrough, accepts(&i420)],
+                NegotiationFailure::empty_link(1, 2),
+            ),
+            (
+                "a wildcard identity's two sides never meet",
+                vec![produces(&nv12), CapsConstraint::IdentityAny, accepts(&i420)],
+                NegotiationFailure::empty_link(0, 2),
+            ),
+        ];
+        for (case, chain, expected) in cases {
+            let refs: Vec<&CapsConstraint> = chain.iter().collect();
+            assert_eq!(solve_linear(&refs), Err(expected), "{case}");
+        }
+    }
+
+    #[test]
+    fn identity_preferences_steer_the_chain() {
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let i420 = fixed_video(RawVideoFormat::I420, 64, 48, 30);
+        let both = CapsSet::from_alternatives(vec![nv12.clone(), i420.clone()]);
+        let src = CapsConstraint::Produces(both.clone());
+        let identity = CapsConstraint::Identity(both);
+        let sink = CapsConstraint::AcceptsAny;
+        // I420 costs the source one, NV12 costs the identity ten
+        let identity_costs = CapsPreferences::new(vec![10, 0]);
+        let links = solve_linear_preferred(
+            &[&src, &identity, &sink],
+            &[None, Some(identity_costs), None],
+        )
+        .expect("chain negotiates");
+        assert_eq!(links, vec![i420.clone(), i420]);
+    }
+
+    #[test]
+    fn mapping_preferences_charge_the_row_both_sides_select() {
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let to_rgba = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
+        let to_bgra = fixed_video(RawVideoFormat::Bgra8, 64, 48, 30);
+        let src = CapsConstraint::Produces(CapsSet::one(nv12.clone()));
+        let map = CapsConstraint::Mapping(vec![
+            (CapsSet::one(nv12.clone()), CapsSet::one(to_rgba.clone())),
+            (CapsSet::one(nv12.clone()), CapsSet::one(to_bgra.clone())),
+        ]);
+        let sink =
+            CapsConstraint::Accepts(CapsSet::from_alternatives(vec![to_rgba, to_bgra.clone()]));
+        // BGRA costs the sink one, the RGBA row costs ten
+        let row_costs = CapsPreferences::new(vec![10, 0]);
+        let links = solve_linear_preferred(&[&src, &map, &sink], &[None, Some(row_costs), None])
+            .expect("chain negotiates");
+        assert_eq!(links, vec![nv12, to_bgra]);
+    }
+
+    #[test]
+    fn preferences_never_pair_a_derived_input_with_an_output_it_cannot_produce() {
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let i420 = fixed_video(RawVideoFormat::I420, 64, 48, 30);
+        let both = CapsSet::from_alternatives(vec![nv12.clone(), i420.clone()]);
+        // the sink's NV12 costs more than the source's I420
+        let sink_costs = CapsPreferences::new(vec![10, 0]);
+        let passthrough_closure =
+            CapsConstraint::DerivedOutput(Box::new(|input: &Caps| CapsSet::one(input.clone())));
+        let passthrough_declared = CapsConstraint::DerivedFields(CapsTransform::RawVideo {
+            accept: Vec::new(),
+            produce: Vec::new(),
+            shapes: vec![RawVideoShape::PASSTHROUGH],
+        });
+        let src = CapsConstraint::Produces(both.clone());
+        let sink = CapsConstraint::Accepts(both);
+        for transform in [&passthrough_closure, &passthrough_declared] {
+            let links = solve_linear_preferred(
+                &[&src, transform, &sink],
+                &[None, None, Some(sink_costs.clone())],
+            )
+            .expect("chain negotiates");
+            assert_eq!(links, vec![i420.clone(), i420.clone()]);
+        }
+    }
+
+    #[test]
+    fn derived_output_drops_inputs_that_cannot_reach_the_sink() {
+        let h264 = fixed_compressed(VideoCodec::H264, 64, 48, 30);
+        let h265 = fixed_compressed(VideoCodec::H265, 64, 48, 30);
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 320, 240, 30);
+        let i420 = fixed_video(RawVideoFormat::I420, 320, 240, 30);
+        let (h264_out, h265_out) = (nv12, i420.clone());
+        let decoder = CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            } => CapsSet::one(h264_out.clone()),
+            _ => CapsSet::one(h265_out.clone()),
+        }));
+        let src = CapsConstraint::Produces(CapsSet::from_alternatives(vec![h264, h265.clone()]));
+        let sink = CapsConstraint::Accepts(CapsSet::one(i420.clone()));
+        let links = solve_linear(&[&src, &decoder, &sink]).expect("chain negotiates");
+        assert_eq!(links, vec![h265, i420]);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn resolve_forward_output_maps_the_input_through_its_row() {
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let i420 = fixed_video(RawVideoFormat::I420, 64, 48, 30);
+        let rgba = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
+        let bgra = fixed_video(RawVideoFormat::Bgra8, 64, 48, 30);
+        let map = CapsConstraint::Mapping(vec![
+            (CapsSet::one(nv12.clone()), CapsSet::one(rgba.clone())),
+            (CapsSet::one(i420), CapsSet::one(bgra)),
+        ]);
+        assert_eq!(
+            resolve_forward_output(&map, &nv12, None, None),
+            ForwardResolve::Fixed(rgba)
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn resolve_forward_output_defers_an_unfixatable_output_that_does_not_track_the_input() {
+        let input = fixed_video(RawVideoFormat::Nv12, 320, 240, 30);
+        let open_rate = video(
+            RawVideoFormat::Nv12,
+            Dim::Fixed(640),
+            Dim::Fixed(480),
+            Rate::Any,
+        );
+        let map =
+            CapsConstraint::Mapping(vec![(CapsSet::one(input.clone()), CapsSet::one(open_rate))]);
+        assert_eq!(
+            resolve_forward_output(&map, &input, None, None),
+            ForwardResolve::Defer
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn resolve_forward_output_keeps_a_previous_shape_only_with_the_input_geometry() {
+        let input = fixed_video(RawVideoFormat::I420, 320, 240, 30);
+        let previous = fixed_video(RawVideoFormat::Nv12, 16, 16, 1);
+        let resolve = |width: u32, height: u32| {
+            let map = CapsConstraint::Mapping(vec![(
+                CapsSet::one(input.clone()),
+                CapsSet::from_alternatives(vec![
+                    fixed_video(RawVideoFormat::I420, width, height, 30),
+                    fixed_video(RawVideoFormat::Nv12, width, height, 30),
+                ]),
+            )]);
+            resolve_forward_output(&map, &input, None, Some(&previous))
+        };
+        assert_eq!(
+            resolve(320, 240),
+            ForwardResolve::Fixed(fixed_video(RawVideoFormat::Nv12, 320, 240, 30))
+        );
+        assert_eq!(resolve(640, 240), ForwardResolve::Defer, "width differs");
+        assert_eq!(resolve(320, 480), ForwardResolve::Defer, "height differs");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn resolve_forward_output_keeps_a_previous_audio_shape_only_with_the_input_layout() {
+        let audio = |format: AudioFormat, channels: u8, sample_rate: u32| Caps::Audio {
+            format,
+            channels,
+            sample_rate,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
+        };
+        let input = audio(AudioFormat::PcmS16Le, 2, 48_000);
+        let resolve = |channels: u8, sample_rate: u32| {
+            let map = CapsConstraint::Mapping(vec![(
+                CapsSet::one(input.clone()),
+                CapsSet::from_alternatives(vec![
+                    audio(AudioFormat::PcmS16Le, channels, sample_rate),
+                    audio(AudioFormat::PcmF32Le, channels, sample_rate),
+                ]),
+            )]);
+            let previous = audio(AudioFormat::PcmF32Le, channels, 8_000);
+            resolve_forward_output(&map, &input, None, Some(&previous))
+        };
+        assert_eq!(
+            resolve(2, 48_000),
+            ForwardResolve::Fixed(audio(AudioFormat::PcmF32Le, 2, 48_000))
+        );
+        assert_eq!(resolve(2, 44_100), ForwardResolve::Defer, "rate differs");
+        assert_eq!(resolve(1, 48_000), ForwardResolve::Defer, "channels differ");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn resolve_forward_output_derives_a_declared_transform_from_an_unfixed_input() {
+        let to_rgba = CapsConstraint::DerivedFields(CapsTransform::RawVideo {
+            accept: Vec::new(),
+            produce: Vec::new(),
+            shapes: vec![RawVideoShape::PASSTHROUGH
+                .with_format(FieldTransform::Fixed(RawVideoFormat::Rgba8))],
+        });
+        let no_rate = video(
+            RawVideoFormat::Nv12,
+            Dim::Fixed(640),
+            Dim::Fixed(480),
+            Rate::Any,
+        );
+        assert_eq!(
+            resolve_forward_output(&to_rgba, &no_rate, None, None),
+            ForwardResolve::Fixed(video(
+                RawVideoFormat::Rgba8,
+                Dim::Fixed(640),
+                Dim::Fixed(480),
+                Rate::Any
+            ))
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn resolve_forward_output_keeps_a_retargeted_field_among_ambiguous_outputs() {
+        let audio = |format: AudioFormat, channels: u8, sample_rate: u32| Caps::Audio {
+            format,
+            channels,
+            sample_rate,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
+        };
+        let mono = |format| {
+            AudioShape::PASSTHROUGH
+                .with_format(FieldTransform::Fixed(format))
+                .with_channels(FieldTransform::Fixed(1))
+        };
+        let to_mono = CapsConstraint::DerivedFields(CapsTransform::Audio {
+            accept: Vec::new(),
+            produce: Vec::new(),
+            shapes: vec![mono(AudioFormat::PcmS16Le), mono(AudioFormat::PcmF32Le)],
+        });
+        let previous = audio(AudioFormat::PcmF32Le, 1, 48_000);
+        assert_eq!(
+            resolve_forward_output(
+                &to_mono,
+                &audio(AudioFormat::PcmS16Le, 2, 8_000),
+                None,
+                Some(&previous)
+            ),
+            ForwardResolve::Fixed(audio(AudioFormat::PcmF32Le, 1, 8_000))
+        );
+    }
+
+    #[cfg(feature = "std")]
+    fn chain_feasibility(constraints: Vec<NodeConstraint>) -> Vec<Option<CapsSet>> {
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let transform = g.add_transform(());
+        let sink = g.add_sink(());
+        g.link(src, transform).unwrap();
+        g.link(transform, sink).unwrap();
+        let v = g.finish().unwrap();
+        let solution = solve_graph(&v, &constraints).expect("chain negotiates");
+        graph_downstream_feasibility(&v, &constraints, &solution)
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn graph_feasibility_inverts_identity_and_mapping() {
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let i420 = fixed_video(RawVideoFormat::I420, 64, 48, 30);
+        let rgba = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
+        let bgra = fixed_video(RawVideoFormat::Bgra8, 64, 48, 30);
+
+        let feasibility = chain_feasibility(vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(i420.clone()))),
+            NodeConstraint::Element(CapsConstraint::Identity(CapsSet::from_alternatives(vec![
+                nv12.clone(),
+                i420.clone(),
+            ]))),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::from_alternatives(vec![
+                i420.clone(),
+                rgba.clone(),
+            ]))),
+        ]);
+        assert_eq!(feasibility[0], Some(CapsSet::one(i420.clone())));
+
+        let feasibility = chain_feasibility(vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(i420.clone()))),
+            NodeConstraint::Element(CapsConstraint::Mapping(vec![
+                (CapsSet::one(nv12), CapsSet::one(rgba)),
+                (CapsSet::one(i420.clone()), CapsSet::one(bgra.clone())),
+            ])),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(bgra))),
+        ]);
+        assert_eq!(feasibility[0], Some(CapsSet::one(i420)));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn graph_feasibility_enumerates_the_formats_a_converter_accepts() {
+        let rgba = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
+        let to_rgba = CapsTransform::RawVideo {
+            accept: vec![RawVideoFormat::Nv12, RawVideoFormat::I420],
+            produce: Vec::new(),
+            shapes: vec![RawVideoShape::PASSTHROUGH
+                .with_format(FieldTransform::Fixed(RawVideoFormat::Rgba8))],
+        };
+        let feasibility = chain_feasibility(vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(fixed_video(
+                RawVideoFormat::Nv12,
+                64,
+                48,
+                30,
+            )))),
+            NodeConstraint::Element(CapsConstraint::DerivedFields(to_rgba.clone())),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(rgba.clone()))),
+        ]);
+        let CapsTransform::RawVideo { accept, .. } = &to_rgba else {
+            unreachable!()
+        };
+        let expected: Vec<Caps> = accept
+            .iter()
+            .map(|&format| fixed_video(format, 64, 48, 30))
+            .collect();
+        assert_eq!(feasibility[0], Some(CapsSet::from_alternatives(expected)));
+
+        let audio = |format| Caps::Audio {
+            format,
+            channels: 2,
+            sample_rate: 48_000,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
+        };
+        let accept = vec![AudioFormat::PcmS16Le, AudioFormat::PcmF32Le];
+        let to_s16 = CapsTransform::Audio {
+            accept: accept.clone(),
+            produce: Vec::new(),
+            shapes: vec![
+                AudioShape::PASSTHROUGH.with_format(FieldTransform::Fixed(AudioFormat::PcmS16Le))
+            ],
+        };
+        let feasibility = chain_feasibility(vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(audio(
+                AudioFormat::PcmF32Le,
+            )))),
+            NodeConstraint::Element(CapsConstraint::DerivedFields(to_s16)),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(audio(
+                AudioFormat::PcmS16Le,
+            )))),
+        ]);
+        let expected: Vec<Caps> = accept.into_iter().map(audio).collect();
+        assert_eq!(feasibility[0], Some(CapsSet::from_alternatives(expected)));
+    }
+
+    fn demux_graph() -> ValidatedGraph<()> {
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let demux = g.add_tee(2);
+        let video_sink = g.add_sink(());
+        let audio_sink = g.add_sink(());
+        g.link(src, demux.input()).unwrap();
+        g.link(demux.out(0), video_sink).unwrap();
+        g.link(demux.out(1), audio_sink).unwrap();
+        g.finish().unwrap()
+    }
+
+    #[test]
+    fn solve_graph_demux_ports_carry_their_own_streams() {
+        let container = fixed_compressed(VideoCodec::H264, 64, 48, 30);
+        let video_stream = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let audio_stream = fixed_video(RawVideoFormat::I420, 32, 24, 30);
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(container.clone()))),
+            NodeConstraint::Demux {
+                input: CapsConstraint::Accepts(CapsSet::one(container.clone())),
+                ports: vec![
+                    CapsConstraint::Produces(CapsSet::one(video_stream.clone())),
+                    CapsConstraint::Produces(CapsSet::one(audio_stream.clone())),
+                ],
+            },
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+        ];
+        let v = demux_graph();
+        assert_eq!(
+            solve_graph(&v, &cs),
+            Ok(vec![container, video_stream, audio_stream])
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn graph_feasibility_of_a_demux_input_is_its_accept_set() {
+        let container = fixed_compressed(VideoCodec::H264, 64, 48, 30);
+        let accepted = CapsSet::from_alternatives(vec![
+            container.clone(),
+            fixed_compressed(VideoCodec::H265, 64, 48, 30),
+        ]);
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(container))),
+            NodeConstraint::Demux {
+                input: CapsConstraint::Accepts(accepted.clone()),
+                ports: vec![
+                    CapsConstraint::Produces(CapsSet::one(fixed_video(
+                        RawVideoFormat::Nv12,
+                        64,
+                        48,
+                        30,
+                    ))),
+                    CapsConstraint::Produces(CapsSet::one(fixed_video(
+                        RawVideoFormat::I420,
+                        32,
+                        24,
+                        30,
+                    ))),
+                ],
+            },
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+        ];
+        let v = demux_graph();
+        let solution = solve_graph(&v, &cs).expect("demux graph negotiates");
+        assert_eq!(
+            graph_downstream_feasibility(&v, &cs, &solution)[0],
+            Some(accepted)
+        );
+    }
+
+    #[test]
+    fn solve_graph_rejects_a_constraint_count_that_differs_from_the_node_count() {
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(nv12))),
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let sink = g.add_sink(());
+        g.link(src, sink).unwrap();
+        let v = g.finish().unwrap();
+        assert_eq!(solve_graph(&v, &cs), Err(NegotiationFailure::Degenerate));
+    }
+
+    #[test]
+    fn solve_graph_mapping_with_no_row_reaching_the_sink_fails_at_the_sink() {
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let i420 = fixed_video(RawVideoFormat::I420, 64, 48, 30);
+        let rgba = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
+        let bgra = fixed_video(RawVideoFormat::Bgra8, 64, 48, 30);
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(nv12.clone()))),
+            NodeConstraint::Element(CapsConstraint::Mapping(vec![
+                (CapsSet::one(nv12), CapsSet::one(rgba)),
+                (CapsSet::one(i420), CapsSet::one(bgra.clone())),
+            ])),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(bgra))),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let map = g.add_transform(());
+        let sink = g.add_sink(());
+        g.link(src, map).unwrap();
+        g.link(map, sink).unwrap();
+        let v = g.finish().unwrap();
+        let err = solve_graph(&v, &cs).expect_err("the NV12 row maps to RGBA only");
+        assert!(
+            matches!(
+                err,
+                NegotiationFailure::EmptyLink {
+                    upstream,
+                    downstream,
+                    ..
+                } if (upstream, downstream) == (map.0 as usize, sink.0 as usize)
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn solve_graph_muxer_pad_narrows_its_source() {
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let i420 = fixed_video(RawVideoFormat::I420, 64, 48, 30);
+        let muxed = fixed_compressed(VideoCodec::H264, 64, 48, 30);
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::from_alternatives(vec![
+                nv12.clone(),
+                i420.clone(),
+            ]))),
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(nv12.clone()))),
+            NodeConstraint::Muxer {
+                inputs: vec![
+                    CapsConstraint::Accepts(CapsSet::one(i420.clone())),
+                    CapsConstraint::AcceptsAny,
+                ],
+                output: CapsConstraint::Produces(CapsSet::one(muxed.clone())),
+                follows: None,
+            },
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let s0 = g.add_source(());
+        let s1 = g.add_source(());
+        let mux = g.add_muxer((), 2);
+        let sink = g.add_sink(());
+        g.link(s0, mux.input(0)).unwrap();
+        g.link(s1, mux.input(1)).unwrap();
+        g.link(mux.output(), sink).unwrap();
+        let v = g.finish().unwrap();
+        assert_eq!(solve_graph(&v, &cs), Ok(vec![i420, nv12, muxed]));
+    }
+
+    #[test]
+    fn solve_graph_batch_output_matches_the_streams_it_was_fixated_with() {
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let i420 = fixed_video(RawVideoFormat::I420, 64, 48, 30);
+        let both = CapsSet::from_alternatives(vec![nv12.clone(), i420.clone()]);
+        let batch = |first: &Caps, second: &Caps| Caps::Batch {
+            streams: vec![first.clone(), second.clone()],
+        };
+        let mixed = CapsSet::from_alternatives(vec![batch(&nv12, &i420), batch(&i420, &nv12)]);
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(both.clone())),
+            NodeConstraint::Element(CapsConstraint::Produces(both)),
+            NodeConstraint::BatchMuxer {
+                inputs: vec![CapsConstraint::AcceptsAny, CapsConstraint::AcceptsAny],
+            },
+            NodeConstraint::Element(CapsConstraint::Accepts(mixed)),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let s0 = g.add_source(());
+        let s1 = g.add_source(());
+        let mux = g.add_muxer((), 2);
+        let sink = g.add_sink(());
+        g.link(s0, mux.input(0)).unwrap();
+        g.link(s1, mux.input(1)).unwrap();
+        g.link(mux.output(), sink).unwrap();
+        let v = g.finish().unwrap();
+        let sol = solve_graph(&v, &cs).expect("a mixed batch exists");
+        assert_eq!(sol[2], batch(&sol[0], &sol[1]));
+    }
+
+    #[test]
+    fn solve_graph_batch_demux_takes_exactly_the_combination_cap() {
+        let max = crate::caps::MAX_BATCH_ALTERNATIVES;
+        let side = max.isqrt() as u32;
+        let batches: Vec<Caps> = (1..=side + 1)
+            .flat_map(|first| {
+                (1..=side + 1).map(move |second| Caps::Batch {
+                    streams: vec![
+                        fixed_video(RawVideoFormat::Nv12, 16 * first, 16, 30),
+                        fixed_video(RawVideoFormat::I420, 16 * second, 16, 30),
+                    ],
+                })
+            })
+            .collect();
+        let solve = |count: usize| {
+            let cs: Vec<NodeConstraint> = vec![
+                NodeConstraint::Element(CapsConstraint::Produces(CapsSet::from_alternatives(
+                    batches[..count].to_vec(),
+                ))),
+                NodeConstraint::BatchDemux {
+                    input: CapsConstraint::AcceptsAny,
+                },
+                NodeConstraint::Element(CapsConstraint::AcceptsAny),
+                NodeConstraint::Element(CapsConstraint::AcceptsAny),
+            ];
+            solve_graph(&demux_graph(), &cs)
+        };
+        let at_cap = solve(max).expect("the cap itself is allowed");
+        assert_eq!(at_cap[0], batches[0]);
+        assert_eq!(
+            solve(max + 1),
+            Err(NegotiationFailure::TooManyBatchAlternatives { index: 1 })
+        );
+    }
 }

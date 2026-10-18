@@ -2109,4 +2109,201 @@ mod link_tests {
         // The queued data frame is untouched.
         assert_eq!(drained_sequences(&rx), [0]);
     }
+
+    fn frame_bytes(bytes: usize) -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(alloc::vec![0u8; bytes].into())),
+            FrameTiming::default(),
+            0,
+        ))
+    }
+
+    #[test]
+    fn a_downstream_bitrate_target_reaches_the_producer() {
+        const TARGET_BPS: u32 = 2_500_000;
+        let (tx, rx) = link(2);
+        let mut sink = SenderSink::new(tx);
+        rx.request_bitrate(TARGET_BPS);
+        let outcome = run_to_ready(sink.push(dummy_frame())).expect("push ok");
+        assert_eq!(outcome, PushOutcome::Bitrate(TARGET_BPS));
+        let outcome = run_to_ready(sink.push(dummy_frame())).expect("push ok");
+        assert_eq!(outcome, PushOutcome::Accepted, "the target is taken once");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_transform_relays_a_bitrate_target_to_its_producer() {
+        const TARGET_BPS: u32 = 2_500_000;
+        let (up_tx, up_rx) = link(2);
+        let (down_tx, down_rx) = link(2);
+        let mut transform_out = SenderSink::new(down_tx);
+        transform_out.relay_bitrate_to(up_rx.bitrate_slot());
+        let mut producer_out = SenderSink::new(up_tx);
+
+        down_rx.request_bitrate(TARGET_BPS);
+        let outcome = run_to_ready(transform_out.push(dummy_frame())).expect("push ok");
+        assert_eq!(outcome, PushOutcome::Accepted, "the transform passes it on");
+        let outcome = run_to_ready(producer_out.push(dummy_frame())).expect("push ok");
+        assert_eq!(outcome, PushOutcome::Bitrate(TARGET_BPS));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn edge_counters_count_packets_and_payload_bytes() {
+        use crate::caps::TensorDType;
+        use crate::memory::SystemView;
+        use crate::tensor::TensorView;
+        const SYSTEM_BYTES: usize = 12;
+        const VIEW_BYTES: usize = 20;
+        let (mut tx, rx) = link(4);
+        let counters = Arc::new(EdgeCounters::default());
+        tx.set_counters(counters.clone());
+        let mut sink = SenderSink::new(tx);
+        let view = PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::SystemView(SystemView::new(
+                Arc::from(alloc::vec![0u8; VIEW_BYTES]),
+                TensorView::contiguous(TensorDType::U8, &[VIEW_BYTES as u32]),
+            )),
+            FrameTiming::default(),
+            1,
+        ));
+        for packet in [
+            frame_bytes(SYSTEM_BYTES),
+            view,
+            PipelinePacket::CapsChanged(proposed_caps()),
+        ] {
+            run_to_ready(sink.push(packet)).expect("push ok");
+        }
+        let counts = counters.snapshot();
+        assert_eq!(counts.packets, 3);
+        assert_eq!(counts.bytes, (SYSTEM_BYTES + VIEW_BYTES) as u64);
+        drop(rx);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_sink_that_applies_orientation_advertises_it_upstream() {
+        let (tx, rx) = link(2);
+        advertise_orientation(&rx, false);
+        assert!(tx.reconfigure.take().is_none());
+        advertise_orientation(&rx, true);
+        assert!(matches!(
+            tx.reconfigure.take(),
+            Some(Reconfigure::AbsorbOrientation)
+        ));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_push_held_by_a_full_link_charges_the_wait_to_its_producer() {
+        extern crate std;
+        let pause = std::time::Duration::from_millis(2);
+        let (tx, rx) = link(1);
+        let mut sink = SenderSink::new(tx);
+        let probe = crate::runtime::instrument::ElementProbe::new("producer".into());
+        sink.set_push_wait_probe(Some(probe.clone()));
+
+        run_to_ready(sink.push(frame_seq(0))).expect("room for one");
+        assert_eq!(
+            probe.record_proc_since(None),
+            0,
+            "an open link holds nothing"
+        );
+
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut held = core::pin::pin!(sink.push(frame_seq(1)));
+        assert!(held.as_mut().poll(&mut cx).is_pending());
+        std::thread::sleep(pause);
+        rx.try_recv().expect("the first frame");
+        assert!(held.as_mut().poll(&mut cx).is_ready());
+        assert!(probe.record_proc_since(None) >= pause.as_nanos() as u64);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_cancelled_push_leaves_no_send_behind_for_the_next() {
+        let (tx, rx) = link(1);
+        let mut sink = SenderSink::new(tx);
+        run_to_ready(sink.push(frame_seq(0))).expect("room for one");
+        {
+            let mut cx = Context::from_waker(Waker::noop());
+            let mut cancelled = core::pin::pin!(sink.push(frame_seq(1)));
+            assert!(cancelled.as_mut().poll(&mut cx).is_pending());
+        }
+        rx.try_recv().expect("the first frame");
+        run_to_ready(sink.push(PipelinePacket::Eos)).expect("room again");
+        assert!(sink.eos_forwarded());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn only_a_frame_stamped_on_arrival_reports_its_age() {
+        let (tx, _rx) = link(4);
+        let mut sink = SenderSink::new(tx);
+        let probe = crate::runtime::instrument::ElementProbe::new("producer".into());
+        sink.set_push_wait_probe(Some(probe.clone()));
+        run_to_ready(sink.push(frame_seq(0))).expect("push ok");
+        assert_eq!(probe.snapshot().age_at_emit.count, 0);
+        let mut stamped = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            FrameTiming::default(),
+            1,
+        );
+        stamped.timing.arrival_ns = crate::metrics::monotonic_ns();
+        run_to_ready(sink.push(PipelinePacket::DataFrame(stamped))).expect("push ok");
+        assert_eq!(probe.snapshot().age_at_emit.count, 1);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn an_adapter_with_no_mutation_endpoint_is_never_retired() {
+        let (tx, _rx) = link(1);
+        assert!(!SenderSink::new(tx).retired());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_producer_endpoint_follows_the_shape_and_timeline_on_its_edge() {
+        let endpoint = ProducerEndpoint::new();
+        let segment = crate::segment::Segment::new();
+        endpoint.observe(&mut PipelinePacket::CapsChanged(proposed_caps()));
+        endpoint.observe(&mut PipelinePacket::Segment(segment));
+        assert_eq!(endpoint.caps(), Some(proposed_caps()));
+        assert_eq!(endpoint.timeline().0, Some(segment));
+    }
+
+    #[cfg(feature = "std")]
+    fn observed_sequence(endpoint: &ProducerEndpoint, sequence: u64) -> u64 {
+        let mut packet = frame_seq(sequence);
+        endpoint.observe(&mut packet);
+        match packet {
+            PipelinePacket::DataFrame(f) => f.sequence,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_producer_taking_over_an_edge_numbers_on_from_what_crossed() {
+        const SEEN: u64 = 10;
+        let endpoint = ProducerEndpoint::new();
+        endpoint.continue_sequence_after(Some(SEEN));
+        assert_eq!(observed_sequence(&endpoint, 3), SEEN + 1);
+        assert_eq!(observed_sequence(&endpoint, 4), SEEN + 2);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_rehomed_endpoint_is_live_again_and_numbers_on() {
+        const LAST: u64 = 5;
+        let endpoint = ProducerEndpoint::new();
+        endpoint.observe(&mut PipelinePacket::Segment(crate::segment::Segment::new()));
+        assert_eq!(observed_sequence(&endpoint, LAST), LAST);
+        endpoint.retire();
+        assert!(endpoint.retired());
+        endpoint.rehome();
+        assert!(!endpoint.retired());
+        assert_eq!(endpoint.timeline(), (None, None));
+        assert_eq!(observed_sequence(&endpoint, 0), LAST + 1);
+    }
 }
