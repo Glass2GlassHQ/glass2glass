@@ -38,6 +38,7 @@ use g2g_plugins::hls::{parse, Playlist};
 use g2g_plugins::hlssink::HlsSink;
 use g2g_plugins::mp4demuxn::{forwardable_streams, Mp4DemuxN, Mp4Port};
 use g2g_plugins::mp4mux::Mp4Mux;
+use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::tsmux::TsMux;
 use g2g_plugins::tsmuxn::TsMux as TsMuxN;
@@ -184,6 +185,42 @@ async fn mux_ts_av(aus: &[(Vec<u8>, FrameTiming)]) -> Vec<(Vec<u8>, FrameTiming)
             .expect("mux video");
         let audio = FrameTiming {
             pts_ns: timing.pts_ns + FRAME_25FPS_NS / 2,
+            keyframe: true,
+            ..FrameTiming::default()
+        };
+        mux.process(1, frame(adts.clone(), audio), &mut sink)
+            .await
+            .expect("mux audio");
+    }
+    for input in 0..2 {
+        mux.process(input, PipelinePacket::Eos, &mut sink)
+            .await
+            .expect("mux eos");
+    }
+    sink.frames
+}
+
+/// Video access units plus one AAC frame per video frame through `Mp4MuxN`
+/// (fragmented, `fragment_ms` fragments), as an A/V fMP4 stream.
+async fn mux_fmp4_av(
+    aus: &[(Vec<u8>, FrameTiming)],
+    fragment_ms: u64,
+) -> Vec<(Vec<u8>, FrameTiming)> {
+    let adts: Vec<u8> = vec![0xFF, 0xF1, 0x4C, 0x80, 0x01, 0x00, 0xFC, 0x00];
+    let mut mux = Mp4MuxN::new(2)
+        .with_fragmented(true)
+        .with_fragment_duration_ms(fragment_ms);
+    mux.configure_pipeline(0, &h264_caps())
+        .expect("configure v");
+    mux.configure_pipeline(1, &aac_caps()).expect("configure a");
+    let mut sink = CaptureSink::default();
+    for (au, timing) in aus {
+        mux.process(0, frame(au.clone(), *timing), &mut sink)
+            .await
+            .expect("mux video");
+        let audio = FrameTiming {
+            pts_ns: timing.pts_ns,
+            duration_ns: FRAME_25FPS_NS,
             keyframe: true,
             ..FrameTiming::default()
         };
@@ -538,6 +575,33 @@ async fn av_multiplex_segments_on_the_video_keyframes() {
             .flat_map(|(b, _)| b.clone())
             .collect::<Vec<_>>(),
         "segmenting adds and drops nothing"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// fMP4 with an audio track: a segment's EXTINF is the length of its longest
+/// track, not the video and audio fragment durations added together.
+#[tokio::test]
+async fn fmp4_av_segment_durations_are_not_summed_across_tracks() {
+    let dir = work_dir("fmp4-av");
+    let playlist_path = at(&dir, "out.m3u8");
+    let aus = synthetic_aus(2);
+    let media_ms = aus.len() as u64 * FRAME_25FPS_NS / 1_000_000;
+    let muxed = mux_fmp4_av(&aus, 400).await;
+
+    let mut sink = HlsSink::new(at(&dir, "seg%05d.m4s"))
+        .with_playlist_location(&playlist_path)
+        .with_init_location(at(&dir, "init.mp4"))
+        .with_target_duration(1)
+        .with_playlist_length(0)
+        .with_max_files(0);
+    package(&mut sink, ByteStreamEncoding::IsoBmff, &muxed).await;
+
+    let playlist = read_playlist(&playlist_path);
+    let total_ms: u64 = playlist.segments.iter().map(|s| s.duration_ms as u64).sum();
+    assert!(
+        (total_ms as i64 - media_ms as i64).abs() < 50,
+        "EXTINF durations sum to the {media_ms} ms of media, got {total_ms} ms"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

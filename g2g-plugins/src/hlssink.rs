@@ -354,9 +354,15 @@ impl HlsSink {
                         .find(|(id, _)| *id == track_id)
                         .map(|(_, ts)| *ts)
                         .ok_or(G2gError::CapsMismatch)?;
-                    self.open_duration_ns = self
-                        .open_duration_ns
-                        .saturating_add((ticks as u128 * 1_000_000_000 / timescale as u128) as u64);
+                    // The segment lasts as long as the moov's first track (the
+                    // video, in an A/V file): the other tracks' fragments straddle
+                    // the cut, and adding every track would double the EXTINF.
+                    let lead_track = self.timescales.first().map(|(id, _)| *id);
+                    if lead_track == Some(track_id) {
+                        self.open_duration_ns = self.open_duration_ns.saturating_add(
+                            (ticks as u128 * 1_000_000_000 / timescale as u128) as u64,
+                        );
+                    }
                 }
                 _ => self.open_segment.extend_from_slice(whole),
             }
