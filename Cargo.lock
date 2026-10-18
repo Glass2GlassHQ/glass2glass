@@ -714,29 +714,6 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
-version = "0.68.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "726e4313eb6ec35d2730258ad4e15b547ee75d6afaa1361a922e78e59b7d8078"
-dependencies = [
- "bitflags 2.13.0",
- "cexpr",
- "clang-sys",
- "lazy_static",
- "lazycell",
- "log",
- "peeking_take_while",
- "prettyplease 0.2.37",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash 1.1.0",
- "shlex 1.3.0",
- "syn 2.0.117",
- "which",
-]
-
-[[package]]
-name = "bindgen"
 version = "0.69.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "271383c67ccabffb7381723dea0672a673f292304fcb45c01cc648c7a8d58088"
@@ -3587,16 +3564,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "env-libvpx-sys"
-version = "5.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26ecdc636a02003406cc821aa9d703c888a966a3fd9bbdae9f7cf27d71720147"
-dependencies = [
- "bindgen 0.68.1",
- "pkg-config",
-]
-
-[[package]]
 name = "equator"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4210,6 +4177,7 @@ dependencies = [
  "async-ffi",
  "audiopus",
  "base64 0.22.1",
+ "bindgen 0.73.2",
  "block2 0.6.2",
  "bytes",
  "cbc",
@@ -4301,7 +4269,6 @@ dependencies = [
  "url",
  "v4l",
  "vello",
- "vpx-encode",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wayland-backend",
@@ -10902,16 +10869,6 @@ name = "void"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
-
-[[package]]
-name = "vpx-encode"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd1f41af42de7667cbdba44e8c38c36e9ede970f1291c32ea57c0ded8eb6f4b6"
-dependencies = [
- "env-libvpx-sys",
- "thiserror 1.0.69",
-]
 
 [[package]]
 name = "vtparse"
