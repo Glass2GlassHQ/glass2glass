@@ -119,8 +119,7 @@ Highest leverage first:
 - **WebRTC.**
   - FEC is blocked upstream (str0m has no FEC payload; loss recovery is
     NACK/RTX).
-  - Data-channel loose ends: str0m surfaces no remote-close event, so EOS rides
-    an explicit marker message; a WHIP/SFU-signalled data channel vs the P2P
+  - Data-channel loose end: a WHIP/SFU-signalled data channel vs the P2P
     `SdpChannel` seam.
 
 ## Adaptive streaming (HLS / DASH)

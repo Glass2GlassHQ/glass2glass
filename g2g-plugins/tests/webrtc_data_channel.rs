@@ -7,8 +7,8 @@
 //!
 //! Runs fully on localhost UDP with synthesized payloads (no fixture, no media
 //! server), so it is a default CI gate under the `webrtc` feature. Deterministic:
-//! the channel is reliable + ordered, so all messages arrive; the sink sends an
-//! end-of-stream marker after the data, which terminates the receiving source.
+//! the channel is reliable + ordered, so all messages arrive; the sink closes the
+//! channel after the data, which terminates the receiving source.
 
 #![cfg(all(target_os = "linux", feature = "webrtc"))]
 
@@ -26,6 +26,8 @@ use g2g_core::{
 };
 use g2g_plugins::webrtcdata::{WebRtcDataSink, WebRtcDataSrc, MAX_MESSAGE_SIZE};
 use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole};
+
+const CLOSE_BUDGET: Duration = Duration::from_secs(10);
 
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -155,11 +157,11 @@ async fn run_one_direction(salt: u8) -> Vec<Vec<u8>> {
         }
     };
 
-    let (s, r) = tokio::time::timeout(Duration::from_secs(30), async {
-        tokio::join!(sender, receiver)
-    })
-    .await
-    .expect("data-channel loopback completes in time");
+    // Well under the ICE disconnect timeout (about 20 s), which is how the
+    // receiver would end if the sink's channel close stopped arriving.
+    let (s, r) = tokio::time::timeout(CLOSE_BUDGET, async { tokio::join!(sender, receiver) })
+        .await
+        .expect("receiver ends on the channel close, not the ICE disconnect");
     s.expect("sender pipeline ok");
     r.expect("receiver pipeline ok");
 

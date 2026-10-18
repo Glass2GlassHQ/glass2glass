@@ -5,17 +5,17 @@
 //!
 //! - [`WebRtcDataSrc`] (`SourceLoop`): owns an `Rtc` + `UdpSocket`, does the
 //!   P2P SDP handshake over an [`SdpChannel`], then drains
-//!   [`Event::ChannelData`] and emits each binary message as a system-memory
-//!   `Caps::ByteStream` `DataFrame`, ending on the sink's end-of-stream marker.
+//!   [`Event::ChannelData`] and emits each message as a system-memory
+//!   `Caps::ByteStream` `DataFrame`, ending when the peer closes the channel.
 //!   Mirrors the wasm `WebRtcSrc` surface so the native and browser ingest paths
 //!   look the same downstream.
 //! - [`WebRtcDataSink`] (`AsyncElement`): on the first frame it runs the
 //!   handshake and spawns a task owning the `Rtc` (so the element stays `Send`,
 //!   as `WebRtcSink` does), then writes each incoming `DataFrame`'s bytes as one
-//!   binary SCTP channel message. On input EOS it sends a one-byte text-flagged
-//!   message as an end-of-stream marker (str0m does not surface a remote channel
-//!   close as an event, so the marker, not a stream reset, ends the src), which
-//!   the ordered reliable channel delivers after the data.
+//!   binary SCTP channel message. On input EOS it closes the channel: the SCTP
+//!   stream reset is sent only after every queued message, and the peer's
+//!   receiver defers it until that data has arrived, so the src sees
+//!   [`Event::ChannelClose`] after the last message.
 //!
 //! Why standalone elements, not a lane folded into [`WebRtcDuplexSession`]: that
 //! session is a media element (H.264 / Opus RTP writers, NACK / RTX counters,
@@ -399,16 +399,7 @@ impl SourceLoop for WebRtcDataSrc {
                         Ok(Output::Transmit(t)) => {
                             send_transmit(&socket, &mut no_turn, &t).await;
                         }
-                        // A text-flagged message is the peer's end-of-stream
-                        // marker (see the sink); binary messages are data.
-                        Ok(Output::Event(Event::ChannelData(cd))) => {
-                            if cd.binary {
-                                messages.push(cd.data);
-                            } else {
-                                ended = true;
-                                break Instant::now();
-                            }
-                        }
+                        Ok(Output::Event(Event::ChannelData(cd))) => messages.push(cd.data),
                         Ok(Output::Event(Event::ChannelClose(_)))
                         | Ok(Output::Event(Event::IceConnectionStateChange(
                             IceConnectionState::Disconnected,
@@ -483,8 +474,8 @@ pub struct WebRtcDataSink {
     sig: Option<SdpChannel>,
     settings: ChannelSettings,
     queue_depth: usize,
-    /// How long the session task keeps pumping after sending the end-of-stream
-    /// marker, so the final messages reach the peer before the task exits.
+    /// How long the session task keeps pumping after closing the channel, so
+    /// the final messages and the stream reset reach the peer before it exits.
     linger: Duration,
     configured: bool,
     /// Set on the first frame, after the handshake spawns the session task.
@@ -673,7 +664,7 @@ async fn run_egress(
     // A message awaiting buffer space (str0m rejected the last write as full).
     let mut pending: Option<Vec<u8>> = None;
     let mut input_done = false;
-    let mut marker_sent = false;
+    let mut channel_closed = false;
     let mut drain_deadline: Option<Instant> = None;
 
     loop {
@@ -684,6 +675,8 @@ async fn run_egress(
                     send_transmit(&socket, &mut no_turn, &t).await;
                 }
                 Ok(Output::Event(Event::ChannelOpen(id, _))) => channel = Some(id),
+                // our own close echoes back as ChannelClose, keep lingering through it
+                Ok(Output::Event(Event::ChannelClose(_))) if channel_closed => {}
                 Ok(Output::Event(Event::ChannelClose(_)))
                 | Ok(Output::Event(Event::IceConnectionStateChange(
                     IceConnectionState::Disconnected,
@@ -703,30 +696,22 @@ async fn run_egress(
             }
         }
 
-        // Input ended and all data is queued: send the end-of-stream marker (a
-        // one-byte text-flagged message the src reads as EOS, ordered after the
-        // data on the reliable channel), then linger so it reaches the peer. A
-        // zero-length message is not delivered, so the marker carries one byte.
-        if input_done && pending.is_none() && !marker_sent {
+        // Input ended and all data is queued: close the channel (sctp-proto sends
+        // the stream reset after the queued data), then linger so it lands.
+        if input_done && pending.is_none() && !channel_closed {
             if let Some(id) = channel {
-                match rtc.channel(id).map(|mut c| c.write(false, &[0u8])) {
-                    Some(Ok(true)) => {
-                        marker_sent = true;
-                        drain_deadline = Some(Instant::now() + linger);
-                    }
-                    // Buffer full or channel not ready: retry next iteration.
-                    Some(Ok(false)) | None => {}
-                    Some(Err(_)) => return,
-                }
+                rtc.direct_api().close_data_channel(id);
+                channel_closed = true;
+                drain_deadline = Some(Instant::now() + linger);
             }
         }
         if drain_deadline.is_some_and(|dl| Instant::now() >= dl) {
             return;
         }
 
-        // Retry quickly while a message (or the marker) is waiting on buffer space.
+        // Retry quickly while a message is waiting on buffer space.
         let base = deadline.saturating_duration_since(Instant::now());
-        let timeout = if pending.is_some() || (input_done && !marker_sent) {
+        let timeout = if pending.is_some() || (input_done && !channel_closed) {
             base.min(Duration::from_millis(5))
         } else {
             base
