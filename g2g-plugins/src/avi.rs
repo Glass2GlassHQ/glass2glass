@@ -13,9 +13,10 @@
 //! read, so chunks in an `AVIX` list carry no keyframe flag.
 //!
 //! Every count, size and offset here comes from the file, so nothing is trusted:
-//! a size that overruns its list, a stream count past what AVI can name, an
-//! `idx1` entry pointing outside `movi`, and a truncated header all fail the
-//! parse rather than panicking or allocating on the declared length.
+//! a stream count past what AVI can name, an `idx1` entry pointing outside
+//! `movi`, and a truncated header all fail the parse rather than panicking or
+//! allocating on the declared length. A list that runs past the end of the file
+//! keeps the whole chunks before the cut, so a truncated download still plays.
 //!
 //! AVI stores chunks in decode order and carries no presentation timestamps, so
 //! a stream's timing is reconstructed from `strh`: sample `n` starts at
@@ -29,8 +30,9 @@ use g2g_core::caps::greatest_common_divisor;
 use g2g_core::{AudioFormat, G2gError, Tag, TagList, VideoCodec};
 
 use crate::riff::{
-    chunk_len, chunks, padded_len, put_chunk, put_chunk_header, read_fourcc, read_u16, read_u32,
-    FourCc, CHUNK_HEADER_LEN, FOURCC_LEN, LIST_FOURCC, RIFF_FOURCC, RIFF_HEADER_LEN,
+    chunk_len, chunks, chunks_to_cut, padded_len, put_chunk, put_chunk_header, read_fourcc,
+    read_u16, read_u32, FourCc, CHUNK_HEADER_LEN, FOURCC_LEN, LIST_FOURCC, RIFF_FOURCC,
+    RIFF_HEADER_LEN,
 };
 use crate::waveformat::{audio_format, sample_frame_len, wave_format_tag, WaveFormatEx};
 
@@ -395,18 +397,22 @@ fn parse_info(data: &[u8], range: core::ops::Range<usize>) -> TagList {
 
 /// Collect the data chunks of one `LIST movi`, descending into the `LIST rec `
 /// groups an interleaved file wraps them in. Empty chunks are dropped: a writer
-/// emits them as padding and no decoder has anything to do with them.
+/// emits them as padding and no decoder has anything to do with them. A data
+/// chunk cut short by the end of the file is dropped too.
 fn collect_movi(
     data: &[u8],
     range: core::ops::Range<usize>,
     stream_count: usize,
     out: &mut Vec<AviChunk>,
-) -> Result<(), G2gError> {
-    let mut walk = chunks(data, range);
-    for chunk in walk.by_ref() {
+) {
+    let mut walk = chunks_to_cut(data, range);
+    while let Some(chunk) = walk.next() {
         if chunk.list_form(data) == Some(REC_FOURCC) {
-            collect_movi(data, chunk.list_body(), stream_count, out)?;
+            collect_movi(data, chunk.list_body(), stream_count, out);
             continue;
+        }
+        if walk.overran() {
+            break;
         }
         let Some(stream) = chunk_stream_number(chunk.id) else {
             continue;
@@ -420,10 +426,6 @@ fn collect_movi(
             keyframe: false,
         });
     }
-    if walk.overran() {
-        return Err(G2gError::CapsMismatch);
-    }
-    Ok(())
 }
 
 /// Apply the `idx1` keyframe flags to the collected chunks. `idx1` offsets are
@@ -479,9 +481,10 @@ fn chunk_starting_at(chunks_out: &[AviChunk], start: usize) -> Option<usize> {
 }
 
 /// Parse a whole AVI file. Fails with [`G2gError::CapsMismatch`] on anything
-/// malformed: a missing or truncated `RIFF AVI ` header, a `LIST` or chunk size
-/// past what the file holds, a stream count AVI cannot name, or a file with no
-/// stream g2g can carry.
+/// malformed: a missing or truncated `RIFF AVI ` header, an `hdrl` the file does
+/// not hold whole, a stream count AVI cannot name, or a file with no stream g2g
+/// can carry. A `RIFF`, `movi` or `idx1` cut short by the end of the file is
+/// read up to the cut.
 pub(crate) fn parse(data: &[u8]) -> Result<AviFile, G2gError> {
     if read_fourcc(data, 0) != Some(RIFF_FOURCC)
         || read_fourcc(data, CHUNK_HEADER_LEN) != Some(AVI_FOURCC)
@@ -496,22 +499,17 @@ pub(crate) fn parse(data: &[u8]) -> Result<AviFile, G2gError> {
     // continuations OpenDML appends past the 4 GB the first list can address.
     let mut riff_at = 0usize;
     while data.len().saturating_sub(riff_at) >= RIFF_HEADER_LEN {
-        let riff = match chunks(data, riff_at..data.len())
+        // anything that is not a `RIFF` list after the last one is trailing padding
+        let Some(riff) = chunks_to_cut(data, riff_at..data.len())
             .next()
             .filter(|c| c.id == RIFF_FOURCC)
-        {
-            Some(riff) => riff,
-            // A first list whose declared size runs past the file is a
-            // truncated download; anything unreadable after the last one is
-            // trailing padding.
-            None if riff_at == 0 => return Err(G2gError::CapsMismatch),
-            None => break,
+        else {
+            break;
         };
         if riff_at != 0 && read_fourcc(data, riff.body.start) != Some(AVIX_FOURCC) {
             break;
         }
-        let mut walk = chunks(data, riff.list_body());
-        for chunk in walk.by_ref() {
+        for chunk in chunks_to_cut(data, riff.list_body()) {
             match chunk.list_form(data) {
                 Some(HDRL_FOURCC) if file.streams.is_empty() => {
                     parse_hdrl(data, chunk.list_body(), &mut file)?;
@@ -528,9 +526,6 @@ pub(crate) fn parse(data: &[u8]) -> Result<AviFile, G2gError> {
                 _ => {}
             }
         }
-        if walk.overran() {
-            return Err(G2gError::CapsMismatch);
-        }
         riff_at = riff
             .body
             .end
@@ -543,7 +538,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<AviFile, G2gError> {
     }
     let stream_count = file.streams.len();
     for (_, range) in &movi_ranges {
-        collect_movi(data, range.clone(), stream_count, &mut file.chunks)?;
+        collect_movi(data, range.clone(), stream_count, &mut file.chunks);
     }
     if let (Some(idx1), Some((form_offset, _))) = (idx1, movi_ranges.first()) {
         apply_idx1(
@@ -1058,14 +1053,62 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_truncated_file() {
+    fn rejects_a_file_cut_inside_its_header() {
         let bytes = write_av();
-        for cut in [0, 4, 11, 20, bytes.len() / 2, bytes.len() - 1] {
+        let avih = find_chunk_body(&bytes, &AVIH_FOURCC).expect("the avih");
+        let hdrl_form = RIFF_HEADER_LEN + CHUNK_HEADER_LEN;
+        for cut in [
+            0,
+            FOURCC_LEN,
+            RIFF_HEADER_LEN - 1,
+            hdrl_form,
+            avih,
+            avih + AVIH_MIN_LEN,
+        ] {
             assert!(
                 parse(&bytes[..cut]).is_err(),
                 "a file cut to {cut} bytes must fail the parse"
             );
         }
+    }
+
+    #[test]
+    fn a_file_cut_inside_movi_keeps_its_whole_chunks() {
+        let bytes = write_av();
+        let whole = parse(&bytes).expect("the whole file parses");
+        let positions = |file: &AviFile| -> Vec<(usize, core::ops::Range<usize>)> {
+            file.chunks
+                .iter()
+                .map(|chunk| (chunk.stream, chunk.body.clone()))
+                .collect()
+        };
+        for chunk in &whole.chunks {
+            let cut = chunk.body.start + chunk.body.len() / 2;
+            let file = parse(&bytes[..cut]).unwrap_or_else(|e| panic!("cut at {cut}: {e:?}"));
+            assert_eq!(file.streams, whole.streams);
+            let mut expected = whole.clone();
+            expected.chunks.retain(|c| c.body.end <= cut);
+            assert_eq!(positions(&file), positions(&expected), "cut at {cut}");
+            // with no idx1 left, only the all-intra MJPEG stream claims keyframes
+            for kept in &file.chunks {
+                assert_eq!(kept.keyframe, kept.stream == 0, "cut at {cut}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_cut_index_flags_the_entries_it_holds() {
+        let bytes = write_av();
+        let idx1 = find_chunk_body(&bytes, &IDX1_FOURCC).expect("the idx1");
+        let file = parse(&bytes[..idx1 + IDX1_ENTRY_LEN + IDX1_ENTRY_FLAGS])
+            .expect("a cut index must not fail the parse");
+        assert_eq!(
+            file.chunks.len(),
+            parse(&bytes).expect("parses").chunks.len()
+        );
+        let flagged: Vec<bool> = file.chunks.iter().map(|c| c.keyframe).collect();
+        assert!(flagged[0], "the one whole entry flags its chunk");
+        assert!(!flagged[1..].contains(&true), "no entry, no flag");
     }
 
     #[test]

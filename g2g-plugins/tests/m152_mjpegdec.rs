@@ -204,6 +204,49 @@ async fn grayscale_jpeg_decodes_through_the_rgba_fallback() {
     );
 }
 
+/// M1570: the same JPEG with its DHT segments cut, the way motion JPEG in AVI
+/// stores its frames.
+fn without_huffman_tables(jpeg: &[u8]) -> Vec<u8> {
+    const MARKER_LEN: usize = 2;
+    const HUFFMAN_TABLE: u8 = 0xC4;
+    const START_OF_SCAN: u8 = 0xDA;
+    let mut stripped = jpeg[..MARKER_LEN].to_vec();
+    let mut at = MARKER_LEN;
+    while jpeg[at + 1] != START_OF_SCAN {
+        let length = u16::from_be_bytes([jpeg[at + MARKER_LEN], jpeg[at + MARKER_LEN + 1]]);
+        let end = at + MARKER_LEN + usize::from(length);
+        if jpeg[at + 1] != HUFFMAN_TABLE {
+            stripped.extend_from_slice(&jpeg[at..end]);
+        }
+        at = end;
+    }
+    stripped.extend_from_slice(&jpeg[at..]);
+    stripped
+}
+
+/// M1570: a frame with no DHT decodes with the ITU-T T.81 Annex K tables, which
+/// both fixtures were encoded with, so it matches the frame that carries them.
+#[tokio::test]
+async fn a_frame_without_huffman_tables_decodes_with_the_default_ones() {
+    let mut decoders: Vec<fn() -> MjpegDec> = vec![MjpegDec::new];
+    #[cfg(feature = "mozjpeg")]
+    decoders
+        .push(|| MjpegDec::new().with_backend(g2g_plugins::mjpegdec::JpegDecodeBackend::Mozjpeg));
+    for jpeg in [RED16, GRAY16] {
+        let stripped = without_huffman_tables(jpeg);
+        assert!(stripped.len() < jpeg.len(), "the fixture carries a DHT");
+        for decoder in &decoders {
+            for format in [RawVideoFormat::Rgba8, RawVideoFormat::I420] {
+                assert_eq!(
+                    decode_with(decoder().with_output_format(format), &stripped).await,
+                    decode_with(decoder().with_output_format(format), jpeg).await,
+                    "{format:?}"
+                );
+            }
+        }
+    }
+}
+
 /// A real 4:2:0 JPEG of a smooth RGBA gradient, so the parity check runs on
 /// content with chroma detail rather than a flat colour.
 #[cfg(feature = "mjpeg-encode")]

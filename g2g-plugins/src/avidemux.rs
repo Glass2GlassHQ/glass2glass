@@ -53,6 +53,8 @@ const AUDIO_STREAM_NAMES: &[(&str, AudioFormat)] = &[
     ("pcm-s16le", AudioFormat::PcmS16Le),
     ("pcm-s24le", AudioFormat::PcmS24Le),
     ("pcm-s32le", AudioFormat::PcmS32Le),
+    ("mulaw", AudioFormat::Mulaw),
+    ("alaw", AudioFormat::Alaw),
     ("mp3", AudioFormat::Mp3),
     ("ac3", AudioFormat::Ac3),
     ("aac", AudioFormat::Aac),
@@ -556,7 +558,7 @@ impl AviDemux {
 static AVIDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "stream to emit: video (the default) | mjpeg | h264 | mpeg4part2 (the video stream by codec) | audio | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | mp3 | ac3 | aac (the audio stream by format)",
+    "stream to emit: video (the default) | mjpeg | h264 | mpeg4part2 (the video stream by codec) | audio | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | mulaw | alaw | mp3 | ac3 | aac (the audio stream by format)",
 )
 .with_default("video")];
 

@@ -185,13 +185,13 @@ pub(crate) fn png_geometry(image: &[u8]) -> Option<(u32, u32)> {
 }
 
 /// Marker prefix byte. A run of them is padding before the next marker.
-const JPEG_MARKER_PREFIX: u8 = 0xFF;
+pub(crate) const JPEG_MARKER_PREFIX: u8 = 0xFF;
 /// Start and end of image, the markers that frame a file.
 const JPEG_START_OF_IMAGE: u8 = 0xD8;
 const JPEG_END_OF_IMAGE: u8 = 0xD9;
 /// Start of scan: its segment header is followed by entropy-coded data, which is
 /// not length-declared and has to be scanned for the next marker.
-const JPEG_START_OF_SCAN: u8 = 0xDA;
+pub(crate) const JPEG_START_OF_SCAN: u8 = 0xDA;
 /// Restart markers, which appear inside the entropy-coded data.
 const JPEG_RESTART_FIRST: u8 = 0xD0;
 const JPEG_RESTART_LAST: u8 = 0xD7;
@@ -201,11 +201,11 @@ const JPEG_TEMPORARY: u8 = 0x01;
 /// codes in that range that mean something else.
 const JPEG_FRAME_HEADER_FIRST: u8 = 0xC0;
 const JPEG_FRAME_HEADER_LAST: u8 = 0xCF;
-const JPEG_HUFFMAN_TABLE: u8 = 0xC4;
+pub(crate) const JPEG_HUFFMAN_TABLE: u8 = 0xC4;
 const JPEG_EXTENSIONS: u8 = 0xC8;
 const JPEG_ARITHMETIC_CONDITIONING: u8 = 0xCC;
 /// Length field, itself included in the count.
-const JPEG_SEGMENT_LENGTH: usize = 2;
+pub(crate) const JPEG_SEGMENT_LENGTH: usize = 2;
 
 fn jpeg_is_standalone(marker: u8) -> bool {
     matches!(
@@ -315,13 +315,24 @@ pub(crate) fn jpeg_frame_length(data: &[u8]) -> Result<Option<usize>, G2gError> 
     }
 }
 
-/// `(width, height)` from a JPEG's frame header (`SOF`). `None` when the image
-/// carries no frame header, or declares a zero side.
-pub(crate) fn jpeg_geometry(image: &[u8]) -> Option<(u32, u32)> {
-    /// Sample precision, then the two 16-bit sides.
-    const PRECISION: usize = 1;
-    let mut offset = 2;
-    loop {
+// a length-declared JPEG marker segment, `code_at` is the offset of the code byte after the FF prefix
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct JpegSegment {
+    pub(crate) marker: u8,
+    pub(crate) code_at: usize,
+}
+
+impl JpegSegment {
+    fn body_at(&self) -> usize {
+        self.code_at + 1 + JPEG_SEGMENT_LENGTH
+    }
+}
+
+// the header's marker segments up to and including the first SOS, stopping early at EOI or a cut header
+pub(crate) fn jpeg_header_segments(image: &[u8]) -> impl Iterator<Item = JpegSegment> + '_ {
+    let mut next = Some(JPEG_SIGNATURE.len());
+    core::iter::from_fn(move || loop {
+        let offset = next.take()?;
         let skip = image
             .get(offset..)?
             .iter()
@@ -330,30 +341,43 @@ pub(crate) fn jpeg_geometry(image: &[u8]) -> Option<(u32, u32)> {
             return None;
         }
         let code = offset + skip;
-        let marker = *image.get(code)?;
+        let marker = image[code];
         if marker == JPEG_END_OF_IMAGE {
             return None;
         }
         if jpeg_is_standalone(marker) {
-            offset = code + 1;
+            next = Some(code + 1);
             continue;
         }
         let header = image.get(code + 1..code + 1 + JPEG_SEGMENT_LENGTH)?;
         let length = usize::from(u16::from_be_bytes([header[0], header[1]]));
-        let body = code + 1 + JPEG_SEGMENT_LENGTH;
-        if jpeg_is_frame_header(marker) {
-            let sides = image.get(body + PRECISION..body + PRECISION + 4)?;
-            let height = u32::from(u16::from_be_bytes([sides[0], sides[1]]));
-            let width = u32::from(u16::from_be_bytes([sides[2], sides[3]]));
-            return (width > 0 && height > 0).then_some((width, height));
+        if marker != JPEG_START_OF_SCAN {
+            next = code
+                .checked_add(1)
+                .and_then(|after| after.checked_add(length));
         }
-        // Past a scan there is no frame header left to find in a baseline file,
-        // and a progressive one repeats its SOF before the first scan.
-        if marker == JPEG_START_OF_SCAN {
-            return None;
-        }
-        offset = code.checked_add(1)?.checked_add(length)?;
-    }
+        return Some(JpegSegment {
+            marker,
+            code_at: code,
+        });
+    })
+}
+
+/// `(width, height)` from a JPEG's frame header (`SOF`). `None` when the image
+/// carries no frame header, or declares a zero side.
+pub(crate) fn jpeg_geometry(image: &[u8]) -> Option<(u32, u32)> {
+    /// Sample precision, then the two 16-bit sides.
+    const PRECISION: usize = 1;
+    // Past a scan there is no frame header left to find in a baseline file,
+    // and a progressive one repeats its SOF before the first scan.
+    let frame_header = jpeg_header_segments(image)
+        .take_while(|segment| segment.marker != JPEG_START_OF_SCAN)
+        .find(|segment| jpeg_is_frame_header(segment.marker))?;
+    let body = frame_header.body_at();
+    let sides = image.get(body + PRECISION..body + PRECISION + 4)?;
+    let height = u32::from(u16::from_be_bytes([sides[0], sides[1]]));
+    let width = u32::from(u16::from_be_bytes([sides[2], sides[3]]));
+    (width > 0 && height > 0).then_some((width, height))
 }
 
 #[cfg(test)]
