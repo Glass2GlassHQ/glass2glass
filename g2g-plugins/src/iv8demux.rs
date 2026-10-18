@@ -235,3 +235,19 @@ impl PadTemplates for Iv8Demux {
         ])
     }
 }
+
+#[cfg(fuzzing)]
+pub fn fuzz_parse(data: &[u8]) {
+    let mut demux = Iv8Demux::new();
+    if demux.configure_pipeline(&Iv8Demux::input_caps()).is_err() {
+        return;
+    }
+    let frame = Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(data.into())),
+        FrameTiming::default(),
+        0,
+    );
+    let _ = crate::fuzz_process(&mut demux, PipelinePacket::DataFrame(frame));
+    // Eos runs the separate parse of a packet cut off at the end of the input.
+    let _ = crate::fuzz_process(&mut demux, PipelinePacket::Eos);
+}
