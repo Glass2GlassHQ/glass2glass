@@ -665,44 +665,8 @@ impl TsDemux {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         for u in units {
-            if !Self::accepts_stream_type(self.stream, u.stream_type) {
+            if first_pid_carrying(&self.demux, self.stream) != Some(u.pid) {
                 continue; // a stream other than the selected one
-            }
-            // A private (0x06) PES is only Opus when its PMT descriptors said so;
-            // skip any other 0x06 the mux may carry.
-            if self.stream == TsStream::Opus && self.demux.opus_channels(u.pid).is_none() {
-                continue;
-            }
-            // Likewise for DVB AC-3 on a private PES: only a PID whose descriptors
-            // carried the AC-3 marker is AC-3 (ATSC 0x81 needs no descriptor).
-            if self.stream == TsStream::Ac3
-                && u.stream_type == STREAM_TYPE_PRIVATE_PES
-                && !self.demux.is_dvb_ac3(u.pid)
-            {
-                continue;
-            }
-            // And for KLV on a private PES: only a PID whose descriptors carried
-            // the 'KLVA' registration is KLV (metadata-in-PES 0x15 needs none).
-            if self.stream == TsStream::Klv
-                && u.stream_type == STREAM_TYPE_PRIVATE_PES
-                && !self.demux.is_klv(u.pid)
-            {
-                continue;
-            }
-            // And for AV1 on a private PES: only a PID whose descriptors carried
-            // the AV1 registration is AV1.
-            if self.stream == TsStream::Av1 && !self.demux.is_av1(u.pid) {
-                continue;
-            }
-            // Likewise for DVB subtitles: only a PID whose descriptors carried a
-            // subtitling_descriptor is one.
-            if self.stream == TsStream::DvbSub && self.demux.subtitling(u.pid).is_none() {
-                continue;
-            }
-            // And for teletext: only a PID whose descriptors carried a
-            // teletext_descriptor is one.
-            if self.stream == TsStream::Teletext && self.demux.teletext(u.pid).is_none() {
-                continue;
             }
             let pts_ns = u
                 .pts_90khz
@@ -1165,6 +1129,7 @@ pub struct TsDemuxN {
     ports: Vec<TsStream>,
     /// Whether port `i` has emitted its opening `CapsChanged` yet.
     announced: Vec<bool>,
+    selected_pids: Vec<Option<u16>>,
     bus: Option<BusHandle>,
     /// Set once the `StreamCollection` has been announced (M386), so it posts once.
     collection_posted: bool,
@@ -1210,6 +1175,7 @@ impl TsDemuxN {
     pub fn new(ports: Vec<TsStream>) -> Self {
         assert!(!ports.is_empty(), "TsDemuxN needs at least one output port");
         let announced = alloc::vec![false; ports.len()];
+        let selected_pids = alloc::vec![None; ports.len()];
         let segment_sent = alloc::vec![false; ports.len()];
         let mpeg2_tuned_in = alloc::vec![false; ports.len()];
         let last_unit_dts_ns = alloc::vec![None; ports.len()];
@@ -1219,6 +1185,7 @@ impl TsDemuxN {
             packets: TsPacketSplitter::new(),
             ports,
             announced,
+            selected_pids,
             segment_base: None,
             segment_sent,
             mpeg2_tuned_in,
@@ -1265,9 +1232,8 @@ impl TsDemuxN {
     /// carries stream ids (from the announced collection, e.g. `"mpegts-pid-256"`);
     /// port `i` re-maps to the stream named by selection id `i`. The demuxer
     /// re-emits that port's `CapsChanged` for the new stream and confirms the active
-    /// ids on the bus ([`BusMessage::StreamsSelected`]). Because TS ports route by
-    /// PMT `stream_type`, a re-map to a different *codec* takes effect at routing;
-    /// two streams of the same codec share a port (as in `MkvDemuxN`). The
+    /// ids on the bus ([`BusMessage::StreamsSelected`]). A port carries the PID its
+    /// id names, so a re-map can pick the second of two tracks of one codec. The
     /// MPEG-TS sibling of [`MkvDemuxN::with_stream_select`](crate::mkvdemux::MkvDemuxN::with_stream_select).
     pub fn with_stream_select(mut self, select: StreamSelectController) -> Self {
         self.stream_select = Some(select);
@@ -1288,11 +1254,12 @@ impl TsDemuxN {
         };
         let mut active = Vec::new();
         for (port, id) in ids.iter().enumerate().take(self.ports.len()) {
-            let Some(stream) = resolve_ts_stream_id(&self.demux, id) else {
+            let Some((pid, stream)) = resolve_ts_stream_id(&self.demux, id) else {
                 continue;
             };
-            if self.ports[port] != stream {
+            if self.ports[port] != stream || self.selected_pids[port] != Some(pid) {
                 self.ports[port] = stream;
+                self.selected_pids[port] = Some(pid);
                 self.announced[port] = false; // re-emit caps for the new stream
             }
             active.push(id.clone());
@@ -1314,12 +1281,12 @@ impl TsDemuxN {
         self.emitted
     }
 
-    /// The port carrying the elementary stream of PMT `stream_type`, or `None` if
-    /// no selected port carries it. The first matching port wins.
-    fn port_for_stream_type(&self, stream_type: u8) -> Option<usize> {
-        self.ports
-            .iter()
-            .position(|&s| TsDemux::accepts_stream_type(s, stream_type))
+    // a port without an app-selected PID carries the first PMT stream of its codec
+    fn port_for_pid(&self, pid: u16) -> Option<usize> {
+        (0..self.ports.len()).position(|port| {
+            self.selected_pids[port].or_else(|| first_pid_carrying(&self.demux, self.ports[port]))
+                == Some(pid)
+        })
     }
 
     /// Announce the active program's PMT elementary streams as a
@@ -1350,32 +1317,9 @@ impl TsDemuxN {
     /// emitting that port's opening `CapsChanged` before its first frame.
     async fn route_units(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
         for u in self.demux.take_units() {
-            let Some(port) = self.port_for_stream_type(u.stream_type) else {
+            let Some(port) = self.port_for_pid(u.pid) else {
                 continue; // a stream no selected port carries
             };
-            // A private (0x06) PES routed to a klv port is only KLV when its PMT
-            // descriptors carried the 'KLVA' registration (the single-output
-            // demuxer applies the same filter in emit_units).
-            if self.ports[port] == TsStream::Klv
-                && u.stream_type == STREAM_TYPE_PRIVATE_PES
-                && !self.demux.is_klv(u.pid)
-            {
-                continue;
-            }
-            // And a private PES routed to an av1 port is only AV1 when its
-            // descriptors carried the AV1 registration.
-            if self.ports[port] == TsStream::Av1 && !self.demux.is_av1(u.pid) {
-                continue;
-            }
-            // And a private PES routed to a dvbsub port is only DVB subtitles
-            // when its descriptors carried a subtitling_descriptor.
-            if self.ports[port] == TsStream::DvbSub && self.demux.subtitling(u.pid).is_none() {
-                continue;
-            }
-            // Likewise a private PES routed to a teletext port.
-            if self.ports[port] == TsStream::Teletext && self.demux.teletext(u.pid).is_none() {
-                continue;
-            }
             if self.ports[port] == TsStream::Mpeg2 && !self.mpeg2_tuned_in[port] {
                 if !mpeg2_can_open_here(&u.data) {
                     continue;
@@ -1483,22 +1427,49 @@ fn config_frame(blob: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
     )
 }
 
-/// Resolve a collection stream id (`"mpegts-pid-{pid}"`) to the [`TsStream`] that
+/// Resolve a collection stream id (`"mpegts-pid-{pid}"`) to its PID and the [`TsStream`] that
 /// selects it, by looking the PID up in the parsed PMT and mapping its
 /// `stream_type`. `None` for an unparseable id, an unknown PID, or a stream_type
 /// g2g does not forward (M475).
-fn resolve_ts_stream_id(demux: &TsDemuxer, id: &str) -> Option<TsStream> {
+fn resolve_ts_stream_id(demux: &TsDemuxer, id: &str) -> Option<(u16, TsStream)> {
     let pid: u16 = id.strip_prefix("mpegts-pid-")?.parse().ok()?;
     let es = demux.streams().iter().find(|e| e.pid == pid)?;
-    match es.stream_type {
-        STREAM_TYPE_H264 => Some(TsStream::H264),
-        STREAM_TYPE_H265 => Some(TsStream::H265),
-        STREAM_TYPE_MPEG4P2 => Some(TsStream::Mpeg4Part2),
-        STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => Some(TsStream::Mpeg2),
-        STREAM_TYPE_PRIVATE_PES if es.av1 => Some(TsStream::Av1),
-        STREAM_TYPE_AAC => Some(TsStream::Aac),
-        _ => None,
+    let stream = match es.stream_type {
+        STREAM_TYPE_H264 => TsStream::H264,
+        STREAM_TYPE_H265 => TsStream::H265,
+        STREAM_TYPE_MPEG4P2 => TsStream::Mpeg4Part2,
+        STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => TsStream::Mpeg2,
+        STREAM_TYPE_PRIVATE_PES if es.av1 => TsStream::Av1,
+        STREAM_TYPE_AAC => TsStream::Aac,
+        _ => return None,
+    };
+    Some((pid, stream))
+}
+
+// a private PES (0x06) carries a codec only when its PMT descriptors name it
+fn pid_carries(demux: &TsDemuxer, stream: TsStream, pid: u16, stream_type: u8) -> bool {
+    if !TsDemux::accepts_stream_type(stream, stream_type) {
+        return false;
     }
+    let private = stream_type == STREAM_TYPE_PRIVATE_PES;
+    match stream {
+        TsStream::Opus => demux.opus_channels(pid).is_some(),
+        TsStream::Ac3 => !private || demux.is_dvb_ac3(pid),
+        TsStream::Klv => !private || demux.is_klv(pid),
+        TsStream::Av1 => demux.is_av1(pid),
+        TsStream::DvbSub => demux.subtitling(pid).is_some(),
+        TsStream::Teletext => demux.teletext(pid).is_some(),
+        _ => true,
+    }
+}
+
+// in PMT order, so several tracks of one codec (languages) never interleave on one output
+fn first_pid_carrying(demux: &TsDemuxer, stream: TsStream) -> Option<u16> {
+    demux
+        .streams()
+        .iter()
+        .find(|es| pid_carries(demux, stream, es.pid, es.stream_type))
+        .map(|es| es.pid)
 }
 
 impl MultiOutputElement for TsDemuxN {
@@ -1932,6 +1903,31 @@ mod tests {
             .await
             .unwrap();
         d.process(PipelinePacket::Eos, sink).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn forwards_only_the_first_pmt_stream_of_the_selected_codec() {
+        const FIRST_PID: u16 = 0x0101;
+        const SECOND_PID: u16 = 0x0102;
+        let first = [0xFFu8, 0xF1, 0x50, 0x80, 0x01, 0x23];
+        let second = [0xFFu8, 0xF1, 0x50, 0x80, 0x02, 0x45];
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&pat(0x1000));
+        stream.extend_from_slice(&pmt2(
+            FIRST_PID,
+            STREAM_TYPE_AAC,
+            SECOND_PID,
+            STREAM_TYPE_AAC,
+        ));
+        stream.extend_from_slice(&ts_packet(SECOND_PID, true, &pes_id(0xC0, &second)));
+        stream.extend_from_slice(&ts_packet(FIRST_PID, true, &pes_id(0xC0, &first)));
+        stream.extend_from_slice(&ts_packet(SECOND_PID, true, &pes_id(0xC0, &second)));
+
+        let mut d = TsDemux::new().with_stream(TsStream::Aac);
+        d.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        run_demux(&mut d, &stream, &mut sink).await;
+        assert_eq!(sink.frames, alloc::vec![first.to_vec()]);
     }
 
     /// The single-output demuxer posts the tags a transport stream carries (M872):

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1559: `tsdemux` forwards only the first PMT stream of the selected codec, and a `TsDemuxN` selection picks one of several tracks of a codec.
 - M1558: the mp4 demuxers read negative version 0 `ctts` and `trun` offsets as signed, so the segment clip no longer drops every other frame of those files.
 - M1557: every audio decoder trims its decoded samples to the upstream segment, so an mp4 edit list drops the AAC priming as ffmpeg does.
 - M1554: an `A420` raw format carries alpha, `ffmpegdec` emits it for VP6-alpha and `videoconvert` converts it to I420 and RGBA.

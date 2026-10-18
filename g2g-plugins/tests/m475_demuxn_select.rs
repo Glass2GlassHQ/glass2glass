@@ -186,6 +186,80 @@ async fn mux_ts_av() -> Vec<u8> {
     sink.bytes
 }
 
+async fn mux_ts_two_aac_tracks(first: &[u8], second: &[u8]) -> Vec<u8> {
+    let mut mux = g2g_plugins::tsmuxn::TsMux::new(2);
+    mux.configure_pipeline(0, &aac_caps()).unwrap();
+    mux.configure_pipeline(1, &aac_caps()).unwrap();
+    let mut sink = Collect::default();
+    for port in [0, 1] {
+        let payload = if port == 0 { first } else { second };
+        mux.process(port, frame(adts_au(payload), 0), &mut sink)
+            .await
+            .unwrap();
+    }
+    for port in [0, 1] {
+        mux.process(port, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+    }
+    sink.bytes
+}
+
+#[tokio::test]
+async fn tsdemuxn_port_carries_one_of_two_tracks_of_a_codec() {
+    use g2g_plugins::tsdemux::{TsDemuxN, TsStream};
+
+    let first = [0xA1u8, 0xA2, 0xA3];
+    let second = [0xB4u8, 0xB5];
+    let file = mux_ts_two_aac_tracks(&first, &second).await;
+    let run = |select_second: bool| {
+        let file = file.clone();
+        async move {
+            let (bus, handle): (Bus, BusHandle) = Bus::new(16);
+            let select = StreamSelectController::new();
+            let mut demux = TsDemuxN::new(vec![TsStream::Aac])
+                .with_bus(handle)
+                .with_stream_select(select.clone());
+            demux
+                .configure_pipeline(&Caps::ByteStream {
+                    encoding: ByteStreamEncoding::MpegTs,
+                })
+                .expect("configure");
+            let mut tap = PortTap::new(1);
+            let mut selected = !select_second;
+            for pkt in file.chunks(188) {
+                demux.process(data_frame(pkt), &mut tap).await.unwrap();
+                if selected {
+                    continue;
+                }
+                while let Some(msg) = bus.try_recv() {
+                    if let BusMessage::StreamCollection(c) = msg {
+                        let ids: Vec<String> = c
+                            .streams_of_type(StreamType::Audio)
+                            .map(|s| s.id.clone())
+                            .collect();
+                        select.select(vec![ids[1].clone()]);
+                        selected = true;
+                    }
+                }
+            }
+            demux.process(PipelinePacket::Eos, &mut tap).await.unwrap();
+            assert!(selected, "the collection was announced");
+            tap.frames.remove(0)
+        }
+    };
+    assert_eq!(
+        run(false).await,
+        vec![adts_au(&first)],
+        "default: first track"
+    );
+    assert_eq!(
+        run(true).await,
+        vec![adts_au(&second)],
+        "selected: second track"
+    );
+}
+
 #[tokio::test]
 async fn tsdemuxn_selection_remaps_which_stream_each_port_carries() {
     use g2g_plugins::tsdemux::{TsDemuxN, TsStream};
