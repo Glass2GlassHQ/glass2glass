@@ -76,6 +76,11 @@ pub(crate) const ICE_TRANSPORT_POLICY_PROP: PropertySpec = PropertySpec::new(
 .with_default("all")
 .with_enum_values("all | relay");
 
+// an empty property string clears an optional server or token
+pub(crate) fn non_empty(text: &str) -> Option<String> {
+    (!text.is_empty()).then(|| text.into())
+}
+
 pub(crate) const STUN_SERVER_PROP: PropertySpec = PropertySpec::new(
     "stun-server",
     PropKind::Str,

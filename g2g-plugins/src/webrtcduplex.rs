@@ -77,9 +77,9 @@ use crate::webrtc_codec::{
 };
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_util::{
-    add_ice_candidates, feed_datagram, get_linger_ms_property, media_time_ns, select_host_ip,
-    send_transmit, set_linger_ms_property, DEFAULT_LINGER_MS, LINGER_MS_PROP, STUN_SERVER_PROP,
-    TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
+    add_ice_candidates, feed_datagram, get_linger_ms_property, media_time_ns, non_empty,
+    select_host_ip, send_transmit, set_linger_ms_property, DEFAULT_LINGER_MS, LINGER_MS_PROP,
+    STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
 };
 
 /// The tracks a duplex session offers at the handshake, in pad order: video on
@@ -120,10 +120,6 @@ static WEBRTCDUPLEX_PROPS: &[PropertySpec] = &[
 fn spare_track_count(value: &PropValue) -> Result<usize, PropError> {
     let count = value.as_uint().ok_or(PropError::Type)?;
     usize::try_from(count).map_err(|_| PropError::Value)
-}
-
-fn non_empty(text: &str) -> Option<String> {
-    (!text.is_empty()).then(|| text.into())
 }
 
 /// Which peer originates the SDP offer in the sendrecv handshake.

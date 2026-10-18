@@ -60,7 +60,7 @@ use crate::webrtc_codec::{
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
 use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
-use crate::webrtc_util::send_transmit;
+use crate::webrtc_util::{non_empty, send_transmit};
 
 /// Output port for the video track.
 const VIDEO_PORT: usize = 0;
@@ -330,14 +330,14 @@ impl MultiOutputSource for LiveKitSrc {
         if let Some(result) = self.ice.set_property(name, &value) {
             return result;
         }
-        let v = value.as_str().ok_or(PropError::Type)?;
+        let text = || value.as_str().ok_or(PropError::Type);
         match name {
-            "url" => self.url = v.into(),
-            "room" => self.room = v.into(),
-            "identity" => self.identity = v.into(),
-            "api-key" => self.api_key = v.into(),
-            "api-secret" => self.api_secret = v.into(),
-            "token" => self.token = (!v.is_empty()).then(|| v.into()),
+            "url" => self.url = text()?.into(),
+            "room" => self.room = text()?.into(),
+            "identity" => self.identity = text()?.into(),
+            "api-key" => self.api_key = text()?.into(),
+            "api-secret" => self.api_secret = text()?.into(),
+            "token" => self.token = non_empty(text()?),
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -552,6 +552,19 @@ mod tests {
             })
         ));
         assert!(src.output_caps(2).is_err());
+    }
+
+    #[test]
+    fn unknown_property_is_unknown_whatever_the_value_type() {
+        let mut src = LiveKitSrc::new("ws://h:7880", "room", "id");
+        assert_eq!(
+            src.set_property("nope", PropValue::Uint(1)),
+            Err(PropError::Unknown)
+        );
+        assert_eq!(
+            src.set_property("url", PropValue::Uint(1)),
+            Err(PropError::Type)
+        );
     }
 
     #[test]

@@ -75,7 +75,7 @@ use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_simulcast::{
     rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
-use crate::webrtc_util::{feed_datagram, select_host_ip, send_transmit};
+use crate::webrtc_util::{feed_datagram, non_empty, select_host_ip, send_transmit};
 
 /// Default bounded depth of the element->session media channel (per direction).
 const DEFAULT_QUEUE_DEPTH: usize = 256;
@@ -745,14 +745,14 @@ impl MultiInputElement for LiveKitSink {
         if let Some(result) = self.ice.set_property(name, &value) {
             return result;
         }
-        let s = value.as_str().ok_or(PropError::Type)?;
+        let text = || value.as_str().ok_or(PropError::Type);
         match name {
-            "url" => self.url = s.into(),
-            "room" => self.room = s.into(),
-            "identity" => self.identity = s.into(),
-            "api-key" => self.api_key = s.into(),
-            "api-secret" => self.api_secret = s.into(),
-            "token" => self.token = if s.is_empty() { None } else { Some(s.into()) },
+            "url" => self.url = text()?.into(),
+            "room" => self.room = text()?.into(),
+            "identity" => self.identity = text()?.into(),
+            "api-key" => self.api_key = text()?.into(),
+            "api-secret" => self.api_secret = text()?.into(),
+            "token" => self.token = non_empty(text()?),
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -1128,6 +1128,10 @@ mod tests {
             .any(|p| p.name == "ice-transport-policy"));
         assert_eq!(
             s.set_property("nope", PropValue::Str("x".into())),
+            Err(PropError::Unknown)
+        );
+        assert_eq!(
+            s.set_property("nope", PropValue::Uint(1)),
             Err(PropError::Unknown)
         );
     }
