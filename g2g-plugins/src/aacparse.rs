@@ -184,6 +184,7 @@ pub(crate) fn is_raw_aac_config(config: &[u8]) -> bool {
 }
 
 // the object type of a config a demuxer can neither ADTS-frame nor send raw (ALS, SLS, ...)
+#[cfg(feature = "std")]
 pub(crate) fn unframable_object_type(config: &[u8]) -> Option<u32> {
     if is_raw_aac_config(config) || adts_from_asc(config, &[]).is_some() {
         return None;
@@ -889,7 +890,6 @@ pub(crate) mod test_frames {
     }
 
     /// One 48 kHz stereo AAC-LC access unit carrying `payload`.
-    #[cfg(feature = "std")]
     pub(crate) fn adts_au(payload: &[u8]) -> Vec<u8> {
         const STEREO: u8 = 2;
         const FREQ_INDEX_48000: u8 = 3;

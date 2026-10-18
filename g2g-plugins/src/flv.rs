@@ -686,6 +686,7 @@ fn sequence_header(tag_type: u8, body: &[u8]) -> Option<(FlvTrack, &[u8])> {
 }
 
 // FLV sound formats this parser does not carry, by the codec name ffmpeg gives them
+#[cfg(feature = "std")]
 const UNSUPPORTED_SOUND_FORMATS: [(u8, &str); 8] = [
     (0, "pcm"),
     (1, "adpcm_swf"),
@@ -697,9 +698,11 @@ const UNSUPPORTED_SOUND_FORMATS: [(u8, &str); 8] = [
     (8, "pcm_mulaw"),
 ];
 // enhanced FLV puts a fourcc after this flag instead of a codec id in the low nibble
+#[cfg(feature = "std")]
 const VIDEO_EX_HEADER: u8 = 0x80;
 
 // the codec of each audio and video tag in an FLV prefix that this parser does not carry
+#[cfg(feature = "std")]
 pub(crate) fn unsupported_codecs(data: &[u8]) -> Vec<alloc::string::String> {
     let Some(mut pos) = data
         .starts_with(FLV_SIGNATURE)
