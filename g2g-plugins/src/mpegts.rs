@@ -15,6 +15,7 @@
 //! directly.
 
 use alloc::borrow::Cow;
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -127,6 +128,8 @@ pub const TAG_KEY_SCHEDULE_EVENT_DURATION: &str = "schedule_event_duration";
 /// another start) would grow the buffer without bound. 16 MiB comfortably holds
 /// a large intra access unit while bounding the memory an untrusted stream costs.
 const MAX_PES_BYTES: usize = 16 * 1024 * 1024;
+// 0.5 s of a 24 Mbit/s multiplex, the longest PAT/PMT gap ETSI TR 101 290 allows.
+const MAX_PACKETS_BEFORE_PMT: usize = 8192;
 
 /// PMT `stream_type` for H.264 (AVC) video.
 pub const STREAM_TYPE_H264: u8 = 0x1B;
@@ -799,6 +802,8 @@ pub struct TsDemuxer {
     video_pts: Vec<(u16, VideoPtsSynth)>,
     last_extended_timestamps: Vec<(u16, u64)>,
     continuity: Vec<PidContinuity>,
+    // replayed once the active program's PMT parses
+    packets_before_pmt: VecDeque<[u8; TS_PACKET_LEN]>,
 }
 
 impl TsDemuxer {
@@ -945,7 +950,10 @@ impl TsDemuxer {
     /// counter drops that PID's partial PES or section. Completed access units
     /// accumulate; drain them with [`take_units`](Self::take_units).
     pub fn push_packet(&mut self, pkt: &[u8]) {
-        if pkt.len() < TS_PACKET_LEN || pkt[0] != SYNC_BYTE {
+        let Some(pkt) = pkt.first_chunk::<TS_PACKET_LEN>() else {
+            return;
+        };
+        if pkt[0] != SYNC_BYTE {
             return;
         }
         let pusi = pkt[1] & 0x40 != 0;
@@ -958,6 +966,7 @@ impl TsDemuxer {
         let table = self.psi_table_of(pid);
         let stream_type = self.stream_type_of(pid);
         if table.is_none() && stream_type.is_none() {
+            self.hold_before_pmt(pid, pkt);
             return;
         }
         if afc & 0x01 == 0 {
@@ -985,6 +994,7 @@ impl TsDemuxer {
         let payload = &pkt[off..TS_PACKET_LEN];
 
         if let Some(table) = table {
+            let pmt_was_missing = self.streams().is_empty();
             for section in self.collect_sections(pid, table, payload, pusi) {
                 match table {
                     PsiTable::Pat => self.parse_pat(&section),
@@ -993,9 +1003,24 @@ impl TsDemuxer {
                     PsiTable::Pmt(program_index) => self.parse_pmt(program_index, &section),
                 }
             }
+            if pmt_was_missing && !self.streams().is_empty() {
+                for held in core::mem::take(&mut self.packets_before_pmt) {
+                    self.push_packet(&held);
+                }
+            }
         } else if let Some(stream_type) = stream_type {
             self.accumulate_pes(pid, stream_type, payload, pusi);
         }
+    }
+
+    fn hold_before_pmt(&mut self, pid: u16, pkt: &[u8; TS_PACKET_LEN]) {
+        if pid == PID_NULL || !self.streams().is_empty() {
+            return;
+        }
+        if self.packets_before_pmt.len() == MAX_PACKETS_BEFORE_PMT {
+            self.packets_before_pmt.pop_front();
+        }
+        self.packets_before_pmt.push_back(*pkt);
     }
 
     fn check_continuity(&mut self, pid: u16, counter: u8, discontinuity: bool) -> Continuity {
@@ -3380,6 +3405,24 @@ pub(crate) mod tests {
         p.extend_from_slice(&header);
         p.extend_from_slice(es);
         p
+    }
+
+    #[test]
+    fn packets_before_the_pmt_keep_the_newest_within_the_bound() {
+        let es_pid = 0x0100;
+        let packets: Vec<Vec<u8>> = (0..=MAX_PACKETS_BEFORE_PMT)
+            .map(|_| ts_packet(es_pid, false, &[0; TS_PACKET_LEN - 4]))
+            .collect();
+        let mut d = TsDemuxer::new();
+        for packet in &packets {
+            d.push_packet(packet);
+        }
+        assert_eq!(d.packets_before_pmt.len(), MAX_PACKETS_BEFORE_PMT);
+        assert_eq!(
+            d.packets_before_pmt.front().map(|held| held.as_slice()),
+            Some(packets[1].as_slice()),
+            "the oldest packet is dropped"
+        );
     }
 
     #[test]

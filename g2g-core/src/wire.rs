@@ -354,6 +354,7 @@ fn bytestream_to_u8(e: ByteStreamEncoding) -> u8 {
         ByteStreamEncoding::Rtcp => 15,
         ByteStreamEncoding::Srtcp => 16,
         ByteStreamEncoding::Dtls => 17,
+        ByteStreamEncoding::Iv8 => 20,
     }
 }
 fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
@@ -378,6 +379,7 @@ fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
         15 => ByteStreamEncoding::Rtcp,
         16 => ByteStreamEncoding::Srtcp,
         17 => ByteStreamEncoding::Dtls,
+        20 => ByteStreamEncoding::Iv8,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -1408,6 +1410,7 @@ mod tests {
             ByteStreamEncoding::Dtls,
             ByteStreamEncoding::Aiff,
             ByteStreamEncoding::Au,
+            ByteStreamEncoding::Iv8,
         ] {
             assert_eq!(bytestream_from_u8(bytestream_to_u8(encoding)), Ok(encoding));
         }

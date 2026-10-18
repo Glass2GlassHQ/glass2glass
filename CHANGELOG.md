@@ -9,6 +9,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1550: FLV VP6 units keep their dimension byte and `ffmpegdec` decodes VP6-alpha to I420, so those files decode at the right size and remux byte-exact.
 - M1548: `qtdemux` applies a video track's edit list, so `ffmpegdec` drops the frames the edit cuts.
 - M1549: `qtdemux` sends ER AAC, ELD and USAC access units raw behind their AudioSpecificConfig, which `ffmpegaudiodec` opens the decoder with.
+- M1552: `iv8demux` reads IndigoVision 8000 files, and `decodebin` plugs it from the file header.
+- M1551: `tsdemux` keeps the PES packets a stream sends before its PMT and emits them once the PMT arrives.
 - M1547: `vpxenc` binds libvpx in-tree with bindgen, so the `vpx` feature builds against libvpx 1.15 and libclang 22.
 - M1546: a bare `decodebin` on an FLV selects the codec its tags carry, so VP6 and Sorenson FLV files decode.
 - M1545: `filesrc` checks a container extension against the file header, and `mpegpsdemux` fails a stream with no pack header.

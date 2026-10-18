@@ -65,6 +65,7 @@ use crate::h265parse::H265Parse;
 use crate::hsv::{HsvDetector, HsvFilter};
 use crate::id3demux::Id3Demux;
 use crate::identity::IdentityTransform;
+use crate::iv8demux::Iv8Demux;
 use crate::ivfdemux::IvfDemux;
 use crate::mkvdemux::MkvDemux;
 use crate::mkvmux::MkvMux;
@@ -1205,6 +1206,9 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<IvfDemux>("ivfdemux", || {
         Box::new(IvfDemux::new())
     }));
+    reg.register_launch(LaunchFactory::of::<Iv8Demux>("iv8demux", || {
+        Box::new(Iv8Demux::new())
+    }));
     // AVI (M1071): `filesrc location=X.avi ! avidemux ! ...` (the video stream,
     // or the `stream=` selection). A multi-branch `avidemux name=d  d.video_0 !
     // ...  d.audio_0 ! ...` fans out via the demux-select hook (AviDemuxN).
@@ -1912,6 +1916,9 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     }));
     reg.register(ElementFactory::of::<IvfDemux>("ivfdemux", |_| {
         Box::new(IvfDemux::new())
+    }));
+    reg.register(ElementFactory::of::<Iv8Demux>("iv8demux", |_| {
+        Box::new(Iv8Demux::new())
     }));
     // AVI (M1071): `ByteStream{Avi}` -> the stream it selects, so
     // `filesrc location=x.avi ! decodebin` auto-plugs this.
