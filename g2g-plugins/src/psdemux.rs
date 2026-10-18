@@ -544,6 +544,9 @@ pub struct PsDemuxer {
     spu: Vec<PendingSpu>,
     /// Video timestamp synthesis state, one per video stream_id.
     video_ts: Vec<(u8, Mpeg2TimestampSynth)>,
+    /// Whether a pack header has parsed. Every program stream carries them, so a
+    /// stream without one is some other format.
+    pack_seen: bool,
 }
 
 impl PsDemuxer {
@@ -589,13 +592,21 @@ impl PsDemuxer {
     /// drop any half-assembled subpicture unit (its declared size never arrived,
     /// so it can never complete). An audio carry is dropped too: it is a partial
     /// frame by definition, and downstream expects whole ones.
-    pub fn flush(&mut self) {
+    ///
+    /// Fails with `CapsMismatch` when no pack header was ever seen: the bytes
+    /// were not a program stream, and the few start codes they happened to hold
+    /// must not pass for a short one.
+    pub fn flush(&mut self) -> Result<(), G2gError> {
         for (stream_id, r) in self.video.iter_mut() {
             r.flush(*stream_id, &mut self.completed);
         }
         self.audio.clear();
         self.spu.clear();
         self.sequence_from_completed();
+        if !self.pack_seen {
+            return Err(G2gError::CapsMismatch);
+        }
+        Ok(())
     }
 
     fn record(&mut self, stream_id: u8, substream_id: Option<u8>) {
@@ -638,7 +649,10 @@ impl PsDemuxer {
                 PS_PACK => match pack_header_len(rest) {
                     // Not enough bytes yet to know the pack header's length.
                     Some(None) => return at,
-                    Some(Some(len)) => at += len,
+                    Some(Some(len)) => {
+                        self.pack_seen = true;
+                        at += len;
+                    }
                     // Neither an MPEG-1 nor an MPEG-2 pack: skip the start code.
                     None => at += 4,
                 },
@@ -1312,7 +1326,7 @@ impl AsyncElement for PsDemux {
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {
-                    self.demux.flush();
+                    self.demux.flush()?;
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
                 }
@@ -1775,7 +1789,7 @@ impl MultiOutputElement for PsDemuxN {
                     }
                 }
                 PipelinePacket::Eos => {
-                    self.demux.flush();
+                    self.demux.flush()?;
                     self.route_units(out).await?;
                 }
                 // The input's (byte-stream) CapsChanged is consumed: each port

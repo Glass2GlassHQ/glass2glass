@@ -840,7 +840,8 @@ fn malformed_input_never_panics() {
     for (name, data) in cases {
         let mut demux = PsDemuxer::new();
         demux.push_data(&data);
-        demux.flush();
+        // most of these carry no pack header, so flush rejects them
+        let _ = demux.flush();
         let units = demux.take_units();
         // Whatever survives must at least be self-consistent.
         for u in &units {
@@ -851,7 +852,7 @@ fn malformed_input_never_panics() {
         for b in &data {
             demux.push_data(&[*b]);
         }
-        demux.flush();
+        let _ = demux.flush();
         let _ = demux.take_units();
     }
 }
@@ -921,7 +922,7 @@ fn a_truncated_pack_waits_for_the_rest_instead_of_overrunning() {
     let mut rest = vec![0xFFu8; 7]; // the promised stuffing
     rest.extend_from_slice(&pes(0xE0, Some(9_000), &video_unit(352, 288, 1)));
     demux.push_data(&rest);
-    demux.flush();
+    demux.flush().expect("a program stream");
     assert_eq!(
         demux.streams().len(),
         1,
@@ -983,7 +984,7 @@ fn a_stream_with_no_start_codes_does_not_rescan_quadratically() {
     for _ in 0..64 {
         demux.push_data(&file);
     }
-    demux.flush();
+    demux.flush().expect("a program stream");
     assert!(
         start.elapsed() < std::time::Duration::from_secs(5),
         "the start-code scan stayed linear: {:?}",
