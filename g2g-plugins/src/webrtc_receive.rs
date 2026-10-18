@@ -47,11 +47,15 @@ impl MediaReceiver {
         }
     }
 
-    #[cfg(feature = "webrtc-kvs")]
-    pub(crate) fn with_mids(video_codec: WebRtcVideoCodec, video_mid: Mid, audio_mid: Mid) -> Self {
+    // str0m raises no MediaAdded for an m-line this side offered, so those mids come from add_media
+    pub(crate) fn with_mids(
+        video_codec: WebRtcVideoCodec,
+        video_mid: Option<Mid>,
+        audio_mid: Option<Mid>,
+    ) -> Self {
         Self {
-            video_mid: Some(video_mid),
-            audio_mid: Some(audio_mid),
+            video_mid,
+            audio_mid,
             ..Self::new(video_codec)
         }
     }

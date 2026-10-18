@@ -350,11 +350,11 @@ impl SourceLoop for WebRtcWhepSrc {
 
             // WHEP: offer a single recv-only m-line for the chosen track, POST
             // it, apply the answer.
-            let (offer_sdp, pending) = {
+            let (offer_sdp, pending, mid) = {
                 let mut api = rtc.sdp_api();
-                api.add_media(track.media_kind(), Direction::RecvOnly, None, None, None);
+                let mid = api.add_media(track.media_kind(), Direction::RecvOnly, None, None, None);
                 let (offer, pending) = api.apply().ok_or_else(hw)?;
-                (offer.to_sdp_string(), pending)
+                (offer.to_sdp_string(), pending, mid)
             };
             let session =
                 post_sdp(&self.whep_url, self.bearer.as_deref(), offer_sdp.clone()).await?;
@@ -393,7 +393,10 @@ impl SourceLoop for WebRtcWhepSrc {
             // Mid-GOP join: video is dropped until the first keyframe, with a
             // PLI asked on a coarse interval so playback starts without waiting
             // for the next natural IDR. See [[rtsp_first_keyframe]].
-            let mut media_receiver = MediaReceiver::new(self.video_codec);
+            let mut media_receiver = match track {
+                Track::Video(codec) => MediaReceiver::with_mids(codec, Some(mid), None),
+                Track::Audio => MediaReceiver::with_mids(self.video_codec, None, Some(mid)),
+            };
             // Emit EOS and DELETE the WHEP resource (RFC 9725 teardown) on a clean
             // end.
             macro_rules! finish {

@@ -252,7 +252,11 @@ impl KvsWebRtcSrc {
             socket,
             local,
             turn,
-            media_receiver: MediaReceiver::with_mids(self.video_codec, video_mid, audio_mid),
+            media_receiver: MediaReceiver::with_mids(
+                self.video_codec,
+                Some(video_mid),
+                Some(audio_mid),
+            ),
             ws_write,
             ws_read,
         })
