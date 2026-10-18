@@ -66,7 +66,7 @@ use crate::livekit_signal::{
     access_token, candidate_from_init_json, candidate_init_json, signal_ws_url, AddTrackRequest,
     IceSettings, IceTransportPolicy, SessionDescription, SignalRequest, SignalResponse,
     SignalTarget, TrackSource, TrackType, VideoGrant, VideoLayer, VideoQuality,
-    ICE_TRANSPORT_POLICY_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
+    ICE_TRANSPORT_POLICY_PROP, LIVEKIT_TURN_SERVER_PROP, TURN_PASS_PROP, TURN_USER_PROP,
 };
 use crate::livekitsrc::{recv_signal, send_signal};
 use crate::turn::TurnSet;
@@ -606,7 +606,7 @@ static LIVEKIT_PROPS: &[PropertySpec] = &[
         PropKind::Uint,
         "aggregate send bitrate cap in bits/second (0 = uncapped); a cap below the simulcast layers' combined nominal rate sheds the top layer",
     ),
-    TURN_SERVER_PROP,
+    LIVEKIT_TURN_SERVER_PROP,
     TURN_USER_PROP,
     TURN_PASS_PROP,
     ICE_TRANSPORT_POLICY_PROP,

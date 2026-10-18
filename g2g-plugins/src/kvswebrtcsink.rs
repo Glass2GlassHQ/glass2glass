@@ -32,7 +32,7 @@ use crate::kvs_signal::{
     candidate_payloads, connect, connect_url, ice_servers, receive, sdp_payload, send_message,
     Action, Credentials, KvsSettings, Received, Role, SignalMessage, SignalingChannel,
     SignalingEndpoints, WsRead, WsWrite, ACCESS_KEY_PROP, ANSWER_TYPE, CHANNEL_ARN_PROP,
-    CHANNEL_NAME_PROP, REGION_PROP, SECRET_KEY_PROP, SESSION_TOKEN_PROP, STUN_SERVER_PROP,
+    CHANNEL_NAME_PROP, KVS_STUN_SERVER_PROP, REGION_PROP, SECRET_KEY_PROP, SESSION_TOKEN_PROP,
 };
 use crate::turn::{TurnSet, REFRESH_INTERVAL};
 use crate::webrtc_codec::{enable_tracks, sink_caps_alternatives, Track, WebRtcVideoCodec};
@@ -589,7 +589,7 @@ static KVSWEBRTCSINK_PROPS: &[PropertySpec] = &[
     ACCESS_KEY_PROP,
     SECRET_KEY_PROP,
     SESSION_TOKEN_PROP,
-    STUN_SERVER_PROP,
+    KVS_STUN_SERVER_PROP,
     ICE_TRANSPORT_POLICY_PROP,
 ];
 

@@ -59,7 +59,7 @@ use crate::webrtc_codec::{
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_ice_candidates, feed_datagram, media_time_ns, parse_restart_answer_frag, random_hex_id,
-    select_host_ip, send_transmit,
+    select_host_ip, send_transmit, STUN_SERVER_PROP,
 };
 
 // each publisher slot owns a pad pair: slot * PORTS_PER_PUBLISHER + VIDEO_PORT / AUDIO_PORT
@@ -357,11 +357,7 @@ static WHIPSERVERSRC_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "bearer token the publisher must send (empty = no auth)",
     ),
-    PropertySpec::new(
-        "stun-server",
-        PropKind::Str,
-        "STUN server host:port for a server-reflexive candidate (empty = host only)",
-    ),
+    STUN_SERVER_PROP,
     PropertySpec::new(
         "tls-cert-file",
         PropKind::Str,

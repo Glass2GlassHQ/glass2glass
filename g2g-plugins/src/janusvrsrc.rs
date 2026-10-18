@@ -41,6 +41,7 @@ use crate::webrtc_codec::{
 };
 use crate::webrtc_util::{
     add_ice_candidates, feed_datagram, media_time_ns, select_host_ip, send_transmit,
+    STUN_SERVER_PROP,
 };
 
 const VIDEO_PORT: usize = 0;
@@ -339,11 +340,7 @@ static JANUSVRSRC_PROPS: &[PropertySpec] = &[
         "send room-id and feed-id as strings (Janus string_ids)",
     )
     .with_default("false"),
-    PropertySpec::new(
-        "stun-server",
-        PropKind::Str,
-        "STUN server host:port for a server-reflexive candidate (empty = host only)",
-    ),
+    STUN_SERVER_PROP,
     VIDEO_CODEC_PROP,
     PropertySpec::new(
         "num-buffers",

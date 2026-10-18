@@ -24,9 +24,7 @@ use str0m::{Candidate, IceCreds, Input, Rtc};
 
 use crate::turn::TurnSet;
 use g2g_core::log::LogSource;
-use g2g_core::{g2g_debug, g2g_info, g2g_warn, G2gError, HardwareError};
-#[cfg(any(feature = "webrtc-livekit", feature = "webrtc-kvs"))]
-use g2g_core::{PropKind, PropertySpec};
+use g2g_core::{g2g_debug, g2g_info, g2g_warn, G2gError, HardwareError, PropKind, PropertySpec};
 
 /// `G2G_DEBUG=webrtc-http:...` names the shared WHIP/WHEP HTTP signalling path.
 struct WebRtcHttpLog;
@@ -74,6 +72,27 @@ pub(crate) const ICE_TRANSPORT_POLICY_PROP: PropertySpec = PropertySpec::new(
 )
 .with_default("all")
 .with_enum_values("all | relay");
+
+pub(crate) const STUN_SERVER_PROP: PropertySpec = PropertySpec::new(
+    "stun-server",
+    PropKind::Str,
+    "STUN server host:port for a server-reflexive candidate (empty = host only)",
+);
+pub(crate) const TURN_SERVER_PROP: PropertySpec = PropertySpec::new(
+    "turn-server",
+    PropKind::Str,
+    "TURN relay host:port for the NAT cases STUN cannot traverse (empty = no relay)",
+);
+pub(crate) const TURN_USER_PROP: PropertySpec = PropertySpec::new(
+    "turn-user",
+    PropKind::Str,
+    "TURN long-term credential username for turn-server",
+);
+pub(crate) const TURN_PASS_PROP: PropertySpec = PropertySpec::new(
+    "turn-pass",
+    PropKind::Str,
+    "TURN long-term credential password for turn-server",
+);
 
 /// STUN magic cookie (RFC 5389).
 const STUN_MAGIC: u32 = 0x2112_A442;

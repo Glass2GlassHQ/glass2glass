@@ -35,7 +35,7 @@ use tokio::net::UdpSocket;
 use crate::turn::TurnSet;
 use crate::webrtc_util::add_ice_candidates;
 pub use crate::webrtc_util::IceTransportPolicy;
-pub(crate) use crate::webrtc_util::ICE_TRANSPORT_POLICY_PROP;
+pub(crate) use crate::webrtc_util::{ICE_TRANSPORT_POLICY_PROP, TURN_PASS_PROP, TURN_USER_PROP};
 
 /// `G2G_DEBUG=livekit-signal:...` names the signalling helpers the three LiveKit elements share.
 pub(crate) struct LiveKitSignalLog;
@@ -531,20 +531,10 @@ impl IceServer {
 const STUN_URL_SCHEME: &str = "stun:";
 const TURN_URL_SCHEMES: [&str; 2] = ["turn:", "turns:"];
 
-pub(crate) const TURN_SERVER_PROP: PropertySpec = PropertySpec::new(
+pub(crate) const LIVEKIT_TURN_SERVER_PROP: PropertySpec = PropertySpec::new(
     "turn-server",
     PropKind::Str,
     "TURN servers, comma-separated (host:port, turn:/turns: URI, or turn://user:pass@host); empty = the servers the JoinResponse hands out",
-);
-pub(crate) const TURN_USER_PROP: PropertySpec = PropertySpec::new(
-    "turn-user",
-    PropKind::Str,
-    "TURN long-term credential username for turn-server",
-);
-pub(crate) const TURN_PASS_PROP: PropertySpec = PropertySpec::new(
-    "turn-pass",
-    PropKind::Str,
-    "TURN long-term credential password for turn-server",
 );
 
 /// The ICE knobs the three LiveKit elements share, and the gathering they drive:

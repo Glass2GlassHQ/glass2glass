@@ -55,7 +55,7 @@ use crate::filesink::io_err;
 use crate::livekit_signal::{
     access_token, candidate_from_init_json, signal_ws_url, IceSettings, IceTransportPolicy,
     LiveKitSignalLog, SessionDescription, SignalRequest, SignalResponse, SignalTarget, VideoGrant,
-    ICE_TRANSPORT_POLICY_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
+    ICE_TRANSPORT_POLICY_PROP, LIVEKIT_TURN_SERVER_PROP, TURN_PASS_PROP, TURN_USER_PROP,
 };
 use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
@@ -286,7 +286,7 @@ static LIVEKITSRC_PROPS: &[PropertySpec] = &[
     )
     .with_default("-1")
     .with_range("-1", "9223372036854775807"),
-    TURN_SERVER_PROP,
+    LIVEKIT_TURN_SERVER_PROP,
     TURN_USER_PROP,
     TURN_PASS_PROP,
     ICE_TRANSPORT_POLICY_PROP,

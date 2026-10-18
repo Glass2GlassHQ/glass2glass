@@ -65,7 +65,7 @@ use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_host_candidate, drain_pacer, feed_datagram, ice_restart, post_sdp, select_host_ip,
     send_transmit, trickle_candidates, ResourceHandle, TricklePatch, TurnConfig,
-    ICE_RESTART_TIMEOUT,
+    ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
 };
 
 /// Default bounded depth of the element->session media channel. Backpressures
@@ -346,26 +346,10 @@ static WEBRTCSINK_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "optional Authorization: Bearer token for the WHIP POST",
     ),
-    PropertySpec::new(
-        "stun-server",
-        PropKind::Str,
-        "STUN server host:port for ICE NAT traversal to a cloud SFU (empty = host-only)",
-    ),
-    PropertySpec::new(
-        "turn-server",
-        PropKind::Str,
-        "TURN relay host:port for the NAT cases STUN cannot traverse (empty = no relay)",
-    ),
-    PropertySpec::new(
-        "turn-user",
-        PropKind::Str,
-        "TURN long-term credential username",
-    ),
-    PropertySpec::new(
-        "turn-pass",
-        PropKind::Str,
-        "TURN long-term credential password",
-    ),
+    STUN_SERVER_PROP,
+    TURN_SERVER_PROP,
+    TURN_USER_PROP,
+    TURN_PASS_PROP,
 ];
 
 impl AsyncElement for WebRtcSink {

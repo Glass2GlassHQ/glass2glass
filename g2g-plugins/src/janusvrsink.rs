@@ -48,7 +48,7 @@ use crate::turn::TurnSet;
 use crate::webrtc_codec::{sink_caps_alternatives, Track, WebRtcVideoCodec};
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
-    add_ice_candidates, drain_pacer, feed_datagram, select_host_ip, send_transmit,
+    add_ice_candidates, drain_pacer, feed_datagram, select_host_ip, send_transmit, STUN_SERVER_PROP,
 };
 use crate::webrtcsink::{MediaUnit, DEFAULT_QUEUE_DEPTH, INITIAL_BITRATE_BPS};
 
@@ -430,11 +430,7 @@ static JANUSVRSINK_PROPS: &[PropertySpec] = &[
         "send room-id and feed-id as strings (Janus string_ids)",
     )
     .with_default("false"),
-    PropertySpec::new(
-        "stun-server",
-        PropKind::Str,
-        "STUN server host:port for a server-reflexive candidate (empty = host only)",
-    ),
+    STUN_SERVER_PROP,
 ];
 
 impl AsyncElement for JanusVrSink {

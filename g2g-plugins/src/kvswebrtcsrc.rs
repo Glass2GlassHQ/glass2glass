@@ -31,7 +31,7 @@ use crate::kvs_signal::{
     candidate_payloads, client_id_is_valid, connect, connect_url, ice_servers, receive,
     sdp_payload, send_message, Action, KvsSettings, Received, Role, SignalMessage,
     SignalingEndpoints, WsRead, WsWrite, ACCESS_KEY_PROP, CHANNEL_ARN_PROP, CHANNEL_NAME_PROP,
-    OFFER_TYPE, REGION_PROP, SECRET_KEY_PROP, SESSION_TOKEN_PROP, STUN_SERVER_PROP,
+    KVS_STUN_SERVER_PROP, OFFER_TYPE, REGION_PROP, SECRET_KEY_PROP, SESSION_TOKEN_PROP,
 };
 use crate::turn::{TurnSet, REFRESH_INTERVAL};
 use crate::webrtc_codec::{
@@ -282,7 +282,7 @@ static KVSWEBRTCSRC_PROPS: &[PropertySpec] = &[
     ACCESS_KEY_PROP,
     SECRET_KEY_PROP,
     SESSION_TOKEN_PROP,
-    STUN_SERVER_PROP,
+    KVS_STUN_SERVER_PROP,
     ICE_TRANSPORT_POLICY_PROP,
     PropertySpec::new(
         "client-id",

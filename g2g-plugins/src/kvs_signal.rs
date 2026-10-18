@@ -488,7 +488,7 @@ pub(crate) const SESSION_TOKEN_PROP: PropertySpec = PropertySpec::new(
     PropKind::Str,
     "AWS session token for temporary credentials (empty = AWS_SESSION_TOKEN)",
 );
-pub(crate) const STUN_SERVER_PROP: PropertySpec = PropertySpec::new(
+pub(crate) const KVS_STUN_SERVER_PROP: PropertySpec = PropertySpec::new(
     "stun-server",
     PropKind::Str,
     "STUN server host:port for a server-reflexive candidate (empty = stun.kinesisvideo.<region>.amazonaws.com:443)",

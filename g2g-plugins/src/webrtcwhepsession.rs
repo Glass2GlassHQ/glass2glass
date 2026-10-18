@@ -51,7 +51,7 @@ use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_host_candidate, delete_resource, feed_datagram, ice_restart, media_time_ns, post_sdp,
     select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
-    ICE_RESTART_TIMEOUT,
+    ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
 };
 
 /// Output port for the video track.
@@ -165,18 +165,10 @@ static WHEPSESSION_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "optional Authorization: Bearer token for the WHEP POST",
     ),
-    PropertySpec::new(
-        "stun-server",
-        PropKind::Str,
-        "STUN server host:port for ICE NAT traversal",
-    ),
-    PropertySpec::new(
-        "turn-server",
-        PropKind::Str,
-        "TURN relay host:port for ICE NAT traversal",
-    ),
-    PropertySpec::new("turn-user", PropKind::Str, "TURN long-term username"),
-    PropertySpec::new("turn-pass", PropKind::Str, "TURN long-term password"),
+    STUN_SERVER_PROP,
+    TURN_SERVER_PROP,
+    TURN_USER_PROP,
+    TURN_PASS_PROP,
     VIDEO_CODEC_PROP,
     PropertySpec::new(
         "num-buffers",

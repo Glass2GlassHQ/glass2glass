@@ -58,7 +58,7 @@ use crate::webrtc_simulcast::{
 use crate::webrtc_util::{
     add_host_candidate, drain_pacer, feed_datagram, ice_restart, post_sdp, select_host_ip,
     send_transmit, trickle_candidates, ResourceHandle, TricklePatch, TurnConfig,
-    ICE_RESTART_TIMEOUT,
+    ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
 };
 
 /// Default bounded depth of the element->session media channel (per direction).
@@ -351,26 +351,10 @@ static WEBRTCSESSION_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "optional Authorization: Bearer token",
     ),
-    PropertySpec::new(
-        "stun-server",
-        PropKind::Str,
-        "STUN server host:port (empty = host-only)",
-    ),
-    PropertySpec::new(
-        "turn-server",
-        PropKind::Str,
-        "TURN relay host:port (empty = no relay)",
-    ),
-    PropertySpec::new(
-        "turn-user",
-        PropKind::Str,
-        "TURN long-term credential username",
-    ),
-    PropertySpec::new(
-        "turn-pass",
-        PropKind::Str,
-        "TURN long-term credential password",
-    ),
+    STUN_SERVER_PROP,
+    TURN_SERVER_PROP,
+    TURN_USER_PROP,
+    TURN_PASS_PROP,
     PropertySpec::new(
         "max-send-bitrate",
         PropKind::Uint,
