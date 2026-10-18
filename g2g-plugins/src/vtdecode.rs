@@ -60,7 +60,7 @@ use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
     HardwareError, Interlace, MemoryDomain, MemoryDomainKind, OutputSink, OwnedCvPixelBuffer,
     PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    RawVideoFormat, VideoCodec,
+    RawVideoFormat, Segment, VideoCodec,
 };
 
 use crate::annexb::{
@@ -183,6 +183,7 @@ pub struct VtDecode {
     /// bytes to system memory.
     cv_output: bool,
     emitted: u64,
+    segment: Segment,
 }
 
 // SAFETY: a `VTDecompressionSession` and the CoreMedia objects are CoreFoundation
@@ -223,6 +224,7 @@ impl VtDecode {
             input_framerate: Rate::Any,
             cv_output: false,
             emitted: 0,
+            segment: Segment::new(),
         }
     }
 
@@ -479,6 +481,7 @@ impl AsyncElement for VtDecode {
                     }
                 }
                 PipelinePacket::Segment(seg) => {
+                    self.segment = seg;
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 other => {
@@ -506,6 +509,9 @@ impl VtDecode {
                 ..
             } => (*width, *height, *pts_ns),
         };
+        if !self.segment.presents(pts_ns) {
+            return Ok(());
+        }
         // `Any` when the stream declared no rate, never a guess.
         let framerate = self.input_framerate.clone();
         // Both '420v' and '420f' are the NV12 byte layout, so the caps are the

@@ -88,7 +88,7 @@ use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
     FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
-    Reconfigure, VideoCodec,
+    Reconfigure, Segment, VideoCodec,
 };
 
 /// Default DRM render node. The user can pick a different device via
@@ -214,6 +214,7 @@ pub struct VaapiDec<C: VaapiCodec> {
     keep_row_padding: bool,
     configured: bool,
     emitted: u64,
+    segment: Segment,
     codec: PhantomData<C>,
 }
 
@@ -260,6 +261,7 @@ impl<C: VaapiCodec> VaapiDec<C> {
             keep_row_padding: false,
             configured: false,
             emitted: 0,
+            segment: Segment::new(),
             codec: PhantomData,
         }
     }
@@ -581,6 +583,7 @@ impl<C: VaapiCodec> AsyncElement for VaapiDec<C> {
                     self.drain_eos(&mut decoded)?;
                 }
                 PipelinePacket::Segment(seg) => {
+                    self.segment = seg;
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 other => {
@@ -589,6 +592,9 @@ impl<C: VaapiCodec> AsyncElement for VaapiDec<C> {
             }
 
             for d in decoded {
+                if !self.segment.presents(d.pts_ns) {
+                    continue;
+                }
                 let new_caps = nv12_caps(d.width, d.height);
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     // M16 workaround #3 Phase A debug assertion. See

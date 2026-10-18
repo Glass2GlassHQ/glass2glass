@@ -25,7 +25,7 @@ macro_rules! av1_decoder {
         use g2g_core::{
             AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
             G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-            RawVideoFormat, Rate, VideoCodec,
+            RawVideoFormat, Rate, Segment, VideoCodec,
         };
 
         use $backend::{Decoder, PixelLayout, PlanarImageComponent, Picture};
@@ -94,6 +94,7 @@ macro_rules! av1_decoder {
             /// Timing of the newest input unit, stamped onto the reorder-delayed
             /// pictures the EOS drain emits (their own units' stamps are gone).
             last_timing: g2g_core::frame::FrameTiming,
+            segment: Segment,
         }
 
         impl core::fmt::Debug for $ty {
@@ -123,6 +124,7 @@ macro_rules! av1_decoder {
                     sequence: 0,
                     configured: false,
                     last_timing: g2g_core::frame::FrameTiming::default(),
+                    segment: Segment::new(),
                 }
             }
 
@@ -204,6 +206,9 @@ macro_rules! av1_decoder {
                 timing: g2g_core::frame::FrameTiming,
                 out: &mut dyn OutputSink,
             ) -> Result<(), G2gError> {
+                if !self.segment.presents(timing.pts_ns) {
+                    return Ok(());
+                }
                 for (shape, pixels) in frames {
                     if self.out != Some(shape) {
                         out.push(PipelinePacket::CapsChanged(self.output_caps(shape)))
@@ -365,6 +370,10 @@ macro_rules! av1_decoder {
                             self.input_colorimetry = colorimetry;
                         }
                         PipelinePacket::CapsChanged(_) => {}
+                        PipelinePacket::Segment(segment) => {
+                            self.segment = segment;
+                            out.push(PipelinePacket::Segment(segment)).await?;
+                        }
                         PipelinePacket::Eos => {
                             // A reordering stream holds its tail pictures back
                             // (M1003): drain them before the sentinel, so the

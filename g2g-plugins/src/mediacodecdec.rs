@@ -52,7 +52,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
     HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
-    RawVideoFormat, VideoCodec,
+    RawVideoFormat, Segment, VideoCodec,
 };
 // gpu-output property surface (mediacodec-wgpu only; the underlying field is gated).
 #[cfg(feature = "mediacodec-wgpu")]
@@ -136,6 +136,7 @@ pub struct MediaCodecDec {
     last_caps: Option<Caps>,
     input_caps: Option<Caps>,
     emitted: u64,
+    segment: Segment,
     /// M304 probe hook: an owned reference to the first decoded frame's backing
     /// `AHardwareBuffer`, captured so the GPU-interop bridge can query its Vulkan
     /// format / import it without re-driving the decode. Acquired (refcount bump)
@@ -192,6 +193,7 @@ impl MediaCodecDec {
             last_caps: None,
             input_caps: None,
             emitted: 0,
+            segment: Segment::new(),
             #[cfg(feature = "mediacodec-wgpu")]
             captured_ahb: None,
             #[cfg(feature = "mediacodec-wgpu")]
@@ -667,6 +669,7 @@ impl AsyncElement for MediaCodecDec {
                     }
                 }
                 PipelinePacket::Segment(seg) => {
+                    self.segment = seg;
                     out.push(PipelinePacket::Segment(seg)).await?;
                     return Ok(());
                 }
@@ -710,6 +713,9 @@ impl AsyncElement for MediaCodecDec {
                         )
                     }
                 };
+                if !self.segment.presents(pts_ns) {
+                    continue;
+                }
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                         .await?;
