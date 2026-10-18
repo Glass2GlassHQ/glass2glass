@@ -53,6 +53,7 @@ use g2g_core::{
 
 use crate::audioframe::{locate_frame, Located, SyncFrameHeader};
 use crate::frame_clock::FrameClock;
+use crate::id3::{parse_id3v1, ID3V1_LEN};
 use g2g_core::time::ticks_to_ns;
 
 /// Samples per channel one AAC access unit decodes to. An SBR / HE-AAC stream
@@ -420,6 +421,16 @@ impl AacParse {
         Ok(())
     }
 
+    // a trailing ID3v1 block leaves the last frame no successor header to confirm its sync
+    fn strip_id3v1(&mut self) {
+        let Some(start) = self.buf.len().checked_sub(ID3V1_LEN) else {
+            return;
+        };
+        if parse_id3v1(&self.buf[start..]).is_some() {
+            self.buf.truncate(start);
+        }
+    }
+
     /// Emit every access unit the buffer holds whole.
     async fn drain(&mut self, eos: bool, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         loop {
@@ -582,6 +593,7 @@ impl AsyncElement for AacParse {
                 // no successor to confirm its sync against.
                 PipelinePacket::Eos => {
                     if self.framing == Framing::Adts {
+                        self.strip_id3v1();
                         self.drain(true, out).await?;
                     }
                 }
@@ -1240,6 +1252,17 @@ mod tests {
         }
         let (parse, _) = run(&[stream]).await;
         assert_eq!(parse.frames_emitted(), 3, "every unit behind the garbage");
+    }
+
+    #[tokio::test]
+    async fn emits_the_last_unit_ahead_of_an_id3v1_trailer() {
+        let mut stream = build_adts(2, 4, 16, 0);
+        stream.extend(build_adts(2, 4, 16, 1));
+        let mut trailer = vec![0u8; crate::id3::ID3V1_LEN];
+        trailer[..3].copy_from_slice(b"TAG");
+        stream.extend(trailer);
+        let (parse, _) = run(&[stream]).await;
+        assert_eq!(parse.frames_emitted(), 2);
     }
 
     #[tokio::test]

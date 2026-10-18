@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1586: `aacparse` emits the last ADTS frame of a file that ends in an ID3v1 tag.
 - M1585: `avidemux` reads `VP60` to `VP62` as plain VP6, which `ffmpegdec` decodes, and the mp4 demuxers read Avid `AVDJ` motion JPEG.
 - M1584: typefind finds an ADTS, AC-3, MP3 or MPEG-PS stream that starts after leading bytes, as in a file cut mid-frame or padded.
 - M1583: typefind recognizes an MPEG-1/2 video elementary stream, so `decodebin` decodes `.m2v` files.
