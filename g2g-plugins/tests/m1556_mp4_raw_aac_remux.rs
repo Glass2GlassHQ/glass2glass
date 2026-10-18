@@ -4,10 +4,10 @@
 //! it as ADTS.
 #![cfg(feature = "std")]
 
+#[path = "common/audio_mp4.rs"]
+mod audio_mp4;
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
-#[path = "common/eld_mp4.rs"]
-mod eld_mp4;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
@@ -18,8 +18,8 @@ use g2g_plugins::mp4demux::Mp4Demux;
 use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::tsmux::TsMux;
 
+use audio_mp4::{access_units, progressive_eld_mp4, ELD_CONFIG};
 use collect_sink::CollectSink;
-use eld_mp4::{access_units, progressive_eld_mp4, ELD_CONFIG};
 
 const BOX_HEADER_LEN: usize = 8;
 const FULL_BOX_HEADER_LEN: usize = 4;

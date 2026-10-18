@@ -170,6 +170,9 @@ Highest leverage first:
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
+- **MP4 audio sample entries:** read Vorbis (`msVo`, its Xiph-laced headers led
+  in-band by both demuxers), `in24` / `in32` / `fl32` with the `enda` byte-order
+  flag, and version 2 `lpcm` sound descriptions.
 - **Matroska `ContentEncoding`:** chained encodings, bzip2 / lzo, and
   `ContentEncryption` stay refused (blocks forward as stored, flagged
   `unsupported_encoding`); zlib and header stripping are undone at demux.

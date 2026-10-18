@@ -133,7 +133,10 @@ fn pcm_from_bits(bits: u16) -> Option<AudioFormat> {
 /// The graph format a (`bits`, AIFC compression) pair describes, plus whether
 /// multi-byte samples are big-endian on the wire. `None` for an unmodeled
 /// payload (ima4, GSM, 64-bit float).
-fn audio_from_comm(bits: u16, compression: Option<[u8; 4]>) -> Option<(AudioFormat, bool)> {
+pub(crate) fn audio_from_comm(
+    bits: u16,
+    compression: Option<[u8; 4]>,
+) -> Option<(AudioFormat, bool)> {
     let fourcc = compression.as_ref();
     let sowt = fourcc == Some(b"sowt");
     let linear = sowt || fourcc.is_none() || fourcc == Some(b"NONE") || fourcc == Some(b"none");

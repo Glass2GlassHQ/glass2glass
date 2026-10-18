@@ -31,9 +31,10 @@ use g2g_core::{
 };
 
 use crate::aacparse::{is_raw_aac_config, require_adts};
+use crate::avidemux::{is_pcm, pcm_alternatives};
 use crate::fmp4::{
     parse_all_tracks, parse_fragments_multi, parse_progressive_multi, prepend_param_sets,
-    starts_with_param_set, track_framerate_q16, TrackKind,
+    starts_with_param_set, track_framerate_q16, Sample, TrackHeader, TrackKind,
 };
 use crate::mp4box::find_box;
 use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
@@ -43,12 +44,12 @@ use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
 /// codec named (M961, `stream=av1` etc., so a codec-specific decoder negotiates
 /// truthful startup caps instead of the nominal H.264), or the audio track,
 /// which a bare `decodebin` on an audio-only file selects via the primary-stream
-/// hook (`stream=aac`). MP4 audio is AAC in g2g, so the audio case carries no codec.
+/// hook (`stream=aac`, `stream=pcm-s16le`, ...), named by its format.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum StreamSelect {
     Video,
     VideoNamed(VideoCodec),
-    Audio,
+    Audio(AudioFormat),
 }
 
 /// The `stream=` names for a codec-named video selection (M961), the set
@@ -63,6 +64,27 @@ const VIDEO_STREAM_NAMES: &[(&str, VideoCodec)] = &[
     ("vp8", VideoCodec::Vp8),
     ("mjpeg", VideoCodec::Mjpeg),
 ];
+
+/// The `stream=` names for the audio formats [`parse_all_tracks`](crate::fmp4)
+/// reads from a `moov` sample entry.
+const AUDIO_STREAM_NAMES: &[(&str, AudioFormat)] = &[
+    ("aac", AudioFormat::Aac),
+    ("opus", AudioFormat::Opus),
+    ("mp3", AudioFormat::Mp3),
+    ("pcm-u8", AudioFormat::PcmU8),
+    ("pcm-s16le", AudioFormat::PcmS16Le),
+    ("pcm-s24le", AudioFormat::PcmS24Le),
+    ("pcm-s32le", AudioFormat::PcmS32Le),
+    ("alaw", AudioFormat::Alaw),
+    ("mulaw", AudioFormat::Mulaw),
+];
+
+pub(crate) fn mp4_audio_stream_str(format: AudioFormat) -> Option<&'static str> {
+    AUDIO_STREAM_NAMES
+        .iter()
+        .find(|(_, f)| *f == format)
+        .map(|(name, _)| *name)
+}
 
 pub(crate) fn mp4_video_stream_str(codec: VideoCodec) -> Option<&'static str> {
     VIDEO_STREAM_NAMES
@@ -136,17 +158,21 @@ impl Mp4Demux {
         }
     }
 
-    /// The audio negotiation placeholder: AAC with a channels / sample-rate
-    /// wildcard (`0`), refined to the concrete `moov` layout via `CapsChanged` at
-    /// `Eos`. Mirrors [`Mp4DemuxN`](crate::mp4demuxn)'s audio port so the same
-    /// `aacparse -> decoder` chain plugs.
-    fn audio_nego_caps() -> Caps {
-        Caps::Audio {
-            format: AudioFormat::Aac,
+    /// The audio negotiation placeholder: the format with a channels /
+    /// sample-rate wildcard (`0`), refined to the concrete `moov` layout via
+    /// `CapsChanged` at `Eos`. Mirrors [`Mp4DemuxN`](crate::mp4demuxn)'s audio
+    /// port so the same `aacparse -> decoder` chain plugs. PCM leads with a
+    /// concrete layout, as `AviDemux` does, since a lone wildcard cannot fixate.
+    fn audio_nego_caps(format: AudioFormat) -> Vec<Caps> {
+        if is_pcm(format) {
+            return pcm_alternatives(format);
+        }
+        Vec::from([Caps::Audio {
+            format,
             channels: 0,
             sample_rate: 0,
             channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        }
+        }])
     }
 
     /// The negotiation placeholder: a fixatable `Range` (not `Dim::Any`, which
@@ -177,26 +203,32 @@ impl Mp4Demux {
         self.drained = true;
         match self.select {
             StreamSelect::Video | StreamSelect::VideoNamed(_) => self.drain_video(out).await,
-            StreamSelect::Audio => self.drain_audio(out).await,
+            StreamSelect::Audio(format) => self.drain_audio(format, out).await,
         }
     }
 
-    /// Parse the buffered file's audio track and emit it (M748): the concrete AAC
-    /// caps (channels / rate from the `moov`) via `CapsChanged`, then every access
-    /// unit ADTS-framed from the track's AudioSpecificConfig, so the elementary
-    /// stream is self-describing (the shape [`Mp4DemuxN`](crate::mp4demuxn)'s audio
-    /// port emits). Runs once, at `Eos`. Fails loud if there is no audio track.
-    async fn drain_audio(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+    /// Parse the buffered file's first audio track of the `selected` format and
+    /// emit it (M748): the concrete caps (channels / rate from the `moov`) via
+    /// `CapsChanged`, then every access unit, AAC ADTS-framed from the track's
+    /// AudioSpecificConfig so the elementary stream is self-describing (the shape
+    /// [`Mp4DemuxN`](crate::mp4demuxn)'s audio port emits). Runs once, at `Eos`.
+    /// Fails loud if there is no such track.
+    async fn drain_audio(
+        &mut self,
+        selected: AudioFormat,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
         let tracks = parse_all_tracks(&self.buffer)?;
         let audio = tracks
             .iter()
-            .find(|t| matches!(t.kind, TrackKind::Audio { .. }))
+            .find(|t| matches!(t.kind, TrackKind::Audio { format, .. } if format == selected))
             .ok_or(G2gError::CapsMismatch)?;
         let TrackKind::Audio {
             format,
             channels,
             sample_rate,
             config,
+            ..
         } = &audio.kind
         else {
             return Err(G2gError::CapsMismatch);
@@ -228,10 +260,10 @@ impl Mp4Demux {
             .await?;
             self.sequence += 1;
         }
-        for (_, sample) in parse_progressive_multi(&self.buffer, core::slice::from_ref(audio))? {
+        for (_, sample) in track_samples(&self.buffer, audio)? {
             // ADTS-frame the raw AAC access unit from the track's ASC, so a decoder
             // starts without the out-of-band config (like the in-band video param
-            // sets); Opus packets and raw AAC go as they are.
+            // sets); raw AAC and every other format go as they are.
             let data = match format {
                 AudioFormat::Aac if !raw_aac => {
                     require_adts(config, &sample.annexb, short_type_name::<Self>())?
@@ -265,7 +297,7 @@ impl Mp4Demux {
     async fn drain_video(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         let named_codec = match self.select {
             StreamSelect::VideoNamed(codec) => Some(codec),
-            StreamSelect::Video | StreamSelect::Audio => None,
+            StreamSelect::Video | StreamSelect::Audio(_) => None,
         };
         let tracks = parse_all_tracks(&self.buffer)?;
         let video = tracks
@@ -297,14 +329,8 @@ impl Mp4Demux {
         if edit != Segment::new() {
             out.push(PipelinePacket::Segment(edit)).await?;
         }
-        let selected = core::slice::from_ref(video);
-        let samples = if find_box(&self.buffer, b"moof").is_some() {
-            parse_fragments_multi(&self.buffer, selected, 0, None)?
-        } else {
-            parse_progressive_multi(&self.buffer, selected)?
-        };
         let mut need_param_sets = true;
-        for (_, s) in samples {
+        for (_, s) in track_samples(&self.buffer, video)? {
             let mut annexb = s.annexb;
             // The moov's config-record parameter sets are out-of-band, so prepend
             // them to the first access unit if it does not already carry them.
@@ -332,6 +358,16 @@ impl Mp4Demux {
     }
 }
 
+// a fragmented file's samples are in its moofs, a progressive file's in the sample tables
+fn track_samples(data: &[u8], track: &TrackHeader) -> Result<Vec<(u32, Sample)>, G2gError> {
+    let selected = core::slice::from_ref(track);
+    if find_box(data, b"moof").is_some() {
+        parse_fragments_multi(data, selected, 0, None)
+    } else {
+        parse_progressive_multi(data, selected)
+    }
+}
+
 impl AsyncElement for Mp4Demux {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -353,8 +389,8 @@ impl AsyncElement for Mp4Demux {
         // refined from the moov via CapsChanged at Eos (like fmp4demux), but a
         // downstream that names another codec (an `h265parse`) can pick it, so
         // the other codecs follow the default as alternatives. A codec-named
-        // selection (M961) negotiates that codec alone; audio is AAC with a
-        // wildcard layout, refined the same way.
+        // selection (M961) negotiates that codec alone; audio negotiates its
+        // selected format with a wildcard layout, refined the same way.
         let nego = match self.select {
             StreamSelect::Video => {
                 let mut codecs = Vec::from([self.out_codec]);
@@ -367,7 +403,9 @@ impl AsyncElement for Mp4Demux {
                 CapsSet::from_alternatives(codecs.into_iter().map(Self::nego_caps).collect())
             }
             StreamSelect::VideoNamed(codec) => CapsSet::one(Self::nego_caps(codec)),
-            StreamSelect::Audio => CapsSet::one(Self::audio_nego_caps()),
+            StreamSelect::Audio(format) => {
+                CapsSet::from_alternatives(Self::audio_nego_caps(format))
+            }
         };
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
             Caps::ByteStream {
@@ -406,12 +444,16 @@ impl AsyncElement for Mp4Demux {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "stream" => {
-                self.select = match value.as_str().ok_or(PropError::Type)? {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                let audio = AUDIO_STREAM_NAMES
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, format)| StreamSelect::Audio(*format));
+                self.select = match name {
                     "video" => StreamSelect::Video,
-                    "aac" => StreamSelect::Audio,
-                    name => StreamSelect::VideoNamed(
-                        mp4_video_stream_from_str(name).ok_or(PropError::Value)?,
-                    ),
+                    _ => audio
+                        .or_else(|| mp4_video_stream_from_str(name).map(StreamSelect::VideoNamed))
+                        .ok_or(PropError::Value)?,
                 };
                 Ok(())
             }
@@ -428,7 +470,7 @@ impl AsyncElement for Mp4Demux {
                     StreamSelect::VideoNamed(codec) => {
                         mp4_video_stream_str(codec).unwrap_or("video")
                     }
-                    StreamSelect::Audio => "aac",
+                    StreamSelect::Audio(format) => mp4_audio_stream_str(format).unwrap_or("aac"),
                 }
                 .into(),
             )),
@@ -471,23 +513,26 @@ impl AsyncElement for Mp4Demux {
 static MP4DEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | vp8 | mjpeg (the video track by codec) | aac (the audio track)",
+    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | vp8 | mjpeg (the video track by codec) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | alaw | mulaw (the audio track by format)",
 )];
 
 impl PadTemplates for Mp4Demux {
     fn pad_templates() -> Vec<PadTemplate> {
         let video = Self::nego_caps;
+        let mut source = Vec::from([
+            video(VideoCodec::H264),
+            video(VideoCodec::H265),
+            video(VideoCodec::Av1),
+            video(VideoCodec::Mpeg4Part2),
+            video(VideoCodec::Vp8),
+            video(VideoCodec::Mjpeg),
+        ]);
+        for (_, format) in AUDIO_STREAM_NAMES {
+            source.extend(Self::audio_nego_caps(*format));
+        }
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
-            PadTemplate::source(CapsSet::from_alternatives(Vec::from([
-                video(VideoCodec::H264),
-                video(VideoCodec::H265),
-                video(VideoCodec::Av1),
-                video(VideoCodec::Mpeg4Part2),
-                video(VideoCodec::Vp8),
-                video(VideoCodec::Mjpeg),
-                Self::audio_nego_caps(),
-            ]))),
+            PadTemplate::source(CapsSet::from_alternatives(source)),
         ])
     }
 }

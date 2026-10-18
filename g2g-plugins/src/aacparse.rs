@@ -106,25 +106,13 @@ pub(crate) fn strip_adts(au: &[u8]) -> &[u8] {
 /// demuxers (M662).
 pub(crate) fn adts_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
     let mut r = BitReader::new(asc);
-    let mut aot = r.read_bits(5)?;
-    let sr_index = r.read_bits(4)?;
-    let channel_config = r.read_bits(4)?;
-    if aot == AOT_SBR || aot == AOT_PS {
-        // explicit SBR signalling: the core rate came first, then the SBR rate and the core type
-        if r.read_bits(4)? == EXPLICIT_RATE_INDEX {
-            r.read_bits(24)?;
-        }
-        aot = r.read_bits(5)?;
-    }
-    if !(AOT_AAC_MAIN..=AOT_AAC_LTP).contains(&aot) || sr_index as usize >= SAMPLE_RATES.len() {
-        return None;
+    let core = read_adts_core_config(&mut r)?;
+    // GASpecificConfig: frameLengthFlag, dependsOnCoreCoder, extensionFlag
+    if r.read_bits(1)? == 1 {
+        return None; // 960-sample frames
     }
     let mut payload = Vec::new();
-    if channel_config == 0 {
-        // GASpecificConfig: frameLengthFlag, dependsOnCoreCoder, extensionFlag
-        if r.read_bits(1)? == 1 {
-            return None; // 960-sample frames
-        }
+    if core.channel_config == 0 {
         if r.read_bits(1)? == 1 {
             r.read_bits(14)?;
         }
@@ -138,11 +126,38 @@ pub(crate) fn adts_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
     }
     payload.extend_from_slice(au);
     adts_frame(
-        (aot - 1) as u8,
-        sr_index as u8,
-        channel_config as u8,
+        (core.object_type - 1) as u8,
+        core.sr_index as u8,
+        core.channel_config as u8,
         &payload,
     )
+}
+
+// the AudioSpecificConfig fields an ADTS header repeats
+struct AdtsCoreConfig {
+    object_type: u32,
+    sr_index: u32,
+    channel_config: u32,
+}
+
+// reads up to the GASpecificConfig, `None` unless the core object type has an ADTS profile
+fn read_adts_core_config(r: &mut BitReader) -> Option<AdtsCoreConfig> {
+    let mut object_type = r.read_bits(5)?;
+    let sr_index = r.read_bits(4)?;
+    let channel_config = r.read_bits(4)?;
+    if object_type == AOT_SBR || object_type == AOT_PS {
+        // explicit SBR signalling: the core rate came first, then the SBR rate and the core type
+        if r.read_bits(4)? == EXPLICIT_RATE_INDEX {
+            r.read_bits(24)?;
+        }
+        object_type = r.read_bits(5)?;
+    }
+    let has_adts_profile = (AOT_AAC_MAIN..=AOT_AAC_LTP).contains(&object_type);
+    (has_adts_profile && (sr_index as usize) < SAMPLE_RATES.len()).then_some(AdtsCoreConfig {
+        object_type,
+        sr_index,
+        channel_config,
+    })
 }
 
 // a demuxer's AAC access unit as ADTS, failing loud on a config ADTS cannot frame
@@ -161,10 +176,16 @@ pub(crate) fn require_adts(
     })
 }
 
-// ADTS has no profile for ER AAC, ELD or USAC, so a demuxer sends their access units raw behind this config as a frame
+// ADTS has no profile for ER AAC, ELD or USAC and no field for 960-sample frames, so a demuxer sends their access units raw behind this config as a frame
 pub(crate) fn is_raw_aac_config(config: &[u8]) -> bool {
     read_object_type(&mut BitReader::new(config))
         .is_some_and(|object_type| RAW_AAC_OBJECT_TYPES.contains(&object_type))
+        || has_960_sample_frames(config)
+}
+
+fn has_960_sample_frames(config: &[u8]) -> bool {
+    let mut r = BitReader::new(config);
+    read_adts_core_config(&mut r).is_some() && r.read_bits(1) == Some(1)
 }
 
 // longest AudioSpecificConfig a muxer takes from the frame leading a raw AAC stream
@@ -939,8 +960,17 @@ mod tests {
         const ELD_ASC: [u8; 4] = [0xF8, 0xE6, 0x40, 0x00];
         // AAC LC 48 kHz, frameLengthFlag set (960-sample frames), PCE follows
         const SHORT_FRAME_ASC: [u8; 2] = [0x11, 0x84];
+        // AAC LC 48 kHz mono, frameLengthFlag set
+        const SHORT_FRAME_MONO_ASC: [u8; 2] = [0x11, 0x8C];
+        // AAC LC 48 kHz stereo
+        const LC_ASC: [u8; 2] = [0x11, 0x90];
         assert!(adts_from_asc(&ELD_ASC, &[0xAA]).is_none());
         assert!(adts_from_asc(&SHORT_FRAME_ASC, &[0xAA]).is_none());
+        assert!(adts_from_asc(&SHORT_FRAME_MONO_ASC, &[0xAA]).is_none());
+        for raw in [&ELD_ASC[..], &SHORT_FRAME_ASC, &SHORT_FRAME_MONO_ASC] {
+            assert!(is_raw_aac_config(raw), "{raw:02x?} goes raw");
+        }
+        assert!(!is_raw_aac_config(&LC_ASC));
         #[cfg(feature = "std")]
         assert!(require_adts(&ELD_ASC, &[0xAA], "test").is_err());
     }
