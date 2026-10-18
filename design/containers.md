@@ -18,7 +18,11 @@ constraint maps it to the elementary stream type.
 A launch `filesrc` types its file from the extension, and sniffs the header when
 the extension is unknown or `bytestream-format=auto`. When the sniff recognizes
 nothing, `probe_output_caps` returns an error and `decodebin` fails the parse
-with `ParseError::UnrecognizedContent` instead of guessing a container.
+with `ParseError::UnrecognizedContent` instead of guessing a container. `.m4v`
+has no extension mapping, since it names both an MP4 and a raw MPEG-4 Part 2
+stream. The sniff types a raw H.264 or H.265 stream once it has seen two kinds
+of parameter set behind well-formed NAL units, so a start-code run inside an ID3
+tag or an MXF partition does not read as video.
 
 ## Encoding profiles
 

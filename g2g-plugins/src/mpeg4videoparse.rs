@@ -26,17 +26,17 @@ use crate::startcodeparse::{
 };
 
 /// `visual_object_sequence_start_code`.
-const VISUAL_OBJECT_SEQUENCE_START_CODE: u8 = 0xB0;
+pub(crate) const VISUAL_OBJECT_SEQUENCE_START_CODE: u8 = 0xB0;
 /// `group_of_vop_start_code`.
 const GROUP_OF_VOP_START_CODE: u8 = 0xB3;
 /// `visual_object_start_code`.
-const VISUAL_OBJECT_START_CODE: u8 = 0xB5;
+pub(crate) const VISUAL_OBJECT_START_CODE: u8 = 0xB5;
 /// `vop_start_code`: the coded picture.
 const VOP_START_CODE: u8 = 0xB6;
 /// `video_object_start_code` range.
-const VIDEO_OBJECT_START_CODES: core::ops::RangeInclusive<u8> = 0x00..=0x1F;
+pub(crate) const VIDEO_OBJECT_START_CODES: core::ops::RangeInclusive<u8> = 0x00..=0x1F;
 /// `video_object_layer_start_code` range: the header carrying the geometry.
-const VIDEO_OBJECT_LAYER_START_CODES: core::ops::RangeInclusive<u8> = 0x20..=0x2F;
+pub(crate) const VIDEO_OBJECT_LAYER_START_CODES: core::ops::RangeInclusive<u8> = 0x20..=0x2F;
 
 /// `video_object_layer_shape` value for a plain rectangular layer, the only one
 /// that codes a width and height in the VOL header.

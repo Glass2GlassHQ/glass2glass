@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1494: typefind needs two parameter sets and well-formed NALs for H.264 and H.265, skips ID3 ahead of ADTS, and types raw MPEG-4 Part 2.
 - M1493: auto-plugging counts raw PCM in every sample format as decoded audio, so `decodebin` plays U8 PCM in AVI.
 - M1492: a bare `decodebin` names the codec when the container's demuxer drops the stream, instead of falling through to the default H.264 port.
 - M1491: a bare `decodebin` on Ogg selects any audio bitstream it reads, so Vorbis behind Theora no longer plugs the Opus default.

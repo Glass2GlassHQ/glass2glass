@@ -462,7 +462,9 @@ pub(crate) fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
         "mkv" | "webm" => ByteStreamEncoding::Matroska,
         "ogg" | "oga" | "opus" => ByteStreamEncoding::Ogg,
         "flv" => ByteStreamEncoding::Flv,
-        "mp4" | "m4v" | "m4a" | "mov" | "qt" => ByteStreamEncoding::Mp4,
+        // `.m4v` is absent: it names both an MP4 and a raw MPEG-4 Part 2 stream,
+        // and sniffing tells them apart.
+        "mp4" | "m4a" | "mov" | "qt" => ByteStreamEncoding::Mp4,
         "ivf" => ByteStreamEncoding::Ivf,
         "mpg" | "mpeg" | "vob" => ByteStreamEncoding::MpegPs,
         "y4m" => ByteStreamEncoding::Y4m,

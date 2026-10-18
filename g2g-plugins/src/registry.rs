@@ -284,6 +284,10 @@ fn decode_parser_provider(input: &Caps) -> Option<&'static str> {
             codec: g2g_core::VideoCodec::Av1,
             ..
         } => Some("av1parse"),
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::Mpeg4Part2,
+            ..
+        } => Some("mpeg4videoparse"),
         Caps::Audio {
             format: AudioFormat::Flac,
             ..

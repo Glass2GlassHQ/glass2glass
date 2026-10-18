@@ -98,6 +98,9 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
     if let Some(codec) = sniff_annexb_video(header) {
         return Some(elementary_video_caps(codec));
     }
+    if sniff_mpeg4_visual(header) {
+        return Some(elementary_video_caps(VideoCodec::Mpeg4Part2));
+    }
     if crate::av1parse::opens_obu_stream(header) {
         return Some(elementary_video_caps(VideoCodec::Av1));
     }
@@ -135,8 +138,10 @@ pub fn elementary_audio_caps(format: AudioFormat) -> Caps {
 /// not one. A valid ADTS header at offset 0 is trusted only when the header at
 /// its frame length is valid too and declares the same profile, sampling
 /// frequency index and channel configuration, the same two-header rule the other
-/// self-syncing audio sniffs use.
+/// self-syncing audio sniffs use. A leading ID3v2 tag is skipped.
 fn sniff_adts_aac(header: &[u8]) -> bool {
+    let tag_len = crate::id3::id3v2_len(header).unwrap_or(0);
+    let header = header.get(tag_len..).unwrap_or_default();
     let Some(first) = adts_header(header) else {
         return false;
     };
@@ -351,13 +356,34 @@ pub fn sniff(header: &[u8]) -> Option<ByteStreamEncoding> {
 /// the near-universal first box; `moov` / `mdat` / `styp` / `free` / `skip` / `wide`
 /// cover header-less QuickTime and fragment / mdat-first layouts.
 fn looks_like_iso_bmff(header: &[u8]) -> bool {
-    if header.len() < 8 {
+    const BOX_HEADER_LEN: usize = 8;
+    const LARGE_BOX_HEADER_LEN: usize = 16;
+    const SIZE_TO_END: u32 = 0;
+    const LARGE_SIZE: u32 = 1;
+    let Some(box_type) = header.get(4..BOX_HEADER_LEN) else {
         return false;
-    }
-    matches!(
-        &header[4..8],
+    };
+    let known_first_box = matches!(
+        box_type,
         b"ftyp" | b"styp" | b"moov" | b"moof" | b"mdat" | b"free" | b"skip" | b"wide"
-    )
+    );
+    let size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+    let box_len = match size {
+        SIZE_TO_END => return known_first_box,
+        LARGE_SIZE => header
+            .get(BOX_HEADER_LEN..LARGE_BOX_HEADER_LEN)
+            .map(|large| u64::from_be_bytes(large.try_into().expect("8 bytes")))
+            .filter(|&len| len >= LARGE_BOX_HEADER_LEN as u64),
+        len => Some(u64::from(len)).filter(|&len| len >= BOX_HEADER_LEN as u64),
+    };
+    let Some(box_len) = box_len else {
+        return false;
+    };
+    // the box after the first, when the header reaches it, has a printable type
+    let next_type = usize::try_from(box_len)
+        .ok()
+        .and_then(|at| header.get(at.checked_add(4)?..at.checked_add(BOX_HEADER_LEN)?));
+    known_first_box && next_type.is_none_or(|kind| kind.iter().all(u8::is_ascii_graphic))
 }
 
 /// Sniff a subtitle document from its text header, or `None` if it is not one we
@@ -412,42 +438,111 @@ fn looks_like_mpegts(header: &[u8]) -> bool {
 }
 
 /// Guess H.264 vs H.265 from a raw Annex-B elementary stream, or `None` if the
-/// header is not one. Scans for start-code-prefixed NAL units and keys on a
-/// parameter-set NAL, whose type is decisive between the two codecs: HEVC VPS/
-/// SPS/PPS (32/33/34) read as H.264 types 0/1/2 (never parameter sets), and H.264
-/// SPS/PPS (7/8) read as HEVC types 51/4. Returns on the first parameter set,
-/// which every real elementary stream carries before its slices. A malformed
-/// stream that leads with a bare slice is undecodeable anyway and stays `None`.
+/// header is not one. Scans for start-code-prefixed NAL units and keys on the
+/// parameter-set NALs, whose types are decisive between the two codecs: HEVC
+/// VPS/SPS/PPS (32/33/34) read as H.264 types 0/1/2 (never parameter sets), and
+/// H.264 SPS/PPS (7/8) read as HEVC types 51/4. A start-code-like byte run turns
+/// up inside other formats (an ID3 tag, an MXF partition), so the stream is
+/// taken for video only once two kinds of parameter set have appeared (H.264
+/// SPS and PPS, two of the HEVC three) and every NAL before them is well formed:
+/// a valid header, and a payload free of the byte runs emulation prevention
+/// escapes. A malformed stream that leads with a bare slice is undecodeable
+/// anyway and stays `None`.
 fn sniff_annexb_video(header: &[u8]) -> Option<VideoCodec> {
-    const MAX_NALS: usize = 8;
-    let mut pos = 0;
+    const MAX_NALS: usize = 16;
+    const H264_SPS: u8 = 7;
+    const H264_PPS: u8 = 8;
+    const HEVC_PARAMETER_SETS: core::ops::RangeInclusive<u8> = 32..=34;
+    const HEVC_PARAMETER_SET_KINDS_NEEDED: usize = 2;
+    let mut h264_sps = false;
+    let mut h264_pps = false;
+    let mut hevc_parameter_sets = [false; 3];
+    let mut nal = find_start_code(header, 0)?;
     for _ in 0..MAX_NALS {
-        let nal = find_start_code(header, pos)?;
-        pos = nal + 1;
         let b0 = *header.get(nal)?;
-        // forbidden_zero_bit must be 0 in both codecs; anything else is not a
-        // NAL header (likely a start-code-like byte run in unrelated data).
+        // forbidden_zero_bit must be 0 in both codecs
         if b0 & 0x80 != 0 {
-            continue;
+            return None;
         }
-        // HEVC: 2-byte header, nal_unit_type = bits 1..6, temporal_id_plus1 (b1
-        // low 3 bits) is mandatory and nonzero.
-        let hevc_type = (b0 >> 1) & 0x3f;
-        if matches!(hevc_type, 32..=34) {
-            if let Some(&b1) = header.get(nal + 1) {
-                if b1 & 0x07 != 0 {
-                    return Some(VideoCodec::H265);
-                }
+        let next = find_start_code(header, nal + 1);
+        if let Some(next) = next {
+            if !escaped_nal_payload(&header[nal..next - START_CODE_LEN]) {
+                return None;
             }
+        }
+        // HEVC: 2-byte header, nal_unit_type = bits 1..6, nuh_layer_id (b0 bit 0
+        // and b1 bits 3..7) is 0 in a base layer, temporal_id_plus1 (b1 low 3
+        // bits) is mandatory and nonzero.
+        let hevc_type = (b0 >> 1) & 0x3f;
+        let hevc_base_layer = header
+            .get(nal + 1)
+            .is_some_and(|&b1| b0 & 0x01 == 0 && b1 >> 3 == 0 && b1 & 0x07 != 0);
+        if hevc_base_layer && HEVC_PARAMETER_SETS.contains(&hevc_type) {
+            hevc_parameter_sets[usize::from(hevc_type - HEVC_PARAMETER_SETS.start())] = true;
+        }
+        if hevc_parameter_sets.iter().filter(|&&seen| seen).count()
+            >= HEVC_PARAMETER_SET_KINDS_NEEDED
+        {
+            return Some(VideoCodec::H265);
         }
         // H.264: 1-byte header, nal_unit_type = low 5 bits; a parameter set has a
         // nonzero nal_ref_idc (bits 5..6).
         let h264_type = b0 & 0x1f;
-        if matches!(h264_type, 7 | 8) && b0 & 0x60 != 0 {
+        if b0 & 0x60 != 0 {
+            h264_sps |= h264_type == H264_SPS;
+            h264_pps |= h264_type == H264_PPS;
+        }
+        if h264_sps && h264_pps {
             return Some(VideoCodec::H264);
         }
+        nal = next?;
     }
     None
+}
+
+const START_CODE_LEN: usize = 3;
+
+// a NAL never holds `00 00 00` or `00 00 02` ahead of the zeros padding it out to the next start code
+fn escaped_nal_payload(nal: &[u8]) -> bool {
+    let padding = nal.iter().rev().take_while(|&&byte| byte == 0).count();
+    let payload = &nal[..nal.len() - padding];
+    !payload
+        .windows(START_CODE_LEN)
+        .any(|run| run[0] == 0 && run[1] == 0 && run[2] <= 2)
+}
+
+/// A raw MPEG-4 Part 2 stream (`.m4v`, `.cmp`): it opens with a Visual Object
+/// Sequence start code followed by a Visual Object one, or with a Video Object
+/// start code followed by a Video Object Layer one. AVS opens with the same
+/// `0xB0` sequence start code, which is why the code after it is checked too.
+fn sniff_mpeg4_visual(header: &[u8]) -> bool {
+    use crate::mpeg4videoparse::{
+        VIDEO_OBJECT_LAYER_START_CODES, VIDEO_OBJECT_START_CODES,
+        VISUAL_OBJECT_SEQUENCE_START_CODE, VISUAL_OBJECT_START_CODE,
+    };
+    let Some(first) = opening_start_code(header).and_then(|at| find_start_code(header, at)) else {
+        return false;
+    };
+    let code_at = |at: usize| header.get(at).copied();
+    let Some(code) = code_at(first) else {
+        return false;
+    };
+    let Some(next_code) = find_start_code(header, first + 1).and_then(code_at) else {
+        return false;
+    };
+    let sequence_opens =
+        code == VISUAL_OBJECT_SEQUENCE_START_CODE && next_code == VISUAL_OBJECT_START_CODE;
+    let object_opens = VIDEO_OBJECT_START_CODES.contains(&code)
+        && VIDEO_OBJECT_LAYER_START_CODES.contains(&next_code);
+    sequence_opens || object_opens
+}
+
+/// Offset of the stream's first start code, past the zero bytes ahead of it, or
+/// `None` when the stream opens with anything else.
+fn opening_start_code(header: &[u8]) -> Option<usize> {
+    const START_CODE_ZEROS: usize = 2;
+    let zeros = header.iter().take_while(|&&byte| byte == 0).count();
+    (zeros >= START_CODE_ZEROS && header.get(zeros) == Some(&1)).then(|| zeros - START_CODE_ZEROS)
 }
 
 /// Offset of the NAL header byte after the next Annex-B start code (`00 00 01`,
@@ -874,9 +969,12 @@ mod tests {
     }
 
     #[test]
-    fn detects_h264_annexb_by_sps_nal() {
-        // 4-byte start code, then an SPS NAL (0x67: nal_ref_idc=3, type=7).
-        let data = [0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e];
+    fn detects_h264_annexb_by_sps_and_pps_nals() {
+        // 4-byte start codes, then an SPS NAL (0x67: nal_ref_idc=3, type=7) and a
+        // PPS NAL (0x68: type=8).
+        let data = [
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e, 0x00, 0x00, 0x00, 0x01, 0x68, 0xce,
+        ];
         assert_eq!(sniff_annexb_video(&data), Some(VideoCodec::H264));
         assert!(matches!(
             sniff_caps(&data),
@@ -889,15 +987,50 @@ mod tests {
 
     #[test]
     fn detects_h264_annexb_after_aud_and_3byte_start_code() {
-        // AUD (0x09) then SPS (0x68 -> nal_ref_idc=3, type=8 PPS), 3-byte codes.
-        let data = [0x00, 0x00, 0x01, 0x09, 0x10, 0x00, 0x00, 0x01, 0x67, 0x42];
+        // AUD (0x09), SPS (0x67) and PPS (0x68), 3-byte codes.
+        let data = [
+            0x00, 0x00, 0x01, 0x09, 0x10, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x00, 0x01, 0x68,
+            0xce,
+        ];
         assert_eq!(sniff_annexb_video(&data), Some(VideoCodec::H264));
     }
 
     #[test]
-    fn detects_h265_annexb_by_vps_nal() {
-        // 4-byte start code, then a VPS NAL (0x40 0x01: type=32, temporal_id_plus1=1).
-        let data = [0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0c, 0x01];
+    fn a_chunk_header_between_nals_is_not_annexb() {
+        // an hxvs file: VPS and SPS NALs, each behind a `HXVF` chunk header
+        // whose zero bytes no escaped NAL payload holds
+        let mut data = b"HXVF\x1c\x00\x00\x00".to_vec();
+        data.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0c, 0x01]);
+        data.extend_from_slice(b"HXVF\x31\x00\x00\x00\x99\x22");
+        data.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x42, 0x01, 0x01]);
+        assert_eq!(sniff_annexb_video(&data), None);
+    }
+
+    #[test]
+    fn an_sps_alone_is_not_enough_for_h264() {
+        let data = [0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e];
+        assert_eq!(sniff_annexb_video(&data), None);
+    }
+
+    #[test]
+    fn a_start_code_run_inside_an_id3_tag_is_not_video() {
+        // what id3v2.aac carries: an SPS-looking run in the tag, then ADTS frames
+        // whose `00 00 01` runs read as NAL headers with the forbidden bit set
+        let mut data = id3v2_tag(16);
+        data.extend_from_slice(&[0x00, 0x00, 0x01, 0x67, 0x88]);
+        data.extend_from_slice(&[0x00, 0x00, 0x01, 0xC8, 0x07]);
+        data.extend_from_slice(&[0x00, 0x00, 0x01, 0x68, 0xce]);
+        assert_eq!(sniff_annexb_video(&data), None);
+    }
+
+    #[test]
+    fn detects_h265_annexb_by_vps_and_sps_nals() {
+        // 4-byte start codes, then a VPS NAL (0x40 0x01: type=32, temporal_id_plus1=1)
+        // and an SPS NAL (0x42 0x01: type=33).
+        let data = [
+            0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0c, 0x01, 0x00, 0x00, 0x00, 0x01, 0x42, 0x01,
+            0x01,
+        ];
         assert_eq!(sniff_annexb_video(&data), Some(VideoCodec::H265));
         assert!(matches!(
             sniff_caps(&data),
@@ -1003,6 +1136,50 @@ mod tests {
             stream.extend(crate::audioframe::test_frames::ac3_frame(fill as u8));
         }
         stream
+    }
+
+    #[test]
+    fn detects_adts_aac_behind_an_id3v2_tag() {
+        let mut data = id3v2_tag(32);
+        data.extend_from_slice(&adts_stream(3));
+        assert_eq!(
+            sniff_caps(&data),
+            Some(elementary_audio_caps(AudioFormat::Aac))
+        );
+    }
+
+    #[test]
+    fn detects_a_raw_mpeg4_visual_stream() {
+        // VOS (profile byte), then the Visual Object start code
+        let data = [0x00, 0x00, 0x01, 0xB0, 0x01, 0x00, 0x00, 0x01, 0xB5, 0x89];
+        assert_eq!(
+            sniff_caps(&data),
+            Some(elementary_video_caps(VideoCodec::Mpeg4Part2))
+        );
+        // a Video Object then its Video Object Layer
+        let data = [0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x20, 0x00];
+        assert!(sniff_mpeg4_visual(&data));
+    }
+
+    #[test]
+    fn an_avs_sequence_header_is_not_mpeg4_visual() {
+        // AVS shares the 0xB0 sequence start code, followed by a picture header
+        let data = [0x00, 0x00, 0x01, 0xB0, 0x20, 0x00, 0x00, 0x01, 0xB3, 0x00];
+        assert!(!sniff_mpeg4_visual(&data));
+    }
+
+    #[test]
+    fn iso_bmff_needs_a_box_size_that_covers_its_header() {
+        assert!(looks_like_iso_bmff(
+            b"\x00\x00\x00\x10ftypisom\x00\x00\x02\x00"
+        ));
+        assert!(!looks_like_iso_bmff(
+            b"\x00\x00\x00\x04ftypisom\x00\x00\x02\x00"
+        ));
+        // the next box's type, which the header reaches, is not text
+        assert!(!looks_like_iso_bmff(
+            b"\x00\x00\x00\x08free\x00\x00\x00\x08\x00\x01\x02\x03"
+        ));
     }
 
     #[test]
