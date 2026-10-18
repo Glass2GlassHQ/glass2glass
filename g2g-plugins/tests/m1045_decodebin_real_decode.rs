@@ -75,14 +75,29 @@ fn ffmpeg_i420() -> Option<Vec<u8>> {
     out.status.success().then_some(out.stdout)
 }
 
-/// ffmpeg's own decode of the fixture's AAC track to the fan-out test's PCM layout.
+/// ffmpeg's own decode of the fixture's AAC track to the fan-out test's PCM
+/// layout, cut to the track duration: ffmpeg keeps the end padding the edit list cuts.
 fn ffmpeg_pcm() -> Option<Vec<u8>> {
+    let probe = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "a:0"])
+        .args([
+            "-show_entries",
+            "stream=duration_ts",
+            "-of",
+            "csv=p=0",
+            FIXTURE,
+        ])
+        .output()
+        .ok()?;
+    let duration_samples: usize = String::from_utf8(probe.stdout).ok()?.trim().parse().ok()?;
     let out = Command::new("ffmpeg")
         .args(["-v", "error", "-i", FIXTURE])
         .args(["-vn", "-f", "s16le", "-ar", "44100", "-ac", "1", "pipe:1"])
         .output()
         .ok()?;
-    out.status.success().then_some(out.stdout)
+    let mut pcm = out.status.success().then_some(out.stdout)?;
+    pcm.truncate(duration_samples * S16_BYTES);
+    Some(pcm)
 }
 
 /// A bare `decodebin` over the committed MP4 decodes real pixels: the raw link
