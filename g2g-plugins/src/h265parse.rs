@@ -96,6 +96,53 @@ const SPS_NUT: u8 = 33;
 /// H.265 NAL unit types for the video and picture parameter sets.
 const VPS_NUT: u8 = 32;
 const PPS_NUT: u8 = 34;
+const RASL_N_NUT: u8 = 8;
+const RASL_R_NUT: u8 = 9;
+const CRA_NUT: u8 = 21;
+const END_OF_SEQUENCE_NUT: u8 = 36;
+const END_OF_BITSTREAM_NUT: u8 = 37;
+
+// RASL pictures reference pictures from before their CRA, which a decoder that
+// starts at that CRA never receives (NoRaslOutputFlag, H.265 8.1.3).
+#[derive(Debug)]
+pub(crate) struct LeadingRaslFilter {
+    next_irap_starts_sequence: bool,
+    rasl_undecodable: bool,
+}
+
+impl Default for LeadingRaslFilter {
+    fn default() -> Self {
+        Self {
+            next_irap_starts_sequence: true,
+            rasl_undecodable: true,
+        }
+    }
+}
+
+impl LeadingRaslFilter {
+    pub(crate) fn restart(&mut self) {
+        *self = Self::default();
+    }
+
+    pub(crate) fn keeps_access_unit(&mut self, nals: &[&[u8]]) -> bool {
+        let nal_types = || nals.iter().filter_map(|nal| h265_nal_type(nal));
+        let keep = match nal_types().find(|&nal_type| nal_type <= 31) {
+            Some(nal_type @ 16..=23) => {
+                self.rasl_undecodable = self.next_irap_starts_sequence || nal_type != CRA_NUT;
+                self.next_irap_starts_sequence = false;
+                true
+            }
+            Some(RASL_N_NUT | RASL_R_NUT) => !self.rasl_undecodable,
+            _ => true,
+        };
+        if nal_types()
+            .any(|nal_type| matches!(nal_type, END_OF_SEQUENCE_NUT | END_OF_BITSTREAM_NUT))
+        {
+            self.next_irap_starts_sequence = true;
+        }
+        keep
+    }
+}
 
 /// Walk the NALs of `au` (Annex-B or AVCC, auto-detected), running `parse` over
 /// the de-emulated RBSP of each SPS NAL and returning the first result it

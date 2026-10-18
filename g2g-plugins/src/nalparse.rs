@@ -117,6 +117,7 @@ pub struct NalParse<C: NalCodec> {
     /// Parameter-set re-insertion cadence, applied on the re-framing
     /// (access-unit-aligned Annex-B) output.
     config_interval: ConfigInterval,
+    leading_rasl: crate::h265parse::LeadingRaslFilter,
     /// Cached parameter-set NAL bodies (start codes stripped), one bucket per
     /// [`NalCodec::PARAM_SET_TYPES`] entry in the same order, refreshed as they
     /// flow so a keyframe lacking inline parameter sets can be prefixed.
@@ -147,6 +148,7 @@ impl<C: NalCodec> Default for NalParse<C> {
             seq: 0,
             input_is_annexb: None,
             config_interval: ConfigInterval::default(),
+            leading_rasl: crate::h265parse::LeadingRaslFilter::default(),
             cached: C::PARAM_SET_TYPES.iter().map(|_| Vec::new()).collect(),
             #[cfg(feature = "metadata")]
             hdr: None,
@@ -324,6 +326,9 @@ impl<C: NalCodec> NalParse<C> {
             return Ok(());
         }
         let nals: Vec<&[u8]> = nal_units(&au).collect();
+        if C::CODEC == VideoCodec::H265 && !self.leading_rasl.keeps_access_unit(&nals) {
+            return Ok(());
+        }
         self.refine_caps(&nals, out).await?;
         timing.keyframe = crate::annexb::nal_units_contain_keyframe(C::CODEC, nals.iter().copied());
         #[cfg(feature = "metadata")]
@@ -490,10 +495,12 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                     // so caps re-emit after the seek.
                     self.framer.clear();
                     self.caps.forget();
+                    self.leading_rasl.restart();
                     out.push(PipelinePacket::Flush).await?;
                 }
-                // Segment is control: forward unchanged.
+                // A new segment may splice in a bitstream the decoder has no references for.
                 PipelinePacket::Segment(seg) => {
+                    self.leading_rasl.restart();
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 PipelinePacket::Eos => {
