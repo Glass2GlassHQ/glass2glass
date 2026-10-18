@@ -2073,10 +2073,10 @@ pub fn audio_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode
     if prefix.starts_with(b"OggS") {
         let mut demux = crate::ogg::OggDemuxer::new();
         demux.push_data(&prefix);
-        let Some(info) = demux.info() else {
+        let Some(first) = forwardable_ogg_streams(&demux).into_iter().next() else {
             return Ok(None);
         };
-        let Some((stream, format)) = ogg_mapping(info.codec) else {
+        let Some((stream, format)) = ogg_mapping(first.port.codec) else {
             return Ok(None);
         };
         let source = crate::filesrc::FileSrc::new(
@@ -2115,9 +2115,9 @@ pub fn audio_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode
 /// Bare-`decodebin` primary-stream hook for Ogg (M775): the Ogg sibling of
 /// [`ts_primary_stream`]. [`OggDemux`](crate::oggdemux::OggDemux) defaults to its
 /// Opus port, so `filesrc location=X.oga ! decodebin` on an Ogg-FLAC / Vorbis
-/// file would plug an Opus decoder. Sniff the first packet and select the
-/// matching `oggdemux stream=` for the decoder search. Declines a non-Ogg file
-/// and Opus (the default port is already right).
+/// file would plug an Opus decoder. Lists an `oggdemux stream=` selection for
+/// each logical bitstream g2g reads, so a Vorbis track behind a Theora one is
+/// found too. Declines a non-Ogg file and one with no readable bitstream.
 #[cfg(feature = "std")]
 pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
     if !matches!(
@@ -2131,30 +2131,31 @@ pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     let prefix = read_prefix(location)?;
     let mut demux = crate::ogg::OggDemuxer::new();
     demux.push_data(&prefix);
-    let info = demux.info()?;
-    if info.sample_rate == 0 {
+    let streams: Vec<PrimaryStream> = forwardable_ogg_streams(&demux)
+        .into_iter()
+        .filter_map(|ogg| {
+            let Caps::Audio { format, .. } = ogg.caps else {
+                return None;
+            };
+            let (stream, _) = ogg_mapping(ogg.port.codec)?;
+            Some(PrimaryStream {
+                demux: "oggdemux",
+                props: stream_selection(stream),
+                // Sentinel channels/rate for the decoder search (the demux refines the
+                // concrete header values via CapsChanged at runtime).
+                caps: Caps::Audio {
+                    format,
+                    channels: 0,
+                    sample_rate: 0,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+                },
+            })
+        })
+        .collect();
+    if streams.is_empty() {
         return None;
     }
-    // Opus is declined: `OggDemux` already defaults to its Opus port.
-    if info.codec == crate::ogg::OggCodec::Opus {
-        return None;
-    }
-    let (stream, format) = ogg_mapping(info.codec)?;
-    let stream = PrimaryStream {
-        demux: "oggdemux",
-        props: stream_selection(stream),
-        // Sentinel channels/rate for the decoder search (the demux refines the
-        // concrete header values via CapsChanged at runtime).
-        caps: Caps::Audio {
-            format,
-            channels: 0,
-            sample_rate: 0,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        },
-    };
-    Some(ContainerStreams {
-        streams: alloc::vec![stream],
-    })
+    Some(ContainerStreams { streams })
 }
 
 /// Probe an MP4 file and build an [`Mp4DemuxN`](crate::mp4demuxn::Mp4DemuxN) with

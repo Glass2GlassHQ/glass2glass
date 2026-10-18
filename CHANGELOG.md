@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1491: a bare `decodebin` on Ogg selects any audio bitstream it reads, so Vorbis behind Theora no longer plugs the Opus default.
 - M1490: a bare `decodebin` decodes the container stream the next element accepts, so `decodebin ! audioconvert` gets the audio track.
 - M1502: mp4 AAC with a program config element decodes, and ER AAC, ELD and USAC fail loud in the demuxer.
 - M1501: mp4 demuxers put a new sample description's parameter sets in-band where the track switches to it.
