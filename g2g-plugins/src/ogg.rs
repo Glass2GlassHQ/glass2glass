@@ -55,6 +55,55 @@ pub enum OggCodec {
     Flac,
     /// A first packet this demuxer does not recognize.
     Other,
+    /// The VP8 mapping (`OVP80` stream-info header), one frame per packet.
+    Vp8,
+    /// Theora video (`\x80theora` identification header), which g2g does not
+    /// decode: named so a video request can report it.
+    Theora,
+}
+
+// every header packet of the VP8 mapping opens with this, then the header type
+const VP8_HEADER_MAGIC: &[u8] = b"OVP80";
+const VP8_STREAM_INFO_HEADER: u8 = 0x01;
+const VP8_STREAM_INFO_LEN: usize = 26;
+const VP8_HEADER_TYPE_OFFSET: usize = 5;
+const VP8_WIDTH_OFFSET: usize = 8;
+const VP8_HEIGHT_OFFSET: usize = 10;
+const VP8_FRAMERATE_NUMERATOR_OFFSET: usize = 18;
+const VP8_FRAMERATE_DENOMINATOR_OFFSET: usize = 22;
+
+/// The coded size and frame rate a VP8 stream-info header declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OggVp8Info {
+    pub width: u16,
+    pub height: u16,
+    pub framerate_numerator: u32,
+    pub framerate_denominator: u32,
+}
+
+/// Parse the VP8 mapping's stream-info header, `None` for any other packet or
+/// one declaring a zero dimension or frame rate term.
+pub fn parse_vp8_stream_info(packet: &[u8]) -> Option<OggVp8Info> {
+    use crate::bereader::{be_u16, be_u32};
+    let is_stream_info = packet.len() == VP8_STREAM_INFO_LEN
+        && packet.starts_with(VP8_HEADER_MAGIC)
+        && packet[VP8_HEADER_TYPE_OFFSET] == VP8_STREAM_INFO_HEADER;
+    if !is_stream_info {
+        return None;
+    }
+    let info = OggVp8Info {
+        width: be_u16(packet, VP8_WIDTH_OFFSET)?,
+        height: be_u16(packet, VP8_HEIGHT_OFFSET)?,
+        framerate_numerator: be_u32(packet, VP8_FRAMERATE_NUMERATOR_OFFSET)?,
+        framerate_denominator: be_u32(packet, VP8_FRAMERATE_DENOMINATOR_OFFSET)?,
+    };
+    let declared = [
+        u32::from(info.width),
+        u32::from(info.height),
+        info.framerate_numerator,
+        info.framerate_denominator,
+    ];
+    declared.iter().all(|&value| value > 0).then_some(info)
 }
 
 /// Stream parameters recovered from the first (identification) packet.
@@ -549,6 +598,15 @@ impl OggLogicalStream {
             self.packets_seen += 1;
             return;
         }
+        // a VP8 frame tag never reads `O` (it would be bitstream version 7), so the magic marks a header
+        if self.info.map(|i| i.codec) == Some(OggCodec::Vp8) && packet.starts_with(VP8_HEADER_MAGIC)
+        {
+            if self.packets_seen == 0 {
+                self.head_header = Some(packet);
+            }
+            self.packets_seen += 1;
+            return;
+        }
         let header_count = match self.info.map(|i| i.codec) {
             Some(OggCodec::Opus) => 2,   // OpusHead + OpusTags
             Some(OggCodec::Vorbis) => 3, // id + comment + setup
@@ -695,6 +753,20 @@ fn detect(packet: &[u8]) -> OggStreamInfo {
                 sample_rate: 0,
                 pre_skip: 0,
             },
+        }
+    } else if packet.starts_with(b"\x80theora") {
+        OggStreamInfo {
+            codec: OggCodec::Theora,
+            channels: 0,
+            sample_rate: 0,
+            pre_skip: 0,
+        }
+    } else if parse_vp8_stream_info(packet).is_some() {
+        OggStreamInfo {
+            codec: OggCodec::Vp8,
+            channels: 0,
+            sample_rate: 0,
+            pre_skip: 0,
         }
     } else if packet.starts_with(b"\x01vorbis") && packet.len() >= 16 {
         // Vorbis identification header: magic(7), version(4), channels at

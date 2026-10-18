@@ -207,11 +207,11 @@ async fn mkvdemuxn_splits_av_onto_two_ports() {
         "audio port retypes to AAC caps"
     );
 
-    // Port 1 gets exactly the AAC payloads (de-ADTS'd), in PTS order; the video
+    // Port 1 gets exactly the AAC access units (ADTS-framed again), in PTS order; the video
     // payloads land only on port 0. The single demuxer fed both branches.
     assert_eq!(
         tap.frames[1],
-        vec![vec![0xA1u8, 0xA2, 0xA3], vec![0xB4, 0xB5]],
+        vec![adts_au(&[0xA1, 0xA2, 0xA3]), adts_au(&[0xB4, 0xB5])],
         "audio port carries only the AAC track"
     );
     assert_eq!(

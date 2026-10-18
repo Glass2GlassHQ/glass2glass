@@ -49,6 +49,7 @@ use g2g_core::{
     StreamCollection, StreamType, SubPictureFormat, TagList, TextFormat, VideoCodec,
 };
 
+use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::matroska::{MatroskaDemuxer, MkvCodec};
 use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
@@ -100,6 +101,8 @@ pub enum MkvStream {
     /// `Caps::SubPicture { Pgs }`). Everything the decoder needs is in the
     /// blocks, so there is no config frame to forward.
     Pgs,
+    /// The first raw PCM audio stream (`A_PCM/*`) of this PCM sample format.
+    Pcm(AudioFormat),
 }
 
 /// A Matroska `Cues` prefetch in flight (M374): an end-of-file `Cues` index
@@ -340,6 +343,12 @@ impl MkvDemux {
             MkvStream::Pgs => Caps::SubPicture {
                 format: SubPictureFormat::Pgs,
             },
+            MkvStream::Pcm(format) => Caps::Audio {
+                format,
+                channels: 0,
+                sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            },
         }
     }
 
@@ -359,27 +368,6 @@ impl MkvDemux {
         }
     }
 
-    /// The parser codec matching the selected stream.
-    fn selected_codec(stream: MkvStream) -> MkvCodec {
-        match stream {
-            MkvStream::H264 => MkvCodec::H264,
-            MkvStream::H265 => MkvCodec::H265,
-            MkvStream::Vp8 => MkvCodec::Vp8,
-            MkvStream::Vp9 => MkvCodec::Vp9,
-            MkvStream::Av1 => MkvCodec::Av1,
-            MkvStream::Mjpeg => MkvCodec::Mjpeg,
-            MkvStream::Aac => MkvCodec::Aac,
-            MkvStream::Opus => MkvCodec::Opus,
-            MkvStream::Ac3 => MkvCodec::Ac3,
-            MkvStream::Flac => MkvCodec::Flac,
-            MkvStream::Vorbis => MkvCodec::Vorbis,
-            MkvStream::Subtitle(format) => MkvCodec::Subtitle(format),
-            MkvStream::VobSub => MkvCodec::VobSub,
-            MkvStream::DvbSub => MkvCodec::DvbSub,
-            MkvStream::Pgs => MkvCodec::Pgs,
-        }
-    }
-
     /// The concrete caps for the selected track once Tracks has been parsed,
     /// with real geometry / audio parameters. `None` until the track is known.
     fn concrete_caps(&self) -> Option<Caps> {
@@ -388,11 +376,10 @@ impl MkvDemux {
 
     // the first track of the codec, a second one stays out of the output
     fn selected_track(demux: &MatroskaDemuxer, stream: MkvStream) -> Option<u64> {
-        let want = Self::selected_codec(stream);
         demux
             .tracks()
             .iter()
-            .find(|t| t.codec == want)
+            .find(|t| codec_to_stream(t.codec) == Some(stream))
             .map(|t| t.number)
     }
 
@@ -401,8 +388,10 @@ impl MkvDemux {
     /// stream-parameterized form [`concrete_caps`](Self::concrete_caps) and the
     /// multi-output [`MkvDemuxN`] share, so a per-port announce reuses it.
     fn concrete_caps_of(demux: &MatroskaDemuxer, stream: MkvStream) -> Option<Caps> {
-        let want = Self::selected_codec(stream);
-        let track = demux.tracks().iter().find(|t| t.codec == want)?;
+        let track = demux
+            .tracks()
+            .iter()
+            .find(|t| codec_to_stream(t.codec) == Some(stream))?;
         match Self::output_caps(stream) {
             Caps::CompressedVideo { codec, .. } if track.width > 0 && track.height > 0 => {
                 Some(Caps::CompressedVideo {
@@ -433,9 +422,12 @@ impl MkvDemux {
     /// parsed, if the selected stream's codec is absent, fall back to the file's
     /// first video track.
     fn auto_select_video_track(&mut self) {
-        let want = Self::selected_codec(self.stream);
         let tracks = self.demux.tracks();
-        if tracks.is_empty() || tracks.iter().any(|t| t.codec == want) {
+        if tracks.is_empty()
+            || tracks
+                .iter()
+                .any(|t| codec_to_stream(t.codec) == Some(self.stream))
+        {
             return;
         }
         if let Some(stream) = tracks.iter().find_map(|t| {
@@ -525,6 +517,7 @@ impl MkvDemux {
             MkvCodec::Ac3 => (StreamType::Audio, audio(AudioFormat::Ac3)),
             MkvCodec::Flac => (StreamType::Audio, audio(AudioFormat::Flac)),
             MkvCodec::Vorbis => (StreamType::Audio, audio(AudioFormat::Vorbis)),
+            MkvCodec::Pcm { format, .. } => (StreamType::Audio, audio(format)),
             // Forwarded as plain UTF-8 text (de-framed at emit), whatever the source.
             MkvCodec::Subtitle(_) => (
                 StreamType::Text,
@@ -592,30 +585,30 @@ impl MkvDemux {
         resolve_stream_id(&self.demux, id)
     }
 
-    /// Refuse a bitmap-subtitle track whose `ContentEncoding` the demuxer cannot
-    /// undo (bzip2 / lzo / encryption): its blocks are encoded bytes rather than
-    /// SPU packets or DVB segments, so forwarding them would feed the decoder
-    /// garbage. zlib and header-stripped tracks are decoded at demux and pass.
-    /// Only the subpicture selections are checked; the other codecs' handling of
-    /// an undecodable encoding is unchanged.
-    fn reject_compressed_subpicture(&self) -> Result<(), G2gError> {
-        let codec = match self.stream {
-            MkvStream::VobSub => MkvCodec::VobSub,
-            MkvStream::DvbSub => MkvCodec::DvbSub,
-            MkvStream::Pgs => MkvCodec::Pgs,
-            _ => return Ok(()),
-        };
-        if !self
-            .demux
-            .tracks()
-            .iter()
-            .any(|t| t.codec == codec && t.unsupported_encoding)
+    /// Refuse a bitmap-subtitle or PCM track whose `ContentEncoding` the demuxer
+    /// cannot undo (bzip2 / lzo / encryption): its blocks are encoded bytes rather
+    /// than SPU packets, DVB segments or samples, so forwarding them would feed
+    /// garbage downstream. zlib and header-stripped tracks are decoded at demux
+    /// and pass. Only the subpicture and PCM selections are checked; the other
+    /// codecs' handling of an undecodable encoding is unchanged.
+    fn reject_undecodable_encoding(&self) -> Result<(), G2gError> {
+        let checked = matches!(
+            self.stream,
+            MkvStream::VobSub | MkvStream::DvbSub | MkvStream::Pgs | MkvStream::Pcm(_)
+        );
+        if !checked
+            || !self
+                .demux
+                .tracks()
+                .iter()
+                .any(|t| codec_to_stream(t.codec) == Some(self.stream) && t.unsupported_encoding)
         {
             return Ok(());
         }
         g2g_error!(
             Target::category("mkvdemux"),
-            "bitmap subtitle track declares a ContentEncoding this demuxer cannot undo (bzip2 / lzo / encryption)"
+            "{} track declares a ContentEncoding this demuxer cannot undo (bzip2 / lzo / encryption)",
+            mkv_stream_to_str(self.stream)
         );
         Err(G2gError::CapsMismatch)
     }
@@ -634,7 +627,7 @@ impl MkvDemux {
         // Fall back to the file's actual video track when the default (Vp9)
         // selection is absent, so autoplug of a VP8 / AV1 / H.264 WebM works.
         self.auto_select_video_track();
-        self.reject_compressed_subpicture()?;
+        self.reject_undecodable_encoding()?;
         if let Some(caps) = self.concrete_caps() {
             if self.last_caps.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -871,7 +864,7 @@ impl AsyncElement for MkvDemux {
 static MKVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus | ac3 | flac | vobsub | dvbsub | pgs",
+    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE)",
 )];
 
 /// The [`MkvStream`] a demuxer forwards for a parsed track's codec, or `None` for
@@ -893,6 +886,7 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::VobSub => Some(MkvStream::VobSub),
         MkvCodec::DvbSub => Some(MkvStream::DvbSub),
         MkvCodec::Pgs => Some(MkvStream::Pgs),
+        MkvCodec::Pcm { format, .. } => Some(MkvStream::Pcm(format)),
         MkvCodec::Other => None,
     }
 }
@@ -901,8 +895,10 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
 /// its plain UTF-8 cue text (the source-format framing stripped, see
 /// [`crate::subparse::deframe_subtitle_block`]) so every subtitle stream forwards
 /// as `Text { Utf8 }`; an H.264 / H.265 block converts from the container's
-/// length-prefixed framing to Annex-B (see [`video_block_to_annexb`]); every
-/// other codec passes through unchanged. The cue timing rides the frame (block
+/// length-prefixed framing to Annex-B (see [`video_block_to_annexb`]); an AAC
+/// block is ADTS-framed from the track's AudioSpecificConfig; big-endian PCM is
+/// byte-swapped to the graph's little-endian samples; every other codec passes
+/// through unchanged. The cue timing rides the frame (block
 /// PTS + `BlockDuration`), so only the text is extracted.
 fn deframe_block(demux: &MatroskaDemuxer, f: crate::matroska::MkvFrame) -> Vec<u8> {
     match f.codec {
@@ -914,6 +910,21 @@ fn deframe_block(demux: &MatroskaDemuxer, f: crate::matroska::MkvFrame) -> Vec<u
             let private = demux.codec_private(f.track);
             video_block_to_annexb(f.codec, f.keyframe, private, f.data)
         }
+        MkvCodec::Pcm {
+            format,
+            big_endian: true,
+        } => {
+            let mut samples = f.data;
+            if let Some(width) = format.bytes_per_sample() {
+                crate::pcmendian::swap_endian(&mut samples, width);
+            }
+            samples
+        }
+        // ER AAC, ELD and USAC have no ADTS form and go raw behind their config
+        MkvCodec::Aac => demux
+            .codec_private(f.track)
+            .and_then(|config| adts_from_asc(config, &f.data))
+            .unwrap_or(f.data),
         _ => f.data,
     }
 }
@@ -1079,7 +1090,8 @@ fn resolve_stream_id(demux: &MatroskaDemuxer, id: &str) -> Option<MkvStream> {
 /// The `OpusHead` is validated rather than trusted: a `CodecPrivate` that is not
 /// one is dropped, since a decoder would read garbage from it. A Vorbis
 /// `CodecPrivate` laces the identification, comment and setup headers, which
-/// go as three packets, the way `OggDemux` forwards them.
+/// go as three packets, the way `OggDemux` forwards them. An AAC config ADTS
+/// cannot carry (ER AAC, ELD, USAC) leads the track's raw blocks.
 fn config_headers(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Vec<Vec<u8>> {
     let Some(private) = demux.codec_private(track) else {
         return Vec::new();
@@ -1099,6 +1111,7 @@ fn config_headers(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Vec<V
         // the composition / ancillary page ids the display sets compose under
         MkvCodec::DvbSub => whole(crate::dvbsub::parse_page_ids(private).is_some()),
         MkvCodec::Vorbis => vorbis_headers(private),
+        MkvCodec::Aac => whole(is_raw_aac_config(private)),
         _ => Vec::new(),
     }
 }
@@ -1275,7 +1288,7 @@ fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
         "vobsub" | "dvdsub" => Some(MkvStream::VobSub),
         "dvbsub" => Some(MkvStream::DvbSub),
         "pgs" | "hdmvpgs" => Some(MkvStream::Pgs),
-        _ => None,
+        _ => g2g_core::pcm_from_gst_format(s).map(MkvStream::Pcm),
     }
 }
 
@@ -1301,6 +1314,9 @@ fn mkv_stream_to_str(stream: MkvStream) -> &'static str {
         MkvStream::VobSub => "vobsub",
         MkvStream::DvbSub => "dvbsub",
         MkvStream::Pgs => "pgs",
+        MkvStream::Pcm(format) => {
+            g2g_core::pcm_gst_format(format).expect("a PCM stream names a PCM format")
+        }
     }
 }
 
@@ -1308,7 +1324,7 @@ impl PadTemplates for MkvDemux {
     fn pad_templates() -> Vec<PadTemplate> {
         // One sink (the Matroska byte stream); the source pad can carry any of
         // the selectable elementary streams (an instance pins one via with_stream).
-        let source = CapsSet::from_alternatives(Vec::from([
+        let mut source = Vec::from([
             Self::output_caps(MkvStream::H264),
             Self::output_caps(MkvStream::H265),
             Self::output_caps(MkvStream::Vp8),
@@ -1324,10 +1340,13 @@ impl PadTemplates for MkvDemux {
             Self::output_caps(MkvStream::VobSub),
             Self::output_caps(MkvStream::DvbSub),
             Self::output_caps(MkvStream::Pgs),
-        ]));
+        ]);
+        source.extend(
+            g2g_core::pcm_formats().map(|format| Self::output_caps(MkvStream::Pcm(format))),
+        );
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
-            PadTemplate::source(source),
+            PadTemplate::source(CapsSet::from_alternatives(source)),
         ])
     }
 }
@@ -1478,7 +1497,7 @@ impl MkvDemuxN {
     fn port_for_codec(&self, codec: MkvCodec) -> Option<usize> {
         self.ports
             .iter()
-            .position(|&s| MkvDemux::selected_codec(s) == codec)
+            .position(|&s| codec_to_stream(codec) == Some(s))
     }
 
     /// Announce every container track as a [`BusMessage::StreamCollection`] (M376),
@@ -2060,6 +2079,140 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sink.0.frames, alloc::vec![alloc::vec![0x11]]);
+    }
+
+    // one A_AAC track carrying `config` as its CodecPrivate, with one block of `access_unit`
+    fn aac_with_config(config: &[u8], access_unit: &[u8]) -> Vec<u8> {
+        let track_number = 1;
+        let track = [
+            elem(&[0xD7], &uint_body(track_number)),
+            elem(&[0x86], b"A_AAC"),
+            elem(&[0x63, 0xA2], config),
+        ]
+        .concat();
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &elem(&[0xAE], &track));
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[
+                elem(&[0xE7], &uint_body(0)),
+                elem(&[0xA3], &block(track_number, 0, access_unit)),
+            ]
+            .concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
+        [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
+    }
+
+    #[tokio::test]
+    async fn an_aac_lc_block_leaves_adts_framed() {
+        let access_unit = [0x21, 0x10, 0x05];
+        let adts = crate::aacparse::test_frames::adts_au(&access_unit);
+        let config = crate::aacparse::asc_from_adts(&adts).unwrap();
+        let mut sink = CaptureSink::default();
+        run(
+            MkvStream::Aac,
+            &aac_with_config(&config, &access_unit),
+            &mut sink,
+        )
+        .await;
+        assert_eq!(sink.frames, alloc::vec![adts]);
+    }
+
+    #[tokio::test]
+    async fn an_eld_config_leads_its_raw_blocks() {
+        // AAC-ELD 48 kHz stereo, an object type ADTS has no profile for
+        const ELD_CONFIG: [u8; 4] = [0xF8, 0xE6, 0x40, 0x00];
+        let access_unit = [0x7E, 0x89, 0xB4];
+        let mut sink = CaptureSink::default();
+        run(
+            MkvStream::Aac,
+            &aac_with_config(&ELD_CONFIG, &access_unit),
+            &mut sink,
+        )
+        .await;
+        assert_eq!(
+            sink.frames,
+            alloc::vec![ELD_CONFIG.to_vec(), access_unit.to_vec()]
+        );
+    }
+
+    // one stereo 48 kHz 16-bit `codec_id` track with `entry_children` appended, and one block of `samples`
+    fn pcm_file(codec_id: &[u8], entry_children: &[u8], samples: &[u8]) -> Vec<u8> {
+        let track_number = 1;
+        let audio = [
+            elem(&[0x9F], &uint_body(2)),
+            elem(&[0xB5], &48_000f32.to_be_bytes()),
+            elem(&[0x62, 0x64], &uint_body(16)),
+        ]
+        .concat();
+        let track = [
+            elem(&[0xD7], &uint_body(track_number)),
+            elem(&[0x86], codec_id),
+            elem(&[0xE1], &audio),
+            entry_children.to_vec(),
+        ]
+        .concat();
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &elem(&[0xAE], &track));
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[
+                elem(&[0xE7], &uint_body(0)),
+                elem(&[0xA3], &block(track_number, 0, samples)),
+            ]
+            .concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
+        [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
+    }
+
+    #[tokio::test]
+    async fn a_big_endian_pcm_block_leaves_little_endian() {
+        let samples: [i16; 4] = [0x1234, -0x5678, 1, -1];
+        let big_endian: Vec<u8> = samples.iter().flat_map(|s| s.to_be_bytes()).collect();
+        let little_endian: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let mut sink = CaptureSink::default();
+        run(
+            MkvStream::Pcm(AudioFormat::PcmS16Le),
+            &pcm_file(b"A_PCM/INT/BIG", &[], &big_endian),
+            &mut sink,
+        )
+        .await;
+        assert_eq!(sink.frames, alloc::vec![little_endian]);
+        assert_eq!(
+            sink.caps.last(),
+            Some(&Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 2,
+                sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn lzo_compressed_pcm_fails_instead_of_forwarding_packed_bytes() {
+        const LZO_COMPRESSION_ALGORITHM: u64 = 2;
+        let compression = elem(
+            &[0x50, 0x34],
+            &elem(&[0x42, 0x54], &uint_body(LZO_COMPRESSION_ALGORITHM)),
+        );
+        let encodings = elem(&[0x6D, 0x80], &elem(&[0x62, 0x40], &compression));
+        let mut demux = MkvDemux::new().with_stream(MkvStream::Pcm(AudioFormat::PcmS16Le));
+        demux.configure_pipeline(&MkvDemux::input_caps()).unwrap();
+        let file = pcm_file(b"A_PCM/INT/LIT", &encodings, b"lzo bytes");
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(file.into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        let mut sink = CaptureSink::default();
+        assert_eq!(
+            demux
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await,
+            Err(G2gError::CapsMismatch)
+        );
+        assert!(sink.frames.is_empty());
     }
 
     fn subtitle_track(num: u64, codec: &[u8]) -> Vec<u8> {

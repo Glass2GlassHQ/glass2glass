@@ -1731,15 +1731,16 @@ pub fn mkv_decodebin_select(
     mkv_select(location, pads)
 }
 
-/// The `oggdemux stream=` name and the caps format of an Ogg mapping g2g reads,
-/// or `None` for one it does not. The one place the readable set is written: a
-/// port on any other mapping would negotiate caps no decoder can take.
+/// The `oggdemux stream=` name of an Ogg mapping g2g reads, or `None` for one
+/// it does not. The one place the readable set is written: a port on any other
+/// mapping would negotiate caps no decoder can take.
 #[cfg(feature = "std")]
-fn ogg_mapping(codec: crate::ogg::OggCodec) -> Option<(&'static str, g2g_core::AudioFormat)> {
+fn ogg_mapping(codec: crate::ogg::OggCodec) -> Option<&'static str> {
     match codec {
-        crate::ogg::OggCodec::Opus => Some(("opus", g2g_core::AudioFormat::Opus)),
-        crate::ogg::OggCodec::Vorbis => Some(("vorbis", g2g_core::AudioFormat::Vorbis)),
-        crate::ogg::OggCodec::Flac => Some(("flac", g2g_core::AudioFormat::Flac)),
+        crate::ogg::OggCodec::Opus => Some("opus"),
+        crate::ogg::OggCodec::Vorbis => Some("vorbis"),
+        crate::ogg::OggCodec::Flac => Some("flac"),
+        crate::ogg::OggCodec::Vp8 => Some("vp8"),
         _ => None,
     }
 }
@@ -1752,9 +1753,15 @@ struct OggStream {
     caps: Caps,
 }
 
+#[cfg(feature = "std")]
+impl OggStream {
+    fn is_video(&self) -> bool {
+        matches!(self.caps, Caps::CompressedVideo { .. })
+    }
+}
+
 /// The readable Ogg logical bitstreams of a probed file, in beginning-of-stream
-/// order. Every Ogg mapping g2g reads is audio, so a grouped file's ports are
-/// all audio ports.
+/// order.
 #[cfg(feature = "std")]
 fn forwardable_ogg_streams(demux: &crate::ogg::OggDemuxer) -> Vec<OggStream> {
     demux
@@ -1763,15 +1770,10 @@ fn forwardable_ogg_streams(demux: &crate::ogg::OggDemuxer) -> Vec<OggStream> {
         .enumerate()
         .filter_map(|(slot, stream)| {
             let info = stream.info()?;
-            let (_, format) = ogg_mapping(info.codec)?;
+            ogg_mapping(info.codec)?;
             Some(OggStream {
                 port: crate::oggdemux::OggPort::new(slot, info.codec),
-                caps: Caps::Audio {
-                    format,
-                    channels: info.channels.max(1),
-                    sample_rate: info.sample_rate,
-                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-                },
+                caps: crate::oggdemux::concrete_caps(stream)?,
             })
         })
         .collect()
@@ -1810,11 +1812,14 @@ impl OggProbe {
         // channels and rate the probe read: the decode chain is plugged against
         // the declaration, and the header's real shape arrives at runtime as the
         // port's `CapsChanged`.
-        let av: Vec<(Caps, bool)> = (0..self.streams.len())
-            .map(|port| {
+        let av: Vec<(Caps, bool)> = self
+            .streams
+            .iter()
+            .enumerate()
+            .map(|(port, stream)| {
                 let caps = MultiOutputElement::port_output_caps(&demux, port)
                     .expect("the demuxer has a port per stream");
-                (caps, false)
+                (caps, stream.is_video())
             })
             .collect();
         file_fanout(&self.path, Self::ENCODING, Box::new(demux), &av)
@@ -1823,8 +1828,8 @@ impl OggProbe {
 
 /// The lone-`fallbacksrc` URI fan-out hook for Ogg (M1171): a grouped Ogg file's
 /// logical bitstreams each get their own decode chain, `fallbackswitch` and
-/// audio sink. Every Ogg mapping g2g reads is audio, so this is the hook that
-/// needs the fan-out's several-ports-of-one-kind support; a single-stream Ogg
+/// sink. Several audio streams in one Ogg file are ordinary, so this is the hook
+/// that needs the fan-out's several-ports-of-one-kind support; a single-stream Ogg
 /// file reports one port, which does not fan out, and falls through to
 /// [`audio_playbin`]'s single-stream shape.
 ///
@@ -1836,9 +1841,9 @@ pub fn ogg_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, P
 }
 
 /// Probe an Ogg file and build an [`OggDemuxN`](crate::oggdemux::OggDemuxN) with
-/// one port per pad request (M790). Every Ogg mapping g2g reads is audio, so
-/// `audio_k` (or a bare `d.`) picks the k-th logical bitstream of the grouped
-/// file. Declines a non-Ogg file or an unsatisfiable request.
+/// one port per pad request (M790). `audio_k` / `video_k` (or a bare `d.`) picks
+/// the k-th logical bitstream of that kind in the grouped file. Declines a
+/// non-Ogg file or an unsatisfiable request.
 #[cfg(feature = "std")]
 fn ogg_select(
     location: &str,
@@ -1851,7 +1856,16 @@ fn ogg_select(
     if streams.is_empty() {
         return None;
     }
-    let kinds = alloc::vec![PadKind::Audio; streams.len()];
+    let kinds: Vec<PadKind> = streams
+        .iter()
+        .map(|s| {
+            if s.is_video() {
+                PadKind::Video
+            } else {
+                PadKind::Audio
+            }
+        })
+        .collect();
     let sel = resolve_pads(&kinds, pads)?;
     let ports = sel.iter().map(|&k| streams[k].port).collect();
     let caps: Vec<Caps> = sel.iter().map(|&k| streams[k].caps.clone()).collect();
@@ -2123,10 +2137,13 @@ pub fn audio_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode
     if prefix.starts_with(b"OggS") {
         let mut demux = crate::ogg::OggDemuxer::new();
         demux.push_data(&prefix);
-        let Some(first) = forwardable_ogg_streams(&demux).into_iter().next() else {
+        let Some(first) = forwardable_ogg_streams(&demux)
+            .into_iter()
+            .find(|s| !s.is_video())
+        else {
             return Ok(None);
         };
-        let Some((stream, format)) = ogg_mapping(first.port.codec) else {
+        let Some(stream) = ogg_mapping(first.port.codec) else {
             return Ok(None);
         };
         let source = crate::filesrc::FileSrc::new(
@@ -2142,12 +2159,7 @@ pub fn audio_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode
             .expect("oggdemux stream property");
         let demux = graph.add_transform(GraphNodeRef::element(ogg));
         graph.link(src, demux).map_err(ParseError::Graph)?;
-        let caps = Caps::Audio {
-            format,
-            channels: 0,
-            sample_rate: 0,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        };
+        let caps = crate::oggdemux::OggDemux::output_caps(first.port.codec);
         wire_audio_branch(reg, &mut graph, demux, &caps)?;
         return Ok(Some(graph));
     }
@@ -2167,7 +2179,8 @@ pub fn audio_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode
 /// Opus port, so `filesrc location=X.oga ! decodebin` on an Ogg-FLAC / Vorbis
 /// file would plug an Opus decoder. Lists an `oggdemux stream=` selection for
 /// each logical bitstream g2g reads, so a Vorbis track behind a Theora one is
-/// found too. Declines a non-Ogg file and one with no readable bitstream.
+/// found too, and names each Theora stream so a video request reports the
+/// missing decoder. Declines a non-Ogg file and one with neither.
 #[cfg(feature = "std")]
 pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
     if !matches!(
@@ -2181,33 +2194,32 @@ pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     let prefix = read_prefix(location)?;
     let mut demux = crate::ogg::OggDemuxer::new();
     demux.push_data(&prefix);
-    let streams: Vec<PrimaryStream> = forwardable_ogg_streams(&demux)
+    let mut forwardable = forwardable_ogg_streams(&demux);
+    forwardable.sort_by_key(|ogg| !ogg.is_video());
+    let streams: Vec<PrimaryStream> = forwardable
         .into_iter()
         .filter_map(|ogg| {
-            let Caps::Audio { format, .. } = ogg.caps else {
-                return None;
-            };
-            let (stream, _) = ogg_mapping(ogg.port.codec)?;
             Some(PrimaryStream {
                 demux: "oggdemux",
-                props: stream_selection(stream),
-                // Sentinel channels/rate for the decoder search (the demux refines the
-                // concrete header values via CapsChanged at runtime).
-                caps: Caps::Audio {
-                    format,
-                    channels: 0,
-                    sample_rate: 0,
-                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-                },
+                props: stream_selection(ogg_mapping(ogg.port.codec)?),
+                // The placeholder the demux declares for the decoder search (it
+                // refines the concrete header values via CapsChanged at runtime).
+                caps: crate::oggdemux::OggDemux::output_caps(ogg.port.codec),
             })
         })
         .collect();
-    if streams.is_empty() {
+    let unsupported: Vec<alloc::string::String> = demux
+        .streams()
+        .iter()
+        .filter(|s| s.info().map(|i| i.codec) == Some(crate::ogg::OggCodec::Theora))
+        .map(|_| alloc::string::String::from("theora"))
+        .collect();
+    if streams.is_empty() && unsupported.is_empty() {
         return None;
     }
     Some(ContainerStreams {
         streams,
-        unsupported: Vec::new(),
+        unsupported,
     })
 }
 

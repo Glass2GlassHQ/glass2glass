@@ -1,6 +1,7 @@
-//! Ogg demuxer element (M116): `Caps::ByteStream{Ogg}` in, the selected audio
+//! Ogg demuxer element (M116): `Caps::ByteStream{Ogg}` in, the selected
 //! elementary stream out (`Caps::Audio{Opus}` default, `stream=flac` for the
-//! Ogg-FLAC mapping (M775), `stream=vorbis` for Vorbis (M777)).
+//! Ogg-FLAC mapping (M775), `stream=vorbis` for Vorbis (M777), `stream=vp8` for
+//! the VP8 video mapping).
 //!
 //! Wraps the pure [`crate::ogg::OggDemuxer`], the Ogg sibling of
 //! [`crate::mkvdemux::MkvDemux`]: it reassembles the logical bitstream's packets,
@@ -54,21 +55,24 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SeekController;
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_debug, g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding,
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
     LatencyReport, MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate,
     PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Seek, Segment,
-    Stream, StreamCollection, StreamType, TagList,
+    Stream, StreamCollection, StreamType, TagList, VideoCodec,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
-use crate::ogg::{OggCodec, OggDemuxer, OggLogicalStream};
+use crate::ogg::{parse_vp8_stream_info, OggCodec, OggDemuxer, OggLogicalStream};
 use crate::opusparse::packet_samples as opus_packet_samples;
+use crate::typefind::framerate_within_placeholder;
 use crate::vorbiscomment::parse_vorbis_comment;
 
 /// Convert a 48 kHz sample count to nanoseconds.
@@ -375,15 +379,18 @@ impl OggDemux {
         }
     }
 
-    /// The placeholder output for the selected stream: a sentinel channels/rate,
-    /// refined from the identification header via `CapsChanged` once parsed.
-    fn output_caps(stream: OggCodec) -> Caps {
+    /// The placeholder output for the selected stream: a sentinel channels/rate
+    /// or a `Range` geometry, refined from the identification header via
+    /// `CapsChanged` once parsed.
+    pub(crate) fn output_caps(stream: OggCodec) -> Caps {
+        let format = match stream {
+            OggCodec::Vp8 => return crate::typefind::elementary_video_caps(VideoCodec::Vp8),
+            OggCodec::Flac => AudioFormat::Flac,
+            OggCodec::Vorbis => AudioFormat::Vorbis,
+            _ => AudioFormat::Opus,
+        };
         Caps::Audio {
-            format: match stream {
-                OggCodec::Flac => AudioFormat::Flac,
-                OggCodec::Vorbis => AudioFormat::Vorbis,
-                _ => AudioFormat::Opus,
-            },
+            format,
             channels: 0,
             sample_rate: 0,
             channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
@@ -506,12 +513,13 @@ impl OggDemux {
                 out.push(PipelinePacket::Segment(seg)).await?;
             }
             for (payload, timing, config) in ready.frames {
-                // M362 seek: every audio packet is a resync point, so drop until
-                // the first packet at/after the target, which emits a fresh
-                // segment. The in-band codec config always flows: the decoder
+                // M362 seek: every audio packet and every VP8 keyframe is a resync
+                // point, so drop until the first one at/after the target, which
+                // emits a fresh segment. The in-band codec config always flows: the decoder
                 // needs it whatever the seek target.
                 if !config {
-                    match self.seek.admit(timing.pts_ns, true) {
+                    let resync_point = timing.keyframe || self.stream != OggCodec::Vp8;
+                    match self.seek.admit(timing.pts_ns, resync_point) {
                         Admit::Drop => continue,
                         Admit::Resume(start) => {
                             let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
@@ -603,6 +611,8 @@ struct StreamEmitter {
     awaiting_anchor: bool,
     // counted against the first audio page's packet count to find where that page ends
     audio_packets_stepped: u64,
+    // VP8 frames with the show_frame bit set, so far in this chain
+    shown_frames: u64,
 }
 
 impl StreamEmitter {
@@ -634,7 +644,12 @@ impl StreamEmitter {
     /// Vorbis also needs its block-size tables and the priming anchor, both
     /// learned from the start of the stream the landing skips past.
     fn can_resume(&self, codec: OggCodec) -> bool {
-        codec != OggCodec::Vorbis || (self.vorbis.is_some() && self.anchor_offset.is_some())
+        match codec {
+            OggCodec::Vorbis => self.vorbis.is_some() && self.anchor_offset.is_some(),
+            // timed by counting frames from the start of the stream
+            OggCodec::Vp8 => false,
+            _ => true,
+        }
     }
 
     /// Arm a mid-file landing (M862): the position state is re-established from
@@ -710,7 +725,7 @@ impl StreamEmitter {
             self.awaiting_anchor = false;
             ready.resumed_at = Some(self.position_ns);
         }
-        if let Some(caps) = concrete_caps(info) {
+        if let Some(caps) = concrete_caps(stream) {
             if self.last_caps.as_ref() != Some(&caps) {
                 self.last_caps = Some(caps.clone());
                 ready.caps = Some(caps);
@@ -727,6 +742,10 @@ impl StreamEmitter {
                     .frames
                     .extend(heads.into_iter().map(|h| (h, FrameTiming::default(), true)));
             }
+        }
+        if codec == OggCodec::Vp8 {
+            self.step_vp8(stream, packets, &mut ready);
+            return ready;
         }
         // Vorbis timing tables (M778): parse once ident + setup have landed.
         if codec == OggCodec::Vorbis && self.vorbis.is_none() {
@@ -884,11 +903,69 @@ impl StreamEmitter {
         ready.first_page_ns = first_page_packets.map(|_| first_page_ns);
         ready
     }
+
+    // one frame per packet, timed by the count of shown frames before it, so an invisible (altref) frame takes no time
+    fn step_vp8(
+        &mut self,
+        stream: &OggLogicalStream,
+        packets: Vec<Vec<u8>>,
+        ready: &mut StreamReady,
+    ) {
+        const INTERFRAME_BIT: u8 = 0x01;
+        const SHOW_FRAME_BIT: u8 = 0x10;
+        let Some(vp8) = stream.head_header().and_then(parse_vp8_stream_info) else {
+            return;
+        };
+        let frames_to_ns = |frames: u64| {
+            ticks_to_ns(
+                frames.saturating_mul(u64::from(vp8.framerate_denominator)),
+                vp8.framerate_numerator,
+            )
+        };
+        for packet in packets {
+            // the parser drops empty packets
+            let frame_tag = packet[0];
+            let shown_before = self.shown_frames;
+            if frame_tag & SHOW_FRAME_BIT != 0 {
+                self.shown_frames = shown_before.saturating_add(1);
+            }
+            let start_ns = frames_to_ns(shown_before);
+            let duration_ns = frames_to_ns(self.shown_frames).saturating_sub(start_ns);
+            let pts_ns = start_ns.saturating_add(self.chain_offset_ns);
+            self.playable_end_ns = start_ns.saturating_add(duration_ns);
+            self.position_ns = pts_ns.saturating_add(duration_ns);
+            ready.frames.push((
+                packet,
+                FrameTiming {
+                    pts_ns,
+                    dts_ns: pts_ns,
+                    duration_ns,
+                    keyframe: frame_tag & INTERFRAME_BIT == 0,
+                    ..FrameTiming::default()
+                },
+                false,
+            ));
+        }
+    }
 }
 
 /// The concrete caps of a parsed stream, or `None` for a codec with no g2g
 /// mapping / before the identification header lands.
-fn concrete_caps(info: crate::ogg::OggStreamInfo) -> Option<Caps> {
+pub(crate) fn concrete_caps(stream: &OggLogicalStream) -> Option<Caps> {
+    let info = stream.info()?;
+    if info.codec == OggCodec::Vp8 {
+        let vp8 = parse_vp8_stream_info(stream.head_header()?)?;
+        return Some(Caps::CompressedVideo {
+            codec: VideoCodec::Vp8,
+            width: Dim::Fixed(u32::from(vp8.width)),
+            height: Dim::Fixed(u32::from(vp8.height)),
+            framerate: framerate_within_placeholder(framerate_q16_from_fraction(
+                vp8.framerate_numerator,
+                vp8.framerate_denominator,
+            )),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        });
+    }
     if info.sample_rate == 0 {
         return None;
     }
@@ -931,6 +1008,8 @@ fn in_band_headers(codec: OggCodec, stream: &OggLogicalStream) -> Vec<Vec<u8>> {
                 heads.push(native);
             }
         }
+        // the stream-info header is container framing a VP8 decoder does not read
+        OggCodec::Vp8 => {}
         _ => {
             if let Some(head) = stream.head_header() {
                 heads.push(head.to_vec());
@@ -1072,6 +1151,7 @@ impl AsyncElement for OggDemux {
                     "opus" => OggCodec::Opus,
                     "flac" => OggCodec::Flac,
                     "vorbis" => OggCodec::Vorbis,
+                    "vp8" => OggCodec::Vp8,
                     _ => return Err(PropError::Value),
                 };
                 Ok(())
@@ -1086,6 +1166,7 @@ impl AsyncElement for OggDemux {
                 match self.stream {
                     OggCodec::Flac => "flac",
                     OggCodec::Vorbis => "vorbis",
+                    OggCodec::Vp8 => "vp8",
                     _ => "opus",
                 }
                 .into(),
@@ -1113,7 +1194,7 @@ impl LogSource for OggDemux {
 static OGGDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "logical stream to emit: opus | flac | vorbis",
+    "logical stream to emit: opus | flac | vorbis | vp8",
 )];
 
 /// The published stream id of the bitstream in slot `slot`. Positional,
@@ -1254,11 +1335,12 @@ impl OggDemuxN {
             .iter()
             .filter(|s| s.chain() == chain)
             .filter_map(|s| {
-                Some(Stream::new(
-                    stream_id(s.slot()),
-                    StreamType::Audio,
-                    concrete_caps(s.info()?)?,
-                ))
+                let caps = concrete_caps(s)?;
+                let stream_type = match caps {
+                    Caps::CompressedVideo { .. } => StreamType::Video,
+                    _ => StreamType::Audio,
+                };
+                Some(Stream::new(stream_id(s.slot()), stream_type, caps))
             })
             .collect();
         if streams.is_empty() {
@@ -1434,6 +1516,7 @@ impl PadTemplates for OggDemux {
                 Self::output_caps(OggCodec::Opus),
                 Self::output_caps(OggCodec::Flac),
                 Self::output_caps(OggCodec::Vorbis),
+                Self::output_caps(OggCodec::Vp8),
             ]))),
         ])
     }
@@ -1503,6 +1586,7 @@ mod tests {
     struct CaptureSink {
         caps: Vec<Caps>,
         frames: Vec<Vec<u8>>,
+        timings: Vec<FrameTiming>,
         eos: bool,
     }
     impl OutputSink for CaptureSink {
@@ -1519,6 +1603,7 @@ mod tests {
                         if let Some(s) = f.domain.as_system_slice() {
                             self.frames.push(s.to_vec());
                         }
+                        self.timings.push(f.timing);
                     }
                     PipelinePacket::Eos => self.eos = true,
                     _ => {}
@@ -1526,6 +1611,101 @@ mod tests {
                 Ok(PushOutcome::Accepted)
             })
         }
+    }
+
+    // the VP8 mapping's stream-info header at square pixels
+    fn vp8_stream_info(width: u16, height: u16, framerate: (u32, u32)) -> Vec<u8> {
+        const MAPPING_VERSION: [u8; 2] = [1, 0];
+        const ONE_24_BIT: [u8; 3] = [0, 0, 1];
+        [
+            b"OVP80\x01".as_slice(),
+            &MAPPING_VERSION,
+            &width.to_be_bytes(),
+            &height.to_be_bytes(),
+            &ONE_24_BIT,
+            &ONE_24_BIT,
+            &framerate.0.to_be_bytes(),
+            &framerate.1.to_be_bytes(),
+        ]
+        .concat()
+    }
+
+    #[tokio::test]
+    async fn demuxes_vp8_frames_timed_by_shown_frames() {
+        const KEYFRAME_SHOWN: u8 = 0x10;
+        const INTERFRAME_HIDDEN: u8 = 0x01;
+        const INTERFRAME_SHOWN: u8 = 0x11;
+        const WIDTH: u16 = 320;
+        const HEIGHT: u16 = 240;
+        const FRAMERATE: (u32, u32) = (30, 1);
+        let comment = b"OVP80\x02\x20comments".to_vec();
+        let frames = [
+            alloc::vec![KEYFRAME_SHOWN, 0xAA],
+            alloc::vec![INTERFRAME_HIDDEN, 0xBB],
+            alloc::vec![INTERFRAME_SHOWN, 0xCC],
+        ];
+        let serial = 9;
+        let mut stream = page(
+            0x02,
+            serial,
+            0,
+            &[&vp8_stream_info(WIDTH, HEIGHT, FRAMERATE)],
+        );
+        stream.extend_from_slice(&page(0x00, serial, 1, &[&comment]));
+        let packets: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
+        stream.extend_from_slice(&page(0x00, serial, 2, &packets));
+
+        let mut d = OggDemux::new();
+        d.set_property("stream", PropValue::Str("vp8".into()))
+            .unwrap();
+        d.configure_pipeline(&OggDemux::input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        d.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sink.caps,
+            alloc::vec![Caps::CompressedVideo {
+                codec: VideoCodec::Vp8,
+                width: Dim::Fixed(u32::from(WIDTH)),
+                height: Dim::Fixed(u32::from(HEIGHT)),
+                framerate: Rate::Fixed(
+                    framerate_q16_from_fraction(FRAMERATE.0, FRAMERATE.1).unwrap()
+                ),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            }]
+        );
+        assert_eq!(
+            sink.frames, frames,
+            "the two header packets stay in the container"
+        );
+        // each frame start rounds to the nearest ns, so a duration can be one ns longer than the last
+        let frame_start_ns = |frame: u64| ticks_to_ns(frame * u64::from(FRAMERATE.1), FRAMERATE.0);
+        let timing = |frame: u64, shown: bool, keyframe| {
+            let shown_frames = frame + u64::from(shown);
+            FrameTiming {
+                pts_ns: frame_start_ns(frame),
+                dts_ns: frame_start_ns(frame),
+                duration_ns: frame_start_ns(shown_frames) - frame_start_ns(frame),
+                keyframe,
+                ..FrameTiming::default()
+            }
+        };
+        assert_eq!(
+            sink.timings,
+            alloc::vec![
+                timing(0, true, true),
+                // an invisible frame shows nothing, so it takes no time
+                timing(1, false, false),
+                timing(1, true, false),
+            ]
+        );
     }
 
     #[test]
