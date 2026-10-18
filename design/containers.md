@@ -16,7 +16,9 @@ it, `FileSrc::new(path, Caps::ByteStream{MpegTs})`, and the demuxer's transform
 constraint maps it to the elementary stream type.
 
 A launch `filesrc` types its file from the extension, and sniffs the header when
-the extension is unknown or `bytestream-format=auto`. When the sniff recognizes
+the extension is unknown or `bytestream-format=auto`. An extension that names a
+container is checked against the header too: a different container the sniff
+recognizes wins, so a transport stream saved as `.mpg` reaches `tsdemux`. When the sniff recognizes
 nothing, `probe_output_caps` returns an error and `decodebin` fails the parse
 with `ParseError::UnrecognizedContent` instead of guessing a container. `.m4v`
 has no extension mapping, since it names both an MP4 and a raw MPEG-4 Part 2
@@ -780,7 +782,9 @@ the demux and mux coverage spans the major containers.
 covering VCD-era MPEG-1 program streams and DVD MPEG-2 ones through one element.
 `g2g-plugins::psdemux::PsDemuxer` syncs to pack headers, `00 00 01 BA`, in both
 the MPEG-2 `01`-marker layout with its stuffing and the flat 8-byte MPEG-1 one,
-and reads the PES packets between them. `PsDemux` and `PsDemuxN` wrap it with a
+and reads the PES packets between them. A stream that ends without a single pack
+header was not a program stream, so `PsDemuxer::flush` fails it with
+`CapsMismatch`. `PsDemux` and `PsDemuxN` wrap it with a
 `PsStream` selection of `Mpeg2` video, `Mp2` audio, `Ac3` and `SubPicture`. Two
 things make it unlike `TsDemux`.
 

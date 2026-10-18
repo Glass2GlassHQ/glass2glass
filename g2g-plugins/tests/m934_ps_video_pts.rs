@@ -71,7 +71,8 @@ fn seq_and_gop() -> Vec<u8> {
 
 /// The video units' PTS values, in emission (coded) order.
 fn video_pts(demux: &mut PsDemuxer) -> Vec<Option<u64>> {
-    demux.flush();
+    // these streams are bare PES packets with no pack header, which flush rejects
+    let _ = demux.flush();
     demux
         .take_units()
         .into_iter()

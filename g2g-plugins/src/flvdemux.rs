@@ -48,7 +48,7 @@ use crate::annexb::{
 };
 use crate::bereader::{take_be_u16, take_be_u32};
 use crate::demuxseek::{Admit, DemuxSeek};
-use crate::flv::{FlvCodec, FlvDemuxer, FlvUnit};
+use crate::flv::{FlvCodec, FlvDemuxer, FlvTrack, FlvUnit};
 
 /// Which elementary stream an [`FlvDemux`] instance forwards. An FLV stream
 /// interleaves one video and one audio track; this element has one output pad, so
@@ -528,6 +528,40 @@ static FLVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "elementary stream to emit: h264 | sorenson | vp6 | vp6a | aac | mp3 | speex",
 )];
 
+/// The stream each codec an FLV tag names is forwarded on, the inverse of
+/// [`FlvDemux::selected_codec`].
+fn stream_of_codec(codec: FlvCodec) -> FlvStream {
+    match codec {
+        FlvCodec::H264 => FlvStream::H264,
+        FlvCodec::SorensonH263 => FlvStream::SorensonH263,
+        FlvCodec::Vp6 => FlvStream::Vp6,
+        FlvCodec::Vp6Alpha => FlvStream::Vp6Alpha,
+        FlvCodec::Aac => FlvStream::Aac,
+        FlvCodec::Mp3 => FlvStream::Mp3,
+        FlvCodec::Speex => FlvStream::Speex,
+    }
+}
+
+/// The streams the tags in an FLV `prefix` carry, video first, each with the
+/// caps [`FlvDemux`] emits for it. Empty when the prefix holds no audio or
+/// video tag g2g reads.
+pub fn forwardable_streams(prefix: &[u8]) -> Vec<(FlvStream, Caps)> {
+    let mut demux = FlvDemuxer::new();
+    demux.push_data(prefix);
+    let mut codecs: Vec<FlvCodec> = Vec::new();
+    for unit in demux.take_units() {
+        if !codecs.contains(&unit.codec) {
+            codecs.push(unit.codec);
+        }
+    }
+    codecs.sort_by_key(|codec| codec.track() != FlvTrack::Video);
+    codecs
+        .into_iter()
+        .map(stream_of_codec)
+        .map(|stream| (stream, FlvDemux::output_caps(stream)))
+        .collect()
+}
+
 /// Parse a `stream` property string to an [`FlvStream`].
 fn flv_stream_from_str(s: &str) -> Option<FlvStream> {
     match s {
@@ -543,7 +577,7 @@ fn flv_stream_from_str(s: &str) -> Option<FlvStream> {
 }
 
 /// The `stream` property string for an [`FlvStream`].
-fn flv_stream_to_str(stream: FlvStream) -> &'static str {
+pub(crate) fn flv_stream_to_str(stream: FlvStream) -> &'static str {
     match stream {
         FlvStream::H264 => "h264",
         FlvStream::SorensonH263 => "sorenson",
