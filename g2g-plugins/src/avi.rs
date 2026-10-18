@@ -31,7 +31,7 @@ use g2g_core::{AudioFormat, G2gError, Tag, TagList, VideoCodec};
 
 use crate::riff::{
     chunk_len, chunks, chunks_to_cut, padded_len, put_chunk, put_chunk_header, read_fourcc,
-    read_u16, read_u32, FourCc, CHUNK_HEADER_LEN, FOURCC_LEN, LIST_FOURCC, RIFF_FOURCC,
+    read_u16, read_u32, Chunk, FourCc, CHUNK_HEADER_LEN, FOURCC_LEN, LIST_FOURCC, RIFF_FOURCC,
     RIFF_HEADER_LEN,
 };
 use crate::waveformat::{audio_format, sample_frame_len, wave_format_tag, WaveFormatEx};
@@ -408,24 +408,44 @@ fn collect_movi(
     let mut walk = chunks_to_cut(data, range);
     while let Some(chunk) = walk.next() {
         if chunk.list_form(data) == Some(REC_FOURCC) {
-            collect_movi(data, chunk.list_body(), stream_count, out);
+            collect_data_chunks(data, chunk.list_body(), stream_count, out);
             continue;
         }
         if walk.overran() {
             break;
         }
-        let Some(stream) = chunk_stream_number(chunk.id) else {
-            continue;
-        };
-        if stream >= stream_count || chunk.body.is_empty() {
-            continue;
-        }
-        out.push(AviChunk {
-            stream,
-            body: chunk.body,
-            keyframe: false,
-        });
+        push_data_chunk(chunk, stream_count, out);
     }
+}
+
+// AVI only puts `rec ` directly in `movi`, so a list inside one is skipped rather than walked
+fn collect_data_chunks(
+    data: &[u8],
+    range: core::ops::Range<usize>,
+    stream_count: usize,
+    out: &mut Vec<AviChunk>,
+) {
+    let mut walk = chunks_to_cut(data, range);
+    while let Some(chunk) = walk.next() {
+        if walk.overran() {
+            break;
+        }
+        push_data_chunk(chunk, stream_count, out);
+    }
+}
+
+fn push_data_chunk(chunk: Chunk, stream_count: usize, out: &mut Vec<AviChunk>) {
+    let Some(stream) = chunk_stream_number(chunk.id) else {
+        return;
+    };
+    if stream >= stream_count || chunk.body.is_empty() {
+        return;
+    }
+    out.push(AviChunk {
+        stream,
+        body: chunk.body,
+        keyframe: false,
+    });
 }
 
 /// Apply the `idx1` keyframe flags to the collected chunks. `idx1` offsets are
@@ -1070,6 +1090,29 @@ mod tests {
                 "a file cut to {cut} bytes must fail the parse"
             );
         }
+    }
+
+    #[test]
+    fn nested_rec_lists_do_not_exhaust_the_stack() {
+        const DEPTH: usize = 1 << 16;
+        const LIST_HEADER_LEN: usize = CHUNK_HEADER_LEN + FOURCC_LEN;
+        let video = *b"00dc";
+        let payload = [1u8, 2, 3, 4];
+        let mut data = Vec::new();
+        for layer in 0..DEPTH {
+            let inner_len =
+                (DEPTH - 1 - layer) * LIST_HEADER_LEN + CHUNK_HEADER_LEN + payload.len();
+            put_chunk_header(&mut data, &LIST_FOURCC, FOURCC_LEN + inner_len);
+            data.extend_from_slice(&REC_FOURCC);
+        }
+        put_chunk(&mut data, &video, &payload);
+        let top_level = data.len() + CHUNK_HEADER_LEN;
+        put_chunk(&mut data, &video, &payload);
+
+        let mut out = Vec::new();
+        collect_movi(&data, 0..data.len(), 1, &mut out);
+        let bodies: Vec<_> = out.iter().map(|chunk| chunk.body.clone()).collect();
+        assert_eq!(bodies, vec![top_level..top_level + payload.len()]);
     }
 
     #[test]
