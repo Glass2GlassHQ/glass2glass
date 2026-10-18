@@ -152,6 +152,13 @@ drops nothing.
 PAT, PMT, SDT and EIT sections reassemble across packets, capped at 1024 bytes
 for the first three and 4096 for the EIT.
 
+Packets on PIDs no table names yet are held until the active program's PMT
+parses, then replayed in order, so a capture that starts between two PMT
+repeats keeps its first access units. At most 8192 packets are held, 0.5 s of
+a 24 Mbit/s multiplex, which is the longest PAT/PMT gap ETSI TR 101 290
+allows. The oldest is dropped when the limit is reached, and null packets are
+never held.
+
 PTS and DTS are 33-bit counters that wrap about every 26.5 hours. The demuxer
 places each one against the last timestamp on its PID: the same cycle, one wrap
 ahead, or one wrap behind once the PID has wrapped, whichever lands within an
