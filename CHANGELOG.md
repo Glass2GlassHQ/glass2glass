@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1521: `rtspsrc` and `rtspsrcn` negotiate a placeholder frame rate when the SPS declares none, so such streams decode.
 - M1520: `srtsrc` sends full ACKs with its free receive buffer, so a libsrt caller no longer stalls after 8192 packets.
 - M1481: the single-output `qtdemux` offers every mp4 video codec at negotiation, so `qtdemux ! h265parse` builds without `stream=h265`.
 - M1480: `mpegtsmux` carries Opus as a private PES with the Opus descriptors and control headers.
