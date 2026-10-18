@@ -15,7 +15,9 @@
 //! header (mkv `CodecPrivate`, the first Ogg packet), which the demuxer forwards
 //! in-band as a leading `fLaC`-prefixed frame; this element takes it as extradata
 //! and opens the decoder lazily (the AAC / MP2 / AC-3 decoders open eagerly at
-//! configure, their frames being self-describing).
+//! configure, their frames being self-describing). ER AAC, ELD and USAC have no
+//! ADTS form, so their raw access units arrive led by the AudioSpecificConfig as
+//! a frame of its own, which reopens the AAC decoder with it as extradata.
 //!
 //! Negotiation: the channel count and sample rate are only known once a frame
 //! decodes, so the element advertises a `PcmS16Le { ANY_CHANNELS, .. }` output at
@@ -70,6 +72,8 @@ pub struct FfmpegAudioDec {
     /// Drives the libavcodec codec choice and the per-format access-unit split.
     format: AudioFormat,
     configured: bool,
+    // the leading config of a raw AAC stream, whose access units arrive one per frame
+    raw_aac_config: Option<Vec<u8>>,
     emitted: u64,
     /// Last emitted output caps, to suppress re-emitting an unchanged `CapsChanged`.
     last_out: Option<Caps>,
@@ -102,6 +106,7 @@ impl FfmpegAudioDec {
             decoder: None,
             format: AudioFormat::Aac,
             configured: false,
+            raw_aac_config: None,
             emitted: 0,
             last_out: None,
         }
@@ -132,7 +137,7 @@ impl FfmpegAudioDec {
     }
 
     /// Open the libavcodec decoder for `self.format`, optionally seeding it with
-    /// `extradata` (FLAC's STREAMINFO). libavcodec owns the extradata buffer (frees
+    /// `extradata` (FLAC's STREAMINFO, a raw AAC stream's AudioSpecificConfig). libavcodec owns the extradata buffer (frees
     /// it on close) and requires the `AV_INPUT_BUFFER_PADDING_SIZE` trailing zero
     /// bytes, the same setup [`FfmpegH264Dec`](crate::ffmpegdec) uses for parameter
     /// sets. Idempotent: a second call while open is a no-op.
@@ -161,6 +166,23 @@ impl FfmpegAudioDec {
                 let raw = decoder_ctx.as_mut_ptr();
                 (*raw).extradata = buf;
                 (*raw).extradata_size = size as i32;
+            }
+        }
+        // without a channel count in the context, libavcodec's ER AAC decode returns frames with no buffer
+        let aac_info = match (self.format, extradata) {
+            (AudioFormat::Aac, Some(config)) => crate::aacparse::audio_specific_config_info(config),
+            _ => None,
+        };
+        if let Some(info) = aac_info {
+            // SAFETY: `decoder_ctx` is not yet opened, and its fresh channel
+            // layout holds no allocated channel map for the default to overwrite.
+            unsafe {
+                let raw = decoder_ctx.as_mut_ptr();
+                (*raw).sample_rate = info.sample_rate as i32;
+                ffmpeg::ffi::av_channel_layout_default(
+                    &mut (*raw).ch_layout,
+                    i32::from(info.channels),
+                );
             }
         }
         let decoder = decoder_ctx
@@ -314,6 +336,19 @@ impl AsyncElement for FfmpegAudioDec {
                             .send_packet(&pkt)
                             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                         self.drain(&mut decoded)?;
+                    } else if self.format == AudioFormat::Aac
+                        && self.raw_aac_config.as_deref() == Some(buf)
+                    {
+                        // a demuxer re-sends the config after a flush or a track switch
+                        return Ok(());
+                    } else if self.format == AudioFormat::Aac
+                        && self.raw_aac_config.is_none()
+                        && crate::aacparse::is_raw_aac_config(buf)
+                    {
+                        self.decoder = None;
+                        self.open_decoder(Some(buf))?;
+                        self.raw_aac_config = Some(buf.to_vec());
+                        return Ok(());
                     } else {
                         // libavcodec wants one access unit per packet, but a demuxed
                         // buffer (one MPEG-TS PES) carries several frames back to
@@ -323,6 +358,7 @@ impl AsyncElement for FfmpegAudioDec {
                         let aus = match self.format {
                             AudioFormat::Mp2 | AudioFormat::Mp3 => mpa_frames(buf),
                             AudioFormat::Ac3 => ac3_frames(buf),
+                            _ if self.raw_aac_config.is_some() => alloc::vec![buf],
                             _ => adts_frames(buf),
                         };
                         for au in aus {
