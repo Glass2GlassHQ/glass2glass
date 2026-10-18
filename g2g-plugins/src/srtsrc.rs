@@ -280,6 +280,8 @@ impl SourceLoop for SrtSrc {
             let mut emitted = 0u64;
             let mut last_nack_ns = 0u64;
             let mut last_ack_ns = 0u64;
+            // Full ACK numbers start at 1 (0 marks a light ACK).
+            let mut ack_no = 0u32;
             loop {
                 // A short receive timeout so buffered packets still flush on their
                 // TSBPD schedule when no new datagram arrives (a silent gap).
@@ -354,8 +356,15 @@ impl SourceLoop for SrtSrc {
                 let ack_due = now.saturating_sub(last_ack_ns) >= ACK_INTERVAL_NS;
                 if let Some(ack_seq) = receiver.ack_seq().filter(|_| ack_due) {
                     last_ack_ns = now;
-                    let ack =
-                        srt::build_control(&Control::Ack { ack_no: 0, ack_seq }, 0, peer_socket_id);
+                    ack_no = ack_no.wrapping_add(1);
+                    let ack = Control::Ack {
+                        ack_no,
+                        ack_seq,
+                        rtt_us: srt::INITIAL_RTT_US,
+                        rtt_variance_us: srt::INITIAL_RTT_VARIANCE_US,
+                        available_buffer: receiver.available_buffer(),
+                    };
+                    let ack = srt::build_control(&ack, 0, peer_socket_id);
                     socket.send_to(&ack, peer).await.map_err(io_err)?;
                 }
             }
