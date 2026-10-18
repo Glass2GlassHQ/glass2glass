@@ -38,7 +38,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    PropValue, PropertySpec, Rate, RawVideoFormat, Segment, VideoCodec,
 };
 
 use zune_jpeg::zune_core::bytestream::ZCursor;
@@ -77,6 +77,7 @@ pub struct MjpegDec {
     out_dims: Option<(u32, u32)>,
     sequence: u64,
     configured: bool,
+    segment: Segment,
 }
 
 impl Default for MjpegDec {
@@ -95,6 +96,7 @@ impl MjpegDec {
             out_dims: None,
             sequence: 0,
             configured: false,
+            segment: Segment::new(),
         }
     }
 
@@ -435,6 +437,9 @@ impl AsyncElement for MjpegDec {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if !self.segment.presents(frame.timing.pts_ns) {
+                        return Ok(());
+                    }
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
@@ -456,6 +461,10 @@ impl AsyncElement for MjpegDec {
                 // the runner forwards Eos after process(Eos) returns; re-emitting
                 // it here races the sink's exit on the first one.
                 PipelinePacket::Eos => {}
+                PipelinePacket::Segment(segment) => {
+                    self.segment = segment;
+                    out.push(PipelinePacket::Segment(segment)).await?;
+                }
                 other => {
                     out.push(other).await?;
                 }

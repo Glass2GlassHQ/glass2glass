@@ -37,7 +37,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
     HardwareError, Interlace, MemoryDomain, OutputSink, OwnedWebGPUExternalTexture, PadTemplate,
-    PadTemplates, PipelinePacket, Rate, RawVideoFormat, VideoCodec, WebGPUKeepAlive,
+    PadTemplates, PipelinePacket, Rate, RawVideoFormat, Segment, VideoCodec, WebGPUKeepAlive,
 };
 
 use wasm_bindgen::prelude::*;
@@ -84,6 +84,7 @@ pub struct WebCodecsDecode {
     decoder_configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
+    segment: Segment,
 }
 
 impl Default for WebCodecsDecode {
@@ -107,6 +108,7 @@ impl WebCodecsDecode {
             decoder_configured: false,
             last_caps: None,
             emitted: 0,
+            segment: Segment::new(),
         }
     }
 
@@ -177,6 +179,10 @@ impl WebCodecsDecode {
     /// system RGBA per the configured output mode.
     async fn drain_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         while let Some(frame) = self.inbox.as_ref().and_then(|i| i.try_pop()) {
+            if !self.segment.presents(video_frame_pts_ns(&frame)) {
+                frame.close();
+                continue;
+            }
             if self.gpu_output {
                 self.emit_external_texture(frame, out).await?;
             } else {
@@ -239,7 +245,7 @@ impl WebCodecsDecode {
         // Visible dims (see `copy_out_rgba` / `visible_dims`): the region the
         // external texture samples, not the SAR-corrected display size.
         let (w, h) = visible_dims(&frame);
-        let pts_ns = (frame.timestamp().max(0.0) as u64).saturating_mul(1000);
+        let pts_ns = video_frame_pts_ns(&frame);
         self.announce_caps(w, h, out).await?;
         let domain = MemoryDomain::WebGPUExternalTexture(OwnedWebGPUExternalTexture::new(
             w,
@@ -387,6 +393,7 @@ impl AsyncElement for WebCodecsDecode {
                     self.drain_ready(out).await?;
                 }
                 PipelinePacket::Segment(seg) => {
+                    self.segment = seg;
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 // future PipelinePacket variants: forward unchanged.
@@ -442,6 +449,11 @@ impl core::fmt::Debug for WebCodecsDecode {
     }
 }
 
+// VideoFrame timestamps are microseconds
+fn video_frame_pts_ns(frame: &VideoFrame) -> u64 {
+    (frame.timestamp().max(0.0) as u64).saturating_mul(1000)
+}
+
 /// Copy one `VideoFrame` out as packed RGBA: `(bytes, width, height, pts_ns)`.
 /// `copyTo` is asked to convert to RGBA; the copy targets a JS `Uint8Array` (not
 /// a wasm-memory slice) because the await can outlive a linear-memory grow that
@@ -453,8 +465,7 @@ pub(crate) async fn copy_out_rgba(
     // Visible-rect dims: `copyTo`/`allocationSize` default to the visible rect,
     // so the RGBA buffer is exactly `visible.w * visible.h * 4`.
     let (w, h) = visible_dims(frame);
-    // VideoFrame timestamps are microseconds; map back to ns.
-    let pts_ns = (frame.timestamp().max(0.0) as u64).saturating_mul(1000);
+    let pts_ns = video_frame_pts_ns(frame);
 
     let opts = VideoFrameCopyToOptions::new();
     opts.set_format(VideoPixelFormat::Rgba);

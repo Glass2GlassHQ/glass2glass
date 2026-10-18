@@ -193,6 +193,12 @@ impl Segment {
         ts >= self.start && self.stop.is_none_or(|stop| ts <= stop)
     }
 
+    // the stop is exclusive, like an edit list's end
+    pub fn presents(&self, pts_ns: u64) -> bool {
+        pts_ns == crate::frame::FrameTiming::PTS_NONE
+            || (pts_ns >= self.start && self.stop.is_none_or(|stop| pts_ns < stop))
+    }
+
     /// Map a stream timestamp to **running time** (pipeline-clock ns), or
     /// `None` if `ts` is outside the segment (or the segment is reverse with no
     /// `stop` to measure from). Rate- and direction-aware:
@@ -416,6 +422,21 @@ mod tests {
         assert_eq!(seg.to_stream_time(1_000), Some(50_000));
         assert_eq!(seg.to_stream_time(2_000), Some(52_000));
         assert_eq!(seg.to_stream_time(500), None);
+    }
+
+    #[test]
+    fn presents_keeps_start_and_drops_stop() {
+        let seg = Segment {
+            start: 1_000,
+            stop: Some(5_000),
+            ..Segment::new()
+        };
+        assert!(!seg.presents(999));
+        assert!(seg.presents(1_000));
+        assert!(seg.presents(4_999));
+        assert!(!seg.presents(5_000));
+        assert!(seg.presents(crate::frame::FrameTiming::PTS_NONE));
+        assert!(Segment::new().presents(u64::MAX - 1));
     }
 
     #[test]

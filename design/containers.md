@@ -708,10 +708,12 @@ the first `moof` rather than at the `moov`.
 `Mp4Demux` and `Mp4DemuxN` turn a video track's edit list into the `Segment`
 they send ahead of its samples: it starts at the first edit's `media_time` and,
 when the list holds that one media edit, stops where the edit ends. Every sample
-still goes downstream, because the cut pictures can be references, and
-`ffmpegdec` drops each decoded picture whose pts is before the start or at or
-past the stop, the frames ffmpeg drops for the same edit. An audio track's
-segment takes only the start, its priming trim.
+still goes downstream, because the cut pictures can be references, and every
+video decoder drops each decoded picture whose pts `Segment::presents` rejects:
+before the start, or at or past the stop, the frames ffmpeg drops for the same
+edit. The intra-only decoders (`mjpegdec`, `jpegxsdec`) skip the cut units
+before decoding them. An audio track's segment takes only the start, its
+priming trim.
 
 Which duration a reader reports depends on the layout, so `Mp4MuxN` writes both,
 selected by the `fragmented` property, default `true`.

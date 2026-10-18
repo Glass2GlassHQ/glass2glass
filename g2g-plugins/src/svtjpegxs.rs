@@ -38,7 +38,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment, VideoCodec,
 };
 
 // ================================================================
@@ -654,6 +654,7 @@ pub struct SvtJpegXsDec {
     /// Total output frame size (sum of component byte sizes).
     frame_size: usize,
     caps_sent: bool,
+    segment: Segment,
 }
 
 // SAFETY: same ownership-transfer contract as `SvtJpegXsEnc`: the `DecoderApi`'s
@@ -688,6 +689,7 @@ impl SvtJpegXsDec {
             components_num: 0,
             frame_size: 0,
             caps_sent: false,
+            segment: Segment::new(),
         }
     }
 }
@@ -755,6 +757,9 @@ impl AsyncElement for SvtJpegXsDec {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if !self.segment.presents(frame.timing.pts_ns) {
+                        return Ok(());
+                    }
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
@@ -786,6 +791,10 @@ impl AsyncElement for SvtJpegXsDec {
                 // A compressed CapsChanged upstream carries no pixel layout; swallow it
                 // (our own output CapsChanged is emitted from the first decoded frame).
                 PipelinePacket::CapsChanged(_) => Ok(()),
+                PipelinePacket::Segment(segment) => {
+                    self.segment = segment;
+                    out.push(PipelinePacket::Segment(segment)).await.map(|_| ())
+                }
                 other => out.push(other).await.map(|_| ()),
             }
         })

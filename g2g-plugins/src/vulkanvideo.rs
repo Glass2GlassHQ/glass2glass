@@ -30,7 +30,8 @@ use g2g_core::runtime::block_on;
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment,
+    VideoCodec,
 };
 
 /// Compiled SPIR-V for the YCbCr -> RGBA compute shader, shared with the Android
@@ -13812,6 +13813,7 @@ pub struct VulkanVideoDec {
     last_caps: Option<Caps>,
     framerate: Rate,
     emitted: u64,
+    segment: Segment,
     /// The resolved output memory domain: `System` (NV12 readback, the default)
     /// or `WgpuTexture` (zero-copy GPU-resident RGBA), settled by
     /// [`configure_allocation`](AsyncElement::configure_allocation) against the
@@ -13987,6 +13989,7 @@ impl VulkanVideoDec {
             last_caps: None,
             framerate: Rate::Any,
             emitted: 0,
+            segment: Segment::new(),
             // Default to system NV12 (works with any sink); a WgpuTexture-capable
             // consumer flips this via `configure_allocation` (the zero-copy path).
             out_domain: MemoryDomainKind::System,
@@ -14276,6 +14279,9 @@ impl VulkanVideoDec {
         f: Nv12Frame,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
+        if !self.segment.presents(src_timing.pts_ns) {
+            return Ok(());
+        }
         let caps = Caps::RawVideo {
             format: two_plane_raw_format(f.bit_depth),
             width: Dim::Fixed(f.width),
@@ -14370,6 +14376,9 @@ impl VulkanVideoDec {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         for (timing, tex) in textures {
+            if !self.segment.presents(timing.pts_ns) {
+                continue;
+            }
             let (w, h) = (tex.width(), tex.height());
             let two_plane_format = match tex.format() {
                 wgpu::TextureFormat::NV12 => Some(RawVideoFormat::Nv12),
@@ -14915,6 +14924,11 @@ impl AsyncElement for VulkanVideoDec {
                     self.reorder_tex.reset();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
+                    Ok(())
+                }
+                PipelinePacket::Segment(segment) => {
+                    self.segment = segment;
+                    out.push(PipelinePacket::Segment(segment)).await?;
                     Ok(())
                 }
                 other => {

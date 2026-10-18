@@ -66,7 +66,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     D3D11KeepAlive, Dim, FrameTiming, G2gError, HardwareError, Interlace, MemoryDomain, OutputSink,
-    OwnedD3D11Texture, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat, VideoCodec,
+    OwnedD3D11Texture, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat, Segment,
+    VideoCodec,
 };
 
 /// Live MFT plus the negotiated output geometry. Recreated nowhere — the
@@ -159,6 +160,7 @@ pub struct MfDecode {
     /// geometry. See `ffmpegdec.rs` for the same field with full notes.
     input_caps: Option<Caps>,
     emitted: u64,
+    segment: Segment,
     /// M12 / W1: the downstream consumer's allocation proposal, recorded in
     /// `configure_allocation`. A `MemoryDomainKind::D3D11Texture` request from a
     /// GPU sink (`D3D11Sink`) is satisfied by construction on the `with_d3d11`
@@ -195,6 +197,7 @@ impl MfDecode {
             last_caps: None,
             input_caps: None,
             emitted: 0,
+            segment: Segment::new(),
             requested_alloc: None,
         }
     }
@@ -462,6 +465,7 @@ impl AsyncElement for MfDecode {
                     self.drain_eos(&mut decoded)?;
                 }
                 PipelinePacket::Segment(seg) => {
+                    self.segment = seg;
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 other => {
@@ -475,6 +479,9 @@ impl AsyncElement for MfDecode {
                 _ => Rate::Any,
             };
             for d in decoded {
+                if !self.segment.presents(d.pts_ns) {
+                    continue;
+                }
                 let new_caps = nv12_caps(d.width, d.height, out_framerate.clone());
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     // M16 workaround #3 Phase A debug assertion:

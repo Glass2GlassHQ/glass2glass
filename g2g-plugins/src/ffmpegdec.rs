@@ -1846,7 +1846,7 @@ impl AsyncElement for FfmpegVideoDec {
                 _ => g2g_core::Colorimetry::UNKNOWN,
             };
             for d in decoded {
-                if !presented_in(&self.segment, d.pts_ns) {
+                if !self.segment.presents(d.pts_ns) {
                     continue;
                 }
                 self.saw_interlaced |= d.interlaced;
@@ -1935,11 +1935,6 @@ impl AsyncElement for FfmpegVideoDec {
             Ok(())
         })
     }
-}
-
-// the stop is exclusive, like an edit list's end
-fn presented_in(segment: &Segment, pts_ns: u64) -> bool {
-    pts_ns >= segment.start && segment.stop.is_none_or(|stop| pts_ns < stop)
 }
 
 /// Single source of truth for the decoder's output-side caps derivation.

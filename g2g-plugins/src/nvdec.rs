@@ -62,7 +62,7 @@ use g2g_core::memory::{CudaKeepAlive, DomainSet, MemoryDomainKind, OwnedCudaBuff
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment,
     SystemSlice, VideoCodec,
 };
 
@@ -104,6 +104,7 @@ pub struct NvDec {
     /// the element; the parser holds a raw pointer to it as user-data.
     state: Box<DecoderState>,
     emitted: u64,
+    segment: Segment,
     /// Caps of the last frame emitted; a decoded frame whose format / geometry
     /// differs (a mid-stream resolution or bit-depth change) re-announces.
     last_caps: Option<Caps>,
@@ -238,6 +239,7 @@ impl NvDec {
                 error: None,
             }),
             emitted: 0,
+            segment: Segment::new(),
             last_caps: None,
             input_caps: None,
             max_display_delay: DEFAULT_MAX_DISPLAY_DELAY,
@@ -527,6 +529,9 @@ impl NvDec {
             return Ok(());
         }
         for f in frames {
+            if !self.segment.presents(f.pts_ns) {
+                continue;
+            }
             // Announce the frame's own format / geometry, so a mid-stream
             // resolution or bit-depth change re-announces before its first frame.
             let caps = self.frame_caps(f.format, f.buffer.width, f.buffer.height);
@@ -1132,6 +1137,10 @@ impl AsyncElement for NvDec {
                     self.input_caps = Some(caps);
                 }
                 PipelinePacket::CapsChanged(_) => {}
+                PipelinePacket::Segment(segment) => {
+                    self.segment = segment;
+                    out.push(PipelinePacket::Segment(segment)).await?;
+                }
                 other => {
                     out.push(other).await?;
                 }
