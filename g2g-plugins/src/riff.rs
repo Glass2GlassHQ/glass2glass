@@ -99,6 +99,7 @@ pub(crate) struct Chunks<'a> {
     pos: usize,
     end: usize,
     overran: bool,
+    yields_cut_chunk: bool,
 }
 
 /// Walk the chunks of `range`, which is clamped to what `data` actually holds.
@@ -108,6 +109,15 @@ pub(crate) fn chunks(data: &[u8], range: Range<usize>) -> Chunks<'_> {
         pos: range.start.min(data.len()),
         end: range.end.min(data.len()),
         overran: false,
+        yields_cut_chunk: false,
+    }
+}
+
+// like `chunks`, but a chunk overrunning the range comes last with its body cut at the range end
+pub(crate) fn chunks_to_cut(data: &[u8], range: Range<usize>) -> Chunks<'_> {
+    Chunks {
+        yields_cut_chunk: true,
+        ..chunks(data, range)
     }
 }
 
@@ -134,7 +144,14 @@ impl Iterator for Chunks<'_> {
         let next = header_end.checked_add(padded_len(size)?)?;
         if body_end > self.end {
             self.overran = true;
-            return None;
+            if !self.yields_cut_chunk {
+                return None;
+            }
+            self.pos = self.end;
+            return Some(Chunk {
+                id,
+                body: header_end..self.end,
+            });
         }
         self.pos = next;
         Some(Chunk {
