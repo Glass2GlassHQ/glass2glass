@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1558: the mp4 demuxers read negative version 0 `ctts` offsets as signed, so the segment clip no longer drops every other frame of those files.
 - M1557: every audio decoder trims its decoded samples to the upstream segment, so an mp4 edit list drops the AAC priming as ffmpeg does.
 - M1554: an `A420` raw format carries alpha, `ffmpegdec` emits it for VP6-alpha and `videoconvert` converts it to I420 and RGBA.
 - M1553: every video decoder drops the pictures outside the upstream segment, so an mp4 edit list cuts frames whichever decoder runs.

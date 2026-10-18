@@ -1301,28 +1301,7 @@ fn parse_progressive_track(
     }
     durations.resize(sample_count, 0);
 
-    // ctts (optional): composition-time offsets for B-frame reorder. v0 carries
-    // them unsigned, v1 signed; `pts = dts + ctts`. Absent => pts == dts.
-    let ctts_offsets: Vec<i64> = match find_box(stbl, b"ctts") {
-        Some(ctts) => {
-            let signed = ctts.first() == Some(&1);
-            let mut out: Vec<i64> = Vec::with_capacity(sample_count);
-            for e in 0..be32(ctts, 4)? as usize {
-                let cnt = be32(ctts, 8 + e * 8)? as usize;
-                let raw = be32(ctts, 12 + e * 8)?;
-                let off = if signed {
-                    raw as i32 as i64
-                } else {
-                    raw as i64
-                };
-                let target = out.len().saturating_add(cnt).min(sample_count);
-                out.resize(target, off);
-            }
-            out.resize(sample_count, 0);
-            out
-        }
-        None => alloc::vec![0i64; sample_count],
-    };
+    let ctts_offsets = composition_offsets(stbl, sample_count)?;
 
     // stco (32-bit) or co64 (64-bit): per-chunk file offsets.
     let chunk_offsets: Vec<u64> = if let Some(stco) = find_box(stbl, b"stco") {
@@ -1460,6 +1439,22 @@ const FIRST_SAMPLE_DESCRIPTION: u32 = 1;
 
 // one sample entry's codec and config-record parameter sets
 type EntryParamSets = (VideoCodec, Vec<Vec<u8>>);
+
+// encoders write negative offsets into version 0 too, so both versions read signed, as in ffmpeg
+fn composition_offsets(stbl: &[u8], sample_count: usize) -> Result<Vec<i64>, G2gError> {
+    let Some(ctts) = find_box(stbl, b"ctts") else {
+        return Ok(alloc::vec![0i64; sample_count]);
+    };
+    let mut out: Vec<i64> = Vec::with_capacity(sample_count);
+    for e in 0..be32(ctts, 4)? as usize {
+        let cnt = be32(ctts, 8 + e * 8)? as usize;
+        let off = i64::from(be32(ctts, 12 + e * 8)? as i32);
+        let target = out.len().saturating_add(cnt).min(sample_count);
+        out.resize(target, off);
+    }
+    out.resize(sample_count, 0);
+    Ok(out)
+}
 
 // the parameter sets of each H.264 / H.265 sample entry, in stsd order
 fn video_entry_param_sets(stbl: &[u8]) -> Result<Vec<Option<EntryParamSets>>, G2gError> {
@@ -2290,6 +2285,27 @@ mod tests {
         let truncated = parse_progressive(&file[..file.len() - 1], 1000).expect("truncated parse");
         assert_eq!(truncated.len(), 1);
         assert_eq!(truncated[0].annexb, samples[0].annexb);
+    }
+
+    #[test]
+    fn composition_offsets_read_signed_in_version_0() {
+        use crate::mp4box::full_box;
+        const NEGATIVE_OFFSET: i32 = -3003;
+        let mut runs = 2u32.to_be_bytes().to_vec();
+        for (count, offset) in [(1u32, 3003i32), (2, NEGATIVE_OFFSET)] {
+            runs.extend_from_slice(&count.to_be_bytes());
+            runs.extend_from_slice(&offset.to_be_bytes());
+        }
+        let stbl = full_box(b"ctts", 0, 0, &runs);
+        assert_eq!(
+            composition_offsets(&stbl, 4).expect("ctts parses"),
+            alloc::vec![
+                3003,
+                i64::from(NEGATIVE_OFFSET),
+                i64::from(NEGATIVE_OFFSET),
+                0
+            ]
+        );
     }
 
     #[test]
