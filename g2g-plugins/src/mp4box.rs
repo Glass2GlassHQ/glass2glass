@@ -25,6 +25,10 @@ pub(crate) fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
 /// A compact box header: 32-bit size, then the type.
 pub(crate) const BOX_HEADER_LEN: usize = 8;
 
+// a 32-bit size of 1 means a 64-bit size follows the type
+const LARGE_SIZE_MARKER: u32 = 1;
+const LARGE_BOX_HEADER_LEN: usize = 16;
+
 /// Append the header of a box whose payload is `payload_len` bytes.
 pub(crate) fn put_box_header(out: &mut Vec<u8>, kind: &[u8; 4], payload_len: usize) {
     out.extend_from_slice(&((payload_len + BOX_HEADER_LEN) as u32).to_be_bytes());
@@ -111,7 +115,7 @@ pub(crate) fn next_box_len(buf: &[u8]) -> Result<Option<usize>, G2gError> {
         return Ok(None);
     }
     let size = be_u32(buf, 0).expect("8 header bytes are buffered");
-    let total = if size == 1 {
+    let total = if size == LARGE_SIZE_MARKER {
         let Some(large_size) = be_u64(buf, 8) else {
             return Ok(None);
         };
@@ -143,12 +147,18 @@ pub(crate) fn boxes(data: &[u8]) -> impl Iterator<Item = (&[u8; 4], &[u8])> {
 pub(crate) fn boxes_at(data: &[u8]) -> impl Iterator<Item = (&[u8; 4], &[u8], usize)> {
     let mut i = 0usize;
     core::iter::from_fn(move || {
-        let size = be_u32(data, i)? as usize;
-        if size < 8 || i + size > data.len() {
+        let (size, header_len) = match be_u32(data, i)? {
+            LARGE_SIZE_MARKER => (
+                usize::try_from(be_u64(data, i + BOX_HEADER_LEN)?).ok()?,
+                LARGE_BOX_HEADER_LEN,
+            ),
+            size => (size as usize, BOX_HEADER_LEN),
+        };
+        if size < header_len || i.checked_add(size)? > data.len() {
             return None;
         }
         let kind: &[u8; 4] = data[i + 4..i + 8].try_into().expect("4 bytes");
-        let payload = &data[i + 8..i + size];
+        let payload = &data[i + header_len..i + size];
         let start = i;
         i += size;
         Some((kind, payload, start))
@@ -193,7 +203,7 @@ pub(crate) fn parse_esds(esds: &[u8]) -> Result<Vec<u8>, G2gError> {
 /// it to confirm the codec before tagging. The DecoderSpecificInfo (0x05) is the
 /// VOL header the software decoder wants as in-band config; some muxers omit it
 /// and carry the config in-band, so its absence is tolerated (empty vec).
-pub(crate) fn parse_esds_video(esds: &[u8]) -> Result<(u8, Vec<u8>), G2gError> {
+pub(crate) fn parse_esds_decoder_config(esds: &[u8]) -> Result<(u8, Vec<u8>), G2gError> {
     // skip the full-box version/flags (4 bytes).
     let es = find_descriptor(esds.get(4..).ok_or(G2gError::CapsMismatch)?, 0x03)
         .ok_or(G2gError::CapsMismatch)?;
@@ -615,10 +625,10 @@ fn itunes_atom(tag: &Tag) -> Option<(&'static [u8; 4], &str)> {
 mod tests {
     use super::*;
 
-    /// `parse_esds_video` returns the DecoderConfig objectTypeIndication and the
+    /// `parse_esds_decoder_config` returns the DecoderConfig objectTypeIndication and the
     /// DecoderSpecificInfo; a missing DSI yields an empty vec (config in-band).
     #[test]
-    fn parse_esds_video_extracts_oti_and_dsi() {
+    fn parse_esds_decoder_config_extracts_oti_and_dsi() {
         let descriptor = |tag: u8, body: &[u8]| {
             let mut v = alloc::vec![tag, body.len() as u8];
             v.extend_from_slice(body);
@@ -641,11 +651,11 @@ mod tests {
         };
 
         let vol: &[u8] = &[0x00, 0x00, 0x01, 0xB0, 0x08];
-        let (oti, dsi) = parse_esds_video(&build(0x20, Some(vol))).expect("parse");
+        let (oti, dsi) = parse_esds_decoder_config(&build(0x20, Some(vol))).expect("parse");
         assert_eq!(oti, 0x20);
         assert_eq!(dsi, vol);
 
-        let (oti, dsi) = parse_esds_video(&build(0x20, None)).expect("parse without DSI");
+        let (oti, dsi) = parse_esds_decoder_config(&build(0x20, None)).expect("parse without DSI");
         assert_eq!(oti, 0x20);
         assert!(dsi.is_empty(), "absent DecoderSpecificInfo is tolerated");
     }

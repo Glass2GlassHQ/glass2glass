@@ -4,7 +4,7 @@
 //! `ByteStream{IsoBmff}`): a progressive `.mp4` / `.mov` keeps its `moov` sample
 //! tables (`stbl`) and an `mdat`, and the `moov` may sit at the *end* of the file
 //! with absolute `stco` chunk offsets, so the whole file is buffered before the
-//! `fmp4::parse_progressive` pass runs at `Eos`.
+//! `fmp4::parse_progressive_multi` pass runs at `Eos`.
 //!
 //! This is what a bare `filesrc location=movie.mp4 ! decodebin` auto-plugs: a file
 //! source types itself `ByteStream{Mp4}` (M478), the auto-plugger picks this
@@ -22,6 +22,7 @@ use core::pin::Pin;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
+use g2g_core::log::short_type_name;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
@@ -29,11 +30,12 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, VideoCodec,
 };
 
-use crate::aacparse::adts_from_asc;
+use crate::aacparse::require_adts;
 use crate::fmp4::{
-    parse_all_tracks, parse_header, parse_progressive, parse_progressive_multi, prepend_param_sets,
-    starts_with_param_set, TrackKind,
+    parse_all_tracks, parse_fragments_multi, parse_progressive_multi, prepend_param_sets,
+    starts_with_param_set, track_framerate_q16, TrackKind,
 };
+use crate::mp4box::find_box;
 use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
 
 /// Which track the single-output demux emits (M748): the video track (the
@@ -50,7 +52,7 @@ enum StreamSelect {
 }
 
 /// The `stream=` names for a codec-named video selection (M961), the set
-/// [`parse_header`](crate::fmp4) can read from a `moov` sample entry. Shared
+/// [`parse_all_tracks`](crate::fmp4) can read from a `moov` sample entry. Shared
 /// with the bare-`decodebin` primary-stream hook, which names the file's actual
 /// codec through this table.
 const VIDEO_STREAM_NAMES: &[(&str, VideoCodec)] = &[
@@ -58,6 +60,8 @@ const VIDEO_STREAM_NAMES: &[(&str, VideoCodec)] = &[
     ("h265", VideoCodec::H265),
     ("av1", VideoCodec::Av1),
     ("mpeg4part2", VideoCodec::Mpeg4Part2),
+    ("vp8", VideoCodec::Vp8),
+    ("mjpeg", VideoCodec::Mjpeg),
 ];
 
 pub(crate) fn mp4_video_stream_str(codec: VideoCodec) -> Option<&'static str> {
@@ -221,8 +225,13 @@ impl Mp4Demux {
         for (_, sample) in parse_progressive_multi(&self.buffer, core::slice::from_ref(audio))? {
             // ADTS-frame the raw AAC access unit from the track's ASC, so a decoder
             // starts without the out-of-band config (like the in-band video param
-            // sets); a malformed ASC leaves the raw bytes.
-            let data = adts_from_asc(config, &sample.annexb).unwrap_or(sample.annexb);
+            // sets); Opus packets go as they are.
+            let data = match format {
+                AudioFormat::Aac => {
+                    require_adts(config, &sample.annexb, short_type_name::<Self>())?
+                }
+                _ => sample.annexb,
+            };
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
                 timing: FrameTiming {
@@ -244,30 +253,52 @@ impl Mp4Demux {
 
     /// Parse the buffered file and emit the video track: announce the concrete
     /// caps from the `moov`, then every access unit (parameter sets prepended to
-    /// the first, matching `fmp4demux`). Idempotent; runs once, at `Eos`.
+    /// the first, matching `fmp4demux`). The track is the first video track, or
+    /// the first of the named codec, read from the sample tables or, in a
+    /// fragmented file, from the `moof`s. Idempotent; runs once, at `Eos`.
     async fn drain_video(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
-        let header = parse_header(&self.buffer)?;
+        let named_codec = match self.select {
+            StreamSelect::VideoNamed(codec) => Some(codec),
+            StreamSelect::Video | StreamSelect::Audio => None,
+        };
+        let tracks = parse_all_tracks(&self.buffer)?;
+        let video = tracks
+            .iter()
+            .find(|t| match t.kind {
+                TrackKind::Video { codec, .. } => named_codec.is_none_or(|named| named == codec),
+                _ => false,
+            })
+            .ok_or(G2gError::CapsMismatch)?;
+        let TrackKind::Video {
+            codec,
+            width,
+            height,
+            param_sets,
+        } = &video.kind
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        let codec = *codec;
         if !self.caps_sent {
-            let framerate = framerate_within_placeholder(header.framerate_q16);
-            let caps = Self::output_caps(
-                header.codec,
-                Dim::Fixed(header.width),
-                Dim::Fixed(header.height),
-                framerate,
-            );
+            let framerate = framerate_within_placeholder(track_framerate_q16(&self.buffer, video));
+            let caps = Self::output_caps(codec, Dim::Fixed(*width), Dim::Fixed(*height), framerate);
             out.push(PipelinePacket::CapsChanged(caps)).await?;
-            self.out_codec = header.codec;
+            self.out_codec = codec;
             self.caps_sent = true;
         }
-        let codec = header.codec;
-        let samples = parse_progressive(&self.buffer, header.timescale)?;
+        let selected = core::slice::from_ref(video);
+        let samples = if find_box(&self.buffer, b"moof").is_some() {
+            parse_fragments_multi(&self.buffer, selected, 0, None)?
+        } else {
+            parse_progressive_multi(&self.buffer, selected)?
+        };
         let mut need_param_sets = true;
-        for s in samples {
+        for (_, s) in samples {
             let mut annexb = s.annexb;
             // The moov's config-record parameter sets are out-of-band, so prepend
             // them to the first access unit if it does not already carry them.
             if need_param_sets && !starts_with_param_set(&annexb, codec) {
-                annexb = prepend_param_sets(&annexb, &header.param_sets, codec);
+                annexb = prepend_param_sets(&annexb, param_sets, codec);
             }
             need_param_sets = false;
             let frame = Frame {
@@ -429,7 +460,7 @@ impl AsyncElement for Mp4Demux {
 static MP4DEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 (the video track by codec) | aac (the audio track)",
+    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | vp8 | mjpeg (the video track by codec) | aac (the audio track)",
 )];
 
 impl PadTemplates for Mp4Demux {
@@ -442,6 +473,8 @@ impl PadTemplates for Mp4Demux {
                 video(VideoCodec::H265),
                 video(VideoCodec::Av1),
                 video(VideoCodec::Mpeg4Part2),
+                video(VideoCodec::Vp8),
+                video(VideoCodec::Mjpeg),
                 Self::audio_nego_caps(),
             ]))),
         ])

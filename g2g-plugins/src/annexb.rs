@@ -372,7 +372,8 @@ fn read_record_nals(
 }
 
 /// Parse an `avcC` (AVCDecoderConfigurationRecord): every SPS then every PPS.
-/// Fails on truncation or a record with no SPS or no PPS.
+/// Fails on truncation or a record with SPS but no PPS (or the reverse). A
+/// record with neither is valid for `avc3`, which carries them in-band.
 pub(crate) fn parse_avcc(avcc: &[u8]) -> Result<DecoderConfigRecord, G2gError> {
     let length_byte = *avcc
         .get(AVCC_LENGTH_SIZE_BYTE)
@@ -388,7 +389,7 @@ pub(crate) fn parse_avcc(avcc: &[u8]) -> Result<DecoderConfigRecord, G2gError> {
     let pps_count = usize::from(*avcc.get(at).ok_or(G2gError::CapsMismatch)?);
     at += 1;
     read_record_nals(avcc, &mut at, pps_count, &mut parameter_sets)?;
-    if sps_count == 0 || pps_count == 0 {
+    if (sps_count == 0) != (pps_count == 0) {
         return Err(G2gError::CapsMismatch);
     }
     Ok(DecoderConfigRecord {
@@ -398,7 +399,8 @@ pub(crate) fn parse_avcc(avcc: &[u8]) -> Result<DecoderConfigRecord, G2gError> {
 }
 
 /// Parse an `hvcC` (HEVCDecoderConfigurationRecord): every NAL of every array,
-/// in array order (VPS, SPS, PPS). Fails on truncation or an empty record.
+/// in array order (VPS, SPS, PPS). Fails on truncation. A record with no arrays
+/// is valid for `hev1`, which carries its parameter sets in-band.
 pub(crate) fn parse_hvcc(hvcc: &[u8]) -> Result<DecoderConfigRecord, G2gError> {
     let length_byte = *hvcc
         .get(HVCC_LENGTH_SIZE_BYTE)
@@ -415,9 +417,6 @@ pub(crate) fn parse_hvcc(hvcc: &[u8]) -> Result<DecoderConfigRecord, G2gError> {
         let num_nalus = usize::from(u16::from_be_bytes([count_bytes[0], count_bytes[1]]));
         at += 2;
         read_record_nals(hvcc, &mut at, num_nalus, &mut parameter_sets)?;
-    }
-    if parameter_sets.is_empty() {
-        return Err(G2gError::CapsMismatch);
     }
     Ok(DecoderConfigRecord {
         parameter_sets,
@@ -773,18 +772,16 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// MSB-first bit writer, the inverse of [`BitReader`]. Test-only: the codec
-/// parsers (`h264parse`, `h265parse`, `av1parse`, `vp9parse`) and `vulkanvideo`
-/// hand-build RBSP / bitstream fragments to feed their parsers, and all wrote an
-/// identical copy of this before it was shared here.
-#[cfg(test)]
-#[derive(Default)]
+/// MSB-first bit writer, the inverse of [`BitReader`]. `aacparse` writes the
+/// AAC program config element with it, and the codec parser tests (`h264parse`,
+/// `h265parse`, `av1parse`, `vp9parse`) and `vulkanvideo` hand-build RBSP /
+/// bitstream fragments to feed their parsers.
+#[derive(Debug, Default)]
 pub(crate) struct BitWriter {
     buf: Vec<u8>,
     bit_pos: usize,
 }
 
-#[cfg(test)]
 impl BitWriter {
     pub(crate) fn write_bit(&mut self, b: u32) {
         let byte_idx = self.bit_pos / 8;
@@ -803,6 +800,7 @@ impl BitWriter {
     }
 
     /// Unsigned Exp-Golomb (`ue(v)`), the H.264/H.265 RBSP coding.
+    #[cfg(test)]
     pub(crate) fn write_ue(&mut self, v: u32) {
         let v1 = v + 1;
         let n = 31 - v1.leading_zeros();
@@ -985,6 +983,9 @@ mod tests {
         // Truncated record, or one without a PPS, fails.
         assert!(parse_avcc(&avcc[..7]).is_err());
         assert!(parse_avcc(&build_avcc(&[sps], &[], 4)).is_err());
+        // an avc3 record with neither carries them in-band
+        let in_band = parse_avcc(&build_avcc(&[], &[], 4)).expect("empty avcC");
+        assert!(in_band.parameter_sets.is_empty());
     }
 
     #[test]
@@ -1006,6 +1007,11 @@ mod tests {
         assert_eq!(record.nal_length_size, 4);
         assert_eq!(record.parameter_sets, vec![vps, sps, pps]);
         assert!(parse_hvcc(&hvcc[..24]).is_err());
+        // an hev1 record with no arrays carries its sets in-band
+        let mut no_arrays = hvcc[..=HVCC_ARRAY_COUNT_BYTE].to_vec();
+        no_arrays[HVCC_ARRAY_COUNT_BYTE] = 0;
+        let in_band = parse_hvcc(&no_arrays).expect("empty hvcC");
+        assert!(in_band.parameter_sets.is_empty());
     }
 
     #[test]

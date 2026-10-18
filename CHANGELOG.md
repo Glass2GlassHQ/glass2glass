@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1502: mp4 AAC with a program config element decodes, and ER AAC, ELD and USAC fail loud in the demuxer.
+- M1501: mp4 demuxers put a new sample description's parameter sets in-band where the track switches to it.
+- M1500: the single-output `qtdemux` reads fragmented, truncated and version 1 files, the video track behind an audio track, and VP8 / MJPEG.
 - M1522: `mp4mux` text and audio samples with no decode timestamp decode when they present, so a first cue keeps its start time in a fragmented file.
 - M1513: `flacparse` ends a frame only at a sync that continues the frame number or closes a valid CRC-16, and drops a truncated last frame.
 - M1512: `opusdec` decodes multichannel Opus with the `OpusHead` channel mapping or the RFC 7845 defaults.
