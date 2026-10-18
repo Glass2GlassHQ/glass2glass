@@ -28,7 +28,7 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use g2g_core::{Chapter, SubPictureFormat, Tag, TagList, TextFormat};
+use g2g_core::{AudioFormat, Chapter, SubPictureFormat, Tag, TagList, TextFormat};
 
 use crate::dvbsub::{page_id_blob, parse_page_ids, segment_span, PageIds, DEFAULT_SUBTITLING_TYPE};
 use crate::fifobuffer::FifoBuffer;
@@ -83,6 +83,7 @@ const ID_CONTENT_COMP_SETTINGS: u32 = 0x4255;
 const ID_CONTENT_ENCRYPTION: u32 = 0x5035;
 const ID_CHANNELS: u32 = 0x009F;
 const ID_SAMPLING_FREQ: u32 = 0x00B5;
+const ID_BIT_DEPTH: u32 = 0x6264;
 const ID_CLUSTER: u32 = 0x1F43_B675;
 const ID_TIMESTAMP: u32 = 0x00E7;
 const ID_SIMPLE_BLOCK: u32 = 0x00A3;
@@ -178,6 +179,13 @@ pub enum MkvCodec {
     Pgs,
     /// A `CodecID` this demuxer does not map to a g2g caps type.
     Other,
+    /// Raw PCM (`A_PCM/INT/LIT`, `A_PCM/INT/BIG`, `A_PCM/FLOAT/IEEE`): `format` is
+    /// the CodecID's layout at the track's `BitDepth`, and `big_endian` samples are
+    /// byte-swapped into it at demux.
+    Pcm {
+        format: AudioFormat,
+        big_endian: bool,
+    },
 }
 
 impl MkvCodec {
@@ -250,7 +258,8 @@ impl MkvCodec {
             MkvCodec::VobSub => b"S_VOBSUB",
             MkvCodec::DvbSub => b"S_DVBSUB",
             MkvCodec::Pgs => b"S_HDMV/PGS",
-            MkvCodec::Subtitle(_) | MkvCodec::Other => return None,
+            // `A_PCM/*` is a read-side mapping only: the muxer writes no `BitDepth`.
+            MkvCodec::Subtitle(_) | MkvCodec::Other | MkvCodec::Pcm { .. } => return None,
         })
     }
 
@@ -265,7 +274,12 @@ impl MkvCodec {
     /// `1` for video, `2` for audio, `0x11` for subtitle (the Matroska `TrackType`).
     fn track_type(self) -> u8 {
         match self {
-            MkvCodec::Aac | MkvCodec::Opus | MkvCodec::Ac3 | MkvCodec::Flac | MkvCodec::Vorbis => 2,
+            MkvCodec::Aac
+            | MkvCodec::Opus
+            | MkvCodec::Ac3
+            | MkvCodec::Flac
+            | MkvCodec::Vorbis
+            | MkvCodec::Pcm { .. } => 2,
             MkvCodec::Subtitle(_) | MkvCodec::VobSub | MkvCodec::DvbSub | MkvCodec::Pgs => 0x11,
             _ => 1,
         }
@@ -1176,6 +1190,7 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
     let mut height = 0u32;
     let mut channels = 0u8;
     let mut sample_rate = 0u32;
+    let mut bit_depth = 0u64;
     let mut default_duration_ns = 0u64;
     let mut compression = None;
     for (id, data) in children(body) {
@@ -1206,6 +1221,7 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
                     match aid {
                         ID_CHANNELS => channels = read_uint(adata) as u8,
                         ID_SAMPLING_FREQ => sample_rate = read_float(adata) as u32,
+                        ID_BIT_DEPTH => bit_depth = read_uint(adata),
                         _ => {}
                     }
                 }
@@ -1227,7 +1243,9 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
         tags.push(Tag::Language(String::from(lang)));
     }
     let codec = match MkvCodec::from_codec_id(codec_id) {
-        MkvCodec::Other => vfw_codec(codec_id, codec_private).unwrap_or(MkvCodec::Other),
+        MkvCodec::Other => pcm_codec(codec_id, bit_depth)
+            .or_else(|| vfw_codec(codec_id, codec_private))
+            .unwrap_or(MkvCodec::Other),
         codec => codec,
     };
     Some(ParsedTrack {
@@ -1247,6 +1265,19 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
         tags,
         compression,
     })
+}
+
+// the sample format of an `A_PCM/*` track, `None` for another CodecID or a depth no PCM format has
+fn pcm_codec(codec_id: &[u8], bit_depth: u64) -> Option<MkvCodec> {
+    use crate::waveformat::{audio_format, WAVE_FORMAT_IEEE_FLOAT, WAVE_FORMAT_PCM};
+    let (wave_format_tag, big_endian) = match without_nul_padding(codec_id) {
+        b"A_PCM/INT/LIT" => (WAVE_FORMAT_PCM, false),
+        b"A_PCM/INT/BIG" => (WAVE_FORMAT_PCM, true),
+        b"A_PCM/FLOAT/IEEE" => (WAVE_FORMAT_IEEE_FLOAT, false),
+        _ => return None,
+    };
+    let format = audio_format(wave_format_tag, u16::try_from(bit_depth).ok()?)?;
+    Some(MkvCodec::Pcm { format, big_endian })
 }
 
 const VFW_CODEC_ID: &str = "V_MS/VFW/FOURCC";
@@ -2854,12 +2885,13 @@ mod tests {
         )
     }
 
-    /// A single-track file whose `TrackEntry` carries `encodings` and whose one
-    /// Cluster holds `block` as that track's only block payload.
-    fn encoded_file(codec: &[u8], encodings: &[u8], block: &[u8]) -> Vec<u8> {
+    /// A single-track file whose `TrackEntry` carries the `entry_children`
+    /// elements (`ContentEncodings`, `Audio`) and whose one Cluster holds `block`
+    /// as that track's only block payload.
+    fn encoded_file(codec: &[u8], entry_children: &[u8], block: &[u8]) -> Vec<u8> {
         let mut entry = elem(&[0xD7], &uint_body(1));
         entry.extend_from_slice(&elem(&[0x86], codec));
-        entry.extend_from_slice(encodings);
+        entry.extend_from_slice(entry_children);
         let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &elem(&[0xAE], &entry));
         let cluster = elem(
             &[0x1F, 0x43, 0xB6, 0x75],
@@ -2990,6 +3022,30 @@ mod tests {
         d.push_data(&encoded_file(b"S_TEXT/UTF8", &scoped, b"stored bytes"));
         assert!(d.tracks()[0].unsupported_encoding, "scope 2");
         assert_eq!(d.take_frames()[0].data, &b"stored bytes"[..]);
+    }
+
+    /// `A_PCM/*` maps to the PCM format of its byte order and `BitDepth`, and a
+    /// depth no g2g format carries stays an unmapped codec `decodebin` names.
+    #[test]
+    fn maps_pcm_codec_ids_at_their_bit_depth() {
+        let pcm = |format, big_endian| Some(MkvCodec::Pcm { format, big_endian });
+        let cases: [(&[u8], u64, Option<MkvCodec>); 5] = [
+            (b"A_PCM/INT/LIT", 8, pcm(AudioFormat::PcmU8, false)),
+            (b"A_PCM/INT/LIT", 16, pcm(AudioFormat::PcmS16Le, false)),
+            (b"A_PCM/INT/BIG", 24, pcm(AudioFormat::PcmS24Le, true)),
+            (b"A_PCM/FLOAT/IEEE", 32, pcm(AudioFormat::PcmF32Le, false)),
+            (b"A_PCM/FLOAT/IEEE", 64, None),
+        ];
+        for (codec_id, bit_depth, want) in cases {
+            let audio = elem(&[0xE1], &elem(&[0x62, 0x64], &uint_body(bit_depth)));
+            let mut d = MatroskaDemuxer::new();
+            d.push_data(&encoded_file(codec_id, &audio, b"samples"));
+            let name = core::str::from_utf8(codec_id).unwrap();
+            match want {
+                Some(codec) => assert_eq!(d.tracks()[0].codec, codec, "{name} {bit_depth}"),
+                None => assert_eq!(d.unmapped_codec_ids(), [name], "{bit_depth}"),
+            }
+        }
     }
 
     #[test]

@@ -439,7 +439,11 @@ element IDs and sizes, descend into the Segment, read Tracks for the elementary
 streams and `Info` TimestampScale, then parse each Cluster's SimpleBlock and
 Block frames with scaled timestamps. `MkvDemux` wraps it with a per-codec
 `MkvStream` selection, H.264 / H.265 / VP8 / VP9 / AV1 / MJPEG video and AAC /
-Opus / AC-3 / FLAC / Vorbis audio, defaulting to VP9. MJPEG is `V_MJPEG` or a
+Opus / AC-3 / FLAC / Vorbis / PCM audio, defaulting to VP9. An `A_PCM/*` track
+takes the PCM format its byte order and `BitDepth` name, the `WAVEFORMATEX`
+table WAV and AVI use, and big-endian samples are swapped at demux. A PCM or
+bitmap-subtitle track under a `ContentEncoding` the demuxer cannot undo fails
+the stream. MJPEG is `V_MJPEG` or a
 `V_MS/VFW/FOURCC` track whose BITMAPINFOHEADER names `MJPG`. A Vorbis track's
 `CodecPrivate` Xiph-laces the three headers, which go in band as three packets
 ahead of the first block, and its blocks go untimed, because millisecond block
@@ -564,6 +568,13 @@ from the first packet's `OpusHead`, skip the setup headers. `OggDemux` emits the
 Opus audio packets as `Caps::Audio{Opus}` with the channel count refined from
 `OpusHead`. The container is auto-detectable through `typefind` "OggS" and
 `filesrc bytestream-format=auto`.
+
+The VP8 mapping is the one video mapping: its `OVP80` stream-info header gives
+the coded size and frame rate, the header packets stay in the container, and
+each frame is timed by the count of shown frames before it, so an invisible
+frame takes no time. A Theora stream is recognised only to be named: `decodebin`
+reports it as a stream without a decoder instead of offering the audio behind
+it to a video consumer.
 
 ### Grouped multi-stream Ogg
 
