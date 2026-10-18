@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1544: `decodebin` puts `mpegvideoparse` ahead of the MPEG-2 decoder, so a transport stream whose PES packets split pictures decodes cleanly.
 - M1543: `matroskademux` reads a Cluster block by block, so a file cut short inside a Cluster keeps its complete blocks.
 - M1523: `whepsrc` drops video until the first keyframe through the shared WebRTC receiver, like the other WebRTC sources.
 - M1495: `matroskademux` reads Vorbis and MJPEG tracks, including MJPEG behind a `V_MS/VFW/FOURCC` id.

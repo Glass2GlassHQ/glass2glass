@@ -264,7 +264,9 @@ use crate::{opusdec::OpusDec, opusenc::OpusEnc};
 /// `parse_launch` shares this mapping; both launch registrations construct the
 /// re-framing form). Returns `None` for codecs without a re-framing parser (the
 /// input decodes directly). H.264 (M421) and H.265 (M425) re-frame to one access
-/// unit per packet, AV1 to one temporal unit (a raw `.obu` byte stream); FLAC frame-aligns via `flacparse` (M775, a bare `.flac` byte
+/// unit per packet, AV1 to one temporal unit (a raw `.obu` byte stream), MPEG-1 / MPEG-2
+/// video to one picture (a transport stream's PES packets need not align to
+/// pictures); FLAC frame-aligns via `flacparse` (M775, a bare `.flac` byte
 /// stream carries no frame lengths), and MPEG audio, AAC and AC-3 frame-align via
 /// `mpegaudioparse` / `aacparse` / `ac3parse` (M1065, M1074: one self-syncing
 /// frame per packet); other audio decodes directly. JPEG and PNG frame into
@@ -284,6 +286,10 @@ fn decode_parser_provider(input: &Caps) -> Option<&'static str> {
             codec: g2g_core::VideoCodec::Av1,
             ..
         } => Some("av1parse"),
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::Mpeg2,
+            ..
+        } => Some("mpegvideoparse"),
         Caps::CompressedVideo {
             codec: g2g_core::VideoCodec::Mpeg4Part2,
             ..
