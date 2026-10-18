@@ -59,7 +59,7 @@ pub(crate) fn carries_yuv(format: RawVideoFormat) -> bool {
 pub(crate) fn even_dims_required(format: RawVideoFormat) -> (bool, bool) {
     match format {
         RawVideoFormat::Nv12 | RawVideoFormat::P010 => (true, true),
-        RawVideoFormat::Yuyv => (true, false),
+        RawVideoFormat::Yuyv | RawVideoFormat::Uyvy => (true, false),
         _ => match format.chroma_shift() {
             Some((hs, vs)) => (hs > 0, vs > 0),
             None => (false, false),
@@ -189,7 +189,7 @@ pub(crate) fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
 pub(crate) mod tests {
     use super::*;
 
-    pub(crate) const EVERY_FORMAT: [RawVideoFormat; 16] = [
+    pub(crate) const EVERY_FORMAT: [RawVideoFormat; 17] = [
         RawVideoFormat::Nv12,
         RawVideoFormat::I420,
         RawVideoFormat::Rgba8,
@@ -206,6 +206,7 @@ pub(crate) mod tests {
         RawVideoFormat::I444p12,
         RawVideoFormat::P010,
         RawVideoFormat::A420,
+        RawVideoFormat::Uyvy,
     ];
 
     // odd and even on each axis, so a subsampled chroma plane has to round up

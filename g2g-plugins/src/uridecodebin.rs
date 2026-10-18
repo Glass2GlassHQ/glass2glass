@@ -2060,6 +2060,9 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
                 Caps::CompressedVideo { codec, .. } => {
                     crate::mp4demux::mp4_video_stream_str(codec)?
                 }
+                Caps::RawVideo { format, .. } => {
+                    crate::uncompressedvideo::raw_video_stream_str(format)?
+                }
                 Caps::Audio { format, .. } => crate::mp4demux::mp4_audio_stream_str(format)?,
                 _ => return None,
             };
@@ -2427,6 +2430,9 @@ pub fn avi_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
         .filter_map(|info| {
             let stream = match &info.caps {
                 Caps::CompressedVideo { codec, .. } => crate::avidemux::video_stream_str(*codec)?,
+                Caps::RawVideo { format, .. } => {
+                    crate::uncompressedvideo::raw_video_stream_str(*format)?
+                }
                 Caps::Audio { format, .. } => crate::avidemux::audio_stream_str(*format)?,
                 _ => return None,
             };

@@ -268,6 +268,7 @@ pub fn raw_format_to_u8(f: RawVideoFormat) -> u8 {
         RawVideoFormat::P010 => 13,
         RawVideoFormat::Rgb8 => 14,
         RawVideoFormat::A420 => 15,
+        RawVideoFormat::Uyvy => 16,
     }
 }
 /// Inverse of [`raw_format_to_u8`]; errors on an unknown byte (never trust the
@@ -290,6 +291,7 @@ pub fn raw_format_from_u8(v: u8) -> Result<RawVideoFormat, WireError> {
         13 => RawVideoFormat::P010,
         14 => RawVideoFormat::Rgb8,
         15 => RawVideoFormat::A420,
+        16 => RawVideoFormat::Uyvy,
         _ => return Err(WireError::BadTag),
     })
 }

@@ -44,6 +44,7 @@ use crate::fmp4::{
     parse_progressive_multi, starts_with_param_set, Sample, TrackHeader, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
+use crate::uncompressedvideo::{raw_video_frame_bytes, warn_short_raw_video_frame};
 
 /// The id a track carries in the `StreamCollection` and on its `StreamTag`s.
 pub(crate) fn stream_id(track_id: u32) -> alloc::string::String {
@@ -83,6 +84,10 @@ pub struct Mp4StreamInfo {
 /// convention [`TsDemux`](crate::tsdemux::TsDemux) uses. Refined at runtime by
 /// [`real_caps`] via the port's `CapsChanged`.
 fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
+    let framerate_span = Rate::Range {
+        min_q16: 1 << 16,
+        max_q16: 240 << 16,
+    };
     match kind {
         TrackKind::Video {
             codec,
@@ -94,12 +99,22 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
                 codec: *codec,
                 width: Dim::Fixed(*width),
                 height: Dim::Fixed(*height),
-                framerate: Rate::Range {
-                    min_q16: 1 << 16,
-                    max_q16: 240 << 16,
-                },
+                framerate: framerate_span,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
+            true,
+        ),
+        TrackKind::RawVideo {
+            format,
+            width,
+            height,
+        } => (
+            crate::uncompressedvideo::raw_video_caps(
+                *format,
+                Dim::Fixed(*width),
+                Dim::Fixed(*height),
+                framerate_span,
+            ),
             true,
         ),
         // PCM negotiates its real layout, as `AviDemux` does, since a lone wildcard cannot fixate
@@ -127,9 +142,10 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
 /// For video this equals [`nego_caps`] (geometry is already concrete).
 pub(crate) fn real_caps(kind: &TrackKind) -> Caps {
     match kind {
-        TrackKind::Video { .. } | TrackKind::Text { .. } | TrackKind::ClosedCaption { .. } => {
-            nego_caps(kind).0
-        }
+        TrackKind::Video { .. }
+        | TrackKind::RawVideo { .. }
+        | TrackKind::Text { .. }
+        | TrackKind::ClosedCaption { .. } => nego_caps(kind).0,
         TrackKind::Audio {
             format,
             channels,
@@ -176,6 +192,7 @@ pub fn forwardable_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
                     let config = match &t.kind {
                         TrackKind::Audio { config, .. } => config.clone(),
                         TrackKind::Video { .. }
+                        | TrackKind::RawVideo { .. }
                         | TrackKind::Text { .. }
                         | TrackKind::ClosedCaption { .. } => Vec::new(),
                     };
@@ -567,7 +584,7 @@ impl Mp4DemuxN {
             .iter()
             .map(|t| {
                 let ty = match t.kind {
-                    TrackKind::Video { .. } => StreamType::Video,
+                    TrackKind::Video { .. } | TrackKind::RawVideo { .. } => StreamType::Video,
                     TrackKind::Audio { .. } => StreamType::Audio,
                     // A caption track is a text stream to a selector, even though
                     // its samples are cc_data rather than cues.
@@ -892,6 +909,18 @@ impl Mp4DemuxN {
                 // MP3 frames carry their own headers, and the sample parse already
                 // turned PCM into the graph's byte layout
                 Some(TrackKind::Audio { .. }) => {}
+                Some(TrackKind::RawVideo {
+                    format,
+                    width,
+                    height,
+                }) => {
+                    let Some(pixels) = raw_video_frame_bytes(*format, *width, *height, data.len())
+                    else {
+                        warn_short_raw_video_frame("qtdemux", *format, *width, *height, data.len());
+                        continue;
+                    };
+                    data.truncate(pixels);
+                }
                 // Text cues and caption cc_data arrive already de-framed by the
                 // sample parse (the tx3g length prefix stripped, the caption atoms
                 // unwrapped); forward the payload as is.

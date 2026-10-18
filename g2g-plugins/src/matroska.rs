@@ -30,7 +30,7 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use g2g_core::{AudioFormat, Chapter, SubPictureFormat, Tag, TagList, TextFormat};
+use g2g_core::{AudioFormat, Chapter, RawVideoFormat, SubPictureFormat, Tag, TagList, TextFormat};
 
 use crate::dvbsub::{page_id_blob, parse_page_ids, segment_span, PageIds, DEFAULT_SUBTITLING_TYPE};
 use crate::fifobuffer::FifoBuffer;
@@ -74,6 +74,7 @@ const ID_DEFAULT_DURATION: u32 = 0x0023_E383;
 const ID_VIDEO: u32 = 0x00E0;
 const ID_PIXEL_WIDTH: u32 = 0x00B0;
 const ID_PIXEL_HEIGHT: u32 = 0x00BA;
+const ID_COLOUR_SPACE: u32 = 0x002E_B524;
 const ID_AUDIO: u32 = 0x00E1;
 const ID_CONTENT_ENCODINGS: u32 = 0x6D80;
 const ID_CONTENT_ENCODING: u32 = 0x6240;
@@ -188,6 +189,8 @@ pub enum MkvCodec {
         format: AudioFormat,
         big_endian: bool,
     },
+    // `V_UNCOMPRESSED` with its `ColourSpace` fourcc, or a `V_MS/VFW/FOURCC` naming a raw layout
+    RawVideo(RawVideoFormat),
 }
 
 impl MkvCodec {
@@ -261,7 +264,10 @@ impl MkvCodec {
             MkvCodec::DvbSub => b"S_DVBSUB",
             MkvCodec::Pgs => b"S_HDMV/PGS",
             // `A_PCM/*` is a read-side mapping only: the muxer writes no `BitDepth`.
-            MkvCodec::Subtitle(_) | MkvCodec::Other | MkvCodec::Pcm { .. } => return None,
+            MkvCodec::Subtitle(_)
+            | MkvCodec::Other
+            | MkvCodec::Pcm { .. }
+            | MkvCodec::RawVideo(_) => return None,
         })
     }
 
@@ -1232,6 +1238,7 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
     let mut codec_private: &[u8] = &[];
     let mut width = 0u32;
     let mut height = 0u32;
+    let mut colour_space: Option<[u8; 4]> = None;
     let mut channels = 0u8;
     let mut sample_rate = 0u32;
     let mut bit_depth = 0u64;
@@ -1256,6 +1263,7 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
                     match vid {
                         ID_PIXEL_WIDTH => width = read_uint(vdata) as u32,
                         ID_PIXEL_HEIGHT => height = read_uint(vdata) as u32,
+                        ID_COLOUR_SPACE => colour_space = vdata.try_into().ok(),
                         _ => {}
                     }
                 }
@@ -1289,6 +1297,7 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
     let codec = match MkvCodec::from_codec_id(codec_id) {
         MkvCodec::Other => pcm_codec(codec_id, bit_depth)
             .or_else(|| vfw_codec(codec_id, codec_private))
+            .or_else(|| uncompressed_codec(codec_id, colour_space?))
             .unwrap_or(MkvCodec::Other),
         codec => codec,
     };
@@ -1340,9 +1349,18 @@ fn vfw_fourcc<'a>(codec_id: &[u8], codec_private: &'a [u8]) -> Option<&'a [u8]> 
 }
 
 fn vfw_codec(codec_id: &[u8], codec_private: &[u8]) -> Option<MkvCodec> {
-    vfw_fourcc(codec_id, codec_private)?
-        .eq_ignore_ascii_case(b"MJPG")
-        .then_some(MkvCodec::Mjpeg)
+    let fourcc = vfw_fourcc(codec_id, codec_private)?;
+    if fourcc.eq_ignore_ascii_case(b"MJPG") {
+        return Some(MkvCodec::Mjpeg);
+    }
+    crate::uncompressedvideo::raw_video_format(fourcc.try_into().ok()?).map(MkvCodec::RawVideo)
+}
+
+fn uncompressed_codec(codec_id: &[u8], colour_space: [u8; 4]) -> Option<MkvCodec> {
+    (without_nul_padding(codec_id) == b"V_UNCOMPRESSED")
+        .then(|| crate::uncompressedvideo::raw_video_format(colour_space))
+        .flatten()
+        .map(MkvCodec::RawVideo)
 }
 
 // the packet count less one, the 255-run sizes of all but the last packet, then the packets

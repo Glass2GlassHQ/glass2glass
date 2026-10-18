@@ -473,6 +473,7 @@ pub fn parse_raw_format(s: &str) -> Option<RawVideoFormat> {
         "y444_12le" => RawVideoFormat::I444p12,
         "p010_10le" | "p010" => RawVideoFormat::P010,
         "a420" => RawVideoFormat::A420,
+        "uyvy" => RawVideoFormat::Uyvy,
         _ => return None,
     })
 }

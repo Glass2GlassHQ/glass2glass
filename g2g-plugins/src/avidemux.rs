@@ -29,7 +29,8 @@ use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, MultiOutputElement, MultiOutputSink,
     OutputSink, PadTemplate, PadTemplates, PropError, PropKind, PropValue, PropertySpec, Rate,
-    Stream, StreamCollection, StreamType, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    RawVideoFormat, Stream, StreamCollection, StreamType, VideoCodec, ANY_CHANNELS,
+    ANY_SAMPLE_RATE,
 };
 
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
@@ -37,6 +38,10 @@ use crate::annexb::{
     is_annex_b, length_prefixed_to_annexb, parse_avcc, prepend_param_sets, starts_with_param_set,
 };
 use crate::avi::{parse, parse_streams, AviFile, AviStream, AviStreamKind};
+use crate::uncompressedvideo::{
+    raw_video_caps, raw_video_formats, raw_video_frame_bytes, raw_video_placeholder_caps,
+    raw_video_stream_from_str, raw_video_stream_str, warn_short_raw_video_frame,
+};
 
 /// The `stream=` names for a codec-named video selection, so a decode chain
 /// negotiates the file's real codec instead of the nominal default.
@@ -78,6 +83,7 @@ pub enum AviStreamSelect {
     #[default]
     Video,
     VideoNamed(VideoCodec),
+    RawVideo(RawVideoFormat),
     /// The first audio stream, its format refined from the file at `Eos`.
     Audio,
     AudioNamed(AudioFormat),
@@ -105,6 +111,7 @@ fn select_from_str(name: &str) -> Option<AviStreamSelect> {
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(_, c)| AviStreamSelect::VideoNamed(*c))
+            .or_else(|| raw_video_stream_from_str(name).map(AviStreamSelect::RawVideo))
             .or_else(|| {
                 AUDIO_STREAM_NAMES
                     .iter()
@@ -128,11 +135,15 @@ fn video_caps(codec: VideoCodec, width: Dim, height: Dim) -> Caps {
         codec,
         width,
         height,
-        framerate: Rate::Range {
-            min_q16: MIN_RATE_Q16,
-            max_q16: MAX_RATE_Q16,
-        },
+        framerate: framerate_span(),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+    }
+}
+
+fn framerate_span() -> Rate {
+    Rate::Range {
+        min_q16: MIN_RATE_Q16,
+        max_q16: MAX_RATE_Q16,
     }
 }
 
@@ -188,6 +199,19 @@ fn nego_caps(kind: &AviStreamKind) -> Option<(Caps, bool)> {
             height,
         } => Some((
             video_caps(*codec, Dim::Fixed(*width), Dim::Fixed(*height)),
+            true,
+        )),
+        AviStreamKind::RawVideo {
+            format,
+            width,
+            height,
+        } => Some((
+            raw_video_caps(
+                *format,
+                Dim::Fixed(*width),
+                Dim::Fixed(*height),
+                framerate_span(),
+            ),
             true,
         )),
         AviStreamKind::Audio {
@@ -312,10 +336,11 @@ fn h264_config(stream: &AviStream) -> H264Config {
 
 /// Re-frame one chunk's payload for the pipeline: AVCC H.264 to Annex-B with
 /// the out-of-band parameter sets ahead of the first access unit, raw AAC to
-/// ADTS where ADTS can carry its config, everything else untouched. `first` is
-/// set only for the stream's opening chunk.
-fn deframe(stream: &AviStream, h264: &H264Config, data: &[u8], first: bool) -> Vec<u8> {
-    match &stream.kind {
+/// ADTS where ADTS can carry its config, uncompressed video cut to its pixels,
+/// everything else untouched. `first` is set only for the stream's opening
+/// chunk. `None` drops an uncompressed frame too short for its geometry.
+fn deframe(stream: &AviStream, h264: &H264Config, data: &[u8], first: bool) -> Option<Vec<u8>> {
+    Some(match &stream.kind {
         AviStreamKind::Video {
             codec: VideoCodec::H264,
             ..
@@ -341,8 +366,19 @@ fn deframe(stream: &AviStream, h264: &H264Config, data: &[u8], first: bool) -> V
             format: AudioFormat::Aac,
             ..
         } => adts_from_asc(&stream.codec_config, data).unwrap_or_else(|| Vec::from(data)),
+        AviStreamKind::RawVideo {
+            format,
+            width,
+            height,
+        } => {
+            let Some(pixels) = raw_video_frame_bytes(*format, *width, *height, data.len()) else {
+                warn_short_raw_video_frame("avidemux", *format, *width, *height, data.len());
+                return None;
+            };
+            Vec::from(&data[..pixels])
+        }
         _ => Vec::from(data),
-    }
+    })
 }
 
 /// One chunk ready to leave the demuxer: which stream, the re-framed payload,
@@ -400,6 +436,14 @@ fn emittable<'a>(
                 bytes,
                 first[chunk.stream],
             );
+            let timing = FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                duration_ns,
+                capture_ns: pts_ns,
+                keyframe: chunk.keyframe,
+                ..FrameTiming::default()
+            };
             let lead_config =
                 raw_aac_config(stream)
                     .filter(|_| first[chunk.stream])
@@ -409,17 +453,10 @@ fn emittable<'a>(
                         timing: FrameTiming::default(),
                     });
             first[chunk.stream] = false;
-            lead_config.into_iter().chain(core::iter::once(Emitted {
+            lead_config.into_iter().chain(payload.map(|data| Emitted {
                 stream: chunk.stream,
-                data: payload,
-                timing: FrameTiming {
-                    pts_ns,
-                    dts_ns: pts_ns,
-                    duration_ns,
-                    capture_ns: pts_ns,
-                    keyframe: chunk.keyframe,
-                    ..FrameTiming::default()
-                },
+                data,
+                timing,
             }))
         })
 }
@@ -442,7 +479,7 @@ fn stream_collection(file: &AviFile) -> Option<StreamCollection> {
         .enumerate()
         .filter_map(|(index, s)| {
             let ty = match s.kind {
-                AviStreamKind::Video { .. } => StreamType::Video,
+                AviStreamKind::Video { .. } | AviStreamKind::RawVideo { .. } => StreamType::Video,
                 AviStreamKind::Audio { .. } => StreamType::Audio,
                 AviStreamKind::Unsupported { .. } => return None,
             };
@@ -502,6 +539,7 @@ impl AviDemux {
         match self.select {
             AviStreamSelect::Video => Vec::from([video_placeholder_caps(VideoCodec::H264)]),
             AviStreamSelect::VideoNamed(codec) => Vec::from([video_placeholder_caps(codec)]),
+            AviStreamSelect::RawVideo(format) => Vec::from([raw_video_placeholder_caps(format)]),
             AviStreamSelect::Audio => pcm_alternatives(AudioFormat::PcmS16Le),
             AviStreamSelect::AudioNamed(format) if is_pcm(format) => pcm_alternatives(format),
             AviStreamSelect::AudioNamed(format) => Vec::from([audio_caps(format, 0, 0)]),
@@ -512,10 +550,10 @@ impl AviDemux {
     fn selected(&self, file: &AviFile) -> Option<usize> {
         let want_video = matches!(
             self.select,
-            AviStreamSelect::Video | AviStreamSelect::VideoNamed(_)
+            AviStreamSelect::Video | AviStreamSelect::VideoNamed(_) | AviStreamSelect::RawVideo(_)
         );
         let of_wanted_kind = |kind: &AviStreamKind| match kind {
-            AviStreamKind::Video { .. } => want_video,
+            AviStreamKind::Video { .. } | AviStreamKind::RawVideo { .. } => want_video,
             AviStreamKind::Audio { .. } => !want_video,
             AviStreamKind::Unsupported { .. } => false,
         };
@@ -526,6 +564,9 @@ impl AviDemux {
         let named = |kind: &AviStreamKind| match (self.select, kind) {
             (AviStreamSelect::VideoNamed(want), AviStreamKind::Video { codec, .. }) => {
                 *codec == want
+            }
+            (AviStreamSelect::RawVideo(want), AviStreamKind::RawVideo { format, .. }) => {
+                *format == want
             }
             (AviStreamSelect::AudioNamed(want), AviStreamKind::Audio { format, .. }) => {
                 *format == want
@@ -574,7 +615,7 @@ impl AviDemux {
 static AVIDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "stream to emit: video (the default) | mjpeg | h264 | mpeg4part2 (the video stream by codec) | audio | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | mulaw | alaw | mp3 | ac3 | aac (the audio stream by format)",
+    "stream to emit: video (the default) | mjpeg | h264 | mpeg4part2 | vp6 (the video stream by codec) | raw-i420 | raw-yuy2 | raw-uyvy (the uncompressed video stream by layout) | audio | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | mulaw | alaw | mp3 | ac3 | aac (the audio stream by format)",
 )
 .with_default("video")];
 
@@ -649,6 +690,7 @@ impl AsyncElement for AviDemux {
                     AviStreamSelect::Audio => "audio",
                     // Both come from the tables the names were parsed from.
                     AviStreamSelect::VideoNamed(codec) => video_stream_str(codec)?,
+                    AviStreamSelect::RawVideo(format) => raw_video_stream_str(format)?,
                     AviStreamSelect::AudioNamed(format) => audio_stream_str(format)?,
                 }
                 .into(),
@@ -697,6 +739,7 @@ impl PadTemplates for AviDemux {
         let mut outputs: Vec<Caps> = VIDEO_STREAM_NAMES
             .iter()
             .map(|(_, codec)| video_placeholder_caps(*codec))
+            .chain(raw_video_formats().map(raw_video_placeholder_caps))
             .collect();
         for (_, format) in AUDIO_STREAM_NAMES {
             if is_pcm(*format) {
@@ -1155,6 +1198,67 @@ mod tests {
             payloads,
             vec![eld_config, units[0].clone(), units[1].clone()],
             "the config leads, then each chunk unframed"
+        );
+    }
+
+    #[test]
+    fn an_uncompressed_stream_leaves_as_raw_video_cut_to_its_pixels() {
+        const WIDTH: u32 = 4;
+        const HEIGHT: u32 = 2;
+        const FRAME_PERIOD_NS: u64 = 40_000_000;
+        let pixels = crate::pixel::frame_byte_size(RawVideoFormat::Uyvy, WIDTH, HEIGHT);
+        let stored = [
+            [vec![1u8; pixels], vec![0xEE; 2]].concat(),
+            vec![2u8; pixels - 1],
+            vec![3u8; pixels],
+        ];
+        let mut writer = AviWriter::new(vec![AviWriteStream::Video {
+            codec: VideoCodec::Mjpeg,
+            width: WIDTH,
+            height: HEIGHT,
+        }]);
+        for (i, frame) in stored.iter().enumerate() {
+            writer
+                .push(0, frame.clone(), i as u64 * FRAME_PERIOD_NS, true)
+                .expect("video chunk");
+        }
+        let mut bytes = writer.finish().expect("the file serializes");
+        while let Some(at) = bytes.windows(4).position(|w| w == b"MJPG") {
+            bytes[at..at + 4].copy_from_slice(b"UYVY");
+        }
+
+        let want_caps = raw_video_caps(
+            RawVideoFormat::Uyvy,
+            Dim::Fixed(WIDTH),
+            Dim::Fixed(HEIGHT),
+            framerate_span(),
+        );
+        let infos = forwardable_streams(&bytes);
+        assert_eq!(infos[0].caps, want_caps);
+        let mut demux = AviDemux::new();
+        demux
+            .set_property("stream", PropValue::Str("raw-uyvy".into()))
+            .expect("raw-uyvy names a stream");
+        demux
+            .configure_pipeline(&input_caps())
+            .expect("the byte stream is accepted");
+        let mut sink = Capture::default();
+        block_on(async {
+            let frame = frame_of(bytes, FrameTiming::default(), 0);
+            demux
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .expect("the bytes buffer");
+            demux
+                .process(PipelinePacket::Eos, &mut sink)
+                .await
+                .expect("the file demuxes");
+        });
+        assert_eq!(sink.caps, Some(want_caps));
+        assert_eq!(
+            sink.payloads,
+            vec![vec![1u8; pixels], vec![3u8; pixels]],
+            "the short frame is dropped and the long one cut"
         );
     }
 

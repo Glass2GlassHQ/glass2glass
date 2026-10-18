@@ -640,6 +640,8 @@ mod riff;
 mod waveformat;
 // AVI container parsing / writing (M1071), behind `avidemux` and `avimux`.
 mod avi;
+// The uncompressed video layouts the AVI, Matroska and QuickTime demuxers read.
+mod uncompressedvideo;
 // AVI demuxer elements (M1071): one `ByteStream{Avi}` in, its streams out.
 pub mod avidemux;
 // AVI muxer elements (M1071): one video plus an optional audio stream in, a

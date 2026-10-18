@@ -17,8 +17,8 @@ use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::time::ticks_to_ns;
 
 use g2g_core::{
-    AudioFormat, Chapter, ClosedCaptionFormat, FrameTiming, G2gError, Segment, TagList, TextFormat,
-    VideoCodec,
+    AudioFormat, Chapter, ClosedCaptionFormat, FrameTiming, G2gError, RawVideoFormat, Segment,
+    TagList, TextFormat, VideoCodec,
 };
 
 use crate::aiff::audio_from_comm;
@@ -308,6 +308,12 @@ pub(crate) enum TrackKind {
         height: u32,
         param_sets: Vec<Vec<u8>>,
     },
+    // geometry from the sample entry, which the stored frames follow whatever tkhd displays
+    RawVideo {
+        format: RawVideoFormat,
+        width: u32,
+        height: u32,
+    },
     Audio {
         format: AudioFormat,
         channels: u8,
@@ -457,7 +463,7 @@ impl TrackHeader {
     pub(crate) fn presentation_segment(&self) -> Segment {
         match self.kind {
             TrackKind::Audio { format, .. } if format != AudioFormat::Opus => self.edit_segment(),
-            TrackKind::Video { .. } => self.edit_segment(),
+            TrackKind::Video { .. } | TrackKind::RawVideo { .. } => self.edit_segment(),
             _ => Segment::new(),
         }
     }
@@ -793,6 +799,10 @@ fn parse_video_entry(
         (VideoCodec::Mpeg4Part2, sets, None)
     } else if let Some(av01) = find_box(entries, b"av01") {
         (VideoCodec::Av1, parse_av1c_config(av01)?, None)
+    } else if let Some((format, entry)) = boxes(entries).find_map(|(fourcc, entry)| {
+        Some((crate::uncompressedvideo::raw_video_format(*fourcc)?, entry))
+    }) {
+        return Ok(Some((raw_video_track(format, entry)?, None)));
     } else if visual_sample_entry(entries) {
         // A well-formed VisualSampleEntry naming a codec we do not read: decline
         // so the rest of the file still demuxes.
@@ -809,6 +819,25 @@ fn parse_video_entry(
         },
         cenc,
     )))
+}
+
+// VisualSampleEntry: reserved, data_reference_index and pre_defined fields, then width and height
+const VISUAL_SAMPLE_ENTRY_WIDTH_AT: usize = 24;
+const VISUAL_SAMPLE_ENTRY_HEIGHT_AT: usize = 26;
+
+fn raw_video_track(format: RawVideoFormat, entry: &[u8]) -> Result<TrackKind, G2gError> {
+    let dimension = |at: usize| -> Result<u32, G2gError> {
+        let bytes = entry.get(at..at + 2).ok_or(G2gError::CapsMismatch)?;
+        match u16::from_be_bytes([bytes[0], bytes[1]]) {
+            0 => Err(G2gError::CapsMismatch),
+            pixels => Ok(u32::from(pixels)),
+        }
+    };
+    Ok(TrackKind::RawVideo {
+        format,
+        width: dimension(VISUAL_SAMPLE_ENTRY_WIDTH_AT)?,
+        height: dimension(VISUAL_SAMPLE_ENTRY_HEIGHT_AT)?,
+    })
 }
 
 /// Whether `entries` (an `stsd`'s sample-entry list) holds at least one entry
@@ -1353,6 +1382,7 @@ pub(crate) fn parse_fragments_multi(
                 let kf = au_is_keyframe(*codec, &annexb);
                 (annexb, kf)
             }
+            TrackKind::RawVideo { .. } => (bytes.into_owned(), true),
             // Audio access units are stored verbatim; each is a sync point.
             TrackKind::Audio {
                 format,
@@ -1490,7 +1520,7 @@ impl SampleFraming {
     fn of(kind: &TrackKind) -> Self {
         match kind {
             TrackKind::Video { codec, .. } if length_prefixed(*codec) => SampleFraming::Video,
-            TrackKind::Video { .. } => SampleFraming::PassThrough,
+            TrackKind::Video { .. } | TrackKind::RawVideo { .. } => SampleFraming::PassThrough,
             TrackKind::Audio {
                 format,
                 channels,
@@ -3475,6 +3505,34 @@ mod tests {
         let sample_ns = ticks_to_ns(u64::from(SAMPLE_TICKS), TIMESCALE);
         assert_eq!(decode_times, alloc::vec![0, sample_ns]);
         assert_eq!(samples[1].1.duration_ns, sample_ns);
+    }
+
+    #[test]
+    fn reads_a_2vuy_entry_as_raw_video_at_its_coded_size() {
+        const VISUAL_SAMPLE_ENTRY_LEN: usize = 78;
+        const CODED_WIDTH: u16 = 320;
+        const CODED_HEIGHT: u16 = 240;
+        let mut fields = [0u8; VISUAL_SAMPLE_ENTRY_LEN];
+        fields[VISUAL_SAMPLE_ENTRY_WIDTH_AT..VISUAL_SAMPLE_ENTRY_WIDTH_AT + 2]
+            .copy_from_slice(&CODED_WIDTH.to_be_bytes());
+        fields[VISUAL_SAMPLE_ENTRY_HEIGHT_AT..VISUAL_SAMPLE_ENTRY_HEIGHT_AT + 2]
+            .copy_from_slice(&CODED_HEIGHT.to_be_bytes());
+        let entry = crate::mp4box::mp4_box(b"2vuy", &fields);
+        let Some((kind, _)) = parse_video_entry(&entry, 640, 480).expect("the entry parses") else {
+            panic!("2vuy is read as a video track");
+        };
+        let TrackKind::RawVideo {
+            format,
+            width,
+            height,
+        } = kind
+        else {
+            panic!("2vuy is uncompressed");
+        };
+        assert_eq!(format, RawVideoFormat::Uyvy);
+        assert_eq!((width, height), (CODED_WIDTH.into(), CODED_HEIGHT.into()));
+        let no_geometry = crate::mp4box::mp4_box(b"2vuy", &[0; VISUAL_SAMPLE_ENTRY_LEN]);
+        assert!(parse_video_entry(&no_geometry, 640, 480).is_err());
     }
 
     #[test]

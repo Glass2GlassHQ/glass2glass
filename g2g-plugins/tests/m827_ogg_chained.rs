@@ -275,7 +275,7 @@ async fn run_line(line: &str) -> u64 {
         .frames_consumed
 }
 
-#[cfg(any(feature = "opus", feature = "vorbis"))]
+#[cfg(feature = "opus")]
 /// Every sample within 1 LSB of the reference, same length.
 fn assert_pcm_matches(pcm: &[u8], reference: &[u8]) {
     assert_eq!(pcm.len(), reference.len(), "decoded length");

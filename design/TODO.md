@@ -173,6 +173,9 @@ Highest leverage first:
 - **MP4 audio sample entries:** read Vorbis (`msVo`, its Xiph-laced headers led
   in-band by both demuxers), `in24` / `in32` / `fl32` with the `enda` byte-order
   flag, and version 2 `lpcm` sound descriptions.
+- **Uncompressed video layouts:** read AVI `BI_RGB` (bottom-up BGR / BGRx rows
+  padded to four bytes), `YV12` and `Y800` / `GREY`, and QuickTime `raw ` and
+  `v210`, each of which needs a `RawVideoFormat` g2g does not have.
 - **Matroska `ContentEncoding`:** chained encodings, bzip2 / lzo, and
   `ContentEncryption` stay refused (blocks forward as stored, flagged
   `unsupported_encoding`); zlib and header stripping are undone at demux.

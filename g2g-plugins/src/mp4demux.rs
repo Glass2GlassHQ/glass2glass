@@ -27,7 +27,7 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PropError, PropKind,
-    PropValue, PropertySpec, Rate, Segment, VideoCodec,
+    PropValue, PropertySpec, Rate, RawVideoFormat, Segment, VideoCodec,
 };
 
 use crate::aacparse::{is_raw_aac_config, require_adts};
@@ -38,6 +38,10 @@ use crate::fmp4::{
 };
 use crate::mp4box::find_box;
 use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
+use crate::uncompressedvideo::{
+    raw_video_caps, raw_video_formats, raw_video_frame_bytes, raw_video_placeholder_caps,
+    raw_video_stream_from_str, raw_video_stream_str, warn_short_raw_video_frame,
+};
 
 /// Which track the single-output demux emits (M748): the video track (the
 /// default, so `filesrc ! qtdemux ! ...` is unchanged), the video track with its
@@ -49,6 +53,7 @@ use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
 enum StreamSelect {
     Video,
     VideoNamed(VideoCodec),
+    RawVideo(RawVideoFormat),
     Audio(AudioFormat),
 }
 
@@ -203,6 +208,7 @@ impl Mp4Demux {
         self.drained = true;
         match self.select {
             StreamSelect::Video | StreamSelect::VideoNamed(_) => self.drain_video(out).await,
+            StreamSelect::RawVideo(format) => self.drain_raw_video(format, out).await,
             StreamSelect::Audio(format) => self.drain_audio(format, out).await,
         }
     }
@@ -301,7 +307,7 @@ impl Mp4Demux {
     async fn drain_video(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         let named_codec = match self.select {
             StreamSelect::VideoNamed(codec) => Some(codec),
-            StreamSelect::Video | StreamSelect::Audio(_) => None,
+            StreamSelect::Video | StreamSelect::RawVideo(_) | StreamSelect::Audio(_) => None,
         };
         let tracks = parse_all_tracks(&self.buffer)?;
         let video = tracks
@@ -334,31 +340,78 @@ impl Mp4Demux {
             out.push(PipelinePacket::Segment(edit)).await?;
         }
         let mut need_param_sets = true;
-        for s in track_samples(&self.buffer, video)? {
-            let mut annexb = s.annexb;
+        for mut s in track_samples(&self.buffer, video)? {
+            let mut annexb = core::mem::take(&mut s.annexb);
             // The moov's config-record parameter sets are out-of-band, so prepend
             // them to the first access unit if it does not already carry them.
             if need_param_sets && !starts_with_param_set(&annexb, codec) {
                 annexb = prepend_param_sets(&annexb, param_sets, codec);
             }
             need_param_sets = false;
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(annexb.into_boxed_slice())),
-                timing: FrameTiming {
-                    pts_ns: s.pts_ns,
-                    dts_ns: s.pts_ns,
-                    duration_ns: s.duration_ns,
-                    capture_ns: s.pts_ns,
-                    arrival_ns: g2g_core::metrics::monotonic_ns(),
-                    keyframe: s.keyframe,
-                },
-                sequence: self.sequence,
-                meta: Default::default(),
-            };
+            let frame = video_frame(annexb, &s, self.sequence);
             self.sequence += 1;
             out.push(PipelinePacket::DataFrame(frame)).await?;
         }
         Ok(())
+    }
+
+    // the first uncompressed track of the selected layout, each frame cut to its pixels
+    async fn drain_raw_video(
+        &mut self,
+        selected: RawVideoFormat,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        let tracks = parse_all_tracks(&self.buffer)?;
+        let video = tracks
+            .iter()
+            .find(|t| matches!(t.kind, TrackKind::RawVideo { format, .. } if format == selected))
+            .ok_or(G2gError::CapsMismatch)?;
+        let TrackKind::RawVideo {
+            format,
+            width,
+            height,
+        } = video.kind
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        if !self.caps_sent {
+            let framerate = framerate_within_placeholder(track_framerate_q16(&self.buffer, video));
+            let caps = raw_video_caps(format, Dim::Fixed(width), Dim::Fixed(height), framerate);
+            out.push(PipelinePacket::CapsChanged(caps)).await?;
+            self.caps_sent = true;
+        }
+        let edit = video.presentation_segment();
+        if edit != Segment::new() {
+            out.push(PipelinePacket::Segment(edit)).await?;
+        }
+        for mut s in track_samples(&self.buffer, video)? {
+            let mut pixels = core::mem::take(&mut s.annexb);
+            let Some(len) = raw_video_frame_bytes(format, width, height, pixels.len()) else {
+                warn_short_raw_video_frame("qtdemux", format, width, height, pixels.len());
+                continue;
+            };
+            pixels.truncate(len);
+            let frame = video_frame(pixels, &s, self.sequence);
+            self.sequence += 1;
+            out.push(PipelinePacket::DataFrame(frame)).await?;
+        }
+        Ok(())
+    }
+}
+
+fn video_frame(data: Vec<u8>, sample: &Sample, sequence: u64) -> Frame {
+    Frame {
+        domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        timing: FrameTiming {
+            pts_ns: sample.pts_ns,
+            dts_ns: sample.pts_ns,
+            duration_ns: sample.duration_ns,
+            capture_ns: sample.pts_ns,
+            arrival_ns: g2g_core::metrics::monotonic_ns(),
+            keyframe: sample.keyframe,
+        },
+        sequence,
+        meta: Default::default(),
     }
 }
 
@@ -411,6 +464,7 @@ impl AsyncElement for Mp4Demux {
                 CapsSet::from_alternatives(codecs.into_iter().map(Self::nego_caps).collect())
             }
             StreamSelect::VideoNamed(codec) => CapsSet::one(Self::nego_caps(codec)),
+            StreamSelect::RawVideo(format) => CapsSet::one(raw_video_placeholder_caps(format)),
             StreamSelect::Audio(format) => {
                 CapsSet::from_alternatives(Self::audio_nego_caps(format))
             }
@@ -461,6 +515,7 @@ impl AsyncElement for Mp4Demux {
                     "video" => StreamSelect::Video,
                     _ => audio
                         .or_else(|| mp4_video_stream_from_str(name).map(StreamSelect::VideoNamed))
+                        .or_else(|| raw_video_stream_from_str(name).map(StreamSelect::RawVideo))
                         .ok_or(PropError::Value)?,
                 };
                 Ok(())
@@ -477,6 +532,9 @@ impl AsyncElement for Mp4Demux {
                     // constructed from the same table, so the name is always there
                     StreamSelect::VideoNamed(codec) => {
                         mp4_video_stream_str(codec).unwrap_or("video")
+                    }
+                    StreamSelect::RawVideo(format) => {
+                        raw_video_stream_str(format).unwrap_or("video")
                     }
                     StreamSelect::Audio(format) => mp4_audio_stream_str(format).unwrap_or("aac"),
                 }
@@ -521,7 +579,7 @@ impl AsyncElement for Mp4Demux {
 static MP4DEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | vp8 | mjpeg (the video track by codec) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | alaw | mulaw (the audio track by format)",
+    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | vp8 | mjpeg (the video track by codec) | raw-i420 | raw-yuy2 | raw-uyvy (the uncompressed video track by layout) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | alaw | mulaw (the audio track by format)",
 )];
 
 impl PadTemplates for Mp4Demux {
@@ -535,6 +593,7 @@ impl PadTemplates for Mp4Demux {
             video(VideoCodec::Vp8),
             video(VideoCodec::Mjpeg),
         ]);
+        source.extend(raw_video_formats().map(raw_video_placeholder_caps));
         for (_, format) in AUDIO_STREAM_NAMES {
             source.extend(Self::audio_nego_caps(*format));
         }

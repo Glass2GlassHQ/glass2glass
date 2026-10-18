@@ -186,7 +186,9 @@ impl SourceLoop for Mp4Src {
                         .iter()
                         .map(|t| {
                             let stream_type = match &t.kind {
-                                TrackKind::Video { .. } => StreamType::Video,
+                                TrackKind::Video { .. } | TrackKind::RawVideo { .. } => {
+                                    StreamType::Video
+                                }
                                 TrackKind::Audio { .. } => StreamType::Audio,
                                 TrackKind::Text { .. } | TrackKind::ClosedCaption { .. } => {
                                     StreamType::Text

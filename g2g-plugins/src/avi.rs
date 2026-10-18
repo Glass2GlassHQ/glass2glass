@@ -27,7 +27,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::caps::greatest_common_divisor;
-use g2g_core::{AudioFormat, G2gError, Tag, TagList, VideoCodec};
+use g2g_core::{AudioFormat, G2gError, RawVideoFormat, Tag, TagList, VideoCodec};
 
 use crate::riff::{
     chunk_len, chunks, chunks_to_cut, padded_len, put_chunk, put_chunk_header, read_fourcc,
@@ -148,6 +148,11 @@ const INFO_TAGS: &[(FourCc, InfoTagBuilder)] = &[
 pub(crate) enum AviStreamKind {
     Video {
         codec: VideoCodec,
+        width: u32,
+        height: u32,
+    },
+    RawVideo {
+        format: RawVideoFormat,
         width: u32,
         height: u32,
     },
@@ -344,13 +349,23 @@ fn parse_video_format(strh: &[u8], strf: &[u8]) -> Option<(AviStreamKind, Vec<u8
         return None;
     }
     let compression = read_fourcc(strf, BITMAPINFO_COMPRESSION)?;
-    let codec =
-        video_codec(compression).or_else(|| video_codec(read_fourcc(strh, STRH_HANDLER)?))?;
     let width = read_u32(strf, BITMAPINFO_WIDTH)?;
     let height = (read_u32(strf, BITMAPINFO_HEIGHT)? as i32).unsigned_abs();
     if width == 0 || height == 0 {
         return None;
     }
+    if let Some(format) = crate::uncompressedvideo::raw_video_format(compression) {
+        return Some((
+            AviStreamKind::RawVideo {
+                format,
+                width,
+                height,
+            },
+            Vec::new(),
+        ));
+    }
+    let codec =
+        video_codec(compression).or_else(|| video_codec(read_fourcc(strh, STRH_HANDLER)?))?;
     Some((
         AviStreamKind::Video {
             codec,
@@ -595,7 +610,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<AviFile, G2gError> {
                 AviStreamKind::Video {
                     codec: VideoCodec::Mjpeg,
                     ..
-                }
+                } | AviStreamKind::RawVideo { .. }
             );
         }
     }

@@ -1971,6 +1971,8 @@ pub enum RawVideoFormat {
     P010,
     // I420's planes followed by a full-resolution 8-bit alpha plane.
     A420,
+    // YUYV with each byte pair swapped: U Y0 V Y1, the QuickTime `2vuy` layout
+    Uyvy,
 }
 
 impl RawVideoFormat {
@@ -1993,6 +1995,7 @@ impl RawVideoFormat {
             RawVideoFormat::I444p12 => "Y444_12LE",
             RawVideoFormat::P010 => "P010_10LE",
             RawVideoFormat::A420 => "A420",
+            RawVideoFormat::Uyvy => "UYVY",
         }
     }
 
@@ -2072,7 +2075,8 @@ impl RawVideoFormat {
             RawVideoFormat::Rgba8
             | RawVideoFormat::Bgra8
             | RawVideoFormat::Rgb8
-            | RawVideoFormat::Yuyv => self.plane_stride(0, width),
+            | RawVideoFormat::Yuyv
+            | RawVideoFormat::Uyvy => self.plane_stride(0, width),
             RawVideoFormat::Nv12 | RawVideoFormat::I420 => width.div_ceil(2).checked_mul(2),
             _ => None,
         }
@@ -2090,7 +2094,8 @@ impl RawVideoFormat {
             RawVideoFormat::Rgba8
             | RawVideoFormat::Bgra8
             | RawVideoFormat::Rgb8
-            | RawVideoFormat::Yuyv => Some(luma),
+            | RawVideoFormat::Yuyv
+            | RawVideoFormat::Uyvy => Some(luma),
             RawVideoFormat::Nv12 | RawVideoFormat::I420 => {
                 luma.checked_add(stride.checked_mul(height.div_ceil(2))?)
             }
@@ -2108,7 +2113,8 @@ impl RawVideoFormat {
             RawVideoFormat::Rgba8
             | RawVideoFormat::Bgra8
             | RawVideoFormat::Rgb8
-            | RawVideoFormat::Yuyv => 1,
+            | RawVideoFormat::Yuyv
+            | RawVideoFormat::Uyvy => 1,
             RawVideoFormat::Nv12 | RawVideoFormat::P010 => 2,
             RawVideoFormat::I420
             | RawVideoFormat::I420p10
@@ -2131,7 +2137,7 @@ impl RawVideoFormat {
         match self {
             RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => Some(4),
             RawVideoFormat::Rgb8 => Some(3),
-            RawVideoFormat::Yuyv => Some(2),
+            RawVideoFormat::Yuyv | RawVideoFormat::Uyvy => Some(2),
             _ => None,
         }
     }
@@ -2144,7 +2150,7 @@ impl RawVideoFormat {
         if plane >= self.plane_count() {
             return None;
         }
-        if self == RawVideoFormat::Yuyv {
+        if matches!(self, RawVideoFormat::Yuyv | RawVideoFormat::Uyvy) {
             return width.div_ceil(2).checked_mul(4);
         }
         if let Some(pixel) = self.pixel_stride() {
@@ -2429,7 +2435,7 @@ pub enum TensorLayout {
 }
 
 #[cfg(all(test, feature = "alloc"))]
-pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 16] = [
+pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 17] = [
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
     RawVideoFormat::Rgba8,
@@ -2446,6 +2452,7 @@ pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 16] = [
     RawVideoFormat::I444p12,
     RawVideoFormat::P010,
     RawVideoFormat::A420,
+    RawVideoFormat::Uyvy,
 ];
 
 #[cfg(test)]

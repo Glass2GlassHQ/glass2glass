@@ -38,7 +38,7 @@ use g2g_core::{
 
 /// Formats this element can both consume and produce. The convert `target`
 /// is always one of these.
-pub(crate) const FORMATS: [RawVideoFormat; 16] = [
+pub(crate) const FORMATS: [RawVideoFormat; 17] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Rgb8,
@@ -55,6 +55,7 @@ pub(crate) const FORMATS: [RawVideoFormat; 16] = [
     RawVideoFormat::Yuyv,
     RawVideoFormat::P010,
     RawVideoFormat::A420,
+    RawVideoFormat::Uyvy,
 ];
 
 /// # Example
@@ -646,6 +647,24 @@ fn convert_strided(
                 hub,
             )
         }
+        (Uyvy, _) => convert_strided(
+            &swap_byte_pairs(&src[..frame_byte_size(Uyvy, w as u32, h as u32)]),
+            Yuyv,
+            to,
+            (w, h),
+            row_bytes(Yuyv, w),
+            matrix,
+            hub,
+        ),
+        (_, Uyvy) => swap_byte_pairs(&convert_strided(
+            src,
+            from,
+            Yuyv,
+            (w, h),
+            src_stride,
+            matrix,
+            hub,
+        )),
         (Nv12, I420) => nv12_to_i420(src, w, h),
         (I420, Nv12) => i420_to_nv12(src, w, h),
         (Nv12, Rgba8) => yuv420_to_rgb(src, w, h, true, 0, 2, matrix),
@@ -1103,6 +1122,15 @@ fn yuyv_to_rgb(
             dst[p + b_off] = b as u8;
             dst[p + 3] = 255;
         }
+    }
+    dst.into_boxed_slice()
+}
+
+// UYVY <-> YUYV
+fn swap_byte_pairs(src: &[u8]) -> Box<[u8]> {
+    let mut dst = Vec::from(src);
+    for pair in dst.as_chunks_mut::<2>().0 {
+        pair.swap(0, 1);
     }
     dst.into_boxed_slice()
 }

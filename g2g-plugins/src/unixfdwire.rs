@@ -81,6 +81,7 @@ const META_NAME_TRAILER_BYTES: usize = 2;
 const GST_VIDEO_FORMATS: &[(RawVideoFormat, i32)] = &[
     (RawVideoFormat::I420, 2),
     (RawVideoFormat::Yuyv, 4),
+    (RawVideoFormat::Uyvy, 5),
     (RawVideoFormat::Rgba8, 11),
     (RawVideoFormat::Bgra8, 12),
     (RawVideoFormat::Rgb8, 15),

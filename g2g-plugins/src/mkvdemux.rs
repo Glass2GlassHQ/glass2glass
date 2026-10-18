@@ -45,14 +45,19 @@ use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
     MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream,
-    StreamCollection, StreamType, SubPictureFormat, TagList, TextFormat, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Seek,
+    Segment, Stream, StreamCollection, StreamType, SubPictureFormat, TagList, TextFormat,
+    VideoCodec,
 };
 
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::matroska::{MatroskaDemuxer, MkvCodec};
 use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
+use crate::uncompressedvideo::{
+    raw_video_caps, raw_video_formats, raw_video_frame_bytes, raw_video_placeholder_caps,
+    raw_video_stream_from_str, raw_video_stream_str, warn_short_raw_video_frame,
+};
 
 const NANOSECONDS_PER_SECOND: u32 = 1_000_000_000;
 
@@ -103,6 +108,7 @@ pub enum MkvStream {
     Pgs,
     /// The first raw PCM audio stream (`A_PCM/*`) of this PCM sample format.
     Pcm(AudioFormat),
+    RawVideo(RawVideoFormat),
 }
 
 /// A Matroska `Cues` prefetch in flight (M374): an end-of-file `Cues` index
@@ -349,6 +355,7 @@ impl MkvDemux {
                 sample_rate: 0,
                 channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
+            MkvStream::RawVideo(format) => raw_video_placeholder_caps(format),
         }
     }
 
@@ -401,6 +408,14 @@ impl MkvDemux {
                     framerate: default_duration_framerate(track.default_duration_ns),
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 })
+            }
+            Caps::RawVideo { format, .. } if track.width > 0 && track.height > 0 => {
+                Some(raw_video_caps(
+                    format,
+                    Dim::Fixed(track.width),
+                    Dim::Fixed(track.height),
+                    default_duration_framerate(track.default_duration_ns),
+                ))
             }
             Caps::Audio { format, .. } if track.sample_rate > 0 => Some(Caps::Audio {
                 format,
@@ -484,18 +499,14 @@ impl MkvDemux {
     /// parameters when the track declared them. `None` for an unmappable codec.
     fn track_to_stream(track: &crate::matroska::MkvTrack) -> Option<Stream> {
         let id = stream_id(track.number);
+        let dim = |pixels| match pixels {
+            0 => Dim::Any,
+            pixels => Dim::Fixed(pixels),
+        };
         let video = |codec| Caps::CompressedVideo {
             codec,
-            width: if track.width > 0 {
-                Dim::Fixed(track.width)
-            } else {
-                Dim::Any
-            },
-            height: if track.height > 0 {
-                Dim::Fixed(track.height)
-            } else {
-                Dim::Any
-            },
+            width: dim(track.width),
+            height: dim(track.height),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
@@ -518,6 +529,10 @@ impl MkvDemux {
             MkvCodec::Flac => (StreamType::Audio, audio(AudioFormat::Flac)),
             MkvCodec::Vorbis => (StreamType::Audio, audio(AudioFormat::Vorbis)),
             MkvCodec::Pcm { format, .. } => (StreamType::Audio, audio(format)),
+            MkvCodec::RawVideo(format) => (
+                StreamType::Video,
+                raw_video_caps(format, dim(track.width), dim(track.height), Rate::Any),
+            ),
             // Forwarded as plain UTF-8 text (de-framed at emit), whatever the source.
             MkvCodec::Subtitle(_) => (
                 StreamType::Text,
@@ -683,10 +698,11 @@ impl MkvDemux {
                 duration_ns: forwarded_duration_ns(&f),
                 ..FrameTiming::default()
             };
+            let Some(payload) = deframe_block(&self.demux, f) else {
+                continue;
+            };
             let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(
-                    deframe_block(&self.demux, f).into_boxed_slice(),
-                )),
+                MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
                 timing,
                 self.emitted,
             );
@@ -864,7 +880,7 @@ impl AsyncElement for MkvDemux {
 static MKVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE)",
+    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy)",
 )];
 
 /// The [`MkvStream`] a demuxer forwards for a parsed track's codec, or `None` for
@@ -887,6 +903,7 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::DvbSub => Some(MkvStream::DvbSub),
         MkvCodec::Pgs => Some(MkvStream::Pgs),
         MkvCodec::Pcm { format, .. } => Some(MkvStream::Pcm(format)),
+        MkvCodec::RawVideo(format) => Some(MkvStream::RawVideo(format)),
         MkvCodec::Other => None,
     }
 }
@@ -899,9 +916,10 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
 /// block is ADTS-framed from the track's AudioSpecificConfig; big-endian PCM is
 /// byte-swapped to the graph's little-endian samples; every other codec passes
 /// through unchanged. The cue timing rides the frame (block
-/// PTS + `BlockDuration`), so only the text is extracted.
-fn deframe_block(demux: &MatroskaDemuxer, f: crate::matroska::MkvFrame) -> Vec<u8> {
-    match f.codec {
+/// PTS + `BlockDuration`), so only the text is extracted. `None` drops an
+/// uncompressed video frame too short for its track's geometry.
+fn deframe_block(demux: &MatroskaDemuxer, f: crate::matroska::MkvFrame) -> Option<Vec<u8>> {
+    Some(match f.codec {
         MkvCodec::Subtitle(format) => {
             let text = alloc::string::String::from_utf8_lossy(&f.data);
             crate::subparse::deframe_subtitle_block(&text, format).into_bytes()
@@ -925,8 +943,19 @@ fn deframe_block(demux: &MatroskaDemuxer, f: crate::matroska::MkvFrame) -> Vec<u
             .codec_private(f.track)
             .and_then(|config| adts_from_asc(config, &f.data))
             .unwrap_or(f.data),
+        MkvCodec::RawVideo(format) => {
+            let track = demux.tracks().iter().find(|t| t.number == f.track)?;
+            let (width, height) = (track.width, track.height);
+            let mut data = f.data;
+            let Some(pixels) = raw_video_frame_bytes(format, width, height, data.len()) else {
+                warn_short_raw_video_frame("mkvdemux", format, width, height, data.len());
+                return None;
+            };
+            data.truncate(pixels);
+            data
+        }
         _ => f.data,
-    }
+    })
 }
 
 /// Convert a length-prefixed (AVCC / HVCC, the Matroska-native H.26x framing
@@ -1019,6 +1048,7 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
                     | MkvStream::Vp9
                     | MkvStream::Av1
                     | MkvStream::Mjpeg
+                    | MkvStream::RawVideo(_)
             );
             // Fill the concrete channel count from the track header for an audio
             // stream: `output_caps` is the generic per-stream placeholder (channels
@@ -1299,7 +1329,9 @@ fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
         "vobsub" | "dvdsub" => Some(MkvStream::VobSub),
         "dvbsub" => Some(MkvStream::DvbSub),
         "pgs" | "hdmvpgs" => Some(MkvStream::Pgs),
-        _ => g2g_core::pcm_from_gst_format(s).map(MkvStream::Pcm),
+        _ => g2g_core::pcm_from_gst_format(s)
+            .map(MkvStream::Pcm)
+            .or_else(|| raw_video_stream_from_str(s).map(MkvStream::RawVideo)),
     }
 }
 
@@ -1328,6 +1360,8 @@ fn mkv_stream_to_str(stream: MkvStream) -> &'static str {
         MkvStream::Pcm(format) => {
             g2g_core::pcm_gst_format(format).expect("a PCM stream names a PCM format")
         }
+        MkvStream::RawVideo(format) => raw_video_stream_str(format)
+            .expect("an uncompressed stream names a layout from the fourcc table"),
     }
 }
 
@@ -1355,6 +1389,7 @@ impl PadTemplates for MkvDemux {
         source.extend(
             g2g_core::pcm_formats().map(|format| Self::output_caps(MkvStream::Pcm(format))),
         );
+        source.extend(raw_video_formats().map(raw_video_placeholder_caps));
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
             PadTemplate::source(CapsSet::from_alternatives(source)),
@@ -1647,9 +1682,12 @@ impl MultiOutputElement for MkvDemuxN {
                             duration_ns: forwarded_duration_ns(&f),
                             ..FrameTiming::default()
                         };
+                        let Some(payload) = deframe_block(&self.demux, f) else {
+                            continue;
+                        };
                         let out_frame = Frame::new(
                             MemoryDomain::System(SystemSlice::from_boxed(
-                                deframe_block(&self.demux, f).into_boxed_slice(),
+                                payload.into_boxed_slice(),
                             )),
                             timing,
                             self.emitted,
@@ -1921,6 +1959,76 @@ mod tests {
         assert!(
             !sink.eos,
             "EOS is forwarded by the runner's arm, not the element"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uncompressed_track_leaves_as_raw_video_cut_to_its_pixels() {
+        const WIDTH: u32 = 4;
+        const HEIGHT: u32 = 2;
+        let pixels = crate::pixel::frame_byte_size(RawVideoFormat::I420, WIDTH, HEIGHT);
+        let geometry = [
+            elem(&[0xB0], &uint_body(WIDTH.into())),
+            elem(&[0xBA], &uint_body(HEIGHT.into())),
+            elem(&[0x2E, 0xB5, 0x24], b"I420"),
+        ]
+        .concat();
+        let track = elem(
+            &[0xAE],
+            &[
+                elem(&[0xD7], &uint_body(1)),
+                elem(&[0x86], b"V_UNCOMPRESSED"),
+                elem(&[0xE0], &geometry),
+            ]
+            .concat(),
+        );
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[
+                elem(&[0xE7], &uint_body(0)),
+                elem(
+                    &[0xA3],
+                    &block(
+                        1,
+                        0,
+                        &[alloc::vec![1u8; pixels], alloc::vec![9; 3]].concat(),
+                    ),
+                ),
+                elem(&[0xA3], &block(1, 40, &alloc::vec![2u8; pixels - 1])),
+                elem(&[0xA3], &block(1, 80, &alloc::vec![3u8; pixels])),
+            ]
+            .concat(),
+        );
+        let segment = elem(
+            &[0x18, 0x53, 0x80, 0x67],
+            &[elem(&[0x16, 0x54, 0xAE, 0x6B], &track), cluster].concat(),
+        );
+        let file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat();
+
+        let mut demux = MatroskaDemuxer::new();
+        demux.push_data(&file);
+        let stream = forwardable_streams(&demux)[0].stream;
+        assert_eq!(stream, MkvStream::RawVideo(RawVideoFormat::I420));
+        let mut sink = CaptureSink::default();
+        run(
+            mkv_stream_from_str(mkv_stream_str(stream)).expect("the name reads back"),
+            &file,
+            &mut sink,
+        )
+        .await;
+        assert_eq!(
+            sink.caps,
+            alloc::vec![raw_video_caps(
+                RawVideoFormat::I420,
+                Dim::Fixed(WIDTH),
+                Dim::Fixed(HEIGHT),
+                Rate::Any
+            )]
+        );
+        assert_eq!(
+            sink.frames,
+            alloc::vec![alloc::vec![1u8; pixels], alloc::vec![3u8; pixels]],
+            "the short frame is dropped and the long one cut"
         );
     }
 
