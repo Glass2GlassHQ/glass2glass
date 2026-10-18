@@ -343,7 +343,7 @@ impl VpxContext {
                 pts,
                 1,
                 0,
-                ffi::VPX_DL_REALTIME as ffi::vpx_enc_deadline_t,
+                ffi::VPX_DL_REALTIME as core::ffi::c_ulong,
             )
         })
     }
@@ -359,7 +359,7 @@ impl VpxContext {
                 -1,
                 1,
                 0,
-                ffi::VPX_DL_REALTIME as ffi::vpx_enc_deadline_t,
+                ffi::VPX_DL_REALTIME as core::ffi::c_ulong,
             )
         })
     }
