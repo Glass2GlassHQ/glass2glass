@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1541: `h264parse` and `h265parse` read a raw stream with bytes before its first start code as Annex-B.
 - M1540: `jpegparse` skips padding and trailers between JPEG images instead of failing the stream.
 - M1502: mp4 AAC with a program config element decodes, and ER AAC, ELD and USAC fail loud in the demuxer.
 - M1501: mp4 demuxers put a new sample description's parameter sets in-band where the track switches to it.

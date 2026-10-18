@@ -308,6 +308,19 @@ pub(crate) fn length_prefixed_to_annexb(data: &[u8], len_size: usize) -> Option<
 // a 4-byte length and a 4-byte start code are the same size, so the sample converts in place
 const _: () = assert!(ANNEX_B_START_CODE.len() == AVCC_LENGTH_SIZE);
 
+/// Whether `data` walks as 4-byte length-prefixed NAL units to its exact end,
+/// the shape [`avcc_to_annexb_in_place`] converts.
+pub(crate) fn is_avcc(data: &[u8]) -> bool {
+    let mut consumed = 0usize;
+    for nal in avcc_nal_units(data) {
+        if nal.is_empty() {
+            return false;
+        }
+        consumed += AVCC_LENGTH_SIZE + nal.len();
+    }
+    consumed == data.len()
+}
+
 // refuses what length_prefixed_to_annexb refuses, leaving `sample` partly rewritten
 pub(crate) fn avcc_to_annexb_in_place(sample: &mut [u8]) -> Option<()> {
     let mut at = 0usize;
