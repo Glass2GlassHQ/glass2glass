@@ -183,6 +183,14 @@ pub(crate) fn is_raw_aac_config(config: &[u8]) -> bool {
         || has_960_sample_frames(config)
 }
 
+// the object type of a config a demuxer can neither ADTS-frame nor send raw (ALS, SLS, ...)
+pub(crate) fn unframable_object_type(config: &[u8]) -> Option<u32> {
+    if is_raw_aac_config(config) || adts_from_asc(config, &[]).is_some() {
+        return None;
+    }
+    read_object_type(&mut BitReader::new(config))
+}
+
 fn has_960_sample_frames(config: &[u8]) -> bool {
     let mut r = BitReader::new(config);
     read_adts_core_config(&mut r).is_some() && r.read_bits(1) == Some(1)
@@ -773,8 +781,7 @@ fn parse_adts(au: &[u8]) -> Option<AacInfo> {
 fn parse_loas(au: &[u8]) -> Option<AacInfo> {
     let last = au.len().checked_sub(3)?;
     for i in 0..=last {
-        // Syncword 0x2B7 byte-aligned: byte0 = 0x56, top 3 bits of byte1 = 111.
-        if au[i] != 0x56 || (au[i + 1] & 0xE0) != 0xE0 {
+        if !opens_loas_frame(&au[i..]) {
             continue;
         }
         // audioMuxLengthBytes: the 13 bits after the 11-bit syncword.
@@ -787,6 +794,11 @@ fn parse_loas(au: &[u8]) -> Option<AacInfo> {
         }
     }
     None
+}
+
+// syncword 0x2B7 byte-aligned: byte0 = 0x56, top 3 bits of byte1 = 111
+pub(crate) fn opens_loas_frame(data: &[u8]) -> bool {
+    matches!(data, [0x56, second, ..] if second & 0xE0 == 0xE0)
 }
 
 /// Parse a LATM `AudioMuxElement` (muxConfigPresent = 1, the LOAS case) far

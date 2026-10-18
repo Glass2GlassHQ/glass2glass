@@ -31,7 +31,7 @@ use g2g_core::{
 };
 
 use crate::riff::{
-    padded_len, read_fourcc, read_u16, read_u32, CHUNK_HEADER_LEN, FOURCC_LEN, RIFF_FOURCC,
+    chunks, padded_len, read_fourcc, read_u16, read_u32, CHUNK_HEADER_LEN, FOURCC_LEN, RIFF_FOURCC,
     RIFF_HEADER_LEN,
 };
 use crate::waveformat::{audio_format, sample_frame_len};
@@ -77,12 +77,16 @@ const CODED_FORMATS: [AudioFormat; 3] =
 /// The coded payloads a WAV file can carry, at the unknown-layout sentinels a
 /// decoder negotiates against before the `fmt ` chunk is read.
 fn coded_alternatives() -> [Caps; 3] {
-    CODED_FORMATS.map(|format| Caps::Audio {
+    CODED_FORMATS.map(coded_caps)
+}
+
+fn coded_caps(format: AudioFormat) -> Caps {
+    Caps::Audio {
         format,
         channels: ANY_CHANNELS,
         sample_rate: ANY_SAMPLE_RATE,
         channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-    })
+    }
 }
 
 /// Read a `fmt ` chunk body. `None` when it is too short or names a payload this
@@ -91,19 +95,16 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
     if body.len() < FMT_CHUNK_MIN_LEN {
         return None;
     }
-    let mut tag = read_u16(body, 0)?;
+    let tag = format_tag(body)?;
     let mut channel_layout = ChannelLayout::UNSPECIFIED;
-    if tag == FORMAT_EXTENSIBLE {
-        tag = read_u16(body, EXTENSIBLE_TAG_OFFSET)?;
-        if body.len() >= EXTENSIBLE_FMT_MIN_LEN {
-            let mask = read_u32(body, EXTENSIBLE_CHANNEL_MASK_OFFSET)?;
-            channel_layout = ChannelLayout::from_mask(mask as u16);
-        }
+    if read_u16(body, 0)? == FORMAT_EXTENSIBLE && body.len() >= EXTENSIBLE_FMT_MIN_LEN {
+        let mask = read_u32(body, EXTENSIBLE_CHANNEL_MASK_OFFSET)?;
+        channel_layout = ChannelLayout::from_mask(mask as u16);
     }
     let channels = read_u16(body, 2)?;
     let sample_rate = read_u32(body, 4)?;
     let byte_rate = read_u32(body, 8)?;
-    let bits = read_u16(body, 14)?;
+    let bits = read_u16(body, BITS_OFFSET)?;
     if channels == 0 || channels > u8::MAX as u16 || sample_rate == 0 {
         return None;
     }
@@ -114,13 +115,70 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
         channel_layout = ChannelLayout::UNSPECIFIED;
     }
     Some(WaveFormat {
-        format: audio_format(tag, bits)
-            .filter(|format| pcm_formats().contains(format) || CODED_FORMATS.contains(format))?,
+        format: readable_format(tag, bits)?,
         channels: channels as u8,
         channel_layout,
         sample_rate,
         byte_rate,
     })
+}
+
+const BITS_OFFSET: usize = 14;
+
+// the chunk's `wFormatTag`, or for WAVE_FORMAT_EXTENSIBLE the tag its GUID extends
+fn format_tag(body: &[u8]) -> Option<u16> {
+    match read_u16(body, 0)? {
+        FORMAT_EXTENSIBLE => read_u16(body, EXTENSIBLE_TAG_OFFSET),
+        tag => Some(tag),
+    }
+}
+
+fn readable_format(tag: u16, bits: u16) -> Option<AudioFormat> {
+    audio_format(tag, bits)
+        .filter(|format| pcm_formats().contains(format) || CODED_FORMATS.contains(format))
+}
+
+impl WaveFormat {
+    fn caps(&self) -> Caps {
+        Caps::Audio {
+            format: self.format,
+            channels: self.channels,
+            sample_rate: self.sample_rate,
+            channel_layout: self.channel_layout,
+        }
+    }
+}
+
+// what a WAV file carries: the caps `WavParse` emits for it, or a `wFormatTag` it does not read
+#[derive(Debug, Clone, PartialEq)]
+pub enum WavStream {
+    Readable(Caps),
+    UnreadableTag(u16),
+}
+
+// `None` for a prefix that is not RIFF/WAVE or ends before a whole `fmt ` chunk
+pub fn probe_stream(prefix: &[u8]) -> Option<WavStream> {
+    if read_fourcc(prefix, 0) != Some(RIFF_FOURCC)
+        || read_fourcc(prefix, CHUNK_HEADER_LEN) != Some(*b"WAVE")
+    {
+        return None;
+    }
+    let fmt = chunks(prefix, RIFF_HEADER_LEN..prefix.len()).find(|chunk| &chunk.id == b"fmt ")?;
+    let body = fmt.body(prefix);
+    if let Some(format) = parse_fmt(body) {
+        // a decoder's coded input pad takes only the unknown-layout sentinels
+        let caps = if CODED_FORMATS.contains(&format.format) {
+            coded_caps(format.format)
+        } else {
+            format.caps()
+        };
+        return Some(WavStream::Readable(caps));
+    }
+    let tag = format_tag(body)?;
+    let bits = read_u16(body, BITS_OFFSET)?;
+    readable_format(tag, bits)
+        .is_none()
+        .then_some(WavStream::UnreadableTag(tag))
 }
 
 /// Parses a WAV byte stream into the PCM stream it carries.
@@ -227,13 +285,7 @@ impl WavParse {
                 let format = self.format.ok_or(G2gError::CapsMismatch)?;
                 self.post_duration(size, format);
                 self.data_remaining = (size != UNKNOWN_DATA_LEN).then_some(size);
-                out.push(PipelinePacket::CapsChanged(Caps::Audio {
-                    format: format.format,
-                    channels: format.channels,
-                    sample_rate: format.sample_rate,
-                    channel_layout: format.channel_layout,
-                }))
-                .await?;
+                out.push(PipelinePacket::CapsChanged(format.caps())).await?;
                 self.in_data = true;
                 break;
             }

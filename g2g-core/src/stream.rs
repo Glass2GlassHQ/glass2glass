@@ -30,6 +30,28 @@ pub enum StreamType {
     Unknown,
 }
 
+impl StreamType {
+    pub fn of(caps: &Caps) -> Self {
+        match caps {
+            Caps::CompressedVideo { .. } | Caps::RawVideo { .. } => StreamType::Video,
+            Caps::Audio { .. } => StreamType::Audio,
+            Caps::Text { .. } | Caps::ClosedCaption { .. } | Caps::SubPicture { .. } => {
+                StreamType::Text
+            }
+            _ => StreamType::Unknown,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            StreamType::Video => "video",
+            StreamType::Audio => "audio",
+            StreamType::Text => "text",
+            StreamType::Unknown => "unknown",
+        }
+    }
+}
+
 /// One elementary stream of a container: a stable id, its media kind, and the
 /// [`Caps`] it carries. The id is the cross-run-stable stream identifier (the
 /// GStreamer stream-id analog), e.g. `"matroska-track-1"`, so an application can

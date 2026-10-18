@@ -1057,23 +1057,77 @@ pub fn forwardable_streams(demux: &TsDemuxer) -> Vec<TsStreamInfo> {
     demux
         .streams()
         .iter()
-        .filter_map(|es| {
-            let stream = es_to_ts_stream(es)?;
-            let video = matches!(
-                stream,
-                TsStream::H264
-                    | TsStream::H265
-                    | TsStream::Mpeg2
-                    | TsStream::Mpeg4Part2
-                    | TsStream::Av1
-            );
-            Some(TsStreamInfo {
-                stream,
-                caps: TsDemux::output_caps(stream),
-                video,
-            })
-        })
+        .filter_map(es_to_ts_stream)
+        .map(stream_info)
         .collect()
+}
+
+fn stream_info(stream: TsStream) -> TsStreamInfo {
+    let video = matches!(
+        stream,
+        TsStream::H264 | TsStream::H265 | TsStream::Mpeg2 | TsStream::Mpeg4Part2 | TsStream::Av1
+    );
+    TsStreamInfo {
+        stream,
+        caps: TsDemux::output_caps(stream),
+        video,
+    }
+}
+
+// a probed transport stream's audio and video streams, split by whether a demux port forwards them
+#[derive(Debug, Default)]
+pub struct TsProbedStreams {
+    pub forwardable: Vec<TsStreamInfo>,
+    pub unsupported: Vec<&'static str>,
+}
+
+// reads the PES units `demux` completed so far, to tell apart streams their stream_type leaves ambiguous
+pub fn probe_streams(demux: &mut TsDemuxer) -> TsProbedStreams {
+    let units = demux.take_units();
+    let first_payload = |pid: u16| {
+        units
+            .iter()
+            .find(|unit| unit.pid == pid)
+            .map(|unit| unit.data.as_slice())
+    };
+    let mut probed = TsProbedStreams::default();
+    for es in demux.streams() {
+        if let Some(codec) = unsupported_codec(es, first_payload(es.pid)) {
+            probed.unsupported.push(codec);
+        } else if let Some(stream) = es_to_ts_stream(es) {
+            probed.forwardable.push(stream_info(stream));
+        }
+    }
+    probed
+}
+
+// ISO/IEC 13818-1 audio and video stream types no `TsStream` carries
+const UNSUPPORTED_STREAM_TYPES: [(u8, &str); 4] = [
+    (0x11, LATM_CODEC),
+    (0x21, "jpeg2000"),
+    (0x33, "vvc"),
+    (0x42, "cavs"),
+];
+const LATM_CODEC: &str = "aac_latm";
+const DTS_CORE_SYNC: [u8; 4] = [0x7F, 0xFE, 0x80, 0x01];
+
+fn unsupported_codec(
+    es: &crate::mpegts::ElementaryStream,
+    first_payload: Option<&[u8]>,
+) -> Option<&'static str> {
+    match es.stream_type {
+        // some broadcasters label LATM with the ADTS stream type
+        STREAM_TYPE_AAC => first_payload
+            .is_some_and(crate::aacparse::opens_loas_frame)
+            .then_some(LATM_CODEC),
+        STREAM_TYPE_PRIVATE_PES if es_to_ts_stream(es).is_none() => first_payload
+            .is_some_and(|payload| payload.starts_with(&DTS_CORE_SYNC))
+            .then_some("dts"),
+        stream_type => UNSUPPORTED_STREAM_TYPES
+            .iter()
+            .find(|(unsupported, _)| *unsupported == stream_type)
+            .map(|(_, codec)| *codec),
+    }
 }
 
 impl PadTemplates for TsDemux {

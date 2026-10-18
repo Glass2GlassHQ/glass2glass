@@ -9,6 +9,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1582: the mp4 demuxers read a truncated QuickTime PCM track up to the cut instead of refusing its frame count.
 - M1581: `avidemux` reads the H.264 framing from the stream's `avcC`, and `h264parse` takes a buffer that walks as length-prefixed NALs for one.
 - M1580: `jpegparse` keeps the two field images of an interlaced AVI motion JPEG frame together and `mjpegdec` weaves them into one frame.
+- M1578: `FfmpegAudioDec` skips an access unit libavcodec rejects and decodes on, as the ffmpeg CLI does.
+- M1577: a bare `decodebin` fails at launch naming an unsupported codec, or the missing audio or video stream, across TS, PS, FLV, MP4, Matroska, WAV and still images.
 - M1576: `matroskademux` skips damaged data inside a Cluster to the next Cluster, as ffmpeg does.
 - M1575: `flacparse` passes a chained Ogg-FLAC file through to its last link, so `decodebin` decodes every link.
 - M1574: the mp4 demuxers end an audio track where its edit list ends, and cut raw PCM tracks to the edit themselves.

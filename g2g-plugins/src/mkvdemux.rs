@@ -983,6 +983,17 @@ pub struct MkvStreamInfo {
     pub video: bool,
 }
 
+// the audio and video streams whose track declares a ContentEncoding the demuxer cannot undo
+pub fn encoded_streams(demux: &MatroskaDemuxer) -> Vec<MkvStream> {
+    demux
+        .tracks()
+        .iter()
+        .filter(|track| track.unsupported_encoding)
+        .filter_map(|track| codec_to_stream(track.codec))
+        .filter(|stream| !is_subtitle(*stream))
+        .collect()
+}
+
 /// The forwardable elementary streams a parsed Matroska container carries, in
 /// track order (M382): one [`MkvStreamInfo`] per track whose codec maps to an
 /// [`MkvStream`] (an unmappable track is dropped). `demux` must have parsed its

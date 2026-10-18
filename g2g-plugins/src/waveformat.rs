@@ -55,6 +55,11 @@ pub(crate) fn audio_format(tag: u16, bits: u16) -> Option<AudioFormat> {
         .map(|(format, _, _)| *format)
 }
 
+// how a decode error names a `wFormatTag` g2g does not decode
+pub(crate) fn format_tag_name(tag: u16) -> alloc::string::String {
+    alloc::format!("audio format tag {tag:#06x}")
+}
+
 /// Bytes one sample frame of a constant-width format takes, `None` for a
 /// compressed or block-coded one.
 pub(crate) fn sample_frame_len(format: AudioFormat, channels: u8) -> Option<usize> {

@@ -45,12 +45,13 @@ use ffmpeg::Error as FfError;
 use ffmpeg_next as ffmpeg;
 
 use g2g_core::frame::{Frame, FrameTiming};
+use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Segment,
-    ANY_CHANNELS, ANY_SAMPLE_RATE,
+    g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, Segment, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::pcmclip::clip_pcm_to_segment;
@@ -204,6 +205,23 @@ impl FfmpegAudioDec {
         self.emitted
     }
 
+    // the ffmpeg CLI logs a unit libavcodec rejects for its content and decodes on
+    fn send_unit(&mut self, unit: &[u8]) -> Result<(), G2gError> {
+        let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
+        match decoder.send_packet(&Packet::copy(unit)) {
+            Ok(()) => Ok(()),
+            Err(error @ (FfError::InvalidData | FfError::PatchWelcome)) => {
+                g2g_warn!(
+                    Target::category(short_type_name::<Self>()),
+                    "skipped a {}-byte unit libavcodec rejects: {error}",
+                    unit.len()
+                );
+                Ok(())
+            }
+            Err(_) => Err(G2gError::Hardware(HardwareError::Other)),
+        }
+    }
+
     /// Drain whatever the decoder is ready to release into `out_frames`,
     /// converting each to interleaved `PcmS16Le`. libavcodec may buffer, so a
     /// send commonly yields zero frames.
@@ -317,7 +335,7 @@ impl AsyncElement for FfmpegAudioDec {
                 PipelinePacket::DataFrame(frame) => {
                     let slice = frame
                         .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                        .require_system_slice(short_type_name::<Self>())?;
                     timing = frame.timing;
                     let buf = slice;
                     // FLAC arrives container-framed (one frame per packet), led by
@@ -335,11 +353,7 @@ impl AsyncElement for FfmpegAudioDec {
                         // extradata (frame headers are self-describing for standard
                         // rates), then decode the frame.
                         self.open_decoder(None)?;
-                        let pkt = Packet::copy(buf);
-                        let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
-                        decoder
-                            .send_packet(&pkt)
-                            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                        self.send_unit(buf)?;
                         self.drain(&mut decoded)?;
                     } else if self.format == AudioFormat::Aac
                         && self.raw_aac_config.as_deref() == Some(buf)
@@ -367,11 +381,7 @@ impl AsyncElement for FfmpegAudioDec {
                             _ => adts_frames(buf),
                         };
                         for au in aus {
-                            let pkt = Packet::copy(au);
-                            let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
-                            decoder
-                                .send_packet(&pkt)
-                                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                            self.send_unit(au)?;
                             self.drain(&mut decoded)?;
                         }
                     }
