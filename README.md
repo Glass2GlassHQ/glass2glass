@@ -539,6 +539,7 @@ cargo clippy --workspace --all-targets
 | `MoqtSink` (MoQ Transport draft-16/18 publisher: fMP4 to groups / objects over WebTransport, subgroup streams or datagrams) | `moqt` | web-transport-quinn |
 | `MoqtSrc` (MoQ Transport draft-16/18 subscriber: catalog read, stream + datagram reassembly to fMP4) | `moqt` | web-transport-quinn |
 | `LiveKitSink` (publish into a LiveKit room: JWT + protobuf signalling) | `webrtc-livekit` | + tokio-tungstenite |
+| `KvsWebRtcSink` / `KvsWebRtcSrc` (Amazon Kinesis Video Streams WebRTC signalling: SigV4-signed WebSocket, master answers a viewer's offer, TURN from the service) | `webrtc-kvs` | + tokio-tungstenite + serde_json + base64 |
 | `JanusVrSink` / `JanusVrSrc` (publish into or subscribe from a Janus VideoRoom: JSON WebSocket signalling, keepalive, unpublish + leave on EOS) | `webrtc-janus` | + tokio-tungstenite + serde_json |
 | `HttpSrc` (HTTP(S) byte-stream source) | `http-src` | reqwest |
 | `HlsSrc` (TS + fMP4 / CMAF, live, LL-HLS parts + blocking reload, AES-128 / SAMPLE-AES) | `hls` | reqwest + aes |

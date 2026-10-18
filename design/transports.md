@@ -177,6 +177,25 @@ that makes Janus send the all-inactive `updated`. Validated by a default-run
 mock test and by `tests/janus_smoke.rs` against Janus 1.1.4, where an unbounded
 subscriber ended by itself on the sink's EOS.
 
+### Kinesis Video Streams
+
+`KvsWebRtcSink` (master) and `KvsWebRtcSrc` (viewer), feature `webrtc-kvs`,
+use Amazon's rented signalling: `kvs_signal` signs with a hand-rolled SigV4
+(header signing for `DescribeSignalingChannel`, `GetSignalingChannelEndpoint`
+and `GetIceServerConfig`, query-string presigning for the WebSocket, verified
+against botocore vectors), credentials from the `access-key` / `secret-key` /
+`session-token` / `region` properties or the `AWS_*` environment, no AWS SDK
+crate. Messages are the service's `{action, recipientClientId, messagePayload}`
+envelopes with base64 JSON payloads. The viewer offers recvonly video in
+`video-codec` plus Opus and runs the two-output media loop; the master answers
+with every carried codec enabled (str0m rejects its own answer otherwise) but
+sends only its input track, reading its mid from the answer SDP because
+`MediaAdded` lands after the first frame. TURN comes from `GetIceServerConfig`
+through `TurnSet::setup_each`; `with_endpoints` skips the control plane for the
+mock. One viewer per sink run. Validated by a default-run mock relay loopback
+and by `tests/kvswebrtc_smoke.rs` (ignored) against a real channel in
+us-east-1, 180 of 180 units arriving.
+
 ### Stats
 
 Every str0m element (`WebRtcSink`, `WebRtcWhepSrc`, `WebRtcWhepSessionSrc`,

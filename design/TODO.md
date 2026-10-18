@@ -117,7 +117,6 @@ Highest leverage first:
   connection); revisit only with a concrete need. Egress to a real CDN stays
   user-side.
 - **WebRTC.**
-  - A Kinesis Video Streams signaller as wanted.
   - FEC is blocked upstream (str0m has no FEC payload; loss recovery is
     NACK/RTX).
   - Data-channel loose ends: str0m surfaces no remote-close event, so EOS rides

@@ -2557,6 +2557,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "livekitsink" => "webrtc-livekit";
         "janusvrsink" => "webrtc-janus";
         "janusvrsrc" => "webrtc-janus";
+        "kvswebrtcsink" => "webrtc-kvs";
+        "kvswebrtcsrc" => "webrtc-kvs";
         "livekitsrc" => "webrtc-livekit";
         "httpsrc" => "http-src";
         "hlssrc" => "hls";
@@ -3382,6 +3384,10 @@ fn register_feature_gated(reg: &mut Registry) {
             crate::janusvrsink::DEFAULT_ENDPOINT,
         ))
     }));
+    #[cfg(feature = "webrtc-kvs")]
+    reg.register_launch(LaunchFactory::new("kvswebrtcsink", Vec::new(), || {
+        Box::new(crate::kvswebrtcsink::KvsWebRtcSink::new())
+    }));
     // Multi-track WHIP session sink (M725): a terminal fan-in whose track kinds
     // come from each linked pad's caps (video pads group as simulcast layers in
     // pad order): `v ! s.  a ! s.  webrtcsessionsink name=s location=...`.
@@ -3418,6 +3424,12 @@ fn register_feature_gated(reg: &mut Registry) {
                 crate::janusvrsrc::DEFAULT_ENDPOINT,
             ))
         },
+    ));
+    // Kinesis Video Streams viewer, same two outputs.
+    #[cfg(feature = "webrtc-kvs")]
+    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
+        "kvswebrtcsrc",
+        |_n| Box::new(crate::kvswebrtcsrc::KvsWebRtcSrc::new()),
     ));
     // WHIP server ingest: a publisher POSTs to `host-addr`, same two outputs.
     #[cfg(feature = "webrtc")]

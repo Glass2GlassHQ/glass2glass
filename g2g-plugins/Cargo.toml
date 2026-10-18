@@ -196,6 +196,10 @@ webrtc-livekit = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/native-t
 # API (JSON, `janus-protocol` subprotocol) and publishes one track through the
 # str0m PeerConnection. Layers on `webrtc` like the LiveKit elements.
 webrtc-janus = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/native-tls", "futures-util/sink", "dep:serde_json"]
+# Amazon Kinesis Video Streams WebRTC (KvsWebRtcSink as master, KvsWebRtcSrc as
+# viewer): hand-rolled SigV4 for the control-plane calls and the presigned
+# signalling WebSocket, str0m for the PeerConnection. Layers on `webrtc`.
+webrtc-kvs = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/native-tls", "futures-util/sink", "dep:serde_json", "dep:base64"]
 # ONVIF camera discovery + RTSP stream-URI resolution (OnvifSrc). Hand-rolled
 # WS-Discovery Probe (UDP multicast) and the two media SOAP calls
 # (GetProfiles / GetStreamUri) with a WS-Security UsernameToken digest header.

@@ -916,6 +916,13 @@ mod janus_signal;
 pub mod janusvrsink;
 #[cfg(feature = "webrtc-janus")]
 pub mod janusvrsrc;
+// Amazon Kinesis Video Streams WebRTC master (sink) and viewer (source).
+#[cfg(feature = "webrtc-kvs")]
+mod kvs_signal;
+#[cfg(feature = "webrtc-kvs")]
+pub mod kvswebrtcsink;
+#[cfg(feature = "webrtc-kvs")]
+pub mod kvswebrtcsrc;
 #[cfg(feature = "webrtc-livekit")]
 pub mod livekit_signal;
 #[cfg(feature = "webrtc-livekit")]
