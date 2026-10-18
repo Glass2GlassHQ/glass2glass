@@ -60,6 +60,8 @@ const DESC_TAG_SHORT_EVENT: u8 = 0x4D;
 /// `registration_descriptor` tag: a 4-byte format_identifier naming what a
 /// stream_type on its own does not say (which is every use of a private PES).
 const DESC_TAG_REGISTRATION: u8 = 0x05;
+/// DVB `AC-3_descriptor` tag, which marks a private PES as AC-3.
+pub(crate) const DESC_TAG_AC3: u8 = 0x6A;
 // DVB extension_descriptor, whose extension tag 0x80 is the Opus channel code
 const DESC_TAG_EXTENSION: u8 = 0x7F;
 const DESC_EXT_TAG_OPUS: u8 = 0x80;
@@ -1415,7 +1417,7 @@ impl TsDemuxer {
             // (the ffmpeg convention); a private 0x06 needs the 'KLVA' registration.
             let klv = stream_type == STREAM_TYPE_METADATA_PES
                 || private.is_some_and(has_klv_registration);
-            self.programs[prog_idx].streams.push(ElementaryStream {
+            let mut es = ElementaryStream {
                 pid,
                 stream_type,
                 opus_channels,
@@ -1425,7 +1427,16 @@ impl TsDemuxer {
                 subtitling: private.and_then(parse_subtitling_descriptor),
                 teletext: private.and_then(parse_teletext_descriptor),
                 language: descriptors.and_then(parse_iso639_language),
-            });
+            };
+            let streams = &mut self.programs[prog_idx].streams;
+            // a PID listed twice takes its last entry's type, as ffmpeg does
+            match streams.iter_mut().find(|listed| listed.pid == pid) {
+                Some(listed) => {
+                    es.language = es.language.or(listed.language);
+                    *listed = es;
+                }
+                None => streams.push(es),
+            }
             i = i.saturating_add(5).saturating_add(es_info_length);
         }
     }
@@ -1770,7 +1781,7 @@ fn has_ac3_descriptor(mut desc: &[u8]) -> bool {
             return false;
         };
         match tag {
-            0x6A => return true, // DVB AC-3_descriptor
+            DESC_TAG_AC3 => return true,
             DESC_TAG_REGISTRATION if body.len() >= 4 && &body[..4] == b"AC-3" => return true,
             _ => {}
         }

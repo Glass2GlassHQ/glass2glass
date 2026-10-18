@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1566: `tsdemux` takes the last PMT entry of a PID listed twice and forwards DVB AC-3 from a private PES.
 - M1565: `mpegpsdemux` forwards only the first stream of the selected codec, and a `PsDemuxN` selection picks one of several tracks of a codec.
 - M1561: `ac3parse`, `aacparse` and `mpegaudioparse` stamp each frame with its own chunk's demuxer time when frames arrive one per chunk, so the segment clip no longer drops transport-stream audio.
 - M1560: `tsdemux` and `mpegpsdemux` open the stream at the first DTS, so the open-GOP B frames ahead of the first I frame stay in the segment.

@@ -152,6 +152,11 @@ drops nothing.
 PAT, PMT, SDT and EIT sections reassemble across packets, capped at 1024 bytes
 for the first three and 4096 for the EIT.
 
+A PMT that lists one PID twice keeps the PID at its first position with the
+last entry's stream type and descriptors, as ffmpeg does. One broadcast mux
+lists each AC-3 PID as MPEG audio and then again as a private PES with an AC-3
+descriptor.
+
 Packets on PIDs no table names yet are held until the active program's PMT
 parses, then replayed in order, so a capture that starts between two PMT
 repeats keeps its first access units. At most 8192 packets are held, 0.5 s of

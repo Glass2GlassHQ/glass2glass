@@ -639,11 +639,15 @@ impl TsDemux {
     /// (0x03) and MPEG-2 (0x04) audio; Opus accepts the private PES 0x06 (the
     /// 'Opus' registration is checked separately, at PMT parse); Klv accepts the
     /// private PES 0x06 (the 'KLVA' registration likewise) and metadata-in-PES
-    /// 0x15; Av1 accepts the private PES 0x06 (its registration likewise).
+    /// 0x15; Av1 accepts the private PES 0x06 (its registration likewise); Ac3
+    /// accepts ATSC 0x81 and the DVB private PES 0x06 (its AC-3 descriptor likewise).
     fn accepts_stream_type(stream: TsStream, stream_type: u8) -> bool {
         match stream {
             TsStream::Mp2 => {
                 stream_type == STREAM_TYPE_MPEG1_AUDIO || stream_type == STREAM_TYPE_MPEG2_AUDIO
+            }
+            TsStream::Ac3 => {
+                stream_type == STREAM_TYPE_AC3 || stream_type == STREAM_TYPE_PRIVATE_PES
             }
             TsStream::Klv => {
                 stream_type == STREAM_TYPE_PRIVATE_PES || stream_type == STREAM_TYPE_METADATA_PES
@@ -1964,6 +1968,68 @@ mod tests {
         let mut sink = CaptureSink::default();
         run_demux(&mut d, &stream, &mut sink).await;
         assert_eq!(sink.frames, alloc::vec![first.to_vec()]);
+    }
+
+    // a PMT naming each (stream_type, pid, descriptors) entry in order, PCR on the first
+    fn pmt_entries(entries: &[(u8, u16, &[u8])]) -> Vec<u8> {
+        let pcr_pid = entries[0].1;
+        let mut body = alloc::vec![
+            0x00,
+            0x01,
+            0xC1,
+            0x00,
+            0x00,
+            0xE0 | (pcr_pid >> 8) as u8 & 0x1F,
+            pcr_pid as u8,
+            0xF0,
+            0x00,
+        ];
+        for (stream_type, pid, descriptors) in entries {
+            body.extend_from_slice(&[
+                *stream_type,
+                0xE0 | (pid >> 8) as u8 & 0x1F,
+                *pid as u8,
+                0xF0 | (descriptors.len() >> 8) as u8 & 0x0F,
+                descriptors.len() as u8,
+            ]);
+            body.extend_from_slice(descriptors);
+        }
+        psi(0x1000, 0x02, &body)
+    }
+
+    #[tokio::test]
+    async fn a_pid_listed_twice_in_the_pmt_takes_its_last_entry() {
+        const AC3_PID: u16 = 0x0134;
+        const PRIVATE_STREAM_1: u8 = 0xBD;
+        let ac3_descriptor = [crate::mpegts::DESC_TAG_AC3, 1, 0x00];
+        let syncframe = [0x0Bu8, 0x77, 0x12, 0x34];
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&pat(0x1000));
+        stream.extend_from_slice(&pmt_entries(&[
+            (STREAM_TYPE_MPEG2_AUDIO, AC3_PID, &[]),
+            (STREAM_TYPE_PRIVATE_PES, AC3_PID, &ac3_descriptor),
+        ]));
+        stream.extend_from_slice(&ts_packet(
+            AC3_PID,
+            true,
+            &pes_id(PRIVATE_STREAM_1, &syncframe),
+        ));
+
+        let mut probe = TsDemuxer::new();
+        for packet in stream.chunks(TS_PACKET_LEN) {
+            probe.push_packet(packet);
+        }
+        let streams: Vec<TsStream> = forwardable_streams(&probe)
+            .iter()
+            .map(|info| info.stream)
+            .collect();
+        assert_eq!(streams, alloc::vec![TsStream::Ac3]);
+
+        let mut d = TsDemux::new().with_stream(TsStream::Ac3);
+        d.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        run_demux(&mut d, &stream, &mut sink).await;
+        assert_eq!(sink.frames, alloc::vec![syncframe.to_vec()]);
     }
 
     /// The single-output demuxer posts the tags a transport stream carries (M872):
