@@ -14,8 +14,9 @@
 //! 14-bit sync code, each candidate validated by parsing the whole frame
 //! header and checking its CRC-8 (audio bytes alias the sync pattern, so an
 //! unvalidated sync would mis-split). A frame ends at the next validated sync
-//! (or EOF), and PTS / duration accumulate from each header's block size, so
-//! the emitted timeline is sample-accurate.
+//! whose number follows the current frame's or that closes a valid CRC-16, and a
+//! last frame failing its CRC-16 is dropped. PTS / duration accumulate from each
+//! header's block size, so the emitted timeline is sample-accurate.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -41,6 +42,19 @@ pub(crate) struct StreamInfo {
 /// sample count (its block size).
 pub(crate) struct FrameHeader {
     pub(crate) block_size: u32,
+    // the coded frame number, or the first sample's number for variable block sizes
+    number: u64,
+    variable_block_size: bool,
+}
+
+impl FrameHeader {
+    fn next_number(&self) -> u64 {
+        if self.variable_block_size {
+            self.number.saturating_add(u64::from(self.block_size))
+        } else {
+            self.number.saturating_add(1)
+        }
+    }
 }
 
 /// # Example
@@ -163,7 +177,7 @@ impl FlacParse {
                 // longer buffer either validates or the resync below advances.
                 return Ok(());
             }
-            let Some(end) = next_sync(&self.buf, 1) else {
+            let Some(end) = frame_end(&self.buf) else {
                 return Ok(()); // the current frame's end has not arrived
             };
             let frame: Vec<u8> = self.buf.drain(..end).collect();
@@ -235,6 +249,22 @@ fn crc8(data: &[u8]) -> u8 {
     crc
 }
 
+// CRC-16 (polynomial 0x8005, init 0), the FLAC frame footer checksum
+fn crc16(data: &[u8]) -> u16 {
+    let mut crc = 0u16;
+    for &b in data {
+        crc ^= u16::from(b) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x8005
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
 /// Parse and validate a FLAC frame header at the start of `data`: the 14-bit
 /// sync code, the fixed fields (rejecting reserved values), the UTF-8-coded
 /// frame/sample number, the optional block-size / sample-rate bytes, and the
@@ -243,6 +273,7 @@ fn crc8(data: &[u8]) -> u8 {
 /// Shared with [`crate::oggdemux`], which times Ogg-FLAC packets by block size.
 pub(crate) fn parse_frame_header(data: &[u8]) -> Option<FrameHeader> {
     let b1 = *data.get(1)?;
+    let variable_block_size = b1 & 0x01 != 0;
     // 14 sync bits (0b11111111_111110) and the reserved bit after them.
     if data[0] != 0xFF || b1 & 0xFC != 0xF8 || b1 & 0x02 != 0 {
         return None;
@@ -268,10 +299,19 @@ pub(crate) fn parse_frame_header(data: &[u8]) -> Option<FrameHeader> {
         _ => return None, // 0b10xxxxxx or 0xFF: not a valid first byte
     };
     at += 1;
+    // a multi-byte first byte spends its leading ones plus a zero on the length
+    let first_value_mask = if extra == 0 {
+        0x7F
+    } else {
+        0x7F >> (extra + 1)
+    };
+    let mut number = u64::from(first & first_value_mask);
     for _ in 0..extra {
-        if data.get(at)? & 0xC0 != 0x80 {
+        let continuation = *data.get(at)?;
+        if continuation & 0xC0 != 0x80 {
             return None;
         }
+        number = (number << 6) | u64::from(continuation & 0x3F);
         at += 1;
     }
     // Explicit block-size / sample-rate bytes when the codes call for them.
@@ -296,18 +336,24 @@ pub(crate) fn parse_frame_header(data: &[u8]) -> Option<FrameHeader> {
         _ => {}
     }
     let crc = *data.get(at)?;
-    (crc8(&data[..at]) == crc).then_some(FrameHeader { block_size })
+    (crc8(&data[..at]) == crc).then_some(FrameHeader {
+        block_size,
+        number,
+        variable_block_size,
+    })
 }
 
-/// The next validated frame-sync offset at or past `from`, or `None`.
-fn next_sync(data: &[u8], from: usize) -> Option<usize> {
-    let mut at = from;
+// the next validated sync that follows in number or closes a frame whose CRC-16 passes
+fn frame_end(data: &[u8]) -> Option<usize> {
+    let next_number = parse_frame_header(data)?.next_number();
+    let mut at = 1;
     while at + 1 < data.len() {
-        if data[at] == 0xFF
-            && data[at + 1] & 0xFC == 0xF8
-            && parse_frame_header(&data[at..]).is_some()
-        {
-            return Some(at);
+        if data[at] == 0xFF && data[at + 1] & 0xFC == 0xF8 {
+            let follows = parse_frame_header(&data[at..])
+                .is_some_and(|next| next.number == next_number || crc16(&data[..at]) == 0);
+            if follows {
+                return Some(at);
+            }
         }
         at += 1;
     }
@@ -384,7 +430,10 @@ impl AsyncElement for FlacParse {
                 // The last frame ends at EOF, not at a next sync: flush it.
                 PipelinePacket::Eos => {
                     self.drain(out).await?;
-                    if self.header_sent && parse_frame_header(&self.buf).is_some() {
+                    if self.header_sent
+                        && parse_frame_header(&self.buf).is_some()
+                        && crc16(&self.buf) == 0
+                    {
                         let tail = core::mem::take(&mut self.buf);
                         self.emit(tail, out).await?;
                     }

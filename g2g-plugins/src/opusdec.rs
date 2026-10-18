@@ -44,7 +44,8 @@
 //! worse than concealment. Either knob on fills the gap, with the same PTS span
 //! and sample accounting.
 //!
-//! Scope: 48 kHz mono/stereo, S16LE (default) or F32LE output.
+//! Scope: 48 kHz, the `OpusHead` channel mapping or the RFC 7845 defaults for
+//! the channel count, S16LE (default) or F32LE output.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -56,16 +57,18 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::time::{ns_to_ticks, ticks_to_ns};
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ChannelLayout, ChannelPosition,
+    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
-use audiopus::coder::Decoder;
-use audiopus::packet::Packet;
-use audiopus::{Channels, MutSignals, SampleRate};
+use audiopus::ffi;
 
-use crate::opusparse::{packet_frame_samples, packet_samples, parse_opus_head, OPUS_RATE_HZ};
+use crate::opusparse::{
+    mapping_len, packet_frame_samples, packet_samples, parse_opus_head, OPUS_HEAD_FIXED,
+    OPUS_RATE_HZ,
+};
 
 /// Largest Opus frame is 120 ms; at 48 kHz that is 5760 samples per channel. The
 /// decode output buffer is sized for it so any single packet fits.
@@ -87,6 +90,150 @@ const MAX_PLC_SAMPLES: u64 = (OPUS_RATE_HZ as u64 * 200) / 1000;
 /// opusdec's assumption for an unknown duration).
 const DEFAULT_PLC_CHUNK_SAMPLES: u64 = (OPUS_RATE_HZ as u64 * 20) / 1000;
 
+const MAPPING_FAMILY_RTP: u8 = 0;
+const MAPPING_FAMILY_VORBIS: u8 = 1;
+const MAPPING_FAMILY_OFFSET: usize = OPUS_HEAD_FIXED - 1;
+
+// RFC 7845 section 5.1.1.2: streams, coupled streams, table per channel count
+const VORBIS_MAPPINGS: [(u8, u8, &[u8]); 8] = [
+    (1, 0, &[0]),
+    (1, 1, &[0, 1]),
+    (2, 1, &[0, 2, 1]),
+    (2, 2, &[0, 1, 2, 3]),
+    (3, 2, &[0, 4, 1, 2, 3]),
+    (4, 2, &[0, 4, 1, 2, 3, 5]),
+    (4, 3, &[0, 4, 1, 2, 3, 5, 6]),
+    (5, 3, &[0, 6, 1, 2, 3, 4, 5, 7]),
+];
+
+// the Vorbis-order channel behind each channel of the ffmpeg default order
+fn vorbis_layout(channels: u8) -> Option<(ChannelLayout, &'static [usize])> {
+    use ChannelPosition::*;
+    Some(match channels {
+        3 => (ChannelLayout::of(&[Fl, Fr, Fc]), &[0, 2, 1]),
+        4 => (ChannelLayout::of(&[Fl, Fr, Bl, Br]), &[0, 1, 2, 3]),
+        5 => (ChannelLayout::of(&[Fl, Fr, Fc, Bl, Br]), &[0, 2, 1, 3, 4]),
+        6 => (ChannelLayout::SURROUND_5_1, &[0, 2, 1, 5, 3, 4]),
+        7 => (
+            ChannelLayout::of(&[Fl, Fr, Fc, Lfe, Bc, Sl, Sr]),
+            &[0, 2, 1, 6, 5, 3, 4],
+        ),
+        8 => (ChannelLayout::SURROUND_7_1, &[0, 2, 1, 7, 5, 6, 3, 4]),
+        _ => return None,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChannelMapping {
+    streams: u8,
+    coupled_streams: u8,
+    table: Vec<u8>,
+    layout: ChannelLayout,
+}
+
+impl ChannelMapping {
+    fn default_for(channels: u8) -> Option<Self> {
+        let family = if channels <= 2 {
+            MAPPING_FAMILY_RTP
+        } else {
+            MAPPING_FAMILY_VORBIS
+        };
+        let &(streams, coupled_streams, table) =
+            VORBIS_MAPPINGS.get(usize::from(channels).checked_sub(1)?)?;
+        Self::new(family, streams, coupled_streams, table)
+    }
+
+    fn from_opus_head(head: &[u8]) -> Option<Self> {
+        let (channels, _) = parse_opus_head(head)?;
+        let family = *head.get(MAPPING_FAMILY_OFFSET)?;
+        if family == MAPPING_FAMILY_RTP {
+            return Self::default_for(channels).filter(|_| channels <= 2);
+        }
+        let table = head.get(OPUS_HEAD_FIXED..OPUS_HEAD_FIXED + mapping_len(family, channels))?;
+        let (&streams, rest) = table.split_first()?;
+        let (&coupled_streams, table) = rest.split_first()?;
+        Self::new(family, streams, coupled_streams, table)
+    }
+
+    // family 1 output is permuted to the ffmpeg default order of its layout
+    fn new(family: u8, streams: u8, coupled_streams: u8, table: &[u8]) -> Option<Self> {
+        let coded_channels = u16::from(streams) + u16::from(coupled_streams);
+        if streams == 0 || coupled_streams > streams || coded_channels > u16::from(u8::MAX) {
+            return None;
+        }
+        let channels = u8::try_from(table.len()).ok()?;
+        let reorder = (family == MAPPING_FAMILY_VORBIS)
+            .then(|| vorbis_layout(channels))
+            .flatten();
+        let Some((layout, vorbis_index)) = reorder else {
+            return Some(Self {
+                streams,
+                coupled_streams,
+                table: table.to_vec(),
+                layout: ChannelLayout::UNSPECIFIED,
+            });
+        };
+        Some(Self {
+            streams,
+            coupled_streams,
+            table: vorbis_index.iter().map(|&index| table[index]).collect(),
+            layout,
+        })
+    }
+
+    fn channels(&self) -> u8 {
+        self.table.len() as u8
+    }
+}
+
+struct MultistreamDecoder(core::ptr::NonNull<ffi::OpusMSDecoder>);
+
+// SAFETY: libopus decoder state has no thread affinity and is only reached via `&mut self`.
+unsafe impl Send for MultistreamDecoder {}
+
+impl MultistreamDecoder {
+    fn new(mapping: &ChannelMapping) -> Result<Self, G2gError> {
+        let mut error = 0;
+        // SAFETY: `table` has one entry per output channel and `error` is a valid out-pointer.
+        let decoder = unsafe {
+            ffi::opus_multistream_decoder_create(
+                OPUS_RATE_HZ as i32,
+                i32::from(mapping.channels()),
+                i32::from(mapping.streams),
+                i32::from(mapping.coupled_streams),
+                mapping.table.as_ptr(),
+                &mut error,
+            )
+        };
+        match core::ptr::NonNull::new(decoder) {
+            Some(decoder) if error == ffi::OPUS_OK => Ok(Self(decoder)),
+            _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    fn checked_samples(decoded: i32) -> Result<usize, G2gError> {
+        usize::try_from(decoded).map_err(|_| G2gError::CapsMismatch)
+    }
+}
+
+impl Drop for MultistreamDecoder {
+    fn drop(&mut self) {
+        // SAFETY: the pointer came from `opus_multistream_decoder_create`, destroyed once here.
+        unsafe { ffi::opus_multistream_decoder_destroy(self.0.as_ptr()) }
+    }
+}
+
+// a lost packet is null data for libopus
+fn packet_parts(opus: Option<&[u8]>) -> Result<(*const u8, i32), G2gError> {
+    match opus {
+        Some(data) => Ok((
+            data.as_ptr(),
+            i32::try_from(data.len()).map_err(|_| G2gError::CapsMismatch)?,
+        )),
+        None => Ok((core::ptr::null(), 0)),
+    }
+}
+
 /// Decodes an Opus elementary stream into raw interleaved S16LE PCM.
 ///
 /// # Example
@@ -99,11 +246,12 @@ const DEFAULT_PLC_CHUNK_SAMPLES: u64 = (OPUS_RATE_HZ as u64 * 20) / 1000;
 /// ```
 pub struct OpusDec {
     channels: u8,
+    mapping: Option<ChannelMapping>,
     /// Negotiated output sample format: `PcmS16Le` (default) or `PcmF32Le`
     /// (libopus' float API, no i16 quantize). Settled by the solver via
     /// `configure_output` / the runner's pre-fixed output `CapsChanged`.
     out_format: AudioFormat,
-    dec: Option<Decoder>,
+    dec: Option<MultistreamDecoder>,
     /// Last emitted output caps, to suppress re-emitting an unchanged
     /// `CapsChanged` and to detect a channel-count change.
     last_out: Option<Caps>,
@@ -157,6 +305,7 @@ impl OpusDec {
     pub fn new() -> Self {
         Self {
             channels: 0,
+            mapping: None,
             out_format: AudioFormat::PcmS16Le,
             dec: None,
             last_out: None,
@@ -196,18 +345,19 @@ impl OpusDec {
         self.fec
     }
 
-    /// (Re)create the libopus decoder for a concrete channel count. Called from
+    /// (Re)create the libopus decoder for a channel mapping. Called from
     /// `configure_pipeline` when the negotiated input already carries a real
-    /// count, and from `process` when the demuxer's `CapsChanged` delivers it.
-    fn build_decoder(&mut self, channels: u8) -> Result<(), G2gError> {
-        let ch = match channels {
-            1 => Channels::Mono,
-            2 => Channels::Stereo,
-            _ => return Err(G2gError::CapsMismatch),
-        };
-        self.dec = Some(Decoder::new(SampleRate::Hz48000, ch).map_err(|_| G2gError::CapsMismatch)?);
-        self.channels = channels;
+    /// count, from `process` when the demuxer's `CapsChanged` delivers it, and
+    /// from an in-band `OpusHead`.
+    fn build_decoder(&mut self, mapping: ChannelMapping) -> Result<(), G2gError> {
+        self.dec = Some(MultistreamDecoder::new(&mapping)?);
+        self.channels = mapping.channels();
+        self.mapping = Some(mapping);
         Ok(())
+    }
+
+    fn build_default_decoder(&mut self, channels: u8) -> Result<(), G2gError> {
+        self.build_decoder(ChannelMapping::default_for(channels).ok_or(G2gError::CapsMismatch)?)
     }
 
     /// Sink pad template: Opus at any channel count / nominal rate. The auto-plug
@@ -230,7 +380,10 @@ impl OpusDec {
             format: self.out_format,
             channels: self.channels,
             sample_rate: OPUS_RATE_HZ,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            channel_layout: self
+                .mapping
+                .as_ref()
+                .map_or(ChannelLayout::UNSPECIFIED, |mapping| mapping.layout),
         }
     }
 
@@ -248,15 +401,21 @@ impl OpusDec {
     ) -> Result<(Vec<i16>, usize), G2gError> {
         let channels = self.channels as usize;
         let dec = self.dec.as_mut().ok_or(G2gError::NotConfigured)?;
-        let packet = opus
-            .map(|o| Packet::try_from(o).map_err(|_| G2gError::CapsMismatch))
-            .transpose()?;
+        let (data, len) = packet_parts(opus)?;
         let mut pcm = alloc::vec![0i16; capacity * channels];
-        let per_channel = {
-            let signals = MutSignals::try_from(&mut pcm[..]).map_err(|_| G2gError::CapsMismatch)?;
-            dec.decode(packet, signals, fec)
-                .map_err(|_| G2gError::CapsMismatch)?
+        let frame_size = i32::try_from(capacity).map_err(|_| G2gError::CapsMismatch)?;
+        // SAFETY: `data` is `len` bytes or null, `pcm` holds `frame_size` samples per channel.
+        let decoded = unsafe {
+            ffi::opus_multistream_decode(
+                dec.0.as_ptr(),
+                data,
+                len,
+                pcm.as_mut_ptr(),
+                frame_size,
+                i32::from(fec),
+            )
         };
+        let per_channel = MultistreamDecoder::checked_samples(decoded)?;
         pcm.truncate(per_channel * channels);
         Ok((pcm, per_channel))
     }
@@ -271,15 +430,21 @@ impl OpusDec {
     ) -> Result<(Vec<f32>, usize), G2gError> {
         let channels = self.channels as usize;
         let dec = self.dec.as_mut().ok_or(G2gError::NotConfigured)?;
-        let packet = opus
-            .map(|o| Packet::try_from(o).map_err(|_| G2gError::CapsMismatch))
-            .transpose()?;
+        let (data, len) = packet_parts(opus)?;
         let mut pcm = alloc::vec![0f32; capacity * channels];
-        let per_channel = {
-            let signals = MutSignals::try_from(&mut pcm[..]).map_err(|_| G2gError::CapsMismatch)?;
-            dec.decode_float(packet, signals, fec)
-                .map_err(|_| G2gError::CapsMismatch)?
+        let frame_size = i32::try_from(capacity).map_err(|_| G2gError::CapsMismatch)?;
+        // SAFETY: `data` is `len` bytes or null, `pcm` holds `frame_size` samples per channel.
+        let decoded = unsafe {
+            ffi::opus_multistream_decode_float(
+                dec.0.as_ptr(),
+                data,
+                len,
+                pcm.as_mut_ptr(),
+                frame_size,
+                i32::from(fec),
+            )
         };
+        let per_channel = MultistreamDecoder::checked_samples(decoded)?;
         pcm.truncate(per_channel * channels);
         Ok((pcm, per_channel))
     }
@@ -513,8 +678,8 @@ impl AsyncElement for OpusDec {
         self.configured = true;
         // A concrete count (the direct OpusParse path) builds the decoder now; the
         // `ANY_CHANNELS` (0) placeholder defers it to the demuxer's `CapsChanged`.
-        if *channels == 1 || *channels == 2 {
-            self.build_decoder(*channels)?;
+        if *channels != ANY_CHANNELS {
+            self.build_default_decoder(*channels)?;
         }
         Ok(ConfigureOutcome::Accepted)
     }
@@ -583,17 +748,19 @@ impl AsyncElement for OpusDec {
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // An in-band OpusHead is codec config, not audio: read its
-                    // channel count + pre-skip, (re)build the decoder, and consume
+                    // channel mapping + pre-skip, (re)build the decoder, and consume
                     // it (no PCM out). The demuxer forwards it before the audio.
-                    if let Some((channels, pre_skip)) = parse_opus_head(slice) {
-                        // A header opening a new logical stream (a channel-count
+                    if let Some((_, pre_skip)) = parse_opus_head(slice) {
+                        let mapping =
+                            ChannelMapping::from_opus_head(slice).ok_or(G2gError::CapsMismatch)?;
+                        // A header opening a new logical stream (a channel-mapping
                         // change, or a chained physical stream, which a `Segment`
                         // announces, M830) needs a decoder that has not carried
                         // the previous stream's state into it: that stream's
                         // encoder started cold, so the decoder must too. A header
                         // merely re-stated mid-stream keeps the running decoder.
-                        if self.channels != channels || self.new_segment {
-                            self.build_decoder(channels)?;
+                        if self.mapping.as_ref() != Some(&mapping) || self.new_segment {
+                            self.build_decoder(mapping)?;
                         }
                         // Fresh stream, fresh pre-skip window and PLC cadence.
                         self.pre_skip = pre_skip as u32;
@@ -661,7 +828,7 @@ impl AsyncElement for OpusDec {
                         channels,
                         ..
                     } => {
-                        self.build_decoder(*channels)?;
+                        self.build_default_decoder(*channels)?;
                     }
                     // The runner's pre-fixed forward output caps: adopt the
                     // chosen sample format and forward on.

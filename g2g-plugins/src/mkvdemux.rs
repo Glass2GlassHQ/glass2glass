@@ -374,6 +374,16 @@ impl MkvDemux {
         Self::concrete_caps_of(&self.demux, self.stream)
     }
 
+    // the first track of the codec, a second one stays out of the output
+    fn selected_track(demux: &MatroskaDemuxer, stream: MkvStream) -> Option<u64> {
+        let want = Self::selected_codec(stream);
+        demux
+            .tracks()
+            .iter()
+            .find(|t| t.codec == want)
+            .map(|t| t.number)
+    }
+
     /// The concrete caps for `stream` in `demux` once Tracks has been parsed, with
     /// real geometry / audio parameters (`None` until that track is known). The
     /// stream-parameterized form [`concrete_caps`](Self::concrete_caps) and the
@@ -617,9 +627,9 @@ impl MkvDemux {
                 self.last_caps = Some(caps);
             }
         }
-        let want = Self::selected_codec(self.stream);
+        let selected_track = Self::selected_track(&self.demux, self.stream);
         for f in self.demux.take_frames() {
-            if f.codec != want {
+            if Some(f.track) != selected_track {
                 continue; // a stream other than the selected one
             }
             // M362 seek: drop frames until the keyframe at/after the target (the
@@ -1504,7 +1514,9 @@ impl MultiOutputElement for MkvDemuxN {
                     // (and its re-armed CapsChanged) takes effect for the frames now.
                     self.apply_stream_selection();
                     for f in self.demux.take_frames() {
-                        let Some(port) = self.port_for_codec(f.codec) else {
+                        let Some(port) = self.port_for_codec(f.codec).filter(|&port| {
+                            MkvDemux::selected_track(&self.demux, self.ports[port]) == Some(f.track)
+                        }) else {
                             continue; // a track no selected port carries
                         };
                         if !self.segment_sent[port] {
@@ -1926,6 +1938,68 @@ mod tests {
             d.set_property("stream", PropValue::Str("theora".into())),
             Err(PropError::Value)
         );
+    }
+
+    // two AAC tracks, one block each
+    fn two_aac_tracks() -> Vec<u8> {
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &[
+                audio_track(1, b"A_AAC", 2, 48_000),
+                audio_track(2, b"A_AAC", 2, 48_000),
+            ]
+            .concat(),
+        );
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[
+                elem(&[0xE7], &uint_body(0)),
+                elem(&[0xA3], &block(1, 0, &[0x11])),
+                elem(&[0xA3], &block(2, 0, &[0x22])),
+            ]
+            .concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
+        [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
+    }
+
+    #[tokio::test]
+    async fn a_second_track_of_the_selected_codec_stays_out() {
+        let mut sink = CaptureSink::default();
+        run(MkvStream::Aac, &two_aac_tracks(), &mut sink).await;
+        assert_eq!(sink.frames, alloc::vec![alloc::vec![0x11]]);
+    }
+
+    struct OnePortSink(CaptureSink);
+    impl MultiOutputSink for OnePortSink {
+        fn poll_push_to(
+            &mut self,
+            cx: &mut core::task::Context<'_>,
+            _port: usize,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            self.0.poll_push(cx, packet_slot)
+        }
+        fn port_count(&self) -> usize {
+            1
+        }
+    }
+
+    #[tokio::test]
+    async fn a_port_carries_one_track_of_its_codec() {
+        let mut demux = MkvDemuxN::new(alloc::vec![MkvStream::Aac]);
+        demux.configure_pipeline(&MkvDemux::input_caps()).unwrap();
+        let mut sink = OnePortSink(CaptureSink::default());
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(two_aac_tracks().into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        demux
+            .process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(sink.0.frames, alloc::vec![alloc::vec![0x11]]);
     }
 
     fn subtitle_track(num: u64, codec: &[u8]) -> Vec<u8> {

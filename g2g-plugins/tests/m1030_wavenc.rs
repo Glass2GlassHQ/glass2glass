@@ -382,3 +382,77 @@ fn an_overlong_chunk_does_not_read_past_the_buffer() {
         .unwrap();
     assert!(sink.packets.is_empty());
 }
+
+// input chunks split samples, and chunks sit on both sides of `data`
+#[test]
+fn only_whole_frames_of_the_data_chunk_come_out() {
+    use g2g_plugins::wavparse::WavParse;
+
+    const CHANNELS: u16 = 2;
+    const BITS: u16 = 24;
+    const RATE: u32 = 48_000;
+    const INPUT_CHUNK_LEN: usize = 7;
+    let block_align = CHANNELS * BITS / 8;
+    let samples: Vec<u8> = (0..u8::MAX).take(usize::from(block_align) * 20).collect();
+
+    let mut fmt = Vec::new();
+    fmt.extend_from_slice(&1u16.to_le_bytes());
+    fmt.extend_from_slice(&CHANNELS.to_le_bytes());
+    fmt.extend_from_slice(&RATE.to_le_bytes());
+    fmt.extend_from_slice(&(RATE * u32::from(block_align)).to_le_bytes());
+    fmt.extend_from_slice(&block_align.to_le_bytes());
+    fmt.extend_from_slice(&BITS.to_le_bytes());
+    let list_body = b"INFOISFT\x03\x00\x00\x00g2g\x00";
+
+    let mut body = Vec::new();
+    body.extend_from_slice(b"WAVE");
+    for (id, chunk) in [
+        (b"fmt ", &fmt[..]),
+        (b"LIST", &list_body[..]),
+        (b"data", &samples[..]),
+        (b"cue ", &[9u8; 12][..]),
+    ] {
+        body.extend_from_slice(id);
+        body.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+        body.extend_from_slice(chunk);
+    }
+    let mut file = Vec::new();
+    file.extend_from_slice(b"RIFF");
+    file.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    file.extend_from_slice(&body);
+
+    let mut parse = WavParse::new();
+    parse
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Wav,
+        })
+        .unwrap();
+    let mut sink = CollectSink::default();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    for piece in file.chunks(INPUT_CHUNK_LEN) {
+        rt.block_on(parse.process(PipelinePacket::DataFrame(frame(piece.to_vec())), &mut sink))
+            .unwrap();
+    }
+    rt.block_on(parse.process(PipelinePacket::Eos, &mut sink))
+        .unwrap();
+
+    let frames: Vec<Vec<u8>> = sink
+        .packets
+        .iter()
+        .filter_map(|p| match p {
+            PipelinePacket::DataFrame(f) => {
+                Some(f.domain.require_system_slice("test").unwrap().to_vec())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        frames
+            .iter()
+            .all(|f| f.len() % usize::from(block_align) == 0),
+        "every buffer holds whole sample frames"
+    );
+    assert_eq!(frames.concat(), samples, "only the data chunk's samples");
+}
