@@ -455,6 +455,9 @@ ahead of the first block, and its blocks go untimed, because millisecond block
 timestamps cannot carry the sample-exact packet lengths `vorbisdec` trims to.
 WebM, the VP8/VP9/AV1 plus Opus subset, is the browser-delivery motivator.
 Block lacing, Xiph / EBML / fixed, is split, so multi-frame audio blocks demux.
+A Cluster child that names a track `Tracks` did not declare, or whose size is
+unknown or overflows, marks damaged data: the parser drops bytes up to the next
+Cluster ID and carries on there, as ffmpeg does.
 
 Matroska's Tracks element carries concrete geometry and audio parameters, so the
 demuxer refines the output caps itself via `CapsChanged` once Tracks is parsed,
