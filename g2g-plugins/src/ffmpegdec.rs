@@ -197,6 +197,8 @@ pub enum OutputFormat {
     /// planar 10-bit software decode or verbatim from a `P010LE` hardware frame;
     /// a source of another depth is a loud `CapsMismatch`.
     P010,
+    // only a YUVA420P source, such as VP6 with alpha, fills the alpha plane
+    A420,
 }
 
 impl OutputFormat {
@@ -216,6 +218,7 @@ impl OutputFormat {
             OutputFormat::I444p10 => RawVideoFormat::I444p10,
             OutputFormat::I444p12 => RawVideoFormat::I444p12,
             OutputFormat::P010 => RawVideoFormat::P010,
+            OutputFormat::A420 => RawVideoFormat::A420,
         }
     }
 
@@ -244,7 +247,8 @@ impl OutputFormat {
             | OutputFormat::Auto
             | OutputFormat::I420p10
             | OutputFormat::I420p12
-            | OutputFormat::P010 => (1, 1),
+            | OutputFormat::P010
+            | OutputFormat::A420 => (1, 1),
             OutputFormat::I422 | OutputFormat::I422p10 | OutputFormat::I422p12 => (1, 0),
             OutputFormat::I444 | OutputFormat::I444p10 | OutputFormat::I444p12 => (0, 0),
         }
@@ -258,11 +262,8 @@ impl OutputFormat {
 fn resolve_output_format(requested: OutputFormat, src: Pixel) -> Result<OutputFormat, G2gError> {
     match requested {
         OutputFormat::Auto => match src {
-            // YUVA420P (VP6 with alpha) drops its alpha plane: no raw format
-            // carries one.
-            Pixel::YUV420P | Pixel::YUVJ420P | Pixel::YUVA420P | Pixel::NV12 => {
-                Ok(OutputFormat::I420)
-            }
+            Pixel::YUV420P | Pixel::YUVJ420P | Pixel::NV12 => Ok(OutputFormat::I420),
+            Pixel::YUVA420P => Ok(OutputFormat::A420),
             Pixel::YUV422P | Pixel::YUVJ422P => Ok(OutputFormat::I422),
             Pixel::YUV444P | Pixel::YUVJ444P => Ok(OutputFormat::I444),
             // high bit depth: preserve chroma and depth (LE 2-byte samples)
@@ -298,6 +299,7 @@ fn accepts_output(requested: OutputFormat, format: RawVideoFormat) -> bool {
                 | RawVideoFormat::I444p10
                 | RawVideoFormat::I444p12
                 | RawVideoFormat::P010
+                | RawVideoFormat::A420
         ),
         other => other.raw_format() == format,
     }
@@ -1397,6 +1399,7 @@ impl PadTemplates for FfmpegVideoDec {
                 any_geometry(RawVideoFormat::I444p10),
                 any_geometry(RawVideoFormat::I444p12),
                 any_geometry(RawVideoFormat::P010),
+                any_geometry(RawVideoFormat::A420),
             ]))),
         ])
     }
@@ -1568,6 +1571,7 @@ impl AsyncElement for FfmpegVideoDec {
                     "i444p10" | "y444_10le" => OutputFormat::I444p10,
                     "i444p12" | "y444_12le" => OutputFormat::I444p12,
                     "p010" | "p010_10le" => OutputFormat::P010,
+                    "a420" => OutputFormat::A420,
                     _ => return Err(PropError::Value),
                 });
                 Ok(())
@@ -1646,6 +1650,7 @@ impl AsyncElement for FfmpegVideoDec {
                     OutputFormat::I444p10 => "i444p10",
                     OutputFormat::I444p12 => "i444p12",
                     OutputFormat::P010 => "p010",
+                    OutputFormat::A420 => "a420",
                 }
                 .into(),
             )),
@@ -1984,7 +1989,7 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
     .with_enum_values(
         "i420 | nv12 | i422 | i444 | auto | i420p10 | i420_10le | i420p12 | i420_12le | \
          i422p10 | i422_10le | i422p12 | i422_12le | i444p10 | y444_10le | i444p12 | \
-         y444_12le | p010 | p010_10le",
+         y444_12le | p010 | p010_10le | a420",
     )
     .with_default("i420"),
     PropertySpec::new(
@@ -2137,6 +2142,7 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
                     // A hardware 10-bit frame arrives semi-planar, so `Auto`
                     // resolves it to P010 (the Vaapi backend's 10-bit output).
                     mk(RawVideoFormat::P010),
+                    mk(RawVideoFormat::A420),
                 ]),
                 other => CapsSet::one(mk(other.raw_format())),
             }
@@ -2277,9 +2283,9 @@ fn pack_planar_16(dst: &mut [u8], frame: &FfVideo, (sx, sy): (u32, u32)) {
     debug_assert_eq!(dst.len(), y_bytes + 2 * c_bytes);
     let (y_dst, chroma_dst) = dst.split_at_mut(y_bytes);
     let (u_dst, v_dst) = chroma_dst.split_at_mut(c_bytes);
-    write_plane_16(y_dst, frame.data(0), frame.stride(0), w * 2, h);
-    write_plane_16(u_dst, frame.data(1), frame.stride(1), cw * 2, ch);
-    write_plane_16(v_dst, frame.data(2), frame.stride(2), cw * 2, ch);
+    copy_plane_rows(y_dst, frame.data(0), frame.stride(0), w * 2, h);
+    copy_plane_rows(u_dst, frame.data(1), frame.stride(1), cw * 2, ch);
+    copy_plane_rows(v_dst, frame.data(2), frame.stride(2), cw * 2, ch);
 }
 
 /// A planar 10-bit LE sample (value in the low bits) as a P010 word: the value
@@ -2333,8 +2339,8 @@ fn pack_p010_verbatim(dst: &mut [u8], frame: &FfVideo) {
     let y_bytes = w * h * 2;
     debug_assert_eq!(dst.len(), y_bytes + cw * ch * 4);
     let (y_dst, uv_dst) = dst.split_at_mut(y_bytes);
-    write_plane_16(y_dst, frame.data(0), frame.stride(0), w * 2, h);
-    write_plane_16(uv_dst, frame.data(1), frame.stride(1), cw * 4, ch);
+    copy_plane_rows(y_dst, frame.data(0), frame.stride(0), w * 2, h);
+    copy_plane_rows(uv_dst, frame.data(1), frame.stride(1), cw * 4, ch);
 }
 
 /// Unpack a `P010LE` source frame into planar 10-bit (`I420p10`): each word's
@@ -2374,9 +2380,9 @@ fn unpack_p010_to_planar10(dst: &mut [u8], frame: &FfVideo) {
 }
 
 /// Write `rows` rows of `row_bytes` bytes from a strided source plane into `dst`,
-/// packing the rows contiguously. The LE sample bytes are copied verbatim, so
-/// the destination keeps the source's little-endian layout.
-fn write_plane_16(dst: &mut [u8], src: &[u8], stride: usize, row_bytes: usize, rows: usize) {
+/// packing the rows contiguously. Sample bytes are copied verbatim, so a 16-bit
+/// destination keeps the source's little-endian layout.
+fn copy_plane_rows(dst: &mut [u8], src: &[u8], stride: usize, row_bytes: usize, rows: usize) {
     debug_assert_eq!(dst.len(), row_bytes * rows);
     for row in 0..rows {
         let s = row * stride;
@@ -2458,10 +2464,14 @@ fn copy_yuv(
         Pixel::YUV444P | Pixel::YUVJ444P => SourceLayout::Planar444,
         _ => return Err(G2gError::CapsMismatch),
     };
-    let required_planes = if matches!(src, SourceLayout::SemiPlanar420) {
-        2
-    } else {
-        3
+    let copies_alpha = format.raw_format().alpha_plane().is_some();
+    if copies_alpha && frame.format() != Pixel::YUVA420P {
+        return Err(G2gError::CapsMismatch);
+    }
+    let required_planes = match (src, copies_alpha) {
+        (SourceLayout::SemiPlanar420, _) => 2,
+        (_, false) => 3,
+        (_, true) => 4,
     };
     if frame.planes() < required_planes {
         return Err(G2gError::Hardware(HardwareError::Other));
@@ -2472,7 +2482,8 @@ fn copy_yuv(
     let ch = h.div_ceil(1 << osy);
     let y_size = w * h;
     let c_size = cw * ch;
-    let total = y_size + 2 * c_size;
+    let alpha_size = if copies_alpha { y_size } else { 0 };
+    let total = y_size + 2 * c_size + alpha_size;
 
     // Resolved before the destination is taken, so an unsupported pairing is
     // rejected rather than leaving a half-written buffer. A mismatch we do not
@@ -2482,7 +2493,7 @@ fn copy_yuv(
     let chroma = match (src, format) {
         // --- Matching subsampling: a plane copy (I420 from 4:2:0, I422 from
         // 4:2:2, I444 from 4:4:4) ---
-        (SourceLayout::Planar420, OutputFormat::I420)
+        (SourceLayout::Planar420, OutputFormat::I420 | OutputFormat::A420)
         | (SourceLayout::Planar422, OutputFormat::I422)
         | (SourceLayout::Planar444, OutputFormat::I444) => ChromaPack::PlanarCopy,
         (SourceLayout::Planar420, OutputFormat::Nv12) => ChromaPack::PlanarToInterleaved,
@@ -2495,15 +2506,14 @@ fn copy_yuv(
     };
 
     Ok(pack_into(pool, total, |dst| {
-        let (y_dst, chroma_dst) = dst.split_at_mut(y_size);
+        let (y_dst, rest) = dst.split_at_mut(y_size);
+        let (chroma_dst, alpha_dst) = rest.split_at_mut(2 * c_size);
         // Y plane (full resolution), honouring source pitch.
-        let y_src = frame.data(0);
-        let y_pitch = frame.stride(0);
-        for row in 0..h {
-            let s = row * y_pitch;
-            y_dst[row * w..(row + 1) * w].copy_from_slice(&y_src[s..s + w]);
-        }
+        copy_plane_rows(y_dst, frame.data(0), frame.stride(0), w, h);
         write_chroma(chroma_dst, chroma, frame, cw, ch);
+        if copies_alpha {
+            copy_plane_rows(alpha_dst, frame.data(3), frame.stride(3), w, h);
+        }
     }))
 }
 
@@ -2890,6 +2900,7 @@ mod tests {
         assert_eq!(resolve_output_format(Auto, Pixel::NV12).unwrap(), I420);
         assert_eq!(resolve_output_format(Auto, Pixel::YUV422P).unwrap(), I422);
         assert_eq!(resolve_output_format(Auto, Pixel::YUV444P).unwrap(), I444);
+        assert_eq!(resolve_output_format(Auto, Pixel::YUVA420P).unwrap(), A420);
         assert!(
             resolve_output_format(Auto, Pixel::RGB24).is_err(),
             "unsupported src"

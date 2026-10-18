@@ -176,8 +176,6 @@ Highest leverage first:
 
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
-- **Alpha in planar YUV:** add an `A420` raw format so `ffmpegdec` can emit
-  the alpha plane of VP6-alpha (`yuva420p`) instead of dropping it.
 
 ## Colorimetry
 

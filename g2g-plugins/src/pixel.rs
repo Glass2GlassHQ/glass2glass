@@ -189,7 +189,7 @@ pub(crate) fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
 pub(crate) mod tests {
     use super::*;
 
-    pub(crate) const EVERY_FORMAT: [RawVideoFormat; 15] = [
+    pub(crate) const EVERY_FORMAT: [RawVideoFormat; 16] = [
         RawVideoFormat::Nv12,
         RawVideoFormat::I420,
         RawVideoFormat::Rgba8,
@@ -205,6 +205,7 @@ pub(crate) mod tests {
         RawVideoFormat::I444p10,
         RawVideoFormat::I444p12,
         RawVideoFormat::P010,
+        RawVideoFormat::A420,
     ];
 
     // odd and even on each axis, so a subsampled chroma plane has to round up

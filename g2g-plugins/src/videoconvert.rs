@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 use crate::pixel::pack_planes;
 use crate::pixel::{
     carries_yuv, chroma_420_offsets, chroma_420_size, frame_byte_size, planar_planes, row_bytes,
+    tight_plane,
 };
 use crate::yuvmatrix::YuvRgbMatrix;
 use g2g_core::caps_parse::parse_raw_format;
@@ -37,7 +38,7 @@ use g2g_core::{
 
 /// Formats this element can both consume and produce. The convert `target`
 /// is always one of these.
-pub(crate) const FORMATS: [RawVideoFormat; 15] = [
+pub(crate) const FORMATS: [RawVideoFormat; 16] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Rgb8,
@@ -53,6 +54,7 @@ pub(crate) const FORMATS: [RawVideoFormat; 15] = [
     RawVideoFormat::I444p12,
     RawVideoFormat::Yuyv,
     RawVideoFormat::P010,
+    RawVideoFormat::A420,
 ];
 
 /// # Example
@@ -656,6 +658,8 @@ fn convert_strided(
         (Yuyv, Rgba8) => yuyv_to_rgb(src, w, h, 0, 2, matrix),
         (Yuyv, Bgra8) => yuyv_to_rgb(src, w, h, 2, 0, matrix),
         (P010, Nv12) | (Nv12, P010) => rescale_semi_planar(src, from, to, w, h, &mut hub.depth),
+        // A420 is an I420 frame with the alpha plane appended.
+        (A420, I420) => src[..frame_byte_size(I420, w as u32, h as u32)].into(),
         // Any conversion involving a high-bit-depth / 4:2:2 / 4:4:4 format (the
         // pairs above are the fast 8-bit paths) goes through the general hub:
         // unpack to 4:4:4 YUV at a working depth, then repack to the target.
@@ -707,13 +711,14 @@ fn convert_via_hub(
     from_hub(hub, wd, to, w, h, matrix)
 }
 
-/// The 4:4:4 Y, U, V planes [`to_hub`] fills and [`from_hub`] reads, and the
-/// depth table the repack scales through.
+/// The 4:4:4 Y, U, V planes and the 8-bit alpha [`to_hub`] fills and
+/// [`from_hub`] reads, and the depth table the repack scales through.
 #[derive(Debug, Default)]
 struct HubScratch {
     y: Vec<i32>,
     u: Vec<i32>,
     v: Vec<i32>,
+    alpha: Vec<u8>,
     depth: DepthTable,
 }
 
@@ -790,6 +795,7 @@ fn to_hub(
     hub.y.resize(n, 0);
     hub.u.resize(n, 0);
     hub.v.resize(n, 0);
+    fill_hub_alpha(src, from, w, h, &mut hub.alpha);
     let (y, u, v) = (&mut hub.y, &mut hub.u, &mut hub.v);
     match from {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => {
@@ -861,6 +867,24 @@ fn to_hub(
     }
 }
 
+// opaque for a format that carries no alpha
+fn fill_hub_alpha(src: &[u8], from: RawVideoFormat, w: usize, h: usize, alpha: &mut Vec<u8>) {
+    let n = w * h;
+    alpha.clear();
+    if matches!(from, RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8) {
+        let (pixels, _) = src[..n * 4].as_chunks::<4>();
+        alpha.extend(pixels.iter().map(|pixel| pixel[3]));
+        return;
+    }
+    match from.alpha_plane() {
+        Some(plane) => {
+            let (offset, _, _) = tight_plane(from, plane, w, h).expect("frame size fits");
+            alpha.extend_from_slice(&src[offset..offset + n]);
+        }
+        None => alpha.resize(n, u8::MAX),
+    }
+}
+
 /// Repack full-resolution (4:4:4) planar Y, U, V at working depth `wd` into `to`:
 /// RGB is color-converted from 8-bit YUV; the YUV targets downsample chroma by
 /// box-averaging and scale the depth.
@@ -878,7 +902,7 @@ fn from_hub(
         f => f.bit_depth(),
     };
     hub.depth.set(wd, target_depth);
-    let (y, u, v, depth) = (&hub.y, &hub.u, &hub.v, &hub.depth);
+    let (y, u, v, alpha, depth) = (&hub.y, &hub.u, &hub.v, &hub.alpha, &hub.depth);
     match to {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => {
             let (r_off, b_off) = crate::pixel::rgba_rb_offsets(to);
@@ -890,7 +914,7 @@ fn from_hub(
                 dst[p + r_off] = r as u8;
                 dst[p + 1] = g as u8;
                 dst[p + b_off] = b as u8;
-                dst[p + 3] = 255;
+                dst[p + 3] = alpha[i];
             }
             dst.into_boxed_slice()
         }
@@ -935,8 +959,7 @@ fn from_hub(
             let bps = f.bytes_per_sample();
             let (hs, vs) = f.chroma_shift().expect("planar format");
             let planes = planar_planes(f, w, h);
-            let total = planes[2].0 + planes[2].1 * planes[2].2 * bps;
-            let mut dst = vec![0u8; total];
+            let mut dst = vec![0u8; frame_byte_size(f, w as u32, h as u32)];
             let mut wr = |off: usize, idx: usize, val: i32| {
                 let val = depth.get(val);
                 if bps == 2 {
@@ -958,6 +981,10 @@ fn from_hub(
                     wr(planes[1].0, ci, su);
                     wr(planes[2].0, ci, sv);
                 }
+            }
+            if let Some(plane) = f.alpha_plane() {
+                let (offset, _, _) = tight_plane(f, plane, w, h).expect("frame size fits");
+                dst[offset..offset + n].copy_from_slice(alpha);
             }
             dst.into_boxed_slice()
         }

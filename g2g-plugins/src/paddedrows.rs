@@ -34,7 +34,11 @@ pub(crate) fn plane_shapes_with_stride_shift(
     (0..format.plane_count())
         .map(|plane| {
             let (_, row_bytes, rows) = crate::pixel::tight_plane(format, plane, w, h)?;
-            let shift = if plane == 0 { 0 } else { chroma_stride_shift };
+            let shift = if format.is_full_resolution_plane(plane) {
+                0
+            } else {
+                chroma_stride_shift
+            };
             Some((row_bytes, rows, shift))
         })
         .collect()

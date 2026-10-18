@@ -127,6 +127,9 @@ template.
   whole set at negotiation and fixing the concrete format per frame via
   `CapsChanged`.
 - `YUVJ*P` is accepted with the same plane layout as its studio-range sibling.
+- `A420` is I420 followed by a full-resolution 8-bit alpha plane. `Auto` emits
+  it for a `YUVA420P` source (VP6 with alpha), all four planes copied, and
+  `videoconvert` drops the alpha for I420 or carries it into RGBA / BGRA.
 
 Mismatches needing a real conversion, chroma upsampling or an 8-bit request from
 a 10-bit source, are rejected with `CapsMismatch` instead of silently converted.

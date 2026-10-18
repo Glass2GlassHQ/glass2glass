@@ -1966,6 +1966,8 @@ pub enum RawVideoFormat {
     /// GStreamer `P010_10LE` format, NVDEC's `P016` surface). The hardware 10-bit
     /// decode / encode surface format.
     P010,
+    // I420's planes followed by a full-resolution 8-bit alpha plane.
+    A420,
 }
 
 impl RawVideoFormat {
@@ -1987,6 +1989,7 @@ impl RawVideoFormat {
             RawVideoFormat::I444p10 => "Y444_10LE",
             RawVideoFormat::I444p12 => "Y444_12LE",
             RawVideoFormat::P010 => "P010_10LE",
+            RawVideoFormat::A420 => "A420",
         }
     }
 
@@ -2021,9 +2024,10 @@ impl RawVideoFormat {
     /// layout.
     pub const fn chroma_shift(self) -> Option<(u32, u32)> {
         match self {
-            RawVideoFormat::I420 | RawVideoFormat::I420p10 | RawVideoFormat::I420p12 => {
-                Some((1, 1))
-            }
+            RawVideoFormat::I420
+            | RawVideoFormat::I420p10
+            | RawVideoFormat::I420p12
+            | RawVideoFormat::A420 => Some((1, 1)),
             RawVideoFormat::I422 | RawVideoFormat::I422p10 | RawVideoFormat::I422p12 => {
                 Some((1, 0))
             }
@@ -2035,10 +2039,22 @@ impl RawVideoFormat {
     }
 
     /// True for the fully-planar I420 / I422 / I444 family (three Y, U, V planes
-    /// of [`Self::bytes_per_sample`]-byte samples). Excludes the semi-planar NV12
-    /// and the packed formats.
+    /// of [`Self::bytes_per_sample`]-byte samples, then A420's alpha plane).
+    /// Excludes the semi-planar NV12 and the packed formats.
     pub const fn is_planar_yuv(self) -> bool {
         self.chroma_shift().is_some()
+    }
+
+    // Packed RGBA / BGRA keep alpha inside their single plane.
+    pub const fn alpha_plane(self) -> Option<usize> {
+        match self {
+            RawVideoFormat::A420 => Some(3),
+            _ => None,
+        }
+    }
+
+    pub const fn is_full_resolution_plane(self, plane: usize) -> bool {
+        plane == 0 || matches!(self.alpha_plane(), Some(alpha) if alpha == plane)
     }
 
     /// Narrowest row stride in bytes at `width` that every plane of a
@@ -2081,8 +2097,9 @@ impl RawVideoFormat {
 
     /// How many separate planes the format stores: 1 packed (RGBA / BGRA / RGB /
     /// YUYV), 2 semi-planar (NV12 / P010, luma then interleaved chroma), 3 fully
-    /// planar (the I420 / I422 / I444 family). Matched exhaustively so a new
-    /// format has to state its own layout rather than inherit a wrong one.
+    /// planar (the I420 / I422 / I444 family), 4 for A420 (I420 plus alpha).
+    /// Matched exhaustively so a new format has to state its own layout rather
+    /// than inherit a wrong one.
     pub const fn plane_count(self) -> usize {
         match self {
             RawVideoFormat::Rgba8
@@ -2099,6 +2116,7 @@ impl RawVideoFormat {
             | RawVideoFormat::I444
             | RawVideoFormat::I444p10
             | RawVideoFormat::I444p12 => 3,
+            RawVideoFormat::A420 => 4,
         }
     }
 
@@ -2130,7 +2148,7 @@ impl RawVideoFormat {
             return width.checked_mul(pixel as u32);
         }
         let sample = self.bytes_per_sample() as u32;
-        if plane == 0 {
+        if self.is_full_resolution_plane(plane) {
             return width.checked_mul(sample);
         }
         match self {
@@ -2151,7 +2169,7 @@ impl RawVideoFormat {
         if plane >= self.plane_count() {
             return None;
         }
-        if plane == 0 {
+        if self.is_full_resolution_plane(plane) {
             return Some(height);
         }
         match self {
@@ -2408,7 +2426,7 @@ pub enum TensorLayout {
 }
 
 #[cfg(all(test, feature = "alloc"))]
-pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 15] = [
+pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 16] = [
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
     RawVideoFormat::Rgba8,
@@ -2424,6 +2442,7 @@ pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 15] = [
     RawVideoFormat::I444p10,
     RawVideoFormat::I444p12,
     RawVideoFormat::P010,
+    RawVideoFormat::A420,
 ];
 
 #[cfg(test)]

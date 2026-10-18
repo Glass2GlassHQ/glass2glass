@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1554: an `A420` raw format carries alpha, `ffmpegdec` emits it for VP6-alpha and `videoconvert` converts it to I420 and RGBA.
 - M1550: FLV VP6 units keep their dimension byte and `ffmpegdec` decodes VP6-alpha to I420, so those files decode at the right size and remux byte-exact.
 - M1548: `qtdemux` applies a video track's edit list, so `ffmpegdec` drops the frames the edit cuts.
 - M1549: `qtdemux` sends ER AAC, ELD and USAC access units raw behind their AudioSpecificConfig, which `ffmpegaudiodec` opens the decoder with.

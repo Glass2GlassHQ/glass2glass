@@ -315,7 +315,9 @@ fn plane_layout(format: RawVideoFormat, stride: u32, height: u32) -> Option<Plan
     };
     for plane in 0..count {
         let plane_stride = match format.chroma_shift() {
-            Some((horizontal, _)) if plane > 0 => stride >> horizontal,
+            Some((horizontal, _)) if !format.is_full_resolution_plane(plane) => {
+                stride >> horizontal
+            }
             _ => stride,
         };
         let rows = format.plane_rows(plane, height)?;

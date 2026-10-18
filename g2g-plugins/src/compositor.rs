@@ -720,6 +720,7 @@ impl Compositor {
     pub fn with_format(mut self, format: RawVideoFormat) -> Self {
         let ok = matches!(format, RawVideoFormat::Rgba8)
             || (format.bytes_per_sample() == 1
+                && format.alpha_plane().is_none()
                 && (matches!(format, RawVideoFormat::Nv12) || format.is_planar_yuv()));
         assert!(
             ok,

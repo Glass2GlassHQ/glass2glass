@@ -27,7 +27,7 @@ use crate::fakesink::FakeSink;
 
 /// The raw video formats a `fakevideosink` pad advertises: every one g2g has, so
 /// nothing negotiable is turned away.
-const RAW_VIDEO_FORMATS: [RawVideoFormat; 15] = [
+const RAW_VIDEO_FORMATS: [RawVideoFormat; 16] = [
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
     RawVideoFormat::Rgba8,
@@ -43,6 +43,7 @@ const RAW_VIDEO_FORMATS: [RawVideoFormat; 15] = [
     RawVideoFormat::I444p10,
     RawVideoFormat::I444p12,
     RawVideoFormat::P010,
+    RawVideoFormat::A420,
 ];
 
 /// The PCM formats a `fakeaudiosink` pad advertises. `Caps::Audio` also carries
