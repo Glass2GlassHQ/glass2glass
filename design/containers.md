@@ -707,7 +707,9 @@ QuickTime PCM sample entries (`twos`, `sowt`, `raw `, `alaw`, `ulaw`, version
 read as AIFC's big-endian `NONE` and 8-bit `raw ` as unsigned. Their `stsz`
 counts single frames, often at size 1, so the demuxers size a frame from the
 format and channel count and emit one buffer per chunk, converted to the
-graph's little-endian, unsigned 8-bit layout. The rate comes from the sound
+graph's little-endian, unsigned 8-bit layout. A file cut short ends the track
+at the last whole frame before the cut, so a `stsz` count past the file size is
+clamped to it rather than refused. The rate comes from the sound
 description. MP3 rides `.mp3` or an `mp4a` whose esds names MPEG-1 or MPEG-2
 audio, and its frames pass unchanged. `qtdemux stream=` names the audio track
 by format (`aac`, `mp3`, `pcm-s16le`, `alaw`, ...).
@@ -752,14 +754,24 @@ placeholder it negotiated. `mp4src` applies the same rule and announces it in a
 the first `moof` rather than at the `moov`.
 
 `Mp4Demux` and `Mp4DemuxN` turn a video track's edit list into the `Segment`
-they send ahead of its samples: it starts at the first edit's `media_time` and,
-when the list holds that one media edit, stops where the edit ends. Every sample
-still goes downstream, because the cut pictures can be references, and every
-video decoder drops each decoded picture whose pts `Segment::presents` rejects:
+they send ahead of its samples. It starts at the `media_time` of the first
+media edit, past any leading empty edits, whose delay is not applied. When
+every edit after them is a media edit with a duration, each starting at or
+after the end of the one before, the segment stops where the last one ends and
+the demuxers cut the media between edits out of the timeline, as ffmpeg's mov
+demuxer does: a sample after a gap moves back by the length of the gaps before
+it, a decode time inside a gap moves to its start, and a sample whose pts is
+inside a gap moves past the segment's stop. A list of any other shape keeps
+only the first media edit's start. Every sample still goes downstream, because
+the cut pictures can be references, and every video decoder drops each decoded
+picture whose pts `Segment::presents` rejects:
 before the start, or at or past the stop, the frames ffmpeg drops for the same
 edit. The intra-only decoders (`mjpegdec`, `jpegxsdec`) skip the cut units
-before decoding them. An audio track's segment takes only the start, its
-priming trim, and Opus gets none, its pre-skip being trimmed by `OpusDec`.
+before decoding them. An audio track's segment takes the same start and stop,
+trimming the encoder's priming and end padding, and Opus gets none, its
+pre-skip being trimmed by `OpusDec`. The stop is exact where ffmpeg keeps every
+packet that starts before the edit's end. Raw PCM reaches no decoder, so the
+demuxers cut its chunks to the segment themselves.
 Every audio decoder cuts its decoded PCM to the segment by sample: a frame
 that straddles the start loses the samples before it and takes the start as
 its pts, a frame that straddles the stop ends there, and a frame wholly

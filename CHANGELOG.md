@@ -6,10 +6,13 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1582: the mp4 demuxers read a truncated QuickTime PCM track up to the cut instead of refusing its frame count.
 - M1581: `avidemux` reads the H.264 framing from the stream's `avcC`, and `h264parse` takes a buffer that walks as length-prefixed NALs for one.
 - M1580: `jpegparse` keeps the two field images of an interlaced AVI motion JPEG frame together and `mjpegdec` weaves them into one frame.
 - M1576: `matroskademux` skips damaged data inside a Cluster to the next Cluster, as ffmpeg does.
 - M1575: `flacparse` passes a chained Ogg-FLAC file through to its last link, so `decodebin` decodes every link.
+- M1574: the mp4 demuxers end an audio track where its edit list ends, and cut raw PCM tracks to the edit themselves.
+- M1573: the mp4 demuxers apply every media edit of an edit list, cutting the media between edits, and skip a leading empty edit.
 - M1572: `flvdemux` reads every H.264 packet as length-prefixed, so a NAL of 256 to 511 bytes is no longer mistaken for Annex-B.
 - M1571: `avidemux` walks a `rec ` list only directly inside `movi`, so nested lists no longer overflow the stack.
 - M1570: `mjpegdec` decodes a frame that carries no Huffman tables with the ITU-T T.81 Annex K defaults, as AVI motion JPEG expects.

@@ -40,8 +40,8 @@ use g2g_core::{
 };
 
 use crate::fmp4::{
-    parse_all_tracks, parse_chapters, parse_fragments_multi, parse_progressive_multi,
-    starts_with_param_set, Sample, TrackHeader, TrackKind,
+    clip_stored_pcm, parse_all_tracks, parse_chapters, parse_fragments_multi,
+    parse_progressive_multi, starts_with_param_set, Sample, TrackHeader, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 
@@ -767,10 +767,12 @@ impl Mp4DemuxN {
             let Some(port) = self.ports.iter().position(|p| p.track_id == track_id) else {
                 continue; // a track no port forwards
             };
-            let kind = tracks
-                .iter()
-                .find(|t| t.track_id == track_id)
-                .map(|t| &t.kind);
+            let track = tracks.iter().find(|t| t.track_id == track_id);
+            let kind = track.map(|t| &t.kind);
+            let sample = match track {
+                Some(track) => track.edited_sample(sample),
+                None => sample,
+            };
             // Announce the port's real caps once (refining the looser negotiation
             // caps the branch solved against, e.g. concrete AAC channels/rate).
             if !self.announced[port] {
@@ -779,10 +781,7 @@ impl Mp4DemuxN {
                     .unwrap_or_else(|| self.ports[port].caps.clone());
                 out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
                 self.announced[port] = true;
-                let edit = tracks
-                    .iter()
-                    .find(|t| t.track_id == track_id)
-                    .map_or(Segment::new(), TrackHeader::presentation_segment);
+                let edit = track.map_or(Segment::new(), TrackHeader::presentation_segment);
                 if edit != self.port_edit[port] {
                     self.port_edit[port] = edit;
                     out.push_to(port, PipelinePacket::Segment(self.port_segment(port)))
@@ -856,17 +855,22 @@ impl Mp4DemuxN {
                 let frame = self.next_frame(head, FrameTiming::default());
                 out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
             }
-            let frame = self.next_frame(
-                data,
-                FrameTiming {
-                    pts_ns: sample.pts_ns,
-                    dts_ns: sample.dts_ns,
-                    duration_ns: sample.duration_ns,
-                    capture_ns: sample.pts_ns,
-                    arrival_ns: g2g_core::metrics::monotonic_ns(),
-                    keyframe: sample.keyframe,
-                },
-            );
+            let timing = FrameTiming {
+                pts_ns: sample.pts_ns,
+                dts_ns: sample.dts_ns,
+                duration_ns: sample.duration_ns,
+                capture_ns: sample.pts_ns,
+                arrival_ns: g2g_core::metrics::monotonic_ns(),
+                keyframe: sample.keyframe,
+            };
+            let clipped = match kind {
+                Some(kind) => clip_stored_pcm(kind, &self.port_segment(port), timing, data)?,
+                None => Some((timing, data)),
+            };
+            let Some((timing, data)) = clipped else {
+                continue;
+            };
+            let frame = self.next_frame(data, timing);
             out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
         }
         Ok(())
