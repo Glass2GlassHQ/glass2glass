@@ -15,16 +15,13 @@ use tokio::net::UdpSocket;
 
 use str0m::change::SdpAnswer;
 use str0m::crypto::from_feature_flags;
-use str0m::media::{Direction, KeyframeRequestKind, MediaKind, Mid};
+use str0m::media::{Direction, MediaKind};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
-use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    g2g_debug, g2g_info, g2g_warn, Caps, FrameTiming, G2gError, HardwareError, MemoryDomain,
-    MultiOutputSink, MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    g2g_debug, g2g_info, g2g_warn, Caps, G2gError, HardwareError, MultiOutputSink,
+    MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::kvs_signal::{
@@ -38,16 +35,15 @@ use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
+use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_util::{
-    drain_pacer, feed_datagram, media_time_ns, random_hex_id, select_host_ip, send_transmit,
-    IceTransportPolicy, ICE_TRANSPORT_POLICY_PROP,
+    drain_pacer, feed_datagram, random_hex_id, select_host_ip, send_transmit, IceTransportPolicy,
+    ICE_TRANSPORT_POLICY_PROP,
 };
 
 const VIDEO_PORT: usize = 0;
 const AUDIO_PORT: usize = 1;
 const OUTPUT_COUNT: usize = 2;
-const PLI_INTERVAL: Duration = Duration::from_secs(1);
-const UDP_RECV_BYTES: usize = 2000;
 const STEREO: u8 = 2;
 // kvs holds an offer for an absent master until its message ttl runs out
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
@@ -256,8 +252,7 @@ impl KvsWebRtcSrc {
             socket,
             local,
             turn,
-            video_mid,
-            audio_mid,
+            media_receiver: MediaReceiver::with_mids(self.video_codec, video_mid, audio_mid),
             ws_write,
             ws_read,
         })
@@ -269,8 +264,7 @@ struct Session {
     socket: UdpSocket,
     local: SocketAddr,
     turn: TurnSet,
-    video_mid: Mid,
-    audio_mid: Mid,
+    media_receiver: MediaReceiver,
     ws_write: WsWrite,
     ws_read: WsRead,
 }
@@ -380,8 +374,6 @@ impl MultiOutputSource for KvsWebRtcSrc {
             out.push_to(AUDIO_PORT, PipelinePacket::CapsChanged(opus_caps(STEREO)))
                 .await?;
 
-            let mut video_keyframed = false;
-            let mut last_pli = Instant::now();
             let mut signalling_open = true;
             let mut refresh_at = Instant::now() + REFRESH_INTERVAL;
             let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
@@ -399,29 +391,23 @@ impl MultiOutputSource for KvsWebRtcSrc {
             }
 
             loop {
-                let mut frames: Vec<(usize, u64, Vec<u8>)> = Vec::new();
+                let mut frames: Vec<(usize, ReceivedUnit)> = Vec::new();
                 let deadline = loop {
                     match s.rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => send_transmit(&s.socket, &mut s.turn, &t).await,
                         Ok(Output::Event(Event::MediaData(d))) => {
-                            let pts_ns = media_time_ns(d.time);
-                            if d.mid == s.video_mid {
-                                if !video_keyframed {
-                                    if !video_codec.is_keyframe(&d.data) {
-                                        continue;
-                                    }
-                                    g2g_debug!(self, "first video keyframe, forwarding");
-                                    video_keyframed = true;
-                                }
-                                frames.push((
-                                    VIDEO_PORT,
-                                    pts_ns,
-                                    video_codec.pipeline_unit(&d.data),
-                                ));
-                            } else if d.mid == s.audio_mid {
-                                frames.push((AUDIO_PORT, pts_ns, d.data.to_vec()));
+                            let Some(unit) = s.media_receiver.media_data(&d) else {
+                                continue;
+                            };
+                            if unit.first_keyframe {
+                                g2g_debug!(self, "first video keyframe, forwarding");
                             }
+                            let port = match unit.kind {
+                                MediaKind::Video => VIDEO_PORT,
+                                MediaKind::Audio => AUDIO_PORT,
+                            };
+                            frames.push((port, unit));
                         }
                         Ok(Output::Event(Event::Closed)) => {
                             g2g_info!(self, "the master closed the session, ending run");
@@ -444,31 +430,12 @@ impl MultiOutputSource for KvsWebRtcSrc {
                     }
                 };
 
-                if !video_keyframed && last_pli.elapsed() >= PLI_INTERVAL {
-                    last_pli = Instant::now();
-                    if let Some(rx) = s.rtc.direct_api().stream_rx_by_mid(s.video_mid, None) {
-                        g2g_debug!(self, "no keyframe yet, sending pli");
-                        rx.request_keyframe(KeyframeRequestKind::Pli);
-                    }
+                if s.media_receiver.request_keyframe_if_due(&mut s.rtc) {
+                    g2g_debug!(self, "no keyframe yet, sending pli");
                 }
 
-                for (port, pts_ns, data) in frames {
-                    let keyframe = port == VIDEO_PORT && video_codec.is_keyframe(&data);
-                    let frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(
-                            data.into_boxed_slice(),
-                        )),
-                        timing: FrameTiming {
-                            pts_ns,
-                            dts_ns: pts_ns,
-                            duration_ns: 0,
-                            capture_ns: pts_ns,
-                            arrival_ns: g2g_core::metrics::monotonic_ns(),
-                            keyframe,
-                        },
-                        sequence: seq,
-                        meta: Default::default(),
-                    };
+                for (port, unit) in frames {
+                    let frame = unit.into_frame(seq);
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     seq += 1;
                     if seq >= self.frame_limit {

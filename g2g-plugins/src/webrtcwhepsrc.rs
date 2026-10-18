@@ -30,7 +30,6 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use core::time::Duration;
 use std::time::Instant;
 
 use tokio::net::UdpSocket;
@@ -55,16 +54,13 @@ use crate::webrtc_codec::{
     get_video_codec_property, opus_caps, set_video_codec_property, Track, WebRtcVideoCodec,
     VIDEO_CODEC_PROP,
 };
+use crate::webrtc_receive::{PLI_INTERVAL, UDP_RECV_BYTES};
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_host_candidate, delete_resource, feed_datagram, ice_restart, media_time_ns, post_sdp,
     select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
     ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
 };
-
-/// Minimum gap between keyframe (PLI) requests while waiting for the first one,
-/// so a slow producer is not spammed every frame period.
-const PLI_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Which media this source subscribes to. WHEP offers one recv-only m-line, and
 /// a `SourceLoop` has one output pad, so the source carries a single track; the
@@ -396,7 +392,7 @@ impl SourceLoop for WebRtcWhepSrc {
             // Announce the produced caps before the first frame.
             out.push(PipelinePacket::CapsChanged(self.caps())).await?;
 
-            let mut buf = alloc::vec![0u8; 2000];
+            let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut seq = 0u64;
             // Mid-GOP join recovery (video): until the first keyframe arrives, ask
             // the remote for one (PLI) on a coarse interval so playback starts

@@ -61,6 +61,7 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
 use crate::webrtc_codec::{sink_caps_alternatives, Track, WebRtcVideoCodec};
+use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_host_candidate, drain_pacer, feed_datagram, ice_restart, post_sdp, select_host_ip,
@@ -535,7 +536,7 @@ async fn run_session(
     stats: WebRtcStatsHandle,
     mut rx: mpsc::Receiver<MediaUnit>,
 ) {
-    let mut buf = alloc::vec![0u8; 2000];
+    let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
     // The negotiated payload type for this track's codec, discovered once the
     // writer exists.
     let mut pt: Option<Pt> = None;

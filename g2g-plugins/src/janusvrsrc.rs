@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use futures_util::{Sink, StreamExt};
 use serde_json::{json, Value};
@@ -17,16 +17,13 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 use str0m::change::SdpOffer;
 use str0m::crypto::from_feature_flags;
-use str0m::media::{KeyframeRequestKind, MediaKind, Mid};
+use str0m::media::MediaKind;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
-use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    g2g_debug, g2g_info, g2g_warn, Caps, FrameTiming, G2gError, HardwareError, MemoryDomain,
-    MultiOutputSink, MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    g2g_debug, g2g_info, g2g_warn, Caps, G2gError, HardwareError, MultiOutputSink,
+    MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 pub use crate::janus_signal::DEFAULT_ENDPOINT;
@@ -39,16 +36,14 @@ use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
+use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_util::{
-    add_ice_candidates, feed_datagram, media_time_ns, select_host_ip, send_transmit,
-    STUN_SERVER_PROP,
+    add_ice_candidates, feed_datagram, select_host_ip, send_transmit, STUN_SERVER_PROP,
 };
 
 const VIDEO_PORT: usize = 0;
 const AUDIO_PORT: usize = 1;
 const OUTPUT_COUNT: usize = 2;
-const PLI_INTERVAL: Duration = Duration::from_secs(1);
-const UDP_RECV_BYTES: usize = 2000;
 const STEREO: u8 = 2;
 
 pub struct JanusVrSrc {
@@ -445,10 +440,7 @@ impl MultiOutputSource for JanusVrSrc {
             out.push_to(AUDIO_PORT, PipelinePacket::CapsChanged(opus_caps(STEREO)))
                 .await?;
 
-            let mut video_mid: Option<Mid> = None;
-            let mut audio_mid: Option<Mid> = None;
-            let mut video_keyframed = false;
-            let mut last_pli = Instant::now();
+            let mut media_receiver = MediaReceiver::new(video_codec);
             let mut keepalive_at = Instant::now() + KEEPALIVE_INTERVAL;
             let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut turn = TurnSet::empty();
@@ -463,37 +455,27 @@ impl MultiOutputSource for JanusVrSrc {
             }
 
             loop {
-                let mut frames: Vec<(usize, u64, Vec<u8>)> = Vec::new();
+                let mut frames: Vec<(usize, ReceivedUnit)> = Vec::new();
                 let deadline = loop {
                     match s.rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => send_transmit(&s.socket, &mut turn, &t).await,
                         Ok(Output::Event(Event::MediaAdded(m))) => {
                             g2g_debug!(self, "{:?} track on mid {:?}", m.kind, m.mid);
-                            match m.kind {
-                                MediaKind::Video if video_mid.is_none() => video_mid = Some(m.mid),
-                                MediaKind::Audio if audio_mid.is_none() => audio_mid = Some(m.mid),
-                                _ => {}
-                            }
+                            media_receiver.media_added(&m);
                         }
                         Ok(Output::Event(Event::MediaData(d))) => {
-                            let pts_ns = media_time_ns(d.time);
-                            if Some(d.mid) == video_mid {
-                                if !video_keyframed {
-                                    if !video_codec.is_keyframe(&d.data) {
-                                        continue;
-                                    }
-                                    g2g_debug!(self, "first video keyframe, forwarding");
-                                    video_keyframed = true;
-                                }
-                                frames.push((
-                                    VIDEO_PORT,
-                                    pts_ns,
-                                    video_codec.pipeline_unit(&d.data),
-                                ));
-                            } else if Some(d.mid) == audio_mid {
-                                frames.push((AUDIO_PORT, pts_ns, d.data.to_vec()));
+                            let Some(unit) = media_receiver.media_data(&d) else {
+                                continue;
+                            };
+                            if unit.first_keyframe {
+                                g2g_debug!(self, "first video keyframe, forwarding");
                             }
+                            let port = match unit.kind {
+                                MediaKind::Video => VIDEO_PORT,
+                                MediaKind::Audio => AUDIO_PORT,
+                            };
+                            frames.push((port, unit));
                         }
                         Ok(Output::Event(Event::IceConnectionStateChange(
                             IceConnectionState::Disconnected,
@@ -509,33 +491,12 @@ impl MultiOutputSource for JanusVrSrc {
                     }
                 };
 
-                if let Some(mid) = video_mid {
-                    if !video_keyframed && last_pli.elapsed() >= PLI_INTERVAL {
-                        last_pli = Instant::now();
-                        if let Some(rx) = s.rtc.direct_api().stream_rx_by_mid(mid, None) {
-                            g2g_debug!(self, "no keyframe yet, sending pli");
-                            rx.request_keyframe(KeyframeRequestKind::Pli);
-                        }
-                    }
+                if media_receiver.request_keyframe_if_due(&mut s.rtc) {
+                    g2g_debug!(self, "no keyframe yet, sending pli");
                 }
 
-                for (port, pts_ns, data) in frames {
-                    let keyframe = port == VIDEO_PORT && video_codec.is_keyframe(&data);
-                    let frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(
-                            data.into_boxed_slice(),
-                        )),
-                        timing: FrameTiming {
-                            pts_ns,
-                            dts_ns: pts_ns,
-                            duration_ns: 0,
-                            capture_ns: pts_ns,
-                            arrival_ns: g2g_core::metrics::monotonic_ns(),
-                            keyframe,
-                        },
-                        sequence: seq,
-                        meta: Default::default(),
-                    };
+                for (port, unit) in frames {
+                    let frame = unit.into_frame(seq);
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     seq += 1;
                     if seq >= self.frame_limit {

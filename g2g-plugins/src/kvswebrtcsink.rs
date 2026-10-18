@@ -36,6 +36,7 @@ use crate::kvs_signal::{
 };
 use crate::turn::{TurnSet, REFRESH_INTERVAL};
 use crate::webrtc_codec::{enable_tracks, sink_caps_alternatives, Track, WebRtcVideoCodec};
+use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     drain_pacer, feed_datagram, select_host_ip, send_transmit, IceTransportPolicy,
@@ -46,7 +47,6 @@ use crate::webrtcsink::{MediaUnit, DEFAULT_QUEUE_DEPTH, INITIAL_BITRATE_BPS};
 const LEAVE_TIMEOUT: Duration = Duration::from_secs(2);
 // the service closes an idle socket after 10 minutes and any socket after an hour
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
-const UDP_RECV_BYTES: usize = 2000;
 const REJECTED_PORT: &str = "0";
 const SENDING_DIRECTIONS: [&str; 2] = ["a=sendonly", "a=sendrecv"];
 const MID_LINE_PREFIX: &str = "a=mid:";

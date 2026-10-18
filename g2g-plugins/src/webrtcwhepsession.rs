@@ -47,6 +47,7 @@ use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
+use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_host_candidate, delete_resource, feed_datagram, ice_restart, media_time_ns, post_sdp,
@@ -322,7 +323,7 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
             out.push_to(AUDIO_PORT, PipelinePacket::CapsChanged(opus_caps(2)))
                 .await?;
 
-            let mut buf = alloc::vec![0u8; 2000];
+            let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut seq = 0u64;
             // Emit EOS to both outputs, DELETE the WHEP resource (RFC 9725
             // teardown), and finish.

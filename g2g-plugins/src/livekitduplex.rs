@@ -35,16 +35,14 @@ use tokio_tungstenite::tungstenite::Message;
 
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::crypto::from_feature_flags;
-use str0m::media::{Direction, KeyframeRequestKind, MediaKind, Mid, Pt};
+use str0m::media::{Direction, MediaKind, Mid, Pt};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 
 use g2g_core::fanout::{DuplexInbound, MultiDuplexSession};
-use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    g2g_warn, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, MultiOutputSink, PipelinePacket, ReverseChannel,
+    g2g_warn, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, HardwareError,
+    MultiOutputSink, PipelinePacket, ReverseChannel,
 };
 
 use crate::filesink::io_err;
@@ -57,12 +55,12 @@ use crate::livekitsrc::{answer_offer, recv_signal, send_signal};
 use crate::webrtc_codec::{
     enable_tracks, opus_caps, sink_caps_alternatives, Track, WebRtcVideoCodec,
 };
-use crate::webrtc_util::{feed_datagram, media_time_ns, send_transmit};
+use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
+use crate::webrtc_util::{feed_datagram, send_transmit};
 
 /// Send input / recv output pad layout: 0 = video, 1 = audio.
 const VIDEO: usize = 0;
 const AUDIO: usize = 1;
-const PLI_INTERVAL: Duration = Duration::from_secs(1);
 const TOKEN_TTL_SECS: u64 = 3600;
 
 /// Bidirectional LiveKit participant. See the module docs.
@@ -409,18 +407,15 @@ impl MultiDuplexSession for LiveKitDuplex {
             out.push_to(AUDIO, PipelinePacket::CapsChanged(opus_caps(2)))
                 .await?;
 
-            let mut recv_video_mid: Option<Mid> = None;
-            let mut recv_audio_mid: Option<Mid> = None;
-            let mut video_keyframed = false;
-            let mut last_pli = Instant::now();
+            let mut media_receiver = MediaReceiver::new(recv_video);
             let mut video_pt: Option<Pt> = None;
             let mut audio_pt: Option<Pt> = None;
             let mut next_ping = Instant::now() + ping_interval;
             let mut send_done = false;
             let mut drain_deadline: Option<Instant> = None;
 
-            let mut buf = alloc::vec![0u8; 2000];
-            let mut sub_buf = alloc::vec![0u8; 2000];
+            let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
+            let mut sub_buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut received = 0u64;
             macro_rules! finish {
                 () => {{
@@ -433,7 +428,7 @@ impl MultiDuplexSession for LiveKitDuplex {
 
             loop {
                 // Drain both PCs' outputs; the loop deadline is the earlier one.
-                let mut frames: Vec<(usize, u64, Vec<u8>)> = Vec::new();
+                let mut frames: Vec<(usize, ReceivedUnit)> = Vec::new();
                 let pub_deadline = loop {
                     match pub_rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
@@ -468,28 +463,16 @@ impl MultiDuplexSession for LiveKitDuplex {
                         Ok(Output::Transmit(t)) => {
                             send_transmit(&sub_socket, &mut sub_turn, &t).await;
                         }
-                        Ok(Output::Event(Event::MediaAdded(m))) => match m.kind {
-                            MediaKind::Video if recv_video_mid.is_none() => {
-                                recv_video_mid = Some(m.mid)
-                            }
-                            MediaKind::Audio if recv_audio_mid.is_none() => {
-                                recv_audio_mid = Some(m.mid)
-                            }
-                            _ => {}
-                        },
+                        Ok(Output::Event(Event::MediaAdded(m))) => media_receiver.media_added(&m),
                         Ok(Output::Event(Event::MediaData(d))) => {
-                            let pts_ns = media_time_ns(d.time);
-                            if Some(d.mid) == recv_video_mid {
-                                if !video_keyframed {
-                                    if !recv_video.is_keyframe(&d.data) {
-                                        continue;
-                                    }
-                                    video_keyframed = true;
-                                }
-                                frames.push((VIDEO, pts_ns, recv_video.pipeline_unit(&d.data)));
-                            } else if Some(d.mid) == recv_audio_mid {
-                                frames.push((AUDIO, pts_ns, d.data.to_vec()));
-                            }
+                            let Some(unit) = media_receiver.media_data(&d) else {
+                                continue;
+                            };
+                            let port = match unit.kind {
+                                MediaKind::Video => VIDEO,
+                                MediaKind::Audio => AUDIO,
+                            };
+                            frames.push((port, unit));
                         }
                         Ok(Output::Event(Event::IceConnectionStateChange(
                             IceConnectionState::Disconnected,
@@ -500,32 +483,10 @@ impl MultiDuplexSession for LiveKitDuplex {
                 };
                 let deadline = pub_deadline.min(sub_deadline);
 
-                if let Some(mid) = recv_video_mid {
-                    if !video_keyframed && last_pli.elapsed() >= PLI_INTERVAL {
-                        last_pli = Instant::now();
-                        if let Some(rx) = sub_rtc.direct_api().stream_rx_by_mid(mid, None) {
-                            rx.request_keyframe(KeyframeRequestKind::Pli);
-                        }
-                    }
-                }
+                media_receiver.request_keyframe_if_due(&mut sub_rtc);
 
-                for (port, pts_ns, data) in frames {
-                    let keyframe = port == VIDEO && recv_video.is_keyframe(&data);
-                    let frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(
-                            data.into_boxed_slice(),
-                        )),
-                        timing: FrameTiming {
-                            pts_ns,
-                            dts_ns: pts_ns,
-                            duration_ns: 0,
-                            capture_ns: pts_ns,
-                            arrival_ns: g2g_core::metrics::monotonic_ns(),
-                            keyframe,
-                        },
-                        sequence: received,
-                        meta: Default::default(),
-                    };
+                for (port, unit) in frames {
+                    let frame = unit.into_frame(received);
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     received += 1;
                     if received >= self.frame_limit {

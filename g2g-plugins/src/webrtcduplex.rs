@@ -71,6 +71,7 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::turn::TurnSet;
 use crate::webrtc_codec::{enable_tracks, opus_caps, Track, WebRtcVideoCodec};
+use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_util::{
     add_ice_candidates, feed_datagram, media_time_ns, select_host_ip, send_transmit,
 };
@@ -579,7 +580,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                 announced[o] = true;
             }
 
-            let mut buf = alloc::vec![0u8; 2000];
+            let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut seq = 0u64;
             let mut received = 0u64;
             let mut send_done = false;

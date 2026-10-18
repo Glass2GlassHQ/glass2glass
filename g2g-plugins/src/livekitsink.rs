@@ -71,6 +71,7 @@ use crate::livekit_signal::{
 use crate::livekitsrc::{recv_signal, send_signal};
 use crate::turn::TurnSet;
 use crate::webrtc_codec::{enable_tracks, sink_caps_alternatives, Track, WebRtcVideoCodec};
+use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_simulcast::{
     rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
@@ -806,7 +807,7 @@ struct SessionArgs {
 /// the JoinResponse interval. Mirrors `WebRtcSessionSink::run_session` with the
 /// WebSocket signalling folded in (LiveKit trickles over the WS, not HTTP PATCH).
 async fn run_session(mut a: SessionArgs) {
-    let mut buf = alloc::vec![0u8; 2000];
+    let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
     let mut video_pt: Option<Pt> = None;
     let mut audio_pt: Option<Pt> = None;
     let mut ping_at = Instant::now() + a.ping_interval;

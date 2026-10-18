@@ -46,6 +46,7 @@ use crate::janus_signal::{
 };
 use crate::turn::TurnSet;
 use crate::webrtc_codec::{sink_caps_alternatives, Track, WebRtcVideoCodec};
+use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_ice_candidates, drain_pacer, feed_datagram, select_host_ip, send_transmit, STUN_SERVER_PROP,
@@ -53,7 +54,6 @@ use crate::webrtc_util::{
 use crate::webrtcsink::{MediaUnit, DEFAULT_QUEUE_DEPTH, INITIAL_BITRATE_BPS};
 
 const LEAVE_TIMEOUT: Duration = Duration::from_secs(2);
-const UDP_RECV_BYTES: usize = 2000;
 
 /// Janus VideoRoom publisher. See the module docs.
 ///

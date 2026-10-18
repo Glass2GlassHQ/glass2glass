@@ -28,7 +28,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
@@ -38,16 +38,13 @@ use tokio_native_tls::{native_tls, TlsAcceptor};
 
 use str0m::change::SdpOffer;
 use str0m::crypto::from_feature_flags;
-use str0m::media::{KeyframeRequestKind, MediaKind, Mid};
+use str0m::media::MediaKind;
 use str0m::{Candidate, Event, IceConnectionState, IceCreds, Input, Output, Rtc, RtcConfig};
 
-use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource, Target};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    g2g_debug, g2g_info, g2g_warn, Caps, FrameTiming, G2gError, HardwareError, MemoryDomain,
-    MultiOutputSink, MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    g2g_debug, g2g_info, g2g_warn, Caps, G2gError, HardwareError, MultiOutputSink,
+    MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
@@ -56,10 +53,11 @@ use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
+use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
-    add_ice_candidates, feed_datagram, media_time_ns, parse_restart_answer_frag, random_hex_id,
-    select_host_ip, send_transmit, STUN_SERVER_PROP,
+    add_ice_candidates, feed_datagram, parse_restart_answer_frag, random_hex_id, select_host_ip,
+    send_transmit, STUN_SERVER_PROP,
 };
 
 // each publisher slot owns a pad pair: slot * PORTS_PER_PUBLISHER + VIDEO_PORT / AUDIO_PORT
@@ -70,7 +68,6 @@ const DEFAULT_MAX_PUBLISHERS: usize = 1;
 // pad indices are u8 in the graph
 const MAX_PUBLISHERS: usize = u8::MAX as usize / PORTS_PER_PUBLISHER;
 const DATAGRAM_QUEUE_DEPTH: usize = 256;
-const PLI_INTERVAL: Duration = Duration::from_secs(1);
 pub const DEFAULT_HOST_ADDR: &str = "http://127.0.0.1:8080";
 const HTTP_SCHEME: &str = "http://";
 const HTTP_DEFAULT_PORT: u16 = 80;
@@ -87,7 +84,6 @@ const MAX_HEAD_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const READ_CHUNK_BYTES: usize = 4096;
 const REQUEST_QUEUE_DEPTH: usize = 16;
-const UDP_RECV_BYTES: usize = 2000;
 const STEREO: u8 = 2;
 const CORS_HEADERS: &[(&str, &str)] = &[
     ("Access-Control-Allow-Origin", "*"),
@@ -336,10 +332,7 @@ impl WhipServerSrc {
                 .map(|creds| creds.ufrag),
             offer_sdp: request.body.clone(),
             resource_id,
-            video_mid: None,
-            audio_mid: None,
-            video_keyframed: false,
-            last_pli: Instant::now(),
+            media_receiver: MediaReceiver::new(self.video_codec),
         });
         response
     }
@@ -556,7 +549,7 @@ impl MultiOutputSource for WhipServerSrc {
                     continue;
                 }
 
-                let mut frames: Vec<(usize, u64, Vec<u8>)> = Vec::new();
+                let mut frames: Vec<(usize, ReceivedUnit)> = Vec::new();
                 let mut ended: Vec<(usize, &'static str)> = Vec::new();
                 let mut deadline: Option<Instant> = None;
                 for s in sessions.iter_mut().flatten() {
@@ -575,37 +568,23 @@ impl MultiOutputSource for WhipServerSrc {
                                     m.kind,
                                     m.mid
                                 );
-                                match m.kind {
-                                    MediaKind::Video if s.video_mid.is_none() => {
-                                        s.video_mid = Some(m.mid)
-                                    }
-                                    MediaKind::Audio if s.audio_mid.is_none() => {
-                                        s.audio_mid = Some(m.mid)
-                                    }
-                                    _ => {}
-                                }
+                                s.media_receiver.media_added(&m);
                             }
                             Ok(Output::Event(Event::MediaData(d))) => {
-                                let pts_ns = media_time_ns(d.time);
-                                if Some(d.mid) == s.video_mid {
-                                    if !s.video_keyframed {
-                                        if !video_codec.is_keyframe(&d.data) {
-                                            continue;
-                                        }
-                                        g2g_debug!(
-                                            self,
-                                            "slot {slot}: first video keyframe, forwarding"
-                                        );
-                                        s.video_keyframed = true;
-                                    }
-                                    frames.push((
-                                        first_port + VIDEO_PORT,
-                                        pts_ns,
-                                        video_codec.pipeline_unit(&d.data),
-                                    ));
-                                } else if Some(d.mid) == s.audio_mid {
-                                    frames.push((first_port + AUDIO_PORT, pts_ns, d.data.to_vec()));
+                                let Some(unit) = s.media_receiver.media_data(&d) else {
+                                    continue;
+                                };
+                                if unit.first_keyframe {
+                                    g2g_debug!(
+                                        self,
+                                        "slot {slot}: first video keyframe, forwarding"
+                                    );
                                 }
+                                let port = match unit.kind {
+                                    MediaKind::Video => first_port + VIDEO_PORT,
+                                    MediaKind::Audio => first_port + AUDIO_PORT,
+                                };
+                                frames.push((port, unit));
                             }
                             Ok(Output::Event(Event::IceConnectionStateChange(
                                 IceConnectionState::Disconnected,
@@ -638,38 +617,16 @@ impl MultiOutputSource for WhipServerSrc {
                     };
                     deadline = Some(deadline.map_or(session_deadline, |d| d.min(session_deadline)));
 
-                    if let Some(mid) = s.video_mid {
-                        if !s.video_keyframed && s.last_pli.elapsed() >= PLI_INTERVAL {
-                            s.last_pli = Instant::now();
-                            if let Some(rx) = s.rtc.direct_api().stream_rx_by_mid(mid, None) {
-                                g2g_debug!(self, "slot {slot}: no keyframe yet, sending pli");
-                                rx.request_keyframe(KeyframeRequestKind::Pli);
-                            }
-                        }
+                    if s.media_receiver.request_keyframe_if_due(&mut s.rtc) {
+                        g2g_debug!(self, "slot {slot}: no keyframe yet, sending pli");
                     }
                 }
                 for (slot, reason) in ended {
                     release!(slot, reason);
                 }
 
-                for (port, pts_ns, data) in frames {
-                    let keyframe =
-                        port % PORTS_PER_PUBLISHER == VIDEO_PORT && video_codec.is_keyframe(&data);
-                    let frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(
-                            data.into_boxed_slice(),
-                        )),
-                        timing: FrameTiming {
-                            pts_ns,
-                            dts_ns: pts_ns,
-                            duration_ns: 0,
-                            capture_ns: pts_ns,
-                            arrival_ns: g2g_core::metrics::monotonic_ns(),
-                            keyframe,
-                        },
-                        sequence: seq,
-                        meta: Default::default(),
-                    };
+                for (port, unit) in frames {
+                    let frame = unit.into_frame(seq);
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     seq += 1;
                     if seq >= self.frame_limit {
@@ -768,10 +725,7 @@ struct Session {
     resource_id: String,
     remote_ufrag: Option<String>,
     offer_sdp: String,
-    video_mid: Option<Mid>,
-    audio_mid: Option<Mid>,
-    video_keyframed: bool,
-    last_pli: Instant,
+    media_receiver: MediaReceiver,
 }
 
 impl Session {

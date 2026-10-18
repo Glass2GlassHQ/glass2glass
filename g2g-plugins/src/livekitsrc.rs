@@ -40,15 +40,13 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use str0m::change::SdpOffer;
 use str0m::crypto::from_feature_flags;
-use str0m::media::{KeyframeRequestKind, MediaKind, Mid};
+use str0m::media::MediaKind;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
-use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    g2g_warn, Caps, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink,
-    MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    g2g_warn, Caps, G2gError, HardwareError, MultiOutputSink, MultiOutputSource, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
@@ -61,14 +59,14 @@ use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
-use crate::webrtc_util::{media_time_ns, send_transmit};
+use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
+use crate::webrtc_util::send_transmit;
 
 /// Output port for the video track.
 const VIDEO_PORT: usize = 0;
 /// Output port for the Opus audio track.
 const AUDIO_PORT: usize = 1;
 /// Repeat the PLI at this interval until the first keyframe arrives.
-const PLI_INTERVAL: Duration = Duration::from_secs(1);
 /// Access-token lifetime, matching the sink.
 const TOKEN_TTL_SECS: u64 = 3600;
 
@@ -418,13 +416,10 @@ impl MultiOutputSource for LiveKitSrc {
 
             // Track routing state: the first video / audio m-line the server
             // offers claims its port; video is gated until the first keyframe.
-            let mut video_mid: Option<Mid> = None;
-            let mut audio_mid: Option<Mid> = None;
-            let mut video_keyframed = false;
-            let mut last_pli = Instant::now();
+            let mut media_receiver = MediaReceiver::new(video_codec);
             let mut next_ping = Instant::now() + ping_interval;
 
-            let mut buf = alloc::vec![0u8; 2000];
+            let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
             let mut seq = 0u64;
             macro_rules! finish {
                 () => {{
@@ -436,36 +431,23 @@ impl MultiOutputSource for LiveKitSrc {
             }
 
             loop {
-                let mut frames: Vec<(usize, u64, Vec<u8>)> = Vec::new();
+                let mut frames: Vec<(usize, ReceivedUnit)> = Vec::new();
                 let deadline = loop {
                     match rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => {
                             send_transmit(&socket, &mut turn, &t).await;
                         }
-                        Ok(Output::Event(Event::MediaAdded(m))) => match m.kind {
-                            MediaKind::Video if video_mid.is_none() => video_mid = Some(m.mid),
-                            MediaKind::Audio if audio_mid.is_none() => audio_mid = Some(m.mid),
-                            _ => {}
-                        },
+                        Ok(Output::Event(Event::MediaAdded(m))) => media_receiver.media_added(&m),
                         Ok(Output::Event(Event::MediaData(d))) => {
-                            let pts_ns = media_time_ns(d.time);
-                            if Some(d.mid) == video_mid {
-                                // Mid-GOP subscribe: drop until the first IDR.
-                                if !video_keyframed {
-                                    if !video_codec.is_keyframe(&d.data) {
-                                        continue;
-                                    }
-                                    video_keyframed = true;
-                                }
-                                frames.push((
-                                    VIDEO_PORT,
-                                    pts_ns,
-                                    video_codec.pipeline_unit(&d.data),
-                                ));
-                            } else if Some(d.mid) == audio_mid {
-                                frames.push((AUDIO_PORT, pts_ns, d.data.to_vec()));
-                            }
+                            let Some(unit) = media_receiver.media_data(&d) else {
+                                continue;
+                            };
+                            let port = match unit.kind {
+                                MediaKind::Video => VIDEO_PORT,
+                                MediaKind::Audio => AUDIO_PORT,
+                            };
+                            frames.push((port, unit));
                         }
                         Ok(Output::Event(Event::IceConnectionStateChange(
                             IceConnectionState::Disconnected,
@@ -476,32 +458,10 @@ impl MultiOutputSource for LiveKitSrc {
                 };
 
                 // Re-PLI until the video decodes from a keyframe.
-                if let Some(mid) = video_mid {
-                    if !video_keyframed && last_pli.elapsed() >= PLI_INTERVAL {
-                        last_pli = Instant::now();
-                        if let Some(rx) = rtc.direct_api().stream_rx_by_mid(mid, None) {
-                            rx.request_keyframe(KeyframeRequestKind::Pli);
-                        }
-                    }
-                }
+                media_receiver.request_keyframe_if_due(&mut rtc);
 
-                for (port, pts_ns, data) in frames {
-                    let keyframe = port == VIDEO_PORT && video_codec.is_keyframe(&data);
-                    let frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(
-                            data.into_boxed_slice(),
-                        )),
-                        timing: FrameTiming {
-                            pts_ns,
-                            dts_ns: pts_ns,
-                            duration_ns: 0,
-                            capture_ns: pts_ns,
-                            arrival_ns: g2g_core::metrics::monotonic_ns(),
-                            keyframe,
-                        },
-                        sequence: seq,
-                        meta: Default::default(),
-                    };
+                for (port, unit) in frames {
+                    let frame = unit.into_frame(seq);
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     seq += 1;
                     if seq >= self.frame_limit {

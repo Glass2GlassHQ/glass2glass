@@ -52,6 +52,7 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
 use crate::webrtc_codec::{enable_tracks, sink_caps_alternatives, Track, WebRtcVideoCodec};
+use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_simulcast::{
     rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
@@ -562,7 +563,7 @@ struct SessionArgs {
 /// the LiveKit sink's loop with WHIP signalling (HTTP PATCH trickle / restart)
 /// instead of a WebSocket.
 async fn run_session(mut a: SessionArgs) {
-    let mut buf = alloc::vec![0u8; 2000];
+    let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
     // Negotiated payload type per track, discovered once each writer exists.
     let mut video_pt: Option<Pt> = None;
     let mut audio_pt: Option<Pt> = None;
