@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1500: the single-output `qtdemux` reads fragmented, truncated and version 1 files, the video track behind an audio track, and VP8 / MJPEG.
 - M1481: the single-output `qtdemux` offers every mp4 video codec at negotiation, so `qtdemux ! h265parse` builds without `stream=h265`.
 - M1480: `mpegtsmux` carries Opus as a private PES with the Opus descriptors and control headers.
 - M1479: `matroskamux` writes DocTypeVersion 4 plus MuxingApp and WritingApp.

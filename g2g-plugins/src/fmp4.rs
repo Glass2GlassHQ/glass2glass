@@ -27,8 +27,8 @@ use crate::cenc::{
 #[cfg(any(test, feature = "dash"))]
 use crate::mp4box::next_box_len;
 use crate::mp4box::{
-    be32, be64, boxes, boxes_at, find_box, find_path, parse_chpl, parse_esds, parse_esds_video,
-    parse_ilst_tags,
+    be32, be64, boxes, boxes_at, find_box, find_path, parse_chpl, parse_esds,
+    parse_esds_decoder_config, parse_ilst_tags,
 };
 use crate::opusparse::{opus_head_from_dops, parse_opus_head};
 
@@ -80,28 +80,14 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
     let moov = find_box(data, b"moov").ok_or(G2gError::CapsMismatch)?;
     let trak = find_box(moov, b"trak").ok_or(G2gError::CapsMismatch)?;
 
-    // tkhd v0: width/height as 16.16 at payload offset 76/80 (after the
-    // 4-byte version/flags).
-    let tkhd = find_box(trak, b"tkhd").ok_or(G2gError::CapsMismatch)?;
-    if tkhd.first() != Some(&0) {
-        return Err(G2gError::CapsMismatch);
-    }
-    let width = be32(tkhd, 76)? >> 16;
-    let height = be32(tkhd, 80)? >> 16;
+    let tkhd = read_tkhd(find_box(trak, b"tkhd").ok_or(G2gError::CapsMismatch)?)?;
+    let (width, height) = (tkhd.width, tkhd.height);
 
-    // mdhd v0: timescale at payload offset 12.
     let mdia = find_box(trak, b"mdia").ok_or(G2gError::CapsMismatch)?;
-    let mdhd = find_box(mdia, b"mdhd").ok_or(G2gError::CapsMismatch)?;
-    if mdhd.first() != Some(&0) {
-        return Err(G2gError::CapsMismatch);
-    }
-    let timescale = be32(mdhd, 12)?;
-    if timescale == 0 {
-        return Err(G2gError::CapsMismatch);
-    }
-    // mdhd v0 duration at payload offset 16, in timescale units. `0` means the
-    // length is not yet known (a fragmented init segment), so report `None`.
-    let duration_ns = match be32(mdhd, 16)? {
+    let mdhd = read_mdhd(find_box(mdia, b"mdhd").ok_or(G2gError::CapsMismatch)?)?;
+    let timescale = mdhd.timescale;
+    // `0` means the length is not yet known (a fragmented init segment).
+    let duration_ns = match mdhd.duration {
         0 => None,
         units => Some((units as u128 * 1_000_000_000 / timescale as u128) as u64),
     };
@@ -129,7 +115,7 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
         // 0x20 (Visual ISO/IEC 14496-2) so another mp4v-boxed codec is rejected.
         let children = mp4v.get(78..).ok_or(G2gError::CapsMismatch)?;
         let esds = find_box(children, b"esds").ok_or(G2gError::CapsMismatch)?;
-        let (oti, dsi) = parse_esds_video(esds)?;
+        let (oti, dsi) = parse_esds_decoder_config(esds)?;
         if oti != 0x20 {
             return Err(G2gError::CapsMismatch);
         }
@@ -175,6 +161,57 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
     })
 }
 
+#[derive(Debug)]
+struct TrackHeaderBox {
+    track_id: u32,
+    width: u32,
+    height: u32,
+}
+
+// a version 1 tkhd / mdhd widens the creation and modification times to 64 bits
+const VERSION_1_TIME_WIDENING: usize = 8;
+const VERSION_1_DURATION_WIDENING: usize = 4;
+
+fn read_tkhd(tkhd: &[u8]) -> Result<TrackHeaderBox, G2gError> {
+    let (track_id_at, width_at) = match tkhd.first() {
+        Some(0) => (12, 76),
+        Some(1) => (
+            12 + VERSION_1_TIME_WIDENING,
+            76 + VERSION_1_TIME_WIDENING + VERSION_1_DURATION_WIDENING,
+        ),
+        _ => return Err(G2gError::CapsMismatch),
+    };
+    Ok(TrackHeaderBox {
+        track_id: be32(tkhd, track_id_at)?,
+        width: be32(tkhd, width_at)? >> 16,
+        height: be32(tkhd, width_at + 4)? >> 16,
+    })
+}
+
+#[derive(Debug)]
+struct MediaHeaderBox {
+    timescale: u32,
+    duration: u64,
+}
+
+fn read_mdhd(mdhd: &[u8]) -> Result<MediaHeaderBox, G2gError> {
+    let (timescale, duration) = match mdhd.first() {
+        Some(0) => (be32(mdhd, 12)?, u64::from(be32(mdhd, 16)?)),
+        Some(1) => (
+            be32(mdhd, 12 + VERSION_1_TIME_WIDENING)?,
+            be64(mdhd, 16 + VERSION_1_TIME_WIDENING)?,
+        ),
+        _ => return Err(G2gError::CapsMismatch),
+    };
+    if timescale == 0 {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(MediaHeaderBox {
+        timescale,
+        duration,
+    })
+}
+
 // stts: a 4-byte version/flags and a 4-byte entry count, then (count, delta) pairs
 const STTS_FIRST_ENTRY: usize = 8;
 const STTS_ENTRY_LEN: usize = 8;
@@ -206,6 +243,35 @@ pub(crate) fn fragment_framerate_q16(moof: &[u8], timescale: u32) -> Option<u32>
     let tfhd = find_path(moof, &[b"traf", b"tfhd"])?;
     let (default_duration, _) = tfhd_defaults(tfhd).ok()?;
     framerate_q16_from_fraction(timescale, default_duration).filter(|&q16| q16 > 0)
+}
+
+// tfhd payload: version/flags, then track_ID
+const TFHD_TRACK_ID_AT: usize = 4;
+
+// the constant frame rate of one track of a whole file, from its stts or its first fragment's tfhd
+pub(crate) fn track_framerate_q16(data: &[u8], track: &TrackHeader) -> Option<u32> {
+    let moov = find_box(data, b"moov")?;
+    let stbl = find_path(
+        find_trak_by_id(moov, track.track_id)?,
+        &[b"mdia", b"minf", b"stbl"],
+    )?;
+    constant_framerate_q16(stbl, track.timescale).or_else(|| {
+        let tfhd_duration = find_box(data, b"moof")
+            .and_then(|moof| {
+                boxes(moof)
+                    .filter(|(kind, _)| *kind == b"traf")
+                    .filter_map(|(_, traf)| find_box(traf, b"tfhd"))
+                    .find(|tfhd| be32(tfhd, TFHD_TRACK_ID_AT).ok() == Some(track.track_id))
+            })
+            .and_then(|tfhd| tfhd_defaults(tfhd).ok())
+            .map_or(0, |(duration, _)| duration);
+        let duration = if tfhd_duration == 0 {
+            track.trex_defaults.0
+        } else {
+            tfhd_duration
+        };
+        framerate_q16_from_fraction(track.timescale, duration).filter(|&q16| q16 > 0)
+    })
 }
 
 /// Pair a track's `tenc` defaults with the movie-level `seig` table its `stbl`
@@ -292,6 +358,9 @@ pub(crate) struct TrackHeader {
     /// 1024-sample priming. `0` when there is no edit list or it does not start
     /// with a media edit.
     pub(crate) media_start: u64,
+    /// The `mvex/trex` default sample duration and size, `0` when not declared,
+    /// which a fragment falls back to when its `tfhd` declares neither.
+    pub(crate) trex_defaults: (u32, u32),
 }
 
 /// Parse every forwardable (`vide` / `soun` / timed-text) track out of a `moov`
@@ -309,7 +378,8 @@ pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError
         if kind != b"trak" {
             continue;
         }
-        if let Some(header) = parse_trak(trak)? {
+        if let Some(mut header) = parse_trak(trak)? {
+            header.trex_defaults = trex_defaults(moov, header.track_id);
             tracks.push(header);
         }
     }
@@ -322,26 +392,13 @@ pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError
 /// Parse one `trak`. Returns `None` for a handler we do not forward (skip it),
 /// `Err` for a malformed video / audio track.
 fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
-    // tkhd v0: track_ID at payload offset 12 (4 version/flags + 8 times), then
-    // width/height as 16.16 at 76/80.
-    let tkhd = find_box(trak, b"tkhd").ok_or(G2gError::CapsMismatch)?;
-    if tkhd.first() != Some(&0) {
-        return Err(G2gError::CapsMismatch);
-    }
-    let track_id = be32(tkhd, 12)?;
-    let width = be32(tkhd, 76)? >> 16;
-    let height = be32(tkhd, 80)? >> 16;
-
-    // mdhd v0: timescale at payload offset 12, duration at 16.
+    let TrackHeaderBox {
+        track_id,
+        width,
+        height,
+    } = read_tkhd(find_box(trak, b"tkhd").ok_or(G2gError::CapsMismatch)?)?;
     let mdia = find_box(trak, b"mdia").ok_or(G2gError::CapsMismatch)?;
-    let mdhd = find_box(mdia, b"mdhd").ok_or(G2gError::CapsMismatch)?;
-    if mdhd.first() != Some(&0) {
-        return Err(G2gError::CapsMismatch);
-    }
-    let timescale = be32(mdhd, 12)?;
-    if timescale == 0 {
-        return Err(G2gError::CapsMismatch);
-    }
+    let timescale = read_mdhd(find_box(mdia, b"mdhd").ok_or(G2gError::CapsMismatch)?)?.timescale;
 
     // hdlr handler_type at payload offset 8 (4 version/flags + 4 pre_defined)
     // selects how to read the sample entry.
@@ -355,11 +412,15 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
     let (kind, cenc) = match handler {
         // A video sample entry we have no reader for is skipped like an unknown
         // handler: one unsupported track must not fail the whole file.
-        b"vide" => match parse_video_entry(entries, width, height)? {
+        // `pict` is a HEIF / AVIF image sequence, coded like a video track
+        b"vide" | b"pict" => match parse_video_entry(entries, width, height)? {
             Some(entry) => entry,
             None => return Ok(None),
         },
-        b"soun" => parse_audio_entry(entries, timescale)?,
+        b"soun" => match parse_audio_entry(entries, timescale)? {
+            Some(entry) => entry,
+            None => return Ok(None),
+        },
         // A subtitle / timed-text handler (`text` = 3GPP/QuickTime timed text,
         // `sbtl` / `subt` = MP4 / ISO subtitle). Forwarded only when its sample
         // entry is one we de-frame (`tx3g`); an unrecognized text codec is skipped.
@@ -382,7 +443,29 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         cenc: cenc_track(cenc, stbl)?,
         tags: parse_ilst_tags(trak),
         media_start: edit_media_start(trak),
+        trex_defaults: (0, 0),
     }))
+}
+
+// trex payload: version/flags, track_ID, sample description index, then the defaults
+const TREX_TRACK_ID_AT: usize = 4;
+const TREX_DURATION_AT: usize = 12;
+const TREX_SIZE_AT: usize = 16;
+
+fn trex_defaults(moov: &[u8], track_id: u32) -> (u32, u32) {
+    let Some(mvex) = find_box(moov, b"mvex") else {
+        return (0, 0);
+    };
+    boxes(mvex)
+        .filter(|(kind, _)| *kind == b"trex")
+        .find(|(_, trex)| be32(trex, TREX_TRACK_ID_AT).ok() == Some(track_id))
+        .and_then(|(_, trex)| {
+            Some((
+                be32(trex, TREX_DURATION_AT).ok()?,
+                be32(trex, TREX_SIZE_AT).ok()?,
+            ))
+        })
+        .unwrap_or((0, 0))
 }
 
 /// The `media_time` of a `trak`'s first edit (`edts/elst`), in media timescale
@@ -425,48 +508,21 @@ fn parse_av1c_config(av01: &[u8]) -> Result<Vec<Vec<u8>>, G2gError> {
     })
 }
 
-/// Read a video sample entry (`avc1` / `hvc1` / `hev1`, or the encrypted `encv`)
+/// Read a video sample entry (`avc1` / `avc3` / `hvc1` / `hev1` / `mp4v` / `av01` /
+/// `vp08` / `jpeg`, or the encrypted `encv`)
 /// into a [`TrackKind::Video`] plus the cbcs `cenc` defaults for an encrypted
 /// track. An `encv` carries the original codec config (`avcC` / `hvcC`) alongside
 /// a `sinf` (original format + `cbcs` scheme + `tenc`), the same shape
 /// [`parse_header`] reads. Returns `None` for an entry that is well-formed but
-/// names a codec with no reader here (MJPEG in MP4, say), so that track is
+/// names a codec with no reader here (VP6 in MOV, say), so that track is
 /// skipped; malformed entry data is still an error.
 fn parse_video_entry(
     entries: &[u8],
     width: u32,
     height: u32,
 ) -> Result<Option<(TrackKind, Option<CencDefaults>)>, G2gError> {
-    let (codec, param_sets, cenc) = if let Some(avc1) = find_box(entries, b"avc1") {
-        let children = avc1.get(78..).ok_or(G2gError::CapsMismatch)?;
-        let avcc = find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
-        (VideoCodec::H264, parse_avcc(avcc)?.parameter_sets, None)
-    } else if let Some(hvc1) = find_box(entries, b"hvc1").or_else(|| find_box(entries, b"hev1")) {
-        let children = hvc1.get(78..).ok_or(G2gError::CapsMismatch)?;
-        let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
-        (VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets, None)
-    } else if let Some(mp4v) = find_box(entries, b"mp4v") {
-        // MPEG-4 Part 2: the mp4v visual sample entry nests an esds carrying the
-        // VOL header as its DecoderSpecificInfo. Confirm objectTypeIndication
-        // 0x20 (Visual ISO/IEC 14496-2) so another mp4v-boxed codec is declined.
-        let children = mp4v.get(78..).ok_or(G2gError::CapsMismatch)?;
-        let esds = find_box(children, b"esds").ok_or(G2gError::CapsMismatch)?;
-        let (oti, dsi) = parse_esds_video(esds)?;
-        if oti != 0x20 {
-            // Another codec in an mp4v box (ffmpeg writes MJPEG-in-MP4 this way,
-            // objectTypeIndication 0x6C): a valid entry we have no reader for.
-            return Ok(None);
-        }
-        // The VOL header is the single config blob (empty if carried in-band).
-        let sets = if dsi.is_empty() {
-            Vec::new()
-        } else {
-            Vec::from([dsi])
-        };
-        (VideoCodec::Mpeg4Part2, sets, None)
-    } else if let Some(av01) = find_box(entries, b"av01") {
-        (VideoCodec::Av1, parse_av1c_config(av01)?, None)
-    } else if let Some(encv) = find_box(entries, b"encv") {
+    // ahead of a clear entry, so ciphertext never decodes as clear
+    let (codec, param_sets, cenc) = if let Some(encv) = find_box(entries, b"encv") {
         let children = encv.get(78..).ok_or(G2gError::CapsMismatch)?;
         let sinf = find_box(children, b"sinf").ok_or(G2gError::CapsMismatch)?;
         let cenc = parse_sinf(sinf)?;
@@ -483,6 +539,39 @@ fn parse_video_entry(
             _ => return Err(G2gError::CapsMismatch),
         };
         (codec, param_sets, Some(cenc))
+    } else if let Some(avc1) = find_box(entries, b"avc1").or_else(|| find_box(entries, b"avc3")) {
+        let children = avc1.get(78..).ok_or(G2gError::CapsMismatch)?;
+        let avcc = find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
+        (VideoCodec::H264, parse_avcc(avcc)?.parameter_sets, None)
+    } else if let Some(hvc1) = find_box(entries, b"hvc1").or_else(|| find_box(entries, b"hev1")) {
+        let children = hvc1.get(78..).ok_or(G2gError::CapsMismatch)?;
+        let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
+        (VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets, None)
+    } else if find_box(entries, b"vp08").is_some() {
+        (VideoCodec::Vp8, Vec::new(), None)
+    } else if find_box(entries, b"jpeg").is_some() {
+        (VideoCodec::Mjpeg, Vec::new(), None)
+    } else if let Some(mp4v) = find_box(entries, b"mp4v") {
+        // MPEG-4 Part 2: the mp4v visual sample entry nests an esds carrying the
+        // VOL header as its DecoderSpecificInfo. Confirm objectTypeIndication
+        // 0x20 (Visual ISO/IEC 14496-2) so another mp4v-boxed codec is declined.
+        let children = mp4v.get(78..).ok_or(G2gError::CapsMismatch)?;
+        let esds = find_box(children, b"esds").ok_or(G2gError::CapsMismatch)?;
+        let (oti, dsi) = parse_esds_decoder_config(esds)?;
+        if oti != 0x20 {
+            // Another codec in an mp4v box (ffmpeg writes MJPEG-in-MP4 this way,
+            // objectTypeIndication 0x6C): a valid entry we have no reader for.
+            return Ok(None);
+        }
+        // The VOL header is the single config blob (empty if carried in-band).
+        let sets = if dsi.is_empty() {
+            Vec::new()
+        } else {
+            Vec::from([dsi])
+        };
+        (VideoCodec::Mpeg4Part2, sets, None)
+    } else if let Some(av01) = find_box(entries, b"av01") {
+        (VideoCodec::Av1, parse_av1c_config(av01)?, None)
     } else if visual_sample_entry(entries) {
         // A well-formed VisualSampleEntry naming a codec we do not read: decline
         // so the rest of the file still demuxes.
@@ -512,11 +601,12 @@ fn visual_sample_entry(entries: &[u8]) -> bool {
 /// Read an audio sample entry into a [`TrackKind::Audio`] plus the cbcs `cenc`
 /// defaults for an encrypted track: AAC (`mp4a`/`esds`, or the encrypted
 /// `enca`) or Opus (`Opus`/`dOps`, M767). The sample rate is the media
-/// timescale (matching `Mp4AudioSrc`).
+/// timescale (matching `Mp4AudioSrc`). `None` for a well-formed entry naming a
+/// codec with no reader here, so that track is skipped.
 fn parse_audio_entry(
     entries: &[u8],
     timescale: u32,
-) -> Result<(TrackKind, Option<CencDefaults>), G2gError> {
+) -> Result<Option<(TrackKind, Option<CencDefaults>)>, G2gError> {
     // Opus: the `dOps` carries the same fields as an `OpusHead`, so it is
     // rebuilt into one and forwarded in-band (M791), the convention `OggDemux`
     // already uses, so the decoder trims the pre-skip and a remux keeps it. The
@@ -539,7 +629,7 @@ fn parse_audio_entry(
         if channels == 0 {
             return Err(G2gError::CapsMismatch);
         }
-        return Ok((
+        return Ok(Some((
             TrackKind::Audio {
                 format: AudioFormat::Opus,
                 channels,
@@ -547,16 +637,18 @@ fn parse_audio_entry(
                 config,
             },
             None,
-        ));
+        )));
     }
-    let (entry, cenc) = match find_box(entries, b"mp4a") {
-        Some(mp4a) => (mp4a, None),
-        None => {
-            let enca = find_box(entries, b"enca").ok_or(G2gError::CapsMismatch)?;
+    let (entry, cenc) = match (find_box(entries, b"mp4a"), find_box(entries, b"enca")) {
+        (Some(mp4a), _) => (mp4a, None),
+        (None, Some(enca)) => {
             let children = enca.get(28..).ok_or(G2gError::CapsMismatch)?;
             let sinf = find_box(children, b"sinf").ok_or(G2gError::CapsMismatch)?;
             (enca, Some(parse_sinf(sinf)?))
         }
+        // a codec we have no reader for (ALAC, PCM, ...): skip the track
+        (None, None) if boxes(entries).next().is_some() => return Ok(None),
+        (None, None) => return Err(G2gError::CapsMismatch),
     };
     // AudioSampleEntry: channelcount at offset 16, then 28 bytes before the esds.
     let channels = u16::from_be_bytes(
@@ -569,10 +661,18 @@ fn parse_audio_entry(
     if channels == 0 {
         return Err(G2gError::CapsMismatch);
     }
-    let esds = find_box(entry.get(28..).ok_or(G2gError::CapsMismatch)?, b"esds")
+    let children = entry
+        .get(sound_entry_children_at(entry)?..)
         .ok_or(G2gError::CapsMismatch)?;
+    // QuickTime nests the esds in a `wave` box
+    let esds = find_box(children, b"esds")
+        .or_else(|| find_path(children, &[b"wave", b"esds"]))
+        .ok_or(G2gError::CapsMismatch)?;
+    if MPEG_AUDIO_OBJECT_TYPES.contains(&parse_esds_decoder_config(esds)?.0) {
+        return Ok(None);
+    }
     let config = parse_esds(esds)?;
-    Ok((
+    Ok(Some((
         TrackKind::Audio {
             format: AudioFormat::Aac,
             channels,
@@ -580,7 +680,24 @@ fn parse_audio_entry(
             config,
         },
         cenc,
-    ))
+    )))
+}
+
+// esds objectTypeIndication of MPEG-2 and MPEG-1 audio (MP3) in an `mp4a` entry
+const MPEG_AUDIO_OBJECT_TYPES: [u8; 2] = [0x69, 0x6B];
+
+// QuickTime sound description versions 1 and 2 add fields before the child boxes
+const SOUND_ENTRY_V0_CHILDREN_AT: usize = 28;
+const SOUND_ENTRY_V1_CHILDREN_AT: usize = 44;
+const SOUND_ENTRY_V2_CHILDREN_AT: usize = 64;
+
+fn sound_entry_children_at(entry: &[u8]) -> Result<usize, G2gError> {
+    let version = entry.get(8..10).ok_or(G2gError::CapsMismatch)?;
+    Ok(match version {
+        [0, 1] => SOUND_ENTRY_V1_CHILDREN_AT,
+        [0, 2] => SOUND_ENTRY_V2_CHILDREN_AT,
+        _ => SOUND_ENTRY_V0_CHILDREN_AT,
+    })
 }
 
 /// Recognize a timed-text sample entry and map it to the [`TrackKind::Text`] the
@@ -775,7 +892,7 @@ struct OpenFragment {
 
 /// Walk the `moof`+`mdat` pairs in `data` and split every sample out of its
 /// `mdat`, timed in its track's timescale. `track` maps a fragment's `track_ID`
-/// to that track's timescale and encryption, and a fragment it returns `None`
+/// to that track's timescale, encryption and `trex` defaults, and a fragment it returns `None`
 /// for is skipped. `base_offset` is where `data` sits in the source byte stream.
 ///
 /// Assumes each `trun`'s samples are stored contiguously from the start of the
@@ -785,11 +902,13 @@ struct OpenFragment {
 pub(crate) fn moof_samples<'a, 't>(
     data: &'a [u8],
     base_offset: u64,
-    track: impl Fn(Option<u32>) -> Option<(u32, Option<&'t CencTrack>)>,
+    track: impl Fn(Option<u32>) -> Option<(u32, Option<&'t CencTrack>, (u32, u32))>,
 ) -> Result<Vec<MoofSample<'a>>, G2gError> {
     let mut out = Vec::new();
     // `Some(None)` is an open fragment of a skipped track.
     let mut open: Option<Option<OpenFragment>> = None;
+    // per track, where the next fragment starts when it has no tfdt
+    let mut fragment_end_ticks: Vec<(Option<u32>, u64)> = Vec::new();
     for (kind, payload, box_at) in boxes_at(data) {
         match kind {
             b"moof" => {
@@ -797,22 +916,38 @@ pub(crate) fn moof_samples<'a, 't>(
                 let tfhd = find_box(traf, b"tfhd");
                 // tfhd: track_ID at payload offset 4 (after version/flags).
                 let track_id = tfhd.map(|tfhd| be32(tfhd, 4)).transpose()?;
-                let Some((timescale, cenc)) = track(track_id) else {
+                let Some((timescale, cenc, (trex_duration, trex_size))) = track(track_id) else {
                     open = Some(None);
                     continue;
                 };
-                let tfdt = find_box(traf, b"tfdt").ok_or(G2gError::CapsMismatch)?;
-                let base_time = match tfdt.first() {
-                    Some(1) => be64(tfdt, 4)?,
-                    Some(0) => be32(tfdt, 4)? as u64,
-                    _ => return Err(G2gError::CapsMismatch),
+                let previous_end = fragment_end_ticks
+                    .iter()
+                    .position(|(id, _)| *id == track_id);
+                let base_time = match find_box(traf, b"tfdt").map(|tfdt| (tfdt.first(), tfdt)) {
+                    Some((Some(1), tfdt)) => be64(tfdt, 4)?,
+                    Some((Some(0), tfdt)) => be32(tfdt, 4)? as u64,
+                    Some(_) => return Err(G2gError::CapsMismatch),
+                    None => previous_end.map_or(0, |at| fragment_end_ticks[at].1),
                 };
                 let trun = find_box(traf, b"trun").ok_or(G2gError::CapsMismatch)?;
                 // The `tfhd` is where a CMAF fragment declares the sample duration
                 // its `trun` then omits.
-                let (default_duration, default_size) =
+                let (tfhd_duration, tfhd_size) =
                     tfhd.map(tfhd_defaults).transpose()?.unwrap_or((0, 0));
+                let default_duration = if tfhd_duration == 0 {
+                    trex_duration
+                } else {
+                    tfhd_duration
+                };
+                let default_size = if tfhd_size == 0 { trex_size } else { tfhd_size };
                 let trun_samples = parse_trun(trun, default_duration, default_size, data.len())?;
+                let end = trun_samples.iter().fold(base_time, |end, sample| {
+                    end.saturating_add(u64::from(sample.duration))
+                });
+                match previous_end {
+                    Some(at) => fragment_end_ticks[at].1 = end,
+                    None => fragment_end_ticks.push((track_id, end)),
+                }
                 // An encrypted track's per-sample IVs / subsample maps live in the
                 // fragment's aux info, addressed from the start of this `moof`.
                 let crypt = match cenc {
@@ -902,7 +1037,7 @@ pub(crate) fn parse_fragments_multi(
 ) -> Result<Vec<(u32, Sample)>, G2gError> {
     let track_of = |track_id: Option<u32>| tracks.iter().find(|t| Some(t.track_id) == track_id);
     let stored = moof_samples(data, base_offset, |track_id| {
-        track_of(track_id).map(|t| (t.timescale, t.cenc.as_ref()))
+        track_of(track_id).map(|t| (t.timescale, t.cenc.as_ref(), t.trex_defaults))
     })?;
     let mut out = Vec::with_capacity(stored.len());
     for sample in &stored {
@@ -910,7 +1045,11 @@ pub(crate) fn parse_fragments_multi(
         let bytes = clear_sample_bytes(sample, track.cenc.is_some(), &mut decrypt)?;
         let (annexb, keyframe) = match &track.kind {
             TrackKind::Video { codec, .. } => {
-                let annexb = avcc_to_annexb(&bytes)?;
+                let annexb = if length_prefixed(*codec) {
+                    avcc_to_annexb(&bytes)?
+                } else {
+                    bytes.into_owned()
+                };
                 let kf = au_is_keyframe(*codec, &annexb);
                 (annexb, kf)
             }
@@ -963,16 +1102,14 @@ pub(crate) fn parse_fragments(
     base_offset: u64,
     mut decrypt: Option<SampleDecrypt<'_>>,
 ) -> Result<Vec<Sample>, G2gError> {
-    let stored = moof_samples(data, base_offset, |_| Some((timescale, cenc)))?;
+    let stored = moof_samples(data, base_offset, |_| Some((timescale, cenc, (0, 0))))?;
     let mut samples = Vec::with_capacity(stored.len());
     for sample in &stored {
         let bytes = clear_sample_bytes(sample, cenc.is_some(), &mut decrypt)?;
-        let annexb = if matches!(codec, VideoCodec::Mpeg4Part2 | VideoCodec::Av1) {
-            // Raw elementary samples (start codes / low-overhead OBUs): no
-            // length-prefix de-framing.
-            bytes.into_owned()
-        } else {
+        let annexb = if length_prefixed(codec) {
             avcc_to_annexb(&bytes)?
+        } else {
+            bytes.into_owned()
         };
         let keyframe = au_is_keyframe(codec, &annexb);
         samples.push(Sample {
@@ -1034,14 +1171,8 @@ impl SampleFraming {
     /// The de-framing a track's [`TrackKind`] selects.
     fn of(kind: &TrackKind) -> Self {
         match kind {
-            // MPEG-4 Part 2 samples are raw elementary stream (start codes) and
-            // AV1 samples plain low-overhead OBUs, like the single-track case in
-            // [`parse_progressive`]; H.264/H.265 are AVCC.
-            TrackKind::Video {
-                codec: VideoCodec::Mpeg4Part2 | VideoCodec::Av1,
-                ..
-            } => SampleFraming::PassThrough,
-            TrackKind::Video { .. } => SampleFraming::Video,
+            TrackKind::Video { codec, .. } if length_prefixed(*codec) => SampleFraming::Video,
+            TrackKind::Video { .. } => SampleFraming::PassThrough,
             TrackKind::Audio { .. } => SampleFraming::PassThrough,
             TrackKind::Text { sample, .. } => Self::of_text(*sample),
             TrackKind::ClosedCaption { format } => SampleFraming::ClosedCaption(*format),
@@ -1201,7 +1332,10 @@ fn parse_progressive_track(
         let end = off
             .checked_add(sizes[i] as usize)
             .ok_or(G2gError::CapsMismatch)?;
-        let raw = data.get(off..end).ok_or(G2gError::CapsMismatch)?;
+        // a truncated file ends the track at its last whole sample, as ffmpeg does
+        let Some(raw) = data.get(off..end) else {
+            break;
+        };
         let pts = (dts as i64).saturating_add(ctts_offsets[i]).max(0) as u64;
         let keyframe = match &sync {
             Some(list) => list.binary_search(&((i + 1) as u32)).is_ok(),
@@ -1367,8 +1501,8 @@ fn find_trak_by_id(moov: &[u8], track_id: u32) -> Option<&[u8]> {
         .map(|(_, t)| t)
         .find(|trak| {
             find_box(trak, b"tkhd")
-                .filter(|tkhd| tkhd.first() == Some(&0))
-                .and_then(|tkhd| be32(tkhd, 12).ok())
+                .and_then(|tkhd| read_tkhd(tkhd).ok())
+                .map(|tkhd| tkhd.track_id)
                 == Some(track_id)
         })
 }
@@ -1552,6 +1686,11 @@ fn fragment_sample_timings(
             timing
         })
         .collect()
+}
+
+// H.264 / H.265 samples are AVCC, every other codec stores its elementary bytes as is
+fn length_prefixed(codec: VideoCodec) -> bool {
+    matches!(codec, VideoCodec::H264 | VideoCodec::H265)
 }
 
 /// 4-byte-length-prefixed AVCC NALUs back to Annex-B start codes.
@@ -1991,6 +2130,11 @@ mod tests {
         assert!(!samples[1].keyframe, "sample 2 is not in stss");
         assert_eq!(samples[0].pts_ns, 0);
         assert_eq!(samples[1].pts_ns, 1_000_000_000); // 1000 / timescale 1000 s
+
+        // a file cut inside the last sample keeps the whole ones
+        let truncated = parse_progressive(&file[..file.len() - 1], 1000).expect("truncated parse");
+        assert_eq!(truncated.len(), 1);
+        assert_eq!(truncated[0].annexb, samples[0].annexb);
     }
 
     #[test]
@@ -2662,5 +2806,91 @@ mod tests {
         // A truncated box (size past the end) stops the scan, no panic.
         let truncated = [0, 0, 0, 0xFF, b'v', b't', b't', b'c'];
         assert!(deframe_wvtt(&truncated).is_empty());
+    }
+
+    #[test]
+    fn fragments_read_version_1_headers_large_boxes_and_trex_defaults() {
+        use crate::mp4box::{ftyp, full_box, mp4_box};
+        const TRACK_ID: u32 = 1;
+        const TIMESCALE: u32 = 90_000;
+        const SAMPLE_TICKS: u32 = 3000;
+        const LARGE_SIZE_MARKER: u32 = 1;
+        let (width, height) = (320u32, 240u32);
+        let sample: &[u8] = &[0, 0, 0, 2, 0x65, 0xAA];
+
+        // version 1 tkhd / mdhd: 64-bit times and duration
+        let mut tkhd = alloc::vec![0u8; 92];
+        tkhd[16..20].copy_from_slice(&TRACK_ID.to_be_bytes());
+        tkhd[84..88].copy_from_slice(&(width << 16).to_be_bytes());
+        tkhd[88..92].copy_from_slice(&(height << 16).to_be_bytes());
+        let mut mdhd = alloc::vec![0u8; 28];
+        mdhd[16..20].copy_from_slice(&TIMESCALE.to_be_bytes());
+        let mut hdlr = alloc::vec![0u8; 20];
+        hdlr[4..8].copy_from_slice(b"vide");
+        // one 2-byte SPS and one 2-byte PPS
+        let avcc = [
+            1, 0x42, 0, 0x1e, 0xFF, 0xE1, 0, 2, 0x67, 0x42, 1, 0, 2, 0x68, 0xce,
+        ];
+        let mut avc1 = alloc::vec![0u8; 78];
+        avc1.extend_from_slice(&mp4_box(b"avcC", &avcc));
+        let mut stsd = 1u32.to_be_bytes().to_vec();
+        stsd.extend_from_slice(&mp4_box(b"avc1", &avc1));
+        let stbl = mp4_box(b"stbl", &full_box(b"stsd", 0, 0, &stsd));
+        let mdia = mp4_box(
+            b"mdia",
+            &[
+                full_box(b"mdhd", 1, 0, &mdhd),
+                full_box(b"hdlr", 0, 0, &hdlr),
+                mp4_box(b"minf", &stbl),
+            ]
+            .concat(),
+        );
+        let trak = mp4_box(b"trak", &[full_box(b"tkhd", 1, 0, &tkhd), mdia].concat());
+        let trex = full_box(
+            b"trex",
+            0,
+            0,
+            &[TRACK_ID, 1, SAMPLE_TICKS, sample.len() as u32, 0]
+                .iter()
+                .flat_map(|field| field.to_be_bytes())
+                .collect::<Vec<u8>>(),
+        );
+        let moov = mp4_box(b"moov", &[trak, mp4_box(b"mvex", &trex)].concat());
+
+        // no tfdt, and a trun that leaves duration and size to the trex
+        let moof = mp4_box(
+            b"moof",
+            &mp4_box(
+                b"traf",
+                &[
+                    full_box(b"tfhd", 0, 0, &TRACK_ID.to_be_bytes()),
+                    full_box(b"trun", 0, 0, &1u32.to_be_bytes()),
+                ]
+                .concat(),
+            ),
+        );
+        let mut large_mdat = LARGE_SIZE_MARKER.to_be_bytes().to_vec();
+        large_mdat.extend_from_slice(b"mdat");
+        large_mdat.extend_from_slice(&(16 + sample.len() as u64).to_be_bytes());
+        large_mdat.extend_from_slice(sample);
+
+        let mut file = ftyp();
+        file.extend_from_slice(&moov);
+        for _ in 0..2 {
+            file.extend_from_slice(&moof);
+            file.extend_from_slice(&large_mdat);
+        }
+
+        let tracks = parse_all_tracks(&file).expect("version 1 headers parse");
+        assert_eq!(tracks[0].timescale, TIMESCALE);
+        assert!(matches!(
+            tracks[0].kind,
+            TrackKind::Video { width: w, height: h, .. } if (w, h) == (width, height)
+        ));
+        let samples = parse_fragments_multi(&file, &tracks, 0, None).expect("fragments parse");
+        let decode_times: Vec<u64> = samples.iter().map(|(_, s)| s.dts_ns).collect();
+        let sample_ns = ticks_to_ns(u64::from(SAMPLE_TICKS), TIMESCALE);
+        assert_eq!(decode_times, alloc::vec![0, sample_ns]);
+        assert_eq!(samples[1].1.duration_ns, sample_ns);
     }
 }
