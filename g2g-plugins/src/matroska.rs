@@ -143,6 +143,8 @@ pub enum MkvCodec {
     Vp8,
     Vp9,
     Av1,
+    // `V_MJPEG`, or `V_MS/VFW/FOURCC` whose BITMAPINFOHEADER names `MJPG`
+    Mjpeg,
     Aac,
     Opus,
     /// Dolby Digital audio (`A_AC3`, incl. BSID-suffixed forms). Self-syncing
@@ -151,6 +153,8 @@ pub enum MkvCodec {
     /// FLAC audio (`A_FLAC`). The `CodecPrivate` carries the native `fLaC`
     /// STREAMINFO header the decoder needs as extradata.
     Flac,
+    // `A_VORBIS`, the three header packets Xiph-laced in the `CodecPrivate`
+    Vorbis,
     /// A timed-text subtitle track (`S_TEXT/*`); `format` names the on-disk block
     /// payload's syntax, which the demuxer de-frames to plain UTF-8 cue text:
     /// `S_TEXT/UTF8` -> [`TextFormat::Utf8`] (verbatim), `S_TEXT/ASS` / `S_TEXT/SSA`
@@ -192,6 +196,10 @@ impl MkvCodec {
             MkvCodec::Vp9
         } else if id == b"V_AV1" {
             MkvCodec::Av1
+        } else if id == b"V_MJPEG" {
+            MkvCodec::Mjpeg
+        } else if id == b"A_VORBIS" {
+            MkvCodec::Vorbis
         } else if id.starts_with(b"A_AAC") {
             MkvCodec::Aac
         } else if id == b"A_OPUS" {
@@ -226,6 +234,8 @@ impl MkvCodec {
             MkvCodec::Vp8 => b"V_VP8",
             MkvCodec::Vp9 => b"V_VP9",
             MkvCodec::Av1 => b"V_AV1",
+            MkvCodec::Mjpeg => b"V_MJPEG",
+            MkvCodec::Vorbis => b"A_VORBIS",
             MkvCodec::Aac => b"A_AAC",
             MkvCodec::Opus => b"A_OPUS",
             MkvCodec::Ac3 => b"A_AC3",
@@ -247,14 +257,14 @@ impl MkvCodec {
     pub fn is_webm(self) -> bool {
         matches!(
             self,
-            MkvCodec::Vp8 | MkvCodec::Vp9 | MkvCodec::Av1 | MkvCodec::Opus
+            MkvCodec::Vp8 | MkvCodec::Vp9 | MkvCodec::Av1 | MkvCodec::Opus | MkvCodec::Vorbis
         )
     }
 
     /// `1` for video, `2` for audio, `0x11` for subtitle (the Matroska `TrackType`).
     fn track_type(self) -> u8 {
         match self {
-            MkvCodec::Aac | MkvCodec::Opus | MkvCodec::Ac3 | MkvCodec::Flac => 2,
+            MkvCodec::Aac | MkvCodec::Opus | MkvCodec::Ac3 | MkvCodec::Flac | MkvCodec::Vorbis => 2,
             MkvCodec::Subtitle(_) | MkvCodec::VobSub | MkvCodec::DvbSub | MkvCodec::Pgs => 0x11,
             _ => 1,
         }
@@ -1226,9 +1236,12 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
     if let Some(lang) = language_bcp47.or(language) {
         tags.push(Tag::Language(String::from(lang)));
     }
-    let codec = MkvCodec::from_codec_id(codec_id);
+    let codec = match MkvCodec::from_codec_id(codec_id) {
+        MkvCodec::Other => vfw_codec(codec_id, codec_private).unwrap_or(MkvCodec::Other),
+        codec => codec,
+    };
     Some(ParsedTrack {
-        unmapped_codec_id: unmapped_av_codec_id(codec, codec_id),
+        unmapped_codec_id: unmapped_av_codec_id(codec, codec_id, codec_private),
         track: MkvTrack {
             number,
             uid,
@@ -1246,14 +1259,50 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
     })
 }
 
-fn unmapped_av_codec_id(codec: MkvCodec, codec_id: &[u8]) -> Option<String> {
+const VFW_CODEC_ID: &str = "V_MS/VFW/FOURCC";
+const BITMAPINFO_COMPRESSION: core::ops::Range<usize> = 16..20;
+
+fn without_nul_padding(codec_id: &[u8]) -> &[u8] {
+    let padding = codec_id.iter().rev().take_while(|&&byte| byte == 0).count();
+    &codec_id[..codec_id.len() - padding]
+}
+
+// the fourcc a `V_MS/VFW/FOURCC` track's BITMAPINFOHEADER names
+fn vfw_fourcc<'a>(codec_id: &[u8], codec_private: &'a [u8]) -> Option<&'a [u8]> {
+    (without_nul_padding(codec_id) == VFW_CODEC_ID.as_bytes())
+        .then(|| codec_private.get(BITMAPINFO_COMPRESSION))
+        .flatten()
+}
+
+fn vfw_codec(codec_id: &[u8], codec_private: &[u8]) -> Option<MkvCodec> {
+    vfw_fourcc(codec_id, codec_private)?
+        .eq_ignore_ascii_case(b"MJPG")
+        .then_some(MkvCodec::Mjpeg)
+}
+
+// the packet count less one, the 255-run sizes of all but the last packet, then the packets
+pub(crate) fn split_xiph_codec_private(private: &[u8]) -> Option<Vec<&[u8]>> {
+    let (&count_less_one, laced) = private.split_first()?;
+    split_xiph(laced, usize::from(count_less_one) + 1)
+}
+
+fn unmapped_av_codec_id(codec: MkvCodec, codec_id: &[u8], codec_private: &[u8]) -> Option<String> {
     if codec != MkvCodec::Other {
         return None;
     }
-    let codec_id = bounded_string(codec_id)?.trim_end_matches('\0');
+    let name = bounded_string(without_nul_padding(codec_id))?;
     let audio_or_video =
-        codec_id.starts_with(AUDIO_CODEC_ID_PREFIX) || codec_id.starts_with(VIDEO_CODEC_ID_PREFIX);
-    audio_or_video.then(|| String::from(codec_id))
+        name.starts_with(AUDIO_CODEC_ID_PREFIX) || name.starts_with(VIDEO_CODEC_ID_PREFIX);
+    if !audio_or_video {
+        return None;
+    }
+    let fourcc = vfw_fourcc(codec_id, codec_private)
+        .filter(|fourcc| fourcc.iter().all(u8::is_ascii_graphic))
+        .and_then(|fourcc| core::str::from_utf8(fourcc).ok());
+    Some(match fourcc {
+        Some(fourcc) => alloc::format!("{name} {fourcc}"),
+        None => String::from(name),
+    })
 }
 
 const AUDIO_CODEC_ID_PREFIX: &str = "A_";
@@ -2748,6 +2797,33 @@ mod tests {
         assert_eq!(d.codec_private(1), Some(&flac_private[..]));
         assert_eq!(d.tracks()[1].codec, MkvCodec::Ac3);
         assert_eq!(d.codec_private(2), None, "AC-3 carries no private data");
+    }
+
+    #[test]
+    fn a_vfw_track_maps_by_its_bitmapinfoheader_fourcc() {
+        const BITMAPINFO_LEN: usize = 40;
+        let vfw_entry = |number: u64, fourcc: &[u8; 4]| {
+            let mut bitmap_info = vec![0u8; BITMAPINFO_LEN];
+            bitmap_info[16..20].copy_from_slice(fourcc);
+            let body = [
+                elem(&[0xD7], &uint_body(number)),
+                elem(&[0x86], b"V_MS/VFW/FOURCC"),
+                elem(&[0x63, 0xA2], &bitmap_info),
+            ]
+            .concat();
+            elem(&[0xAE], &body)
+        };
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &[vfw_entry(1, b"MJPG"), vfw_entry(2, b"XVID")].concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &tracks);
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&[elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat());
+
+        assert_eq!(d.tracks()[0].codec, MkvCodec::Mjpeg);
+        assert_eq!(d.tracks()[1].codec, MkvCodec::Other);
+        assert_eq!(d.unmapped_codec_ids(), ["V_MS/VFW/FOURCC XVID"]);
     }
 
     /// A Matroska `S_TEXT/UTF8` subtitle track is recognized as

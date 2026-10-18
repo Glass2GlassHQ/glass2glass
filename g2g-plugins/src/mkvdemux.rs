@@ -75,6 +75,7 @@ pub enum MkvStream {
     #[default]
     Vp9,
     Av1,
+    Mjpeg,
     Aac,
     Opus,
     /// The first AC-3 audio stream (`A_AC3`).
@@ -82,6 +83,8 @@ pub enum MkvStream {
     /// The first FLAC audio stream (`A_FLAC`); its `CodecPrivate` `fLaC` header
     /// is forwarded in-band before the first frame (decoder extradata).
     Flac,
+    // the three header packets of its `CodecPrivate` go in band ahead of the first block
+    Vorbis,
     /// A timed-text subtitle stream (`S_TEXT/UTF8` -> `Caps::Text { format }`).
     Subtitle(TextFormat),
     /// A DVD subpicture (bitmap) subtitle stream (`S_VOBSUB` ->
@@ -143,7 +146,7 @@ pub struct MkvDemux {
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
     /// Whether the selected track's `CodecPrivate` has been forwarded in-band,
-    /// once, before its first frame (see [`config_header`]). Re-armed on a flush.
+    /// once, before its first frame (see [`config_headers`]). Re-armed on a flush.
     config_sent: bool,
     /// Set once a `Segment` has gone out, whether the stream-start one or a
     /// seek's, so the first frame's timestamp maps to running time 0 and a paced
@@ -291,6 +294,7 @@ impl MkvDemux {
             MkvStream::Vp8 => Self::compressed_video(VideoCodec::Vp8),
             MkvStream::Vp9 => Self::compressed_video(VideoCodec::Vp9),
             MkvStream::Av1 => Self::compressed_video(VideoCodec::Av1),
+            MkvStream::Mjpeg => Self::compressed_video(VideoCodec::Mjpeg),
             MkvStream::Aac => Caps::Audio {
                 format: AudioFormat::Aac,
                 channels: 0,
@@ -311,6 +315,12 @@ impl MkvDemux {
             },
             MkvStream::Opus => Caps::Audio {
                 format: AudioFormat::Opus,
+                channels: 0,
+                sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            },
+            MkvStream::Vorbis => Caps::Audio {
+                format: AudioFormat::Vorbis,
                 channels: 0,
                 sample_rate: 0,
                 channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
@@ -357,10 +367,12 @@ impl MkvDemux {
             MkvStream::Vp8 => MkvCodec::Vp8,
             MkvStream::Vp9 => MkvCodec::Vp9,
             MkvStream::Av1 => MkvCodec::Av1,
+            MkvStream::Mjpeg => MkvCodec::Mjpeg,
             MkvStream::Aac => MkvCodec::Aac,
             MkvStream::Opus => MkvCodec::Opus,
             MkvStream::Ac3 => MkvCodec::Ac3,
             MkvStream::Flac => MkvCodec::Flac,
+            MkvStream::Vorbis => MkvCodec::Vorbis,
             MkvStream::Subtitle(format) => MkvCodec::Subtitle(format),
             MkvStream::VobSub => MkvCodec::VobSub,
             MkvStream::DvbSub => MkvCodec::DvbSub,
@@ -507,10 +519,12 @@ impl MkvDemux {
             MkvCodec::Vp8 => (StreamType::Video, video(VideoCodec::Vp8)),
             MkvCodec::Vp9 => (StreamType::Video, video(VideoCodec::Vp9)),
             MkvCodec::Av1 => (StreamType::Video, video(VideoCodec::Av1)),
+            MkvCodec::Mjpeg => (StreamType::Video, video(VideoCodec::Mjpeg)),
             MkvCodec::Aac => (StreamType::Audio, audio(AudioFormat::Aac)),
             MkvCodec::Opus => (StreamType::Audio, audio(AudioFormat::Opus)),
             MkvCodec::Ac3 => (StreamType::Audio, audio(AudioFormat::Ac3)),
             MkvCodec::Flac => (StreamType::Audio, audio(AudioFormat::Flac)),
+            MkvCodec::Vorbis => (StreamType::Audio, audio(AudioFormat::Vorbis)),
             // Forwarded as plain UTF-8 text (de-framed at emit), whatever the source.
             MkvCodec::Subtitle(_) => (
                 StreamType::Text,
@@ -656,7 +670,7 @@ impl MkvDemux {
             // frame (FLAC STREAMINFO, Opus `OpusHead`).
             if !self.config_sent {
                 self.config_sent = true;
-                if let Some(header) = config_header(&self.demux, f.codec, f.track) {
+                for header in config_headers(&self.demux, f.codec, f.track) {
                     let frame = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(header.into_boxed_slice())),
                         FrameTiming {
@@ -673,7 +687,7 @@ impl MkvDemux {
             let timing = FrameTiming {
                 pts_ns: f.pts_ns,
                 dts_ns: f.pts_ns,
-                duration_ns: f.duration_ns,
+                duration_ns: forwarded_duration_ns(&f),
                 ..FrameTiming::default()
             };
             let frame = Frame::new(
@@ -869,10 +883,12 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::Vp8 => Some(MkvStream::Vp8),
         MkvCodec::Vp9 => Some(MkvStream::Vp9),
         MkvCodec::Av1 => Some(MkvStream::Av1),
+        MkvCodec::Mjpeg => Some(MkvStream::Mjpeg),
         MkvCodec::Aac => Some(MkvStream::Aac),
         MkvCodec::Opus => Some(MkvStream::Opus),
         MkvCodec::Ac3 => Some(MkvStream::Ac3),
         MkvCodec::Flac => Some(MkvStream::Flac),
+        MkvCodec::Vorbis => Some(MkvStream::Vorbis),
         MkvCodec::Subtitle(format) => Some(MkvStream::Subtitle(format)),
         MkvCodec::VobSub => Some(MkvStream::VobSub),
         MkvCodec::DvbSub => Some(MkvStream::DvbSub),
@@ -980,6 +996,7 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
                     | MkvStream::Vp8
                     | MkvStream::Vp9
                     | MkvStream::Av1
+                    | MkvStream::Mjpeg
             );
             // Fill the concrete channel count from the track header for an audio
             // stream: `output_caps` is the generic per-stream placeholder (channels
@@ -1054,24 +1071,61 @@ fn resolve_stream_id(demux: &MatroskaDemuxer, id: &str) -> Option<MkvStream> {
     codec_to_stream(track.codec)
 }
 
-/// The decoder-init bytes to forward in band ahead of a track's first frame, or
-/// `None` for a codec that carries its config in the stream. FLAC needs the
+/// The decoder-init packets to forward in band ahead of a track's first frame,
+/// none for a codec that carries its config in the stream. FLAC needs the
 /// native `fLaC` STREAMINFO as extradata; an Opus track's `CodecPrivate` is its
 /// RFC 7845 `OpusHead`, and forwarding it is how the pre-skip reaches `OpusDec`
 /// and a remuxer (M792, the convention `OggDemux` / `Mp4DemuxN` already use).
 /// The `OpusHead` is validated rather than trusted: a `CodecPrivate` that is not
-/// one is dropped, since a decoder would read garbage from it.
-fn config_header(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Option<Vec<u8>> {
-    let private = demux.codec_private(track)?;
+/// one is dropped, since a decoder would read garbage from it. A Vorbis
+/// `CodecPrivate` laces the identification, comment and setup headers, which
+/// go as three packets, the way `OggDemux` forwards them.
+fn config_headers(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Vec<Vec<u8>> {
+    let Some(private) = demux.codec_private(track) else {
+        return Vec::new();
+    };
+    let whole = |valid: bool| {
+        if valid {
+            alloc::vec![private.to_vec()]
+        } else {
+            Vec::new()
+        }
+    };
     match codec {
-        MkvCodec::Flac => Some(private.to_vec()),
-        MkvCodec::Opus => crate::opusparse::parse_opus_head(private).map(|_| private.to_vec()),
+        MkvCodec::Flac => whole(true),
+        MkvCodec::Opus => whole(crate::opusparse::parse_opus_head(private).is_some()),
         // the `.idx` text carrying the palette and display size
-        MkvCodec::VobSub => crate::vobsub::parse_idx(private).map(|_| private.to_vec()),
+        MkvCodec::VobSub => whole(crate::vobsub::parse_idx(private).is_some()),
         // the composition / ancillary page ids the display sets compose under
-        MkvCodec::DvbSub => crate::dvbsub::parse_page_ids(private).map(|_| private.to_vec()),
-        _ => None,
+        MkvCodec::DvbSub => whole(crate::dvbsub::parse_page_ids(private).is_some()),
+        MkvCodec::Vorbis => vorbis_headers(private),
+        _ => Vec::new(),
     }
+}
+
+// block timing is millisecond-grained, and VorbisDec trims each packet to the duration it gets
+fn forwarded_duration_ns(frame: &crate::matroska::MkvFrame) -> u64 {
+    match frame.codec {
+        MkvCodec::Vorbis => 0,
+        _ => frame.duration_ns,
+    }
+}
+
+// identification, comment and setup, in that order, or none
+fn vorbis_headers(private: &[u8]) -> Vec<Vec<u8>> {
+    const HEADER_TYPES: [u8; 3] = [0x01, 0x03, 0x05];
+    const VORBIS_MAGIC: &[u8] = b"vorbis";
+    let Some(packets) = crate::matroska::split_xiph_codec_private(private) else {
+        return Vec::new();
+    };
+    let well_formed = packets.len() == HEADER_TYPES.len()
+        && packets.iter().zip(HEADER_TYPES).all(|(packet, kind)| {
+            packet.first() == Some(&kind) && packet[1..].starts_with(VORBIS_MAGIC)
+        });
+    if !well_formed {
+        return Vec::new();
+    }
+    packets.into_iter().map(<[u8]>::to_vec).collect()
 }
 
 /// Prefix of the published stream ids (`matroska-track-N`, N the track number).
@@ -1212,10 +1266,12 @@ fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
         "vp8" => Some(MkvStream::Vp8),
         "vp9" => Some(MkvStream::Vp9),
         "av1" => Some(MkvStream::Av1),
+        "mjpeg" => Some(MkvStream::Mjpeg),
         "aac" => Some(MkvStream::Aac),
         "opus" => Some(MkvStream::Opus),
         "ac3" => Some(MkvStream::Ac3),
         "flac" => Some(MkvStream::Flac),
+        "vorbis" => Some(MkvStream::Vorbis),
         "vobsub" | "dvdsub" => Some(MkvStream::VobSub),
         "dvbsub" => Some(MkvStream::DvbSub),
         "pgs" | "hdmvpgs" => Some(MkvStream::Pgs),
@@ -1235,10 +1291,12 @@ fn mkv_stream_to_str(stream: MkvStream) -> &'static str {
         MkvStream::Vp8 => "vp8",
         MkvStream::Vp9 => "vp9",
         MkvStream::Av1 => "av1",
+        MkvStream::Mjpeg => "mjpeg",
         MkvStream::Aac => "aac",
         MkvStream::Opus => "opus",
         MkvStream::Ac3 => "ac3",
         MkvStream::Flac => "flac",
+        MkvStream::Vorbis => "vorbis",
         MkvStream::Subtitle(_) => "text",
         MkvStream::VobSub => "vobsub",
         MkvStream::DvbSub => "dvbsub",
@@ -1256,10 +1314,12 @@ impl PadTemplates for MkvDemux {
             Self::output_caps(MkvStream::Vp8),
             Self::output_caps(MkvStream::Vp9),
             Self::output_caps(MkvStream::Av1),
+            Self::output_caps(MkvStream::Mjpeg),
             Self::output_caps(MkvStream::Aac),
             Self::output_caps(MkvStream::Opus),
             Self::output_caps(MkvStream::Ac3),
             Self::output_caps(MkvStream::Flac),
+            Self::output_caps(MkvStream::Vorbis),
             Self::output_caps(MkvStream::Subtitle(TextFormat::Utf8)),
             Self::output_caps(MkvStream::VobSub),
             Self::output_caps(MkvStream::DvbSub),
@@ -1308,7 +1368,7 @@ pub struct MkvDemuxN {
     /// Whether port `i` has emitted its opening `CapsChanged` yet.
     announced: Vec<bool>,
     /// Whether port `i` has forwarded its track's `CodecPrivate` in band yet
-    /// (see [`config_header`]). Re-armed on a flush, like the caps.
+    /// (see [`config_headers`]). Re-armed on a flush, like the caps.
     config_sent: Vec<bool>,
     bus: Option<BusHandle>,
     /// Bus posting of the container's tags and chapters, once each.
@@ -1535,7 +1595,7 @@ impl MultiOutputElement for MkvDemuxN {
                         // port, once (FLAC STREAMINFO, Opus `OpusHead`).
                         if !self.config_sent[port] {
                             self.config_sent[port] = true;
-                            if let Some(header) = config_header(&self.demux, f.codec, f.track) {
+                            for header in config_headers(&self.demux, f.codec, f.track) {
                                 let lead = Frame::new(
                                     MemoryDomain::System(SystemSlice::from_boxed(
                                         header.into_boxed_slice(),
@@ -1554,7 +1614,7 @@ impl MultiOutputElement for MkvDemuxN {
                         let timing = FrameTiming {
                             pts_ns: f.pts_ns,
                             dts_ns: f.pts_ns,
-                            duration_ns: f.duration_ns,
+                            duration_ns: forwarded_duration_ns(&f),
                             ..FrameTiming::default()
                         };
                         let out_frame = Frame::new(

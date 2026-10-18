@@ -429,10 +429,14 @@ The same parser plus element split keyed on `Caps::ByteStream{Matroska}`.
 element IDs and sizes, descend into the Segment, read Tracks for the elementary
 streams and `Info` TimestampScale, then parse each Cluster's SimpleBlock and
 Block frames with scaled timestamps. `MkvDemux` wraps it with a per-codec
-`MkvStream` selection, H.264 / H.265 / VP8 / VP9 / AV1 video and AAC / Opus
-audio, defaulting to VP9. WebM, the VP8/VP9/AV1 plus Opus subset, is the
-browser-delivery motivator. Block lacing, Xiph / EBML / fixed, is split, so
-multi-frame audio blocks demux.
+`MkvStream` selection, H.264 / H.265 / VP8 / VP9 / AV1 / MJPEG video and AAC /
+Opus / AC-3 / FLAC / Vorbis audio, defaulting to VP9. MJPEG is `V_MJPEG` or a
+`V_MS/VFW/FOURCC` track whose BITMAPINFOHEADER names `MJPG`. A Vorbis track's
+`CodecPrivate` Xiph-laces the three headers, which go in band as three packets
+ahead of the first block, and its blocks go untimed, because millisecond block
+timestamps cannot carry the sample-exact packet lengths `vorbisdec` trims to.
+WebM, the VP8/VP9/AV1 plus Opus subset, is the browser-delivery motivator.
+Block lacing, Xiph / EBML / fixed, is split, so multi-frame audio blocks demux.
 
 Matroska's Tracks element carries concrete geometry and audio parameters, so the
 demuxer refines the output caps itself via `CapsChanged` once Tracks is parsed,
