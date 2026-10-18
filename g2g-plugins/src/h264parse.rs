@@ -1185,6 +1185,38 @@ mod tests {
         assert_eq!(payloads[1], au1);
     }
 
+    #[tokio::test]
+    async fn reframing_reads_avcc_whose_length_prefix_looks_like_a_start_code() {
+        use crate::annexb::{ANNEX_B_START_CODE, AVCC_LENGTH_SIZE, START_CODE_PREFIX};
+        let mut parse = H264Parse::reframing();
+        parse.configure_pipeline(&h264_parse_caps()).unwrap();
+        let mut sink = CollectSink::default();
+
+        // the shortest NAL whose 4-byte length prefix begins `00 00 01`
+        let mut length_prefix = [0u8; AVCC_LENGTH_SIZE];
+        length_prefix[..START_CODE_PREFIX.len()].copy_from_slice(&START_CODE_PREFIX);
+        let nal_len = u32::from_be_bytes(length_prefix) as usize;
+        let mut expected = Vec::new();
+        for tag in 0..2u8 {
+            // a first_mb == 0 slice, so each buffer is a picture of its own
+            let mut slice = vec![0x41u8, 0x80, tag];
+            slice.resize(nal_len, 0xAA);
+            let mut avcc = length_prefix.to_vec();
+            avcc.extend_from_slice(&slice);
+            parse
+                .process(
+                    PipelinePacket::DataFrame(frame_with_bytes(tag.into(), avcc)),
+                    &mut sink,
+                )
+                .await
+                .expect("the stream frames as length-prefixed");
+            expected.push([&ANNEX_B_START_CODE[..], &slice].concat());
+        }
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        assert_eq!(data_payloads(&sink), expected);
+    }
+
     /// M1116: an upstream that hands over one access unit per buffer (RtspSrc, the
     /// depayloader, the demuxers) must not have its trailing picture held back for
     /// the next buffer's start code, which cost a frame period of latency on every
