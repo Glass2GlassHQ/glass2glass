@@ -146,7 +146,7 @@ pub(crate) fn adts_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
     )
 }
 
-// a demuxer's AAC access unit as ADTS, failing loud on a config no decoder here takes (ER AAC, ELD, USAC)
+// a demuxer's AAC access unit as ADTS, failing loud on a config ADTS cannot frame
 #[cfg(feature = "std")]
 pub(crate) fn require_adts(
     asc: &[u8],
@@ -162,11 +162,27 @@ pub(crate) fn require_adts(
     })
 }
 
+// ADTS has no profile for ER AAC, ELD or USAC, so a demuxer sends their access units raw behind this config as a frame
+pub(crate) fn is_raw_aac_config(config: &[u8]) -> bool {
+    read_object_type(&mut BitReader::new(config))
+        .is_some_and(|object_type| RAW_AAC_OBJECT_TYPES.contains(&object_type))
+}
+
+fn read_object_type(r: &mut BitReader) -> Option<u32> {
+    match r.read_bits(5)? {
+        AOT_ESCAPE => Some(AOT_ESCAPE + 1 + r.read_bits(6)?),
+        object_type => Some(object_type),
+    }
+}
+
 // audio object types (ISO/IEC 14496-3 1.5.1.1)
 const AOT_AAC_MAIN: u32 = 1;
 const AOT_AAC_LTP: u32 = 4;
 const AOT_SBR: u32 = 5;
 const AOT_PS: u32 = 29;
+const AOT_ESCAPE: u32 = 31;
+// ER AAC LC, ER AAC LTP, ER AAC LD, ER AAC ELD, USAC
+const RAW_AAC_OBJECT_TYPES: [u32; 5] = [17, 19, 23, 39, 42];
 const EXPLICIT_RATE_INDEX: u32 = 15;
 // raw_data_block element id of a program_config_element
 const ID_PCE: u32 = 5;
@@ -295,6 +311,8 @@ enum Framing {
     Adts,
     /// LOAS/LATM: already framed by the broadcast container, forwarded as is.
     Latm,
+    // raw access units behind a leading AudioSpecificConfig frame, forwarded as is
+    Raw,
 }
 
 impl AacParse {
@@ -444,24 +462,33 @@ impl AsyncElement for AacParse {
                     if self.framing == Framing::Undecided && !bytes.is_empty() {
                         self.framing = if parse_adts(bytes).is_some() {
                             Framing::Adts
+                        } else if is_raw_aac_config(bytes) {
+                            Framing::Raw
                         } else {
                             Framing::Latm
                         };
                     }
-                    if self.framing == Framing::Adts {
-                        // A byte source stamps every chunk 0, so only a real time
-                        // (a demuxer's) re-bases the counter.
-                        if let Some(pts) = frame.timing.pts().filter(|pts| *pts != 0) {
-                            self.pending_rebase =
-                                Some((self.buf_offset + self.buf.len() as u64, pts));
+                    match self.framing {
+                        Framing::Adts => {
+                            // A byte source stamps every chunk 0, so only a real
+                            // time (a demuxer's) re-bases the counter.
+                            if let Some(pts) = frame.timing.pts().filter(|pts| *pts != 0) {
+                                self.pending_rebase =
+                                    Some((self.buf_offset + self.buf.len() as u64, pts));
+                            }
+                            self.buf.extend_from_slice(bytes);
+                            self.drain(false, out).await?;
                         }
-                        self.buf.extend_from_slice(bytes);
-                        self.drain(false, out).await?;
-                    } else {
-                        if let Some(info) = parse_aac(bytes) {
-                            self.announce(info.caps(), out).await?;
+                        // raw access unit bytes can alias an ADTS or LOAS sync, so they are not scanned
+                        Framing::Raw => {
+                            out.push(PipelinePacket::DataFrame(frame)).await?;
                         }
-                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                        Framing::Undecided | Framing::Latm => {
+                            if let Some(info) = parse_aac(bytes) {
+                                self.announce(info.caps(), out).await?;
+                            }
+                            out.push(PipelinePacket::DataFrame(frame)).await?;
+                        }
                     }
                 }
                 PipelinePacket::CapsChanged(c) => {
@@ -536,9 +563,9 @@ impl PadTemplates for AacParse {
 
 /// Channel count and sample rate recovered from an AAC bitstream header (ADTS or
 /// LOAS/LATM).
-struct AacInfo {
-    channels: u8,
-    sample_rate: u32,
+pub(crate) struct AacInfo {
+    pub(crate) channels: u8,
+    pub(crate) sample_rate: u32,
 }
 
 impl AacInfo {
@@ -718,15 +745,17 @@ fn parse_audio_mux_element(data: &[u8]) -> Option<AacInfo> {
     parse_audio_specific_config(&mut r)
 }
 
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+pub(crate) fn audio_specific_config_info(config: &[u8]) -> Option<AacInfo> {
+    parse_audio_specific_config(&mut BitReader::new(config))
+}
+
 /// Read the leading fields of an `AudioSpecificConfig` (ISO/IEC 14496-3): the
 /// audio object type, sampling frequency (index or explicit), and channel
 /// configuration, enough to pin the channel count and sample rate.
 fn parse_audio_specific_config(r: &mut BitReader) -> Option<AacInfo> {
-    let mut aot = r.read_bits(5)?;
-    if aot == 31 {
-        aot = 32 + r.read_bits(6)?; // escape value
-    }
-    let _ = aot; // the object type does not affect the channel count / rate
+    // the object type does not affect the channel count / rate
+    read_object_type(r)?;
     let sr_index = r.read_bits(4)? as usize;
     let sample_rate = if sr_index == 0x0F {
         r.read_bits(24)? // explicit 24-bit sampling frequency

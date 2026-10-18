@@ -144,7 +144,7 @@ pub(crate) fn real_caps(kind: &TrackKind) -> Caps {
 
 // ADTS synthesis moved to the ungated `aacparse` module (M662, the no_std FLV
 // demuxer shares it); imported so this module's uses keep reading the same.
-use crate::aacparse::require_adts;
+use crate::aacparse::{is_raw_aac_config, require_adts};
 use g2g_core::log::short_type_name;
 
 /// The forwardable tracks an MP4 carries, in `moov` order (M392): one
@@ -293,9 +293,9 @@ pub struct Mp4DemuxN {
     announced: Vec<bool>,
     /// Whether port `i` still owes the `moov`'s out-of-band codec config: a video
     /// track's parameter sets, prepended to its next frame when it carries none
-    /// in band, or an Opus track's `OpusHead`, pushed ahead of it as its own
-    /// frame. Persists across the incremental fragment emits, so only the first
-    /// frame pays it.
+    /// in band, or an Opus track's `OpusHead` or a raw AAC track's
+    /// AudioSpecificConfig, pushed ahead of it as its own frame. Persists across
+    /// the incremental fragment emits, so only the first frame pays it.
     need_config: Vec<bool>,
     bus: Option<BusHandle>,
     /// Set once the `StreamCollection` (M386) has been announced, so it posts once.
@@ -793,8 +793,8 @@ impl Mp4DemuxN {
             }
 
             let mut data = sample.annexb;
-            // An Opus track's config goes downstream as its own frame ahead of
-            // the audio, so it is built here and pushed below.
+            // An Opus or raw AAC track's config goes downstream as its own frame
+            // ahead of the audio, so it is built here and pushed below.
             let mut lead_config = None;
             match kind {
                 // Prepend out-of-band parameter sets to the first video frame if
@@ -821,6 +821,15 @@ impl Mp4DemuxN {
                     ..
                 }) => {
                     if self.need_config[port] && !config.is_empty() {
+                        lead_config = Some(config.clone());
+                    }
+                }
+                Some(TrackKind::Audio {
+                    format: AudioFormat::Aac,
+                    config,
+                    ..
+                }) if is_raw_aac_config(config) => {
+                    if self.need_config[port] {
                         lead_config = Some(config.clone());
                     }
                 }

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1549: `qtdemux` sends ER AAC, ELD and USAC access units raw behind their AudioSpecificConfig, which `ffmpegaudiodec` opens the decoder with.
 - M1547: `vpxenc` binds libvpx in-tree with bindgen, so the `vpx` feature builds against libvpx 1.15 and libclang 22.
 - M1546: a bare `decodebin` on an FLV selects the codec its tags carry, so VP6 and Sorenson FLV files decode.
 - M1545: `filesrc` checks a container extension against the file header, and `mpegpsdemux` fails a stream with no pack header.

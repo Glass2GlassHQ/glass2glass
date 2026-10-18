@@ -30,7 +30,7 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, VideoCodec,
 };
 
-use crate::aacparse::require_adts;
+use crate::aacparse::{is_raw_aac_config, require_adts};
 use crate::fmp4::{
     parse_all_tracks, parse_fragments_multi, parse_progressive_multi, prepend_param_sets,
     starts_with_param_set, track_framerate_q16, TrackKind,
@@ -212,8 +212,10 @@ impl Mp4Demux {
             self.caps_sent = true;
         }
         // Opus config leads the audio in-band (M791), the `OggDemux` convention,
-        // so the decoder trims the pre-skip; AAC is self-describing once ADTS-framed.
-        if *format == AudioFormat::Opus && !config.is_empty() {
+        // so the decoder trims the pre-skip; AAC is self-describing once ADTS-framed,
+        // except the object types ADTS cannot carry, which go raw behind their config.
+        let raw_aac = *format == AudioFormat::Aac && is_raw_aac_config(config);
+        if (*format == AudioFormat::Opus && !config.is_empty()) || raw_aac {
             out.push(PipelinePacket::DataFrame(Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(config.clone().into_boxed_slice())),
                 FrameTiming::default(),
@@ -225,9 +227,9 @@ impl Mp4Demux {
         for (_, sample) in parse_progressive_multi(&self.buffer, core::slice::from_ref(audio))? {
             // ADTS-frame the raw AAC access unit from the track's ASC, so a decoder
             // starts without the out-of-band config (like the in-band video param
-            // sets); Opus packets go as they are.
+            // sets); Opus packets and raw AAC go as they are.
             let data = match format {
-                AudioFormat::Aac => {
+                AudioFormat::Aac if !raw_aac => {
                     require_adts(config, &sample.annexb, short_type_name::<Self>())?
                 }
                 _ => sample.annexb,
