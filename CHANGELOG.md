@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1560: `tsdemux` and `mpegpsdemux` open the stream at the first DTS, so the open-GOP B frames ahead of the first I frame stay in the segment.
 - M1559: `tsdemux` forwards only the first PMT stream of the selected codec, and a `TsDemuxN` selection picks one of several tracks of a codec.
 - M1558: the mp4 demuxers read negative version 0 `ctts` and `trun` offsets as signed, so the segment clip no longer drops every other frame of those files.
 - M1557: every audio decoder trims its decoded samples to the upstream segment, so an mp4 edit list drops the AAC priming as ffmpeg does.

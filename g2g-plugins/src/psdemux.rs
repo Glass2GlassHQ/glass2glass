@@ -1141,9 +1141,10 @@ impl PsDemux {
             // Reordered video carries a separate DTS; fall back to the PTS when
             // the packet had none (the convention the TS / mkv demuxers share).
             let dts_ns = ns_from_90khz(u.dts_90khz).unwrap_or(pts_ns);
+            // the DTS, since open-GOP B frames after the first I frame present before it
             if !self.segment_sent {
                 self.segment_sent = true;
-                let seg = Segment::for_flush_seek(&Seek::flush_to(pts_ns), None);
+                let seg = Segment::for_flush_seek(&Seek::flush_to(dts_ns), None);
                 out.push(PipelinePacket::Segment(seg)).await?;
             }
             // The sequence header is only known once a video packet has been
@@ -1494,7 +1495,7 @@ pub struct PsDemuxN {
     /// wired it.
     stream_select: Option<StreamSelectController>,
     emitted: u64,
-    /// Stream-start PTS (ns) latched from the first routed unit; every port's
+    /// Stream-start DTS (ns) latched from the first routed unit; every port's
     /// opening `Segment` maps it to running time 0 so A/V stay aligned and a
     /// mid-title slice's large PTS does not stall a paced sink.
     segment_base: Option<u64>,
@@ -1662,7 +1663,7 @@ impl PsDemuxN {
             }
             if !self.segment_sent[port] {
                 self.segment_sent[port] = true;
-                let base = *self.segment_base.get_or_insert(pts_ns);
+                let base = *self.segment_base.get_or_insert(dts_ns);
                 let seg = Segment::for_flush_seek(&Seek::flush_to(base), None);
                 out.push_to(port, PipelinePacket::Segment(seg)).await?;
             }

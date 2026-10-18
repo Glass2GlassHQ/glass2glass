@@ -103,7 +103,7 @@ fn bytes(frame: &Frame) -> Vec<u8> {
 }
 
 /// The opening `Segment` of a packet run, asserted to precede the first frame,
-/// with that frame's timestamp. Returns `(segment, first pts)`.
+/// with that frame's decode timestamp. Returns `(segment, first dts)`.
 fn opening_segment(packets: &[PipelinePacket]) -> (Segment, u64) {
     let seg_at = packets
         .iter()
@@ -123,17 +123,17 @@ fn opening_segment(packets: &[PipelinePacket]) -> (Segment, u64) {
     let PipelinePacket::DataFrame(f) = &packets[frame_at] else {
         unreachable!();
     };
-    (*seg, f.timing.pts_ns)
+    (*seg, f.timing.dts_ns)
 }
 
 /// The mapping every stream-start segment must establish: the first frame
-/// presents at running time 0, however large its timestamp.
-fn assert_maps_to_zero(seg: &Segment, first_pts: u64) {
-    assert_eq!(seg.start, first_pts, "segment start is the first timestamp");
+/// decodes at running time 0, however large its timestamp.
+fn assert_maps_to_zero(seg: &Segment, first_dts: u64) {
+    assert_eq!(seg.start, first_dts, "segment start is the first timestamp");
     assert_eq!(
-        seg.to_running_time(first_pts),
+        seg.to_running_time(first_dts),
         Some(0),
-        "so the first frame presents immediately"
+        "so the first frame decodes immediately"
     );
 }
 
@@ -217,12 +217,12 @@ async fn tsdemux_opens_on_a_stream_start_segment() {
     .expect("tsdemux accepts a transport stream");
     let sink = run_single(&mut el, &file).await;
 
-    let (seg, first_pts) = opening_segment(&sink.packets);
+    let (seg, first_dts) = opening_segment(&sink.packets);
     assert!(
-        first_pts > 3_000_000_000,
-        "the capture's timestamps start an hour in: {first_pts}"
+        first_dts > 3_000_000_000,
+        "the capture's timestamps start an hour in: {first_dts}"
     );
-    assert_maps_to_zero(&seg, first_pts);
+    assert_maps_to_zero(&seg, first_dts);
     // And only one: a segment per frame would reset the sink's mapping.
     let segments = sink
         .packets
@@ -258,9 +258,9 @@ async fn tsdemuxn_ports_share_one_running_time_origin() {
         .await
         .expect("flush");
 
-    let (video_seg, video_pts) = opening_segment(&tap.ports[0]);
+    let (video_seg, video_dts) = opening_segment(&tap.ports[0]);
     let (audio_seg, _) = opening_segment(&tap.ports[1]);
-    assert_maps_to_zero(&video_seg, video_pts);
+    assert_maps_to_zero(&video_seg, video_dts);
     // One origin across the ports: a per-port base would shift A against V by
     // the difference between their first timestamps.
     assert_eq!(
@@ -311,8 +311,8 @@ async fn tsdemux_mpeg2_joins_at_a_sequence_header() {
         parse_sequence_header(&bytes(frames[0])).is_some(),
         "the first unit out carries the sequence header"
     );
-    let (seg, first_pts) = opening_segment(&sink.packets);
-    assert_maps_to_zero(&seg, first_pts);
+    let (seg, first_dts) = opening_segment(&sink.packets);
+    assert_maps_to_zero(&seg, first_dts);
 
     // The whole file, read from its start, keeps every unit: the drop only ever
     // applies to what precedes the first sequence header.
@@ -366,8 +366,8 @@ async fn mkvdemux_opens_on_a_stream_start_segment() {
     .expect("matroskademux accepts a Matroska stream");
     let sink = run_single(&mut el, &file).await;
 
-    let (seg, first_pts) = opening_segment(&sink.packets);
-    assert_maps_to_zero(&seg, first_pts);
+    let (seg, first_dts) = opening_segment(&sink.packets);
+    assert_maps_to_zero(&seg, first_dts);
     let _ = std::fs::remove_file(path);
 }
 
@@ -414,9 +414,9 @@ async fn mkvdemuxn_ports_share_one_running_time_origin() {
         .await
         .expect("flush");
 
-    let (video_seg, video_pts) = opening_segment(&tap.ports[0]);
+    let (video_seg, video_dts) = opening_segment(&tap.ports[0]);
     let (audio_seg, _) = opening_segment(&tap.ports[1]);
-    assert_maps_to_zero(&video_seg, video_pts);
+    assert_maps_to_zero(&video_seg, video_dts);
     assert_eq!(
         video_seg.start, audio_seg.start,
         "both ports map from the same origin"

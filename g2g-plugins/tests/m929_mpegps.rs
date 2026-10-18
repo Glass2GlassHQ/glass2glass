@@ -1497,6 +1497,22 @@ fn pes(stream_id: u8, pts90: Option<u64>, payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// One MPEG-2 PES packet carrying both a PTS and a DTS.
+fn pes_with_dts(stream_id: u8, pts90: u64, dts90: u64, payload: &[u8]) -> Vec<u8> {
+    let mut pts = pts_field(pts90);
+    pts[0] = (pts[0] & 0x0F) | 0x30;
+    let mut dts = pts_field(dts90);
+    dts[0] = (dts[0] & 0x0F) | 0x10;
+    let mut body = Vec::from([0x80u8, 0xC0, 0x0A]);
+    body.extend_from_slice(&pts);
+    body.extend_from_slice(&dts);
+    body.extend_from_slice(payload);
+    let mut out = Vec::from([0x00u8, 0x00, 0x01, stream_id]);
+    out.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
 /// A video access unit with no sequence header: just a picture of
 /// `coding_type` (2 = P, 3 = B), the shape a mid-GOP tune-in starts on.
 fn picture_unit(coding_type: u8) -> Vec<u8> {
@@ -1677,7 +1693,7 @@ fn the_source_pad_advertises_every_selection() {
 
 /// A DVD title's PTS starts wherever the disc puts it (a mid-title slice can
 /// open at hundreds of seconds), so each stream must open with a `Segment`
-/// mapping its first PTS to running time 0: without one a paced sink holds
+/// mapping its first DTS to running time 0: without one a paced sink holds
 /// every frame until that offset passes on the wall clock.
 #[tokio::test]
 async fn a_stream_start_segment_precedes_the_first_frame() {
@@ -1704,11 +1720,43 @@ async fn a_stream_start_segment_precedes_the_first_frame() {
     let PipelinePacket::Segment(seg) = &video.packets[seg_at] else {
         unreachable!();
     };
-    let first_pts = video.frames()[0].timing.pts_ns;
-    assert_eq!(seg.start, first_pts, "segment start is the first PTS");
+    let first_dts = video.frames()[0].timing.dts_ns;
+    assert_eq!(seg.start, first_dts, "segment start is the first DTS");
     assert_eq!(
-        seg.to_running_time(first_pts),
+        seg.to_running_time(first_dts),
         Some(0),
-        "the first frame presents immediately"
+        "the first frame decodes immediately"
+    );
+}
+
+#[tokio::test]
+async fn open_gop_b_frames_before_the_first_i_frame_stay_in_the_segment() {
+    const FRAME_TICKS: u64 = 3_600;
+    let mut file = Vec::new();
+    file.extend_from_slice(&PACK);
+    file.extend_from_slice(&pes_with_dts(
+        0xE0,
+        3 * FRAME_TICKS,
+        FRAME_TICKS,
+        &video_unit(352, 288, 1),
+    ));
+    for pts in [FRAME_TICKS, 2 * FRAME_TICKS] {
+        file.extend_from_slice(&PACK);
+        file.extend_from_slice(&pes(0xE0, Some(pts), &picture_unit(3)));
+    }
+    let video = demux(&file, PsStream::Mpeg2).await;
+    let seg = video
+        .packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::Segment(seg) => Some(*seg),
+            _ => None,
+        })
+        .expect("a stream-start segment is emitted");
+    let frames = video.frames();
+    assert_eq!(frames.len(), 3);
+    assert!(
+        frames.iter().all(|f| seg.presents(f.timing.pts_ns)),
+        "every picture presents inside {seg:?}"
     );
 }

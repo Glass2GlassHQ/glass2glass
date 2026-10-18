@@ -715,11 +715,12 @@ impl TsDemux {
                 }
                 Admit::Emit => {}
             }
-            // Stream start: map the first emitted PTS to running time 0. A seek's
-            // resume above already did that for its own case.
+            // Stream start: map the first emitted DTS to running time 0, since
+            // open-GOP B frames present before the first I frame. A seek's resume
+            // above already did that for its own case.
             if !self.segment_sent {
                 self.segment_sent = true;
-                let seg = Segment::for_flush_seek(&Seek::flush_to(pts_ns), None);
+                let seg = Segment::for_flush_seek(&Seek::flush_to(dts_ns), None);
                 out.push(PipelinePacket::Segment(seg)).await?;
             }
             if self.stream == TsStream::Opus {
@@ -1144,7 +1145,7 @@ pub struct TsDemuxN {
     /// preserved across a parser reset so a seek keeps the selection.
     program_number: Option<u16>,
     emitted: u64,
-    /// Stream-start PTS (ns) latched from the first routed unit; every port's
+    /// Stream-start DTS (ns) latched from the first routed unit; every port's
     /// opening `Segment` maps it to running time 0, so the ports share one
     /// running-time origin and a capture's arbitrary PTS base does not stall a
     /// paced sink.
@@ -1330,9 +1331,15 @@ impl TsDemuxN {
                 .pts_90khz
                 .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64)
                 .unwrap_or(0);
+            // Reordered video carries a separate DTS; fall back to the PTS when
+            // absent (the no-DTS convention shared with the fmp4 / mkv demux).
+            let dts_ns = u
+                .dts_90khz
+                .map(|d| (d as u128 * 1_000_000_000 / 90_000) as u64)
+                .unwrap_or(pts_ns);
             if !self.segment_sent[port] {
                 self.segment_sent[port] = true;
-                let base = *self.segment_base.get_or_insert(pts_ns);
+                let base = *self.segment_base.get_or_insert(dts_ns);
                 let seg = Segment::for_flush_seek(&Seek::flush_to(base), None);
                 out.push_to(port, PipelinePacket::Segment(seg)).await?;
             }
@@ -1351,12 +1358,6 @@ impl TsDemuxN {
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                 }
             }
-            // Reordered video carries a separate DTS; fall back to the PTS when
-            // absent (the no-DTS convention shared with the fmp4 / mkv demux).
-            let dts_ns = u
-                .dts_90khz
-                .map(|d| (d as u128 * 1_000_000_000 / 90_000) as u64)
-                .unwrap_or(pts_ns);
             if holds_timed_units(self.ports[port]) {
                 self.learn_held_unit(port, u.pts_90khz.map(|_| dts_ns));
             }
@@ -1810,6 +1811,8 @@ mod tests {
     #[derive(Default)]
     struct CaptureSink {
         frames: Vec<Vec<u8>>,
+        pts_ns: Vec<u64>,
+        segments: Vec<Segment>,
         eos: bool,
     }
     impl OutputSink for CaptureSink {
@@ -1825,7 +1828,9 @@ mod tests {
                         if let Some(s) = f.domain.as_system_slice() {
                             self.frames.push(s.to_vec());
                         }
+                        self.pts_ns.push(f.timing.pts_ns);
                     }
+                    PipelinePacket::Segment(seg) => self.segments.push(seg),
                     PipelinePacket::Eos => self.eos = true,
                     _ => {}
                 }
@@ -1903,6 +1908,37 @@ mod tests {
             .await
             .unwrap();
         d.process(PipelinePacket::Eos, sink).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_gop_b_frames_before_the_first_i_frame_stay_in_the_segment() {
+        const FRAME_TICKS: u64 = 3_600;
+        const START_TICKS: u64 = 900_000;
+        let mut m = crate::mpegts::TsMuxer::with_streams(&[STREAM_TYPE_H264]);
+        let mut stream = m.push_au(
+            &[0, 0, 0, 1, 0x65, 0x11],
+            Some(START_TICKS + 3 * FRAME_TICKS),
+            Some(START_TICKS + FRAME_TICKS),
+            true,
+        );
+        for frame in [1, 2] {
+            let pts = START_TICKS + frame * FRAME_TICKS;
+            stream.extend(m.push_au(&[0, 0, 0, 1, 0x01, 0x22], Some(pts), None, false));
+        }
+
+        let mut d = TsDemux::new();
+        d.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        run_demux(&mut d, &stream, &mut sink).await;
+        let [seg] = sink.segments.as_slice() else {
+            panic!("one stream-start segment, got {:?}", sink.segments);
+        };
+        assert_eq!(sink.pts_ns.len(), 3);
+        assert!(
+            sink.pts_ns.iter().all(|&pts| seg.presents(pts)),
+            "every picture presents inside {seg:?}: {:?}",
+            sink.pts_ns
+        );
     }
 
     #[tokio::test]
