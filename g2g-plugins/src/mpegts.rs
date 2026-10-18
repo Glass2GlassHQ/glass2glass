@@ -2477,9 +2477,9 @@ impl TsMuxer {
 
     /// Declare elementary stream `index` as Opus audio in its PMT entry: the
     /// 'Opus' `registration_descriptor` plus the DVB `extension_descriptor`
-    /// carrying the channel count, the pair [`parse_opus_descriptors`] reads and
+    /// carrying the channel count, the pair `parse_opus_descriptors` reads and
     /// ffmpeg writes. Every access unit then goes out behind the control header
-    /// [`opus_ts_packets`] strips. An out-of-range index or a stream that is not
+    /// `opus_ts_packets` strips. An out-of-range index or a stream that is not
     /// a private PES is ignored. Call before the first access unit.
     pub fn set_stream_opus(&mut self, index: usize, channels: u8) {
         let descriptor = [
