@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1480: `mpegtsmux` carries Opus as a private PES with the Opus descriptors and control headers.
+- M1479: `matroskamux` writes DocTypeVersion 4 plus MuxingApp and WritingApp.
+- M1478: `hlssink` times an fMP4 segment by its first track instead of adding every track's fragments.
+- M1477: the fragmented mp4 muxers take an untimed first sample's duration from the caps framerate and write composition offsets in the `trun`.
 - M1476: the str0m source elements share one receive helper for mid routing, the keyframe gate, and PLI.
 - M1475: the KVS elements take `ice-transport-policy` and default to the regional STUN server, and `kvswebrtcsink` serves viewers in turn over a reconnecting signalling socket.
 - M1474: `WebRtcDataSink` ends the stream by closing the data channel, and `WebRtcDataSrc` ends on the peer's channel close.

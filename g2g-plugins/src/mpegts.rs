@@ -59,6 +59,10 @@ const DESC_TAG_SHORT_EVENT: u8 = 0x4D;
 /// `registration_descriptor` tag: a 4-byte format_identifier naming what a
 /// stream_type on its own does not say (which is every use of a private PES).
 const DESC_TAG_REGISTRATION: u8 = 0x05;
+// DVB extension_descriptor, whose extension tag 0x80 is the Opus channel code
+const DESC_TAG_EXTENSION: u8 = 0x7F;
+const DESC_EXT_TAG_OPUS: u8 = 0x80;
+const OPUS_REGISTRATION_ID: &[u8; 4] = b"Opus";
 /// DVB `service_descriptor` tag: service_type, then the length-prefixed provider
 /// and service name.
 const DESC_TAG_SERVICE: u8 = 0x48;
@@ -1714,9 +1718,11 @@ fn parse_opus_descriptors(mut desc: &[u8]) -> Option<u8> {
         let body = desc.get(2..2 + len)?;
         match tag {
             // registration_descriptor: format_identifier is the first 4 bytes.
-            DESC_TAG_REGISTRATION if body.len() >= 4 && &body[..4] == b"Opus" => is_opus = true,
+            DESC_TAG_REGISTRATION if body.len() >= 4 && &body[..4] == OPUS_REGISTRATION_ID => {
+                is_opus = true
+            }
             // DVB extension_descriptor: ext tag 0x80 (provisional Opus) + code.
-            0x7F if body.len() >= 2 && body[0] == 0x80 => {
+            DESC_TAG_EXTENSION if body.len() >= 2 && body[0] == DESC_EXT_TAG_OPUS => {
                 let code = body[1];
                 channels = Some(if code == 0 { 2 } else { code });
             }
@@ -2047,6 +2053,22 @@ pub(crate) fn opus_ts_packets(buf: &[u8]) -> Vec<&[u8]> {
     out
 }
 
+/// Wrap one Opus packet in the Opus-in-TS control header [`opus_ts_packets`]
+/// strips: the `0x7FE0` sync with no trim or extension flags, then `au_size` as a
+/// run of `0xFF` bytes plus a final byte under `0xFF`.
+fn opus_ts_access_unit(au: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(au.len() + 2 + au.len() / 0xFF + 1);
+    out.extend_from_slice(&[0x7F, 0xE0]);
+    let mut size = au.len();
+    while size >= 0xFF {
+        out.push(0xFF);
+        size -= 0xFF;
+    }
+    out.push(size as u8);
+    out.extend_from_slice(au);
+    out
+}
+
 // --- Muxing (M114): the inverse of the demuxer above. ---
 
 /// Base PID layout for the mux: program `p`'s PMT rides `MUX_PMT_PID + p`, and
@@ -2119,6 +2141,9 @@ struct MuxStream {
     dvb_subtitle: bool,
     // EN 300 472 forbids an adaptation field beside teletext payload
     teletext: bool,
+    /// Set by [`TsMuxer::set_stream_opus`]: each access unit goes out behind the
+    /// Opus-in-TS control header that [`opus_ts_packets`] strips.
+    opus: bool,
     overrun_warned: bool,
 }
 
@@ -2273,6 +2298,7 @@ impl TsMuxer {
                 identity_len: es_info.len(),
                 dvb_subtitle: false,
                 teletext: false,
+                opus: false,
                 overrun_warned: false,
             });
         }
@@ -2447,6 +2473,31 @@ impl TsMuxer {
         ]);
         descriptor.extend_from_slice(AV1_REGISTRATION_ID_GSTREAMER);
         self.set_private_identity(index, &descriptor);
+    }
+
+    /// Declare elementary stream `index` as Opus audio in its PMT entry: the
+    /// 'Opus' `registration_descriptor` plus the DVB `extension_descriptor`
+    /// carrying the channel count, the pair [`parse_opus_descriptors`] reads and
+    /// ffmpeg writes. Every access unit then goes out behind the control header
+    /// [`opus_ts_packets`] strips. An out-of-range index or a stream that is not
+    /// a private PES is ignored. Call before the first access unit.
+    pub fn set_stream_opus(&mut self, index: usize, channels: u8) {
+        let descriptor = [
+            DESC_TAG_REGISTRATION,
+            OPUS_REGISTRATION_ID.len() as u8,
+            OPUS_REGISTRATION_ID[0],
+            OPUS_REGISTRATION_ID[1],
+            OPUS_REGISTRATION_ID[2],
+            OPUS_REGISTRATION_ID[3],
+            DESC_TAG_EXTENSION,
+            2,
+            DESC_EXT_TAG_OPUS,
+            channels,
+        ];
+        self.set_private_identity(index, &descriptor);
+        if let Some(s) = self.streams.get_mut(index) {
+            s.opus = s.stream_type == STREAM_TYPE_PRIVATE_PES;
+        }
     }
 
     /// Replace a private-PES stream's identifying descriptor. A bare 0x06 means
@@ -2699,6 +2750,7 @@ impl TsMuxer {
         let field = s
             .dvb_subtitle
             .then(|| crate::dvbsub::pes_data_field(au))
+            .or_else(|| s.opus.then(|| opus_ts_access_unit(au)))
             .or(cell);
         let payload = field.map_or(Cow::Borrowed(au), Cow::Owned);
         let header = pes_header(s.stream_id, payload.len(), pts_90khz, dts_90khz);
@@ -3809,6 +3861,26 @@ pub(crate) mod tests {
         // no 'Opus' registration: not Opus. Truncated descriptor: fails to None.
         assert_eq!(parse_opus_descriptors(&[0x7F, 2, 0x80, 2]), None);
         assert_eq!(parse_opus_descriptors(&[0x05, 40, b'O']), None);
+    }
+
+    /// The muxer's Opus stream demuxes as Opus: the PMT entry carries the
+    /// registration + channel descriptors and each packet comes back out of its
+    /// control header intact.
+    #[test]
+    fn opus_mux_round_trips_descriptors_and_control_header() {
+        let mut m = TsMuxer::new(STREAM_TYPE_PRIVATE_PES);
+        m.set_stream_opus(0, 1);
+        let packet: Vec<u8> = (0..300u32).map(|i| i as u8).collect(); // au_size over one 0xFF run
+        let ts = m.push_au(&packet, Some(0), None, true);
+        let mut d = TsDemuxer::new();
+        for pkt in ts.chunks(TS_PACKET_LEN) {
+            d.push_packet(pkt);
+        }
+        d.flush();
+        let units = d.take_units();
+        assert_eq!(units.len(), 1);
+        assert_eq!(d.opus_channels(units[0].pid), Some(1));
+        assert_eq!(opus_ts_packets(&units[0].data), [packet.as_slice()]);
     }
 
     #[test]

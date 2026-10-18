@@ -334,6 +334,12 @@ pub(crate) fn stream_type_for(caps: &Caps, klv_sync: bool) -> Option<u8> {
             format: AudioFormat::Aac,
             ..
         } => Some(STREAM_TYPE_AAC),
+        // Opus has no stream_type of its own: it rides a private PES told apart
+        // by the 'Opus' registration + extension descriptors the muxer writes.
+        Caps::Audio {
+            format: AudioFormat::Opus,
+            ..
+        } => Some(STREAM_TYPE_PRIVATE_PES),
         Caps::Klv => Some(if klv_sync {
             STREAM_TYPE_METADATA_PES
         } else {
@@ -359,6 +365,20 @@ pub(crate) fn is_av1(caps: &Caps) -> bool {
             ..
         }
     )
+}
+
+/// The channel count of an Opus input pad, whose PMT entry needs the Opus
+/// descriptors and whose access units need the control header. `None` for
+/// any other caps.
+pub(crate) fn opus_channels(caps: &Caps) -> Option<u8> {
+    match caps {
+        Caps::Audio {
+            format: AudioFormat::Opus,
+            channels,
+            ..
+        } => Some(*channels),
+        _ => None,
+    }
 }
 
 /// Whether an input caps is the DVB subtitle pad, whose PMT entry needs the
@@ -538,6 +558,12 @@ impl TsMux {
                 sample_rate: 0,
                 channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
+            Caps::Audio {
+                format: AudioFormat::Opus,
+                channels: 0,
+                sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            },
             Caps::Klv,
             Caps::SubPicture {
                 format: SubPictureFormat::DvbSub,
@@ -617,6 +643,9 @@ impl AsyncElement for TsMux {
         }
         if is_av1(absolute_caps) {
             mux.set_stream_av1(0);
+        }
+        if let Some(channels) = opus_channels(absolute_caps) {
+            mux.set_stream_opus(0, channels);
         }
         self.mux = Some(mux);
         if is_dvbsub(absolute_caps) {

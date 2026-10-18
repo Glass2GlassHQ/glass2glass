@@ -45,8 +45,8 @@ use g2g_core::{
 use crate::dvbsub::DEFAULT_PAGE_ID;
 use crate::mpegts::{TsMuxer, PES_CLOCK_HZ, STREAM_TYPE_H264, STREAM_TYPE_H265};
 use crate::tsmux::{
-    is_av1, is_dvbsub, language_from_tags, service_from_tags, stream_type_for, DvbSubDecl,
-    TsMuxSettings, MUX_PROPERTIES, UNDETERMINED_LANGUAGE,
+    is_av1, is_dvbsub, language_from_tags, opus_channels, service_from_tags, stream_type_for,
+    DvbSubDecl, TsMuxSettings, MUX_PROPERTIES, UNDETERMINED_LANGUAGE,
 };
 
 /// Muxes N elementary streams into one MPEG-TS byte stream, in decode order.
@@ -100,6 +100,9 @@ pub struct TsMux {
     /// Which pads carry AV1 (M1049), so their PMT entries get the AV1
     /// registration descriptor rather than the private PES default of KLV.
     av1: Vec<bool>,
+    /// Per input: the channel count of an Opus pad, which declares the Opus
+    /// descriptors and wraps its access units in the control header.
+    opus: Vec<Option<u8>>,
 }
 
 impl TsMux {
@@ -123,6 +126,7 @@ impl TsMux {
             dvbsub: alloc::vec![None; inputs],
             dvbsub_page_id: DEFAULT_PAGE_ID,
             av1: alloc::vec![false; inputs],
+            opus: alloc::vec![None; inputs],
         }
     }
 
@@ -376,6 +380,7 @@ impl MultiInputElement for TsMux {
             self.dvbsub[input] = Some(DvbSubDecl::on_page(self.dvbsub_page_id));
         }
         self.av1[input] = is_av1(absolute_caps);
+        self.opus[input] = opus_channels(absolute_caps);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -511,6 +516,9 @@ impl MultiInputElement for TsMux {
                 for i in 0..self.inputs {
                     if self.av1[i] {
                         mux.set_stream_av1(i);
+                    }
+                    if let Some(channels) = self.opus[i] {
+                        mux.set_stream_opus(i, channels);
                     }
                     let effective = self.effective_tags(i);
                     let language = language_from_tags(&effective);
