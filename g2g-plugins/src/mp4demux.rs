@@ -33,7 +33,7 @@ use g2g_core::{
 use crate::aacparse::{is_raw_aac_config, require_adts};
 use crate::fmp4::{
     parse_all_tracks, parse_fragments_multi, parse_progressive_multi, prepend_param_sets,
-    starts_with_param_set, track_framerate_q16, TrackKind,
+    starts_with_param_set, track_framerate_q16, Sample, TrackHeader, TrackKind,
 };
 use crate::mp4box::find_box;
 use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
@@ -228,7 +228,7 @@ impl Mp4Demux {
             .await?;
             self.sequence += 1;
         }
-        for (_, sample) in parse_progressive_multi(&self.buffer, core::slice::from_ref(audio))? {
+        for (_, sample) in track_samples(&self.buffer, audio)? {
             // ADTS-frame the raw AAC access unit from the track's ASC, so a decoder
             // starts without the out-of-band config (like the in-band video param
             // sets); Opus packets and raw AAC go as they are.
@@ -297,14 +297,8 @@ impl Mp4Demux {
         if edit != Segment::new() {
             out.push(PipelinePacket::Segment(edit)).await?;
         }
-        let selected = core::slice::from_ref(video);
-        let samples = if find_box(&self.buffer, b"moof").is_some() {
-            parse_fragments_multi(&self.buffer, selected, 0, None)?
-        } else {
-            parse_progressive_multi(&self.buffer, selected)?
-        };
         let mut need_param_sets = true;
-        for (_, s) in samples {
+        for (_, s) in track_samples(&self.buffer, video)? {
             let mut annexb = s.annexb;
             // The moov's config-record parameter sets are out-of-band, so prepend
             // them to the first access unit if it does not already carry them.
@@ -329,6 +323,16 @@ impl Mp4Demux {
             out.push(PipelinePacket::DataFrame(frame)).await?;
         }
         Ok(())
+    }
+}
+
+// a fragmented file's samples are in its moofs, a progressive file's in the sample tables
+fn track_samples(data: &[u8], track: &TrackHeader) -> Result<Vec<(u32, Sample)>, G2gError> {
+    let selected = core::slice::from_ref(track);
+    if find_box(data, b"moof").is_some() {
+        parse_fragments_multi(data, selected, 0, None)
+    } else {
+        parse_progressive_multi(data, selected)
     }
 }
 

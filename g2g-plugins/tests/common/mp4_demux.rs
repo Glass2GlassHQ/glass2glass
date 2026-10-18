@@ -1,6 +1,8 @@
+#![allow(dead_code)] // not every test file uses every helper here
+
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{AsyncElement, ByteStreamEncoding, Caps};
+use g2g_core::{AsyncElement, ByteStreamEncoding, Caps, PropValue};
 use g2g_plugins::mp4demux::Mp4Demux;
 
 use crate::collect_sink::CollectSink;
@@ -15,7 +17,19 @@ pub(crate) struct Demuxed {
 
 // feeds a whole file through a default Mp4Demux in filesrc-sized chunks
 pub(crate) async fn demux(file: &[u8]) -> Demuxed {
+    demux_with(Mp4Demux::new(), file).await
+}
+
+// as `demux`, with the Mp4Demux emitting the audio track
+pub(crate) async fn demux_audio(file: &[u8]) -> Demuxed {
     let mut demux = Mp4Demux::new();
+    demux
+        .set_property("stream", PropValue::Str("aac".into()))
+        .expect("stream=aac");
+    demux_with(demux, file).await
+}
+
+async fn demux_with(mut demux: Mp4Demux, file: &[u8]) -> Demuxed {
     demux
         .configure_pipeline(&Caps::ByteStream {
             encoding: ByteStreamEncoding::Mp4,

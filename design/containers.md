@@ -670,8 +670,9 @@ carries the `edts`/`elst` the Opus-in-ISOBMFF binding requires, with
 `media_time` = pre-skip.
 
 AAC leaves the MP4 demuxers ADTS-framed from the track's AudioSpecificConfig.
-ADTS has no profile for ER AAC, ELD or USAC, so those access units go out raw
-with the AudioSpecificConfig ahead of them as a frame of its own. `aacparse`
+ADTS has no profile for ER AAC, ELD or USAC and no field for 960-sample
+frames, so those access units go out raw with the AudioSpecificConfig ahead of
+them as a frame of its own. `aacparse`
 forwards that stream unchanged. `ffmpegaudiodec` reopens the AAC decoder with the
 config as extradata and presets the channel count and rate it declares, which
 libavcodec needs to output an ER AAC frame. USAC decodes only on libavcodec 62
