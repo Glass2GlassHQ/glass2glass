@@ -3647,4 +3647,33 @@ mod tests {
         // BT2020_10 parses to the same transfer as BT2020_12
         assert_eq!(Colorimetry::from_gst_string("2:3:13:1"), Some(cases[4].1));
     }
+
+    #[test]
+    fn packed_rgb_and_yuyv_report_their_pixel_size() {
+        use RawVideoFormat::*;
+        const WIDTH: u32 = 640;
+        const RGB_BYTES: usize = 3;
+        const YUYV_BYTES_PER_PIXEL: usize = 2;
+        assert_eq!(Rgb8.pixel_stride(), Some(RGB_BYTES));
+        assert_eq!(Rgb8.plane_stride(0, WIDTH), Some(WIDTH * RGB_BYTES as u32));
+        assert_eq!(Yuyv.pixel_stride(), Some(YUYV_BYTES_PER_PIXEL));
+    }
+
+    #[test]
+    fn tensor_shape_from_slice_takes_one_to_max_rank_dims() {
+        assert_eq!(TensorShape::from_slice(&[]), None);
+        let full = [2u32; MAX_TENSOR_RANK];
+        let shape = TensorShape::from_slice(&full).expect("the maximum rank fits");
+        assert_eq!(shape.dims(), &full);
+        let past = [2u32; MAX_TENSOR_RANK + 1];
+        assert_eq!(TensorShape::from_slice(&past), None);
+    }
+
+    #[test]
+    fn tensor_shape_edits_in_place_and_counts_its_elements() {
+        let mut shape = TensorShape::from_slice(&[1, 3, 4]).expect("rank three");
+        shape.dims_mut()[0] = 2;
+        assert_eq!(shape.dims(), &[2, 3, 4]);
+        assert_eq!(shape.elements(), 2 * 3 * 4);
+    }
 }

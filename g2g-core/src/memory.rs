@@ -1668,4 +1668,166 @@ mod tests {
         assert!(!MemoryDomainKind::Cuda.is_system());
         assert!(!MemoryDomainKind::DmaBuf.is_system());
     }
+
+    #[cfg(all(feature = "std", target_os = "linux"))]
+    #[test]
+    fn a_dma_buf_reports_its_fd_and_sync_and_closes_the_fd_with_its_last_share() {
+        extern crate std;
+        use std::io::Read;
+        use std::os::unix::io::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+        const STRIDE: u32 = 256;
+        const SYNC_VALUE: u64 = 7;
+        let (buffer_end, mut buffer_peer) = UnixStream::pair().expect("socket pair");
+        let (sync_end, _sync_peer) = UnixStream::pair().expect("socket pair");
+        let (fd, sync_fd) = (buffer_end.into_raw_fd(), sync_end.into_raw_fd());
+        // SAFETY: `into_raw_fd` just released this fd, so nothing else owns it.
+        let sync = unsafe { SyncFd::from_raw(sync_fd) };
+        // SAFETY: as above, for the buffer's fd.
+        let buffer = unsafe { OwnedDmaBuf::from_raw(fd, STRIDE, 0) }.with_sync(sync, SYNC_VALUE);
+        assert_eq!(buffer.as_raw(), fd);
+        assert_eq!(buffer.sync_fd(), Some(sync_fd));
+        assert_eq!(buffer.sync_value(), Some(SYNC_VALUE));
+        let (shared_sync, value) = buffer.sync().expect("the buffer carries its sync");
+        assert_eq!((shared_sync.as_raw(), value), (sync_fd, SYNC_VALUE));
+
+        let share = buffer.clone();
+        assert_eq!(buffer.share_count(), 2);
+        drop(share);
+        drop(buffer);
+        buffer_peer.set_nonblocking(true).expect("nonblocking");
+        let mut byte = [0u8; 1];
+        assert_eq!(
+            buffer_peer
+                .read(&mut byte)
+                .expect("the closed end reads as end of file"),
+            0
+        );
+    }
+
+    #[derive(Debug)]
+    struct NoBuffer;
+
+    impl WgpuBufferKeepAlive for NoBuffer {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn a_wgpu_buffer_keeps_the_plane_layout_it_was_given() {
+        use crate::meta::{Plane, PlaneLayout};
+        const STRIDE: usize = 256;
+        const ROWS: usize = 64;
+        let layout = PlaneLayout::new(&[
+            Plane {
+                offset: 0,
+                stride: STRIDE,
+            },
+            Plane {
+                offset: STRIDE * ROWS,
+                stride: STRIDE,
+            },
+        ])
+        .expect("two planes");
+        let len = 2 * STRIDE * ROWS;
+        assert!(OwnedWgpuBuffer::new(len, Arc::new(NoBuffer))
+            .plane_layout()
+            .is_none());
+        let padded = OwnedWgpuBuffer::new(len, Arc::new(NoBuffer)).with_plane_layout(layout);
+        assert_eq!(padded.plane_layout(), Some(&layout));
+    }
+
+    #[test]
+    fn a_domain_set_adds_and_unites_without_dropping_members() {
+        use MemoryDomainKind::{Cuda, DmaBuf, System};
+        let system = DomainSet::only(System);
+        assert!(
+            system.with(System).contains(System),
+            "adding a member keeps it"
+        );
+        let united = system.with(Cuda).union(DomainSet::only(Cuda).with(DmaBuf));
+        for kind in [System, Cuda, DmaBuf] {
+            assert!(united.contains(kind), "{kind:?}");
+        }
+        assert!(DomainSet::EMPTY.is_empty());
+        assert!(!system.is_empty());
+    }
+
+    #[test]
+    fn a_strided_view_reads_as_dense_system_bytes() {
+        use crate::caps::TensorDType;
+        use crate::tensor::TensorView;
+        let bytes: alloc::vec::Vec<u8> = (0..12).collect();
+        let view = MemoryDomain::SystemView(SystemView::new(
+            Arc::from(bytes.clone()),
+            TensorView::contiguous(TensorDType::U8, &[bytes.len() as u32]),
+        ));
+        let read = view
+            .require_system_bytes("test")
+            .expect("a view is CPU memory");
+        assert_eq!(read.as_ref(), bytes.as_slice());
+    }
+
+    #[test]
+    fn a_shared_slice_is_unique_once_its_sibling_drops() {
+        let mut slice = SystemSlice::from_boxed(alloc::vec![0u8; 4].into_boxed_slice());
+        assert!(slice.is_uniquely_held());
+        slice.make_shared();
+        let sibling = slice.share_handle();
+        assert!(!slice.is_uniquely_held());
+        drop(sibling);
+        assert!(slice.is_uniquely_held());
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn a_pooled_slice_writes_in_place_and_shares_by_refcount() {
+        let pool = crate::pool::BufferPool::new_byte_pool(1, 8);
+        let mut slice = SystemSlice::from_pool(pool.try_acquire().expect("one buffer"), 4);
+        assert!(slice.is_uniquely_held());
+        slice.as_mut_slice().copy_from_slice(&[1, 2, 3, 4]);
+        let pooled_at = slice.as_slice().as_ptr();
+        slice.make_shared();
+        let sibling = slice.share_handle();
+        assert_eq!(
+            sibling.as_slice().as_ptr(),
+            pooled_at,
+            "a share is a refcount bump"
+        );
+        assert!(!slice.is_uniquely_held());
+        drop(sibling);
+        assert!(slice.is_uniquely_held());
+        slice.as_mut_slice()[0] = 9;
+        assert_eq!(
+            slice.as_slice().as_ptr(),
+            pooled_at,
+            "a unique share is reclaimed without a copy"
+        );
+        assert_eq!(slice.as_slice(), &[9, 2, 3, 4]);
+    }
+
+    #[test]
+    fn an_exclusive_foreign_slice_writes_the_lent_bytes_in_place() {
+        let mut lent = [5u8; 4];
+        let shared = [5u8; 4];
+        // SAFETY: `lent` outlives the slice and nothing else touches it meanwhile.
+        let mut exclusive = unsafe {
+            SystemSlice::from_foreign_exclusive(
+                lent.as_mut_ptr(),
+                lent.len(),
+                None,
+                core::ptr::null_mut(),
+            )
+        };
+        // SAFETY: `shared` outlives the slice and is only read.
+        let read_only = unsafe {
+            SystemSlice::from_foreign(shared.as_ptr(), shared.len(), None, core::ptr::null_mut())
+        };
+        assert!(exclusive.is_uniquely_held());
+        assert!(!read_only.is_uniquely_held());
+        exclusive.as_mut_slice()[0] = 9;
+        drop(exclusive);
+        assert_eq!(lent, [9, 5, 5, 5]);
+    }
 }

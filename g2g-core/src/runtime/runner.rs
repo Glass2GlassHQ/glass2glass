@@ -1720,3 +1720,510 @@ mod profile_tests {
         assert_eq!(take(LatencyProfile::Throughput), 8);
     }
 }
+
+#[cfg(all(test, feature = "std"))]
+mod run_tests {
+    use super::*;
+    use crate::fanout::{MultiOutputSink, Router};
+    use crate::frame::{Frame, FrameTiming};
+    use crate::memory::{MemoryDomain, SystemSlice};
+    use crate::runtime::block_on;
+    use crate::{Bus, BusMessage, Dim, HardwareError, PipelineState, Rate, RawVideoFormat};
+    use core::pin::Pin;
+
+    const FRAMES: u64 = 6;
+    const LINK_CAPACITY: usize = 2;
+
+    struct ZeroClock;
+
+    impl PipelineClock for ZeroClock {
+        fn now_ns(&self) -> u64 {
+            0
+        }
+    }
+
+    fn caps() -> Caps {
+        Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(2),
+            height: Dim::Fixed(2),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: crate::Interlace::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
+        }
+    }
+
+    fn frame(sequence: u64) -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 16]))),
+            FrameTiming::default(),
+            sequence,
+        ))
+    }
+
+    fn every_frame() -> Vec<u64> {
+        (0..FRAMES).collect()
+    }
+
+    // answers its first `refixates` configures with a counter-proposal
+    #[derive(Default)]
+    struct TestSource {
+        refixates: u32,
+    }
+
+    impl SourceLoop for TestSource {
+        type RunFuture<'a>
+            = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+        where
+            Self: 'a;
+        type CapsFuture<'a>
+            = core::future::Ready<Result<Caps, G2gError>>
+        where
+            Self: 'a;
+
+        fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
+            core::future::ready(Ok(caps()))
+        }
+
+        fn configure_pipeline(&mut self, caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+            if self.refixates == 0 {
+                return Ok(ConfigureOutcome::Accepted);
+            }
+            self.refixates -= 1;
+            Ok(ConfigureOutcome::ReFixate(caps.clone()))
+        }
+
+        fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+            Box::pin(async move {
+                for sequence in 0..FRAMES {
+                    out.push(frame(sequence)).await?;
+                }
+                out.push(PipelinePacket::Eos).await?;
+                Ok(FRAMES)
+            })
+        }
+    }
+
+    type Seen = Arc<Mutex<Vec<u64>>>;
+
+    #[derive(Default)]
+    struct TestSink {
+        seen: Seen,
+        fail_from: Option<u64>,
+        proposal: Option<AllocationParams>,
+        requests: crate::meta::MetaRequests,
+    }
+
+    fn sink_failure() -> G2gError {
+        G2gError::Hardware(HardwareError::Io(5))
+    }
+
+    impl AsyncElement for TestSink {
+        type ProcessFuture<'a>
+            = core::future::Ready<Result<(), G2gError>>
+        where
+            Self: 'a;
+
+        fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+            Ok(upstream.clone())
+        }
+
+        fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+            Ok(ConfigureOutcome::Accepted)
+        }
+
+        fn propose_allocation(&self, _caps: &Caps) -> Option<AllocationParams> {
+            self.proposal
+        }
+
+        fn meta_requests(&self) -> crate::meta::MetaRequests {
+            self.requests
+        }
+
+        fn process<'a>(
+            &'a mut self,
+            packet: PipelinePacket,
+            _out: &'a mut dyn OutputSink,
+        ) -> Self::ProcessFuture<'a> {
+            if let PipelinePacket::DataFrame(f) = &packet {
+                if self.fail_from.is_some_and(|from| f.sequence >= from) {
+                    return core::future::ready(Err(sink_failure()));
+                }
+                self.seen.lock().push(f.sequence);
+            }
+            core::future::ready(Ok(()))
+        }
+    }
+
+    struct Pass;
+
+    impl AsyncElement for Pass {
+        type ProcessFuture<'a>
+            = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+        where
+            Self: 'a;
+
+        fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+            Ok(upstream.clone())
+        }
+
+        fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+            Ok(ConfigureOutcome::Accepted)
+        }
+
+        fn process<'a>(
+            &'a mut self,
+            packet: PipelinePacket,
+            out: &'a mut dyn OutputSink,
+        ) -> Self::ProcessFuture<'a> {
+            Box::pin(async move { out.push(packet).await.map(|_| ()) })
+        }
+    }
+
+    struct TwoOutputSession;
+
+    impl MultiOutputSource for TwoOutputSession {
+        type RunFuture<'a>
+            = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+        where
+            Self: 'a;
+
+        fn output_count(&self) -> usize {
+            2
+        }
+
+        fn output_caps(&self, _output: usize) -> Result<Caps, G2gError> {
+            Ok(caps())
+        }
+
+        fn run<'a>(&'a mut self, out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a> {
+            Box::pin(async move {
+                let ports = out.port_count();
+                for sequence in 0..FRAMES {
+                    for port in 0..ports {
+                        out.push_to(port, frame(sequence)).await?;
+                    }
+                }
+                for port in 0..ports {
+                    out.push_to(port, PipelinePacket::Eos).await?;
+                }
+                Ok(FRAMES * ports as u64)
+            })
+        }
+    }
+
+    fn assert_ran_every_frame(stats: Result<RunStats, G2gError>, seen: &Seen, entry: &str) {
+        let stats = stats.unwrap_or_else(|e| panic!("{entry}: {e:?}"));
+        assert_eq!(stats.frames_emitted, FRAMES, "{entry}");
+        assert_eq!(stats.frames_consumed, FRAMES, "{entry}");
+        assert_eq!(*seen.lock(), every_frame(), "{entry}");
+    }
+
+    #[test]
+    fn simple_pipeline_reports_the_sink_failure_not_the_shutdown_it_causes() {
+        let mut sink = TestSink {
+            fail_from: Some(1),
+            ..TestSink::default()
+        };
+        let result = block_on(run_simple_pipeline(
+            &mut TestSource::default(),
+            &mut sink,
+            &ZeroClock,
+            LINK_CAPACITY,
+        ));
+        assert_eq!(result, Err(sink_failure()));
+    }
+
+    #[test]
+    fn startup_negotiation_takes_every_allowed_attempt() {
+        let mut source = TestSource {
+            refixates: MAX_FIXATION_ATTEMPTS - 1,
+        };
+        let mut sink = TestSink::default();
+        let stats = block_on(run_simple_pipeline(
+            &mut source,
+            &mut sink,
+            &ZeroClock,
+            LINK_CAPACITY,
+        ));
+        assert_ran_every_frame(stats, &sink.seen, "last attempt");
+
+        let mut source = TestSource {
+            refixates: MAX_FIXATION_ATTEMPTS,
+        };
+        let result = block_on(run_simple_pipeline(
+            &mut source,
+            &mut TestSink::default(),
+            &ZeroClock,
+            LINK_CAPACITY,
+        ));
+        assert_eq!(result, Err(G2gError::FixationFailed));
+    }
+
+    #[test]
+    fn simple_pipeline_settles_the_allocation_on_a_domain_the_source_emits() {
+        let cuda_or_system = AllocationParams {
+            accepts: DomainSet::only(MemoryDomainKind::Cuda).with(MemoryDomainKind::System),
+            ..AllocationParams::cuda(64, 2, 1)
+        };
+        let mut source = TestSource::default();
+        let emits = SourceLoop::output_domains(&source);
+        let mut sink = TestSink {
+            proposal: Some(cuda_or_system),
+            ..TestSink::default()
+        };
+        let stats = block_on(run_simple_pipeline(
+            &mut source,
+            &mut sink,
+            &ZeroClock,
+            LINK_CAPACITY,
+        ))
+        .expect("runs");
+        let settled = stats.allocation.expect("the sink proposed one");
+        assert!(emits.contains(settled.domain), "{settled:?}");
+        assert_eq!(settled.size_bytes, cuda_or_system.size_bytes);
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn simple_pipeline_passes_a_metadata_only_proposal_through() {
+        let requests = crate::meta::MetaRequests::new().request::<crate::meta::AnalyticsMeta>();
+        let mut sink = TestSink {
+            requests,
+            ..TestSink::default()
+        };
+        let stats = block_on(run_simple_pipeline(
+            &mut TestSource::default(),
+            &mut sink,
+            &ZeroClock,
+            LINK_CAPACITY,
+        ))
+        .expect("runs");
+        assert_eq!(
+            stats.allocation,
+            Some(AllocationParams::meta_demand(requests))
+        );
+    }
+
+    #[test]
+    fn stateful_pipeline_flows_while_playing_and_stops_at_null() {
+        let mut sink = TestSink::default();
+        let playing = StateController::new(PipelineState::Playing);
+        let stats = block_on(run_simple_pipeline_stateful(
+            &mut TestSource::default(),
+            &mut sink,
+            &ZeroClock,
+            LINK_CAPACITY,
+            &playing,
+        ));
+        assert_ran_every_frame(stats, &sink.seen, "playing");
+
+        let mut sink = TestSink::default();
+        let null = StateController::new(PipelineState::Null);
+        let _ = block_on(run_simple_pipeline_stateful(
+            &mut TestSource::default(),
+            &mut sink,
+            &ZeroClock,
+            LINK_CAPACITY,
+            &null,
+        ));
+        assert!(sink.seen.lock().is_empty());
+    }
+
+    #[test]
+    fn simple_pipeline_with_a_bus_reports_the_sink_link_fill() {
+        let (bus, handle) = Bus::new(64);
+        let mut sink = TestSink::default();
+        let stats = block_on(run_simple_pipeline_with_bus(
+            &mut TestSource::default(),
+            &mut sink,
+            &ZeroClock,
+            LINK_CAPACITY,
+            &handle,
+        ));
+        assert_ran_every_frame(stats, &sink.seen, "with bus");
+        let mut buffering = 0;
+        while let Some(message) = bus.try_recv() {
+            if matches!(message, BusMessage::Buffering { .. }) {
+                buffering += 1;
+            }
+        }
+        assert!(buffering > 0);
+    }
+
+    #[test]
+    fn linear_entry_points_run_the_stream_through_a_transform() {
+        let (_bus, handle) = Bus::new(64);
+
+        let mut sink = TestSink::default();
+        let stats = block_on(run_linear_chain(
+            &mut TestSource::default(),
+            alloc::vec![&mut Pass as &mut dyn DynAsyncElement],
+            &mut sink,
+            &ZeroClock,
+            LINK_CAPACITY,
+        ));
+        assert_ran_every_frame(stats, &sink.seen, "run_linear_chain");
+
+        let mut sink = TestSink::default();
+        let stats = block_on(run_linear_chain_with_bus(
+            &mut TestSource::default(),
+            alloc::vec![&mut Pass as &mut dyn DynAsyncElement],
+            &mut sink,
+            &ZeroClock,
+            LINK_CAPACITY,
+            &handle,
+        ));
+        assert_ran_every_frame(stats, &sink.seen, "run_linear_chain_with_bus");
+
+        let mut sink = TestSink::default();
+        let stats = block_on(run_source_transform_sink_with_bus(
+            &mut TestSource::default(),
+            &mut Pass,
+            &mut sink,
+            &ZeroClock,
+            LINK_CAPACITY,
+            &handle,
+        ));
+        assert_ran_every_frame(stats, &sink.seen, "run_source_transform_sink_with_bus");
+    }
+
+    #[test]
+    fn fan_out_entry_points_deliver_to_the_selected_branch() {
+        let (_bus, handle) = Bus::new(64);
+        let observer = Observer::new();
+        let selected = 1;
+        for entry in ["run_source_fanout", "observed", "with_bus"] {
+            let mut router = Router::new(2);
+            router.handle().select(selected);
+            let (mut idle, mut chosen) = (TestSink::default(), TestSink::default());
+            let sinks: Vec<&mut dyn DynAsyncElement> = alloc::vec![&mut idle, &mut chosen];
+            let mut source = TestSource::default();
+            let run = match entry {
+                "run_source_fanout" => block_on(run_source_fanout(
+                    &mut source,
+                    &mut router,
+                    sinks,
+                    &ZeroClock,
+                    LINK_CAPACITY,
+                )),
+                "observed" => block_on(run_source_fanout_observed(
+                    &mut source,
+                    &mut router,
+                    sinks,
+                    &ZeroClock,
+                    LINK_CAPACITY,
+                    &observer,
+                )),
+                _ => block_on(run_source_fanout_with_bus(
+                    &mut source,
+                    &mut router,
+                    sinks,
+                    &ZeroClock,
+                    LINK_CAPACITY,
+                    &handle,
+                )),
+            };
+            assert_ran_every_frame(run, &chosen.seen, entry);
+            assert!(idle.seen.lock().is_empty(), "{entry}");
+        }
+    }
+
+    #[test]
+    fn fan_out_session_entry_points_feed_every_output() {
+        let observer = Observer::new();
+        for observed in [false, true] {
+            let (mut first, mut second) = (TestSink::default(), TestSink::default());
+            let sinks: Vec<&mut dyn DynAsyncElement> = alloc::vec![&mut first, &mut second];
+            let mut session = TwoOutputSession;
+            let ports = session.output_count() as u64;
+            let stats = if observed {
+                block_on(run_fanout_session_observed(
+                    &mut session,
+                    sinks,
+                    &ZeroClock,
+                    LINK_CAPACITY,
+                    &observer,
+                ))
+            } else {
+                block_on(run_fanout_session(
+                    &mut session,
+                    sinks,
+                    &ZeroClock,
+                    LINK_CAPACITY,
+                ))
+            }
+            .expect("session runs");
+            assert_eq!(stats.frames_consumed, FRAMES * ports, "observed {observed}");
+            for sink in [&first, &second] {
+                assert_eq!(*sink.seen.lock(), every_frame(), "observed {observed}");
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_router_deals_frames_round_robin() {
+        let branches: Vec<TestSink> = (0..2).map(|_| TestSink::default()).collect();
+        let seen: Vec<Seen> = branches.iter().map(|b| b.seen.clone()).collect();
+        let mut source = TestSource::default();
+        let (handle, run) = run_source_router_dynamic(&mut source, LINK_CAPACITY);
+        for branch in branches {
+            handle
+                .add_branch(Box::new(branch))
+                .expect("router accepts the branch");
+        }
+        let stats = block_on(run).expect("router runs");
+        assert_eq!(stats.frames_consumed, FRAMES);
+        for (index, branch) in seen.iter().enumerate() {
+            let dealt: Vec<u64> = every_frame()
+                .into_iter()
+                .filter(|sequence| *sequence as usize % seen.len() == index)
+                .collect();
+            assert_eq!(*branch.lock(), dealt, "branch {index}");
+        }
+    }
+
+    struct PropertyTypedSource;
+
+    impl SourceLoop for PropertyTypedSource {
+        type RunFuture<'a>
+            = core::future::Ready<Result<u64, G2gError>>
+        where
+            Self: 'a;
+        type CapsFuture<'a>
+            = core::future::Ready<Result<Caps, G2gError>>
+        where
+            Self: 'a;
+
+        fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
+            core::future::ready(Ok(caps()))
+        }
+
+        fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+            Ok(ConfigureOutcome::Accepted)
+        }
+
+        fn run<'a>(&'a mut self, _out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+            core::future::ready(Ok(0))
+        }
+
+        fn configured_output_caps(&self) -> Option<Caps> {
+            Some(caps())
+        }
+    }
+
+    #[test]
+    fn source_defaults_claim_no_duration_and_no_properties() {
+        let mut source = PropertyTypedSource;
+        assert_eq!(source.query_duration(), None);
+        assert_eq!(
+            source.set_property("location", PropValue::Str("clip.mp4".into())),
+            Err(PropError::Unknown)
+        );
+        assert_eq!(
+            source.probe_output_caps(),
+            Ok(source.configured_output_caps())
+        );
+        assert!(source.configured_output_caps().is_some());
+    }
+}
