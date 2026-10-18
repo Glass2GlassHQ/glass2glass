@@ -42,26 +42,67 @@ use g2g_core::fanout::{DuplexInbound, MultiDuplexSession};
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
     g2g_warn, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, HardwareError,
-    MultiOutputSink, PipelinePacket, ReverseChannel,
+    MultiOutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ReverseChannel,
 };
 
 use crate::filesink::io_err;
 use crate::livekit_signal::{
     access_token, candidate_from_init_json, signal_ws_url, AddTrackRequest, IceSettings,
     IceTransportPolicy, SessionDescription, SignalRequest, SignalResponse, SignalTarget,
-    TrackSource, TrackType, VideoGrant,
+    TrackSource, TrackType, VideoGrant, ICE_TRANSPORT_POLICY_PROP, LIVEKIT_TURN_SERVER_PROP,
+    TURN_PASS_PROP, TURN_USER_PROP,
 };
 use crate::livekitsrc::{answer_offer, recv_signal, send_signal};
 use crate::webrtc_codec::{
-    enable_tracks, opus_caps, sink_caps_alternatives, Track, WebRtcVideoCodec,
+    enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property,
+    sink_caps_alternatives, Track, WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
 use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
-use crate::webrtc_util::{feed_datagram, send_transmit};
+use crate::webrtc_util::{
+    feed_datagram, get_linger_ms_property, send_transmit, set_linger_ms_property,
+    DEFAULT_LINGER_MS, LINGER_MS_PROP,
+};
 
 /// Send input / recv output pad layout: 0 = video, 1 = audio.
 const VIDEO: usize = 0;
 const AUDIO: usize = 1;
 const TOKEN_TTL_SECS: u64 = 3600;
+const UNLIMITED_BUFFERS_TEXT: &str = "-1";
+const MAX_BUFFERS_TEXT: &str = "9223372036854775807";
+
+static LIVEKITDUPLEX_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "url",
+        PropKind::Str,
+        "LiveKit signalling URL (ws:// or wss://)",
+    ),
+    PropertySpec::new("room", PropKind::Str, "room name to join"),
+    PropertySpec::new("identity", PropKind::Str, "participant identity"),
+    PropertySpec::new("api-key", PropKind::Str, "LiveKit API key (mints a token)"),
+    PropertySpec::new(
+        "api-secret",
+        PropKind::Str,
+        "LiveKit API secret (mints a token)",
+    ),
+    PropertySpec::new(
+        "token",
+        PropKind::Str,
+        "pre-minted access token (overrides api-key/secret)",
+    ),
+    VIDEO_CODEC_PROP,
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "access units to receive across both tracks then EOS (-1 = until the room ends)",
+    )
+    .with_default(UNLIMITED_BUFFERS_TEXT)
+    .with_range(UNLIMITED_BUFFERS_TEXT, MAX_BUFFERS_TEXT),
+    LINGER_MS_PROP,
+    LIVEKIT_TURN_SERVER_PROP,
+    TURN_USER_PROP,
+    TURN_PASS_PROP,
+    ICE_TRANSPORT_POLICY_PROP,
+];
 
 /// Bidirectional LiveKit participant. See the module docs.
 ///
@@ -139,7 +180,7 @@ impl LiveKitDuplex {
             video_codec: WebRtcVideoCodec::default(),
             reverse: (0..2).map(|_| ReverseChannel::new()).collect(),
             frame_limit: u64::MAX,
-            linger: Duration::from_millis(1500),
+            linger: Duration::from_millis(DEFAULT_LINGER_MS),
             ice: IceSettings::default(),
             log_name: LogName::new(),
         }
@@ -257,6 +298,54 @@ impl MultiDuplexSession for LiveKitDuplex {
 
     fn reverse_channel(&self, input: usize) -> Option<ReverseChannel> {
         self.reverse.get(input).cloned()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        LIVEKITDUPLEX_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "num-buffers" => {
+                return crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value)
+            }
+            "video-codec" => return set_video_codec_property(&mut self.video_codec, &value),
+            "linger-ms" => return set_linger_ms_property(&mut self.linger, &value),
+            _ => {}
+        }
+        if let Some(result) = self.ice.set_property(name, &value) {
+            return result;
+        }
+        let text_slot = match name {
+            "url" => &mut self.url,
+            "room" => &mut self.room,
+            "identity" => &mut self.identity,
+            "api-key" => &mut self.api_key,
+            "api-secret" => &mut self.api_secret,
+            "token" => {
+                let token = value.as_str().ok_or(PropError::Type)?;
+                self.token = (!token.is_empty()).then(|| token.into());
+                return Ok(());
+            }
+            _ => return Err(PropError::Unknown),
+        };
+        *text_slot = value.as_str().ok_or(PropError::Type)?.into();
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "url" => Some(PropValue::Str(self.url.clone())),
+            "room" => Some(PropValue::Str(self.room.clone())),
+            "identity" => Some(PropValue::Str(self.identity.clone())),
+            "api-key" => Some(PropValue::Str(self.api_key.clone())),
+            "api-secret" => Some(PropValue::Str(self.api_secret.clone())),
+            "token" => Some(PropValue::Str(self.token.clone().unwrap_or_default())),
+            "video-codec" => Some(get_video_codec_property(self.video_codec)),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
+            "linger-ms" => Some(get_linger_ms_property(self.linger)),
+            _ => self.ice.get_property(name),
+        }
     }
 
     fn run<'a>(
@@ -632,6 +721,78 @@ mod tests {
         assert!(MultiDuplexSession::output_caps(&d, 0).is_ok());
         assert!(MultiDuplexSession::output_caps(&d, 2).is_err());
         assert!(MultiDuplexSession::reverse_channel(&d, 0).is_some());
+    }
+
+    #[test]
+    fn every_property_round_trips() {
+        let mut d = LiveKitDuplex::new("ws://h:7880", "room", "id");
+        assert_eq!(
+            MultiDuplexSession::get_property(&d, LINGER_MS_PROP.name),
+            Some(
+                LINGER_MS_PROP
+                    .parse_value(LINGER_MS_PROP.default.unwrap())
+                    .unwrap()
+            )
+        );
+        for spec in MultiDuplexSession::properties(&d) {
+            let value = crate::webrtc_util::sample_property_value(spec);
+            MultiDuplexSession::set_property(&mut d, spec.name, value.clone()).unwrap();
+            assert_eq!(
+                MultiDuplexSession::get_property(&d, spec.name),
+                Some(value),
+                "{}",
+                spec.name
+            );
+        }
+        MultiDuplexSession::set_property(&mut d, "num-buffers", PropValue::Int(-1)).unwrap();
+        assert_eq!(d.frame_limit, u64::MAX);
+    }
+
+    #[test]
+    fn unknown_and_mistyped_properties_are_distinct_errors() {
+        let mut d = LiveKitDuplex::new("ws://h:7880", "room", "id");
+        assert_eq!(
+            MultiDuplexSession::set_property(&mut d, "no-such-property", PropValue::Uint(0)),
+            Err(PropError::Unknown)
+        );
+        assert_eq!(
+            MultiDuplexSession::get_property(&d, "no-such-property"),
+            None
+        );
+        for name in ["url", "linger-ms", "num-buffers", "turn-server"] {
+            assert_eq!(
+                MultiDuplexSession::set_property(&mut d, name, PropValue::Double(0.0)),
+                Err(PropError::Type),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            MultiDuplexSession::set_property(
+                &mut d,
+                "ice-transport-policy",
+                PropValue::Str("nearby".into())
+            ),
+            Err(PropError::Value)
+        );
+    }
+
+    #[test]
+    fn video_codec_property_retags_the_video_output() {
+        let mut d = LiveKitDuplex::new("ws://h:7880", "room", "id");
+        MultiDuplexSession::set_property(&mut d, "video-codec", PropValue::Str("vp9".into()))
+            .unwrap();
+        assert_eq!(
+            MultiDuplexSession::output_caps(&d, VIDEO),
+            Ok(WebRtcVideoCodec::Vp9.caps_placeholder())
+        );
+        assert_eq!(
+            MultiDuplexSession::set_property(
+                &mut d,
+                "video-codec",
+                PropValue::Str("theora".into())
+            ),
+            Err(PropError::Value)
+        );
     }
 
     #[test]

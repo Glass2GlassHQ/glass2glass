@@ -65,15 +65,21 @@ use g2g_core::g2g_warn;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     Caps, CapsConstraint, ConfigureOutcome, DuplexInbound, G2gError, HardwareError, MemoryDomain,
-    MultiDuplexSession, MultiOutputSink, PipelinePacket, ReverseChannel,
+    MultiDuplexSession, MultiOutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, ReverseChannel,
 };
 
 use crate::filesink::io_err;
 use crate::turn::TurnSet;
-use crate::webrtc_codec::{enable_tracks, opus_caps, Track, WebRtcVideoCodec};
+use crate::webrtc_codec::{
+    enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
+    WebRtcVideoCodec, VIDEO_CODEC_PROP,
+};
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_util::{
-    add_ice_candidates, feed_datagram, media_time_ns, select_host_ip, send_transmit,
+    add_ice_candidates, feed_datagram, get_linger_ms_property, media_time_ns, select_host_ip,
+    send_transmit, set_linger_ms_property, DEFAULT_LINGER_MS, LINGER_MS_PROP, STUN_SERVER_PROP,
+    TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
 };
 
 /// The tracks a duplex session offers at the handshake, in pad order: video on
@@ -86,6 +92,39 @@ fn active_kinds(video_codec: WebRtcVideoCodec, track_count: usize) -> Vec<Track>
 
 /// The most tracks a session offers at the handshake (video + audio).
 const MAX_ACTIVE_TRACKS: usize = 2;
+
+const DEFAULT_SPARE_TRACKS: usize = 0;
+const DEFAULT_SPARE_TRACKS_TEXT: &str = "0";
+
+static WEBRTCDUPLEX_PROPS: &[PropertySpec] = &[
+    STUN_SERVER_PROP,
+    TURN_SERVER_PROP,
+    TURN_USER_PROP,
+    TURN_PASS_PROP,
+    VIDEO_CODEC_PROP,
+    LINGER_MS_PROP,
+    PropertySpec::new(
+        "spare-video-tracks",
+        PropKind::Uint,
+        "video pads reserved beyond the active tracks, bound when a video track is added mid-session",
+    )
+    .with_default(DEFAULT_SPARE_TRACKS_TEXT),
+    PropertySpec::new(
+        "spare-audio-tracks",
+        PropKind::Uint,
+        "audio pads reserved beyond the active tracks, bound when an audio track is added mid-session",
+    )
+    .with_default(DEFAULT_SPARE_TRACKS_TEXT),
+];
+
+fn spare_track_count(value: &PropValue) -> Result<usize, PropError> {
+    let count = value.as_uint().ok_or(PropError::Type)?;
+    usize::try_from(count).map_err(|_| PropError::Value)
+}
+
+fn non_empty(text: &str) -> Option<String> {
+    (!text.is_empty()).then(|| text.into())
+}
 
 /// Which peer originates the SDP offer in the sendrecv handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +241,8 @@ pub struct WebRtcDuplexSession {
     /// reserved by [`Self::with_spare_tracks`]. Its length is both `input_count`
     /// and `output_count` (input i and output i share m-line i).
     pad_kinds: Vec<Track>,
+    spare_video_tracks: usize,
+    spare_audio_tracks: usize,
     /// The one video codec on every video m-line: a sendrecv m-line carries
     /// one codec both ways, so the send pads must match it and the recv pads
     /// emit it.
@@ -253,12 +294,14 @@ impl WebRtcDuplexSession {
             sig: Some(sig),
             track_count,
             pad_kinds: active_kinds(video_codec, track_count),
+            spare_video_tracks: DEFAULT_SPARE_TRACKS,
+            spare_audio_tracks: DEFAULT_SPARE_TRACKS,
             video_codec,
             stun_server: None,
             turn_server: None,
             turn_user: String::new(),
             turn_pass: String::new(),
-            linger: Duration::from_millis(1500),
+            linger: Duration::from_millis(DEFAULT_LINGER_MS),
             inputs: alloc::vec![None; track_count],
             reverse: (0..track_count).map(|_| ReverseChannel::new()).collect(),
             nacks_seen: Arc::new(AtomicU64::new(0)),
@@ -274,27 +317,40 @@ impl WebRtcDuplexSession {
     /// dynamic runner (`run_duplex_session_dynamic`, M1014) grows the pad count
     /// instead, so it needs no reserve.
     pub fn with_spare_tracks(mut self, video: usize, audio: usize) -> Self {
-        self.pad_kinds
-            .extend(core::iter::repeat_n(Track::Video(self.video_codec), video));
-        self.pad_kinds
-            .extend(core::iter::repeat_n(Track::Audio, audio));
-        let pads = self.pad_kinds.len();
-        self.inputs.resize(pads, None);
-        self.reverse.resize_with(pads, ReverseChannel::new);
+        self.set_spare_tracks(video, audio);
         self
+    }
+
+    fn set_spare_tracks(&mut self, video: usize, audio: usize) {
+        self.spare_video_tracks = video;
+        self.spare_audio_tracks = audio;
+        self.rebuild_pad_kinds();
     }
 
     /// Carry `codec` on every video m-line instead of H.264. A video send pad
     /// configured with another codec is refused, since the m-line it would
     /// share with the matching recv pad negotiates one codec for both ways.
     pub fn with_video_codec(mut self, codec: WebRtcVideoCodec) -> Self {
-        self.video_codec = codec;
-        for kind in &mut self.pad_kinds {
-            if kind.is_video() {
-                *kind = Track::Video(codec);
-            }
-        }
+        self.set_video_codec(codec);
         self
+    }
+
+    fn set_video_codec(&mut self, codec: WebRtcVideoCodec) {
+        self.video_codec = codec;
+        self.rebuild_pad_kinds();
+    }
+
+    fn rebuild_pad_kinds(&mut self) {
+        let mut pad_kinds = active_kinds(self.video_codec, self.track_count);
+        pad_kinds.extend(core::iter::repeat_n(
+            Track::Video(self.video_codec),
+            self.spare_video_tracks,
+        ));
+        pad_kinds.extend(core::iter::repeat_n(Track::Audio, self.spare_audio_tracks));
+        let pads = pad_kinds.len();
+        self.pad_kinds = pad_kinds;
+        self.inputs.resize(pads, None);
+        self.reverse.resize_with(pads, ReverseChannel::new);
     }
 
     /// A cloneable mid-session control handle (M729): toggling a track
@@ -462,6 +518,48 @@ impl MultiDuplexSession for WebRtcDuplexSession {
 
     fn reverse_channel(&self, input: usize) -> Option<ReverseChannel> {
         self.reverse.get(input).cloned()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        WEBRTCDUPLEX_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "stun-server" => self.stun_server = non_empty(value.as_str().ok_or(PropError::Type)?),
+            "turn-server" => self.turn_server = non_empty(value.as_str().ok_or(PropError::Type)?),
+            "turn-user" => self.turn_user = value.as_str().ok_or(PropError::Type)?.into(),
+            "turn-pass" => self.turn_pass = value.as_str().ok_or(PropError::Type)?.into(),
+            "video-codec" => {
+                let mut codec = self.video_codec;
+                set_video_codec_property(&mut codec, &value)?;
+                self.set_video_codec(codec);
+            }
+            "linger-ms" => set_linger_ms_property(&mut self.linger, &value)?,
+            "spare-video-tracks" => {
+                self.set_spare_tracks(spare_track_count(&value)?, self.spare_audio_tracks)
+            }
+            "spare-audio-tracks" => {
+                self.set_spare_tracks(self.spare_video_tracks, spare_track_count(&value)?)
+            }
+            _ => return Err(PropError::Unknown),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        let value = match name {
+            "stun-server" => PropValue::Str(self.stun_server.clone().unwrap_or_default()),
+            "turn-server" => PropValue::Str(self.turn_server.clone().unwrap_or_default()),
+            "turn-user" => PropValue::Str(self.turn_user.clone()),
+            "turn-pass" => PropValue::Str(self.turn_pass.clone()),
+            "video-codec" => get_video_codec_property(self.video_codec),
+            "linger-ms" => get_linger_ms_property(self.linger),
+            "spare-video-tracks" => PropValue::Uint(self.spare_video_tracks as u64),
+            "spare-audio-tracks" => PropValue::Uint(self.spare_audio_tracks as u64),
+            _ => return None,
+        };
+        Some(value)
     }
 
     fn run<'a>(
@@ -1112,6 +1210,101 @@ mod tests {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(s.intercept_caps(0, &raw), Err(G2gError::CapsMismatch));
+    }
+
+    #[test]
+    fn every_property_round_trips() {
+        let (a, _b) = SdpChannel::pair();
+        let mut s = WebRtcDuplexSession::new(SignalRole::Offerer, a, 2);
+        assert_eq!(
+            s.get_property(LINGER_MS_PROP.name),
+            Some(
+                LINGER_MS_PROP
+                    .parse_value(LINGER_MS_PROP.default.unwrap())
+                    .unwrap()
+            )
+        );
+        for spec in s.properties() {
+            let value = crate::webrtc_util::sample_property_value(spec);
+            s.set_property(spec.name, value.clone()).unwrap();
+            assert_eq!(s.get_property(spec.name), Some(value), "{}", spec.name);
+        }
+        s.set_property("stun-server", PropValue::Str(String::new()))
+            .unwrap();
+        assert_eq!(s.stun_server, None);
+    }
+
+    #[test]
+    fn unknown_and_mistyped_properties_are_distinct_errors() {
+        let (a, _b) = SdpChannel::pair();
+        let mut s = WebRtcDuplexSession::new(SignalRole::Offerer, a, 2);
+        assert_eq!(
+            s.set_property("no-such-property", PropValue::Uint(0)),
+            Err(PropError::Unknown)
+        );
+        assert_eq!(s.get_property("no-such-property"), None);
+        assert_eq!(
+            s.set_property("linger-ms", PropValue::Str("fast".into())),
+            Err(PropError::Type)
+        );
+        assert_eq!(
+            s.set_property("stun-server", PropValue::Uint(0)),
+            Err(PropError::Type)
+        );
+    }
+
+    #[test]
+    fn video_codec_property_retags_every_video_pad() {
+        let (a, _b) = SdpChannel::pair();
+        let mut s = WebRtcDuplexSession::new(SignalRole::Offerer, a, 2).with_spare_tracks(1, 0);
+        s.set_property("video-codec", PropValue::Str("vp8".into()))
+            .unwrap();
+        for pad in [0, 2] {
+            assert!(matches!(
+                s.output_caps(pad),
+                Ok(Caps::CompressedVideo {
+                    codec: VideoCodec::Vp8,
+                    ..
+                })
+            ));
+        }
+        assert!(s.intercept_caps(0, &h264_caps()).is_err());
+        assert!(s
+            .intercept_caps(0, &WebRtcVideoCodec::Vp8.caps_any())
+            .is_ok());
+    }
+
+    #[test]
+    fn spare_track_properties_set_absolute_counts() {
+        let (a, _b) = SdpChannel::pair();
+        let mut s = WebRtcDuplexSession::new(SignalRole::Offerer, a, 2);
+        s.set_property("spare-video-tracks", PropValue::Uint(1))
+            .unwrap();
+        s.set_property("spare-video-tracks", PropValue::Uint(1))
+            .unwrap();
+        assert_eq!(s.input_count(), 3);
+        s.set_property("spare-audio-tracks", PropValue::Uint(2))
+            .unwrap();
+        assert_eq!(s.input_count(), 5);
+        assert_eq!(s.output_count(), 5);
+        assert_eq!(s.reverse.len(), 5);
+        assert!(matches!(
+            s.output_caps(4),
+            Ok(Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            })
+        ));
+        s.set_property("spare-video-tracks", PropValue::Uint(0))
+            .unwrap();
+        assert_eq!(s.input_count(), 4);
+        assert!(matches!(
+            s.output_caps(2),
+            Ok(Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            })
+        ));
     }
 
     #[test]

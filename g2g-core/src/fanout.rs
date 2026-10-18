@@ -509,6 +509,22 @@ pub trait MultiDuplexSession: ElementBound {
         inbound: &'a mut dyn DuplexInbound,
         out: &'a mut dyn MultiOutputSink,
     ) -> Self::RunFuture<'a>;
+
+    /// Runtime properties this session exposes, mirroring
+    /// [`AsyncElement::properties`]. Default: none.
+    fn properties(&self) -> &'static [PropertySpec] {
+        &[]
+    }
+
+    /// Set a property by name. Default: every name is unknown.
+    fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
+        Err(PropError::Unknown)
+    }
+
+    /// Read a property back by name. Default: `None`.
+    fn get_property(&self, _name: &str) -> Option<PropValue> {
+        None
+    }
 }
 
 /// Multi-output element trait variant: identical negotiation to

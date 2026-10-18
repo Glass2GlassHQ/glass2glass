@@ -24,7 +24,10 @@ use str0m::{Candidate, IceCreds, Input, Rtc};
 
 use crate::turn::TurnSet;
 use g2g_core::log::LogSource;
-use g2g_core::{g2g_debug, g2g_info, g2g_warn, G2gError, HardwareError, PropKind, PropertySpec};
+use g2g_core::{
+    g2g_debug, g2g_info, g2g_warn, G2gError, HardwareError, PropError, PropKind, PropValue,
+    PropertySpec,
+};
 
 /// `G2G_DEBUG=webrtc-http:...` names the shared WHIP/WHEP HTTP signalling path.
 struct WebRtcHttpLog;
@@ -93,6 +96,41 @@ pub(crate) const TURN_PASS_PROP: PropertySpec = PropertySpec::new(
     PropKind::Str,
     "TURN long-term credential password for turn-server",
 );
+
+pub(crate) const DEFAULT_LINGER_MS: u64 = 1500;
+const DEFAULT_LINGER_MS_TEXT: &str = "1500";
+pub(crate) const LINGER_MS_PROP: PropertySpec = PropertySpec::new(
+    "linger-ms",
+    PropKind::Uint,
+    "milliseconds to keep receiving from the peer after the local send side ends",
+)
+.with_default(DEFAULT_LINGER_MS_TEXT);
+
+pub(crate) fn set_linger_ms_property(
+    slot: &mut Duration,
+    value: &PropValue,
+) -> Result<(), PropError> {
+    *slot = Duration::from_millis(value.as_uint().ok_or(PropError::Type)?);
+    Ok(())
+}
+
+pub(crate) fn get_linger_ms_property(linger: Duration) -> PropValue {
+    PropValue::Uint(linger.as_millis().try_into().unwrap_or(u64::MAX))
+}
+
+#[cfg(test)]
+const SAMPLE_PROPERTY_NUMBER: u8 = 3;
+
+// last nick, since the first one is usually the default
+#[cfg(test)]
+pub(crate) fn sample_property_value(spec: &PropertySpec) -> PropValue {
+    match spec.kind {
+        PropKind::Uint => PropValue::Uint(SAMPLE_PROPERTY_NUMBER.into()),
+        PropKind::Int => PropValue::Int(SAMPLE_PROPERTY_NUMBER.into()),
+        PropKind::Str => PropValue::Str(spec.enum_nicks().last().unwrap_or(spec.name).into()),
+        kind => panic!("no sample value for {} of kind {kind:?}", spec.name),
+    }
+}
 
 /// STUN magic cookie (RFC 5389).
 const STUN_MAGIC: u32 = 0x2112_A442;
