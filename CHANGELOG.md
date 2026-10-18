@@ -9,6 +9,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1554: an `A420` raw format carries alpha, `ffmpegdec` emits it for VP6-alpha and `videoconvert` converts it to I420 and RGBA.
 - M1553: every video decoder drops the pictures outside the upstream segment, so an mp4 edit list cuts frames whichever decoder runs.
 - M1556: the MP4, Matroska and FLV muxers store ER AAC, ELD and USAC raw behind their AudioSpecificConfig, `flvdemux` and `avidemux` send them that way, and `mpegtsmux` refuses them.
+- M1555: `h265parse` drops the RASL pictures of a CRA that starts the stream, so `decodebin` outputs only decodable pictures.
 - M1550: FLV VP6 units keep their dimension byte and `ffmpegdec` decodes VP6-alpha to I420, so those files decode at the right size and remux byte-exact.
 - M1548: `qtdemux` applies a video track's edit list, so `ffmpegdec` drops the frames the edit cuts.
 - M1549: `qtdemux` sends ER AAC, ELD and USAC access units raw behind their AudioSpecificConfig, which `ffmpegaudiodec` opens the decoder with.

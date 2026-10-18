@@ -28,6 +28,12 @@ The decoders skip that placeholder too. `ffmpegdec`, `dav1ddec` and `rav1ddec`
 ignore the rate in the first `configure_pipeline` call and take it from the
 runner's later calls, which carry the caps an upstream `CapsChanged` declared.
 
+In re-framing mode `h265parse` drops the RASL access units of a BLA, and of a
+CRA that starts the stream, follows an end-of-sequence or end-of-bitstream NAL,
+or follows a `Flush` or `Segment`. Those pictures reference pictures before the
+random access point that the decoder never received (`NoRaslOutputFlag == 1`,
+H.265 8.1.3). RASL pictures of any other CRA decode normally and pass through.
+
 ## VaapiDec (Linux VAAPI, cros-codecs)
 
 `VaapiDec<C>` (`g2g-plugins/src/vaapidec.rs`, feature `vaapi`,

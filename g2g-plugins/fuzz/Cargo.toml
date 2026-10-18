@@ -228,6 +228,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "iv8demux"
+path = "fuzz_targets/iv8demux.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fmp4"
 path = "fuzz_targets/fmp4.rs"
 test = false

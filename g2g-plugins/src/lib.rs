@@ -29,6 +29,30 @@ pub(crate) fn fuzz_block_on<F: core::future::Future>(f: F) -> F::Output {
     }
 }
 
+// Runs one packet through an element in a `#[cfg(fuzzing)]` shim, discarding its output.
+#[cfg(fuzzing)]
+pub(crate) fn fuzz_process<E: g2g_core::AsyncElement>(
+    element: &mut E,
+    packet: g2g_core::PipelinePacket,
+) -> Result<(), g2g_core::G2gError> {
+    use core::task::{Context, Poll};
+    use g2g_core::{G2gError, OutputSink, PipelinePacket, PushOutcome};
+
+    struct DiscardSink;
+    impl OutputSink for DiscardSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> Poll<Result<PushOutcome, G2gError>> {
+            packet_slot.take();
+            Poll::Ready(Ok(PushOutcome::Accepted))
+        }
+    }
+
+    fuzz_block_on(element.process(packet, &mut DiscardSink))
+}
+
 pub mod aacparse;
 // IMA ADPCM codec elements (M1073), wrapping the heap-free `g2g-mcu` block math.
 pub mod ac3parse;

@@ -284,21 +284,7 @@ impl PadTemplates for IvfDemux {
 
 #[cfg(fuzzing)]
 pub fn fuzz_parse(data: &[u8]) {
-    use g2g_core::PushOutcome;
-
     let _ = IvfDemux::parse_header(data);
-
-    struct NoopSink;
-    impl OutputSink for NoopSink {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            packet_slot.take();
-            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-        }
-    }
 
     let mut demux = IvfDemux::new();
     if demux
@@ -315,8 +301,7 @@ pub fn fuzz_parse(data: &[u8]) {
         sequence: 0,
         meta: Default::default(),
     };
-    let mut sink = NoopSink;
-    let _ = crate::fuzz_block_on(demux.process(PipelinePacket::DataFrame(frame), &mut sink));
+    let _ = crate::fuzz_process(&mut demux, PipelinePacket::DataFrame(frame));
 }
 
 #[cfg(test)]
