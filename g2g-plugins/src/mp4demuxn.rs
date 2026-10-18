@@ -767,10 +767,12 @@ impl Mp4DemuxN {
             let Some(port) = self.ports.iter().position(|p| p.track_id == track_id) else {
                 continue; // a track no port forwards
             };
-            let kind = tracks
-                .iter()
-                .find(|t| t.track_id == track_id)
-                .map(|t| &t.kind);
+            let track = tracks.iter().find(|t| t.track_id == track_id);
+            let kind = track.map(|t| &t.kind);
+            let sample = match track {
+                Some(track) => track.edited_sample(sample),
+                None => sample,
+            };
             // Announce the port's real caps once (refining the looser negotiation
             // caps the branch solved against, e.g. concrete AAC channels/rate).
             if !self.announced[port] {
@@ -779,10 +781,7 @@ impl Mp4DemuxN {
                     .unwrap_or_else(|| self.ports[port].caps.clone());
                 out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
                 self.announced[port] = true;
-                let edit = tracks
-                    .iter()
-                    .find(|t| t.track_id == track_id)
-                    .map_or(Segment::new(), TrackHeader::presentation_segment);
+                let edit = track.map_or(Segment::new(), TrackHeader::presentation_segment);
                 if edit != self.port_edit[port] {
                     self.port_edit[port] = edit;
                     out.push_to(port, PipelinePacket::Segment(self.port_segment(port)))

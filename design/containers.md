@@ -746,10 +746,17 @@ placeholder it negotiated. `mp4src` applies the same rule and announces it in a
 the first `moof` rather than at the `moov`.
 
 `Mp4Demux` and `Mp4DemuxN` turn a video track's edit list into the `Segment`
-they send ahead of its samples: it starts at the first edit's `media_time` and,
-when the list holds that one media edit, stops where the edit ends. Every sample
-still goes downstream, because the cut pictures can be references, and every
-video decoder drops each decoded picture whose pts `Segment::presents` rejects:
+they send ahead of its samples. It starts at the `media_time` of the first
+media edit, past any leading empty edits, whose delay is not applied. When
+every edit after them is a media edit with a duration, each starting at or
+after the end of the one before, the segment stops where the last one ends and
+the demuxers cut the media between edits out of the timeline, as ffmpeg's mov
+demuxer does: a sample after a gap moves back by the length of the gaps before
+it, a decode time inside a gap moves to its start, and a sample whose pts is
+inside a gap moves past the segment's stop. A list of any other shape keeps
+only the first media edit's start. Every sample still goes downstream, because
+the cut pictures can be references, and every video decoder drops each decoded
+picture whose pts `Segment::presents` rejects:
 before the start, or at or past the stop, the frames ffmpeg drops for the same
 edit. The intra-only decoders (`mjpegdec`, `jpegxsdec`) skip the cut units
 before decoding them. An audio track's segment takes only the start, its

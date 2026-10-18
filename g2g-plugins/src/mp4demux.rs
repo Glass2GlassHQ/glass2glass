@@ -260,7 +260,7 @@ impl Mp4Demux {
             .await?;
             self.sequence += 1;
         }
-        for (_, sample) in track_samples(&self.buffer, audio)? {
+        for sample in track_samples(&self.buffer, audio)? {
             // ADTS-frame the raw AAC access unit from the track's ASC, so a decoder
             // starts without the out-of-band config (like the in-band video param
             // sets); raw AAC and every other format go as they are.
@@ -325,12 +325,12 @@ impl Mp4Demux {
             self.caps_sent = true;
         }
         // the decoder drops the pictures the edit list cuts
-        let edit = video.edit_segment();
+        let edit = video.presentation_segment();
         if edit != Segment::new() {
             out.push(PipelinePacket::Segment(edit)).await?;
         }
         let mut need_param_sets = true;
-        for (_, s) in track_samples(&self.buffer, video)? {
+        for s in track_samples(&self.buffer, video)? {
             let mut annexb = s.annexb;
             // The moov's config-record parameter sets are out-of-band, so prepend
             // them to the first access unit if it does not already carry them.
@@ -359,13 +359,17 @@ impl Mp4Demux {
 }
 
 // a fragmented file's samples are in its moofs, a progressive file's in the sample tables
-fn track_samples(data: &[u8], track: &TrackHeader) -> Result<Vec<(u32, Sample)>, G2gError> {
+fn track_samples(data: &[u8], track: &TrackHeader) -> Result<Vec<Sample>, G2gError> {
     let selected = core::slice::from_ref(track);
-    if find_box(data, b"moof").is_some() {
-        parse_fragments_multi(data, selected, 0, None)
+    let samples = if find_box(data, b"moof").is_some() {
+        parse_fragments_multi(data, selected, 0, None)?
     } else {
-        parse_progressive_multi(data, selected)
-    }
+        parse_progressive_multi(data, selected)?
+    };
+    Ok(samples
+        .into_iter()
+        .map(|(_, sample)| track.edited_sample(sample))
+        .collect())
 }
 
 impl AsyncElement for Mp4Demux {
