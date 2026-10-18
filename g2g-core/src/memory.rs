@@ -1660,4 +1660,12 @@ mod tests {
         drop(s);
         assert_eq!(frees.load(Ordering::SeqCst), 1, "no double free after CoW");
     }
+
+    #[test]
+    fn only_the_cpu_domains_are_system_memory() {
+        assert!(MemoryDomainKind::System.is_system());
+        assert!(MemoryDomainKind::SystemView.is_system());
+        assert!(!MemoryDomainKind::Cuda.is_system());
+        assert!(!MemoryDomainKind::DmaBuf.is_system());
+    }
 }

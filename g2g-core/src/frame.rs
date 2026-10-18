@@ -183,4 +183,14 @@ mod tests {
         let f = frame();
         assert!(f.meta.is_empty(), "a fresh frame's metadata set is empty");
     }
+
+    #[test]
+    fn pts_is_none_only_for_the_unset_marker() {
+        let timing = |pts_ns| FrameTiming {
+            pts_ns,
+            ..FrameTiming::default()
+        };
+        assert_eq!(timing(FrameTiming::PTS_NONE).pts(), None);
+        assert_eq!(timing(40_000_000).pts(), Some(40_000_000));
+    }
 }

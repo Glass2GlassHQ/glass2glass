@@ -3370,4 +3370,281 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), n, "gst format names must be unique");
     }
+
+    #[test]
+    fn caps_intersect_matches_scalar_variants_by_value() {
+        assert_eq!(Caps::Klv.intersect(&Caps::Klv), Ok(Caps::Klv));
+        assert_eq!(
+            Caps::OnvifMetadata.intersect(&Caps::OnvifMetadata),
+            Ok(Caps::OnvifMetadata)
+        );
+        let audio = |format| Caps::Audio {
+            format,
+            channels: 2,
+            sample_rate: 48_000,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
+        };
+        assert_eq!(
+            audio(AudioFormat::Opus).intersect(&audio(AudioFormat::Aac)),
+            Err(G2gError::CapsMismatch)
+        );
+        let tensor = |dtype, shape: [u32; 4], layout| Caps::Tensor {
+            dtype,
+            shape: TensorShape::new(shape),
+            layout,
+        };
+        let nchw = tensor(TensorDType::F32, [1, 3, 224, 224], TensorLayout::Nchw);
+        for other in [
+            tensor(TensorDType::U8, [1, 3, 224, 224], TensorLayout::Nchw),
+            tensor(TensorDType::F32, [1, 3, 640, 640], TensorLayout::Nchw),
+            tensor(TensorDType::F32, [1, 3, 224, 224], TensorLayout::Nhwc),
+        ] {
+            assert_eq!(nchw.intersect(&other), Err(G2gError::CapsMismatch));
+        }
+        let pairs = [
+            (
+                Caps::ByteStream {
+                    encoding: ByteStreamEncoding::MpegTs,
+                },
+                Caps::ByteStream {
+                    encoding: ByteStreamEncoding::Matroska,
+                },
+            ),
+            (
+                Caps::Text {
+                    format: TextFormat::Srt,
+                },
+                Caps::Text {
+                    format: TextFormat::WebVtt,
+                },
+            ),
+            (
+                Caps::SubPicture {
+                    format: SubPictureFormat::VobSub,
+                },
+                Caps::SubPicture {
+                    format: SubPictureFormat::Pgs,
+                },
+            ),
+        ];
+        for (a, b) in pairs {
+            assert_eq!(a.intersect(&a), Ok(a.clone()));
+            assert_eq!(a.intersect(&b), Err(G2gError::CapsMismatch));
+        }
+    }
+
+    #[test]
+    fn interlace_intersect_any_is_identity_and_scans_are_disjoint() {
+        let progressive = Interlace::Progressive;
+        let interleaved = Interlace::Interleaved;
+        assert_eq!(Interlace::Any.intersect(&interleaved), Some(interleaved));
+        assert_eq!(progressive.intersect(&Interlace::Any), Some(progressive));
+        assert_eq!(progressive.intersect(&progressive), Some(progressive));
+        assert_eq!(progressive.intersect(&interleaved), None);
+    }
+
+    #[test]
+    fn pcm_any_sample_rate_intersects_as_a_wildcard() {
+        let pcm = |sample_rate| Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
+        };
+        assert_eq!(
+            pcm(ANY_SAMPLE_RATE).intersect(&pcm(48_000)),
+            Ok(pcm(48_000))
+        );
+        assert_eq!(
+            pcm(44_100).intersect(&pcm(ANY_SAMPLE_RATE)),
+            Ok(pcm(44_100))
+        );
+        assert_eq!(
+            pcm(44_100).intersect(&pcm(48_000)),
+            Err(G2gError::CapsMismatch)
+        );
+    }
+
+    #[test]
+    fn batch_alternatives_stop_past_the_bound() {
+        let rates: Vec<Caps> = (1..=32u32)
+            .map(|sample_rate| Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 2,
+                sample_rate,
+                channel_layout: crate::ChannelLayout::UNSPECIFIED,
+            })
+            .collect();
+        let side = MAX_BATCH_ALTERNATIVES.isqrt();
+        let at_bound = batch_alternatives(&[&rates[..side], &rates[..side]]).unwrap();
+        assert_eq!(at_bound.len(), MAX_BATCH_ALTERNATIVES);
+        assert_eq!(
+            batch_alternatives(&[&rates[..side], &rates[..side * 2]]),
+            None
+        );
+    }
+
+    #[test]
+    fn text_and_subpicture_caps_round_trip_through_the_gst_string() {
+        let text = [
+            TextFormat::Utf8,
+            TextFormat::PangoMarkup,
+            TextFormat::Srt,
+            TextFormat::WebVtt,
+            TextFormat::Ssa,
+            TextFormat::Ttml,
+            TextFormat::Teletext,
+        ]
+        .map(|format| Caps::Text { format });
+        let subpicture = [
+            SubPictureFormat::VobSub,
+            SubPictureFormat::DvbSub,
+            SubPictureFormat::Pgs,
+        ]
+        .map(|format| Caps::SubPicture { format });
+        for caps in text.iter().chain(&subpicture) {
+            let printed = caps.to_gst_string();
+            let parsed = CapsSet::from_gst_string(&printed).unwrap_or_else(|| panic!("{printed}"));
+            assert_eq!(
+                parsed.alternatives(),
+                core::slice::from_ref(caps),
+                "{printed}"
+            );
+        }
+    }
+
+    #[test]
+    fn framerate_prints_a_whole_rate_over_one() {
+        let printed = |q16| video(Dim::Any, Dim::Any, Rate::Fixed(q16)).to_gst_string();
+        assert!(printed(30 << 16).contains(",framerate=30/1"));
+        let fractional = (30 << 16) + 1;
+        assert!(printed(fractional).contains(&format!(",framerate={fractional}/65536")));
+    }
+
+    #[test]
+    fn caps_with_an_open_framerate_is_not_fixed() {
+        assert!(!video(Dim::Fixed(1), Dim::Fixed(1), Rate::Any).is_fixed());
+        assert!(!video(
+            Dim::Fixed(1),
+            Dim::Fixed(1),
+            Rate::Range {
+                min_q16: 1,
+                max_q16: 2
+            }
+        )
+        .is_fixed());
+    }
+
+    #[test]
+    fn yuv_conversion_follows_the_matrix() {
+        let conversion = |colorimetry: Colorimetry| colorimetry.yuv_conversion();
+        assert_eq!(
+            conversion(Colorimetry::BT709).matrix,
+            MatrixCoefficients::Bt709
+        );
+        assert_eq!(conversion(Colorimetry::BT709).luma, LumaCoefficients::BT709);
+        assert_eq!(
+            conversion(Colorimetry::BT2020).matrix,
+            MatrixCoefficients::Bt2020Ncl
+        );
+        assert_eq!(
+            conversion(Colorimetry::BT2020).luma,
+            LumaCoefficients::BT2020_NCL
+        );
+        assert_eq!(
+            conversion(Colorimetry::UNKNOWN).luma,
+            LumaCoefficients::BT601
+        );
+    }
+
+    #[test]
+    fn luma_green_weight_completes_the_sum() {
+        for luma in [
+            LumaCoefficients::BT601,
+            LumaCoefficients::BT709,
+            LumaCoefficients::BT2020_NCL,
+        ] {
+            assert!(
+                (luma.kr + luma.kg() + luma.kb - 1.0).abs() < 1e-6,
+                "{luma:?}"
+            );
+        }
+        assert!((LumaCoefficients::BT709.kg() - 0.7152).abs() < 1e-6);
+    }
+
+    #[test]
+    fn colorimetry_4_part_form_covers_every_gst_code() {
+        let colorimetry = |range, matrix, transfer, primaries| Colorimetry {
+            range,
+            matrix,
+            transfer,
+            primaries,
+        };
+        let cases = [
+            (
+                "0:4:5:3",
+                colorimetry(
+                    ColorRange::Unknown,
+                    MatrixCoefficients::Bt601,
+                    TransferCharacteristics::Bt709,
+                    ColorPrimaries::Bt470bg,
+                ),
+            ),
+            (
+                "1:6:7:4",
+                colorimetry(
+                    ColorRange::Full,
+                    MatrixCoefficients::Bt2020Ncl,
+                    TransferCharacteristics::Srgb,
+                    ColorPrimaries::Smpte170m,
+                ),
+            ),
+            (
+                "2:0:14:7",
+                colorimetry(
+                    ColorRange::Limited,
+                    MatrixCoefficients::Unknown,
+                    TransferCharacteristics::Pq,
+                    ColorPrimaries::Bt2020,
+                ),
+            ),
+            (
+                "1:1:15:0",
+                colorimetry(
+                    ColorRange::Full,
+                    MatrixCoefficients::Identity,
+                    TransferCharacteristics::Hlg,
+                    ColorPrimaries::Unknown,
+                ),
+            ),
+            (
+                "2:3:11:1",
+                colorimetry(
+                    ColorRange::Limited,
+                    MatrixCoefficients::Bt709,
+                    TransferCharacteristics::Bt2020,
+                    ColorPrimaries::Bt709,
+                ),
+            ),
+            (
+                "1:4:0:1",
+                colorimetry(
+                    ColorRange::Full,
+                    MatrixCoefficients::Bt601,
+                    TransferCharacteristics::Unknown,
+                    ColorPrimaries::Bt709,
+                ),
+            ),
+        ];
+        for (printed, expected) in cases {
+            assert_eq!(
+                Colorimetry::from_gst_string(printed),
+                Some(expected),
+                "{printed}"
+            );
+            assert_eq!(expected.to_gst_string().as_deref(), Some(printed));
+        }
+        // BT2020_10 parses to the same transfer as BT2020_12
+        assert_eq!(Colorimetry::from_gst_string("2:3:13:1"), Some(cases[4].1));
+    }
 }
