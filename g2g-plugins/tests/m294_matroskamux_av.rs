@@ -130,6 +130,11 @@ async fn muxes_two_tracks_into_one_matroska_stream() {
         .unwrap();
 
     let out = &sink.bytes;
+    // DocTypeVersion 4 (CodecDelay / SeekPreRoll are v4 elements) and the
+    // MuxingApp / WritingApp strings mkvalidator requires in Info.
+    assert_eq!(count(out, &[0x42, 0x87, 0x81, 4]), 1, "DocTypeVersion 4");
+    assert_eq!(count(out, &[0x4D, 0x80]), 1, "MuxingApp present once");
+    assert_eq!(count(out, &[0x57, 0x41]), 1, "WritingApp present once");
     // A Matroska stream: EBML header + Segment + Tracks, with both CodecIDs and a
     // CodecPrivate per track (0x63A2).
     assert!(

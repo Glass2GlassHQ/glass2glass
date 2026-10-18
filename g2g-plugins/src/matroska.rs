@@ -43,6 +43,12 @@ const ID_INFO: u32 = 0x1549_A966;
 const ID_TIMESTAMP_SCALE: u32 = 0x002A_D7B1;
 const ID_DURATION: u32 = 0x4489;
 const ID_TITLE: u32 = 0x7BA9;
+const ID_MUXING_APP: u32 = 0x4D80;
+const ID_WRITING_APP: u32 = 0x5741;
+// CodecDelay and SeekPreRoll are v4 elements, so the file says so like ffmpeg does
+const DOC_TYPE_VERSION: u8 = 4;
+const DOC_TYPE_READ_VERSION: u8 = 2;
+const APP_NAME: &str = concat!("g2g-plugins ", env!("CARGO_PKG_VERSION"));
 const ID_TAGS: u32 = 0x1254_C367;
 const ID_TAG: u32 = 0x7373;
 const ID_TARGETS: u32 = 0x63C0;
@@ -2219,8 +2225,8 @@ fn ebml_header(doctype: &[u8]) -> Vec<u8> {
     h.extend_from_slice(&elem_vec(0x42F2, &[4])); // EBMLMaxIDLength
     h.extend_from_slice(&elem_vec(0x42F3, &[8])); // EBMLMaxSizeLength
     h.extend_from_slice(&elem_vec(0x4282, doctype)); // DocType
-    h.extend_from_slice(&elem_vec(0x4287, &[2])); // DocTypeVersion
-    h.extend_from_slice(&elem_vec(0x4285, &[2])); // DocTypeReadVersion
+    h.extend_from_slice(&elem_vec(0x4287, &[DOC_TYPE_VERSION])); // DocTypeVersion
+    h.extend_from_slice(&elem_vec(0x4285, &[DOC_TYPE_READ_VERSION])); // DocTypeReadVersion
     elem_vec(ID_EBML, &h)
 }
 
@@ -2231,6 +2237,8 @@ fn ebml_header(doctype: &[u8]) -> Vec<u8> {
 /// [`MatroskaMuxer::duration_patch`](MatroskaMuxer::duration_patch).
 fn info_element(with_duration: bool) -> (Vec<u8>, Option<usize>) {
     let mut body = elem_vec(ID_TIMESTAMP_SCALE, &uint_bytes(DEFAULT_TIMESTAMP_SCALE));
+    body.extend_from_slice(&elem_vec(ID_MUXING_APP, APP_NAME.as_bytes()));
+    body.extend_from_slice(&elem_vec(ID_WRITING_APP, APP_NAME.as_bytes()));
     let mut payload_at = None;
     if with_duration {
         body.extend_from_slice(&elem_vec(ID_DURATION, &0f64.to_be_bytes()));
