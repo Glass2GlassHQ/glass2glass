@@ -17,7 +17,9 @@
 //! Scope (v1): a single Segment. Clusters, definite-size and unknown-size (the
 //! live-streaming shape) alike, are descended into and their children parsed one
 //! at a time until the next top-level element ends them, so the blocks of a
-//! Cluster a truncated file cuts short still demux. SimpleBlock / Block frames,
+//! Cluster a truncated file cuts short still demux. A Cluster child that names no
+//! declared track or carries no usable size is damage: the parser drops bytes up
+//! to the next Cluster ID and carries on there. SimpleBlock / Block frames,
 //! including all three lacing modes (Xiph / EBML / fixed), are split; laced frames
 //! share the block timestamp. The `Cues` index is parsed into a time -> Cluster
 //! byte-position map ([`MatroskaDemuxer::cue_seek_offset`]) for indexed seeking
@@ -496,6 +498,8 @@ pub struct MatroskaDemuxer {
     /// The current Timestamp of the open Cluster. `Some` while its children are
     /// being parsed at the top level, `None` otherwise.
     open_cluster_ts: Option<u64>,
+    // set by damage inside a Cluster, cleared when the next Cluster ID turns up
+    resyncing: bool,
     /// Absolute byte offset of `buf[0]` in the source stream (bytes consumed so
     /// far). Used once to fix `segment_data_pos`, the anchor for Cue positions.
     consumed: u64,
@@ -535,6 +539,7 @@ impl MatroskaDemuxer {
             track_entry_tags: Vec::new(),
             chapters: Vec::new(),
             open_cluster_ts: None,
+            resyncing: false,
             consumed: 0,
             segment_data_pos: None,
             cues: Vec::new(),
@@ -584,6 +589,7 @@ impl MatroskaDemuxer {
     pub fn reset_keeping_tracks(&mut self) {
         self.buf.clear();
         self.open_cluster_ts = None;
+        self.resyncing = false;
         self.completed.clear();
     }
 
@@ -591,6 +597,31 @@ impl MatroskaDemuxer {
     fn consume(&mut self, n: usize) {
         self.buf.discard(n);
         self.consumed = self.consumed.saturating_add(n as u64);
+    }
+
+    // damage inside a Cluster: skip to the next Cluster ID, as ffmpeg does
+    fn begin_resync(&mut self) {
+        self.open_cluster_ts = None;
+        self.resyncing = true;
+    }
+
+    // drops bytes up to the next Cluster ID, false while none is buffered yet
+    fn skip_to_cluster(&mut self) -> bool {
+        let cluster_id = ID_CLUSTER.to_be_bytes();
+        let found = self
+            .buf
+            .as_slice()
+            .windows(cluster_id.len())
+            .position(|window| window == cluster_id);
+        let Some(at) = found else {
+            // keep a Cluster ID split across two pushes
+            let partial_id_len = cluster_id.len() - 1;
+            self.consume(self.buf.len().saturating_sub(partial_id_len));
+            return false;
+        };
+        self.consume(at);
+        self.resyncing = false;
+        true
     }
 
     /// The elementary streams announced by `Tracks` (empty until it is seen).
@@ -666,6 +697,9 @@ impl MatroskaDemuxer {
     /// buffered.
     fn drain_elements(&mut self) {
         loop {
+            if self.resyncing && !self.skip_to_cluster() {
+                return;
+            }
             let Some((id, id_len)) = read_id(self.buf.as_slice(), 0) else {
                 return;
             };
@@ -700,12 +734,22 @@ impl MatroskaDemuxer {
             if self.open_cluster_ts.is_some() {
                 match id {
                     ID_TIMESTAMP | ID_SIMPLE_BLOCK | ID_BLOCK_GROUP => {
-                        if unknown {
-                            return; // a Cluster child must carry a definite size
-                        }
-                        let Some(total) = header.checked_add(size as usize) else {
-                            return;
+                        // a Cluster child must carry a definite size
+                        let Some(total) = header.checked_add(size as usize).filter(|_| !unknown)
+                        else {
+                            self.begin_resync();
+                            continue;
                         };
+                        // checked on the buffered prefix, so a damaged size cannot stall the wait below
+                        let buffered = &self.buf.as_slice()[header..total.min(self.buf.len())];
+                        let names_unknown_track = id != ID_TIMESTAMP
+                            && !self.tracks.is_empty()
+                            && block_track_number(id, buffered)
+                                .is_some_and(|n| !self.tracks.iter().any(|t| t.number == n));
+                        if names_unknown_track {
+                            self.begin_resync();
+                            continue;
+                        }
                         if self.buf.len() < total {
                             return;
                         }
@@ -733,11 +777,11 @@ impl MatroskaDemuxer {
                     // an element we do not decode: skip its bytes and keep the
                     // Cluster open so the following blocks still parse.
                     _ => {
-                        if unknown {
-                            return; // need a definite size to skip
-                        }
-                        let Some(total) = header.checked_add(size as usize) else {
-                            return;
+                        // need a definite size to skip
+                        let Some(total) = header.checked_add(size as usize).filter(|_| !unknown)
+                        else {
+                            self.begin_resync();
+                            continue;
                         };
                         if self.buf.len() < total {
                             return;
@@ -1390,6 +1434,16 @@ fn apply_discard_padding(frames: &mut [MkvFrame], discard_ns: i64) {
         return;
     }
     frame.duration_ns = packet_ns - discard_ns as u64;
+}
+
+// the track number a SimpleBlock or a BlockGroup's Block names, `None` when it does not parse
+fn block_track_number(id: u32, body: &[u8]) -> Option<u64> {
+    let block = if id == ID_BLOCK_GROUP {
+        children(body).find(|(child, _)| *child == ID_BLOCK)?.1
+    } else {
+        body
+    };
+    read_size(block, 0).map(|(track, _, _)| track)
 }
 
 /// Parse a single Cluster child block element (a `SimpleBlock` or `BlockGroup`)
@@ -3282,6 +3336,69 @@ mod tests {
         assert_eq!(
             frames.iter().map(|f| f.data.as_slice()).collect::<Vec<_>>(),
             complete.to_vec()
+        );
+    }
+
+    #[test]
+    fn damage_inside_a_cluster_resyncs_at_the_next_cluster() {
+        const TRACK: u64 = 1;
+        const UNDECLARED_TRACK: u64 = TRACK + 1;
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &track_entry(TRACK, b"V_VP8", Some((16, 16)), None),
+        );
+        let cluster_id = [0x1F, 0x43, 0xB6, 0x75];
+        let block = |payload: &[u8]| elem(&[0xA3], &block_body(TRACK, 0, true, payload));
+        let before: &[u8] = &[0xAA];
+        let damaged_cluster_good_block: &[u8] = &[0xBB];
+        let after: &[u8] = &[0xCC];
+        let first = elem(
+            &cluster_id,
+            &[elem(&[0xE7], &uint_body(0)), block(before)].concat(),
+        );
+        // A block naming an undeclared track, then an element whose size runs
+        // far past the end of the file.
+        let mut garbage = elem(&[0xA3], &block_body(UNDECLARED_TRACK, 0, true, &[0xDD]));
+        let overrun = vint(1 << 20);
+        garbage.extend_from_slice(&[[0xEA].as_slice(), &overrun, &[0xEE; 8]].concat());
+        let damaged = elem(
+            &cluster_id,
+            &[
+                elem(&[0xE7], &uint_body(10)),
+                block(damaged_cluster_good_block),
+                garbage,
+            ]
+            .concat(),
+        );
+        let last = elem(
+            &cluster_id,
+            &[elem(&[0xE7], &uint_body(20)), block(after)].concat(),
+        );
+        let segment = elem(
+            &[0x18, 0x53, 0x80, 0x67],
+            &[tracks, first, damaged, last].concat(),
+        );
+        let file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat();
+        let expected = vec![before, damaged_cluster_good_block, after];
+
+        let mut whole = MatroskaDemuxer::new();
+        whole.push_data(&file);
+        let frames = whole.take_frames();
+        assert_eq!(
+            frames.iter().map(|f| f.data.as_slice()).collect::<Vec<_>>(),
+            expected,
+            "the blocks either side of the damage demux"
+        );
+
+        // The Cluster ID the resync looks for arrives split across pushes.
+        let mut bytewise = MatroskaDemuxer::new();
+        for b in &file {
+            bytewise.push_data(&[*b]);
+        }
+        let frames = bytewise.take_frames();
+        assert_eq!(
+            frames.iter().map(|f| f.data.as_slice()).collect::<Vec<_>>(),
+            expected
         );
     }
 

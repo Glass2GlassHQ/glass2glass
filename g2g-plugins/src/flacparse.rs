@@ -16,7 +16,9 @@
 //! unvalidated sync would mis-split). A frame ends at the next validated sync
 //! whose number follows the current frame's or that closes a valid CRC-16, and a
 //! last frame failing its CRC-16 is dropped. PTS / duration accumulate from each
-//! header's block size, so the emitted timeline is sample-accurate.
+//! header's block size, so the emitted timeline is sample-accurate. A `Segment`
+//! also ends the last frame, and a `fLaC` header after it (a chained Ogg link)
+//! is forwarded again and re-announces the caps if they changed.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -71,8 +73,8 @@ pub struct FlacParse {
     /// the current frame's sync).
     buf: Vec<u8>,
     info: Option<StreamInfo>,
-    /// Whether the `fLaC` header block has been emitted downstream.
-    header_sent: bool,
+    /// How many `fLaC` header blocks have been emitted downstream.
+    headers_sent: u64,
     /// Per-channel samples emitted so far (the PTS accumulator).
     samples: u64,
     sequence: u64,
@@ -88,7 +90,7 @@ impl core::fmt::Debug for FlacParse {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("FlacParse")
             .field("buffered", &self.buf.len())
-            .field("header_sent", &self.header_sent)
+            .field("headers_sent", &self.headers_sent)
             .field("sequence", &self.sequence)
             .finish()
     }
@@ -100,15 +102,15 @@ impl FlacParse {
             configured: false,
             buf: Vec::new(),
             info: None,
-            header_sent: false,
+            headers_sent: 0,
             samples: 0,
             sequence: 0,
         }
     }
 
-    /// Count of frames emitted (excluding the in-band header block).
+    /// Count of frames emitted (excluding the in-band header blocks).
     pub fn frames_emitted(&self) -> u64 {
-        self.sequence.saturating_sub(u64::from(self.header_sent))
+        self.sequence.saturating_sub(self.headers_sent)
     }
 
     fn flac_caps(&self) -> Caps {
@@ -153,20 +155,35 @@ impl FlacParse {
         Ok(())
     }
 
+    // the last frame ends at the end of the stream, not at a next sync
+    async fn flush_last_frame(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        self.drain(out).await?;
+        if self.headers_sent > 0 && parse_frame_header(&self.buf).is_some() && crc16(&self.buf) == 0
+        {
+            let tail = core::mem::take(&mut self.buf);
+            self.emit(tail, out).await?;
+        }
+        Ok(())
+    }
+
     /// Consume as much of `buf` as is settled: the header once its last
     /// metadata block is complete, then every frame whose end (the next
     /// validated sync) has arrived.
     async fn drain(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
-        if !self.header_sent {
+        // A chained Ogg link or a re-read after a flush re-sends the header in-band.
+        while self.headers_sent == 0 || self.buf.starts_with(b"fLaC") {
             let Some(header_len) = complete_header_len(&self.buf)? else {
                 return Ok(()); // header still arriving
             };
+            let caps_before = self.info.map(|_| self.flac_caps());
             self.info =
                 Some(parse_streaminfo(&self.buf[..header_len]).ok_or(G2gError::CapsMismatch)?);
-            out.push(PipelinePacket::CapsChanged(self.flac_caps()))
-                .await?;
+            let caps = self.flac_caps();
+            if caps_before.as_ref() != Some(&caps) {
+                out.push(PipelinePacket::CapsChanged(caps)).await?;
+            }
             let header: Vec<u8> = self.buf.drain(..header_len).collect();
-            self.header_sent = true;
+            self.headers_sent += 1;
             self.emit(header, out).await?;
         }
         // Frames: buf starts at the current frame's sync; emit each frame whose
@@ -427,16 +444,12 @@ impl AsyncElement for FlacParse {
                     self.buf.extend_from_slice(slice);
                     self.drain(out).await?;
                 }
-                // The last frame ends at EOF, not at a next sync: flush it.
-                PipelinePacket::Eos => {
-                    self.drain(out).await?;
-                    if self.header_sent
-                        && parse_frame_header(&self.buf).is_some()
-                        && crc16(&self.buf) == 0
-                    {
-                        let tail = core::mem::take(&mut self.buf);
-                        self.emit(tail, out).await?;
-                    }
+                PipelinePacket::Eos => self.flush_last_frame(out).await?,
+                // The previous stream's last frame goes out ahead of a new segment
+                // (a chained Ogg link).
+                PipelinePacket::Segment(segment) => {
+                    self.flush_last_frame(out).await?;
+                    out.push(PipelinePacket::Segment(segment)).await?;
                 }
                 PipelinePacket::Flush => {
                     self.buf.clear();

@@ -19,7 +19,7 @@ use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-#[cfg(any(feature = "opus", feature = "vorbis"))]
+#[cfg(any(feature = "opus", feature = "vorbis", feature = "ffmpeg"))]
 use g2g_core::runtime::parse_launch;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, G2gError, MultiOutputElement,
@@ -27,12 +27,12 @@ use g2g_core::{
 };
 use g2g_plugins::ogg::OggCodec;
 use g2g_plugins::oggdemux::{OggDemux, OggDemuxN, OggPort};
-#[cfg(any(feature = "opus", feature = "vorbis"))]
+#[cfg(any(feature = "opus", feature = "vorbis", feature = "ffmpeg"))]
 use g2g_plugins::registry::default_registry;
 
-#[cfg(any(feature = "opus", feature = "vorbis"))]
+#[cfg(any(feature = "opus", feature = "vorbis", feature = "ffmpeg"))]
 struct ZeroClock;
-#[cfg(any(feature = "opus", feature = "vorbis"))]
+#[cfg(any(feature = "opus", feature = "vorbis", feature = "ffmpeg"))]
 impl g2g_core::PipelineClock for ZeroClock {
     fn now_ns(&self) -> u64 {
         0
@@ -251,7 +251,7 @@ async fn demux(ogg: &[u8], stream: &str) -> CaptureSink {
     sink
 }
 
-#[cfg(any(feature = "opus", feature = "vorbis"))]
+#[cfg(any(feature = "opus", feature = "vorbis", feature = "ffmpeg"))]
 /// ffmpeg's own decode of `path` to interleaved S16LE, the PCM oracle.
 fn ffmpeg_pcm(path: &Path) -> Vec<u8> {
     let out = Command::new("ffmpeg")
@@ -264,7 +264,7 @@ fn ffmpeg_pcm(path: &Path) -> Vec<u8> {
     out.stdout
 }
 
-#[cfg(any(feature = "opus", feature = "vorbis"))]
+#[cfg(any(feature = "opus", feature = "vorbis", feature = "ffmpeg"))]
 /// Run a launch line to completion, returning the frames the sink consumed.
 async fn run_line(line: &str) -> u64 {
     let reg = default_registry();
@@ -396,6 +396,110 @@ async fn chained_ogg_flac_continues_the_timeline() {
         return;
     };
     assert_chain_continues(&vector, "flac", 1).await;
+}
+
+/// Every packet the demuxer put out, in order.
+#[derive(Default)]
+struct PacketLog(Vec<PipelinePacket>);
+
+impl OutputSink for PacketLog {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        self.0
+            .push(packet_slot.take().expect("poll_push without a packet"));
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+    }
+}
+
+/// `flacparse` behind the demuxer (what `decodebin` plugs) passes every frame of
+/// both chains: the segment opening the second chain ends the first chain's
+/// last frame, and the second chain's `fLaC` header goes out again.
+#[tokio::test]
+async fn flacparse_continues_a_chained_ogg_flac() {
+    use g2g_plugins::flacparse::FlacParse;
+
+    let Some(vector) = chained_vector("flac-parse", "flac", 2, 44_100) else {
+        eprintln!("skipping: no ffmpeg");
+        return;
+    };
+    let mut d = OggDemux::new();
+    d.set_property("stream", PropValue::Str("flac".into()))
+        .expect("stream property");
+    d.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::Ogg,
+    })
+    .expect("configure");
+    let mut demuxed = PacketLog::default();
+    for piece in vector.bytes.chunks(997) {
+        AsyncElement::process(&mut d, chunk(piece), &mut demuxed)
+            .await
+            .expect("demux");
+    }
+
+    let mut parse = FlacParse::new();
+    let flac = Caps::Audio {
+        format: AudioFormat::Flac,
+        channels: 2,
+        sample_rate: 44_100,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+    };
+    parse.configure_pipeline(&flac).expect("configure");
+    let mut parsed = CaptureSink::default();
+    for packet in demuxed.0.into_iter().chain([PipelinePacket::Eos]) {
+        AsyncElement::process(&mut parse, packet, &mut parsed)
+            .await
+            .expect("parse");
+    }
+
+    let demuxed_audio: Vec<Vec<u8>> = demux(&vector.bytes, "flac")
+        .await
+        .audio()
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    let parsed_audio: Vec<Vec<u8>> = parsed.audio().into_iter().map(|(p, _)| p).collect();
+    assert_eq!(
+        parsed_audio.len(),
+        demuxed_audio.len(),
+        "every frame of both chains passes the parser"
+    );
+    assert!(parsed_audio == demuxed_audio, "each frame passes whole");
+    assert_eq!(
+        parsed.frames.iter().filter(|(p, _)| is_header(p)).count(),
+        2,
+        "each chain's header is forwarded"
+    );
+    assert_eq!(parsed.segments.len(), 1, "the chain's segment passes");
+}
+
+/// Decoding a chained Ogg-FLAC file through `decodebin` is ffmpeg's decode of
+/// it, bit for bit (FLAC is lossless).
+#[cfg(feature = "ffmpeg")]
+#[tokio::test]
+async fn chained_ogg_flac_decodes_like_ffmpeg() {
+    let Some(vector) = chained_vector("flac-decode", "flac", 2, 44_100) else {
+        eprintln!("skipping: no ffmpeg");
+        return;
+    };
+    let out = temp_path("flac-decode-out", "raw");
+    let _ = std::fs::remove_file(&out);
+    let line = format!(
+        "filesrc location={} ! decodebin ! audioconvert ! \
+         audio/x-raw,format=S16LE,rate=44100,channels=2 ! filesink location={}",
+        vector.chained.display(),
+        out.display()
+    );
+    assert!(run_line(&line).await > 0, "{line}");
+    let pcm = std::fs::read(&out).expect("pcm written");
+    let _ = std::fs::remove_file(&out);
+    assert!(
+        pcm == ffmpeg_pcm(&vector.chained),
+        "chained decode matches ffmpeg ({} bytes)",
+        pcm.len()
+    );
 }
 
 /// The second chain's own parameters reach the decoder: a stereo chain after a
