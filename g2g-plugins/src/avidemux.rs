@@ -35,7 +35,6 @@ use g2g_core::{
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::annexb::{
     is_annex_b, length_prefixed_to_annexb, parse_avcc, prepend_param_sets, starts_with_param_set,
-    AVCC_LENGTH_SIZE,
 };
 use crate::avi::{parse, parse_streams, AviFile, AviStream, AviStreamKind};
 
@@ -271,53 +270,69 @@ fn stream_id(stream: usize) -> String {
     alloc::format!("avi-stream-{stream}")
 }
 
-/// The parameter sets a video stream's `strf` extradata carries, in Annex-B
-/// form. An H.264 writer stores either the raw NALs or an `avcC` record there;
-/// anything else (an `strf` with no extradata, an unparseable record) yields
-/// nothing and the stream is left to carry its config in band.
-fn config_param_sets(stream: &AviStream) -> Vec<Vec<u8>> {
+// an H.264 stream's out-of-band parameter sets, and the NAL length width when its chunks are length-prefixed
+#[derive(Debug, Default)]
+struct H264Config {
+    param_sets: Vec<Vec<u8>>,
+    nal_length_size: Option<usize>,
+}
+
+/// Read a video stream's `strf` extradata. An H.264 writer stores either the
+/// raw NALs there, and then writes Annex-B chunks, or an `avcC` record, and
+/// then writes chunks length-prefixed to the record's width. Anything else (an
+/// `strf` with no extradata, an unparseable record) means Annex-B chunks that
+/// carry their config in band.
+fn h264_config(stream: &AviStream) -> H264Config {
     let AviStreamKind::Video {
         codec: VideoCodec::H264,
         ..
     } = stream.kind
     else {
-        return Vec::new();
+        return H264Config::default();
     };
     let config = &stream.codec_config;
-    if config.is_empty() {
-        return Vec::new();
-    }
     if is_annex_b(config) {
-        return crate::annexb::split_annexb(config)
-            .into_iter()
-            .map(Vec::from)
-            .collect();
+        return H264Config {
+            param_sets: crate::annexb::split_annexb(config)
+                .into_iter()
+                .map(Vec::from)
+                .collect(),
+            nal_length_size: None,
+        };
     }
-    parse_avcc(config).map_or_else(|_| Vec::new(), |record| record.parameter_sets)
+    parse_avcc(config).map_or_else(
+        |_| H264Config::default(),
+        |record| H264Config {
+            param_sets: record.parameter_sets,
+            nal_length_size: Some(record.nal_length_size),
+        },
+    )
 }
 
 /// Re-frame one chunk's payload for the pipeline: AVCC H.264 to Annex-B with
 /// the out-of-band parameter sets ahead of the first access unit, raw AAC to
 /// ADTS where ADTS can carry its config, everything else untouched. `first` is
 /// set only for the stream's opening chunk.
-fn deframe(stream: &AviStream, param_sets: &[Vec<u8>], data: &[u8], first: bool) -> Vec<u8> {
+fn deframe(stream: &AviStream, h264: &H264Config, data: &[u8], first: bool) -> Vec<u8> {
     match &stream.kind {
         AviStreamKind::Video {
             codec: VideoCodec::H264,
             ..
         } => {
-            let mut annexb = if is_annex_b(data) {
-                Vec::from(data)
-            } else {
-                // 4-byte lengths, the only width an AVI writer emits. They come
-                // from the file, so a walk that does not consume the chunk
-                // exactly leaves the original bytes rather than emitting a
-                // mis-framed stream.
-                length_prefixed_to_annexb(data, AVCC_LENGTH_SIZE).unwrap_or_else(|| Vec::from(data))
+            let mut annexb = match h264.nal_length_size {
+                // The lengths come from the file, so a walk that does not consume
+                // the chunk exactly leaves the original bytes rather than
+                // emitting a mis-framed stream.
+                Some(len_size) => {
+                    length_prefixed_to_annexb(data, len_size).unwrap_or_else(|| Vec::from(data))
+                }
+                None => Vec::from(data),
             };
-            if first && !param_sets.is_empty() && !starts_with_param_set(&annexb, VideoCodec::H264)
+            if first
+                && !h264.param_sets.is_empty()
+                && !starts_with_param_set(&annexb, VideoCodec::H264)
             {
-                annexb = prepend_param_sets(&annexb, param_sets, VideoCodec::H264);
+                annexb = prepend_param_sets(&annexb, &h264.param_sets, VideoCodec::H264);
             }
             annexb
         }
@@ -362,7 +377,7 @@ fn emittable<'a>(
 ) -> impl Iterator<Item = Emitted> + 'a {
     let mut positions = alloc::vec![0u64; file.streams.len()];
     let mut first = alloc::vec![true; file.streams.len()];
-    let param_sets: Vec<Vec<Vec<u8>>> = file.streams.iter().map(config_param_sets).collect();
+    let h264_configs: Vec<H264Config> = file.streams.iter().map(h264_config).collect();
     file.chunks
         .iter()
         .filter(move |chunk| {
@@ -380,7 +395,7 @@ fn emittable<'a>(
             positions[chunk.stream] += samples;
             let payload = deframe(
                 stream,
-                &param_sets[chunk.stream],
+                &h264_configs[chunk.stream],
                 bytes,
                 first[chunk.stream],
             );
@@ -1039,6 +1054,64 @@ mod tests {
             assert_eq!(sink.payloads.len(), 4, "{select:?}");
             assert_eq!(sink.caps, Some(want_caps), "{select:?}");
         }
+    }
+
+    #[test]
+    fn converts_avcc_chunks_whose_length_prefix_looks_like_a_start_code() {
+        use crate::annexb::{avcc_record, ANNEX_B_START_CODE, AVCC_LENGTH_SIZE, START_CODE_PREFIX};
+        let sps = [0x67u8, 0x42, 0x00, 0x1E];
+        let pps = [0x68u8, 0xCE, 0x3C, 0x80];
+        let idr = [0x65u8, 0x88];
+        // the shortest NAL whose 4-byte length prefix begins `00 00 01`
+        let mut slice_prefix = [0u8; AVCC_LENGTH_SIZE];
+        slice_prefix[..START_CODE_PREFIX.len()].copy_from_slice(&START_CODE_PREFIX);
+        let mut slice = vec![0x22u8; u32::from_be_bytes(slice_prefix) as usize];
+        slice[0] = 0x41;
+        let mut idr_chunk = (idr.len() as u32).to_be_bytes().to_vec();
+        idr_chunk.extend_from_slice(&idr);
+        let mut slice_chunk = slice_prefix.to_vec();
+        slice_chunk.extend_from_slice(&slice);
+        let data = [idr_chunk.clone(), slice_chunk].concat();
+        let file = AviFile {
+            streams: vec![AviStream {
+                kind: AviStreamKind::Video {
+                    codec: VideoCodec::H264,
+                    width: 16,
+                    height: 16,
+                },
+                scale: 1,
+                rate: 25,
+                start: 0,
+                sample_size: 0,
+                codec_config: avcc_record(&[&sps, &pps]),
+            }],
+            chunks: vec![
+                AviChunk {
+                    stream: 0,
+                    body: 0..idr_chunk.len(),
+                    keyframe: true,
+                },
+                AviChunk {
+                    stream: 0,
+                    body: idr_chunk.len()..data.len(),
+                    keyframe: false,
+                },
+            ],
+            ..AviFile::default()
+        };
+        let payloads: Vec<Vec<u8>> = emittable(&data, &file, &[0])
+            .map(|emitted| emitted.data)
+            .collect();
+        let annexb = |nals: &[&[u8]]| -> Vec<u8> {
+            nals.iter()
+                .flat_map(|nal| ANNEX_B_START_CODE.iter().chain(nal.iter()).copied())
+                .collect()
+        };
+        assert_eq!(
+            payloads,
+            vec![annexb(&[&sps, &pps, &idr]), annexb(&[&slice])],
+            "every chunk is converted with the avcC length width"
+        );
     }
 
     #[test]
