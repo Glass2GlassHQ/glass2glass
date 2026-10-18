@@ -702,6 +702,7 @@ fn bytestream_gst_media_type(e: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Rtcp => "application/x-rtcp",
         ByteStreamEncoding::Srtcp => "application/x-srtcp",
         ByteStreamEncoding::Dtls => "application/x-dtls",
+        ByteStreamEncoding::Iv8 => "video/x-iv8",
     }
 }
 
@@ -1820,6 +1821,8 @@ pub enum ByteStreamEncoding {
     /// One datagram per frame carrying DTLS records multiplexed with SRTP
     /// and SRTCP, split on the first byte per RFC 7983.
     Dtls,
+    // IndigoVision 8000 video: 16-byte packet headers around MPEG-4 Part 2 frames
+    Iv8,
 }
 
 /// Format of a [`Caps::Text`] stream. Generalizes "subtitles": a `Text` link

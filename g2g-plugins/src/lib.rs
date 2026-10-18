@@ -695,6 +695,9 @@ pub mod mkvdemux;
 // IVF demuxer element (no_std): Caps::ByteStream{Ivf} -> the VP8 / VP9 / AV1
 // video elementary stream, the raw libvpx / libaom conformance-vector container.
 pub mod ivfdemux;
+// IV8 demuxer element (no_std): Caps::ByteStream{Iv8} -> the MPEG-4 Part 2 video
+// elementary stream of an IndigoVision 8000 file.
+pub mod iv8demux;
 // Matroska / WebM muxer element (no_std): one elementary stream ->
 // Caps::ByteStream{Matroska}, the inverse of mkvdemux.
 pub mod mkvmux;

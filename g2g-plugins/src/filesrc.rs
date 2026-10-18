@@ -571,6 +571,7 @@ pub(crate) fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
         "mp4" | "mov" | "qt" | "m4v" => Some(ByteStreamEncoding::Mp4),
         "isobmff" | "cmaf" | "fmp4" => Some(ByteStreamEncoding::IsoBmff),
         "ivf" => Some(ByteStreamEncoding::Ivf),
+        "iv8" => Some(ByteStreamEncoding::Iv8),
         "mpegps" | "ps" | "mpg" | "vob" => Some(ByteStreamEncoding::MpegPs),
         "wav" => Some(ByteStreamEncoding::Wav),
         "aiff" | "aif" | "aifc" => Some(ByteStreamEncoding::Aiff),
@@ -608,6 +609,7 @@ pub(crate) fn encoding_to_str(encoding: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Rtcp => "rtcp",
         ByteStreamEncoding::Srtcp => "srtcp",
         ByteStreamEncoding::Dtls => "dtls",
+        ByteStreamEncoding::Iv8 => "iv8",
         ByteStreamEncoding::Raw => "raw",
         // Only encodings produced by `encoding_from_str` / sniffing are stored,
         // so any future `ByteStreamEncoding` variant cannot reach here.

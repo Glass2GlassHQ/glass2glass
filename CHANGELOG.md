@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1552: `iv8demux` reads IndigoVision 8000 files, and `decodebin` plugs it from the file header.
 - M1551: `tsdemux` keeps the PES packets a stream sends before its PMT and emits them once the PMT arrives.
 - M1547: `vpxenc` binds libvpx in-tree with bindgen, so the `vpx` feature builds against libvpx 1.15 and libclang 22.
 - M1546: a bare `decodebin` on an FLV selects the codec its tags carry, so VP6 and Sorenson FLV files decode.

@@ -48,6 +48,8 @@ const OGG_MAGIC: [u8; 4] = *b"OggS";
 const FLV_MAGIC: [u8; 3] = *b"FLV";
 /// IVF file signature (the first 4 bytes of the 32-byte `DKIF` header).
 const IVF_MAGIC: [u8; 4] = *b"DKIF";
+// the first video packet header ffmpeg's iv8 probe matches: type 257, size 952, flags 0x8060
+const IV8_MAGIC: [u8; 6] = [0x01, 0x01, 0x03, 0xB8, 0x80, 0x60];
 /// MPEG program stream: a pack header start code. Every PS (MPEG-1 `.mpg`,
 /// MPEG-2 `.vob`) opens on one, and packs recur throughout.
 const PS_PACK_MAGIC: [u8; 4] = [0x00, 0x00, 0x01, 0xBA];
@@ -315,6 +317,9 @@ pub fn sniff(header: &[u8]) -> Option<ByteStreamEncoding> {
     }
     if header.starts_with(&IVF_MAGIC) {
         return Some(ByteStreamEncoding::Ivf);
+    }
+    if header.starts_with(&IV8_MAGIC) {
+        return Some(ByteStreamEncoding::Iv8);
     }
     if header.starts_with(&PS_PACK_MAGIC) {
         return Some(ByteStreamEncoding::MpegPs);

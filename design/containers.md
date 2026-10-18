@@ -846,6 +846,19 @@ the pad opens on a synthesized `.idx` holding only the video's `size:` line and
 Out of scope: LPCM and DTS substreams, the program stream map, a PS muxer, and
 seeking.
 
+## IV8
+
+`iv8demux` on `Caps::ByteStream{Iv8}` reads IndigoVision 8000 files, which
+often carry a `.mpg` name. The `filesrc` extension check corrects that to `Iv8`
+when the header starts with the six bytes ffmpeg's probe matches. Each packet
+is a 16-byte big-endian header (type, size, flags, packet number, 90 kHz PTS,
+four unknown bytes) and a payload of `size - 12` bytes. Type 257 payloads join
+into one MPEG-4 Part 2 frame until a packet sets flag `0x80`, and the frame
+takes the PTS of its first packet. Other types are skipped. A size with no
+payload fails with `CapsMismatch`, and so does a frame past 16 MiB. At end of
+stream a cut video payload is emitted with the bytes that arrived, and a cut
+header drops the unfinished frame, both as ffmpeg does.
+
 ## MPEG-1 and MPEG-2 video
 
 `VideoCodec::Mpeg2` covers MPEG-1 and MPEG-2 video as one codec, libavcodec's
