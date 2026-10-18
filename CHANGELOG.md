@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1512: `opusdec` decodes multichannel Opus with the `OpusHead` channel mapping or the RFC 7845 defaults.
 - M1511: `mkvdemux` and `MkvDemuxN` forward only the first track of the selected codec.
 - M1510: `wavparse` stops at the end of the `data` chunk and emits whole sample frames only.
 - M1481: the single-output `qtdemux` offers every mp4 video codec at negotiation, so `qtdemux ! h265parse` builds without `stream=h265`.

@@ -77,7 +77,7 @@ pub(crate) const OPUS_ENCODER_PRE_SKIP: u16 = 312;
 
 /// Fixed part of an RFC 7845 `OpusHead`: 8-byte magic, version, channel count,
 /// pre-skip, input sample rate, output gain, channel mapping family.
-const OPUS_HEAD_FIXED: usize = 19;
+pub(crate) const OPUS_HEAD_FIXED: usize = 19;
 
 /// A synthesized `OpusHead` (RFC 7845 §5.1) for a stream that carried none: a
 /// freshly encoded one, where the pre-skip is the encoder's lookahead. Channel
@@ -127,7 +127,7 @@ pub(crate) fn parse_opus_head(packet: &[u8]) -> Option<(u8, u16)> {
 /// coupled count, then one output-channel index per channel (RFC 7845 §5.1.1).
 /// Zero for mapping family 0, which has no table.
 #[cfg(feature = "std")]
-fn mapping_len(family: u8, channels: u8) -> usize {
+pub(crate) fn mapping_len(family: u8, channels: u8) -> usize {
     if family == 0 {
         0
     } else {
