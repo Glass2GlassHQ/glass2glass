@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1542: `ffmpegdec` skips access units libavcodec rejects instead of failing the stream.
 - M1541: `h264parse` and `h265parse` read a raw stream with bytes before its first start code as Annex-B.
 - M1540: `jpegparse` skips padding and trailers between JPEG images instead of failing the stream.
 - M1502: mp4 AAC with a program config element decodes, and ER AAC, ELD and USAC fail loud in the demuxer.
