@@ -674,7 +674,8 @@ ADTS has no profile for ER AAC, ELD or USAC, so those access units go out raw
 with the AudioSpecificConfig ahead of them as a frame of its own. `aacparse`
 forwards that stream unchanged. `ffmpegaudiodec` reopens the AAC decoder with the
 config as extradata and presets the channel count and rate it declares, which
-libavcodec needs to output an ER AAC frame. `flvdemux` and `avidemux` send the
+libavcodec needs to output an ER AAC frame. USAC decodes only on libavcodec 62
+(ffmpeg 8) or later. `flvdemux` and `avidemux` send the
 same stream from the FLV sequence header and the AVI `strf` config.
 
 `Mp4MuxN`, `MkvMuxN` and both FLV muxers take an AAC stream's

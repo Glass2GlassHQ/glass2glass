@@ -1272,6 +1272,8 @@ host.
 | Debian / Ubuntu | `libavcodec-dev libavformat-dev libavutil-dev libswscale-dev` | `libwayland-dev` | `libdrm-dev` | `libva-dev` |
 | Arch | `ffmpeg` | `wayland` | `libdrm` | `libva` |
 
+USAC (xHE-AAC) decode needs libavcodec 62 (ffmpeg 8) or later.
+
 For the CUDA path, install the NVIDIA driver and CUDA runtime your
 distribution ships, with `libnvcuvid.so` and `libcuda.so` on the linker path.
 `Backend::NvdecCuvid` / `Backend::NvdecCuda` need an `ffmpeg` build with cuvid
