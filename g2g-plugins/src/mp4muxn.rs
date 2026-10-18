@@ -42,9 +42,10 @@ use g2g_core::{
     split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter,
     ClosedCaptionFormat, ConfigureOutcome, Dim, FrameTiming, G2gError, InputAggregator,
     MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, TagList, TextFormat, VideoCodec,
+    PropertySpec, Rate, TagList, TextFormat, VideoCodec,
 };
 
+use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::time::ns_to_ticks;
 
 use crate::cea::{build_cdp, parse_cc_data, CcTriple};
@@ -69,11 +70,18 @@ const TEXT_TIMESCALE: u32 = 1_000;
 /// The `mvhd` timescale, so movie-level durations are milliseconds.
 const MOVIE_TIMESCALE: u32 = 1000;
 const DEFAULT_VIDEO_DURATION_NS: u64 = 33_333_333;
+const TRUN_FLAGS: u32 = 0x000701;
+const TRUN_COMPOSITION_OFFSET: u32 = 0x000800;
 
 /// What an input pad carries, learned from its negotiated caps at configure.
 #[derive(Debug, Clone, Copy)]
 enum PadKind {
-    Video(VideoCodec),
+    Video {
+        codec: VideoCodec,
+        /// One frame's duration from the caps framerate, the fallback for a
+        /// sample upstream did not time (an encoder's first frame).
+        frame_ns: u64,
+    },
     Audio {
         format: AudioFormat,
         channels: u8,
@@ -223,6 +231,8 @@ pub(crate) struct PendingSample {
     /// Sample duration in the track's timescale.
     pub(crate) duration: u32,
     pub(crate) is_sync: bool,
+    /// `pts - dts` in the track's timescale (0 without reordering).
+    pub(crate) composition_offset: u32,
 }
 
 impl PendingSample {
@@ -231,6 +241,7 @@ impl PendingSample {
             bytes: &self.bytes,
             duration: self.duration,
             is_sync: self.is_sync,
+            composition_offset: self.composition_offset,
         }
     }
 }
@@ -242,6 +253,9 @@ pub(crate) struct FragmentSample<'a> {
     /// Sample duration in the track's timescale.
     pub(crate) duration: u32,
     pub(crate) is_sync: bool,
+    /// `pts - dts` in the track's timescale, written to the `trun` when any
+    /// sample of the fragment has one (B-frame reorder).
+    pub(crate) composition_offset: u32,
 }
 
 /// One finished sample on its way into the file: its bytes and the timing the
@@ -446,8 +460,17 @@ impl Mp4MuxN {
                     | VideoCodec::Vp8
                     | VideoCodec::Vp9
                     | VideoCodec::Av1),
+                framerate,
                 ..
-            } => Some(PadKind::Video(*c)),
+            } => Some(PadKind::Video {
+                codec: *c,
+                frame_ns: match framerate {
+                    Rate::Fixed(q16) => {
+                        framerate_q16_period_ns(*q16).unwrap_or(DEFAULT_VIDEO_DURATION_NS)
+                    }
+                    _ => DEFAULT_VIDEO_DURATION_NS,
+                },
+            }),
             Caps::Audio {
                 format: format @ (AudioFormat::Aac | AudioFormat::Opus),
                 channels,
@@ -553,7 +576,7 @@ impl Mp4MuxN {
             return;
         }
         match self.kinds[input] {
-            Some(PadKind::Video(codec)) => {
+            Some(PadKind::Video { codec, .. }) => {
                 let (w, h) = self.dims[input];
                 match codec {
                     VideoCodec::H264 | VideoCodec::H265 => {
@@ -647,7 +670,7 @@ impl Mp4MuxN {
     /// sync sample.
     fn sample_for(&mut self, input: usize, au: &[u8]) -> (Vec<u8>, bool) {
         match self.kinds[input] {
-            Some(PadKind::Video(codec)) => video_sample(codec, au),
+            Some(PadKind::Video { codec, .. }) => video_sample(codec, au),
             // Audio access units are always sync samples. AAC strips its ADTS
             // header; Opus packets are stored raw.
             Some(PadKind::Audio {
@@ -699,6 +722,7 @@ impl Mp4MuxN {
                 samples * 1_000_000_000 / rate.max(1) as u64
             }
             Some(PadKind::Audio { rate, .. }) => 1024 * 1_000_000_000 / rate.max(1) as u64,
+            Some(PadKind::Video { frame_ns, .. }) => frame_ns,
             _ => DEFAULT_VIDEO_DURATION_NS,
         };
         let first_sample = self.prev_pts_ns[input].is_none();
@@ -821,6 +845,7 @@ impl Mp4MuxN {
             bytes: sample,
             duration,
             is_sync,
+            composition_offset: ns_to_ticks(pts_ns - dts_ns, timescale) as u32,
         });
         pend.accum_ticks += duration as u64;
         pend.chunk_ticks += duration as u64;
@@ -1996,13 +2021,25 @@ pub(crate) fn av_fragment(
             let mut p = Vec::new();
             p.extend_from_slice(&(samples.len() as u32).to_be_bytes()); // sample count
             p.extend_from_slice(&data_offset.to_be_bytes());
+            let reordered = samples.iter().any(|s| s.composition_offset != 0);
             for s in samples {
                 let flags: u32 = if s.is_sync { 0x0200_0000 } else { 0x0101_0000 };
                 p.extend_from_slice(&s.duration.to_be_bytes());
                 p.extend_from_slice(&(s.bytes.len() as u32).to_be_bytes());
                 p.extend_from_slice(&flags.to_be_bytes());
+                if reordered {
+                    p.extend_from_slice(&s.composition_offset.to_be_bytes());
+                }
             }
-            full_box(b"trun", 0, 0x000701, &p) // data-offset | duration | size | flags (per sample)
+            // data-offset | duration | size | flags (per sample), plus the
+            // composition offset only when a sample is reordered
+            let trun_flags = TRUN_FLAGS
+                | if reordered {
+                    TRUN_COMPOSITION_OFFSET
+                } else {
+                    0
+                };
+            full_box(b"trun", 0, trun_flags, &p)
         };
         let traf = mp4_box(b"traf", &[tfhd, tfdt, trun].concat());
         mp4_box(b"moof", &[mfhd, traf].concat())
@@ -2149,6 +2186,46 @@ mod tests {
         assert_eq!(samples0, 6);
     }
 
+    /// A fragment with a reordered sample writes the per-sample composition
+    /// offset (and says so in the `trun` flags); one without stays offset-free.
+    #[test]
+    fn trun_carries_composition_offsets_only_for_reordered_samples() {
+        use crate::fmp4::parse_trun;
+        use crate::mp4box::find_box;
+        let payload = [9u8, 9, 9, 9];
+        let offsets_of = |composition_offsets: &[u32]| {
+            let samples: Vec<FragmentSample<'_>> = composition_offsets
+                .iter()
+                .map(|&composition_offset| FragmentSample {
+                    bytes: &payload,
+                    duration: 3000,
+                    is_sync: false,
+                    composition_offset,
+                })
+                .collect();
+            let mut fragment = Vec::new();
+            av_fragment(&mut fragment, 1, 1, 0, false, &samples);
+            let moof_len = u32::from_be_bytes(fragment[..4].try_into().unwrap()) as usize;
+            let moof = &fragment[BOX_HEADER_LEN..moof_len];
+            let trun = find_box(find_box(moof, b"traf").unwrap(), b"trun").unwrap();
+            let flags = u32::from_be_bytes(trun[..4].try_into().unwrap()) & 0x00FF_FFFF;
+            let parsed: Vec<i64> = parse_trun(trun, 0, 0, fragment.len())
+                .unwrap()
+                .iter()
+                .map(|s| s.composition_offset)
+                .collect();
+            (flags, parsed)
+        };
+        assert_eq!(offsets_of(&[0, 0]), (TRUN_FLAGS, Vec::from([0, 0])));
+        assert_eq!(
+            offsets_of(&[6000, 0, 3000]),
+            (
+                TRUN_FLAGS | TRUN_COMPOSITION_OFFSET,
+                Vec::from([6000, 0, 3000])
+            )
+        );
+    }
+
     #[test]
     fn trun_data_offset_points_at_the_mdat_payload() {
         let payload = [9u8, 9, 9, 9];
@@ -2156,6 +2233,7 @@ mod tests {
             bytes: &payload,
             duration: 3000,
             is_sync: true,
+            composition_offset: 0,
         };
         let mut fragment = Vec::new();
         av_fragment(&mut fragment, 1, 1, 0, false, &[sample]);

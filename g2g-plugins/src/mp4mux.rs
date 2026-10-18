@@ -34,6 +34,7 @@ use g2g_core::{
 };
 
 use crate::fmp4mux::Fmp4Muxer;
+use g2g_core::caps::framerate_q16_period_ns;
 
 /// Muxes one H.264 / H.265 elementary stream into a fragmented-MP4 byte stream.
 ///
@@ -53,6 +54,8 @@ pub struct Mp4Mux {
     codec: VideoCodec,
     width: u32,
     height: u32,
+    /// One frame's duration from the caps framerate, 0 when the rate is not fixed.
+    frame_ns: u64,
     tags: TagList,
     /// The table of contents, written as the `moov`'s `udta/chpl` (M1046).
     chapters: Vec<Chapter>,
@@ -85,6 +88,7 @@ impl Mp4Mux {
             codec: VideoCodec::H264,
             width: 0,
             height: 0,
+            frame_ns: 0,
             tags: TagList::new(),
             chapters: Vec::new(),
             mux: None,
@@ -166,11 +170,15 @@ impl Mp4Mux {
             codec,
             width,
             height,
+            framerate,
             ..
         } = caps
         else {
             return Err(G2gError::CapsMismatch);
         };
+        if let Rate::Fixed(q16) = framerate {
+            self.frame_ns = framerate_q16_period_ns(*q16).unwrap_or(0);
+        }
         if !matches!(codec, VideoCodec::H264 | VideoCodec::H265) {
             return Err(G2gError::CapsMismatch);
         }
@@ -337,9 +345,14 @@ impl AsyncElement for Mp4Mux {
                             .with_cmaf(cmaf)
                             .with_chunk_duration_ns(chunk_ns)
                             .with_producer_clock(clock)
+                            .with_frame_duration_ns(self.frame_ns)
                     });
-                    let bytes =
-                        mux.push_au(slice, frame.timing.pts_ns, frame.timing.duration_ns)?;
+                    let bytes = mux.push_au(
+                        slice,
+                        frame.timing.pts_ns,
+                        frame.timing.dts_ns,
+                        frame.timing.duration_ns,
+                    )?;
                     // In batched mode a buffering push yields no bytes yet; don't
                     // emit an empty frame.
                     if !bytes.is_empty() {

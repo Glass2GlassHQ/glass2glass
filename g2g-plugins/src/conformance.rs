@@ -570,8 +570,15 @@ pub fn mp4() -> [MaturityRecord; 2] {
 
     let [idr, inter] = h264_access_units();
     let mut mux = Fmp4Muxer::new(VideoCodec::H264, WIDTH, HEIGHT, TagList::new());
-    let mut bytes = mux.push_au(&idr, 0, FRAME_DURATION_NS).unwrap_or_default();
-    if let Ok(more) = mux.push_au(&inter, FRAME_DURATION_NS, FRAME_DURATION_NS) {
+    let mut bytes = mux
+        .push_au(&idr, 0, 0, FRAME_DURATION_NS)
+        .unwrap_or_default();
+    if let Ok(more) = mux.push_au(
+        &inter,
+        FRAME_DURATION_NS,
+        FRAME_DURATION_NS,
+        FRAME_DURATION_NS,
+    ) {
         bytes.extend(more);
     }
     bytes.extend(mux.flush());

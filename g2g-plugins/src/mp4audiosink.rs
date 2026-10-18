@@ -191,6 +191,7 @@ impl AsyncElement for Mp4AudioSink {
                         bytes: au,
                         duration,
                         is_sync: true,
+                        composition_offset: 0,
                     };
                     let mut frag = Vec::new();
                     av_fragment(

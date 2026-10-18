@@ -50,7 +50,12 @@ pub(crate) struct Fmp4Muxer {
     sequence: u64,
     /// Accumulated decode time in media-timescale units (`tfdt`).
     decode_time: u64,
-    prev_pts_ns: Option<u64>,
+    /// Decode-order timestamp of the previous access unit (its DTS when
+    /// upstream set one, else its PTS).
+    prev_decode_ns: Option<u64>,
+    /// One frame's duration from the caps framerate, the fallback for a sample
+    /// upstream did not time (an encoder's first frame).
+    frame_ns: u64,
     /// Target fragment duration in nanoseconds (`0` = one access unit per fragment,
     /// the default). When set, access units are batched into a single multi-sample
     /// `moof`+`mdat` until the accumulated duration reaches the target, closing the
@@ -98,7 +103,8 @@ impl Fmp4Muxer {
             header_written: false,
             sequence: 0,
             decode_time: 0,
-            prev_pts_ns: None,
+            prev_decode_ns: None,
+            frame_ns: DEFAULT_DURATION_NS,
             fragment_duration_ns: 0,
             cmaf: false,
             chunk_duration_ns: 0,
@@ -182,10 +188,20 @@ impl Fmp4Muxer {
     /// Mux one Annex-B access unit, returning the bytes to emit. The first call
     /// prepends the `ftyp`+`moov` init segment. `duration_ns` of 0 derives the
     /// sample duration from the PTS delta (or a default for the first frame).
+    /// A frame's nominal duration from the caps framerate, used when upstream
+    /// does not time a sample and no previous sample gives a delta.
+    pub(crate) fn with_frame_duration_ns(mut self, ns: u64) -> Self {
+        if ns > 0 {
+            self.frame_ns = ns;
+        }
+        self
+    }
+
     pub(crate) fn push_au(
         &mut self,
         annexb: &[u8],
         pts_ns: u64,
+        dts_ns: u64,
         duration_ns: u64,
     ) -> Result<Vec<u8>, G2gError> {
         let nalus = split_annexb(annexb);
@@ -210,17 +226,26 @@ impl Fmp4Muxer {
             out.extend_from_slice(&av_moov(&[Some(track)], None, &metadata, &[]));
             self.header_written = true;
         }
-        // duration: explicit, else pts delta, else the default.
+        // A zero `dts_ns` means upstream is not timing decode order, except on
+        // the first sample, where it is also where a reordered stream starts. A
+        // DTS past the PTS is not expressible in a version 0 `trun`.
+        let first_sample = self.prev_decode_ns.is_none();
+        let decode_ns = match dts_ns {
+            d if d <= pts_ns && (d > 0 || first_sample) => d,
+            _ => pts_ns,
+        };
+        // duration: explicit, else decode-order delta, else one caps frame.
         let duration_ns = if duration_ns != 0 {
             duration_ns
         } else {
-            match self.prev_pts_ns {
-                Some(prev) if pts_ns > prev => pts_ns - prev,
-                _ => DEFAULT_DURATION_NS,
+            match self.prev_decode_ns {
+                Some(prev) if decode_ns > prev => decode_ns - prev,
+                _ => self.frame_ns,
             }
         };
-        self.prev_pts_ns = Some(pts_ns);
+        self.prev_decode_ns = Some(decode_ns);
         let duration = ns_to_ticks(duration_ns, VIDEO_TIMESCALE) as u32;
+        let composition_offset = ns_to_ticks(pts_ns - decode_ns, VIDEO_TIMESCALE) as u32;
         let sample = avcc_sample(&nalus);
         let is_sync = au_is_keyframe(self.codec, annexb);
 
@@ -234,6 +259,7 @@ impl Fmp4Muxer {
                 bytes: &sample,
                 duration,
                 is_sync,
+                composition_offset,
             };
             av_fragment(
                 &mut out,
@@ -270,6 +296,7 @@ impl Fmp4Muxer {
             bytes: sample,
             duration,
             is_sync,
+            composition_offset,
         });
         self.pending_dur_ns = self.pending_dur_ns.saturating_add(duration_ns);
         self.fragment_dur_ns = self.fragment_dur_ns.saturating_add(duration_ns);
@@ -611,7 +638,7 @@ mod tests {
         let mut out = Vec::new();
         for i in 0..4u64 {
             let data = if i == 0 { &key } else { &inter };
-            out.extend_from_slice(&m.push_au(data, i * 40_000_000, 40_000_000).unwrap());
+            out.extend_from_slice(&m.push_au(data, i * 40_000_000, 0, 40_000_000).unwrap());
         }
         out.extend_from_slice(&m.flush());
 
@@ -656,7 +683,7 @@ mod tests {
             .with_producer_clock(Some(|| NTP));
         let mut out = Vec::new();
         for i in 0..3u64 {
-            out.extend_from_slice(&m.push_au(&key, i * 40_000_000, 40_000_000).unwrap());
+            out.extend_from_slice(&m.push_au(&key, i * 40_000_000, 0, 40_000_000).unwrap());
         }
         out.extend_from_slice(&m.flush());
 
@@ -665,5 +692,58 @@ mod tests {
         assert_eq!(count(b"prft"), 3, "a prft ahead of every fragment");
         let p = out.windows(4).position(|w| w == b"prft").unwrap() + 4;
         assert_eq!(&out[p + 8..p + 16], &NTP.to_be_bytes());
+    }
+    /// An encoder's frames carry no duration. The first sample then lasts one
+    /// caps frame (not the 30 fps default), the rest the decode-order delta, and
+    /// a reordered stream's `trun` carries `pts - dts` per sample.
+    #[test]
+    fn untimed_samples_take_the_caps_frame_period_and_keep_reorder_offsets() {
+        use crate::fmp4::parse_trun;
+        use crate::mp4box::find_box;
+        const FRAME_NS: u64 = 40_000_000;
+        let au = |nals: &[&[u8]]| {
+            let mut v = Vec::new();
+            for n in nals {
+                v.extend_from_slice(&[0, 0, 0, 1]);
+                v.extend_from_slice(n);
+            }
+            v
+        };
+        let key = au(&[
+            &[0x67, 0x42, 0x00, 0x1e, 0x88],
+            &[0x68, 0xce, 0x3c, 0x80],
+            &[0x65, 0x88, 0x84, 0x00],
+        ]);
+        let inter = au(&[&[0x41, 0x9a, 0x00]]);
+        let mut m = Fmp4Muxer::new(VideoCodec::H264, 320, 240, TagList::new())
+            .with_frame_duration_ns(FRAME_NS);
+        // decode order I P B: (pts, dts) with a one-frame reorder delay
+        let frames = [
+            (&key, FRAME_NS, 0),
+            (&inter, 3 * FRAME_NS, FRAME_NS),
+            (&inter, 2 * FRAME_NS, 2 * FRAME_NS),
+        ];
+        let mut got = Vec::new();
+        for (data, pts, dts) in frames {
+            let out = m.push_au(data, pts, dts, 0).unwrap();
+            let moof_at = out.windows(4).position(|w| w == b"moof").unwrap() - 4;
+            let moof_len = u32::from_be_bytes(out[moof_at..moof_at + 4].try_into().unwrap());
+            let moof = &out[moof_at + 8..moof_at + moof_len as usize];
+            let traf = find_box(moof, b"traf").unwrap();
+            let trun = find_box(traf, b"trun").unwrap();
+            let samples = parse_trun(trun, 0, 0, out.len()).unwrap();
+            assert_eq!(samples.len(), 1);
+            got.push((samples[0].duration, samples[0].composition_offset));
+        }
+        let tick = |ns: u64| ns_to_ticks(ns, VIDEO_TIMESCALE);
+        assert_eq!(
+            got,
+            [
+                (tick(FRAME_NS) as u32, tick(FRAME_NS) as i64),
+                (tick(FRAME_NS) as u32, tick(2 * FRAME_NS) as i64),
+                (tick(FRAME_NS) as u32, 0),
+            ],
+            "(duration, composition offset) per sample"
+        );
     }
 }
