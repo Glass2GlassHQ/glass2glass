@@ -34,6 +34,8 @@ use tokio::net::UdpSocket;
 
 use crate::turn::TurnSet;
 use crate::webrtc_util::add_ice_candidates;
+pub use crate::webrtc_util::IceTransportPolicy;
+pub(crate) use crate::webrtc_util::ICE_TRANSPORT_POLICY_PROP;
 
 /// `G2G_DEBUG=livekit-signal:...` names the signalling helpers the three LiveKit elements share.
 pub(crate) struct LiveKitSignalLog;
@@ -526,33 +528,6 @@ impl IceServer {
     }
 }
 
-/// Which local candidates an element offers: every kind, or TURN relays only
-/// (`ice-transport-policy=relay`, the webrtcbin knob that forces media through
-/// a relay to prove or require that path).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum IceTransportPolicy {
-    #[default]
-    All,
-    Relay,
-}
-
-impl IceTransportPolicy {
-    pub fn parse(name: &str) -> Option<Self> {
-        match name {
-            "all" => Some(Self::All),
-            "relay" => Some(Self::Relay),
-            _ => None,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Relay => "relay",
-        }
-    }
-}
-
 const STUN_URL_SCHEME: &str = "stun:";
 const TURN_URL_SCHEMES: [&str; 2] = ["turn:", "turns:"];
 
@@ -571,13 +546,6 @@ pub(crate) const TURN_PASS_PROP: PropertySpec = PropertySpec::new(
     PropKind::Str,
     "TURN long-term credential password for turn-server",
 );
-pub(crate) const ICE_TRANSPORT_POLICY_PROP: PropertySpec = PropertySpec::new(
-    "ice-transport-policy",
-    PropKind::Str,
-    "local candidates to offer: all, or relay (TURN only, so the media is forced through a relay)",
-)
-.with_default("all")
-.with_enum_values("all | relay");
 
 /// The ICE knobs the three LiveKit elements share, and the gathering they drive:
 /// host plus the JoinResponse's STUN under `all`, TURN allocations from

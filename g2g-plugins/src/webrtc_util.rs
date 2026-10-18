@@ -25,6 +25,8 @@ use str0m::{Candidate, IceCreds, Input, Rtc};
 use crate::turn::TurnSet;
 use g2g_core::log::LogSource;
 use g2g_core::{g2g_debug, g2g_info, g2g_warn, G2gError, HardwareError};
+#[cfg(any(feature = "webrtc-livekit", feature = "webrtc-kvs"))]
+use g2g_core::{PropKind, PropertySpec};
 
 /// `G2G_DEBUG=webrtc-http:...` names the shared WHIP/WHEP HTTP signalling path.
 struct WebRtcHttpLog;
@@ -34,6 +36,44 @@ impl LogSource for WebRtcHttpLog {
         "webrtc-http"
     }
 }
+
+/// Which local candidates an element offers: every kind, or TURN relays only
+/// (`ice-transport-policy=relay`, the webrtcbin knob that forces media through
+/// a relay to prove or require that path).
+#[cfg(any(feature = "webrtc-livekit", feature = "webrtc-kvs"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IceTransportPolicy {
+    #[default]
+    All,
+    Relay,
+}
+
+#[cfg(any(feature = "webrtc-livekit", feature = "webrtc-kvs"))]
+impl IceTransportPolicy {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "all" => Some(Self::All),
+            "relay" => Some(Self::Relay),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Relay => "relay",
+        }
+    }
+}
+
+#[cfg(any(feature = "webrtc-livekit", feature = "webrtc-kvs"))]
+pub(crate) const ICE_TRANSPORT_POLICY_PROP: PropertySpec = PropertySpec::new(
+    "ice-transport-policy",
+    PropKind::Str,
+    "local candidates to offer: all, or relay (TURN only, so the media is forced through a relay)",
+)
+.with_default("all")
+.with_enum_values("all | relay");
 
 /// STUN magic cookie (RFC 5389).
 const STUN_MAGIC: u32 = 0x2112_A442;

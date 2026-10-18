@@ -190,11 +190,22 @@ envelopes with base64 JSON payloads. The viewer offers recvonly video in
 `video-codec` plus Opus and runs the two-output media loop; the master answers
 with every carried codec enabled (str0m rejects its own answer otherwise) but
 sends only its input track, reading its mid from the answer SDP because
-`MediaAdded` lands after the first frame. TURN comes from `GetIceServerConfig`
-through `TurnSet::setup_each`; `with_endpoints` skips the control plane for the
-mock. One viewer per sink run. Validated by a default-run mock relay loopback
-and by `tests/kvswebrtc_smoke.rs` (ignored) against a real channel in
-us-east-1, 180 of 180 units arriving.
+`MediaAdded` lands after the first frame. STUN defaults to the regional
+`stun.kinesisvideo.<region>.amazonaws.com:443`; TURN comes from
+`GetIceServerConfig` through `TurnSet::setup_each`, fetched per viewer because
+the credentials carry a TTL; `ice-transport-policy=relay` (shared
+`IceTransportPolicy` in `webrtc_util`) offers relays only. `with_endpoints`
+skips the control plane for the mock. The master task outlives its viewers:
+it answers them one at a time, drops media units while none is connected,
+asks the encoder for a keyframe on each join, and reconnects the signalling
+socket (fresh presigned URL, 2 s delay) after `GO_AWAY` or the service's idle
+close. Both elements end a session with `Rtc::close`, so the peer sees
+`Event::Closed` at once instead of the ICE timeout; `RECONNECT_ICE_SERVER` is
+only logged, the next viewer gets a fresh ICE config. A message whose base64
+payload exceeds the service's 10 KiB is refused before sending. Validated by
+the default-run mock relay loopback (single viewer, and `GO_AWAY` plus a
+second viewer) and by `tests/kvswebrtc_smoke.rs` (ignored) against a real
+channel, all candidates and relay-only.
 
 ### Stats
 

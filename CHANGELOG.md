@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1475: the KVS elements take `ice-transport-policy` and default to the regional STUN server, and `kvswebrtcsink` serves viewers in turn over a reconnecting signalling socket.
 - M1474: `WebRtcDataSink` ends the stream by closing the data channel, and `WebRtcDataSrc` ends on the peer's channel close.
 - M1473: `kvswebrtcsink` and `kvswebrtcsrc` signal through an Amazon Kinesis Video Streams channel as master and viewer, behind the `webrtc-kvs` feature.
 - M1472: `whipserversrc` takes `max-publishers` concurrent publishers, each on its own video + audio pad pair with its own stats handle.

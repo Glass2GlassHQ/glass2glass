@@ -28,7 +28,7 @@ use g2g_core::{
 };
 
 use crate::kvs_signal::{
-    candidate_payloads, client_id_is_valid, connect, connect_url, gather, ice_servers, receive,
+    candidate_payloads, client_id_is_valid, connect, connect_url, ice_servers, receive,
     sdp_payload, send_message, Action, KvsSettings, Received, Role, SignalMessage,
     SignalingEndpoints, WsRead, WsWrite, ACCESS_KEY_PROP, CHANNEL_ARN_PROP, CHANNEL_NAME_PROP,
     OFFER_TYPE, REGION_PROP, SECRET_KEY_PROP, SESSION_TOKEN_PROP, STUN_SERVER_PROP,
@@ -39,7 +39,8 @@ use crate::webrtc_codec::{
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
 use crate::webrtc_util::{
-    feed_datagram, media_time_ns, random_hex_id, select_host_ip, send_transmit,
+    drain_pacer, feed_datagram, media_time_ns, random_hex_id, select_host_ip, send_transmit,
+    IceTransportPolicy, ICE_TRANSPORT_POLICY_PROP,
 };
 
 const VIDEO_PORT: usize = 0;
@@ -118,6 +119,11 @@ impl KvsWebRtcSrc {
         self
     }
 
+    pub fn with_ice_transport_policy(mut self, policy: IceTransportPolicy) -> Self {
+        self.settings.transport_policy = policy;
+        self
+    }
+
     // skips the control-plane lookups
     pub fn with_endpoints(
         mut self,
@@ -184,16 +190,14 @@ impl KvsWebRtcSrc {
             .clear_codecs();
         let mut rtc = enable_tracks(config, [Track::Video(self.video_codec), Track::Audio])
             .build(Instant::now());
-        let turn = gather(
-            &mut rtc,
-            &socket,
-            self.settings.stun_server.as_deref(),
-            &servers,
-        )
-        .await?;
+        let turn = self
+            .settings
+            .gather(&mut rtc, &socket, &region, &servers)
+            .await?;
         g2g_debug!(
             self,
-            "{} turn allocation(s) at {:?}",
+            "ice policy {}, {} turn allocation(s) at {:?}",
+            self.settings.transport_policy.name(),
             turn.relay_addrs().len(),
             turn.relay_addrs()
         );
@@ -279,6 +283,7 @@ static KVSWEBRTCSRC_PROPS: &[PropertySpec] = &[
     SECRET_KEY_PROP,
     SESSION_TOKEN_PROP,
     STUN_SERVER_PROP,
+    ICE_TRANSPORT_POLICY_PROP,
     PropertySpec::new(
         "client-id",
         PropKind::Str,
@@ -383,6 +388,9 @@ impl MultiOutputSource for KvsWebRtcSrc {
             let mut seq = 0u64;
             macro_rules! finish {
                 () => {{
+                    // close_notify tells the master now, not at the ice timeout
+                    let _ = s.rtc.close();
+                    drain_pacer(&mut s.rtc, &s.socket, &mut s.turn).await;
                     let _ = s.ws_write.close().await;
                     out.push_to(VIDEO_PORT, PipelinePacket::Eos).await?;
                     out.push_to(AUDIO_PORT, PipelinePacket::Eos).await?;
@@ -415,11 +423,18 @@ impl MultiOutputSource for KvsWebRtcSrc {
                                 frames.push((AUDIO_PORT, pts_ns, d.data.to_vec()));
                             }
                         }
+                        Ok(Output::Event(Event::Closed)) => {
+                            g2g_info!(self, "the master closed the session, ending run");
+                            finish!()
+                        }
                         Ok(Output::Event(Event::IceConnectionStateChange(
                             IceConnectionState::Disconnected,
                         ))) => {
                             g2g_info!(self, "ice disconnected, ending run");
                             finish!()
+                        }
+                        Ok(Output::Event(Event::IceConnectionStateChange(state))) => {
+                            g2g_debug!(self, "ice {state:?}");
                         }
                         Ok(Output::Event(_)) => {}
                         Err(e) => {
@@ -480,6 +495,9 @@ impl MultiOutputSource for KvsWebRtcSrc {
                         Received::Signal(SignalMessage::GoAway) => {
                             g2g_info!(self, "signalling service sent GO_AWAY, media continues");
                             signalling_open = false;
+                        }
+                        Received::Signal(SignalMessage::ReconnectIceServer) => {
+                            g2g_info!(self, "relay servers are going away, media continues until ice fails");
                         }
                         Received::Signal(other) => g2g_debug!(self, "ignoring {other:?}"),
                         Received::Skipped(reason) => g2g_debug!(self, "skipped a message: {reason}"),
@@ -564,6 +582,7 @@ mod tests {
             ("secret-key", "secret"),
             ("session-token", "token"),
             ("stun-server", "stun.example.com:3478"),
+            ("ice-transport-policy", "relay"),
             ("client-id", "viewer-1"),
             ("video-codec", "vp8"),
         ] {

@@ -889,6 +889,9 @@ pub mod webrtc_stats;
 pub use turn::fuzz_parse as turn_fuzz_parse;
 #[cfg(all(feature = "webrtc", fuzzing))]
 pub use webrtc_util::fuzz_parse as stun_fuzz_parse;
+// `ice-transport-policy` on the elements whose signalling server hands out TURN.
+#[cfg(any(feature = "webrtc-livekit", feature = "webrtc-kvs"))]
+pub use webrtc_util::IceTransportPolicy;
 #[cfg(feature = "webrtc")]
 pub mod webrtcdata;
 #[cfg(feature = "webrtc")]

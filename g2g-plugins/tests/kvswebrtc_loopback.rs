@@ -28,7 +28,7 @@ use g2g_plugins::kvswebrtcsink::KvsWebRtcSink;
 use g2g_plugins::kvswebrtcsrc::KvsWebRtcSrc;
 use g2g_plugins::webrtc_codec::WebRtcVideoCodec;
 use numbuffers_common::CollectPorts;
-use webrtc_streams_common::{data_frames, fixed_caps, frame_bytes, synthetic_stream, FPS};
+use webrtc_streams_common::{data_frames, fixed_caps, frame_bytes, synthetic_stream, FPS, GOP};
 
 const CHANNEL_ARN: &str =
     "arn:aws:kinesisvideo:us-west-2:123456789012:channel/g2g-loopback/1234567890123";
@@ -37,9 +37,10 @@ const ACCESS_KEY: &str = "AKIDEXAMPLE";
 const SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
 const SESSION_TOKEN: &str = "session-token-example";
 const VIEWER_CLIENT_ID: &str = "g2g-viewer-1";
+// unresolvable, keeps the loopback off the real kvs stun server
+const NO_STUN: &str = "stun.invalid:3478";
 const VIDEO_CODEC: WebRtcVideoCodec = WebRtcVideoCodec::H264;
 const VIDEO_UNITS: usize = 60;
-const MIN_DELIVERED_PERCENT: usize = 90;
 const UNIT_TAIL_BYTES: usize = 64;
 // let the sender's pacer flush before EOS
 const DRAIN_BEFORE_EOS: Duration = Duration::from_millis(500);
@@ -49,6 +50,12 @@ const SIGNATURE_HEX_DIGITS: usize = 64;
 const PRESIGNED_EXPIRES_SECONDS: &str = "299";
 const HEADER_END: &[u8] = b"\r\n\r\n";
 const HTTP_READ_BYTES: usize = 4096;
+const GO_AWAY: &str = "GO_AWAY";
+const SECOND_VIEWER_CLIENT_ID: &str = "g2g-viewer-2";
+// units each viewer collects before ending its run
+const VIEWER_UNITS: usize = 30;
+// long enough for two viewers plus the master's 2 s reconnect
+const TWO_VIEWER_UNITS: usize = 300;
 
 struct Discard;
 
@@ -115,6 +122,16 @@ impl Router {
         }
     }
 
+    // a message for an absent peer is held, as the service does, until it reconnects
+    fn unregister(&mut self, viewer: Option<&str>) {
+        match viewer {
+            None => self.master = None,
+            Some(id) => {
+                self.viewers.remove(id);
+            }
+        }
+    }
+
     fn register(&mut self, viewer: Option<&str>, sender: mpsc::UnboundedSender<String>) {
         let held = match viewer {
             None => core::mem::take(&mut self.held_for_master),
@@ -167,15 +184,20 @@ async fn serve_signalling(
     loop {
         tokio::select! {
             Some(outgoing) = rx.recv() => {
+                let going_away = outgoing.contains(GO_AWAY);
                 if write.send(Message::Text(outgoing)).await.is_err() {
-                    return;
+                    break;
+                }
+                // the service closes the socket after GO_AWAY
+                if going_away {
+                    break;
                 }
             }
             frame = read.next() => {
                 let text = match frame {
                     Some(Ok(Message::Text(text))) => text,
                     Some(Ok(_)) => continue,
-                    _ => return,
+                    _ => break,
                 };
                 let message: Value = serde_json::from_str(&text).unwrap();
                 let action = message["action"].as_str().unwrap().to_string();
@@ -197,10 +219,14 @@ async fn serve_signalling(
             }
         }
     }
+    router.lock().unwrap().unregister(viewer.as_deref());
 }
 
-async fn mock_signalling(listener: TcpListener, state: Arc<Mutex<MockState>>) {
-    let router = Arc::new(Mutex::new(Router::default()));
+async fn mock_signalling(
+    listener: TcpListener,
+    state: Arc<Mutex<MockState>>,
+    router: Arc<Mutex<Router>>,
+) {
     loop {
         let (tcp, _) = listener.accept().await.unwrap();
         tokio::spawn(serve_signalling(tcp, state.clone(), router.clone()));
@@ -311,31 +337,102 @@ fn assert_presigned(parameters: &HashMap<String, String>) {
     assert!(signature.bytes().all(|b| b.is_ascii_hexdigit()));
 }
 
+struct Mock {
+    state: Arc<Mutex<MockState>>,
+    router: Arc<Mutex<Router>>,
+    websocket: String,
+    https: String,
+    servers: [tokio::task::JoinHandle<()>; 2],
+}
+
+impl Mock {
+    async fn start() -> Self {
+        g2g_core::log::init_from_env();
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let router = Arc::new(Mutex::new(Router::default()));
+        let signalling = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ice_config = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket = format!("ws://{}", signalling.local_addr().unwrap());
+        let https = format!("http://{}", ice_config.local_addr().unwrap());
+        let servers = [
+            tokio::spawn(mock_signalling(signalling, state.clone(), router.clone())),
+            tokio::spawn(mock_ice_config(ice_config, state.clone())),
+        ];
+        Self {
+            state,
+            router,
+            websocket,
+            https,
+            servers,
+        }
+    }
+
+    fn sink(&self) -> KvsWebRtcSink {
+        let mut sink = KvsWebRtcSink::new()
+            .with_channel_arn(CHANNEL_ARN)
+            .with_region(REGION)
+            .with_credentials(ACCESS_KEY, SECRET_KEY, Some(SESSION_TOKEN.to_string()))
+            .with_endpoints(self.websocket.clone(), self.https.clone())
+            .with_stun_server(NO_STUN);
+        sink.configure_pipeline(&fixed_caps(VIDEO_CODEC)).unwrap();
+        sink
+    }
+
+    fn viewer(&self, client_id: &str, frame_limit: usize) -> KvsWebRtcSrc {
+        KvsWebRtcSrc::new()
+            .with_channel_arn(CHANNEL_ARN)
+            .with_region(REGION)
+            .with_credentials(ACCESS_KEY, SECRET_KEY, Some(SESSION_TOKEN.to_string()))
+            .with_endpoints(self.websocket.clone(), self.https.clone())
+            .with_stun_server(NO_STUN)
+            .with_client_id(client_id)
+            .with_video_codec(VIDEO_CODEC)
+            .with_frame_limit(frame_limit as u64)
+    }
+
+    fn send_master_away(&self) {
+        let go_away = json!({ "messageType": GO_AWAY }).to_string();
+        self.router.lock().unwrap().deliver(None, go_away);
+    }
+
+    fn stop(self) -> MockState {
+        for server in self.servers {
+            server.abort();
+        }
+        core::mem::take(&mut *self.state.lock().unwrap())
+    }
+}
+
+// the viewer joins while the master is already sending, so it starts at a gop boundary
+fn assert_video_from_a_keyframe(video: &[PipelinePacket], units: &[Vec<u8>], expected: usize) {
+    assert!(
+        matches!(
+            video.first(),
+            Some(PipelinePacket::CapsChanged(Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                ..
+            }))
+        ),
+        "{:?}",
+        video.first()
+    );
+    assert!(matches!(video.last(), Some(PipelinePacket::Eos)));
+    let video_frames = data_frames(video);
+    assert_eq!(video_frames.len(), expected);
+    let first_video = video_frames[0];
+    assert!(first_video.timing.keyframe, "video starts on a keyframe");
+    let gop_start = units
+        .iter()
+        .step_by(GOP)
+        .any(|unit| frame_bytes(first_video).ends_with(&unit[unit.len() - UNIT_TAIL_BYTES..]));
+    assert!(gop_start, "first video frame is not a sent keyframe");
+}
+
 #[tokio::test]
 async fn master_streams_to_a_viewer_through_the_signalling_relay() {
-    g2g_core::log::init_from_env();
-    let state = Arc::new(Mutex::new(MockState::default()));
-    let signalling = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let ice_config = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let websocket = format!("ws://{}", signalling.local_addr().unwrap());
-    let https = format!("http://{}", ice_config.local_addr().unwrap());
-    let signalling_server = tokio::spawn(mock_signalling(signalling, state.clone()));
-    let ice_config_server = tokio::spawn(mock_ice_config(ice_config, state.clone()));
-
-    let mut sink = KvsWebRtcSink::new()
-        .with_channel_arn(CHANNEL_ARN)
-        .with_region(REGION)
-        .with_credentials(ACCESS_KEY, SECRET_KEY, Some(SESSION_TOKEN.to_string()))
-        .with_endpoints(websocket.clone(), https.clone());
-    sink.configure_pipeline(&fixed_caps(VIDEO_CODEC)).unwrap();
-    let mut src = KvsWebRtcSrc::new()
-        .with_channel_arn(CHANNEL_ARN)
-        .with_region(REGION)
-        .with_credentials(ACCESS_KEY, SECRET_KEY, Some(SESSION_TOKEN.to_string()))
-        .with_endpoints(websocket, https)
-        .with_client_id(VIEWER_CLIENT_ID)
-        .with_video_codec(VIDEO_CODEC)
-        .with_frame_limit(VIDEO_UNITS as u64);
+    let mock = Mock::start().await;
+    let mut sink = mock.sink();
+    let mut src = mock.viewer(VIEWER_CLIENT_ID, VIEWER_UNITS);
     let units = synthetic_stream(VIDEO_CODEC, VIDEO_UNITS);
     let mut out = CollectPorts::new(src.output_count());
 
@@ -345,11 +442,9 @@ async fn master_streams_to_a_viewer_through_the_signalling_relay() {
     .await
     .expect("the viewer run ends");
     let emitted = emitted.expect("run succeeds");
-    signalling_server.abort();
-    ice_config_server.abort();
+    let state = mock.stop();
     assert_eq!(sink.frames_sent(), units.len() as u64);
 
-    let state = state.lock().unwrap();
     let [master, viewer] = state.connections.as_slice() else {
         panic!("{:?}", state.connections)
     };
@@ -410,17 +505,7 @@ async fn master_streams_to_a_viewer_through_the_signalling_relay() {
     let [video, audio] = out.packets.as_slice() else {
         panic!("two output ports")
     };
-    assert!(
-        matches!(
-            video.first(),
-            Some(PipelinePacket::CapsChanged(Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                ..
-            }))
-        ),
-        "{:?}",
-        video.first()
-    );
+    assert_video_from_a_keyframe(video, &units, VIEWER_UNITS);
     assert!(
         matches!(
             audio.first(),
@@ -432,25 +517,54 @@ async fn master_streams_to_a_viewer_through_the_signalling_relay() {
         "{:?}",
         audio.first()
     );
-    assert!(matches!(video.last(), Some(PipelinePacket::Eos)));
     assert!(matches!(audio.last(), Some(PipelinePacket::Eos)));
-
-    let video_frames = data_frames(video);
     assert_eq!(
         emitted,
-        (video_frames.len() + data_frames(audio).len()) as u64
+        (data_frames(video).len() + data_frames(audio).len()) as u64
     );
-    assert!(
-        video_frames.len() >= units.len() * MIN_DELIVERED_PERCENT / 100,
-        "{} of {} units arrived",
-        video_frames.len(),
-        units.len()
-    );
-    let first_video = video_frames[0];
-    assert!(first_video.timing.keyframe, "video starts on a keyframe");
-    let first_unit = &units[0];
-    assert!(
-        frame_bytes(first_video).ends_with(&first_unit[first_unit.len() - UNIT_TAIL_BYTES..]),
-        "first video frame is not the first sent keyframe"
-    );
+}
+
+#[tokio::test]
+async fn master_reconnects_after_go_away_and_answers_the_next_viewer() {
+    let mock = Mock::start().await;
+    let mut sink = mock.sink();
+    let units = synthetic_stream(VIDEO_CODEC, TWO_VIEWER_UNITS);
+    let mut first = mock.viewer(VIEWER_CLIENT_ID, VIEWER_UNITS);
+    let mut second = mock.viewer(SECOND_VIEWER_CLIENT_ID, VIEWER_UNITS);
+    let mut first_out = CollectPorts::new(first.output_count());
+    let mut second_out = CollectPorts::new(second.output_count());
+
+    let viewers = async {
+        first.run(&mut first_out).await.expect("first viewer run");
+        // the service closes the master's socket, the next offer waits for it to come back
+        mock.send_master_away();
+        second
+            .run(&mut second_out)
+            .await
+            .expect("second viewer run");
+    };
+    tokio::time::timeout(RUN_TIMEOUT, async {
+        tokio::join!(publish(&mut sink, &units), viewers)
+    })
+    .await
+    .expect("both viewer runs end");
+    let state = mock.stop();
+    assert_eq!(sink.frames_sent(), units.len() as u64);
+
+    let masters = state
+        .connections
+        .iter()
+        .filter(|c| !c.contains_key("X-Amz-ClientId"))
+        .count();
+    assert_eq!(masters, 2, "{:?}", state.connections);
+    // one ice config fetch per master answer plus one per viewer
+    assert_eq!(state.ice_config_requests.len(), 4);
+    let [video, _] = first_out.packets.as_slice() else {
+        panic!("two output ports")
+    };
+    assert_video_from_a_keyframe(video, &units, VIEWER_UNITS);
+    let [video, _] = second_out.packets.as_slice() else {
+        panic!("two output ports")
+    };
+    assert_video_from_a_keyframe(video, &units, VIEWER_UNITS);
 }

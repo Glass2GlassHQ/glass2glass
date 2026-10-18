@@ -29,18 +29,23 @@ use g2g_core::{
 };
 
 use crate::kvs_signal::{
-    candidate_payloads, connect, connect_url, gather, ice_servers, receive, sdp_payload,
-    send_message, Action, KvsSettings, Received, Role, SignalMessage, SignalingEndpoints, WsRead,
-    WsWrite, ACCESS_KEY_PROP, ANSWER_TYPE, CHANNEL_ARN_PROP, CHANNEL_NAME_PROP, REGION_PROP,
-    SECRET_KEY_PROP, SESSION_TOKEN_PROP, STUN_SERVER_PROP,
+    candidate_payloads, connect, connect_url, ice_servers, receive, sdp_payload, send_message,
+    Action, Credentials, KvsSettings, Received, Role, SignalMessage, SignalingChannel,
+    SignalingEndpoints, WsRead, WsWrite, ACCESS_KEY_PROP, ANSWER_TYPE, CHANNEL_ARN_PROP,
+    CHANNEL_NAME_PROP, REGION_PROP, SECRET_KEY_PROP, SESSION_TOKEN_PROP, STUN_SERVER_PROP,
 };
 use crate::turn::{TurnSet, REFRESH_INTERVAL};
 use crate::webrtc_codec::{enable_tracks, sink_caps_alternatives, Track, WebRtcVideoCodec};
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
-use crate::webrtc_util::{drain_pacer, feed_datagram, select_host_ip, send_transmit};
+use crate::webrtc_util::{
+    drain_pacer, feed_datagram, select_host_ip, send_transmit, IceTransportPolicy,
+    ICE_TRANSPORT_POLICY_PROP,
+};
 use crate::webrtcsink::{MediaUnit, DEFAULT_QUEUE_DEPTH, INITIAL_BITRATE_BPS};
 
 const LEAVE_TIMEOUT: Duration = Duration::from_secs(2);
+// the service closes an idle socket after 10 minutes and any socket after an hour
+const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const UDP_RECV_BYTES: usize = 2000;
 const REJECTED_PORT: &str = "0";
 const SENDING_DIRECTIONS: [&str; 2] = ["a=sendonly", "a=sendrecv"];
@@ -123,6 +128,11 @@ impl KvsWebRtcSink {
         self
     }
 
+    pub fn with_ice_transport_policy(mut self, policy: IceTransportPolicy) -> Self {
+        self.settings.transport_policy = policy;
+        self
+    }
+
     // skips the control-plane lookups
     pub fn with_endpoints(
         mut self,
@@ -145,7 +155,7 @@ impl KvsWebRtcSink {
     }
 
     async fn start_session(&mut self) -> Result<(), G2gError> {
-        match self.answer_a_viewer().await {
+        match self.connect_as_master().await {
             Ok(()) => Ok(()),
             Err(reason) => {
                 g2g_warn!(self, "{reason}");
@@ -154,19 +164,13 @@ impl KvsWebRtcSink {
         }
     }
 
-    async fn answer_a_viewer(&mut self) -> Result<(), String> {
+    async fn connect_as_master(&mut self) -> Result<(), String> {
         let credentials = self.settings.credentials()?;
         let region = self.settings.region()?;
         let channel = self
             .settings
             .resolve(Role::Master, &credentials, &region)
             .await?;
-        let servers = ice_servers(&credentials, &region, &channel)
-            .await
-            .unwrap_or_else(|reason| {
-                g2g_warn!(self, "no turn servers, continuing without: {reason}");
-                Vec::new()
-            });
         let url = connect_url(&credentials, &region, &channel, None)?;
         let ws = connect(&url).await?;
         g2g_info!(
@@ -174,115 +178,22 @@ impl KvsWebRtcSink {
             "connected to {} as master, waiting for a viewer",
             channel.arn
         );
-        let (mut ws_write, mut ws_read) = ws.split();
-
-        let mut early_candidates: Vec<(Option<String>, Candidate)> = Vec::new();
-        let (viewer, offer_sdp) = loop {
-            match receive(ws_read.next().await) {
-                Received::Signal(SignalMessage::Offer { sender, sdp }) => break (sender, sdp),
-                Received::Signal(SignalMessage::Candidate { sender, candidate }) => {
-                    early_candidates.push((sender, candidate));
-                }
-                Received::Signal(SignalMessage::GoAway) => {
-                    return Err("signalling service sent GO_AWAY before any offer".to_string())
-                }
-                Received::Signal(SignalMessage::Status(status)) => {
-                    g2g_warn!(self, "signalling status: {status}");
-                }
-                Received::Signal(other) => g2g_debug!(self, "ignoring {other:?} before an offer"),
-                Received::Skipped(reason) => g2g_debug!(self, "skipped a message: {reason}"),
-                Received::Control => {}
-                Received::Closed(reason) => return Err(reason),
-            }
-        };
-        g2g_info!(self, "offer from viewer {viewer}");
-
-        let socket = UdpSocket::bind((select_host_ip(), 0))
-            .await
-            .map_err(|e| format!("udp bind: {e}"))?;
-        let local = socket.local_addr().map_err(|e| format!("udp bind: {e}"))?;
-        let config = RtcConfig::new()
-            .set_crypto_provider(Arc::new(from_feature_flags()))
-            .enable_bwe(Some(Bitrate::bps(INITIAL_BITRATE_BPS)))
-            .set_stats_interval(Some(STATS_INTERVAL))
-            .clear_codecs();
-        // str0m answers an m-line it has no codec for with an empty payload list
-        let every_track = WebRtcVideoCodec::ALL
-            .map(Track::Video)
-            .into_iter()
-            .chain([Track::Audio]);
-        let mut rtc = enable_tracks(config, every_track).build(Instant::now());
-        let turn = gather(
-            &mut rtc,
-            &socket,
-            self.settings.stun_server.as_deref(),
-            &servers,
-        )
-        .await?;
-        g2g_debug!(
-            self,
-            "{} turn allocation(s) at {:?}",
-            turn.relay_addrs().len(),
-            turn.relay_addrs()
-        );
-        let offer = SdpOffer::from_sdp_string(&offer_sdp)
-            .map_err(|e| format!("offer sdp: {e:?}\n{offer_sdp}"))?;
-        let answer_sdp = rtc
-            .sdp_api()
-            .accept_offer(offer)
-            .map_err(|e| format!("offer rejected: {e:?}\n{offer_sdp}"))?
-            .to_sdp_string();
-        let mid = sending_mid(&answer_sdp, self.track.media_kind()).ok_or_else(|| {
-            format!(
-                "viewer {viewer} offered no {:?} m-line we can send on",
-                self.track.media_kind()
-            )
-        })?;
-        let pt = rtc
-            .writer(mid)
-            .and_then(|writer| {
-                writer
-                    .payload_params()
-                    .find(|p| p.spec().codec == self.track.codec())
-                    .map(|p| p.pt())
-            })
-            .ok_or_else(|| format!("viewer {viewer} does not take {:?}", self.track.codec()))?;
-        send_message(
-            &mut ws_write,
-            Action::SdpAnswer,
-            Some(&viewer),
-            &sdp_payload(ANSWER_TYPE, &answer_sdp),
-        )
-        .await?;
-        for payload in candidate_payloads(&answer_sdp) {
-            send_message(&mut ws_write, Action::IceCandidate, Some(&viewer), &payload).await?;
-        }
-        for (sender, candidate) in early_candidates {
-            if sender.as_deref() == Some(viewer.as_str()) {
-                rtc.add_remote_candidate(candidate);
-            }
-        }
-        g2g_debug!(self, "answered viewer {viewer}, rtc socket {local}");
-
         let (tx, rx) = mpsc::channel(DEFAULT_QUEUE_DEPTH);
         let (left_tx, left_rx) = oneshot::channel();
-        tokio::spawn(run_session(SessionArgs {
-            rtc,
-            socket,
-            local,
-            turn,
+        tokio::spawn(run_master(Master {
+            settings: self.settings.clone(),
+            credentials,
+            region,
+            channel,
             track: self.track,
-            mid,
-            pt,
-            viewer,
-            ws_write,
-            ws_read,
+            signalling: Some(ws.split()),
+            reconnect_at: None,
+            rx,
             keyframe_requested: Arc::clone(&self.keyframe_requested),
             bitrate_estimate: Arc::clone(&self.bitrate_estimate),
             stats: self.stats.clone(),
-            rx,
             left: Some(left_tx),
-            log: SessionLog(self.log_name.clone()),
+            log: MasterLog(self.log_name.clone()),
         }));
         self.tx = Some(tx);
         self.left = Some(left_rx);
@@ -290,9 +201,9 @@ impl KvsWebRtcSink {
     }
 }
 
-struct SessionLog(LogName);
+struct MasterLog(LogName);
 
-impl LogSource for SessionLog {
+impl LogSource for MasterLog {
     fn log_category(&self) -> &'static str {
         short_type_name::<KvsWebRtcSink>()
     }
@@ -304,23 +215,47 @@ impl LogSource for SessionLog {
     }
 }
 
-struct SessionArgs {
+type Signalling = (WsWrite, WsRead);
+
+struct Master {
+    settings: KvsSettings,
+    credentials: Credentials,
+    region: String,
+    channel: SignalingChannel,
+    track: Track,
+    signalling: Option<Signalling>,
+    reconnect_at: Option<Instant>,
+    rx: mpsc::Receiver<MediaUnit>,
+    keyframe_requested: Arc<AtomicBool>,
+    bitrate_estimate: Arc<AtomicU64>,
+    stats: WebRtcStatsHandle,
+    left: Option<oneshot::Sender<()>>,
+    log: MasterLog,
+}
+
+struct Session {
     rtc: Rtc,
     socket: UdpSocket,
     local: SocketAddr,
     turn: TurnSet,
-    track: Track,
     mid: Mid,
     pt: Pt,
     viewer: String,
-    ws_write: WsWrite,
-    ws_read: WsRead,
-    keyframe_requested: Arc<AtomicBool>,
-    bitrate_estimate: Arc<AtomicU64>,
-    stats: WebRtcStatsHandle,
-    rx: mpsc::Receiver<MediaUnit>,
-    left: Option<oneshot::Sender<()>>,
-    log: SessionLog,
+}
+
+enum Waited {
+    Offer {
+        viewer: String,
+        sdp: String,
+        candidates: Vec<Candidate>,
+    },
+    InputEnded,
+}
+
+#[derive(PartialEq, Eq)]
+enum SessionEnd {
+    ViewerLeft,
+    InputEnded,
 }
 
 // MediaAdded comes too late for the first frame, the answer names the mid up front
@@ -345,17 +280,222 @@ fn sending_mid(answer_sdp: &str, kind: MediaKind) -> Option<Mid> {
     })
 }
 
-async fn run_session(mut a: SessionArgs) {
+async fn run_master(mut m: Master) {
+    loop {
+        let Waited::Offer {
+            viewer,
+            sdp,
+            candidates,
+        } = wait_for_offer(&mut m).await
+        else {
+            return leave(&mut m).await;
+        };
+        g2g_info!(&m.log, "offer from viewer {viewer}");
+        let session = match answer(&mut m, &viewer, &sdp, candidates).await {
+            Ok(session) => session,
+            Err(reason) => {
+                g2g_warn!(&m.log, "viewer {viewer}: {reason}");
+                continue;
+            }
+        };
+        // a viewer joining mid-stream waits for the next keyframe
+        m.keyframe_requested.store(true, Ordering::Relaxed);
+        if run_session(&mut m, session).await == SessionEnd::InputEnded {
+            return leave(&mut m).await;
+        }
+        g2g_info!(&m.log, "waiting for the next viewer");
+    }
+}
+
+// pending while the socket is down, so a select branch can sit on it
+async fn next_signal(signalling: &mut Option<Signalling>) -> Received {
+    match signalling {
+        Some((_, read)) => receive(read.next().await),
+        None => core::future::pending().await,
+    }
+}
+
+fn wake(at: Option<Instant>) -> tokio::time::Sleep {
+    tokio::time::sleep_until(tokio::time::Instant::from_std(
+        at.unwrap_or_else(Instant::now),
+    ))
+}
+
+fn drop_signalling(m: &mut Master, reason: &str) {
+    g2g_info!(&m.log, "{reason}, reconnecting in {RECONNECT_DELAY:?}");
+    m.signalling = None;
+    m.reconnect_at = Some(Instant::now() + RECONNECT_DELAY);
+}
+
+async fn reconnect(m: &mut Master) {
+    m.reconnect_at = None;
+    let connected = match connect_url(&m.credentials, &m.region, &m.channel, None) {
+        Ok(url) => connect(&url).await,
+        Err(reason) => Err(reason),
+    };
+    match connected {
+        Ok(ws) => {
+            g2g_info!(&m.log, "reconnected to {} as master", m.channel.arn);
+            m.signalling = Some(ws.split());
+        }
+        Err(reason) => {
+            g2g_warn!(&m.log, "{reason}, retrying in {RECONNECT_DELAY:?}");
+            m.reconnect_at = Some(Instant::now() + RECONNECT_DELAY);
+        }
+    }
+}
+
+// handles what both loops treat alike, hands back the offer and candidate messages
+fn on_signal(m: &mut Master, received: Received) -> Option<SignalMessage> {
+    match received {
+        Received::Signal(SignalMessage::Status(status)) => {
+            g2g_warn!(&m.log, "signalling status: {status}");
+        }
+        Received::Signal(SignalMessage::GoAway) => {
+            drop_signalling(m, "signalling service sent GO_AWAY");
+        }
+        Received::Signal(SignalMessage::ReconnectIceServer) => {
+            g2g_debug!(
+                &m.log,
+                "relay servers are going away, the next viewer gets a fresh ice config"
+            );
+        }
+        Received::Signal(other) => return Some(other),
+        Received::Skipped(reason) => g2g_debug!(&m.log, "skipped a message: {reason}"),
+        Received::Control => {}
+        Received::Closed(reason) => drop_signalling(m, &reason),
+    }
+    None
+}
+
+// media units arriving while no viewer is connected are dropped
+async fn wait_for_offer(m: &mut Master) -> Waited {
+    let mut early_candidates: Vec<(Option<String>, Candidate)> = Vec::new();
+    loop {
+        tokio::select! {
+            received = next_signal(&mut m.signalling) => match on_signal(m, received) {
+                Some(SignalMessage::Offer { sender, sdp }) => {
+                    let candidates = early_candidates
+                        .into_iter()
+                        .filter(|(from, _)| from.as_deref() == Some(sender.as_str()))
+                        .map(|(_, candidate)| candidate)
+                        .collect();
+                    return Waited::Offer { viewer: sender, sdp, candidates };
+                }
+                Some(SignalMessage::Candidate { sender, candidate }) => {
+                    early_candidates.push((sender, candidate));
+                }
+                _ => {}
+            },
+            unit = m.rx.recv() => {
+                if unit.is_none() {
+                    return Waited::InputEnded;
+                }
+            }
+            _ = wake(m.reconnect_at), if m.reconnect_at.is_some() => reconnect(m).await,
+        }
+    }
+}
+
+async fn answer(
+    m: &mut Master,
+    viewer: &str,
+    offer_sdp: &str,
+    candidates: Vec<Candidate>,
+) -> Result<Session, String> {
+    // fetched per viewer, the relay credentials carry a ttl
+    let servers = ice_servers(&m.credentials, &m.region, &m.channel)
+        .await
+        .unwrap_or_else(|reason| {
+            g2g_warn!(&m.log, "no turn servers, continuing without: {reason}");
+            Vec::new()
+        });
+    let socket = UdpSocket::bind((select_host_ip(), 0))
+        .await
+        .map_err(|e| format!("udp bind: {e}"))?;
+    let local = socket.local_addr().map_err(|e| format!("udp bind: {e}"))?;
+    let config = RtcConfig::new()
+        .set_crypto_provider(Arc::new(from_feature_flags()))
+        .enable_bwe(Some(Bitrate::bps(INITIAL_BITRATE_BPS)))
+        .set_stats_interval(Some(STATS_INTERVAL))
+        .clear_codecs();
+    // str0m answers an m-line it has no codec for with an empty payload list
+    let every_track = WebRtcVideoCodec::ALL
+        .map(Track::Video)
+        .into_iter()
+        .chain([Track::Audio]);
+    let mut rtc = enable_tracks(config, every_track).build(Instant::now());
+    let turn = m
+        .settings
+        .gather(&mut rtc, &socket, &m.region, &servers)
+        .await?;
+    g2g_debug!(
+        &m.log,
+        "ice policy {}, {} turn allocation(s) at {:?}",
+        m.settings.transport_policy.name(),
+        turn.relay_addrs().len(),
+        turn.relay_addrs()
+    );
+    let offer = SdpOffer::from_sdp_string(offer_sdp)
+        .map_err(|e| format!("offer sdp: {e:?}\n{offer_sdp}"))?;
+    let answer_sdp = rtc
+        .sdp_api()
+        .accept_offer(offer)
+        .map_err(|e| format!("offer rejected: {e:?}\n{offer_sdp}"))?
+        .to_sdp_string();
+    let mid = sending_mid(&answer_sdp, m.track.media_kind()).ok_or_else(|| {
+        format!(
+            "offered no {:?} m-line we can send on",
+            m.track.media_kind()
+        )
+    })?;
+    let pt = rtc
+        .writer(mid)
+        .and_then(|writer| {
+            writer
+                .payload_params()
+                .find(|p| p.spec().codec == m.track.codec())
+                .map(|p| p.pt())
+        })
+        .ok_or_else(|| format!("does not take {:?}", m.track.codec()))?;
+    let Some((ws_write, _)) = m.signalling.as_mut() else {
+        return Err("signalling closed before the answer went out".to_string());
+    };
+    send_message(
+        ws_write,
+        Action::SdpAnswer,
+        Some(viewer),
+        &sdp_payload(ANSWER_TYPE, &answer_sdp),
+    )
+    .await?;
+    for payload in candidate_payloads(&answer_sdp) {
+        send_message(ws_write, Action::IceCandidate, Some(viewer), &payload).await?;
+    }
+    for candidate in candidates {
+        rtc.add_remote_candidate(candidate);
+    }
+    g2g_debug!(&m.log, "answered viewer {viewer}, rtc socket {local}");
+    Ok(Session {
+        rtc,
+        socket,
+        local,
+        turn,
+        mid,
+        pt,
+        viewer: viewer.to_string(),
+    })
+}
+
+async fn run_session(m: &mut Master, mut s: Session) -> SessionEnd {
     let mut buf = alloc::vec![0u8; UDP_RECV_BYTES];
-    let mut signalling_open = true;
     let mut refresh_at = Instant::now() + REFRESH_INTERVAL;
     loop {
         let deadline = loop {
-            match a.rtc.poll_output() {
+            match s.rtc.poll_output() {
                 Ok(Output::Timeout(t)) => break t,
-                Ok(Output::Transmit(t)) => send_transmit(&a.socket, &mut a.turn, &t).await,
+                Ok(Output::Transmit(t)) => send_transmit(&s.socket, &mut s.turn, &t).await,
                 Ok(Output::Event(Event::KeyframeRequest(_))) => {
-                    a.keyframe_requested.store(true, Ordering::Relaxed);
+                    m.keyframe_requested.store(true, Ordering::Relaxed);
                 }
                 Ok(Output::Event(Event::EgressBitrateEstimate(kind))) => {
                     let bps = match kind {
@@ -364,80 +504,80 @@ async fn run_session(mut a: SessionArgs) {
                         _ => None,
                     };
                     if let Some(bps) = bps {
-                        a.bitrate_estimate.store(bps, Ordering::Relaxed);
+                        m.bitrate_estimate.store(bps, Ordering::Relaxed);
                     }
+                }
+                Ok(Output::Event(Event::Closed)) => {
+                    g2g_info!(&m.log, "viewer {} closed the session", s.viewer);
+                    return SessionEnd::ViewerLeft;
                 }
                 Ok(Output::Event(Event::IceConnectionStateChange(
                     IceConnectionState::Disconnected,
                 ))) => {
-                    g2g_info!(&a.log, "viewer {} disconnected", a.viewer);
-                    return leave(&mut a).await;
+                    g2g_info!(&m.log, "viewer {} disconnected", s.viewer);
+                    return SessionEnd::ViewerLeft;
                 }
-                Ok(Output::Event(event)) => a.stats.record(&event),
+                Ok(Output::Event(Event::IceConnectionStateChange(state))) => {
+                    g2g_debug!(&m.log, "viewer {} ice {state:?}", s.viewer);
+                }
+                Ok(Output::Event(event)) => m.stats.record(&event),
                 Err(e) => {
-                    g2g_warn!(&a.log, "rtc failed: {e:?}");
-                    return leave(&mut a).await;
+                    g2g_warn!(&m.log, "rtc failed: {e:?}");
+                    return SessionEnd::ViewerLeft;
                 }
             }
         };
         let timeout = deadline.saturating_duration_since(Instant::now());
         tokio::select! {
-            r = a.socket.recv_from(&mut buf) => {
-                let Ok((n, source)) = r else { return leave(&mut a).await };
-                if !feed_datagram(&mut a.rtc, &mut a.turn, a.local, &buf[..n], source) {
-                    return leave(&mut a).await;
+            r = s.socket.recv_from(&mut buf) => {
+                let Ok((n, source)) = r else { return SessionEnd::ViewerLeft };
+                if !feed_datagram(&mut s.rtc, &mut s.turn, s.local, &buf[..n], source) {
+                    return SessionEnd::ViewerLeft;
                 }
             }
-            frame = a.ws_read.next(), if signalling_open => match receive(frame) {
-                Received::Signal(SignalMessage::Candidate { sender, candidate })
-                    if sender.as_deref() == Some(a.viewer.as_str()) =>
+            received = next_signal(&mut m.signalling) => match on_signal(m, received) {
+                Some(SignalMessage::Candidate { sender, candidate })
+                    if sender.as_deref() == Some(s.viewer.as_str()) =>
                 {
-                    a.rtc.add_remote_candidate(candidate);
+                    s.rtc.add_remote_candidate(candidate);
                 }
-                Received::Signal(SignalMessage::Offer { sender, .. }) => {
-                    g2g_info!(&a.log, "ignoring the offer from viewer {sender}: viewer {} is live", a.viewer);
+                Some(SignalMessage::Offer { sender, .. }) => {
+                    g2g_info!(&m.log, "ignoring the offer from viewer {sender}: viewer {} is live", s.viewer);
                 }
-                Received::Signal(SignalMessage::Status(status)) => {
-                    g2g_warn!(&a.log, "signalling status: {status}");
-                }
-                Received::Signal(SignalMessage::GoAway) => {
-                    g2g_info!(&a.log, "signalling service sent GO_AWAY, media continues");
-                    signalling_open = false;
-                }
-                Received::Signal(other) => g2g_debug!(&a.log, "ignoring {other:?}"),
-                Received::Skipped(reason) => g2g_debug!(&a.log, "skipped a message: {reason}"),
-                Received::Control => {}
-                Received::Closed(reason) => {
-                    g2g_info!(&a.log, "{reason}, media continues without signalling");
-                    signalling_open = false;
-                }
+                _ => {}
             },
-            unit = a.rx.recv() => {
+            unit = m.rx.recv() => {
                 let Some(unit) = unit else {
-                    drain_pacer(&mut a.rtc, &a.socket, &mut a.turn).await;
-                    return leave(&mut a).await;
+                    // the last frames, then close_notify so the viewer ends now
+                    drain_pacer(&mut s.rtc, &s.socket, &mut s.turn).await;
+                    let _ = s.rtc.close();
+                    drain_pacer(&mut s.rtc, &s.socket, &mut s.turn).await;
+                    return SessionEnd::InputEnded;
                 };
-                let rtp_time = a.track.media_time(unit.pts_ns);
-                if let Some(writer) = a.rtc.writer(a.mid) {
-                    let _ = writer.write(a.pt, Instant::now(), rtp_time, unit.data);
+                let rtp_time = m.track.media_time(unit.pts_ns);
+                if let Some(writer) = s.rtc.writer(s.mid) {
+                    let _ = writer.write(s.pt, Instant::now(), rtp_time, unit.data);
                 }
             }
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if !a.turn.is_empty() => {
-                a.turn.refresh_all(&a.socket).await;
+            _ = wake(Some(refresh_at)), if !s.turn.is_empty() => {
+                s.turn.refresh_all(&s.socket).await;
                 refresh_at = Instant::now() + REFRESH_INTERVAL;
             }
+            _ = wake(m.reconnect_at), if m.reconnect_at.is_some() => reconnect(m).await,
             _ = tokio::time::sleep(timeout) => {
-                if a.rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
-                    return leave(&mut a).await;
+                if s.rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
+                    return SessionEnd::ViewerLeft;
                 }
             }
         }
     }
 }
 
-async fn leave(a: &mut SessionArgs) {
-    let _ = a.ws_write.close().await;
-    if let Some(left) = a.left.take() {
+async fn leave(m: &mut Master) {
+    if let Some((mut ws_write, _)) = m.signalling.take() {
+        let _ = ws_write.close().await;
+    }
+    if let Some(left) = m.left.take() {
         let _ = left.send(());
     }
 }
@@ -450,6 +590,7 @@ static KVSWEBRTCSINK_PROPS: &[PropertySpec] = &[
     SECRET_KEY_PROP,
     SESSION_TOKEN_PROP,
     STUN_SERVER_PROP,
+    ICE_TRANSPORT_POLICY_PROP,
 ];
 
 impl AsyncElement for KvsWebRtcSink {
@@ -542,7 +683,7 @@ impl AsyncElement for KvsWebRtcSink {
                         self.start_session().await?;
                     }
                     if let Some(tx) = &self.tx {
-                        // a closed channel means the viewer left
+                        // a closed channel means the master task died
                         tx.send(unit).await.map_err(|_| G2gError::Shutdown)?;
                     }
                     self.frames_sent += 1;
@@ -590,6 +731,7 @@ mod tests {
             ("secret-key", "secret"),
             ("session-token", "token"),
             ("stun-server", "stun.example.com:3478"),
+            ("ice-transport-policy", "relay"),
         ] {
             sink.set_property(name, PropValue::Str(value.into()))
                 .unwrap();

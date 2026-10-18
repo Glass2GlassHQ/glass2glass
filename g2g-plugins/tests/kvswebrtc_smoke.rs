@@ -33,6 +33,7 @@ use g2g_core::{
 use g2g_plugins::kvswebrtcsink::KvsWebRtcSink;
 use g2g_plugins::kvswebrtcsrc::KvsWebRtcSrc;
 use g2g_plugins::webrtc_codec::WebRtcVideoCodec;
+use g2g_plugins::IceTransportPolicy;
 use numbuffers_common::CollectPorts;
 use webrtc_streams_common::{data_frames, fixed_caps, synthetic_stream, FPS};
 
@@ -80,18 +81,19 @@ async fn publish(sink: &mut KvsWebRtcSink, units: &[Vec<u8>]) {
         .unwrap();
 }
 
-#[tokio::test]
-#[ignore = "needs AWS credentials and a KVS signalling channel (see the module docs)"]
-async fn master_streams_to_a_viewer_through_kvs() {
+async fn master_streams_to_a_viewer(policy: IceTransportPolicy) {
     g2g_core::log::init_from_env();
     let channel = std::env::var(CHANNEL_VARIABLE)
         .expect("G2G_KVS_CHANNEL names an existing signalling channel");
     let units = synthetic_stream(VIDEO_CODEC, (PUBLISH_SECONDS * FPS) as usize);
-    let mut sink = KvsWebRtcSink::new().with_channel_name(channel.clone());
+    let mut sink = KvsWebRtcSink::new()
+        .with_channel_name(channel.clone())
+        .with_ice_transport_policy(policy);
     sink.configure_pipeline(&fixed_caps(VIDEO_CODEC)).unwrap();
     let mut src = KvsWebRtcSrc::new()
         .with_channel_name(channel)
         .with_video_codec(VIDEO_CODEC)
+        .with_ice_transport_policy(policy)
         .with_frame_limit(units.len() as u64);
     let mut out = CollectPorts::new(src.output_count());
 
@@ -124,4 +126,17 @@ async fn master_streams_to_a_viewer_through_kvs() {
     let video_frames = data_frames(video);
     let first = video_frames.first().expect("video frames arrived");
     assert!(first.timing.keyframe, "video starts on a keyframe");
+}
+
+#[tokio::test]
+#[ignore = "needs AWS credentials and a KVS signalling channel (see the module docs)"]
+async fn master_streams_to_a_viewer_through_kvs() {
+    master_streams_to_a_viewer(IceTransportPolicy::All).await;
+}
+
+// neither side offers a host or reflexive candidate, so the media went through the service's TURN
+#[tokio::test]
+#[ignore = "needs AWS credentials and a KVS signalling channel (see the module docs)"]
+async fn master_streams_to_a_viewer_through_the_kvs_relay() {
+    master_streams_to_a_viewer(IceTransportPolicy::Relay).await;
 }

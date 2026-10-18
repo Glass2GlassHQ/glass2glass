@@ -22,7 +22,7 @@ use tokio::net::UdpSocket;
 use g2g_core::{PropError, PropKind, PropValue, PropertySpec};
 
 use crate::turn::TurnSet;
-use crate::webrtc_util::add_ice_candidates;
+use crate::webrtc_util::{add_ice_candidates, IceTransportPolicy};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -42,6 +42,10 @@ const ICE_SERVER_CONFIG_PATH: &str = "/v1/get-ice-server-config";
 const JSON_CONTENT_TYPE: &str = "application/json";
 const WSS_PROTOCOL: &str = "WSS";
 const HTTPS_PROTOCOL: &str = "HTTPS";
+const STUN_HOST_PREFIX: &str = "stun.kinesisvideo.";
+const STUN_HOST_SUFFIX: &str = ".amazonaws.com:443";
+// the service rejects a longer messagePayload with a STATUS_RESPONSE
+const MAX_MESSAGE_PAYLOAD_BYTES: usize = 10 * 1024;
 const TURN_URI_SCHEMES: [&str; 2] = ["turn:", "turns:"];
 // the turn client cannot speak dtls
 const TURNS_OVER_UDP_PREFIX: &str = "turns:";
@@ -450,16 +454,8 @@ pub(crate) async fn ice_servers(
     Ok(parse_ice_servers(&reply))
 }
 
-pub(crate) async fn gather(
-    rtc: &mut Rtc,
-    socket: &UdpSocket,
-    stun_server: Option<&str>,
-    servers: &[IceServer],
-) -> Result<TurnSet, String> {
-    add_ice_candidates(rtc, socket, stun_server)
-        .await
-        .map_err(|_| "ice candidate gathering failed".to_string())?;
-    Ok(TurnSet::setup_each(rtc, socket, turn_entries(servers)).await)
+pub(crate) fn default_stun_server(region: &str) -> String {
+    format!("{STUN_HOST_PREFIX}{region}{STUN_HOST_SUFFIX}")
 }
 
 pub(crate) const CHANNEL_NAME_PROP: PropertySpec = PropertySpec::new(
@@ -495,7 +491,7 @@ pub(crate) const SESSION_TOKEN_PROP: PropertySpec = PropertySpec::new(
 pub(crate) const STUN_SERVER_PROP: PropertySpec = PropertySpec::new(
     "stun-server",
     PropKind::Str,
-    "STUN server host:port for a server-reflexive candidate (empty = host and the channel's TURN relays only)",
+    "STUN server host:port for a server-reflexive candidate (empty = stun.kinesisvideo.<region>.amazonaws.com:443)",
 );
 
 #[derive(Clone, Default)]
@@ -507,6 +503,7 @@ pub(crate) struct KvsSettings {
     secret_key: Option<String>,
     session_token: Option<String>,
     pub(crate) stun_server: Option<String>,
+    pub(crate) transport_policy: IceTransportPolicy,
     endpoint_override: Option<SignalingEndpoints>,
 }
 
@@ -516,6 +513,8 @@ impl core::fmt::Debug for KvsSettings {
             .field("channel_name", &self.channel_name)
             .field("channel_arn", &self.channel_arn)
             .field("region", &self.region)
+            .field("stun_server", &self.stun_server)
+            .field("transport_policy", &self.transport_policy)
             .field("endpoint_override", &self.endpoint_override)
             .finish_non_exhaustive()
     }
@@ -572,6 +571,18 @@ impl KvsSettings {
         name: &str,
         value: &PropValue,
     ) -> Option<Result<(), PropError>> {
+        if name == "ice-transport-policy" {
+            let Some(text) = value.as_str() else {
+                return Some(Err(PropError::Type));
+            };
+            return Some(match IceTransportPolicy::parse(text) {
+                Some(policy) => {
+                    self.transport_policy = policy;
+                    Ok(())
+                }
+                None => Err(PropError::Value),
+            });
+        }
         let field = match name {
             "channel-name" => &mut self.channel_name,
             "channel-arn" => &mut self.channel_arn,
@@ -590,6 +601,9 @@ impl KvsSettings {
     }
 
     pub(crate) fn get_property(&self, name: &str) -> Option<PropValue> {
+        if name == "ice-transport-policy" {
+            return Some(PropValue::Str(self.transport_policy.name().into()));
+        }
         let field = match name {
             "channel-name" => &self.channel_name,
             "channel-arn" => &self.channel_arn,
@@ -601,6 +615,30 @@ impl KvsSettings {
             _ => return None,
         };
         Some(PropValue::Str(field.clone().unwrap_or_default()))
+    }
+
+    // host and STUN candidates under `all`, the channel's TURN relays always
+    pub(crate) async fn gather(
+        &self,
+        rtc: &mut Rtc,
+        socket: &UdpSocket,
+        region: &str,
+        servers: &[IceServer],
+    ) -> Result<TurnSet, String> {
+        if self.transport_policy == IceTransportPolicy::All {
+            let stun = self
+                .stun_server
+                .clone()
+                .unwrap_or_else(|| default_stun_server(region));
+            add_ice_candidates(rtc, socket, Some(&stun))
+                .await
+                .map_err(|_| "ice candidate gathering failed".to_string())?;
+        }
+        let turn = TurnSet::setup_each(rtc, socket, turn_entries(servers)).await;
+        if self.transport_policy == IceTransportPolicy::Relay && turn.is_empty() {
+            return Err("ice-transport-policy=relay but no TURN allocation succeeded".to_string());
+        }
+        Ok(turn)
     }
 
     pub(crate) fn credentials(&self) -> Result<Credentials, String> {
@@ -769,15 +807,27 @@ pub(crate) fn candidate_payloads(sdp: &str) -> Vec<Value> {
         .collect()
 }
 
-pub(crate) fn encode_message(action: Action, recipient: Option<&str>, payload: &Value) -> String {
+pub(crate) fn encode_message(
+    action: Action,
+    recipient: Option<&str>,
+    payload: &Value,
+) -> Result<String, String> {
+    let encoded = STANDARD.encode(payload.to_string());
+    if encoded.len() > MAX_MESSAGE_PAYLOAD_BYTES {
+        return Err(format!(
+            "{} payload is {} bytes base64, over the service's {MAX_MESSAGE_PAYLOAD_BYTES}",
+            action.name(),
+            encoded.len()
+        ));
+    }
     let mut message = json!({
         "action": action.name(),
-        "messagePayload": STANDARD.encode(payload.to_string()),
+        "messagePayload": encoded,
     });
     if let Some(recipient) = recipient {
         message["recipientClientId"] = json!(recipient);
     }
-    message.to_string()
+    Ok(message.to_string())
 }
 
 pub(crate) async fn send_message<S>(
@@ -789,7 +839,7 @@ pub(crate) async fn send_message<S>(
 where
     S: Sink<Message, Error = WsError> + Unpin,
 {
-    ws.send(Message::Text(encode_message(action, recipient, payload)))
+    ws.send(Message::Text(encode_message(action, recipient, payload)?))
         .await
         .map_err(|e| format!("websocket send: {e}"))
 }
@@ -1040,7 +1090,8 @@ mod tests {
 
     #[test]
     fn envelopes_round_trip() {
-        let offer = encode_message(Action::SdpOffer, None, &sdp_payload(OFFER_TYPE, "v=0\r\n"));
+        let offer =
+            encode_message(Action::SdpOffer, None, &sdp_payload(OFFER_TYPE, "v=0\r\n")).unwrap();
         let sent: Value = serde_json::from_str(&offer).unwrap();
         assert_eq!(sent["action"], "SDP_OFFER");
         assert!(sent.get("recipientClientId").is_none());
@@ -1059,7 +1110,8 @@ mod tests {
         }
 
         let candidate = json!({ "candidate": HOST_CANDIDATE, "sdpMid": "0", "sdpMLineIndex": 0 });
-        let trickle = encode_message(Action::IceCandidate, Some(EXAMPLE_CLIENT_ID), &candidate);
+        let trickle =
+            encode_message(Action::IceCandidate, Some(EXAMPLE_CLIENT_ID), &candidate).unwrap();
         let sent: Value = serde_json::from_str(&trickle).unwrap();
         assert_eq!(sent["action"], "ICE_CANDIDATE");
         assert_eq!(sent["recipientClientId"], EXAMPLE_CLIENT_ID);
@@ -1077,7 +1129,8 @@ mod tests {
             Action::SdpAnswer,
             Some(EXAMPLE_CLIENT_ID),
             &sdp_payload(ANSWER_TYPE, "v=0"),
-        );
+        )
+        .unwrap();
         let sent: Value = serde_json::from_str(&answer).unwrap();
         let delivered =
             json!({ "messageType": "SDP_ANSWER", "messagePayload": sent["messagePayload"] });
@@ -1235,6 +1288,38 @@ mod tests {
             ]
         );
         assert!(parse_ice_servers(&json!({ "IceServerList": 7 })).is_empty());
+    }
+
+    #[test]
+    fn oversized_payloads_are_refused_before_sending() {
+        let sdp = "a".repeat(MAX_MESSAGE_PAYLOAD_BYTES);
+        let refused =
+            encode_message(Action::SdpOffer, None, &sdp_payload(OFFER_TYPE, &sdp)).unwrap_err();
+        assert!(refused.starts_with("SDP_OFFER payload is "), "{refused}");
+        let small = sdp_payload(OFFER_TYPE, "v=0");
+        assert!(encode_message(Action::SdpOffer, None, &small).is_ok());
+    }
+
+    #[test]
+    fn the_stun_server_defaults_to_the_regional_kvs_host() {
+        assert_eq!(
+            default_stun_server("us-west-2"),
+            "stun.kinesisvideo.us-west-2.amazonaws.com:443"
+        );
+        let mut settings = KvsSettings::default();
+        assert_eq!(
+            settings.get_property("ice-transport-policy"),
+            Some(PropValue::Str("all".into()))
+        );
+        settings
+            .set_property("ice-transport-policy", &PropValue::Str("relay".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(settings.transport_policy, IceTransportPolicy::Relay);
+        assert_eq!(
+            settings.set_property("ice-transport-policy", &PropValue::Str("host".into())),
+            Some(Err(PropError::Value))
+        );
     }
 
     #[test]
