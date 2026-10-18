@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1523: `whepsrc` drops video until the first keyframe through the shared WebRTC receiver, like the other WebRTC sources.
 - M1495: `matroskademux` reads Vorbis and MJPEG tracks, including MJPEG behind a `V_MS/VFW/FOURCC` id.
 - M1494: typefind needs two parameter sets and well-formed NALs for H.264 and H.265, skips ID3 ahead of ADTS, and types raw MPEG-4 Part 2.
 - M1493: auto-plugging counts raw PCM in every sample format as decoded audio, so `decodebin` plays U8 PCM in AVI.
