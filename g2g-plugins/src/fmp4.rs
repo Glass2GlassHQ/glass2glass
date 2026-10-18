@@ -1697,19 +1697,17 @@ pub(crate) struct TrunSample {
 /// `trun` (v0 or v1). A `trun` that omits the per-sample duration or size takes
 /// `default_duration` / `default_size` from its `tfhd`; a duration neither
 /// carries is `0`, but a *size* neither carries is fatal (the samples could not
-/// be split). v0 and v1 differ only in the sign of the per-sample
-/// composition-time offset: unsigned in v0, signed in v1.
+/// be split). Both versions read the per-sample composition-time offset signed,
+/// as ffmpeg does, since encoders write negative offsets into v0 too.
 pub(crate) fn parse_trun(
     trun: &[u8],
     default_duration: u32,
     default_size: u32,
     fragment_len: usize,
 ) -> Result<Vec<TrunSample>, G2gError> {
-    let signed_offsets = match trun.first() {
-        Some(0) => false,
-        Some(1) => true,
-        _ => return Err(G2gError::CapsMismatch), // unknown trun version
-    };
+    if !matches!(trun.first(), Some(0 | 1)) {
+        return Err(G2gError::CapsMismatch); // unknown trun version
+    }
     let flags = be32(trun, 0)? & 0x00FF_FFFF;
     if flags & 0x200 == 0 && default_size == 0 {
         return Err(G2gError::CapsMismatch); // no sample sizes anywhere
@@ -1757,12 +1755,7 @@ pub(crate) fn parse_trun(
         }
         let mut composition_offset = 0;
         if flags & 0x800 != 0 {
-            let raw = be32(trun, at)?;
-            composition_offset = if signed_offsets {
-                i64::from(raw as i32)
-            } else {
-                i64::from(raw)
-            };
+            composition_offset = i64::from(be32(trun, at)? as i32);
             at += 4;
         }
         samples.push(TrunSample {
@@ -2178,7 +2171,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_trun_reads_composition_offset_by_version() {
+    fn parse_trun_reads_composition_offset_signed_in_both_versions() {
         // flags 0xA01: data offset + sample size + composition offset.
         const OFFSET_FIELD: u32 = 0xFFFF_FE00;
         let build = |version: u8| {
@@ -2196,8 +2189,9 @@ mod tests {
             duration: 0,
             composition_offset,
         };
-        assert_eq!(v0, alloc::vec![sample(i64::from(OFFSET_FIELD))]);
-        assert_eq!(v1, alloc::vec![sample(i64::from(OFFSET_FIELD as i32))]);
+        let expected = alloc::vec![sample(i64::from(OFFSET_FIELD as i32))];
+        assert_eq!(v0, expected);
+        assert_eq!(v1, expected);
     }
 
     #[test]
