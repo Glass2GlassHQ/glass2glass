@@ -23,6 +23,11 @@
 //! limited range scale per sample. Grayscale / CMYK / YCCK JPEGs have no such
 //! identity path and still decode through RGBA.
 //!
+//! An access unit holding two JPEG images, each half the frame height upstream
+//! declares, is an interlaced frame stored one image per field (`jpegparse`
+//! pairs them): both decode and their rows are woven into one frame, the first
+//! field on the even rows, and the caps say `Interlace::Interleaved`.
+//!
 //! With the `mozjpeg` feature the `decoder=mozjpeg` property swaps zune-jpeg for
 //! libjpeg-turbo's SIMD decoder; the default stays `zune` (pure Rust, no C).
 
@@ -38,8 +43,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat, Segment, VideoCodec,
+    Interlace, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment, VideoCodec,
 };
 
 use zune_jpeg::zune_core::bytestream::ZCursor;
@@ -48,8 +53,8 @@ use zune_jpeg::zune_core::options::DecoderOptions;
 use zune_jpeg::JpegDecoder;
 
 use crate::stillframe::{
-    jpeg_header_segments, JPEG_HUFFMAN_TABLE, JPEG_MARKER_PREFIX, JPEG_SEGMENT_LENGTH,
-    JPEG_START_OF_SCAN,
+    jpeg_frame_length, jpeg_geometry, jpeg_header_segments, JPEG_HUFFMAN_TABLE, JPEG_MARKER_PREFIX,
+    JPEG_SEGMENT_LENGTH, JPEG_SIGNATURE, JPEG_START_OF_SCAN,
 };
 
 #[derive(Debug)]
@@ -147,6 +152,43 @@ fn with_default_huffman_tables(jpeg: &[u8]) -> Cow<'_, [u8]> {
     )
 }
 
+#[derive(Debug)]
+struct DecodedPicture {
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    interlace: Interlace,
+}
+
+// the rows of the two fields alternate in every plane, the first field's on top
+fn weave_fields(
+    format: RawVideoFormat,
+    first_field: &[u8],
+    second_field: &[u8],
+    width: u32,
+    field_height: u32,
+) -> Result<Vec<u8>, G2gError> {
+    let mut frame = Vec::with_capacity(first_field.len() + second_field.len());
+    let mut plane_start = 0;
+    for plane in 0..format.plane_count() {
+        let stride = format
+            .plane_stride(plane, width)
+            .ok_or(G2gError::CapsMismatch)? as usize;
+        let plane_bytes = format
+            .plane_bytes(plane, width, field_height)
+            .ok_or(G2gError::CapsMismatch)? as usize;
+        let plane_end = plane_start + plane_bytes;
+        let first_rows = first_field[plane_start..plane_end].chunks_exact(stride);
+        let second_rows = second_field[plane_start..plane_end].chunks_exact(stride);
+        for (first_row, second_row) in first_rows.zip(second_rows) {
+            frame.extend_from_slice(first_row);
+            frame.extend_from_slice(second_row);
+        }
+        plane_start = plane_end;
+    }
+    Ok(frame)
+}
+
 /// Which JPEG decoder does the work (`mozjpeg` feature).
 #[cfg(feature = "mozjpeg")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -174,8 +216,10 @@ pub struct MjpegDec {
     framerate: Rate,
     #[cfg(feature = "mozjpeg")]
     backend: JpegDecodeBackend,
-    /// Last emitted geometry, so `CapsChanged` is sent only on change.
-    out_dims: Option<(u32, u32)>,
+    /// Last emitted caps, so `CapsChanged` is sent only on change.
+    declared_caps: Option<Caps>,
+    // the frame height upstream declares, twice a field image's when access units hold fields
+    upstream_height: Option<u32>,
     sequence: u64,
     configured: bool,
     segment: Segment,
@@ -194,7 +238,8 @@ impl MjpegDec {
             framerate: Rate::Any,
             #[cfg(feature = "mozjpeg")]
             backend: JpegDecodeBackend::Zune,
-            out_dims: None,
+            declared_caps: None,
+            upstream_height: None,
             sequence: 0,
             configured: false,
             segment: Segment::new(),
@@ -225,15 +270,54 @@ impl MjpegDec {
         }
     }
 
-    fn output_caps(&self, w: u32, h: u32) -> Caps {
+    fn output_caps(&self, picture: &DecodedPicture) -> Caps {
         Caps::RawVideo {
             format: self.out_format,
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
+            width: Dim::Fixed(picture.width),
+            height: Dim::Fixed(picture.height),
             framerate: self.framerate.clone(),
-            interlace: g2g_core::Interlace::Any,
+            interlace: picture.interlace,
             colorimetry: decoded_colorimetry(self.out_format),
         }
+    }
+
+    fn decode_access_unit(&self, access_unit: &[u8]) -> Result<DecodedPicture, G2gError> {
+        let holds_fields = jpeg_geometry(access_unit).is_some_and(|(_, image_height)| {
+            self.upstream_height
+                .is_some_and(|frame_height| image_height.checked_mul(2) == Some(frame_height))
+        });
+        if !holds_fields {
+            let (pixels, width, height) = self.decode(access_unit)?;
+            return Ok(DecodedPicture {
+                pixels,
+                width,
+                height,
+                interlace: Interlace::Any,
+            });
+        }
+        let first_length = jpeg_frame_length(access_unit)?.ok_or(G2gError::CapsMismatch)?;
+        let after_first = &access_unit[first_length..];
+        let second_at = after_first
+            .windows(JPEG_SIGNATURE.len())
+            .position(|window| window == JPEG_SIGNATURE)
+            .ok_or(G2gError::CapsMismatch)?;
+        let (first_field, width, field_height) = self.decode(&access_unit[..first_length])?;
+        let (second_field, second_width, second_height) = self.decode(&after_first[second_at..])?;
+        if (second_width, second_height) != (width, field_height) {
+            return Err(G2gError::CapsMismatch);
+        }
+        Ok(DecodedPicture {
+            pixels: weave_fields(
+                self.out_format,
+                &first_field,
+                &second_field,
+                width,
+                field_height,
+            )?,
+            width,
+            height: field_height * 2,
+            interlace: Interlace::Interleaved,
+        })
     }
 
     /// Decode one JPEG access unit, returning `(pixels, width, height)` in the
@@ -439,6 +523,7 @@ impl AsyncElement for MjpegDec {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let Caps::CompressedVideo {
             codec: VideoCodec::Mjpeg,
+            height,
             framerate,
             ..
         } = absolute_caps
@@ -452,6 +537,10 @@ impl AsyncElement for MjpegDec {
             return Err(G2gError::CapsMismatch);
         }
         self.framerate = framerate.clone();
+        self.upstream_height = match height {
+            Dim::Fixed(height) => Some(*height),
+            _ => None,
+        };
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -545,14 +634,16 @@ impl AsyncElement for MjpegDec {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let (pixels, w, h) = self.decode(slice)?;
-                    if self.out_dims != Some((w, h)) {
-                        out.push(PipelinePacket::CapsChanged(self.output_caps(w, h)))
-                            .await?;
-                        self.out_dims = Some((w, h));
+                    let picture = self.decode_access_unit(slice)?;
+                    let caps = self.output_caps(&picture);
+                    if self.declared_caps.as_ref() != Some(&caps) {
+                        out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+                        self.declared_caps = Some(caps);
                     }
                     let decoded = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
+                        MemoryDomain::System(SystemSlice::from_boxed(
+                            picture.pixels.into_boxed_slice(),
+                        )),
                         frame.timing,
                         self.sequence,
                     );

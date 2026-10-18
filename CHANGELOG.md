@@ -7,6 +7,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M1581: `avidemux` reads the H.264 framing from the stream's `avcC`, and `h264parse` takes a buffer that walks as length-prefixed NALs for one.
+- M1580: `jpegparse` keeps the two field images of an interlaced AVI motion JPEG frame together and `mjpegdec` weaves them into one frame.
 - M1576: `matroskademux` skips damaged data inside a Cluster to the next Cluster, as ffmpeg does.
 - M1575: `flacparse` passes a chained Ogg-FLAC file through to its last link, so `decodebin` decodes every link.
 - M1572: `flvdemux` reads every H.264 packet as length-prefixed, so a NAL of 256 to 511 bytes is no longer mistaken for Annex-B.

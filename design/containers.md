@@ -1258,6 +1258,17 @@ chunks, and emit one image per buffer with the geometry its header declares. The
 auto-plug chain splices the framer ahead of the decoder, which is what lets a
 `.jpg` be typed by content at all.
 
+Interlaced motion JPEG in AVI stores each frame as two JPEG images, one per
+field, each half the height the AVI header declares. `jpegparse` treats an image
+under three quarters of the upstream frame height as a field, the threshold
+ffmpeg and GStreamer use, and sends both fields of a frame as one buffer declared
+at twice the field height. `mjpegdec` decodes an access unit whose first image is
+half the declared height as two fields and weaves their rows into one frame with
+`Interlace::Interleaved` caps, the first field on the even rows, as GStreamer's
+`jpegdec` does. ffmpeg puts the first field on the odd rows instead when the AVI
+fourcc is `MJPG` and the `strf` extradata carries no AVID `PAL` token. The caps
+have no field order to carry that from `avidemux`, so g2g does not follow it.
+
 The decoders do not assume one file per buffer, because a byte source hands over
 read-sized chunks (`filesrc`) or whole files (`multifilesrc`). Both cases go
 through `stillimage::ImageAssembler`, which accumulates until the format's own
