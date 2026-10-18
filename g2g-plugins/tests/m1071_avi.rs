@@ -476,6 +476,29 @@ async fn types_an_avi_by_content_and_auto_plugs_the_demuxer() {
     assert_eq!(chain.first(), Some(&"avidemux"), "got {chain:?}");
 }
 
+/// M1569: a bare `decodebin` plugs the G.711 decoder for a mu-law or A-law
+/// AVI audio stream.
+#[tokio::test]
+async fn decodebin_decodes_g711_audio_in_an_avi() {
+    const SOURCE_BUFFERS: u64 = 5;
+    for (encoder, name) in [("mulawenc", "mulaw"), ("alawenc", "alaw")] {
+        let out = std::env::temp_dir().join(format!("g2g-m1569-{}-{name}.avi", std::process::id()));
+        let location = out.display();
+        run_line(&format!(
+            "audiotestsrc num-buffers={SOURCE_BUFFERS} ! {encoder} ! avimux ! \
+             filesink location={location}"
+        ))
+        .await;
+        let decoded = run_line(&format!(
+            "filesrc location={location} ! decodebin ! audioconvert ! \
+             audio/x-raw,format=S16LE ! fakesink"
+        ))
+        .await;
+        assert_eq!(decoded, SOURCE_BUFFERS, "{name}: every chunk decodes");
+        let _ = std::fs::remove_file(&out);
+    }
+}
+
 #[tokio::test]
 async fn a_mux_round_trip_preserves_every_chunk() {
     for name in [MJPEG_PCM, H264_MP3] {
