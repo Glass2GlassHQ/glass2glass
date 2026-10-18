@@ -767,7 +767,10 @@ fn parse_video_entry(
         (VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets, None)
     } else if find_box(entries, b"vp08").is_some() {
         (VideoCodec::Vp8, Vec::new(), None)
-    } else if find_box(entries, b"jpeg").is_some() {
+    } else if find_box(entries, b"jpeg")
+        .or_else(|| find_box(entries, b"AVDJ"))
+        .is_some()
+    {
         (VideoCodec::Mjpeg, Vec::new(), None)
     } else if let Some(mp4v) = find_box(entries, b"mp4v") {
         // MPEG-4 Part 2: the mp4v visual sample entry nests an esds carrying the
@@ -3472,5 +3475,17 @@ mod tests {
         let sample_ns = ticks_to_ns(u64::from(SAMPLE_TICKS), TIMESCALE);
         assert_eq!(decode_times, alloc::vec![0, sample_ns]);
         assert_eq!(samples[1].1.duration_ns, sample_ns);
+    }
+
+    #[test]
+    fn reads_avid_motion_jpeg_as_mjpeg() {
+        const VISUAL_SAMPLE_ENTRY_LEN: usize = 78;
+        let entry = crate::mp4box::mp4_box(b"AVDJ", &[0; VISUAL_SAMPLE_ENTRY_LEN]);
+        let Some((TrackKind::Video { codec, .. }, _)) =
+            parse_video_entry(&entry, 720, 486).expect("the entry parses")
+        else {
+            panic!("AVDJ is read as a video track");
+        };
+        assert_eq!(codec, VideoCodec::Mjpeg);
     }
 }

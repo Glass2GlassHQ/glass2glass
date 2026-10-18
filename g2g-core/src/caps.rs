@@ -639,6 +639,7 @@ fn codec_gst_media_type(c: VideoCodec) -> &'static str {
         VideoCodec::SorensonH263 => "video/x-flash-video",
         VideoCodec::Vp6 { alpha: false } => "video/x-vp6-flash",
         VideoCodec::Vp6 { alpha: true } => "video/x-vp6-alpha",
+        VideoCodec::Vp6Plain => "video/x-vp6",
         // GStreamer keeps VC-1 under the Windows Media Video type, told apart
         // by `wmvversion=3, format=WVC1`; the fields do not survive here, so the
         // codec split stays in the caps.
@@ -1735,6 +1736,8 @@ pub enum VideoCodec {
     /// buffer, decoded by `PnmDec` and produced by `PnmEnc`. Media type
     /// `image/x-portable-anymap` and the bitmap / graymap / pixmap variants.
     Pnm,
+    // VP6 as AVI stores it: upright and without the Flash variant's dimension byte
+    Vp6Plain,
 }
 
 /// Wire format of a [`Caps::ByteStream`] link, so a demuxer accepts only the

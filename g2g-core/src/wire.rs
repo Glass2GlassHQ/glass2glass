@@ -221,6 +221,7 @@ fn video_codec_to_u8(c: VideoCodec) -> u8 {
         VideoCodec::WebP => 13,
         VideoCodec::Vc1 => 14,
         VideoCodec::Pnm => 15,
+        VideoCodec::Vp6Plain => 16,
     }
 }
 fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
@@ -241,6 +242,7 @@ fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
         13 => VideoCodec::WebP,
         14 => VideoCodec::Vc1,
         15 => VideoCodec::Pnm,
+        16 => VideoCodec::Vp6Plain,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -1375,6 +1377,7 @@ mod tests {
             VideoCodec::WebP,
             VideoCodec::Vc1,
             VideoCodec::Pnm,
+            VideoCodec::Vp6Plain,
         ];
         for c in video {
             assert_eq!(video_codec_from_u8(video_codec_to_u8(c)), Ok(c));

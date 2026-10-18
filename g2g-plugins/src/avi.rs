@@ -123,6 +123,9 @@ const VIDEO_FOURCCS: &[(FourCc, VideoCodec)] = &[
     (*b"DX50", VideoCodec::Mpeg4Part2),
     (*b"FMP4", VideoCodec::Mpeg4Part2),
     (*b"MP4V", VideoCodec::Mpeg4Part2),
+    (*b"VP60", VideoCodec::Vp6Plain),
+    (*b"VP61", VideoCodec::Vp6Plain),
+    (*b"VP62", VideoCodec::Vp6Plain),
 ];
 
 /// Builds the [`Tag`] one `INFO` chunk carries from its text.
@@ -1086,6 +1089,19 @@ mod tests {
             audio.timing(audio.samples_in(4 * 48_000 / 25), 0).0,
             40_000_000
         );
+    }
+
+    #[test]
+    fn reads_the_vp6_fourccs_as_plain_vp6() {
+        let mut bytes = write_av();
+        while let Some(at) = bytes.windows(FOURCC_LEN).position(|w| w == b"MJPG") {
+            bytes[at..at + FOURCC_LEN].copy_from_slice(b"VP62");
+        }
+        let file = parse(&bytes).expect("the file parses");
+        let AviStreamKind::Video { codec, .. } = file.streams[0].kind else {
+            panic!("stream 0 is video");
+        };
+        assert_eq!(codec, VideoCodec::Vp6Plain);
     }
 
     #[test]

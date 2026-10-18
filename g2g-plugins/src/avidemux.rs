@@ -44,6 +44,7 @@ const VIDEO_STREAM_NAMES: &[(&str, VideoCodec)] = &[
     ("mjpeg", VideoCodec::Mjpeg),
     ("h264", VideoCodec::H264),
     ("mpeg4part2", VideoCodec::Mpeg4Part2),
+    ("vp6", VideoCodec::Vp6Plain),
 ];
 
 /// The `stream=` names for a format-named audio selection.
