@@ -27,7 +27,7 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PropError, PropKind,
-    PropValue, PropertySpec, Rate, VideoCodec,
+    PropValue, PropertySpec, Rate, Segment, VideoCodec,
 };
 
 use crate::aacparse::require_adts;
@@ -285,6 +285,11 @@ impl Mp4Demux {
             out.push(PipelinePacket::CapsChanged(caps)).await?;
             self.out_codec = codec;
             self.caps_sent = true;
+        }
+        // the decoder drops the pictures the edit list cuts
+        let edit = video.edit_segment();
+        if edit != Segment::new() {
+            out.push(PipelinePacket::Segment(edit)).await?;
         }
         let selected = core::slice::from_ref(video);
         let samples = if find_box(&self.buffer, b"moof").is_some() {

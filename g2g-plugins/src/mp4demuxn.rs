@@ -322,11 +322,12 @@ pub struct Mp4DemuxN {
     // a fragment's moof waits for its mdat, then the whole fragment emits at once
     held_fragment_ns: Vec<Option<u64>>,
     /// The last `Segment` from upstream, re-sent per port with that port's
-    /// [`port_start_ns`](Self::port_start_ns) applied.
+    /// [`port_edit`](Self::port_edit) applied.
     upstream_segment: Segment,
-    /// Per port, where the track's presentation starts (ns): an audio edit
-    /// list's priming trim, `0` when none or not yet known.
-    port_start_ns: Vec<u64>,
+    /// Per port, the stream time the track's edit list presents: an audio edit
+    /// list's priming trim, a video edit's start and stop, open when none or not
+    /// yet known.
+    port_edit: Vec<Segment>,
 }
 
 // no real fragment runs this long
@@ -343,7 +344,7 @@ impl Mp4DemuxN {
         let announced = alloc::vec![false; ports.len()];
         let need_config = alloc::vec![true; ports.len()];
         let held_fragment_ns = alloc::vec![None; ports.len()];
-        let port_start_ns = alloc::vec![0; ports.len()];
+        let port_edit = alloc::vec![Segment::new(); ports.len()];
         Self {
             buf: Vec::new(),
             tracks: None,
@@ -361,7 +362,7 @@ impl Mp4DemuxN {
             emitted: 0,
             held_fragment_ns,
             upstream_segment: Segment::new(),
-            port_start_ns,
+            port_edit,
         }
     }
 
@@ -696,11 +697,17 @@ impl Mp4DemuxN {
         }
     }
 
-    /// The upstream segment as port `port` sees it: starting no earlier than
-    /// its track's presentation start, so the priming before it is clipped.
+    /// The upstream segment as port `port` sees it: within its track's
+    /// presentation, so the priming before it and the frames an edit cuts are
+    /// clipped.
     fn port_segment(&self, port: usize) -> Segment {
         let mut seg = self.upstream_segment;
-        seg.start = seg.start.max(self.port_start_ns[port]);
+        let edit = self.port_edit[port];
+        seg.start = seg.start.max(edit.start);
+        seg.stop = match (seg.stop, edit.stop) {
+            (Some(upstream), Some(edit)) => Some(upstream.min(edit)),
+            (upstream, edit) => upstream.or(edit),
+        };
         seg
     }
 
@@ -773,20 +780,28 @@ impl Mp4DemuxN {
                 // presentation: the segment starts past it, so sinks clip it and
                 // a remux writes it back as an edit list. Opus is left out: its
                 // pre-skip rides in the `OpusHead`, which `OpusDec` already trims.
+                // A video edit keeps its stop, which the video decoder applies.
                 let track = tracks.iter().find(|t| t.track_id == track_id);
-                let start_ns = match track {
+                let edit = match track {
                     Some(
                         t @ TrackHeader {
                             kind: TrackKind::Audio { format, .. },
                             ..
                         },
-                    ) if *format != AudioFormat::Opus && t.media_start > 0 => {
-                        t.media_start.saturating_mul(1_000_000_000) / u64::from(t.timescale)
-                    }
-                    _ => 0,
+                    ) if *format != AudioFormat::Opus => Segment {
+                        stop: None,
+                        ..t.edit_segment()
+                    },
+                    Some(
+                        t @ TrackHeader {
+                            kind: TrackKind::Video { .. },
+                            ..
+                        },
+                    ) => t.edit_segment(),
+                    _ => Segment::new(),
                 };
-                if start_ns != self.port_start_ns[port] {
-                    self.port_start_ns[port] = start_ns;
+                if edit != self.port_edit[port] {
+                    self.port_edit[port] = edit;
                     out.push_to(port, PipelinePacket::Segment(self.port_segment(port)))
                         .await?;
                 }
