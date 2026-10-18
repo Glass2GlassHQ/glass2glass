@@ -50,11 +50,11 @@ fn auto_sniff_overrides_a_wrong_extension_at_parse_time() {
     );
 }
 
-/// Without `bytestream-format=auto`, the extension is trusted: the same `.ts` file
-/// types as MPEG-TS at parse time (no content sniff), which is why a mislabeled
-/// file needs `auto` (or an explicit format) to decode.
+/// Without `bytestream-format=auto`, a container extension is still checked
+/// against the file header: the same `.ts` file holds MP4 bytes, so it types as
+/// MP4 at parse time and `decodebin` plugs the right demuxer.
 #[test]
-fn extension_alone_is_trusted_without_auto() {
+fn a_wrong_container_extension_is_overridden_without_auto() {
     let path = write_temp("trusted", "ts", &ftyp_bytes());
     let mut fs = FileSrc::untyped();
     fs.set_property("location", PropValue::Str(path.to_str().unwrap().into()))
@@ -64,9 +64,9 @@ fn extension_alone_is_trusted_without_auto() {
     assert_eq!(
         caps,
         Ok(Some(Caps::ByteStream {
-            encoding: ByteStreamEncoding::MpegTs
+            encoding: ByteStreamEncoding::Mp4
         })),
-        "the .ts extension types as MPEG-TS without a content sniff"
+        "the file header beats the .ts extension"
     );
 }
 
