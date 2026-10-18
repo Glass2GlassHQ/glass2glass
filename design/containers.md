@@ -701,7 +701,9 @@ QuickTime PCM sample entries (`twos`, `sowt`, `raw `, `alaw`, `ulaw`, version
 read as AIFC's big-endian `NONE` and 8-bit `raw ` as unsigned. Their `stsz`
 counts single frames, often at size 1, so the demuxers size a frame from the
 format and channel count and emit one buffer per chunk, converted to the
-graph's little-endian, unsigned 8-bit layout. The rate comes from the sound
+graph's little-endian, unsigned 8-bit layout. A file cut short ends the track
+at the last whole frame before the cut, so a `stsz` count past the file size is
+clamped to it rather than refused. The rate comes from the sound
 description. MP3 rides `.mp3` or an `mp4a` whose esds names MPEG-1 or MPEG-2
 audio, and its frames pass unchanged. `qtdemux stream=` names the audio track
 by format (`aac`, `mp3`, `pcm-s16le`, `alaw`, ...).

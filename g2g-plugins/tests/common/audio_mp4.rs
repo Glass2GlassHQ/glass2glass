@@ -178,9 +178,38 @@ pub(crate) fn edited_quicktime_pcm_mov(
     frame_bytes: usize,
     edit: Option<AudioEdit>,
 ) -> Vec<u8> {
-    let ftyp = mp4_box(b"ftyp", b"qt  \0\0\0\0qt  ");
-    let mdat = mp4_box(b"mdat", &chunks.concat());
-    let mut offset = (ftyp.len() + 8) as u32;
+    let ftyp = quicktime_ftyp();
+    let first_chunk_at = ftyp.len() + 8;
+    let moov = quicktime_pcm_moov(sample_entry, chunks, frame_bytes, first_chunk_at, edit);
+    [ftyp, mp4_box(b"mdat", &chunks.concat()), moov].concat()
+}
+
+// as `quicktime_pcm_mov`, the moov ahead of the mdat so a cut keeps it
+pub(crate) fn moov_first_quicktime_pcm_mov(
+    sample_entry: &[u8],
+    chunks: &[Vec<u8>],
+    frame_bytes: usize,
+) -> Vec<u8> {
+    let ftyp = quicktime_ftyp();
+    // the chunk offsets do not change the moov's length
+    let moov_len = quicktime_pcm_moov(sample_entry, chunks, frame_bytes, 0, None).len();
+    let first_chunk_at = ftyp.len() + moov_len + 8;
+    let moov = quicktime_pcm_moov(sample_entry, chunks, frame_bytes, first_chunk_at, None);
+    [ftyp, moov, mp4_box(b"mdat", &chunks.concat())].concat()
+}
+
+fn quicktime_ftyp() -> Vec<u8> {
+    mp4_box(b"ftyp", b"qt  \0\0\0\0qt  ")
+}
+
+fn quicktime_pcm_moov(
+    sample_entry: &[u8],
+    chunks: &[Vec<u8>],
+    frame_bytes: usize,
+    first_chunk_at: usize,
+    edit: Option<AudioEdit>,
+) -> Vec<u8> {
+    let mut offset = first_chunk_at as u32;
     let mut stsc = vec![chunks.len() as u32];
     let mut stco = vec![chunks.len() as u32];
     for (index, chunk) in chunks.iter().enumerate() {
@@ -196,12 +225,7 @@ pub(crate) fn edited_quicktime_pcm_mov(
         full_box(b"stco", &table(&stco)),
     ]
     .concat();
-    [
-        ftyp,
-        mdat,
-        edited_audio_moov(sample_entry, &tables, &[], edit),
-    ]
-    .concat()
+    edited_audio_moov(sample_entry, &tables, &[], edit)
 }
 
 // a fragmented file with one sound track: ftyp, a moov with empty sample tables, then one moof + mdat

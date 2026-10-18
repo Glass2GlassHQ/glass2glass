@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1582: the mp4 demuxers read a truncated QuickTime PCM track up to the cut instead of refusing its frame count.
 - M1574: the mp4 demuxers end an audio track where its edit list ends, and cut raw PCM tracks to the edit themselves.
 - M1573: the mp4 demuxers apply every media edit of an edit list, cutting the media between edits, and skip a leading empty edit.
 - M1571: `avidemux` walks a `rec ` list only directly inside `movi`, so nested lists no longer overflow the stack.

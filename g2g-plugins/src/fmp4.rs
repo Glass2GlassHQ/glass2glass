@@ -1534,13 +1534,11 @@ fn parse_progressive_track(
     // that size (no table); otherwise a `sample_count`-long table follows.
     let stsz = find_box(stbl, b"stsz").ok_or(G2gError::CapsMismatch)?;
     let default_size = be32(stsz, 4)?;
-    let sample_count = be32(stsz, 8)? as usize;
-    // A sample needs at least one byte of media data, so the count cannot exceed
-    // the file size. Reject a lying stsz before the per-sample allocations below
-    // (the default_size branch fills the Vec, committing physical pages).
-    if sample_count > data.len() {
-        return Err(G2gError::CapsMismatch);
-    }
+    // A sample needs at least one byte of media data, so no sample past the
+    // file size is ever read, whether the stsz lies or the file was cut short.
+    // Clamp before the per-sample allocations below (the default_size branch
+    // fills the Vec, committing physical pages).
+    let sample_count = (be32(stsz, 8)? as usize).min(data.len());
     let sizes: Vec<u32> = if let SampleFraming::Pcm(pcm) = framing {
         let frame_bytes = u32::try_from(pcm.frame_bytes).map_err(|_| G2gError::CapsMismatch)?;
         alloc::vec![frame_bytes; sample_count]
