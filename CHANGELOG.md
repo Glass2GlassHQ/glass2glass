@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1561: `ac3parse`, `aacparse` and `mpegaudioparse` stamp each frame with its own chunk's demuxer time when frames arrive one per chunk, so the segment clip no longer drops transport-stream audio.
 - M1560: `tsdemux` and `mpegpsdemux` open the stream at the first DTS, so the open-GOP B frames ahead of the first I frame stay in the segment.
 - M1559: `tsdemux` forwards only the first PMT stream of the selected codec, and a `TsDemuxN` selection picks one of several tracks of a codec.
 - M1558: the mp4 demuxers read negative version 0 `ctts` and `trun` offsets as signed, so the segment clip no longer drops every other frame of those files.

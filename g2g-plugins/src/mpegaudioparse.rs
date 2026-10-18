@@ -39,10 +39,9 @@ use g2g_core::{
 use crate::audioframe::{
     is_vbr_header_frame, locate_frame, mpa_header, Located, MpaHeader, MpaLayer,
 };
+use crate::frame_clock::FrameClock;
 use crate::id3::{id3v2_len, parse_id3v1, parse_id3v2, ID3V1_LEN, ID3V2_HEADER_LEN};
-
-/// Nanoseconds per second, the presentation-time unit.
-const NS_PER_SECOND: u128 = 1_000_000_000;
+use g2g_core::time::ticks_to_ns;
 
 /// The largest ID3v2 tag whose text frames are read. A tag is skipped whatever
 /// its size, but reading one means holding it whole, and a tag past this is
@@ -74,12 +73,7 @@ pub struct MpegAudioParse {
     /// first) is looked for once.
     first_frame_seen: bool,
     last_caps: Option<Caps>,
-    /// Samples emitted since the last time base, the presentation-time counter.
-    samples: u64,
-    base_ns: u64,
-    /// A presentation time from upstream and the stream offset its buffer began
-    /// at, applied to the first frame that starts at or past it.
-    pending_rebase: Option<(u64, u64)>,
+    clock: FrameClock,
     sequence: u64,
     log_name: LogName,
 }
@@ -228,18 +222,11 @@ impl MpegAudioParse {
             out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
             self.last_caps = Some(caps);
         }
-        if let Some((at, pts_ns)) = self.pending_rebase {
-            if start_offset >= at {
-                self.base_ns = pts_ns;
-                self.samples = 0;
-                self.pending_rebase = None;
-            }
-        }
-        let rate = u128::from(header.sample_rate);
-        let ns = |samples: u64| (u128::from(samples) * NS_PER_SECOND / rate) as u64;
-        let pts_ns = self.base_ns + ns(self.samples);
-        let duration_ns = ns(u64::from(header.samples_per_frame));
-        self.samples += u64::from(header.samples_per_frame);
+        let frame_samples = u64::from(header.samples_per_frame);
+        let pts_ns = self
+            .clock
+            .frame_pts(start_offset, frame_samples, header.sample_rate);
+        let duration_ns = ticks_to_ns(frame_samples, header.sample_rate);
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
             FrameTiming {
@@ -334,7 +321,11 @@ impl AsyncElement for MpegAudioParse {
                     // A byte source stamps every chunk 0, so only a real time
                     // (a demuxer's) re-bases the counter.
                     if let Some(pts) = frame.timing.pts().filter(|pts| *pts != 0) {
-                        self.pending_rebase = Some((self.buf_offset + self.buf.len() as u64, pts));
+                        self.clock.note_chunk(
+                            self.buf_offset,
+                            self.buf_offset + self.buf.len() as u64,
+                            pts,
+                        );
                     }
                     self.buf.extend_from_slice(slice);
                     self.drain(false, out).await?;
@@ -348,7 +339,7 @@ impl AsyncElement for MpegAudioParse {
                 }
                 PipelinePacket::Flush => {
                     self.buf.clear();
-                    self.pending_rebase = None;
+                    self.clock.clear_pending();
                     out.push(PipelinePacket::Flush).await?;
                 }
                 // The refined caps this element emits replace the upstream
@@ -519,7 +510,7 @@ mod tests {
         // An MPEG-1 Layer III frame is 1152 samples. The presentation time comes
         // off the running sample count, not a sum of rounded durations.
         const SAMPLES_PER_FRAME: u64 = 1152;
-        let pts = |frames: u64| frames * SAMPLES_PER_FRAME * NS_PER_SECOND as u64 / FRAME_RATE_HZ;
+        let pts = |frames: u64| ticks_to_ns(frames * SAMPLES_PER_FRAME, FRAME_RATE_HZ as u32);
         let duration = pts(1);
         let times: Vec<(u64, u64)> = sink
             .frames()

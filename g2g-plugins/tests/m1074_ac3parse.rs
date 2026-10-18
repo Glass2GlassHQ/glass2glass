@@ -20,6 +20,7 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{
     is_raw_audio, parse_launch, run_graph, ElementFactory, GraphNode, Registry,
 };
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     G2gError, Graph, OutputSink, PadTemplate, PadTemplates, PipelineClock, PushOutcome,
@@ -46,8 +47,6 @@ const AC3_SAMPLES_PER_FRAME: u64 = 1536;
 /// Bytes per input buffer when a parser is driven directly: an odd size, so
 /// frames straddle buffer boundaries the way `filesrc` chunks make them.
 const CHUNK_LEN: usize = 997;
-
-const NS_PER_SECOND: u64 = 1_000_000_000;
 
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -125,7 +124,7 @@ async fn launch_frames(name: &str, parser: &str) -> u64 {
 /// Every frame's presentation time is one frame duration past the one before it,
 /// and the parsed timeline spans the probed duration.
 fn assert_timeline(sink: &CaptureSink, probe: &Probe, samples_per_frame: u64) {
-    let step = |frames: u64| samples_per_frame * frames * NS_PER_SECOND / probe.sample_rate as u64;
+    let step = |frames: u64| ticks_to_ns(samples_per_frame * frames, probe.sample_rate);
     let times: Vec<u64> = sink.frames.iter().map(|f| f.timing.pts_ns).collect();
     assert_eq!(times, (0..times.len() as u64).map(step).collect::<Vec<_>>());
     let last = sink.frames.last().expect("frames").timing;
