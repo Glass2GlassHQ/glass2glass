@@ -1963,6 +1963,40 @@ pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams
     })
 }
 
+/// Bare-`decodebin` primary-stream hook for FLV: the FLV sibling of
+/// [`ts_primary_stream`]. [`FlvDemux`](crate::flvdemux::FlvDemux) defaults to its
+/// H.264 port, so a VP6, Sorenson or audio-only FLV would plug a decoder that
+/// never receives a frame. Lists a `flvdemux stream=` selection for each codec
+/// the file's tags carry, video first. Declines a non-FLV file and one with no
+/// readable tag.
+#[cfg(feature = "std")]
+pub fn flv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
+    if !matches!(
+        caps,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Flv
+        }
+    ) {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    let streams: Vec<PrimaryStream> = crate::flvdemux::forwardable_streams(&prefix)
+        .into_iter()
+        .map(|(stream, caps)| PrimaryStream {
+            demux: "flvdemux",
+            props: stream_selection(crate::flvdemux::flv_stream_to_str(stream)),
+            caps,
+        })
+        .collect();
+    if streams.is_empty() {
+        return None;
+    }
+    Some(ContainerStreams {
+        streams,
+        unsupported: Vec::new(),
+    })
+}
+
 /// Bare-`decodebin` primary-stream hook for MP4 (M748): the MP4 sibling of
 /// [`ts_primary_stream`]. Lists the file's streams as selections on the
 /// single-stream [`Mp4Demux`](crate::mp4demux::Mp4Demux): each video track with

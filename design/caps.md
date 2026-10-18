@@ -751,7 +751,10 @@ audio (`stream=mp2`, PMT types 0x03/0x04), Opus (`stream=opus`, a private
 unwrapped to raw packets by the demux), and AC-3 (`stream=ac3`, ATSC 0x81 or a
 DVB 0x06 with an AC-3 descriptor). An `mkv_primary_stream` sibling covers
 audio-only Matroska (AAC / Opus / AC-3 / FLAC; FLAC's `CodecPrivate` is
-forwarded in-band ahead of the first frame as decoder extradata).
+forwarded in-band ahead of the first frame as decoder extradata). An
+`flv_primary_stream` sibling lists a `flvdemux stream=` selection for each codec
+the FLV's tags carry, so a VP6 or Sorenson FLV does not plug the default H.264
+port.
 
 - **playbin / uridecodebin** (`std`). `Registry::build_playbin(source_name,
   sink, target, max_depth)` assembles a complete `source → chain → sink` graph
