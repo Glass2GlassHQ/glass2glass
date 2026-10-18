@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1575: `flacparse` passes a chained Ogg-FLAC file through to its last link, so `decodebin` decodes every link.
 - M1571: `avidemux` walks a `rec ` list only directly inside `movi`, so nested lists no longer overflow the stack.
 - M1570: `mjpegdec` decodes a frame that carries no Huffman tables with the ITU-T T.81 Annex K defaults, as AVI motion JPEG expects.
 - M1569: a bare `decodebin` plugs `mulawdec` and `alawdec` for a mu-law or A-law AVI audio stream.

@@ -588,9 +588,12 @@ beginning-of-stream page per logical bitstream before any other page, RFC 3533
 §4, and the parser keeps an `OggLogicalStream` for each with its own codec
 mapping, headers, packets and granule anchors. A serial joins only from a page
 in that opening block, or as the first stream seen when the file was joined
-mid-stream, which a byte-seek does. A beginning-of-stream page arriving later,
-meaning a chained physical stream, is ignored rather than misparsed. The
-concurrent stream count is capped, since the serials come from the file.
+mid-stream, which a byte-seek does. A beginning-of-stream page after the
+group's end opens a chained physical stream, which continues on the same pad
+behind a `Segment` and its own in-band codec headers. `flacparse` ends the
+previous link's last frame at that `Segment` and forwards the new `fLaC`
+header. The concurrent stream count is capped, since the serials come from the
+file.
 
 `OggDemux` forwards the first bitstream whose codec matches its `stream`
 selection and drains the rest. `OggDemuxN` is the multi-output form, one port
