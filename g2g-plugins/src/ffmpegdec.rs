@@ -127,7 +127,7 @@ use g2g_core::{
     ConfigureOutcome, CudaKeepAlive, Dim, ElementMetadata, FrameTiming, G2gError, HardwareError,
     Interlace, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
     PooledBuffer, PropError, PropKind, PropValue, PropertySpec, PushOutcome, QosMessage, Rate,
-    RawVideoFormat, VideoCodec,
+    RawVideoFormat, Segment, VideoCodec,
 };
 
 /// Cap on pending input-pts -> arrival entries, so frames the decoder drops
@@ -535,6 +535,8 @@ pub struct FfmpegVideoDec {
     /// at rate stops paying the kernel's page-zeroing on a fresh multi-megabyte
     /// allocation per frame.
     pack_pool: PackPool,
+    // pictures outside the last upstream segment are decoded but not pushed
+    segment: Segment,
     log_name: LogName,
 }
 
@@ -594,6 +596,7 @@ impl FfmpegVideoDec {
             skipping_nonref: false,
             qos_skipped: 0,
             pack_pool: PackPool::default(),
+            segment: Segment::new(),
             log_name: LogName::default(),
         }
     }
@@ -1805,6 +1808,7 @@ impl AsyncElement for FfmpegVideoDec {
                     undecodable = self.drain_eos(&mut decoded)?;
                 }
                 PipelinePacket::Segment(seg) => {
+                    self.segment = seg;
                     self.push_downstream(out, PipelinePacket::Segment(seg))
                         .await?;
                 }
@@ -1832,6 +1836,9 @@ impl AsyncElement for FfmpegVideoDec {
                 _ => g2g_core::Colorimetry::UNKNOWN,
             };
             for d in decoded {
+                if !presented_in(&self.segment, d.pts_ns) {
+                    continue;
+                }
                 self.saw_interlaced |= d.interlaced;
                 // `Any` (not `Progressive`) until the latch trips: it equals the
                 // runner's pre-fixed output caps, so a progressive stream causes
@@ -1918,6 +1925,11 @@ impl AsyncElement for FfmpegVideoDec {
             Ok(())
         })
     }
+}
+
+// the stop is exclusive, like an edit list's end
+fn presented_in(segment: &Segment, pts_ns: u64) -> bool {
+    pts_ns >= segment.start && segment.stop.is_none_or(|stop| pts_ns < stop)
 }
 
 /// Single source of truth for the decoder's output-side caps derivation.

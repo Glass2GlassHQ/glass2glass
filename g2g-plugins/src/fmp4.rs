@@ -16,7 +16,7 @@ use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::time::ticks_to_ns;
 
 use g2g_core::{
-    AudioFormat, Chapter, ClosedCaptionFormat, G2gError, TagList, TextFormat, VideoCodec,
+    AudioFormat, Chapter, ClosedCaptionFormat, G2gError, Segment, TagList, TextFormat, VideoCodec,
 };
 
 use crate::annexb::au_is_keyframe;
@@ -358,9 +358,24 @@ pub(crate) struct TrackHeader {
     /// 1024-sample priming. `0` when there is no edit list or it does not start
     /// with a media edit.
     pub(crate) media_start: u64,
+    // timescale ticks, exclusive: the end of the elst's only edit
+    pub(crate) media_stop: Option<u64>,
     /// The `mvex/trex` default sample duration and size, `0` when not declared,
     /// which a fragment falls back to when its `tfhd` declares neither.
     pub(crate) trex_defaults: (u32, u32),
+}
+
+impl TrackHeader {
+    // the stream time the edit list presents
+    pub(crate) fn edit_segment(&self) -> Segment {
+        Segment {
+            start: ticks_to_ns(self.media_start, self.timescale),
+            stop: self
+                .media_stop
+                .map(|stop| ticks_to_ns(stop, self.timescale)),
+            ..Segment::new()
+        }
+    }
 }
 
 /// Parse every forwardable (`vide` / `soun` / timed-text) track out of a `moov`
@@ -373,6 +388,10 @@ pub(crate) struct TrackHeader {
 /// forwardable.
 pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError> {
     let moov = find_box(data, b"moov").ok_or(G2gError::CapsMismatch)?;
+    // mvhd lays out its version and timescale the way mdhd does
+    let movie_timescale = find_box(moov, b"mvhd")
+        .and_then(|mvhd| read_mdhd(mvhd).ok())
+        .map(|header| header.timescale);
     let mut tracks = Vec::new();
     for (kind, trak) in boxes(moov) {
         if kind != b"trak" {
@@ -380,6 +399,8 @@ pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError
         }
         if let Some(mut header) = parse_trak(trak)? {
             header.trex_defaults = trex_defaults(moov, header.track_id);
+            header.media_stop =
+                movie_timescale.and_then(|movie| edit_media_stop(trak, movie, header.timescale));
             tracks.push(header);
         }
     }
@@ -443,6 +464,7 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         cenc: cenc_track(cenc, stbl)?,
         tags: parse_ilst_tags(trak),
         media_start: edit_media_start(trak),
+        media_stop: None,
         trex_defaults: (0, 0),
     }))
 }
@@ -474,21 +496,53 @@ fn trex_defaults(moov: &[u8], track_id: u32) -> (u32, u32) {
 /// presentation delay, not a trim), or a malformed box: the edit list is
 /// untrusted, so anything unreadable falls back to presenting from the start.
 fn edit_media_start(trak: &[u8]) -> u64 {
-    let Some(elst) = find_path(trak, &[b"edts", b"elst"]) else {
-        return 0;
-    };
-    let entry_count = be32(elst, 4).unwrap_or(0);
-    if entry_count == 0 {
-        return 0;
+    first_edit(trak)
+        .map(|edit| edit.media_time)
+        .filter(|&t| t > 0)
+        .map_or(0, |t| t as u64)
+}
+
+// a zero segment_duration is a fragmented file's "until the end"
+fn edit_media_stop(trak: &[u8], movie_timescale: u32, media_timescale: u32) -> Option<u64> {
+    let edit = first_edit(trak).filter(|edit| edit.entry_count == 1)?;
+    let media_time = u64::try_from(edit.media_time).ok()?;
+    if edit.segment_duration == 0 {
+        return None;
     }
+    // segment_duration counts movie ticks, rounded to the nearest media tick
+    let duration = (u128::from(edit.segment_duration) * u128::from(media_timescale)
+        + u128::from(movie_timescale / 2))
+    .checked_div(u128::from(movie_timescale))?;
+    media_time.checked_add(u64::try_from(duration).ok()?)
+}
+
+#[derive(Debug)]
+struct FirstEdit {
+    entry_count: u32,
+    // movie timescale ticks
+    segment_duration: u64,
+    // media timescale ticks, -1 for an empty edit
+    media_time: i64,
+}
+
+fn first_edit(trak: &[u8]) -> Option<FirstEdit> {
+    let elst = find_path(trak, &[b"edts", b"elst"])?;
+    let entry_count = be32(elst, 4).ok().filter(|&count| count > 0)?;
     // v0: u32 segment_duration + i32 media_time; v1: u64 + i64. The entries
     // start after version/flags (4) and entry_count (4).
-    let media_time = match elst.first() {
-        Some(0) => be32(elst, 12).map(|t| i64::from(t as i32)),
-        Some(1) => be64(elst, 16).map(|t| t as i64),
-        _ => return 0,
+    let (segment_duration, media_time) = match elst.first() {
+        Some(0) => (
+            u64::from(be32(elst, 8).ok()?),
+            i64::from(be32(elst, 12).ok()? as i32),
+        ),
+        Some(1) => (be64(elst, 8).ok()?, be64(elst, 16).ok()? as i64),
+        _ => return None,
     };
-    media_time.ok().filter(|&t| t > 0).map_or(0, |t| t as u64)
+    Some(FirstEdit {
+        entry_count,
+        segment_duration,
+        media_time,
+    })
 }
 
 /// The out-of-band config from an `av01` sample entry's `av1C` record (M779):
@@ -1910,6 +1964,37 @@ mod tests {
         assert_eq!(edit_media_start(&trak_with_elst(0, 0, &[])), 0);
         assert_eq!(edit_media_start(&trak_with_elst(0, 1, &[0, 0, 1])), 0);
         assert_eq!(edit_media_start(&trak_with_elst(2, 1, &[0; 20])), 0);
+    }
+
+    #[test]
+    fn edit_media_stop_ends_the_only_media_edit() {
+        const MOVIE_TIMESCALE: u32 = 1000;
+        const MEDIA_TIMESCALE: u32 = 12_800;
+        let edit = |duration: u32, media_time: u32| {
+            [
+                duration.to_be_bytes(),
+                media_time.to_be_bytes(),
+                0x0001_0000u32.to_be_bytes(),
+            ]
+            .concat()
+        };
+        let stop = |trak: &[u8]| edit_media_stop(trak, MOVIE_TIMESCALE, MEDIA_TIMESCALE);
+        // 710 ms is 9088 media ticks past the edit's start
+        assert_eq!(stop(&trak_with_elst(0, 1, &edit(710, 3584))), Some(12_672));
+        assert_eq!(stop(&[]), None, "no edit list");
+        assert_eq!(stop(&trak_with_elst(0, 1, &edit(0, 3584))), None, "open");
+        assert_eq!(
+            stop(&trak_with_elst(0, 1, &edit(710, u32::MAX))),
+            None,
+            "an empty edit"
+        );
+        let two_edits = [edit(710, 3584), edit(710, 0)].concat();
+        assert_eq!(stop(&trak_with_elst(0, 2, &two_edits)), None);
+        assert_eq!(
+            edit_media_stop(&trak_with_elst(0, 1, &edit(710, 3584)), 0, MEDIA_TIMESCALE),
+            None,
+            "a zero movie timescale"
+        );
     }
     use alloc::vec;
 
