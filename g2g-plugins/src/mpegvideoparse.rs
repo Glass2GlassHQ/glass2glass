@@ -19,11 +19,11 @@ use crate::access_unit::StartCodeRole;
 use crate::startcodeparse::{StartCodeCodec, StartCodeParse, VideoGeometry, PIXEL_ASPECT_PROPERTY};
 
 /// `sequence_header_code`: the sequence header that carries the geometry.
-const SEQUENCE_HEADER_CODE: u8 = 0xB3;
+pub(crate) const SEQUENCE_HEADER_CODE: u8 = 0xB3;
 /// `group_start_code`: the GOP header, which only ever leads an I-picture.
 const GROUP_START_CODE: u8 = 0xB8;
 /// `picture_start_code`: the coded picture itself.
-const PICTURE_START_CODE: u8 = 0x00;
+pub(crate) const PICTURE_START_CODE: u8 = 0x00;
 
 /// MPEG-1 / MPEG-2 video parser.
 ///

@@ -103,6 +103,9 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
     if sniff_mpeg4_visual(header) {
         return Some(elementary_video_caps(VideoCodec::Mpeg4Part2));
     }
+    if sniff_mpeg_video(header) {
+        return Some(elementary_video_caps(VideoCodec::Mpeg2));
+    }
     if crate::av1parse::opens_obu_stream(header) {
         return Some(elementary_video_caps(VideoCodec::Av1));
     }
@@ -540,6 +543,19 @@ fn sniff_mpeg4_visual(header: &[u8]) -> bool {
     let object_opens = VIDEO_OBJECT_START_CODES.contains(&code)
         && VIDEO_OBJECT_LAYER_START_CODES.contains(&next_code);
     sequence_opens || object_opens
+}
+
+// an MPEG-1/2 video elementary stream opens on a sequence header and a picture follows it
+fn sniff_mpeg_video(header: &[u8]) -> bool {
+    use crate::mpegvideoparse::{PICTURE_START_CODE, SEQUENCE_HEADER_CODE};
+    let Some(first) = opening_start_code(header).and_then(|at| find_start_code(header, at)) else {
+        return false;
+    };
+    let sequence_header = header.get(first) == Some(&SEQUENCE_HEADER_CODE)
+        && crate::mpeg2video::parse_sequence_header(&header[first - START_CODE_LEN..]).is_some();
+    sequence_header
+        && core::iter::successors(Some(first), |&at| find_start_code(header, at))
+            .any(|at| header.get(at) == Some(&PICTURE_START_CODE))
 }
 
 // the codec of content g2g recognizes but cannot decode: JPEG-LS and MxPEG open like a JPEG
@@ -1282,5 +1298,29 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(sniff(&data), Some(ByteStreamEncoding::Matroska));
+    }
+
+    // a 352x288 25 fps sequence header, a GOP header, then a picture header and its first slice
+    fn mpeg_video_stream() -> Vec<u8> {
+        [
+            &[
+                0x00, 0x00, 0x01, 0xB3, 0x16, 0x01, 0x20, 0x13, 0xFF, 0xFF, 0xE0, 0x18,
+            ][..],
+            &[0x00, 0x00, 0x01, 0xB8, 0x00, 0x08, 0x00, 0x00],
+            &[0x00, 0x00, 0x01, 0x00, 0x00, 0x0F, 0xFF, 0xF8],
+            &[0x00, 0x00, 0x01, 0x01, 0x12, 0x34],
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn detects_an_mpeg_video_elementary_stream() {
+        let mpeg2 = Some(elementary_video_caps(VideoCodec::Mpeg2));
+        let stream = mpeg_video_stream();
+        assert_eq!(sniff_caps(&stream), mpeg2);
+        let stuffed = [vec![0; 8], stream.clone()].concat();
+        assert_eq!(sniff_caps(&stuffed), mpeg2);
+        let sequence_header_only = &stream[..12];
+        assert_eq!(sniff_caps(sequence_header_only), None);
     }
 }
