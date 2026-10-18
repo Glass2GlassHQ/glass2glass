@@ -841,6 +841,11 @@ shown rather than reading a table, and geometry comes from the video's own
 sequence header, `00 00 01 B3`, which the demuxer parses to fix the video caps
 via `CapsChanged`.
 
+A selection forwards only the first stream of its codec the parser has seen, so
+a second audio language never interleaves with the first. That is the stream
+ffmpeg's `-map 0:a:0` picks. A `PsDemuxN` stream selection names any one stream
+by its collection id. `TsDemux` follows the same rule in PMT order.
+
 ### Access unit reframing
 
 A PES payload is not an access unit. A program stream cuts its packets on sector

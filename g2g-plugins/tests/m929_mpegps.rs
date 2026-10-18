@@ -1249,6 +1249,86 @@ async fn the_fanout_declares_the_picture_it_holds_once_a_sequence_header_parses(
     );
 }
 
+fn data_frames(packets: &[PipelinePacket]) -> Vec<Vec<u8>> {
+    packets
+        .iter()
+        .filter_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(bytes(f)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Two MPEG audio streams never interleave on one output: the mp2 selection
+/// forwards the first one seen, as ffmpeg's `-map 0:a:0` does, and a fan-out
+/// selection picks the second.
+#[tokio::test]
+async fn one_of_two_mp2_streams_reaches_an_output() {
+    use g2g_core::bus::{Bus, BusHandle, BusMessage};
+    use g2g_core::runtime::StreamSelectController;
+    use g2g_core::StreamType;
+
+    const FIRST_AUDIO: u8 = 0xC0;
+    const SECOND_AUDIO: u8 = 0xC1;
+    let first = mp2_frame(0x11);
+    let second = mp2_frame(0x22);
+    // a lead-in with no frame sync, so both streams are seen before either emits
+    let mut lead_in = Vec::new();
+    for id in [FIRST_AUDIO, SECOND_AUDIO] {
+        lead_in.extend_from_slice(&PACK);
+        lead_in.extend_from_slice(&pes(id, None, &[0u8; 8]));
+    }
+    let mut frames = Vec::new();
+    for _ in 0..2 {
+        for (id, frame) in [(FIRST_AUDIO, &first), (SECOND_AUDIO, &second)] {
+            frames.extend_from_slice(&PACK);
+            frames.extend_from_slice(&pes(id, None, frame));
+        }
+    }
+    let file = [lead_in.clone(), frames.clone()].concat();
+
+    let sink = demux(&file, PsStream::Mp2).await;
+    let emitted: Vec<Vec<u8>> = sink.frames().iter().map(|f| bytes(f)).collect();
+    assert_eq!(
+        emitted,
+        vec![first.clone(), first.clone()],
+        "default: first"
+    );
+
+    let (bus, handle): (Bus, BusHandle) = Bus::new(16);
+    let select = StreamSelectController::new();
+    let mut el = PsDemuxN::new(vec![PsStream::Mp2])
+        .with_bus(handle)
+        .with_stream_select(select.clone());
+    el.configure_pipeline(&ps_caps()).expect("configure");
+    let mut tap = PortTap::new(1);
+    el.process(data_frame(lead_in), &mut tap)
+        .await
+        .expect("demux the lead-in");
+    let mut audio_ids = Vec::new();
+    while let Some(message) = bus.try_recv() {
+        if let BusMessage::StreamCollection(c) = message {
+            audio_ids = c
+                .streams_of_type(StreamType::Audio)
+                .map(|s| s.id.clone())
+                .collect();
+        }
+    }
+    assert_eq!(audio_ids.len(), 2, "the collection names both streams");
+    select.select(vec![audio_ids[1].clone()]);
+    el.process(data_frame(frames), &mut tap)
+        .await
+        .expect("demux the frames");
+    el.process(PipelinePacket::Eos, &mut tap)
+        .await
+        .expect("flush");
+    assert_eq!(
+        data_frames(&tap.ports[0]),
+        vec![second.clone(), second],
+        "selected: second"
+    );
+}
+
 /// M931: `playbin uri=file.vob` on a disc with a subpicture track builds the
 /// compositing overlay graph, and a disc without one builds the plain A/V
 /// fan-out. Needs a decoder for the video, so it runs under the `ffmpeg` feature.
@@ -1553,6 +1633,23 @@ fn video_unit(w: u32, h: u32, coding_type: u8) -> Vec<u8> {
     ]);
     out.extend_from_slice(&[0x42u8; 64]);
     out
+}
+
+const MP2_BITRATE_INDEX_64K: u8 = 4;
+const MP2_RATE_INDEX_48000: u8 = 1;
+// 144 * 64000 / 48000 bytes for a Layer II frame without padding
+const MP2_64K_48000_LEN: usize = 192;
+
+/// One MPEG-1 Layer II frame at 64 kbit/s / 48 kHz, its payload filled with `fill`.
+fn mp2_frame(fill: u8) -> Vec<u8> {
+    let mut frame = Vec::from([
+        0xFF,
+        0xFD, // sync, MPEG-1, Layer II, no CRC
+        (MP2_BITRATE_INDEX_64K << 4) | (MP2_RATE_INDEX_48000 << 2),
+        0x00,
+    ]);
+    frame.resize(MP2_64K_48000_LEN, fill);
+    frame
 }
 
 /// One `private_stream_1` PES packet on a subpicture substream.

@@ -1134,7 +1134,7 @@ impl PsDemux {
                 stream_id: u.stream_id,
                 substream_id: u.substream_id,
             };
-            if es.kind() != Some(self.stream) {
+            if first_stream_of_kind(&self.demux, self.stream) != Some(es) {
                 continue; // a stream other than the selected one
             }
             let pts_ns = ns_from_90khz(u.pts_90khz).unwrap_or(0);
@@ -1213,13 +1213,20 @@ fn stream_id(es: &PsElementaryStream) -> alloc::string::String {
     }
 }
 
-/// Resolve a collection stream id back to the selection that carries it.
-fn resolve_ps_stream_id(demux: &PsDemuxer, id: &str) -> Option<PsStream> {
+/// Resolve a collection stream id back to its stream and the selection that
+/// carries it.
+fn resolve_ps_stream_id(demux: &PsDemuxer, id: &str) -> Option<(PsElementaryStream, PsStream)> {
+    let es = demux.streams().iter().find(|es| stream_id(es) == id)?;
+    Some((*es, es.kind()?))
+}
+
+// in discovery order, so several tracks of one codec (languages) never interleave on one output
+fn first_stream_of_kind(demux: &PsDemuxer, stream: PsStream) -> Option<PsElementaryStream> {
     demux
         .streams()
         .iter()
-        .find(|es| stream_id(es) == id)
-        .and_then(|es| es.kind())
+        .copied()
+        .find(|es| es.kind() == Some(stream))
 }
 
 /// Whether a unit begins an independently-decodable point. An MPEG video access
@@ -1485,6 +1492,7 @@ pub struct PsDemuxN {
     ports: Vec<PsStream>,
     /// Whether port `i` has emitted its opening `CapsChanged` yet.
     announced: Vec<bool>,
+    selected_streams: Vec<Option<PsElementaryStream>>,
     /// The geometry port `i` last announced, so a mid-stream change re-announces
     /// and an unchanged one does not.
     refined: Vec<Option<SequenceHeader>>,
@@ -1523,6 +1531,7 @@ impl PsDemuxN {
     pub fn new(ports: Vec<PsStream>) -> Self {
         assert!(!ports.is_empty(), "PsDemuxN needs at least one output port");
         let announced = alloc::vec![false; ports.len()];
+        let selected_streams = alloc::vec![None; ports.len()];
         let refined = alloc::vec![None; ports.len()];
         let segment_sent = alloc::vec![false; ports.len()];
         let config_sent = alloc::vec![false; ports.len()];
@@ -1530,6 +1539,7 @@ impl PsDemuxN {
             demux: PsDemuxer::new(),
             ports,
             announced,
+            selected_streams,
             refined,
             bus: None,
             collection_posted: false,
@@ -1584,11 +1594,12 @@ impl PsDemuxN {
         };
         let mut active = Vec::new();
         for (port, id) in ids.iter().enumerate().take(self.ports.len()) {
-            let Some(stream) = resolve_ps_stream_id(&self.demux, id) else {
+            let Some((es, stream)) = resolve_ps_stream_id(&self.demux, id) else {
                 continue;
             };
-            if self.ports[port] != stream {
+            if self.ports[port] != stream || self.selected_streams[port] != Some(es) {
                 self.ports[port] = stream;
+                self.selected_streams[port] = Some(es);
                 self.announced[port] = false; // re-emit caps for the new stream
                 self.refined[port] = None;
             }
@@ -1599,6 +1610,15 @@ impl PsDemuxN {
                 bus.try_post(BusMessage::StreamsSelected { ids: active });
             }
         }
+    }
+
+    // a port without an app-selected stream carries the first stream of its codec
+    fn port_for_stream(&self, es: PsElementaryStream) -> Option<usize> {
+        (0..self.ports.len()).position(|port| {
+            self.selected_streams[port]
+                .or_else(|| first_stream_of_kind(&self.demux, self.ports[port]))
+                == Some(es)
+        })
     }
 
     fn post_stream_collection(&mut self) {
@@ -1631,12 +1651,10 @@ impl PsDemuxN {
                 stream_id: u.stream_id,
                 substream_id: u.substream_id,
             };
-            let Some(kind) = es.kind() else {
-                continue;
-            };
-            let Some(port) = self.ports.iter().position(|&s| s == kind) else {
+            let Some(port) = self.port_for_stream(es) else {
                 continue; // a stream no selected port carries
             };
+            let kind = self.ports[port];
             let pts_ns = ns_from_90khz(u.pts_90khz).unwrap_or(0);
             let dts_ns = ns_from_90khz(u.dts_90khz).unwrap_or(pts_ns);
             if !self.announced[port] {
