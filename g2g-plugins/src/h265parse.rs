@@ -2183,6 +2183,52 @@ mod tests {
     }
 
     #[test]
+    fn inter_predicted_set_drops_a_picture_moved_onto_the_current_one() {
+        // deltaRps -4 moves S1[1] from 4 to 0, deltaRps +3 moves S0[1] from -3 to 0
+        let flags = [(true, true); 6];
+        let bytes = inter_predicted_rps(None, -4, &flags);
+        let (parsed, _) = parse_rps(&bytes, 1, 2, &[reference_set()]);
+        assert_eq!(
+            parsed,
+            (
+                vec![(-2, true), (-4, true), (-5, true), (-7, true)],
+                vec![(1, true)]
+            )
+        );
+        let bytes = inter_predicted_rps(None, 3, &flags);
+        let (parsed, _) = parse_rps(&bytes, 1, 2, &[reference_set()]);
+        assert_eq!(
+            parsed,
+            (
+                vec![],
+                vec![(2, true), (3, true), (5, true), (7, true), (8, true)]
+            )
+        );
+    }
+
+    #[test]
+    fn inter_predicted_set_moves_later_pictures_back_with_their_own_flags() {
+        // deltaRps -6 moves all of S1 {2, 4, 5} before the current picture
+        let flags = [
+            (true, true),
+            (false, false),
+            (true, true),
+            (false, true),
+            (false, true),
+            (true, true),
+        ];
+        let bytes = inter_predicted_rps(None, -6, &flags);
+        let (parsed, _) = parse_rps(&bytes, 1, 2, &[reference_set()]);
+        assert_eq!(
+            parsed,
+            (
+                vec![(-1, false), (-2, false), (-4, true), (-6, true), (-7, true)],
+                vec![]
+            )
+        );
+    }
+
+    #[test]
     fn slice_header_set_predicts_from_the_coded_reference_index() {
         // the slice's set sits at num_short_term_ref_pic_sets and names its reference
         let sets = [reference_set(), short_term_set(&[], &[])];
