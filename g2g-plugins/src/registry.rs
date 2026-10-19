@@ -1780,6 +1780,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_decodebin_select(crate::uridecodebin::mp4_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::ps_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::avi_decodebin_select);
+    reg.register_decodebin_select(crate::uridecodebin::ogg_decodebin_select);
     // Bare `filesrc location=X ! decodebin` primary-stream selection (M746): an
     // audio-only container's single-stream demux defaults to a video port; the hook
     // sniffs the file and selects the real (audio) stream instead.

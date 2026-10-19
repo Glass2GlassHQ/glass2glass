@@ -35,7 +35,7 @@ use crate::riff::{
     RIFF_HEADER_LEN,
 };
 use crate::waveformat::{
-    audio_format, format_tag_name, sample_frame_len, wave_format_tag, WaveFormatEx,
+    audio_format, format_tag_name, sample_frame_len, tagged_audio, wave_format_tag, WaveFormatEx,
 };
 
 /// The form type of the first `RIFF` list.
@@ -220,6 +220,30 @@ pub(crate) struct AviChunk {
     pub stream: usize,
     pub body: core::ops::Range<usize>,
     pub keyframe: bool,
+    // a `##pc` chunk, whose new palette entries apply from the stream's next chunk on
+    pub palette_change: bool,
+}
+
+// first entry, entry count and flags, then r, g, b and flags per entry
+const PALETTE_CHANGE_HEADER_LEN: usize = 4;
+const PALETTE_CHANGE_ENTRY_LEN: usize = 4;
+// avidec reads a longer `##pc` chunk as data
+const PALETTE_CHANGE_MAX_LEN: usize = PALETTE_CHANGE_HEADER_LEN + 256 * PALETTE_CHANGE_ENTRY_LEN;
+
+// the entries a `##pc` chunk replaces, a count of 0 meaning 256, none when the range wraps past entry 255 as in avidec
+pub(crate) fn palette_change(body: &[u8]) -> Vec<(u8, [u8; 3])> {
+    let (Some(&first), Some(&count)) = (body.first(), body.get(1)) else {
+        return Vec::new();
+    };
+    let last = first.wrapping_add(count).wrapping_sub(1);
+    let (entries, _) = body
+        .get(PALETTE_CHANGE_HEADER_LEN..)
+        .unwrap_or_default()
+        .as_chunks::<PALETTE_CHANGE_ENTRY_LEN>();
+    (first..=last)
+        .zip(entries)
+        .map(|(index, [r, g, b, _])| (index, [*r, *g, *b]))
+        .collect()
 }
 
 /// A parsed AVI file: its streams in `hdrl` order, its `movi` chunks in file
@@ -394,19 +418,6 @@ fn tagged_video(_compression: FourCc) -> Option<VideoCodec> {
     None
 }
 
-#[cfg(feature = "ffmpeg-long-tail")]
-fn tagged_audio(tag: u16) -> Option<AudioFormat> {
-    Some(AudioFormat::Tagged(g2g_core::CodecTag {
-        namespace: g2g_core::TagNamespace::Riff,
-        tag: u32::from(tag),
-    }))
-}
-
-#[cfg(not(feature = "ffmpeg-long-tail"))]
-fn tagged_audio(_tag: u16) -> Option<AudioFormat> {
-    None
-}
-
 /// An audio stream's format from its `WAVEFORMATEX`, plus the `cbSize` extra
 /// bytes (an AAC stream's `AudioSpecificConfig`), bounded by what the chunk
 /// actually holds rather than by the declared `cbSize`.
@@ -469,23 +480,25 @@ fn parse_info(data: &[u8], range: core::ops::Range<usize>) -> TagList {
 /// Collect the data chunks of one `LIST movi`, descending into the `LIST rec `
 /// groups an interleaved file wraps them in. Empty chunks are dropped: a writer
 /// emits them as padding and no decoder has anything to do with them. A data
-/// chunk cut short by the end of the file is dropped too.
+/// chunk cut short by the end of the file is dropped too, unless it belongs to a
+/// long-tail video stream.
 fn collect_movi(
     data: &[u8],
     range: core::ops::Range<usize>,
-    stream_count: usize,
+    streams: &[AviStream],
     out: &mut Vec<AviChunk>,
 ) {
     let mut walk = chunks_to_cut(data, range);
     while let Some(chunk) = walk.next() {
         if chunk.list_form(data) == Some(REC_FOURCC) {
-            collect_data_chunks(data, chunk.list_body(), stream_count, out);
+            collect_data_chunks(data, chunk.list_body(), streams, out);
             continue;
         }
         if walk.overran() {
+            push_cut_chunk(chunk, streams, out);
             break;
         }
-        push_data_chunk(chunk, stream_count, out);
+        push_data_chunk(chunk, streams.len(), out);
     }
 }
 
@@ -493,15 +506,34 @@ fn collect_movi(
 fn collect_data_chunks(
     data: &[u8],
     range: core::ops::Range<usize>,
-    stream_count: usize,
+    streams: &[AviStream],
     out: &mut Vec<AviChunk>,
 ) {
     let mut walk = chunks_to_cut(data, range);
     while let Some(chunk) = walk.next() {
         if walk.overran() {
+            push_cut_chunk(chunk, streams, out);
             break;
         }
-        push_data_chunk(chunk, stream_count, out);
+        push_data_chunk(chunk, streams.len(), out);
+    }
+}
+
+// libavcodec also decodes what remains of a cut long-tail video chunk, as ffmpeg does
+fn push_cut_chunk(chunk: Chunk, streams: &[AviStream], out: &mut Vec<AviChunk>) {
+    let tagged_video = chunk_stream_number(chunk.id)
+        .and_then(|stream| streams.get(stream))
+        .is_some_and(|stream| {
+            matches!(
+                stream.kind,
+                AviStreamKind::Video {
+                    codec: VideoCodec::Tagged(_),
+                    ..
+                }
+            )
+        });
+    if tagged_video {
+        push_data_chunk(chunk, streams.len(), out);
     }
 }
 
@@ -512,10 +544,12 @@ fn push_data_chunk(chunk: Chunk, stream_count: usize, out: &mut Vec<AviChunk>) {
     if stream >= stream_count || chunk.body.is_empty() {
         return;
     }
+    let palette_change = chunk.id[2..] == *b"pc" && chunk.body.len() <= PALETTE_CHANGE_MAX_LEN;
     out.push(AviChunk {
         stream,
         body: chunk.body,
         keyframe: false,
+        palette_change,
     });
 }
 
@@ -627,9 +661,8 @@ pub(crate) fn parse(data: &[u8]) -> Result<AviFile, G2gError> {
     if file.streams.is_empty() {
         return Err(G2gError::CapsMismatch);
     }
-    let stream_count = file.streams.len();
     for (_, range) in &movi_ranges {
-        collect_movi(data, range.clone(), stream_count, &mut file.chunks);
+        collect_movi(data, range.clone(), &file.streams, &mut file.chunks);
     }
     if let (Some(idx1), Some((form_offset, _))) = (idx1, movi_ranges.first()) {
         apply_idx1(
@@ -1199,6 +1232,26 @@ mod tests {
         assert_eq!(format, AudioFormat::Tagged(riff(0x0022)));
     }
 
+    #[cfg(feature = "ffmpeg-long-tail")]
+    #[test]
+    fn a_cut_long_tail_video_chunk_is_kept() {
+        let bytes = write_unmapped_codecs();
+        let whole = parse(&bytes).expect("the whole file parses");
+        let last_video = whole
+            .chunks
+            .iter()
+            .rev()
+            .find(|chunk| chunk.stream == 0)
+            .expect("a video chunk");
+        let cut = last_video.body.start + last_video.body.len() / 2;
+        let file = parse(&bytes[..cut]).expect("the cut file parses");
+        let kept = file.chunks.last().expect("the cut file keeps chunks");
+        assert_eq!(
+            (kept.stream, kept.body.clone()),
+            (0, last_video.body.start..cut)
+        );
+    }
+
     #[cfg(not(feature = "ffmpeg-long-tail"))]
     #[test]
     fn names_an_unmapped_codec_without_the_long_tail() {
@@ -1257,8 +1310,9 @@ mod tests {
         let top_level = data.len() + CHUNK_HEADER_LEN;
         put_chunk(&mut data, &video, &payload);
 
+        let streams = parse(&write_av()).expect("the file parses").streams;
         let mut out = Vec::new();
-        collect_movi(&data, 0..data.len(), 1, &mut out);
+        collect_movi(&data, 0..data.len(), &streams[..1], &mut out);
         let bodies: Vec<_> = out.iter().map(|chunk| chunk.body.clone()).collect();
         assert_eq!(bodies, vec![top_level..top_level + payload.len()]);
     }
@@ -1285,6 +1339,27 @@ mod tests {
                 assert_eq!(kept.keyframe, kept.stream == 0, "cut at {cut}");
             }
         }
+    }
+
+    #[test]
+    fn a_palette_change_reads_its_entries_like_avidec() {
+        let change = |first: u8, count: u8, entries: &[[u8; 4]]| {
+            let mut body = vec![first, count, 0, 0];
+            for entry in entries {
+                body.extend_from_slice(entry);
+            }
+            palette_change(&body)
+        };
+        assert_eq!(
+            change(5, 2, &[[1, 2, 3, 0], [4, 5, 6, 0]]),
+            vec![(5, [1, 2, 3]), (6, [4, 5, 6])]
+        );
+        const ALL_ENTRIES: usize = 256;
+        assert_eq!(
+            change(0, 0, &[[9, 9, 9, 0]; ALL_ENTRIES]).len(),
+            ALL_ENTRIES
+        );
+        assert!(change(200, 100, &[[1, 1, 1, 0]; 100]).is_empty());
     }
 
     #[test]

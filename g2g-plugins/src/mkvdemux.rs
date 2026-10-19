@@ -51,6 +51,7 @@ use g2g_core::{
     TextFormat, VideoCodec,
 };
 
+use crate::avidemux::pcm_alternatives;
 use crate::codectag::{tagged_stream_name, TaggedStream};
 
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
@@ -766,7 +767,11 @@ impl AsyncElement for MkvDemux {
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::Matroska,
-            } => CapsSet::one(Self::output_caps(stream)),
+            } => match stream {
+                // a lone rate and channel wildcard cannot fixate
+                MkvStream::Pcm(format) => CapsSet::from_alternatives(pcm_alternatives(format)),
+                _ => CapsSet::one(Self::output_caps(stream)),
+            },
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }

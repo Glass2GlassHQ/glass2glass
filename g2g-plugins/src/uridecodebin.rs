@@ -1844,11 +1844,12 @@ pub fn ogg_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, P
 }
 
 /// Probe an Ogg file and build an [`OggDemuxN`](crate::oggdemux::OggDemuxN) with
-/// one port per pad request (M790). `audio_k` / `video_k` (or a bare `d.`) picks
-/// the k-th logical bitstream of that kind in the grouped file. Declines a
-/// non-Ogg file or an unsatisfiable request.
+/// one port per pad request (M790), plus the per-port caps the `decodebin`
+/// fan-out plugs a decoder from (M1596). `audio_k` / `video_k` (or a bare `d.`)
+/// picks the k-th logical bitstream of that kind in the grouped file. Declines
+/// a non-Ogg file or an unsatisfiable request.
 #[cfg(feature = "std")]
-fn ogg_select(
+pub fn ogg_decodebin_select(
     location: &str,
     pads: &[PadRequest],
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
@@ -1871,7 +1872,11 @@ fn ogg_select(
         .collect();
     let sel = resolve_pads(&kinds, pads)?;
     let ports = sel.iter().map(|&k| streams[k].port).collect();
-    let caps: Vec<Caps> = sel.iter().map(|&k| streams[k].caps.clone()).collect();
+    // the placeholders the demux negotiates with, as `ogg_primary_stream` plugs from
+    let caps: Vec<Caps> = sel
+        .iter()
+        .map(|&k| crate::oggdemux::OggDemux::output_caps(streams[k].port.codec))
+        .collect();
     Some((Box::new(crate::oggdemux::OggDemuxN::new(ports)), caps))
 }
 
@@ -1884,7 +1889,7 @@ pub fn ogg_demux_select(
     pads: &[PadRequest],
 ) -> Option<Box<dyn DynMultiOutputElement>> {
     (name == "oggdemux")
-        .then(|| ogg_select(location, pads).map(|(d, _)| d))
+        .then(|| ogg_decodebin_select(location, pads).map(|(d, _)| d))
         .flatten()
 }
 
@@ -2159,7 +2164,7 @@ pub fn wav_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
         crate::wavparse::WavStream::Readable(caps) => ContainerStreams {
             streams: alloc::vec![PrimaryStream {
                 demux: "wavparse",
-                props: Vec::new(),
+                props: tagged_wav_selection(&caps),
                 caps,
             }],
             unsupported: Vec::new(),
@@ -2169,6 +2174,19 @@ pub fn wav_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             unsupported: alloc::vec![crate::waveformat::format_tag_name(tag)],
         },
     })
+}
+
+// a tagged WAV stream has wavparse negotiate its output as that codec
+#[cfg(feature = "std")]
+fn tagged_wav_selection(caps: &Caps) -> Vec<(alloc::string::String, alloc::string::String)> {
+    match caps {
+        Caps::Audio {
+            format: format @ g2g_core::AudioFormat::Tagged(_),
+            ..
+        } => crate::codectag::audio_stream_name(&[], *format)
+            .map_or_else(Vec::new, |name| stream_selection(&name)),
+        _ => Vec::new(),
+    }
 }
 
 pub fn ivf_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {

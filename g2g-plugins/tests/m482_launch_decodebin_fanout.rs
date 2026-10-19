@@ -155,3 +155,32 @@ async fn decodebin_name_fans_out_and_decodes_each_port() {
         kinds.len()
     );
 }
+
+#[cfg(feature = "vorbis")]
+#[tokio::test]
+async fn decodebin_fans_out_a_two_stream_ogg() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/two_vorbis_48000.ogg"
+    );
+    let reg = default_registry();
+    let line = format!(
+        "filesrc location={path} ! decodebin name=d  \
+         d.audio_0 ! audioconvert ! fakesink  d.audio_1 ! audioconvert ! fakesink"
+    );
+    let graph = parse_launch(&reg, &line)
+        .unwrap_or_else(|e| panic!("decodebin fan-out parses `{line}`: {e}"));
+    let vg = graph.finish().expect("valid graph");
+    let kinds: Vec<NodeKind> = vg.topo().iter().map(|&n| vg.kind(n)).collect();
+
+    assert!(
+        kinds.iter().any(|k| matches!(k, NodeKind::Tee(2))),
+        "decodebin built a 2-port fan-out demux: {kinds:?}"
+    );
+    // filesrc + demux + (decoder + convert + sink) per port
+    assert!(
+        kinds.len() >= 8,
+        "a decoder was spliced onto each port: {} nodes",
+        kinds.len()
+    );
+}

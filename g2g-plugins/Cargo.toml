@@ -350,7 +350,7 @@ ffmpeg = ["std", "dep:ffmpeg-next"]
 # The AVI, QuickTime / MP4 and Matroska demuxers forward a stream whose codec
 # g2g has no caps type for under its container tag, and the ffmpeg decoders open
 # whatever libavcodec decoder libavformat's tag tables name for it.
-ffmpeg-long-tail = ["ffmpeg"]
+ffmpeg-long-tail = ["ffmpeg", "metadata"]
 # V4L2 capture source (M90): V4l2Src streams YUYV (4:2:2) frames off a
 # /dev/videoN UVC device via mmap. Pulls the pure-Rust `v4l` crate (no libv4l C
 # dep); Linux-only, implies std. Blocking ioctls run on a dedicated capture

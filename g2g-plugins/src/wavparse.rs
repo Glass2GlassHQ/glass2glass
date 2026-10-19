@@ -19,6 +19,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
@@ -26,15 +27,16 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     pcm_formats, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ChannelLayout, ConfigureOutcome, ElementMetadata, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, ANY_CHANNELS,
-    ANY_SAMPLE_RATE,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
+use crate::codectag::{audio_from_stream_name, audio_stream_name};
 use crate::riff::{
     chunks, padded_len, read_fourcc, read_u16, read_u32, CHUNK_HEADER_LEN, FOURCC_LEN, RIFF_FOURCC,
     RIFF_HEADER_LEN,
 };
-use crate::waveformat::{audio_format, sample_frame_len};
+use crate::waveformat::{audio_format, sample_frame_len, tagged_audio};
 
 /// The fields of a `fmt ` chunk this reads: tag, channels, rate, byte rate,
 /// block align, bit depth.
@@ -68,6 +70,7 @@ struct WaveFormat {
     /// `nAvgBytesPerSec`, what the `data` chunk length divides by to give the
     /// stream's duration. `0` when the file declares none.
     byte_rate: u32,
+    block_align: u16,
 }
 
 /// The coded payloads this reads beside PCM.
@@ -104,6 +107,7 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
     let channels = read_u16(body, 2)?;
     let sample_rate = read_u32(body, 4)?;
     let byte_rate = read_u32(body, 8)?;
+    let block_align = read_u16(body, BLOCK_ALIGN_OFFSET)?;
     let bits = read_u16(body, BITS_OFFSET)?;
     if channels == 0 || channels > u8::MAX as u16 || sample_rate == 0 {
         return None;
@@ -114,15 +118,21 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
     if channel_layout.channels() != channels as u8 {
         channel_layout = ChannelLayout::UNSPECIFIED;
     }
+    let format = match audio_format(tag, bits) {
+        Some(_) => readable_format(tag, bits)?,
+        None => tagged_audio(tag)?,
+    };
     Some(WaveFormat {
-        format: readable_format(tag, bits)?,
+        format,
         channels: channels as u8,
         channel_layout,
         sample_rate,
         byte_rate,
+        block_align,
     })
 }
 
+const BLOCK_ALIGN_OFFSET: usize = 12;
 const BITS_OFFSET: usize = 14;
 
 // the chunk's `wFormatTag`, or for WAVE_FORMAT_EXTENSIBLE the tag its GUID extends
@@ -167,7 +177,9 @@ pub fn probe_stream(prefix: &[u8]) -> Option<WavStream> {
     let body = fmt.body(prefix);
     if let Some(format) = parse_fmt(body) {
         // a decoder's coded input pad takes only the unknown-layout sentinels
-        let caps = if CODED_FORMATS.contains(&format.format) {
+        let caps = if CODED_FORMATS.contains(&format.format)
+            || matches!(format.format, AudioFormat::Tagged(_))
+        {
             coded_caps(format.format)
         } else {
             format.caps()
@@ -199,6 +211,10 @@ pub struct WavParse {
     buf: Vec<u8>,
     riff_seen: bool,
     format: Option<WaveFormat>,
+    // the codec known only by its tag that the output negotiates as, set by the `stream` property
+    tagged: Option<AudioFormat>,
+    // the `fmt ` body a tagged stream sends ahead of its data, for the decoder to open from
+    tagged_header: Vec<u8>,
     bus: Option<BusHandle>,
     /// True once the `data` chunk header has been consumed: everything after it
     /// is samples.
@@ -283,9 +299,16 @@ impl WavParse {
             if &id == b"data" {
                 self.buf.drain(..CHUNK_HEADER_LEN);
                 let format = self.format.ok_or(G2gError::CapsMismatch)?;
+                if self.tagged.is_some_and(|tagged| tagged != format.format) {
+                    return Err(G2gError::CapsMismatch);
+                }
                 self.post_duration(size, format);
                 self.data_remaining = (size != UNKNOWN_DATA_LEN).then_some(size);
                 out.push(PipelinePacket::CapsChanged(format.caps())).await?;
+                if matches!(format.format, AudioFormat::Tagged(_)) {
+                    let header = core::mem::take(&mut self.tagged_header);
+                    self.push_frame(header, out).await?;
+                }
                 self.in_data = true;
                 break;
             }
@@ -300,16 +323,18 @@ impl WavParse {
                 return Ok(());
             }
             if &id == b"fmt " {
-                self.format = Some(
-                    parse_fmt(&self.buf[CHUNK_HEADER_LEN..CHUNK_HEADER_LEN + size])
-                        .ok_or(G2gError::CapsMismatch)?,
-                );
+                let body = &self.buf[CHUNK_HEADER_LEN..CHUNK_HEADER_LEN + size];
+                self.format = Some(parse_fmt(body).ok_or(G2gError::CapsMismatch)?);
+                self.tagged_header = body.to_vec();
             }
             self.buf.drain(..total);
         }
         let format = self.format.ok_or(G2gError::CapsMismatch)?;
-        // Coded payloads have no fixed frame width.
-        let frame_len = sample_frame_len(format.format, format.channels).unwrap_or(1);
+        // Coded payloads have no fixed frame width, a tagged codec decodes whole blocks.
+        let frame_len = match format.format {
+            AudioFormat::Tagged(_) => usize::from(format.block_align.max(1)),
+            _ => sample_frame_len(format.format, format.channels).unwrap_or(1),
+        };
         if self
             .data_remaining
             .is_some_and(|remaining| remaining < frame_len)
@@ -330,8 +355,16 @@ impl WavParse {
         if let Some(remaining) = &mut self.data_remaining {
             *remaining -= whole_frames;
         }
+        self.push_frame(samples, out).await
+    }
+
+    async fn push_frame(
+        &mut self,
+        bytes: Vec<u8>,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
         let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(samples.into_boxed_slice())),
+            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
             FrameTiming::default(),
             self.emitted,
         );
@@ -340,6 +373,13 @@ impl WavParse {
         Ok(())
     }
 }
+
+static WAVPARSE_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "stream",
+    PropKind::Str,
+    "the format the output negotiates as: auto (PCM or the coded payloads the parser reads) | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
+)
+.with_default("auto")];
 
 impl AsyncElement for WavParse {
     type ProcessFuture<'a>
@@ -374,7 +414,13 @@ impl AsyncElement for WavParse {
     /// payloads (M1073) come last, so a downstream that takes anything still
     /// gets PCM.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+        let tagged = self.tagged;
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::Wav,
+            } if tagged.is_some() => {
+                CapsSet::from_alternatives(tagged.map(coded_caps).into_iter().collect())
+            }
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::Wav,
             } => {
@@ -390,6 +436,34 @@ impl AsyncElement for WavParse {
             }
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        WAVPARSE_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "stream" => {
+                let value = value.as_str().ok_or(PropError::Type)?;
+                self.tagged = match value {
+                    "auto" => None,
+                    name => Some(audio_from_stream_name(&[], name).ok_or(PropError::Value)?),
+                };
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "stream" => Some(PropValue::Str(match self.tagged {
+                Some(format) => audio_stream_name(&[], format)?,
+                None => String::from("auto"),
+            })),
+            _ => None,
+        }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
