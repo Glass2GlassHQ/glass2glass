@@ -2711,6 +2711,30 @@ fn build_graph(
             }
         }
     }
+    // a demux behind a network source has no file to probe, so each port takes the
+    // stream its consumer accepts, the way gst links a dynamic pad by caps
+    for ei in 0..specs.len() {
+        if demux_select_node[ei].is_some()
+            || is_tee(ei)
+            || is_demux(ei)
+            || out_deg[ei] <= 1
+            || prebuilt[ei].is_some()
+        {
+            continue;
+        }
+        let wanted: Option<Vec<CapsSet>> = links
+            .iter()
+            .filter(|(s, _, _, _)| *s == ei)
+            .map(|(_, d, _, _)| registry.declared_input_caps(&specs[*d].name))
+            .collect();
+        let Some(wanted) = wanted else {
+            continue;
+        };
+        demux_select_node[ei] = registry
+            .demux_caps_select_hooks()
+            .iter()
+            .find_map(|hook| hook(&specs[ei].name, &wanted));
+    }
     // `decodebin name=d` fan-out (M482): a `decodebin` node left unexpanded (it has
     // named refs) with a file source upstream probes the file, builds the
     // multi-output demuxer (stored like a demux-select node so it fans out on its

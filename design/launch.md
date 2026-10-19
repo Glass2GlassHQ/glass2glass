@@ -65,6 +65,13 @@ reference opens a branch, with `tee` the structural fan-out node broadcasting to
 every branch, its width derived from the branch count. Roles follow
 connectivity.
 
+A named demuxer with several branches (`tsdemux name=d d. ! ... d. ! ...`) is
+built at parse time with one port per branch. A file upstream is probed for its
+streams by a `DemuxSelectHook`. A network source has nothing to probe before the
+run, so a `DemuxCapsSelectHook` gets each branch's first element's sink-pad caps
+(`Registry::declared_input_caps`) and picks the stream per port by codec, the
+static form of gst linking a dynamic pad by caps.
+
 The tokenizer is quote-aware: a double-quoted value is one token, so whitespace
 and `!` inside it are literal, as in `gstwrap element="x264enc bitrate=4000"` and
 `filesrc location="/my file.ts"`. The surrounding quotes are stripped from the

@@ -1768,6 +1768,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     // probes its file and builds the multi-output demuxer honoring the selection.
     reg.register_demux_select(crate::uridecodebin::mkv_demux_select);
     reg.register_demux_select(crate::uridecodebin::ts_demux_select);
+    reg.register_demux_caps_select(crate::uridecodebin::ts_demux_caps_select);
     reg.register_demux_select(crate::uridecodebin::mp4_demux_select);
     reg.register_demux_select(crate::uridecodebin::ogg_demux_select);
     reg.register_demux_select(crate::uridecodebin::ps_demux_select);

@@ -992,6 +992,41 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
     }
 }
 
+const TS_STREAMS: [TsStream; 12] = [
+    TsStream::H264,
+    TsStream::H265,
+    TsStream::Mpeg4Part2,
+    TsStream::Av1,
+    TsStream::Mpeg2,
+    TsStream::Aac,
+    TsStream::Mp2,
+    TsStream::Opus,
+    TsStream::Ac3,
+    TsStream::Klv,
+    TsStream::DvbSub,
+    TsStream::Teletext,
+];
+
+// the first stream whose codec a consumer with sink caps `accepted` takes, a parser's
+// template pins a channel count and rate the stream only states once it is parsed
+pub(crate) fn stream_carrying(accepted: &CapsSet) -> Option<TsStream> {
+    TS_STREAMS.into_iter().find(|&stream| {
+        let carried = TsDemux::output_caps(stream);
+        accepted
+            .alternatives()
+            .iter()
+            .any(|caps| same_codec(caps, &carried))
+    })
+}
+
+fn same_codec(a: &Caps, b: &Caps) -> bool {
+    match (a, b) {
+        (Caps::CompressedVideo { codec: x, .. }, Caps::CompressedVideo { codec: y, .. }) => x == y,
+        (Caps::Audio { format: x, .. }, Caps::Audio { format: y, .. }) => x == y,
+        _ => a == b,
+    }
+}
+
 /// The `stream` property string for a [`TsStream`].
 pub(crate) fn ts_stream_to_str(stream: TsStream) -> &'static str {
     match stream {
