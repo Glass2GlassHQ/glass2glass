@@ -155,14 +155,32 @@ pub(crate) fn h264_nal_type(nal: &[u8]) -> Option<u8> {
 /// BLA / IDR / CRA), an MPEG-4 Part 2 I-VOP (VOP start code 0xB6 whose
 /// vop_coding_type, the top 2 bits of the next byte, is 0), an MPEG-1/2
 /// sync point (see [`mpeg2_start_is_sync`]), or an AV1 key temporal unit (see
-/// [`av1_keyframe`](crate::av1parse::av1_keyframe)). Used by the parsers,
+/// [`av1_keyframe`](crate::av1parse::av1_keyframe)), and every unit of an
+/// intra-only codec. Used by the parsers,
 /// muxers and demuxers to flag a decodable resume point in a stream whose
 /// units carry no keyframe flag of their own.
 pub(crate) fn au_is_keyframe(codec: VideoCodec, au: &[u8]) -> bool {
+    if intra_only(codec) {
+        return true;
+    }
     if codec == VideoCodec::Av1 {
         return crate::av1parse::av1_keyframe(au);
     }
     nal_units_contain_keyframe(codec, nal_units_any(au))
+}
+
+// every frame of these codecs decodes alone
+pub(crate) fn intra_only(codec: VideoCodec) -> bool {
+    matches!(
+        codec,
+        VideoCodec::Mjpeg
+            | VideoCodec::Png
+            | VideoCodec::WebP
+            | VideoCodec::Pnm
+            | VideoCodec::JpegXs
+            | VideoCodec::ProRes { .. }
+            | VideoCodec::DnxHd
+    )
 }
 
 /// [`au_is_keyframe`] over an access unit already split into its units (start

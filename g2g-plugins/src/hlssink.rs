@@ -381,8 +381,7 @@ fn fragment_info(moof: &[u8], frame_len: usize) -> Result<(u32, bool, u64), G2gE
     let tfhd = find_box(traf, b"tfhd").ok_or(G2gError::CapsMismatch)?;
     let trun = find_box(traf, b"trun").ok_or(G2gError::CapsMismatch)?;
     let track_id = be32(tfhd, 4)?;
-    let (default_duration, default_size) = tfhd_defaults(tfhd)?;
-    let samples = parse_trun(trun, default_duration, default_size, frame_len)?;
+    let samples = parse_trun(trun, tfhd_defaults(tfhd)?, frame_len)?;
     let ticks = samples
         .iter()
         .map(|sample| u64::from(sample.duration))

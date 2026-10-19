@@ -2236,11 +2236,12 @@ mod tests {
             let moof = &fragment[BOX_HEADER_LEN..moof_len];
             let trun = find_box(find_box(moof, b"traf").unwrap(), b"trun").unwrap();
             let flags = u32::from_be_bytes(trun[..4].try_into().unwrap()) & 0x00FF_FFFF;
-            let parsed: Vec<i64> = parse_trun(trun, 0, 0, fragment.len())
-                .unwrap()
-                .iter()
-                .map(|s| s.composition_offset)
-                .collect();
+            let parsed: Vec<i64> =
+                parse_trun(trun, crate::fmp4::SampleDefaults::default(), fragment.len())
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.composition_offset)
+                    .collect();
             (flags, parsed)
         };
         assert_eq!(offsets_of(&[0, 0]), (TRUN_FLAGS, Vec::from([0, 0])));

@@ -22,7 +22,7 @@ use g2g_core::{
 };
 
 use crate::aiff::audio_from_comm;
-use crate::annexb::au_is_keyframe;
+use crate::annexb::{au_is_keyframe, intra_only};
 use crate::avidemux::is_pcm;
 use crate::cea::{parse_cdp, write_cc_data, CcTriple};
 use crate::cenc::{
@@ -247,8 +247,8 @@ fn constant_framerate_q16(stbl: &[u8], timescale: u32) -> Option<u32> {
 // a fragmented init leaves stts empty, so the fragment's tfhd declares the sample duration
 pub(crate) fn fragment_framerate_q16(moof: &[u8], timescale: u32) -> Option<u32> {
     let tfhd = find_path(moof, &[b"traf", b"tfhd"])?;
-    let (default_duration, _) = tfhd_defaults(tfhd).ok()?;
-    framerate_q16_from_fraction(timescale, default_duration).filter(|&q16| q16 > 0)
+    let defaults = tfhd_defaults(tfhd).ok()?;
+    framerate_q16_from_fraction(timescale, defaults.duration).filter(|&q16| q16 > 0)
 }
 
 // tfhd payload: version/flags, then track_ID
@@ -270,9 +270,9 @@ pub(crate) fn track_framerate_q16(data: &[u8], track: &TrackHeader) -> Option<u3
                     .find(|tfhd| be32(tfhd, TFHD_TRACK_ID_AT).ok() == Some(track.track_id))
             })
             .and_then(|tfhd| tfhd_defaults(tfhd).ok())
-            .map_or(0, |(duration, _)| duration);
+            .map_or(0, |defaults| defaults.duration);
         let duration = if tfhd_duration == 0 {
-            track.trex_defaults.0
+            track.trex_defaults.duration
         } else {
             tfhd_duration
         };
@@ -393,9 +393,9 @@ pub(crate) struct TrackHeader {
     pub(crate) media_stop: Option<u64>,
     // the media between consecutive edits that neither presents, in order
     pub(crate) edit_gaps: Vec<EditGap>,
-    /// The `mvex/trex` default sample duration and size, `0` when not declared,
-    /// which a fragment falls back to when its `tfhd` declares neither.
-    pub(crate) trex_defaults: (u32, u32),
+    /// The `mvex/trex` default sample duration, size and flags, which a
+    /// fragment falls back to when its `tfhd` does not declare them.
+    pub(crate) trex_defaults: SampleDefaults,
 }
 
 // media time between two edits, in ns
@@ -589,7 +589,7 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         media_start: edit_media_start(&edit_list(trak)),
         media_stop: None,
         edit_gaps: Vec::new(),
-        trex_defaults: (0, 0),
+        trex_defaults: SampleDefaults::default(),
     }))
 }
 
@@ -597,21 +597,23 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
 const TREX_TRACK_ID_AT: usize = 4;
 const TREX_DURATION_AT: usize = 12;
 const TREX_SIZE_AT: usize = 16;
+const TREX_FLAGS_AT: usize = 20;
 
-fn trex_defaults(moov: &[u8], track_id: u32) -> (u32, u32) {
+fn trex_defaults(moov: &[u8], track_id: u32) -> SampleDefaults {
     let Some(mvex) = find_box(moov, b"mvex") else {
-        return (0, 0);
+        return SampleDefaults::default();
     };
     boxes(mvex)
         .filter(|(kind, _)| *kind == b"trex")
         .find(|(_, trex)| be32(trex, TREX_TRACK_ID_AT).ok() == Some(track_id))
         .and_then(|(_, trex)| {
-            Some((
-                be32(trex, TREX_DURATION_AT).ok()?,
-                be32(trex, TREX_SIZE_AT).ok()?,
-            ))
+            Some(SampleDefaults {
+                duration: be32(trex, TREX_DURATION_AT).ok()?,
+                size: be32(trex, TREX_SIZE_AT).ok()?,
+                flags: Some(be32(trex, TREX_FLAGS_AT).ok()?),
+            })
         })
-        .unwrap_or((0, 0))
+        .unwrap_or_default()
 }
 
 /// The `media_time` of a `trak`'s first media edit (`edts/elst`), in media
@@ -1384,7 +1386,7 @@ struct OpenFragment {
 pub(crate) fn moof_samples<'a, 't>(
     data: &'a [u8],
     base_offset: u64,
-    track: impl Fn(Option<u32>) -> Option<(u32, Option<&'t CencTrack>, (u32, u32))>,
+    track: impl Fn(Option<u32>) -> Option<(u32, Option<&'t CencTrack>, SampleDefaults)>,
 ) -> Result<Vec<MoofSample<'a>>, G2gError> {
     let mut out = Vec::new();
     // `Some(None)` is an open fragment of a skipped track.
@@ -1398,7 +1400,7 @@ pub(crate) fn moof_samples<'a, 't>(
                 let tfhd = find_box(traf, b"tfhd");
                 // tfhd: track_ID at payload offset 4 (after version/flags).
                 let track_id = tfhd.map(|tfhd| be32(tfhd, 4)).transpose()?;
-                let Some((timescale, cenc, (trex_duration, trex_size))) = track(track_id) else {
+                let Some((timescale, cenc, trex)) = track(track_id) else {
                     open = Some(None);
                     continue;
                 };
@@ -1414,15 +1416,12 @@ pub(crate) fn moof_samples<'a, 't>(
                 let trun = find_box(traf, b"trun").ok_or(G2gError::CapsMismatch)?;
                 // The `tfhd` is where a CMAF fragment declares the sample duration
                 // its `trun` then omits.
-                let (tfhd_duration, tfhd_size) =
-                    tfhd.map(tfhd_defaults).transpose()?.unwrap_or((0, 0));
-                let default_duration = if tfhd_duration == 0 {
-                    trex_duration
-                } else {
-                    tfhd_duration
-                };
-                let default_size = if tfhd_size == 0 { trex_size } else { tfhd_size };
-                let trun_samples = parse_trun(trun, default_duration, default_size, data.len())?;
+                let defaults = tfhd
+                    .map(tfhd_defaults)
+                    .transpose()?
+                    .unwrap_or_default()
+                    .or_trex(trex);
+                let trun_samples = parse_trun(trun, defaults, data.len())?;
                 let end = trun_samples.iter().fold(base_time, |end, sample| {
                     end.saturating_add(u64::from(sample.duration))
                 });
@@ -1532,8 +1531,8 @@ pub(crate) fn parse_fragments_multi(
                 } else {
                     bytes.into_owned()
                 };
-                let kf = au_is_keyframe(*codec, &annexb);
-                (annexb, kf)
+                let keyframe = fragment_video_keyframe(*codec, sample.timing.sync, &annexb);
+                (annexb, keyframe)
             }
             TrackKind::RawVideo { .. } => (bytes.into_owned(), true),
             // Audio access units are stored verbatim; each is a sync point.
@@ -1574,6 +1573,14 @@ pub(crate) fn parse_fragments_multi(
     Ok(out)
 }
 
+// libavformat keys every sample of an intra-only codec whatever its flags say
+fn fragment_video_keyframe(codec: VideoCodec, sync: Option<bool>, au: &[u8]) -> bool {
+    match sync {
+        Some(sync) => sync || intra_only(codec),
+        None => au_is_keyframe(codec, au),
+    }
+}
+
 // `parse_hvcc` moved to `annexb` (shared with the no_std Matroska demuxer).
 pub(crate) use crate::annexb::parse_hvcc;
 
@@ -1594,7 +1601,9 @@ pub(crate) fn parse_fragments(
     base_offset: u64,
     mut decrypt: Option<SampleDecrypt<'_>>,
 ) -> Result<Vec<Sample>, G2gError> {
-    let stored = moof_samples(data, base_offset, |_| Some((timescale, cenc, (0, 0))))?;
+    let stored = moof_samples(data, base_offset, |_| {
+        Some((timescale, cenc, SampleDefaults::default()))
+    })?;
     let mut samples = Vec::with_capacity(stored.len());
     for sample in &stored {
         let bytes = clear_sample_bytes(sample, cenc.is_some(), &mut decrypt)?;
@@ -1603,7 +1612,7 @@ pub(crate) fn parse_fragments(
         } else {
             bytes.into_owned()
         };
-        let keyframe = au_is_keyframe(codec, &annexb);
+        let keyframe = fragment_video_keyframe(codec, sample.timing.sync, &annexb);
         samples.push(Sample {
             annexb,
             pts_ns: sample.timing.pts_ns,
@@ -2094,7 +2103,14 @@ pub(crate) fn parse_progressive_multi(
         let mdia = find_box(trak, b"mdia").ok_or(G2gError::CapsMismatch)?;
         let stbl = find_path(mdia, &[b"minf", b"stbl"]).ok_or(G2gError::CapsMismatch)?;
         let framing = SampleFraming::of(&track.kind);
-        for s in parse_progressive_track(data, stbl, track.timescale, framing)? {
+        // an stss listing only some samples does not make an intra-only codec's other samples depend on them
+        let every_sample_sync = match &track.kind {
+            TrackKind::Video { codec, .. } => intra_only(*codec),
+            TrackKind::RawVideo { .. } => true,
+            _ => false,
+        };
+        for mut s in parse_progressive_track(data, stbl, track.timescale, framing)? {
+            s.keyframe |= every_sample_sync;
             out.push((track.track_id, s));
         }
     }
@@ -2222,12 +2238,36 @@ fn find_trak_by_id(moov: &[u8], track_id: u32) -> Option<&[u8]> {
         })
 }
 
-/// A `traf`'s `tfhd` `default_sample_duration` and `default_sample_size`
-/// (ISO 14496-12 8.8.7), each `0` when the box does not declare it. A `trun` may
-/// lean on either instead of repeating it per sample, which is what ffmpeg's
+// the sample duration and size a tfhd or trex declares, each 0 when undeclared
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SampleDefaults {
+    pub(crate) duration: u32,
+    pub(crate) size: u32,
+    pub(crate) flags: Option<u32>,
+}
+
+impl SampleDefaults {
+    // a field the tfhd declares overrides the trex one
+    fn or_trex(self, trex: SampleDefaults) -> SampleDefaults {
+        SampleDefaults {
+            duration: if self.duration == 0 {
+                trex.duration
+            } else {
+                self.duration
+            },
+            size: if self.size == 0 { trex.size } else { self.size },
+            flags: self.flags.or(trex.flags),
+        }
+    }
+}
+
+/// A `traf`'s `tfhd` `default_sample_duration`, `default_sample_size` and
+/// `default_sample_flags` (ISO 14496-12 8.8.7), each absent when the box does not
+/// declare it. A `trun` may
+/// lean on any of them instead of repeating it per sample, which is what ffmpeg's
 /// fragmented and CMAF output does (a constant-bitrate audio fragment often
 /// carries neither field in its `trun`).
-pub(crate) fn tfhd_defaults(tfhd: &[u8]) -> Result<(u32, u32), G2gError> {
+pub(crate) fn tfhd_defaults(tfhd: &[u8]) -> Result<SampleDefaults, G2gError> {
     let flags = be32(tfhd, 0)? & 0x00FF_FFFF;
     // version/flags + track_ID, then the optional fields in declaration order.
     let mut at = 8usize;
@@ -2245,15 +2285,33 @@ pub(crate) fn tfhd_defaults(tfhd: &[u8]) -> Result<(u32, u32), G2gError> {
         0
     };
     let size = if flags & 0x10 != 0 {
-        be32(tfhd, at)?
+        let s = be32(tfhd, at)?;
+        at += 4;
+        s
     } else {
         0
     };
-    Ok((duration, size))
+    let sample_flags = if flags & 0x20 != 0 {
+        Some(be32(tfhd, at)?)
+    } else {
+        None
+    };
+    Ok(SampleDefaults {
+        duration,
+        size,
+        flags: sample_flags,
+    })
 }
 
 /// `sample_flags` bit 16: the sample is *not* a sync sample (ISO/IEC 14496-12).
 const NON_SYNC: u32 = 0x0001_0000;
+// sample_depends_on 1: the sample references other samples
+const DEPENDS_ON_OTHERS: u32 = 0x0100_0000;
+
+// libavformat reads either bit as a non-keyframe
+fn sample_flags_sync(flags: u32) -> bool {
+    flags & (NON_SYNC | DEPENDS_ON_OTHERS) == 0
+}
 
 /// Whether the first sample a `trun` describes is a sync sample, i.e. whether
 /// the fragment it belongs to opens at a random access point. A `trun` that
@@ -2288,24 +2346,25 @@ pub(crate) struct TrunSample {
     pub(crate) size: u32,
     pub(crate) duration: u32,
     pub(crate) composition_offset: i64,
+    // None when neither the trun nor the defaults carry sample flags
+    pub(crate) sync: Option<bool>,
 }
 
-/// `trun` (v0 or v1). A `trun` that omits the per-sample duration or size takes
-/// `default_duration` / `default_size` from its `tfhd`; a duration neither
+/// `trun` (v0 or v1). A `trun` that omits the per-sample duration, size or
+/// flags takes them from `defaults`; a duration neither
 /// carries is `0`, but a *size* neither carries is fatal (the samples could not
 /// be split). Both versions read the per-sample composition-time offset signed,
 /// as ffmpeg does, since encoders write negative offsets into v0 too.
 pub(crate) fn parse_trun(
     trun: &[u8],
-    default_duration: u32,
-    default_size: u32,
+    defaults: SampleDefaults,
     fragment_len: usize,
 ) -> Result<Vec<TrunSample>, G2gError> {
     if !matches!(trun.first(), Some(0 | 1)) {
         return Err(G2gError::CapsMismatch); // unknown trun version
     }
     let flags = be32(trun, 0)? & 0x00FF_FFFF;
-    if flags & 0x200 == 0 && default_size == 0 {
+    if flags & 0x200 == 0 && defaults.size == 0 {
         return Err(G2gError::CapsMismatch); // no sample sizes anywhere
     }
     let count = be32(trun, 4)? as usize;
@@ -2313,8 +2372,10 @@ pub(crate) fn parse_trun(
     if flags & 0x1 != 0 {
         at += 4; // data offset (sequential mdat split makes it redundant)
     }
+    let mut first_sample_flags = defaults.flags;
     if flags & 0x4 != 0 {
-        at += 4; // first sample flags
+        first_sample_flags = Some(be32(trun, at)?);
+        at += 4;
     }
     // Each sample consumes at least its 4-byte size plus the optional per-sample
     // fields, so an untrusted `count` cannot exceed the bytes that remain. Reject
@@ -2335,19 +2396,25 @@ pub(crate) fn parse_trun(
         return Err(G2gError::CapsMismatch);
     }
     let mut samples = Vec::with_capacity(count);
-    for _ in 0..count {
-        let mut duration = default_duration;
+    for index in 0..count {
+        let mut duration = defaults.duration;
         if flags & 0x100 != 0 {
             duration = be32(trun, at)?;
             at += 4;
         }
-        let mut size = default_size;
+        let mut size = defaults.size;
         if flags & 0x200 != 0 {
             size = be32(trun, at)?;
             at += 4;
         }
+        let mut sample_flags = if index == 0 {
+            first_sample_flags
+        } else {
+            defaults.flags
+        };
         if flags & 0x400 != 0 {
-            at += 4; // per-sample flags
+            sample_flags = Some(be32(trun, at)?);
+            at += 4;
         }
         let mut composition_offset = 0;
         if flags & 0x800 != 0 {
@@ -2358,6 +2425,7 @@ pub(crate) fn parse_trun(
             size,
             duration,
             composition_offset,
+            sync: sample_flags.map(sample_flags_sync),
         });
     }
     Ok(samples)
@@ -2366,6 +2434,7 @@ pub(crate) fn parse_trun(
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FragmentSampleTiming {
     pub(crate) size: u32,
+    pub(crate) sync: Option<bool>,
     pub(crate) dts_ns: u64,
     pub(crate) pts_ns: u64,
     pub(crate) duration_ns: u64,
@@ -2382,6 +2451,7 @@ fn fragment_sample_timings(
         .map(|sample| {
             let timing = FragmentSampleTiming {
                 size: sample.size,
+                sync: sample.sync,
                 dts_ns: ticks_to_ns(decode_time, timescale),
                 pts_ns: ticks_to_ns(
                     decode_time.saturating_add_signed(sample.composition_offset),
@@ -2662,7 +2732,7 @@ mod tests {
             media_start: edit_media_start(&edits),
             media_stop: Some(second_end),
             edit_gaps: edit_gaps(&spans, MEDIA_TIMESCALE),
-            trex_defaults: (0, 0),
+            trex_defaults: SampleDefaults::default(),
         };
         let gap_ns = ns(u64::from(SECOND_EDIT_MEDIA)) - ns(first_end);
         let segment = track.presentation_segment();
@@ -2775,13 +2845,14 @@ mod tests {
         p.extend_from_slice(&3000u32.to_be_bytes()); // duration
         p.extend_from_slice(&77u32.to_be_bytes()); // size
         p.extend_from_slice(&0x0200_0000u32.to_be_bytes()); // sample flags
-        let samples = parse_trun(&p, 0, 0, 0).unwrap();
+        let samples = parse_trun(&p, SampleDefaults::default(), 0).unwrap();
         assert_eq!(
             samples,
             vec![TrunSample {
                 size: 77,
                 duration: 3000,
                 composition_offset: 0,
+                sync: Some(true),
             }]
         );
     }
@@ -2878,12 +2949,13 @@ mod tests {
             t.extend_from_slice(&OFFSET_FIELD.to_be_bytes());
             t
         };
-        let v0 = parse_trun(&build(0), 0, 0, 0).expect("v0 parses");
-        let v1 = parse_trun(&build(1), 0, 0, 0).expect("v1 parses");
+        let v0 = parse_trun(&build(0), SampleDefaults::default(), 0).expect("v0 parses");
+        let v1 = parse_trun(&build(1), SampleDefaults::default(), 0).expect("v1 parses");
         let sample = |composition_offset| TrunSample {
             size: 1000,
             duration: 0,
             composition_offset,
+            sync: None,
         };
         let expected = alloc::vec![sample(i64::from(OFFSET_FIELD as i32))];
         assert_eq!(v0, expected);
@@ -2898,7 +2970,54 @@ mod tests {
         t.extend_from_slice(&u32::MAX.to_be_bytes()); // count
         t.extend_from_slice(&0u32.to_be_bytes()); // data offset
         t.extend_from_slice(&16u32.to_be_bytes()); // a single sample size
-        assert!(parse_trun(&t, 0, 0, 0).is_err());
+        assert!(parse_trun(&t, SampleDefaults::default(), 0).is_err());
+    }
+
+    #[test]
+    fn parse_trun_takes_first_sample_flags_then_the_defaults() {
+        // flags 0x205: data offset + first sample flags + sizes, three samples.
+        const DEPENDS_ON_NONE: u32 = 0x0200_0000;
+        let mut t = alloc::vec![0u8, 0x00, 0x02, 0x05];
+        t.extend_from_slice(&3u32.to_be_bytes()); // count
+        t.extend_from_slice(&0u32.to_be_bytes()); // data offset
+        t.extend_from_slice(&DEPENDS_ON_NONE.to_be_bytes()); // first sample flags
+        for _ in 0..3 {
+            t.extend_from_slice(&16u32.to_be_bytes());
+        }
+        let defaults = SampleDefaults {
+            flags: Some(NON_SYNC),
+            ..SampleDefaults::default()
+        };
+        let sync: Vec<_> = parse_trun(&t, defaults, 0)
+            .unwrap()
+            .iter()
+            .map(|s| s.sync)
+            .collect();
+        assert_eq!(sync, vec![Some(true), Some(false), Some(false)]);
+    }
+
+    #[test]
+    fn sample_that_depends_on_others_is_not_sync() {
+        assert!(sample_flags_sync(0x0200_0000));
+        assert!(!sample_flags_sync(DEPENDS_ON_OTHERS));
+        assert!(!sample_flags_sync(NON_SYNC));
+    }
+
+    #[test]
+    fn fragment_keyframe_follows_the_flags_except_for_intra_only_codecs() {
+        let idr = [0, 0, 0, 1, 0x65, 0x88];
+        assert!(!fragment_video_keyframe(
+            VideoCodec::H264,
+            Some(false),
+            &idr
+        ));
+        assert!(fragment_video_keyframe(VideoCodec::H264, None, &idr));
+        assert!(fragment_video_keyframe(
+            VideoCodec::Mjpeg,
+            Some(false),
+            &[0xFF, 0xD8]
+        ));
+        assert!(fragment_video_keyframe(VideoCodec::DnxHd, None, &[0; 4]));
     }
 
     /// A minimal progressive (`moov` + `mdat`, no `moof`) file with two AVCC
