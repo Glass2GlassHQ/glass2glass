@@ -1254,6 +1254,13 @@ with `@availabilityTimeOffset` publishing each segment that many seconds before
 its nominal completion, clamped to one segment duration so a chunked packager's
 in-progress segment is reachable but nothing beyond it.
 
+A multi-Period live MPD is played as gst's `dashdemux2` plays it. Playback joins
+the Period holding now minus the presentation delay. A Period with an end, its
+`@duration` or the next Period's `@start`, offers `ceil(span / d)` segments
+(ISO/IEC 23009-1 segment count), so the window never reaches past it. The next
+Period starts once the current one's last segment has been offered, since a
+manifest may list a Period before the one playing has ended.
+
 `with_abr()` makes it throughput-adaptive on the same shared
 `abr::BandwidthEstimator` as `HlsSrc`. A `load_rep` helper resolves any
 Representation, Template, List or `sidx`-fetched SegmentBase, into the run loop's
