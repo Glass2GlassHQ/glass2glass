@@ -253,12 +253,18 @@ impl McpServer {
         }
         let events = EventBuffer::new(EVENT_CAPACITY);
         self.records.reset();
-        let event_collector =
-            EventCollector::spawn(bus, events.clone(), self.records.clone(), None)
-                .map_err(RegistrationError::EventCollector)?;
+        let (drain_sender, drain_request) = tokio::sync::oneshot::channel();
+        let event_collector = EventCollector::spawn(
+            bus,
+            events.clone(),
+            self.records.clone(),
+            Some(drain_request),
+        )
+        .map_err(RegistrationError::EventCollector)?;
         let run_state = Arc::new(Mutex::new(PipelineRunState::Running));
         let handle = RegisteredPipelineHandle {
             run_state: run_state.clone(),
+            drain_sender: Arc::new(Mutex::new(Some(drain_sender))),
         };
         self.pipeline = Some(ManagedPipeline {
             observer,
@@ -316,29 +322,36 @@ enum PipelineLifecycle {
 #[derive(Debug, Clone)]
 pub struct RegisteredPipelineHandle {
     run_state: Arc<Mutex<PipelineRunState>>,
+    drain_sender: Arc<Mutex<Option<DrainSender>>>,
 }
 
 impl RegisteredPipelineHandle {
     /// The run ended normally with `stats`.
     pub fn finish(&self, stats: &RunStats) {
-        *self.run_state.lock().expect("pipeline run state") =
-            PipelineRunState::Finished(Some(stats_json(stats)));
+        self.end(PipelineRunState::Finished(Some(stats_json(stats))));
     }
 
     /// The run ended normally, with no stats to report.
     pub fn finish_without_stats(&self) {
-        *self.run_state.lock().expect("pipeline run state") = PipelineRunState::Finished(None);
+        self.end(PipelineRunState::Finished(None));
     }
 
     /// The run ended with `error`.
     pub fn fail(&self, error: impl Into<String>) {
-        *self.run_state.lock().expect("pipeline run state") =
-            PipelineRunState::Failed(error.into());
+        self.end(PipelineRunState::Failed(error.into()));
     }
 
     /// The host stopped the run before it ended on its own.
     pub fn stop(&self) {
-        *self.run_state.lock().expect("pipeline run state") = PipelineRunState::Stopped;
+        self.end(PipelineRunState::Stopped);
+    }
+
+    fn end(&self, state: PipelineRunState) {
+        let drain_sender = self.drain_sender.lock().expect("drain sender").take();
+        if let Some(drain_sender) = drain_sender {
+            wait_for_event_tail(drain_sender);
+        }
+        *self.run_state.lock().expect("pipeline run state") = state;
     }
 }
 
@@ -564,6 +577,15 @@ fn record_value(line: &str) -> Value {
 }
 
 type DrainRequest = tokio::sync::oneshot::Receiver<mpsc::SyncSender<()>>;
+type DrainSender = tokio::sync::oneshot::Sender<mpsc::SyncSender<()>>;
+
+// an agent that sees the run end must find the run's last bus events in the tail
+fn wait_for_event_tail(drain_sender: DrainSender) {
+    let (drained_sender, drained) = mpsc::sync_channel(1);
+    if drain_sender.send(drained_sender).is_ok() {
+        let _ = drained.recv();
+    }
+}
 
 #[derive(Debug)]
 struct EventCollector {
@@ -1234,11 +1256,7 @@ impl McpServer {
                     }
                     Either::Right(Err(error)) => PipelineRunState::Failed(format!("{error:?}")),
                 };
-                // an agent that sees the run end must find the run's last bus events in the tail
-                let (drained_sender, drained) = mpsc::sync_channel(1);
-                if drain_sender.send(drained_sender).is_ok() {
-                    let _ = drained.recv();
-                }
+                wait_for_event_tail(drain_sender);
                 *thread_run_state.lock().expect("pipeline run state") = state;
             }) {
             Ok(thread) => thread,
@@ -2629,14 +2647,10 @@ mod tests {
         }
         let events = EventBuffer::new(EVENT_CAPACITY);
         let (drain_sender, drain_request) = tokio::sync::oneshot::channel();
-        let (drained_sender, drained) = mpsc::sync_channel(1);
-        drain_sender
-            .send(drained_sender)
-            .expect("collector takes the request");
         let mut collector =
             EventCollector::spawn(bus, events.clone(), RecordStore::new(), Some(drain_request))
                 .expect("spawn collector");
-        drained.recv().expect("collector answers the request");
+        wait_for_event_tail(drain_sender);
         assert_eq!(events.len(), queued.len());
         collector.stop();
     }

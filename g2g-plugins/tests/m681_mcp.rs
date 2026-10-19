@@ -722,13 +722,28 @@ fn a_host_registers_its_own_pipeline_in_process() {
     assert_eq!(still["revision"], 1);
 
     stop.send(()).unwrap();
-    match host.join().unwrap() {
+    let outcome = host.join().unwrap();
+    const LATE_EVENTS: u64 = 128;
+    for code in 0..LATE_EVENTS {
+        assert!(bus_handle.try_post(BusMessage::Custom(code)));
+    }
+    match outcome {
         Either::Left(_) => handle.stop(),
         Either::Right(Ok(stats)) => handle.finish(&stats),
         Either::Right(Err(error)) => panic!("host run failed: {error:?}"),
     }
     let stopped = call(&mut server, "pipeline_status", serde_json::json!({}));
     assert_eq!(stopped["state"], "stopped", "{stopped}");
+    let tail = call(
+        &mut server,
+        "tail_events",
+        serde_json::json!({ "limit": stopped["events"]["capacity"] }),
+    );
+    let late = event_kinds(&tail)
+        .iter()
+        .filter(|kind| kind.as_str() == "custom")
+        .count();
+    assert_eq!(late as u64, LATE_EVENTS, "{tail}");
 
     assert!(server.unregister_pipeline());
     assert!(!server.unregister_pipeline());
