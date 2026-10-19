@@ -1663,6 +1663,8 @@ pub(crate) fn parse_progressive(data: &[u8], timescale: u32) -> Result<Vec<Sampl
 enum SampleFraming {
     Video,
     PassThrough,
+    // a long-tail video track, which also keeps a sample cut short by the end of a truncated file
+    TaggedVideo,
     Tx3gText,
     WvttText,
     ClosedCaption(ClosedCaptionFormat),
@@ -1685,6 +1687,10 @@ impl SampleFraming {
     fn of(kind: &TrackKind) -> Self {
         match kind {
             TrackKind::Video { codec, .. } if length_prefixed(*codec) => SampleFraming::Video,
+            TrackKind::Video {
+                codec: VideoCodec::Tagged(_),
+                ..
+            } => SampleFraming::TaggedVideo,
             TrackKind::Video { .. } | TrackKind::RawVideo { .. } => SampleFraming::PassThrough,
             TrackKind::Audio {
                 format,
@@ -1878,9 +1884,16 @@ fn parse_progressive_track(
         let end = off
             .checked_add(sizes[i] as usize)
             .ok_or(G2gError::CapsMismatch)?;
-        // a truncated file ends the track at its last whole sample, as ffmpeg does
-        let Some(raw) = data.get(off..end) else {
-            break;
+        // a truncated file ends the track at its last whole sample, except that
+        // libavcodec also decodes what remains of a cut long-tail video sample
+        let (raw, cut) = match data.get(off..end) {
+            Some(raw) => (raw, false),
+            None => match data.get(off..) {
+                Some(rest) if !rest.is_empty() && matches!(framing, SampleFraming::TaggedVideo) => {
+                    (rest, true)
+                }
+                _ => break,
+            },
         };
         let pts = (dts as i64).saturating_add(ctts_offsets[i]).max(0) as u64;
         let keyframe = match &sync {
@@ -1900,7 +1913,7 @@ fn parse_progressive_track(
                     _ => annexb,
                 }
             }
-            SampleFraming::PassThrough => raw.to_vec(),
+            SampleFraming::PassThrough | SampleFraming::TaggedVideo => raw.to_vec(),
             SampleFraming::Tx3gText => deframe_tx3g(raw),
             SampleFraming::WvttText => deframe_wvtt(raw),
             SampleFraming::ClosedCaption(format) => deframe_cc(raw, format),
@@ -1915,6 +1928,9 @@ fn parse_progressive_track(
             duration_ns: ticks_to_ns(durations[i] as u64, timescale),
             keyframe,
         });
+        if cut {
+            break;
+        }
         dts = dts.saturating_add(durations[i] as u64);
     }
     Ok(samples)
@@ -3094,6 +3110,18 @@ mod tests {
         let truncated = parse_progressive(&file[..file.len() - 1], 1000).expect("truncated parse");
         assert_eq!(truncated.len(), 1);
         assert_eq!(truncated[0].annexb, samples[0].annexb);
+
+        // a long-tail video track also keeps what remains of the cut sample
+        let cut_file = &file[..file.len() - 1];
+        let stbl = find_path(cut_file, &[b"moov", b"trak", b"mdia", b"minf", b"stbl"]).unwrap();
+        let tagged =
+            parse_progressive_track(cut_file, stbl, 1000, SampleFraming::TaggedVideo).unwrap();
+        let second_sample_at = sample_size as usize;
+        assert_eq!(tagged.len(), 2);
+        assert_eq!(
+            tagged[1].annexb,
+            mdat_body[second_sample_at..mdat_body.len() - 1]
+        );
     }
 
     #[test]
