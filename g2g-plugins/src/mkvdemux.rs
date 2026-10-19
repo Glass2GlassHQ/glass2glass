@@ -907,7 +907,7 @@ impl AsyncElement for MkvDemux {
 static MKVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | mjpeg | theora | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy) | video-riff-<fourcc> | video-mov-<fourcc> | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
+    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | mjpeg | theora | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy | raw-v210) | video-riff-<fourcc> | video-mov-<fourcc> | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
 )];
 
 /// The [`MkvStream`] a demuxer forwards for a parsed track's codec, or `None` for

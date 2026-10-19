@@ -4,7 +4,9 @@
 # Each <name>.v210 is ffmpeg's v210 encode of one testsrc2 frame, and
 # <name>.v210.yuv422p10le is ffmpeg's decode of that file. ffmpeg's encoder
 # refuses an odd width, so the odd-width fixture is the 38-wide encode decoded
-# at 37 pixels, which shares its row stride.
+# at 37 pixels, which shares its row stride. Each v210_52x4.<container> holds two
+# frames, with ffmpeg's stream copy of them as .v210 and its decode as
+# .yuv422p10le beside it.
 set -euo pipefail
 
 fixtures="$(cd "$(dirname "$0")/.." && pwd)/g2g-plugins/tests/fixtures"
@@ -30,3 +32,10 @@ for width in 38 48 52; do
 done
 
 decode 37 "$fixtures/v210_38x${height}.v210" "$fixtures/v210_38x${height}_as_37x${height}.v210.yuv422p10le"
+
+for container in mov avi mkv; do
+    name="$fixtures/v210_52x${height}.$container"
+    encode 52 "$name" -frames:v 2
+    ffmpeg -v error -y -i "$name" -c:v copy -f rawvideo "$name.v210"
+    ffmpeg -v error -y -i "$name" -pix_fmt yuv422p10le -f rawvideo "$name.yuv422p10le"
+done

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1633: `qtdemux`, `avidemux` and `matroskademux` emit `v210` video as v210 raw video.
 - M1631: `videoconvert` converts to and from v210, matching ffmpeg's v210 codec byte for byte.
 - M1630: `v210` and `r210` are new raw formats, with the row strides and bit layouts GStreamer gives them.
 - M1615: `ffmpegdec` skips a tagged codec's packet libavcodec rejects as an unknown error and converts to the packed RGB the negotiation picked.

@@ -16,12 +16,14 @@ const RAW_VIDEO_FOURCCS: &[([u8; 4], RawVideoFormat)] = &[
     (*b"2VUY", RawVideoFormat::Uyvy),
     (*b"HDYC", RawVideoFormat::Uyvy),
     (*b"UYNV", RawVideoFormat::Uyvy),
+    (*b"v210", RawVideoFormat::V210),
 ];
 
 const RAW_VIDEO_STREAM_NAMES: &[(&str, RawVideoFormat)] = &[
     ("raw-i420", RawVideoFormat::I420),
     ("raw-yuy2", RawVideoFormat::Yuyv),
     ("raw-uyvy", RawVideoFormat::Uyvy),
+    ("raw-v210", RawVideoFormat::V210),
 ];
 
 const MAX_DIM: u32 = 65_535;
@@ -75,7 +77,7 @@ pub(crate) fn raw_video_placeholder_caps(format: RawVideoFormat) -> Caps {
     raw_video_caps(format, span(), span(), PLACEHOLDER_FRAMERATE)
 }
 
-// none of these layouts pads its rows, so bytes past the pixels are ignored, as libavcodec does
+// bytes past the frame's rows are ignored, as libavcodec does
 pub(crate) fn raw_video_frame_bytes(
     format: RawVideoFormat,
     width: u32,

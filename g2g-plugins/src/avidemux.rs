@@ -648,7 +648,7 @@ impl AviDemux {
 static AVIDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "stream to emit: video (the default) | mjpeg | h264 | mpeg4part2 | vp6 (the video stream by codec) | raw-i420 | raw-yuy2 | raw-uyvy (the uncompressed video stream by layout) | audio | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | mulaw | alaw | mp3 | ac3 | aac (the audio stream by format) | video-riff-<fourcc> | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
+    "stream to emit: video (the default) | mjpeg | h264 | mpeg4part2 | vp6 (the video stream by codec) | raw-i420 | raw-yuy2 | raw-uyvy | raw-v210 (the uncompressed video stream by layout) | audio | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | mulaw | alaw | mp3 | ac3 | aac (the audio stream by format) | video-riff-<fourcc> | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
 )
 .with_default("video")];
 

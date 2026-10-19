@@ -101,12 +101,12 @@ candidate claims it.
 layout is named by the AVI `biCompression`, the `ColourSpace` of a Matroska
 `V_UNCOMPRESSED` track or the fourcc of a `V_MS/VFW/FOURCC` one, and the
 QuickTime sample entry: `I420` / `IYUV` is I420, `YUY2` / `YUYV` / `YUNV` /
-`yuvs` is YUY2, `UYVY` / `2vuy` / `HDYC` / `UYNV` is UYVY. A demuxer selects
-such a stream as `stream=raw-i420`, `raw-yuy2` or `raw-uyvy`. The frame size
-comes from the `BITMAPINFOHEADER`, the track's `PixelWidth` / `PixelHeight`,
-or the sample entry, never the `tkhd` display size. None of these layouts pads
-its rows, so a stored frame longer than its pixels is cut to them, which is how
-libavcodec reads it, and a shorter one is dropped.
+`yuvs` is YUY2, `UYVY` / `2vuy` / `HDYC` / `UYNV` is UYVY, `v210` is v210. A
+demuxer selects such a stream as `stream=raw-i420`, `raw-yuy2`, `raw-uyvy` or
+`raw-v210`. The frame size comes from the `BITMAPINFOHEADER`, the track's
+`PixelWidth` / `PixelHeight`, or the sample entry, never the `tkhd` display
+size. A stored frame longer than its rows, v210's padded ones included, is cut
+to them, which is how libavcodec reads it, and a shorter one is dropped.
 
 ## Plain-text files
 

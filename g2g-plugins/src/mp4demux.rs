@@ -589,7 +589,7 @@ impl AsyncElement for Mp4Demux {
 static MP4DEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | vp8 | mjpeg | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq (the video track by codec) | raw-i420 | raw-yuy2 | raw-uyvy (the uncompressed video track by layout) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | alaw | mulaw (the audio track by format) | video-mov-<fourcc> | audio-mov-<fourcc> (a codec known only by its sample entry, with ffmpeg-long-tail)",
+    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | vp8 | mjpeg | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq (the video track by codec) | raw-i420 | raw-yuy2 | raw-uyvy | raw-v210 (the uncompressed video track by layout) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | alaw | mulaw (the audio track by format) | video-mov-<fourcc> | audio-mov-<fourcc> (a codec known only by its sample entry, with ffmpeg-long-tail)",
 )];
 
 impl PadTemplates for Mp4Demux {
