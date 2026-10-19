@@ -55,9 +55,13 @@ one per output-pad reference. Pad names select by media kind the GStreamer way:
 `d.video_0` is the first video stream, `d.audio_0` the first audio, `d.text_0`
 (or `d.subtitle_0`) the first subtitle track, `d.src_2` the third stream overall
 (a bare `d.` is positional). Each branch names its own downstream
-(`d.video_0 ! h264parse ! avdec_h264 ! autovideosink`). File sources only; a
-network source still uses `playbin`. Subtitle pads work for `matroskademux` and
-`qtdemux` (MPEG-TS carries no demuxer subtitle track).
+(`d.video_0 ! h264parse ! avdec_h264 ! autovideosink`). A file source is probed
+for its streams. Behind a network source (`srtsrc`, `hlssrc`, `ristsrc ! tsdemux
+name=d`) nothing can be probed before the run, so each `tsdemux` port carries the
+first stream whose codec its branch's first element takes, the way gst links a
+dynamic pad by caps: `d. ! h264parse` gets the H.264 stream, `d. ! aacparse` the
+AAC one. Subtitle pads work for `matroskademux` and `qtdemux` (MPEG-TS carries no
+demuxer subtitle track).
 
 **`decodebin name=d` fans out and decodes** each branch for you (the gst idiom):
 `filesrc location=movie.mp4 ! decodebin name=d  d.video_0 ! videoconvert !
@@ -195,7 +199,7 @@ of any line with `g2g-launch -v`, or a Graphviz graph with `--dot`.
 Most names match GStreamer. Differences are handled two ways:
 
 - **Aliases** resolve automatically in the registry (e.g. `autovideosink`,
-  `autovideosrc`/`autoaudiosrc`, `avdec_h264` → `ffmpegdec`, `vah264dec` →
+  `autovideosrc`/`autoaudiosrc`, `avdec_h264`/`avdec_h265` → `ffmpegdec`, `vah264dec` →
   `vaapidec`, `vp8enc`/`vp9enc` → `vpxenc`, `webmmux` → `matroskamux`,
   `adder`/`liveadder` → `audiomixer`, `videomixer` → `compositor`, `rtmp2sink` →
   `rtmpsink`, and the plain decoder names `vp8dec`/`vp9dec`/`mpeg2dec` →

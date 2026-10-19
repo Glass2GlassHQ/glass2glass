@@ -1936,6 +1936,18 @@ pub fn ts_demux_select(
         .flatten()
 }
 
+#[cfg(feature = "std")]
+pub fn ts_demux_caps_select(
+    name: &str,
+    wanted: &[g2g_core::CapsSet],
+) -> Option<Box<dyn DynMultiOutputElement>> {
+    if name != "tsdemux" {
+        return None;
+    }
+    let streams: Option<Vec<_>> = wanted.iter().map(crate::tsdemux::stream_carrying).collect();
+    Some(Box::new(crate::tsdemux::TsDemuxN::new(streams?)))
+}
+
 /// `decodebin` fan-out over an MPEG-TS file (M482): the demuxer + per-port caps.
 #[cfg(feature = "std")]
 pub fn ts_decodebin_select(

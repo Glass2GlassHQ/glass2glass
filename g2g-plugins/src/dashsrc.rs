@@ -672,11 +672,16 @@ impl SourceLoop for DashSrc {
                     (mpd.minimum_update_period_secs.unwrap_or(1.0) * 1000.0) as u64
                 };
                 tokio::time::sleep(core::time::Duration::from_millis(interval_ms.max(1))).await;
+                let playing_start_secs = mpd.periods[period_idx].start_secs;
                 let text = get_text(&client, &self.url, MAX_MANIFEST_BYTES).await?;
                 mpd = parse(&text).map_err(|_| G2gError::CapsMismatch)?;
-                // The update may carry fewer Periods than the one we were
-                // playing (a Period aged out of the window).
-                period_idx = period_idx.min(mpd.periods.len() - 1);
+                // Periods that aged out of the window drop off the front, so the
+                // one playing is found by its start, not its old index.
+                period_idx = mpd
+                    .periods
+                    .iter()
+                    .position(|p| p.start_secs == playing_start_secs)
+                    .unwrap_or(0);
             }
 
             out.push(PipelinePacket::Eos).await?;

@@ -1379,6 +1379,11 @@ mod factory {
         pads: &[PadRequest],
     ) -> Option<Box<dyn DynMultiOutputElement>>;
 
+    // a demux fed by a network source, which has no file to probe: port i carries
+    // the stream `wanted[i]` (its consumer's sink caps) accepts, `None` declines
+    pub type DemuxCapsSelectHook =
+        fn(name: &str, wanted: &[CapsSet]) -> Option<Box<dyn DynMultiOutputElement>>;
+
     /// A `decodebin` fan-out hook (M482): the decode-per-port sibling of
     /// [`DemuxSelectHook`], for `filesrc location=x.mkv ! decodebin name=d
     /// d.video_0 ! ...  d.audio_0 ! ...`. Unlike the demux-select hook it is NOT
@@ -1508,6 +1513,7 @@ mod factory {
         /// (`None`) a container it does not parse. Empty (the default) leaves a
         /// demux element single-stream (its M114/M180 launch registration).
         demux_select: Vec<DemuxSelectHook>,
+        demux_caps_select: Vec<DemuxCapsSelectHook>,
         /// `decodebin` fan-out hooks (M482): the decode-per-port sibling of
         /// `demux_select`. A `decodebin name=d` with several `d.` refs and a file
         /// upstream tries each until one parses the container, returning the
@@ -1676,6 +1682,15 @@ mod factory {
         /// declines a container it does not parse. Returns `&mut self` to chain.
         pub fn register_demux_select(&mut self, hook: DemuxSelectHook) -> &mut Self {
             self.demux_select.push(hook);
+            self
+        }
+
+        pub fn demux_caps_select_hooks(&self) -> &[DemuxCapsSelectHook] {
+            &self.demux_caps_select
+        }
+
+        pub fn register_demux_caps_select(&mut self, hook: DemuxCapsSelectHook) -> &mut Self {
+            self.demux_caps_select.push(hook);
             self
         }
 
@@ -1998,6 +2013,20 @@ mod factory {
                 .find(|t| t.direction == PadDirection::Source)?;
             match &t.caps {
                 PadCaps::Fixed(set) => set.alternatives().first().cloned(),
+                PadCaps::Any => None,
+            }
+        }
+
+        // `None` for an unregistered name or one whose sink pad takes any caps
+        pub fn declared_input_caps(&self, name: &str) -> Option<CapsSet> {
+            let name = self.resolve_alias(name);
+            let f = self.launch.iter().find(|f| f.name == name)?;
+            let t = f
+                .templates
+                .iter()
+                .find(|t| t.direction == PadDirection::Sink)?;
+            match &t.caps {
+                PadCaps::Fixed(set) => Some(set.clone()),
                 PadCaps::Any => None,
             }
         }
@@ -2993,12 +3022,12 @@ mod factory {
 #[cfg(feature = "std")]
 pub use factory::{
     declared_source_caps, AutoplugError, AutoplugParams, ContainerStreams, DecodebinError,
-    DecodebinSelectHook, DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory,
-    FallbacksrcSourceFactory, FanoutRebuild, FanoutSrcFactory, LaunchFactory, MuxerFactory,
-    PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream, PrimaryStreamHook,
-    PropertyDoc, RankOverride, RankSpecError, Registry, RestartFanoutSourceHook, RestartPolicy,
-    RestartSourceHook, SourceFactory, Uri, UriError, UriFanout, UriFanoutHead, UriFanoutHook,
-    UriFanoutPort, UriRebuild, UriSourceFactory,
+    DecodebinSelectHook, DemuxCapsSelectHook, DemuxFactory, DemuxSelectHook, ElementDoc,
+    ElementFactory, FallbacksrcSourceFactory, FanoutRebuild, FanoutSrcFactory, LaunchFactory,
+    MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream,
+    PrimaryStreamHook, PropertyDoc, RankOverride, RankSpecError, Registry, RestartFanoutSourceHook,
+    RestartPolicy, RestartSourceHook, SourceFactory, Uri, UriError, UriFanout, UriFanoutHead,
+    UriFanoutHook, UriFanoutPort, UriRebuild, UriSourceFactory,
 };
 
 #[cfg(test)]

@@ -49,10 +49,20 @@ pub const EXT_HSRSP: u16 = 2;
 pub const EXT_KMREQ: u16 = 3;
 pub const EXT_KMRSP: u16 = 4;
 pub const EXT_SID: u16 = 5;
+// libsrt rejects a longer stream id, SRT_STREAMID_MAX
+pub const MAX_STREAM_ID_BYTES: usize = 512;
 // Extension Field flag (in the handshake CIF) signalling HSREQ/KMREQ/CONFIG present.
 pub const HS_EXT_FLAG_HSREQ: u16 = 0x0001;
 pub const HS_EXT_FLAG_KMREQ: u16 = 0x0002;
 pub const HS_EXT_FLAG_CONFIG: u16 = 0x0004;
+// HSREQ SRT flags (SRT_OPT_*), the set a libsrt live-mode caller sends
+const SRT_OPT_TSBPDSND: u32 = 0x01;
+const SRT_OPT_TSBPDRCV: u32 = 0x02;
+const SRT_OPT_TLPKTDROP: u32 = 0x08;
+const SRT_OPT_NAKREPORT: u32 = 0x10;
+const SRT_OPT_REXMITFLG: u32 = 0x20;
+const LIVE_CALLER_FLAGS: u32 =
+    SRT_OPT_TSBPDSND | SRT_OPT_TSBPDRCV | SRT_OPT_TLPKTDROP | SRT_OPT_NAKREPORT | SRT_OPT_REXMITFLG;
 
 pub const FLOW_WINDOW_PACKETS: u32 = 8192;
 // libsrt keeps its own RTT estimate when an ACK carries exactly these initial values.
@@ -317,17 +327,19 @@ fn build_handshake_cif(hs: &Handshake) -> Vec<u8> {
     cif.extend_from_slice(&hs.syn_cookie.to_be_bytes());
     cif.extend_from_slice(&hs.peer_ip);
 
-    // HSREQ extension: SRT version, flags (0), then receiver + sender TSBPD
+    // HSREQ extension: SRT version, flags, then receiver + sender TSBPD
     // delay. Emitted as HSREQ in both directions: libsrt accepts an HSREQ-typed
     // block in the listener's response (it reads the TSBPD delay either way), and
     // switching the listener to HSRSP here regresses the plaintext caller. Only
     // the KM extension below is strict about the request/response TLV type.
     if let Some(latency) = hs.latency_ms {
+        // gosrt (mediamtx) rejects a caller whose request lacks the live-mode flags
+        let flags = if hs.is_response { 0 } else { LIVE_CALLER_FLAGS };
         cif.extend_from_slice(&EXT_HSREQ.to_be_bytes());
         cif.extend_from_slice(&3u16.to_be_bytes()); // length in 32-bit words
         cif.extend_from_slice(&SRT_VERSION.to_be_bytes());
-        cif.extend_from_slice(&0u32.to_be_bytes()); // flags
-                                                    // recv TSBPD delay (high 16) | send TSBPD delay (low 16).
+        cif.extend_from_slice(&flags.to_be_bytes());
+        // recv TSBPD delay (high 16) | send TSBPD delay (low 16).
         cif.extend_from_slice(&((latency as u32) << 16 | latency as u32).to_be_bytes());
     }
     // KMREQ / KMRSP extension: the opaque Keying Material blob, padded to a
@@ -342,9 +354,8 @@ fn build_handshake_cif(hs: &Handshake) -> Vec<u8> {
         padded.resize(words * 4, 0);
         cif.extend_from_slice(&padded);
     }
-    // Stream-ID extension: the ASCII id, padded to a 32-bit boundary. SRT stores
-    // it in 32-bit little-endian words; we emit byte order and pad with zeros
-    // (decoders that byte-swap see the same bytes for our loopback peer).
+    // Stream-ID extension: the id padded with zeros to a 32-bit boundary, each
+    // 32-bit word byte-reversed on the wire, as libsrt sends it.
     if let Some(sid) = &hs.stream_id {
         let bytes = sid.as_bytes();
         let words = bytes.len().div_ceil(4);
@@ -352,9 +363,16 @@ fn build_handshake_cif(hs: &Handshake) -> Vec<u8> {
         cif.extend_from_slice(&(words as u16).to_be_bytes());
         let mut padded = bytes.to_vec();
         padded.resize(words * 4, 0);
+        reverse_word_bytes(&mut padded);
         cif.extend_from_slice(&padded);
     }
     cif
+}
+
+fn reverse_word_bytes(bytes: &mut [u8]) {
+    for word in bytes.as_chunks_mut::<4>().0 {
+        word.reverse();
+    }
 }
 
 /// Parse the HSv5 handshake CIF and any HSREQ / Stream-ID extensions.
@@ -404,8 +422,9 @@ fn parse_handshake_cif(cif: &[u8]) -> Option<Handshake> {
                 hs.is_response |= ext_type == EXT_KMRSP;
             }
             EXT_SID => {
-                let raw = &cif[body..end];
-                let trimmed: Vec<u8> = raw.iter().copied().take_while(|&b| b != 0).collect();
+                let mut raw = cif[body..end].to_vec();
+                reverse_word_bytes(&mut raw);
+                let trimmed: Vec<u8> = raw.into_iter().take_while(|&b| b != 0).collect();
                 if let Ok(s) = String::from_utf8(trimmed) {
                     hs.stream_id = Some(s);
                 }
@@ -1241,6 +1260,42 @@ mod tests {
             Some(&[0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44][..]),
             "KM extension bytes survive the cif round trip"
         );
+    }
+
+    // gosrt (mediamtx) rejects a conclusion without these, libsrt sends them
+    #[test]
+    fn caller_conclusion_requests_live_mode() {
+        let flags_of = |is_response: bool| {
+            let mut hs = Handshake::induction(1, 1);
+            hs.hs_type = URQ_CONCLUSION;
+            hs.latency_ms = Some(120);
+            hs.is_response = is_response;
+            let cif = build_handshake_cif(&hs);
+            // the HSREQ TLV header follows the 48-byte fixed CIF, the flags follow the version
+            u32::from_be_bytes(cif[56..60].try_into().unwrap())
+        };
+        let required = SRT_OPT_TSBPDSND
+            | SRT_OPT_TSBPDRCV
+            | SRT_OPT_TLPKTDROP
+            | SRT_OPT_NAKREPORT
+            | SRT_OPT_REXMITFLG;
+        assert_eq!(flags_of(false) & required, required);
+        assert_eq!(
+            flags_of(true),
+            0,
+            "the listener response keeps the flags libsrt callers accept"
+        );
+    }
+
+    #[test]
+    fn stream_id_words_are_byte_reversed_on_the_wire() {
+        let mut hs = Handshake::induction(1, 1);
+        hs.stream_id = Some("publish:x".into());
+        let cif = build_handshake_cif(&hs);
+        // libsrt's layout for "publish:x": "publ" "ish:" "x" padded, each word reversed
+        assert_eq!(&cif[cif.len() - 12..], b"lbup:hsi\0\0\0x");
+        let parsed = parse_handshake_cif(&cif).expect("parse");
+        assert_eq!(parsed.stream_id.as_deref(), Some("publish:x"));
     }
 
     #[test]

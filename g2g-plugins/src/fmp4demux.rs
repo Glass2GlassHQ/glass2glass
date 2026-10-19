@@ -332,7 +332,7 @@ impl AsyncElement for Fmp4Demux {
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::IsoBmff,
-            } => CapsSet::one(Self::output_caps(codec, Dim::Any, Dim::Any, Rate::Any)),
+            } => CapsSet::one(crate::typefind::elementary_video_caps(codec)),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }

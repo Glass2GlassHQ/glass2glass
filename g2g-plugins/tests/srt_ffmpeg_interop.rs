@@ -401,3 +401,73 @@ async fn srtsink_encrypted_caller_streams_mpegts_to_ffmpeg_listener() {
 async fn srtsink_aes256_caller_streams_mpegts_to_ffmpeg_listener() {
     run_reverse_interop(Some(("g2g_srt_interop_passphrase", 32))).await;
 }
+
+/// The `streamid` property reaches libsrt as the caller wrote it: libsrt reads
+/// each 32-bit word of the id byte-reversed, the way mediamtx routes on it.
+#[tokio::test]
+#[ignore = "needs ffmpeg with libsrt; opens a local UDP socket"]
+async fn srtsink_streamid_reaches_the_ffmpeg_listener() {
+    const STREAM_ID: &str = "publish:egress-srt";
+    let port = free_udp_port();
+    let url = format!("srt://127.0.0.1:{port}?mode=listener");
+    let ffmpeg = tokio::task::spawn_blocking(move || {
+        Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "debug",
+                "-i",
+                &url,
+                "-c",
+                "copy",
+                "-f",
+                "null",
+                "-",
+            ])
+            .output()
+    });
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let mut sink = SrtSink::new(([127, 0, 0, 1], port).into());
+    sink.set_property("streamid", g2g_core::PropValue::Str(STREAM_ID.into()))
+        .expect("set streamid");
+    sink.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .expect("configure SrtSink");
+    let path = std::env::temp_dir().join(format!("g2g_srt_sid_{}_{port}.ts", std::process::id()));
+    ffmpeg_generate_ts(&path);
+    let ts_bytes = std::fs::read(&path).expect("read the input TS fixture");
+    let _ = std::fs::remove_file(&path);
+    let mut null = NullOut;
+    for (i, chunk) in ts_bytes.chunks(1316).enumerate() {
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(
+                chunk.to_vec().into_boxed_slice(),
+            )),
+            timing: FrameTiming {
+                pts_ns: i as u64 * 1_000_000,
+                ..FrameTiming::default()
+            },
+            sequence: i as u64,
+            meta: Default::default(),
+        };
+        sink.process(PipelinePacket::DataFrame(frame), &mut null)
+            .await
+            .expect("send TS chunk");
+    }
+    sink.process(PipelinePacket::Eos, &mut null)
+        .await
+        .expect("EOS closes the SRT session");
+
+    let output = tokio::time::timeout(Duration::from_secs(20), ffmpeg)
+        .await
+        .expect("ffmpeg listener finishes within 20s")
+        .expect("join ffmpeg task")
+        .expect("ffmpeg output");
+    let log = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        log.contains(&format!("accept streamid [{STREAM_ID}]")),
+        "libsrt read the stream id the caller set"
+    );
+}

@@ -16,7 +16,7 @@
 //! M18 item 5: `intercept_caps` is async (`SourceLoop::CapsFuture`), so
 //! the source can probe the server for real SDP dims/fps during
 //! negotiation. The default path connects, DESCRIBEs, SETUPs, extracts
-//! the H.264 [`VideoParameters`], drops the session, and caches the
+//! the H.264 / H.265 `VideoParameters`, drops the session, and caches the
 //! discovered caps for `run` to skip re-probing. [`RtspSrc::with_expected_dims`]
 //! short-circuits the probe entirely, returning the caller-supplied
 //! geometry without I/O (useful for tests and offline negotiation).
@@ -39,7 +39,7 @@ use alloc::boxed::Box;
 
 use futures_util::StreamExt;
 use retina::client::{Described, PlayOptions, Session, SessionGroup, SessionOptions, SetupOptions};
-use retina::codec::{CodecItem, FrameFormat, ParametersRef, VideoParameters};
+use retina::codec::{CodecItem, FrameFormat, ParametersRef};
 
 use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
@@ -376,7 +376,7 @@ impl SourceLoop for RtspSrc {
         ElementMetadata::new(
             "RTSP source",
             "Source/Network",
-            "Receives an RTSP / RTP H.264 stream via retina",
+            "Receives an RTSP / RTP H.264 or H.265 stream via retina",
             "g2g",
         )
     }
@@ -691,13 +691,16 @@ async fn run_session(
         .await
         {
             Ok((s, idx)) => {
-                let caps = caps_from_video_params(video_params_for(s.streams(), idx));
+                let caps = video_caps_for(s.streams(), idx);
                 (s, idx, caps)
             }
             Err(e) => return SessionOutcome::NetworkError(e),
         },
     };
     let clock_rate = u64::from(session.streams()[video_idx].clock_rate_hz());
+    let Some(codec) = video_codec(&session.streams()[video_idx]) else {
+        return SessionOutcome::NetworkError(G2gError::CapsMismatch);
+    };
     let mut current_caps = current_caps;
 
     let played = match session.play(PlayOptions::default()).await {
@@ -759,7 +762,7 @@ async fn run_session(
         }
 
         if vf.has_new_parameters() {
-            let refreshed = caps_from_video_params(video_params_for(demuxed.streams(), video_idx));
+            let refreshed = video_caps_for(demuxed.streams(), video_idx);
             if refreshed != current_caps {
                 if let Some(caps) = &refreshed {
                     if let Err(e) = out.push(PipelinePacket::CapsChanged(caps.clone())).await {
@@ -778,9 +781,7 @@ async fn run_session(
         session_max_pts = session_max_pts.max(pts_ns);
 
         let bytes = vf.into_data().into_boxed_slice();
-        // IDR NAL => independently-decodable unit. H.265 streams report false
-        // (the helper is H.264-specific), which matches the safe default.
-        let keyframe = crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &bytes);
+        let keyframe = crate::annexb::au_is_keyframe(codec, &bytes);
 
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
@@ -857,8 +858,7 @@ async fn probe_session(
     transports: &[LowerTransport],
 ) -> Result<StashedSession, G2gError> {
     let (session, video_idx) = connect_describe_setup(url, user_agent, creds, transports).await?;
-    let caps = caps_from_video_params(video_params_for(session.streams(), video_idx))
-        .ok_or(G2gError::CapsMismatch)?;
+    let caps = video_caps_for(session.streams(), video_idx).ok_or(G2gError::CapsMismatch)?;
     Ok(StashedSession {
         session,
         video_idx,
@@ -929,24 +929,25 @@ pub(crate) async fn connect_describe(
 pub(crate) fn video_stream_index(streams: &[retina::client::Stream]) -> Option<usize> {
     streams
         .iter()
-        .position(|s| s.media() == "video" && matches!(s.encoding_name(), "h264" | "h265"))
+        .position(|s| s.media() == "video" && video_codec(s).is_some())
 }
 
-pub(crate) fn video_params_for(
-    streams: &[retina::client::Stream],
-    idx: usize,
-) -> Option<&VideoParameters> {
-    match streams[idx].parameters() {
-        Some(ParametersRef::Video(v)) => Some(v),
+pub(crate) fn video_codec(stream: &retina::client::Stream) -> Option<VideoCodec> {
+    match stream.encoding_name() {
+        "h264" => Some(VideoCodec::H264),
+        "h265" => Some(VideoCodec::H265),
         _ => None,
     }
 }
 
-pub(crate) fn caps_from_video_params(params: Option<&VideoParameters>) -> Option<Caps> {
-    let p = params?;
+pub(crate) fn video_caps_for(streams: &[retina::client::Stream], idx: usize) -> Option<Caps> {
+    let codec = video_codec(&streams[idx])?;
+    let Some(ParametersRef::Video(p)) = streams[idx].parameters() else {
+        return None;
+    };
     let (w, h) = p.pixel_dimensions();
     Some(Caps::CompressedVideo {
-        codec: VideoCodec::H264,
+        codec,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: rate_from_frame_rate(p.frame_rate()),

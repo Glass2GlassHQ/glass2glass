@@ -18,6 +18,13 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1620: `h264parse` tests cover the SPS fields, crop units, separate colour planes and per-level reorder depth.
 - M1615: `ffmpegdec` skips a tagged codec's packet libavcodec rejects as an unknown error and converts to the packed RGB the negotiation picked.
 - M1610: `checksumsink` posts each buffer's pts and digest as the new `BusMessage::Checksum` under its instance name, in launched pipelines too, and `g2g-launch` prints the lines on stdout as gst-launch does.
+- M1608: `dashsrc` keeps playing the current Period of a live multi-Period MPD when older Periods age out.
+- M1607: `rtmpsink` announces its acknowledgement window, so publishing to mediamtx no longer stalls.
+- M1606: `fmp4demux` negotiates behind an HLS, DASH or MoQ source, where it failed to fixate before the init segment arrived.
+- M1605: a `tsdemux name=d` behind a network source gives each branch the stream its first element takes.
+- M1604: `srtsink` publishes to mediamtx, with a new `streamid` property and the live-mode handshake flags.
+- M1603: `rtspsrc` and `rtspsrcn` play an H.265 track, which they labelled H.264.
+- M1602: `avdec_h265` resolves to `ffmpegdec`, as `avdec_h264` does.
 - M1601: a bare `decodebin` behind a network source no longer opens the source's `location` URI as a file and logs a spurious open error.
 - M1600: `avidemux` keeps the cut last chunk of a truncated file for a tagged long-tail video stream, as libavformat does.
 - M1599: with `ffmpeg-long-tail`, `wavparse` forwards a WAV codec g2g has no caps for under its format tag, so GSM 6.10 and TrueSpeech WAV files decode.

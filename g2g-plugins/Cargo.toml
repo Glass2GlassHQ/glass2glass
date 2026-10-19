@@ -947,7 +947,7 @@ getrandom = { version = "0.2", optional = true }
 # PEM bodies the DTLS-SRTP certificate properties carry (dtls-srtp feature).
 base64 = { version = "0.22", optional = true }
 tokio = { version = "1", features = ["rt", "time", "sync"], optional = true }
-retina = { version = "0.4", optional = true, default-features = false }
+retina = { version = "0.4", optional = true, default-features = false, features = ["h265"] }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "async-await"] }
 # WebSocket transport for the distributed-graph primitive (remote-ws feature).
 # 0.24 matches tools/wasm-demo/detect-server so the workspace resolves a single
