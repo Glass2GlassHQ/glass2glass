@@ -9,10 +9,16 @@ use g2g_plugins::dashsrc::DashSrc;
 
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
+#[allow(dead_code)]
 #[path = "common/dash_live_server.rs"]
 mod dash_live_server;
+#[path = "common/http_routes.rs"]
+mod http_routes;
 use collect_sink::CollectSink;
-use dash_live_server::{now_unix, serve, xs_datetime};
+use dash_live_server::{now_unix, xs_datetime};
+use http_routes::serve;
+
+const MANIFEST_PATH: &str = "/manifest.mpd";
 
 const SEGMENT_SECS: u32 = 2;
 const SECOND_PERIOD_START_SECS: u32 = 4;
@@ -71,9 +77,9 @@ async fn requested_paths(manifests: Vec<String>) -> Vec<String> {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&requests);
     let loads = AtomicUsize::new(0);
-    let url = serve(move |path| {
+    let origin = serve(move |path| {
         seen.lock().unwrap().push(String::from(path));
-        if path == "/manifest.mpd" {
+        if path == MANIFEST_PATH {
             let n = loads
                 .fetch_add(1, Ordering::SeqCst)
                 .min(manifests.len() - 1);
@@ -81,7 +87,7 @@ async fn requested_paths(manifests: Vec<String>) -> Vec<String> {
         }
         Some(path.as_bytes().to_vec())
     });
-    let mut src = DashSrc::new(url).with_reload_interval_ms(20);
+    let mut src = DashSrc::new(format!("{origin}{MANIFEST_PATH}")).with_reload_interval_ms(20);
     src.configure_pipeline(&Caps::ByteStream {
         encoding: ByteStreamEncoding::IsoBmff,
     })
