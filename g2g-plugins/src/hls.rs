@@ -320,19 +320,15 @@ fn lang_prefix_match(lang: &str, pref: &str) -> bool {
     lb.len() > pb.len() && lb[pb.len()] == b'-' && lb[..pb.len()].eq_ignore_ascii_case(pb)
 }
 
-fn playlist_lines(text: &str) -> impl Iterator<Item = &str> {
-    text.lines().map(str::trim).filter(|l| !l.is_empty())
-}
-
-pub fn is_playlist(text: &str) -> bool {
-    playlist_lines(text).next() == Some("#EXTM3U")
-}
-
 /// Parse a `.m3u8` playlist. Returns master or media form.
 pub fn parse(text: &str) -> Result<Playlist, HlsError> {
-    if !is_playlist(text) {
-        return Err(HlsError::NotAPlaylist);
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+
+    match lines.next() {
+        Some("#EXTM3U") => {}
+        _ => return Err(HlsError::NotAPlaylist),
     }
+
     let mut variants = Vec::new();
     let mut renditions = Vec::new();
     let mut segments = Vec::new();
@@ -360,7 +356,7 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
     // still being produced.
     let mut pending_parts: Vec<Part> = Vec::new();
 
-    for line in playlist_lines(text).skip(1) {
+    for line in lines {
         if let Some(attrs) = line.strip_prefix("#EXT-X-STREAM-INF:") {
             pending_variant = Some(parse_stream_inf(attrs));
         } else if let Some(attrs) = line.strip_prefix("#EXT-X-MEDIA:") {

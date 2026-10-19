@@ -92,30 +92,6 @@ pub(crate) async fn get_bytes(
     read_capped(get_response(client, url, max).await?, max).await
 }
 
-#[cfg(feature = "hls")]
-pub(crate) async fn get_prefix(
-    client: &reqwest::Client,
-    url: &str,
-    len: usize,
-) -> Result<Vec<u8>, G2gError> {
-    let mut resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(net_err)?
-        .error_for_status()
-        .map_err(net_err)?;
-    let mut prefix = Vec::new();
-    while prefix.len() < len {
-        let Some(chunk) = resp.chunk().await.map_err(net_err)? else {
-            break;
-        };
-        prefix.extend_from_slice(&chunk);
-    }
-    prefix.truncate(len);
-    Ok(prefix)
-}
-
 /// Fetch the byte sub-range `[offset, offset + length)` of `url` via an HTTP
 /// `Range` request, capped at `max` like [`get_bytes`]. A `length` of `0`
 /// fetches nothing (a malformed `#EXT-X-BYTERANGE` is inert, not fatal). A

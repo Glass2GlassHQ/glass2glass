@@ -1,5 +1,3 @@
-#![allow(dead_code)] // no one test file uses every helper here
-
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
