@@ -10,6 +10,12 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1633: `qtdemux`, `avidemux` and `matroskademux` emit `v210` video as v210 raw video.
 - M1631: `videoconvert` converts to and from v210, matching ffmpeg's v210 codec byte for byte.
 - M1630: `v210` and `r210` are new raw formats, with the row strides and bit layouts GStreamer gives them.
+- M1625: `av1parse` tests cover the Main 10 colour config, operating parameters and a header cut before its trailer.
+- M1624: `h265parse` tests cover the RASL filter reset on a flush and inter-predicted RPS edge cases.
+- M1623: `av1parse` reads the uvlc stop bit, so timing info with the largest ticks per picture parses.
+- M1622: `av1parse` tests cover the sequence header, OBU extension headers, reframing checks and keyframe detection.
+- M1621: `h265parse` tests cover the SPS fields and bounds, scaling lists, sub-layers and short-term RPS derivation.
+- M1620: `h264parse` tests cover the SPS fields, crop units, separate colour planes and per-level reorder depth.
 - M1615: `ffmpegdec` skips a tagged codec's packet libavcodec rejects as an unknown error and converts to the packed RGB the negotiation picked.
 - M1610: `checksumsink` posts each buffer's pts and digest as the new `BusMessage::Checksum` under its instance name, in launched pipelines too, and `g2g-launch` prints the lines on stdout as gst-launch does.
 - M1601: a bare `decodebin` behind a network source no longer opens the source's `location` URI as a file and logs a spurious open error.

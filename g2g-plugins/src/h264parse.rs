@@ -542,6 +542,32 @@ mod tests {
 
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     #[test]
+    fn sps_reorder_frames_follows_each_level_dpb_size() {
+        // MaxDpbMbs (Table A-1) over the frame's macroblocks, each under the 16 frame cap
+        let cases: [(u8, (u32, u32), u32); 10] = [
+            (10, (176, 144), 396 / 99),
+            (11, (352, 288), 900 / 396),
+            (12, (352, 288), 2376 / 396),
+            (21, (352, 576), 4752 / 792),
+            (30, (720, 576), 8100 / 1620),
+            (31, (1280, 720), 18000 / 3600),
+            (32, (1280, 1024), 20480 / 5120),
+            (42, (1920, 1088), 34816 / 8160),
+            (50, (1920, 1088), 110400 / 8160),
+            (51, (4096, 2304), 184320 / 36864),
+        ];
+        for (level_idc, (width, height), expected_frames) in cases {
+            let au = annexb_sps(77, level_idc, &sps_body(width, height));
+            assert_eq!(
+                sps_reorder_frames(&au).map(u32::from),
+                Some(expected_frames),
+                "level {level_idc} at {width}x{height}"
+            );
+        }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+    #[test]
     fn sps_reorder_frames_none_without_sps() {
         // A stream carrying only a slice NAL (type 5 = IDR) has no SPS.
         assert_eq!(sps_reorder_frames(&[0, 0, 0, 1, 0x65, 0x88]), None);
@@ -1373,5 +1399,179 @@ mod tests {
             nal_units(&late).any(|n| h264_nal_type(n) == Some(7)),
             "re-inserted after 2 s"
         );
+    }
+
+    // a present scaling list codes delta_scale se(-8), the switch to the default matrix
+    fn annexb_sps_from_head(head: &H264SpsHead, scaling_lists_present: &[bool]) -> Vec<u8> {
+        let mut w = BitWriter::default();
+        w.write_bits(u32::from(head.profile_idc), 8);
+        w.write_bits(0, 8); // constraint_set flags + reserved_zero_2bits
+        w.write_bits(u32::from(head.level_idc), 8);
+        w.write_ue(head.seq_parameter_set_id);
+        if is_high_profile(head.profile_idc) {
+            w.write_ue(head.chroma_format_idc);
+            if head.chroma_format_idc == 3 {
+                w.write_bit(u32::from(head.poc.separate_colour_plane_flag));
+            }
+            w.write_ue(head.bit_depth_luma_minus8);
+            w.write_ue(head.bit_depth_chroma_minus8);
+            w.write_bit(0); // qpprime_y_zero_transform_bypass_flag
+            w.write_bit(u32::from(head.seq_scaling_matrix_present));
+            for &present in scaling_lists_present {
+                w.write_bit(u32::from(present));
+                if present {
+                    w.write_ue(16); // delta_scale = se(-8)
+                }
+            }
+        }
+        w.write_ue(head.poc.log2_max_frame_num - 4);
+        w.write_ue(u32::from(head.poc.pic_order_cnt_type));
+        assert!(
+            head.poc.pic_order_cnt_type != 1,
+            "POC type 1 is not written here"
+        );
+        if head.poc.pic_order_cnt_type == 0 {
+            w.write_ue(head.poc.log2_max_pic_order_cnt_lsb - 4);
+        }
+        w.write_ue(head.max_num_ref_frames);
+        w.write_bit(u32::from(head.gaps_in_frame_num_value_allowed_flag));
+        w.write_ue(head.pic_width_in_mbs_minus1);
+        w.write_ue(head.pic_height_in_map_units_minus1);
+        w.write_bit(u32::from(head.poc.frame_mbs_only_flag));
+        if !head.poc.frame_mbs_only_flag {
+            w.write_bit(u32::from(head.mb_adaptive_frame_field_flag));
+        }
+        w.write_bit(u32::from(head.direct_8x8_inference_flag));
+        w.write_bit(u32::from(head.frame_cropping_flag));
+        if head.frame_cropping_flag {
+            for offset in head.frame_crop_offsets {
+                w.write_ue(offset);
+            }
+        }
+        w.write_bit(0); // vui_parameters_present_flag
+        w.write_bit(1); // rbsp_stop_one_bit
+        w.align_to_byte();
+        let mut out = vec![0u8, 0, 0, 1, 0x67];
+        out.extend_from_slice(&crate::annexb::add_emulation_prevention(&w.into_bytes()));
+        out
+    }
+
+    const CODED_1080I: (u32, u32) = (1936, 1088);
+
+    // 1080i High 4:2:2 10-bit, cropped from 1936x1088 to 1920x1080
+    fn interlaced_422_head() -> H264SpsHead {
+        H264SpsHead {
+            profile_idc: 122,
+            level_idc: 41,
+            seq_parameter_set_id: 3,
+            chroma_format_idc: 2,
+            bit_depth_luma_minus8: 2,
+            bit_depth_chroma_minus8: 2,
+            seq_scaling_matrix_present: false,
+            poc: crate::poc::SpsPocParams {
+                pic_order_cnt_type: 0,
+                log2_max_pic_order_cnt_lsb: 6,
+                log2_max_frame_num: 5,
+                frame_mbs_only_flag: false,
+                ..crate::poc::SpsPocParams::default()
+            },
+            max_num_ref_frames: 4,
+            gaps_in_frame_num_value_allowed_flag: true,
+            pic_width_in_mbs_minus1: CODED_1080I.0 / 16 - 1,
+            pic_height_in_map_units_minus1: CODED_1080I.1 / 32 - 1,
+            mb_adaptive_frame_field_flag: true,
+            direct_8x8_inference_flag: true,
+            frame_cropping_flag: true,
+            frame_crop_offsets: [0, 8, 0, 4],
+        }
+    }
+
+    fn sps_rbsp(annexb_sps: &[u8]) -> Vec<u8> {
+        strip_emulation_prevention(&annexb_sps[ANNEX_B_SPS_HEADER_BYTES..])
+    }
+
+    // start code and NAL header byte
+    const ANNEX_B_SPS_HEADER_BYTES: usize = 5;
+
+    #[test]
+    fn sps_head_reads_every_field_as_coded() {
+        let coded = interlaced_422_head();
+        let rbsp = sps_rbsp(&annexb_sps_from_head(&coded, &[]));
+        let (head, _) = parse_h264_sps_head(&rbsp).expect("SPS head parses");
+        assert_eq!(head.profile_idc, coded.profile_idc);
+        assert_eq!(head.level_idc, coded.level_idc);
+        assert_eq!(head.seq_parameter_set_id, coded.seq_parameter_set_id);
+        assert_eq!(head.chroma_format_idc, coded.chroma_format_idc);
+        assert_eq!(head.bit_depth_luma_minus8, coded.bit_depth_luma_minus8);
+        assert_eq!(head.bit_depth_chroma_minus8, coded.bit_depth_chroma_minus8);
+        assert_eq!(head.poc, coded.poc);
+        assert_eq!(head.max_num_ref_frames, coded.max_num_ref_frames);
+        assert!(head.gaps_in_frame_num_value_allowed_flag);
+        assert_eq!(head.pic_width_in_mbs_minus1, coded.pic_width_in_mbs_minus1);
+        assert_eq!(
+            head.pic_height_in_map_units_minus1,
+            coded.pic_height_in_map_units_minus1
+        );
+        assert!(head.mb_adaptive_frame_field_flag);
+        assert!(head.direct_8x8_inference_flag);
+        assert_eq!(head.frame_crop_offsets, coded.frame_crop_offsets);
+    }
+
+    #[test]
+    fn interlaced_422_sps_crops_in_chroma_and_field_units() {
+        let info = H264Codec::extract_sps_info(&annexb_sps_from_head(&interlaced_422_head(), &[]))
+            .expect("SPS parses");
+        assert_eq!((info.width, info.height), (1920, 1080));
+        assert_eq!(info.poc, Some(interlaced_422_head().poc));
+    }
+
+    #[test]
+    fn separate_colour_planes_reach_the_poc_fields() {
+        // the slice header codes colour_plane_id only under this flag
+        let mut head = interlaced_422_head();
+        head.profile_idc = 244;
+        head.chroma_format_idc = 3;
+        head.poc.separate_colour_plane_flag = true;
+        let info =
+            H264Codec::extract_sps_info(&annexb_sps_from_head(&head, &[])).expect("SPS parses");
+        assert_eq!(info.poc, Some(head.poc));
+    }
+
+    #[test]
+    fn four_four_four_scaling_matrix_crosses_twelve_lists() {
+        // 4:4:4 adds four 8x8 chroma lists after the eight every high profile codes
+        let mut head = interlaced_422_head();
+        head.profile_idc = 244;
+        head.chroma_format_idc = 3;
+        head.seq_scaling_matrix_present = true;
+        head.frame_crop_offsets = [0; 4];
+        head.frame_cropping_flag = false;
+        let lists = [true; 12];
+        let info =
+            H264Codec::extract_sps_info(&annexb_sps_from_head(&head, &lists)).expect("SPS parses");
+        assert_eq!((info.width, info.height), CODED_1080I);
+    }
+
+    #[test]
+    fn log2_max_frame_num_is_bounded() {
+        let mut head = interlaced_422_head();
+        head.poc.log2_max_frame_num = crate::poc::MAX_LOG2_MINUS4 + 4;
+        let info = H264Codec::extract_sps_info(&annexb_sps_from_head(&head, &[]))
+            .expect("the largest frame_num width parses");
+        assert_eq!(info.poc, Some(head.poc.clone()));
+        head.poc.log2_max_frame_num += 1;
+        assert!(H264Codec::extract_sps_info(&annexb_sps_from_head(&head, &[])).is_none());
+    }
+
+    #[test]
+    fn only_poc_type_2_presents_in_decode_order() {
+        let mut head = interlaced_422_head();
+        let info =
+            H264Codec::extract_sps_info(&annexb_sps_from_head(&head, &[])).expect("SPS parses");
+        assert!(!info.presents_in_decode_order, "POC type 0 may reorder");
+        head.poc.pic_order_cnt_type = 2;
+        let info =
+            H264Codec::extract_sps_info(&annexb_sps_from_head(&head, &[])).expect("SPS parses");
+        assert!(info.presents_in_decode_order);
     }
 }

@@ -54,7 +54,15 @@ fn slice_tags(bytes: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-async fn parse(stream: Vec<u8>) -> Vec<u8> {
+fn data(stream: Vec<u8>) -> PipelinePacket {
+    PipelinePacket::DataFrame(Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
+        FrameTiming::default(),
+        0,
+    ))
+}
+
+async fn parse_packets(packets: Vec<PipelinePacket>) -> Vec<u8> {
     let caps = Caps::CompressedVideo {
         codec: VideoCodec::H265,
         width: Dim::Any,
@@ -65,20 +73,14 @@ async fn parse(stream: Vec<u8>) -> Vec<u8> {
     let mut parser = H265Parse::reframing();
     parser.configure_pipeline(&caps).unwrap();
     let mut sink = PictureTags::default();
-    let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
-        FrameTiming::default(),
-        0,
-    );
-    parser
-        .process(PipelinePacket::DataFrame(frame), &mut sink)
-        .await
-        .unwrap();
-    parser
-        .process(PipelinePacket::Eos, &mut sink)
-        .await
-        .unwrap();
+    for packet in packets {
+        parser.process(packet, &mut sink).await.unwrap();
+    }
     sink.tags
+}
+
+async fn parse(stream: Vec<u8>) -> Vec<u8> {
+    parse_packets(vec![data(stream), PipelinePacket::Eos]).await
 }
 
 fn parameter_sets() -> Vec<u8> {
@@ -116,4 +118,27 @@ async fn drops_rasl_of_a_cra_after_an_end_of_sequence_nal() {
     ]
     .concat();
     assert_eq!(parse(stream).await, [1, 3, 4, 6]);
+}
+
+#[tokio::test]
+async fn drops_rasl_of_the_first_cra_after_a_flush() {
+    // the trailing picture is still being assembled when the flush drops it
+    let before_seek = [
+        parameter_sets(),
+        picture(CRA, 1),
+        picture(RASL_N, 2),
+        picture(TRAIL_R, 3),
+        picture(CRA, 4),
+        picture(RASL_N, 5),
+        picture(TRAIL_R, 6),
+    ]
+    .concat();
+    let after_seek = [picture(CRA, 7), picture(RASL_N, 8), picture(TRAIL_R, 9)].concat();
+    let packets = vec![
+        data(before_seek),
+        PipelinePacket::Flush,
+        data(after_seek),
+        PipelinePacket::Eos,
+    ];
+    assert_eq!(parse_packets(packets).await, [1, 3, 4, 5, 7, 9]);
 }
