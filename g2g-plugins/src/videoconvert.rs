@@ -38,7 +38,7 @@ use g2g_core::{
 
 /// Formats this element can both consume and produce. The convert `target`
 /// is always one of these.
-pub(crate) const FORMATS: [RawVideoFormat; 17] = [
+pub(crate) const FORMATS: [RawVideoFormat; 18] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Rgb8,
@@ -56,6 +56,7 @@ pub(crate) const FORMATS: [RawVideoFormat; 17] = [
     RawVideoFormat::P010,
     RawVideoFormat::A420,
     RawVideoFormat::Uyvy,
+    RawVideoFormat::A444p12,
 ];
 
 /// # Example
@@ -895,13 +896,28 @@ fn fill_hub_alpha(src: &[u8], from: RawVideoFormat, w: usize, h: usize, alpha: &
         alpha.extend(pixels.iter().map(|pixel| pixel[3]));
         return;
     }
-    match from.alpha_plane() {
-        Some(plane) => {
-            let (offset, _, _) = tight_plane(from, plane, w, h).expect("frame size fits");
-            alpha.extend_from_slice(&src[offset..offset + n]);
-        }
-        None => alpha.resize(n, u8::MAX),
+    let Some(plane) = from.alpha_plane() else {
+        alpha.resize(n, u8::MAX);
+        return;
+    };
+    let (offset, _, _) = tight_plane(from, plane, w, h).expect("frame size fits");
+    if from.bytes_per_sample() == 1 {
+        alpha.extend_from_slice(&src[offset..offset + n]);
+        return;
     }
+    let shift = from.bit_depth() - 8;
+    let (samples, _) = src[offset..offset + n * 2].as_chunks::<2>();
+    alpha.extend(
+        samples
+            .iter()
+            .map(|sample| (u16::from_le_bytes(*sample) >> shift).min(u16::from(u8::MAX)) as u8),
+    );
+}
+
+// the top bits repeat into the low ones, so opaque stays the deeper format's maximum
+fn widen_alpha(alpha: u8, depth: u8) -> u16 {
+    let shift = depth - 8;
+    (u16::from(alpha) << shift) | (u16::from(alpha) >> (8 - shift))
 }
 
 /// Repack full-resolution (4:4:4) planar Y, U, V at working depth `wd` into `to`:
@@ -1003,7 +1019,14 @@ fn from_hub(
             }
             if let Some(plane) = f.alpha_plane() {
                 let (offset, _, _) = tight_plane(f, plane, w, h).expect("frame size fits");
-                dst[offset..offset + n].copy_from_slice(alpha);
+                if bps == 1 {
+                    dst[offset..offset + n].copy_from_slice(alpha);
+                } else {
+                    let (samples, _) = dst[offset..offset + n * 2].as_chunks_mut::<2>();
+                    for (sample, &value) in samples.iter_mut().zip(alpha) {
+                        *sample = widen_alpha(value, f.bit_depth()).to_le_bytes();
+                    }
+                }
             }
             dst.into_boxed_slice()
         }
@@ -1685,6 +1708,50 @@ mod tests {
         assert_eq!(p0[0], p0[1], "grey: R == G");
         assert_eq!(p0[1], p0[2], "grey: G == B");
         assert_eq!(p0[3], 255, "alpha opaque");
+    }
+
+    #[test]
+    fn twelve_bit_alpha_narrows_into_rgba_and_widens_back() {
+        const ALPHA_PLANE: usize = 3;
+        const RGBA_ALPHA_BYTE: usize = 3;
+        let (w, h) = (2usize, 2usize);
+        let format = RawVideoFormat::A444p12;
+        let alpha_12_bit = [0x0FFFu16, 0x0800, 0x0010, 0];
+        let mut frame = alloc::vec![0u8; frame_byte_size(format, w as u32, h as u32)];
+        let (offset, _, _) = tight_plane(format, ALPHA_PLANE, w, h).expect("alpha plane");
+        for (i, alpha) in alpha_12_bit.iter().enumerate() {
+            frame[offset + 2 * i..offset + 2 * i + 2].copy_from_slice(&alpha.to_le_bytes());
+        }
+        let rgba = convert(
+            &frame,
+            format,
+            RawVideoFormat::Rgba8,
+            w,
+            h,
+            Colorimetry::UNKNOWN,
+        );
+        let narrowed: Vec<u8> = rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| pixel[RGBA_ALPHA_BYTE])
+            .collect();
+        assert_eq!(narrowed, [255, 128, 1, 0]);
+        let back = convert(
+            &rgba,
+            RawVideoFormat::Rgba8,
+            format,
+            w,
+            h,
+            Colorimetry::UNKNOWN,
+        );
+        let widened: Vec<u16> = back[offset..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|sample| u16::from_le_bytes(*sample))
+            .collect();
+        assert_eq!(widened, [0x0FFF, 0x0808, 0x0010, 0]);
     }
 
     #[test]

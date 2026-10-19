@@ -43,8 +43,9 @@ use alloc::vec::Vec;
 
 use crate::caps::{
     AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, ColorPrimaries, ColorRange,
-    Colorimetry, Dim, Interlace, MatrixCoefficients, Rate, RawVideoFormat, SubPictureFormat,
-    TensorDType, TensorLayout, TensorShape, TextFormat, TransferCharacteristics, VideoCodec,
+    Colorimetry, Dim, Interlace, MatrixCoefficients, ProResVariant, Rate, RawVideoFormat,
+    SubPictureFormat, TensorDType, TensorLayout, TensorShape, TextFormat, TransferCharacteristics,
+    VideoCodec,
 };
 use crate::channels::ChannelLayout;
 use crate::frame::{Frame, FrameTiming, PipelinePacket};
@@ -223,6 +224,25 @@ fn video_codec_to_u8(c: VideoCodec) -> u8 {
         VideoCodec::Pnm => 15,
         VideoCodec::Vp6Plain => 16,
         VideoCodec::Theora => 17,
+        VideoCodec::ProRes {
+            variant: ProResVariant::Proxy,
+        } => 18,
+        VideoCodec::ProRes {
+            variant: ProResVariant::Lt,
+        } => 19,
+        VideoCodec::ProRes {
+            variant: ProResVariant::Standard,
+        } => 20,
+        VideoCodec::ProRes {
+            variant: ProResVariant::Hq,
+        } => 21,
+        VideoCodec::ProRes {
+            variant: ProResVariant::FourFourFourFour,
+        } => 22,
+        VideoCodec::ProRes {
+            variant: ProResVariant::FourFourFourFourXq,
+        } => 23,
+        VideoCodec::DnxHd => 24,
     }
 }
 fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
@@ -245,6 +265,25 @@ fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
         15 => VideoCodec::Pnm,
         16 => VideoCodec::Vp6Plain,
         17 => VideoCodec::Theora,
+        18 => VideoCodec::ProRes {
+            variant: ProResVariant::Proxy,
+        },
+        19 => VideoCodec::ProRes {
+            variant: ProResVariant::Lt,
+        },
+        20 => VideoCodec::ProRes {
+            variant: ProResVariant::Standard,
+        },
+        21 => VideoCodec::ProRes {
+            variant: ProResVariant::Hq,
+        },
+        22 => VideoCodec::ProRes {
+            variant: ProResVariant::FourFourFourFour,
+        },
+        23 => VideoCodec::ProRes {
+            variant: ProResVariant::FourFourFourFourXq,
+        },
+        24 => VideoCodec::DnxHd,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -271,6 +310,7 @@ pub fn raw_format_to_u8(f: RawVideoFormat) -> u8 {
         RawVideoFormat::Rgb8 => 14,
         RawVideoFormat::A420 => 15,
         RawVideoFormat::Uyvy => 16,
+        RawVideoFormat::A444p12 => 17,
     }
 }
 /// Inverse of [`raw_format_to_u8`]; errors on an unknown byte (never trust the
@@ -294,6 +334,7 @@ pub fn raw_format_from_u8(v: u8) -> Result<RawVideoFormat, WireError> {
         14 => RawVideoFormat::Rgb8,
         15 => RawVideoFormat::A420,
         16 => RawVideoFormat::Uyvy,
+        17 => RawVideoFormat::A444p12,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -1383,7 +1424,13 @@ mod tests {
             VideoCodec::Pnm,
             VideoCodec::Vp6Plain,
             VideoCodec::Theora,
+            VideoCodec::DnxHd,
         ];
+        let video = video.into_iter().chain(
+            ProResVariant::ALL
+                .into_iter()
+                .map(|variant| VideoCodec::ProRes { variant }),
+        );
         for c in video {
             assert_eq!(video_codec_from_u8(video_codec_to_u8(c)), Ok(c));
         }

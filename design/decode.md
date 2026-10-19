@@ -111,7 +111,8 @@ are `Caps::CompressedVideo { codec: H264, .. }`. The backend is selectable:
 | `NvdecCuda` | `h264` + `AV_HWDEVICE_TYPE_CUDA` | `Cuda` | Zero-copy device-memory output. |
 | `Vaapi` | `h264` + `AV_HWDEVICE_TYPE_VAAPI` | `System` | GPU decode, surface downloaded with `av_hwframe_transfer_data`. The Linux AMD / Intel hardware path, working on Mesa `radeonsi` where `VaapiH264Dec` cannot. Pin the render node with `with_vaapi_device` or the `device` property. Launch name `ffmpegvaapidec`. |
 
-The other codecs libavcodec decodes open the same way. Theora's identification,
+The other codecs libavcodec decodes open the same way. A ProRes decoder gets
+the profile fourcc as its `codec_tag`, which picks its sample depth. Theora's identification,
 comment and setup packets arrive in band ahead of its frames, from `oggdemux`
 or `matroskademux`. The decoder holds them, opens libavcodec's `theora` decoder
 on them Xiph-laced as extradata, and drops the copies a demuxer re-sends after
@@ -142,6 +143,10 @@ template.
 - `A420` is I420 followed by a full-resolution 8-bit alpha plane. `Auto` emits
   it for a `YUVA420P` source (VP6 with alpha), all four planes copied, and
   `videoconvert` drops the alpha for I420 or carries it into RGBA / BGRA.
+- `A444p12` is `I444p12` followed by a full-resolution 12-bit alpha plane, the
+  `YUVA444P12` ProRes 4444 decodes to with transparency. `videoconvert` narrows
+  that alpha to 8 bits for RGBA and widens 8-bit alpha by repeating its top bits,
+  so opaque stays 4095.
 
 Mismatches needing a real conversion, chroma upsampling or an 8-bit request from
 a 10-bit source, are rejected with `CapsMismatch` instead of silently converted.

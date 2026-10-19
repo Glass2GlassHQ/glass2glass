@@ -17,8 +17,8 @@ use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::time::ticks_to_ns;
 
 use g2g_core::{
-    AudioFormat, Chapter, ClosedCaptionFormat, FrameTiming, G2gError, RawVideoFormat, Segment,
-    TagList, TextFormat, VideoCodec,
+    AudioFormat, Chapter, ClosedCaptionFormat, FrameTiming, G2gError, ProResVariant,
+    RawVideoFormat, Segment, TagList, TextFormat, VideoCodec,
 };
 
 use crate::aiff::audio_from_comm;
@@ -799,6 +799,8 @@ fn parse_video_entry(
         (VideoCodec::Mpeg4Part2, sets, None)
     } else if let Some(av01) = find_box(entries, b"av01") {
         (VideoCodec::Av1, parse_av1c_config(av01)?, None)
+    } else if let Some(codec) = boxes(entries).find_map(|(fourcc, _)| mezzanine_codec(*fourcc)) {
+        (codec, Vec::new(), None)
     } else if let Some((format, entry)) = boxes(entries).find_map(|(fourcc, entry)| {
         Some((crate::uncompressedvideo::raw_video_format(*fourcc)?, entry))
     }) {
@@ -819,6 +821,14 @@ fn parse_video_entry(
         },
         cenc,
     )))
+}
+
+// the intra-only editing codecs, each frame decodable alone
+fn mezzanine_codec(fourcc: [u8; 4]) -> Option<VideoCodec> {
+    if let Some(variant) = ProResVariant::from_fourcc(fourcc) {
+        return Some(VideoCodec::ProRes { variant });
+    }
+    matches!(&fourcc, b"AVdn" | b"AVdh").then_some(VideoCodec::DnxHd)
 }
 
 // VisualSampleEntry: reserved, data_reference_index and pre_defined fields, then width and height
@@ -3533,6 +3543,34 @@ mod tests {
         assert_eq!((width, height), (CODED_WIDTH.into(), CODED_HEIGHT.into()));
         let no_geometry = crate::mp4box::mp4_box(b"2vuy", &[0; VISUAL_SAMPLE_ENTRY_LEN]);
         assert!(parse_video_entry(&no_geometry, 640, 480).is_err());
+    }
+
+    #[test]
+    fn reads_the_prores_and_dnxhd_sample_entries() {
+        const VISUAL_SAMPLE_ENTRY_LEN: usize = 78;
+        for (fourcc, want) in [
+            (
+                b"apch",
+                VideoCodec::ProRes {
+                    variant: ProResVariant::Hq,
+                },
+            ),
+            (
+                b"ap4h",
+                VideoCodec::ProRes {
+                    variant: ProResVariant::FourFourFourFour,
+                },
+            ),
+            (b"AVdh", VideoCodec::DnxHd),
+        ] {
+            let entry = crate::mp4box::mp4_box(fourcc, &[0; VISUAL_SAMPLE_ENTRY_LEN]);
+            let Some((TrackKind::Video { codec, .. }, _)) =
+                parse_video_entry(&entry, 1920, 1080).expect("the entry parses")
+            else {
+                panic!("{fourcc:?} is read as a video track");
+            };
+            assert_eq!(codec, want);
+        }
     }
 
     #[test]

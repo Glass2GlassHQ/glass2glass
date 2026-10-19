@@ -759,6 +759,16 @@ applies to Opus only.
 
 ## MP4 and fMP4
 
+The intra-only editing codecs come from the QuickTime sample entry: `apco`,
+`apcs`, `apcn`, `apch`, `ap4h` and `ap4x` are `VideoCodec::ProRes` with the
+matching `ProResVariant`, `AVdn` and `AVdh` are `VideoCodec::DnxHd`. The variant
+travels in the caps, GStreamer's `variant` field, because libavcodec's ProRes
+decoder takes its sample depth from the profile fourcc: 10 bits for the 4:2:2
+profiles, 12 for 4444. A Matroska `V_PRORES` track names its profile with the
+fourcc in its `CodecPrivate`, standard when it has none, and its blocks lack
+the frame size and `icpf` tag a QuickTime ProRes frame opens with, so
+`matroskademux` puts them back, as ffmpeg's demuxer does.
+
 `mp4demux` reports a track's frame rate as `timescale / delta` when every `stts`
 entry codes the same sample delta, and `Rate::Any` when the deltas vary, the
 table is empty (a fragmented init) or the rate falls outside the 1 to 240 fps

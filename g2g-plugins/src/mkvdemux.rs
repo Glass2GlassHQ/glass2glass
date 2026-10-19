@@ -45,9 +45,9 @@ use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
     MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Seek,
-    Segment, Stream, StreamCollection, StreamType, SubPictureFormat, TagList, TextFormat,
-    VideoCodec,
+    PipelinePacket, ProResVariant, PropError, PropKind, PropValue, PropertySpec, Rate,
+    RawVideoFormat, Seek, Segment, Stream, StreamCollection, StreamType, SubPictureFormat, TagList,
+    TextFormat, VideoCodec,
 };
 
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
@@ -110,6 +110,7 @@ pub enum MkvStream {
     Pcm(AudioFormat),
     RawVideo(RawVideoFormat),
     Theora,
+    ProRes(ProResVariant),
 }
 
 /// A Matroska `Cues` prefetch in flight (M374): an end-of-file `Cues` index
@@ -306,6 +307,7 @@ impl MkvDemux {
             MkvStream::Av1 => Self::compressed_video(VideoCodec::Av1),
             MkvStream::Mjpeg => Self::compressed_video(VideoCodec::Mjpeg),
             MkvStream::Theora => Self::compressed_video(VideoCodec::Theora),
+            MkvStream::ProRes(variant) => Self::compressed_video(VideoCodec::ProRes { variant }),
             MkvStream::Aac => Caps::Audio {
                 format: AudioFormat::Aac,
                 channels: 0,
@@ -526,6 +528,7 @@ impl MkvDemux {
             MkvCodec::Av1 => (StreamType::Video, video(VideoCodec::Av1)),
             MkvCodec::Mjpeg => (StreamType::Video, video(VideoCodec::Mjpeg)),
             MkvCodec::Theora => (StreamType::Video, video(VideoCodec::Theora)),
+            MkvCodec::ProRes(variant) => (StreamType::Video, video(VideoCodec::ProRes { variant })),
             MkvCodec::Aac => (StreamType::Audio, audio(AudioFormat::Aac)),
             MkvCodec::Opus => (StreamType::Audio, audio(AudioFormat::Opus)),
             MkvCodec::Ac3 => (StreamType::Audio, audio(AudioFormat::Ac3)),
@@ -883,7 +886,7 @@ impl AsyncElement for MkvDemux {
 static MKVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | mjpeg | theora | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy)",
+    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | mjpeg | theora | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy)",
 )];
 
 /// The [`MkvStream`] a demuxer forwards for a parsed track's codec, or `None` for
@@ -897,6 +900,7 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::Av1 => Some(MkvStream::Av1),
         MkvCodec::Mjpeg => Some(MkvStream::Mjpeg),
         MkvCodec::Theora => Some(MkvStream::Theora),
+        MkvCodec::ProRes(variant) => Some(MkvStream::ProRes(variant)),
         MkvCodec::Aac => Some(MkvStream::Aac),
         MkvCodec::Opus => Some(MkvStream::Opus),
         MkvCodec::Ac3 => Some(MkvStream::Ac3),
@@ -947,6 +951,7 @@ fn deframe_block(demux: &MatroskaDemuxer, f: crate::matroska::MkvFrame) -> Optio
             .codec_private(f.track)
             .and_then(|config| adts_from_asc(config, &f.data))
             .unwrap_or(f.data),
+        MkvCodec::ProRes(_) => prores_frame_with_header(f.data),
         MkvCodec::RawVideo(format) => {
             let track = demux.tracks().iter().find(|t| t.number == f.track)?;
             let (width, height) = (track.width, track.height);
@@ -960,6 +965,27 @@ fn deframe_block(demux: &MatroskaDemuxer, f: crate::matroska::MkvFrame) -> Optio
         }
         _ => f.data,
     })
+}
+
+// Matroska strips the size and `icpf` tag a ProRes frame opens with, which libavcodec reads
+fn prores_frame_with_header(data: Vec<u8>) -> Vec<u8> {
+    const FRAME_TAG: &[u8; 4] = b"icpf";
+    const HEADER_LEN: usize = 8;
+    if data.get(4..HEADER_LEN) == Some(FRAME_TAG.as_slice()) {
+        return data;
+    }
+    let Some(size) = data
+        .len()
+        .checked_add(HEADER_LEN)
+        .and_then(|size| u32::try_from(size).ok())
+    else {
+        return data;
+    };
+    let mut framed = Vec::with_capacity(size as usize);
+    framed.extend_from_slice(&size.to_be_bytes());
+    framed.extend_from_slice(FRAME_TAG);
+    framed.extend_from_slice(&data);
+    framed
 }
 
 /// Convert a length-prefixed (AVCC / HVCC, the Matroska-native H.26x framing
@@ -1054,6 +1080,7 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
                     | MkvStream::Mjpeg
                     | MkvStream::RawVideo(_)
                     | MkvStream::Theora
+                    | MkvStream::ProRes(_)
             );
             // Fill the concrete channel count from the track header for an audio
             // stream: `output_caps` is the generic per-stream placeholder (channels
@@ -1318,6 +1345,24 @@ fn merge_stream_tags(
     }
 }
 
+// the `stream=` names the mp4 demuxers select the same profiles by
+pub(crate) fn prores_stream_str(variant: ProResVariant) -> &'static str {
+    match variant {
+        ProResVariant::Proxy => "prores-proxy",
+        ProResVariant::Lt => "prores-lt",
+        ProResVariant::Standard => "prores-standard",
+        ProResVariant::Hq => "prores-hq",
+        ProResVariant::FourFourFourFour => "prores-4444",
+        ProResVariant::FourFourFourFourXq => "prores-4444xq",
+    }
+}
+
+pub(crate) fn prores_stream_from_str(name: &str) -> Option<ProResVariant> {
+    ProResVariant::ALL
+        .into_iter()
+        .find(|variant| prores_stream_str(*variant) == name)
+}
+
 fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
     match s {
         "h264" => Some(MkvStream::H264),
@@ -1337,7 +1382,8 @@ fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
         "pgs" | "hdmvpgs" => Some(MkvStream::Pgs),
         _ => g2g_core::pcm_from_gst_format(s)
             .map(MkvStream::Pcm)
-            .or_else(|| raw_video_stream_from_str(s).map(MkvStream::RawVideo)),
+            .or_else(|| raw_video_stream_from_str(s).map(MkvStream::RawVideo))
+            .or_else(|| prores_stream_from_str(s).map(MkvStream::ProRes)),
     }
 }
 
@@ -1355,6 +1401,7 @@ fn mkv_stream_to_str(stream: MkvStream) -> &'static str {
         MkvStream::Av1 => "av1",
         MkvStream::Mjpeg => "mjpeg",
         MkvStream::Theora => "theora",
+        MkvStream::ProRes(variant) => prores_stream_str(variant),
         MkvStream::Aac => "aac",
         MkvStream::Opus => "opus",
         MkvStream::Ac3 => "ac3",
@@ -1398,6 +1445,9 @@ impl PadTemplates for MkvDemux {
             g2g_core::pcm_formats().map(|format| Self::output_caps(MkvStream::Pcm(format))),
         );
         source.extend(raw_video_formats().map(raw_video_placeholder_caps));
+        source.extend(
+            ProResVariant::ALL.map(|variant| Self::output_caps(MkvStream::ProRes(variant))),
+        );
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
             PadTemplate::source(CapsSet::from_alternatives(source)),
@@ -2089,6 +2139,57 @@ mod tests {
         let mut expected: Vec<Vec<u8>> = headers.iter().map(|header| header.to_vec()).collect();
         expected.push(alloc::vec![0x00, 0x11]);
         assert_eq!(sink.frames, expected);
+    }
+
+    #[tokio::test]
+    async fn a_prores_block_regains_its_icpf_frame_header() {
+        let geometry = [elem(&[0xB0], &uint_body(64)), elem(&[0xBA], &uint_body(48))].concat();
+        let track = elem(
+            &[0xAE],
+            &[
+                elem(&[0xD7], &uint_body(1)),
+                elem(&[0x86], b"V_PRORES"),
+                elem(&[0x63, 0xA2], b"apch"),
+                elem(&[0xE0], &geometry),
+            ]
+            .concat(),
+        );
+        let bare = [0x00u8, 0xA8, 0x11, 0x22];
+        let already_framed = [&12u32.to_be_bytes()[..], b"icpf", &bare].concat();
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[
+                elem(&[0xE7], &uint_body(0)),
+                elem(&[0xA3], &block(1, 0, &bare)),
+                elem(&[0xA3], &block(1, 40, &already_framed)),
+            ]
+            .concat(),
+        );
+        let segment = elem(
+            &[0x18, 0x53, 0x80, 0x67],
+            &[elem(&[0x16, 0x54, 0xAE, 0x6B], &track), cluster].concat(),
+        );
+        let file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat();
+
+        let mut demux = MatroskaDemuxer::new();
+        demux.push_data(&file);
+        let stream = forwardable_streams(&demux)[0].stream;
+        assert_eq!(stream, MkvStream::ProRes(ProResVariant::Hq));
+        let mut sink = CaptureSink::default();
+        run(stream, &file, &mut sink).await;
+        assert!(matches!(
+            sink.caps[..],
+            [Caps::CompressedVideo {
+                codec: VideoCodec::ProRes {
+                    variant: ProResVariant::Hq
+                },
+                ..
+            }]
+        ));
+        assert_eq!(
+            sink.frames,
+            alloc::vec![already_framed.clone(), already_framed]
+        );
     }
 
     #[tokio::test]

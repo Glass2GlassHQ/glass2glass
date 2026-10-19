@@ -30,7 +30,9 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use g2g_core::{AudioFormat, Chapter, RawVideoFormat, SubPictureFormat, Tag, TagList, TextFormat};
+use g2g_core::{
+    AudioFormat, Chapter, ProResVariant, RawVideoFormat, SubPictureFormat, Tag, TagList, TextFormat,
+};
 
 use crate::dvbsub::{page_id_blob, parse_page_ids, segment_span, PageIds, DEFAULT_SUBTITLING_TYPE};
 use crate::fifobuffer::FifoBuffer;
@@ -193,6 +195,8 @@ pub enum MkvCodec {
     RawVideo(RawVideoFormat),
     // `V_THEORA`, the three header packets Xiph-laced in the `CodecPrivate`
     Theora,
+    // `V_PRORES`, its profile's fourcc in the `CodecPrivate`
+    ProRes(ProResVariant),
 }
 
 impl MkvCodec {
@@ -272,7 +276,8 @@ impl MkvCodec {
             | MkvCodec::Other
             | MkvCodec::Pcm { .. }
             | MkvCodec::RawVideo(_)
-            | MkvCodec::Theora => return None,
+            | MkvCodec::Theora
+            | MkvCodec::ProRes(_) => return None,
         })
     }
 
@@ -1303,6 +1308,7 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
         MkvCodec::Other => pcm_codec(codec_id, bit_depth)
             .or_else(|| vfw_codec(codec_id, codec_private))
             .or_else(|| uncompressed_codec(codec_id, colour_space?))
+            .or_else(|| prores_codec(codec_id, codec_private))
             .unwrap_or(MkvCodec::Other),
         codec => codec,
     };
@@ -1359,6 +1365,17 @@ fn vfw_codec(codec_id: &[u8], codec_private: &[u8]) -> Option<MkvCodec> {
         return Some(MkvCodec::Mjpeg);
     }
     crate::uncompressedvideo::raw_video_format(fourcc.try_into().ok()?).map(MkvCodec::RawVideo)
+}
+
+fn prores_codec(codec_id: &[u8], codec_private: &[u8]) -> Option<MkvCodec> {
+    if without_nul_padding(codec_id) != b"V_PRORES" {
+        return None;
+    }
+    // without a fourcc ffmpeg and GStreamer both decode the track as standard 4:2:2
+    if codec_private.is_empty() {
+        return Some(MkvCodec::ProRes(ProResVariant::Standard));
+    }
+    ProResVariant::from_fourcc(codec_private.try_into().ok()?).map(MkvCodec::ProRes)
 }
 
 fn uncompressed_codec(codec_id: &[u8], colour_space: [u8; 4]) -> Option<MkvCodec> {

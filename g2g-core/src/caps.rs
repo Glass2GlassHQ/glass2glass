@@ -485,6 +485,9 @@ impl Caps {
                 colorimetry,
             } => {
                 let mut s = String::from(codec_gst_media_type(*codec));
+                if let VideoCodec::ProRes { variant } = codec {
+                    s.push_str(&format!(",variant={}", variant.gst_name()));
+                }
                 push_dim(&mut s, "width", width);
                 push_dim(&mut s, "height", height);
                 push_rate(&mut s, framerate);
@@ -641,6 +644,8 @@ fn codec_gst_media_type(c: VideoCodec) -> &'static str {
         VideoCodec::Vp6 { alpha: true } => "video/x-vp6-alpha",
         VideoCodec::Vp6Plain => "video/x-vp6",
         VideoCodec::Theora => "video/x-theora",
+        VideoCodec::ProRes { .. } => "video/x-prores",
+        VideoCodec::DnxHd => "video/x-dnxhd",
         // GStreamer keeps VC-1 under the Windows Media Video type, told apart
         // by `wmvversion=3, format=WVC1`; the fields do not survive here, so the
         // codec split stays in the caps.
@@ -1741,6 +1746,67 @@ pub enum VideoCodec {
     Vp6Plain,
     // its three header packets lead the frames in band, as Vorbis's do
     Theora,
+    // the profile sets the sample depth libavcodec decodes at
+    ProRes {
+        variant: ProResVariant,
+    },
+    DnxHd,
+}
+
+// the profiles QuickTime names by sample entry fourcc and GStreamer by `variant`
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ProResVariant {
+    Proxy,
+    Lt,
+    Standard,
+    Hq,
+    FourFourFourFour,
+    FourFourFourFourXq,
+}
+
+impl ProResVariant {
+    pub const ALL: [ProResVariant; 6] = [
+        ProResVariant::Proxy,
+        ProResVariant::Lt,
+        ProResVariant::Standard,
+        ProResVariant::Hq,
+        ProResVariant::FourFourFourFour,
+        ProResVariant::FourFourFourFourXq,
+    ];
+
+    pub const fn fourcc(self) -> [u8; 4] {
+        match self {
+            ProResVariant::Proxy => *b"apco",
+            ProResVariant::Lt => *b"apcs",
+            ProResVariant::Standard => *b"apcn",
+            ProResVariant::Hq => *b"apch",
+            ProResVariant::FourFourFourFour => *b"ap4h",
+            ProResVariant::FourFourFourFourXq => *b"ap4x",
+        }
+    }
+
+    pub fn from_fourcc(fourcc: [u8; 4]) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|variant| variant.fourcc() == fourcc)
+    }
+
+    pub const fn gst_name(self) -> &'static str {
+        match self {
+            ProResVariant::Proxy => "proxy",
+            ProResVariant::Lt => "lt",
+            ProResVariant::Standard => "standard",
+            ProResVariant::Hq => "hq",
+            ProResVariant::FourFourFourFour => "4444",
+            ProResVariant::FourFourFourFourXq => "4444xq",
+        }
+    }
+
+    pub fn from_gst_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|variant| variant.gst_name() == name)
+    }
 }
 
 /// Wire format of a [`Caps::ByteStream`] link, so a demuxer accepts only the
@@ -1976,6 +2042,8 @@ pub enum RawVideoFormat {
     A420,
     // YUYV with each byte pair swapped: U Y0 V Y1, the QuickTime `2vuy` layout
     Uyvy,
+    // I444p12's planes followed by a full-resolution 12-bit alpha plane
+    A444p12,
 }
 
 impl RawVideoFormat {
@@ -1999,6 +2067,7 @@ impl RawVideoFormat {
             RawVideoFormat::P010 => "P010_10LE",
             RawVideoFormat::A420 => "A420",
             RawVideoFormat::Uyvy => "UYVY",
+            RawVideoFormat::A444p12 => "A444_12LE",
         }
     }
 
@@ -2012,7 +2081,10 @@ impl RawVideoFormat {
             | RawVideoFormat::I422p10
             | RawVideoFormat::I444p10
             | RawVideoFormat::P010 => 10,
-            RawVideoFormat::I420p12 | RawVideoFormat::I422p12 | RawVideoFormat::I444p12 => 12,
+            RawVideoFormat::I420p12
+            | RawVideoFormat::I422p12
+            | RawVideoFormat::I444p12
+            | RawVideoFormat::A444p12 => 12,
             _ => 8,
         }
     }
@@ -2040,9 +2112,10 @@ impl RawVideoFormat {
             RawVideoFormat::I422 | RawVideoFormat::I422p10 | RawVideoFormat::I422p12 => {
                 Some((1, 0))
             }
-            RawVideoFormat::I444 | RawVideoFormat::I444p10 | RawVideoFormat::I444p12 => {
-                Some((0, 0))
-            }
+            RawVideoFormat::I444
+            | RawVideoFormat::I444p10
+            | RawVideoFormat::I444p12
+            | RawVideoFormat::A444p12 => Some((0, 0)),
             _ => None,
         }
     }
@@ -2057,7 +2130,7 @@ impl RawVideoFormat {
     // Packed RGBA / BGRA keep alpha inside their single plane.
     pub const fn alpha_plane(self) -> Option<usize> {
         match self {
-            RawVideoFormat::A420 => Some(3),
+            RawVideoFormat::A420 | RawVideoFormat::A444p12 => Some(3),
             _ => None,
         }
     }
@@ -2128,7 +2201,7 @@ impl RawVideoFormat {
             | RawVideoFormat::I444
             | RawVideoFormat::I444p10
             | RawVideoFormat::I444p12 => 3,
-            RawVideoFormat::A420 => 4,
+            RawVideoFormat::A420 | RawVideoFormat::A444p12 => 4,
         }
     }
 
@@ -2438,7 +2511,7 @@ pub enum TensorLayout {
 }
 
 #[cfg(all(test, feature = "alloc"))]
-pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 17] = [
+pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 18] = [
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
     RawVideoFormat::Rgba8,
@@ -2456,6 +2529,7 @@ pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 17] = [
     RawVideoFormat::P010,
     RawVideoFormat::A420,
     RawVideoFormat::Uyvy,
+    RawVideoFormat::A444p12,
 ];
 
 #[cfg(test)]

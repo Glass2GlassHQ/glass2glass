@@ -8,8 +8,8 @@ use alloc::vec::Vec;
 
 use crate::caps::{
     batch_alternatives, framerate_q16_from_fraction, pcm_from_gst_format, AudioFormat,
-    ByteStreamEncoding, Caps, CapsSet, Colorimetry, Dim, Interlace, Rate, RawVideoFormat,
-    SubPictureFormat, TextFormat, VideoCodec, PCM_FORMATS,
+    ByteStreamEncoding, Caps, CapsSet, Colorimetry, Dim, Interlace, ProResVariant, Rate,
+    RawVideoFormat, SubPictureFormat, TextFormat, VideoCodec, PCM_FORMATS,
 };
 use crate::channels::ChannelLayout;
 
@@ -352,6 +352,25 @@ impl CapsSet {
             "video/x-vp6-alpha" => compressed_set(VideoCodec::Vp6 { alpha: true }),
             "video/x-vp6" => compressed_set(VideoCodec::Vp6Plain),
             "video/x-theora" => compressed_set(VideoCodec::Theora),
+            // a filter that names no variant takes every profile
+            "video/x-prores" => {
+                let variants = match fv("variant") {
+                    None => ProResVariant::ALL.to_vec(),
+                    Some(FieldVal::One(name)) => alloc::vec![ProResVariant::from_gst_name(name)?],
+                    Some(FieldVal::List(names)) => names
+                        .iter()
+                        .map(|name| ProResVariant::from_gst_name(name))
+                        .collect::<Option<Vec<_>>>()?,
+                    Some(FieldVal::Range(..)) => return None,
+                };
+                let mut alternatives = Vec::new();
+                for variant in variants {
+                    let set = compressed_set(VideoCodec::ProRes { variant })?;
+                    alternatives.extend_from_slice(set.alternatives());
+                }
+                Some(CapsSet::from_alternatives(alternatives))
+            }
+            "video/x-dnxhd" => compressed_set(VideoCodec::DnxHd),
             "audio/x-speex" => audio_set(&[AudioFormat::Speex]),
             "audio/x-opus" => audio_set(&[AudioFormat::Opus]),
             "audio/x-ac3" => audio_set(&[AudioFormat::Ac3]),
@@ -475,6 +494,7 @@ pub fn parse_raw_format(s: &str) -> Option<RawVideoFormat> {
         "p010_10le" | "p010" => RawVideoFormat::P010,
         "a420" => RawVideoFormat::A420,
         "uyvy" => RawVideoFormat::Uyvy,
+        "a444_12le" => RawVideoFormat::A444p12,
         _ => return None,
     })
 }
@@ -644,6 +664,28 @@ mod tests {
             }]
         );
         assert!(CapsSet::from_gst_string("text/x-raw,format=nonesuch").is_none());
+    }
+
+    #[test]
+    fn prores_caps_carry_their_variant_through_the_parser() {
+        for variant in ProResVariant::ALL {
+            let caps = Caps::CompressedVideo {
+                codec: VideoCodec::ProRes { variant },
+                width: Dim::Fixed(1920),
+                height: Dim::Fixed(1080),
+                framerate: Rate::Any,
+                colorimetry: Colorimetry::UNKNOWN,
+            };
+            let printed = caps.to_gst_string();
+            assert_eq!(
+                CapsSet::from_gst_string(&printed).unwrap().alternatives(),
+                &[caps],
+                "{printed}"
+            );
+        }
+        let any_variant = CapsSet::from_gst_string("video/x-prores").unwrap();
+        assert_eq!(any_variant.alternatives().len(), ProResVariant::ALL.len());
+        assert!(CapsSet::from_gst_string("video/x-prores,variant=raw").is_none());
     }
 
     #[test]

@@ -153,9 +153,9 @@ pub use aggregator::InputAggregator;
 pub use caps::{
     pcm_formats, pcm_from_gst_format, pcm_gst_format, AudioFormat, ByteStreamEncoding, Caps,
     ClosedCaptionFormat, ColorPrimaries, ColorRange, Colorimetry, Dim, Interlace, LumaCoefficients,
-    MatrixCoefficients, PassthroughFields, Rate, RawVideoFormat, SubPictureFormat, TensorDType,
-    TensorLayout, TensorShape, TextFormat, TransferCharacteristics, VideoCodec, YuvConversion,
-    ANY_CHANNELS, ANY_SAMPLE_RATE, MAX_BATCH_ALTERNATIVES, PCM_FORMATS,
+    MatrixCoefficients, PassthroughFields, ProResVariant, Rate, RawVideoFormat, SubPictureFormat,
+    TensorDType, TensorLayout, TensorShape, TextFormat, TransferCharacteristics, VideoCodec,
+    YuvConversion, ANY_CHANNELS, ANY_SAMPLE_RATE, MAX_BATCH_ALTERNATIVES, PCM_FORMATS,
 };
 pub use channels::{ChannelLayout, ChannelPosition};
 // `CapsSet` (negotiation-time alternatives) needs alloc; `TensorShape` is

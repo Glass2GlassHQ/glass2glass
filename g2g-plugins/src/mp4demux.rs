@@ -26,8 +26,8 @@ use g2g_core::log::short_type_name;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat, Segment, VideoCodec,
+    ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, ProResVariant, PropError,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment, VideoCodec,
 };
 
 use crate::aacparse::{is_raw_aac_config, require_adts};
@@ -36,6 +36,7 @@ use crate::fmp4::{
     clip_stored_pcm, parse_all_tracks, parse_fragments_multi, parse_progressive_multi,
     prepend_param_sets, starts_with_param_set, track_framerate_q16, Sample, TrackHeader, TrackKind,
 };
+use crate::mkvdemux::{prores_stream_from_str, prores_stream_str};
 use crate::mp4box::find_box;
 use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
 use crate::uncompressedvideo::{
@@ -68,6 +69,7 @@ const VIDEO_STREAM_NAMES: &[(&str, VideoCodec)] = &[
     ("mpeg4part2", VideoCodec::Mpeg4Part2),
     ("vp8", VideoCodec::Vp8),
     ("mjpeg", VideoCodec::Mjpeg),
+    ("dnxhd", VideoCodec::DnxHd),
 ];
 
 /// The `stream=` names for the audio formats [`parse_all_tracks`](crate::fmp4)
@@ -92,6 +94,9 @@ pub(crate) fn mp4_audio_stream_str(format: AudioFormat) -> Option<&'static str> 
 }
 
 pub(crate) fn mp4_video_stream_str(codec: VideoCodec) -> Option<&'static str> {
+    if let VideoCodec::ProRes { variant } = codec {
+        return Some(prores_stream_str(variant));
+    }
     VIDEO_STREAM_NAMES
         .iter()
         .find(|(_, c)| *c == codec)
@@ -103,6 +108,7 @@ fn mp4_video_stream_from_str(name: &str) -> Option<VideoCodec> {
         .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, c)| *c)
+        .or_else(|| prores_stream_from_str(name).map(|variant| VideoCodec::ProRes { variant }))
 }
 
 /// # Example
@@ -579,7 +585,7 @@ impl AsyncElement for Mp4Demux {
 static MP4DEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | vp8 | mjpeg (the video track by codec) | raw-i420 | raw-yuy2 | raw-uyvy (the uncompressed video track by layout) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | alaw | mulaw (the audio track by format)",
+    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | vp8 | mjpeg | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq (the video track by codec) | raw-i420 | raw-yuy2 | raw-uyvy (the uncompressed video track by layout) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | alaw | mulaw (the audio track by format)",
 )];
 
 impl PadTemplates for Mp4Demux {
@@ -592,7 +598,9 @@ impl PadTemplates for Mp4Demux {
             video(VideoCodec::Mpeg4Part2),
             video(VideoCodec::Vp8),
             video(VideoCodec::Mjpeg),
+            video(VideoCodec::DnxHd),
         ]);
+        source.extend(ProResVariant::ALL.map(|variant| video(VideoCodec::ProRes { variant })));
         source.extend(raw_video_formats().map(raw_video_placeholder_caps));
         for (_, format) in AUDIO_STREAM_NAMES {
             source.extend(Self::audio_nego_caps(*format));

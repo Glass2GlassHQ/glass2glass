@@ -126,8 +126,8 @@ use g2g_core::{
     g2g_warn, AllocationParams, AsyncElement, BufferPool, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, CudaKeepAlive, Dim, ElementMetadata, FrameTiming, G2gError, HardwareError,
     Interlace, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PooledBuffer, PropError, PropKind, PropValue, PropertySpec, PushOutcome, QosMessage, Rate,
-    RawVideoFormat, Segment, VideoCodec,
+    PooledBuffer, ProResVariant, PropError, PropKind, PropValue, PropertySpec, PushOutcome,
+    QosMessage, Rate, RawVideoFormat, Segment, VideoCodec,
 };
 
 /// Cap on pending input-pts -> arrival entries, so frames the decoder drops
@@ -199,6 +199,8 @@ pub enum OutputFormat {
     P010,
     // only a YUVA420P source, such as VP6 with alpha, fills the alpha plane
     A420,
+    // a YUVA444P12 source, such as ProRes 4444 with alpha
+    A444p12,
 }
 
 impl OutputFormat {
@@ -219,6 +221,7 @@ impl OutputFormat {
             OutputFormat::I444p12 => RawVideoFormat::I444p12,
             OutputFormat::P010 => RawVideoFormat::P010,
             OutputFormat::A420 => RawVideoFormat::A420,
+            OutputFormat::A444p12 => RawVideoFormat::A444p12,
         }
     }
 
@@ -231,7 +234,8 @@ impl OutputFormat {
             | OutputFormat::I422p12
             | OutputFormat::I444p10
             | OutputFormat::I444p12
-            | OutputFormat::P010 => 2,
+            | OutputFormat::P010
+            | OutputFormat::A444p12 => 2,
             _ => 1,
         }
     }
@@ -250,7 +254,10 @@ impl OutputFormat {
             | OutputFormat::P010
             | OutputFormat::A420 => (1, 1),
             OutputFormat::I422 | OutputFormat::I422p10 | OutputFormat::I422p12 => (1, 0),
-            OutputFormat::I444 | OutputFormat::I444p10 | OutputFormat::I444p12 => (0, 0),
+            OutputFormat::I444
+            | OutputFormat::I444p10
+            | OutputFormat::I444p12
+            | OutputFormat::A444p12 => (0, 0),
         }
     }
 }
@@ -273,6 +280,7 @@ fn resolve_output_format(requested: OutputFormat, src: Pixel) -> Result<OutputFo
             Pixel::YUV422P12LE => Ok(OutputFormat::I422p12),
             Pixel::YUV444P10LE => Ok(OutputFormat::I444p10),
             Pixel::YUV444P12LE => Ok(OutputFormat::I444p12),
+            Pixel::YUVA444P12LE => Ok(OutputFormat::A444p12),
             // A hardware 10-bit frame (VAAPI download / cuvid) is already
             // semi-planar; its native output is P010.
             Pixel::P010LE => Ok(OutputFormat::P010),
@@ -300,6 +308,7 @@ fn accepts_output(requested: OutputFormat, format: RawVideoFormat) -> bool {
                 | RawVideoFormat::I444p12
                 | RawVideoFormat::P010
                 | RawVideoFormat::A420
+                | RawVideoFormat::A444p12
         ),
         other => other.raw_format() == format,
     }
@@ -1157,6 +1166,13 @@ impl FfmpegVideoDec {
             (*raw).thread_count = self.max_threads as i32;
             (*raw).thread_type = self.thread_type.ff_bits(self.live);
         }
+        if let VideoCodec::ProRes { variant } = codec_kind {
+            // SAFETY: freshly allocated, not-yet-opened context; the ProRes
+            // decoder reads `codec_tag` at open to pick its sample depth.
+            unsafe {
+                (*decoder_ctx.as_mut_ptr()).codec_tag = u32::from_le_bytes(variant.fourcc());
+            }
+        }
         if self.low_delay {
             // `AV_CODEC_FLAG_LOW_DELAY` tells the codec to release each
             // picture as soon as it's decoded rather than holding it for
@@ -1403,6 +1419,7 @@ impl PadTemplates for FfmpegVideoDec {
                 any_geometry(RawVideoFormat::I444p12),
                 any_geometry(RawVideoFormat::P010),
                 any_geometry(RawVideoFormat::A420),
+                any_geometry(RawVideoFormat::A444p12),
             ]))),
         ])
     }
@@ -1575,6 +1592,7 @@ impl AsyncElement for FfmpegVideoDec {
                     "i444p12" | "y444_12le" => OutputFormat::I444p12,
                     "p010" | "p010_10le" => OutputFormat::P010,
                     "a420" => OutputFormat::A420,
+                    "a444p12" | "a444_12le" => OutputFormat::A444p12,
                     _ => return Err(PropError::Value),
                 });
                 Ok(())
@@ -1654,6 +1672,7 @@ impl AsyncElement for FfmpegVideoDec {
                     OutputFormat::I444p12 => "i444p12",
                     OutputFormat::P010 => "p010",
                     OutputFormat::A420 => "a420",
+                    OutputFormat::A444p12 => "a444p12",
                 }
                 .into(),
             )),
@@ -1965,7 +1984,7 @@ impl AsyncElement for FfmpegVideoDec {
 /// negotiation failure; the runtime mid-stream check refuses
 /// `CapsMismatch` before it ever reaches here.
 /// The compressed codecs this element can open via libavcodec.
-const SUPPORTED_CODECS: [VideoCodec; 12] = [
+const SUPPORTED_CODECS: [VideoCodec; 19] = [
     VideoCodec::H264,
     VideoCodec::H265,
     VideoCodec::Vp8,
@@ -1980,6 +1999,25 @@ const SUPPORTED_CODECS: [VideoCodec; 12] = [
     VideoCodec::Vp6 { alpha: true },
     VideoCodec::Vp6Plain,
     VideoCodec::Theora,
+    VideoCodec::DnxHd,
+    VideoCodec::ProRes {
+        variant: ProResVariant::Proxy,
+    },
+    VideoCodec::ProRes {
+        variant: ProResVariant::Lt,
+    },
+    VideoCodec::ProRes {
+        variant: ProResVariant::Standard,
+    },
+    VideoCodec::ProRes {
+        variant: ProResVariant::Hq,
+    },
+    VideoCodec::ProRes {
+        variant: ProResVariant::FourFourFourFour,
+    },
+    VideoCodec::ProRes {
+        variant: ProResVariant::FourFourFourFourXq,
+    },
 ];
 
 /// `FfmpegVideoDec`'s settable properties: the VAAPI render node (for the
@@ -2000,7 +2038,7 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
     .with_enum_values(
         "i420 | nv12 | i422 | i444 | auto | i420p10 | i420_10le | i420p12 | i420_12le | \
          i422p10 | i422_10le | i422p12 | i422_12le | i444p10 | y444_10le | i444p12 | \
-         y444_12le | p010 | p010_10le | a420",
+         y444_12le | p010 | p010_10le | a420 | a444p12 | a444_12le",
     )
     .with_default("i420"),
     PropertySpec::new(
@@ -2121,6 +2159,8 @@ fn codec_id(codec: VideoCodec) -> Id {
         VideoCodec::Vp6 { alpha: true } => Id::VP6A,
         VideoCodec::Vp6Plain => Id::VP6,
         VideoCodec::Theora => Id::THEORA,
+        VideoCodec::ProRes { .. } => Id::PRORES,
+        VideoCodec::DnxHd => Id::DNXHD,
         _ => unreachable!("ffmpegdec negotiates only known VideoCodec variants"),
     }
 }
@@ -2177,6 +2217,7 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
                     // resolves it to P010 (the Vaapi backend's 10-bit output).
                     mk(RawVideoFormat::P010),
                     mk(RawVideoFormat::A420),
+                    mk(RawVideoFormat::A444p12),
                 ]),
                 other => CapsSet::one(mk(other.raw_format())),
             }
@@ -2225,7 +2266,7 @@ fn high_depth_source_shift(px: Pixel) -> Option<(u32, u32)> {
     match px {
         Pixel::YUV420P10LE | Pixel::YUV420P12LE => Some((1, 1)),
         Pixel::YUV422P10LE | Pixel::YUV422P12LE => Some((1, 0)),
-        Pixel::YUV444P10LE | Pixel::YUV444P12LE => Some((0, 0)),
+        Pixel::YUV444P10LE | Pixel::YUV444P12LE | Pixel::YUVA444P12LE => Some((0, 0)),
         _ => None,
     }
 }
@@ -2477,15 +2518,27 @@ fn copy_yuv(
     // are copied verbatim, so 10- vs 12-bit only differs in the emitted caps
     // label, not the packing.
     if let Some((sx, sy)) = high_depth_source_shift(frame.format()) {
-        if format.bytes_per_sample() != 2 || format.chroma_shift() != (sx, sy) {
+        // an alpha source feeding a format without alpha drops its fourth plane
+        let copies_alpha = format.raw_format().alpha_plane().is_some();
+        let source_alpha = frame.format() == Pixel::YUVA444P12LE;
+        if format.bytes_per_sample() != 2
+            || format.chroma_shift() != (sx, sy)
+            || (copies_alpha && !source_alpha)
+        {
             return Err(G2gError::CapsMismatch);
         }
-        if frame.planes() < 3 {
+        let planes = if copies_alpha { 4 } else { 3 };
+        if frame.planes() < planes {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
-        let total = w * h * 2 + 2 * w.div_ceil(1 << sx) * h.div_ceil(1 << sy) * 2;
-        return Ok(pack_into(pool, total, |dst| {
-            pack_planar_16(dst, frame, (sx, sy))
+        let colour_bytes = w * h * 2 + 2 * w.div_ceil(1 << sx) * h.div_ceil(1 << sy) * 2;
+        let alpha_bytes = if copies_alpha { w * h * 2 } else { 0 };
+        return Ok(pack_into(pool, colour_bytes + alpha_bytes, |dst| {
+            let (colour, alpha) = dst.split_at_mut(colour_bytes);
+            pack_planar_16(colour, frame, (sx, sy));
+            if copies_alpha {
+                copy_plane_rows(alpha, frame.data(3), frame.stride(3), w * 2, h);
+            }
         }));
     }
     let src = match frame.format() {
@@ -3145,6 +3198,48 @@ mod tests {
         // an 8-bit request from a 10-bit source is a loud mismatch, not a silent
         // truncation
         assert!(copy_yuv(&frame, I420, &mut PackPool::default()).is_err());
+    }
+
+    #[test]
+    fn a_twelve_bit_alpha_source_packs_its_alpha_plane_last() {
+        use OutputFormat::*;
+        const ALPHA_PLANE: usize = 3;
+        const OPAQUE_12_BIT: u16 = 0x0FFF;
+        let (w, h) = (4usize, 2usize);
+        let colour = |p: usize, x: usize, y: usize| (p * 300 + y * 4 + x) as u16;
+        let mut frame = planar_frame_16(Pixel::YUVA444P12LE, w as u32, h as u32, (0, 0), colour);
+        let stride = frame.stride(ALPHA_PLANE);
+        for (y, row) in frame
+            .data_mut(ALPHA_PLANE)
+            .chunks_mut(stride)
+            .take(h)
+            .enumerate()
+        {
+            for x in 0..w {
+                let alpha = OPAQUE_12_BIT - (y * w + x) as u16;
+                row[2 * x..2 * x + 2].copy_from_slice(&alpha.to_le_bytes());
+            }
+        }
+        assert_eq!(
+            resolve_output_format(Auto, Pixel::YUVA444P12LE).unwrap(),
+            A444p12
+        );
+        let plane_bytes = w * h * 2;
+        let out = copy_yuv(&frame, A444p12, &mut PackPool::default()).expect("alpha kept");
+        assert_eq!(out.len(), 4 * plane_bytes);
+        let alpha: Vec<u16> = out[3 * plane_bytes..]
+            .chunks(2)
+            .map(|sample| u16::from_le_bytes([sample[0], sample[1]]))
+            .collect();
+        let expected: Vec<u16> = (0..w * h).map(|i| OPAQUE_12_BIT - i as u16).collect();
+        assert_eq!(alpha, expected);
+        assert_eq!(
+            out[plane_bytes..plane_bytes + 2],
+            colour(1, 0, 0).to_le_bytes(),
+            "the colour planes lead"
+        );
+        let dropped = copy_yuv(&frame, I444p12, &mut PackPool::default()).expect("alpha dropped");
+        assert_eq!(dropped.len(), 3 * plane_bytes);
     }
 
     /// Build a `P010LE` frame: Y plane of 16-bit words, then interleaved U/V words.
