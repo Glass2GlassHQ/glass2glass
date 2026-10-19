@@ -39,7 +39,6 @@ fn riff_chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
 }
 
 const PCM_TAG: u16 = 0x0001;
-const GSM_610_TAG: u16 = 0x0031;
 const SAMPLE_RATE: u32 = 8_000;
 const MONO: u16 = 1;
 const PCM_BITS: u16 = 16;
@@ -106,8 +105,11 @@ fn nellymoser_flv() -> Vec<u8> {
     out
 }
 
+// libavcodec decodes GSM 6.10 behind the long tail
+#[cfg(not(feature = "ffmpeg-long-tail"))]
 #[test]
 fn wav_names_its_format_tag() {
+    const GSM_610_TAG: u16 = 0x0031;
     let codecs = missing_decoders("gsm", "wav", &wav(GSM_610_TAG, 0), "audioconvert");
     assert_eq!(codecs, vec![format!("audio format tag {GSM_610_TAG:#06x}")]);
 }
