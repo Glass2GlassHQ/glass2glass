@@ -396,6 +396,32 @@
         .tab-panel pre .num { color: var(--amber); }
         .tab-panel pre .ty  { color: var(--accent); }
 
+        /* ── STATUS ── */
+        #status { border-top: 1px solid var(--border); }
+        .status-list { display: grid; gap: 8px; }
+        .status-row {
+            display: grid; grid-template-columns: 12px 200px 100px 1fr 120px;
+            align-items: center; gap: 16px;
+            background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: 10px; padding: 12px 16px; font-size: 0.9rem;
+        }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--text-muted); }
+        .status-dot.up { background: var(--green); }
+        .status-dot.down { background: var(--rose); }
+        .status-id { font-family: 'JetBrains Mono', monospace; color: var(--text-primary); }
+        .status-tier, .status-uptime { color: var(--text-secondary); }
+        .status-uptime { text-align: right; }
+        .status-days { display: flex; gap: 2px; height: 20px; }
+        .status-days span { flex: 1; border-radius: 2px; background: var(--bg-tertiary); }
+        .status-days span.full { background: var(--green); }
+        .status-days span.partial { background: var(--amber); }
+        .status-days span.bad { background: var(--rose); }
+        .status-note { margin-top: 16px; font-size: 0.85rem; color: var(--text-tertiary); }
+        @media (max-width: 768px) {
+            .status-row { grid-template-columns: 12px 1fr 80px; }
+            .status-tier, .status-days { display: none; }
+        }
+
         /* ── CTA ── */
         .cta-section { padding: 120px 32px; text-align: center; position: relative; overflow: hidden; }
         .cta-section::before {
@@ -500,6 +526,7 @@
             <li><a href="#features">Features</a></li>
             <li><a href="#targets">Targets</a></li>
             <li><a href="#quickstart">Quickstart</a></li>
+            <li><a href="#status">Status</a></li>
             <li><a href="elements.html">Elements</a></li>
             <li><a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/README.md" class="nav-btn-ghost">README</a></li>
             <li><a href="https://github.com/Glass2GlassHQ/glass2glass" class="nav-btn-accent">GitHub</a></li>
@@ -1369,6 +1396,22 @@ g2g-launch videotestsrc num-buffers=8 ! \
     </div>
 </section>
 
+<!-- ═══ STATUS ═══ -->
+<section id="status">
+    <div class="section-inner">
+        <span class="section-label">Status</span>
+        <h2 class="section-title">Decoding live streams, around the clock.</h2>
+        <p class="section-desc">
+            A cloud server runs g2g against live streams all day: our own RTSP, HLS, SRT and
+            WebRTC feeds, and public streams from other sites. A stream counts as up when it
+            decoded a frame in the last minute. Each bar is one day, green when the stream was up
+            at least 99.9 percent of it and amber above 99.
+        </p>
+        <div class="status-list" id="status-list"></div>
+        <p class="status-note" id="status-note">Loading status.</p>
+    </div>
+</section>
+
 <!-- ═══ CTA ═══ -->
 <section class="cta-section">
     <div class="cta-content">
@@ -1405,6 +1448,66 @@ g2g-launch videotestsrc num-buffers=8 ! \
             document.getElementById(tab).classList.add('active');
         });
     });
+
+    // Canary status
+    const STATUS_PAGE = 'https://g2g-canary-000152811496.s3.us-east-1.amazonaws.com/g2g-canary/index.html';
+    const STATUS_JSON = STATUS_PAGE.replace('index.html', 'status.json');
+    // the thresholds the canary's own status page colours a day by
+    const HEALTHY_PERCENT = 99.9;
+    const DEGRADED_PERCENT = 99.0;
+
+    function element(tag, className, text) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+    }
+
+    function dayClass(uptime) {
+        if (uptime === null) return '';
+        if (uptime >= HEALTHY_PERCENT) return 'full';
+        if (uptime >= DEGRADED_PERCENT) return 'partial';
+        return 'bad';
+    }
+
+    function statusRow(pipeline) {
+        const row = element('div', 'status-row');
+        const state = pipeline.up_now === null ? '' : pipeline.up_now ? 'up' : 'down';
+        row.append(element('span', 'status-dot ' + state));
+        row.append(element('span', 'status-id', pipeline.id));
+        row.append(element('span', 'status-tier', pipeline.tier));
+        const days = element('div', 'status-days');
+        for (const day of pipeline.daily) {
+            const bar = element('span', dayClass(day.uptime));
+            bar.title = day.uptime === null ? day.day + ': no data' : day.day + ': ' + day.uptime.toFixed(2) + '%';
+            days.append(bar);
+        }
+        row.append(days);
+        const uptime = pipeline.uptime_30d === null ? 'no data' : pipeline.uptime_30d.toFixed(2) + '% 30d';
+        row.append(element('span', 'status-uptime', uptime));
+        return row;
+    }
+
+    function statusNote(text) {
+        const note = document.getElementById('status-note');
+        note.textContent = text + ' ';
+        const link = element('a', '', 'Full status page');
+        link.href = STATUS_PAGE;
+        link.style.color = 'var(--accent)';
+        note.append(link, '.');
+    }
+
+    fetch(STATUS_JSON, { cache: 'no-store' })
+        .then(response => {
+            if (!response.ok) throw new Error(response.status);
+            return response.json();
+        })
+        .then(status => {
+            document.getElementById('status-list').append(...status.pipelines.map(statusRow));
+            const minutes = Math.round((Date.now() / 1000 - status.generated) / 60);
+            statusNote('Updated ' + minutes + ' minutes ago.');
+        })
+        .catch(() => statusNote('Status is unavailable right now.'));
 </script>
 
 </body>
