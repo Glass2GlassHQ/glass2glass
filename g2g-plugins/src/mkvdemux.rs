@@ -109,6 +109,7 @@ pub enum MkvStream {
     /// The first raw PCM audio stream (`A_PCM/*`) of this PCM sample format.
     Pcm(AudioFormat),
     RawVideo(RawVideoFormat),
+    Theora,
 }
 
 /// A Matroska `Cues` prefetch in flight (M374): an end-of-file `Cues` index
@@ -304,6 +305,7 @@ impl MkvDemux {
             MkvStream::Vp9 => Self::compressed_video(VideoCodec::Vp9),
             MkvStream::Av1 => Self::compressed_video(VideoCodec::Av1),
             MkvStream::Mjpeg => Self::compressed_video(VideoCodec::Mjpeg),
+            MkvStream::Theora => Self::compressed_video(VideoCodec::Theora),
             MkvStream::Aac => Caps::Audio {
                 format: AudioFormat::Aac,
                 channels: 0,
@@ -523,6 +525,7 @@ impl MkvDemux {
             MkvCodec::Vp9 => (StreamType::Video, video(VideoCodec::Vp9)),
             MkvCodec::Av1 => (StreamType::Video, video(VideoCodec::Av1)),
             MkvCodec::Mjpeg => (StreamType::Video, video(VideoCodec::Mjpeg)),
+            MkvCodec::Theora => (StreamType::Video, video(VideoCodec::Theora)),
             MkvCodec::Aac => (StreamType::Audio, audio(AudioFormat::Aac)),
             MkvCodec::Opus => (StreamType::Audio, audio(AudioFormat::Opus)),
             MkvCodec::Ac3 => (StreamType::Audio, audio(AudioFormat::Ac3)),
@@ -880,7 +883,7 @@ impl AsyncElement for MkvDemux {
 static MKVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy)",
+    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | mjpeg | theora | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy)",
 )];
 
 /// The [`MkvStream`] a demuxer forwards for a parsed track's codec, or `None` for
@@ -893,6 +896,7 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::Vp9 => Some(MkvStream::Vp9),
         MkvCodec::Av1 => Some(MkvStream::Av1),
         MkvCodec::Mjpeg => Some(MkvStream::Mjpeg),
+        MkvCodec::Theora => Some(MkvStream::Theora),
         MkvCodec::Aac => Some(MkvStream::Aac),
         MkvCodec::Opus => Some(MkvStream::Opus),
         MkvCodec::Ac3 => Some(MkvStream::Ac3),
@@ -1049,6 +1053,7 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
                     | MkvStream::Av1
                     | MkvStream::Mjpeg
                     | MkvStream::RawVideo(_)
+                    | MkvStream::Theora
             );
             // Fill the concrete channel count from the track header for an audio
             // stream: `output_caps` is the generic per-stream placeholder (channels
@@ -1129,10 +1134,10 @@ fn resolve_stream_id(demux: &MatroskaDemuxer, id: &str) -> Option<MkvStream> {
 /// RFC 7845 `OpusHead`, and forwarding it is how the pre-skip reaches `OpusDec`
 /// and a remuxer (M792, the convention `OggDemux` / `Mp4DemuxN` already use).
 /// The `OpusHead` is validated rather than trusted: a `CodecPrivate` that is not
-/// one is dropped, since a decoder would read garbage from it. A Vorbis
-/// `CodecPrivate` laces the identification, comment and setup headers, which
-/// go as three packets, the way `OggDemux` forwards them. An AAC config ADTS
-/// cannot carry (ER AAC, ELD, USAC) leads the track's raw blocks.
+/// one is dropped, since a decoder would read garbage from it. A Vorbis or
+/// Theora `CodecPrivate` laces the identification, comment and setup headers,
+/// which go as three packets, the way `OggDemux` forwards them. An AAC config
+/// ADTS cannot carry (ER AAC, ELD, USAC) leads the track's raw blocks.
 fn config_headers(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Vec<Vec<u8>> {
     let Some(private) = demux.codec_private(track) else {
         return Vec::new();
@@ -1151,7 +1156,8 @@ fn config_headers(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Vec<V
         MkvCodec::VobSub => whole(crate::vobsub::parse_idx(private).is_some()),
         // the composition / ancillary page ids the display sets compose under
         MkvCodec::DvbSub => whole(crate::dvbsub::parse_page_ids(private).is_some()),
-        MkvCodec::Vorbis => vorbis_headers(private),
+        MkvCodec::Vorbis => xiph_headers(private, [0x01, 0x03, 0x05], b"vorbis"),
+        MkvCodec::Theora => xiph_headers(private, [0x80, 0x81, 0x82], b"theora"),
         MkvCodec::Aac => whole(is_raw_aac_config(private)),
         _ => Vec::new(),
     }
@@ -1166,16 +1172,15 @@ fn forwarded_duration_ns(frame: &crate::matroska::MkvFrame) -> u64 {
 }
 
 // identification, comment and setup, in that order, or none
-fn vorbis_headers(private: &[u8]) -> Vec<Vec<u8>> {
-    const HEADER_TYPES: [u8; 3] = [0x01, 0x03, 0x05];
-    const VORBIS_MAGIC: &[u8] = b"vorbis";
+fn xiph_headers(private: &[u8], header_types: [u8; 3], magic: &[u8]) -> Vec<Vec<u8>> {
     let Some(packets) = crate::matroska::split_xiph_codec_private(private) else {
         return Vec::new();
     };
-    let well_formed = packets.len() == HEADER_TYPES.len()
-        && packets.iter().zip(HEADER_TYPES).all(|(packet, kind)| {
-            packet.first() == Some(&kind) && packet[1..].starts_with(VORBIS_MAGIC)
-        });
+    let well_formed = packets.len() == header_types.len()
+        && packets
+            .iter()
+            .zip(header_types)
+            .all(|(packet, kind)| packet.first() == Some(&kind) && packet[1..].starts_with(magic));
     if !well_formed {
         return Vec::new();
     }
@@ -1321,6 +1326,7 @@ fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
         "vp9" => Some(MkvStream::Vp9),
         "av1" => Some(MkvStream::Av1),
         "mjpeg" => Some(MkvStream::Mjpeg),
+        "theora" => Some(MkvStream::Theora),
         "aac" => Some(MkvStream::Aac),
         "opus" => Some(MkvStream::Opus),
         "ac3" => Some(MkvStream::Ac3),
@@ -1348,6 +1354,7 @@ fn mkv_stream_to_str(stream: MkvStream) -> &'static str {
         MkvStream::Vp9 => "vp9",
         MkvStream::Av1 => "av1",
         MkvStream::Mjpeg => "mjpeg",
+        MkvStream::Theora => "theora",
         MkvStream::Aac => "aac",
         MkvStream::Opus => "opus",
         MkvStream::Ac3 => "ac3",
@@ -1376,6 +1383,7 @@ impl PadTemplates for MkvDemux {
             Self::output_caps(MkvStream::Vp9),
             Self::output_caps(MkvStream::Av1),
             Self::output_caps(MkvStream::Mjpeg),
+            Self::output_caps(MkvStream::Theora),
             Self::output_caps(MkvStream::Aac),
             Self::output_caps(MkvStream::Opus),
             Self::output_caps(MkvStream::Ac3),
@@ -2033,6 +2041,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_theora_track_leads_with_its_three_headers() {
+        let headers: [&[u8]; 3] = [b"\x80theora\x03", b"\x81theora", b"\x82theora\x55"];
+        let laced = [
+            &[2u8, headers[0].len() as u8, headers[1].len() as u8][..],
+            headers[0],
+            headers[1],
+            headers[2],
+        ]
+        .concat();
+        let geometry = [elem(&[0xB0], &uint_body(64)), elem(&[0xBA], &uint_body(48))].concat();
+        let track = elem(
+            &[0xAE],
+            &[
+                elem(&[0xD7], &uint_body(1)),
+                elem(&[0x86], b"V_THEORA"),
+                elem(&[0x63, 0xA2], &laced),
+                elem(&[0xE0], &geometry),
+            ]
+            .concat(),
+        );
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[
+                elem(&[0xE7], &uint_body(0)),
+                elem(&[0xA3], &block(1, 0, &[0x00, 0x11])),
+            ]
+            .concat(),
+        );
+        let segment = elem(
+            &[0x18, 0x53, 0x80, 0x67],
+            &[elem(&[0x16, 0x54, 0xAE, 0x6B], &track), cluster].concat(),
+        );
+        let file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat();
+
+        let mut sink = CaptureSink::default();
+        run(MkvStream::Theora, &file, &mut sink).await;
+        assert!(matches!(
+            sink.caps[..],
+            [Caps::CompressedVideo {
+                codec: VideoCodec::Theora,
+                width: Dim::Fixed(64),
+                height: Dim::Fixed(48),
+                ..
+            }]
+        ));
+        let mut expected: Vec<Vec<u8>> = headers.iter().map(|header| header.to_vec()).collect();
+        expected.push(alloc::vec![0x00, 0x11]);
+        assert_eq!(sink.frames, expected);
+    }
+
+    #[tokio::test]
     async fn selects_audio_with_refined_params() {
         let mut sink = CaptureSink::default();
         run(MkvStream::Opus, &webm(), &mut sink).await;
@@ -2133,7 +2192,7 @@ mod tests {
             .unwrap();
         assert_eq!(d.stream(), MkvStream::Opus);
         assert_eq!(
-            d.set_property("stream", PropValue::Str("theora".into())),
+            d.set_property("stream", PropValue::Str("dirac".into())),
             Err(PropError::Value)
         );
     }

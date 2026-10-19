@@ -1,15 +1,12 @@
-//! M1568: a bare `decodebin` on Ogg offers a VP8 stream to a video consumer, and
-//! names a Theora stream it cannot decode instead of plugging an audio chain.
+//! M1568: a bare `decodebin` on Ogg offers a VP8 or Theora stream to a video
+//! consumer ahead of the audio behind it.
 
 #![cfg(feature = "std")]
 
-use g2g_core::runtime::{parse_launch, ParseError};
 use g2g_core::{ByteStreamEncoding, Caps, VideoCodec};
-use g2g_plugins::registry::default_registry;
 use g2g_plugins::uridecodebin::ogg_primary_stream;
 
 const VORBIS: &[u8] = include_bytes!("fixtures/vorbis_stereo_48k.ogg");
-const THEORA_IDENTIFICATION: &[u8] = b"\x80theora\x03\x02\x01";
 const VIDEO_SERIAL: u32 = 0x7E0A_0001;
 const BEGINNING_OF_STREAM: u8 = 0x02;
 
@@ -84,20 +81,50 @@ fn vp8_is_the_first_stream_decodebin_tries() {
     ));
 }
 
+// a Theora identification header: 320x240 frame, 300x200 picture, 25 fps
+fn theora_identification() -> Vec<u8> {
+    const VERSION: [u8; 3] = [3, 2, 1];
+    const FRAME_MACROBLOCKS: [u16; 2] = [20, 15];
+    const PICTURE: [u8; 6] = [0, 0x01, 0x2C, 0, 0, 0xC8];
+    const PICTURE_OFFSET: [u8; 2] = [0, 0];
+    const FRAMERATE: (u32, u32) = (25, 1);
+    const TRAILER: [u8; 12] = [0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0xC0, 0];
+    [
+        b"\x80theora".as_slice(),
+        &VERSION,
+        &FRAME_MACROBLOCKS[0].to_be_bytes(),
+        &FRAME_MACROBLOCKS[1].to_be_bytes(),
+        &PICTURE,
+        &PICTURE_OFFSET,
+        &FRAMERATE.0.to_be_bytes(),
+        &FRAMERATE.1.to_be_bytes(),
+        &TRAILER,
+    ]
+    .concat()
+}
+
 #[test]
-fn a_video_request_names_the_theora_decoder_it_lacks() {
-    let path = video_then_vorbis("theora", THEORA_IDENTIFICATION);
-    let line = format!(
-        "filesrc location={} ! decodebin ! videoconvert ! fakesink",
-        path.display()
-    );
-    let parsed = parse_launch(&default_registry(), &line);
+fn theora_is_the_first_stream_decodebin_tries() {
+    let path = video_then_vorbis("theora", &theora_identification());
+    let caps = Caps::ByteStream {
+        encoding: ByteStreamEncoding::Ogg,
+    };
+    let streams = ogg_primary_stream(path.to_str().expect("utf8 path"), &caps);
     std::fs::remove_file(&path).ok();
-    match parsed {
-        Err(ParseError::NoStreamDecoder { codecs, .. }) => {
-            assert_eq!(codecs, vec!["theora".to_string()])
+    let streams = streams.expect("the ogg file has readable streams").streams;
+    let selections: Vec<_> = streams.iter().map(|stream| stream.props.clone()).collect();
+    assert_eq!(
+        selections,
+        vec![
+            vec![("stream".to_string(), "theora".to_string())],
+            vec![("stream".to_string(), "vorbis".to_string())],
+        ]
+    );
+    assert!(matches!(
+        streams[0].caps,
+        Caps::CompressedVideo {
+            codec: VideoCodec::Theora,
+            ..
         }
-        Err(other) => panic!("`{line}` fails naming no codec: {other}"),
-        Ok(_) => panic!("`{line}` builds a graph"),
-    }
+    ));
 }

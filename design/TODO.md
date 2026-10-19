@@ -263,7 +263,7 @@ unless it says otherwise.
   `jifmux`, `h264timestamper` / `h265timestamper`, `codec2json`
   (`h2642json` ...).
 - **Video codecs:** `openh264enc` / `openh264dec`, `svtav1enc`, `mpeg2enc`,
-  `theoraparse`-side Theora decode, `openjpegenc` / `openjpegdec`, `openexrdec`,
+  `openjpegenc` / `openjpegdec`, `openexrdec`,
   `gdkpixbufdec`, `rsvgdec`, `flxdec`, `vmncdec`,
   `bayer2rgb` / `rgb2bayer`, `codecalpha` (`alphacombine`, `codecalphademux`,
   `vp8alphadecodebin`), `jp2kdecimator`.

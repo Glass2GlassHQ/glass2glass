@@ -1743,6 +1743,7 @@ fn ogg_mapping(codec: crate::ogg::OggCodec) -> Option<&'static str> {
         crate::ogg::OggCodec::Vorbis => Some("vorbis"),
         crate::ogg::OggCodec::Flac => Some("flac"),
         crate::ogg::OggCodec::Vp8 => Some("vp8"),
+        crate::ogg::OggCodec::Theora => Some("theora"),
         _ => None,
     }
 }
@@ -2244,9 +2245,8 @@ pub fn audio_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode
 /// [`ts_primary_stream`]. [`OggDemux`](crate::oggdemux::OggDemux) defaults to its
 /// Opus port, so `filesrc location=X.oga ! decodebin` on an Ogg-FLAC / Vorbis
 /// file would plug an Opus decoder. Lists an `oggdemux stream=` selection for
-/// each logical bitstream g2g reads, so a Vorbis track behind a Theora one is
-/// found too, and names each Theora stream so a video request reports the
-/// missing decoder. Declines a non-Ogg file and one with neither.
+/// each logical bitstream g2g reads, video first. Declines a non-Ogg file and
+/// one with no readable bitstream.
 #[cfg(feature = "std")]
 pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {
     if !matches!(
@@ -2274,18 +2274,12 @@ pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             })
         })
         .collect();
-    let unsupported: Vec<alloc::string::String> = demux
-        .streams()
-        .iter()
-        .filter(|s| s.info().map(|i| i.codec) == Some(crate::ogg::OggCodec::Theora))
-        .map(|_| alloc::string::String::from("theora"))
-        .collect();
-    if streams.is_empty() && unsupported.is_empty() {
+    if streams.is_empty() {
         return None;
     }
     Some(ContainerStreams {
         streams,
-        unsupported,
+        unsupported: Vec::new(),
     })
 }
 

@@ -111,6 +111,12 @@ are `Caps::CompressedVideo { codec: H264, .. }`. The backend is selectable:
 | `NvdecCuda` | `h264` + `AV_HWDEVICE_TYPE_CUDA` | `Cuda` | Zero-copy device-memory output. |
 | `Vaapi` | `h264` + `AV_HWDEVICE_TYPE_VAAPI` | `System` | GPU decode, surface downloaded with `av_hwframe_transfer_data`. The Linux AMD / Intel hardware path, working on Mesa `radeonsi` where `VaapiH264Dec` cannot. Pin the render node with `with_vaapi_device` or the `device` property. Launch name `ffmpegvaapidec`. |
 
+The other codecs libavcodec decodes open the same way. Theora's identification,
+comment and setup packets arrive in band ahead of its frames, from `oggdemux`
+or `matroskademux`. The decoder holds them, opens libavcodec's `theora` decoder
+on them Xiph-laced as extradata, and drops the copies a demuxer re-sends after
+a flush.
+
 ### Output formats
 
 Output caps are `Caps::RawVideo` with the layout chosen by `with_output_format`

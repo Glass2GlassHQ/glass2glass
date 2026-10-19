@@ -191,6 +191,8 @@ pub enum MkvCodec {
     },
     // `V_UNCOMPRESSED` with its `ColourSpace` fourcc, or a `V_MS/VFW/FOURCC` naming a raw layout
     RawVideo(RawVideoFormat),
+    // `V_THEORA`, the three header packets Xiph-laced in the `CodecPrivate`
+    Theora,
 }
 
 impl MkvCodec {
@@ -212,6 +214,8 @@ impl MkvCodec {
             MkvCodec::Av1
         } else if id == b"V_MJPEG" {
             MkvCodec::Mjpeg
+        } else if id == b"V_THEORA" {
+            MkvCodec::Theora
         } else if id == b"A_VORBIS" {
             MkvCodec::Vorbis
         } else if id.starts_with(b"A_AAC") {
@@ -267,7 +271,8 @@ impl MkvCodec {
             MkvCodec::Subtitle(_)
             | MkvCodec::Other
             | MkvCodec::Pcm { .. }
-            | MkvCodec::RawVideo(_) => return None,
+            | MkvCodec::RawVideo(_)
+            | MkvCodec::Theora => return None,
         })
     }
 

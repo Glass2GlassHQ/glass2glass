@@ -57,8 +57,7 @@ pub enum OggCodec {
     Other,
     /// The VP8 mapping (`OVP80` stream-info header), one frame per packet.
     Vp8,
-    /// Theora video (`\x80theora` identification header), which g2g does not
-    /// decode: named so a video request can report it.
+    // `\x80theora` identification, `\x81theora` comment and `\x82theora` setup headers
     Theora,
 }
 
@@ -100,6 +99,43 @@ pub fn parse_vp8_stream_info(packet: &[u8]) -> Option<OggVp8Info> {
     let declared = [
         u32::from(info.width),
         u32::from(info.height),
+        info.framerate_numerator,
+        info.framerate_denominator,
+    ];
+    declared.iter().all(|&value| value > 0).then_some(info)
+}
+
+const THEORA_IDENTIFICATION_MAGIC: &[u8] = b"\x80theora";
+const THEORA_IDENTIFICATION_LEN: usize = 42;
+const THEORA_PICTURE_WIDTH_OFFSET: usize = 14;
+const THEORA_PICTURE_HEIGHT_OFFSET: usize = 17;
+const THEORA_FRAMERATE_NUMERATOR_OFFSET: usize = 22;
+const THEORA_FRAMERATE_DENOMINATOR_OFFSET: usize = 26;
+
+// the picture region a Theora decoder crops its frames to, and the frame rate
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OggTheoraInfo {
+    pub picture_width: u32,
+    pub picture_height: u32,
+    pub framerate_numerator: u32,
+    pub framerate_denominator: u32,
+}
+
+pub fn parse_theora_identification(packet: &[u8]) -> Option<OggTheoraInfo> {
+    use crate::bereader::{be_u24, be_u32};
+    if packet.len() < THEORA_IDENTIFICATION_LEN || !packet.starts_with(THEORA_IDENTIFICATION_MAGIC)
+    {
+        return None;
+    }
+    let info = OggTheoraInfo {
+        picture_width: be_u24(packet, THEORA_PICTURE_WIDTH_OFFSET)?,
+        picture_height: be_u24(packet, THEORA_PICTURE_HEIGHT_OFFSET)?,
+        framerate_numerator: be_u32(packet, THEORA_FRAMERATE_NUMERATOR_OFFSET)?,
+        framerate_denominator: be_u32(packet, THEORA_FRAMERATE_DENOMINATOR_OFFSET)?,
+    };
+    let declared = [
+        info.picture_width,
+        info.picture_height,
         info.framerate_numerator,
         info.framerate_denominator,
     ];
@@ -572,7 +608,9 @@ impl OggLogicalStream {
     }
 
     fn finalize(&mut self, packet: Vec<u8>) {
-        if packet.is_empty() {
+        // an empty Theora packet repeats the previous frame, so it keeps its place on the timeline
+        let keeps_empty = self.info.map(|i| i.codec) == Some(OggCodec::Theora);
+        if packet.is_empty() && !keeps_empty {
             return;
         }
         if self.info.is_none() {
@@ -608,8 +646,8 @@ impl OggLogicalStream {
             return;
         }
         let header_count = match self.info.map(|i| i.codec) {
-            Some(OggCodec::Opus) => 2,   // OpusHead + OpusTags
-            Some(OggCodec::Vorbis) => 3, // id + comment + setup
+            Some(OggCodec::Opus) => 2,                      // OpusHead + OpusTags
+            Some(OggCodec::Vorbis | OggCodec::Theora) => 3, // id + comment + setup
             _ => 0,
         };
         if self.packets_seen < header_count {
@@ -754,7 +792,7 @@ fn detect(packet: &[u8]) -> OggStreamInfo {
                 pre_skip: 0,
             },
         }
-    } else if packet.starts_with(b"\x80theora") {
+    } else if packet.starts_with(THEORA_IDENTIFICATION_MAGIC) {
         OggStreamInfo {
             codec: OggCodec::Theora,
             channels: 0,

@@ -543,6 +543,8 @@ pub struct FfmpegVideoDec {
     pack_pool: PackPool,
     // pictures outside the last upstream segment are decoded but not pushed
     segment: Segment,
+    // Theora's identification, comment and setup packets, held until the decoder opens on them
+    theora_headers: Vec<Vec<u8>>,
     log_name: LogName,
 }
 
@@ -603,6 +605,7 @@ impl FfmpegVideoDec {
             qos_skipped: 0,
             pack_pool: PackPool::default(),
             segment: Segment::new(),
+            theora_headers: Vec::new(),
             log_name: LogName::default(),
         }
     }
@@ -1691,6 +1694,17 @@ impl AsyncElement for FfmpegVideoDec {
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let codec_kind = self.codec_kind.ok_or(G2gError::NotConfigured)?;
+                    if codec_kind == VideoCodec::Theora && is_theora_header(slice) {
+                        // the headers a demuxer re-sends after a flush reach an open decoder
+                        if self.decoder.is_none() {
+                            self.theora_headers.push(slice.to_vec());
+                            if self.theora_headers.len() == THEORA_HEADERS {
+                                let extradata = xiph_laced(&self.theora_headers);
+                                self.open_decoder(codec_kind, Some(&extradata), None)?;
+                            }
+                        }
+                        return Ok(());
+                    }
                     let (dimension_byte, au) =
                         slice.split_at(vp6_dimension_byte_len(codec_kind).min(slice.len()));
                     // Open the decoder on the first access unit, seeding it with
@@ -1951,7 +1965,7 @@ impl AsyncElement for FfmpegVideoDec {
 /// negotiation failure; the runtime mid-stream check refuses
 /// `CapsMismatch` before it ever reaches here.
 /// The compressed codecs this element can open via libavcodec.
-const SUPPORTED_CODECS: [VideoCodec; 11] = [
+const SUPPORTED_CODECS: [VideoCodec; 12] = [
     VideoCodec::H264,
     VideoCodec::H265,
     VideoCodec::Vp8,
@@ -1965,6 +1979,7 @@ const SUPPORTED_CODECS: [VideoCodec; 11] = [
     VideoCodec::Vp6 { alpha: false },
     VideoCodec::Vp6 { alpha: true },
     VideoCodec::Vp6Plain,
+    VideoCodec::Theora,
 ];
 
 /// `FfmpegVideoDec`'s settable properties: the VAAPI render node (for the
@@ -2039,6 +2054,27 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
 ];
 
 /// The libavcodec `AVCodecID` for a g2g codec (generic + CUDA-hwaccel path).
+const THEORA_HEADERS: usize = 3;
+
+// a Theora header packet sets the top bit of its first byte, a frame never does
+fn is_theora_header(packet: &[u8]) -> bool {
+    packet.first().is_some_and(|byte| byte & 0x80 != 0)
+}
+
+// the packet count less one, the 255-run sizes of all but the last, then the packets
+fn xiph_laced(packets: &[Vec<u8>]) -> Vec<u8> {
+    const LACE_RUN: usize = 255;
+    let mut out = Vec::from([(packets.len() - 1) as u8]);
+    for packet in &packets[..packets.len() - 1] {
+        out.extend(core::iter::repeat_n(u8::MAX, packet.len() / LACE_RUN));
+        out.push((packet.len() % LACE_RUN) as u8);
+    }
+    for packet in packets {
+        out.extend_from_slice(packet);
+    }
+    out
+}
+
 /// Build libavcodec `extradata` from an access unit's Annex-B parameter sets
 /// (H.264 SPS+PPS, H.265 VPS+SPS+PPS), each prefixed with a 4-byte start code so
 /// libavcodec parses them at open. `None` for codecs with no in-band parameter
@@ -2084,6 +2120,7 @@ fn codec_id(codec: VideoCodec) -> Id {
         VideoCodec::Vp6 { alpha: false } => Id::VP6F,
         VideoCodec::Vp6 { alpha: true } => Id::VP6A,
         VideoCodec::Vp6Plain => Id::VP6,
+        VideoCodec::Theora => Id::THEORA,
         _ => unreachable!("ffmpegdec negotiates only known VideoCodec variants"),
     }
 }
@@ -3453,6 +3490,21 @@ mod tests {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(dec.intercept_caps(&proposal), Ok(proposal));
+    }
+
+    #[test]
+    fn theora_headers_lace_into_the_extradata_libavcodec_splits() {
+        const LONGER_THAN_ONE_LACE: usize = 300;
+        let headers = alloc::vec![
+            b"\x80theora".to_vec(),
+            [b"\x81theora".as_slice(), &[7; LONGER_THAN_ONE_LACE]].concat(),
+            b"\x82theora\x55".to_vec(),
+        ];
+        assert!(headers.iter().all(|header| is_theora_header(header)));
+        assert!(!is_theora_header(&[0x40, 0x11]));
+        let extradata = xiph_laced(&headers);
+        let split = crate::matroska::split_xiph_codec_private(&extradata).expect("laced");
+        assert_eq!(split, headers.iter().map(Vec::as_slice).collect::<Vec<_>>());
     }
 
     #[test]

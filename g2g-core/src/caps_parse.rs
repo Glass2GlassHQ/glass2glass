@@ -351,6 +351,7 @@ impl CapsSet {
             "video/x-vp6-flash" => compressed_set(VideoCodec::Vp6 { alpha: false }),
             "video/x-vp6-alpha" => compressed_set(VideoCodec::Vp6 { alpha: true }),
             "video/x-vp6" => compressed_set(VideoCodec::Vp6Plain),
+            "video/x-theora" => compressed_set(VideoCodec::Theora),
             "audio/x-speex" => audio_set(&[AudioFormat::Speex]),
             "audio/x-opus" => audio_set(&[AudioFormat::Opus]),
             "audio/x-ac3" => audio_set(&[AudioFormat::Ac3]),

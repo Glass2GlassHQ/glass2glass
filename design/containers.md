@@ -463,10 +463,10 @@ takes the PCM format its byte order and `BitDepth` name, the `WAVEFORMATEX`
 table WAV and AVI use, and big-endian samples are swapped at demux. A PCM or
 bitmap-subtitle track under a `ContentEncoding` the demuxer cannot undo fails
 the stream. MJPEG is `V_MJPEG` or a
-`V_MS/VFW/FOURCC` track whose BITMAPINFOHEADER names `MJPG`. A Vorbis track's
-`CodecPrivate` Xiph-laces the three headers, which go in band as three packets
-ahead of the first block, and its blocks go untimed, because millisecond block
-timestamps cannot carry the sample-exact packet lengths `vorbisdec` trims to.
+`V_MS/VFW/FOURCC` track whose BITMAPINFOHEADER names `MJPG`. A Vorbis or
+`V_THEORA` track's `CodecPrivate` Xiph-laces the three headers, which go in
+band as three packets ahead of the first block. A Vorbis track's blocks go
+untimed, because millisecond block timestamps cannot carry the sample-exact packet lengths `vorbisdec` trims to.
 WebM, the VP8/VP9/AV1 plus Opus subset, is the browser-delivery motivator.
 Block lacing, Xiph / EBML / fixed, is split, so multi-frame audio blocks demux.
 A Cluster child that names a track `Tracks` did not declare, or whose size is
@@ -591,12 +591,13 @@ Opus audio packets as `Caps::Audio{Opus}` with the channel count refined from
 `OpusHead`. The container is auto-detectable through `typefind` "OggS" and
 `filesrc bytestream-format=auto`.
 
-The VP8 mapping is the one video mapping: its `OVP80` stream-info header gives
-the coded size and frame rate, the header packets stay in the container, and
-each frame is timed by the count of shown frames before it, so an invisible
-frame takes no time. A Theora stream is recognised only to be named: `decodebin`
-reports it as a stream without a decoder instead of offering the audio behind
-it to a video consumer.
+The VP8 mapping's `OVP80` stream-info header gives the coded size and frame
+rate, the header packets stay in the container, and each frame is timed by the
+count of shown frames before it, so an invisible frame takes no time. A Theora
+stream's identification header gives the picture size and frame rate, and its
+three header packets go in band ahead of the frames, as Vorbis's do. Each
+packet is one frame period, and an empty packet, which repeats the previous
+frame, takes its period without being forwarded.
 
 ### Grouped multi-stream Ogg
 

@@ -640,6 +640,7 @@ fn codec_gst_media_type(c: VideoCodec) -> &'static str {
         VideoCodec::Vp6 { alpha: false } => "video/x-vp6-flash",
         VideoCodec::Vp6 { alpha: true } => "video/x-vp6-alpha",
         VideoCodec::Vp6Plain => "video/x-vp6",
+        VideoCodec::Theora => "video/x-theora",
         // GStreamer keeps VC-1 under the Windows Media Video type, told apart
         // by `wmvversion=3, format=WVC1`; the fields do not survive here, so the
         // codec split stays in the caps.
@@ -1738,6 +1739,8 @@ pub enum VideoCodec {
     Pnm,
     // VP6 as AVI stores it: upright and without the Flash variant's dimension byte
     Vp6Plain,
+    // its three header packets lead the frames in band, as Vorbis's do
+    Theora,
 }
 
 /// Wire format of a [`Caps::ByteStream`] link, so a demuxer accepts only the

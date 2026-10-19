@@ -70,7 +70,9 @@ use g2g_core::{
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
-use crate::ogg::{parse_vp8_stream_info, OggCodec, OggDemuxer, OggLogicalStream};
+use crate::ogg::{
+    parse_theora_identification, parse_vp8_stream_info, OggCodec, OggDemuxer, OggLogicalStream,
+};
 use crate::opusparse::packet_samples as opus_packet_samples;
 use crate::typefind::framerate_within_placeholder;
 use crate::vorbiscomment::parse_vorbis_comment;
@@ -385,6 +387,7 @@ impl OggDemux {
     pub(crate) fn output_caps(stream: OggCodec) -> Caps {
         let format = match stream {
             OggCodec::Vp8 => return crate::typefind::elementary_video_caps(VideoCodec::Vp8),
+            OggCodec::Theora => return crate::typefind::elementary_video_caps(VideoCodec::Theora),
             OggCodec::Flac => AudioFormat::Flac,
             OggCodec::Vorbis => AudioFormat::Vorbis,
             _ => AudioFormat::Opus,
@@ -518,7 +521,8 @@ impl OggDemux {
                 // emits a fresh segment. The in-band codec config always flows: the decoder
                 // needs it whatever the seek target.
                 if !config {
-                    let resync_point = timing.keyframe || self.stream != OggCodec::Vp8;
+                    let resync_point =
+                        timing.keyframe || !matches!(self.stream, OggCodec::Vp8 | OggCodec::Theora);
                     match self.seek.admit(timing.pts_ns, resync_point) {
                         Admit::Drop => continue,
                         Admit::Resume(start) => {
@@ -611,7 +615,7 @@ struct StreamEmitter {
     awaiting_anchor: bool,
     // counted against the first audio page's packet count to find where that page ends
     audio_packets_stepped: u64,
-    // VP8 frames with the show_frame bit set, so far in this chain
+    // VP8 frames with the show_frame bit set, or Theora packets, so far in this chain
     shown_frames: u64,
 }
 
@@ -647,7 +651,7 @@ impl StreamEmitter {
         match codec {
             OggCodec::Vorbis => self.vorbis.is_some() && self.anchor_offset.is_some(),
             // timed by counting frames from the start of the stream
-            OggCodec::Vp8 => false,
+            OggCodec::Vp8 | OggCodec::Theora => false,
             _ => true,
         }
     }
@@ -745,6 +749,10 @@ impl StreamEmitter {
         }
         if codec == OggCodec::Vp8 {
             self.step_vp8(stream, packets, &mut ready);
+            return ready;
+        }
+        if codec == OggCodec::Theora {
+            self.step_theora(stream, packets, &mut ready);
             return ready;
         }
         // Vorbis timing tables (M778): parse once ident + setup have landed.
@@ -947,12 +955,66 @@ impl StreamEmitter {
             ));
         }
     }
+
+    // an empty packet repeats the last frame, so it takes its time but has nothing to decode
+    fn step_theora(
+        &mut self,
+        stream: &OggLogicalStream,
+        packets: Vec<Vec<u8>>,
+        ready: &mut StreamReady,
+    ) {
+        const INTER_FRAME_BIT: u8 = 0x40;
+        let Some(theora) = stream.head_header().and_then(parse_theora_identification) else {
+            return;
+        };
+        let frames_to_ns = |frames: u64| {
+            ticks_to_ns(
+                frames.saturating_mul(u64::from(theora.framerate_denominator)),
+                theora.framerate_numerator,
+            )
+        };
+        for packet in packets {
+            let start_ns = frames_to_ns(self.shown_frames);
+            self.shown_frames = self.shown_frames.saturating_add(1);
+            let duration_ns = frames_to_ns(self.shown_frames).saturating_sub(start_ns);
+            let pts_ns = start_ns.saturating_add(self.chain_offset_ns);
+            self.playable_end_ns = start_ns.saturating_add(duration_ns);
+            self.position_ns = pts_ns.saturating_add(duration_ns);
+            let Some(&first) = packet.first() else {
+                continue;
+            };
+            ready.frames.push((
+                packet,
+                FrameTiming {
+                    pts_ns,
+                    dts_ns: pts_ns,
+                    duration_ns,
+                    keyframe: first & INTER_FRAME_BIT == 0,
+                    ..FrameTiming::default()
+                },
+                false,
+            ));
+        }
+    }
 }
 
 /// The concrete caps of a parsed stream, or `None` for a codec with no g2g
 /// mapping / before the identification header lands.
 pub(crate) fn concrete_caps(stream: &OggLogicalStream) -> Option<Caps> {
     let info = stream.info()?;
+    if info.codec == OggCodec::Theora {
+        let theora = parse_theora_identification(stream.head_header()?)?;
+        return Some(Caps::CompressedVideo {
+            codec: VideoCodec::Theora,
+            width: Dim::Fixed(theora.picture_width),
+            height: Dim::Fixed(theora.picture_height),
+            framerate: framerate_within_placeholder(framerate_q16_from_fraction(
+                theora.framerate_numerator,
+                theora.framerate_denominator,
+            )),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        });
+    }
     if info.codec == OggCodec::Vp8 {
         let vp8 = parse_vp8_stream_info(stream.head_header()?)?;
         return Some(Caps::CompressedVideo {
@@ -992,7 +1054,7 @@ pub(crate) fn concrete_caps(stream: &OggLogicalStream) -> Option<Caps> {
 fn in_band_headers(codec: OggCodec, stream: &OggLogicalStream) -> Vec<Vec<u8>> {
     let mut heads: Vec<Vec<u8>> = Vec::new();
     match codec {
-        OggCodec::Vorbis => {
+        OggCodec::Vorbis | OggCodec::Theora => {
             if let (Some(h), Some(c), Some(s)) = (
                 stream.head_header(),
                 stream.comment_header(),
@@ -1152,6 +1214,7 @@ impl AsyncElement for OggDemux {
                     "flac" => OggCodec::Flac,
                     "vorbis" => OggCodec::Vorbis,
                     "vp8" => OggCodec::Vp8,
+                    "theora" => OggCodec::Theora,
                     _ => return Err(PropError::Value),
                 };
                 Ok(())
@@ -1167,6 +1230,7 @@ impl AsyncElement for OggDemux {
                     OggCodec::Flac => "flac",
                     OggCodec::Vorbis => "vorbis",
                     OggCodec::Vp8 => "vp8",
+                    OggCodec::Theora => "theora",
                     _ => "opus",
                 }
                 .into(),
@@ -1194,7 +1258,7 @@ impl LogSource for OggDemux {
 static OGGDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "logical stream to emit: opus | flac | vorbis | vp8",
+    "logical stream to emit: opus | flac | vorbis | vp8 | theora",
 )];
 
 /// The published stream id of the bitstream in slot `slot`. Positional,
@@ -1517,6 +1581,7 @@ impl PadTemplates for OggDemux {
                 Self::output_caps(OggCodec::Flac),
                 Self::output_caps(OggCodec::Vorbis),
                 Self::output_caps(OggCodec::Vp8),
+                Self::output_caps(OggCodec::Theora),
             ]))),
         ])
     }
@@ -1705,6 +1770,93 @@ mod tests {
                 timing(1, false, false),
                 timing(1, true, false),
             ]
+        );
+    }
+
+    // a Theora identification header: 320x240 frame, 300x200 picture, 25 fps
+    fn theora_identification() -> Vec<u8> {
+        const VERSION: [u8; 3] = [3, 2, 1];
+        const FRAME_MACROBLOCKS: [u16; 2] = [20, 15];
+        const PICTURE: [u8; 6] = [0, 0x01, 0x2C, 0, 0, 0xC8];
+        const PICTURE_OFFSET: [u8; 2] = [0, 0];
+        const FRAMERATE: (u32, u32) = (25, 1);
+        const TRAILER: [u8; 12] = [0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0xC0, 0];
+        [
+            b"\x80theora".as_slice(),
+            &VERSION,
+            &FRAME_MACROBLOCKS[0].to_be_bytes(),
+            &FRAME_MACROBLOCKS[1].to_be_bytes(),
+            &PICTURE,
+            &PICTURE_OFFSET,
+            &FRAMERATE.0.to_be_bytes(),
+            &FRAMERATE.1.to_be_bytes(),
+            &TRAILER,
+        ]
+        .concat()
+    }
+
+    #[tokio::test]
+    async fn demuxes_theora_with_its_headers_in_band() {
+        const INTRA_FRAME: u8 = 0x00;
+        const INTER_FRAME: u8 = 0x40;
+        const FRAME_PERIOD_NS: u64 = 40_000_000;
+        let identification = theora_identification();
+        let comment = b"\x81theora\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        let setup = b"\x82theora\x55".to_vec();
+        let frames = [
+            alloc::vec![INTRA_FRAME, 0xAA],
+            Vec::new(),
+            alloc::vec![INTER_FRAME, 0xCC],
+        ];
+        let serial = 5;
+        let mut stream = page(0x02, serial, 0, &[&identification]);
+        stream.extend_from_slice(&page(0x00, serial, 1, &[&comment, &setup]));
+        let packets: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
+        stream.extend_from_slice(&page(0x00, serial, 2, &packets));
+
+        let mut d = OggDemux::new();
+        d.set_property("stream", PropValue::Str("theora".into()))
+            .unwrap();
+        d.configure_pipeline(&OggDemux::input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        d.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sink.caps,
+            alloc::vec![Caps::CompressedVideo {
+                codec: VideoCodec::Theora,
+                width: Dim::Fixed(300),
+                height: Dim::Fixed(200),
+                framerate: Rate::Fixed(25 << 16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            }]
+        );
+        assert_eq!(
+            sink.frames,
+            alloc::vec![
+                identification,
+                comment,
+                setup,
+                frames[0].clone(),
+                frames[2].clone()
+            ],
+            "the headers lead and the empty packet is not forwarded"
+        );
+        let frame_timings: Vec<(u64, bool)> = sink.timings[3..]
+            .iter()
+            .map(|timing| (timing.pts_ns, timing.keyframe))
+            .collect();
+        assert_eq!(
+            frame_timings,
+            alloc::vec![(0, true), (2 * FRAME_PERIOD_NS, false)],
+            "the empty packet still takes its frame period"
         );
     }
 
