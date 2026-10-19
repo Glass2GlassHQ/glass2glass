@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1604: `srtsink` publishes to mediamtx, with a new `streamid` property, the stream id in libsrt's byte order and the live-mode handshake flags.
 - M1603: `rtspsrc` and `rtspsrcn` play an H.265 track, which they labelled H.264.
 - M1602: `avdec_h265` resolves to `ffmpegdec`, as `avdec_h264` does.
 - M1601: a bare `decodebin` behind a network source no longer opens the source's `location` URI as a file and logs a spurious open error.

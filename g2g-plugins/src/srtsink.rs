@@ -369,6 +369,11 @@ impl AsyncElement for SrtSink {
                 PropKind::Str,
                 "AES passphrase (empty = unencrypted)",
             ),
+            PropertySpec::new(
+                "streamid",
+                PropKind::Str,
+                "stream id sent in the handshake, the listener routes on it (empty = none)",
+            ),
         ];
         PROPS
     }
@@ -388,6 +393,14 @@ impl AsyncElement for SrtSink {
                 self.passphrase = (!s.is_empty()).then(|| s.to_string());
                 Ok(())
             }
+            "streamid" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                if s.len() > crate::srt::MAX_STREAM_ID_BYTES {
+                    return Err(PropError::Value);
+                }
+                self.stream_id = (!s.is_empty()).then(|| s.to_string());
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -399,6 +412,7 @@ impl AsyncElement for SrtSink {
         match name {
             "latency" => Some(PropValue::Uint(self.latency_ms as u64)),
             "passphrase" => Some(PropValue::Str(self.passphrase.clone().unwrap_or_default())),
+            "streamid" => Some(PropValue::Str(self.stream_id.clone().unwrap_or_default())),
             _ => None,
         }
     }
