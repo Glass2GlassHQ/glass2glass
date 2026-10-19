@@ -5,8 +5,9 @@
 //!
 //! One line per buffer, `<pts> <digest>`, with the pts in gst's
 //! `h:mm:ss.nnnnnnnnn` form so the output diffs against a gst run's. gst prints
-//! it on stdout; here it goes on the bus as [`BusMessage::Info`] and on the debug
-//! log, so an application collects the lines instead of scraping a terminal.
+//! it on stdout; here it goes on the bus as [`BusMessage::Checksum`], named after
+//! the sink instance, and on the debug log, so an application collects the lines
+//! instead of scraping a terminal. `g2g-launch` prints them on stdout.
 //!
 //! The whole buffer is hashed, exactly the bytes that arrived: no plane or
 //! padding handling, so a frame carried as a strided view is not what this sink
@@ -142,16 +143,40 @@ impl AsyncElement for ChecksumSink {
                     .domain
                     .as_system_slice()
                     .ok_or(G2gError::UnsupportedDomain)?;
-                let line = checksum_line(frame.timing.pts_ns, digest_hex(self.hash, bytes));
+                let pts_ns = frame.timing.pts_ns;
+                let digest = digest_hex(self.hash, bytes);
+                let line = checksum_line(pts_ns, digest.clone());
                 g2g_debug!(self, "{}", line);
                 if let Some(bus) = &self.bus {
-                    bus.try_post(BusMessage::Info(line.clone()));
+                    // waits on a full bus, a dropped line breaks the comparison it exists for
+                    bus.post(BusMessage::Checksum {
+                        element: self
+                            .log_name
+                            .instance()
+                            .unwrap_or_else(|| short_type_name::<Self>())
+                            .to_string(),
+                        pts_ns,
+                        digest,
+                    })
+                    .await?;
                 }
                 self.last_line = line;
                 self.digested += 1;
             }
             Ok(())
         })
+    }
+
+    fn set_bus(&mut self, bus: BusHandle) {
+        self.bus = Some(bus);
+    }
+
+    fn set_instance_name(&mut self, name: String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

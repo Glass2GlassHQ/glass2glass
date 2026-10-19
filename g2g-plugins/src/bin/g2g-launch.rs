@@ -891,12 +891,18 @@ fn main() {
 }
 
 /// Drain the bus, which nothing else reads on this path: keep the element it
-/// named as having ended the run, and under `-v` print each sink's
-/// frame-identity report.
+/// named as having ended the run, print each `checksumsink` line on stdout as
+/// gst-launch does, and under `-v` print each sink's frame-identity report.
 fn drain_bus(bus: &Bus, verbose: bool, failed: &mut Option<String>) {
     while let Some(message) = bus.try_recv() {
         match message {
             BusMessage::ElementError { element, .. } => *failed = Some(element),
+            BusMessage::Checksum { pts_ns, digest, .. } => {
+                println!(
+                    "{}",
+                    g2g_plugins::checksumsink::checksum_line(pts_ns, digest)
+                );
+            }
             BusMessage::FrameIdentity { element, stats } if verbose => {
                 eprintln!("\r{}", frame_identity_line(&element, &stats));
             }

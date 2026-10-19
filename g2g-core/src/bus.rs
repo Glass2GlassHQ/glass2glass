@@ -262,6 +262,11 @@ pub enum BusMessage {
         element: alloc::string::String,
         stats: crate::frame_identity::FrameIdentityStats,
     },
+    Checksum {
+        element: alloc::string::String,
+        pts_ns: u64,
+        digest: alloc::string::String,
+    },
 }
 
 /// What a restarting source is doing, gst `fallbacksrc`'s `status` (M1164).

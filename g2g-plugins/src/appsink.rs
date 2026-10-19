@@ -221,6 +221,12 @@ impl FlatBusMessage {
             BusMessage::StreamStart => flat(BusKind::StreamStart, None, 0, 0),
             BusMessage::Eos => flat(BusKind::Eos, None, 0, 0),
             BusMessage::Info(text) => flat(BusKind::Info, Some(text.clone()), 0, 0),
+            BusMessage::Checksum { pts_ns, digest, .. } => flat(
+                BusKind::Info,
+                Some(crate::checksumsink::checksum_line(*pts_ns, digest.clone())),
+                0,
+                0,
+            ),
             BusMessage::Error(error) => flat(BusKind::Error, Some(format!("{error:?}")), 0, 0),
             BusMessage::Warning(error) => flat(BusKind::Warning, Some(format!("{error:?}")), 0, 0),
             BusMessage::StateChanged { old, new } => flat(
