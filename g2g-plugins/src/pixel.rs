@@ -47,7 +47,7 @@ pub(crate) fn bt709_luma(r: u8, g: u8, b: u8) -> u8 {
 pub(crate) fn carries_yuv(format: RawVideoFormat) -> bool {
     !matches!(
         format,
-        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 | RawVideoFormat::Rgb8
+        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 | RawVideoFormat::Rgb8 | RawVideoFormat::R210
     )
 }
 
@@ -59,7 +59,7 @@ pub(crate) fn carries_yuv(format: RawVideoFormat) -> bool {
 pub(crate) fn even_dims_required(format: RawVideoFormat) -> (bool, bool) {
     match format {
         RawVideoFormat::Nv12 | RawVideoFormat::P010 => (true, true),
-        RawVideoFormat::Yuyv | RawVideoFormat::Uyvy => (true, false),
+        RawVideoFormat::Yuyv | RawVideoFormat::Uyvy | RawVideoFormat::V210 => (true, false),
         _ => match format.chroma_shift() {
             Some((hs, vs)) => (hs > 0, vs > 0),
             None => (false, false),
@@ -189,7 +189,7 @@ pub(crate) fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
 pub(crate) mod tests {
     use super::*;
 
-    pub(crate) const EVERY_FORMAT: [RawVideoFormat; 18] = [
+    pub(crate) const EVERY_FORMAT: [RawVideoFormat; 20] = [
         RawVideoFormat::Nv12,
         RawVideoFormat::I420,
         RawVideoFormat::Rgba8,
@@ -208,6 +208,8 @@ pub(crate) mod tests {
         RawVideoFormat::A420,
         RawVideoFormat::Uyvy,
         RawVideoFormat::A444p12,
+        RawVideoFormat::V210,
+        RawVideoFormat::R210,
     ];
 
     // odd and even on each axis, so a subsampled chroma plane has to round up

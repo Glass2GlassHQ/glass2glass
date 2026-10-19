@@ -2117,6 +2117,10 @@ pub enum RawVideoFormat {
     Uyvy,
     // I444p12's planes followed by a full-resolution 12-bit alpha plane
     A444p12,
+    // packed 10-bit 4:2:2, six pixels in four little-endian 32-bit words, rows padded to 128 bytes
+    V210,
+    // 10-bit RGB in one big-endian 32-bit word per pixel, the top two bits zero
+    R210,
 }
 
 impl RawVideoFormat {
@@ -2141,19 +2145,24 @@ impl RawVideoFormat {
             RawVideoFormat::A420 => "A420",
             RawVideoFormat::Uyvy => "UYVY",
             RawVideoFormat::A444p12 => "A444_12LE",
+            RawVideoFormat::V210 => "v210",
+            RawVideoFormat::R210 => "r210",
         }
     }
 
-    /// Bits per sample of a YUV format: 8, 10, or 12. The 10- and 12-bit formats
+    /// Bits per sample: 8, 10, or 12. The 10- and 12-bit planar formats
     /// store each sample little-endian in a 2-byte word (P010 in the word's top
-    /// bits, the planar family in the low bits). The RGBA / packed formats
+    /// bits, the planar family in the low bits), and v210 / r210 pack three
+    /// 10-bit samples into each 32-bit word. The 8-bit RGBA / packed formats
     /// report 8.
     pub const fn bit_depth(self) -> u8 {
         match self {
             RawVideoFormat::I420p10
             | RawVideoFormat::I422p10
             | RawVideoFormat::I444p10
-            | RawVideoFormat::P010 => 10,
+            | RawVideoFormat::P010
+            | RawVideoFormat::V210
+            | RawVideoFormat::R210 => 10,
             RawVideoFormat::I420p12
             | RawVideoFormat::I422p12
             | RawVideoFormat::I444p12
@@ -2163,6 +2172,7 @@ impl RawVideoFormat {
     }
 
     /// Bytes per sample: 2 for the 10- / 12-bit planar formats (LE `u16`), else 1.
+    /// It does not describe v210 or r210, whose samples share 32-bit words.
     pub const fn bytes_per_sample(self) -> usize {
         if self.bit_depth() > 8 {
             2
@@ -2225,7 +2235,9 @@ impl RawVideoFormat {
             | RawVideoFormat::Bgra8
             | RawVideoFormat::Rgb8
             | RawVideoFormat::Yuyv
-            | RawVideoFormat::Uyvy => self.plane_stride(0, width),
+            | RawVideoFormat::Uyvy
+            | RawVideoFormat::V210
+            | RawVideoFormat::R210 => self.plane_stride(0, width),
             RawVideoFormat::Nv12 | RawVideoFormat::I420 => width.div_ceil(2).checked_mul(2),
             _ => None,
         }
@@ -2244,7 +2256,9 @@ impl RawVideoFormat {
             | RawVideoFormat::Bgra8
             | RawVideoFormat::Rgb8
             | RawVideoFormat::Yuyv
-            | RawVideoFormat::Uyvy => Some(luma),
+            | RawVideoFormat::Uyvy
+            | RawVideoFormat::V210
+            | RawVideoFormat::R210 => Some(luma),
             RawVideoFormat::Nv12 | RawVideoFormat::I420 => {
                 luma.checked_add(stride.checked_mul(height.div_ceil(2))?)
             }
@@ -2263,7 +2277,9 @@ impl RawVideoFormat {
             | RawVideoFormat::Bgra8
             | RawVideoFormat::Rgb8
             | RawVideoFormat::Yuyv
-            | RawVideoFormat::Uyvy => 1,
+            | RawVideoFormat::Uyvy
+            | RawVideoFormat::V210
+            | RawVideoFormat::R210 => 1,
             RawVideoFormat::Nv12 | RawVideoFormat::P010 => 2,
             RawVideoFormat::I420
             | RawVideoFormat::I420p10
@@ -2279,12 +2295,13 @@ impl RawVideoFormat {
     }
 
     /// Bytes one pixel occupies in a packed format's single plane: 4 for RGBA /
-    /// BGRA, 3 for RGB, 2 for YUYV (whose row still rounds up to a whole pixel
+    /// BGRA / r210, 3 for RGB, 2 for YUYV (whose row still rounds up to a whole pixel
     /// pair, see [`Self::plane_stride`]). `None` for the multi-plane formats,
-    /// where one pixel's samples are spread across planes.
+    /// where one pixel's samples are spread across planes, and for v210, whose
+    /// pixels are not a whole number of bytes.
     pub const fn pixel_stride(self) -> Option<usize> {
         match self {
-            RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => Some(4),
+            RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 | RawVideoFormat::R210 => Some(4),
             RawVideoFormat::Rgb8 => Some(3),
             RawVideoFormat::Yuyv | RawVideoFormat::Uyvy => Some(2),
             _ => None,
@@ -2293,14 +2310,22 @@ impl RawVideoFormat {
 
     /// Row stride in bytes of `plane` at `width`, with no row padding. A YUYV
     /// row holds whole 4-byte Y0 U Y1 V groups, so an odd width rounds up to
-    /// the next even one (ffmpeg's `yuyv422`, GStreamer's `YUY2`). `None` for a
-    /// plane this format does not have, or on overflow.
+    /// the next even one (ffmpeg's `yuyv422`, GStreamer's `YUY2`). A v210 row
+    /// always pads to whole 128-byte blocks of 48 pixels, as GStreamer lays it
+    /// out. `None` for a plane this format does not have, or on overflow.
     pub fn plane_stride(self, plane: usize, width: u32) -> Option<u32> {
         if plane >= self.plane_count() {
             return None;
         }
         if matches!(self, RawVideoFormat::Yuyv | RawVideoFormat::Uyvy) {
             return width.div_ceil(2).checked_mul(4);
+        }
+        if self == RawVideoFormat::V210 {
+            const V210_ROW_BLOCK_PIXELS: u32 = 48;
+            const V210_ROW_BLOCK_BYTES: u32 = 128;
+            return width
+                .div_ceil(V210_ROW_BLOCK_PIXELS)
+                .checked_mul(V210_ROW_BLOCK_BYTES);
         }
         if let Some(pixel) = self.pixel_stride() {
             return width.checked_mul(pixel as u32);
@@ -2587,7 +2612,7 @@ pub enum TensorLayout {
 }
 
 #[cfg(all(test, feature = "alloc"))]
-pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 18] = [
+pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 20] = [
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
     RawVideoFormat::Rgba8,
@@ -2606,6 +2631,8 @@ pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 18] = [
     RawVideoFormat::A420,
     RawVideoFormat::Uyvy,
     RawVideoFormat::A444p12,
+    RawVideoFormat::V210,
+    RawVideoFormat::R210,
 ];
 
 #[cfg(test)]
@@ -3326,6 +3353,12 @@ mod tests {
         // Formats with no single-stride layout report nothing rather than a guess.
         assert_eq!(I420p10.frame_bytes(640, 480), None);
         assert_eq!(P010.row_stride(640), None);
+    }
+
+    #[test]
+    fn a_hostile_v210_width_overflows_to_none() {
+        assert_eq!(RawVideoFormat::V210.plane_stride(0, u32::MAX), None);
+        assert_eq!(RawVideoFormat::V210.unpadded_frame_bytes(u32::MAX, 1), None);
     }
 
     #[test]

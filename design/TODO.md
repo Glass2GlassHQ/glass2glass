@@ -151,10 +151,13 @@ Highest leverage first:
   property, and the `IMMNotificationClient` hotplug path. Both are
   compile-checked only (CI cross-compiles them; the runners have no camera and
   no way to replug one).
+- DeckLink SDI capture (`decklinkvideosrc`, `decklinkaudiosrc`).
 
 ## Sinks
 
 - Validate `wasapisink` U8, S24, and S32 acceptance on a Windows host.
+- DeckLink SDI output (`decklinkvideosink`, `decklinkaudiosink`) on Linux, then
+  Windows and macOS.
 
 ## Containers
 
