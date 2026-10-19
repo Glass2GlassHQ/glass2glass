@@ -10,7 +10,9 @@ use g2g_plugins::registry::default_registry;
 // Each `.rgba` / `.rgb` / `.s16le` beside them is ffmpeg's decode of that stream.
 const ZMBV_AVI: &str = "tagged_zmbv_adpcm_ms.avi";
 const QTRLE_MOV: &str = "tagged_qtrle_ima4.mov";
-// both fixtures carry 8 kHz mono audio
+// four GSM 6.10 blocks of seeded random bytes in WAV
+const GSM_WAV: &str = "tagged_gsm_ms.wav";
+// every fixture carries 8 kHz mono audio
 const AUDIO_CAPS: &str = "audio/x-raw,format=S16LE,rate=8000,channels=1";
 
 struct ZeroClock;
@@ -63,6 +65,13 @@ async fn an_avi_adpcm_track_decodes_with_its_block_align() {
     let tail = format!("audioconvert ! {AUDIO_CAPS}");
     let decoded = decode(&fixture(ZMBV_AVI), &tail, "adpcm-ms").await;
     assert_eq!(decoded, expected(&format!("{ZMBV_AVI}.s16le")));
+}
+
+#[tokio::test]
+async fn a_wav_codec_known_only_by_its_tag_decodes() {
+    let tail = format!("audioconvert ! {AUDIO_CAPS}");
+    let decoded = decode(&fixture(GSM_WAV), &tail, "gsm").await;
+    assert_eq!(decoded, expected(&format!("{GSM_WAV}.s16le")));
 }
 
 #[tokio::test]

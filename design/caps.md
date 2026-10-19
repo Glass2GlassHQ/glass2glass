@@ -770,7 +770,7 @@ port.
 
 A codec with no typed `VideoCodec` / `AudioFormat` still decodes when libavcodec
 has a decoder for it, behind the `ffmpeg-long-tail` feature. `avidemux`, the mp4
-demuxers and `matroskademux` forward a stream they would otherwise drop as
+demuxers, `matroskademux` and `wavparse` forward a stream they would otherwise drop as
 `VideoCodec::Tagged(CodecTag)` / `AudioFormat::Tagged(CodecTag)`: the tag its
 container stores in one of libavformat's namespaces, `Riff` (an AVI
 BITMAPINFOHEADER `biCompression` or WAVEFORMATEX `wFormatTag`, and Matroska's
@@ -778,7 +778,7 @@ BITMAPINFOHEADER `biCompression` or WAVEFORMATEX `wFormatTag`, and Matroska's
 Matroska's `V_QUICKTIME`). The container header the decoder needs leads the
 stream in band as a frame of its own, the convention FLAC's `fLaC` and raw AAC's
 AudioSpecificConfig already use: the whole `strf` BITMAPINFOHEADER or
-WAVEFORMATEX, the whole sample entry, or the Matroska
+WAVEFORMATEX, the WAV `fmt ` chunk, the whole sample entry, or the Matroska
 `CodecPrivate`. An AVI `##pc` palette change rides the stream's next frame as a
 `PaletteChange` frame meta, which `ffmpegdec` writes over its palette and hands
 libavcodec with that packet. The ffmpeg

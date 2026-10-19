@@ -35,7 +35,7 @@ use crate::riff::{
     RIFF_HEADER_LEN,
 };
 use crate::waveformat::{
-    audio_format, format_tag_name, sample_frame_len, wave_format_tag, WaveFormatEx,
+    audio_format, format_tag_name, sample_frame_len, tagged_audio, wave_format_tag, WaveFormatEx,
 };
 
 /// The form type of the first `RIFF` list.
@@ -415,19 +415,6 @@ fn tagged_video(compression: FourCc) -> Option<VideoCodec> {
 
 #[cfg(not(feature = "ffmpeg-long-tail"))]
 fn tagged_video(_compression: FourCc) -> Option<VideoCodec> {
-    None
-}
-
-#[cfg(feature = "ffmpeg-long-tail")]
-fn tagged_audio(tag: u16) -> Option<AudioFormat> {
-    Some(AudioFormat::Tagged(g2g_core::CodecTag {
-        namespace: g2g_core::TagNamespace::Riff,
-        tag: u32::from(tag),
-    }))
-}
-
-#[cfg(not(feature = "ffmpeg-long-tail"))]
-fn tagged_audio(_tag: u16) -> Option<AudioFormat> {
     None
 }
 

@@ -2164,7 +2164,7 @@ pub fn wav_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
         crate::wavparse::WavStream::Readable(caps) => ContainerStreams {
             streams: alloc::vec![PrimaryStream {
                 demux: "wavparse",
-                props: Vec::new(),
+                props: tagged_wav_selection(&caps),
                 caps,
             }],
             unsupported: Vec::new(),
@@ -2174,6 +2174,19 @@ pub fn wav_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             unsupported: alloc::vec![crate::waveformat::format_tag_name(tag)],
         },
     })
+}
+
+// a tagged WAV stream has wavparse negotiate its output as that codec
+#[cfg(feature = "std")]
+fn tagged_wav_selection(caps: &Caps) -> Vec<(alloc::string::String, alloc::string::String)> {
+    match caps {
+        Caps::Audio {
+            format: format @ g2g_core::AudioFormat::Tagged(_),
+            ..
+        } => crate::codectag::audio_stream_name(&[], *format)
+            .map_or_else(Vec::new, |name| stream_selection(&name)),
+        _ => Vec::new(),
+    }
 }
 
 pub fn ivf_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams> {

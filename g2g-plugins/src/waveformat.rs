@@ -44,6 +44,20 @@ pub(crate) fn wave_format_tag(format: AudioFormat) -> Option<(u16, u16)> {
         .map(|(_, tag, bits)| (*tag, *bits))
 }
 
+// a tag no typed mapping names goes on as itself, its whole WAVEFORMATEX as the config
+#[cfg(feature = "ffmpeg-long-tail")]
+pub(crate) fn tagged_audio(tag: u16) -> Option<AudioFormat> {
+    Some(AudioFormat::Tagged(g2g_core::CodecTag {
+        namespace: g2g_core::TagNamespace::Riff,
+        tag: u32::from(tag),
+    }))
+}
+
+#[cfg(not(feature = "ffmpeg-long-tail"))]
+pub(crate) fn tagged_audio(_tag: u16) -> Option<AudioFormat> {
+    None
+}
+
 /// The format a `(wFormatTag, wBitsPerSample)` pair names, `None` for a payload
 /// g2g does not model.
 pub(crate) fn audio_format(tag: u16, bits: u16) -> Option<AudioFormat> {
