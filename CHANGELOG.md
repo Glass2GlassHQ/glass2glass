@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1596: `decodebin` fans a multi-stream Ogg file out to one decoder per stream.
 - M1590: with `ffmpeg-long-tail`, AVI, QuickTime and Matroska streams of codecs g2g has no caps for decode through libavcodec under their container tag.
 - M1592: `ffmpegdec` with the cuvid backend fails on a codec that has no cuvid decoder instead of panicking.
 - M1589: the mp4 demuxers and `matroskademux` emit ProRes and DNxHD as typed codecs, which `ffmpegdec` decodes, ProRes 4444 alpha as the new `A444p12` raw format.
