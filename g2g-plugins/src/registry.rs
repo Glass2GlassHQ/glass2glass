@@ -2844,6 +2844,12 @@ fn register_feature_gated(reg: &mut Registry) {
         "rtspsrcn",
         |outputs| Box::new(crate::rtspsrcn::RtspSrcN::new("").with_outputs(outputs)),
     ));
+    // gst's `rtspsrc` has a pad per stream, the parser builds this form when several are linked
+    #[cfg(feature = "rtsp")]
+    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
+        "rtspsrc",
+        |outputs| Box::new(crate::rtspsrcn::RtspSrcN::new("").with_outputs(outputs)),
+    ));
     // ONVIF camera source: set the device service URL + account via
     // `onvifsrc location=... user=... password=...`. The H.264 output caps
     // match RtspSrc (the resolved RTSP stream the element delegates to).

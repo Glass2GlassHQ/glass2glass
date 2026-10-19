@@ -81,6 +81,14 @@ d. ! audioconvert ! autoaudiosink` runs unchanged. Bare `d.` refs take the ports
 in order, video first, where gst links them by caps. When the audio branch comes
 first, name the pads the way `uridecodebin3` does (`d.video_0`, `d.audio_0`).
 
+**`rtspsrc name=s` has a pad per stream**, as in gst: `rtspsrc name=s
+location=rtsp://cam/stream  s. ! h264parse ! avdec_h264 ! ...  s. ! aacparse !
+avdec_aac ! ...` plays video on the first linked pad and audio on the second, off
+one session. g2g's `rtspsrc` depayloads itself, so drop gst's `rtph264depay` /
+`rtpmp4gdepay`. Link video first: g2g assigns these pads in link order, not by
+caps. With one pad linked it is the video-only source. `rtspsrcn` is the same
+multi-pad element under its own name.
+
 **Named input / request pads** let a fan-in reference its inputs by name in any
 order: `d.video_0 ! ... ! o.video   d.text_0 ! o.text   textoverlay name=o ! ...`
 and `... ! m.video_0   ... ! m.audio_0   matroskamux name=m ! ...`. Bare `m.`
@@ -173,7 +181,7 @@ hint where possible); rewrite as shown:
 | caps feature `video/x-raw(memory:GLMemory)` | not supported | drop the feature; g2g picks the memory domain during negotiation (GPU vs system) automatically |
 | bins `( videoconvert ! videoscale )` | not supported (no bin/grouping syntax) | flatten the group inline, or build the sub-graph in Rust and `Graph::merge` it |
 | demux fan-out on a network source `udpsrc ! qtdemux name=d d.video_0 ! …` | file sources only | demux a local file, or use `uridecodebin uri=X name=d` / `playbin` for network multi-stream |
-| `rtspsrc ! decodebin name=d d. ! … d. ! …` | not supported (gst fails it too: `decodebin` takes one `rtspsrc` pad) | `uridecodebin uri=rtsp://… name=d` |
+| `rtspsrc ! decodebin name=d d. ! … d. ! …` | not supported (gst fails it too: `decodebin` takes one `rtspsrc` pad) | `uridecodebin uri=rtsp://… name=d`, or `rtspsrc name=s` with a branch per pad |
 
 ### Equivalence cookbook
 

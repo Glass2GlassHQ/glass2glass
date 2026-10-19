@@ -1624,6 +1624,11 @@ mod factory {
             self.fanout_srcs.iter().any(|f| f.name == name)
         }
 
+        pub fn is_source(&self, name: &str) -> bool {
+            let name = self.resolve_alias(name);
+            self.sources.iter().any(|s| s.name == name)
+        }
+
         /// Build a registered terminal fan-out source with `outputs` ports.
         pub fn make_fanout_src(
             &self,

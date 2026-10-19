@@ -2803,16 +2803,19 @@ fn build_graph(
     let is_select: Vec<bool> = (0..specs.len())
         .map(|ei| demux_select_node[ei].is_some() || uri_fanout_port_of_ref[ei].is_some())
         .collect();
+    // a name registered both ways (`rtspsrc`) is the fan-out form only when several pads are linked
+    let is_fanout_src = |ei: usize| {
+        let name = &specs[ei].name;
+        in_deg[ei] == 0
+            && registry.is_fanout_src(name)
+            && (out_deg[ei] > 1 || !registry.is_source(name))
+    };
     // Auto-tee (M473): a non-tee, non-demux node whose single output fans out to
     // several consumers gets an implicit `tee` spliced in below, so a gst-launch
     // line that omits the explicit tee still builds. `tee`, registered demuxers,
     // and explicit-demux fan-out nodes fan out on their own pads and are left alone.
     let needs_tee = |ei: usize| {
-        !is_tee(ei)
-            && !is_demux(ei)
-            && !is_select[ei]
-            && !registry.is_fanout_src(&specs[ei].name)
-            && out_deg[ei] > 1
+        !is_tee(ei) && !is_demux(ei) && !is_select[ei] && !is_fanout_src(ei) && out_deg[ei] > 1
     };
     // A fan-in element with no output is checked at construction below: a
     // terminal session (`is_terminal`) legally ends the graph (M713), a
@@ -2862,7 +2865,7 @@ fn build_graph(
         let spec = &specs[ei];
         let node = if is_tee(ei) {
             graph.add_tee(out_deg[ei] as u8).node()
-        } else if in_deg[ei] == 0 && registry.is_fanout_src(&spec.name) {
+        } else if is_fanout_src(ei) {
             // Terminal fan-out source (M727): 0 inputs, one output per named
             // pad reference (`s. ! ...`). The element's intrinsic port count
             // must match the linked outputs. Properties are applied first: one
@@ -3011,8 +3014,7 @@ fn build_graph(
             let index = tee_next[s];
             tee_next[s] += 1;
             PadId { node: tee, index }
-        } else if is_tee(s) || is_demux(s) || is_select[s] || registry.is_fanout_src(&specs[s].name)
-        {
+        } else if is_tee(s) || is_demux(s) || is_select[s] || is_fanout_src(s) {
             let ordinal = tee_next[s];
             tee_next[s] += 1;
             let index = uri_fanout_port_of_ref[s]

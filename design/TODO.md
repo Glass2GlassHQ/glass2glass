@@ -247,6 +247,9 @@ Highest leverage first:
 ## Properties / introspection / DSL
 
 - A GUI / tooling introspection surface beyond the text dump.
+- **Link fan-out pads by caps.** Match each bare `s.` / `d.` branch of
+  `rtspsrc name=s` and `uridecodebin name=d` to the stream its first element
+  takes, as gst does, so an audio branch written first still gets the audio.
 
 ## GStreamer element coverage
 

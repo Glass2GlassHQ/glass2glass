@@ -378,7 +378,10 @@ The audio pad negotiates at the decoder-facing caps, not the SDP's. A compressed
 Pad count is fixed before the run, so the `playbin uri=rtsp://...` hook DESCRIBEs
 first (`blocking_probe_tracks`) and declines to the single-pad `RtspSrc` chain
 for a video-only stream. A launch line declares the count by linking pads:
-`rtspsrcn name=s location=... s. ! ... s. ! ...`.
+`rtspsrcn name=s location=... s. ! ... s. ! ...`. gst's `rtspsrc` has a pad per
+stream, so `rtspsrc` is registered both as the `RtspSrc` source and as this
+fan-out source, and the parser builds the fan-out form when more than one of its
+pads is linked. Pads follow link order, video first, where gst links them by caps.
 
 ### OnvifSrc
 
