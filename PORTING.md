@@ -277,7 +277,7 @@ Whole plugins answer by family rather than name:
 | `ladspa*` | no LADSPA host; `volume`, `audiopanorama`, `equalizer-3bands`, `level`, `cutter` |
 | effectv (`*tv`) and geometrictransform (`bulge`, `fisheye`, ...) | no effects plugins; `videoflip`, `videocrop`, `videobox`, `videoscale` are the geometry elements |
 | `qml*` / `gtk*` sinks | no toolkit sinks; render with `wgpusink` or pull frames with `appsink` |
-| `decklink*` | no DeckLink support |
+| `decklink*` | `decklinkvideosink` and `decklinkaudiosink` on Linux (`decklink` feature), no capture elements |
 
 Registered names and the exact table always win over a family rule, so `nvdec`
 and `vaapidec` still answer for themselves.

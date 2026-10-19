@@ -434,7 +434,10 @@ static GST_FAMILY_MAP: &[(&str, &str, GstEquivalent)] = &[
     (
         "decklink",
         "",
-        GstEquivalent::Unsupported("no DeckLink support"),
+        GstEquivalent::Unsupported(
+            "no SDI capture; `decklinkvideosink` and `decklinkaudiosink` play out on Linux \
+         with the `decklink` feature",
+        ),
     ),
 ];
 

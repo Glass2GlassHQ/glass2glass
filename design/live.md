@@ -169,6 +169,58 @@ kernel's own exporter (a sealed memfd through `/dev/udmabuf`) and played through
 without making a sound; the other two sinks read their payload through the same
 `dmabufmap` reader.
 
+## SDI output
+
+`decklinkvideosink` and `decklinkaudiosink` (`decklink` feature, Linux) play
+out through an SDI output for Blackmagic Design DeckLink.
+`g2g-plugins/vendor/decklink/linux` holds the SDK 16.0 headers and its dispatch
+file, unchanged and with Blackmagic's notice. `build.rs` compiles them with
+`csrc/decklink_shim.cpp`, a C ABI over the output calls of the SDK's COM-style
+C++ interfaces. The dispatch file opens `libDeckLinkAPI.so` with `dlopen` on
+first use, so the crate builds and runs without the driver. Opening a device on
+a host without it fails with `HardwareError::LibraryNotFound("libDeckLinkAPI.so")`,
+and any other SDK failure carries its HRESULT in `HardwareError::DeckLink`.
+
+The elements reach the board through the `DeckLinkOutput` trait. The shim
+implements it, and the tests replace it with a mock. A video sink claims its
+`device-number` in a process-wide registry when it is created, and the audio
+sink with the same number finds that device at configure, so the order the
+two configure in does not matter. An audio sink with no video sink on its
+number fails configure with `NotConfigured`, since the board schedules audio
+against the video frames. A second video or audio sink on one number fails
+configure too.
+
+`mode` takes GStreamer's mode names except the widescreen SD ones, which differ
+from the plain ones only in pixel aspect ratio, and raw caps carry none. `auto`
+picks the first mode whose size, frame rate and scan match the caps, an
+undeclared scan counting as progressive. An explicit mode narrows the sink's
+caps to its own size and rate, and configure fails on caps of another mode. The
+video sink takes UYVY, BGRA, v210 and r210 at the strides `RawVideoFormat`
+gives them. The audio sink takes 48 kHz S16LE or S32LE in 2, 8 or 16 channels,
+as GStreamer's does.
+
+Playback is scheduled, as in GStreamer: a buffer goes to the board 30 ms before
+it is due, and the board shows it at its stream time. A buffer is due at a
+deadline on the elected clock. On a live path that is the pipeline base time
+plus its running time. Otherwise the first buffer of either sink on the device
+fixes running time zero 200 ms after it arrived, so audio and video line up by
+timestamp whichever reaches the device first. The sink reads the board clock
+and the elected clock together to move the deadline onto the board clock, and
+rounds a picture's display time up to the frame grid. The first picture starts
+scheduled playback with stream time equal to the board's hardware clock, and
+samples scheduled before that are preroll. When the board's audio buffer is
+full, the rest of the samples go again 10 ms later at their own stream time.
+End of stream stops playback at the end of the last picture and waits for it.
+A flush on the video sink stops playback at once and clears running time zero.
+
+The video sink offers the board clock to election at `AudioProvider` priority,
+as `AlsaSink` offers its DAC: a `DriftClock` over the monotonic clock, fed a
+board reading each time a buffer is scheduled and offset so it starts at the
+monotonic time. GStreamer's audio sink offers the same clock as its video sink.
+Here only the video sink offers it, which elects the same clock.
+
+No board has run either element yet.
+
 ## Echo cancellation
 
 `webrtcdsp` and `webrtcechoprobe` (`webrtcdsp` feature) are GStreamer's voice

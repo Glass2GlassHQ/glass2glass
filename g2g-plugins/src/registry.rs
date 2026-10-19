@@ -129,6 +129,8 @@ use crate::dashsrc::DashSrc;
 #[cfg(feature = "dav1d")]
 use crate::dav1ddec::Dav1dDec;
 #[cfg(all(target_os = "linux", feature = "decklink"))]
+use crate::decklinkaudiosink::DeckLinkAudioSink;
+#[cfg(all(target_os = "linux", feature = "decklink"))]
 use crate::decklinkvideosink::DeckLinkVideoSink;
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 use crate::ffmpegdec::{Backend as FfmpegBackend, FfmpegH264Dec};
@@ -2667,6 +2669,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "wgpusink" => "wgpu-present" on "linux";
         "kmssink" => "kms-sink" on "linux";
         "decklinkvideosink" => "decklink" on "linux";
+        "decklinkaudiosink" => "decklink" on "linux";
         "alsasink" => "alsa-sink" on "linux";
         "alsasrc" => "alsa-src" on "linux";
         "pulsesink" => "pulse-sink" on "linux";
@@ -3519,6 +3522,13 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(
         LaunchFactory::of::<DeckLinkVideoSink>("decklinkvideosink", || {
             Box::new(DeckLinkVideoSink::new())
+        })
+        .with_experimental(),
+    );
+    #[cfg(all(target_os = "linux", feature = "decklink"))]
+    reg.register_launch(
+        LaunchFactory::of::<DeckLinkAudioSink>("decklinkaudiosink", || {
+            Box::new(DeckLinkAudioSink::new())
         })
         .with_experimental(),
     );

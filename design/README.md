@@ -74,7 +74,7 @@ document.
 | [runtime.md](runtime.md) | dynamic graph reconfiguration, the state machine, preroll and seek, the bus, logging. |
 | [timing.md](timing.md) | clock election, the audio master, PTP, presentation anchoring, latency, QoS. |
 | [decode.md](decode.md) | hardware decoders and encoders, and the end-to-end RTSP pipeline. |
-| [live.md](live.md) | capture, device discovery, RTP / RTMP / RTSP / SRT in both directions, fallback switching. |
+| [live.md](live.md) | capture, device discovery, SDI output, RTP / RTMP / RTSP / SRT in both directions, fallback switching. |
 | [containers.md](containers.md) | containers and byte streams, mux and demux, HLS and DASH, still images. |
 | [text.md](text.md) | subtitles, closed captions, bitmap subtitles, teletext, the overlay elements. |
 | [transports.md](transports.md) | WebRTC, distributed graphs, MoQ, ST 2110, in-process graph links, local zero-copy IPC, RIST. |

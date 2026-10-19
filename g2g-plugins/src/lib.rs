@@ -1590,9 +1590,11 @@ pub mod gstwrap;
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 pub mod waylandsink;
 
-// SDI output for Blackmagic Design DeckLink: the SDK boundary, the device a video sink claims, and the sink.
+// SDI output for Blackmagic Design DeckLink: the SDK boundary, the device both sinks share, and the sinks.
 #[cfg(all(target_os = "linux", feature = "decklink"))]
 pub mod decklink;
+#[cfg(all(target_os = "linux", feature = "decklink"))]
+pub mod decklinkaudiosink;
 #[cfg(all(target_os = "linux", feature = "decklink"))]
 mod decklinkoutput;
 #[cfg(all(target_os = "linux", feature = "decklink"))]

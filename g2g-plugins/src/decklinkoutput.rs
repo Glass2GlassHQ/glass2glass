@@ -5,15 +5,15 @@ use std::time::Duration;
 use alloc::boxed::Box;
 
 use g2g_core::{
-    g2g_error, ClockSync, DriftClock, FrameTiming, G2gError, HardwareError, MonotonicClock,
-    PresentationPacer, RawVideoFormat,
+    g2g_error, AudioFormat, ClockSync, DriftClock, FrameTiming, G2gError, HardwareError,
+    MonotonicClock, PresentationPacer, RawVideoFormat,
 };
 
 use crate::decklink::{
     log_target, DeckLinkOpener, DeckLinkOutput, DisplayMode, ScheduledVideoFrame,
 };
 
-// slack between the first buffer and its display time
+// slack between the first buffer and its display time, so the other sink on the device can catch up
 const PREROLL_NS: u64 = 200_000_000;
 
 // GStreamer's decklinkvideosink hands a frame over 30 ms before it is due
@@ -31,14 +31,15 @@ pub(crate) struct PictureLayout {
 struct OutputState {
     board: Option<Box<dyn DeckLinkOutput>>,
     video_enabled: bool,
+    audio_enabled: bool,
     playing: bool,
-    // elected-clock time that running time zero is due at
+    // elected-clock time that running time zero is due at, shared so audio and video line up
     anchor_ns: Option<i128>,
     // the first reference and board readings, so the drift clock starts out at the reference clock's time
     clock_epoch: Option<(u64, u64)>,
 }
 
-// the device a decklinkvideosink claims through its device-number
+// the device one decklinkvideosink and one decklinkaudiosink share through a device-number
 pub(crate) struct SharedOutput {
     device_number: u32,
     opener: DeckLinkOpener,
@@ -75,6 +76,11 @@ pub(crate) fn claim_output(device_number: u32, opener: DeckLinkOpener) -> Arc<Sh
     outputs.insert(device_number, Arc::downgrade(&output));
     outputs.retain(|_, weak| weak.strong_count() > 0);
     output
+}
+
+// an audio sink's way to the device its video sink claimed
+pub(crate) fn find_output(device_number: u32) -> Option<Arc<SharedOutput>> {
+    shared_outputs().get(&device_number).and_then(Weak::upgrade)
 }
 
 fn signed(ns: u64) -> i128 {
@@ -142,6 +148,21 @@ impl SharedOutput {
         }
         self.board(&mut state)?.enable_video(mode)?;
         state.video_enabled = true;
+        Ok(())
+    }
+
+    pub(crate) fn enable_audio(&self, format: AudioFormat, channels: u8) -> Result<(), G2gError> {
+        let mut state = self.lock()?;
+        if state.audio_enabled {
+            g2g_error!(
+                log_target(),
+                "device-number {} already has an audio sink",
+                self.device_number
+            );
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        self.board(&mut state)?.enable_audio(format, channels)?;
+        state.audio_enabled = true;
         Ok(())
     }
 
@@ -217,6 +238,25 @@ impl SharedOutput {
             state.playing = true;
         }
         Ok(display_time_ns + duration_ns)
+    }
+
+    // schedules interleaved samples due at `deadline_ns` and returns how many sample frames the board took
+    pub(crate) fn schedule_audio(
+        &self,
+        sync: &ClockSync,
+        deadline_ns: u64,
+        samples: &[u8],
+        sample_frames: u32,
+    ) -> Result<u32, G2gError> {
+        let mut state = self.lock()?;
+        let (_, stream_time) = self.stream_time_ns(&mut state, sync, deadline_ns)?;
+        let playing = state.playing;
+        let board = self.board(&mut state)?;
+        // as GStreamer does, audio that reaches the board before playback starts is preroll
+        if !playing {
+            board.begin_audio_preroll()?;
+        }
+        board.schedule_audio(samples, sample_frames, stream_time)
     }
 
     // stops playback once the board clock reaches `stop_time_ns`, and returns the board time now
