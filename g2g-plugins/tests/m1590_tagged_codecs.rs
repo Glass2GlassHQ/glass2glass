@@ -12,6 +12,8 @@ const ZMBV_AVI: &str = "tagged_zmbv_adpcm_ms.avi";
 const QTRLE_MOV: &str = "tagged_qtrle_ima4.mov";
 // four GSM 6.10 blocks of seeded random bytes in WAV
 const GSM_WAV: &str = "tagged_gsm_ms.wav";
+// a fate-suite Screenpresso AVI cut inside its second frame, which libavcodec rejects
+const SCREENPRESSO_CUT_AVI: &str = "tagged_screenpresso_cut.avi";
 // every fixture carries 8 kHz mono audio
 const AUDIO_CAPS: &str = "audio/x-raw,format=S16LE,rate=8000,channels=1";
 
@@ -58,6 +60,17 @@ fn expected(name: &str) -> Vec<u8> {
 async fn a_palettized_avi_codec_decodes_to_rgba() {
     let decoded = decode(&fixture(ZMBV_AVI), "video/x-raw,format=RGBA", "zmbv").await;
     assert_eq!(decoded, expected(&format!("{ZMBV_AVI}.rgba")));
+}
+
+#[tokio::test]
+async fn a_cut_frame_the_decoder_rejects_does_not_stop_the_stream() {
+    let decoded = decode(
+        &fixture(SCREENPRESSO_CUT_AVI),
+        "video/x-raw,format=RGBA",
+        "screenpresso",
+    )
+    .await;
+    assert_eq!(decoded, expected(&format!("{SCREENPRESSO_CUT_AVI}.rgba")));
 }
 
 #[tokio::test]

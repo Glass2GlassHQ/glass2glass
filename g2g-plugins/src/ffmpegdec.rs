@@ -1092,7 +1092,8 @@ fn feed_access_unit_into(
 
     let rejected = match state.decoder.send_packet(&packet) {
         Ok(()) => 0,
-        Err(FfError::InvalidData) => 1,
+        // zlib-based decoders such as tscc report a corrupt packet as an unknown error
+        Err(FfError::InvalidData | FfError::Unknown) => 1,
         Err(_) => return Err(G2gError::Hardware(HardwareError::Other)),
     };
     Ok(rejected + drain_frames_into(state, cfg, decoded)?)
@@ -1201,7 +1202,7 @@ fn drain_frames_into(
             }
             Err(FfError::Eof) => return Ok(undecodable),
             // A picture that failed to decode: the next one may still come out.
-            Err(FfError::InvalidData) => undecodable += 1,
+            Err(FfError::InvalidData | FfError::Unknown) => undecodable += 1,
             Err(_) => return Err(G2gError::Hardware(HardwareError::Other)),
         }
     }
@@ -2021,6 +2022,16 @@ impl AsyncElement for FfmpegVideoDec {
                         Caps::RawVideo { format, .. }
                             if accepts_output(self.output_format(), *format) =>
                         {
+                            // a tagged codec converts to the packed RGB the solve picked, not the one `Auto` picks
+                            if self.output_format() == OutputFormat::Auto
+                                && matches!(self.codec_kind, Some(VideoCodec::Tagged(_)))
+                            {
+                                self.requested_output_format = match format {
+                                    RawVideoFormat::Rgba8 => Some(OutputFormat::Rgba),
+                                    RawVideoFormat::Rgb8 => Some(OutputFormat::Rgb),
+                                    _ => None,
+                                };
+                            }
                             self.push_downstream(out, PipelinePacket::CapsChanged(c.clone()))
                                 .await?;
                             self.last_caps = Some(c);
