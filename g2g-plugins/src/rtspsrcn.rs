@@ -47,9 +47,8 @@ use g2g_core::{
 
 use crate::g711::{G711_CLOCK_RATE_HZ, G711_DEFAULT_CHANNELS};
 use crate::rtspsrc::{
-    caps_from_video_params, connect_describe, placeholder_framerate, video_params_for,
-    video_stream_index, with_placeholder_framerate, LowerTransport, ReconnectPolicy,
-    ReconnectState,
+    connect_describe, placeholder_framerate, video_caps_for, video_codec, video_stream_index,
+    with_placeholder_framerate, LowerTransport, ReconnectPolicy, ReconnectState,
 };
 
 /// User-Agent sent on DESCRIBE / SETUP unless `user-agent` overrides it. Also
@@ -513,7 +512,7 @@ pub async fn probe_tracks(url: &str, user_agent: &str) -> Option<RtspTracks> {
     let session = connect_describe(url, user_agent, None).await.ok()?;
     let streams = session.streams();
     let video_idx = video_stream_index(streams)?;
-    let video = caps_from_video_params(video_params_for(streams, video_idx))?;
+    let video = video_caps_for(streams, video_idx)?;
     let audio = audio_stream_index(streams, None)
         .map(|(idx, format)| declared_audio_caps(format, audio_params_for(streams, idx)));
     let onvif_metadata = onvif_metadata_stream_index(streams).is_some();
@@ -882,7 +881,10 @@ async fn run_session(
     // The sender report each stream was last pinned to, indexed by retina's
     // stream index, so a frame can carry the sender's wall clock.
     let mut sender_clocks: Vec<Option<SenderClock>> = alloc::vec![None; session.streams().len()];
-    let mut video_caps = caps_from_video_params(video_params_for(session.streams(), video_idx));
+    let mut video_caps = video_caps_for(session.streams(), video_idx);
+    let Some(codec) = video_codec(&session.streams()[video_idx]) else {
+        return SessionOutcome::NetworkError(G2gError::CapsMismatch);
+    };
 
     // Both streams are set up, so the server's `RTP-Info` origin is what puts
     // them on one timeline; permissive keeps a server that omits `rtptime`
@@ -947,8 +949,7 @@ async fn run_session(
                     seen_keyframe = true;
                 }
                 if vf.has_new_parameters() {
-                    let refreshed =
-                        caps_from_video_params(video_params_for(demuxed.streams(), video_idx));
+                    let refreshed = video_caps_for(demuxed.streams(), video_idx);
                     if refreshed != video_caps {
                         if let Some(caps) = &refreshed {
                             if let Err(e) = out
@@ -963,9 +964,7 @@ async fn run_session(
                 }
                 let timestamp = vf.timestamp();
                 let bytes = vf.into_data().into_boxed_slice();
-                // IDR NAL => independently decodable. H.265 reports false (the
-                // helper is H.264-specific), the safe default.
-                let keyframe = crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &bytes);
+                let keyframe = crate::annexb::au_is_keyframe(codec, &bytes);
                 (VIDEO_PORT, timestamp, 0, bytes, keyframe)
             }
             // The compound packet's sender report pins this stream's RTP clock
