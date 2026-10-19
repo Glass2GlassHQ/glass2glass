@@ -1001,6 +1001,12 @@ mod tests {
     /// `profile`: one operating point, no timing / decoder-model / display-delay.
     fn seq_header_payload(width: u32, height: u32, profile: u8) -> Vec<u8> {
         let mut w = BitWriter::default();
+        write_header_through_geometry(&mut w, profile, (width, height));
+        w.align_to_byte();
+        w.into_bytes()
+    }
+
+    fn write_header_through_geometry(w: &mut BitWriter, profile: u8, (width, height): (u32, u32)) {
         w.write_bits(profile as u32, 3); // seq_profile
         w.write_bit(0); // still_picture
         w.write_bit(0); // reduced_still_picture_header
@@ -1009,14 +1015,16 @@ mod tests {
         w.write_bits(0, 5); // operating_points_cnt_minus_1
         w.write_bits(0, 12); // operating_point_idc[0]
         w.write_bits(0, 5); // seq_level_idx[0] (<= 7, no tier)
+        write_geometry(w, (width, height));
+    }
+
+    fn write_geometry(w: &mut BitWriter, (width, height): (u32, u32)) {
         let (wm1, hm1) = (width - 1, height - 1);
         let (nw, nh) = (bits_for(wm1), bits_for(hm1));
         w.write_bits(nw - 1, 4); // frame_width_bits_minus_1
         w.write_bits(nh - 1, 4); // frame_height_bits_minus_1
         w.write_bits(wm1, nw); // max_frame_width_minus_1
         w.write_bits(hm1, nh); // max_frame_height_minus_1
-        w.align_to_byte();
-        w.into_bytes()
     }
 
     /// A reduced-still-picture sequence-header OBU payload.
@@ -1345,5 +1353,665 @@ mod tests {
             }
             _ => panic!("expected Identity"),
         }
+    }
+
+    const GEOMETRY: (u32, u32) = (1280, 720);
+
+    fn write_tools(w: &mut BitWriter, tools: &Av1SequenceTools) {
+        w.write_bit(u32::from(tools.frame_id_numbers_present_flag));
+        if tools.frame_id_numbers_present_flag {
+            w.write_bits(u32::from(tools.delta_frame_id_length_minus_2), 4);
+            w.write_bits(u32::from(tools.additional_frame_id_length_minus_1), 3);
+        }
+        w.write_bit(u32::from(tools.use_128x128_superblock));
+        w.write_bit(u32::from(tools.enable_filter_intra));
+        w.write_bit(u32::from(tools.enable_intra_edge_filter));
+        w.write_bit(u32::from(tools.enable_interintra_compound));
+        w.write_bit(u32::from(tools.enable_masked_compound));
+        w.write_bit(u32::from(tools.enable_warped_motion));
+        w.write_bit(u32::from(tools.enable_dual_filter));
+        w.write_bit(u32::from(tools.enable_order_hint));
+        if tools.enable_order_hint {
+            w.write_bit(u32::from(tools.enable_jnt_comp));
+            w.write_bit(u32::from(tools.enable_ref_frame_mvs));
+        }
+        let choose_screen_content_tools =
+            tools.seq_force_screen_content_tools == SELECT_SCREEN_CONTENT_TOOLS;
+        w.write_bit(u32::from(choose_screen_content_tools));
+        if !choose_screen_content_tools {
+            w.write_bit(u32::from(tools.seq_force_screen_content_tools));
+        }
+        if tools.seq_force_screen_content_tools > 0 {
+            let choose_integer_mv = tools.seq_force_integer_mv == SELECT_INTEGER_MV;
+            w.write_bit(u32::from(choose_integer_mv));
+            if !choose_integer_mv {
+                w.write_bit(u32::from(tools.seq_force_integer_mv));
+            }
+        }
+        if tools.enable_order_hint {
+            w.write_bits(u32::from(tools.order_hint_bits) - 1, 3); // order_hint_bits_minus_1
+        }
+        w.write_bit(u32::from(tools.enable_superres));
+        w.write_bit(u32::from(tools.enable_cdef));
+        w.write_bit(u32::from(tools.enable_restoration));
+    }
+
+    fn select_tools() -> Av1SequenceTools {
+        Av1SequenceTools {
+            seq_force_screen_content_tools: SELECT_SCREEN_CONTENT_TOOLS,
+            seq_force_integer_mv: SELECT_INTEGER_MV,
+            ..Av1SequenceTools::default()
+        }
+    }
+
+    fn header_through_tools(profile: u8, tools: &Av1SequenceTools) -> BitWriter {
+        let mut w = BitWriter::default();
+        write_header_through_geometry(&mut w, profile, GEOMETRY);
+        write_tools(&mut w, tools);
+        w
+    }
+
+    fn parse_written(mut w: BitWriter) -> Av1SeqHeader {
+        w.align_to_byte();
+        parse_complete_sequence_header(&w.into_bytes()).expect("the whole header parses")
+    }
+
+    // 8-bit 4:2:0 at limited range with no colour description
+    fn expected_header(profile: u8, tools: Av1SequenceTools) -> Av1SeqHeader {
+        Av1SeqHeader {
+            width: GEOMETRY.0,
+            height: GEOMETRY.1,
+            profile,
+            level: 0,
+            tier: 0,
+            high_bitdepth: false,
+            twelve_bit: false,
+            monochrome: false,
+            subsampling_x: true,
+            subsampling_y: true,
+            chroma_sample_position: 0,
+            colorimetry: g2g_core::Colorimetry::from_cicp(
+                CICP_UNSPECIFIED as u8,
+                CICP_UNSPECIFIED as u8,
+                CICP_UNSPECIFIED as u8,
+                false,
+            ),
+            detail: Some(Av1SeqHeaderDetail {
+                still_picture: false,
+                reduced_still_picture_header: false,
+                timing_info_present_flag: false,
+                decoder_model_info_present_flag: false,
+                initial_display_delay_present_flag: false,
+                operating_points_cnt_minus_1: 0,
+                frame_width_bits_minus_1: (bits_for(GEOMETRY.0 - 1) - 1) as u8,
+                frame_height_bits_minus_1: (bits_for(GEOMETRY.1 - 1) - 1) as u8,
+                tools,
+                color_description_present_flag: false,
+                color_primaries: CICP_UNSPECIFIED as u8,
+                transfer_characteristics: CICP_UNSPECIFIED as u8,
+                matrix_coefficients: CICP_UNSPECIFIED as u8,
+                color_range: false,
+                separate_uv_delta_q: false,
+                film_grain_params_present: false,
+            }),
+        }
+    }
+
+    fn detail(header: &mut Av1SeqHeader) -> &mut Av1SeqHeaderDetail {
+        header
+            .detail
+            .as_mut()
+            .expect("expected headers carry the detail")
+    }
+
+    // the color_config and trailer flags of expected_header
+    fn write_plain_color_config(w: &mut BitWriter) {
+        w.write_bit(0); // high_bitdepth
+        w.write_bit(0); // mono_chrome
+        w.write_bit(0); // color_description_present_flag
+        w.write_bit(0); // color_range
+        w.write_bits(0, 2); // chroma_sample_position
+        w.write_bit(0); // separate_uv_delta_q
+        w.write_bit(0); // film_grain_params_present
+    }
+
+    #[test]
+    fn sequence_header_reads_every_coded_tool_flag() {
+        let tools = Av1SequenceTools {
+            frame_id_numbers_present_flag: true,
+            delta_frame_id_length_minus_2: 5,
+            additional_frame_id_length_minus_1: 3,
+            use_128x128_superblock: true,
+            enable_filter_intra: true,
+            enable_intra_edge_filter: true,
+            enable_interintra_compound: true,
+            enable_masked_compound: true,
+            enable_warped_motion: true,
+            enable_dual_filter: true,
+            enable_order_hint: true,
+            enable_jnt_comp: true,
+            enable_ref_frame_mvs: true,
+            seq_force_screen_content_tools: 1,
+            seq_force_integer_mv: 0,
+            order_hint_bits: 7,
+            enable_superres: true,
+            enable_cdef: true,
+            enable_restoration: true,
+        };
+        let mut w = header_through_tools(0, &tools);
+        w.write_bit(0); // high_bitdepth
+        w.write_bit(0); // mono_chrome
+        w.write_bit(1); // color_description_present_flag
+        w.write_bits(1, 8); // color_primaries BT.709
+        w.write_bits(1, 8); // transfer_characteristics BT.709
+        w.write_bits(1, 8); // matrix_coefficients BT.709
+        w.write_bit(0); // color_range
+        w.write_bits(1, 2); // chroma_sample_position vertical
+        w.write_bit(1); // separate_uv_delta_q
+        w.write_bit(1); // film_grain_params_present
+        let mut expected = expected_header(0, tools);
+        expected.chroma_sample_position = 1;
+        expected.colorimetry = g2g_core::Colorimetry::BT709;
+        let expected_detail = detail(&mut expected);
+        expected_detail.color_description_present_flag = true;
+        expected_detail.color_primaries = 1;
+        expected_detail.transfer_characteristics = 1;
+        expected_detail.matrix_coefficients = 1;
+        expected_detail.separate_uv_delta_q = true;
+        expected_detail.film_grain_params_present = true;
+        assert_eq!(parse_written(w), expected);
+    }
+
+    #[test]
+    fn sequence_header_keeps_per_frame_tool_choices() {
+        for tools in [
+            select_tools(),
+            // no screen content tools, so integer motion vectors are not coded
+            Av1SequenceTools {
+                seq_force_screen_content_tools: 0,
+                ..select_tools()
+            },
+        ] {
+            let mut w = header_through_tools(0, &tools);
+            write_plain_color_config(&mut w);
+            assert_eq!(parse_written(w), expected_header(0, tools));
+        }
+    }
+
+    #[test]
+    fn reduced_still_picture_header_codes_only_the_still_tools() {
+        let mut w = BitWriter::default();
+        w.write_bits(0, 3); // seq_profile
+        w.write_bit(1); // still_picture
+        w.write_bit(1); // reduced_still_picture_header
+        w.write_bits(0, 5); // seq_level_idx[0]
+        write_geometry(&mut w, GEOMETRY);
+        w.write_bit(1); // use_128x128_superblock
+        w.write_bit(1); // enable_filter_intra
+        w.write_bit(1); // enable_intra_edge_filter
+        w.write_bit(1); // enable_superres
+        w.write_bit(1); // enable_cdef
+        w.write_bit(1); // enable_restoration
+        write_plain_color_config(&mut w);
+        let tools = Av1SequenceTools {
+            use_128x128_superblock: true,
+            enable_filter_intra: true,
+            enable_intra_edge_filter: true,
+            enable_superres: true,
+            enable_cdef: true,
+            enable_restoration: true,
+            ..select_tools()
+        };
+        let mut expected = expected_header(0, tools);
+        let expected_detail = detail(&mut expected);
+        expected_detail.still_picture = true;
+        expected_detail.reduced_still_picture_header = true;
+        assert_eq!(parse_written(w), expected);
+    }
+
+    #[test]
+    fn twelve_bit_professional_profile_codes_its_subsampling() {
+        // 4:4:4 codes subsampling_x clear and no subsampling_y or sample position
+        let mut w = header_through_tools(2, &select_tools());
+        w.write_bit(1); // high_bitdepth
+        w.write_bit(1); // twelve_bit
+        w.write_bit(0); // mono_chrome
+        w.write_bit(0); // color_description_present_flag
+        w.write_bit(1); // color_range
+        w.write_bit(0); // subsampling_x
+        w.write_bit(1); // separate_uv_delta_q
+        w.write_bit(0); // film_grain_params_present
+        let mut expected = expected_header(2, select_tools());
+        expected.high_bitdepth = true;
+        expected.twelve_bit = true;
+        expected.subsampling_x = false;
+        expected.subsampling_y = false;
+        expected.colorimetry.range = g2g_core::ColorRange::Full;
+        detail(&mut expected).color_range = true;
+        detail(&mut expected).separate_uv_delta_q = true;
+        assert_eq!(parse_written(w), expected);
+
+        let mut w = header_through_tools(2, &select_tools());
+        w.write_bit(1); // high_bitdepth
+        w.write_bit(1); // twelve_bit
+        w.write_bit(0); // mono_chrome
+        w.write_bit(0); // color_description_present_flag
+        w.write_bit(0); // color_range
+        w.write_bit(1); // subsampling_x
+        w.write_bit(1); // subsampling_y
+        w.write_bits(2, 2); // chroma_sample_position colocated
+        write_cleared_trailer_flags(&mut w);
+        let mut expected = expected_header(2, select_tools());
+        expected.high_bitdepth = true;
+        expected.twelve_bit = true;
+        expected.chroma_sample_position = 2;
+        assert_eq!(parse_written(w), expected);
+    }
+
+    fn write_cleared_trailer_flags(w: &mut BitWriter) {
+        w.write_bit(0);
+        w.write_bit(0);
+    }
+
+    #[test]
+    fn ten_bit_professional_profile_is_four_two_two() {
+        let mut w = header_through_tools(2, &select_tools());
+        w.write_bit(1); // high_bitdepth, no twelve_bit at 10 bits
+        w.write_bit(0); // mono_chrome
+        w.write_bit(0); // color_description_present_flag
+        w.write_bit(0); // color_range
+        write_cleared_trailer_flags(&mut w);
+        let mut expected = expected_header(2, select_tools());
+        expected.high_bitdepth = true;
+        expected.subsampling_y = false;
+        assert_eq!(parse_written(w), expected);
+    }
+
+    #[test]
+    fn high_profile_is_four_four_four_and_never_monochrome() {
+        let mut w = header_through_tools(1, &select_tools());
+        w.write_bit(0); // high_bitdepth, then no mono_chrome bit
+        w.write_bit(0); // color_description_present_flag
+        w.write_bit(0); // color_range
+        write_cleared_trailer_flags(&mut w);
+        let mut expected = expected_header(1, select_tools());
+        expected.subsampling_x = false;
+        expected.subsampling_y = false;
+        assert_eq!(parse_written(w), expected);
+    }
+
+    #[test]
+    fn monochrome_codes_a_range_and_no_chroma_fields() {
+        let mut w = header_through_tools(0, &select_tools());
+        w.write_bit(0); // high_bitdepth
+        w.write_bit(1); // mono_chrome
+        w.write_bit(0); // color_description_present_flag
+        w.write_bit(1); // color_range
+        w.write_bit(1); // film_grain_params_present, no separate_uv_delta_q
+        let mut expected = expected_header(0, select_tools());
+        expected.monochrome = true;
+        expected.colorimetry.range = g2g_core::ColorRange::Full;
+        detail(&mut expected).color_range = true;
+        detail(&mut expected).film_grain_params_present = true;
+        assert_eq!(parse_written(w), expected);
+    }
+
+    #[test]
+    fn identity_matrix_needs_bt709_primaries_and_srgb_transfer() {
+        const BT709: u32 = 1;
+        const SRGB: u32 = 13;
+        const IDENTITY: u32 = 0;
+        // only the sRGB case is full-range RGB with no range bit coded
+        for (primaries, transfer, rgb) in [
+            (BT709, SRGB, true),
+            (BT709, BT709, false),
+            (BT709 + 1, SRGB, false),
+        ] {
+            let mut w = header_through_tools(1, &select_tools());
+            w.write_bit(0); // high_bitdepth
+            w.write_bit(1); // color_description_present_flag
+            w.write_bits(primaries, 8);
+            w.write_bits(transfer, 8);
+            w.write_bits(IDENTITY, 8);
+            if !rgb {
+                w.write_bit(0); // color_range
+            }
+            w.write_bit(1); // separate_uv_delta_q
+            w.write_bit(0); // film_grain_params_present
+            let header = parse_written(w);
+            let header_detail = header.detail.expect("whole header");
+            assert_eq!(
+                header_detail.color_range, rgb,
+                "primaries {primaries} transfer {transfer}"
+            );
+            assert!(
+                header_detail.separate_uv_delta_q,
+                "primaries {primaries} transfer {transfer}"
+            );
+            assert_eq!(
+                header.colorimetry,
+                g2g_core::Colorimetry::from_cicp(
+                    primaries as u8,
+                    transfer as u8,
+                    IDENTITY as u8,
+                    rgb
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn operating_points_take_level_and_tier_from_the_first() {
+        let mut w = BitWriter::default();
+        w.write_bits(0, 3); // seq_profile
+        w.write_bit(0); // still_picture
+        w.write_bit(0); // reduced_still_picture_header
+        w.write_bit(1); // timing_info_present_flag
+        w.write_bits(1001, 32); // num_units_in_display_tick
+        w.write_bits(30_000, 32); // time_scale
+        w.write_bit(1); // equal_picture_interval
+        w.write_bit(1); // num_ticks_per_picture_minus_1 = uvlc 0
+        w.write_bit(1); // decoder_model_info_present_flag
+        let buffer_delay_length_minus_1 = 9;
+        w.write_bits(buffer_delay_length_minus_1, 5);
+        w.write_bits(1001, 32); // num_units_in_decoding_tick
+        w.write_bits(0, 5); // buffer_removal_time_length_minus_1
+        w.write_bits(0, 5); // frame_presentation_time_length_minus_1
+        w.write_bit(1); // initial_display_delay_present_flag
+        w.write_bits(1, 5); // operating_points_cnt_minus_1
+                            // the first point has a level with a tier bit, the second the highest without
+        let (first_level, first_tier, second_level) = (9, 1, 7);
+        w.write_bits(0, 12); // operating_point_idc[0]
+        w.write_bits(first_level, 5);
+        w.write_bit(first_tier);
+        w.write_bit(1); // decoder_model_present_for_this_op[0]
+        w.write_bits(0, buffer_delay_length_minus_1 + 1); // decoder_buffer_delay
+        w.write_bits(0, buffer_delay_length_minus_1 + 1); // encoder_buffer_delay
+        w.write_bit(1); // low_delay_mode_flag
+        w.write_bit(1); // initial_display_delay_present_for_this_op[0]
+        w.write_bits(3, 4); // initial_display_delay_minus_1[0]
+        w.write_bits(0, 12); // operating_point_idc[1]
+        w.write_bits(second_level, 5);
+        w.write_bit(0); // decoder_model_present_for_this_op[1]
+        w.write_bit(0); // initial_display_delay_present_for_this_op[1]
+        write_geometry(&mut w, GEOMETRY);
+        write_tools(&mut w, &select_tools());
+        write_plain_color_config(&mut w);
+        let mut expected = expected_header(0, select_tools());
+        expected.level = first_level as u8;
+        expected.tier = first_tier as u8;
+        let expected_detail = detail(&mut expected);
+        expected_detail.timing_info_present_flag = true;
+        expected_detail.decoder_model_info_present_flag = true;
+        expected_detail.initial_display_delay_present_flag = true;
+        expected_detail.operating_points_cnt_minus_1 = 1;
+        assert_eq!(parse_written(w), expected);
+    }
+
+    #[test]
+    fn uvlc_reads_leading_zeros_then_that_many_value_bits() {
+        // (leading zeros, value bits, value bit count, decoded)
+        let codes = [
+            (0, 0, 0, 0),
+            (1, 0, 1, 1),
+            (1, 1, 1, 2),
+            (3, 0b101, 3, 12),
+            (31, u32::MAX >> 1, 31, u32::MAX - 1),
+        ];
+        for (leading_zeros, value, value_bits, decoded) in codes {
+            let mut w = BitWriter::default();
+            w.write_bits(0, leading_zeros);
+            w.write_bit(1);
+            w.write_bits(value, value_bits);
+            w.write_bit(1); // a marker the reader should land on
+            w.align_to_byte();
+            let bytes = w.into_bytes();
+            let mut br = BitReader::new(&bytes);
+            assert_eq!(
+                read_uvlc(&mut br),
+                Some(decoded),
+                "{leading_zeros} leading zeros"
+            );
+            assert_eq!(br.read_bit(), Some(1), "{leading_zeros} leading zeros");
+        }
+    }
+
+    fn obu_header_with_extension(obu_type: u8, has_size: bool) -> u8 {
+        (obu_type << 3) | 0x04 | (u8::from(has_size) << 1)
+    }
+
+    // temporal_id 1, spatial_id 0
+    const OBU_EXTENSION: u8 = 0x20;
+
+    #[test]
+    fn obu_walk_skips_the_extension_header() {
+        let payload = seq_header_payload(GEOMETRY.0, GEOMETRY.1, 0);
+        let mut unit = vec![
+            obu_header_with_extension(OBU_SEQUENCE_HEADER, true),
+            OBU_EXTENSION,
+        ];
+        unit.extend(leb128(payload.len() as u64));
+        unit.extend(&payload);
+        // a last OBU without a size field runs to the end of the unit
+        unit.extend([
+            obu_header_with_extension(OBU_FRAME, false),
+            OBU_EXTENSION,
+            0xAA,
+        ]);
+        let walked: Vec<(u8, &[u8])> = obus(&unit)
+            .iter()
+            .map(|obu| (obu.obu_type, obu.payload))
+            .collect();
+        assert_eq!(
+            walked,
+            vec![
+                (OBU_SEQUENCE_HEADER, &payload[..]),
+                (OBU_FRAME, &[0xAA][..])
+            ]
+        );
+        let info = extract_seq_header(&unit).expect("sequence header parses");
+        assert_eq!((info.width, info.height), GEOMETRY);
+    }
+
+    #[test]
+    fn obu_walk_rejects_a_unit_cut_inside_the_extension_header() {
+        assert!(obus(&[obu_header_with_extension(OBU_FRAME, true)]).is_empty());
+        let empty_delimiter = [
+            obu_header_with_extension(OBU_TEMPORAL_DELIMITER, false),
+            OBU_EXTENSION,
+        ];
+        assert_eq!(
+            obus(&empty_delimiter).len(),
+            1,
+            "an empty OBU may end the unit"
+        );
+    }
+
+    #[tokio::test]
+    async fn reframing_walks_obus_with_extension_headers() {
+        let mut first = vec![
+            obu_header_with_extension(OBU_TEMPORAL_DELIMITER, true),
+            OBU_EXTENSION,
+            0,
+        ];
+        first.extend(obu(OBU_FRAME, &[1; 7]));
+        let second = delimited_unit(2, false);
+        let stream = [first.clone(), second.clone()].concat();
+        let mut parse = Av1Parse::reframing();
+        parse.configure_pipeline(&av1_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        push_each(&mut parse, &[stream], &mut sink).await;
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        assert_eq!(data_payloads(&sink), vec![first, second]);
+    }
+
+    async fn reframe_result(stream: Vec<u8>) -> Result<(), G2gError> {
+        let mut parse = Av1Parse::reframing();
+        parse.configure_pipeline(&av1_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        parse
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, stream)),
+                &mut sink,
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn reframing_refuses_an_obu_without_a_size_field() {
+        let mut stream = obu(OBU_TEMPORAL_DELIMITER, &[]);
+        stream.extend([OBU_FRAME << 3, 0xAA]);
+        assert_eq!(reframe_result(stream).await, Err(G2gError::CapsMismatch));
+    }
+
+    #[tokio::test]
+    async fn reframing_refuses_a_size_longer_than_leb128_allows() {
+        let mut stream = obu(OBU_TEMPORAL_DELIMITER, &[]);
+        stream.push((OBU_FRAME << 3) | 0x02);
+        // every byte says another follows
+        stream.extend([0x80; LEB128_MAX_BYTES]);
+        assert_eq!(reframe_result(stream).await, Err(G2gError::CapsMismatch));
+    }
+
+    #[tokio::test]
+    async fn reframing_holds_a_unit_up_to_the_cap_and_refuses_one_past_it() {
+        for (held_bytes, expected) in [
+            (MAX_TEMPORAL_UNIT_BYTES, Ok(())),
+            (MAX_TEMPORAL_UNIT_BYTES + 1, Err(G2gError::CapsMismatch)),
+        ] {
+            let mut stream = obu(OBU_TEMPORAL_DELIMITER, &[]);
+            stream.push((OBU_FRAME << 3) | 0x02);
+            stream.extend(leb128(MAX_TEMPORAL_UNIT_BYTES as u64));
+            // the frame OBU is still arriving
+            stream.resize(held_bytes, 0);
+            assert_eq!(
+                reframe_result(stream).await,
+                expected,
+                "{held_bytes} bytes held"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reframing_waits_for_two_more_delimited_buffers_before_trusting_alignment() {
+        let units = delimited_units(3);
+        let mut parse = Av1Parse::reframing();
+        parse.configure_pipeline(&av1_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        push_each(&mut parse, &units[..2], &mut sink).await;
+        assert_eq!(
+            data_payloads(&sink),
+            units[..1],
+            "the second unit may still grow"
+        );
+        push_each(&mut parse, &units[2..], &mut sink).await;
+        assert_eq!(data_payloads(&sink), units);
+    }
+
+    fn complete_sequence_header_payload(profile: u8) -> Vec<u8> {
+        let mut w = header_through_tools(profile, &select_tools());
+        write_plain_color_config(&mut w);
+        w.align_to_byte();
+        w.into_bytes()
+    }
+
+    fn raw_obu_file_start() -> Vec<u8> {
+        let mut start = obu(OBU_TEMPORAL_DELIMITER, &[]);
+        start.extend(obu(
+            OBU_SEQUENCE_HEADER,
+            &complete_sequence_header_payload(0),
+        ));
+        start
+    }
+
+    #[test]
+    fn a_raw_obu_file_opens_on_an_empty_delimiter_then_a_sequence_header() {
+        assert!(opens_obu_stream(&raw_obu_file_start()));
+
+        let mut delimiter_reserved_bit = raw_obu_file_start();
+        delimiter_reserved_bit[0] |= 1;
+        assert!(!opens_obu_stream(&delimiter_reserved_bit));
+
+        let mut header_reserved_bit = raw_obu_file_start();
+        let header_start = obu(OBU_TEMPORAL_DELIMITER, &[]).len();
+        header_reserved_bit[header_start] |= 1;
+        assert!(!opens_obu_stream(&header_reserved_bit));
+
+        let mut delimiter_with_payload = obu(OBU_TEMPORAL_DELIMITER, &[0]);
+        delimiter_with_payload.extend(obu(
+            OBU_SEQUENCE_HEADER,
+            &complete_sequence_header_payload(0),
+        ));
+        assert!(!opens_obu_stream(&delimiter_with_payload));
+
+        let mut frame_first = obu(OBU_TEMPORAL_DELIMITER, &[]);
+        frame_first.extend(obu(OBU_FRAME, &[0; 7]));
+        assert!(!opens_obu_stream(&frame_first));
+
+        let mut reserved_profile = obu(OBU_TEMPORAL_DELIMITER, &[]);
+        reserved_profile.extend(obu(
+            OBU_SEQUENCE_HEADER,
+            &complete_sequence_header_payload(MAX_SEQ_PROFILE + 1),
+        ));
+        assert!(!opens_obu_stream(&reserved_profile));
+    }
+
+    #[test]
+    fn sequence_header_obu_is_returned_whole_with_its_parse() {
+        let mut unit = obu(OBU_TEMPORAL_DELIMITER, &[]);
+        let sequence_header = obu(OBU_SEQUENCE_HEADER, &complete_sequence_header_payload(0));
+        unit.extend(&sequence_header);
+        unit.extend(obu(OBU_FRAME, &[0; 7]));
+        let (header, bytes) = seq_header_obu(&unit).expect("unit carries a sequence header");
+        assert_eq!(header, expected_header(0, select_tools()));
+        assert_eq!(bytes, &sequence_header[..]);
+    }
+
+    // show_existing_frame then the two frame_type bits open a frame header
+    fn frame_header_byte(show_existing_frame: bool, frame_type: u8) -> u8 {
+        (u8::from(show_existing_frame) << 7) | (frame_type << 5)
+    }
+
+    const KEY_FRAME: u8 = 0;
+    const INTER_FRAME: u8 = 1;
+    const INTRA_ONLY_FRAME: u8 = 2;
+
+    #[test]
+    fn keyframe_is_a_shown_key_frame_or_a_unit_with_a_sequence_header() {
+        let unit_with = |obu_type: u8, first_byte: u8| {
+            let mut unit = obu(OBU_TEMPORAL_DELIMITER, &[]);
+            unit.extend(obu(obu_type, &[first_byte, 0, 0]));
+            unit
+        };
+        assert!(av1_keyframe(&temporal_unit(GEOMETRY.0, GEOMETRY.1, 0)));
+        assert!(av1_keyframe(&unit_with(
+            OBU_FRAME,
+            frame_header_byte(false, KEY_FRAME)
+        )));
+        assert!(av1_keyframe(&unit_with(
+            OBU_FRAME_HEADER,
+            frame_header_byte(false, KEY_FRAME)
+        )));
+        assert!(!av1_keyframe(&unit_with(
+            OBU_FRAME,
+            frame_header_byte(true, KEY_FRAME)
+        )));
+        assert!(!av1_keyframe(&unit_with(
+            OBU_FRAME,
+            frame_header_byte(false, INTER_FRAME)
+        )));
+        assert!(!av1_keyframe(&unit_with(
+            OBU_FRAME,
+            frame_header_byte(false, INTRA_ONLY_FRAME)
+        )));
+        // padding (15) carries no frame
+        assert!(!av1_keyframe(&unit_with(
+            15,
+            frame_header_byte(false, KEY_FRAME)
+        )));
+        assert!(!av1_keyframe(&[0x80]), "malformed framing");
+        let mut empty_frame = obu(OBU_TEMPORAL_DELIMITER, &[]);
+        empty_frame.extend(obu(OBU_FRAME, &[]));
+        assert!(!av1_keyframe(&empty_frame));
     }
 }
