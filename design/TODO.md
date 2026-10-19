@@ -36,10 +36,53 @@ Highest leverage first:
 
 ## Alloc-optional (heap-free) MCU core
 
-- **On-device `Hardware` rows (ARM).** Finalize the RCC, clock, RMII pin, and
-  RTP destination settings in `examples/g2g-stm32h743`, then run the flagship
-  audio graph and `HwJpegDec` on a NUCLEO-H743ZI2. Add the same conformance and
-  timing evidence for an NXP i.MX RT board.
+- **On-device `Hardware` rows (ARM) on a NUCLEO-H753ZI.** The H753 has the
+  H743's core, memory map and Ethernet MAC. Switch `examples/g2g-stm32h743` to
+  the `stm32h753zi` embassy feature and the `STM32H753ZITx` probe-rs chip, then
+  finalize the RCC, clock, RMII pin and RTP destination settings. Put the
+  Ethernet DMA buffers in non-cached D2 SRAM, since the H7 Ethernet DMA cannot
+  reach DTCM.
+  - **Fixed input.** Run the flagship audio graph on the reference tone, with
+    ffmpeg receiving the RTP on the host, and require the payload checksum to
+    equal `AUDIO_EXPECTED_CHECKSUM`: the first `Hardware` conformance row. Then
+    run `HwJpegDec`.
+  - **Measure against the published budgets.** ROM and static RAM from the
+    flashed ELF, peak stack by stack painting (budget 10572 B ROM, 0 B RAM,
+    6504 B stack), per-frame worst case and jitter from the DWT cycle counter
+    (QEMU figure 764 us per 10 ms frame), power-on to first packet, RTP
+    sequence, timestamp and packet-spacing jitter on the receiver, and a 24 h
+    soak with zero ring overruns.
+  - **Live microphone.** An I2S MEMS microphone on SAI with DMA into
+    `SpscCaptureSrc`: wire the DMA-completion ISR into `StaticLendRing` and
+    connect `EmbassyClock` to a HAL tick. Capture-to-send latency from
+    cycle-counter stamps, and a 24 h soak with zero overruns.
+  - **Nightly run.** A self-hosted runner with the board attached flashes
+    master nightly and writes the `Hardware` row. It takes scheduled and
+    master-push jobs only, never pull requests from forks. Publish the numbers
+    in the conformance matrix, README and docs site.
+  - **Comparison.** The same graph with g2g on Linux and with GStreamer on the
+    smallest Linux board: ROM, RAM and boot time beside the MCU numbers.
+  - Add the same conformance and timing evidence for an NXP i.MX RT board.
+- **TinyML inference on MCU.** A heap-free inference `StaticTransform` behind a
+  trait seam like `JpegDecoder`, `Caps::Tensor` in and out, its tensor arena
+  in static memory. Backends: MicroFlow (pure Rust, `no_std`, `.tflite`), and
+  ExecuTorch (CMSIS-NN, Ethos-U) and LiteRT for Microcontrollers through a C
+  bridge like `CH264Encoder`.
+  - **Preprocessing elements.** Heap-free log-mel features for audio, resize
+    and int8 quantization for vision.
+  - **Host and device check.** Run one graph on the host through g2g-ml's ORT
+    and on the MCU: preprocessing bit-exact, model output within the
+    quantization tolerance, persisted as conformance evidence.
+  - **Keyword spotting on the H753.** Live microphone -> 16 kHz -> log-mel ->
+    int8 keyword model -> smoothed detection out over UART or RTP.
+  - **Camera detector on an STM32N6 board.** The Rust-native NPU target:
+    embassy-stm32 and probe-rs support the N657, and ST's Neural-ART runtime
+    goes behind the C bridge.
+  - **Camera detector on Ethos-U.** An Alif Ensemble E7 AppKit (two Ethos-U55)
+    through ExecuTorch, with g2g as a static library in Alif's C or Zephyr
+    project, since Alif has no Rust HAL or probe-rs target.
+  - Add `thumbv8m.main-none-eabihf` (Cortex-M55 / M33) to the heap-free,
+    panic-free and footprint checks.
 - **ESP32-P4X board bring-up (RISC-V on-device).** Put a pipeline on the
   P4X-EYE board in two tiers. Verify these
   unknowns before committing to a toolchain: whether `esp-hal` has any
@@ -331,11 +374,6 @@ unless it says otherwise.
   `jsongstenc` / `jsongstparse`, `gstregex`, `zlibcompress` / `zlibdecompress`,
   `colordetect`, `videocompare`, `uriplaylistbin`, `ndisrc` / `ndisink`,
   `originalbuffersave` / `originalbufferrestore`.
-
-## Embedded
-
-- Connect `EmbassyClock` to a HAL tick on real hardware.
-- Wire a vendor HAL DMA-completion ISR into `StaticLendRing`.
 
 ## Browser / Wasm
 
