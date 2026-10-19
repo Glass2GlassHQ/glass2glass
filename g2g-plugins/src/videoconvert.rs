@@ -38,7 +38,7 @@ use g2g_core::{
 
 /// Formats this element can both consume and produce. The convert `target`
 /// is always one of these.
-pub(crate) const FORMATS: [RawVideoFormat; 18] = [
+pub(crate) const FORMATS: [RawVideoFormat; 19] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Rgb8,
@@ -57,6 +57,7 @@ pub(crate) const FORMATS: [RawVideoFormat; 18] = [
     RawVideoFormat::A420,
     RawVideoFormat::Uyvy,
     RawVideoFormat::A444p12,
+    RawVideoFormat::V210,
 ];
 
 /// # Example
@@ -666,6 +667,20 @@ fn convert_strided(
             matrix,
             hub,
         )),
+        (V210, _) => convert_strided(
+            &v210_to_i422p10(src, w, h),
+            I422p10,
+            to,
+            (w, h),
+            row_bytes(I422p10, w),
+            matrix,
+            hub,
+        ),
+        (_, V210) => i422p10_to_v210(
+            &convert_strided(src, from, I422p10, (w, h), src_stride, matrix, hub),
+            w,
+            h,
+        ),
         (Nv12, I420) => nv12_to_i420(src, w, h),
         (I420, Nv12) => i420_to_nv12(src, w, h),
         (Nv12, Rgba8) => yuv420_to_rgb(src, w, h, true, 0, 2, matrix),
@@ -1154,6 +1169,76 @@ fn swap_byte_pairs(src: &[u8]) -> Box<[u8]> {
     let mut dst = Vec::from(src);
     for pair in dst.as_chunks_mut::<2>().0 {
         pair.swap(0, 1);
+    }
+    dst.into_boxed_slice()
+}
+
+// a v210 row is the sample stream U0 Y0 V0 Y1 U1 Y2 V1 Y3 ..., three to each 32-bit word
+const V210_SAMPLES_PER_WORD: usize = 3;
+const V210_WORD_BYTES: usize = 4;
+const V210_SAMPLE_BITS: usize = 10;
+const V210_SAMPLE_MAX: u16 = (1 << V210_SAMPLE_BITS) - 1;
+
+// where sample `column` of I422 plane `plane` (Y, U or V) sits in a v210 row
+fn v210_position(plane: usize, column: usize) -> usize {
+    match plane {
+        0 => 2 * column + 1,
+        1 => 4 * column,
+        _ => 4 * column + 2,
+    }
+}
+
+fn v210_word_at(position: usize) -> (usize, usize) {
+    (
+        position / V210_SAMPLES_PER_WORD * V210_WORD_BYTES,
+        position % V210_SAMPLES_PER_WORD * V210_SAMPLE_BITS,
+    )
+}
+
+fn read_v210_sample(row: &[u8], position: usize) -> u16 {
+    let (at, shift) = v210_word_at(position);
+    let word = u32::from_le_bytes([row[at], row[at + 1], row[at + 2], row[at + 3]]);
+    (word >> shift) as u16 & V210_SAMPLE_MAX
+}
+
+// `row` starts zeroed, so samples OR into their word
+fn write_v210_sample(row: &mut [u8], position: usize, value: u16) {
+    let (at, shift) = v210_word_at(position);
+    let mut word = u32::from_le_bytes([row[at], row[at + 1], row[at + 2], row[at + 3]]);
+    word |= u32::from(value.min(V210_SAMPLE_MAX)) << shift;
+    row[at..at + V210_WORD_BYTES].copy_from_slice(&word.to_le_bytes());
+}
+
+fn v210_to_i422p10(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
+    let format = RawVideoFormat::I422p10;
+    let planes = planar_planes(format, w, h);
+    let mut dst = vec![0u8; frame_byte_size(format, w as u32, h as u32)];
+    let rows = src.chunks_exact(row_bytes(RawVideoFormat::V210, w)).take(h);
+    for (y, row) in rows.enumerate() {
+        for (plane, &(offset, samples, _)) in planes.iter().enumerate() {
+            for column in 0..samples {
+                let at = offset + (y * samples + column) * 2;
+                let value = read_v210_sample(row, v210_position(plane, column));
+                dst[at..at + 2].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    dst.into_boxed_slice()
+}
+
+// the samples past an odd width's last pixel and the row padding stay zero, as GStreamer writes them
+fn i422p10_to_v210(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
+    let stride = row_bytes(RawVideoFormat::V210, w);
+    let planes = planar_planes(RawVideoFormat::I422p10, w, h);
+    let mut dst = vec![0u8; stride * h];
+    for (y, row) in dst.chunks_exact_mut(stride).enumerate() {
+        for (plane, &(offset, samples, _)) in planes.iter().enumerate() {
+            for column in 0..samples {
+                let at = offset + (y * samples + column) * 2;
+                let value = u16::from_le_bytes([src[at], src[at + 1]]);
+                write_v210_sample(row, v210_position(plane, column), value);
+            }
+        }
     }
     dst.into_boxed_slice()
 }

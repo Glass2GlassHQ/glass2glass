@@ -423,8 +423,9 @@ U Y V Y, three samples to each little-endian 32-bit word, padded to whole 128-by
 blocks of 48 pixels, and an r210 pixel is one big-endian 32-bit word with red in
 bits 29 to 20, green in 19 to 10 and blue in 9 to 0, rows unpadded. Both follow
 GStreamer: ffmpeg's r210 codec pads each row to 64 pixels instead, and its v210
-encoder clips samples to 4..1019 and refuses an odd width. The CPU paths take odd
-sizes on that layout.
+encoder clips samples to 4..1019 and refuses an odd width. `videoconvert` unpacks
+v210 to `I422p10` and packs it from there, byte for byte as ffmpeg's v210 codec
+does on the samples both accept. The CPU paths take odd sizes on that layout.
 `videoconvert` and `colorspace` average an edge chroma sample over the pixels
 inside the picture and give the last luma column or row the last chroma sample on
 the way back. `videoscale` and `videoconvertscale` map chroma positions through
