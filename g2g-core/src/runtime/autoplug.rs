@@ -1785,6 +1785,10 @@ mod factory {
         /// (M746); `None` when none applies (an unreadable file, or no hook
         /// registered for the container).
         pub fn container_streams(&self, location: &str, caps: &Caps) -> Option<ContainerStreams> {
+            // a network source's location is a URI, which the hooks would open as a file path
+            if Uri::parse(location).is_some() {
+                return None;
+            }
             self.primary_stream
                 .iter()
                 .find_map(|hook| hook(location, caps))
