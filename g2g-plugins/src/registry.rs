@@ -2425,6 +2425,7 @@ fn register_aliases(reg: &mut Registry) {
     // `avdec_h264` falls back to VideoToolbox `vtdec` on macOS builds without
     // the ffmpeg feature.
     reg.register_alias("avdec_h264", &["ffmpegdec", "vtdec"]);
+    reg.register_alias("avdec_h265", &["ffmpegdec"]);
     reg.register_alias("vaapih264dec", &["ffmpegvaapidec", "vaapidec"]);
     // AV1 decode: gst's libav name and its aom plugin name -> the libdav1d
     // decoder, falling back to the pure-Rust re_rav1d decoder when only the

@@ -124,6 +124,23 @@ async fn avdec_h264_alias_resolves_to_ffmpegdec() {
     }
 }
 
+#[cfg(feature = "ffmpeg")]
+#[tokio::test]
+async fn avdec_h265_alias_decodes_hevc() {
+    let reg = default_registry();
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/h265_640x480.h265"
+    );
+    let line = format!("filesrc location={fixture} ! h265parse ! avdec_h265 ! fakesink");
+    let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("{line:?} parse: {e:?}"));
+    let consumed = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("runs")
+        .frames_consumed;
+    assert!(consumed > 0, "{line} decodes no frame");
+}
+
 /// The native WebRTC WHIP sink is launch-parsable under `webrtcsink`, with the
 /// `location` property targeting the endpoint. We only assert the name resolves
 /// (the live publish path needs a WHIP server + network); a parse error naming

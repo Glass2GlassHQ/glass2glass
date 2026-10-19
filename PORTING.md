@@ -195,7 +195,7 @@ of any line with `g2g-launch -v`, or a Graphviz graph with `--dot`.
 Most names match GStreamer. Differences are handled two ways:
 
 - **Aliases** resolve automatically in the registry (e.g. `autovideosink`,
-  `autovideosrc`/`autoaudiosrc`, `avdec_h264` → `ffmpegdec`, `vah264dec` →
+  `autovideosrc`/`autoaudiosrc`, `avdec_h264`/`avdec_h265` → `ffmpegdec`, `vah264dec` →
   `vaapidec`, `vp8enc`/`vp9enc` → `vpxenc`, `webmmux` → `matroskamux`,
   `adder`/`liveadder` → `audiomixer`, `videomixer` → `compositor`, `rtmp2sink` →
   `rtmpsink`, and the plain decoder names `vp8dec`/`vp9dec`/`mpeg2dec` →
