@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1640: the `decklink` feature builds a shim over the vendored SDK 16.0 headers that loads `libDeckLinkAPI.so` at runtime.
 - M1632: `videoconvert` converts to and from r210 through the new `GBR_10LE` raw format, matching ffmpeg's r210 codec byte for byte.
 - M1633: `qtdemux`, `avidemux` and `matroskademux` emit `v210` video as v210 raw video.
 - M1631: `videoconvert` converts to and from v210, matching ffmpeg's v210 codec byte for byte.

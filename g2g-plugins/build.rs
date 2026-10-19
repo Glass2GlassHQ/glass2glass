@@ -26,6 +26,8 @@ fn main() {
     #[cfg(feature = "vpx")]
     generate_vpx_bindings();
 
+    build_decklink_shim();
+
     if std::env::var_os("CARGO_FEATURE_GSTREAMER").is_none() {
         return;
     }
@@ -101,4 +103,24 @@ fn generate_vpx_bindings() {
     bindings
         .write_to_file(out_dir.join("vpx_ffi.rs"))
         .expect("write vpx_ffi.rs to OUT_DIR");
+}
+
+// Only the dispatch file is compiled from the SDK: it dlopens libDeckLinkAPI.so at
+// runtime, so building needs a C++ compiler and no driver.
+fn build_decklink_shim() {
+    let decklink = std::env::var_os("CARGO_FEATURE_DECKLINK").is_some();
+    let linux = std::env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "linux");
+    if !(decklink && linux) {
+        return;
+    }
+    let sdk = "vendor/decklink/linux";
+    println!("cargo:rerun-if-changed=csrc/decklink_shim.cpp");
+    println!("cargo:rerun-if-changed={sdk}");
+    cc::Build::new()
+        .cpp(true)
+        .include(sdk)
+        .file("csrc/decklink_shim.cpp")
+        .file(format!("{sdk}/DeckLinkAPIDispatch.cpp"))
+        .compile("g2g_decklink_shim");
+    println!("cargo:rustc-link-lib=dl");
 }

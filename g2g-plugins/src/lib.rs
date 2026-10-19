@@ -1590,6 +1590,10 @@ pub mod gstwrap;
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 pub mod waylandsink;
 
+// The SDK boundary of SDI output for Blackmagic Design DeckLink.
+#[cfg(all(target_os = "linux", feature = "decklink"))]
+pub mod decklink;
+
 // Linux audio render sinks and capture sources: the two ends of the audio path,
 // the analogs of the Windows-only WasapiSink / WasapiSrc. Each links a different
 // system audio stack and is target-gated to Linux behind its own feature; the

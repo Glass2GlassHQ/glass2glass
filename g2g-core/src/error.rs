@@ -80,4 +80,8 @@ pub enum HardwareError {
     Peripheral,
     /// Other backend-specific failure.
     Other,
+    // HRESULT from a call into the Blackmagic Design DeckLink SDK
+    DeckLink(i32),
+    // a vendor library loaded at runtime is not installed, named by its file name
+    LibraryNotFound(&'static str),
 }

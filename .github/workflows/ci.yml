@@ -186,6 +186,9 @@ jobs:
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
           alsa-sink,kms-sink,vello-overlay
+      # The SDI sinks on their own, with no other device element to pull helpers in.
+      - name: decklink sinks only
+        run: cargo check -p g2g-plugins --locked --all-targets --features decklink
       # And the mirror image: capture with no sink compiled in.
       - name: capture only (no sinks)
         run: cargo check -p g2g-plugins --locked --all-targets --features alsa-src,pulse-src,v4l2
@@ -294,7 +297,7 @@ jobs:
       - name: check g2g-plugins (linux feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
-          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,png,webp,opus,vorbis,alsa-sink,pulse-sink,alsa-src,pulse-src,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,plugin-signing,declarative-yaml,script-rhai,webtransport,moqt,mqtt
+          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,png,webp,opus,vorbis,alsa-sink,pulse-sink,alsa-src,pulse-src,decklink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,plugin-signing,declarative-yaml,script-rhai,webtransport,moqt,mqtt
       # Plugin loading v1 (same-toolchain dlopen) + v2 (frozen C ABI, M1010):
       # each test builds its fixture cdylib (v2 also compiles the plain-C
       # plugin with cc), so the dynamic boundary is exercised, not just checked.

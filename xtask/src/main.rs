@@ -393,6 +393,8 @@ fn host_launch_features(c: &Capabilities) -> Vec<LaunchFeature> {
         lf("analytics", true, ""),
         // v4l crate is pure-Rust (the camera device is a runtime, not build, dep).
         lf("v4l2", true, ""),
+        // The SDK dispatch code loads the driver library at runtime, so a C++ compiler is enough.
+        lf("decklink", true, ""),
         // reqwest's default TLS links system OpenSSL on Linux.
         lf("http-src", c.openssl, "needs openssl-devel"),
         lf("hls", c.openssl, "needs openssl-devel"),
