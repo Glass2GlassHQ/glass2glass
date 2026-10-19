@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1625: `av1parse` tests pin the Main 10 colour config, operating parameters on every operating point and the best-effort parse of a header cut before its trailer.
 - M1624: `h265parse` tests pin the leading RASL filter reset on a flush and inter-predicted RPS pictures that land on the current picture or keep their own flags.
 - M1623: `av1parse` reads a sequence header whose timing info codes the largest ticks per picture, the uvlc reader consuming its stop bit as the spec does.
 - M1622: `av1parse` tests pin the sequence header tool flags and colour config branches, operating points, OBU extension headers, the reframing size checks and keyframe detection that cargo-mutants found untested.

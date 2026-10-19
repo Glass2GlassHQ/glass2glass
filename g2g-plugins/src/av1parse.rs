@@ -1611,6 +1611,21 @@ mod tests {
     }
 
     #[test]
+    fn main_profile_ten_bit_codes_no_twelve_bit_flag() {
+        let mut w = header_through_tools(0, &select_tools());
+        w.write_bit(1); // high_bitdepth
+        w.write_bit(0); // mono_chrome
+        w.write_bit(0); // color_description_present_flag
+        w.write_bit(0); // color_range
+        w.write_bits(1, 2); // chroma_sample_position vertical
+        write_cleared_trailer_flags(&mut w);
+        let mut expected = expected_header(0, select_tools());
+        expected.high_bitdepth = true;
+        expected.chroma_sample_position = 1;
+        assert_eq!(parse_written(w), expected);
+    }
+
+    #[test]
     fn ten_bit_professional_profile_is_four_two_two() {
         let mut w = header_through_tools(2, &select_tools());
         w.write_bit(1); // high_bitdepth, no twelve_bit at 10 bits
@@ -1722,14 +1737,17 @@ mod tests {
         w.write_bits(first_level, 5);
         w.write_bit(first_tier);
         w.write_bit(1); // decoder_model_present_for_this_op[0]
-        w.write_bits(0, buffer_delay_length_minus_1 + 1); // decoder_buffer_delay
-        w.write_bits(0, buffer_delay_length_minus_1 + 1); // encoder_buffer_delay
+        w.write_bits(1000, buffer_delay_length_minus_1 + 1); // decoder_buffer_delay
+        w.write_bits(600, buffer_delay_length_minus_1 + 1); // encoder_buffer_delay
         w.write_bit(1); // low_delay_mode_flag
         w.write_bit(1); // initial_display_delay_present_for_this_op[0]
         w.write_bits(3, 4); // initial_display_delay_minus_1[0]
         w.write_bits(0, 12); // operating_point_idc[1]
         w.write_bits(second_level, 5);
-        w.write_bit(0); // decoder_model_present_for_this_op[1]
+        w.write_bit(1); // decoder_model_present_for_this_op[1]
+        w.write_bits(500, buffer_delay_length_minus_1 + 1); // decoder_buffer_delay
+        w.write_bits(300, buffer_delay_length_minus_1 + 1); // encoder_buffer_delay
+        w.write_bit(0); // low_delay_mode_flag
         w.write_bit(0); // initial_display_delay_present_for_this_op[1]
         write_geometry(&mut w, GEOMETRY);
         write_tools(&mut w, &select_tools());
@@ -1743,6 +1761,27 @@ mod tests {
         expected_detail.initial_display_delay_present_flag = true;
         expected_detail.operating_points_cnt_minus_1 = 1;
         assert_eq!(parse_written(w), expected);
+    }
+
+    #[test]
+    fn caps_parse_keeps_the_colour_of_a_header_cut_before_its_trailer() {
+        // 31 geometry bits end color_config on a byte boundary
+        let geometry = (4096, 2048);
+        let mut w = BitWriter::default();
+        write_header_through_geometry(&mut w, 0, geometry);
+        write_tools(&mut w, &select_tools());
+        w.write_bit(1); // high_bitdepth
+        w.write_bit(0); // mono_chrome
+        w.write_bit(0); // color_description_present_flag
+        w.write_bit(1); // color_range
+        w.write_bits(0, 2); // chroma_sample_position
+        let payload = w.into_bytes();
+        assert_eq!(parse_complete_sequence_header(&payload), None);
+        let header = parse_sequence_header(&payload).expect("the caps parse is best effort");
+        assert_eq!((header.width, header.height), geometry);
+        assert!(header.high_bitdepth);
+        assert_eq!(header.colorimetry.range, g2g_core::ColorRange::Full);
+        assert_eq!(header.detail, None);
     }
 
     #[test]
