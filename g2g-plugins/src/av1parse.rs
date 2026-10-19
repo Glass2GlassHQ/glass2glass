@@ -2018,6 +2018,7 @@ mod tests {
         assert!(!opens_obu_stream(&reserved_profile));
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn sequence_header_obu_is_returned_whole_with_its_parse() {
         let mut unit = obu(OBU_TEMPORAL_DELIMITER, &[]);
