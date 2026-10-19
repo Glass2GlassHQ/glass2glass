@@ -220,6 +220,30 @@ pub(crate) struct AviChunk {
     pub stream: usize,
     pub body: core::ops::Range<usize>,
     pub keyframe: bool,
+    // a `##pc` chunk, whose new palette entries apply from the stream's next chunk on
+    pub palette_change: bool,
+}
+
+// first entry, entry count and flags, then r, g, b and flags per entry
+const PALETTE_CHANGE_HEADER_LEN: usize = 4;
+const PALETTE_CHANGE_ENTRY_LEN: usize = 4;
+// avidec reads a longer `##pc` chunk as data
+const PALETTE_CHANGE_MAX_LEN: usize = PALETTE_CHANGE_HEADER_LEN + 256 * PALETTE_CHANGE_ENTRY_LEN;
+
+// the entries a `##pc` chunk replaces, a count of 0 meaning 256, none when the range wraps past entry 255 as in avidec
+pub(crate) fn palette_change(body: &[u8]) -> Vec<(u8, [u8; 3])> {
+    let (Some(&first), Some(&count)) = (body.first(), body.get(1)) else {
+        return Vec::new();
+    };
+    let last = first.wrapping_add(count).wrapping_sub(1);
+    let (entries, _) = body
+        .get(PALETTE_CHANGE_HEADER_LEN..)
+        .unwrap_or_default()
+        .as_chunks::<PALETTE_CHANGE_ENTRY_LEN>();
+    (first..=last)
+        .zip(entries)
+        .map(|(index, [r, g, b, _])| (index, [*r, *g, *b]))
+        .collect()
 }
 
 /// A parsed AVI file: its streams in `hdrl` order, its `movi` chunks in file
@@ -512,10 +536,12 @@ fn push_data_chunk(chunk: Chunk, stream_count: usize, out: &mut Vec<AviChunk>) {
     if stream >= stream_count || chunk.body.is_empty() {
         return;
     }
+    let palette_change = chunk.id[2..] == *b"pc" && chunk.body.len() <= PALETTE_CHANGE_MAX_LEN;
     out.push(AviChunk {
         stream,
         body: chunk.body,
         keyframe: false,
+        palette_change,
     });
 }
 
@@ -1285,6 +1311,27 @@ mod tests {
                 assert_eq!(kept.keyframe, kept.stream == 0, "cut at {cut}");
             }
         }
+    }
+
+    #[test]
+    fn a_palette_change_reads_its_entries_like_avidec() {
+        let change = |first: u8, count: u8, entries: &[[u8; 4]]| {
+            let mut body = vec![first, count, 0, 0];
+            for entry in entries {
+                body.extend_from_slice(entry);
+            }
+            palette_change(&body)
+        };
+        assert_eq!(
+            change(5, 2, &[[1, 2, 3, 0], [4, 5, 6, 0]]),
+            vec![(5, [1, 2, 3]), (6, [4, 5, 6])]
+        );
+        const ALL_ENTRIES: usize = 256;
+        assert_eq!(
+            change(0, 0, &[[9, 9, 9, 0]; ALL_ENTRIES]).len(),
+            ALL_ENTRIES
+        );
+        assert!(change(200, 100, &[[1, 1, 1, 0]; 100]).is_empty());
     }
 
     #[test]

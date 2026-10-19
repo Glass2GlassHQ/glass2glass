@@ -293,6 +293,15 @@ pub(crate) fn attach_palette(packet: &mut Packet, palette: &[u8]) -> Result<(), 
     Ok(())
 }
 
+// writes a container palette change over the palette, as avidec does before handing it on
+pub(crate) fn apply_palette_change(palette: &mut Vec<u8>, change: &g2g_core::meta::PaletteChange) {
+    palette.resize(PALETTE_BYTES, 0);
+    let (slots, _) = palette.as_chunks_mut::<PALETTE_ENTRY_BYTES>();
+    for (index, rgb) in &change.colors {
+        slots[usize::from(*index)] = opaque_rgb(*rgb).to_ne_bytes();
+    }
+}
+
 // What a video stream's container header gives the decoder: the codec context
 // fields, the extradata, and the palette its first packet carries.
 #[derive(Debug)]

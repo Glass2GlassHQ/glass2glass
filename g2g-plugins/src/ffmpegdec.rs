@@ -617,9 +617,11 @@ pub struct FfmpegVideoDec {
     // a tagged stream's container header, which leads it and comes again after a flush
     #[cfg(feature = "ffmpeg-long-tail")]
     tagged_header: Option<Vec<u8>>,
-    // the container palette the next access unit hands the decoder
+    // the container palette, which the next access unit hands the decoder when it changed
     #[cfg(feature = "ffmpeg-long-tail")]
-    pending_palette: Option<Vec<u8>>,
+    palette: Vec<u8>,
+    #[cfg(feature = "ffmpeg-long-tail")]
+    palette_changed: bool,
     #[cfg(feature = "ffmpeg-long-tail")]
     converter: crate::ffmpegtagged::FormatConverter,
 }
@@ -686,7 +688,9 @@ impl FfmpegVideoDec {
             #[cfg(feature = "ffmpeg-long-tail")]
             tagged_header: None,
             #[cfg(feature = "ffmpeg-long-tail")]
-            pending_palette: None,
+            palette: Vec::new(),
+            #[cfg(feature = "ffmpeg-long-tail")]
+            palette_changed: false,
             #[cfg(feature = "ffmpeg-long-tail")]
             converter: crate::ffmpegtagged::FormatConverter::default(),
         }
@@ -1229,20 +1233,29 @@ impl FfmpegVideoDec {
             extradata,
             None,
         )?;
-        self.pending_palette = video.palette;
+        if let Some(palette) = video.palette {
+            self.palette = palette;
+            self.palette_changed = true;
+        }
         self.tagged_header = Some(header.to_vec());
         Ok(())
     }
 
-    fn access_unit_packet(&mut self, au: &[u8], keyframe: bool) -> Result<Packet, G2gError> {
+    fn access_unit_packet(&mut self, au: &[u8], frame: &Frame) -> Result<Packet, G2gError> {
         let mut packet = Packet::copy(au);
         // libavformat flags a keyframe packet, which a tagged inter-frame codec such as ZeroCodec keys its reference on
-        if keyframe && matches!(self.codec_kind, Some(VideoCodec::Tagged(_))) {
+        if frame.timing.keyframe && matches!(self.codec_kind, Some(VideoCodec::Tagged(_))) {
             packet.set_flags(ffmpeg::packet::Flags::KEY);
         }
         #[cfg(feature = "ffmpeg-long-tail")]
-        if let Some(palette) = self.pending_palette.take() {
-            crate::ffmpegtagged::attach_palette(&mut packet, &palette)?;
+        {
+            if let Some(change) = frame.meta.get::<g2g_core::meta::PaletteChange>() {
+                crate::ffmpegtagged::apply_palette_change(&mut self.palette, change);
+                self.palette_changed = true;
+            }
+            if core::mem::take(&mut self.palette_changed) {
+                crate::ffmpegtagged::attach_palette(&mut packet, &self.palette)?;
+            }
         }
         Ok(packet)
     }
@@ -1919,7 +1932,7 @@ impl AsyncElement for FfmpegVideoDec {
                     #[cfg(feature = "offload")]
                     {
                         let cfg = self.decode_config();
-                        let packet = self.access_unit_packet(au, frame.timing.keyframe)?;
+                        let packet = self.access_unit_packet(au, &frame)?;
                         let pts_ns = frame.timing.pts_ns;
                         let input = InputStamp {
                             arrival_ns: frame.timing.arrival_ns,
@@ -1971,7 +1984,7 @@ impl AsyncElement for FfmpegVideoDec {
                     }
                     #[cfg(not(feature = "offload"))]
                     {
-                        let packet = self.access_unit_packet(au, frame.timing.keyframe)?;
+                        let packet = self.access_unit_packet(au, &frame)?;
                         undecodable = self.feed_access_unit(
                             packet,
                             frame.timing.pts_ns,

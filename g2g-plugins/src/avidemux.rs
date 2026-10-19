@@ -27,17 +27,17 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, MultiOutputElement, MultiOutputSink,
-    OutputSink, PadTemplate, PadTemplates, PropError, PropKind, PropValue, PropertySpec, Rate,
-    RawVideoFormat, Stream, StreamCollection, StreamType, VideoCodec, ANY_CHANNELS,
-    ANY_SAMPLE_RATE,
+    CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameMetaSet, G2gError, MultiOutputElement,
+    MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat, Stream, StreamCollection, StreamType, VideoCodec,
+    ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::annexb::{
     is_annex_b, length_prefixed_to_annexb, parse_avcc, prepend_param_sets, starts_with_param_set,
 };
-use crate::avi::{parse, parse_streams, AviFile, AviStream, AviStreamKind};
+use crate::avi::{palette_change, parse, parse_streams, AviFile, AviStream, AviStreamKind};
 use crate::codectag::{
     audio_from_stream_name, audio_stream_name, video_from_stream_name, video_stream_name,
 };
@@ -380,6 +380,30 @@ struct Emitted {
     stream: usize,
     data: Vec<u8>,
     timing: FrameTiming,
+    meta: FrameMetaSet,
+}
+
+impl Emitted {
+    fn into_frame(self, sequence: u64) -> Frame {
+        Frame {
+            meta: self.meta,
+            ..frame_of(self.data, self.timing, sequence)
+        }
+    }
+}
+
+#[cfg(feature = "metadata")]
+fn palette_meta(colors: Vec<(u8, [u8; 3])>) -> FrameMetaSet {
+    let mut meta = FrameMetaSet::new();
+    if !colors.is_empty() {
+        meta.attach(g2g_core::meta::PaletteChange { colors });
+    }
+    meta
+}
+
+#[cfg(not(feature = "metadata"))]
+fn palette_meta(_colors: Vec<(u8, [u8; 3])>) -> FrameMetaSet {
+    FrameMetaSet::new()
 }
 
 // The config to send as a frame of its own ahead of a stream's units: an AAC
@@ -416,6 +440,7 @@ fn emittable<'a>(
 ) -> impl Iterator<Item = Emitted> + 'a {
     let mut positions = alloc::vec![0u64; file.streams.len()];
     let mut first = alloc::vec![true; file.streams.len()];
+    let mut palette_changes: Vec<Vec<(u8, [u8; 3])>> = alloc::vec![Vec::new(); file.streams.len()];
     let h264_configs: Vec<H264Config> = file.streams.iter().map(h264_config).collect();
     file.chunks
         .iter()
@@ -429,6 +454,10 @@ fn emittable<'a>(
         .flat_map(move |chunk| {
             let stream = &file.streams[chunk.stream];
             let bytes = data.get(chunk.body.clone()).unwrap_or_default();
+            if chunk.palette_change {
+                palette_changes[chunk.stream].extend(palette_change(bytes));
+                return None.into_iter().chain(None);
+            }
             let samples = stream.samples_in(bytes.len());
             let (pts_ns, duration_ns) = stream.timing(positions[chunk.stream], samples);
             positions[chunk.stream] += samples;
@@ -452,12 +481,15 @@ fn emittable<'a>(
                     stream: chunk.stream,
                     data: Vec::from(config),
                     timing: FrameTiming::default(),
+                    meta: FrameMetaSet::new(),
                 });
             first[chunk.stream] = false;
+            let meta = palette_meta(core::mem::take(&mut palette_changes[chunk.stream]));
             lead_config.into_iter().chain(payload.map(|data| Emitted {
                 stream: chunk.stream,
                 data,
                 timing,
+                meta,
             }))
         })
 }
@@ -603,7 +635,7 @@ impl AviDemux {
         let caps = real_caps(&file.streams[selected].kind).ok_or(G2gError::CapsMismatch)?;
         out.push(PipelinePacket::CapsChanged(caps)).await?;
         for emitted in emittable(&self.buffer, &file, &[selected]) {
-            let frame = frame_of(emitted.data, emitted.timing, self.sequence);
+            let frame = emitted.into_frame(self.sequence);
             self.sequence += 1;
             out.push(PipelinePacket::DataFrame(frame)).await?;
         }
@@ -832,7 +864,7 @@ impl AviDemuxN {
             let Some(port) = self.ports.iter().position(|s| *s == emitted.stream) else {
                 continue;
             };
-            let frame = frame_of(emitted.data, emitted.timing, self.emitted);
+            let frame = emitted.into_frame(self.emitted);
             self.emitted += 1;
             out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
         }
@@ -1098,6 +1130,57 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn a_palette_change_rides_the_next_frame_of_its_stream() {
+        let first_frame = [1u8, 2];
+        let change = [7u8, 1, 0, 0, 10, 20, 30, 0];
+        let second_frame = [3u8, 4];
+        let data = [first_frame.as_slice(), &change, &second_frame].concat();
+        let chunk = |body: core::ops::Range<usize>, palette_change| AviChunk {
+            stream: 0,
+            body,
+            keyframe: true,
+            palette_change,
+        };
+        let change_at = first_frame.len();
+        let second_at = change_at + change.len();
+        let file = AviFile {
+            streams: vec![AviStream {
+                kind: AviStreamKind::Video {
+                    codec: VideoCodec::Mjpeg,
+                    width: 16,
+                    height: 16,
+                },
+                scale: 1,
+                rate: 25,
+                start: 0,
+                sample_size: 0,
+                codec_config: Vec::new(),
+            }],
+            chunks: vec![
+                chunk(0..change_at, false),
+                chunk(change_at..second_at, true),
+                chunk(second_at..data.len(), false),
+            ],
+            ..AviFile::default()
+        };
+        let emitted: Vec<Emitted> = emittable(&data, &file, &[0]).collect();
+        let payloads: Vec<&[u8]> = emitted.iter().map(|e| e.data.as_slice()).collect();
+        assert_eq!(payloads, [first_frame.as_slice(), &second_frame]);
+        let changes: Vec<_> = emitted
+            .iter()
+            .map(|e| e.meta.get::<g2g_core::meta::PaletteChange>().cloned())
+            .collect();
+        let expected = g2g_core::meta::PaletteChange {
+            colors: vec![(7, [10, 20, 30])],
+        };
+        assert_eq!(changes, [None, Some(expected)]);
+        // the change chunk takes no frame slot on the stream's clock
+        let second_pts = emitted[1].timing.pts_ns;
+        assert_eq!(second_pts, file.streams[0].timing(1, 1).0);
+    }
+
     #[test]
     fn converts_avcc_chunks_whose_length_prefix_looks_like_a_start_code() {
         use crate::annexb::{avcc_record, ANNEX_B_START_CODE, AVCC_LENGTH_SIZE, START_CODE_PREFIX};
@@ -1132,11 +1215,13 @@ mod tests {
                     stream: 0,
                     body: 0..idr_chunk.len(),
                     keyframe: true,
+                    palette_change: false,
                 },
                 AviChunk {
                     stream: 0,
                     body: idr_chunk.len()..data.len(),
                     keyframe: false,
+                    palette_change: false,
                 },
             ],
             ..AviFile::default()
@@ -1180,11 +1265,13 @@ mod tests {
                     stream: 0,
                     body: 0..units[0].len(),
                     keyframe: true,
+                    palette_change: false,
                 },
                 AviChunk {
                     stream: 0,
                     body: units[0].len()..data.len(),
                     keyframe: true,
+                    palette_change: false,
                 },
             ],
             ..AviFile::default()

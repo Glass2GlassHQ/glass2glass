@@ -778,7 +778,10 @@ BITMAPINFOHEADER `biCompression` or WAVEFORMATEX `wFormatTag`, and Matroska's
 Matroska's `V_QUICKTIME`). The container header the decoder needs leads the
 stream in band as a frame of its own, the convention FLAC's `fLaC` and raw AAC's
 AudioSpecificConfig already use: the whole `strf` BITMAPINFOHEADER or
-WAVEFORMATEX, the whole sample entry, or the Matroska `CodecPrivate`. The ffmpeg
+WAVEFORMATEX, the whole sample entry, or the Matroska
+`CodecPrivate`. An AVI `##pc` palette change rides the stream's next frame as a
+`PaletteChange` frame meta, which `ffmpegdec` writes over its palette and hands
+libavcodec with that packet. The ffmpeg
 decoders resolve the tag through libavformat's public tag tables, read from the
 header the extradata, palette, `bits_per_coded_sample` and `block_align`
 libavformat would hand libavcodec, and open on that first frame. A codec they

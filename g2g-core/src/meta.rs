@@ -1466,6 +1466,28 @@ mod on {
             Propagation::Drop
         }
     }
+
+    // the palette entries a palettized stream replaces from this frame on, as index and RGB
+    #[derive(Debug, Default, Clone, PartialEq, Eq)]
+    pub struct PaletteChange {
+        pub colors: Vec<(u8, [u8; 3])>,
+    }
+
+    impl FrameMeta for PaletteChange {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(self.clone())
+        }
+        // only a decoder reads it, so no transformed frame keeps it
+        fn propagate(&self, _transform: Transform) -> Propagation {
+            Propagation::Drop
+        }
+    }
 }
 
 #[cfg(all(test, feature = "metadata"))]
