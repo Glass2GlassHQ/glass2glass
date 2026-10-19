@@ -1452,6 +1452,7 @@ g2g-launch videotestsrc num-buffers=8 ! \
     // Canary status
     const STATUS_PAGE = 'https://g2g-canary-000152811496.s3.us-east-1.amazonaws.com/g2g-canary/index.html';
     const STATUS_JSON = STATUS_PAGE.replace('index.html', 'status.json');
+    const COMMIT_URL = 'https://github.com/Glass2GlassHQ/glass2glass/commit/';
     // the thresholds the canary's own status page colours a day by
     const HEALTHY_PERCENT = 99.9;
     const DEGRADED_PERCENT = 99.0;
@@ -1488,13 +1489,19 @@ g2g-launch videotestsrc num-buffers=8 ! \
         return row;
     }
 
-    function statusNote(text) {
+    function link(text, href) {
+        const node = element('a', '', text);
+        node.href = href;
+        node.style.color = 'var(--accent)';
+        return node;
+    }
+
+    function statusNote(text, commit) {
         const note = document.getElementById('status-note');
         note.textContent = text + ' ';
-        const link = element('a', '', 'Full status page');
-        link.href = STATUS_PAGE;
-        link.style.color = 'var(--accent)';
-        note.append(link, '.');
+        // a canary image built before it reported its g2g commit has no g2g_commit
+        if (commit) note.append('Running g2g ', link(commit.slice(0, 7), COMMIT_URL + commit), '. ');
+        note.append(link('Full status page', STATUS_PAGE), '.');
     }
 
     fetch(STATUS_JSON, { cache: 'no-store' })
@@ -1505,7 +1512,7 @@ g2g-launch videotestsrc num-buffers=8 ! \
         .then(status => {
             document.getElementById('status-list').append(...status.pipelines.map(statusRow));
             const minutes = Math.round((Date.now() / 1000 - status.generated) / 60);
-            statusNote('Updated ' + minutes + ' minutes ago.');
+            statusNote('Updated ' + minutes + ' minutes ago.', status.g2g_commit);
         })
         .catch(() => statusNote('Status is unavailable right now.'));
 </script>
