@@ -1145,10 +1145,11 @@ impl FfmpegVideoDec {
             }
             // The `*_cuvid` decoders are standalone codec entries, not hwaccel
             // hooks, so they're found by name rather than by AVCodecID. If absent,
-            // the libavcodec build wasn't compiled with `--enable-cuvid` or
-            // libnvcuvid isn't loadable at runtime; either way the right answer is
-            // to fail loud so the caller picks Software explicitly.
-            Backend::NvdecCuvid => codec::decoder::find_by_name(cuvid_name(codec_kind)),
+            // the codec has no cuvid decoder, the libavcodec build wasn't compiled
+            // with `--enable-cuvid` or libnvcuvid isn't loadable at runtime; either
+            // way the right answer is to fail loud so the caller picks Software
+            // explicitly.
+            Backend::NvdecCuvid => cuvid_name(codec_kind).and_then(codec::decoder::find_by_name),
         }
         .ok_or(G2gError::Hardware(HardwareError::Other))?;
 
@@ -2166,16 +2167,16 @@ fn codec_id(codec: VideoCodec) -> Id {
 }
 
 /// The standalone `*_cuvid` decoder name for a codec (NvdecCuvid backend).
-fn cuvid_name(codec: VideoCodec) -> &'static str {
+fn cuvid_name(codec: VideoCodec) -> Option<&'static str> {
     match codec {
-        VideoCodec::H264 => "h264_cuvid",
-        VideoCodec::H265 => "hevc_cuvid",
-        VideoCodec::Vp8 => "vp8_cuvid",
-        VideoCodec::Vp9 => "vp9_cuvid",
-        VideoCodec::Av1 => "av1_cuvid",
-        VideoCodec::Mjpeg => "mjpeg_cuvid",
-        VideoCodec::Mpeg2 => "mpeg2_cuvid",
-        _ => unreachable!("ffmpegdec negotiates only known VideoCodec variants"),
+        VideoCodec::H264 => Some("h264_cuvid"),
+        VideoCodec::H265 => Some("hevc_cuvid"),
+        VideoCodec::Vp8 => Some("vp8_cuvid"),
+        VideoCodec::Vp9 => Some("vp9_cuvid"),
+        VideoCodec::Av1 => Some("av1_cuvid"),
+        VideoCodec::Mjpeg => Some("mjpeg_cuvid"),
+        VideoCodec::Mpeg2 => Some("mpeg2_cuvid"),
+        _ => None,
     }
 }
 
@@ -3609,9 +3610,10 @@ mod tests {
         assert_eq!(codec_id(VideoCodec::Vp8), Id::VP8);
         assert_eq!(codec_id(VideoCodec::Vp9), Id::VP9);
         assert_eq!(codec_id(VideoCodec::Av1), Id::AV1);
-        assert_eq!(cuvid_name(VideoCodec::H264), "h264_cuvid");
-        assert_eq!(cuvid_name(VideoCodec::Vp9), "vp9_cuvid");
-        assert_eq!(cuvid_name(VideoCodec::Av1), "av1_cuvid");
+        assert_eq!(cuvid_name(VideoCodec::H264), Some("h264_cuvid"));
+        assert_eq!(cuvid_name(VideoCodec::Vp9), Some("vp9_cuvid"));
+        assert_eq!(cuvid_name(VideoCodec::Av1), Some("av1_cuvid"));
+        assert_eq!(cuvid_name(VideoCodec::Theora), None);
     }
 
     #[test]

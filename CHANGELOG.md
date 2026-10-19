@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1592: `ffmpegdec` with the cuvid backend fails on a codec that has no cuvid decoder instead of panicking.
 - M1589: the mp4 demuxers and `matroskademux` emit ProRes and DNxHD as typed codecs, which `ffmpegdec` decodes, ProRes 4444 alpha as the new `A444p12` raw format.
 - M1588: `oggdemux` and `matroskademux` emit Theora as `VideoCodec::Theora` with its headers in band, which `ffmpegdec` decodes.
 - M1587: `avidemux`, `matroskademux` and `qtdemux` emit uncompressed I420, YUY2 and UYVY video as `Caps::RawVideo`, UYVY being a new raw format.
