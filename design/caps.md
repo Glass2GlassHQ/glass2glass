@@ -781,7 +781,8 @@ AudioSpecificConfig already use: the whole `strf` BITMAPINFOHEADER or
 WAVEFORMATEX, the WAV `fmt ` chunk, the whole sample entry, or the Matroska
 `CodecPrivate`. An AVI `##pc` palette change rides the stream's next frame as a
 `PaletteChange` frame meta, which `ffmpegdec` writes over its palette and hands
-libavcodec with that packet. The ffmpeg
+libavcodec with that packet. A truncated file keeps the cut last chunk or sample
+of a tagged video stream, which libavformat also hands its decoder. The ffmpeg
 decoders resolve the tag through libavformat's public tag tables, read from the
 header the extradata, palette, `bits_per_coded_sample` and `block_align`
 libavformat would hand libavcodec, and open on that first frame. A codec they

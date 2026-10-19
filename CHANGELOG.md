@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1600: `avidemux` keeps the cut last chunk of a truncated file for a tagged long-tail video stream, as libavformat does.
 - M1599: with `ffmpeg-long-tail`, `wavparse` forwards a WAV codec g2g has no caps for under its format tag, so GSM 6.10 and TrueSpeech WAV files decode.
 - M1598: Matroska PCM tracks negotiate through `audioresample`, `matroskademux` offering a fixed default rate and channel count as `avidemux` does.
 - M1597: an AVI `##pc` palette change rides the next frame as the new `PaletteChange` frame meta, which `ffmpegdec` applies.

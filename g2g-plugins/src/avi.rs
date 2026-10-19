@@ -480,23 +480,25 @@ fn parse_info(data: &[u8], range: core::ops::Range<usize>) -> TagList {
 /// Collect the data chunks of one `LIST movi`, descending into the `LIST rec `
 /// groups an interleaved file wraps them in. Empty chunks are dropped: a writer
 /// emits them as padding and no decoder has anything to do with them. A data
-/// chunk cut short by the end of the file is dropped too.
+/// chunk cut short by the end of the file is dropped too, unless it belongs to a
+/// long-tail video stream.
 fn collect_movi(
     data: &[u8],
     range: core::ops::Range<usize>,
-    stream_count: usize,
+    streams: &[AviStream],
     out: &mut Vec<AviChunk>,
 ) {
     let mut walk = chunks_to_cut(data, range);
     while let Some(chunk) = walk.next() {
         if chunk.list_form(data) == Some(REC_FOURCC) {
-            collect_data_chunks(data, chunk.list_body(), stream_count, out);
+            collect_data_chunks(data, chunk.list_body(), streams, out);
             continue;
         }
         if walk.overran() {
+            push_cut_chunk(chunk, streams, out);
             break;
         }
-        push_data_chunk(chunk, stream_count, out);
+        push_data_chunk(chunk, streams.len(), out);
     }
 }
 
@@ -504,15 +506,34 @@ fn collect_movi(
 fn collect_data_chunks(
     data: &[u8],
     range: core::ops::Range<usize>,
-    stream_count: usize,
+    streams: &[AviStream],
     out: &mut Vec<AviChunk>,
 ) {
     let mut walk = chunks_to_cut(data, range);
     while let Some(chunk) = walk.next() {
         if walk.overran() {
+            push_cut_chunk(chunk, streams, out);
             break;
         }
-        push_data_chunk(chunk, stream_count, out);
+        push_data_chunk(chunk, streams.len(), out);
+    }
+}
+
+// libavcodec also decodes what remains of a cut long-tail video chunk, as ffmpeg does
+fn push_cut_chunk(chunk: Chunk, streams: &[AviStream], out: &mut Vec<AviChunk>) {
+    let tagged_video = chunk_stream_number(chunk.id)
+        .and_then(|stream| streams.get(stream))
+        .is_some_and(|stream| {
+            matches!(
+                stream.kind,
+                AviStreamKind::Video {
+                    codec: VideoCodec::Tagged(_),
+                    ..
+                }
+            )
+        });
+    if tagged_video {
+        push_data_chunk(chunk, streams.len(), out);
     }
 }
 
@@ -640,9 +661,8 @@ pub(crate) fn parse(data: &[u8]) -> Result<AviFile, G2gError> {
     if file.streams.is_empty() {
         return Err(G2gError::CapsMismatch);
     }
-    let stream_count = file.streams.len();
     for (_, range) in &movi_ranges {
-        collect_movi(data, range.clone(), stream_count, &mut file.chunks);
+        collect_movi(data, range.clone(), &file.streams, &mut file.chunks);
     }
     if let (Some(idx1), Some((form_offset, _))) = (idx1, movi_ranges.first()) {
         apply_idx1(
@@ -1212,6 +1232,26 @@ mod tests {
         assert_eq!(format, AudioFormat::Tagged(riff(0x0022)));
     }
 
+    #[cfg(feature = "ffmpeg-long-tail")]
+    #[test]
+    fn a_cut_long_tail_video_chunk_is_kept() {
+        let bytes = write_unmapped_codecs();
+        let whole = parse(&bytes).expect("the whole file parses");
+        let last_video = whole
+            .chunks
+            .iter()
+            .rev()
+            .find(|chunk| chunk.stream == 0)
+            .expect("a video chunk");
+        let cut = last_video.body.start + last_video.body.len() / 2;
+        let file = parse(&bytes[..cut]).expect("the cut file parses");
+        let kept = file.chunks.last().expect("the cut file keeps chunks");
+        assert_eq!(
+            (kept.stream, kept.body.clone()),
+            (0, last_video.body.start..cut)
+        );
+    }
+
     #[cfg(not(feature = "ffmpeg-long-tail"))]
     #[test]
     fn names_an_unmapped_codec_without_the_long_tail() {
@@ -1270,8 +1310,9 @@ mod tests {
         let top_level = data.len() + CHUNK_HEADER_LEN;
         put_chunk(&mut data, &video, &payload);
 
+        let streams = parse(&write_av()).expect("the file parses").streams;
         let mut out = Vec::new();
-        collect_movi(&data, 0..data.len(), 1, &mut out);
+        collect_movi(&data, 0..data.len(), &streams[..1], &mut out);
         let bodies: Vec<_> = out.iter().map(|chunk| chunk.body.clone()).collect();
         assert_eq!(bodies, vec![top_level..top_level + payload.len()]);
     }
