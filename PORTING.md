@@ -74,8 +74,9 @@ probing at parse time rather than gst's runtime `pad-added`, so it's file source
 feeding a multi-stream container.)
 
 **`uridecodebin uri=X name=d` fans out** the same way for any URI a fan-out probe
-understands: a local file, `rtsp://` (video and audio off one session), and
-`hls://`. `uridecodebin uri=rtsp://cam/stream name=d  d. ! videoconvert ! autovideosink
+understands: a local file, `rtsp://` (video and audio off one session), and HLS
+(`hls://`, or an `http(s)://` URL ending in `.m3u8`, as gst's `uridecodebin` takes
+it). `uridecodebin uri=rtsp://cam/stream name=d  d. ! videoconvert ! autovideosink
 d. ! audioconvert ! autoaudiosink` runs unchanged. Bare `d.` refs take the ports
 in order, video first, where gst links them by caps. When the audio branch comes
 first, name the pads the way `uridecodebin3` does (`d.video_0`, `d.audio_0`).

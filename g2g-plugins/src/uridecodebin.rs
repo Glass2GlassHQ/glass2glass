@@ -208,19 +208,46 @@ pub fn file_handler() -> UriSourceFactory {
 /// variant, or a network failure during the master probe).
 #[cfg(feature = "hls")]
 pub fn hls_handler() -> UriSourceFactory {
-    UriSourceFactory::new("hls", |uri: &Uri| {
-        if uri.rest.is_empty() {
-            return Err(UriError::Malformed);
-        }
-        let url = alloc::format!("https://{}", uri.rest);
-        let src = crate::hlssrc::HlsSrc::new(url);
-        Ok((
-            Box::new(src) as Box<dyn DynSourceLoop>,
-            Caps::ByteStream {
-                encoding: g2g_core::ByteStreamEncoding::MpegTs,
-            },
-        ))
-    })
+    UriSourceFactory::new("hls", hls_source)
+}
+
+// gst's `uridecodebin` plays an http playlist URL, any other http URL is refused
+#[cfg(feature = "hls")]
+pub fn hls_http_handlers() -> [UriSourceFactory; 2] {
+    [
+        UriSourceFactory::new("http", hls_source),
+        UriSourceFactory::new("https", hls_source),
+    ]
+}
+
+#[cfg(feature = "hls")]
+fn hls_source(uri: &Uri) -> Result<(Box<dyn DynSourceLoop>, Caps), UriError> {
+    if uri.rest.is_empty() {
+        return Err(UriError::Malformed);
+    }
+    let url = hls_url(uri.scheme, uri.rest).ok_or(UriError::UnknownContent)?;
+    let src = crate::hlssrc::HlsSrc::new(url);
+    Ok((
+        Box::new(src) as Box<dyn DynSourceLoop>,
+        Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::MpegTs,
+        },
+    ))
+}
+
+#[cfg(feature = "hls")]
+const HLS_PLAYLIST_EXTENSION: &str = ".m3u8";
+
+// `hls://` fetches over https, an http(s) URL plays only when its path names a playlist
+#[cfg(feature = "hls")]
+fn hls_url(scheme: &str, rest: &str) -> Option<String> {
+    let path = rest.split(['?', '#']).next().unwrap_or(rest);
+    let names_playlist = path.to_ascii_lowercase().ends_with(HLS_PLAYLIST_EXTENSION);
+    match scheme {
+        "hls" => Some(alloc::format!("https://{rest}")),
+        "http" | "https" if names_playlist => Some(alloc::format!("{scheme}://{rest}")),
+        _ => None,
+    }
 }
 
 /// `v4l2:///dev/videoN` -> [`V4l2Src`](crate::v4l2src::V4l2Src): YUYV capture.
@@ -2680,10 +2707,10 @@ pub fn build_hls_separate_fanout(
 /// [`mp4_playbin`]. The variant's media playlist picks the demuxer: an
 /// `#EXT-X-MAP` init segment is fMP4 (Mp4DemuxN, tracks from the init's moov),
 /// otherwise muxed MPEG-TS (TsDemuxN, ports from CODECS). The `hls` scheme maps to
-/// an `https` origin.
+/// an `https` origin, and an `http(s)` URL naming an `.m3u8` is fetched as is.
 ///
 /// Declines (`Ok(None)`, so the single-stream [`hls_handler`] takes over) for a
-/// non-`hls` URI, a master-probe network failure, a media-only playlist, or a TS
+/// URI that names no HLS playlist, a master-probe network failure, a media-only playlist, or a TS
 /// variant without at least two routable muxed streams. Network-coupled: the probe
 /// is validated against a live server, not in CI.
 /// Assemble the HLS subtitle-overlay graph (M419): the video (and any muxed audio)
@@ -3026,14 +3053,13 @@ struct HlsPlaylists {
     media: crate::hls::MediaPlaylist,
 }
 
-/// Fetch and parse the master behind `url_rest` plus its chosen variant's media
+/// Fetch and parse the master at `source_url` plus its chosen variant's media
 /// playlist. `None` (so the caller declines to the single-stream handler) on a
 /// failed fetch or parse, a URI naming a media playlist rather than a master, or
 /// a master offering no variant. Three blocking fetches: network-coupled,
 /// validated against a live server rather than in CI.
 #[cfg(feature = "hls")]
-fn hls_playlists(url_rest: &str) -> Option<HlsPlaylists> {
-    let source_url = alloc::format!("https://{url_rest}");
+fn hls_playlists(source_url: alloc::string::String) -> Option<HlsPlaylists> {
     let master_text = blocking_get_text(&source_url)?;
     let Ok(crate::hls::Playlist::Master(master)) = crate::hls::parse(&master_text) else {
         return None;
@@ -3143,14 +3169,14 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
     let Some(parsed) = Uri::parse(uri) else {
         return Ok(None);
     };
-    if parsed.scheme != "hls" || parsed.rest.is_empty() {
+    if parsed.rest.is_empty() {
         return Ok(None);
     }
     // A `#audio-lang=` / `#subtitle-lang=` URI fragment carries the rendition
     // language preference (HLS URIs have no other place for it); strip it off the
     // playlist URL (M418).
     let (url_rest, (audio_lang, subtitle_lang, cc)) = hls_lang_hints(parsed.rest);
-    let Some(playlists) = hls_playlists(url_rest) else {
+    let Some(playlists) = hls_url(parsed.scheme, url_rest).and_then(hls_playlists) else {
         return Ok(None);
     };
     let HlsPlaylists {
@@ -3235,8 +3261,8 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
 /// The lone-`fallbacksrc` URI fan-out hook for HLS (M1169), the open-ported
 /// sibling of [`hls_playbin`]: probe the master and carry the chosen variant's
 /// muxed MPEG-TS or fMP4 streams as demux ports, so each gets its own
-/// `fallbackswitch` and sink. Declines (`Ok(None)`) a non-`hls` URI, a failed
-/// probe, and a variant with no routable muxed stream. A separate audio
+/// `fallbackswitch` and sink. Declines (`Ok(None)`) a URI that names no HLS
+/// playlist, a failed probe, and a variant with no routable muxed stream. A separate audio
 /// rendition is left to the single-stream expansion: its audio is a second
 /// playlist, and one fan-out has one source. Rendition-language and
 /// `#closed-captions=` fragments are stripped and ignored, there is no overlay
@@ -3246,11 +3272,13 @@ pub fn hls_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, P
     let Some(parsed) = Uri::parse(uri) else {
         return Ok(None);
     };
-    if parsed.scheme != "hls" || parsed.rest.is_empty() {
+    if parsed.rest.is_empty() {
         return Ok(None);
     }
     let (url_rest, _hints) = hls_lang_hints(parsed.rest);
-    Ok(hls_playlists(url_rest).and_then(|playlists| playlists.fanout()))
+    Ok(hls_url(parsed.scheme, url_rest)
+        .and_then(hls_playlists)
+        .and_then(|playlists| playlists.fanout()))
 }
 
 #[cfg(all(test, feature = "hls"))]

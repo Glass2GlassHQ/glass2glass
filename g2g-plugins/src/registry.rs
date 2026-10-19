@@ -1811,6 +1811,9 @@ fn register_uri_handlers(reg: &mut Registry) {
     #[cfg(feature = "hls")]
     {
         reg.register_uri(crate::uridecodebin::hls_handler());
+        for handler in crate::uridecodebin::hls_http_handlers() {
+            reg.register_uri(handler);
+        }
         reg.register_playbin(crate::uridecodebin::hls_playbin);
         reg.register_uri_fanout(crate::uridecodebin::hls_uri_fanout);
     }

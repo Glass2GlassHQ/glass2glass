@@ -29,7 +29,10 @@ use g2g_plugins::mp4mux::Mp4Mux;
 
 #[path = "common/dash_live_server.rs"]
 mod dash_live_server;
-use dash_live_server::{now_unix, serve, xs_datetime};
+use dash_live_server::{now_unix, xs_datetime};
+#[path = "common/http_routes.rs"]
+mod http_routes;
+use http_routes::serve;
 
 #[derive(Default)]
 struct CaptureSink {
@@ -141,7 +144,7 @@ fn serve_live(manifests: Vec<String>) -> (String, Arc<Mutex<Vec<String>>>) {
             .and_then(|s| s.strip_suffix(".m4s"))
             .and_then(|s| s.parse::<usize>().ok())
             .map(media_body)
-    });
+    }) + "/manifest.mpd";
     (url, requests)
 }
 
@@ -464,7 +467,7 @@ async fn dash_multi_period_plays_through_and_emits_a_boundary_segment() {
             .and_then(|s| s.strip_suffix(".m4s"))
             .and_then(|s| s.parse::<usize>().ok())
             .and_then(|i| segs.get(i).cloned())
-    });
+    }) + "/manifest.mpd";
 
     let mut src = DashSrc::new(url);
     let sink = run_dash(&mut src).await;

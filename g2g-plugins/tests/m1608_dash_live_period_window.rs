@@ -10,7 +10,10 @@ use g2g_plugins::dashsrc::DashSrc;
 
 #[path = "common/dash_live_server.rs"]
 mod dash_live_server;
-use dash_live_server::{now_unix, serve, xs_datetime};
+use dash_live_server::{now_unix, xs_datetime};
+#[path = "common/http_routes.rs"]
+mod http_routes;
+use http_routes::serve;
 
 struct DiscardSink;
 
@@ -80,7 +83,7 @@ async fn a_live_reload_keeps_the_period_being_played_when_older_ones_age_out() {
             return Some(manifests[n].clone().into_bytes());
         }
         Some(path.as_bytes().to_vec())
-    });
+    }) + "/manifest.mpd";
 
     let mut src = DashSrc::new(url).with_reload_interval_ms(20);
     src.configure_pipeline(&Caps::ByteStream {

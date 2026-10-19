@@ -905,7 +905,8 @@ as before.
   (through `SubParse` when the cue payload is a structured format, straight in for
   plain-UTF8 `tx3g`). An MP4 with no subtitle track keeps the plain per-stream
   fan-out. `hls_playbin` is the HLS sibling:
-  it probes a `hls://` master playlist (the scheme maps to an `https` origin),
+  it probes a `hls://` master playlist (the scheme maps to an `https` origin, and an
+  `http://` or `https://` URL whose path ends in `.m3u8` is taken as is),
   discovers the selected variant's renditions (`hls` parses `#EXT-X-MEDIA`
   alternate renditions and the variant's `AUDIO` / `SUBTITLES` / `VIDEO` group
   bindings; `hlssrc::variant_streams` maps the variant's `CODECS` + alternate audio
