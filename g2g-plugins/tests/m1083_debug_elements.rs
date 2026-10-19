@@ -341,8 +341,12 @@ async fn checksumsink_reports_each_buffer_under_the_named_hash() {
         );
         assert_eq!(
             bus.try_recv(),
-            Some(BusMessage::Info(sink.last_line().into())),
-            "the line the application collects is the line the sink kept"
+            Some(BusMessage::Checksum {
+                element: "ChecksumSink".into(),
+                pts_ns: DIGEST_PTS_NS,
+                digest: expected.into(),
+            }),
+            "the application collects the pts and digest of the line the sink kept"
         );
     }
 }

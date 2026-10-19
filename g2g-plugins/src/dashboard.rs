@@ -184,6 +184,16 @@ pub fn event_value(msg: &BusMessage) -> Option<Value> {
             "latency_max_ns": stats.latency_max_ns,
             "latency_mean_ns": stats.latency_mean_ns,
         }),
+        BusMessage::Checksum {
+            element,
+            pts_ns,
+            digest,
+        } => json!({
+            "kind": "checksum",
+            "element": element,
+            "pts_ns": pts_ns,
+            "digest": digest,
+        }),
         // Skip the large structured payloads the dashboard has no view for, and
         // anything added since.
         _ => return None,
