@@ -878,27 +878,53 @@ mod tests {
         conf: Option<(u32, u32, u32, u32)>,
         ptl: &GeneralProfileTierLevel,
     ) -> BitWriter {
+        let (conformance_window_flag, conformance_window) = match conf {
+            Some((left, right, top, bottom)) => (true, [left, right, top, bottom]),
+            None => (false, [0; 4]),
+        };
+        write_sps_head(&H265SpsHead {
+            sps_video_parameter_set_id: 0,
+            sps_max_sub_layers_minus1: 0,
+            sps_temporal_id_nesting_flag: true,
+            ptl: *ptl,
+            sps_seq_parameter_set_id: 0,
+            chroma_format_idc,
+            separate_colour_plane_flag: false,
+            pic_width_in_luma_samples: pic_w,
+            pic_height_in_luma_samples: pic_h,
+            conformance_window_flag,
+            conformance_window,
+        })
+    }
+
+    // codes no sub-layer profile or level
+    fn write_sps_head(head: &H265SpsHead) -> BitWriter {
         let mut w = BitWriter::default();
-        w.write_bits(0, 4); // sps_video_parameter_set_id
-        w.write_bits(0, 3); // sps_max_sub_layers_minus1
-        w.write_bit(1); // sps_temporal_id_nesting_flag
-        write_profile_tier_level(&mut w, ptl); // single layer = 96 bits
-        w.write_ue(0); // sps_seq_parameter_set_id
-        w.write_ue(chroma_format_idc);
-        if chroma_format_idc == 3 {
-            w.write_bit(0); // separate_colour_plane_flag
+        w.write_bits(u32::from(head.sps_video_parameter_set_id), 4);
+        w.write_bits(u32::from(head.sps_max_sub_layers_minus1), 3);
+        w.write_bit(u32::from(head.sps_temporal_id_nesting_flag));
+        write_profile_tier_level(&mut w, &head.ptl);
+        for _ in 0..head.sps_max_sub_layers_minus1 {
+            w.write_bit(0); // sub_layer_profile_present_flag
+            w.write_bit(0); // sub_layer_level_present_flag
         }
-        w.write_ue(pic_w);
-        w.write_ue(pic_h);
-        match conf {
-            Some((l, r, t, b)) => {
-                w.write_bit(1); // conformance_window_flag
-                w.write_ue(l);
-                w.write_ue(r);
-                w.write_ue(t);
-                w.write_ue(b);
+        if head.sps_max_sub_layers_minus1 > 0 {
+            for _ in head.sps_max_sub_layers_minus1..8 {
+                w.write_bits(0, 2); // reserved_zero_2bits
             }
-            None => w.write_bit(0),
+        }
+        w.write_ue(head.sps_seq_parameter_set_id);
+        w.write_ue(head.chroma_format_idc);
+        if head.chroma_format_idc == 3 {
+            w.write_bit(u32::from(head.separate_colour_plane_flag));
+        }
+        w.write_ue(head.pic_width_in_luma_samples);
+        w.write_ue(head.pic_height_in_luma_samples);
+        w.write_bit(u32::from(head.conformance_window_flag));
+        if head.conformance_window_flag {
+            for offset in head.conformance_window {
+                w.write_ue(offset);
+            }
         }
         w
     }
@@ -949,27 +975,18 @@ mod tests {
         color: Option<(u8, u8, u8, bool)>,
     ) -> Vec<u8> {
         let mut w = sps_head(pic_w, pic_h, 1, None, &ZERO_PTL);
-        w.write_ue(0); // bit_depth_luma_minus8
-        w.write_ue(0); // bit_depth_chroma_minus8
-        w.write_ue(0); // log2_max_pic_order_cnt_lsb_minus4
-        w.write_bit(1); // sps_sub_layer_ordering_info_present_flag
-        w.write_ue(0); // sps_max_dec_pic_buffering_minus1
-        w.write_ue(0); // sps_max_num_reorder_pics
-        w.write_ue(0); // sps_max_latency_increase_plus1
-        w.write_ue(0); // log2_min_luma_coding_block_size_minus3
-        w.write_ue(0); // log2_diff_max_min_luma_coding_block_size
-        w.write_ue(0); // log2_min_luma_transform_block_size_minus2
-        w.write_ue(0); // log2_diff_max_min_luma_transform_block_size
-        w.write_ue(0); // max_transform_hierarchy_depth_inter
-        w.write_ue(0); // max_transform_hierarchy_depth_intra
-        w.write_bit(0); // scaling_list_enabled_flag
-        w.write_bit(0); // amp_enabled_flag
-        w.write_bit(0); // sample_adaptive_offset_enabled_flag
-        w.write_bit(0); // pcm_enabled_flag
-        w.write_ue(0); // num_short_term_ref_pic_sets
-        w.write_bit(0); // long_term_ref_pics_present_flag
-        w.write_bit(0); // sps_temporal_mvp_enabled_flag
-        w.write_bit(0); // strong_intra_smoothing_enabled_flag
+        write_sps_middle(&mut w, &plain_middle(), 0);
+        write_vui(&mut w, num_units_in_tick, time_scale, color);
+        finish_sps(w)
+    }
+
+    // codes only the optional video_signal_type block and timing_info
+    fn write_vui(
+        w: &mut BitWriter,
+        num_units_in_tick: u32,
+        time_scale: u32,
+        color: Option<(u8, u8, u8, bool)>,
+    ) {
         w.write_bit(1); // vui_parameters_present_flag
         w.write_bit(0); // aspect_ratio_info_present_flag
         w.write_bit(0); // overscan_info_present_flag
@@ -993,7 +1010,140 @@ mod tests {
         w.write_bit(1); // vui_timing_info_present_flag
         w.write_bits(num_units_in_tick, 32);
         w.write_bits(time_scale, 32);
-        finish_sps(w)
+    }
+
+    // every optional block absent, one sub-layer with zero ordering limits
+    fn plain_middle() -> H265SpsMiddle {
+        H265SpsMiddle {
+            log2_max_pic_order_cnt_lsb_minus4: Some(0),
+            sub_layer_ordering: Some(H265SubLayerOrdering {
+                info_present_flag: true,
+                ..H265SubLayerOrdering::default()
+            }),
+            ..H265SpsMiddle::default()
+        }
+    }
+
+    fn write_sps_middle(w: &mut BitWriter, middle: &H265SpsMiddle, highest_sub_layer: usize) {
+        write_sps_middle_through_short_term_refs(w, middle, highest_sub_layer);
+        write_sps_middle_from_long_term_refs(w, middle);
+    }
+
+    fn log2_max_pic_order_cnt_lsb_minus4(middle: &H265SpsMiddle) -> u32 {
+        middle
+            .log2_max_pic_order_cnt_lsb_minus4
+            .expect("the writer needs the order-count lsb width")
+    }
+
+    fn write_sps_middle_through_short_term_refs(
+        w: &mut BitWriter,
+        middle: &H265SpsMiddle,
+        highest_sub_layer: usize,
+    ) {
+        w.write_ue(middle.bit_depth_luma_minus8);
+        w.write_ue(middle.bit_depth_chroma_minus8);
+        w.write_ue(log2_max_pic_order_cnt_lsb_minus4(middle));
+        let ordering = middle
+            .sub_layer_ordering
+            .expect("the writer needs the sub-layer ordering");
+        w.write_bit(u32::from(ordering.info_present_flag));
+        let first_coded = if ordering.info_present_flag {
+            0
+        } else {
+            highest_sub_layer
+        };
+        for sub_layer in first_coded..=highest_sub_layer {
+            w.write_ue(ordering.max_dec_pic_buffering_minus1[sub_layer]);
+            w.write_ue(ordering.max_num_reorder_pics[sub_layer]);
+            w.write_ue(ordering.max_latency_increase_plus1[sub_layer]);
+        }
+        w.write_ue(middle.log2_min_luma_coding_block_size_minus3);
+        w.write_ue(middle.log2_diff_max_min_luma_coding_block_size);
+        w.write_ue(middle.log2_min_luma_transform_block_size_minus2);
+        w.write_ue(middle.log2_diff_max_min_luma_transform_block_size);
+        w.write_ue(middle.max_transform_hierarchy_depth_inter);
+        w.write_ue(middle.max_transform_hierarchy_depth_intra);
+        w.write_bit(u32::from(middle.scaling_list_enabled_flag));
+        if middle.scaling_list_enabled_flag {
+            w.write_bit(u32::from(middle.sps_scaling_list_data_present_flag));
+            if middle.sps_scaling_list_data_present_flag {
+                write_scaling_list_data(w);
+            }
+        }
+        w.write_bit(u32::from(middle.amp_enabled_flag));
+        w.write_bit(u32::from(middle.sample_adaptive_offset_enabled_flag));
+        w.write_bit(u32::from(middle.pcm_enabled_flag));
+        if middle.pcm_enabled_flag {
+            w.write_bits(middle.pcm_sample_bit_depth_luma_minus1, 4);
+            w.write_bits(middle.pcm_sample_bit_depth_chroma_minus1, 4);
+            w.write_ue(middle.log2_min_pcm_luma_coding_block_size_minus3);
+            w.write_ue(middle.log2_diff_max_min_pcm_luma_coding_block_size);
+            w.write_bit(u32::from(middle.pcm_loop_filter_disabled_flag));
+        }
+        w.write_ue(middle.short_term_rps.len() as u32);
+        for (idx, set) in middle.short_term_rps.iter().enumerate() {
+            write_explicit_short_term_rps(w, idx, set);
+        }
+    }
+
+    fn write_sps_middle_from_long_term_refs(w: &mut BitWriter, middle: &H265SpsMiddle) {
+        w.write_bit(u32::from(middle.long_term_ref_pics_present_flag));
+        if middle.long_term_ref_pics_present_flag {
+            w.write_ue(middle.num_long_term_ref_pics_sps);
+            for lt in 0..middle.num_long_term_ref_pics_sps as usize {
+                w.write_bits(
+                    middle.lt_ref_pic_poc_lsb_sps[lt],
+                    log2_max_pic_order_cnt_lsb_minus4(middle) + 4,
+                );
+                w.write_bit(u32::from(middle.used_by_curr_pic_lt_sps_flag[lt]));
+            }
+        }
+        w.write_bit(u32::from(middle.sps_temporal_mvp_enabled_flag));
+        w.write_bit(u32::from(middle.strong_intra_smoothing_enabled_flag));
+    }
+
+    fn write_explicit_short_term_rps(w: &mut BitWriter, idx: usize, set: &H265ShortTermRps) {
+        if idx != 0 {
+            w.write_bit(0); // inter_ref_pic_set_prediction_flag
+        }
+        w.write_ue(u32::from(set.num_negative_pics));
+        w.write_ue(u32::from(set.num_positive_pics));
+        let mut previous = 0i32;
+        for k in 0..usize::from(set.num_negative_pics) {
+            w.write_ue((previous - set.delta_poc_s0[k] - 1) as u32); // delta_poc_s0_minus1
+            w.write_bit(u32::from(set.used_s0[k]));
+            previous = set.delta_poc_s0[k];
+        }
+        let mut previous = 0i32;
+        for k in 0..usize::from(set.num_positive_pics) {
+            w.write_ue((set.delta_poc_s1[k] - previous - 1) as u32); // delta_poc_s1_minus1
+            w.write_bit(u32::from(set.used_s1[k]));
+            previous = set.delta_poc_s1[k];
+        }
+    }
+
+    // H.265 7.3.4: a 4x4 list codes 16 coefficients, the larger ones an 8x8 subsample
+    const SCALING_LIST_COEFFICIENTS: [usize; 4] = [16, 64, 64, 64];
+    const SCALING_LIST_MATRICES: [usize; 4] = [6, 6, 6, 2];
+
+    // even matrices are explicit with every delta +1, odd ones copy the previous matrix
+    fn write_scaling_list_data(w: &mut BitWriter) {
+        for size_id in 0..SCALING_LIST_COEFFICIENTS.len() {
+            for matrix_id in 0..SCALING_LIST_MATRICES[size_id] {
+                let explicit = matrix_id % 2 == 0;
+                w.write_bit(u32::from(explicit)); // scaling_list_pred_mode_flag
+                if !explicit {
+                    w.write_ue(1); // scaling_list_pred_matrix_id_delta
+                    continue;
+                }
+                if size_id > 1 {
+                    w.write_ue(1); // scaling_list_dc_coef_minus8 = se(+1)
+                }
+                for _ in 0..SCALING_LIST_COEFFICIENTS[size_id] {
+                    w.write_ue(1); // scaling_list_delta_coef = se(+1)
+                }
+            }
+        }
     }
 
     /// Inverse of `annexb::strip_emulation_prevention`: insert `0x03` after each
@@ -1509,5 +1659,556 @@ mod tests {
             out2.ends_with(&au2),
             "the original AU is preserved at the tail"
         );
+    }
+
+    #[test]
+    fn codec_string_spells_profile_spaces_b_and_c() {
+        let ptl = GeneralProfileTierLevel {
+            profile_space: 2,
+            profile_idc: 1,
+            compatibility_flags: 0x6000_0000,
+            level_idc: 93,
+            ..ZERO_PTL
+        };
+        let stream = build_annexb_sps_with_ptl(&ptl);
+        assert_eq!(h265_codec_string(&stream).as_deref(), Some("hev1.B1.6.L93"));
+        let ptl = GeneralProfileTierLevel {
+            profile_space: 3,
+            ..ptl
+        };
+        let stream = build_annexb_sps_with_ptl(&ptl);
+        assert_eq!(h265_codec_string(&stream).as_deref(), Some("hev1.C1.6.L93"));
+    }
+
+    #[test]
+    fn source_flags_read_the_first_constraint_byte_most_significant_bit_first() {
+        // progressive, interlaced, non-packed, frame-only
+        let flags_by_byte = [
+            (0b1000_0000, [1, 0, 0, 0]),
+            (0b0100_0000, [0, 1, 0, 0]),
+            (0b0010_0000, [0, 0, 1, 0]),
+            (0b0001_0000, [0, 0, 0, 1]),
+            (0b1011_1111, [1, 0, 1, 1]),
+        ];
+        for (first_byte, expected) in flags_by_byte {
+            let ptl = GeneralProfileTierLevel {
+                constraint_bytes: [first_byte, 0, 0, 0, 0, 0],
+                ..ZERO_PTL
+            };
+            let flags = [
+                ptl.progressive_source_flag(),
+                ptl.interlaced_source_flag(),
+                ptl.non_packed_constraint_flag(),
+                ptl.frame_only_constraint_flag(),
+            ];
+            assert_eq!(flags, expected, "constraint byte {first_byte:#010b}");
+        }
+    }
+
+    #[test]
+    fn profile_tier_level_crosses_coded_sub_layer_blocks() {
+        let mut w = BitWriter::default();
+        write_profile_tier_level(&mut w, &ZERO_PTL);
+        let max_sub_layers_minus1 = 2;
+        // sub-layer 0 codes profile and level, sub-layer 1 only a level
+        w.write_bit(1);
+        w.write_bit(1);
+        w.write_bit(0);
+        w.write_bit(1);
+        for _ in max_sub_layers_minus1..8 {
+            w.write_bits(0, 2); // reserved_zero_2bits
+        }
+        // sub_layer profile/tier block of 88 bits, then the 8-bit level
+        w.write_bits(0, 32);
+        w.write_bits(0, 32);
+        w.write_bits(0, 24);
+        w.write_bits(0, 8); // sub_layer_level_idc[0]
+        w.write_bits(0, 8); // sub_layer_level_idc[1]
+        w.write_bit(1); // a marker the reader should land on (ue value 0)
+        w.align_to_byte();
+        let bytes = w.into_bytes();
+        let mut br = BitReader::new(&bytes);
+        read_profile_tier_level(&mut br, max_sub_layers_minus1).expect("reads every block");
+        assert_eq!(
+            br.read_ue(),
+            Some(0),
+            "reader landed just past the sub-layer blocks"
+        );
+        assert_eq!(br.read_bit(), Some(0), "only alignment padding is left");
+    }
+
+    fn head_with(chroma_format_idc: u32, separate_colour_plane_flag: bool) -> H265SpsHead {
+        H265SpsHead {
+            sps_video_parameter_set_id: 5,
+            sps_max_sub_layers_minus1: 0,
+            sps_temporal_id_nesting_flag: true,
+            ptl: ZERO_PTL,
+            sps_seq_parameter_set_id: 7,
+            chroma_format_idc,
+            separate_colour_plane_flag,
+            pic_width_in_luma_samples: 1920,
+            pic_height_in_luma_samples: 1088,
+            conformance_window_flag: true,
+            conformance_window: [0, 0, 0, 4],
+        }
+    }
+
+    fn annexb_sps(head: &H265SpsHead, middle: &H265SpsMiddle, frame_rate: (u32, u32)) -> Vec<u8> {
+        let (num_units_in_tick, time_scale) = frame_rate;
+        let mut w = write_sps_head(head);
+        write_sps_middle(&mut w, middle, usize::from(head.sps_max_sub_layers_minus1));
+        write_vui(&mut w, num_units_in_tick, time_scale, None);
+        finish_sps(w)
+    }
+
+    const FRAME_RATE_25: (u32, u32) = (1, 25);
+    const FRAME_RATE_25_Q16: u32 = 25 << 16;
+
+    #[test]
+    fn sps_head_reads_every_field_as_coded() {
+        let coded = head_with(3, true);
+        let stream = annexb_sps(&coded, &plain_middle(), FRAME_RATE_25);
+        let rbsp = strip_emulation_prevention(&stream[ANNEX_B_SPS_HEADER_BYTES..]);
+        let (head, _) = parse_h265_sps_head(&rbsp).expect("SPS head parses");
+        assert_eq!(
+            head.sps_video_parameter_set_id,
+            coded.sps_video_parameter_set_id
+        );
+        assert_eq!(
+            head.sps_max_sub_layers_minus1,
+            coded.sps_max_sub_layers_minus1
+        );
+        assert!(head.sps_temporal_id_nesting_flag);
+        assert_eq!(
+            head.sps_seq_parameter_set_id,
+            coded.sps_seq_parameter_set_id
+        );
+        assert_eq!(head.chroma_format_idc, coded.chroma_format_idc);
+        assert!(head.separate_colour_plane_flag);
+        assert_eq!(
+            head.pic_width_in_luma_samples,
+            coded.pic_width_in_luma_samples
+        );
+        assert_eq!(
+            head.pic_height_in_luma_samples,
+            coded.pic_height_in_luma_samples
+        );
+        assert!(head.conformance_window_flag);
+        assert_eq!(head.conformance_window, coded.conformance_window);
+    }
+
+    // start code and the two NAL header bytes
+    const ANNEX_B_SPS_HEADER_BYTES: usize = 6;
+
+    #[test]
+    fn separate_colour_planes_and_poc_lsb_width_reach_the_poc_fields() {
+        // the slice header codes colour_plane_id only under the flag
+        let mut middle = plain_middle();
+        middle.log2_max_pic_order_cnt_lsb_minus4 = Some(2);
+        let stream = annexb_sps(&head_with(3, true), &middle, FRAME_RATE_25);
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS parses");
+        let expected = crate::poc::SpsPocParams {
+            log2_max_pic_order_cnt_lsb: 2 + 4,
+            separate_colour_plane_flag: true,
+            ..crate::poc::SpsPocParams::default()
+        };
+        assert_eq!(info.poc, Some(expected));
+    }
+
+    #[test]
+    fn four_two_two_conformance_window_crops_in_chroma_units() {
+        // SubWidthC 2, SubHeightC 1: 4 units right are 8 columns, 4 units bottom 4 rows
+        let stream = build_annexb_sps(1928, 1084, 2, Some((0, 4, 0, 4)));
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS parses");
+        assert_eq!((info.width, info.height), (1920, 1080));
+    }
+
+    #[test]
+    fn only_zero_reorder_pictures_present_in_decode_order() {
+        let stream = annexb_sps(&head_with(1, false), &plain_middle(), FRAME_RATE_25);
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS parses");
+        assert!(info.presents_in_decode_order);
+        let mut middle = plain_middle();
+        let mut ordering = middle
+            .sub_layer_ordering
+            .expect("plain middle has ordering");
+        ordering.max_num_reorder_pics[0] = 2;
+        middle.sub_layer_ordering = Some(ordering);
+        let stream = annexb_sps(&head_with(1, false), &middle, FRAME_RATE_25);
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS parses");
+        assert!(!info.presents_in_decode_order);
+    }
+
+    #[test]
+    fn poc_lsb_width_is_bounded() {
+        let mut middle = plain_middle();
+        middle.log2_max_pic_order_cnt_lsb_minus4 = Some(crate::poc::MAX_LOG2_MINUS4);
+        let stream = annexb_sps(&head_with(1, false), &middle, FRAME_RATE_25);
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS parses");
+        let lsb_width = info.poc.map(|poc| poc.log2_max_pic_order_cnt_lsb);
+        assert_eq!(lsb_width, Some(crate::poc::MAX_LOG2_MINUS4 + 4));
+        assert_eq!(info.framerate, Some(FRAME_RATE_25_Q16));
+
+        middle.log2_max_pic_order_cnt_lsb_minus4 = Some(crate::poc::MAX_LOG2_MINUS4 + 1);
+        let stream = annexb_sps(&head_with(1, false), &middle, FRAME_RATE_25);
+        let info = H265Codec::extract_sps_info(&stream).expect("geometry still parses");
+        assert_eq!((info.width, info.height), (1920, 1080));
+        assert_eq!(info.poc, None);
+        assert_eq!(info.framerate, None);
+    }
+
+    #[test]
+    fn sub_layer_ordering_reads_every_coded_sub_layer() {
+        let mut head = head_with(1, false);
+        head.sps_max_sub_layers_minus1 = 2;
+        for info_present_flag in [true, false] {
+            let mut middle = plain_middle();
+            middle.sub_layer_ordering = Some(H265SubLayerOrdering {
+                info_present_flag,
+                max_dec_pic_buffering_minus1: [4, 4, 4, 0, 0, 0, 0],
+                // only the highest sub-layer forbids reordering
+                max_num_reorder_pics: [2, 1, 0, 0, 0, 0, 0],
+                max_latency_increase_plus1: [0; H265_MAX_SUB_LAYERS],
+            });
+            let stream = annexb_sps(&head, &middle, FRAME_RATE_25);
+            let info = H265Codec::extract_sps_info(&stream).expect("SPS parses");
+            assert!(
+                info.presents_in_decode_order,
+                "info present {info_present_flag}"
+            );
+            assert_eq!(info.framerate, Some(FRAME_RATE_25_Q16));
+        }
+    }
+
+    #[test]
+    fn scaling_list_data_is_crossed_to_the_vui() {
+        for data_present in [true, false] {
+            let mut middle = plain_middle();
+            middle.scaling_list_enabled_flag = true;
+            middle.sps_scaling_list_data_present_flag = data_present;
+            let stream = annexb_sps(&head_with(1, false), &middle, FRAME_RATE_25);
+            let info = H265Codec::extract_sps_info(&stream).expect("SPS parses");
+            assert_eq!(
+                info.framerate,
+                Some(FRAME_RATE_25_Q16),
+                "scaling list data present {data_present}"
+            );
+        }
+    }
+
+    #[test]
+    fn sps_middle_reads_every_field_as_coded() {
+        let mut coded = plain_middle();
+        coded.bit_depth_luma_minus8 = 2;
+        coded.bit_depth_chroma_minus8 = 2;
+        coded.amp_enabled_flag = true;
+        coded.sample_adaptive_offset_enabled_flag = true;
+        coded.pcm_enabled_flag = true;
+        coded.pcm_sample_bit_depth_luma_minus1 = 7;
+        coded.pcm_sample_bit_depth_chroma_minus1 = 6;
+        coded.log2_min_pcm_luma_coding_block_size_minus3 = 1;
+        coded.log2_diff_max_min_pcm_luma_coding_block_size = 2;
+        coded.pcm_loop_filter_disabled_flag = true;
+        coded.long_term_ref_pics_present_flag = true;
+        coded.num_long_term_ref_pics_sps = 2;
+        coded.lt_ref_pic_poc_lsb_sps[0] = 9;
+        coded.lt_ref_pic_poc_lsb_sps[1] = 14;
+        coded.used_by_curr_pic_lt_sps_flag[1] = true;
+        coded.sps_temporal_mvp_enabled_flag = true;
+        coded.strong_intra_smoothing_enabled_flag = true;
+        let mut w = BitWriter::default();
+        write_sps_middle(&mut w, &coded, 0);
+        w.write_bit(1); // a marker the reader should land on
+        w.align_to_byte();
+        let bytes = w.into_bytes();
+        let mut br = BitReader::new(&bytes);
+        let mut middle = H265SpsMiddle::default();
+        read_h265_sps_middle(&mut br, 0, &mut middle).expect("middle parses");
+        assert_eq!(middle.bit_depth_luma_minus8, coded.bit_depth_luma_minus8);
+        assert_eq!(
+            middle.bit_depth_chroma_minus8,
+            coded.bit_depth_chroma_minus8
+        );
+        assert!(middle.amp_enabled_flag);
+        assert!(middle.sample_adaptive_offset_enabled_flag);
+        assert!(middle.pcm_enabled_flag);
+        assert_eq!(
+            middle.pcm_sample_bit_depth_luma_minus1,
+            coded.pcm_sample_bit_depth_luma_minus1
+        );
+        assert_eq!(
+            middle.pcm_sample_bit_depth_chroma_minus1,
+            coded.pcm_sample_bit_depth_chroma_minus1
+        );
+        assert_eq!(
+            middle.log2_min_pcm_luma_coding_block_size_minus3,
+            coded.log2_min_pcm_luma_coding_block_size_minus3
+        );
+        assert_eq!(
+            middle.log2_diff_max_min_pcm_luma_coding_block_size,
+            coded.log2_diff_max_min_pcm_luma_coding_block_size
+        );
+        assert!(middle.pcm_loop_filter_disabled_flag);
+        assert!(middle.long_term_ref_pics_present_flag);
+        assert_eq!(
+            middle.num_long_term_ref_pics_sps,
+            coded.num_long_term_ref_pics_sps
+        );
+        assert_eq!(middle.lt_ref_pic_poc_lsb_sps, coded.lt_ref_pic_poc_lsb_sps);
+        assert_eq!(
+            middle.used_by_curr_pic_lt_sps_flag,
+            coded.used_by_curr_pic_lt_sps_flag
+        );
+        assert!(middle.sps_temporal_mvp_enabled_flag);
+        assert!(middle.strong_intra_smoothing_enabled_flag);
+        assert_eq!(br.read_bit(), Some(1), "reader landed on the marker");
+    }
+
+    #[test]
+    fn short_term_ref_pic_set_count_is_bounded() {
+        let one_back = H265ShortTermRps {
+            num_negative_pics: 1,
+            delta_poc_s0: [-1; 16],
+            used_s0: [true; 16],
+            ..H265ShortTermRps::default()
+        };
+        let mut middle = plain_middle();
+        middle.short_term_rps = vec![one_back; H265_MAX_SHORT_TERM_REF_PIC_SETS as usize];
+        let stream = annexb_sps(&head_with(1, false), &middle, FRAME_RATE_25);
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS parses");
+        assert_eq!(info.framerate, Some(FRAME_RATE_25_Q16));
+
+        middle.short_term_rps.push(middle.short_term_rps[0].clone());
+        let stream = annexb_sps(&head_with(1, false), &middle, FRAME_RATE_25);
+        let info = H265Codec::extract_sps_info(&stream).expect("geometry still parses");
+        assert_eq!((info.width, info.height), (1920, 1080));
+        assert_eq!(info.framerate, None);
+    }
+
+    #[test]
+    fn long_term_ref_pic_count_is_bounded() {
+        let mut middle = plain_middle();
+        middle.long_term_ref_pics_present_flag = true;
+        middle.num_long_term_ref_pics_sps = H265_MAX_LONG_TERM_REF_PICS_SPS as u32;
+        let stream = annexb_sps(&head_with(1, false), &middle, FRAME_RATE_25);
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS parses");
+        assert_eq!(info.framerate, Some(FRAME_RATE_25_Q16));
+
+        // past the array bound, so coded by hand from the long-term block on
+        let middle = plain_middle();
+        let mut w = write_sps_head(&head_with(1, false));
+        write_sps_middle_through_short_term_refs(&mut w, &middle, 0);
+        w.write_bit(1); // long_term_ref_pics_present_flag
+        let too_many = H265_MAX_LONG_TERM_REF_PICS_SPS as u32 + 1;
+        w.write_ue(too_many);
+        for _ in 0..too_many {
+            w.write_bits(0, log2_max_pic_order_cnt_lsb_minus4(&middle) + 4); // lt_ref_pic_poc_lsb_sps
+            w.write_bit(0); // used_by_curr_pic_lt_sps_flag
+        }
+        w.write_bit(0); // sps_temporal_mvp_enabled_flag
+        w.write_bit(0); // strong_intra_smoothing_enabled_flag
+        write_vui(&mut w, FRAME_RATE_25.0, FRAME_RATE_25.1, None);
+        let stream = finish_sps(w);
+        let info = H265Codec::extract_sps_info(&stream).expect("geometry still parses");
+        assert_eq!((info.width, info.height), (1920, 1080));
+        assert_eq!(info.framerate, None);
+    }
+
+    #[test]
+    fn a_one_byte_nal_is_skipped_without_reading_past_it() {
+        let mut stream = vec![0u8, 0, 0, 1, 0x42];
+        stream.extend_from_slice(&build_annexb_sps(1280, 720, 1, None));
+        let info = H265Codec::extract_sps_info(&stream).expect("the later SPS parses");
+        assert_eq!((info.width, info.height), (1280, 720));
+    }
+
+    // (POC delta, used by the current picture) per picture, negative then positive
+    type RpsPictures = (Vec<(i32, bool)>, Vec<(i32, bool)>);
+
+    fn short_term_set(negative: &[(i32, bool)], positive: &[(i32, bool)]) -> H265ShortTermRps {
+        let mut set = H265ShortTermRps {
+            num_negative_pics: negative.len() as u8,
+            num_positive_pics: positive.len() as u8,
+            ..H265ShortTermRps::default()
+        };
+        for (k, &(delta, used)) in negative.iter().enumerate() {
+            set.delta_poc_s0[k] = delta;
+            set.used_s0[k] = used;
+        }
+        for (k, &(delta, used)) in positive.iter().enumerate() {
+            set.delta_poc_s1[k] = delta;
+            set.used_s1[k] = used;
+        }
+        set
+    }
+
+    fn pictures(set: &H265ShortTermRps) -> RpsPictures {
+        let negative = usize::from(set.num_negative_pics);
+        let positive = usize::from(set.num_positive_pics);
+        (
+            set.delta_poc_s0[..negative]
+                .iter()
+                .copied()
+                .zip(set.used_s0[..negative].iter().copied())
+                .collect(),
+            set.delta_poc_s1[..positive]
+                .iter()
+                .copied()
+                .zip(set.used_s1[..positive].iter().copied())
+                .collect(),
+        )
+    }
+
+    // flags holds (used_by_curr_pic_flag, use_delta_flag) per reference picture, then deltaRps
+    fn inter_predicted_rps(
+        delta_idx_minus1: Option<u32>,
+        delta_rps: i32,
+        flags: &[(bool, bool)],
+    ) -> Vec<u8> {
+        let mut w = BitWriter::default();
+        w.write_bit(1); // inter_ref_pic_set_prediction_flag
+        if let Some(delta_idx_minus1) = delta_idx_minus1 {
+            w.write_ue(delta_idx_minus1);
+        }
+        w.write_bit(u32::from(delta_rps < 0)); // delta_rps_sign
+        w.write_ue(delta_rps.unsigned_abs() - 1); // abs_delta_rps_minus1
+        for &(used_by_curr_pic, use_delta) in flags {
+            w.write_bit(u32::from(used_by_curr_pic));
+            if !used_by_curr_pic {
+                w.write_bit(u32::from(use_delta));
+            }
+        }
+        w.write_bit(1); // a marker the reader should land on
+        w.align_to_byte();
+        w.into_bytes()
+    }
+
+    // two pictures before and three after, so S0 and S1 indices differ
+    fn reference_set() -> H265ShortTermRps {
+        short_term_set(
+            &[(-1, true), (-3, true)],
+            &[(2, true), (4, true), (5, true)],
+        )
+    }
+
+    const REFERENCE_SET_PICTURES: u8 = 5;
+
+    fn parse_rps(
+        bytes: &[u8],
+        idx: usize,
+        num_sets: usize,
+        prev: &[H265ShortTermRps],
+    ) -> (RpsPictures, u8) {
+        let mut br = BitReader::new(bytes);
+        let (set, reference_pictures) =
+            parse_h265_short_term_rps(&mut br, idx, num_sets, prev).expect("set parses");
+        assert_eq!(br.read_bit(), Some(1), "reader landed on the marker");
+        (pictures(&set), reference_pictures)
+    }
+
+    #[test]
+    fn explicit_short_term_set_reads_deltas_and_flags() {
+        let coded = short_term_set(&[(-1, true), (-4, false)], &[(2, false), (3, true)]);
+        let mut w = BitWriter::default();
+        write_explicit_short_term_rps(&mut w, 1, &coded);
+        w.write_bit(1);
+        w.align_to_byte();
+        let (parsed, reference_pictures) = parse_rps(&w.into_bytes(), 1, 2, &[reference_set()]);
+        assert_eq!(parsed, pictures(&coded));
+        assert_eq!(
+            reference_pictures, 0,
+            "an explicit set references no other set"
+        );
+    }
+
+    #[test]
+    fn explicit_short_term_set_rejects_more_than_sixteen_pictures_a_side() {
+        let too_many = 17;
+        for (negative, positive) in [(too_many, 0), (0, too_many)] {
+            let mut w = BitWriter::default();
+            w.write_ue(negative); // num_negative_pics
+            w.write_ue(positive); // num_positive_pics
+            for _ in 0..negative + positive {
+                w.write_ue(0); // delta_poc_s*_minus1
+                w.write_bit(1); // used_by_curr_pic_s*_flag
+            }
+            w.align_to_byte();
+            let bytes = w.into_bytes();
+            let mut br = BitReader::new(&bytes);
+            assert!(parse_h265_short_term_rps(&mut br, 0, 1, &[]).is_none());
+        }
+    }
+
+    // H.265 7.4.8 for deltaRps -1 over S0 {-1, -3} and S1 {2, 4, 5}: S0 shifts to
+    // {-2, -4}, S1 to {1, 3, 4}, and deltaRps itself is a picture at -1.
+    const BACKWARD_FLAGS: [(bool, bool); 6] = [
+        (true, true),
+        (false, true),
+        // dropped: S1[0] moved to 1
+        (false, false),
+        (true, true),
+        (false, true),
+        (true, true),
+    ];
+
+    fn backward_prediction() -> RpsPictures {
+        (
+            vec![(-1, true), (-2, true), (-4, false)],
+            vec![(3, true), (4, false)],
+        )
+    }
+
+    #[test]
+    fn inter_predicted_set_shifts_the_reference_back() {
+        let bytes = inter_predicted_rps(None, -1, &BACKWARD_FLAGS);
+        let (parsed, reference_pictures) = parse_rps(&bytes, 1, 2, &[reference_set()]);
+        assert_eq!(parsed, backward_prediction());
+        assert_eq!(reference_pictures, REFERENCE_SET_PICTURES);
+    }
+
+    #[test]
+    fn inter_predicted_set_shifts_the_reference_forward() {
+        // deltaRps +2: S0 moves to {1, -1}, S1 to {4, 6, 7}, and +2 itself
+        let mut flags = [(true, true); 6];
+        flags[0] = (false, false);
+        let bytes = inter_predicted_rps(None, 2, &flags);
+        let (parsed, _) = parse_rps(&bytes, 1, 2, &[reference_set()]);
+        assert_eq!(
+            parsed,
+            (
+                vec![(-1, true)],
+                vec![(2, true), (4, true), (6, true), (7, true)]
+            )
+        );
+    }
+
+    #[test]
+    fn slice_header_set_predicts_from_the_coded_reference_index() {
+        // the slice's set sits at num_short_term_ref_pic_sets and names its reference
+        let sets = [reference_set(), short_term_set(&[], &[])];
+        let delta_idx_minus1 = 1;
+        let bytes = inter_predicted_rps(Some(delta_idx_minus1), -1, &BACKWARD_FLAGS);
+        let (parsed, reference_pictures) = parse_rps(&bytes, sets.len(), sets.len(), &sets);
+        assert_eq!(parsed, backward_prediction());
+        assert_eq!(reference_pictures, REFERENCE_SET_PICTURES);
+    }
+
+    #[test]
+    fn inter_predicted_set_keeps_at_most_sixteen_pictures_a_side() {
+        let side = 16;
+        let negative: Vec<(i32, bool)> = (1..=side).map(|k| (-k, true)).collect();
+        let positive: Vec<(i32, bool)> = (1..=side).map(|k| (k, true)).collect();
+        let reference = short_term_set(&negative, &positive);
+        let flags = vec![(true, true); 2 * side as usize + 1];
+        // shifting past the far side moves all 33 candidates to one side
+        let shift = side + 1;
+
+        let bytes = inter_predicted_rps(None, -shift, &flags);
+        let (parsed, _) = parse_rps(&bytes, 1, 2, core::slice::from_ref(&reference));
+        assert_eq!(parsed, (negative.clone(), vec![]));
+
+        let bytes = inter_predicted_rps(None, shift, &flags);
+        let (parsed, _) = parse_rps(&bytes, 1, 2, core::slice::from_ref(&reference));
+        assert_eq!(parsed, (vec![], positive));
     }
 }

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1621: `h265parse` tests pin the SPS head and middle fields, their count bounds, scaling lists, sub-layer ordering and the short-term RPS derivation that cargo-mutants found untested.
 - M1620: `h264parse` tests pin the SPS head fields, the 4:2:2 and field crop units, separate colour planes and the per-level reorder depth that cargo-mutants found untested.
 - M1615: `ffmpegdec` skips a tagged codec's packet libavcodec rejects as an unknown error and converts to the packed RGB the negotiation picked.
 - M1601: a bare `decodebin` behind a network source no longer opens the source's `location` URI as a file and logs a spurious open error.
