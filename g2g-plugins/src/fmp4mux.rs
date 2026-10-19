@@ -731,7 +731,8 @@ mod tests {
             let moof = &out[moof_at + 8..moof_at + moof_len as usize];
             let traf = find_box(moof, b"traf").unwrap();
             let trun = find_box(traf, b"trun").unwrap();
-            let samples = parse_trun(trun, 0, 0, out.len()).unwrap();
+            let samples =
+                parse_trun(trun, crate::fmp4::SampleDefaults::default(), out.len()).unwrap();
             assert_eq!(samples.len(), 1);
             got.push((samples[0].duration, samples[0].composition_offset));
         }

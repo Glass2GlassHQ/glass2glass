@@ -562,8 +562,18 @@ fn default_mac_color_256(index: usize) -> [u8; 3] {
 // the extension atoms mov.c turns into extradata
 fn extension_atom(id: Id, kind: &[u8; 4], payload: &[u8], extradata: &mut Vec<u8>) {
     const BITMAPINFO_IN_STRF: usize = BITMAPINFO_LEN;
+    // profile and level byte plus six more before the VC-1 sequence header
+    const DVC1_HEADER_LEN: usize = 7;
+    const DVC1_PROFILE_MASK: u8 = 0xF0;
+    const DVC1_ADVANCED_PROFILE: u8 = 0xC0;
     match kind {
         b"glbl" if extradata.len() <= 1 => *extradata = payload.to_vec(),
+        b"dvc1"
+            if payload.len() >= DVC1_HEADER_LEN
+                && payload[0] & DVC1_PROFILE_MASK == DVC1_ADVANCED_PROFILE =>
+        {
+            *extradata = payload[DVC1_HEADER_LEN..].to_vec()
+        }
         b"strf" if payload.len() > BITMAPINFO_IN_STRF => {
             *extradata = payload[BITMAPINFO_IN_STRF..].to_vec()
         }
@@ -769,6 +779,23 @@ mod tests {
         );
         assert_eq!(audio_codec_id(mov(b"MAC3")), Some(Id::MACE3));
         assert_eq!(audio_codec_id(mov(b"ms\0\x02")), Some(Id::ADPCM_MS));
+    }
+
+    #[test]
+    fn an_advanced_profile_dvc1_atom_gives_its_sequence_header_as_extradata() {
+        // the start of the dvc1 atom in fate-suite isom/vc1-wmapro.ism
+        let header = [0xC8, 0x80, 0x24, 0x18, 0x18, 0x3B, 0xF7];
+        let sequence_header = [0x25, 0x00, 0x00, 0x01, 0x0F, 0xCB];
+        let mut payload = [header.as_slice(), &sequence_header].concat();
+        let mut extradata = Vec::new();
+        extension_atom(Id::VC1, b"dvc1", &payload, &mut extradata);
+        assert_eq!(extradata, sequence_header);
+
+        const MAIN_PROFILE: u8 = 0x40;
+        payload[0] = MAIN_PROFILE;
+        extradata.clear();
+        extension_atom(Id::VC1, b"dvc1", &payload, &mut extradata);
+        assert!(extradata.is_empty());
     }
 
     #[test]

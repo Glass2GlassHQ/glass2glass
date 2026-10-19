@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1595: the mp4 demuxers keep the cut last sample of a truncated file for a tagged long-tail video track, as libavformat does.
+- M1594: VC-1 in an ISMV track decodes with its `dvc1` sequence header as extradata.
+- M1593: fragmented mp4 keyframes follow the `trun` and `tfhd` sample flags, and every sample of an intra-only codec is a keyframe.
 - M1590: with `ffmpeg-long-tail`, AVI, QuickTime and Matroska streams of codecs g2g has no caps for decode through libavcodec under their container tag.
 - M1592: `ffmpegdec` with the cuvid backend fails on a codec that has no cuvid decoder instead of panicking.
 - M1589: the mp4 demuxers and `matroskademux` emit ProRes and DNxHD as typed codecs, which `ffmpegdec` decodes, ProRes 4444 alpha as the new `A444p12` raw format.

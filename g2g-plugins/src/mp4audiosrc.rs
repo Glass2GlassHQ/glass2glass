@@ -199,14 +199,16 @@ fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
 /// Walk `moof`+`mdat` pairs and split every raw AAC access unit out of its
 /// `mdat`.
 fn parse_fragments(data: &[u8], timescale: u32) -> Result<Vec<Sample>, G2gError> {
-    Ok(moof_samples(data, 0, |_| Some((timescale, None, (0, 0))))?
-        .into_iter()
-        .map(|sample| Sample {
-            au: sample.bytes.to_vec(),
-            pts_ns: sample.timing.pts_ns,
-            duration_ns: sample.timing.duration_ns,
-        })
-        .collect())
+    Ok(moof_samples(data, 0, |_| {
+        Some((timescale, None, crate::fmp4::SampleDefaults::default()))
+    })?
+    .into_iter()
+    .map(|sample| Sample {
+        au: sample.bytes.to_vec(),
+        pts_ns: sample.timing.pts_ns,
+        duration_ns: sample.timing.duration_ns,
+    })
+    .collect())
 }
 
 #[cfg(test)]
