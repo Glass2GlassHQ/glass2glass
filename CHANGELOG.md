@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1650: `uridecodebin uri=X name=d` decodes each stream of a file, RTSP or HLS URI on its own `d.` branch, and a bare `d.` decodes an audio port too.
 - M1642: `decklinkaudiosink` plays 48 kHz S16LE or S32LE PCM in 2, 8 or 16 channels on the device of its `decklinkvideosink`.
 - M1641: `decklinkvideosink` schedules UYVY, BGRA, v210 and r210 frames on an SDI output for Blackmagic Design DeckLink and offers the board clock.
 - M1640: the `decklink` feature builds a shim over the vendored SDK 16.0 headers that loads `libDeckLinkAPI.so` at runtime.

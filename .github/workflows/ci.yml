@@ -227,6 +227,9 @@ jobs:
         run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1124_encoder_colorimetry
       - name: TS audio codec auto-plug selection
         run: cargo test -p g2g-plugins --locked --features ffmpeg,opus --test m753_ts_audio_codecs --test m757_ac3_flac
+      # ffmpeg packetizes the A/V fixture as RTP, the job with its CLI is where these run
+      - name: RTSP video and audio pads
+        run: cargo test -p g2g-plugins --locked --features ffmpeg,rtsp --test m1650_uridecodebin_fanout
       # Needs the ffmpeg + ffprobe CLIs for its fixtures and its reference peer.
       - name: discovery vs ffprobe
         run: cargo test -p g2g-plugins --locked --features tooling-json --test m1107_discover

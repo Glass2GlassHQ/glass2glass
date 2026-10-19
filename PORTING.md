@@ -73,6 +73,13 @@ grammar as the raw demuxer fan-out above; the difference is `decodebin` decodes,
 probing at parse time rather than gst's runtime `pad-added`, so it's file sources
 feeding a multi-stream container.)
 
+**`uridecodebin uri=X name=d` fans out** the same way for any URI a fan-out probe
+understands: a local file, `rtsp://` (video and audio off one session), and
+`hls://`. `uridecodebin uri=rtsp://cam/stream name=d  d. ! videoconvert ! autovideosink
+d. ! audioconvert ! autoaudiosink` runs unchanged. Bare `d.` refs take the ports
+in order, video first, where gst links them by caps. When the audio branch comes
+first, name the pads the way `uridecodebin3` does (`d.video_0`, `d.audio_0`).
+
 **Named input / request pads** let a fan-in reference its inputs by name in any
 order: `d.video_0 ! ... ! o.video   d.text_0 ! o.text   textoverlay name=o ! ...`
 and `... ! m.video_0   ... ! m.audio_0   matroskamux name=m ! ...`. Bare `m.`
@@ -164,7 +171,8 @@ hint where possible); rewrite as shown:
 | :--- | :--- | :--- |
 | caps feature `video/x-raw(memory:GLMemory)` | not supported | drop the feature; g2g picks the memory domain during negotiation (GPU vs system) automatically |
 | bins `( videoconvert ! videoscale )` | not supported (no bin/grouping syntax) | flatten the group inline, or build the sub-graph in Rust and `Graph::merge` it |
-| demux fan-out on a network source `udpsrc ! qtdemux name=d d.video_0 ! …` | file sources only | demux a local file, or use `uridecodebin` / `playbin` for network multi-stream |
+| demux fan-out on a network source `udpsrc ! qtdemux name=d d.video_0 ! …` | file sources only | demux a local file, or use `uridecodebin uri=X name=d` / `playbin` for network multi-stream |
+| `rtspsrc ! decodebin name=d d. ! … d. ! …` | not supported (gst fails it too: `decodebin` takes one `rtspsrc` pad) | `uridecodebin uri=rtsp://… name=d` |
 
 ### Equivalence cookbook
 

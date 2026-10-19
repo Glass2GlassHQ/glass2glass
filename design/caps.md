@@ -824,6 +824,16 @@ as before.
   gst's MP3 typefind asks. A program stream needs a second start code behind
   its pack header.
 
+- **uridecodebin fan-out** (`std`). `uridecodebin uri=X name=d` with `d.`
+  references runs the URI fan-out hooks a lone `fallbacksrc` uses
+  (`Registry::register_uri_fanout`). The hook's head, a byte source plus demuxer or a
+  session source such as `RtspSrcN`, becomes the `d` node, and each reference
+  decodes the port its pad request names: `d.video_N` / `d.audio_N` by kind,
+  `d.src_N` or the Nth bare `d.` by position. A URI no hook claims takes the
+  single-stream expansion, its last node named `d`. The decode target of every
+  fan-out port, here and behind `decodebin name=d`, follows the port's caps rather
+  than the pad request, so a bare `d.` on an audio port decodes to raw audio.
+
 - **playbin (multi-stream front door)** (`std`). Beyond the
   single-stream expansion, g2g's `playbin` can split a container into *all* its
   streams and decode each to its own sink, built on the stream-collection model:

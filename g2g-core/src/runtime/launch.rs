@@ -398,6 +398,7 @@ enum Item {
 enum PrebuiltNode {
     Source(Box<dyn DynSourceLoop>),
     Element(Box<dyn DynAsyncElement>),
+    UriFanout(UriFanout),
 }
 
 /// A run of items linked left-to-right by `!`. Branches are separate chains
@@ -931,6 +932,23 @@ fn choose_container_stream(
     Ok(streams.streams.swap_remove(chosen))
 }
 
+fn referenced_names(chains: &[Chain]) -> alloc::collections::BTreeSet<String> {
+    chains
+        .iter()
+        .flatten()
+        .filter_map(|item| match item {
+            Item::Ref { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_referenced(spec: &ElementSpec, referenced: &alloc::collections::BTreeSet<String>) -> bool {
+    spec.instance
+        .as_deref()
+        .is_some_and(|name| referenced.contains(name))
+}
+
 /// Expand every `decodebin` node into the decoder chain the registry auto-plugs
 /// from its predecessor's declared caps down to raw (video or audio). An empty
 /// chain (the input is already raw) drops the node entirely, so its predecessor
@@ -948,22 +966,9 @@ fn expand_decodebin(
     // here and handled by the decodebin-select path in `build_graph` (which probes
     // the file, demuxes, and decodes each requested port). Only the unreferenced
     // inline `... ! decodebin ! ...` expands to a linear decode chain below.
-    let mut referenced: alloc::collections::BTreeSet<String> = alloc::collections::BTreeSet::new();
-    for chain in &chains {
-        for item in chain {
-            if let Item::Ref { name, .. } = item {
-                referenced.insert(name.clone());
-            }
-        }
-    }
-    let is_fanout_decodebin = |spec: &ElementSpec| {
-        is_decodebin(&spec.name)
-            && spec
-                .instance
-                .as_deref()
-                .map(|n| referenced.contains(n))
-                .unwrap_or(false)
-    };
+    let referenced = referenced_names(&chains);
+    let is_fanout_decodebin =
+        |spec: &ElementSpec| is_decodebin(&spec.name) && is_referenced(spec, &referenced);
 
     let mut out = Vec::with_capacity(chains.len());
     for chain in chains {
@@ -2334,6 +2339,7 @@ fn expand_uri_sources(
     // A `fallbacksrc` that is the whole line has nothing downstream of its
     // switch, so the expansion appends the sink for the kind it reached.
     let lone_fallbacksrc = lone_fallbacksrc_spec(&chains).is_some();
+    let referenced = referenced_names(&chains);
     for chain in chains {
         let mut new_chain: Chain = Vec::with_capacity(chain.len());
         let mut fallback_chains: Vec<Chain> = Vec::new();
@@ -2375,6 +2381,17 @@ fn expand_uri_sources(
             let is_playbin = spec.name.starts_with("playbin");
             let uri =
                 prop(&spec, "uri").ok_or_else(|| ParseError::MissingUri(spec.name.clone()))?;
+            // `uridecodebin name=d  d. ! ...  d. ! ...` exposes every stream the URI
+            // carries, as gst's does. A URI no fan-out hook claims has one stream.
+            if !is_playbin && is_referenced(&spec, &referenced) {
+                if let Some(fanout) = uri_fanout(registry, uri)? {
+                    new_chain.push(Item::Prebuilt {
+                        node: PrebuiltNode::UriFanout(fanout),
+                        name: spec.instance.clone(),
+                    });
+                    continue;
+                }
+            }
             let (source, caps) = registry
                 .build_uri_source(uri)
                 .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
@@ -2407,6 +2424,12 @@ fn expand_uri_sources(
                     node: PrebuiltNode::Element(dec),
                     name: None,
                 });
+            }
+            // `d.` references read the decoded stream, so the name goes on the last node
+            if !is_playbin {
+                if let Some(Item::Prebuilt { name, .. }) = new_chain.last_mut() {
+                    *name = spec.instance.clone();
+                }
             }
             if let Some(sink) = sink {
                 new_chain.push(Item::Element(ElementSpec {
@@ -2481,7 +2504,7 @@ fn build_graph(
                         names.push((inst.clone(), ei));
                     }
                     let placeholder = match node {
-                        PrebuiltNode::Source(_) => "uridecodebin",
+                        PrebuiltNode::Source(_) | PrebuiltNode::UriFanout(_) => "uridecodebin",
                         PrebuiltNode::Element(_) => "(decoder)",
                     };
                     specs.push(ElementSpec {
@@ -2763,7 +2786,23 @@ fn build_graph(
             }
         }
     }
-    let is_select: Vec<bool> = demux_select_node.iter().map(|d| d.is_some()).collect();
+    // `uridecodebin name=d` fan-out: the hook probed every port, so each `d.`
+    // reference picks its port here and the wiring below decodes it.
+    let mut uri_fanout_port_of_ref: Vec<Option<Vec<u8>>> = alloc::vec![None; specs.len()];
+    for ei in 0..specs.len() {
+        let Some((PrebuiltNode::UriFanout(fanout), _)) = &prebuilt[ei] else {
+            continue;
+        };
+        uri_fanout_port_of_ref[ei] = Some(uri_fanout_ports(
+            &fanout.ports,
+            &demux_pads[ei],
+            &output_pad_names[ei],
+        )?);
+        decode_fanout_caps[ei] = Some(fanout.ports.iter().map(|p| p.caps.clone()).collect());
+    }
+    let is_select: Vec<bool> = (0..specs.len())
+        .map(|ei| demux_select_node[ei].is_some() || uri_fanout_port_of_ref[ei].is_some())
+        .collect();
     // Auto-tee (M473): a non-tee, non-demux node whose single output fans out to
     // several consumers gets an implicit `tee` spliced in below, so a gst-launch
     // line that omits the explicit tee still builds. `tee`, registered demuxers,
@@ -2812,6 +2851,7 @@ fn build_graph(
                     graph.add_sink(GraphNodeRef::Element(el))
                 }
                 PrebuiltNode::Element(el) => graph.add_transform(GraphNodeRef::Element(el)),
+                PrebuiltNode::UriFanout(fanout) => add_uri_fanout_head(&mut graph, fanout)?,
             };
             if let Some(name) = name {
                 graph.set_node_name(nid, name);
@@ -2973,8 +3013,11 @@ fn build_graph(
             PadId { node: tee, index }
         } else if is_tee(s) || is_demux(s) || is_select[s] || registry.is_fanout_src(&specs[s].name)
         {
-            let index = tee_next[s];
+            let ordinal = tee_next[s];
             tee_next[s] += 1;
+            let index = uri_fanout_port_of_ref[s]
+                .as_ref()
+                .map_or(ordinal, |ports| ports[ordinal as usize]);
             PadId {
                 node: node_s,
                 index,
@@ -2999,13 +3042,11 @@ fn build_graph(
         // already, so it links straight through (no codec).
         if let Some(caps) = &decode_fanout_caps[s] {
             let port = src.index as usize;
-            let kind = demux_pads[s]
-                .get(port)
-                .map(|r| r.kind)
-                .unwrap_or(PadKind::Any);
-            if !matches!(kind, PadKind::Text) {
+            // the port's own caps say what it carries, a bare `d.` request does not
+            let kind = StreamType::of(&caps[port]);
+            if kind != StreamType::Text {
                 let target: &dyn Fn(&Caps) -> bool = match kind {
-                    PadKind::Audio => &is_raw_audio,
+                    StreamType::Audio => &is_raw_audio,
                     _ => &is_raw_video,
                 };
                 registry
@@ -3347,6 +3388,55 @@ fn name_node(
     graph.set_node_name(node, name.clone());
     taken.push(name);
     Ok(())
+}
+
+// `d.video_1` reads the second video port, `d.src_1` and the second bare `d.` the second port
+fn uri_fanout_ports(
+    ports: &[UriFanoutPort],
+    requests: &[PadRequest],
+    pad_names: &[&str],
+) -> Result<Vec<u8>, ParseError> {
+    let mut taken = alloc::vec![false; ports.len()];
+    let mut chosen = Vec::with_capacity(requests.len());
+    for (request, pad) in requests.iter().zip(pad_names) {
+        let kind = match request.kind {
+            PadKind::Video => Some(StreamType::Video),
+            PadKind::Audio => Some(StreamType::Audio),
+            PadKind::Text => Some(StreamType::Text),
+            PadKind::Any => None,
+        };
+        let port = ports
+            .iter()
+            .enumerate()
+            .filter(|(_, port)| kind.is_none_or(|kind| port.stream_type == kind))
+            .nth(request.index)
+            .map(|(index, _)| index)
+            .filter(|&index| !core::mem::replace(&mut taken[index], true))
+            .ok_or_else(|| ParseError::UnknownOutputPad {
+                element: "uridecodebin".to_string(),
+                pad: pad.to_string(),
+            })?;
+        chosen.push(port as u8);
+    }
+    Ok(chosen)
+}
+
+fn add_uri_fanout_head(
+    graph: &mut Graph<GraphNode>,
+    fanout: UriFanout,
+) -> Result<NodeId, ParseError> {
+    let ports = fanout.ports.len() as u8;
+    Ok(match fanout.head {
+        UriFanoutHead::Demux { source, demux, .. } => {
+            let source = graph.add_source(GraphNodeRef::Source(source));
+            let demux = graph.add_demux(GraphNodeRef::Demux(demux), ports);
+            graph.link(source, demux.input())?;
+            demux.node()
+        }
+        UriFanoutHead::FanoutSource { source, .. } => graph
+            .add_fanout_src(GraphNodeRef::FanoutSource(source), ports)
+            .node(),
+    })
 }
 
 /// The first registered fan-out hook that claims `uri`, or `None` when every hook
