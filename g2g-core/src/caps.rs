@@ -2121,6 +2121,8 @@ pub enum RawVideoFormat {
     V210,
     // 10-bit RGB in one big-endian 32-bit word per pixel, the top two bits zero
     R210,
+    // planar 10-bit RGB in the plane order G, B, R, each sample in the low bits of a little-endian u16
+    Gbr10Le,
 }
 
 impl RawVideoFormat {
@@ -2147,6 +2149,7 @@ impl RawVideoFormat {
             RawVideoFormat::A444p12 => "A444_12LE",
             RawVideoFormat::V210 => "v210",
             RawVideoFormat::R210 => "r210",
+            RawVideoFormat::Gbr10Le => "GBR_10LE",
         }
     }
 
@@ -2162,7 +2165,8 @@ impl RawVideoFormat {
             | RawVideoFormat::I444p10
             | RawVideoFormat::P010
             | RawVideoFormat::V210
-            | RawVideoFormat::R210 => 10,
+            | RawVideoFormat::R210
+            | RawVideoFormat::Gbr10Le => 10,
             RawVideoFormat::I420p12
             | RawVideoFormat::I422p12
             | RawVideoFormat::I444p12
@@ -2219,7 +2223,9 @@ impl RawVideoFormat {
     }
 
     pub const fn is_full_resolution_plane(self, plane: usize) -> bool {
-        plane == 0 || matches!(self.alpha_plane(), Some(alpha) if alpha == plane)
+        plane == 0
+            || matches!(self, RawVideoFormat::Gbr10Le)
+            || matches!(self.alpha_plane(), Some(alpha) if alpha == plane)
     }
 
     /// Narrowest row stride in bytes at `width` that every plane of a
@@ -2268,7 +2274,7 @@ impl RawVideoFormat {
 
     /// How many separate planes the format stores: 1 packed (RGBA / BGRA / RGB /
     /// YUYV), 2 semi-planar (NV12 / P010, luma then interleaved chroma), 3 fully
-    /// planar (the I420 / I422 / I444 family), 4 for A420 (I420 plus alpha).
+    /// planar (the I420 / I422 / I444 family and GBR_10LE), 4 for A420 (I420 plus alpha).
     /// Matched exhaustively so a new format has to state its own layout rather
     /// than inherit a wrong one.
     pub const fn plane_count(self) -> usize {
@@ -2289,7 +2295,8 @@ impl RawVideoFormat {
             | RawVideoFormat::I422p12
             | RawVideoFormat::I444
             | RawVideoFormat::I444p10
-            | RawVideoFormat::I444p12 => 3,
+            | RawVideoFormat::I444p12
+            | RawVideoFormat::Gbr10Le => 3,
             RawVideoFormat::A420 | RawVideoFormat::A444p12 => 4,
         }
     }
@@ -2612,7 +2619,7 @@ pub enum TensorLayout {
 }
 
 #[cfg(all(test, feature = "alloc"))]
-pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 20] = [
+pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 21] = [
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
     RawVideoFormat::Rgba8,
@@ -2633,6 +2640,7 @@ pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 20] = [
     RawVideoFormat::A444p12,
     RawVideoFormat::V210,
     RawVideoFormat::R210,
+    RawVideoFormat::Gbr10Le,
 ];
 
 #[cfg(test)]

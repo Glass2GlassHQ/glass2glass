@@ -94,6 +94,7 @@ const GST_VIDEO_FORMATS: &[(RawVideoFormat, i32)] = &[
     (RawVideoFormat::I420p10, 43),
     (RawVideoFormat::I422p10, 45),
     (RawVideoFormat::I444p10, 47),
+    (RawVideoFormat::Gbr10Le, 50),
     (RawVideoFormat::P010, 62),
     (RawVideoFormat::I420p12, 73),
     (RawVideoFormat::I422p12, 75),

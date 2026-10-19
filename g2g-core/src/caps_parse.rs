@@ -549,6 +549,7 @@ pub fn parse_raw_format(s: &str) -> Option<RawVideoFormat> {
         "a444_12le" => RawVideoFormat::A444p12,
         "v210" => RawVideoFormat::V210,
         "r210" => RawVideoFormat::R210,
+        "gbr_10le" => RawVideoFormat::Gbr10Le,
         _ => return None,
     })
 }

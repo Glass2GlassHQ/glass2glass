@@ -38,7 +38,7 @@ use g2g_core::{
 
 /// Formats this element can both consume and produce. The convert `target`
 /// is always one of these.
-pub(crate) const FORMATS: [RawVideoFormat; 19] = [
+pub(crate) const FORMATS: [RawVideoFormat; 21] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Rgb8,
@@ -58,6 +58,8 @@ pub(crate) const FORMATS: [RawVideoFormat; 19] = [
     RawVideoFormat::Uyvy,
     RawVideoFormat::A444p12,
     RawVideoFormat::V210,
+    RawVideoFormat::R210,
+    RawVideoFormat::Gbr10Le,
 ];
 
 /// # Example
@@ -681,6 +683,41 @@ fn convert_strided(
             w,
             h,
         ),
+        (R210, Gbr10Le) => r210_to_gbr10(src, w, h),
+        (Gbr10Le, R210) => gbr10_to_r210(src, w, h),
+        (R210, _) => convert_strided(
+            &r210_to_gbr10(src, w, h),
+            Gbr10Le,
+            to,
+            (w, h),
+            row_bytes(Gbr10Le, w),
+            matrix,
+            hub,
+        ),
+        (_, R210) => gbr10_to_r210(
+            &convert_strided(src, from, Gbr10Le, (w, h), src_stride, matrix, hub),
+            w,
+            h,
+        ),
+        // GBR_10LE reaches every other format through RGBA, the precision the colour step works at
+        (Gbr10Le, Rgba8 | Bgra8) => gbr10_to_rgba(src, to, w, h, &mut hub.depth),
+        (Rgba8 | Bgra8, Gbr10Le) => rgba_to_gbr10(src, from, w, h, &mut hub.depth),
+        (Gbr10Le, _) => convert_strided(
+            &gbr10_to_rgba(src, Rgba8, w, h, &mut hub.depth),
+            Rgba8,
+            to,
+            (w, h),
+            row_bytes(Rgba8, w),
+            matrix,
+            hub,
+        ),
+        (_, Gbr10Le) => rgba_to_gbr10(
+            &convert_strided(src, from, Rgba8, (w, h), src_stride, matrix, hub),
+            Rgba8,
+            w,
+            h,
+            &mut hub.depth,
+        ),
         (Nv12, I420) => nv12_to_i420(src, w, h),
         (I420, Nv12) => i420_to_nv12(src, w, h),
         (Nv12, Rgba8) => yuv420_to_rgb(src, w, h, true, 0, 2, matrix),
@@ -1173,11 +1210,12 @@ fn swap_byte_pairs(src: &[u8]) -> Box<[u8]> {
     dst.into_boxed_slice()
 }
 
+const TEN_BIT_SAMPLE_BITS: usize = 10;
+const TEN_BIT_SAMPLE_MAX: u16 = (1 << TEN_BIT_SAMPLE_BITS) - 1;
+
 // a v210 row is the sample stream U0 Y0 V0 Y1 U1 Y2 V1 Y3 ..., three to each 32-bit word
 const V210_SAMPLES_PER_WORD: usize = 3;
 const V210_WORD_BYTES: usize = 4;
-const V210_SAMPLE_BITS: usize = 10;
-const V210_SAMPLE_MAX: u16 = (1 << V210_SAMPLE_BITS) - 1;
 
 // where sample `column` of I422 plane `plane` (Y, U or V) sits in a v210 row
 fn v210_position(plane: usize, column: usize) -> usize {
@@ -1191,21 +1229,21 @@ fn v210_position(plane: usize, column: usize) -> usize {
 fn v210_word_at(position: usize) -> (usize, usize) {
     (
         position / V210_SAMPLES_PER_WORD * V210_WORD_BYTES,
-        position % V210_SAMPLES_PER_WORD * V210_SAMPLE_BITS,
+        position % V210_SAMPLES_PER_WORD * TEN_BIT_SAMPLE_BITS,
     )
 }
 
 fn read_v210_sample(row: &[u8], position: usize) -> u16 {
     let (at, shift) = v210_word_at(position);
     let word = u32::from_le_bytes([row[at], row[at + 1], row[at + 2], row[at + 3]]);
-    (word >> shift) as u16 & V210_SAMPLE_MAX
+    (word >> shift) as u16 & TEN_BIT_SAMPLE_MAX
 }
 
 // `row` starts zeroed, so samples OR into their word
 fn write_v210_sample(row: &mut [u8], position: usize, value: u16) {
     let (at, shift) = v210_word_at(position);
     let mut word = u32::from_le_bytes([row[at], row[at + 1], row[at + 2], row[at + 3]]);
-    word |= u32::from(value.min(V210_SAMPLE_MAX)) << shift;
+    word |= u32::from(value.min(TEN_BIT_SAMPLE_MAX)) << shift;
     row[at..at + V210_WORD_BYTES].copy_from_slice(&word.to_le_bytes());
 }
 
@@ -1238,6 +1276,104 @@ fn i422p10_to_v210(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
                 let value = u16::from_le_bytes([src[at], src[at + 1]]);
                 write_v210_sample(row, v210_position(plane, column), value);
             }
+        }
+    }
+    dst.into_boxed_slice()
+}
+
+// the planes of a GBR_10LE frame holding red, green and blue, which it stores G, B, R
+const GBR_RGB_PLANES: [usize; 3] = [2, 0, 1];
+// where red, green and blue sit in an r210 word
+const R210_RGB_SHIFTS: [usize; 3] = [20, 10, 0];
+
+fn gbr10_rgb_offsets(w: usize, h: usize) -> [usize; 3] {
+    GBR_RGB_PLANES.map(|plane| {
+        let (offset, _, _) =
+            tight_plane(RawVideoFormat::Gbr10Le, plane, w, h).expect("frame size fits");
+        offset
+    })
+}
+
+fn read_gbr10_sample(src: &[u8], plane_offset: usize, pixel: usize) -> u16 {
+    let at = plane_offset + pixel * 2;
+    u16::from_le_bytes([src[at], src[at + 1]])
+}
+
+fn write_gbr10_sample(dst: &mut [u8], plane_offset: usize, pixel: usize, value: u16) {
+    let at = plane_offset + pixel * 2;
+    dst[at..at + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn r210_to_gbr10(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
+    let offsets = gbr10_rgb_offsets(w, h);
+    let mut dst = vec![0u8; frame_byte_size(RawVideoFormat::Gbr10Le, w as u32, h as u32)];
+    for (pixel, bytes) in src[..w * h * 4].as_chunks::<4>().0.iter().enumerate() {
+        let word = u32::from_be_bytes(*bytes);
+        for (offset, shift) in offsets.into_iter().zip(R210_RGB_SHIFTS) {
+            let value = (word >> shift) as u16 & TEN_BIT_SAMPLE_MAX;
+            write_gbr10_sample(&mut dst, offset, pixel, value);
+        }
+    }
+    dst.into_boxed_slice()
+}
+
+fn gbr10_to_r210(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
+    let offsets = gbr10_rgb_offsets(w, h);
+    let mut dst = Vec::with_capacity(w * h * 4);
+    for pixel in 0..w * h {
+        let word = offsets
+            .into_iter()
+            .zip(R210_RGB_SHIFTS)
+            .fold(0u32, |word, (offset, shift)| {
+                let value = read_gbr10_sample(src, offset, pixel).min(TEN_BIT_SAMPLE_MAX);
+                word | u32::from(value) << shift
+            });
+        dst.extend_from_slice(&word.to_be_bytes());
+    }
+    dst.into_boxed_slice()
+}
+
+// byte offsets of red, green and blue in a packed RGBA or BGRA pixel
+fn rgba_channel_offsets(format: RawVideoFormat) -> [usize; 3] {
+    let (r_off, b_off) = crate::pixel::rgba_rb_offsets(format);
+    [r_off, 1, b_off]
+}
+
+fn gbr10_to_rgba(
+    src: &[u8],
+    to: RawVideoFormat,
+    w: usize,
+    h: usize,
+    depth: &mut DepthTable,
+) -> Box<[u8]> {
+    depth.set(TEN_BIT_SAMPLE_BITS as u8, 8);
+    let offsets = gbr10_rgb_offsets(w, h);
+    let channels = rgba_channel_offsets(to);
+    let mut dst = vec![u8::MAX; w * h * 4];
+    for (pixel, rgba) in dst.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        for (offset, channel) in offsets.into_iter().zip(channels) {
+            let value = read_gbr10_sample(src, offset, pixel);
+            rgba[channel] = depth.get(i32::from(value)) as u8;
+        }
+    }
+    dst.into_boxed_slice()
+}
+
+fn rgba_to_gbr10(
+    src: &[u8],
+    from: RawVideoFormat,
+    w: usize,
+    h: usize,
+    depth: &mut DepthTable,
+) -> Box<[u8]> {
+    depth.set(8, TEN_BIT_SAMPLE_BITS as u8);
+    let offsets = gbr10_rgb_offsets(w, h);
+    let channels = rgba_channel_offsets(from);
+    let mut dst = vec![0u8; frame_byte_size(RawVideoFormat::Gbr10Le, w as u32, h as u32)];
+    for (pixel, rgba) in src[..w * h * 4].as_chunks::<4>().0.iter().enumerate() {
+        for (offset, channel) in offsets.into_iter().zip(channels) {
+            let value = depth.get(i32::from(rgba[channel])) as u16;
+            write_gbr10_sample(&mut dst, offset, pixel, value);
         }
     }
     dst.into_boxed_slice()

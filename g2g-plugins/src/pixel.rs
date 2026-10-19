@@ -42,12 +42,16 @@ pub(crate) fn bt709_luma(r: u8, g: u8, b: u8) -> u8 {
 }
 
 /// Whether a format's samples are YUV, so its caps colorimetry names the matrix
-/// a converter has to apply or undo. The packed RGB formats are the only ones
+/// a converter has to apply or undo. The RGB formats are the only ones
 /// that are not.
 pub(crate) fn carries_yuv(format: RawVideoFormat) -> bool {
     !matches!(
         format,
-        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 | RawVideoFormat::Rgb8 | RawVideoFormat::R210
+        RawVideoFormat::Rgba8
+            | RawVideoFormat::Bgra8
+            | RawVideoFormat::Rgb8
+            | RawVideoFormat::R210
+            | RawVideoFormat::Gbr10Le
     )
 }
 
@@ -189,7 +193,7 @@ pub(crate) fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
 pub(crate) mod tests {
     use super::*;
 
-    pub(crate) const EVERY_FORMAT: [RawVideoFormat; 20] = [
+    pub(crate) const EVERY_FORMAT: [RawVideoFormat; 21] = [
         RawVideoFormat::Nv12,
         RawVideoFormat::I420,
         RawVideoFormat::Rgba8,
@@ -210,6 +214,7 @@ pub(crate) mod tests {
         RawVideoFormat::A444p12,
         RawVideoFormat::V210,
         RawVideoFormat::R210,
+        RawVideoFormat::Gbr10Le,
     ];
 
     // odd and even on each axis, so a subsampled chroma plane has to round up

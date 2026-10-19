@@ -3,10 +3,11 @@
 //! `tools/packed-10bit-fixtures.sh` writes.
 #![cfg(feature = "std")]
 
-use std::path::{Path, PathBuf};
+#[path = "common/raw_convert.rs"]
+mod raw_convert;
+use raw_convert::{fixture, read_fixture, temp_path, ZeroClock};
 
 use g2g_core::runtime::{parse_launch, run_graph};
-use g2g_core::PipelineClock;
 use g2g_plugins::registry::default_registry;
 
 // (two-frame file, the demuxer that reads it)
@@ -21,27 +22,9 @@ const STREAM_COPY_SUFFIX: &str = "v210";
 const DECODE_SUFFIX: &str = "yuv422p10le";
 const DECODE_CAPS: &str = "video/x-raw,format=I422_10LE";
 
-struct ZeroClock;
-impl PipelineClock for ZeroClock {
-    fn now_ns(&self) -> u64 {
-        0
-    }
-}
-
-fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name)
-}
-
-fn read_fixture(name: &str) -> Vec<u8> {
-    std::fs::read(fixture(name)).expect("the fixture is committed")
-}
-
 // what `filesrc ! <demux> stream=raw-v210 <tail> ! filesink` writes for `file`
 async fn demux(file: &str, demuxer: &str, tail: &str, tag: &str) -> Vec<u8> {
-    let out =
-        std::env::temp_dir().join(format!("g2g-m1633-{file}-{tag}-{}.raw", std::process::id()));
+    let out = temp_path(&format!("{file}-{tag}"));
     let line = format!(
         "filesrc location={} ! {demuxer} stream={STREAM}{tail} ! filesink location={}",
         fixture(file).display(),

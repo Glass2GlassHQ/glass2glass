@@ -425,7 +425,11 @@ bits 29 to 20, green in 19 to 10 and blue in 9 to 0, rows unpadded. Both follow
 GStreamer: ffmpeg's r210 codec pads each row to 64 pixels instead, and its v210
 encoder clips samples to 4..1019 and refuses an odd width. `videoconvert` unpacks
 v210 to `I422p10` and packs it from there, byte for byte as ffmpeg's v210 codec
-does on the samples both accept. The CPU paths take odd sizes on that layout.
+does on the samples both accept. `GBR_10LE` holds G, B and R as three
+full-resolution planes of 10-bit little-endian samples, ffmpeg's `gbrp10le`.
+`videoconvert` repacks r210 to and from it without loss, and converts it to and
+from every other format through 8-bit RGBA. The CPU paths take odd sizes on that
+layout.
 `videoconvert` and `colorspace` average an edge chroma sample over the pixels
 inside the picture and give the last luma column or row the last chroma sample on
 the way back. `videoscale` and `videoconvertscale` map chroma positions through
