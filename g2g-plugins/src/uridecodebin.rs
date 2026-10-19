@@ -2062,18 +2062,20 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
                     crate::mp4demux::mp4_video_stream_str(codec)?
                 }
                 Caps::RawVideo { format, .. } => {
-                    crate::uncompressedvideo::raw_video_stream_str(format)?
+                    String::from(crate::uncompressedvideo::raw_video_stream_str(format)?)
                 }
                 Caps::Audio { format, .. } => crate::mp4demux::mp4_audio_stream_str(format)?,
                 _ => return None,
             };
             Some(PrimaryStream {
                 demux: "qtdemux",
-                props: stream_selection(stream),
+                props: stream_selection(&stream),
                 caps: info.caps,
             })
         })
         .collect();
+    #[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+    let (streams, unsupported) = name_undecodable_tagged(streams, unsupported);
     Some(ContainerStreams {
         streams,
         unsupported,
@@ -2118,10 +2120,12 @@ pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
         .into_iter()
         .map(|info| PrimaryStream {
             demux: "matroskademux",
-            props: stream_selection(crate::mkvdemux::mkv_stream_str(info.stream)),
+            props: stream_selection(&crate::mkvdemux::mkv_stream_str(info.stream)),
             caps: info.caps,
         })
         .collect();
+    #[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+    let (streams, unsupported) = name_undecodable_tagged(streams, unsupported);
     Some(ContainerStreams {
         streams,
         unsupported,
@@ -2425,22 +2429,42 @@ pub fn avi_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             let stream = match &info.caps {
                 Caps::CompressedVideo { codec, .. } => crate::avidemux::video_stream_str(*codec)?,
                 Caps::RawVideo { format, .. } => {
-                    crate::uncompressedvideo::raw_video_stream_str(*format)?
+                    String::from(crate::uncompressedvideo::raw_video_stream_str(*format)?)
                 }
                 Caps::Audio { format, .. } => crate::avidemux::audio_stream_str(*format)?,
                 _ => return None,
             };
             Some(PrimaryStream {
                 demux: "avidemux",
-                props: stream_selection(stream),
+                props: stream_selection(&stream),
                 caps: info.caps,
             })
         })
         .collect();
+    #[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+    let (streams, unsupported) = name_undecodable_tagged(streams, unsupported);
     Some(ContainerStreams {
         streams,
         unsupported,
     })
+}
+
+// a tagged stream no decoder takes is named the way its demuxer named it before it forwarded tags
+#[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+fn name_undecodable_tagged(
+    streams: Vec<PrimaryStream>,
+    mut unsupported: Vec<String>,
+) -> (Vec<PrimaryStream>, Vec<String>) {
+    let (undecodable, streams): (Vec<_>, Vec<_>) = streams.into_iter().partition(|stream| {
+        crate::codectag::tagged_codec_name(&stream.caps).is_some()
+            && !crate::ffmpegtagged::decodes(&stream.caps)
+    });
+    unsupported.extend(
+        undecodable
+            .iter()
+            .filter_map(|stream| crate::codectag::tagged_codec_name(&stream.caps)),
+    );
+    (streams, unsupported)
 }
 
 /// Fetch a text resource synchronously on a throwaway current-thread runtime, for

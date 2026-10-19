@@ -768,6 +768,34 @@ forwarded in-band ahead of the first frame as decoder extradata). An
 the FLV's tags carry, so a VP6 or Sorenson FLV does not plug the default H.264
 port.
 
+A codec with no typed `VideoCodec` / `AudioFormat` still decodes when libavcodec
+has a decoder for it, behind the `ffmpeg-long-tail` feature. `avidemux`, the mp4
+demuxers and `matroskademux` forward a stream they would otherwise drop as
+`VideoCodec::Tagged(CodecTag)` / `AudioFormat::Tagged(CodecTag)`: the tag its
+container stores in one of libavformat's namespaces, `Riff` (an AVI
+BITMAPINFOHEADER `biCompression` or WAVEFORMATEX `wFormatTag`, and Matroska's
+`V_MS/VFW/FOURCC` / `A_MS/ACM`) or `Mov` (a QuickTime sample entry fourcc, and
+Matroska's `V_QUICKTIME`). The container header the decoder needs leads the
+stream in band as a frame of its own, the convention FLAC's `fLaC` and raw AAC's
+AudioSpecificConfig already use: the whole `strf` BITMAPINFOHEADER or
+WAVEFORMATEX, the whole sample entry, or the Matroska `CodecPrivate`. The ffmpeg
+decoders resolve the tag through libavformat's public tag tables, read from the
+header the extradata, palette, `bits_per_coded_sample` and `block_align`
+libavformat would hand libavcodec, and open on that first frame. A codec they
+decode no typed caps can list, so the registry adds a second `ffmpegdec` /
+`ffmpegaudiodec` auto-plug entry whose sink takes any caps and whose
+`accepting_input` keeps the tags libavformat maps to a decoder. The container
+hooks move a tagged stream no decoder takes back into `unsupported` under the
+name its demuxer gave it before, so `decodebin` still fails at launch with
+`no decoder for <tag>`. A tagged decoder's pixel format with no `RawVideoFormat`
+(palettized, packed RGB, 4:1:0, 16-bit, ...) is converted with libswscale: to
+the requested format, or under `Auto` to RGBA / RGB for RGB and palettized
+sources, A420 for YUV with alpha, else planar YUV of the same subsampling at the
+nearest depth, 4:2:0 when g2g has none. Typed mappings win: a demuxer emits
+`Tagged` only for what it would reject, so each typed mapping added shrinks the
+fallback, and without the feature those streams are reported unsupported exactly
+as before.
+
 - **playbin / uridecodebin** (`std`). `Registry::build_playbin(source_name,
   sink, target, max_depth)` assembles a complete `source → chain → sink` graph
   from a *named* registered source. `build_uridecodebin(uri, sink, target,

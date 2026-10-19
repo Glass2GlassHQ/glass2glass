@@ -42,10 +42,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::caps::{
-    AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, ColorPrimaries, ColorRange,
-    Colorimetry, Dim, Interlace, MatrixCoefficients, ProResVariant, Rate, RawVideoFormat,
-    SubPictureFormat, TensorDType, TensorLayout, TensorShape, TextFormat, TransferCharacteristics,
-    VideoCodec,
+    AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, CodecTag, ColorPrimaries,
+    ColorRange, Colorimetry, Dim, Interlace, MatrixCoefficients, ProResVariant, Rate,
+    RawVideoFormat, SubPictureFormat, TagNamespace, TensorDType, TensorLayout, TensorShape,
+    TextFormat, TransferCharacteristics, VideoCodec,
 };
 use crate::channels::ChannelLayout;
 use crate::frame::{Frame, FrameTiming, PipelinePacket};
@@ -243,7 +243,60 @@ fn video_codec_to_u8(c: VideoCodec) -> u8 {
             variant: ProResVariant::FourFourFourFourXq,
         } => 23,
         VideoCodec::DnxHd => 24,
+        VideoCodec::Tagged(_) => VIDEO_CODEC_TAGGED,
     }
+}
+
+// a tagged codec's byte, followed by its namespace byte and tag
+const VIDEO_CODEC_TAGGED: u8 = 25;
+const AUDIO_FORMAT_TAGGED: u8 = 16;
+
+fn put_video_codec(w: &mut Writer, codec: VideoCodec) {
+    w.u8(video_codec_to_u8(codec));
+    if let VideoCodec::Tagged(tag) = codec {
+        put_codec_tag(w, tag);
+    }
+}
+
+fn get_video_codec(r: &mut Reader) -> Result<VideoCodec, WireError> {
+    match r.u8()? {
+        VIDEO_CODEC_TAGGED => Ok(VideoCodec::Tagged(get_codec_tag(r)?)),
+        v => video_codec_from_u8(v),
+    }
+}
+
+fn put_audio_format(w: &mut Writer, format: AudioFormat) {
+    w.u8(audio_format_to_u8(format));
+    if let AudioFormat::Tagged(tag) = format {
+        put_codec_tag(w, tag);
+    }
+}
+
+fn get_audio_format(r: &mut Reader) -> Result<AudioFormat, WireError> {
+    match r.u8()? {
+        AUDIO_FORMAT_TAGGED => Ok(AudioFormat::Tagged(get_codec_tag(r)?)),
+        v => audio_format_from_u8(v),
+    }
+}
+
+fn put_codec_tag(w: &mut Writer, tag: CodecTag) {
+    w.u8(match tag.namespace {
+        TagNamespace::Riff => 0,
+        TagNamespace::Mov => 1,
+    });
+    w.u32(tag.tag);
+}
+
+fn get_codec_tag(r: &mut Reader) -> Result<CodecTag, WireError> {
+    let namespace = match r.u8()? {
+        0 => TagNamespace::Riff,
+        1 => TagNamespace::Mov,
+        _ => return Err(WireError::BadTag),
+    };
+    Ok(CodecTag {
+        namespace,
+        tag: r.u32()?,
+    })
 }
 fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
     Ok(match v {
@@ -357,6 +410,7 @@ fn audio_format_to_u8(f: AudioFormat) -> u8 {
         AudioFormat::Speex => 13,
         AudioFormat::PcmS32Le => 14,
         AudioFormat::PcmU8 => 15,
+        AudioFormat::Tagged(_) => AUDIO_FORMAT_TAGGED,
     }
 }
 fn audio_format_from_u8(v: u8) -> Result<AudioFormat, WireError> {
@@ -680,7 +734,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             colorimetry,
         } => {
             w.u8(0);
-            w.u8(video_codec_to_u8(*codec));
+            put_video_codec(w, *codec);
             put_dim(w, width);
             put_dim(w, height);
             put_rate(w, framerate);
@@ -709,7 +763,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             channel_layout,
         } => {
             w.u8(2);
-            w.u8(audio_format_to_u8(*format));
+            put_audio_format(w, *format);
             w.u8(*channels);
             w.u32(*sample_rate);
             w.u16(channel_layout.mask());
@@ -758,7 +812,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
 fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
     Ok(match r.u8()? {
         0 => Caps::CompressedVideo {
-            codec: video_codec_from_u8(r.u8()?)?,
+            codec: get_video_codec(r)?,
             width: get_dim(r)?,
             height: get_dim(r)?,
             framerate: get_rate(r)?,
@@ -773,7 +827,7 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             colorimetry: get_colorimetry(r)?,
         },
         2 => Caps::Audio {
-            format: audio_format_from_u8(r.u8()?)?,
+            format: get_audio_format(r)?,
             channels: r.u8()?,
             sample_rate: r.u32()?,
             channel_layout: ChannelLayout::from_mask(r.u16()?),
@@ -1425,6 +1479,14 @@ mod tests {
             VideoCodec::Vp6Plain,
             VideoCodec::Theora,
             VideoCodec::DnxHd,
+            VideoCodec::Tagged(CodecTag {
+                namespace: TagNamespace::Riff,
+                tag: u32::from_le_bytes(*b"cvid"),
+            }),
+            VideoCodec::Tagged(CodecTag {
+                namespace: TagNamespace::Mov,
+                tag: u32::from_le_bytes(*b"rle "),
+            }),
         ];
         let video = video.into_iter().chain(
             ProResVariant::ALL
@@ -1432,7 +1494,9 @@ mod tests {
                 .map(|variant| VideoCodec::ProRes { variant }),
         );
         for c in video {
-            assert_eq!(video_codec_from_u8(video_codec_to_u8(c)), Ok(c));
+            let mut w = Writer::with_capacity(0);
+            put_video_codec(&mut w, c);
+            assert_eq!(get_video_codec(&mut Reader::new(&w.buf)), Ok(c));
         }
         let audio = [
             AudioFormat::Aac,
@@ -1451,9 +1515,15 @@ mod tests {
             AudioFormat::Mulaw,
             AudioFormat::Alaw,
             AudioFormat::ImaAdpcm,
+            AudioFormat::Tagged(CodecTag {
+                namespace: TagNamespace::Riff,
+                tag: 0x0022,
+            }),
         ];
         for f in audio {
-            assert_eq!(audio_format_from_u8(audio_format_to_u8(f)), Ok(f));
+            let mut w = Writer::with_capacity(0);
+            put_audio_format(&mut w, f);
+            assert_eq!(get_audio_format(&mut Reader::new(&w.buf)), Ok(f));
         }
     }
 

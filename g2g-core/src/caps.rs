@@ -484,7 +484,7 @@ impl Caps {
                 framerate,
                 colorimetry,
             } => {
-                let mut s = String::from(codec_gst_media_type(*codec));
+                let mut s = codec_gst_media_type(*codec);
                 if let VideoCodec::ProRes { variant } = codec {
                     s.push_str(&format!(",variant={}", variant.gst_name()));
                 }
@@ -500,8 +500,7 @@ impl Caps {
                 sample_rate,
                 channel_layout,
             } => {
-                let (media_type, fmt) = audio_gst_media_type(*format);
-                let mut s = String::from(media_type);
+                let (mut s, fmt) = audio_gst_media_type(*format);
                 if let Some(f) = fmt {
                     s.push_str(&format!(",format={f}"));
                 }
@@ -622,8 +621,8 @@ fn subpicture_gst_media_type(f: SubPictureFormat) -> &'static str {
 
 /// The GStreamer media type for a compressed video codec.
 #[cfg(feature = "alloc")]
-fn codec_gst_media_type(c: VideoCodec) -> &'static str {
-    match c {
+fn codec_gst_media_type(c: VideoCodec) -> String {
+    let media_type = match c {
         VideoCodec::H264 => "video/x-h264",
         VideoCodec::H265 => "video/x-h265",
         VideoCodec::Av1 => "video/x-av1",
@@ -653,13 +652,63 @@ fn codec_gst_media_type(c: VideoCodec) -> &'static str {
         // The four Netpbm media types collapse onto one codec; the PBM / PGM /
         // PPM split lives in the file magic, not in caps.
         VideoCodec::Pnm => "image/x-portable-anymap",
+        VideoCodec::Tagged(tag) => return tagged_gst_media_type(StreamKind::Video, tag),
+    };
+    String::from(media_type)
+}
+
+#[cfg(feature = "alloc")]
+#[derive(Clone, Copy)]
+enum StreamKind {
+    Video,
+    Audio,
+}
+
+// what gst's avidemux and qtdemux name a stream whose tag they cannot map
+#[cfg(feature = "alloc")]
+fn tagged_gst_media_type(kind: StreamKind, tag: CodecTag) -> String {
+    let kind_name = match kind {
+        StreamKind::Video => "video",
+        StreamKind::Audio => "audio",
+    };
+    match (tag.namespace, kind) {
+        (TagNamespace::Riff, StreamKind::Video) => {
+            format!(
+                "{kind_name}/{RIFF_UNKNOWN_SUBTYPE},{RIFF_VIDEO_TAG_FIELD}={}",
+                tag.tag
+            )
+        }
+        (TagNamespace::Riff, StreamKind::Audio) => {
+            format!(
+                "{kind_name}/{RIFF_UNKNOWN_SUBTYPE},{RIFF_AUDIO_TAG_FIELD}={}",
+                tag.tag
+            )
+        }
+        (TagNamespace::Mov, _) => {
+            let fourcc: String = tag
+                .tag
+                .to_le_bytes()
+                .iter()
+                .map(|&b| char::from(b))
+                .collect();
+            format!("{kind_name}/{MOV_UNKNOWN_SUBTYPE_PREFIX}{fourcc}")
+        }
     }
 }
 
+#[cfg(feature = "alloc")]
+pub(crate) const RIFF_UNKNOWN_SUBTYPE: &str = "x-avi-unknown";
+#[cfg(feature = "alloc")]
+pub(crate) const RIFF_VIDEO_TAG_FIELD: &str = "fourcc";
+#[cfg(feature = "alloc")]
+pub(crate) const RIFF_AUDIO_TAG_FIELD: &str = "codec_id";
+#[cfg(feature = "alloc")]
+pub(crate) const MOV_UNKNOWN_SUBTYPE_PREFIX: &str = "x-gst-fourcc-";
+
 /// The GStreamer media type (and raw `format=` name, if raw) for an audio format.
 #[cfg(feature = "alloc")]
-fn audio_gst_media_type(f: AudioFormat) -> (&'static str, Option<&'static str>) {
-    match f {
+fn audio_gst_media_type(f: AudioFormat) -> (String, Option<&'static str>) {
+    let (media_type, format) = match f {
         AudioFormat::Aac => ("audio/mpeg", None),
         AudioFormat::Opus => ("audio/x-opus", None),
         // gst distinguishes mp2 from AAC by mpegversion/layer on audio/mpeg; the
@@ -682,7 +731,9 @@ fn audio_gst_media_type(f: AudioFormat) -> (&'static str, Option<&'static str>) 
         AudioFormat::Mulaw => ("audio/x-mulaw", None),
         AudioFormat::Alaw => ("audio/x-alaw", None),
         AudioFormat::ImaAdpcm => ("audio/x-adpcm", None),
-    }
+        AudioFormat::Tagged(tag) => return (tagged_gst_media_type(StreamKind::Audio, tag), None),
+    };
+    (String::from(media_type), format)
 }
 
 /// The GStreamer media type for a container byte stream.
@@ -1751,6 +1802,25 @@ pub enum VideoCodec {
         variant: ProResVariant,
     },
     DnxHd,
+    // a codec no variant above names, known only by its container's tag
+    Tagged(CodecTag),
+}
+
+// The tag a container stores for a codec, in the namespace that gives it meaning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CodecTag {
+    pub namespace: TagNamespace,
+    // the tag's bytes read little-endian, the way libavformat's tag tables hold them
+    pub tag: u32,
+}
+
+// libavformat keeps one tag table per namespace, so every consumer handles each one
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TagNamespace {
+    // a BITMAPINFOHEADER biCompression for video, a WAVEFORMATEX wFormatTag for audio
+    Riff,
+    // a QuickTime / ISO BMFF sample entry fourcc
+    Mov,
 }
 
 // the profiles QuickTime names by sample entry fourcc and GStreamer by `variant`
@@ -2363,6 +2433,8 @@ pub enum AudioFormat {
     /// (GStreamer `audio/x-adpcm` layout=dvi). Encoded like the G.711 pair;
     /// codec in `g2g-mcu::adpcm` (M639).
     ImaAdpcm,
+    // a codec no variant above names, known only by its container's tag
+    Tagged(CodecTag),
 }
 
 impl AudioFormat {
@@ -2383,7 +2455,8 @@ impl AudioFormat {
             | AudioFormat::Speex
             | AudioFormat::Flac
             | AudioFormat::Vorbis
-            | AudioFormat::ImaAdpcm => None,
+            | AudioFormat::ImaAdpcm
+            | AudioFormat::Tagged(_) => None,
         }
     }
 }

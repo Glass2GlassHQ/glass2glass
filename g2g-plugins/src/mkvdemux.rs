@@ -41,6 +41,7 @@ use g2g_core::frame::Frame;
 use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, StreamSelectController};
+use g2g_core::CodecTag;
 use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
@@ -49,6 +50,8 @@ use g2g_core::{
     RawVideoFormat, Seek, Segment, Stream, StreamCollection, StreamType, SubPictureFormat, TagList,
     TextFormat, VideoCodec,
 };
+
+use crate::codectag::{tagged_stream_name, TaggedStream};
 
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -111,6 +114,10 @@ pub enum MkvStream {
     RawVideo(RawVideoFormat),
     Theora,
     ProRes(ProResVariant),
+    // the first `V_MS/VFW/FOURCC` / `V_QUICKTIME` track of this tag, its `CodecPrivate` leading it
+    TaggedVideo(CodecTag),
+    // the first `A_MS/ACM` track of this tag, its `CodecPrivate` leading it
+    TaggedAudio(CodecTag),
 }
 
 /// A Matroska `Cues` prefetch in flight (M374): an end-of-file `Cues` index
@@ -360,6 +367,13 @@ impl MkvDemux {
                 channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             MkvStream::RawVideo(format) => raw_video_placeholder_caps(format),
+            MkvStream::TaggedVideo(tag) => Self::compressed_video(VideoCodec::Tagged(tag)),
+            MkvStream::TaggedAudio(tag) => Caps::Audio {
+                format: AudioFormat::Tagged(tag),
+                channels: 0,
+                sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            },
         }
     }
 
@@ -539,6 +553,8 @@ impl MkvDemux {
                 StreamType::Video,
                 raw_video_caps(format, dim(track.width), dim(track.height), Rate::Any),
             ),
+            MkvCodec::TaggedVideo(tag) => (StreamType::Video, video(VideoCodec::Tagged(tag))),
+            MkvCodec::TaggedAudio(tag) => (StreamType::Audio, audio(AudioFormat::Tagged(tag))),
             // Forwarded as plain UTF-8 text (de-framed at emit), whatever the source.
             MkvCodec::Subtitle(_) => (
                 StreamType::Text,
@@ -629,7 +645,7 @@ impl MkvDemux {
         g2g_error!(
             Target::category("mkvdemux"),
             "{} track declares a ContentEncoding this demuxer cannot undo (bzip2 / lzo / encryption)",
-            mkv_stream_to_str(self.stream)
+            mkv_stream_str(self.stream)
         );
         Err(G2gError::CapsMismatch)
     }
@@ -876,7 +892,7 @@ impl AsyncElement for MkvDemux {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "stream" => Some(PropValue::Str(mkv_stream_to_str(self.stream).into())),
+            "stream" => Some(PropValue::Str(mkv_stream_str(self.stream))),
             _ => None,
         }
     }
@@ -886,7 +902,7 @@ impl AsyncElement for MkvDemux {
 static MKVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | mjpeg | theora | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy)",
+    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | mjpeg | theora | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy) | video-riff-<fourcc> | video-mov-<fourcc> | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
 )];
 
 /// The [`MkvStream`] a demuxer forwards for a parsed track's codec, or `None` for
@@ -912,6 +928,8 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::Pgs => Some(MkvStream::Pgs),
         MkvCodec::Pcm { format, .. } => Some(MkvStream::Pcm(format)),
         MkvCodec::RawVideo(format) => Some(MkvStream::RawVideo(format)),
+        MkvCodec::TaggedVideo(tag) => Some(MkvStream::TaggedVideo(tag)),
+        MkvCodec::TaggedAudio(tag) => Some(MkvStream::TaggedAudio(tag)),
         MkvCodec::Other => None,
     }
 }
@@ -1186,6 +1204,7 @@ fn config_headers(demux: &MatroskaDemuxer, codec: MkvCodec, track: u64) -> Vec<V
         MkvCodec::Vorbis => xiph_headers(private, [0x01, 0x03, 0x05], b"vorbis"),
         MkvCodec::Theora => xiph_headers(private, [0x80, 0x81, 0x82], b"theora"),
         MkvCodec::Aac => whole(is_raw_aac_config(private)),
+        MkvCodec::TaggedVideo(_) | MkvCodec::TaggedAudio(_) => whole(true),
         _ => Vec::new(),
     }
 }
@@ -1383,17 +1402,17 @@ fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
         _ => g2g_core::pcm_from_gst_format(s)
             .map(MkvStream::Pcm)
             .or_else(|| raw_video_stream_from_str(s).map(MkvStream::RawVideo))
-            .or_else(|| prores_stream_from_str(s).map(MkvStream::ProRes)),
+            .or_else(|| prores_stream_from_str(s).map(MkvStream::ProRes))
+            .or_else(|| match crate::codectag::tagged_stream_from_name(s)? {
+                TaggedStream::Video(tag) => Some(MkvStream::TaggedVideo(tag)),
+                TaggedStream::Audio(tag) => Some(MkvStream::TaggedAudio(tag)),
+            }),
     }
 }
 
 /// The `stream` property value naming an [`MkvStream`] (the hook and launch use it).
-pub fn mkv_stream_str(stream: MkvStream) -> &'static str {
-    mkv_stream_to_str(stream)
-}
-
-fn mkv_stream_to_str(stream: MkvStream) -> &'static str {
-    match stream {
+pub fn mkv_stream_str(stream: MkvStream) -> alloc::string::String {
+    let name = match stream {
         MkvStream::H264 => "h264",
         MkvStream::H265 => "h265",
         MkvStream::Vp8 => "vp8",
@@ -1416,7 +1435,10 @@ fn mkv_stream_to_str(stream: MkvStream) -> &'static str {
         }
         MkvStream::RawVideo(format) => raw_video_stream_str(format)
             .expect("an uncompressed stream names a layout from the fourcc table"),
-    }
+        MkvStream::TaggedVideo(tag) => return tagged_stream_name(TaggedStream::Video(tag)),
+        MkvStream::TaggedAudio(tag) => return tagged_stream_name(TaggedStream::Audio(tag)),
+    };
+    alloc::string::String::from(name)
 }
 
 impl PadTemplates for MkvDemux {
@@ -2069,7 +2091,7 @@ mod tests {
         assert_eq!(stream, MkvStream::RawVideo(RawVideoFormat::I420));
         let mut sink = CaptureSink::default();
         run(
-            mkv_stream_from_str(mkv_stream_str(stream)).expect("the name reads back"),
+            mkv_stream_from_str(&mkv_stream_str(stream)).expect("the name reads back"),
             &file,
             &mut sink,
         )

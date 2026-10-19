@@ -28,7 +28,7 @@ linux-full = [
     "rtsp", "rtsp-server", "srt", "rist", "srtp", "dtls-srtp", "tcp", "shm", "unixfd", "udp-egress", "udp-ingress", "rtmp", "webrtc",
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
-    "ffmpeg", "vaapi", "v4l2",
+    "ffmpeg", "ffmpeg-long-tail", "vaapi", "v4l2",
     "opus", "vorbis", "webrtcdsp", "vpx", "av1-encode", "mjpeg", "mjpeg-encode", "png", "webp",
     "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire", "portal",
     "wayland-sink", "gl-sink", "kms-sink", "wgpu-sink", "wgpu-present", "vello-overlay", "analytics",
@@ -347,6 +347,10 @@ vaapi = ["std", "dep:cros-codecs"]
 # libavutil-dev). Its VAAPI backend is the AMD hardware path, the `vaapi`
 # feature works on Intel only (cros-codecs has no radeonsi NV12 surfaces).
 ffmpeg = ["std", "dep:ffmpeg-next"]
+# The AVI, QuickTime / MP4 and Matroska demuxers forward a stream whose codec
+# g2g has no caps type for under its container tag, and the ffmpeg decoders open
+# whatever libavcodec decoder libavformat's tag tables name for it.
+ffmpeg-long-tail = ["ffmpeg"]
 # V4L2 capture source (M90): V4l2Src streams YUYV (4:2:2) frames off a
 # /dev/videoN UVC device via mmap. Pulls the pure-Rust `v4l` crate (no libv4l C
 # dep); Linux-only, implies std. Blocking ioctls run on a dedicated capture

@@ -76,8 +76,9 @@ pub struct FfmpegAudioDec {
     /// Drives the libavcodec codec choice and the per-format access-unit split.
     format: AudioFormat,
     configured: bool,
-    // the leading config of a raw AAC stream, whose access units arrive one per frame
-    raw_aac_config: Option<Vec<u8>>,
+    // the config frame that led the stream (a raw AAC stream's AudioSpecificConfig,
+    // a tagged codec's container header), which a demuxer sends again after a flush
+    lead_config: Option<Vec<u8>>,
     emitted: u64,
     /// Last emitted output caps, to suppress re-emitting an unchanged `CapsChanged`.
     last_out: Option<Caps>,
@@ -111,7 +112,7 @@ impl FfmpegAudioDec {
             decoder: None,
             format: AudioFormat::Aac,
             configured: false,
-            raw_aac_config: None,
+            lead_config: None,
             emitted: 0,
             last_out: None,
             segment: Segment::new(),
@@ -120,14 +121,42 @@ impl FfmpegAudioDec {
 
     /// Whether `format` is a compressed input this element decodes.
     fn decodes(format: AudioFormat) -> bool {
-        matches!(
-            format,
-            AudioFormat::Aac
-                | AudioFormat::Mp2
-                | AudioFormat::Mp3
-                | AudioFormat::Ac3
-                | AudioFormat::Flac
-        )
+        match format {
+            #[cfg(feature = "ffmpeg-long-tail")]
+            AudioFormat::Tagged(tag) => crate::ffmpegtagged::audio_codec_id(tag).is_some(),
+            typed => matches!(
+                typed,
+                AudioFormat::Aac
+                    | AudioFormat::Mp2
+                    | AudioFormat::Mp3
+                    | AudioFormat::Ac3
+                    | AudioFormat::Flac
+            ),
+        }
+    }
+
+    #[cfg(feature = "ffmpeg-long-tail")]
+    fn open_tagged_decoder(
+        &mut self,
+        tag: g2g_core::CodecTag,
+        header: &[u8],
+    ) -> Result<(), G2gError> {
+        let audio = crate::ffmpegtagged::tagged_audio(tag, header)?;
+        let codec = codec::decoder::find(audio.id).ok_or(G2gError::CapsMismatch)?;
+        let mut decoder_ctx = codec::decoder::new();
+        if !audio.extradata.is_empty() {
+            crate::ffmpegdec::set_extradata(&mut decoder_ctx, &audio.extradata)?;
+        }
+        // SAFETY: `decoder_ctx` is freshly allocated and not yet opened.
+        unsafe { audio.set_context_fields(decoder_ctx.as_mut_ptr()) };
+        let decoder = decoder_ctx
+            .open_as(codec)
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?
+            .audio()
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        self.decoder = Some(decoder);
+        self.lead_config = Some(header.to_vec());
+        Ok(())
     }
 
     /// The libavcodec decoder Id for a decoded format.
@@ -156,23 +185,7 @@ impl FfmpegAudioDec {
             .ok_or(G2gError::Hardware(HardwareError::Other))?;
         let mut decoder_ctx = codec::decoder::new();
         if let Some(extradata) = extradata {
-            // SAFETY: `decoder_ctx` is freshly allocated and not yet opened.
-            // `av_mallocz` returns a zeroed buffer (so the required trailing
-            // padding is already zero); we copy `extradata` into it and hand
-            // ownership to the context via its raw `extradata`/`extradata_size`
-            // fields, the canonical way to set decoder extradata.
-            unsafe {
-                let size = extradata.len();
-                let total = size + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
-                let buf = ffmpeg::ffi::av_mallocz(total) as *mut u8;
-                if buf.is_null() {
-                    return Err(G2gError::Hardware(HardwareError::Other));
-                }
-                core::ptr::copy_nonoverlapping(extradata.as_ptr(), buf, size);
-                let raw = decoder_ctx.as_mut_ptr();
-                (*raw).extradata = buf;
-                (*raw).extradata_size = size as i32;
-            }
+            crate::ffmpegdec::set_extradata(&mut decoder_ctx, extradata)?;
         }
         // without a channel count in the context, libavcodec's ER AAC decode returns frames with no buffer
         let aac_info = match (self.format, extradata) {
@@ -302,9 +315,10 @@ impl AsyncElement for FfmpegAudioDec {
             return Err(G2gError::CapsMismatch);
         }
         self.format = *format;
-        // FLAC opens lazily on its `fLaC` STREAMINFO header (needed as extradata);
-        // the rest open eagerly, their frames being self-describing.
-        if self.format != AudioFormat::Flac {
+        // FLAC opens lazily on its `fLaC` STREAMINFO header (needed as extradata)
+        // and a tagged codec on its container header. The rest open eagerly,
+        // their frames being self-describing.
+        if !matches!(self.format, AudioFormat::Flac | AudioFormat::Tagged(_)) {
             self.open_decoder(None)?;
         }
         self.configured = true;
@@ -338,6 +352,17 @@ impl AsyncElement for FfmpegAudioDec {
                         .require_system_slice(short_type_name::<Self>())?;
                     timing = frame.timing;
                     let buf = slice;
+                    // a tagged codec opens on the container header leading its stream
+                    #[cfg(feature = "ffmpeg-long-tail")]
+                    if let AudioFormat::Tagged(tag) = self.format {
+                        if self.lead_config.as_deref() == Some(buf) {
+                            return Ok(());
+                        }
+                        if self.decoder.is_none() {
+                            self.open_tagged_decoder(tag, buf)?;
+                            return Ok(());
+                        }
+                    }
                     // FLAC arrives container-framed (one frame per packet), led by
                     // the native `fLaC` STREAMINFO header the demuxer forwards
                     // in-band: take it as extradata and open the decoder, emitting
@@ -356,17 +381,17 @@ impl AsyncElement for FfmpegAudioDec {
                         self.send_unit(buf)?;
                         self.drain(&mut decoded)?;
                     } else if self.format == AudioFormat::Aac
-                        && self.raw_aac_config.as_deref() == Some(buf)
+                        && self.lead_config.as_deref() == Some(buf)
                     {
                         // a demuxer re-sends the config after a flush or a track switch
                         return Ok(());
                     } else if self.format == AudioFormat::Aac
-                        && self.raw_aac_config.is_none()
+                        && self.lead_config.is_none()
                         && crate::aacparse::is_raw_aac_config(buf)
                     {
                         self.decoder = None;
                         self.open_decoder(Some(buf))?;
-                        self.raw_aac_config = Some(buf.to_vec());
+                        self.lead_config = Some(buf.to_vec());
                         return Ok(());
                     } else {
                         // libavcodec wants one access unit per packet, but a demuxed
@@ -377,7 +402,7 @@ impl AsyncElement for FfmpegAudioDec {
                         let aus = match self.format {
                             AudioFormat::Mp2 | AudioFormat::Mp3 => mpa_frames(buf),
                             AudioFormat::Ac3 => ac3_frames(buf),
-                            _ if self.raw_aac_config.is_some() => alloc::vec![buf],
+                            _ if self.lead_config.is_some() => alloc::vec![buf],
                             _ => adts_frames(buf),
                         };
                         for au in aus {
@@ -590,7 +615,8 @@ fn packed_bytes<T>(frame: &FfAudio, samples: usize, channels: usize) -> Result<&
 /// Convert one decoded libavcodec audio frame to interleaved little-endian
 /// `PcmS16Le`. Handles the layouts libavcodec emits for the codecs we decode:
 /// planar / packed 32-bit float (AAC / AC-3's native `FLTP`), planar / packed S16
-/// (FLAC <= 16-bit), and planar / packed S32 (FLAC 24-bit, high bits kept). Float
+/// (FLAC <= 16-bit), planar / packed S32 (FLAC 24-bit, high bits kept), and the
+/// unsigned 8-bit and 64-bit float layouts some tagged codecs decode to. Float
 /// samples convert like swresample (round to nearest at 1<<15 scale, clipped) so
 /// the PCM matches ffmpeg's own decode of the same stream; an unsupported layout
 /// is a loud `CapsMismatch` rather than silent noise.
@@ -605,6 +631,9 @@ fn to_s16_interleaved(frame: &FfAudio) -> Result<DecodedAudio, G2gError> {
     // other libavcodec consumer converts this way, so a differential decode
     // against ffmpeg stays bit-exact
     let f32_to_i16 = |v: f32| (v * 32768.0).round_ties_even().clamp(-32768.0, 32767.0) as i16;
+    let f64_to_i16 = |v: f64| (v * 32768.0).round_ties_even().clamp(-32768.0, 32767.0) as i16;
+    // unsigned 8-bit is offset by 128, and swresample widens it by a plain shift
+    let u8_to_i16 = |v: u8| (i16::from(v) - 128) << 8;
     match frame.format() {
         Sample::F32(Type::Planar) => {
             for (c, slot) in (0..channels).zip(0..) {
@@ -646,6 +675,34 @@ fn to_s16_interleaved(frame: &FfAudio) -> Result<DecodedAudio, G2gError> {
             let data = packed_bytes::<i32>(frame, samples, channels)?;
             for (i, b) in data.as_chunks::<4>().0.iter().enumerate() {
                 out[i] = (i32::from_ne_bytes(*b) >> 16) as i16;
+            }
+        }
+        Sample::U8(Type::Planar) => {
+            for (c, slot) in (0..channels).zip(0..) {
+                let plane = frame.plane::<u8>(c);
+                for i in 0..samples {
+                    out[i * channels + slot] = u8_to_i16(plane[i]);
+                }
+            }
+        }
+        Sample::U8(Type::Packed) => {
+            let data = packed_bytes::<u8>(frame, samples, channels)?;
+            for (i, &b) in data.iter().enumerate() {
+                out[i] = u8_to_i16(b);
+            }
+        }
+        Sample::F64(Type::Planar) => {
+            for (c, slot) in (0..channels).zip(0..) {
+                let plane = frame.plane::<f64>(c);
+                for i in 0..samples {
+                    out[i * channels + slot] = f64_to_i16(plane[i]);
+                }
+            }
+        }
+        Sample::F64(Type::Packed) => {
+            let data = packed_bytes::<f64>(frame, samples, channels)?;
+            for (i, b) in data.as_chunks::<8>().0.iter().enumerate() {
+                out[i] = f64_to_i16(f64::from_ne_bytes(*b));
             }
         }
         _ => return Err(G2gError::CapsMismatch),

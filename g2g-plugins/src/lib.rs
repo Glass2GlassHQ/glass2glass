@@ -638,6 +638,8 @@ mod bereader;
 mod riff;
 // `WAVEFORMATEX` tags and the WAVE header, shared by the WAV and AVI elements.
 mod waveformat;
+// Stream names for codecs the demuxers know only by container tag.
+mod codectag;
 // AVI container parsing / writing (M1071), behind `avidemux` and `avimux`.
 mod avi;
 // The uncompressed video layouts the AVI, Matroska and QuickTime demuxers read.
@@ -1471,6 +1473,9 @@ pub mod ffmpegdec;
 // of `ffmpegdec`. Same Linux + `ffmpeg` gate.
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 pub mod ffmpegaudiodec;
+// libavcodec setup for codecs known only by container tag.
+#[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+mod ffmpegtagged;
 
 // H.264 encode via libavcodec (NVENC / libx264), the encode-side mirror of
 // ffmpegdec (M266). Same Linux + ffmpeg gating.

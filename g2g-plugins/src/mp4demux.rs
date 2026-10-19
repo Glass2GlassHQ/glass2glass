@@ -16,6 +16,7 @@
 //! `stream=aac` (M748), the one stream a linear `decodebin` chain decodes.
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
@@ -32,6 +33,9 @@ use g2g_core::{
 
 use crate::aacparse::{is_raw_aac_config, require_adts};
 use crate::avidemux::{is_pcm, pcm_alternatives};
+use crate::codectag::{
+    audio_from_stream_name, audio_stream_name, video_from_stream_name, video_stream_name,
+};
 use crate::fmp4::{
     clip_stored_pcm, parse_all_tracks, parse_fragments_multi, parse_progressive_multi,
     prepend_param_sets, starts_with_param_set, track_framerate_q16, Sample, TrackHeader, TrackKind,
@@ -86,28 +90,19 @@ const AUDIO_STREAM_NAMES: &[(&str, AudioFormat)] = &[
     ("mulaw", AudioFormat::Mulaw),
 ];
 
-pub(crate) fn mp4_audio_stream_str(format: AudioFormat) -> Option<&'static str> {
-    AUDIO_STREAM_NAMES
-        .iter()
-        .find(|(_, f)| *f == format)
-        .map(|(name, _)| *name)
+pub(crate) fn mp4_audio_stream_str(format: AudioFormat) -> Option<String> {
+    audio_stream_name(AUDIO_STREAM_NAMES, format)
 }
 
-pub(crate) fn mp4_video_stream_str(codec: VideoCodec) -> Option<&'static str> {
+pub(crate) fn mp4_video_stream_str(codec: VideoCodec) -> Option<String> {
     if let VideoCodec::ProRes { variant } = codec {
-        return Some(prores_stream_str(variant));
+        return Some(String::from(prores_stream_str(variant)));
     }
-    VIDEO_STREAM_NAMES
-        .iter()
-        .find(|(_, c)| *c == codec)
-        .map(|(name, _)| *name)
+    video_stream_name(VIDEO_STREAM_NAMES, codec)
 }
 
 fn mp4_video_stream_from_str(name: &str) -> Option<VideoCodec> {
-    VIDEO_STREAM_NAMES
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, c)| *c)
+    video_from_stream_name(VIDEO_STREAM_NAMES, name)
         .or_else(|| prores_stream_from_str(name).map(|variant| VideoCodec::ProRes { variant }))
 }
 
@@ -262,8 +257,10 @@ impl Mp4Demux {
         // Opus config leads the audio in-band (M791), the `OggDemux` convention,
         // so the decoder trims the pre-skip; AAC is self-describing once ADTS-framed,
         // except the object types ADTS cannot carry, which go raw behind their config.
+        // A tagged codec's whole sample entry leads it the same way.
         let raw_aac = *format == AudioFormat::Aac && is_raw_aac_config(config);
-        if (*format == AudioFormat::Opus && !config.is_empty()) || raw_aac {
+        let tagged = matches!(format, AudioFormat::Tagged(_));
+        if (*format == AudioFormat::Opus && !config.is_empty()) || raw_aac || tagged {
             out.push(PipelinePacket::DataFrame(Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(config.clone().into_boxed_slice())),
                 FrameTiming::default(),
@@ -345,7 +342,17 @@ impl Mp4Demux {
         if edit != Segment::new() {
             out.push(PipelinePacket::Segment(edit)).await?;
         }
-        let mut need_param_sets = true;
+        // a tagged codec's whole sample entry leads its samples as a frame of its own
+        if let (VideoCodec::Tagged(_), Some(entry)) = (codec, param_sets.first()) {
+            out.push(PipelinePacket::DataFrame(Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(entry.clone().into_boxed_slice())),
+                FrameTiming::default(),
+                self.sequence,
+            )))
+            .await?;
+            self.sequence += 1;
+        }
+        let mut need_param_sets = !matches!(codec, VideoCodec::Tagged(_));
         for mut s in track_samples(&self.buffer, video)? {
             let mut annexb = core::mem::take(&mut s.annexb);
             // The moov's config-record parameter sets are out-of-band, so prepend
@@ -513,10 +520,8 @@ impl AsyncElement for Mp4Demux {
         match name {
             "stream" => {
                 let name = value.as_str().ok_or(PropError::Type)?;
-                let audio = AUDIO_STREAM_NAMES
-                    .iter()
-                    .find(|(n, _)| *n == name)
-                    .map(|(_, format)| StreamSelect::Audio(*format));
+                let audio =
+                    audio_from_stream_name(AUDIO_STREAM_NAMES, name).map(StreamSelect::Audio);
                 self.select = match name {
                     "video" => StreamSelect::Video,
                     _ => audio
@@ -532,20 +537,19 @@ impl AsyncElement for Mp4Demux {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "stream" => Some(PropValue::Str(
-                match self.select {
-                    StreamSelect::Video => "video",
-                    // constructed from the same table, so the name is always there
-                    StreamSelect::VideoNamed(codec) => {
-                        mp4_video_stream_str(codec).unwrap_or("video")
-                    }
-                    StreamSelect::RawVideo(format) => {
-                        raw_video_stream_str(format).unwrap_or("video")
-                    }
-                    StreamSelect::Audio(format) => mp4_audio_stream_str(format).unwrap_or("aac"),
+            "stream" => Some(PropValue::Str(match self.select {
+                StreamSelect::Video => String::from("video"),
+                // constructed from the same table, so the name is always there
+                StreamSelect::VideoNamed(codec) => {
+                    mp4_video_stream_str(codec).unwrap_or_else(|| String::from("video"))
                 }
-                .into(),
-            )),
+                StreamSelect::RawVideo(format) => {
+                    String::from(raw_video_stream_str(format).unwrap_or("video"))
+                }
+                StreamSelect::Audio(format) => {
+                    mp4_audio_stream_str(format).unwrap_or_else(|| String::from("aac"))
+                }
+            })),
             _ => None,
         }
     }
@@ -585,7 +589,7 @@ impl AsyncElement for Mp4Demux {
 static MP4DEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | vp8 | mjpeg | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq (the video track by codec) | raw-i420 | raw-yuy2 | raw-uyvy (the uncompressed video track by layout) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | alaw | mulaw (the audio track by format)",
+    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | vp8 | mjpeg | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq (the video track by codec) | raw-i420 | raw-yuy2 | raw-uyvy (the uncompressed video track by layout) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | alaw | mulaw (the audio track by format) | video-mov-<fourcc> | audio-mov-<fourcc> (a codec known only by its sample entry, with ffmpeg-long-tail)",
 )];
 
 impl PadTemplates for Mp4Demux {

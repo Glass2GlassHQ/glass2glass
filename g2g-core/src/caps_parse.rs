@@ -8,8 +8,10 @@ use alloc::vec::Vec;
 
 use crate::caps::{
     batch_alternatives, framerate_q16_from_fraction, pcm_from_gst_format, AudioFormat,
-    ByteStreamEncoding, Caps, CapsSet, Colorimetry, Dim, Interlace, ProResVariant, Rate,
-    RawVideoFormat, SubPictureFormat, TextFormat, VideoCodec, PCM_FORMATS,
+    ByteStreamEncoding, Caps, CapsSet, CodecTag, Colorimetry, Dim, Interlace, ProResVariant, Rate,
+    RawVideoFormat, SubPictureFormat, TagNamespace, TextFormat, VideoCodec,
+    MOV_UNKNOWN_SUBTYPE_PREFIX, PCM_FORMATS, RIFF_AUDIO_TAG_FIELD, RIFF_UNKNOWN_SUBTYPE,
+    RIFF_VIDEO_TAG_FIELD,
 };
 use crate::channels::ChannelLayout;
 
@@ -293,6 +295,13 @@ impl CapsSet {
 
         let text_set = |format| Some(CapsSet::one(Caps::Text { format }));
 
+        if let Some(tagged) = tagged_codec(media, &fields) {
+            return match tagged {
+                TaggedCodec::Video(tag) => compressed_set(VideoCodec::Tagged(tag)),
+                TaggedCodec::Audio(tag) => audio_set(&[AudioFormat::Tagged(tag)]),
+            };
+        }
+
         match media {
             "video/x-raw" => {
                 let (formats, widths, heights, rates) = (
@@ -440,6 +449,49 @@ impl CapsSet {
             },
             _ => None,
         }
+    }
+}
+
+enum TaggedCodec {
+    Video(CodecTag),
+    Audio(CodecTag),
+}
+
+// the media types `Caps::to_gst_string` prints for `VideoCodec::Tagged` / `AudioFormat::Tagged`
+fn tagged_codec(media: &str, fields: &[(&str, FieldVal<'_>)]) -> Option<TaggedCodec> {
+    let (kind, subtype) = media.split_once('/')?;
+    if let Some(fourcc) = subtype.strip_prefix(MOV_UNKNOWN_SUBTYPE_PREFIX) {
+        let tag = CodecTag {
+            namespace: TagNamespace::Mov,
+            tag: u32::from_le_bytes(fourcc.as_bytes().try_into().ok()?),
+        };
+        return tagged_of_kind(kind, tag);
+    }
+    if subtype != RIFF_UNKNOWN_SUBTYPE {
+        return None;
+    }
+    let tag_field = match kind {
+        "video" => RIFF_VIDEO_TAG_FIELD,
+        "audio" => RIFF_AUDIO_TAG_FIELD,
+        _ => return None,
+    };
+    let (_, FieldVal::One(value)) = fields.iter().find(|(key, _)| *key == tag_field)? else {
+        return None;
+    };
+    // gst prints the field typed, `fourcc=(int)1447250246`
+    let value = value.strip_prefix("(int)").unwrap_or(value);
+    let tag = CodecTag {
+        namespace: TagNamespace::Riff,
+        tag: value.trim().parse().ok()?,
+    };
+    tagged_of_kind(kind, tag)
+}
+
+fn tagged_of_kind(kind: &str, tag: CodecTag) -> Option<TaggedCodec> {
+    match kind {
+        "video" => Some(TaggedCodec::Video(tag)),
+        "audio" => Some(TaggedCodec::Audio(tag)),
+        _ => None,
     }
 }
 
@@ -686,6 +738,81 @@ mod tests {
         let any_variant = CapsSet::from_gst_string("video/x-prores").unwrap();
         assert_eq!(any_variant.alternatives().len(), ProResVariant::ALL.len());
         assert!(CapsSet::from_gst_string("video/x-prores,variant=raw").is_none());
+    }
+
+    #[test]
+    fn tagged_codecs_read_the_names_gst_prints_and_round_trip() {
+        let riff_video = VideoCodec::Tagged(CodecTag {
+            namespace: TagNamespace::Riff,
+            tag: u32::from_le_bytes(*b"FICV"),
+        });
+        let parsed = CapsSet::from_gst_string("video/x-avi-unknown, fourcc=(int)1447250246")
+            .expect("gst's avidemux caps parse");
+        assert!(matches!(
+            parsed.alternatives(),
+            [Caps::CompressedVideo { codec, .. }] if *codec == riff_video
+        ));
+        let riff_audio = AudioFormat::Tagged(CodecTag {
+            namespace: TagNamespace::Riff,
+            tag: 0x0401,
+        });
+        let parsed = CapsSet::from_gst_string("audio/x-avi-unknown, codec_id=(int)1025")
+            .expect("gst's avidemux caps parse");
+        assert!(matches!(
+            parsed.alternatives(),
+            [Caps::Audio { format, .. }] if *format == riff_audio
+        ));
+        let mov_video = VideoCodec::Tagged(CodecTag {
+            namespace: TagNamespace::Mov,
+            tag: u32::from_le_bytes(*b"nclc"),
+        });
+        let mov_audio = AudioFormat::Tagged(CodecTag {
+            namespace: TagNamespace::Mov,
+            tag: u32::from_le_bytes(*b"MAC3"),
+        });
+        for caps in [
+            compressed(
+                riff_video,
+                Dim::Fixed(64),
+                Dim::Fixed(48),
+                Rate::Any,
+                Colorimetry::UNKNOWN,
+            ),
+            compressed(
+                mov_video,
+                Dim::Any,
+                Dim::Any,
+                Rate::Any,
+                Colorimetry::UNKNOWN,
+            ),
+            Caps::Audio {
+                format: riff_audio,
+                channels: 1,
+                sample_rate: 22_050,
+                channel_layout: ChannelLayout::UNSPECIFIED,
+            },
+            Caps::Audio {
+                format: mov_audio,
+                channels: 2,
+                sample_rate: 44_100,
+                channel_layout: ChannelLayout::UNSPECIFIED,
+            },
+        ] {
+            let printed = caps.to_gst_string();
+            let parsed = CapsSet::from_gst_string(&printed)
+                .unwrap_or_else(|| panic!("{printed} does not parse back"));
+            assert_eq!(parsed.alternatives(), [caps].as_slice(), "{printed}");
+        }
+        assert_eq!(
+            Caps::Audio {
+                format: mov_audio,
+                channels: 2,
+                sample_rate: 44_100,
+                channel_layout: ChannelLayout::UNSPECIFIED,
+            }
+            .to_gst_string(),
+            "audio/x-gst-fourcc-MAC3,channels=2,rate=44100"
+        );
     }
 
     #[test]

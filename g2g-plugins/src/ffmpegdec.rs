@@ -201,6 +201,10 @@ pub enum OutputFormat {
     A420,
     // a YUVA444P12 source, such as ProRes 4444 with alpha
     A444p12,
+    // packed 8-bit RGB with alpha, what `Auto` makes of a palettized or alpha RGB source
+    Rgba,
+    // packed 8-bit RGB, what `Auto` makes of an RGB source with no alpha
+    Rgb,
 }
 
 impl OutputFormat {
@@ -222,6 +226,39 @@ impl OutputFormat {
             OutputFormat::P010 => RawVideoFormat::P010,
             OutputFormat::A420 => RawVideoFormat::A420,
             OutputFormat::A444p12 => RawVideoFormat::A444p12,
+            OutputFormat::Rgba => RawVideoFormat::Rgba8,
+            OutputFormat::Rgb => RawVideoFormat::Rgb8,
+        }
+    }
+
+    // the packed RGB layouts: the libavcodec pixel format and its bytes per pixel
+    fn packed_rgb(self) -> Option<(Pixel, usize)> {
+        match self {
+            OutputFormat::Rgba => Some((Pixel::RGBA, 4)),
+            OutputFormat::Rgb => Some((Pixel::RGB24, 3)),
+            _ => None,
+        }
+    }
+
+    // the libavcodec pixel format a fixed planar format packs from without conversion
+    #[cfg(feature = "ffmpeg-long-tail")]
+    fn planar_pixel(self) -> Pixel {
+        match self {
+            OutputFormat::I420 | OutputFormat::Auto => Pixel::YUV420P,
+            OutputFormat::Nv12 => Pixel::NV12,
+            OutputFormat::I422 => Pixel::YUV422P,
+            OutputFormat::I444 => Pixel::YUV444P,
+            OutputFormat::I420p10 => Pixel::YUV420P10LE,
+            OutputFormat::I420p12 => Pixel::YUV420P12LE,
+            OutputFormat::I422p10 => Pixel::YUV422P10LE,
+            OutputFormat::I422p12 => Pixel::YUV422P12LE,
+            OutputFormat::I444p10 => Pixel::YUV444P10LE,
+            OutputFormat::I444p12 => Pixel::YUV444P12LE,
+            OutputFormat::P010 => Pixel::P010LE,
+            OutputFormat::A420 => Pixel::YUVA420P,
+            OutputFormat::A444p12 => Pixel::YUVA444P12LE,
+            OutputFormat::Rgba => Pixel::RGBA,
+            OutputFormat::Rgb => Pixel::RGB24,
         }
     }
 
@@ -258,6 +295,7 @@ impl OutputFormat {
             | OutputFormat::I444p10
             | OutputFormat::I444p12
             | OutputFormat::A444p12 => (0, 0),
+            OutputFormat::Rgba | OutputFormat::Rgb => (0, 0),
         }
     }
 }
@@ -284,6 +322,8 @@ fn resolve_output_format(requested: OutputFormat, src: Pixel) -> Result<OutputFo
             // A hardware 10-bit frame (VAAPI download / cuvid) is already
             // semi-planar; its native output is P010.
             Pixel::P010LE => Ok(OutputFormat::P010),
+            Pixel::RGBA => Ok(OutputFormat::Rgba),
+            Pixel::RGB24 => Ok(OutputFormat::Rgb),
             _ => Err(G2gError::CapsMismatch),
         },
         other => Ok(other),
@@ -309,8 +349,27 @@ fn accepts_output(requested: OutputFormat, format: RawVideoFormat) -> bool {
                 | RawVideoFormat::P010
                 | RawVideoFormat::A420
                 | RawVideoFormat::A444p12
+                | RawVideoFormat::Rgba8
+                | RawVideoFormat::Rgb8
         ),
         other => other.raw_format() == format,
+    }
+}
+
+// The pixel format to convert a decoded picture to before packing, `None` when
+// it packs as decoded. Only a source with no direct mapping converts, to the
+// requested format, or under `Auto` to the nearest one g2g has.
+#[cfg(feature = "ffmpeg-long-tail")]
+fn conversion_target(requested: OutputFormat, source: Pixel) -> Option<Pixel> {
+    if let Some((packed, _)) = requested.packed_rgb() {
+        return (source != packed).then_some(packed);
+    }
+    match (requested, resolve_output_format(OutputFormat::Auto, source)) {
+        (OutputFormat::Auto, Ok(_)) => None,
+        (OutputFormat::Auto, Err(_)) => Some(crate::ffmpegtagged::nearest_output_pixel(source)),
+        // the YUV packing decides what it takes from a YUV source
+        (_, Ok(native)) if native.packed_rgb().is_none() => None,
+        (fixed, _) => Some(fixed.planar_pixel()),
     }
 }
 
@@ -555,6 +614,14 @@ pub struct FfmpegVideoDec {
     // Theora's identification, comment and setup packets, held until the decoder opens on them
     theora_headers: Vec<Vec<u8>>,
     log_name: LogName,
+    // a tagged stream's container header, which leads it and comes again after a flush
+    #[cfg(feature = "ffmpeg-long-tail")]
+    tagged_header: Option<Vec<u8>>,
+    // the container palette the next access unit hands the decoder
+    #[cfg(feature = "ffmpeg-long-tail")]
+    pending_palette: Option<Vec<u8>>,
+    #[cfg(feature = "ffmpeg-long-tail")]
+    converter: crate::ffmpegtagged::FormatConverter,
 }
 
 /// Back-compat alias from when this element decoded only H.264. The struct is
@@ -616,6 +683,12 @@ impl FfmpegVideoDec {
             segment: Segment::new(),
             theora_headers: Vec::new(),
             log_name: LogName::default(),
+            #[cfg(feature = "ffmpeg-long-tail")]
+            tagged_header: None,
+            #[cfg(feature = "ffmpeg-long-tail")]
+            pending_palette: None,
+            #[cfg(feature = "ffmpeg-long-tail")]
+            converter: crate::ffmpegtagged::FormatConverter::default(),
         }
     }
 
@@ -912,6 +985,8 @@ impl FfmpegVideoDec {
             decoder: self.decoder.as_mut().ok_or(G2gError::NotConfigured)?,
             pts_to_input: &mut self.pts_to_input,
             pack_pool: &mut self.pack_pool,
+            #[cfg(feature = "ffmpeg-long-tail")]
+            converter: &mut self.converter,
         };
         feed_access_unit_into(&mut state, &cfg, packet, pts_ns, input, decoded)
     }
@@ -922,6 +997,8 @@ impl FfmpegVideoDec {
             decoder: self.decoder.as_mut().ok_or(G2gError::NotConfigured)?,
             pts_to_input: &mut self.pts_to_input,
             pack_pool: &mut self.pack_pool,
+            #[cfg(feature = "ffmpeg-long-tail")]
+            converter: &mut self.converter,
         };
         drain_frames_into(&mut state, &cfg, decoded)
     }
@@ -943,6 +1020,8 @@ struct DecodeState<'a> {
     decoder: &'a mut ffmpeg::decoder::Video,
     pts_to_input: &'a mut alloc::collections::BTreeMap<u64, InputStamp>,
     pack_pool: &'a mut PackPool,
+    #[cfg(feature = "ffmpeg-long-tail")]
+    converter: &'a mut crate::ffmpegtagged::FormatConverter,
 }
 
 /// Config the offloadable decode helpers read instead of `&self`, so they can
@@ -962,6 +1041,8 @@ struct OffloadDecode {
     decoder: Option<ffmpeg::decoder::Video>,
     pts_to_input: alloc::collections::BTreeMap<u64, InputStamp>,
     pack_pool: PackPool,
+    #[cfg(feature = "ffmpeg-long-tail")]
+    converter: crate::ffmpegtagged::FormatConverter,
     decoded: Vec<DecodedPicture>,
     result: Result<u64, G2gError>,
 }
@@ -1085,9 +1166,17 @@ fn drain_frames_into(
                         resolved,
                     )
                 } else {
-                    let resolved = resolve_output_format(format, frame.format())?;
+                    #[cfg(feature = "ffmpeg-long-tail")]
+                    let converted = match conversion_target(format, frame.format()) {
+                        Some(target) => Some(state.converter.convert(&mut frame, target)?),
+                        None => None,
+                    };
+                    #[cfg(not(feature = "ffmpeg-long-tail"))]
+                    let converted: Option<FfVideo> = None;
+                    let source = converted.as_ref().unwrap_or(&frame);
+                    let resolved = resolve_output_format(format, source.format())?;
                     (
-                        DecodedPayload::System(copy_yuv(&frame, resolved, state.pack_pool)?),
+                        DecodedPayload::System(copy_yuv(source, resolved, state.pack_pool)?),
                         resolved,
                     )
                 };
@@ -1115,6 +1204,49 @@ fn drain_frames_into(
 }
 
 impl FfmpegVideoDec {
+    #[cfg(feature = "ffmpeg-long-tail")]
+    fn open_tagged_decoder(
+        &mut self,
+        tag: g2g_core::CodecTag,
+        header: &[u8],
+    ) -> Result<(), G2gError> {
+        let mut video = crate::ffmpegtagged::tagged_video(tag, header)?;
+        // a Matroska `V_QUICKTIME` header may leave the geometry to the track, which the caps carry
+        if let Some(Caps::CompressedVideo {
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            ..
+        }) = &self.input_caps
+        {
+            if video.fields.width == 0 || video.fields.height == 0 {
+                video.fields.width = i32::try_from(*width).map_err(|_| G2gError::CapsMismatch)?;
+                video.fields.height = i32::try_from(*height).map_err(|_| G2gError::CapsMismatch)?;
+            }
+        }
+        let extradata = Some(video.extradata.as_slice()).filter(|data| !data.is_empty());
+        self.open_decoder(
+            DecoderCodec::Tagged(video.id, video.fields),
+            extradata,
+            None,
+        )?;
+        self.pending_palette = video.palette;
+        self.tagged_header = Some(header.to_vec());
+        Ok(())
+    }
+
+    fn access_unit_packet(&mut self, au: &[u8], keyframe: bool) -> Result<Packet, G2gError> {
+        let mut packet = Packet::copy(au);
+        // libavformat flags a keyframe packet, which a tagged inter-frame codec such as ZeroCodec keys its reference on
+        if keyframe && matches!(self.codec_kind, Some(VideoCodec::Tagged(_))) {
+            packet.set_flags(ffmpeg::packet::Flags::KEY);
+        }
+        #[cfg(feature = "ffmpeg-long-tail")]
+        if let Some(palette) = self.pending_palette.take() {
+            crate::ffmpegtagged::attach_palette(&mut packet, &palette)?;
+        }
+        Ok(packet)
+    }
+
     fn drain_eos(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<u64, G2gError> {
         if let Some(d) = self.decoder.as_mut() {
             d.send_eof()
@@ -1133,27 +1265,34 @@ impl FfmpegVideoDec {
     /// codec_data side channel), the way ffmpeg / gstreamer seed their decoders.
     fn open_decoder(
         &mut self,
-        codec_kind: VideoCodec,
+        target: DecoderCodec,
         extradata: Option<&[u8]>,
         reorder_frames: Option<u8>,
     ) -> Result<(), G2gError> {
-        let codec = match self.backend {
-            // The generic decoder hosts the CUDA / VAAPI hwaccel; NvdecCuda and
-            // Vaapi attach a device + get_format hook to it below.
-            Backend::Software | Backend::NvdecCuda | Backend::Vaapi => {
-                codec::decoder::find(codec_id(codec_kind))
-            }
+        let codec = match (self.backend, &target) {
             // The `*_cuvid` decoders are standalone codec entries, not hwaccel
             // hooks, so they're found by name rather than by AVCodecID. If absent,
             // the codec has no cuvid decoder, the libavcodec build wasn't compiled
             // with `--enable-cuvid` or libnvcuvid isn't loadable at runtime; either
             // way the right answer is to fail loud so the caller picks Software
             // explicitly.
-            Backend::NvdecCuvid => cuvid_name(codec_kind).and_then(codec::decoder::find_by_name),
+            (Backend::NvdecCuvid, DecoderCodec::Typed(kind)) => {
+                cuvid_name(*kind).and_then(codec::decoder::find_by_name)
+            }
+            // The generic decoder hosts the CUDA / VAAPI hwaccel, NvdecCuda and
+            // Vaapi attach a device + get_format hook to it below.
+            (_, DecoderCodec::Typed(kind)) => codec::decoder::find(codec_id(*kind)),
+            #[cfg(feature = "ffmpeg-long-tail")]
+            (_, DecoderCodec::Tagged(id, _)) => codec::decoder::find(*id),
         }
         .ok_or(G2gError::Hardware(HardwareError::Other))?;
 
         let mut decoder_ctx = codec::decoder::new();
+        #[cfg(feature = "ffmpeg-long-tail")]
+        if let DecoderCodec::Tagged(_, fields) = target {
+            // SAFETY: `decoder_ctx` is freshly allocated and not yet opened.
+            unsafe { fields.set_on(decoder_ctx.as_mut_ptr()) };
+        }
         // Threading. libavcodec defaults to one thread, so without this the
         // software decoder runs on a single core. Which method is allowed is
         // `thread-type`; the default resolves against the path's liveness, to
@@ -1167,7 +1306,7 @@ impl FfmpegVideoDec {
             (*raw).thread_count = self.max_threads as i32;
             (*raw).thread_type = self.thread_type.ff_bits(self.live);
         }
-        if let VideoCodec::ProRes { variant } = codec_kind {
+        if let DecoderCodec::Typed(VideoCodec::ProRes { variant }) = target {
             // SAFETY: freshly allocated, not-yet-opened context; the ProRes
             // decoder reads `codec_tag` at open to pick its sample depth.
             unsafe {
@@ -1187,23 +1326,7 @@ impl FfmpegVideoDec {
         // doc). libavcodec owns the buffer (frees it on close) and requires the
         // `AV_INPUT_BUFFER_PADDING_SIZE` trailing zero bytes.
         if let Some(extradata) = extradata {
-            // SAFETY: `decoder_ctx` is freshly allocated and not yet opened.
-            // `av_mallocz` returns a zeroed buffer (so the required trailing
-            // padding is already zero); we copy `extradata` into it and hand
-            // ownership to the context via its raw `extradata`/`extradata_size`
-            // fields, the canonical way to set decoder extradata.
-            unsafe {
-                let size = extradata.len();
-                let total = size + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
-                let buf = ffmpeg::ffi::av_mallocz(total) as *mut u8;
-                if buf.is_null() {
-                    return Err(G2gError::Hardware(HardwareError::Other));
-                }
-                core::ptr::copy_nonoverlapping(extradata.as_ptr(), buf, size);
-                let raw = decoder_ctx.as_mut_ptr();
-                (*raw).extradata = buf;
-                (*raw).extradata_size = size as i32;
-            }
+            set_extradata(&mut decoder_ctx, extradata)?;
         }
         // Tell the decoder its output-reorder depth up front (from the SPS), so it
         // buffers the opening GOP's leading pictures instead of emitting the first
@@ -1439,6 +1562,17 @@ impl AsyncElement for FfmpegVideoDec {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        if let Caps::CompressedVideo {
+            codec: codec @ VideoCodec::Tagged(_),
+            ..
+        } = upstream_caps
+        {
+            return if decodes(*codec) {
+                Ok(upstream_caps.clone())
+            } else {
+                Err(G2gError::CapsMismatch)
+            };
+        }
         for codec in SUPPORTED_CODECS {
             let candidate = Caps::CompressedVideo {
                 codec,
@@ -1485,9 +1619,13 @@ impl AsyncElement for FfmpegVideoDec {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let codec_kind = match absolute_caps {
-            Caps::CompressedVideo { codec, .. } if SUPPORTED_CODECS.contains(codec) => *codec,
+            Caps::CompressedVideo { codec, .. } if decodes(*codec) => *codec,
             _ => return Err(G2gError::CapsMismatch),
         };
+        // a tagged codec opens a libavcodec software decoder, whatever its hardware backends
+        if matches!(codec_kind, VideoCodec::Tagged(_)) && self.backend != Backend::Software {
+            return Err(G2gError::CapsMismatch);
+        }
 
         // ffmpeg::init() registers codecs once per process; calling it
         // repeatedly is safe and cheap.
@@ -1594,6 +1732,8 @@ impl AsyncElement for FfmpegVideoDec {
                     "p010" | "p010_10le" => OutputFormat::P010,
                     "a420" => OutputFormat::A420,
                     "a444p12" | "a444_12le" => OutputFormat::A444p12,
+                    "rgba" => OutputFormat::Rgba,
+                    "rgb" => OutputFormat::Rgb,
                     _ => return Err(PropError::Value),
                 });
                 Ok(())
@@ -1674,6 +1814,8 @@ impl AsyncElement for FfmpegVideoDec {
                     OutputFormat::P010 => "p010",
                     OutputFormat::A420 => "a420",
                     OutputFormat::A444p12 => "a444p12",
+                    OutputFormat::Rgba => "rgba",
+                    OutputFormat::Rgb => "rgb",
                 }
                 .into(),
             )),
@@ -1714,13 +1856,29 @@ impl AsyncElement for FfmpegVideoDec {
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let codec_kind = self.codec_kind.ok_or(G2gError::NotConfigured)?;
+                    // a tagged stream leads with its container header, which opens the decoder
+                    #[cfg(feature = "ffmpeg-long-tail")]
+                    if let VideoCodec::Tagged(tag) = codec_kind {
+                        if self.decoder.is_none() {
+                            self.open_tagged_decoder(tag, slice)?;
+                            return Ok(());
+                        }
+                        // a demuxer sends it again after a flush
+                        if self.tagged_header.as_deref() == Some(slice) {
+                            return Ok(());
+                        }
+                    }
                     if codec_kind == VideoCodec::Theora && is_theora_header(slice) {
                         // the headers a demuxer re-sends after a flush reach an open decoder
                         if self.decoder.is_none() {
                             self.theora_headers.push(slice.to_vec());
                             if self.theora_headers.len() == THEORA_HEADERS {
                                 let extradata = xiph_laced(&self.theora_headers);
-                                self.open_decoder(codec_kind, Some(&extradata), None)?;
+                                self.open_decoder(
+                                    DecoderCodec::Typed(codec_kind),
+                                    Some(&extradata),
+                                    None,
+                                )?;
                             }
                         }
                         return Ok(());
@@ -1741,7 +1899,11 @@ impl AsyncElement for FfmpegVideoDec {
                             VideoCodec::H264 => crate::h264parse::sps_reorder_frames(au),
                             _ => None,
                         };
-                        self.open_decoder(codec_kind, extradata.as_deref(), reorder)?;
+                        self.open_decoder(
+                            DecoderCodec::Typed(codec_kind),
+                            extradata.as_deref(),
+                            reorder,
+                        )?;
                     }
                     // M997: shed this picture if a QoS report left budget, and
                     // spend one unit of it. Before the feed, since libavcodec
@@ -1757,7 +1919,7 @@ impl AsyncElement for FfmpegVideoDec {
                     #[cfg(feature = "offload")]
                     {
                         let cfg = self.decode_config();
-                        let packet = Packet::copy(au);
+                        let packet = self.access_unit_packet(au, frame.timing.keyframe)?;
                         let pts_ns = frame.timing.pts_ns;
                         let input = InputStamp {
                             arrival_ns: frame.timing.arrival_ns,
@@ -1767,6 +1929,8 @@ impl AsyncElement for FfmpegVideoDec {
                             decoder: self.decoder.take(),
                             pts_to_input: core::mem::take(&mut self.pts_to_input),
                             pack_pool: core::mem::take(&mut self.pack_pool),
+                            #[cfg(feature = "ffmpeg-long-tail")]
+                            converter: core::mem::take(&mut self.converter),
                             decoded: Vec::new(),
                             result: Ok(0),
                         };
@@ -1778,6 +1942,8 @@ impl AsyncElement for FfmpegVideoDec {
                                         decoder,
                                         pts_to_input: &mut b.pts_to_input,
                                         pack_pool: &mut b.pack_pool,
+                                        #[cfg(feature = "ffmpeg-long-tail")]
+                                        converter: &mut b.converter,
                                     };
                                     feed_access_unit_into(
                                         &mut state,
@@ -1796,13 +1962,18 @@ impl AsyncElement for FfmpegVideoDec {
                         self.decoder = bundle.decoder.take();
                         self.pts_to_input = core::mem::take(&mut bundle.pts_to_input);
                         self.pack_pool = core::mem::take(&mut bundle.pack_pool);
+                        #[cfg(feature = "ffmpeg-long-tail")]
+                        {
+                            self.converter = core::mem::take(&mut bundle.converter);
+                        }
                         undecodable = bundle.result?;
                         decoded = bundle.decoded;
                     }
                     #[cfg(not(feature = "offload"))]
                     {
+                        let packet = self.access_unit_packet(au, frame.timing.keyframe)?;
                         undecodable = self.feed_access_unit(
-                            Packet::copy(au),
+                            packet,
                             frame.timing.pts_ns,
                             InputStamp {
                                 arrival_ns: frame.timing.arrival_ns,
@@ -1827,7 +1998,7 @@ impl AsyncElement for FfmpegVideoDec {
                     //      decoded frame; suppress re-emission from the
                     //      decode loop by recording `last_caps`.
                     match &c {
-                        Caps::CompressedVideo { codec, .. } if SUPPORTED_CODECS.contains(codec) => {
+                        Caps::CompressedVideo { codec, .. } if decodes(*codec) => {
                             self.input_caps = Some(c);
                         }
                         // A pre-fixed output CapsChanged from the runner: accept
@@ -2039,7 +2210,7 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
     .with_enum_values(
         "i420 | nv12 | i422 | i444 | auto | i420p10 | i420_10le | i420p12 | i420_12le | \
          i422p10 | i422_10le | i422p12 | i422_12le | i444p10 | y444_10le | i444p12 | \
-         y444_12le | p010 | p010_10le | a420 | a444p12 | a444_12le",
+         y444_12le | p010 | p010_10le | a420 | a444p12 | a444_12le | rgba | rgb",
     )
     .with_default("i420"),
     PropertySpec::new(
@@ -2091,6 +2262,48 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
     )
     .with_default("30"),
 ];
+
+// Hands a not yet opened codec context its extradata. libavcodec owns the buffer
+// (frees it on close) and requires `AV_INPUT_BUFFER_PADDING_SIZE` trailing zero bytes.
+pub(crate) fn set_extradata(
+    context: &mut codec::Context,
+    extradata: &[u8],
+) -> Result<(), G2gError> {
+    let size = i32::try_from(extradata.len()).map_err(|_| G2gError::CapsMismatch)?;
+    // SAFETY: the context is not yet opened. `av_mallocz` returns a zeroed
+    // buffer, so the padding is already zero. `extradata` is copied into it and
+    // the context takes ownership through its `extradata` / `extradata_size`.
+    unsafe {
+        let total = extradata.len() + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
+        let buf = ffmpeg::ffi::av_mallocz(total) as *mut u8;
+        if buf.is_null() {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        core::ptr::copy_nonoverlapping(extradata.as_ptr(), buf, extradata.len());
+        let raw = context.as_mut_ptr();
+        (*raw).extradata = buf;
+        (*raw).extradata_size = size;
+    }
+    Ok(())
+}
+
+// What the decoder opens as: a typed codec, or the codec a container tag names
+// with the context fields its header sets.
+#[derive(Debug, Clone, Copy)]
+enum DecoderCodec {
+    Typed(VideoCodec),
+    #[cfg(feature = "ffmpeg-long-tail")]
+    Tagged(Id, crate::ffmpegtagged::VideoContextFields),
+}
+
+// a codec this element opens: a typed one, or with ffmpeg-long-tail one libavformat's tag tables name
+fn decodes(codec: VideoCodec) -> bool {
+    match codec {
+        #[cfg(feature = "ffmpeg-long-tail")]
+        VideoCodec::Tagged(tag) => crate::ffmpegtagged::video_codec_id(tag).is_some(),
+        typed => SUPPORTED_CODECS.contains(&typed),
+    }
+}
 
 /// The libavcodec `AVCodecID` for a g2g codec (generic + CUDA-hwaccel path).
 const THEORA_HEADERS: usize = 3;
@@ -2188,7 +2401,7 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
             height,
             framerate,
             colorimetry,
-        } if SUPPORTED_CODECS.contains(codec) => {
+        } if decodes(*codec) => {
             let mk = |f: RawVideoFormat| Caps::RawVideo {
                 format: f,
                 width: width.clone(),
@@ -2204,22 +2417,29 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
                 // advertise every preserve format so a flexible downstream links,
                 // then the decoder fixes the concrete one via its own
                 // `CapsChanged` after decode.
-                OutputFormat::Auto => CapsSet::from_alternatives(alloc::vec![
-                    mk(RawVideoFormat::I420),
-                    mk(RawVideoFormat::I422),
-                    mk(RawVideoFormat::I444),
-                    mk(RawVideoFormat::I420p10),
-                    mk(RawVideoFormat::I420p12),
-                    mk(RawVideoFormat::I422p10),
-                    mk(RawVideoFormat::I422p12),
-                    mk(RawVideoFormat::I444p10),
-                    mk(RawVideoFormat::I444p12),
-                    // A hardware 10-bit frame arrives semi-planar, so `Auto`
-                    // resolves it to P010 (the Vaapi backend's 10-bit output).
-                    mk(RawVideoFormat::P010),
-                    mk(RawVideoFormat::A420),
-                    mk(RawVideoFormat::A444p12),
-                ]),
+                OutputFormat::Auto => {
+                    let mut formats = alloc::vec![
+                        mk(RawVideoFormat::I420),
+                        mk(RawVideoFormat::I422),
+                        mk(RawVideoFormat::I444),
+                        mk(RawVideoFormat::I420p10),
+                        mk(RawVideoFormat::I420p12),
+                        mk(RawVideoFormat::I422p10),
+                        mk(RawVideoFormat::I422p12),
+                        mk(RawVideoFormat::I444p10),
+                        mk(RawVideoFormat::I444p12),
+                        // A hardware 10-bit frame arrives semi-planar, so `Auto`
+                        // resolves it to P010 (the Vaapi backend's 10-bit output).
+                        mk(RawVideoFormat::P010),
+                        mk(RawVideoFormat::A420),
+                        mk(RawVideoFormat::A444p12),
+                    ];
+                    // a tagged codec's RGB and palettized pictures convert to packed RGB
+                    if matches!(codec, VideoCodec::Tagged(_)) {
+                        formats.extend([mk(RawVideoFormat::Rgba8), mk(RawVideoFormat::Rgb8)]);
+                    }
+                    CapsSet::from_alternatives(formats)
+                }
                 other => CapsSet::one(mk(other.raw_format())),
             }
         }
@@ -2473,6 +2693,15 @@ fn copy_yuv(
 ) -> Result<PackedBuffer, G2gError> {
     let w = frame.width() as usize;
     let h = frame.height() as usize;
+    if let Some((pixel, pixel_bytes)) = format.packed_rgb() {
+        if frame.format() != pixel {
+            return Err(G2gError::CapsMismatch);
+        }
+        let row_bytes = w * pixel_bytes;
+        return Ok(pack_into(pool, row_bytes * h, |dst| {
+            copy_plane_rows(dst, frame.data(0), frame.stride(0), row_bytes, h)
+        }));
+    }
     // Semi-planar 10-bit output: from a planar 10-bit software decode (interleave
     // the chroma, shift each sample into the word's top bits) or verbatim from a
     // hardware `P010LE` frame, which is already in this layout. Any other source
@@ -2990,7 +3219,7 @@ mod tests {
         assert_eq!(resolve_output_format(Auto, Pixel::YUV444P).unwrap(), I444);
         assert_eq!(resolve_output_format(Auto, Pixel::YUVA420P).unwrap(), A420);
         assert!(
-            resolve_output_format(Auto, Pixel::RGB24).is_err(),
+            resolve_output_format(Auto, Pixel::GBRP).is_err(),
             "unsupported src"
         );
         // A fixed request passes through regardless of the source.
@@ -3414,7 +3643,7 @@ mod tests {
             assert!(!set.intersect(&one).is_empty(), "Auto advertises {fmt:?}");
         }
         assert!(accepts_output(OutputFormat::Auto, RawVideoFormat::I444));
-        assert!(!accepts_output(OutputFormat::Auto, RawVideoFormat::Rgba8));
+        assert!(!accepts_output(OutputFormat::Auto, RawVideoFormat::Bgra8));
         assert!(accepts_output(OutputFormat::I420, RawVideoFormat::I420));
         assert!(!accepts_output(OutputFormat::I420, RawVideoFormat::I444));
     }
@@ -3684,7 +3913,7 @@ mod tests {
             .unwrap();
         assert_eq!(dec.output_format(), OutputFormat::Nv12);
         assert_eq!(
-            dec.set_property("output-format", PropValue::Str("rgb".into())),
+            dec.set_property("output-format", PropValue::Str("bgra".into())),
             Err(PropError::Value)
         );
         // A type mismatch and an unknown name are distinct errors.
@@ -3756,7 +3985,7 @@ mod tests {
             .with_max_threads(threads)
             .with_thread_type(thread_type);
         dec.configure_liveness(live);
-        dec.open_decoder(VideoCodec::H264, None, None)
+        dec.open_decoder(DecoderCodec::Typed(VideoCodec::H264), None, None)
             .expect("the software H.264 decoder opens");
         dec
     }

@@ -30,8 +30,11 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+#[cfg(feature = "ffmpeg-long-tail")]
+use g2g_core::TagNamespace;
 use g2g_core::{
-    AudioFormat, Chapter, ProResVariant, RawVideoFormat, SubPictureFormat, Tag, TagList, TextFormat,
+    AudioFormat, Chapter, CodecTag, ProResVariant, RawVideoFormat, SubPictureFormat, Tag, TagList,
+    TextFormat,
 };
 
 use crate::dvbsub::{page_id_blob, parse_page_ids, segment_span, PageIds, DEFAULT_SUBTITLING_TYPE};
@@ -197,6 +200,11 @@ pub enum MkvCodec {
     Theora,
     // `V_PRORES`, its profile's fourcc in the `CodecPrivate`
     ProRes(ProResVariant),
+    // `V_MS/VFW/FOURCC` or `V_QUICKTIME` naming a codec no variant above maps, its
+    // `CodecPrivate` the BITMAPINFOHEADER or the sample entry
+    TaggedVideo(CodecTag),
+    // `A_MS/ACM` naming a codec no variant above maps, its `CodecPrivate` the WAVEFORMATEX
+    TaggedAudio(CodecTag),
 }
 
 impl MkvCodec {
@@ -277,7 +285,9 @@ impl MkvCodec {
             | MkvCodec::Pcm { .. }
             | MkvCodec::RawVideo(_)
             | MkvCodec::Theora
-            | MkvCodec::ProRes(_) => return None,
+            | MkvCodec::ProRes(_)
+            | MkvCodec::TaggedVideo(_)
+            | MkvCodec::TaggedAudio(_) => return None,
         })
     }
 
@@ -297,7 +307,8 @@ impl MkvCodec {
             | MkvCodec::Ac3
             | MkvCodec::Flac
             | MkvCodec::Vorbis
-            | MkvCodec::Pcm { .. } => 2,
+            | MkvCodec::Pcm { .. }
+            | MkvCodec::TaggedAudio(_) => 2,
             MkvCodec::Subtitle(_) | MkvCodec::VobSub | MkvCodec::DvbSub | MkvCodec::Pgs => 0x11,
             _ => 1,
         }
@@ -1309,6 +1320,7 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
             .or_else(|| vfw_codec(codec_id, codec_private))
             .or_else(|| uncompressed_codec(codec_id, colour_space?))
             .or_else(|| prores_codec(codec_id, codec_private))
+            .or_else(|| tagged_codec(codec_id, codec_private))
             .unwrap_or(MkvCodec::Other),
         codec => codec,
     };
@@ -1383,6 +1395,45 @@ fn uncompressed_codec(codec_id: &[u8], colour_space: [u8; 4]) -> Option<MkvCodec
         .then(|| crate::uncompressedvideo::raw_video_format(colour_space))
         .flatten()
         .map(MkvCodec::RawVideo)
+}
+
+// the wrappers whose `CodecPrivate` carries an AVI or QuickTime codec header, which a tagged codec rides
+#[cfg(feature = "ffmpeg-long-tail")]
+fn tagged_codec(codec_id: &[u8], codec_private: &[u8]) -> Option<MkvCodec> {
+    const BITMAPINFO_LEN: usize = 40;
+    const WAVEFORMAT_LEN: usize = 14;
+    const WAVEFORMAT_TAG: core::ops::Range<usize> = 0..2;
+    const SAMPLE_ENTRY_FOURCC: core::ops::Range<usize> = 4..8;
+    const VISUAL_SAMPLE_ENTRY_LEN: usize = 86;
+    let tag = |namespace, bytes: &[u8]| {
+        let mut word = [0u8; 4];
+        word[..bytes.len()].copy_from_slice(bytes);
+        CodecTag {
+            namespace,
+            tag: u32::from_le_bytes(word),
+        }
+    };
+    match without_nul_padding(codec_id) {
+        id if id == VFW_CODEC_ID.as_bytes() && codec_private.len() >= BITMAPINFO_LEN => {
+            Some(MkvCodec::TaggedVideo(tag(
+                TagNamespace::Riff,
+                &codec_private[BITMAPINFO_COMPRESSION],
+            )))
+        }
+        b"A_MS/ACM" if codec_private.len() >= WAVEFORMAT_LEN => Some(MkvCodec::TaggedAudio(tag(
+            TagNamespace::Riff,
+            &codec_private[WAVEFORMAT_TAG],
+        ))),
+        b"V_QUICKTIME" if codec_private.len() >= VISUAL_SAMPLE_ENTRY_LEN => Some(
+            MkvCodec::TaggedVideo(tag(TagNamespace::Mov, &codec_private[SAMPLE_ENTRY_FOURCC])),
+        ),
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "ffmpeg-long-tail"))]
+fn tagged_codec(_codec_id: &[u8], _codec_private: &[u8]) -> Option<MkvCodec> {
+    None
 }
 
 // the packet count less one, the 255-run sizes of all but the last packet, then the packets
@@ -2920,8 +2971,67 @@ mod tests {
         d.push_data(&[elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat());
 
         assert_eq!(d.tracks()[0].codec, MkvCodec::Mjpeg);
-        assert_eq!(d.tracks()[1].codec, MkvCodec::Other);
-        assert_eq!(d.unmapped_codec_ids(), ["V_MS/VFW/FOURCC XVID"]);
+        #[cfg(not(feature = "ffmpeg-long-tail"))]
+        {
+            assert_eq!(d.tracks()[1].codec, MkvCodec::Other);
+            assert_eq!(d.unmapped_codec_ids(), ["V_MS/VFW/FOURCC XVID"]);
+        }
+        #[cfg(feature = "ffmpeg-long-tail")]
+        {
+            let xvid = CodecTag {
+                namespace: TagNamespace::Riff,
+                tag: u32::from_le_bytes(*b"XVID"),
+            };
+            assert_eq!(d.tracks()[1].codec, MkvCodec::TaggedVideo(xvid));
+            assert!(d.unmapped_codec_ids().is_empty());
+        }
+    }
+
+    #[cfg(feature = "ffmpeg-long-tail")]
+    #[test]
+    fn acm_and_quicktime_tracks_go_on_under_their_tags() {
+        const WAVEFORMATEX_LEN: usize = 18;
+        const VISUAL_SAMPLE_ENTRY_LEN: usize = 86;
+        const TRUESPEECH: u16 = 0x0022;
+        let entry = |number: u64, codec_id: &[u8], private: &[u8]| {
+            let body = [
+                elem(&[0xD7], &uint_body(number)),
+                elem(&[0x86], codec_id),
+                elem(&[0x63, 0xA2], private),
+            ]
+            .concat();
+            elem(&[0xAE], &body)
+        };
+        let mut wave_format = vec![0u8; WAVEFORMATEX_LEN];
+        wave_format[..2].copy_from_slice(&TRUESPEECH.to_le_bytes());
+        let mut sample_entry = vec![0u8; VISUAL_SAMPLE_ENTRY_LEN];
+        sample_entry[4..8].copy_from_slice(b"rle ");
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &[
+                entry(1, b"A_MS/ACM", &wave_format),
+                entry(2, b"V_QUICKTIME", &sample_entry),
+            ]
+            .concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &tracks);
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&[elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat());
+        assert_eq!(
+            d.tracks()[0].codec,
+            MkvCodec::TaggedAudio(CodecTag {
+                namespace: TagNamespace::Riff,
+                tag: u32::from(TRUESPEECH),
+            })
+        );
+        assert_eq!(
+            d.tracks()[1].codec,
+            MkvCodec::TaggedVideo(CodecTag {
+                namespace: TagNamespace::Mov,
+                tag: u32::from_le_bytes(*b"rle "),
+            })
+        );
+        assert_eq!(d.codec_private(2), Some(sample_entry.as_slice()));
     }
 
     /// A Matroska `S_TEXT/UTF8` subtitle track is recognized as

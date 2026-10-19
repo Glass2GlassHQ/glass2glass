@@ -509,6 +509,7 @@ cargo clippy --workspace --all-targets
 | `OnvifSrc` (camera discovery + stream-URI resolution) / `OnvifMetadataParse` / `OnvifMetadataCombiner` | `onvif` | reqwest + roxmltree |
 | `H264Parse` | (default) | none |
 | `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda` / `Vaapi`) | `ffmpeg` | Linux + libavcodec |
+| AVI / QuickTime / Matroska streams g2g has no caps type for (Cinepak, Indeo, Ut Video, QuickTime RLE, ADPCM, MACE, ...), demuxed under their container tag and decoded by `ffmpegdec` / `ffmpegaudiodec` | `ffmpeg-long-tail` | Linux + libavcodec + libavformat |
 | `VaapiH264Dec` | `vaapi` | Linux + libva + GBM |
 | `MfDecode` / `MfEncode` / `MfAacEncode` / `MfAacDecode` | `mf-decode`, `mf-encode`, `mf-aac` | Windows + Media Foundation |
 | `VtDecode` / `VtEncode` (H.264 / H.265, zero-copy `CVPixelBuffer` output via `cv-output`) | `vtdecode`, `vtencode` | macOS + VideoToolbox |

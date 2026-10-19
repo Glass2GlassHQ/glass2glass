@@ -38,6 +38,9 @@ use crate::annexb::{
     is_annex_b, length_prefixed_to_annexb, parse_avcc, prepend_param_sets, starts_with_param_set,
 };
 use crate::avi::{parse, parse_streams, AviFile, AviStream, AviStreamKind};
+use crate::codectag::{
+    audio_from_stream_name, audio_stream_name, video_from_stream_name, video_stream_name,
+};
 use crate::uncompressedvideo::{
     raw_video_caps, raw_video_formats, raw_video_frame_bytes, raw_video_placeholder_caps,
     raw_video_stream_from_str, raw_video_stream_str, warn_short_raw_video_frame,
@@ -89,34 +92,23 @@ pub enum AviStreamSelect {
     AudioNamed(AudioFormat),
 }
 
-pub(crate) fn video_stream_str(codec: VideoCodec) -> Option<&'static str> {
-    VIDEO_STREAM_NAMES
-        .iter()
-        .find(|(_, c)| *c == codec)
-        .map(|(name, _)| *name)
+pub(crate) fn video_stream_str(codec: VideoCodec) -> Option<String> {
+    video_stream_name(VIDEO_STREAM_NAMES, codec)
 }
 
-pub(crate) fn audio_stream_str(format: AudioFormat) -> Option<&'static str> {
-    AUDIO_STREAM_NAMES
-        .iter()
-        .find(|(_, f)| *f == format)
-        .map(|(name, _)| *name)
+pub(crate) fn audio_stream_str(format: AudioFormat) -> Option<String> {
+    audio_stream_name(AUDIO_STREAM_NAMES, format)
 }
 
 fn select_from_str(name: &str) -> Option<AviStreamSelect> {
     match name {
         "video" => Some(AviStreamSelect::Video),
         "audio" => Some(AviStreamSelect::Audio),
-        _ => VIDEO_STREAM_NAMES
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, c)| AviStreamSelect::VideoNamed(*c))
+        _ => video_from_stream_name(VIDEO_STREAM_NAMES, name)
+            .map(AviStreamSelect::VideoNamed)
             .or_else(|| raw_video_stream_from_str(name).map(AviStreamSelect::RawVideo))
             .or_else(|| {
-                AUDIO_STREAM_NAMES
-                    .iter()
-                    .find(|(n, _)| *n == name)
-                    .map(|(_, f)| AviStreamSelect::AudioNamed(*f))
+                audio_from_stream_name(AUDIO_STREAM_NAMES, name).map(AviStreamSelect::AudioNamed)
             }),
     }
 }
@@ -390,23 +382,33 @@ struct Emitted {
     timing: FrameTiming,
 }
 
-// the AudioSpecificConfig to send ahead of an AAC stream's units, when ADTS cannot carry it (ER AAC, ELD, USAC)
-fn raw_aac_config(stream: &AviStream) -> Option<&[u8]> {
-    let AviStreamKind::Audio {
-        format: AudioFormat::Aac,
-        ..
-    } = stream.kind
-    else {
-        return None;
-    };
-    Some(stream.codec_config.as_slice()).filter(|config| is_raw_aac_config(config))
+// The config to send as a frame of its own ahead of a stream's units: an AAC
+// AudioSpecificConfig ADTS cannot carry (ER AAC, ELD, USAC), or a tagged codec's
+// whole `strf` header.
+fn lead_config(stream: &AviStream) -> Option<&[u8]> {
+    match stream.kind {
+        AviStreamKind::Audio {
+            format: AudioFormat::Aac,
+            ..
+        } => Some(stream.codec_config.as_slice()).filter(|config| is_raw_aac_config(config)),
+        AviStreamKind::Video {
+            codec: VideoCodec::Tagged(_),
+            ..
+        }
+        | AviStreamKind::Audio {
+            format: AudioFormat::Tagged(_),
+            ..
+        } => Some(stream.codec_config.as_slice()),
+        _ => None,
+    }
 }
 
 /// Walk a parsed file's chunks of the `selected` streams into emittable frames,
 /// reconstructing each stream's timing from its `strh`. AVI stores chunks in
 /// decode order with no presentation timestamp, so dts equals pts and a stream
 /// with B-frames is reordered by the decoder downstream. A raw AAC stream's
-/// config goes out as a frame of its own ahead of its first chunk.
+/// config, or a tagged codec's header, goes out as a frame of its own ahead of
+/// its first chunk.
 fn emittable<'a>(
     data: &'a [u8],
     file: &'a AviFile,
@@ -444,14 +446,13 @@ fn emittable<'a>(
                 keyframe: chunk.keyframe,
                 ..FrameTiming::default()
             };
-            let lead_config =
-                raw_aac_config(stream)
-                    .filter(|_| first[chunk.stream])
-                    .map(|config| Emitted {
-                        stream: chunk.stream,
-                        data: Vec::from(config),
-                        timing: FrameTiming::default(),
-                    });
+            let lead_config = lead_config(stream)
+                .filter(|_| first[chunk.stream])
+                .map(|config| Emitted {
+                    stream: chunk.stream,
+                    data: Vec::from(config),
+                    timing: FrameTiming::default(),
+                });
             first[chunk.stream] = false;
             lead_config.into_iter().chain(payload.map(|data| Emitted {
                 stream: chunk.stream,
@@ -615,7 +616,7 @@ impl AviDemux {
 static AVIDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "stream to emit: video (the default) | mjpeg | h264 | mpeg4part2 | vp6 (the video stream by codec) | raw-i420 | raw-yuy2 | raw-uyvy (the uncompressed video stream by layout) | audio | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | mulaw | alaw | mp3 | ac3 | aac (the audio stream by format)",
+    "stream to emit: video (the default) | mjpeg | h264 | mpeg4part2 | vp6 (the video stream by codec) | raw-i420 | raw-yuy2 | raw-uyvy (the uncompressed video stream by layout) | audio | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | mulaw | alaw | mp3 | ac3 | aac (the audio stream by format) | video-riff-<fourcc> | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
 )
 .with_default("video")];
 
@@ -684,17 +685,14 @@ impl AsyncElement for AviDemux {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "stream" => Some(PropValue::Str(
-                match self.select {
-                    AviStreamSelect::Video => "video",
-                    AviStreamSelect::Audio => "audio",
-                    // Both come from the tables the names were parsed from.
-                    AviStreamSelect::VideoNamed(codec) => video_stream_str(codec)?,
-                    AviStreamSelect::RawVideo(format) => raw_video_stream_str(format)?,
-                    AviStreamSelect::AudioNamed(format) => audio_stream_str(format)?,
-                }
-                .into(),
-            )),
+            "stream" => Some(PropValue::Str(match self.select {
+                AviStreamSelect::Video => String::from("video"),
+                AviStreamSelect::Audio => String::from("audio"),
+                // Both come from the tables the names were parsed from.
+                AviStreamSelect::VideoNamed(codec) => video_stream_str(codec)?,
+                AviStreamSelect::RawVideo(format) => String::from(raw_video_stream_str(format)?),
+                AviStreamSelect::AudioNamed(format) => audio_stream_str(format)?,
+            })),
             _ => None,
         }
     }

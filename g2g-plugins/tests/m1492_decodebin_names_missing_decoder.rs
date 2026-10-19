@@ -10,6 +10,9 @@ fn le32(value: u32) -> [u8; 4] {
     value.to_le_bytes()
 }
 
+// no demuxer maps it and libavformat's tag tables do not know it
+const UNKNOWN_FOURCC: &[u8; 4] = b"ZZZ9";
+
 fn riff_chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
     let mut out = id.to_vec();
     out.extend_from_slice(&le32(body.len() as u32));
@@ -24,8 +27,8 @@ fn riff_list(form: &[u8; 4], body: &[u8]) -> Vec<u8> {
     riff_chunk(b"LIST", &[form.as_slice(), body].concat())
 }
 
-// one AASC video stream, its RIFF size claiming more than the file holds
-fn truncated_aasc_avi() -> Vec<u8> {
+// one video stream whose fourcc no decoder knows, its RIFF size claiming more than the file holds
+fn truncated_avi_with_an_unknown_fourcc() -> Vec<u8> {
     const STREAM_COUNT_AT: usize = 24;
     const STRH_LEN: usize = 56;
     const BITMAPINFO_LEN: usize = 40;
@@ -34,14 +37,14 @@ fn truncated_aasc_avi() -> Vec<u8> {
     avih[STREAM_COUNT_AT..STREAM_COUNT_AT + 4].copy_from_slice(&le32(1));
     let mut strh = vec![0u8; STRH_LEN];
     strh[0..4].copy_from_slice(b"vids");
-    strh[4..8].copy_from_slice(b"AASC");
+    strh[4..8].copy_from_slice(UNKNOWN_FOURCC);
     strh[20..24].copy_from_slice(&le32(1));
     strh[24..28].copy_from_slice(&le32(25));
     let mut strf = vec![0u8; BITMAPINFO_LEN];
     strf[0..4].copy_from_slice(&le32(BITMAPINFO_LEN as u32));
     strf[4..8].copy_from_slice(&le32(320));
     strf[8..12].copy_from_slice(&le32(176));
-    strf[16..20].copy_from_slice(b"AASC");
+    strf[16..20].copy_from_slice(UNKNOWN_FOURCC);
     let strl = riff_list(
         b"strl",
         &[riff_chunk(b"strh", &strh), riff_chunk(b"strf", &strf)].concat(),
@@ -133,8 +136,14 @@ fn missing_decoders(tag: &str, ext: &str, bytes: &[u8], consumer: &str) -> Vec<S
 
 #[test]
 fn truncated_avi_names_its_video_codec() {
-    let codecs = missing_decoders("aasc", "avi", &truncated_aasc_avi(), "videoconvert");
-    assert_eq!(codecs, vec!["AASC".to_string()]);
+    let codecs = missing_decoders(
+        "unknown-fourcc",
+        "avi",
+        &truncated_avi_with_an_unknown_fourcc(),
+        "videoconvert",
+    );
+    let fourcc = std::str::from_utf8(UNKNOWN_FOURCC).expect("ASCII");
+    assert_eq!(codecs, vec![fourcc.to_string()]);
 }
 
 #[test]

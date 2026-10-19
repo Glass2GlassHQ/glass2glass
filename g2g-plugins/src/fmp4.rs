@@ -808,7 +808,7 @@ fn parse_video_entry(
     } else if visual_sample_entry(entries) {
         // A well-formed VisualSampleEntry naming a codec we do not read: decline
         // so the rest of the file still demuxes.
-        return Ok(None);
+        return Ok(unread_video_entry(entries, width, height));
     } else {
         return Err(G2gError::CapsMismatch);
     };
@@ -848,6 +848,147 @@ fn raw_video_track(format: RawVideoFormat, entry: &[u8]) -> Result<TrackKind, G2
         width: dimension(VISUAL_SAMPLE_ENTRY_WIDTH_AT)?,
         height: dimension(VISUAL_SAMPLE_ENTRY_HEIGHT_AT)?,
     })
+}
+
+// a sample entry no reader here takes goes on under its fourcc, its whole entry leading the samples
+#[cfg(feature = "ffmpeg-long-tail")]
+fn unread_video_entry(
+    entries: &[u8],
+    width: u32,
+    height: u32,
+) -> Option<(TrackKind, Option<CencDefaults>)> {
+    let (fourcc, payload) = boxes(entries).next()?;
+    let kind = TrackKind::Video {
+        codec: VideoCodec::Tagged(mov_tag(fourcc)),
+        width,
+        height,
+        param_sets: Vec::from([crate::mp4box::mp4_box(fourcc, payload)]),
+    };
+    Some((kind, None))
+}
+
+#[cfg(not(feature = "ffmpeg-long-tail"))]
+fn unread_video_entry(
+    _entries: &[u8],
+    _width: u32,
+    _height: u32,
+) -> Option<(TrackKind, Option<CencDefaults>)> {
+    None
+}
+
+#[cfg(feature = "ffmpeg-long-tail")]
+fn mov_tag(fourcc: &[u8; 4]) -> g2g_core::CodecTag {
+    g2g_core::CodecTag {
+        namespace: g2g_core::TagNamespace::Mov,
+        tag: u32::from_le_bytes(*fourcc),
+    }
+}
+
+// a sound description that does not parse leaves the track skipped, as before tagged codecs
+#[cfg(feature = "ffmpeg-long-tail")]
+fn unread_audio_entry(
+    entries: &[u8],
+    timescale: u32,
+) -> Result<Option<(TrackKind, Option<CencDefaults>)>, G2gError> {
+    let Some((fourcc, payload)) = boxes(entries).next() else {
+        return Ok(None);
+    };
+    let tag = mov_tag(fourcc);
+    let Ok(description) = SoundDescription::parse(payload, tag.tag) else {
+        return Ok(None);
+    };
+    let Some(channels) = u8::try_from(description.channels)
+        .ok()
+        .filter(|channels| *channels > 0)
+    else {
+        return Ok(None);
+    };
+    let kind = TrackKind::Audio {
+        format: AudioFormat::Tagged(tag),
+        channels,
+        sample_rate: match description.sample_rate {
+            0 => timescale,
+            rate => rate,
+        },
+        config: crate::mp4box::mp4_box(fourcc, payload),
+        stored_pcm: None,
+    };
+    Ok(Some((kind, None)))
+}
+
+#[cfg(not(feature = "ffmpeg-long-tail"))]
+fn unread_audio_entry(
+    _entries: &[u8],
+    _timescale: u32,
+) -> Result<Option<(TrackKind, Option<CencDefaults>)>, G2gError> {
+    Ok(None)
+}
+
+// The QuickTime sound description fields mov.c reads to cut a coded track into
+// packets and set up its decoder. Offsets count from the entry payload.
+#[cfg(feature = "ffmpeg-long-tail")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SoundDescription {
+    pub channels: u16,
+    pub sample_bits: u16,
+    // 0 when the entry leaves the rate to the media timescale
+    pub sample_rate: u32,
+    pub samples_per_frame: u32,
+    pub bytes_per_frame: u32,
+    pub children_at: usize,
+}
+
+#[cfg(feature = "ffmpeg-long-tail")]
+impl SoundDescription {
+    pub(crate) fn parse(payload: &[u8], fourcc: u32) -> Result<Self, G2gError> {
+        const V1_SAMPLES_PER_FRAME: usize = 28;
+        const V1_BYTES_PER_FRAME: usize = 36;
+        const V2_SAMPLE_RATE: usize = 32;
+        const V2_CHANNELS: usize = 40;
+        const V2_SAMPLE_BITS: usize = 48;
+        const V2_BYTES_PER_FRAME: usize = 56;
+        const V2_SAMPLES_PER_FRAME: usize = 60;
+        let mut description = SoundDescription {
+            channels: sound_entry_u16(payload, SOUND_ENTRY_CHANNELS)?,
+            sample_bits: sound_entry_u16(payload, SOUND_ENTRY_SAMPLE_BITS)?,
+            sample_rate: u32::from(sound_entry_u16(payload, SOUND_ENTRY_SAMPLE_RATE)?),
+            samples_per_frame: 0,
+            bytes_per_frame: 0,
+            children_at: sound_entry_children_at(payload)?,
+        };
+        match sound_entry_u16(payload, SOUND_ENTRY_VERSION)? {
+            1 => {
+                description.samples_per_frame = be32(payload, V1_SAMPLES_PER_FRAME)?;
+                description.bytes_per_frame = be32(payload, V1_BYTES_PER_FRAME)?;
+            }
+            SOUND_ENTRY_VERSION_2 => {
+                let rate = f64::from_bits(be64(payload, V2_SAMPLE_RATE)?);
+                // a NaN or out-of-range rate saturates, and a zero one falls back to the timescale
+                description.sample_rate = rate as u32;
+                description.channels = u16::try_from(be32(payload, V2_CHANNELS)?)
+                    .map_err(|_| G2gError::CapsMismatch)?;
+                description.sample_bits = u16::try_from(be32(payload, V2_SAMPLE_BITS)?)
+                    .map_err(|_| G2gError::CapsMismatch)?;
+                description.bytes_per_frame = be32(payload, V2_BYTES_PER_FRAME)?;
+                description.samples_per_frame = be32(payload, V2_SAMPLES_PER_FRAME)?;
+            }
+            _ => {}
+        }
+        // mov.c's fixed framing for the codecs that predate version 1, which wins over the entry's
+        let channels = u32::from(description.channels);
+        let fixed = match &fourcc.to_le_bytes() {
+            b"MAC3" => Some((6, channels.saturating_mul(2))),
+            b"MAC6" => Some((6, channels)),
+            b"ima4" => Some((64, channels.saturating_mul(34))),
+            b"agsm" => Some((160, 33)),
+            _ => None,
+        };
+        if let Some((samples, bytes)) = fixed {
+            description.samples_per_frame = samples;
+            description.bytes_per_frame = bytes;
+        }
+        Ok(description)
+    }
 }
 
 /// Whether `entries` (an `stsd`'s sample-entry list) holds at least one entry
@@ -924,7 +1065,9 @@ fn parse_audio_entry(
             (enca, Some(parse_sinf(sinf)?))
         }
         // a codec we have no reader for (ALAC, ...): skip the track
-        (None, None) if boxes(entries).next().is_some() => return Ok(None),
+        (None, None) if boxes(entries).next().is_some() => {
+            return unread_audio_entry(entries, timescale)
+        }
         (None, None) => return Err(G2gError::CapsMismatch),
     };
     let channels = sound_entry_channels(entry)?;
@@ -1515,6 +1658,9 @@ enum SampleFraming {
     WvttText,
     ClosedCaption(ClosedCaptionFormat),
     Pcm(PcmFraming),
+    // a coded QuickTime sound track, which an stts of unit durations stores by chunk
+    #[cfg(feature = "ffmpeg-long-tail")]
+    QuickTimeChunks(SoundDescription),
 }
 
 // a QuickTime PCM track stores one frame per sample, whatever size its stsz gives
@@ -1543,6 +1689,18 @@ impl SampleFraming {
                     stored: *stored,
                 }),
                 None => SampleFraming::PassThrough,
+            },
+            #[cfg(feature = "ffmpeg-long-tail")]
+            TrackKind::Audio {
+                format: AudioFormat::Tagged(tag),
+                config,
+                ..
+            } => match config
+                .get(crate::mp4box::BOX_HEADER_LEN..)
+                .map(|payload| SoundDescription::parse(payload, tag.tag))
+            {
+                Some(Ok(sound)) => SampleFraming::QuickTimeChunks(sound),
+                _ => SampleFraming::PassThrough,
             },
             TrackKind::Audio { .. } => SampleFraming::PassThrough,
             TrackKind::Text { sample, .. } => Self::of_text(*sample),
@@ -1577,6 +1735,21 @@ fn parse_progressive_track(
     // that size (no table); otherwise a `sample_count`-long table follows.
     let stsz = find_box(stbl, b"stsz").ok_or(G2gError::CapsMismatch)?;
     let default_size = be32(stsz, 4)?;
+    // stsz counts PCM samples here, many to a stored byte, so the per-sample walk below does not apply
+    #[cfg(feature = "ffmpeg-long-tail")]
+    if let SampleFraming::QuickTimeChunks(sound) = framing {
+        let stts = find_box(stbl, b"stts").ok_or(G2gError::CapsMismatch)?;
+        if be32(stts, 4)? == 1 && be32(stts, 12)? == 1 {
+            let chunks = chunk_sample_counts(stbl, &chunk_offsets(stbl)?)?;
+            return Ok(quicktime_chunk_samples(
+                data,
+                &chunks,
+                timescale,
+                sound,
+                default_size,
+            ));
+        }
+    }
     // A sample needs at least one byte of media data, so no sample past the
     // file size is ever read, whether the stsz lies or the file was cut short.
     // Clamp before the per-sample allocations below (the default_size branch
@@ -1605,17 +1778,7 @@ fn parse_progressive_track(
 
     let ctts_offsets = composition_offsets(stbl, sample_count)?;
 
-    // stco (32-bit) or co64 (64-bit): per-chunk file offsets.
-    let chunk_offsets: Vec<u64> = if let Some(stco) = find_box(stbl, b"stco") {
-        (0..be32(stco, 4)? as usize)
-            .map(|c| be32(stco, 8 + c * 4).map(u64::from))
-            .collect::<Result<_, _>>()?
-    } else {
-        let co64 = find_box(stbl, b"co64").ok_or(G2gError::CapsMismatch)?;
-        (0..be32(co64, 4)? as usize)
-            .map(|c| be64(co64, 8 + c * 8))
-            .collect::<Result<_, _>>()?
-    };
+    let chunk_offsets = chunk_offsets(stbl)?;
 
     // stsc: how many samples sit in each chunk, run-length over chunk ranges.
     // Resolve to a samples-per-chunk count for every chunk.
@@ -1733,6 +1896,8 @@ fn parse_progressive_track(
             SampleFraming::WvttText => deframe_wvtt(raw),
             SampleFraming::ClosedCaption(format) => deframe_cc(raw, format),
             SampleFraming::Pcm(_) => unreachable!("PCM tracks return per chunk above"),
+            #[cfg(feature = "ffmpeg-long-tail")]
+            SampleFraming::QuickTimeChunks(_) => raw.to_vec(),
         };
         samples.push(Sample {
             annexb,
@@ -1787,6 +1952,80 @@ fn pcm_chunk_samples(
         }
         first_frame += frames;
         dts = dts.saturating_add(duration);
+    }
+    samples
+}
+
+// stco (32-bit) or co64 (64-bit): per-chunk file offsets
+fn chunk_offsets(stbl: &[u8]) -> Result<Vec<u64>, G2gError> {
+    if let Some(stco) = find_box(stbl, b"stco") {
+        return (0..be32(stco, 4)? as usize)
+            .map(|c| be32(stco, 8 + c * 4).map(u64::from))
+            .collect();
+    }
+    let co64 = find_box(stbl, b"co64").ok_or(G2gError::CapsMismatch)?;
+    (0..be32(co64, 4)? as usize)
+        .map(|c| be64(co64, 8 + c * 8))
+        .collect()
+}
+
+// each chunk's file offset and the samples stsc puts in it
+#[cfg(feature = "ffmpeg-long-tail")]
+fn chunk_sample_counts(stbl: &[u8], offsets: &[u64]) -> Result<Vec<(u64, usize)>, G2gError> {
+    const STSC_ENTRY_LEN: usize = 12;
+    let stsc = find_box(stbl, b"stsc").ok_or(G2gError::CapsMismatch)?;
+    let entries = be32(stsc, 4)? as usize;
+    let mut next_entry = 0;
+    let mut samples_per_chunk = 0;
+    let mut chunks = Vec::with_capacity(offsets.len());
+    for (index, &offset) in offsets.iter().enumerate() {
+        // stsc numbers chunks from 1, and an entry runs until the next one's first chunk
+        while next_entry < entries
+            && be32(stsc, 8 + next_entry * STSC_ENTRY_LEN)? as usize <= index + 1
+        {
+            samples_per_chunk = be32(stsc, 12 + next_entry * STSC_ENTRY_LEN)? as usize;
+            next_entry += 1;
+        }
+        chunks.push((offset, samples_per_chunk));
+    }
+    Ok(chunks)
+}
+
+// One sample per chunk, its bytes what mov.c reads for the chunk's sample count:
+// whole frames of the sound description, or stsz's size per sample.
+#[cfg(feature = "ffmpeg-long-tail")]
+fn quicktime_chunk_samples(
+    data: &[u8],
+    chunks: &[(u64, usize)],
+    timescale: u32,
+    sound: SoundDescription,
+    sample_size: u32,
+) -> Vec<Sample> {
+    let mut samples = Vec::with_capacity(chunks.len());
+    let mut dts: u64 = 0;
+    for &(offset, count) in chunks.iter().filter(|(_, count)| *count > 0) {
+        let count = count as u64;
+        let len = if sound.samples_per_frame > 1 {
+            count / u64::from(sound.samples_per_frame) * u64::from(sound.bytes_per_frame)
+        } else {
+            count.saturating_mul(u64::from(sample_size))
+        };
+        let bytes = usize::try_from(offset)
+            .ok()
+            .zip(usize::try_from(len).ok())
+            .and_then(|(start, len)| data.get(start..start.checked_add(len)?));
+        // a truncated file ends the track at its last whole chunk
+        let Some(bytes) = bytes.filter(|bytes| !bytes.is_empty()) else {
+            break;
+        };
+        samples.push(Sample {
+            annexb: bytes.to_vec(),
+            pts_ns: ticks_to_ns(dts, timescale),
+            dts_ns: ticks_to_ns(dts, timescale),
+            duration_ns: ticks_to_ns(count, timescale),
+            keyframe: true,
+        });
+        dts = dts.saturating_add(count);
     }
     samples
 }
@@ -3515,6 +3754,60 @@ mod tests {
         let sample_ns = ticks_to_ns(u64::from(SAMPLE_TICKS), TIMESCALE);
         assert_eq!(decode_times, alloc::vec![0, sample_ns]);
         assert_eq!(samples[1].1.duration_ns, sample_ns);
+    }
+
+    #[cfg(feature = "ffmpeg-long-tail")]
+    #[test]
+    fn an_unread_sample_entry_goes_on_under_its_fourcc() {
+        const VISUAL_SAMPLE_ENTRY_LEN: usize = 78;
+        let entry = crate::mp4box::mp4_box(b"rpza", &[0; VISUAL_SAMPLE_ENTRY_LEN]);
+        let Some((
+            TrackKind::Video {
+                codec, param_sets, ..
+            },
+            _,
+        )) = parse_video_entry(&entry, 128, 96).expect("the entry parses")
+        else {
+            panic!("rpza is read as a video track");
+        };
+        assert_eq!(
+            codec,
+            VideoCodec::Tagged(g2g_core::CodecTag {
+                namespace: g2g_core::TagNamespace::Mov,
+                tag: u32::from_le_bytes(*b"rpza"),
+            })
+        );
+        assert_eq!(
+            param_sets,
+            [entry],
+            "the whole sample entry leads the stream"
+        );
+    }
+
+    #[cfg(feature = "ffmpeg-long-tail")]
+    #[test]
+    fn a_mace_track_is_cut_into_whole_frames_per_chunk() {
+        const SOUND_ENTRY_V0_LEN: usize = 28;
+        const CHANNELS: u16 = 2;
+        const SAMPLE_RATE: u16 = 22_050;
+        const CHUNK_SAMPLES: usize = 36;
+        let mut payload = [0u8; SOUND_ENTRY_V0_LEN];
+        payload[SOUND_ENTRY_CHANNELS].copy_from_slice(&CHANNELS.to_be_bytes());
+        payload[SOUND_ENTRY_SAMPLE_RATE].copy_from_slice(&SAMPLE_RATE.to_be_bytes());
+        let mac3 = u32::from_le_bytes(*b"MAC3");
+        let sound = SoundDescription::parse(&payload, mac3).expect("the entry parses");
+        // MACE 3:1 packs 6 samples per channel into 2 bytes
+        assert_eq!((sound.samples_per_frame, sound.bytes_per_frame), (6, 4));
+        let stored_bytes = CHUNK_SAMPLES / 6 * 4;
+        let data: Vec<u8> = (0..2 * stored_bytes as u8).collect();
+        let chunks = [(0u64, CHUNK_SAMPLES), (stored_bytes as u64, CHUNK_SAMPLES)];
+        let samples = quicktime_chunk_samples(&data, &chunks, u32::from(SAMPLE_RATE), sound, 1);
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[1].annexb, data[stored_bytes..]);
+        assert_eq!(
+            samples[1].pts_ns,
+            ticks_to_ns(CHUNK_SAMPLES as u64, u32::from(SAMPLE_RATE))
+        );
     }
 
     #[test]

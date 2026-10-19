@@ -37,6 +37,7 @@ use g2g_core::{
     AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, Dim, FrameTiming, G2gError, LatencyReport, MemoryDomain, MultiOutputElement,
     MultiOutputSink, PipelinePacket, Rate, Segment, Stream, StreamCollection, StreamType,
+    VideoCodec,
 };
 
 use crate::fmp4::{
@@ -855,10 +856,29 @@ impl Mp4DemuxN {
             }
 
             let mut data = sample.annexb;
-            // An Opus or raw AAC track's config goes downstream as its own frame
-            // ahead of the audio, so it is built here and pushed below.
+            // An Opus, raw AAC or tagged track's config goes downstream as its own
+            // frame ahead of the samples, so it is built here and pushed below.
             let mut lead_config = None;
             match kind {
+                // a tagged codec's whole sample entry leads it as a frame of its own
+                Some(TrackKind::Video {
+                    codec: VideoCodec::Tagged(_),
+                    param_sets,
+                    ..
+                }) => {
+                    if self.need_config[port] {
+                        lead_config = param_sets.first().cloned();
+                    }
+                }
+                Some(TrackKind::Audio {
+                    format: AudioFormat::Tagged(_),
+                    config,
+                    ..
+                }) => {
+                    if self.need_config[port] {
+                        lead_config = Some(config.clone());
+                    }
+                }
                 // Prepend out-of-band parameter sets to the first video frame if
                 // it carries none (our own muxer keeps them in-band; CMAF may not).
                 Some(TrackKind::Video {

@@ -364,16 +364,47 @@ fn parse_video_format(strh: &[u8], strf: &[u8]) -> Option<(AviStreamKind, Vec<u8
             Vec::new(),
         ));
     }
-    let codec =
-        video_codec(compression).or_else(|| video_codec(read_fourcc(strh, STRH_HANDLER)?))?;
+    let typed =
+        video_codec(compression).or_else(|| read_fourcc(strh, STRH_HANDLER).and_then(video_codec));
+    let (codec, codec_config) = match typed {
+        Some(codec) => (codec, Vec::from(&strf[BITMAPINFO_LEN..])),
+        None => (tagged_video(compression)?, strf.to_vec()),
+    };
     Some((
         AviStreamKind::Video {
             codec,
             width,
             height,
         },
-        Vec::from(&strf[BITMAPINFO_LEN..]),
+        codec_config,
     ))
+}
+
+// a codec no typed mapping names goes on under its tag, its whole `strf` as the config
+#[cfg(feature = "ffmpeg-long-tail")]
+fn tagged_video(compression: FourCc) -> Option<VideoCodec> {
+    Some(VideoCodec::Tagged(g2g_core::CodecTag {
+        namespace: g2g_core::TagNamespace::Riff,
+        tag: u32::from_le_bytes(compression),
+    }))
+}
+
+#[cfg(not(feature = "ffmpeg-long-tail"))]
+fn tagged_video(_compression: FourCc) -> Option<VideoCodec> {
+    None
+}
+
+#[cfg(feature = "ffmpeg-long-tail")]
+fn tagged_audio(tag: u16) -> Option<AudioFormat> {
+    Some(AudioFormat::Tagged(g2g_core::CodecTag {
+        namespace: g2g_core::TagNamespace::Riff,
+        tag: u32::from(tag),
+    }))
+}
+
+#[cfg(not(feature = "ffmpeg-long-tail"))]
+fn tagged_audio(_tag: u16) -> Option<AudioFormat> {
+    None
 }
 
 /// An audio stream's format from its `WAVEFORMATEX`, plus the `cbSize` extra
@@ -383,15 +414,21 @@ fn parse_audio_format(strf: &[u8]) -> Option<(AviStreamKind, Vec<u8>)> {
     if strf.len() < WAVEFORMAT_LEN {
         return None;
     }
-    let format = audio_format(
-        read_u16(strf, WAVEFORMAT_TAG)?,
-        read_u16(strf, WAVEFORMAT_BITS)?,
-    )?;
+    let tag = read_u16(strf, WAVEFORMAT_TAG)?;
+    let typed = audio_format(tag, read_u16(strf, WAVEFORMAT_BITS)?);
     let channels = read_u16(strf, WAVEFORMAT_CHANNELS)?;
     let sample_rate = read_u32(strf, WAVEFORMAT_SAMPLE_RATE)?;
     if channels == 0 || channels > u8::MAX as u16 || sample_rate == 0 {
         return None;
     }
+    let Some(format) = typed else {
+        let kind = AviStreamKind::Audio {
+            format: tagged_audio(tag)?,
+            channels: channels as u8,
+            sample_rate,
+        };
+        return Some((kind, strf.to_vec()));
+    };
     let extra = match read_u16(strf, WAVEFORMAT_EXTRA_SIZE) {
         Some(declared) => {
             let end = WAVEFORMAT_EX_LEN
@@ -1117,6 +1154,70 @@ mod tests {
             panic!("stream 0 is video");
         };
         assert_eq!(codec, VideoCodec::Vp6Plain);
+    }
+
+    // the written file with its video recoded to Cinepak and its audio to TrueSpeech
+    fn write_unmapped_codecs() -> Vec<u8> {
+        const TRUESPEECH: u16 = 0x0022;
+        let mut bytes = write_av();
+        while let Some(at) = bytes.windows(FOURCC_LEN).position(|w| w == b"MJPG") {
+            bytes[at..at + FOURCC_LEN].copy_from_slice(b"cvid");
+        }
+        let audio_strf = bytes
+            .windows(FOURCC_LEN)
+            .enumerate()
+            .filter(|(_, window)| *window == STRF_FOURCC)
+            .nth(1)
+            .map(|(at, _)| at + CHUNK_HEADER_LEN)
+            .expect("the audio stream has a strf");
+        bytes[audio_strf + WAVEFORMAT_TAG..audio_strf + WAVEFORMAT_TAG + 2]
+            .copy_from_slice(&TRUESPEECH.to_le_bytes());
+        bytes
+    }
+
+    #[cfg(feature = "ffmpeg-long-tail")]
+    #[test]
+    fn forwards_an_unmapped_codec_under_its_tag() {
+        use g2g_core::{CodecTag, TagNamespace};
+        let file = parse(&write_unmapped_codecs()).expect("the file parses");
+        let AviStreamKind::Video { codec, .. } = file.streams[0].kind else {
+            panic!("stream 0 is video");
+        };
+        let riff = |tag| CodecTag {
+            namespace: TagNamespace::Riff,
+            tag,
+        };
+        assert_eq!(
+            codec,
+            VideoCodec::Tagged(riff(u32::from_le_bytes(*b"cvid")))
+        );
+        let compression = BITMAPINFO_COMPRESSION..BITMAPINFO_COMPRESSION + FOURCC_LEN;
+        assert_eq!(&file.streams[0].codec_config[compression], b"cvid");
+        let AviStreamKind::Audio { format, .. } = file.streams[1].kind else {
+            panic!("stream 1 is audio");
+        };
+        assert_eq!(format, AudioFormat::Tagged(riff(0x0022)));
+    }
+
+    #[cfg(not(feature = "ffmpeg-long-tail"))]
+    #[test]
+    fn names_an_unmapped_codec_without_the_long_tail() {
+        let file = parse(&write_unmapped_codecs()).expect("the file parses");
+        let names: Vec<_> = file
+            .streams
+            .iter()
+            .map(|stream| match &stream.kind {
+                AviStreamKind::Unsupported { codec } => codec.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                Some(String::from("cvid")),
+                Some(String::from("audio format tag 0x0022"))
+            ]
+        );
     }
 
     #[test]

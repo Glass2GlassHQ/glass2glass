@@ -2041,6 +2041,40 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         "ffmpegaudiodec",
         |_| Box::new(crate::ffmpegaudiodec::FfmpegAudioDec::new()),
     ));
+    // A codec known only by its container tag (`ffmpeg-long-tail`) has no caps a
+    // template can list, so these registrations take any input and keep the tags
+    // libavformat maps to a libavcodec decoder.
+    #[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+    {
+        use g2g_core::{PadDirection, PadTemplate, PadTemplates};
+        let any_input = |templates: Vec<PadTemplate>| {
+            let mut tagged = Vec::from([PadTemplate::sink_any()]);
+            tagged.extend(
+                templates
+                    .into_iter()
+                    .filter(|template| template.direction == PadDirection::Source),
+            );
+            tagged
+        };
+        reg.register(
+            ElementFactory::new(
+                "ffmpegdec",
+                any_input(FfmpegH264Dec::pad_templates()),
+                |out| {
+                    Box::new(FfmpegH264Dec::new().with_output_format(ffmpegdec_output_format(out)))
+                },
+            )
+            .accepting_input(crate::ffmpegtagged::decodes_video),
+        );
+        reg.register(
+            ElementFactory::new(
+                "ffmpegaudiodec",
+                any_input(crate::ffmpegaudiodec::FfmpegAudioDec::pad_templates()),
+                |_| Box::new(crate::ffmpegaudiodec::FfmpegAudioDec::new()),
+            )
+            .accepting_input(crate::ffmpegtagged::decodes_audio),
+        );
+    }
     // ffmpeg VAAPI hwaccel backend as a distinct name (M237). Same element type
     // as ffmpegdec, constructed with `Backend::Vaapi`; the libva device defaults
     // to the VA display's choice (a `device=` property is a follow-up).
