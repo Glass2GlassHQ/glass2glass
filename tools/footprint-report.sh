@@ -28,8 +28,9 @@ TARGET="thumbv7em-none-eabihf"
 # Caps::Tensor negotiated on the transform link M636): measured 2026-07 at
 # 4096 ROM / 0 static / 1388 stack (opt-level "s" since M644: "z" stopped
 # inlining the grown archive's async state machines, which reintroduced
-# panic paths; "s" is also smaller here).
-MAX_ROM=5120
+# panic paths; "s" is also smaller here). Measured 2026-10 at 5136 ROM on
+# CI: the codec tag in AudioFormat::Tagged grew Caps::intersect.
+MAX_ROM=6144
 MAX_STACK=2048
 MAX_STATIC_RAM=0
 # Flagship audio graph (M644: two captures -> convert -> resample -> mix ->

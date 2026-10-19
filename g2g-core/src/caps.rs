@@ -1525,7 +1525,10 @@ pub fn pcm_from_gst_format(name: &str) -> Option<AudioFormat> {
 /// Raw (uncompressed) PCM formats, the only ones the "any rate" wildcard (M187)
 /// and the resampler apply to.
 fn is_pcm(f: AudioFormat) -> bool {
-    pcm_gst_format(f).is_some()
+    // comparing discriminants keeps the format names out of heap-free builds
+    PCM_FORMATS
+        .iter()
+        .any(|(format, _)| core::mem::discriminant(format) == core::mem::discriminant(&f))
 }
 
 /// Intersect two [`Caps::Audio`] sample rates, where [`ANY_SAMPLE_RATE`] (0) is
