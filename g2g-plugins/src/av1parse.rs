@@ -944,14 +944,11 @@ fn parse_color_config(
 /// read that many value bits. `>= 32` leading zeros saturates with no value read.
 pub(crate) fn read_uvlc(br: &mut BitReader) -> Option<u32> {
     let mut leading_zeros = 0u32;
-    loop {
-        if br.read_bit()? == 1 {
-            break;
-        }
-        leading_zeros += 1;
-        if leading_zeros >= 32 {
-            return Some(u32::MAX);
-        }
+    while br.read_bit()? == 0 {
+        leading_zeros = leading_zeros.saturating_add(1);
+    }
+    if leading_zeros >= 32 {
+        return Some(u32::MAX);
     }
     let value = br.read_bits(leading_zeros)?;
     Some(value + (1u32 << leading_zeros) - 1)
@@ -1745,6 +1742,32 @@ mod tests {
         expected_detail.decoder_model_info_present_flag = true;
         expected_detail.initial_display_delay_present_flag = true;
         expected_detail.operating_points_cnt_minus_1 = 1;
+        assert_eq!(parse_written(w), expected);
+    }
+
+    #[test]
+    fn timing_info_crosses_the_largest_ticks_per_picture() {
+        let mut w = BitWriter::default();
+        w.write_bits(0, 3); // seq_profile
+        w.write_bit(0); // still_picture
+        w.write_bit(0); // reduced_still_picture_header
+        w.write_bit(1); // timing_info_present_flag
+        w.write_bits(1, 32); // num_units_in_display_tick
+        w.write_bits(25, 32); // time_scale
+        w.write_bit(1); // equal_picture_interval
+                        // uvlc for 2^32 - 1: 32 leading zeros, the stop bit and no value bits
+        w.write_bits(0, 32);
+        w.write_bit(1);
+        w.write_bit(0); // decoder_model_info_present_flag
+        w.write_bit(0); // initial_display_delay_present_flag
+        w.write_bits(0, 5); // operating_points_cnt_minus_1
+        w.write_bits(0, 12); // operating_point_idc[0]
+        w.write_bits(0, 5); // seq_level_idx[0]
+        write_geometry(&mut w, GEOMETRY);
+        write_tools(&mut w, &select_tools());
+        write_plain_color_config(&mut w);
+        let mut expected = expected_header(0, select_tools());
+        detail(&mut expected).timing_info_present_flag = true;
         assert_eq!(parse_written(w), expected);
     }
 

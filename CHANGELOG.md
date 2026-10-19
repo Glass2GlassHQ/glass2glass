@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1623: `av1parse` reads a sequence header whose timing info codes the largest ticks per picture, the uvlc reader consuming its stop bit as the spec does.
 - M1622: `av1parse` tests pin the sequence header tool flags and colour config branches, operating points, OBU extension headers, the reframing size checks and keyframe detection that cargo-mutants found untested.
 - M1621: `h265parse` tests pin the SPS head and middle fields, their count bounds, scaling lists, sub-layer ordering and the short-term RPS derivation that cargo-mutants found untested.
 - M1620: `h264parse` tests pin the SPS head fields, the 4:2:2 and field crop units, separate colour planes and the per-level reorder depth that cargo-mutants found untested.
