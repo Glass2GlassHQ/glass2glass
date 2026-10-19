@@ -253,8 +253,9 @@ impl McpServer {
         }
         let events = EventBuffer::new(EVENT_CAPACITY);
         self.records.reset();
-        let event_collector = EventCollector::spawn(bus, events.clone(), self.records.clone())
-            .map_err(RegistrationError::EventCollector)?;
+        let event_collector =
+            EventCollector::spawn(bus, events.clone(), self.records.clone(), None)
+                .map_err(RegistrationError::EventCollector)?;
         let run_state = Arc::new(Mutex::new(PipelineRunState::Running));
         let handle = RegisteredPipelineHandle {
             run_state: run_state.clone(),
@@ -562,6 +563,8 @@ fn record_value(line: &str) -> Value {
     serde_json::from_str(line).unwrap_or_else(|_| json!({ RAW_RECORD_KEY: line }))
 }
 
+type DrainRequest = tokio::sync::oneshot::Receiver<mpsc::SyncSender<()>>;
+
 #[derive(Debug)]
 struct EventCollector {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
@@ -569,7 +572,12 @@ struct EventCollector {
 }
 
 impl EventCollector {
-    fn spawn(bus: Bus, events: EventBuffer, records: RecordStore) -> std::io::Result<Self> {
+    fn spawn(
+        bus: Bus,
+        events: EventBuffer,
+        records: RecordStore,
+        drain_request: Option<DrainRequest>,
+    ) -> std::io::Result<Self> {
         let (stop, stop_receiver) = tokio::sync::oneshot::channel();
         let thread = std::thread::Builder::new()
             .name("g2g-mcp-events".into())
@@ -579,18 +587,36 @@ impl EventCollector {
                     .build()
                     .expect("build bus event runtime");
                 runtime.block_on(async move {
+                    let collect = |message: BusMessage| {
+                        match &message {
+                            BusMessage::MetadataRecord { record, .. } => {
+                                records.push(record_value(record));
+                            }
+                            BusMessage::Eos => records.end(),
+                            _ => {}
+                        }
+                        if let Some(event) = crate::dashboard::event_value(&message) {
+                            events.push(event);
+                        }
+                    };
                     let drain = async move {
-                        while let Some(message) = bus.recv().await {
-                            match &message {
-                                BusMessage::MetadataRecord { record, .. } => {
-                                    records.push(record_value(record));
+                        if let Some(mut drain_request) = drain_request {
+                            loop {
+                                // the bus goes first in select2 to empty it before the request
+                                match select2(bus.recv(), &mut drain_request).await {
+                                    Either::Left(Some(message)) => collect(message),
+                                    Either::Left(None) => return,
+                                    Either::Right(request) => {
+                                        if let Ok(drained) = request {
+                                            let _ = drained.send(());
+                                        }
+                                        break;
+                                    }
                                 }
-                                BusMessage::Eos => records.end(),
-                                _ => {}
                             }
-                            if let Some(event) = crate::dashboard::event_value(&message) {
-                                events.push(event);
-                            }
+                        }
+                        while let Some(message) = bus.recv().await {
+                            collect(message);
                         }
                     };
                     let _ = select2(stop_receiver, drain).await;
@@ -1158,10 +1184,12 @@ impl McpServer {
         let (bus, bus_handle) = Bus::new(256);
         let events = EventBuffer::new(EVENT_CAPACITY);
         self.records.reset();
+        let (drain_sender, drain_request) = tokio::sync::oneshot::channel();
         let mut event_collector = match EventCollector::spawn(
             bus,
             events.clone(),
             self.records.clone(),
+            Some(drain_request),
         ) {
             Ok(collector) => collector,
             Err(error) => {
@@ -1206,6 +1234,11 @@ impl McpServer {
                     }
                     Either::Right(Err(error)) => PipelineRunState::Failed(format!("{error:?}")),
                 };
+                // an agent that sees the run end must find the run's last bus events in the tail
+                let (drained_sender, drained) = mpsc::sync_channel(1);
+                if drain_sender.send(drained_sender).is_ok() {
+                    let _ = drained.recv();
+                }
                 *thread_run_state.lock().expect("pipeline run state") = state;
             }) {
             Ok(thread) => thread,
@@ -2581,6 +2614,31 @@ mod tests {
             started.elapsed() < WAIT_TIMEOUT,
             "a failed run must not hold the caller"
         );
+    }
+
+    #[test]
+    fn a_drain_request_is_answered_after_the_queued_bus_events() {
+        let (bus, bus_handle) = Bus::new(8);
+        let queued = [
+            BusMessage::StreamStart,
+            BusMessage::Custom(1),
+            BusMessage::Eos,
+        ];
+        for message in queued.iter().cloned() {
+            assert!(bus_handle.try_post(message));
+        }
+        let events = EventBuffer::new(EVENT_CAPACITY);
+        let (drain_sender, drain_request) = tokio::sync::oneshot::channel();
+        let (drained_sender, drained) = mpsc::sync_channel(1);
+        drain_sender
+            .send(drained_sender)
+            .expect("collector takes the request");
+        let mut collector =
+            EventCollector::spawn(bus, events.clone(), RecordStore::new(), Some(drain_request))
+                .expect("spawn collector");
+        drained.recv().expect("collector answers the request");
+        assert_eq!(events.len(), queued.len());
+        collector.stop();
     }
 
     fn odd_size_frame(format: g2g_core::RawVideoFormat) -> CapturedFrame {
