@@ -8,6 +8,7 @@
 # the release notes when the bump ships.
 constructible_struct_adds_field: field ElementDesc.accepts_input
 constructible_struct_adds_field: field QosMessage.taken_ns
+enum_discriminants_undefined_non_unit_variant: enum AudioFormat
 enum_variant_added: variant NodeConstraint:BatchDemux
 enum_variant_added: variant NodeConstraint:BatchMuxer
 enum_variant_missing: variant CapsConstraint::LegacySink

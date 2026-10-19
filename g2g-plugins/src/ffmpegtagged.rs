@@ -130,14 +130,32 @@ pub(crate) fn nearest_output_pixel(source: Pixel) -> Pixel {
 pub(crate) struct FormatConverter {
     // null until the first conversion allocates it
     context: *mut ffi::SwsContext,
+    // what an explicitly initialized context was set up for, libswscale 8 and older only
+    initialized_for: Option<ScaleShape>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScaleShape {
+    width: i32,
+    height: i32,
+    source_format: i32,
+    target_format: i32,
 }
 
 impl Default for FormatConverter {
     fn default() -> Self {
         Self {
             context: core::ptr::null_mut(),
+            initialized_for: None,
         }
     }
+}
+
+// libswscale 9 sets a bare context up from the frames, older ones crash in sws_scale_frame without sws_init_context
+fn needs_initialized_context() -> bool {
+    const FIRST_SELF_CONFIGURING_MAJOR: u32 = 9;
+    // SAFETY: returns a version constant.
+    unsafe { ffi::swscale_version() >> 16 < FIRST_SELF_CONFIGURING_MAJOR }
 }
 
 impl core::fmt::Debug for FormatConverter {
@@ -168,6 +186,15 @@ impl FormatConverter {
         target: Pixel,
     ) -> Result<FfVideo, G2gError> {
         let failed = || G2gError::Hardware(g2g_core::HardwareError::Other);
+        let shape = ScaleShape {
+            width: frame.width() as i32,
+            height: frame.height() as i32,
+            source_format: ffi::AVPixelFormat::from(frame.format()) as i32,
+            target_format: ffi::AVPixelFormat::from(target) as i32,
+        };
+        if needs_initialized_context() && self.initialized_for != Some(shape) {
+            self.initialize(shape).map_err(|()| failed())?;
+        }
         if self.context.is_null() {
             // SAFETY: a plain allocation, checked for null below.
             self.context = unsafe { ffi::sws_alloc_context() };
@@ -204,6 +231,39 @@ impl FormatConverter {
             return Err(failed());
         }
         Ok(converted)
+    }
+}
+
+impl FormatConverter {
+    fn initialize(&mut self, shape: ScaleShape) -> Result<(), ()> {
+        // SAFETY: the old context is null or ours and unused after this, the new
+        // one is checked for null, and each name is one of its int options.
+        unsafe {
+            ffi::sws_freeContext(self.context);
+            self.initialized_for = None;
+            self.context = ffi::sws_alloc_context();
+            if self.context.is_null() {
+                return Err(());
+            }
+            for (option, value) in [
+                (c"srcw", shape.width),
+                (c"srch", shape.height),
+                (c"src_format", shape.source_format),
+                (c"dstw", shape.width),
+                (c"dsth", shape.height),
+                (c"dst_format", shape.target_format),
+            ] {
+                if ffi::av_opt_set_int(self.context.cast(), option.as_ptr(), value.into(), 0) < 0 {
+                    return Err(());
+                }
+            }
+            if ffi::sws_init_context(self.context, core::ptr::null_mut(), core::ptr::null_mut()) < 0
+            {
+                return Err(());
+            }
+        }
+        self.initialized_for = Some(shape);
+        Ok(())
     }
 }
 
@@ -315,9 +375,10 @@ fn riff_video(id: Id, tag: u32, header: &[u8]) -> Result<TaggedVideo, G2gError> 
             start -= BOTTOM_UP.len();
         }
         let mut palette = alloc::vec![0u8; PALETTE_BYTES];
-        let entries = extradata[start..start + palette_len].chunks_exact(PALETTE_ENTRY_BYTES);
-        for (slot, entry) in palette.chunks_exact_mut(PALETTE_ENTRY_BYTES).zip(entries) {
-            let rgb = u32::from_le_bytes(entry.try_into().expect("4 bytes"));
+        let (entries, _) = extradata[start..start + palette_len].as_chunks::<PALETTE_ENTRY_BYTES>();
+        let (slots, _) = palette.as_chunks_mut::<PALETTE_ENTRY_BYTES>();
+        for (slot, entry) in slots.iter_mut().zip(entries) {
+            let rgb = u32::from_le_bytes(*entry);
             slot.copy_from_slice(&(OPAQUE | rgb).to_ne_bytes());
         }
         palette
@@ -420,10 +481,10 @@ fn qt_palette(id: Id, entry: &[u8], depth: u16) -> Result<Option<Vec<u8>>, G2gEr
         let start = be32(entry, VISUAL_ENTRY_COLOR_TABLE)? as usize;
         let end = be16(entry, VISUAL_ENTRY_COLOR_TABLE + 6)? as usize;
         if start <= end && end < words.len() {
-            let records = entry
+            let (records, _) = entry
                 .get(VISUAL_ENTRY_COLOR_TABLE + 8..)
                 .unwrap_or_default()
-                .chunks_exact(COLOR_RECORD_LEN);
+                .as_chunks::<COLOR_RECORD_LEN>();
             for (word, record) in words[start..=end].iter_mut().zip(records) {
                 let rgb = &record[COLOR_RECORD_RGB_AT..];
                 // the top byte of each 16-bit component
