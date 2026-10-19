@@ -1808,9 +1808,13 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_primary_stream(crate::uridecodebin::flv_primary_stream);
     // hls:// fan-out (M395): probe the master playlist, fan its variant's muxed TS
     // streams out; the hls_handler is the single-stream fallback it declines to.
+    // An http(s):// URI takes the same hooks when its body typefinds as a playlist.
     #[cfg(feature = "hls")]
     {
         reg.register_uri(crate::uridecodebin::hls_handler());
+        for handler in crate::uridecodebin::http_handlers() {
+            reg.register_uri(handler);
+        }
         reg.register_playbin(crate::uridecodebin::hls_playbin);
         reg.register_uri_fanout(crate::uridecodebin::hls_uri_fanout);
     }

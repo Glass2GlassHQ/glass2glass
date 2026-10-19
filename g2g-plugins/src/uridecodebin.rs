@@ -212,15 +212,40 @@ pub fn hls_handler() -> UriSourceFactory {
         if uri.rest.is_empty() {
             return Err(UriError::Malformed);
         }
-        let url = alloc::format!("https://{}", uri.rest);
-        let src = crate::hlssrc::HlsSrc::new(url);
-        Ok((
-            Box::new(src) as Box<dyn DynSourceLoop>,
-            Caps::ByteStream {
-                encoding: g2g_core::ByteStreamEncoding::MpegTs,
-            },
-        ))
+        Ok(hls_source(alloc::format!("https://{}", uri.rest)))
     })
+}
+
+#[cfg(feature = "hls")]
+fn hls_source(url: alloc::string::String) -> (Box<dyn DynSourceLoop>, Caps) {
+    (
+        Box::new(crate::hlssrc::HlsSrc::new(url)),
+        Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::MpegTs,
+        },
+    )
+}
+
+#[cfg(feature = "hls")]
+pub fn http_handlers() -> [UriSourceFactory; 2] {
+    [
+        UriSourceFactory::new("http", http_source),
+        UriSourceFactory::new("https", http_source),
+    ]
+}
+
+#[cfg(feature = "hls")]
+fn http_source(uri: &Uri) -> Result<(Box<dyn DynSourceLoop>, Caps), UriError> {
+    if uri.rest.is_empty() {
+        return Err(UriError::Malformed);
+    }
+    let prefix = blocking_get_prefix(uri.raw).ok_or(UriError::Unreadable)?;
+    if is_hls_playlist(&prefix) {
+        return Ok(hls_source(uri.raw.into()));
+    }
+    let caps = crate::typefind::sniff_caps(&prefix).ok_or(UriError::UnknownContent)?;
+    let src = crate::httpsrc::HttpSrc::new(uri.raw, caps.clone());
+    Ok((Box::new(src) as Box<dyn DynSourceLoop>, caps))
 }
 
 /// `v4l2:///dev/videoN` -> [`V4l2Src`](crate::v4l2src::V4l2Src): YUYV capture.
@@ -2516,6 +2541,34 @@ fn blocking_get_text(url: &str) -> Option<alloc::string::String> {
     .ok()
 }
 
+#[cfg(feature = "hls")]
+fn is_hls_playlist(prefix: &[u8]) -> bool {
+    crate::hls::is_playlist(&alloc::string::String::from_utf8_lossy(prefix))
+}
+
+#[cfg(feature = "hls")]
+fn blocking_get_prefix(url: &str) -> Option<Vec<u8>> {
+    // a fallbacksrc rebuild calls the URI handler on a runtime thread, where a second runtime cannot start
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok()?;
+                let client = reqwest::Client::new();
+                rt.block_on(crate::fetch::get_prefix(
+                    &client,
+                    url,
+                    crate::typefind::SNIFF_LEN,
+                ))
+                .ok()
+            })
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
 /// Fetch a binary resource synchronously (the fMP4 `#EXT-X-MAP` init segment),
 /// the byte sibling of [`blocking_get_text`]. `None` on any failure.
 #[cfg(feature = "hls")]
@@ -2683,9 +2736,10 @@ pub fn build_hls_separate_fanout(
 /// an `https` origin.
 ///
 /// Declines (`Ok(None)`, so the single-stream [`hls_handler`] takes over) for a
-/// non-`hls` URI, a master-probe network failure, a media-only playlist, or a TS
-/// variant without at least two routable muxed streams. Network-coupled: the probe
-/// is validated against a live server, not in CI.
+/// URI that is neither `hls://` nor an `http(s)://` playlist, a master-probe
+/// network failure, a media-only playlist, or a TS variant without at least two
+/// routable muxed streams. Network-coupled: the probe is validated against a
+/// live server, not in CI.
 /// Assemble the HLS subtitle-overlay graph (M419): the video (and any muxed audio)
 /// rides the variant's own MPEG-TS segments through a `TsDemuxN`, the video branch
 /// feeding a [`TextOverlayN`](crate::textoverlay::TextOverlayN); the subtitle is a
@@ -3013,7 +3067,25 @@ fn hls_lang_hints(rest: &str) -> (&str, HlsHints) {
     (url, (audio, subtitle, cc))
 }
 
-/// An `hls://` URI's playlists, fetched and parsed: the origin URL every branch
+#[cfg(feature = "hls")]
+fn hls_playlist_url(uri: &str) -> Option<(alloc::string::String, HlsHints)> {
+    let parsed = Uri::parse(uri)?;
+    if parsed.rest.is_empty() {
+        return None;
+    }
+    // A `#audio-lang=` / `#subtitle-lang=` URI fragment carries the rendition
+    // language preference (HLS URIs have no other place for it); strip it off the
+    // playlist URL (M418).
+    let (url_rest, hints) = hls_lang_hints(parsed.rest);
+    let url = match parsed.scheme {
+        "hls" => return Some((alloc::format!("https://{url_rest}"), hints)),
+        "http" | "https" => alloc::format!("{}://{url_rest}", parsed.scheme),
+        _ => return None,
+    };
+    is_hls_playlist(&blocking_get_prefix(&url)?).then_some((url, hints))
+}
+
+/// An HLS URI's playlists, fetched and parsed: the origin URL every branch
 /// reads, the master, the variant chosen from it, and that variant's media
 /// playlist (whose `#EXT-X-MAP` says the packaging). Shared by [`hls_playbin`]
 /// and [`hls_uri_fanout`], which differ only in what they build over it.
@@ -3026,14 +3098,13 @@ struct HlsPlaylists {
     media: crate::hls::MediaPlaylist,
 }
 
-/// Fetch and parse the master behind `url_rest` plus its chosen variant's media
+/// Fetch and parse the master at `source_url` plus its chosen variant's media
 /// playlist. `None` (so the caller declines to the single-stream handler) on a
 /// failed fetch or parse, a URI naming a media playlist rather than a master, or
 /// a master offering no variant. Three blocking fetches: network-coupled,
 /// validated against a live server rather than in CI.
 #[cfg(feature = "hls")]
-fn hls_playlists(url_rest: &str) -> Option<HlsPlaylists> {
-    let source_url = alloc::format!("https://{url_rest}");
+fn hls_playlists(source_url: alloc::string::String) -> Option<HlsPlaylists> {
     let master_text = blocking_get_text(&source_url)?;
     let Ok(crate::hls::Playlist::Master(master)) = crate::hls::parse(&master_text) else {
         return None;
@@ -3140,17 +3211,10 @@ pub fn hls_fmp4_uri_fanout(source_url: &str, init: &[u8]) -> Option<UriFanout> {
 
 #[cfg(feature = "hls")]
 pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
-    let Some(parsed) = Uri::parse(uri) else {
+    let Some((source_url, (audio_lang, subtitle_lang, cc))) = hls_playlist_url(uri) else {
         return Ok(None);
     };
-    if parsed.scheme != "hls" || parsed.rest.is_empty() {
-        return Ok(None);
-    }
-    // A `#audio-lang=` / `#subtitle-lang=` URI fragment carries the rendition
-    // language preference (HLS URIs have no other place for it); strip it off the
-    // playlist URL (M418).
-    let (url_rest, (audio_lang, subtitle_lang, cc)) = hls_lang_hints(parsed.rest);
-    let Some(playlists) = hls_playlists(url_rest) else {
+    let Some(playlists) = hls_playlists(source_url) else {
         return Ok(None);
     };
     let HlsPlaylists {
@@ -3235,22 +3299,19 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
 /// The lone-`fallbacksrc` URI fan-out hook for HLS (M1169), the open-ported
 /// sibling of [`hls_playbin`]: probe the master and carry the chosen variant's
 /// muxed MPEG-TS or fMP4 streams as demux ports, so each gets its own
-/// `fallbackswitch` and sink. Declines (`Ok(None)`) a non-`hls` URI, a failed
-/// probe, and a variant with no routable muxed stream. A separate audio
+/// `fallbackswitch` and sink. Declines (`Ok(None)`) a URI that is neither
+/// `hls://` nor an `http(s)://` playlist, a failed probe, and a variant with no
+/// routable muxed stream. A separate audio
 /// rendition is left to the single-stream expansion: its audio is a second
 /// playlist, and one fan-out has one source. Rendition-language and
 /// `#closed-captions=` fragments are stripped and ignored, there is no overlay
 /// on this path. Network-coupled, like [`hls_playbin`].
 #[cfg(feature = "hls")]
 pub fn hls_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, ParseError> {
-    let Some(parsed) = Uri::parse(uri) else {
+    let Some((source_url, _hints)) = hls_playlist_url(uri) else {
         return Ok(None);
     };
-    if parsed.scheme != "hls" || parsed.rest.is_empty() {
-        return Ok(None);
-    }
-    let (url_rest, _hints) = hls_lang_hints(parsed.rest);
-    Ok(hls_playlists(url_rest).and_then(|playlists| playlists.fanout()))
+    Ok(hls_playlists(source_url).and_then(|playlists| playlists.fanout()))
 }
 
 #[cfg(all(test, feature = "hls"))]

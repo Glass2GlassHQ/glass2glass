@@ -7,8 +7,8 @@
 //!
 //! Caps are declared at construction (`HttpSrc::new(url, caps)`) or via the
 //! `bytestream-format` property, because the container cannot be known from the
-//! URL alone. Header-sniff (`auto`) and a `uridecodebin` `http(s)://` handler are
-//! follow-ups: both need a negotiation-time ranged fetch to detect the container.
+//! URL alone. The `uridecodebin` `http(s)://` handler sniffs the body before it
+//! builds one. A header-sniff (`auto`) on the element itself is a follow-up.
 //!
 //! Runs on the caller's tokio runtime (reqwest is async); chunks carry no PTS
 //! (timing is recovered by the downstream parser/decoder), matching `FileSrc`.

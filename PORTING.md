@@ -695,7 +695,8 @@ to hit.
   (str0m carries no FEC payload, so loss recovery is NACK/RTX only), and a run
   against LiveKit Cloud over a real TURN relay.
 - `playbin uri=hls://...` probes a master playlist and fans the variant out to its
-  elementary streams, but there is no DASH URI handler: point `dashsrc` at the
+  elementary streams. An `http(s)://` URI whose body is a playlist takes the same
+  path, as gst typefinds it, but there is no DASH URI handler: point `dashsrc` at the
   MPD and wire the demuxer and decoders explicitly.
 - Native dynamic-plugin loading (§7c) has two ABIs. The `declare_plugin!` path
   needs plugin and host to share a `g2g-core` version, a `rustc`, and the
