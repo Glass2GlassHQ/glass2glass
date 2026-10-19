@@ -992,6 +992,7 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
     }
 }
 
+#[cfg(feature = "std")]
 const TS_STREAMS: [TsStream; 12] = [
     TsStream::H264,
     TsStream::H265,
@@ -1009,6 +1010,7 @@ const TS_STREAMS: [TsStream; 12] = [
 
 // the first stream whose codec a consumer with sink caps `accepted` takes, a parser's
 // template pins a channel count and rate the stream only states once it is parsed
+#[cfg(feature = "std")]
 pub(crate) fn stream_carrying(accepted: &CapsSet) -> Option<TsStream> {
     TS_STREAMS.into_iter().find(|&stream| {
         let carried = TsDemux::output_caps(stream);
@@ -1019,6 +1021,7 @@ pub(crate) fn stream_carrying(accepted: &CapsSet) -> Option<TsStream> {
     })
 }
 
+#[cfg(feature = "std")]
 fn same_codec(a: &Caps, b: &Caps) -> bool {
     match (a, b) {
         (Caps::CompressedVideo { codec: x, .. }, Caps::CompressedVideo { codec: y, .. }) => x == y,
