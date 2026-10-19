@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1607: `rtmpsink` keeps publishing to mediamtx past the server's first acknowledgement window instead of stalling on acks that never come.
 - M1606: `fmp4demux` negotiates behind an HLS, DASH or MoQ source, where it failed to fixate before the init segment arrived.
 - M1605: a `tsdemux name=d` behind a network source gives each branch the stream its first element takes.
 - M1604: `srtsink` publishes to mediamtx, with a new `streamid` property, the stream id in libsrt's byte order and the live-mode handshake flags.

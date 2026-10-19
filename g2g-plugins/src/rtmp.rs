@@ -797,6 +797,9 @@ impl RtmpPublisher {
             MSG_WINDOW_ACK_SIZE => {
                 if let Some(w) = payload.get(..4) {
                     self.peer_window = u32::from_be_bytes([w[0], w[1], w[2], w[3]]);
+                    // mediamtx acks only a publisher that sends its own window, half keeps acks ahead of the throttle
+                    let own_window = (self.peer_window / 2).max(1);
+                    self.send_control(MSG_WINDOW_ACK_SIZE, &own_window.to_be_bytes());
                 }
                 return;
             }
@@ -1447,6 +1450,27 @@ mod tests {
             publisher.unacked_bytes() < 4096,
             "unacked backlog dropped below the window"
         );
+    }
+
+    // gortmplib, mediamtx's RTMP stack, acknowledges only after the peer's own Window Acknowledgement Size
+    #[test]
+    fn publisher_announces_half_the_server_window_so_the_server_acknowledges() {
+        const SERVER_WINDOW: u32 = 4096;
+        let mut server = RtmpSession::new().with_window_ack_size(SERVER_WINDOW);
+        let mut publisher = RtmpPublisher::new("live", "rtmp://localhost/live", "k");
+        let mut sent = Vec::new();
+        for _ in 0..8 {
+            let to_server = publisher.take_outbound();
+            sent.extend_from_slice(&to_server);
+            server.push(&to_server);
+            publisher.push(&server.take_outbound());
+        }
+        let mut reader = ChunkReader::new();
+        reader.push(&sent[1 + 2 * HANDSHAKE_SIZE..]);
+        let announced = core::iter::from_fn(|| reader.next_message())
+            .find(|(msg_type, _, _)| *msg_type == MSG_WINDOW_ACK_SIZE)
+            .map(|(_, _, payload)| payload);
+        assert_eq!(announced, Some((SERVER_WINDOW / 2).to_be_bytes().to_vec()));
     }
 
     /// Compact comparator for `FlvUnit` in assertions.
