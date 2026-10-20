@@ -1154,7 +1154,7 @@ impl SessionParameters {
             .enumerate()
             .map(|(i, (config, pt))| {
                 let capture_time_ids = config.capture_time_ids(settings.capture_time_ids);
-                config.media_section(*pt, i) + &capture_time_extmap(&capture_time_ids)
+                config.media_section(*pt, i) + capture_time_extmap(&capture_time_ids).as_str()
             })
             .collect();
         let sdp = session_description(&sections);
