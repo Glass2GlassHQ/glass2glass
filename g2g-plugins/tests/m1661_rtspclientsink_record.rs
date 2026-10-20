@@ -18,6 +18,9 @@ use g2g_core::{
     OutputSink, PipelinePacket, PushOutcome, Rate, VideoCodec,
 };
 
+use g2g_core::mediaclock::MediaClock;
+use g2g_core::{unix_nanos_from_ntp, PropValue};
+use g2g_plugins::rtcp::{self, RtcpPacket};
 use g2g_plugins::rtpdepay::RtpH264Depayloader;
 use g2g_plugins::rtspclient::LowerTransport;
 use g2g_plugins::rtspclientsink::RtspClientSink;
@@ -40,6 +43,8 @@ const FRAME_PERIOD_NS: u64 = 33_333_333;
 const SERVER_DEADLINE: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const NS_PER_SECOND: u64 = 1_000_000_000;
+// the smallest rtcp-sr-interval the element accepts
+const MIN_REPORT_INTERVAL_MS: u64 = 1;
 
 const AUDIO_RATE_HZ: u32 = 48_000;
 const AUDIO_CHANNELS: u8 = 2;
@@ -189,8 +194,12 @@ fn video_pad() -> PadFrames {
     }
 }
 
-// pushes the pads' frames interleaved in turn
-async fn publish_frames(sink: &mut RtspClientSink, pads: &[PadFrames]) -> Result<(), G2gError> {
+// pushes the pads' frames interleaved in turn, waiting `pace` after each round
+async fn publish_frames(
+    sink: &mut RtspClientSink,
+    pads: &[PadFrames],
+    pace: Duration,
+) -> Result<(), G2gError> {
     let mut discard = Capture::default();
     for (input, pad) in pads.iter().enumerate() {
         sink.configure_pipeline(input, &pad.caps)?;
@@ -201,6 +210,7 @@ async fn publish_frames(sink: &mut RtspClientSink, pads: &[PadFrames]) -> Result
             sink.process(input, data_frame(data.clone(), *pts_ns), &mut discard)
                 .await?;
         }
+        tokio::time::sleep(pace).await;
     }
     Ok(())
 }
@@ -231,7 +241,7 @@ async fn ingest_one_publisher(
     };
     let pads = [video_pad()];
     let send = async {
-        publish_frames(sink, &pads).await?;
+        publish_frames(sink, &pads, Duration::ZERO).await?;
         // UDP media can arrive after the TEARDOWN on the control connection, so EOS waits for the server
         while received.borrow().len() < ACCESS_UNITS {
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -370,27 +380,42 @@ async fn record_one_publisher(
     }
 }
 
-async fn publish_to_recorder(
-    pads: &[PadFrames],
-    gate: Option<DigestGate>,
-    credentials: Option<(&str, &str)>,
-) -> (RecordedPublish, Result<(), G2gError>) {
+async fn recorder_listener() -> (tokio::net::TcpListener, String) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let mut sink = RtspClientSink::new(pads.len(), format!("rtsp://127.0.0.1:{port}/av"));
-    if let Some((user, password)) = credentials {
-        sink = sink.with_credentials(user, password);
-    }
+    (listener, format!("rtsp://127.0.0.1:{port}/av"))
+}
+
+async fn publish_and_record(
+    listener: tokio::net::TcpListener,
+    gate: Option<DigestGate>,
+    sink: &mut RtspClientSink,
+    pads: &[PadFrames],
+    pace: Duration,
+) -> (RecordedPublish, Result<(), G2gError>) {
     let recorder = async {
         tokio::time::timeout(SERVER_DEADLINE, record_one_publisher(listener, gate))
             .await
             .expect("recorder finishes")
     };
     let send = async {
-        publish_frames(&mut sink, pads).await?;
-        end_streams(&mut sink, pads.len()).await
+        publish_frames(sink, pads, pace).await?;
+        end_streams(sink, pads.len()).await
     };
     tokio::join!(recorder, send)
+}
+
+async fn publish_to_recorder(
+    pads: &[PadFrames],
+    gate: Option<DigestGate>,
+    credentials: Option<(&str, &str)>,
+) -> (RecordedPublish, Result<(), G2gError>) {
+    let (listener, location) = recorder_listener().await;
+    let mut sink = RtspClientSink::new(pads.len(), location);
+    if let Some((user, password)) = credentials {
+        sink = sink.with_credentials(user, password);
+    }
+    publish_and_record(listener, gate, &mut sink, pads, Duration::ZERO).await
 }
 
 fn rtp_timestamp(packet: &[u8]) -> u32 {
@@ -399,6 +424,55 @@ fn rtp_timestamp(packet: &[u8]) -> u32 {
 
 fn interleaved_rtp_channel(pad: usize) -> u8 {
     (pad * 2) as u8
+}
+
+fn interleaved_rtcp_channel(pad: usize) -> u8 {
+    interleaved_rtp_channel(pad) + 1
+}
+
+fn rtp_ssrc(packet: &[u8]) -> u32 {
+    u32::from_be_bytes([packet[8], packet[9], packet[10], packet[11]])
+}
+
+// RFC 3550 §6.4.1: the sender's packet and octet counts follow the SSRC, NTP and RTP timestamps
+const SR_PACKET_COUNT_OFFSET: usize = 20;
+const SR_OCTET_COUNT_OFFSET: usize = 24;
+
+fn word_at(packet: &[u8], offset: usize) -> u32 {
+    u32::from_be_bytes(packet[offset..offset + 4].try_into().unwrap())
+}
+
+#[derive(Debug)]
+struct SenderReport {
+    ssrc: u32,
+    ntp: u64,
+    rtp_ts: u32,
+    packet_count: u32,
+    octet_count: u32,
+}
+
+// a compound report as RFC 3550 §6.1 requires it: an SR first, then the SDES carrying the CNAME
+fn sender_report(compound: &[u8]) -> SenderReport {
+    let packets = rtcp::parse_compound(compound);
+    let [RtcpPacket::SenderReport {
+        ssrc, ntp, rtp_ts, ..
+    }, RtcpPacket::Other { pt: rtcp::PT_SDES }] = packets.as_slice()
+    else {
+        panic!("SR then SDES: {packets:?}");
+    };
+    SenderReport {
+        ssrc: *ssrc,
+        ntp: *ntp,
+        rtp_ts: *rtp_ts,
+        packet_count: word_at(compound, SR_PACKET_COUNT_OFFSET),
+        octet_count: word_at(compound, SR_OCTET_COUNT_OFFSET),
+    }
+}
+
+// the wall-clock time a report maps RTP timestamp zero to
+fn rtp_zero_unix_ns(report: &SenderReport, clock_rate: u32) -> i64 {
+    let unix_ns = unix_nanos_from_ntp(report.ntp).expect("NTP in range");
+    unix_ns - (u64::from(report.rtp_ts) * NS_PER_SECOND / u64::from(clock_rate)) as i64
 }
 
 #[tokio::test]
@@ -514,6 +588,83 @@ async fn audio_and_video_pads_publish_as_one_announced_session() {
 }
 
 #[tokio::test]
+async fn sender_reports_count_the_media_sent_before_them() {
+    let (listener, location) = recorder_listener().await;
+    let mut sink = RtspClientSink::new(1, location);
+    sink.set_property("rtcp-sr-interval", PropValue::Uint(MIN_REPORT_INTERVAL_MS))
+        .expect("interval");
+    let pads = [video_pad()];
+    let pace = Duration::from_millis(MIN_REPORT_INTERVAL_MS * 2);
+    let (recorded, published) = publish_and_record(listener, None, &mut sink, &pads, pace).await;
+    published.expect("publish and teardown");
+
+    let media = &recorded.channels[&interleaved_rtp_channel(VIDEO_PAD)];
+    let reports: Vec<SenderReport> = recorded.channels[&interleaved_rtcp_channel(VIDEO_PAD)]
+        .iter()
+        .map(|compound| sender_report(compound))
+        .collect();
+    assert!(
+        reports.len() > 1,
+        "a report every interval while frames flow: {reports:?}"
+    );
+    for report in &reports {
+        assert_eq!(report.ssrc, rtp_ssrc(&media[0]), "the media SSRC reports");
+        let counted: Vec<&Vec<u8>> = media
+            .iter()
+            .filter(|p| rtp_timestamp(p) <= report.rtp_ts)
+            .collect();
+        assert_eq!(report.packet_count as usize, counted.len());
+        assert_eq!(
+            report.octet_count as usize,
+            counted
+                .iter()
+                .map(|p| p.len() - RTP_HEADER_LEN)
+                .sum::<usize>(),
+            "payload octets, without the RTP header"
+        );
+    }
+}
+
+#[tokio::test]
+async fn audio_and_video_sender_reports_share_one_wall_clock() {
+    let aac = aac_frames();
+    let pads = [
+        video_pad(),
+        PadFrames {
+            caps: audio_caps(AudioFormat::Aac),
+            frames: aac
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (f.clone(), pts_at(i, AAC_FRAME_SAMPLES)))
+                .collect(),
+        },
+    ];
+    let (listener, location) = recorder_listener().await;
+    let mut sink = RtspClientSink::new(pads.len(), location);
+    sink.set_property("rtcp-sr-interval", PropValue::Uint(MIN_REPORT_INTERVAL_MS))
+        .expect("interval");
+    let pace = Duration::from_millis(MIN_REPORT_INTERVAL_MS * 2);
+    let (recorded, published) = publish_and_record(listener, None, &mut sink, &pads, pace).await;
+    published.expect("publish and teardown");
+    let rtp_zeros = |pad: usize, clock_rate: u32| -> Vec<i64> {
+        recorded.channels[&interleaved_rtcp_channel(pad)]
+            .iter()
+            .map(|compound| rtp_zero_unix_ns(&sender_report(compound), clock_rate))
+            .collect()
+    };
+    let mut zeros = rtp_zeros(VIDEO_PAD, MediaClock::VIDEO_RATE_HZ);
+    zeros.extend(rtp_zeros(AAC_PAD, AUDIO_RATE_HZ));
+    assert!(zeros.len() > pads.len(), "several reports per stream");
+    let one_audio_tick_ns = (NS_PER_SECOND / u64::from(AUDIO_RATE_HZ)) as i64;
+    assert!(
+        zeros
+            .iter()
+            .all(|zero| (zero - zeros[0]).abs() <= one_audio_tick_ns),
+        "every report of both streams puts PTS zero at one wall-clock instant: {zeros:?}"
+    );
+}
+
+#[tokio::test]
 async fn digest_challenge_is_answered_on_every_request() {
     let gate = DigestGate {
         user: USER,
@@ -553,7 +704,6 @@ async fn refused_credentials_fail_the_publish() {
 #[test]
 fn launch_line_properties_reach_the_element() {
     use g2g_core::runtime::parse_launch;
-    use g2g_core::PropValue;
     use g2g_plugins::registry::default_registry;
 
     let registry = default_registry();
@@ -564,6 +714,7 @@ fn launch_line_properties_reach_the_element() {
         ("user-pw", PASSWORD),
         ("user-agent", "canary"),
         ("tcp-timeout", "5000000"),
+        ("rtcp-sr-interval", "2500"),
     ];
     let assignments: Vec<String> = settings.iter().map(|(k, v)| format!("{k}={v}")).collect();
     parse_launch(

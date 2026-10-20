@@ -636,7 +636,15 @@ TCP-interleaved on channel `2 * pad`, or over UDP from a bound even/odd port
 pair per stream. `protocols` lists the transports to try at the first SETUP, and
 the rest of the session keeps the one that succeeded. Server RTCP arriving on
 the control connection is read and dropped before every frame so it cannot fill
-the socket. Validated against mediamtx 1.21 (ffprobe, ffmpeg and gst `rtspsrc`
+the socket.
+
+Each stream sends an RTCP sender report, with an SDES CNAME shared by the
+session's streams, after its first frame and then every `rtcp-sr-interval`
+(5 s), spread over 0.5 to 1.5 times the interval as RFC 3550 does. The report's
+NTP time is the wall-clock time of PTS zero, fixed when the session starts, plus
+the frame's PTS, so a player lines the streams up by PTS. Reports go out on
+channel `2 * pad + 1` or to the server's RTCP port, and are sent only when a
+frame arrives. Validated against mediamtx 1.21 (ffprobe, ffmpeg and gst `rtspsrc`
 decode the published streams back, over both transports and both auth schemes)
 and against `RtspServerSrc` in tests.
 

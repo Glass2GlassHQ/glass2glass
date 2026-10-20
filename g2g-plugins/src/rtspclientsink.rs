@@ -14,10 +14,11 @@ use tokio::net::{TcpStream, UdpSocket};
 
 use g2g_core::log::{io_err, short_type_name, LogName, LogSource};
 use g2g_core::mediaclock::MediaClock;
+use g2g_core::metrics::{monotonic_ns, unix_time_ns};
 use g2g_core::{
-    g2g_warn, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, VideoCodec,
+    g2g_warn, ntp_from_unix_nanos, AudioFormat, Caps, CapsConstraint, ConfigureOutcome, Dim,
+    ElementMetadata, G2gError, HardwareError, MultiInputElement, OutputSink, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::aacparse::{
@@ -26,6 +27,7 @@ use crate::aacparse::{
 };
 use crate::annexb::{parameter_sets, split_annexb};
 use crate::opusparse::{is_opus_config, parse_opus_head, parse_toc};
+use crate::rtcp::{build_sdes_cname, SenderCounters};
 use crate::rtpklv::rtp_timestamp_at_clock;
 use crate::rtppay::{RtpAacPacketizer, RtpH264Packetizer, RtpH265Packetizer, RtpOpusPacketizer};
 use crate::rtspclient::{
@@ -55,6 +57,10 @@ const READ_BUF_LEN: usize = 8192;
 const MAX_PENDING: usize = 64 * 1024;
 // as gst's `retry` default
 const UDP_PORT_PAIR_ATTEMPTS: usize = 20;
+// RFC 3550's nominal sender-report interval, the gst rtpsession default
+const DEFAULT_REPORT_INTERVAL_MS: u64 = 5_000;
+const MAX_REPORT_INTERVAL_MS: u64 = 60_000;
+const NS_PER_MS: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamCodec {
@@ -273,6 +279,7 @@ enum PublishError {
     TimedOut,
     Closed,
     AccessUnitTooLarge,
+    TimestampOutsideNtpRange,
 }
 
 impl From<RtspClientError> for PublishError {
@@ -309,6 +316,9 @@ impl core::fmt::Display for PublishError {
             PublishError::Closed => write!(f, "server closed the RTSP connection"),
             PublishError::AccessUnitTooLarge => {
                 write!(f, "AAC access unit exceeds the 13-bit RTP AU size")
+            }
+            PublishError::TimestampOutsideNtpRange => {
+                write!(f, "frame PTS maps outside the NTP timestamp range")
             }
         }
     }
@@ -430,24 +440,79 @@ impl ControlConnection {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PacketKind {
+    Rtp,
+    Rtcp,
+}
+
 #[derive(Debug)]
 enum MediaDestination {
     Interleaved {
         rtp_channel: u8,
+        rtcp_channel: u8,
     },
     Udp {
         rtp_socket: UdpSocket,
         server_rtp: SocketAddr,
-        // bound so the RTCP port the SETUP advertised belongs to this session
-        _rtcp_socket: UdpSocket,
+        rtcp_socket: UdpSocket,
+        server_rtcp: SocketAddr,
     },
+}
+
+impl MediaDestination {
+    async fn deliver(
+        &self,
+        control: &mut ControlConnection,
+        kind: PacketKind,
+        packets: &[Vec<u8>],
+    ) -> Result<(), PublishError> {
+        match self {
+            MediaDestination::Interleaved {
+                rtp_channel,
+                rtcp_channel,
+            } => {
+                let channel = match kind {
+                    PacketKind::Rtp => *rtp_channel,
+                    PacketKind::Rtcp => *rtcp_channel,
+                };
+                let framed_len = packets
+                    .iter()
+                    .map(|packet| INTERLEAVED_HEADER_LEN + packet.len())
+                    .sum();
+                let mut framed = Vec::with_capacity(framed_len);
+                for packet in packets {
+                    push_interleaved(&mut framed, channel, packet);
+                }
+                within(control.timeout, control.stream.write_all(&framed)).await
+            }
+            MediaDestination::Udp {
+                rtp_socket,
+                server_rtp,
+                rtcp_socket,
+                server_rtcp,
+            } => {
+                let (socket, address) = match kind {
+                    PacketKind::Rtp => (rtp_socket, server_rtp),
+                    PacketKind::Rtcp => (rtcp_socket, server_rtcp),
+                };
+                for packet in packets {
+                    socket.send_to(packet, *address).await?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
 struct SessionStream {
     packetizer: StreamPacketizer,
+    ssrc: u32,
     clock_rate: u32,
     destination: MediaDestination,
+    counters: SenderCounters,
+    next_report_ns: u64,
 }
 
 #[derive(Debug)]
@@ -455,6 +520,10 @@ struct PublishSession {
     control: ControlConnection,
     request_url: String,
     streams: Vec<SessionStream>,
+    cname: String,
+    // the wall-clock time of PTS zero, so every stream's sender reports share one NTP mapping
+    pts_zero_unix_ns: i64,
+    report_interval_ns: u64,
 }
 
 impl PublishSession {
@@ -463,29 +532,27 @@ impl PublishSession {
         let stream = &mut self.streams[input];
         let timestamp = rtp_timestamp_at_clock(pts_ns, u64::from(stream.clock_rate));
         let packets = stream.packetizer.packetize(frame, timestamp)?;
-        match &stream.destination {
-            MediaDestination::Interleaved { rtp_channel } => {
-                let framed_len = packets
-                    .iter()
-                    .map(|packet| INTERLEAVED_HEADER_LEN + packet.len())
-                    .sum();
-                let mut framed = Vec::with_capacity(framed_len);
-                for packet in &packets {
-                    push_interleaved(&mut framed, *rtp_channel, packet);
-                }
-                within(self.control.timeout, self.control.stream.write_all(&framed)).await
-            }
-            MediaDestination::Udp {
-                rtp_socket,
-                server_rtp,
-                ..
-            } => {
-                for packet in &packets {
-                    rtp_socket.send_to(packet, *server_rtp).await?;
-                }
-                Ok(())
-            }
+        for packet in &packets {
+            stream.counters.count(packet);
         }
+        stream
+            .destination
+            .deliver(&mut self.control, PacketKind::Rtp, &packets)
+            .await?;
+
+        let now = monotonic_ns();
+        if now < stream.next_report_ns {
+            return Ok(());
+        }
+        stream.next_report_ns = now.saturating_add(randomized_interval_ns(self.report_interval_ns));
+        let ntp = ntp_from_unix_nanos(self.pts_zero_unix_ns.saturating_add_unsigned(pts_ns))
+            .ok_or(PublishError::TimestampOutsideNtpRange)?;
+        let mut report = stream.counters.sender_report(stream.ssrc, ntp, timestamp);
+        report.extend(build_sdes_cname(stream.ssrc, &self.cname));
+        stream
+            .destination
+            .deliver(&mut self.control, PacketKind::Rtcp, &[report])
+            .await
     }
 
     async fn teardown(&mut self) -> Result<(), PublishError> {
@@ -529,10 +596,16 @@ fn payload_type(index: usize) -> Result<u8, PublishError> {
         .ok_or(PublishError::TooManyStreams)
 }
 
-fn random_ssrc() -> u32 {
+fn random_u32() -> u32 {
     let mut bytes = [0u8; 4];
-    getrandom::getrandom(&mut bytes).expect("OS RNG for the RTP SSRC");
+    getrandom::getrandom(&mut bytes).expect("OS RNG for the RTP SSRC and RTCP timing");
     u32::from_be_bytes(bytes)
+}
+
+// RFC 3550 §6.3.1 spreads each report over 0.5 to 1.5 times the nominal interval
+fn randomized_interval_ns(nominal_ns: u64) -> u64 {
+    let spread = (u128::from(nominal_ns) * u128::from(random_u32())) >> u32::BITS;
+    nominal_ns / 2 + spread as u64
 }
 
 async fn bind_udp_port_pair(local_ip: IpAddr) -> Result<(UdpSocket, UdpSocket), PublishError> {
@@ -571,12 +644,15 @@ async fn setup_stream(
                 .await?;
             require_ok("SETUP", &response)?;
             control.requests.accept_session(&response)?;
-            let (rtp_channel, _) = response
+            let (rtp_channel, rtcp_channel) = response
                 .transport
                 .as_deref()
                 .and_then(parse_interleaved_channels)
                 .ok_or(RtspClientError::MissingTransport)?;
-            Ok(MediaDestination::Interleaved { rtp_channel })
+            Ok(MediaDestination::Interleaved {
+                rtp_channel,
+                rtcp_channel,
+            })
         }
         LowerTransport::Udp => {
             let local_ip = control.stream.local_addr()?.ip();
@@ -597,11 +673,15 @@ async fn setup_stream(
                 .as_deref()
                 .and_then(|t| parse_rtp_port(t, "server_port="))
                 .ok_or(RtspClientError::MissingTransport)?;
+            let server_rtcp_port = server_port
+                .checked_add(1)
+                .ok_or(RtspClientError::MissingTransport)?;
             let server_ip = control.stream.peer_addr()?.ip();
             Ok(MediaDestination::Udp {
                 rtp_socket,
                 server_rtp: SocketAddr::new(server_ip, server_port),
-                _rtcp_socket: rtcp_socket,
+                rtcp_socket,
+                server_rtcp: SocketAddr::new(server_ip, server_rtcp_port),
             })
         }
     }
@@ -629,6 +709,7 @@ pub struct RtspClientSink {
     user_pw: String,
     user_agent: String,
     tcp_timeout_us: u64,
+    report_interval_ms: u64,
     pads: Vec<Pad>,
     held: Vec<HeldFrame>,
     session: Option<PublishSession>,
@@ -674,6 +755,13 @@ static RTSP_CLIENT_SINK_PROPS: &[PropertySpec] = &[
         "fail when the server does not answer or accept data within this many microseconds (0 = never)",
     )
     .with_default("20000000"),
+    PropertySpec::new(
+        "rtcp-sr-interval",
+        PropKind::Uint,
+        "nominal RTCP sender-report interval in milliseconds, randomized per RFC 3550",
+    )
+    .with_default("5000")
+    .with_range("1", "60000"),
 ];
 
 impl RtspClientSink {
@@ -685,6 +773,7 @@ impl RtspClientSink {
             user_pw: String::new(),
             user_agent: DEFAULT_USER_AGENT.to_string(),
             tcp_timeout_us: DEFAULT_TCP_TIMEOUT_US,
+            report_interval_ms: DEFAULT_REPORT_INTERVAL_MS,
             pads: (0..inputs).map(|_| Pad::default()).collect(),
             held: Vec::new(),
             session: None,
@@ -749,6 +838,7 @@ impl RtspClientSink {
     async fn start_session(
         &self,
         configs: &[StreamConfig],
+        first_pts_ns: u64,
     ) -> Result<PublishSession, PublishError> {
         let target = publish_target(&self.location)?;
         let timeout = self.tcp_timeout();
@@ -805,10 +895,14 @@ impl RtspClientSink {
                 .setup_with_fallback(&mut control, &control_url, i, &candidates)
                 .await?;
             chosen = Some(transport);
+            let ssrc = random_u32();
             streams.push(SessionStream {
-                packetizer: config.packetizer(*pt, random_ssrc()),
+                packetizer: config.packetizer(*pt, ssrc),
+                ssrc,
                 clock_rate: config.clock_rate(),
                 destination,
+                counters: SenderCounters::default(),
+                next_report_ns: 0,
             });
         }
 
@@ -820,6 +914,9 @@ impl RtspClientSink {
             control,
             request_url: url,
             streams,
+            cname: format!("g2g-{:08x}", random_u32()),
+            pts_zero_unix_ns: unix_time_ns().saturating_sub_unsigned(first_pts_ns),
+            report_interval_ns: self.report_interval_ms * NS_PER_MS,
         })
     }
 
@@ -866,12 +963,12 @@ impl RtspClientSink {
             .iter()
             .filter_map(|pad| pad.config.clone())
             .collect();
-        let mut session = self
-            .start_session(&configs)
-            .await
-            .map_err(|e| self.publish_failed(e))?;
         let mut held = core::mem::take(&mut self.held);
         held.sort_by_key(|frame| frame.pts_ns);
+        let mut session = self
+            .start_session(&configs, held[0].pts_ns)
+            .await
+            .map_err(|e| self.publish_failed(e))?;
         for frame in held {
             if let Err(e) = session.send(frame.input, &frame.data, frame.pts_ns).await {
                 return Err(self.publish_failed(e));
@@ -1010,6 +1107,13 @@ impl MultiInputElement for RtspClientSink {
             "user-pw" => self.user_pw = text()?,
             "user-agent" => self.user_agent = text()?,
             "tcp-timeout" => self.tcp_timeout_us = value.as_uint().ok_or(PropError::Type)?,
+            "rtcp-sr-interval" => {
+                let ms = value.as_uint().ok_or(PropError::Type)?;
+                if !(1..=MAX_REPORT_INTERVAL_MS).contains(&ms) {
+                    return Err(PropError::Value);
+                }
+                self.report_interval_ms = ms;
+            }
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -1024,6 +1128,7 @@ impl MultiInputElement for RtspClientSink {
             "user-pw" => text(&self.user_pw),
             "user-agent" => text(&self.user_agent),
             "tcp-timeout" => Some(PropValue::Uint(self.tcp_timeout_us)),
+            "rtcp-sr-interval" => Some(PropValue::Uint(self.report_interval_ms)),
             _ => None,
         }
     }
