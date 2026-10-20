@@ -154,9 +154,8 @@ async fn stream_segment_chunks(
 /// every ABR switch.
 ///
 /// A live `@duration` Representation instead takes its segments from the
-/// wall-clock window (`live`), falling back to the static resolution when the
-/// window is empty (a `SegmentTimeline`, which lists its own window, or a Period
-/// whose first segment is not complete yet).
+/// wall-clock window (`live`), which is empty until the Period's first segment
+/// is complete. A `SegmentTimeline` lists its own window.
 async fn load_rep(
     client: &reqwest::Client,
     base: &str,
@@ -182,11 +181,10 @@ async fn load_rep(
             init,
         ));
     }
-    if let Some(edge) = live {
-        let segs = rep.live_segments(edge, now_unix, period_end_secs(total_secs));
-        if !segs.is_empty() {
-            return Ok((segs, rep.timescale(), init));
-        }
+    if let Some(segs) =
+        live.and_then(|edge| rep.live_segments(edge, now_unix, period_end_secs(total_secs)))
+    {
+        return Ok((segs, rep.timescale(), init));
     }
     Ok((rep.resolved_segments(total_secs), rep.timescale(), init))
 }
