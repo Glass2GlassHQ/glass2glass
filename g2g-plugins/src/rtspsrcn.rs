@@ -490,18 +490,22 @@ fn declared_audio_caps(format: AudioFormat, params: Option<&AudioParameters>) ->
 
 /// [`probe_tracks`] on a throwaway current-thread runtime, so a synchronous
 /// graph builder (the `playbin uri=rtsp://...` hook) can size the fan-out before
-/// the graph exists. `None` when the server is unreachable, offers no
-/// H.264 / H.265 video, or the caller is already inside a runtime (blocking one
-/// of its threads would deadlock it): an async caller awaits [`probe_tracks`].
+/// the graph exists. `None` when the server is unreachable or offers no
+/// H.264 / H.265 video.
 pub fn blocking_probe_tracks(url: &str, user_agent: &str) -> Option<RtspTracks> {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        return None;
-    }
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-    rt.block_on(probe_tracks(url, user_agent))
+    // a runtime cannot block_on inside the caller's runtime, so it gets a thread of its own
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok()?;
+                rt.block_on(probe_tracks(url, user_agent))
+            })
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
 }
 
 /// DESCRIBE `url` and report the tracks g2g can play from it: the first
