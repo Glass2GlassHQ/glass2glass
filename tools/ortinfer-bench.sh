@@ -31,6 +31,8 @@ done
 
 python_version=$("$pyml/.venv/bin/python" -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")')
 export PYTHONPATH="$pyml/plugins/python:$pyml/.venv/lib/$python_version/site-packages:$pyml/.venv/lib64/$python_version/site-packages:$HOME/.local/lib/$python_version/site-packages"
+# the CUDA execution provider loads libcudnn.so.9, which the venv's nvidia-cudnn wheel ships
+export LD_LIBRARY_PATH="$pyml/.venv/lib/$python_version/site-packages/nvidia/cudnn/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 decode="filesrc location=$clip ! qtdemux ! h264parse ! ffmpegdec ! videoconvert ! videoscale ! video/x-raw,format=RGBA,width=$model_side,height=$model_side"
 native="$decode ! ortinfer model=$model execution-provider=cuda ! detectionpostprocess ! fakesink"
@@ -51,9 +53,8 @@ measure() {
         exit 1
     fi
     awk -v side="$side" -v run="$run" -v element="$element" '
-        /^  frames:/ { frames = $3; sub(",", "", frames) }
         /^  run:/ { wall = $2; fps = $5 }
-        $1 ~ "^" element && $2 == "proc" { p50 = $4; p99 = $8 }
+        $1 ~ "^" element && $2 == "proc" { p50 = $4; p99 = $8; frames = $10; gsub(/[^0-9]/, "", frames) }
         /^peak-rss-kib/ { rss = $2 / 1024 }
         END {
             if (fps == "" || p50 == "") { print "ortinfer-bench: no run summary for " side > "/dev/stderr"; exit 1 }
@@ -64,6 +65,6 @@ measure() {
 echo "$(date -I) $(hostname) $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1), load $(cut -d' ' -f1-3 /proc/loadavg)"
 printf "%-7s %3s %6s %7s %13s %9s %9s %13s\n" side run frames fps "wall ms/frame" "p50 ms" "p99 ms" "peak RSS MiB"
 for run in $(seq "$runs"); do
-    measure native "$run" ortinfer "$native"
-    measure hosted "$run" pyelement "$hosted"
+    measure native "$run" Inference "$native"
+    measure hosted "$run" PyTransform "$hosted"
 done
