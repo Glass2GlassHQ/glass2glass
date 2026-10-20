@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1696: `rtspclientsink` sends a GET_PARAMETER or OPTIONS keepalive ahead of the session timeout, as gst does.
 - M1695: `rtspclientsink` sends an RTCP sender report per stream every `rtcp-sr-interval`, on one NTP mapping of PTS.
 - M1684: a terminal fan-in element (`rtspclientsink`, `webrtcsessionsink`, `livekitsink`) reports the `sink` telemetry role, so observers summing packets into sinks count its frames.
 - M1683: `hlssrc location=X ! decodebin name=d` decodes each muxed stream of the playlist on its own `d.` branch.

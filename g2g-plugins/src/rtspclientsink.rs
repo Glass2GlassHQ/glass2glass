@@ -31,9 +31,9 @@ use crate::rtcp::{build_sdes_cname, SenderCounters};
 use crate::rtpklv::rtp_timestamp_at_clock;
 use crate::rtppay::{RtpAacPacketizer, RtpH264Packetizer, RtpH265Packetizer, RtpOpusPacketizer};
 use crate::rtspclient::{
-    record_transport_tcp, record_transport_udp, transports_from_flags, transports_to_flags,
-    Credentials, LowerTransport, RtspClientError, RtspPublishRequests, RtspResponse, STATUS_OK,
-    STATUS_UNAUTHORIZED,
+    keepalive_interval_s, record_transport_tcp, record_transport_udp, transports_from_flags,
+    transports_to_flags, Credentials, LowerTransport, RtspClientError, RtspPublishRequests,
+    RtspResponse, STATUS_OK, STATUS_UNAUTHORIZED,
 };
 use crate::rtspserver::{
     interleaved_frame, parse_interleaved_channels, parse_rtp_port, push_interleaved,
@@ -61,6 +61,7 @@ const UDP_PORT_PAIR_ATTEMPTS: usize = 20;
 const DEFAULT_REPORT_INTERVAL_MS: u64 = 5_000;
 const MAX_REPORT_INTERVAL_MS: u64 = 60_000;
 const NS_PER_MS: u64 = 1_000_000;
+const NS_PER_SECOND: u64 = 1_000_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamCodec {
@@ -383,7 +384,10 @@ impl ControlConnection {
     ) -> Result<RtspResponse, PublishError> {
         let request = self.requests.request(method, uri, headers, body);
         within(self.timeout, self.stream.write_all(&request)).await?;
-        let response = self.read_response().await?;
+        let mut response = self.read_response().await?;
+        while self.requests.answers_earlier_request(&response) {
+            response = self.read_response().await?;
+        }
         self.requests.check_cseq(&response)?;
         Ok(response)
     }
@@ -516,9 +520,17 @@ struct SessionStream {
 }
 
 #[derive(Debug)]
+struct Keepalive {
+    method: &'static str,
+    interval_ns: u64,
+    last_request_ns: u64,
+}
+
+#[derive(Debug)]
 struct PublishSession {
     control: ControlConnection,
     request_url: String,
+    keepalive: Option<Keepalive>,
     streams: Vec<SessionStream>,
     cname: String,
     // the wall-clock time of PTS zero, so every stream's sender reports share one NTP mapping
@@ -529,6 +541,7 @@ struct PublishSession {
 impl PublishSession {
     async fn send(&mut self, input: usize, frame: &[u8], pts_ns: u64) -> Result<(), PublishError> {
         self.control.discard_inbound()?;
+        self.keep_alive().await?;
         let stream = &mut self.streams[input];
         let timestamp = rtp_timestamp_at_clock(pts_ns, u64::from(stream.clock_rate));
         let packets = stream.packetizer.packetize(frame, timestamp)?;
@@ -553,6 +566,27 @@ impl PublishSession {
             .destination
             .deliver(&mut self.control, PacketKind::Rtcp, &[report])
             .await
+    }
+
+    // the answer is read and dropped with the server's RTCP, as gst does not wait for it either
+    async fn keep_alive(&mut self) -> Result<(), PublishError> {
+        let Some(keepalive) = &mut self.keepalive else {
+            return Ok(());
+        };
+        let now = monotonic_ns();
+        if now.saturating_sub(keepalive.last_request_ns) < keepalive.interval_ns {
+            return Ok(());
+        }
+        keepalive.last_request_ns = now;
+        let request = self
+            .control
+            .requests
+            .request(keepalive.method, &self.request_url, &[], b"");
+        within(
+            self.control.timeout,
+            self.control.stream.write_all(&request),
+        )
+        .await
     }
 
     async fn teardown(&mut self) -> Result<(), PublishError> {
@@ -709,6 +743,7 @@ pub struct RtspClientSink {
     user_pw: String,
     user_agent: String,
     tcp_timeout_us: u64,
+    keep_alive: bool,
     report_interval_ms: u64,
     pads: Vec<Pad>,
     held: Vec<HeldFrame>,
@@ -756,6 +791,12 @@ static RTSP_CLIENT_SINK_PROPS: &[PropertySpec] = &[
     )
     .with_default("20000000"),
     PropertySpec::new(
+        "do-rtsp-keep-alive",
+        PropKind::Bool,
+        "send GET_PARAMETER, or OPTIONS when the server lacks it, ahead of the session timeout",
+    )
+    .with_default("true"),
+    PropertySpec::new(
         "rtcp-sr-interval",
         PropKind::Uint,
         "nominal RTCP sender-report interval in milliseconds, randomized per RFC 3550",
@@ -773,6 +814,7 @@ impl RtspClientSink {
             user_pw: String::new(),
             user_agent: DEFAULT_USER_AGENT.to_string(),
             tcp_timeout_us: DEFAULT_TCP_TIMEOUT_US,
+            keep_alive: true,
             report_interval_ms: DEFAULT_REPORT_INTERVAL_MS,
             pads: (0..inputs).map(|_| Pad::default()).collect(),
             held: Vec::new(),
@@ -910,9 +952,21 @@ impl RtspClientSink {
             .exchange("RECORD", &url, &[("Range", "npt=0.000-")], b"")
             .await?;
         require_ok("RECORD", &record)?;
+        let keepalive_method = if options.allows("GET_PARAMETER") {
+            "GET_PARAMETER"
+        } else {
+            "OPTIONS"
+        };
+        let keepalive = self.keep_alive.then(|| Keepalive {
+            method: keepalive_method,
+            interval_ns: keepalive_interval_s(control.requests.session_timeout_s())
+                .saturating_mul(NS_PER_SECOND),
+            last_request_ns: monotonic_ns(),
+        });
         Ok(PublishSession {
             control,
             request_url: url,
+            keepalive,
             streams,
             cname: format!("g2g-{:08x}", random_u32()),
             pts_zero_unix_ns: unix_time_ns().saturating_sub_unsigned(first_pts_ns),
@@ -1107,6 +1161,7 @@ impl MultiInputElement for RtspClientSink {
             "user-pw" => self.user_pw = text()?,
             "user-agent" => self.user_agent = text()?,
             "tcp-timeout" => self.tcp_timeout_us = value.as_uint().ok_or(PropError::Type)?,
+            "do-rtsp-keep-alive" => self.keep_alive = value.as_bool().ok_or(PropError::Type)?,
             "rtcp-sr-interval" => {
                 let ms = value.as_uint().ok_or(PropError::Type)?;
                 if !(1..=MAX_REPORT_INTERVAL_MS).contains(&ms) {
@@ -1128,6 +1183,7 @@ impl MultiInputElement for RtspClientSink {
             "user-pw" => text(&self.user_pw),
             "user-agent" => text(&self.user_agent),
             "tcp-timeout" => Some(PropValue::Uint(self.tcp_timeout_us)),
+            "do-rtsp-keep-alive" => Some(PropValue::Bool(self.keep_alive)),
             "rtcp-sr-interval" => Some(PropValue::Uint(self.report_interval_ms)),
             _ => None,
         }

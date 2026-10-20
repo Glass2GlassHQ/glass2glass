@@ -6,7 +6,7 @@ use md5::{Digest, Md5};
 
 use g2g_core::{PropError, PropValue};
 
-use crate::rtspserver::RtspMessage;
+use crate::rtspserver::{RtspMessage, DEFAULT_SESSION_TIMEOUT_SECS};
 use crate::textencoding::{base64_encode, hex_encode};
 
 /// An RTP lower transport a SETUP may request, the subset of gst's
@@ -102,7 +102,9 @@ pub struct RtspResponse {
     pub status_line: String,
     pub cseq: u32,
     pub session: Option<String>,
+    pub session_timeout_s: Option<u64>,
     pub transport: Option<String>,
+    pub public: Option<String>,
     pub www_authenticate: Vec<String>,
 }
 
@@ -123,12 +125,30 @@ impl RtspResponse {
             .header("Session")
             .and_then(|value| value.split(';').next())
             .map(|id| id.trim().to_string());
+        let session_timeout_s = message
+            .header("Session")
+            .and_then(|value| {
+                value.split(';').skip(1).find_map(|param| {
+                    let (key, seconds) = param.split_once('=')?;
+                    key.trim()
+                        .eq_ignore_ascii_case("timeout")
+                        .then(|| seconds.trim())
+                })
+            })
+            .map(|seconds| {
+                seconds
+                    .parse()
+                    .map_err(|_| RtspClientError::MalformedResponse)
+            })
+            .transpose()?;
         let response = RtspResponse {
             status,
             status_line: message.start_line.to_string(),
             cseq: message.cseq(),
             session,
+            session_timeout_s,
             transport: message.header("Transport").map(str::to_string),
+            public: message.header("Public").map(str::to_string),
             www_authenticate: message
                 .headers_named("WWW-Authenticate")
                 .map(str::to_string)
@@ -136,6 +156,30 @@ impl RtspResponse {
         };
         Ok(Some((response, message.consumed)))
     }
+
+    // whether the `Public` header of an OPTIONS answer lists `method`
+    pub fn allows(&self, method: &str) -> bool {
+        self.public
+            .as_deref()
+            .is_some_and(|methods| methods.split(',').any(|m| m.trim() == method))
+    }
+}
+
+// gst's next-timeout margin: 5 s early from a 20 s timeout, 20% early from 5 s, 1 s early below that
+const KEEPALIVE_LONG_TIMEOUT_S: u64 = 20;
+const KEEPALIVE_LONG_MARGIN_S: u64 = 5;
+const KEEPALIVE_MEDIUM_TIMEOUT_S: u64 = 5;
+const KEEPALIVE_MEDIUM_MARGIN_DIVISOR: u64 = 5;
+const KEEPALIVE_SHORT_MARGIN_S: u64 = 1;
+
+pub fn keepalive_interval_s(session_timeout_s: u64) -> u64 {
+    if session_timeout_s >= KEEPALIVE_LONG_TIMEOUT_S {
+        return session_timeout_s - KEEPALIVE_LONG_MARGIN_S;
+    }
+    if session_timeout_s >= KEEPALIVE_MEDIUM_TIMEOUT_S {
+        return session_timeout_s - session_timeout_s / KEEPALIVE_MEDIUM_MARGIN_DIVISOR;
+    }
+    session_timeout_s.saturating_sub(KEEPALIVE_SHORT_MARGIN_S)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +271,7 @@ pub struct RtspPublishRequests {
     challenge: Option<Challenge>,
     last_cseq: u32,
     session: Option<String>,
+    session_timeout_s: u64,
 }
 
 impl RtspPublishRequests {
@@ -237,6 +282,7 @@ impl RtspPublishRequests {
             challenge: None,
             last_cseq: 0,
             session: None,
+            session_timeout_s: u64::from(DEFAULT_SESSION_TIMEOUT_SECS),
         }
     }
 
@@ -269,6 +315,11 @@ impl RtspPublishRequests {
         let mut bytes = out.into_bytes();
         bytes.extend_from_slice(body);
         bytes
+    }
+
+    // a keepalive goes out without waiting, so its answer can arrive ahead of a later request's
+    pub fn answers_earlier_request(&self, response: &RtspResponse) -> bool {
+        response.cseq < self.last_cseq
     }
 
     pub fn check_cseq(&self, response: &RtspResponse) -> Result<(), RtspClientError> {
@@ -307,7 +358,14 @@ impl RtspPublishRequests {
             .clone()
             .ok_or(RtspClientError::MissingSession)?;
         self.session = Some(session);
+        if let Some(timeout) = response.session_timeout_s {
+            self.session_timeout_s = timeout;
+        }
         Ok(())
+    }
+
+    pub fn session_timeout_s(&self) -> u64 {
+        self.session_timeout_s
     }
 }
 
@@ -355,6 +413,49 @@ mod tests {
             r.transport.as_deref(),
             Some("RTP/AVP/TCP;unicast;interleaved=0-1")
         );
+    }
+
+    #[test]
+    fn session_timeout_and_public_methods_are_read() {
+        let r = response(
+            "RTSP/1.0 200 OK\r\nCSeq: 1\r\nSession: c688f40b; timeout=55\r\nPublic: OPTIONS, ANNOUNCE, GET_PARAMETER\r\n\r\n",
+        );
+        assert_eq!(r.session_timeout_s, Some(55));
+        assert!(r.allows("GET_PARAMETER"));
+        assert!(!r.allows("SET_PARAMETER"));
+        let bare = response("RTSP/1.0 200 OK\r\nCSeq: 1\r\nSession: c688f40b\r\n\r\n");
+        assert_eq!(bare.session_timeout_s, None);
+        assert!(
+            !bare.allows("GET_PARAMETER"),
+            "no Public header lists nothing"
+        );
+        assert_eq!(
+            RtspResponse::parse(b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nSession: a;timeout=soon\r\n\r\n"),
+            Err(RtspClientError::MalformedResponse)
+        );
+    }
+
+    #[test]
+    fn keepalive_runs_ahead_of_the_session_timeout_as_gst_does() {
+        // (session timeout, keepalive interval) as gst_rtsp_connection_next_timeout_usec computes them
+        for (timeout, interval) in [(60, 55), (20, 15), (19, 16), (5, 4), (4, 3), (1, 0)] {
+            assert_eq!(keepalive_interval_s(timeout), interval, "timeout {timeout}");
+        }
+    }
+
+    #[test]
+    fn requests_keep_the_session_timeout_of_the_setup() {
+        let mut requests = RtspPublishRequests::new("g2g".to_string(), None);
+        assert_eq!(
+            requests.session_timeout_s(),
+            u64::from(DEFAULT_SESSION_TIMEOUT_SECS)
+        );
+        requests
+            .accept_session(&response(
+                "RTSP/1.0 200 OK\r\nCSeq: 1\r\nSession: abc;timeout=30\r\n\r\n",
+            ))
+            .expect("session present");
+        assert_eq!(requests.session_timeout_s(), 30);
     }
 
     #[test]

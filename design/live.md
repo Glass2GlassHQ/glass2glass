@@ -644,7 +644,16 @@ session's streams, after its first frame and then every `rtcp-sr-interval`
 NTP time is the wall-clock time of PTS zero, fixed when the session starts, plus
 the frame's PTS, so a player lines the streams up by PTS. Reports go out on
 channel `2 * pad + 1` or to the server's RTCP port, and are sent only when a
-frame arrives. Validated against mediamtx 1.21 (ffprobe, ffmpeg and gst `rtspsrc`
+frame arrives.
+
+With `do-rtsp-keep-alive` (on by default) the session is kept alive the way gst
+does it: a GET_PARAMETER, or an OPTIONS when the OPTIONS answer does not list
+GET_PARAMETER, goes out ahead of the `Session: id;timeout=N` timeout (60 s when
+the server names none), 5 s early from a 20 s timeout, 20% early from 5 s and
+1 s early below that. Like the reports it is checked when a frame arrives, and
+its answer is dropped with the server's RTCP. mediamtx keeps a RECORD session
+alive on the media alone, so the keepalive matters only for servers that count
+RTSP requests. Validated against mediamtx 1.21 (ffprobe, ffmpeg and gst `rtspsrc`
 decode the published streams back, over both transports and both auth schemes)
 and against `RtspServerSrc` in tests.
 

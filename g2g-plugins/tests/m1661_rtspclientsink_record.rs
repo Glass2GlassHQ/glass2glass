@@ -328,9 +328,9 @@ impl DigestGate {
 async fn record_one_publisher(
     listener: tokio::net::TcpListener,
     gate: Option<DigestGate>,
+    mut responder: RtspResponder,
 ) -> RecordedPublish {
     let (mut conn, _) = listener.accept().await.expect("publisher connects");
-    let mut responder = RtspResponder::new("", 0, 0);
     let mut recorded = RecordedPublish::default();
     let mut pending = Vec::new();
     let mut buf = [0u8; 8192];
@@ -386,17 +386,25 @@ async fn recorder_listener() -> (tokio::net::TcpListener, String) {
     (listener, format!("rtsp://127.0.0.1:{port}/av"))
 }
 
+fn recorder_responder() -> RtspResponder {
+    RtspResponder::new("", 0, 0)
+}
+
 async fn publish_and_record(
     listener: tokio::net::TcpListener,
     gate: Option<DigestGate>,
+    responder: RtspResponder,
     sink: &mut RtspClientSink,
     pads: &[PadFrames],
     pace: Duration,
 ) -> (RecordedPublish, Result<(), G2gError>) {
     let recorder = async {
-        tokio::time::timeout(SERVER_DEADLINE, record_one_publisher(listener, gate))
-            .await
-            .expect("recorder finishes")
+        tokio::time::timeout(
+            SERVER_DEADLINE,
+            record_one_publisher(listener, gate, responder),
+        )
+        .await
+        .expect("recorder finishes")
     };
     let send = async {
         publish_frames(sink, pads, pace).await?;
@@ -415,7 +423,15 @@ async fn publish_to_recorder(
     if let Some((user, password)) = credentials {
         sink = sink.with_credentials(user, password);
     }
-    publish_and_record(listener, gate, &mut sink, pads, Duration::ZERO).await
+    publish_and_record(
+        listener,
+        gate,
+        recorder_responder(),
+        &mut sink,
+        pads,
+        Duration::ZERO,
+    )
+    .await
 }
 
 fn rtp_timestamp(packet: &[u8]) -> u32 {
@@ -595,7 +611,8 @@ async fn sender_reports_count_the_media_sent_before_them() {
         .expect("interval");
     let pads = [video_pad()];
     let pace = Duration::from_millis(MIN_REPORT_INTERVAL_MS * 2);
-    let (recorded, published) = publish_and_record(listener, None, &mut sink, &pads, pace).await;
+    let (recorded, published) =
+        publish_and_record(listener, None, recorder_responder(), &mut sink, &pads, pace).await;
     published.expect("publish and teardown");
 
     let media = &recorded.channels[&interleaved_rtp_channel(VIDEO_PAD)];
@@ -644,7 +661,8 @@ async fn audio_and_video_sender_reports_share_one_wall_clock() {
     sink.set_property("rtcp-sr-interval", PropValue::Uint(MIN_REPORT_INTERVAL_MS))
         .expect("interval");
     let pace = Duration::from_millis(MIN_REPORT_INTERVAL_MS * 2);
-    let (recorded, published) = publish_and_record(listener, None, &mut sink, &pads, pace).await;
+    let (recorded, published) =
+        publish_and_record(listener, None, recorder_responder(), &mut sink, &pads, pace).await;
     published.expect("publish and teardown");
     let rtp_zeros = |pad: usize, clock_rate: u32| -> Vec<i64> {
         recorded.channels[&interleaved_rtcp_channel(pad)]
@@ -662,6 +680,54 @@ async fn audio_and_video_sender_reports_share_one_wall_clock() {
             .all(|zero| (zero - zeros[0]).abs() <= one_audio_tick_ns),
         "every report of both streams puts PTS zero at one wall-clock instant: {zeros:?}"
     );
+}
+
+// the recorder's session timeout gives a one-second keepalive interval
+const SHORT_SESSION_TIMEOUT_S: u32 = 2;
+// two keepalive intervals pass within the eight frames, with a margin either side
+const KEEPALIVE_TEST_PACE: Duration = Duration::from_millis(400);
+const KEEPALIVES_WITHIN_TEST: usize = 2;
+
+async fn keepalive_requests(keep_alive: bool) -> Vec<String> {
+    let (listener, location) = recorder_listener().await;
+    let mut sink = RtspClientSink::new(1, location);
+    sink.set_property("do-rtsp-keep-alive", PropValue::Bool(keep_alive))
+        .expect("keep-alive");
+    let responder = recorder_responder().with_session_timeout_secs(SHORT_SESSION_TIMEOUT_S);
+    let pads = [video_pad()];
+    let (recorded, published) = publish_and_record(
+        listener,
+        None,
+        responder,
+        &mut sink,
+        &pads,
+        KEEPALIVE_TEST_PACE,
+    )
+    .await;
+    published.expect("publish and teardown");
+    recorded
+        .requests
+        .into_iter()
+        .filter(|head| head.starts_with("GET_PARAMETER "))
+        .collect()
+}
+
+#[tokio::test]
+async fn keepalives_go_out_ahead_of_the_session_timeout() {
+    let keepalives = keepalive_requests(true).await;
+    assert!(
+        keepalives.len() >= KEEPALIVES_WITHIN_TEST,
+        "a GET_PARAMETER every keepalive interval: {keepalives:?}"
+    );
+    assert!(
+        keepalives.iter().all(|head| head.contains("Session: ")),
+        "each keepalive names the session"
+    );
+}
+
+#[tokio::test]
+async fn do_rtsp_keep_alive_false_sends_none() {
+    assert!(keepalive_requests(false).await.is_empty());
 }
 
 #[tokio::test]
@@ -715,6 +781,7 @@ fn launch_line_properties_reach_the_element() {
         ("user-agent", "canary"),
         ("tcp-timeout", "5000000"),
         ("rtcp-sr-interval", "2500"),
+        ("do-rtsp-keep-alive", "false"),
     ];
     let assignments: Vec<String> = settings.iter().map(|(k, v)| format!("{k}={v}")).collect();
     parse_launch(
