@@ -265,10 +265,15 @@ architectural answer to MediaPipe's runtime CPU and GPU delegate switch.
 against the same YOLO11m ONNX model hosted through `pyelement` from
 gst-python-ml, both over `data/people.mp4` on the one box, and prints each
 run's frame count, fps, wall ms per frame and peak RSS. On the RTX 3060 on
-2026-10-20 the hosted path was the faster one, 38 fps against 27 for the native
-element at the same 1.26 GB peak RSS, two runs each. The runner's per-element
-p50 and p99 read the same 33.55 ms on every run, one histogram bucket, so the
-fps column is the number to read.
+2026-10-20, under the threaded runner, the native element ran at 43 fps against
+38 for the hosted one at the same 1.26 GB peak RSS. The runner matters: the
+hosted element does its Python work on its own OS thread, so decode and the
+CPU `videoconvert ! videoscale` stage (16 ms per frame on this clip) overlap
+with inference, while `ortinfer` runs the session inline on the element's arm.
+On the cooperative runner that holds every other element for the inference
+time, and the native path drops to 26 fps while the hosted one stays at 38.
+The runner's per-element p50 and p99 read the same 33.55 ms on every run, one
+histogram bucket, so the fps column is the number to read.
 
 ### ExecuTorch
 

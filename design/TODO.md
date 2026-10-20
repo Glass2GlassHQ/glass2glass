@@ -381,7 +381,8 @@ unless it says otherwise.
 - D3D11 decoder surface import into `WgpuPreprocess` (bind the surface directly
   into the compute pass, the Windows counterpart of the dma-buf import).
 - Run the QNN and CoreML execution providers on Qualcomm and Apple hardware.
-- `ortinfer` on the CUDA execution provider runs YOLO11m at 27 fps where the
-  hosted gst-python-ml `pyelement` reaches 38 fps on the same model and clip
-  (`tools/ortinfer-bench.sh`, RTX 3060). Find the gap: preprocessing, the
-  session options, or the per-frame tensor copy.
+- Run the ONNX Runtime session off the element's arm (`offload::run_blocking`
+  or a worker thread like the hosted Python element's), so `ortinfer` on the
+  cooperative runner no longer holds decode and preprocessing for the inference
+  time: 26 fps there against 43 under the threaded runner on YOLO11m
+  (`tools/ortinfer-bench.sh`). The same applies to the other inference elements.

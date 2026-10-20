@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Runs the gst-python-ml people.mp4 clip through YOLO11m twice per side:
 # native `ortinfer execution-provider=cuda ! detectionpostprocess` and the hosted
-# gst-python-ml `ObjectDetector` on cuda:0, both in g2g-launch-py, and prints one
-# row per run from the run summary and /usr/bin/time.
+# gst-python-ml `ObjectDetector` on cuda:0, both in g2g-launch-py under the
+# threaded runner (ortinfer runs the session inline, so the cooperative runner
+# would stall decode and preprocessing during inference), and prints one row per
+# run from the run summary and /usr/bin/time.
 #
 # Build first (PYO3_PYTHON must be the venv the hosted element imports from):
 #   PYO3_PYTHON=$HOME/src/gst-python-ml/.venv/bin/python \
@@ -47,7 +49,7 @@ measure() {
     local log=$scratch/$side-$run.log
     # word splitting of $pipeline is the launch line's own tokenization
     # shellcheck disable=SC2086
-    if ! /usr/bin/time -f 'peak-rss-kib %M' "$launch" $pipeline >"$log" 2>&1; then
+    if ! /usr/bin/time -f 'peak-rss-kib %M' "$launch" --threads $pipeline >"$log" 2>&1; then
         echo "ortinfer-bench: $side run $run failed, log follows" >&2
         cat "$log" >&2
         exit 1
