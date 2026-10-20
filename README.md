@@ -506,6 +506,7 @@ cargo clippy --workspace --all-targets
 | Element | Feature | Platform / system dep |
 | :--- | :--- | :--- |
 | `RtspSrc` (video) / `RtspSrcN` (video + audio, plus the ONVIF analytics metadata track under `onvif-metadata=true`) | `rtsp` | retina |
+| `RtspClientSink` (`rtspclientsink`: publishes H.264 / H.265 + AAC / Opus to an RTSP server with ANNOUNCE / RECORD, TCP-interleaved or UDP, Basic / Digest auth) | `rtsp-client-sink` | none |
 | `OnvifSrc` (camera discovery + stream-URI resolution) / `OnvifMetadataParse` / `OnvifMetadataCombiner` | `onvif` | reqwest + roxmltree |
 | `H264Parse` | (default) | none |
 | `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda` / `Vaapi`) | `ffmpeg` | Linux + libavcodec |

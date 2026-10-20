@@ -284,7 +284,7 @@ Whole plugins answer by family rather than name:
 
 | gst names | g2g |
 | :--- | :--- |
-| `rtp*pay` / `rtp*depay` | payloading is inside `udpsink` / `udpsrc` (and `rtspsrc`, `webrtcsink`) |
+| `rtp*pay` / `rtp*depay` | payloading is inside `udpsink` / `udpsrc` (and `rtspsrc`, `rtspclientsink`, `webrtcsink`) |
 | `rtpbin`, `rtpsession`, `rtpjitterbuffer`, `rtprtx*`, `rtpulpfec*`, `rtpst2022-1-fec*` | `udpsrc` properties (`jitter-latency`, `jitter-depth`, `rtcp-rr-interval`, `nack`, `rtx-payload-type`, `fec-payload-type`, `flexfec-payload-type`) and `udpsink` properties (`rtcp-sr-interval`, `retransmit`, `fec-columns`, `fec-rows`) |
 | `gl*` | no OpenGL elements; `wgpusink`, `wgpucompositor`, `dmabuftowgpu` / `wgputodmabuf` |
 | `cuda*` | `nvdec` / `nvenc`, and `localcudasrc` / `localcudasink` for cross-process CUDA memory |

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1661: `rtspclientsink` publishes H.264, H.265, AAC and Opus pads to an RTSP server over TCP-interleaved or UDP, with Basic or Digest auth.
+- M1660: RTP packetizers for H.265, AAC and Opus, an SDP writer shared with the RTSP server, and a sans-IO RTSP publishing client.
 - M1652: `rtspsrc name=s` with several linked pads plays a pad per stream off one session, as gst's `rtspsrc` does.
 - M1651: an `http://` or `https://` URL ending in `.m3u8` is an HLS URI for `uridecodebin` and `playbin`.
 - M1650: `uridecodebin uri=X name=d` decodes each stream of a file, RTSP or HLS URI on its own `d.` branch, and a bare `d.` decodes an audio port too.

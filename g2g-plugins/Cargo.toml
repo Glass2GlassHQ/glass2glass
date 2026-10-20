@@ -25,7 +25,7 @@ default = []
 # explicitly), and the no_std `embassy*` RTOS backends.
 linux-full = [
     "multi-thread", "plugin-loader", "plugin-signing",
-    "rtsp", "rtsp-server", "srt", "rist", "srtp", "dtls-srtp", "tcp", "shm", "unixfd", "udp-egress", "udp-ingress", "rtmp", "webrtc",
+    "rtsp", "rtsp-server", "rtsp-client-sink", "srt", "rist", "srtp", "dtls-srtp", "tcp", "shm", "unixfd", "udp-egress", "udp-ingress", "rtmp", "webrtc",
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "ffmpeg", "ffmpeg-long-tail", "vaapi", "v4l2",
@@ -72,6 +72,10 @@ rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
 # serving RTP over UDP to a connecting player. The sans-IO `rtspserver` responder
 # is always compiled; only the tokio TCP/UDP element needs this. Implies std + tokio.
 rtsp-server = ["std", "tokio/net", "tokio/io-util", "tokio/macros"]
+# RTSP publishing sink (RtspClientSink): ANNOUNCE + SETUP + RECORD to an RTSP
+# server, RTP over TCP-interleaved or UDP. The sans-IO `rtspclient` request and
+# response layer is always compiled. Implies std + tokio.
+rtsp-client-sink = ["std", "tokio/net", "tokio/io-util", "dep:url", "dep:getrandom"]
 # SRT transport: SrtSink (caller, egress) + SrtSrc (listener, ingress) carrying an
 # MPEG-TS byte stream over UDP, with the HSv5 handshake + NAK-based ARQ. The sans-IO
 # `srt` wire/handshake/reliability layer is always compiled; only the tokio UDP

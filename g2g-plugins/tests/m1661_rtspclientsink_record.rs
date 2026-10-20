@@ -1,0 +1,596 @@
+#![cfg(all(feature = "rtsp-client-sink", feature = "rtsp-server"))]
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::net::TcpListener as StdTcpListener;
+use std::rc::Rc;
+use std::time::Duration;
+
+use md5::{Digest, Md5};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use g2g_core::frame::Frame;
+use g2g_core::memory::SystemSlice;
+use g2g_core::rtp::RTP_HEADER_LEN;
+use g2g_core::runtime::SourceLoop;
+use g2g_core::{
+    AudioFormat, Caps, ChannelLayout, Dim, FrameTiming, G2gError, MemoryDomain, MultiInputElement,
+    OutputSink, PipelinePacket, PushOutcome, Rate, VideoCodec,
+};
+
+use g2g_plugins::rtpdepay::RtpH264Depayloader;
+use g2g_plugins::rtspclient::LowerTransport;
+use g2g_plugins::rtspclientsink::RtspClientSink;
+use g2g_plugins::rtspserver::{
+    interleaved_frame, RtspEvent, RtspRequest, RtspResponder, INTERLEAVED_MARKER,
+};
+use g2g_plugins::rtspserversrc::RtspServerSrc;
+use g2g_plugins::sdp::{scan_sections, SdpMedia};
+use g2g_plugins::textencoding::hex_encode;
+
+// High profile SPS header (profile_idc 100, level 40) and a PPS, as the RTSP server's SDP tests use
+const SPS: &[u8] = &[0x67, 0x64, 0x00, 0x28, 0xAC, 0xD9];
+const PPS: &[u8] = &[0x68, 0xEB, 0xEC, 0xB2];
+const IDR_NAL_HEADER: u8 = 0x65;
+const START_CODE: &[u8] = &[0, 0, 0, 1];
+const ACCESS_UNITS: usize = 8;
+// past the 1400-byte packet payload, so every access unit goes out as FU-A fragments
+const IDR_BODY_LEN: usize = 3000;
+const FRAME_PERIOD_NS: u64 = 33_333_333;
+const SERVER_DEADLINE: Duration = Duration::from_secs(10);
+const POLL_INTERVAL: Duration = Duration::from_millis(5);
+const NS_PER_SECOND: u64 = 1_000_000_000;
+
+const AUDIO_RATE_HZ: u32 = 48_000;
+const AUDIO_CHANNELS: u8 = 2;
+const AAC_LC_OBJECT_TYPE: u8 = 2;
+const AAC_48K_RATE_INDEX: u8 = 3;
+const AAC_FRAME_SAMPLES: u64 = 1024;
+const AAC_AU_HEADER_SECTION_LEN: usize = 4;
+const ADTS_HEADER_LEN: usize = 7;
+const OPUS_FRAME_SAMPLES: u64 = 960;
+// TOC config 31 (CELT fullband 20 ms) with the stereo flag
+const OPUS_STEREO_TOC: u8 = 0xFC;
+
+const VIDEO_PAD: usize = 0;
+const AAC_PAD: usize = 1;
+const OPUS_PAD: usize = 2;
+
+const DIGEST_REALM: &str = "g2g-test";
+const DIGEST_NONCE: &str = "6e6f6e6365";
+const USER: &str = "publisher";
+const PASSWORD: &str = "s3cret";
+
+#[derive(Default)]
+struct Capture {
+    access_units: Rc<RefCell<Vec<Vec<u8>>>>,
+}
+
+impl OutputSink for Capture {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        if let PipelinePacket::DataFrame(frame) = &packet {
+            let data = frame.domain.as_system_slice().expect("system frame");
+            self.access_units.borrow_mut().push(data.to_vec());
+        }
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+    }
+}
+
+fn h264_caps() -> Caps {
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Fixed(320),
+        height: Dim::Fixed(240),
+        framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+    }
+}
+
+fn audio_caps(format: AudioFormat) -> Caps {
+    Caps::Audio {
+        format,
+        channels: AUDIO_CHANNELS,
+        sample_rate: AUDIO_RATE_HZ,
+        channel_layout: ChannelLayout::UNSPECIFIED,
+    }
+}
+
+fn annex_b(nals: &[&[u8]]) -> Vec<u8> {
+    nals.iter()
+        .flat_map(|nal| START_CODE.iter().chain(nal.iter()).copied())
+        .collect()
+}
+
+// the first access unit carries the parameter sets the ANNOUNCE needs, every one is tagged at the IDR's first body byte
+fn access_unit(index: usize) -> Vec<u8> {
+    let mut idr = vec![IDR_NAL_HEADER, index as u8];
+    idr.extend((0..IDR_BODY_LEN).map(|i| (i % 251) as u8 | 1));
+    if index == 0 {
+        annex_b(&[SPS, PPS, &idr])
+    } else {
+        annex_b(&[&idr])
+    }
+}
+
+fn video_frames() -> Vec<Vec<u8>> {
+    (0..ACCESS_UNITS).map(access_unit).collect()
+}
+
+// ISO/IEC 13818-7 ADTS header without CRC, for AAC LC at 48 kHz stereo
+fn adts_frame(payload: &[u8]) -> Vec<u8> {
+    let len = ADTS_HEADER_LEN + payload.len();
+    let profile = AAC_LC_OBJECT_TYPE - 1;
+    let mut frame = vec![
+        0xFF,
+        0xF1,
+        (profile << 6) | (AAC_48K_RATE_INDEX << 2) | (AUDIO_CHANNELS >> 2),
+        ((AUDIO_CHANNELS & 0x3) << 6) | (len >> 11) as u8,
+        (len >> 3) as u8,
+        (((len & 0x7) << 5) as u8) | 0x1F,
+        0xFC,
+    ];
+    frame.extend_from_slice(payload);
+    frame
+}
+
+// the two-byte AudioSpecificConfig the same object type, rate index and channel count spell
+fn expected_audio_specific_config() -> Vec<u8> {
+    let bits = (u16::from(AAC_LC_OBJECT_TYPE) << 11)
+        | (u16::from(AAC_48K_RATE_INDEX) << 7)
+        | (u16::from(AUDIO_CHANNELS) << 3);
+    bits.to_be_bytes().to_vec()
+}
+
+fn aac_frames() -> Vec<Vec<u8>> {
+    (0..ACCESS_UNITS)
+        .map(|i| adts_frame(&[0x21, i as u8, 0xA5, 0x5A]))
+        .collect()
+}
+
+fn opus_frames() -> Vec<Vec<u8>> {
+    (0..ACCESS_UNITS)
+        .map(|i| vec![OPUS_STEREO_TOC, i as u8, 0x77])
+        .collect()
+}
+
+fn pts_at(index: usize, samples_per_frame: u64) -> u64 {
+    index as u64 * samples_per_frame * NS_PER_SECOND / u64::from(AUDIO_RATE_HZ)
+}
+
+fn data_frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
+    PipelinePacket::DataFrame(Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+        FrameTiming {
+            pts_ns,
+            ..FrameTiming::default()
+        },
+        0,
+    ))
+}
+
+struct PadFrames {
+    caps: Caps,
+    frames: Vec<(Vec<u8>, u64)>,
+}
+
+fn video_pad() -> PadFrames {
+    PadFrames {
+        caps: h264_caps(),
+        frames: video_frames()
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| (f, i as u64 * FRAME_PERIOD_NS))
+            .collect(),
+    }
+}
+
+// pushes the pads' frames interleaved in turn
+async fn publish_frames(sink: &mut RtspClientSink, pads: &[PadFrames]) -> Result<(), G2gError> {
+    let mut discard = Capture::default();
+    for (input, pad) in pads.iter().enumerate() {
+        sink.configure_pipeline(input, &pad.caps)?;
+    }
+    for i in 0..ACCESS_UNITS {
+        for (input, pad) in pads.iter().enumerate() {
+            let (data, pts_ns) = &pad.frames[i];
+            sink.process(input, data_frame(data.clone(), *pts_ns), &mut discard)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn end_streams(sink: &mut RtspClientSink, pads: usize) -> Result<(), G2gError> {
+    let mut discard = Capture::default();
+    for input in 0..pads {
+        sink.process(input, PipelinePacket::Eos, &mut discard)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn ingest_one_publisher(
+    sink: &mut RtspClientSink,
+    mut server: RtspServerSrc,
+) -> (Vec<Vec<u8>>, Result<(), G2gError>) {
+    server.configure_pipeline(&h264_caps()).expect("configure");
+    let received = Rc::new(RefCell::new(Vec::new()));
+    let mut capture = Capture {
+        access_units: received.clone(),
+    };
+    let receive = async {
+        tokio::time::timeout(SERVER_DEADLINE, server.run(&mut capture))
+            .await
+            .expect("server finishes")
+            .expect("server runs")
+    };
+    let pads = [video_pad()];
+    let send = async {
+        publish_frames(sink, &pads).await?;
+        // UDP media can arrive after the TEARDOWN on the control connection, so EOS waits for the server
+        while received.borrow().len() < ACCESS_UNITS {
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        end_streams(sink, pads.len()).await
+    };
+    let (_, published) = tokio::join!(receive, send);
+    let access_units = received.borrow().clone();
+    (access_units, published)
+}
+
+fn one_shot_server() -> (RtspServerSrc, u16) {
+    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind rtsp");
+    let port = listener.local_addr().unwrap().port();
+    let server = RtspServerSrc::from_listener(listener)
+        .unwrap()
+        .with_max_sessions(1);
+    (server, port)
+}
+
+#[tokio::test]
+async fn h264_published_over_tcp_interleaved_reaches_the_record_server_intact() {
+    let (server, port) = one_shot_server();
+    let mut sink = RtspClientSink::new(1, format!("rtsp://127.0.0.1:{port}/stream"));
+    let (received, published) = ingest_one_publisher(&mut sink, server).await;
+    published.expect("publish and teardown");
+    assert_eq!(
+        received,
+        video_frames(),
+        "every access unit depayloads back to the bytes published"
+    );
+}
+
+#[tokio::test]
+async fn h264_published_over_udp_reaches_the_record_server_intact() {
+    let (server, port) = one_shot_server();
+    let mut sink = RtspClientSink::new(1, format!("rtsp://127.0.0.1:{port}/stream"))
+        .with_protocols(vec![LowerTransport::Udp]);
+    let (received, published) = ingest_one_publisher(&mut sink, server).await;
+    published.expect("publish and teardown");
+    assert_eq!(received, video_frames());
+}
+
+#[derive(Default)]
+struct RecordedPublish {
+    announced_sdp: String,
+    // RTP packets by interleaved channel, in arrival order
+    channels: BTreeMap<u8, Vec<Vec<u8>>>,
+    requests: Vec<String>,
+    torn_down: bool,
+}
+
+struct DigestGate {
+    user: &'static str,
+    password: &'static str,
+}
+
+fn md5_hex(text: &str) -> String {
+    hex_encode(&Md5::digest(text.as_bytes()))
+}
+
+impl DigestGate {
+    fn challenge(&self) -> String {
+        format!("Digest realm=\"{DIGEST_REALM}\", nonce=\"{DIGEST_NONCE}\"")
+    }
+
+    // RFC 2617 §3.2.2 as the server checks it
+    fn authorizes(&self, method: &str, uri: &str, request_head: &str) -> bool {
+        let Some(header) = request_head
+            .lines()
+            .find_map(|line| line.strip_prefix("Authorization: Digest "))
+        else {
+            return false;
+        };
+        let user_hash = md5_hex(&format!("{}:{DIGEST_REALM}:{}", self.user, self.password));
+        let request_hash = md5_hex(&format!("{method}:{uri}"));
+        let expected = md5_hex(&format!("{user_hash}:{DIGEST_NONCE}:{request_hash}"));
+        header.contains(&format!("response=\"{expected}\""))
+            && header.contains(&format!("uri=\"{uri}\""))
+    }
+}
+
+// one publisher against g2g's RTSP responder, recording what it announces and sends
+async fn record_one_publisher(
+    listener: tokio::net::TcpListener,
+    gate: Option<DigestGate>,
+) -> RecordedPublish {
+    let (mut conn, _) = listener.accept().await.expect("publisher connects");
+    let mut responder = RtspResponder::new("", 0, 0);
+    let mut recorded = RecordedPublish::default();
+    let mut pending = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        loop {
+            if pending.first() == Some(&INTERLEAVED_MARKER) {
+                let Some(frame) = interleaved_frame(&pending) else {
+                    break;
+                };
+                let (channel, packet, consumed) =
+                    (frame.channel, frame.packet.to_vec(), frame.consumed);
+                recorded.channels.entry(channel).or_default().push(packet);
+                pending.drain(..consumed);
+                continue;
+            }
+            let Some((request, consumed)) = RtspRequest::parse(&pending) else {
+                break;
+            };
+            let head = String::from_utf8_lossy(&pending[..consumed]).to_string();
+            pending.drain(..consumed);
+            recorded.requests.push(head.clone());
+            if let Some(gate) = &gate {
+                if !gate.authorizes(&request.method, &request.uri, &head) {
+                    let refusal = format!(
+                        "RTSP/1.0 401 Unauthorized\r\nCSeq: {}\r\nWWW-Authenticate: {}\r\n\r\n",
+                        request.cseq,
+                        gate.challenge()
+                    );
+                    conn.write_all(refusal.as_bytes()).await.unwrap();
+                    continue;
+                }
+            }
+            if request.method == "ANNOUNCE" {
+                recorded.announced_sdp = String::from_utf8(request.body.clone()).unwrap();
+            }
+            let (response, event) = responder.handle_request(&request);
+            conn.write_all(&response).await.unwrap();
+            if event == RtspEvent::Teardown {
+                recorded.torn_down = true;
+                return recorded;
+            }
+        }
+        match conn.read(&mut buf).await {
+            Ok(0) | Err(_) => return recorded,
+            Ok(n) => pending.extend_from_slice(&buf[..n]),
+        }
+    }
+}
+
+async fn publish_to_recorder(
+    pads: &[PadFrames],
+    gate: Option<DigestGate>,
+    credentials: Option<(&str, &str)>,
+) -> (RecordedPublish, Result<(), G2gError>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut sink = RtspClientSink::new(pads.len(), format!("rtsp://127.0.0.1:{port}/av"));
+    if let Some((user, password)) = credentials {
+        sink = sink.with_credentials(user, password);
+    }
+    let recorder = async {
+        tokio::time::timeout(SERVER_DEADLINE, record_one_publisher(listener, gate))
+            .await
+            .expect("recorder finishes")
+    };
+    let send = async {
+        publish_frames(&mut sink, pads).await?;
+        end_streams(&mut sink, pads.len()).await
+    };
+    tokio::join!(recorder, send)
+}
+
+fn rtp_timestamp(packet: &[u8]) -> u32 {
+    u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]])
+}
+
+fn interleaved_rtp_channel(pad: usize) -> u8 {
+    (pad * 2) as u8
+}
+
+#[tokio::test]
+async fn audio_and_video_pads_publish_as_one_announced_session() {
+    let aac = aac_frames();
+    let opus = opus_frames();
+    let pads = [
+        video_pad(),
+        PadFrames {
+            caps: audio_caps(AudioFormat::Aac),
+            frames: aac
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (f.clone(), pts_at(i, AAC_FRAME_SAMPLES)))
+                .collect(),
+        },
+        PadFrames {
+            caps: audio_caps(AudioFormat::Opus),
+            frames: opus
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (f.clone(), pts_at(i, OPUS_FRAME_SAMPLES)))
+                .collect(),
+        },
+    ];
+    let (recorded, published) = publish_to_recorder(&pads, None, None).await;
+    published.expect("publish and teardown");
+    assert!(recorded.torn_down, "EOS on every pad sends TEARDOWN");
+
+    let media = SdpMedia::parse_all(&recorded.announced_sdp);
+    let caps: Vec<&Caps> = media.iter().map(|m| &m.caps).collect();
+    assert!(
+        matches!(
+            caps.as_slice(),
+            [
+                Caps::CompressedVideo {
+                    codec: VideoCodec::H264,
+                    ..
+                },
+                Caps::Audio {
+                    format: AudioFormat::Aac,
+                    channels: AUDIO_CHANNELS,
+                    sample_rate: AUDIO_RATE_HZ,
+                    ..
+                },
+                Caps::Audio {
+                    format: AudioFormat::Opus,
+                    channels: AUDIO_CHANNELS,
+                    sample_rate: AUDIO_RATE_HZ,
+                    ..
+                },
+            ]
+        ),
+        "one media section per pad in pad order: {}",
+        recorded.announced_sdp
+    );
+    assert_eq!(
+        media[VIDEO_PAD].parameter_sets,
+        annex_b(&[SPS, PPS]),
+        "the H.264 parameter sets of the first frame ride the fmtp"
+    );
+    let aac_fmtp = scan_sections(&recorded.announced_sdp)[AAC_PAD]
+        .fmtp
+        .clone()
+        .expect("AAC fmtp");
+    assert!(
+        aac_fmtp.contains(&format!(
+            "config={}",
+            hex_encode(&expected_audio_specific_config())
+        )),
+        "the AudioSpecificConfig the ADTS header implies: {aac_fmtp}"
+    );
+
+    let mut depayloader = RtpH264Depayloader::new();
+    let video: Vec<Vec<u8>> = recorded.channels[&interleaved_rtp_channel(VIDEO_PAD)]
+        .iter()
+        .filter_map(|packet| depayloader.depacketize(packet))
+        .map(|access_unit| access_unit.data)
+        .collect();
+    assert_eq!(video, video_frames());
+
+    let aac_packets = &recorded.channels[&interleaved_rtp_channel(AAC_PAD)];
+    let aac_payloads: Vec<&[u8]> = aac_packets
+        .iter()
+        .map(|p| &p[RTP_HEADER_LEN + AAC_AU_HEADER_SECTION_LEN..])
+        .collect();
+    let raw_aac: Vec<&[u8]> = aac.iter().map(|f| &f[ADTS_HEADER_LEN..]).collect();
+    assert_eq!(
+        aac_payloads, raw_aac,
+        "AAC goes out without its ADTS header"
+    );
+    assert!(
+        aac_packets
+            .windows(2)
+            .all(|w| rtp_timestamp(&w[1]).wrapping_sub(rtp_timestamp(&w[0]))
+                == AAC_FRAME_SAMPLES as u32),
+        "AAC RTP timestamps tick at the sample rate"
+    );
+
+    let opus_packets = &recorded.channels[&interleaved_rtp_channel(OPUS_PAD)];
+    let opus_payloads: Vec<&[u8]> = opus_packets.iter().map(|p| &p[RTP_HEADER_LEN..]).collect();
+    assert_eq!(
+        opus_payloads,
+        opus.iter().map(Vec::as_slice).collect::<Vec<_>>()
+    );
+    assert!(
+        opus_packets
+            .windows(2)
+            .all(|w| rtp_timestamp(&w[1]).wrapping_sub(rtp_timestamp(&w[0]))
+                == OPUS_FRAME_SAMPLES as u32),
+        "Opus RTP timestamps tick at 48 kHz"
+    );
+}
+
+#[tokio::test]
+async fn digest_challenge_is_answered_on_every_request() {
+    let gate = DigestGate {
+        user: USER,
+        password: PASSWORD,
+    };
+    let (recorded, published) =
+        publish_to_recorder(&[video_pad()], Some(gate), Some((USER, PASSWORD))).await;
+    published.expect("publish and teardown");
+    assert!(recorded.torn_down);
+    assert!(
+        !recorded.channels[&interleaved_rtp_channel(VIDEO_PAD)].is_empty(),
+        "media flowed after the authorized RECORD"
+    );
+    let unanswered = recorded
+        .requests
+        .iter()
+        .filter(|head| !head.contains("Authorization: Digest "))
+        .count();
+    assert_eq!(
+        unanswered, 1,
+        "only the first request goes out before the challenge"
+    );
+}
+
+#[tokio::test]
+async fn refused_credentials_fail_the_publish() {
+    let gate = DigestGate {
+        user: USER,
+        password: PASSWORD,
+    };
+    let (recorded, published) =
+        publish_to_recorder(&[video_pad()], Some(gate), Some((USER, "wrong"))).await;
+    assert!(published.is_err(), "a second 401 fails the element");
+    assert!(recorded.channels.is_empty(), "no media without RECORD");
+}
+
+#[test]
+fn launch_line_properties_reach_the_element() {
+    use g2g_core::runtime::parse_launch;
+    use g2g_core::PropValue;
+    use g2g_plugins::registry::default_registry;
+
+    let registry = default_registry();
+    let settings = [
+        ("location", "rtsp://127.0.0.1:8554/live"),
+        ("protocols", "udp+tcp"),
+        ("user-id", USER),
+        ("user-pw", PASSWORD),
+        ("user-agent", "canary"),
+        ("tcp-timeout", "5000000"),
+    ];
+    let assignments: Vec<String> = settings.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    parse_launch(
+        &registry,
+        &format!(
+            "rtspclientsink name=s {} fakesrc ! s.sink_0 fakesrc ! s.sink_1",
+            assignments.join(" ")
+        ),
+    )
+    .expect("two request pads and every property parse");
+
+    let mut sink = registry
+        .make_muxer("rtspclientsink", 2)
+        .expect("registered as a fan-in");
+    for (name, text) in settings {
+        let spec = *sink
+            .properties()
+            .iter()
+            .find(|s| s.name == name)
+            .expect("declared");
+        let value = spec.parse_value(text).expect("parses");
+        sink.set_property(name, value.clone()).expect("applies");
+        assert_eq!(sink.get_property(name), Some(value), "{name} round-trips");
+    }
+    assert_eq!(
+        sink.get_property("protocols"),
+        Some(PropValue::Flags(vec!["udp".to_string(), "tcp".to_string()])),
+        "transports keep the order written"
+    );
+}

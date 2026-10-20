@@ -52,6 +52,9 @@ use g2g_core::{
     PropertySpec, Rate, VideoCodec,
 };
 
+use crate::rtspclient::LowerTransport;
+use crate::rtspclient::{transports_from_flags, transports_to_flags};
+
 /// Reconnect policy for [`RtspSrc`]. Off by default: a session failure
 /// surfaces as `G2gError::Hardware` and the source ends. When enabled,
 /// the source retries up to `max_attempts` times with exponential backoff
@@ -186,31 +189,7 @@ pub struct RtspSrc {
     configured: bool,
 }
 
-/// An RTP lower transport a SETUP may request, the subset of gst's
-/// `GstRTSPLowerTrans` retina implements.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LowerTransport {
-    Udp,
-    Tcp,
-}
-
 impl LowerTransport {
-    pub(crate) fn nick(self) -> &'static str {
-        match self {
-            LowerTransport::Udp => "udp",
-            LowerTransport::Tcp => "tcp",
-        }
-    }
-
-    /// Parse a `protocols=` flag nick.
-    pub(crate) fn from_nick(nick: &str) -> Option<Self> {
-        match nick {
-            "udp" => Some(LowerTransport::Udp),
-            "tcp" => Some(LowerTransport::Tcp),
-            _ => None,
-        }
-    }
-
     pub(crate) fn retina(self) -> retina::client::Transport {
         match self {
             LowerTransport::Udp => {
@@ -512,17 +491,7 @@ impl SourceLoop for RtspSrc {
                 Ok(())
             }
             "protocols" => {
-                let mut order = Vec::new();
-                for nick in value.as_flags().ok_or(PropError::Type)? {
-                    let t = LowerTransport::from_nick(nick.as_str()).ok_or(PropError::Value)?;
-                    if !order.contains(&t) {
-                        order.push(t);
-                    }
-                }
-                if order.is_empty() {
-                    return Err(PropError::Value);
-                }
-                self.transports = order;
+                self.transports = transports_from_flags(&value)?;
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -557,12 +526,7 @@ impl SourceLoop for RtspSrc {
             "reconnect" => Some(PropValue::Uint(self.reconnect.max_attempts as u64)),
             "reconnect-backoff" => Some(PropValue::Uint(self.reconnect.initial_backoff_ms)),
             "reconnect-backoff-max" => Some(PropValue::Uint(self.reconnect.max_backoff_ms)),
-            "protocols" => Some(PropValue::Flags(
-                self.transports
-                    .iter()
-                    .map(|t| t.nick().to_string())
-                    .collect(),
-            )),
+            "protocols" => Some(transports_to_flags(&self.transports)),
             _ => None,
         }
     }

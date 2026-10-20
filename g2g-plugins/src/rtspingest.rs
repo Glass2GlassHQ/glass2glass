@@ -21,7 +21,10 @@ use g2g_core::{G2gError, OutputSink, PipelinePacket, PushOutcome};
 use crate::rtpdepay::RtpH264Depayloader;
 use crate::rtpjitter::RtpPtsRebase;
 use crate::rtprecv::push_access_unit;
-use crate::rtspserver::{RtspEvent, RtspRequest, RtspResponder};
+use crate::rtspserver::{
+    interleaved_frame, RtspEvent, RtspRequest, RtspResponder, INTERLEAVED_HEADER_LEN,
+    INTERLEAVED_MARKER,
+};
 
 /// TCP read buffer for RTSP control requests.
 const CTRL_BUF: usize = 8192;
@@ -333,23 +336,15 @@ enum Interleaved {
 fn next_interleaved(buf: &[u8]) -> Interleaved {
     match buf.first() {
         None => Interleaved::NeedMore,
-        Some(&0x24) => {
-            if buf.len() < 4 {
-                return Interleaved::NeedMore;
-            }
-            let channel = buf[1];
-            let len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
-            let consumed = 4 + len;
-            if buf.len() < consumed {
-                return Interleaved::NeedMore;
-            }
-            Interleaved::Binary {
-                channel,
-                start: 4,
-                end: consumed,
-                consumed,
-            }
-        }
+        Some(&INTERLEAVED_MARKER) => match interleaved_frame(buf) {
+            Some(frame) => Interleaved::Binary {
+                channel: frame.channel,
+                start: INTERLEAVED_HEADER_LEN,
+                end: frame.consumed,
+                consumed: frame.consumed,
+            },
+            None => Interleaved::NeedMore,
+        },
         // Not a binary frame: an interleaved RTSP request (e.g. TEARDOWN).
         Some(_) => match RtspRequest::parse(buf) {
             Some((_req, consumed)) => Interleaved::Rtsp { consumed },

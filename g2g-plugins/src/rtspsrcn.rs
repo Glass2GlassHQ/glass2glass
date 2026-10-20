@@ -46,9 +46,10 @@ use g2g_core::{
 };
 
 use crate::g711::{G711_CLOCK_RATE_HZ, G711_DEFAULT_CHANNELS};
+use crate::rtspclient::{transports_from_flags, transports_to_flags, LowerTransport};
 use crate::rtspsrc::{
     connect_describe, placeholder_framerate, video_caps_for, video_codec, video_stream_index,
-    with_placeholder_framerate, LowerTransport, ReconnectPolicy, ReconnectState,
+    with_placeholder_framerate, ReconnectPolicy, ReconnectState,
 };
 
 /// User-Agent sent on DESCRIBE / SETUP unless `user-agent` overrides it. Also
@@ -694,17 +695,7 @@ impl MultiOutputSource for RtspSrcN {
                 Ok(())
             }
             "protocols" => {
-                let mut order = Vec::new();
-                for nick in value.as_flags().ok_or(PropError::Type)? {
-                    let t = LowerTransport::from_nick(nick.as_str()).ok_or(PropError::Value)?;
-                    if !order.contains(&t) {
-                        order.push(t);
-                    }
-                }
-                if order.is_empty() {
-                    return Err(PropError::Value);
-                }
-                self.transports = order;
+                self.transports = transports_from_flags(&value)?;
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -741,12 +732,7 @@ impl MultiOutputSource for RtspSrcN {
             "reconnect" => Some(PropValue::Uint(self.reconnect.max_attempts as u64)),
             "reconnect-backoff" => Some(PropValue::Uint(self.reconnect.initial_backoff_ms)),
             "reconnect-backoff-max" => Some(PropValue::Uint(self.reconnect.max_backoff_ms)),
-            "protocols" => Some(PropValue::Flags(
-                self.transports
-                    .iter()
-                    .map(|t| t.nick().to_string())
-                    .collect(),
-            )),
+            "protocols" => Some(transports_to_flags(&self.transports)),
             _ => None,
         }
     }

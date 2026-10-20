@@ -34,11 +34,16 @@ const MAX_UNIT_BYTES: usize = 16 * 1024 * 1024;
 /// 32-bit RTP field (the wrap is what the wire carries). The one conversion
 /// every g2g RTP sender uses, so video and its KLV metadata stamp alike.
 pub fn rtp_timestamp_from_pts(pts_ns: u64) -> u32 {
+    rtp_timestamp_at_clock(pts_ns, RTP_CLOCK_HZ)
+}
+
+// the same conversion for a media clock other than 90 kHz, an audio stream's sample rate
+pub fn rtp_timestamp_at_clock(pts_ns: u64, clock_hz: u64) -> u32 {
     // u128 keeps the product exact for any pts (u64 ns * 90k overflows at ~2.4
     // days), matching the mpegts conversions; rounded to the nearest tick, since
     // a PTS truncated to whole ns (1/30 s = 33_333_333) sits just under its
     // exact tick; the cast wraps into the 32-bit RTP field as the wire requires.
-    ((pts_ns as u128 * RTP_CLOCK_HZ as u128 + 500_000_000) / 1_000_000_000) as u32
+    ((pts_ns as u128 * clock_hz as u128 + 500_000_000) / 1_000_000_000) as u32
 }
 
 /// The nanosecond presentation time a 90 kHz RTP timestamp names, relative to
