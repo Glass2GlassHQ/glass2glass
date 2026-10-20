@@ -168,6 +168,22 @@ converting in place through a ring slot with checked geometry. An integration
 test drives `camera -> YuyvToI420 -> HwH264Enc -> RtpSink` as one static pipeline
 and traces a camera-stamped byte to the RTP payload.
 
+## TinyML inference
+
+`g2g-mcu::inference::TensorInference` is the heap-free inference
+`StaticTransform`, the ML twin of `HwJpegDec`. The backend sits behind the
+`TensorModel` seam: it reports its input and output `TensorFormat` (dtype,
+shape and layout, the three fields of `Caps::Tensor`) and runs one forward pass
+from an input byte slice into an output byte slice. `run` is async so an NPU
+backend can await its completion interrupt. The element rejects a frame whose
+payload is not exactly the input tensor's byte length before the backend sees
+it, and writes the output into a lent `StaticLendRing` slot, so the output
+buffer is static memory sized by the ring's const generics. A backend that needs
+a tensor arena, such as a C-bridged LiteRT for Microcontrollers interpreter,
+holds it itself, since a compiled backend keeps its intermediates on the stack
+and has no arena. `input_caps` and `output_caps` give the app the
+`Caps::Tensor` of each side for wiring a static graph.
+
 ## RTOS executors and C integration
 
 The same pipeline runs under a real Embassy task (`examples/g2g-embassy`, the
