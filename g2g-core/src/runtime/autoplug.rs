@@ -75,6 +75,7 @@ pub struct CapabilityDescriptor {
     /// default 0. Use it to order otherwise-equivalent backends (e.g. two ffmpeg
     /// codecs), or as an operator override, not as the primary selector.
     pub rank: i16,
+    pub cost: FrameCost,
 }
 
 impl Default for CapabilityDescriptor {
@@ -83,9 +84,48 @@ impl Default for CapabilityDescriptor {
             output_memory: MemoryDomainKind::System,
             acceleration: Acceleration::Software,
             rank: 0,
+            cost: FrameCost::UNKNOWN,
         }
     }
 }
+
+// wall time of one frame through an element
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameCost {
+    pub fixed_us: u32,
+    pub per_megapixel_us: u32,
+}
+
+impl FrameCost {
+    // adds nothing to a chain's cost and does not make the chain priced
+    pub const UNKNOWN: Self = Self {
+        fixed_us: 0,
+        per_megapixel_us: 0,
+    };
+
+    fn is_known(self) -> bool {
+        self != Self::UNKNOWN
+    }
+
+    fn micros(self, pixels: u64) -> u64 {
+        let scaled = u64::from(self.per_megapixel_us).saturating_mul(pixels) / PIXELS_PER_MEGAPIXEL;
+        u64::from(self.fixed_us).saturating_add(scaled)
+    }
+}
+
+// wall time of the converter the runner splices on a `from` to `to` edge, per megabyte of frame
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DomainTransferCost {
+    pub from: MemoryDomainKind,
+    pub to: MemoryDomainKind,
+    pub per_megabyte_us: u32,
+}
+
+const PIXELS_PER_MEGAPIXEL: u64 = 1_000_000;
+const BYTES_PER_MEGABYTE: u64 = 1_000_000;
+
+// the rank `G2G_PLUGIN_FEATURE_RANK`'s `max` sets, which cost never overrides
+const PINNED_RANK: i16 = i16::MAX;
 
 impl CapabilityDescriptor {
     /// Score this candidate against what the search wants; higher is tried first.
@@ -161,6 +201,11 @@ impl ElementDesc {
     /// Set the deterministic tiebreaker rank (higher wins among equal scores).
     pub fn with_rank(mut self, rank: i16) -> Self {
         self.capabilities.rank = rank;
+        self
+    }
+
+    pub fn with_cost(mut self, cost: FrameCost) -> Self {
+        self.capabilities.cost = cost;
         self
     }
 
@@ -260,7 +305,7 @@ pub fn find_chain(
 
 /// Like [`find_chain`], but biases ties toward a chain whose terminal element
 /// emits the `preferred` memory feature. Thin wrapper over [`find_chain_with`]
-/// with a memory-only [`SelectionContext`].
+/// with a memory-only [`SelectionContext`] and no domain transfer costs.
 pub fn find_chain_preferring(
     descs: &[ElementDesc],
     input: &Caps,
@@ -273,38 +318,56 @@ pub fn find_chain_preferring(
         input,
         target,
         max_depth,
-        SelectionContext {
-            preferred_memory: preferred,
-            prefer_hardware: false,
-        },
+        memory_only_context(preferred),
+        &[],
     )
 }
 
+fn memory_only_context(preferred: MemoryDomainKind) -> SelectionContext {
+    SelectionContext {
+        preferred_memory: preferred,
+        prefer_hardware: false,
+    }
+}
+
 /// Like [`find_chain`], but scores candidates against `ctx` ([`SelectionContext`])
-/// to choose among elements that satisfy the same caps. The search is still
-/// breadth-first, so a shorter chain always wins; among equal-length chains, the
-/// higher-scoring candidate ([`CapabilityDescriptor::score`]) is tried first, so a
-/// GPU consumer can request `Cuda` and get `NvDec` ahead of a CPU decoder.
+/// to choose among elements that satisfy the same caps. Among equal-length
+/// chains, the higher-scoring candidate ([`CapabilityDescriptor::score`]) is
+/// tried first, so a GPU consumer can request `Cuda` and get `NvDec` ahead of a
+/// CPU decoder.
 ///
 /// The context only reorders which candidate is *tried first* at each hop; if no
 /// chain matching the preference exists, the search still finds any valid one. A
 /// default `ctx` scores every candidate equally, so the visit order is
 /// registration order and a plain pipeline's selection is unchanged.
+///
+/// When `input` carries a fixed width and height and the first chain found is
+/// priced, the search goes on past it and returns the cheapest priced chain
+/// within `max_depth`: the elements' [`FrameCost`]s at that size plus the
+/// `transfer_costs` entry for moving the last element's output frame into
+/// `ctx.preferred_memory`. A chain is priced when one of its elements has a
+/// known cost and any transfer it needs is listed, so an element nobody
+/// measured keeps the selection it had without costs. Ties keep the chain
+/// found first. Otherwise, and whenever the first chain holds a `max`-pinned
+/// element, the first chain found is the result, the shortest one.
 pub fn find_chain_with(
     descs: &[ElementDesc],
     input: &Caps,
     target: &dyn Fn(&Caps) -> bool,
     max_depth: usize,
     ctx: SelectionContext,
+    transfer_costs: &[DomainTransferCost],
 ) -> Option<Vec<ChainLink>> {
     if target(input) {
         return Some(Vec::new());
     }
+    let pricing = ChainPricing::for_input(input, ctx.preferred_memory, transfer_costs);
     // Visit order: highest score first, ties broken by registration order (the
     // sort is stable). A default context scores all candidates 0, so this is
     // registration order (no behavior change).
     let mut order: Vec<usize> = (0..descs.len()).collect();
     order.sort_by_key(|&i| core::cmp::Reverse(descs[i].capabilities.score(&ctx)));
+    let mut cheapest: Option<PricedChain> = None;
     // BFS frontier: each entry is a reached caps state and the element path
     // that produced it. Depth is bounded by max_depth so an unsatisfiable
     // target terminates even with cycle-free same-shape elements.
@@ -327,18 +390,145 @@ pub fn find_chain_with(
                         output: out.clone(),
                     });
                     if target(out) {
-                        return Some(new_path);
+                        let finished =
+                            settle_complete_chain(pricing.as_ref(), &mut cheapest, descs, new_path);
+                        if finished.is_some() {
+                            return finished;
+                        }
+                        continue;
                     }
-                    next.push((out.clone(), new_path));
+                    let costs_too_much =
+                        cheapest
+                            .as_ref()
+                            .zip(pricing.as_ref())
+                            .is_some_and(|(best, pricing)| {
+                                pricing.elements_cost(descs, &new_path) >= best.cost
+                            });
+                    if !costs_too_much {
+                        next.push((out.clone(), new_path));
+                    }
                 }
             }
         }
         if next.is_empty() {
-            return None;
+            break;
         }
         frontier = next;
     }
+    cheapest.map(|priced| priced.chain)
+}
+
+// the chain to return right away, or `None` while a cheaper one may still turn up
+fn settle_complete_chain(
+    pricing: Option<&ChainPricing<'_>>,
+    cheapest: &mut Option<PricedChain>,
+    descs: &[ElementDesc],
+    chain: Vec<ChainLink>,
+) -> Option<Vec<ChainLink>> {
+    let Some(pricing) = pricing else {
+        return Some(chain);
+    };
+    if let Some(best) = cheapest {
+        if let Some(cost) = pricing.chain_cost(descs, &chain) {
+            best.keep_cheaper(cost, chain);
+        }
+        return None;
+    }
+    let Some(cost) = pricing.first_chain_cost(descs, &chain) else {
+        return Some(chain);
+    };
+    *cheapest = Some(PricedChain { cost, chain });
     None
+}
+
+// each element's cost at the input's fixed size, plus the transfer into the consumer's domain
+#[derive(Debug)]
+struct ChainPricing<'a> {
+    width: u32,
+    height: u32,
+    preferred: MemoryDomainKind,
+    transfer_costs: &'a [DomainTransferCost],
+}
+
+impl<'a> ChainPricing<'a> {
+    // `None` unless both dimensions are fixed
+    fn for_input(
+        input: &Caps,
+        preferred: MemoryDomainKind,
+        transfer_costs: &'a [DomainTransferCost],
+    ) -> Option<Self> {
+        let (width, height, _) = input.dims()?;
+        Some(Self {
+            width: width.fixed()?,
+            height: height.fixed()?,
+            preferred,
+            transfer_costs,
+        })
+    }
+
+    fn pixels(&self) -> u64 {
+        u64::from(self.width) * u64::from(self.height)
+    }
+
+    fn elements_cost(&self, descs: &[ElementDesc], chain: &[ChainLink]) -> u64 {
+        chain.iter().fold(0, |total, link| {
+            total.saturating_add(descs[link.index].capabilities.cost.micros(self.pixels()))
+        })
+    }
+
+    fn chain_cost(&self, descs: &[ElementDesc], chain: &[ChainLink]) -> Option<u64> {
+        let measured = chain
+            .iter()
+            .any(|link| descs[link.index].capabilities.cost.is_known());
+        if !measured {
+            return None;
+        }
+        let transfer = self.transfer_cost(descs, chain.last()?)?;
+        Some(self.elements_cost(descs, chain).saturating_add(transfer))
+    }
+
+    // a chain holding a pinned element is final, so it gets no price to beat
+    fn first_chain_cost(&self, descs: &[ElementDesc], chain: &[ChainLink]) -> Option<u64> {
+        let pinned = chain
+            .iter()
+            .any(|link| descs[link.index].capabilities.rank == PINNED_RANK);
+        if pinned {
+            return None;
+        }
+        self.chain_cost(descs, chain)
+    }
+
+    fn transfer_cost(&self, descs: &[ElementDesc], last: &ChainLink) -> Option<u64> {
+        let produced = descs[last.index].capabilities.output_memory;
+        if produced == self.preferred {
+            return Some(0);
+        }
+        let per_megabyte_us = self
+            .transfer_costs
+            .iter()
+            .find(|transfer| transfer.from == produced && transfer.to == self.preferred)?
+            .per_megabyte_us;
+        let Caps::RawVideo { format, .. } = &last.output else {
+            return None;
+        };
+        let frame_bytes = format.unpadded_frame_bytes(self.width, self.height)?;
+        Some(u64::from(per_megabyte_us).saturating_mul(frame_bytes) / BYTES_PER_MEGABYTE)
+    }
+}
+
+#[derive(Debug)]
+struct PricedChain {
+    cost: u64,
+    chain: Vec<ChainLink>,
+}
+
+impl PricedChain {
+    // a tie keeps the chain found first
+    fn keep_cheaper(&mut self, cost: u64, chain: Vec<ChainLink>) {
+        if cost < self.cost {
+            *self = Self { cost, chain };
+        }
+    }
 }
 
 /// The media kind a demux output-pad / muxer input-pad reference names (M476,
@@ -584,6 +774,11 @@ mod factory {
 
         pub fn accepting_input(mut self, accepts: fn(&Caps) -> bool) -> Self {
             self.desc.accepts_input = Some(accepts);
+            self
+        }
+
+        pub fn cost(mut self, cost: FrameCost) -> Self {
+            self.desc = self.desc.with_cost(cost);
             self
         }
 
@@ -1446,7 +1641,7 @@ mod factory {
 
     impl RankOverride {
         // beats any memory-domain or hardware score bonus
-        pub const MAX: Self = Self::Rank(i16::MAX);
+        pub const MAX: Self = Self::Rank(PINNED_RANK);
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1566,6 +1761,7 @@ mod factory {
         /// carries the factory; `None` (the default) leaves a domain mismatch to
         /// fail loud at negotiation, as it did before.
         domain_converter: Option<fn(MemoryDomainKind, MemoryDomainKind) -> Option<GraphNode>>,
+        transfer_costs: Vec<DomainTransferCost>,
         rank_overridden: Vec<&'static str>,
     }
 
@@ -1890,6 +2086,13 @@ mod factory {
             factory: fn(MemoryDomainKind, MemoryDomainKind) -> Option<GraphNode>,
         ) -> &mut Self {
             self.domain_converter = Some(factory);
+            self
+        }
+
+        /// Price the converter the domain-converter factory builds for one edge,
+        /// so the cost-based search can weigh a chain whose output needs it.
+        pub fn register_transfer_cost(&mut self, transfer: DomainTransferCost) -> &mut Self {
+            self.transfer_costs.push(transfer);
             self
         }
 
@@ -2412,7 +2615,14 @@ mod factory {
             avoided: &[&str],
         ) -> Option<Vec<&'static str>> {
             let (descs, indices) = self.descs_avoiding(avoided);
-            let chain = find_chain_preferring(&descs, input, target, max_depth, preferred)?;
+            let chain = find_chain_with(
+                &descs,
+                input,
+                target,
+                max_depth,
+                memory_only_context(preferred),
+                &self.transfer_costs,
+            )?;
             Some(
                 chain
                     .into_iter()
@@ -2431,7 +2641,14 @@ mod factory {
             avoided: &[&str],
         ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
             let (descs, indices) = self.descs_avoiding(avoided);
-            let chain = find_chain_preferring(&descs, input, target, max_depth, preferred)?;
+            let chain = find_chain_with(
+                &descs,
+                input,
+                target,
+                max_depth,
+                memory_only_context(preferred),
+                &self.transfer_costs,
+            )?;
             let chain = chain
                 .into_iter()
                 .map(|link| ChainLink {
@@ -2472,7 +2689,14 @@ mod factory {
             max_depth: usize,
         ) -> Option<Vec<&'static str>> {
             let descs = self.descs();
-            let chain = find_chain(&descs, input, target, max_depth)?;
+            let chain = find_chain_with(
+                &descs,
+                input,
+                target,
+                max_depth,
+                memory_only_context(MemoryDomainKind::System),
+                &self.transfer_costs,
+            )?;
             Some(
                 chain
                     .into_iter()
@@ -2495,7 +2719,14 @@ mod factory {
             max_depth: usize,
         ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
             let descs = self.descs();
-            let chain = find_chain(&descs, input, target, max_depth)?;
+            let chain = find_chain_with(
+                &descs,
+                input,
+                target,
+                max_depth,
+                memory_only_context(MemoryDomainKind::System),
+                &self.transfer_costs,
+            )?;
             self.instantiate(chain, &AutoplugParams::new()).ok()
         }
 
@@ -2626,10 +2857,7 @@ mod factory {
                 input,
                 target,
                 max_depth,
-                SelectionContext {
-                    preferred_memory: Self::derived_memory_preference(graph, to),
-                    prefer_hardware: false,
-                },
+                memory_only_context(Self::derived_memory_preference(graph, to)),
                 params,
             )?;
             if let Some(parser) = self.maybe_prepend_parser(input, &mut elements) {
@@ -2673,7 +2901,14 @@ mod factory {
             preferred: MemoryDomainKind,
         ) -> Option<Vec<&'static str>> {
             let descs = self.descs();
-            let chain = find_chain_preferring(&descs, input, target, max_depth, preferred)?;
+            let chain = find_chain_with(
+                &descs,
+                input,
+                target,
+                max_depth,
+                memory_only_context(preferred),
+                &self.transfer_costs,
+            )?;
             Some(
                 chain
                     .into_iter()
@@ -2693,7 +2928,14 @@ mod factory {
             preferred: MemoryDomainKind,
         ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
             let descs = self.descs();
-            let chain = find_chain_preferring(&descs, input, target, max_depth, preferred)?;
+            let chain = find_chain_with(
+                &descs,
+                input,
+                target,
+                max_depth,
+                memory_only_context(preferred),
+                &self.transfer_costs,
+            )?;
             self.instantiate(chain, &AutoplugParams::new()).ok()
         }
 
@@ -2711,7 +2953,8 @@ mod factory {
             ctx: SelectionContext,
         ) -> Option<Vec<&'static str>> {
             let descs = self.descs();
-            let chain = find_chain_with(&descs, input, target, max_depth, ctx)?;
+            let chain =
+                find_chain_with(&descs, input, target, max_depth, ctx, &self.transfer_costs)?;
             Some(
                 chain
                     .into_iter()
@@ -2731,7 +2974,8 @@ mod factory {
             ctx: SelectionContext,
         ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
             let descs = self.descs();
-            let chain = find_chain_with(&descs, input, target, max_depth, ctx)?;
+            let chain =
+                find_chain_with(&descs, input, target, max_depth, ctx, &self.transfer_costs)?;
             self.instantiate(chain, &AutoplugParams::new()).ok()
         }
 
@@ -2747,8 +2991,9 @@ mod factory {
             params: &AutoplugParams,
         ) -> Result<Vec<Box<dyn DynAsyncElement>>, AutoplugError> {
             let descs = self.descs();
-            let chain = find_chain_with(&descs, input, target, max_depth, ctx)
-                .ok_or(AutoplugError::NoChain)?;
+            let chain =
+                find_chain_with(&descs, input, target, max_depth, ctx, &self.transfer_costs)
+                    .ok_or(AutoplugError::NoChain)?;
             self.instantiate(chain, params)
         }
 
@@ -3163,6 +3408,7 @@ mod tests {
             &is_raw_video,
             4,
             SelectionContext::default(),
+            &[],
         )
         .expect("a decoder reaches raw");
         assert_eq!(
@@ -3181,8 +3427,8 @@ mod tests {
             preferred_memory: MemoryDomainKind::Cuda,
             prefer_hardware: false,
         };
-        let chain =
-            find_chain_with(&descs, &h264(Dim::Any), &is_raw_video, 4, ctx).expect("reaches raw");
+        let chain = find_chain_with(&descs, &h264(Dim::Any), &is_raw_video, 4, ctx, &[])
+            .expect("reaches raw");
         assert_eq!(
             indices(&chain),
             Vec::from([1usize]),
@@ -3208,8 +3454,9 @@ mod tests {
             prefer_hardware: false,
         };
         let decoder_for = |width: u32| {
-            let chain = find_chain_with(&descs, &h264(Dim::Fixed(width)), &is_raw_video, 4, ctx)
-                .expect("reaches raw");
+            let chain =
+                find_chain_with(&descs, &h264(Dim::Fixed(width)), &is_raw_video, 4, ctx, &[])
+                    .expect("reaches raw");
             indices(&chain)
         };
         assert_eq!(decoder_for(SMALLEST_ACCEPTED_WIDTH), Vec::from([1usize]));
@@ -3230,6 +3477,7 @@ mod tests {
             &is_raw_video,
             4,
             SelectionContext::default(),
+            &[],
         )
         .expect("reaches raw");
         assert_eq!(
@@ -3237,6 +3485,101 @@ mod tests {
             Vec::from([1usize]),
             "higher rank wins the tie"
         );
+    }
+
+    const SOFTWARE_DECODE: FrameCost = FrameCost {
+        fixed_us: 0,
+        per_megapixel_us: 600,
+    };
+    const HARDWARE_DECODE: FrameCost = FrameCost {
+        fixed_us: 2800,
+        per_megapixel_us: 0,
+    };
+    const DOWNLOAD: DomainTransferCost = DomainTransferCost {
+        from: MemoryDomainKind::Cuda,
+        to: MemoryDomainKind::System,
+        per_megabyte_us: 170,
+    };
+    const UHD: (u32, u32) = (3840, 2160);
+    const FULL_HD: (u32, u32) = (1920, 1080);
+
+    fn sized_h264((width, height): (u32, u32)) -> Caps {
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            framerate: Rate::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
+        }
+    }
+
+    fn priced_decoders() -> [ElementDesc; 2] {
+        [
+            decoder().with_cost(SOFTWARE_DECODE),
+            gpu_decoder().with_cost(HARDWARE_DECODE),
+        ]
+    }
+
+    fn cheapest_decoder(
+        descs: &[ElementDesc],
+        input: &Caps,
+        preferred: MemoryDomainKind,
+    ) -> &'static str {
+        let chain = find_chain_with(
+            descs,
+            input,
+            &is_raw_video,
+            4,
+            memory_only_context(preferred),
+            &[DOWNLOAD],
+        )
+        .expect("a decoder reaches raw");
+        assert_eq!(chain.len(), 1);
+        descs[chain[0].index].name
+    }
+
+    #[test]
+    fn a_large_picture_takes_the_hardware_decoder_and_its_download() {
+        let descs = priced_decoders();
+        let chosen = cheapest_decoder(&descs, &sized_h264(UHD), MemoryDomainKind::System);
+        assert_eq!(chosen, "nvdec");
+    }
+
+    #[test]
+    fn a_small_picture_keeps_the_software_decoder() {
+        let descs = priced_decoders();
+        let chosen = cheapest_decoder(&descs, &sized_h264(FULL_HD), MemoryDomainKind::System);
+        assert_eq!(chosen, "h264dec");
+    }
+
+    #[test]
+    fn an_unsized_input_keeps_registration_order() {
+        let descs = priced_decoders();
+        let chosen = cheapest_decoder(&descs, &h264(Dim::Any), MemoryDomainKind::System);
+        assert_eq!(chosen, "h264dec");
+    }
+
+    #[test]
+    fn a_max_pin_wins_over_cost() {
+        let [software, hardware] = priced_decoders();
+        let descs = [software.with_rank(PINNED_RANK), hardware];
+        let chosen = cheapest_decoder(&descs, &sized_h264(UHD), MemoryDomainKind::System);
+        assert_eq!(chosen, "h264dec");
+    }
+
+    #[test]
+    fn unmeasured_decoders_keep_registration_order_at_any_size() {
+        let descs = [decoder(), gpu_decoder()];
+        let chosen = cheapest_decoder(&descs, &sized_h264(UHD), MemoryDomainKind::System);
+        assert_eq!(chosen, "h264dec");
+    }
+
+    #[test]
+    fn a_transfer_without_a_price_never_replaces_the_first_chain() {
+        // nothing prices the upload a software decoder would need to reach a Cuda consumer
+        let descs = priced_decoders();
+        let chosen = cheapest_decoder(&descs, &sized_h264(FULL_HD), MemoryDomainKind::Cuda);
+        assert_eq!(chosen, "nvdec");
     }
 
     #[test]

@@ -985,13 +985,32 @@ as before.
   tiebreaker among otherwise-equal candidates (the explicit-override knob, the
   genuinely useful 20% of GStreamer's rank). `find_chain_with(.., ctx)` /
   `Registry::{autoplug,autoplug_names}_with(.., ctx)` score-order which candidate
-  is *tried first*; it is still breadth-first (a shorter chain always wins), and a
-  default `ctx` scores every candidate equally, so the visit order is registration
-  order and a plain pipeline is unchanged (`NvDec` registered last never hijacks a
-  CPU path). `find_chain_preferring` / `{autoplug,decodebin}_preferring(.., domain)`
-  remain as the memory-only special case. Ranking matters *only* on the auto-plug
-  path; an explicit typed graph names its element, so the descriptor never touches
-  the core.
+  is *tried first*. The search is breadth-first, and a default `ctx` scores every
+  candidate equally, so the visit order is registration order and a plain pipeline
+  is unchanged (`NvDec` registered last never hijacks a CPU path).
+  `find_chain_preferring` / `{autoplug,decodebin}_preferring(.., domain)` remain
+  as the memory-only special case. Ranking matters *only* on the auto-plug path;
+  an explicit typed graph names its element, so the descriptor never touches the
+  core.
+
+  When the input caps carry a fixed width and height, the chain is chosen by cost
+  instead of length (M1718). Each descriptor has a `cost: FrameCost { fixed_us,
+  per_megapixel_us }` (`ElementFactory::cost`), and the registry holds a
+  `DomainTransferCost { from, to, per_megabyte_us }` per converter it prices
+  (`Registry::register_transfer_cost`). A chain costs the sum of its elements'
+  costs at the input's picture size, plus, when its last element's output domain
+  is not `preferred_memory`, the transfer of one frame of that element's output
+  format into it. The search still visits in score order, takes the first chain
+  it finds, and then keeps searching to `max_depth` for a strictly cheaper one,
+  pruning any path already as expensive as the best. A chain is priced only when
+  one of its elements has a known cost and any transfer it needs is listed; an
+  unpriced chain never replaces the first one, so an unmeasured element or an
+  unpriced upload keeps the selection the score order gives. The first chain is
+  final when it is unpriced or holds an element at the rank
+  `G2G_PLUGIN_FEATURE_RANK`'s `max` sets, so a pin always wins over cost. An input
+  whose size is not fixed takes the first chain, the shortest, exactly as without
+  costs. The measured constants and the probes that report a size are in
+  [decode.md](decode.md#decoder-cost-model).
 
   The preference is not the caller's to state: `Registry::decodebin` reads it off
   the graph it is splicing into (`Registry::derived_memory_preference`). The

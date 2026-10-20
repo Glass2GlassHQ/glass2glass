@@ -331,6 +331,42 @@ loop stays on the GPU and out of libavcodec.
   asserting geometry and, via a small device-to-host copy, real luma content. It
   skips with no NVIDIA GPU, and the `nvdec` feature is CI-excluded.
 
+## Decoder cost model
+
+When the input caps carry a fixed picture size, `decodebin` picks the decode
+chain with the lowest per-frame cost rather than the shortest one (M1718, the
+rule is in [caps.md](caps.md)). The constants are one table in
+`g2g-plugins/src/registry.rs`, applied with `ElementFactory::cost` and
+`Registry::register_transfer_cost`.
+
+Measured on 2026-10-20 on a Ryzen 7 6800U with an RTX 3060, while other builds
+were running: a release `g2g-launch`, `filesrc ! decodebin ! fakesink` over a
+300-frame clip, wall time divided by frames.
+
+| input | `ffmpegdec` | `nvdec` + download | `vulkanvideodec` + download |
+| :--- | :--- | :--- | :--- |
+| 1920x1080 H.264 (2.07 MP, 3.1 MB NV12) | 1.3 ms | 3.3 ms | 4.6 ms |
+| 3840x2160 HEVC (8.29 MP, 12.4 MB NV12) | 5.0 ms | 4.9 ms | 7.3 ms |
+
+Derived constants: `ffmpegdec` 600 us per megapixel (0.63 and 0.60 measured),
+`nvdec` 2800 us per frame, `vulkanvideodec` 3700 us per frame, `cudadownload`
+170 us per MB and `wgpudownload` 290 us per MB. The download is priced for one
+frame of the decoder's chosen output format, NV12 at 1.5 bytes per pixel. A
+System-memory consumer crosses over at about 8 MP, so 4K HEVC takes `nvdec` and
+1080p keeps `ffmpegdec`. The larger gain at 4K is CPU time: 12.6 s for the clip
+in software against 0.5 s with `nvdec`.
+
+`dav1ddec`, `rav1ddec`, the VA-API decoders and the platform decoders are not
+measured. Their cost is unknown, so a chain through one is never priced and the
+score order picks as before.
+
+A size reaches the search only from a probe that reads it: a raw Annex-B H.264
+or H.265 file through `filesrc` (the content sniff parses the SPS), an IVF
+header, and the SDP of an RTSP stream with audio that `uridecodebin` or
+`playbin` probes. MP4, Matroska and MPEG-TS probes report no picture size, and
+`rtspsrc ! decodebin` has no parse-time DESCRIBE, so those inputs keep the
+shortest chain.
+
 ## End-to-end RTSP pipeline
 
 ```

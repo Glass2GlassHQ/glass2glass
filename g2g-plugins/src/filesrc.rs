@@ -60,10 +60,12 @@ pub struct FileSrc {
     /// `bytestream-format=auto`: sniff the container from the file header at
     /// negotiation, replacing `caps` with the detected `ByteStream{..}`.
     auto_detect: bool,
-    /// `caps` is the container the `location` extension names. At negotiation
-    /// the file header is sniffed, and a different container it recognizes
-    /// replaces `caps`: a transport stream saved as `.mpg` is still demuxed as one.
-    verify_container_extension: bool,
+    /// `caps` is the container or Annex-B video stream the `location` extension
+    /// names. At negotiation the file header is sniffed, and a different
+    /// container it recognizes replaces `caps`: a transport stream saved as
+    /// `.mpg` is still demuxed as one. A video stream of the same codec replaces
+    /// it too, carrying the picture size its SPS gives.
+    verify_extension: bool,
     /// `true` once the media type is pinned explicitly (the `new` caps argument or
     /// a `bytestream-format` property). While `false` (a bare launch `filesrc`),
     /// setting `location` derives the type from the file extension (M478), so
@@ -90,7 +92,7 @@ impl FileSrc {
             path: path.into(),
             caps,
             auto_detect: false,
-            verify_container_extension: false,
+            verify_extension: false,
             // The caller pinned the caps, so `location` must not re-type it.
             format_explicit: true,
             chunk_size: DEFAULT_CHUNK_SIZE,
@@ -112,7 +114,7 @@ impl FileSrc {
                 encoding: ByteStreamEncoding::MpegTs,
             },
             auto_detect: false,
-            verify_container_extension: false,
+            verify_extension: false,
             format_explicit: false,
             chunk_size: DEFAULT_CHUNK_SIZE,
             target_chunks: u64::MAX,
@@ -136,10 +138,10 @@ impl FileSrc {
     /// (clears the flag), so calling it from both negotiation entry points reads
     /// the header at most once.
     fn resolve_auto_caps(&mut self) -> Result<(), G2gError> {
-        if self.verify_container_extension {
+        if self.verify_extension {
             // an unreadable file still fails at run, naming its path
             if let Ok(header) = read_file_header(&self.path, short_type_name::<Self>()) {
-                self.verify_container_extension_against(&header);
+                self.verify_extension_against(&header);
             }
         }
         if !self.auto_detect {
@@ -151,13 +153,28 @@ impl FileSrc {
     }
 
     /// Replace the extension's container with the one `header` holds, when the
-    /// sniff recognizes a container at all. Anything else keeps the extension.
-    fn verify_container_extension_against(&mut self, header: &[u8]) {
-        self.verify_container_extension = false;
-        if let Some(sniffed @ Caps::ByteStream { encoding }) = file_caps_from_header(header) {
-            if encoding != ByteStreamEncoding::Raw {
-                self.caps = sniffed;
+    /// sniff recognizes a container at all, and an extension's video stream with
+    /// the sniffed one of the same codec. Anything else keeps the extension.
+    fn verify_extension_against(&mut self, header: &[u8]) {
+        self.verify_extension = false;
+        let Some(sniffed) = file_caps_from_header(header) else {
+            return;
+        };
+        let replaces = match (&self.caps, &sniffed) {
+            (Caps::ByteStream { .. }, Caps::ByteStream { encoding }) => {
+                *encoding != ByteStreamEncoding::Raw
             }
+            (
+                Caps::CompressedVideo { codec, .. },
+                Caps::CompressedVideo {
+                    codec: sniffed_codec,
+                    ..
+                },
+            ) => codec == sniffed_codec,
+            _ => false,
+        };
+        if replaces {
+            self.caps = sniffed;
         }
     }
 
@@ -218,15 +235,15 @@ impl SourceLoop for FileSrc {
     /// content rather than a possibly-wrong extension. Content the sniff does not
     /// recognize is an error, an unreadable file returns `None`.
     fn probe_output_caps(&mut self) -> Result<Option<Caps>, G2gError> {
-        if !self.auto_detect && !self.verify_container_extension {
+        if !self.auto_detect && !self.verify_extension {
             return Ok(self.configured_output_caps());
         }
         // an unreadable file still fails at run, naming its path
         let Ok(header) = read_file_header(&self.path, short_type_name::<Self>()) else {
             return Ok(None);
         };
-        if self.verify_container_extension {
-            self.verify_container_extension_against(&header);
+        if self.verify_extension {
+            self.verify_extension_against(&header);
         }
         if self.auto_detect {
             self.caps = file_caps_from_header(&header).ok_or(G2gError::CapsMismatch)?;
@@ -333,7 +350,8 @@ impl SourceLoop for FileSrc {
                 if !self.format_explicit {
                     match caps_from_extension(&self.path) {
                         Some(caps) => {
-                            self.verify_container_extension = names_container(&caps);
+                            self.verify_extension =
+                                names_container(&caps) || names_annexb_video(&caps);
                             self.caps = caps;
                             self.auto_detect = false;
                         }
@@ -345,7 +363,7 @@ impl SourceLoop for FileSrc {
             "bytestream-format" => {
                 // An explicit format pins the type; a later `location` won't re-type.
                 self.format_explicit = true;
-                self.verify_container_extension = false;
+                self.verify_extension = false;
                 match value.as_str().ok_or(PropError::Type)? {
                     "auto" => self.auto_detect = true,
                     PLAIN_TEXT_FORMAT => {
@@ -555,6 +573,16 @@ pub(crate) fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
 /// can correct. A headerless `Raw` dump has no magic to check against.
 fn names_container(caps: &Caps) -> bool {
     matches!(caps, Caps::ByteStream { encoding } if *encoding != ByteStreamEncoding::Raw)
+}
+
+fn names_annexb_video(caps: &Caps) -> bool {
+    matches!(
+        caps,
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264 | VideoCodec::H265,
+            ..
+        }
+    )
 }
 
 /// Parse a `bytestream-format` value to an encoding (the `auto` value is handled

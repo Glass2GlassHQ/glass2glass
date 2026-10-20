@@ -11,7 +11,8 @@
 //! types a bare `.264` / `.jsv` / `.obu` recording by content), as does a still image (PNG / WebP, one
 //! frame per file); a subtitle document yields a
 //! `Caps::Text{format}` (so `filesrc ! subparse` types without an explicit
-//! source). The sniff functions themselves are pure `no_std`, no allocation.
+//! source). The sniff functions themselves are pure `no_std`, and only the
+//! SPS read behind an Annex-B match allocates.
 //!
 //! [`TypeFind`] is the same sniff as a mid-graph element, for a byte stream that
 //! did not come from a file: it holds back the leading frames, sniffs them, and
@@ -37,7 +38,10 @@ use crate::aacparse::adts_header;
 use crate::audioframe::{
     ac3_header, mpa_header, MpaHeader, MpaLayer, AC3_MAX_FRAME_LEN, MPA_HEADER_LEN,
 };
+use crate::h264parse::H264Codec;
+use crate::h265parse::H265Codec;
 use crate::mpegts::{sniff_packet_stride, SYNC_BYTE, TS_PACKET_LEN};
+use crate::nalparse::NalCodec;
 
 /// MPEG-TS packet stride; the sync byte recurs at this interval.
 /// EBML magic (Matroska / WebM): the leading bytes of the EBML header element.
@@ -98,7 +102,8 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
         return Some(still_image_caps(codec));
     }
     if let Some(codec) = sniff_annexb_video(header) {
-        return Some(elementary_video_caps(codec));
+        let placeholder = elementary_video_caps(codec);
+        return Some(sized_by_sps(&placeholder, header).unwrap_or(placeholder));
     }
     if sniff_mpeg4_visual(header) {
         return Some(elementary_video_caps(VideoCodec::Mpeg4Part2));
@@ -578,6 +583,32 @@ fn sniff_annexb_video(header: &[u8]) -> Option<VideoCodec> {
         nal = next?;
     }
     None
+}
+
+// the header's SPS picture size in place of the placeholder range, so auto-plug can weigh it
+fn sized_by_sps(placeholder: &Caps, header: &[u8]) -> Option<Caps> {
+    let Caps::CompressedVideo {
+        codec,
+        width,
+        height,
+        framerate,
+        colorimetry,
+    } = placeholder
+    else {
+        return None;
+    };
+    let geometry = match codec {
+        VideoCodec::H264 => H264Codec::extract_sps_info(header),
+        VideoCodec::H265 => H265Codec::extract_sps_info(header),
+        _ => None,
+    }?;
+    Some(Caps::CompressedVideo {
+        codec: *codec,
+        width: width.intersect(&Dim::Fixed(geometry.width))?,
+        height: height.intersect(&Dim::Fixed(geometry.height))?,
+        framerate: framerate.clone(),
+        colorimetry: *colorimetry,
+    })
 }
 
 const START_CODE_LEN: usize = 3;
@@ -1112,6 +1143,37 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_truncated_sps_keeps_the_placeholder_size() {
+        let data = [
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e, 0x00, 0x00, 0x00, 0x01, 0x68, 0xce,
+        ];
+        assert_eq!(
+            sniff_caps(&data),
+            Some(elementary_video_caps(VideoCodec::H264))
+        );
+    }
+
+    fn sniffed_size(stream: &[u8]) -> Option<(Dim, Dim)> {
+        let header = &stream[..stream.len().min(SNIFF_LEN)];
+        match sniff_caps(header)? {
+            Caps::CompressedVideo { width, height, .. } => Some((width, height)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn an_annexb_header_with_a_whole_sps_sniffs_its_picture_size() {
+        assert_eq!(
+            sniffed_size(include_bytes!("../tests/fixtures/h264_64x48_bframes.h264")),
+            Some((Dim::Fixed(64), Dim::Fixed(48)))
+        );
+        assert_eq!(
+            sniffed_size(include_bytes!("../tests/fixtures/h265_320x180.hevc")),
+            Some((Dim::Fixed(320), Dim::Fixed(180)))
+        );
     }
 
     #[test]

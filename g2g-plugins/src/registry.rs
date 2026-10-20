@@ -1881,7 +1881,42 @@ fn ffmpegdec_pinned_output_format(out: &Caps) -> Option<crate::ffmpegdec::Output
     })
 }
 
+// measured 2026-10-20, see design/decode.md
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+const FFMPEGDEC_FRAME_COST: g2g_core::runtime::FrameCost = g2g_core::runtime::FrameCost {
+    fixed_us: 0,
+    per_megapixel_us: 600,
+};
+#[cfg(all(target_os = "linux", feature = "nvdec"))]
+const NVDEC_FRAME_COST: g2g_core::runtime::FrameCost = g2g_core::runtime::FrameCost {
+    fixed_us: 2800,
+    per_megapixel_us: 0,
+};
+#[cfg(feature = "vulkan-video")]
+const VULKANVIDEODEC_FRAME_COST: g2g_core::runtime::FrameCost = g2g_core::runtime::FrameCost {
+    fixed_us: 3700,
+    per_megapixel_us: 0,
+};
+#[cfg(all(target_os = "linux", feature = "cuda"))]
+const CUDADOWNLOAD_COST: g2g_core::runtime::DomainTransferCost =
+    g2g_core::runtime::DomainTransferCost {
+        from: g2g_core::MemoryDomainKind::Cuda,
+        to: g2g_core::MemoryDomainKind::System,
+        per_megabyte_us: 170,
+    };
+#[cfg(feature = "wgpu-sink")]
+const WGPUDOWNLOAD_COST: g2g_core::runtime::DomainTransferCost =
+    g2g_core::runtime::DomainTransferCost {
+        from: g2g_core::MemoryDomainKind::WgpuTexture,
+        to: g2g_core::MemoryDomainKind::System,
+        per_megabyte_us: 290,
+    };
+
 fn register_autoplug_candidates(reg: &mut Registry) {
+    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    reg.register_transfer_cost(CUDADOWNLOAD_COST);
+    #[cfg(feature = "wgpu-sink")]
+    reg.register_transfer_cost(WGPUDOWNLOAD_COST);
     // Parsers (baseline): elementary-stream framing, no external deps.
     reg.register(ElementFactory::of::<H264Parse>("h264parse", |_| {
         Box::new(H264Parse::new())
@@ -2045,9 +2080,12 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // pre-fix (sink's NV12 accept-set) hit the decoder's `format != output_format`
     // arm and failed startup negotiation. A loose target gets `Auto`.
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-    reg.register(ElementFactory::of::<FfmpegH264Dec>("ffmpegdec", |out| {
-        Box::new(FfmpegH264Dec::new().with_output_format(ffmpegdec_output_format(out)))
-    }));
+    reg.register(
+        ElementFactory::of::<FfmpegH264Dec>("ffmpegdec", |out| {
+            Box::new(FfmpegH264Dec::new().with_output_format(ffmpegdec_output_format(out)))
+        })
+        .cost(FFMPEGDEC_FRAME_COST),
+    );
     // AAC (and other libavcodec audio codecs) -> interleaved PcmS16Le (M422), the
     // audio sibling of ffmpegdec, in the auto-plug pool so a decode chain reaches
     // raw audio (e.g. an MPEG-TS / HLS AAC track).
@@ -2079,7 +2117,8 @@ fn register_autoplug_candidates(reg: &mut Registry) {
                     Box::new(FfmpegH264Dec::new().with_output_format(ffmpegdec_output_format(out)))
                 },
             )
-            .accepting_input(crate::ffmpegtagged::decodes_video),
+            .accepting_input(crate::ffmpegtagged::decodes_video)
+            .cost(FFMPEGDEC_FRAME_COST),
         );
         reg.register(
             ElementFactory::new(
@@ -2126,7 +2165,8 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         ElementFactory::of::<NvDec>("nvdec", |_| Box::new(NvDec::new()))
             .produces(g2g_core::MemoryDomainKind::Cuda)
             .hardware()
-            .accepting_input(NvDec::accepts_input),
+            .accepting_input(NvDec::accepts_input)
+            .cost(NVDEC_FRAME_COST),
     );
     // Vendor-neutral Vulkan Video hardware decode (M493; H.264 / H.265 / AV1 since
     // M517), the wgpu-texture analog of NvDec: tagged `produces(WgpuTexture)`, so a
@@ -2141,7 +2181,8 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         })
         .produces(g2g_core::MemoryDomainKind::WgpuTexture)
         .hardware()
-        .accepting_input(crate::vulkanvideo::VulkanVideoDec::accepts_input),
+        .accepting_input(crate::vulkanvideo::VulkanVideoDec::accepts_input)
+        .cost(VULKANVIDEODEC_FRAME_COST),
     );
     // Android hardware video decode via the NDK MediaCodec (M219/M302); one
     // factory per codec (the MIME is fixed at construction). Reachable from
