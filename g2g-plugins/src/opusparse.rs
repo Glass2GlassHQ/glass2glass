@@ -396,7 +396,7 @@ pub struct OpusToc {
 /// Decode the TOC byte of an Opus packet (RFC 6716 §3.1). `None` only for an
 /// empty packet: every TOC byte value is structurally valid, so a non-empty
 /// packet always yields a `OpusToc`.
-fn parse_toc(packet: &[u8]) -> Option<OpusToc> {
+pub(crate) fn parse_toc(packet: &[u8]) -> Option<OpusToc> {
     let toc = *packet.first()?;
     let config = toc >> 3; // top 5 bits select mode + bandwidth + frame size
     let stereo = (toc >> 2) & 0x01 == 1; // 1 bit

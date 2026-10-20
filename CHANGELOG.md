@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1661: `rtspclientsink` publishes H.264, H.265, AAC and Opus pads to an RTSP server over TCP-interleaved or UDP, with Basic or Digest auth.
 - M1660: RTP packetizers for H.265, AAC and Opus, an SDP writer shared with the RTSP server, and a sans-IO RTSP publishing client.
 - M1642: `decklinkaudiosink` plays 48 kHz S16LE or S32LE PCM in 2, 8 or 16 channels on the device of its `decklinkvideosink`.
 - M1641: `decklinkvideosink` schedules UYVY, BGRA, v210 and r210 frames on an SDI output for Blackmagic Design DeckLink and offers the board clock.

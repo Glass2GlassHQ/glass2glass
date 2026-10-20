@@ -2584,6 +2584,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "multiudpsink" => "udp-egress";
         "cotsink" => "udp-egress";
         "rtspserversink" => "rtsp-server";
+        "rtspclientsink" => "rtsp-client-sink";
         "rtspserversrc" => "rtsp-server";
         "rtspserversrcn" => "rtsp-server";
         "srtsrc" => "srt";
@@ -3011,6 +3012,12 @@ fn register_feature_gated(reg: &mut Registry) {
         },
         || Box::new(RtspServerSrc::new("0.0.0.0:8554".parse().unwrap())),
     ));
+    // RTSP publisher: one stream per linked pad, ANNOUNCEd and RECORDed to the
+    // server at `location` (`v ! s.sink_0  a ! s.sink_1  rtspclientsink name=s location=...`).
+    #[cfg(feature = "rtsp-client-sink")]
+    reg.register_muxer(MuxerFactory::new("rtspclientsink", |inputs| {
+        Box::new(crate::rtspclientsink::RtspClientSink::new(inputs, ""))
+    }));
     // Concurrent multi-publisher ingest (M863): one endpoint, one recording
     // publisher per linked pad (`rtspserversrcn name=s  s. ! ...  s. ! ...`).
     #[cfg(feature = "rtsp-server")]

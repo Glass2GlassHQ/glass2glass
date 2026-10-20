@@ -615,6 +615,31 @@ mid-stream on an interleaved control connection and are consumed there.
 Validated end to end over loopback: handshake, RTP recovery, SR delivery on both
 transports, RR-extended lifetime, and silent-client reap.
 
+## RTSP publishing
+
+`RtspClientSink` (`rtspclientsink.rs`, `rtsp-client-sink` feature) is the
+client side of RECORD, gst's `rtspclientsink`: a terminal fan-in with one
+`sink_%u` request pad per stream. It takes encoded H.264, H.265, AAC and Opus
+and payloads them itself (`rtppay.rs`), so a launch line links the encoder
+straight to it. Retina has no RECORD, so the handshake is hand-written: the
+sans-IO `rtspclient.rs` numbers requests, keeps the session id, parses
+responses and answers a 401 with Basic or MD5 Digest, and the element drives
+OPTIONS, ANNOUNCE, one SETUP per pad and RECORD over tokio, then TEARDOWN once
+every pad has ended.
+
+The ANNOUNCE needs each stream's parameters, so frames are held until every pad
+has delivered its first one: H.264 / H.265 parameter sets from the first access
+unit, the AAC AudioSpecificConfig from its ADTS header or leading config frame,
+the Opus channel count from the caps or the first packet. The SDP is built by
+the writer side of `sdp.rs`, which the RTSP server's DESCRIBE shares. Media goes
+TCP-interleaved on channel `2 * pad`, or over UDP from a bound even/odd port
+pair per stream. `protocols` lists the transports to try at the first SETUP, and
+the rest of the session keeps the one that succeeded. Server RTCP arriving on
+the control connection is read and dropped before every frame so it cannot fill
+the socket. Validated against mediamtx 1.21 (ffprobe, ffmpeg and gst `rtspsrc`
+decode the published streams back, over both transports and both auth schemes)
+and against `RtspServerSrc` in tests.
+
 ## SRT
 
 `SrtSink` (caller, egress) and `SrtSrc` (listener, ingress, `srt` feature) carry

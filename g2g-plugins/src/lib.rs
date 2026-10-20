@@ -879,8 +879,11 @@ pub mod rtspserversink;
 pub mod rtspserversrc;
 #[cfg(feature = "rtsp-server")]
 pub mod rtspserversrcn;
-// Sans-IO RTSP publishing client: requests, responses and the auth answer.
+// Sans-IO RTSP publishing client (always compiled) and the tokio sink that
+// publishes a pipeline's streams to an RTSP server with ANNOUNCE and RECORD.
 pub mod rtspclient;
+#[cfg(feature = "rtsp-client-sink")]
+pub mod rtspclientsink;
 
 // Sans-IO SRT (Secure Reliable Transport) wire layer + handshake + ARQ (always
 // compiled); the tokio caller sink / listener source sit behind the `srt` feature.
