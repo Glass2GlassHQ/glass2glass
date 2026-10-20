@@ -1,7 +1,7 @@
 //! M980 runtime caps dump: `g2g-launch --run-json` runs the line to EOS and
 //! prints the `--validate-json` shape with each edge's caps as observed while it
 //! ran, so a stream whose geometry only arrives with the data reports what it
-//! really carried instead of the solver's startup placeholder.
+//! really carried instead of the geometry negotiation started from.
 //!
 //! Run with `cargo test -p g2g-plugins --features tooling-json --test
 //! m980_runtime_caps_dump`.
@@ -30,18 +30,18 @@ fn line() -> String {
     format!("filesrc location={RECONFIG_CLIP} ! h264parse ! fakesink")
 }
 
-/// The solve-time dump can only offer the placeholder geometry the parser
-/// advertises before it has seen an SPS; the run dump replaces it with the caps
-/// the frames crossed under, and says which edge is which.
+/// The solve-time dump carries the geometry the source sniffed from the file's
+/// first SPS; the run dump replaces it with the caps the frames crossed under
+/// once the clip changes resolution, and says which edge is which.
 #[tokio::test]
-async fn run_dump_reports_refined_caps_where_negotiation_had_a_placeholder() {
+async fn run_dump_reports_refined_caps_where_negotiation_had_the_first_sps() {
     let reg = default_registry();
     let solved = validate_json(&reg, &line()).await;
     assert_eq!(solved["ok"], true, "{solved}");
     let solved_parse_out = solved["edges"][1]["caps"].as_str().unwrap().to_string();
     assert!(
-        solved_parse_out.contains("width=16") && solved_parse_out.contains("height=16"),
-        "negotiation has only the placeholder geometry, got {solved_parse_out}"
+        solved_parse_out.contains("width=640") && solved_parse_out.contains("height=480"),
+        "negotiation has the first SPS geometry, got {solved_parse_out}"
     );
 
     let ran = observed_graph_json(&reg, &line()).await;
@@ -64,7 +64,7 @@ async fn run_dump_reports_refined_caps_where_negotiation_had_a_placeholder() {
     );
 
     // The parser's output link carried the clip's final geometry, not the
-    // placeholder, and is marked as read from the run.
+    // first SPS's, and is marked as read from the run.
     let observed = edges[1]["caps"].as_str().unwrap();
     assert_eq!(edges[1]["caps_source"], "runtime");
     assert!(
@@ -101,7 +101,7 @@ async fn observer_keeps_negotiated_and_observed_caps_apart() {
         .observed_caps
         .as_deref()
         .expect("a CapsChanged crossed the parser's output link");
-    assert!(negotiated.contains("width=16"), "{negotiated}");
+    assert!(negotiated.contains("width=640"), "{negotiated}");
     assert!(observed.contains("width=320"), "{observed}");
 
     // The source's byte-stream link never sees a CapsChanged, so it has no

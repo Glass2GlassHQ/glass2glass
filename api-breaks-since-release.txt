@@ -6,6 +6,7 @@
 # CI job verifies nothing until the next publish. This list is what still holds
 # a break to a deliberate act during that window, and it is the raw material for
 # the release notes when the bump ships.
+constructible_struct_adds_field: field CapabilityDescriptor.cost
 constructible_struct_adds_field: field ElementDesc.accepts_input
 constructible_struct_adds_field: field QosMessage.taken_ns
 enum_discriminants_undefined_non_unit_variant: enum AudioFormat
@@ -19,6 +20,7 @@ function_missing: function g2g_core::format_element::legacy_sink_constraint
 function_missing: function g2g_core::format_element::legacy_transform_constraint
 function_missing: function g2g_core::legacy_sink_constraint
 function_missing: function g2g_core::legacy_transform_constraint
+function_parameter_count_changed: g2g_core::runtime::find_chain_with now takes 6 parameters instead of 5
 inherent_method_missing: Registry::primary_stream
 method_parameter_count_changed: g2g_core::QosTracker::judge_frame takes 3 parameters
 method_parameter_count_changed: g2g_core::qos::QosTracker::judge_frame takes 3 parameters
