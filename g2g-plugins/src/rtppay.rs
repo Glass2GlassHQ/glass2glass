@@ -88,6 +88,19 @@ impl RtpPacketWriter {
         packets
     }
 
+    fn write_with_capture_time(
+        &mut self,
+        payloads: &[Payload<'_>],
+        timestamp: u32,
+        capture_time_ids: CaptureTimeExtensionIds,
+        capture_ntp: u64,
+    ) -> Vec<Vec<u8>> {
+        let capture_ntp_bytes = capture_ntp.to_be_bytes();
+        let extensions: Vec<RtpHeaderExtension<'_>> =
+            capture_time_ids.elements(&capture_ntp_bytes).collect();
+        self.write(payloads, timestamp, &extensions)
+    }
+
     fn write_header(
         &self,
         out: &mut Vec<u8>,
@@ -222,11 +235,9 @@ impl RtpH264Packetizer {
         capture_time_ids: CaptureTimeExtensionIds,
         capture_ntp: u64,
     ) -> Vec<Vec<u8>> {
-        let capture_ntp_bytes = capture_ntp.to_be_bytes();
-        let extensions: Vec<RtpHeaderExtension<'_>> =
-            capture_time_ids.elements(&capture_ntp_bytes).collect();
         let payloads = nal_payloads(access_unit, self.max_payload, &H264_FRAGMENTATION);
-        self.writer.write(&payloads, rtp_timestamp, &extensions)
+        self.writer
+            .write_with_capture_time(&payloads, rtp_timestamp, capture_time_ids, capture_ntp)
     }
 }
 
@@ -251,8 +262,24 @@ impl RtpH265Packetizer {
     }
 
     pub fn packetize(&mut self, access_unit: &[u8], rtp_timestamp: u32) -> Vec<Vec<u8>> {
+        self.packetize_with_capture_time(
+            access_unit,
+            rtp_timestamp,
+            CaptureTimeExtensionIds::default(),
+            0,
+        )
+    }
+
+    pub fn packetize_with_capture_time(
+        &mut self,
+        access_unit: &[u8],
+        rtp_timestamp: u32,
+        capture_time_ids: CaptureTimeExtensionIds,
+        capture_ntp: u64,
+    ) -> Vec<Vec<u8>> {
         let payloads = nal_payloads(access_unit, self.max_payload, &H265_FRAGMENTATION);
-        self.writer.write(&payloads, rtp_timestamp, &[])
+        self.writer
+            .write_with_capture_time(&payloads, rtp_timestamp, capture_time_ids, capture_ntp)
     }
 }
 

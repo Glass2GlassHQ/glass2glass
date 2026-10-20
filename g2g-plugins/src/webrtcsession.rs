@@ -38,6 +38,7 @@ use tokio::sync::mpsc;
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind, Mid, Pt, Rid};
+use str0m::rtp::AbsCaptureTime;
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use core::time::Duration;
@@ -51,7 +52,10 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
-use crate::webrtc_codec::{enable_tracks, sink_caps_alternatives, Track, WebRtcVideoCodec};
+use crate::webrtc_codec::{
+    enable_tracks, frame_capture_time, sink_caps_alternatives, stamp_capture_time, Track,
+    WebRtcVideoCodec,
+};
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_simulcast::{
     rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SimulcastPads,
@@ -72,6 +76,7 @@ struct MediaUnit {
     track: Track,
     rid: Option<Rid>,
     pts_ns: u64,
+    capture_time: Option<AbsCaptureTime>,
     data: Vec<u8>,
 }
 
@@ -458,6 +463,7 @@ impl MultiInputElement for WebRtcSessionSink {
                         track,
                         rid,
                         pts_ns: frame.timing.pts_ns,
+                        capture_time: frame_capture_time(&frame),
                         data: slice.to_vec(),
                     };
                     if let Some(tx) = &self.tx {
@@ -694,7 +700,12 @@ async fn run_session(mut a: SessionArgs) {
                             Some(rid) => writer.rid(rid),
                             None => writer,
                         };
-                        let _ = writer.write(p, Instant::now(), rtp_time, unit.data);
+                        let _ = stamp_capture_time(writer, unit.capture_time).write(
+                            p,
+                            Instant::now(),
+                            rtp_time,
+                            unit.data,
+                        );
                     }
                 }
             }

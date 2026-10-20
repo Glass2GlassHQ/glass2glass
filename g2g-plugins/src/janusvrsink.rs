@@ -45,7 +45,10 @@ use crate::janus_signal::{
     wait_for, Signaller, WsRead, WsWrite, KEEPALIVE_INTERVAL,
 };
 use crate::turn::TurnSet;
-use crate::webrtc_codec::{sink_caps_alternatives, Track, WebRtcVideoCodec};
+use crate::webrtc_codec::{
+    enable_tracks, frame_capture_time, sink_caps_alternatives, stamp_capture_time, Track,
+    WebRtcVideoCodec,
+};
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
@@ -215,7 +218,7 @@ impl JanusVrSink {
             .enable_bwe(Some(Bitrate::bps(INITIAL_BITRATE_BPS)))
             .set_stats_interval(Some(STATS_INTERVAL))
             .clear_codecs();
-        let mut rtc = self.track.enable(config).build(Instant::now());
+        let mut rtc = enable_tracks(config, [self.track]).build(Instant::now());
         // every candidate rides in the offer, so gather before it
         add_ice_candidates(&mut rtc, &socket, self.stun_server.as_deref())
             .await
@@ -366,7 +369,8 @@ async fn run_session(mut a: SessionArgs) {
                 if let Some(p) = pt {
                     let rtp_time = a.track.media_time(unit.pts_ns);
                     if let Some(writer) = a.rtc.writer(a.mid) {
-                        let _ = writer.write(p, Instant::now(), rtp_time, unit.data);
+                        let _ = stamp_capture_time(writer, unit.capture_time)
+                            .write(p, Instant::now(), rtp_time, unit.data);
                     }
                 }
             }
@@ -532,6 +536,7 @@ impl AsyncElement for JanusVrSink {
                         .require_system_slice(short_type_name::<Self>())?;
                     let unit = MediaUnit {
                         pts_ns: frame.timing.pts_ns,
+                        capture_time: frame_capture_time(&frame),
                         data: slice.to_vec(),
                     };
                     if self.tx.is_none() {

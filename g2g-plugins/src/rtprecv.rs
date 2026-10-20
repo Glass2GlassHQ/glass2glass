@@ -208,12 +208,12 @@ pub(crate) fn get_recv_prop(cfg: &RtpRecvConfig, name: &str) -> Option<PropValue
 }
 
 #[derive(Debug, Default)]
-struct CaptureTimeLatch {
+pub(crate) struct CaptureTimeLatch {
     latest: Option<(u32, i64)>,
 }
 
 impl CaptureTimeLatch {
-    fn observe(&mut self, ids: &CaptureTimeExtensionIds, packet: &[u8]) {
+    pub(crate) fn observe(&mut self, ids: &CaptureTimeExtensionIds, packet: &[u8]) {
         let Some(ntp) = ids.read(packet) else { return };
         let Some(parsed) = RtpHeader::parse_header(packet) else {
             return;
@@ -222,7 +222,7 @@ impl CaptureTimeLatch {
             g2g_core::unix_nanos_from_ntp(ntp).map(|unix_ns| (parsed.header.timestamp, unix_ns));
     }
 
-    fn take(&mut self, rtp_timestamp: u32) -> Option<i64> {
+    pub(crate) fn take(&mut self, rtp_timestamp: u32) -> Option<i64> {
         let (stamped, unix_ns) = self.latest?;
         if stamped != rtp_timestamp {
             return None;

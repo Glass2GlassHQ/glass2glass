@@ -48,8 +48,8 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
 use crate::webrtc_codec::{
-    get_video_codec_property, opus_caps, set_video_codec_property, Track, WebRtcVideoCodec,
-    VIDEO_CODEC_PROP,
+    enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
+    WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
 use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
@@ -343,7 +343,7 @@ impl SourceLoop for WebRtcWhepSrc {
                 .set_crypto_provider(alloc::sync::Arc::new(from_feature_flags()))
                 .set_stats_interval(Some(STATS_INTERVAL))
                 .clear_codecs();
-            let mut rtc = track.enable(config).build(Instant::now());
+            let mut rtc = enable_tracks(config, [track]).build(Instant::now());
             // Trickle ICE: the offer carries the host candidate only; reflexive /
             // relay candidates are gathered after the POST and trickled by PATCH.
             add_host_candidate(&mut rtc, &socket)?;

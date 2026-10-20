@@ -53,8 +53,8 @@ use crate::filesink::io_err;
 use crate::rtpjitter::JitterConfig;
 use crate::rtprecv::RtpRecvConfig;
 use crate::rtspingest::{
-    handshake, inactive_for, receive_interleaved, refuse_one, watch_control, RecordTransport,
-    SessionEnd, SessionTap,
+    handshake, inactive_for, receive_interleaved, refuse_one, session_recv_config, watch_control,
+    RecordTransport, SessionEnd, SessionTap,
 };
 use crate::rtspserver::{sdp_h264, RtspResponder, DEFAULT_SESSION_TIMEOUT_SECS};
 
@@ -590,15 +590,18 @@ impl SourceLoop for RtspServerSrc {
                             rtp_socket,
                             mut control,
                             mut responder,
-                        } => tokio::select! {
-                            r = crate::rtprecv::receive_rtp_h264(&rtp_socket, &recv, remaining, seq_base, &mut tap) => {
-                                r?;
-                                SessionEnd::Limit
+                        } => {
+                            let session_recv = session_recv_config(&recv, &responder);
+                            tokio::select! {
+                                r = crate::rtprecv::receive_rtp_h264(&rtp_socket, &session_recv, remaining, seq_base, &mut tap) => {
+                                    r?;
+                                    SessionEnd::Limit
+                                }
+                                _ = watch_control(&mut control, &mut responder, &activity) => SessionEnd::PeerGone,
+                                _ = inactive_for(&activity, timeout_ns) => SessionEnd::PeerGone,
+                                _ = refuse_extras(&listener, &refused) => unreachable!("refusal never ends"),
                             }
-                            _ = watch_control(&mut control, &mut responder, &activity) => SessionEnd::PeerGone,
-                            _ = inactive_for(&activity, timeout_ns) => SessionEnd::PeerGone,
-                            _ = refuse_extras(&listener, &refused) => unreachable!("refusal never ends"),
-                        },
+                        }
                         // TCP-interleaved: the control stream itself carries the
                         // `$`-framed RTP, so its close ends the session.
                         RecordTransport::Interleaved {

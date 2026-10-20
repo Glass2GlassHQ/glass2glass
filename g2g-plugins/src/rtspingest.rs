@@ -20,7 +20,7 @@ use g2g_core::{G2gError, OutputSink, PipelinePacket, PushOutcome};
 
 use crate::rtpdepay::RtpH264Depayloader;
 use crate::rtpjitter::RtpPtsRebase;
-use crate::rtprecv::push_access_unit;
+use crate::rtprecv::{push_access_unit, CaptureTimeLatch, RtpRecvConfig};
 use crate::rtspserver::{
     interleaved_frame, RtspEvent, RtspRequest, RtspResponder, INTERLEAVED_HEADER_LEN,
     INTERLEAVED_MARKER,
@@ -130,6 +130,17 @@ pub(crate) enum RecordTransport {
         rtp_channel: u8,
         leftover: Vec<u8>,
     },
+}
+
+// the UDP receive path reads the capture-time extensions this publisher announced
+pub(crate) fn session_recv_config(
+    recv: &RtpRecvConfig,
+    responder: &RtspResponder,
+) -> RtpRecvConfig {
+    RtpRecvConfig {
+        capture_time_ids: responder.capture_time_ids(),
+        ..recv.clone()
+    }
 }
 
 /// Why a publisher's session stopped.
@@ -372,6 +383,8 @@ pub(crate) async fn receive_interleaved(
     let mut depay = RtpH264Depayloader::new();
     let mut seq = seq_base;
     let mut pts_rebase = RtpPtsRebase::new();
+    let capture_time_ids = responder.capture_time_ids();
+    let mut capture_time = CaptureTimeLatch::default();
     let mut buf = [0u8; CTRL_BUF];
     loop {
         // Drain every complete interleaved item currently buffered.
@@ -385,10 +398,13 @@ pub(crate) async fn receive_interleaved(
                 } => {
                     // Depayload only the RTP channel (skip RTCP / other channels).
                     if channel == rtp_channel {
-                        if let Some(au) = depay.depacketize(&pending[start..end]) {
+                        let packet = &pending[start..end];
+                        capture_time.observe(&capture_time_ids, packet);
+                        if let Some(au) = depay.depacketize(packet) {
+                            let capture_unix_ns = capture_time.take(au.rtp_timestamp);
                             if push_access_unit(
                                 au,
-                                None,
+                                capture_unix_ns,
                                 &mut pts_rebase,
                                 &mut seq,
                                 seq_base,

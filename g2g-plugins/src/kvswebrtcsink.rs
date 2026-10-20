@@ -35,7 +35,10 @@ use crate::kvs_signal::{
     CHANNEL_NAME_PROP, KVS_STUN_SERVER_PROP, REGION_PROP, SECRET_KEY_PROP, SESSION_TOKEN_PROP,
 };
 use crate::turn::{TurnSet, REFRESH_INTERVAL};
-use crate::webrtc_codec::{enable_tracks, sink_caps_alternatives, Track, WebRtcVideoCodec};
+use crate::webrtc_codec::{
+    enable_tracks, frame_capture_time, sink_caps_alternatives, stamp_capture_time, Track,
+    WebRtcVideoCodec,
+};
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
@@ -556,7 +559,12 @@ async fn run_session(m: &mut Master, mut s: Session) -> SessionEnd {
                 };
                 let rtp_time = m.track.media_time(unit.pts_ns);
                 if let Some(writer) = s.rtc.writer(s.mid) {
-                    let _ = writer.write(s.pt, Instant::now(), rtp_time, unit.data);
+                    let _ = stamp_capture_time(writer, unit.capture_time).write(
+                        s.pt,
+                        Instant::now(),
+                        rtp_time,
+                        unit.data,
+                    );
                 }
             }
             _ = wake(Some(refresh_at)), if !s.turn.is_empty() => {
@@ -677,6 +685,7 @@ impl AsyncElement for KvsWebRtcSink {
                         .require_system_slice(short_type_name::<Self>())?;
                     let unit = MediaUnit {
                         pts_ns: frame.timing.pts_ns,
+                        capture_time: frame_capture_time(&frame),
                         data: slice.to_vec(),
                     };
                     if self.tx.is_none() {

@@ -31,7 +31,7 @@ use tokio::net::UdpSocket;
 
 use str0m::change::SdpAnswer;
 use str0m::crypto::from_feature_flags;
-use str0m::media::Direction;
+use str0m::media::{Direction, MediaData};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 
 use g2g_core::frame::Frame;
@@ -47,7 +47,7 @@ use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
-use crate::webrtc_receive::UDP_RECV_BYTES;
+use crate::webrtc_receive::{capture_time_meta, media_capture_unix_ns, UDP_RECV_BYTES};
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
     add_host_candidate, delete_resource, feed_datagram, ice_restart, media_time_ns, post_sdp,
@@ -339,14 +339,13 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
             }
 
             loop {
-                // (port, pts_ns, data) collected while draining poll_output.
-                let mut frames: Vec<(usize, u64, Vec<u8>)> = Vec::new();
+                // (port, media) collected while draining poll_output.
+                let mut frames: Vec<(usize, MediaData)> = Vec::new();
                 let deadline = loop {
                     match rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
                         Ok(Output::Event(Event::MediaData(d))) => {
-                            let pts_ns = media_time_ns(d.time);
                             let port = if d.mid == video_mid {
                                 VIDEO_PORT
                             } else if d.mid == audio_mid {
@@ -354,12 +353,7 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                             } else {
                                 continue;
                             };
-                            let unit = if port == VIDEO_PORT {
-                                video_codec.pipeline_unit(&d.data)
-                            } else {
-                                d.data.to_vec()
-                            };
-                            frames.push((port, pts_ns, unit));
+                            frames.push((port, d));
                         }
                         Ok(Output::Event(Event::IceConnectionStateChange(state))) => match state {
                             IceConnectionState::Disconnected => {
@@ -393,7 +387,13 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                     }
                 }
 
-                for (port, pts_ns, data) in frames {
+                for (port, media) in frames {
+                    let pts_ns = media_time_ns(media.time);
+                    let data = if port == VIDEO_PORT {
+                        video_codec.pipeline_unit(&media.data)
+                    } else {
+                        media.data.to_vec()
+                    };
                     let keyframe = port == VIDEO_PORT && video_codec.is_keyframe(&data);
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
@@ -408,7 +408,7 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                             keyframe,
                         },
                         sequence: seq,
-                        meta: Default::default(),
+                        meta: capture_time_meta(media_capture_unix_ns(&media)),
                     };
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     seq += 1;

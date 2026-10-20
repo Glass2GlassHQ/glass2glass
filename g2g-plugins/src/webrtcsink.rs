@@ -49,6 +49,7 @@ use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, Mid, Pt};
+use str0m::rtp::AbsCaptureTime;
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::log::{short_type_name, LogName, LogSource};
@@ -60,7 +61,10 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::turn::{self, TurnSet};
-use crate::webrtc_codec::{sink_caps_alternatives, Track, WebRtcVideoCodec};
+use crate::webrtc_codec::{
+    enable_tracks, frame_capture_time, sink_caps_alternatives, stamp_capture_time, Track,
+    WebRtcVideoCodec,
+};
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
@@ -81,6 +85,7 @@ pub(crate) const INITIAL_BITRATE_BPS: u64 = 2_000_000;
 #[derive(Debug)]
 pub(crate) struct MediaUnit {
     pub(crate) pts_ns: u64,
+    pub(crate) capture_time: Option<AbsCaptureTime>,
     pub(crate) data: Vec<u8>,
 }
 
@@ -253,7 +258,7 @@ impl WebRtcSink {
             .enable_bwe(Some(Bitrate::bps(INITIAL_BITRATE_BPS)))
             .set_stats_interval(Some(STATS_INTERVAL))
             .clear_codecs();
-        let config = self.track.enable(config);
+        let config = enable_tracks(config, [self.track]);
         let mut rtc = config.build(Instant::now());
 
         // Trickle ICE: the offer carries the host candidate only; reflexive /
@@ -485,6 +490,7 @@ impl AsyncElement for WebRtcSink {
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let unit = MediaUnit {
                         pts_ns: frame.timing.pts_ns,
+                        capture_time: frame_capture_time(&frame),
                         data: slice.to_vec(),
                     };
                     if self.tx.is_none() {
@@ -647,7 +653,8 @@ async fn run_session(
                 if let Some(p) = pt {
                     let rtp_time = track.media_time(unit.pts_ns);
                     if let Some(writer) = rtc.writer(mid) {
-                        let _ = writer.write(p, Instant::now(), rtp_time, unit.data);
+                        let _ = stamp_capture_time(writer, unit.capture_time)
+                            .write(p, Instant::now(), rtp_time, unit.data);
                     }
                 }
             }

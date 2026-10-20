@@ -15,7 +15,10 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::sdp::{h264_media_section, session_description};
+use g2g_core::rtp::CaptureTimeExtensionIds;
+use g2g_core::{Caps, VideoCodec};
+
+use crate::sdp::{h264_media_section, session_description, SdpMedia};
 
 /// What the I/O layer should do after a request, beyond sending the response.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +160,23 @@ pub fn sdp_h264(payload_type: u8, sps: Option<&[u8]>, pps: Option<&[u8]>) -> Str
     session_description(&[h264_media_section(payload_type, sps, pps, 0)])
 }
 
+// the ingest path receives H.264 only, so that section's extmap names the extensions
+fn announced_capture_time_ids(sdp: &str) -> CaptureTimeExtensionIds {
+    SdpMedia::parse_all(sdp)
+        .into_iter()
+        .find(|media| {
+            matches!(
+                media.caps,
+                Caps::CompressedVideo {
+                    codec: VideoCodec::H264,
+                    ..
+                }
+            )
+        })
+        .map(|media| media.capture_time_ids())
+        .unwrap_or_default()
+}
+
 /// Sans-IO RTSP server responder for one session.
 #[derive(Debug)]
 pub struct RtspResponder {
@@ -171,6 +191,7 @@ pub struct RtspResponder {
     /// Session timeout advertised at SETUP (RFC 2326 §12.37); the I/O layer reaps
     /// a client silent (no request, no RTCP) past it.
     timeout_secs: u32,
+    capture_time_ids: CaptureTimeExtensionIds,
 }
 
 /// Default RTSP session timeout (RFC 2326 §12.37's default).
@@ -190,6 +211,7 @@ impl RtspResponder {
             client_rtp_port: None,
             interleaved: None,
             timeout_secs: DEFAULT_SESSION_TIMEOUT_SECS,
+            capture_time_ids: CaptureTimeExtensionIds::default(),
         }
     }
 
@@ -208,6 +230,12 @@ impl RtspResponder {
     /// `SETUP` has been handled (RFC 2326 §10.12).
     pub fn interleaved_channels(&self) -> Option<(u8, u8)> {
         self.interleaved
+    }
+
+    /// The capture-time extension ids the publisher's ANNOUNCE maps on its
+    /// H.264 stream, empty before an ANNOUNCE.
+    pub fn capture_time_ids(&self) -> CaptureTimeExtensionIds {
+        self.capture_time_ids
     }
 
     /// The session identifier assigned at `SETUP`.
@@ -249,6 +277,7 @@ impl RtspResponder {
                 if !req.body.is_empty() {
                     if let Ok(sdp) = core::str::from_utf8(&req.body) {
                         self.sdp = sdp.to_string();
+                        self.capture_time_ids = announced_capture_time_ids(sdp);
                     }
                 }
                 (self.respond(req.cseq, "200 OK", &[], b""), RtspEvent::None)

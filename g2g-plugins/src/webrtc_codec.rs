@@ -1,12 +1,18 @@
 //! The media the str0m WebRTC elements carry: the video codecs they packetize
 //! and depacketize, the sinks' accepted caps, the sources' placeholder caps, and
-//! the `video-codec` property every receiving element exposes.
+//! the `video-codec` property every receiving element exposes, and the
+//! abs-capture-time extension that carries each frame's capture time.
 
 use alloc::vec::Vec;
 
+use std::time::UNIX_EPOCH;
+
 use str0m::format::Codec;
-use str0m::media::{Frequency, MediaKind, MediaTime};
+use str0m::media::{Frequency, MediaKind, MediaTime, Writer};
+use str0m::rtp::{AbsCaptureTime, Extension};
 use str0m::RtcConfig;
+
+use g2g_core::frame::Frame;
 
 use g2g_core::{
     AudioFormat, Caps, Dim, PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
@@ -247,7 +253,7 @@ impl Track {
     }
 
     /// Turn this track's codec on in an `Rtc` under construction.
-    pub(crate) fn enable(self, config: RtcConfig) -> RtcConfig {
+    fn enable(self, config: RtcConfig) -> RtcConfig {
         match self {
             Track::Video(codec) => codec.enable(config),
             Track::Audio => config.enable_opus(true),
@@ -294,11 +300,18 @@ impl Track {
     }
 }
 
+// a slot ExtensionMap::standard leaves free, str0m takes the peer's id from its SDP
+const ABS_CAPTURE_TIME_EXTENSION_ID: u8 = 5;
+
 /// Enable every distinct codec in `tracks` on an `Rtc` under construction.
 pub(crate) fn enable_tracks(
-    mut config: RtcConfig,
+    config: RtcConfig,
     tracks: impl IntoIterator<Item = Track>,
 ) -> RtcConfig {
+    let mut config = config.set_extension(
+        ABS_CAPTURE_TIME_EXTENSION_ID,
+        Extension::AbsoluteCaptureTime,
+    );
     let mut seen: Vec<Track> = Vec::new();
     for track in tracks {
         if !seen.contains(&track) {
@@ -307,6 +320,45 @@ pub(crate) fn enable_tracks(
         }
     }
     config
+}
+
+pub(crate) fn frame_capture_time(frame: &Frame) -> Option<AbsCaptureTime> {
+    #[cfg(feature = "metadata")]
+    {
+        let wall_clock = frame.meta.get::<g2g_core::WallClockMeta>()?;
+        // str0m writes a time before 1970 as zero, the value that means no time
+        let since_epoch =
+            core::time::Duration::from_nanos(u64::try_from(wall_clock.unix_nanos).ok()?);
+        Some(AbsCaptureTime {
+            capture_time: UNIX_EPOCH + since_epoch,
+            clock_offset: None,
+        })
+    }
+    #[cfg(not(feature = "metadata"))]
+    {
+        let _ = frame;
+        None
+    }
+}
+
+pub(crate) fn stamp_capture_time(
+    writer: Writer<'_>,
+    capture_time: Option<AbsCaptureTime>,
+) -> Writer<'_> {
+    match capture_time {
+        Some(capture_time) => writer.abs_capture_time(capture_time),
+        None => writer,
+    }
+}
+
+// str0m reads zero, the value that means no time, as the epoch itself
+pub(crate) fn capture_unix_ns(capture_time: &AbsCaptureTime) -> Option<i64> {
+    let since_epoch = capture_time
+        .capture_time
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .filter(|since_epoch| !since_epoch.is_zero())?;
+    i64::try_from(since_epoch.as_nanos()).ok()
 }
 
 #[cfg(test)]
@@ -401,6 +453,55 @@ mod tests {
         for codec in WebRtcVideoCodec::ALL {
             assert!(codec.caps_placeholder().fixate().is_ok());
         }
+    }
+
+    #[test]
+    fn every_offer_maps_abs_capture_time_on_its_media() {
+        let config = RtcConfig::new()
+            .set_crypto_provider(alloc::sync::Arc::new(str0m::crypto::from_feature_flags()))
+            .clear_codecs();
+        let mut rtc = enable_tracks(config, [Track::Video(WebRtcVideoCodec::H264), Track::Audio])
+            .build(std::time::Instant::now());
+        let mut api = rtc.sdp_api();
+        for kind in [MediaKind::Video, MediaKind::Audio] {
+            api.add_media(kind, str0m::media::Direction::SendOnly, None, None, None);
+        }
+        let (offer, _pending) = api.apply().expect("an offer");
+        let extmap = alloc::format!(
+            "a=extmap:{ABS_CAPTURE_TIME_EXTENSION_ID} {}",
+            g2g_core::rtp::ABS_CAPTURE_TIME_URI
+        );
+        assert_eq!(
+            offer.to_sdp_string().matches(&extmap).count(),
+            2,
+            "both m-lines map the extension"
+        );
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn capture_time_round_trips_through_abs_capture_time() {
+        // 2026-10-20 plus a sub-microsecond tail
+        const UNIX_NANOS: i64 = 1_792_454_400_123_456_789;
+        let stamped = |unix_nanos| {
+            let mut frame = Frame::new(
+                g2g_core::MemoryDomain::System(g2g_core::SystemSlice::from_boxed(
+                    alloc::vec![0u8; 1].into_boxed_slice(),
+                )),
+                g2g_core::FrameTiming::default(),
+                0,
+            );
+            frame.meta.attach(g2g_core::WallClockMeta { unix_nanos });
+            frame
+        };
+        let capture_time = frame_capture_time(&stamped(UNIX_NANOS)).expect("a stamped frame");
+        assert_eq!(capture_unix_ns(&capture_time), Some(UNIX_NANOS));
+        assert_eq!(frame_capture_time(&stamped(-1)), None, "before 1970");
+        let epoch = AbsCaptureTime {
+            capture_time: UNIX_EPOCH,
+            clock_offset: None,
+        };
+        assert_eq!(capture_unix_ns(&epoch), None, "str0m's reading of zero");
     }
 
     #[test]

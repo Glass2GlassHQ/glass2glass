@@ -54,8 +54,9 @@ use crate::livekit_signal::{
 };
 use crate::livekitsrc::{answer_offer, recv_signal, send_signal};
 use crate::webrtc_codec::{
-    enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property,
-    sink_caps_alternatives, Track, WebRtcVideoCodec, VIDEO_CODEC_PROP,
+    enable_tracks, frame_capture_time, get_video_codec_property, opus_caps,
+    set_video_codec_property, sink_caps_alternatives, stamp_capture_time, Track, WebRtcVideoCodec,
+    VIDEO_CODEC_PROP,
 };
 use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_util::{
@@ -665,7 +666,8 @@ impl MultiDuplexSession for LiveKitDuplex {
                                 if let Some(p) = *pt_slot {
                                     let rtp_time = track.media_time(frame.timing.pts_ns);
                                     if let Some(writer) = pub_rtc.writer(mid) {
-                                        let _ = writer.write(
+                                        let capture_time = frame_capture_time(&frame);
+                                        let _ = stamp_capture_time(writer, capture_time).write(
                                             p,
                                             Instant::now(),
                                             rtp_time,

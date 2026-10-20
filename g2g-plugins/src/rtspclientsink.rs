@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 use g2g_core::log::{io_err, short_type_name, LogName, LogSource};
 use g2g_core::mediaclock::MediaClock;
 use g2g_core::metrics::{monotonic_ns, unix_time_ns};
+use g2g_core::rtp::CaptureTimeExtensionIds;
 use g2g_core::{
     g2g_info, g2g_warn, ntp_from_unix_nanos, AudioFormat, Caps, CapsConstraint, ConfigureOutcome,
     Dim, ElementMetadata, G2gError, HardwareError, MultiInputElement, OutputSink, PipelinePacket,
@@ -31,6 +32,9 @@ use crate::aacparse::{
 use crate::annexb::{au_is_keyframe, parameter_sets, split_annexb};
 use crate::opusparse::{is_opus_config, parse_opus_head, parse_toc};
 use crate::rtcp::{build_sdes_cname, SenderCounters};
+use crate::rtpcapturetime::{
+    get_capture_time_prop, set_capture_time_prop, ABS_CAPTURE_TIME_ID_PROPERTY, NTP_64_ID_PROPERTY,
+};
 use crate::rtpklv::rtp_timestamp_at_clock;
 use crate::rtppay::{RtpAacPacketizer, RtpH264Packetizer, RtpH265Packetizer, RtpOpusPacketizer};
 use crate::rtspclient::{
@@ -44,8 +48,8 @@ use crate::rtspserver::{
     INTERLEAVED_HEADER_LEN, INTERLEAVED_MARKER,
 };
 use crate::sdp::{
-    aac_media_section, h264_media_section, h265_media_section, opus_media_section,
-    session_description, stream_control, OPUS_CLOCK_HZ,
+    aac_media_section, capture_time_extmap, h264_media_section, h265_media_section,
+    opus_media_section, session_description, stream_control, OPUS_CLOCK_HZ,
 };
 
 const DEFAULT_USER_AGENT: &str = concat!("g2g/", env!("CARGO_PKG_VERSION"));
@@ -218,6 +222,14 @@ impl StreamConfig {
         }
     }
 
+    // only the video packetizers write capture time
+    fn capture_time_ids(&self, requested: CaptureTimeExtensionIds) -> CaptureTimeExtensionIds {
+        match self.video_codec() {
+            Some(_) => requested,
+            None => CaptureTimeExtensionIds::default(),
+        }
+    }
+
     fn clock_rate(&self) -> u32 {
         match self {
             StreamConfig::H264 { .. } | StreamConfig::H265 { .. } => MediaClock::VIDEO_RATE_HZ,
@@ -260,14 +272,27 @@ enum StreamPacketizer {
 }
 
 impl StreamPacketizer {
+    // `capture_time_ids` is empty for audio, see `StreamConfig::capture_time_ids`
     fn packetize(
         &mut self,
         frame: &[u8],
         rtp_timestamp: u32,
+        capture_time_ids: CaptureTimeExtensionIds,
+        capture_ntp: u64,
     ) -> Result<Vec<Vec<u8>>, PublishError> {
         match self {
-            StreamPacketizer::H264(p) => Ok(p.packetize(frame, rtp_timestamp)),
-            StreamPacketizer::H265(p) => Ok(p.packetize(frame, rtp_timestamp)),
+            StreamPacketizer::H264(p) => Ok(p.packetize_with_capture_time(
+                frame,
+                rtp_timestamp,
+                capture_time_ids,
+                capture_ntp,
+            )),
+            StreamPacketizer::H265(p) => Ok(p.packetize_with_capture_time(
+                frame,
+                rtp_timestamp,
+                capture_time_ids,
+                capture_ntp,
+            )),
             StreamPacketizer::Aac {
                 packetizer,
                 audio_specific_config,
@@ -541,6 +566,7 @@ impl MediaDestination {
 #[derive(Debug)]
 struct SessionStream {
     packetizer: StreamPacketizer,
+    capture_time_ids: CaptureTimeExtensionIds,
     ssrc: u32,
     clock_rate: u32,
     destination: MediaDestination,
@@ -578,11 +604,30 @@ struct PublishSession {
 }
 
 impl PublishSession {
-    async fn send(&mut self, input: usize, frame: &[u8], pts_ns: u64) -> Result<(), PublishError> {
+    async fn send(
+        &mut self,
+        input: usize,
+        frame: &[u8],
+        pts_ns: u64,
+        capture_unix_ns: Option<i64>,
+    ) -> Result<(), PublishError> {
         self.control.discard_inbound()?;
         let stream = &mut self.streams[input];
         let rtp_timestamp = rtp_timestamp_at_clock(pts_ns, u64::from(stream.clock_rate));
-        let packets = stream.packetizer.packetize(frame, rtp_timestamp)?;
+        let capture_ntp = if stream.capture_time_ids.is_empty() {
+            0
+        } else {
+            // an unstamped frame takes the wall-clock time its sender reports pair with its PTS
+            let capture_unix_ns = capture_unix_ns
+                .unwrap_or_else(|| self.pts_zero_unix_ns.saturating_add_unsigned(pts_ns));
+            ntp_from_unix_nanos(capture_unix_ns).ok_or(PublishError::TimestampOutsideNtpRange)?
+        };
+        let packets = stream.packetizer.packetize(
+            frame,
+            rtp_timestamp,
+            stream.capture_time_ids,
+            capture_ntp,
+        )?;
         for packet in &packets {
             stream.counters.count(packet);
         }
@@ -909,6 +954,7 @@ enum PublishState {
 struct HeldFrame {
     input: usize,
     pts_ns: u64,
+    capture_unix_ns: Option<i64>,
     data: Vec<u8>,
 }
 
@@ -923,6 +969,7 @@ struct PublishSettings {
     keep_alive: bool,
     report_interval_ms: u64,
     reconnect: ReconnectPolicy,
+    capture_time_ids: CaptureTimeExtensionIds,
     log_name: LogName,
 }
 
@@ -1015,6 +1062,8 @@ static RTSP_CLIENT_SINK_PROPS: &[PropertySpec] = &[
         "cap on the doubling reconnect backoff, milliseconds",
     )
     .with_default("5000"),
+    ABS_CAPTURE_TIME_ID_PROPERTY,
+    NTP_64_ID_PROPERTY,
 ];
 
 impl PublishSettings {
@@ -1103,7 +1152,10 @@ impl SessionParameters {
             .iter()
             .zip(&payload_types)
             .enumerate()
-            .map(|(i, (config, pt))| config.media_section(*pt, i))
+            .map(|(i, (config, pt))| {
+                let capture_time_ids = config.capture_time_ids(settings.capture_time_ids);
+                config.media_section(*pt, i) + &capture_time_extmap(&capture_time_ids)
+            })
             .collect();
         let sdp = session_description(&sections);
         let announce = control
@@ -1132,6 +1184,7 @@ impl SessionParameters {
             let ssrc = random_u32();
             streams.push(SessionStream {
                 packetizer: config.packetizer(*pt, ssrc),
+                capture_time_ids: config.capture_time_ids(settings.capture_time_ids),
                 ssrc,
                 clock_rate: config.clock_rate(),
                 destination,
@@ -1224,6 +1277,7 @@ impl RtspClientSink {
                     initial_backoff_ms: DEFAULT_INITIAL_BACKOFF_MS,
                     max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
                 },
+                capture_time_ids: CaptureTimeExtensionIds::default(),
                 log_name: LogName::new(),
             },
             pads: (0..inputs).map(|_| Pad::default()).collect(),
@@ -1246,7 +1300,13 @@ impl RtspClientSink {
         self
     }
 
-    async fn on_frame(&mut self, input: usize, frame: &[u8], pts_ns: u64) -> Result<(), G2gError> {
+    async fn on_frame(
+        &mut self,
+        input: usize,
+        frame: &[u8],
+        pts_ns: u64,
+        capture_unix_ns: Option<i64>,
+    ) -> Result<(), G2gError> {
         let pad = self.pads.get(input).ok_or(G2gError::NotConfigured)?;
         let codec = pad.codec.ok_or(G2gError::NotConfigured)?;
         if pad.config.is_none() {
@@ -1266,11 +1326,12 @@ impl RtspClientSink {
             return Ok(());
         }
         let PublishState::Holding(held) = &mut self.state else {
-            return self.publish(input, frame, pts_ns).await;
+            return self.publish(input, frame, pts_ns, capture_unix_ns).await;
         };
         held.push(HeldFrame {
             input,
             pts_ns,
+            capture_unix_ns,
             data: frame.to_vec(),
         });
         if let Some(waiting) = self.pads.iter().position(|pad| pad.config.is_none()) {
@@ -1295,7 +1356,13 @@ impl RtspClientSink {
             Err(e) => return self.lose_session(parameters, e),
         }
         for frame in held {
-            self.publish(frame.input, &frame.data, frame.pts_ns).await?;
+            self.publish(
+                frame.input,
+                &frame.data,
+                frame.pts_ns,
+                frame.capture_unix_ns,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -1307,7 +1374,13 @@ impl RtspClientSink {
             .collect()
     }
 
-    async fn publish(&mut self, input: usize, frame: &[u8], pts_ns: u64) -> Result<(), G2gError> {
+    async fn publish(
+        &mut self,
+        input: usize,
+        frame: &[u8],
+        pts_ns: u64,
+        capture_unix_ns: Option<i64>,
+    ) -> Result<(), G2gError> {
         let video_codec = self.pads[input]
             .config
             .as_ref()
@@ -1330,7 +1403,7 @@ impl RtspClientSink {
         if session.streams[input].awaiting_keyframe && !opens_stream {
             return Ok(());
         }
-        let Err(error) = session.send(input, frame, pts_ns).await else {
+        let Err(error) = session.send(input, frame, pts_ns, capture_unix_ns).await else {
             return Ok(());
         };
         // aborted under the lock, before the old task can run on the dead session
@@ -1472,7 +1545,14 @@ impl MultiInputElement for RtspClientSink {
                         g2g_warn!(self, "pad {input}: frame has no PTS for its RTP timestamp");
                         return Err(G2gError::CapsMismatch);
                     };
-                    self.on_frame(input, data, pts_ns).await
+                    #[cfg(feature = "metadata")]
+                    let capture_unix_ns = frame
+                        .meta
+                        .get::<g2g_core::WallClockMeta>()
+                        .map(|wall_clock| wall_clock.unix_nanos);
+                    #[cfg(not(feature = "metadata"))]
+                    let capture_unix_ns = None;
+                    self.on_frame(input, data, pts_ns, capture_unix_ns).await
                 }
                 PipelinePacket::Eos => self.on_eos(input).await,
                 _ => Ok(()),
@@ -1485,6 +1565,11 @@ impl MultiInputElement for RtspClientSink {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(result) =
+            set_capture_time_prop(&mut self.settings.capture_time_ids, name, &value)
+        {
+            return result;
+        }
         let text = || value.as_str().map(str::to_string).ok_or(PropError::Type);
         match name {
             "location" => self.settings.location = text()?,
@@ -1523,6 +1608,9 @@ impl MultiInputElement for RtspClientSink {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = get_capture_time_prop(&self.settings.capture_time_ids, name) {
+            return Some(value);
+        }
         let text = |s: &str| Some(PropValue::Str(s.to_string()));
         match name {
             "location" => text(&self.settings.location),

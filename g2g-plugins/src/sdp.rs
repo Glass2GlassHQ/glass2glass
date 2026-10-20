@@ -27,6 +27,7 @@ use alloc::vec::Vec;
 
 use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::mediaclock::MediaClock;
+use g2g_core::rtp::{CaptureTimeExtensionIds, ABS_CAPTURE_TIME_URI, NTP_64_URI};
 use g2g_core::{AudioFormat, Caps, Dim, Rate, VideoCodec};
 
 use crate::nalparse::NalCodec;
@@ -151,6 +152,17 @@ fn parse_extmap(a: &str) -> Option<(NonZeroU8, String)> {
     Some((id, fields.next()?.to_string()))
 }
 
+// the `a=extmap` lines `parse_extmap` reads back, one per capture-time extension in use
+pub fn capture_time_extmap(ids: &CaptureTimeExtensionIds) -> String {
+    [
+        (ids.abs_capture_time, ABS_CAPTURE_TIME_URI),
+        (ids.ntp_64, NTP_64_URI),
+    ]
+    .into_iter()
+    .filter_map(|(id, uri)| Some(format!("a=extmap:{} {uri}\r\n", id?)))
+    .collect()
+}
+
 /// Parse `IEEE1588-2008:<gmid>:<domain>` into `(gmid, domain)`.
 fn parse_refclk(a: &str) -> Option<(String, u8)> {
     let rest = a.split_once(':')?.1; // drop the profile
@@ -213,6 +225,14 @@ impl SdpMedia {
             .into_iter()
             .filter_map(|s| Self::from_section(&s))
             .collect()
+    }
+
+    pub fn capture_time_ids(&self) -> CaptureTimeExtensionIds {
+        let mut ids = CaptureTimeExtensionIds::default();
+        for (id, uri) in &self.extmap {
+            ids.assign_extmap(*id, uri);
+        }
+        ids
     }
 
     fn from_section(s: &SdpSection) -> Option<Self> {
@@ -637,6 +657,23 @@ mod tests {
                 (20, g2g_core::rtp::ABS_CAPTURE_TIME_URI)
             ],
             "id 0 and a non-numeric id are not RFC 8285 ids"
+        );
+    }
+
+    #[test]
+    fn capture_time_extmap_reads_back_as_the_ids_written() {
+        let ids = CaptureTimeExtensionIds {
+            abs_capture_time: NonZeroU8::new(7),
+            ntp_64: NonZeroU8::new(20),
+        };
+        let mut section = h264_media_section(96, None, None, 0);
+        section.push_str(&capture_time_extmap(&ids));
+        let media = SdpMedia::parse(&session_description(&[section])).expect("an H.264 section");
+        assert_eq!(media.capture_time_ids(), ids);
+        assert_eq!(
+            capture_time_extmap(&CaptureTimeExtensionIds::default()),
+            "",
+            "no extension in use writes no line"
         );
     }
 

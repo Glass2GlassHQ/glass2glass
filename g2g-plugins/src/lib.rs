@@ -1104,7 +1104,11 @@ pub mod remotetransform;
 ))]
 mod netprop;
 // The capture-time RTP header extensions' properties and sender stamp.
-#[cfg(any(feature = "udp-ingress", feature = "udp-egress"))]
+#[cfg(any(
+    feature = "udp-ingress",
+    feature = "udp-egress",
+    feature = "rtsp-client-sink"
+))]
 mod rtpcapturetime;
 
 // Shared byte-stream carrier pieces (M1068, M1079): the frame shape a received

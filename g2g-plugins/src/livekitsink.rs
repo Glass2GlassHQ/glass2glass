@@ -52,6 +52,7 @@ use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind, Mid, Pt, Rid};
+use str0m::rtp::AbsCaptureTime;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::log::{short_type_name, LogName, LogSource, Target};
@@ -70,7 +71,10 @@ use crate::livekit_signal::{
 };
 use crate::livekitsrc::{recv_signal, send_signal};
 use crate::turn::TurnSet;
-use crate::webrtc_codec::{enable_tracks, sink_caps_alternatives, Track, WebRtcVideoCodec};
+use crate::webrtc_codec::{
+    enable_tracks, frame_capture_time, sink_caps_alternatives, stamp_capture_time, Track,
+    WebRtcVideoCodec,
+};
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_simulcast::{
     rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SimulcastPads,
@@ -96,6 +100,7 @@ struct MediaUnit {
     mid: Mid,
     rid: Option<Rid>,
     pts_ns: u64,
+    capture_time: Option<AbsCaptureTime>,
     data: Vec<u8>,
 }
 
@@ -716,6 +721,7 @@ impl MultiInputElement for LiveKitSink {
                         mid: sink.mid,
                         rid: sink.rid,
                         pts_ns,
+                        capture_time: frame_capture_time(&frame),
                         data,
                     };
                     if let Some(tx) = &self.tx {
@@ -951,7 +957,12 @@ async fn run_session(mut a: SessionArgs) {
                             Some(rid) => writer.rid(rid),
                             None => writer,
                         };
-                        let _ = writer.write(p, Instant::now(), rtp_time, unit.data);
+                        let _ = stamp_capture_time(writer, unit.capture_time).write(
+                            p,
+                            Instant::now(),
+                            rtp_time,
+                            unit.data,
+                        );
                     }
                 }
             }

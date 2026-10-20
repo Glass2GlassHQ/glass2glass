@@ -8,9 +8,9 @@ use str0m::Rtc;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::{FrameTiming, MemoryDomain};
+use g2g_core::{FrameMetaSet, FrameTiming, MemoryDomain};
 
-use crate::webrtc_codec::WebRtcVideoCodec;
+use crate::webrtc_codec::{capture_unix_ns, WebRtcVideoCodec};
 use crate::webrtc_util::media_time_ns;
 
 pub(crate) const PLI_INTERVAL: Duration = Duration::from_secs(1);
@@ -30,6 +30,7 @@ pub(crate) struct MediaReceiver {
 pub(crate) struct ReceivedUnit {
     pub(crate) kind: MediaKind,
     pub(crate) pts_ns: u64,
+    pub(crate) capture_unix_ns: Option<i64>,
     pub(crate) data: Vec<u8>,
     // true on the unit that opened the keyframe gate (callers log it)
     pub(crate) first_keyframe: bool,
@@ -70,6 +71,7 @@ impl MediaReceiver {
 
     pub(crate) fn media_data(&mut self, data: &MediaData) -> Option<ReceivedUnit> {
         let pts_ns = media_time_ns(data.time);
+        let capture_unix_ns = media_capture_unix_ns(data);
         if Some(data.mid) == self.video_mid {
             let first_keyframe = !self.video_keyframed;
             if first_keyframe {
@@ -83,6 +85,7 @@ impl MediaReceiver {
             return Some(ReceivedUnit {
                 kind: MediaKind::Video,
                 pts_ns,
+                capture_unix_ns,
                 keyframe: self.video_codec.is_keyframe(&converted),
                 data: converted,
                 first_keyframe,
@@ -92,6 +95,7 @@ impl MediaReceiver {
             return Some(ReceivedUnit {
                 kind: MediaKind::Audio,
                 pts_ns,
+                capture_unix_ns,
                 data: data.data.to_vec(),
                 first_keyframe: false,
                 keyframe: false,
@@ -129,7 +133,30 @@ impl ReceivedUnit {
                 keyframe: self.keyframe,
             },
             sequence,
-            meta: Default::default(),
+            meta: capture_time_meta(self.capture_unix_ns),
         }
+    }
+}
+
+pub(crate) fn media_capture_unix_ns(data: &MediaData) -> Option<i64> {
+    data.ext_vals
+        .abs_capture_time
+        .as_ref()
+        .and_then(capture_unix_ns)
+}
+
+pub(crate) fn capture_time_meta(capture_unix_ns: Option<i64>) -> FrameMetaSet {
+    #[cfg(feature = "metadata")]
+    {
+        let mut meta = FrameMetaSet::new();
+        if let Some(unix_nanos) = capture_unix_ns {
+            meta.attach(g2g_core::WallClockMeta { unix_nanos });
+        }
+        meta
+    }
+    #[cfg(not(feature = "metadata"))]
+    {
+        let _ = capture_unix_ns;
+        FrameMetaSet::new()
     }
 }
