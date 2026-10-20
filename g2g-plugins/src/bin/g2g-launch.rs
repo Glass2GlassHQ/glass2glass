@@ -73,7 +73,7 @@
 //! adds the successful per-edge intersect / fixate narration on top. Both are
 //! read by `g2g_core::log::init_from_env`.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::process;
 use std::time::{Duration, Instant};
 
@@ -832,7 +832,10 @@ fn main() {
                     Ok(r) => break r,
                     Err(_elapsed) => {
                         drain_bus(&bus, opts.verbose, &mut failed);
-                        if !opts.quiet && last_status.elapsed() >= STATUS_INTERVAL {
+                        if !opts.quiet
+                            && std::io::stderr().is_terminal()
+                            && last_status.elapsed() >= STATUS_INTERVAL
+                        {
                             last_status = Instant::now();
                             let pos = match progress.position() {
                                 Some(ns) => format!("t={:.1}s", ns as f64 / 1.0e9),

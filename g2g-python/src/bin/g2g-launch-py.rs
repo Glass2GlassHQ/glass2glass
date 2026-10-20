@@ -36,6 +36,7 @@
 //! ffmpeg / wayland-sink / analytics).
 
 use std::future::Future;
+use std::io::IsTerminal;
 use std::pin::Pin;
 use std::process;
 use std::time::{Duration, Instant};
@@ -163,7 +164,7 @@ fn main() {
             match tokio::time::timeout(Duration::from_secs(1), &mut run).await {
                 Ok(r) => break r,
                 Err(_elapsed) => {
-                    if !quiet {
+                    if !quiet && std::io::stderr().is_terminal() {
                         let pos = match progress.position() {
                             Some(ns) => format!("t={:.1}s", ns as f64 / 1.0e9),
                             None => String::from("prerolling"),
