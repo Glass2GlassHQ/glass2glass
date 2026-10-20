@@ -1066,6 +1066,31 @@ fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
                     w.u32(r.id);
                     w.u32(r.label);
                 }
+                AnalyticsNode::Pose(p) => {
+                    w.u8(5);
+                    w.f32(p.bbox.x);
+                    w.f32(p.bbox.y);
+                    w.f32(p.bbox.w);
+                    w.f32(p.bbox.h);
+                    w.u32(p.label);
+                    w.f32(p.confidence);
+                    w.u32(p.keypoints.len() as u32);
+                    for k in &p.keypoints {
+                        w.f32(k.x);
+                        w.f32(k.y);
+                        w.f32(k.confidence);
+                    }
+                }
+                AnalyticsNode::OrientedDetection(o) => {
+                    w.u8(6);
+                    w.f32(o.cx);
+                    w.f32(o.cy);
+                    w.f32(o.w);
+                    w.f32(o.h);
+                    w.f32(o.angle_radians);
+                    w.u32(o.label);
+                    w.f32(o.confidence);
+                }
             }
         }
         w.u32(a.relations.len() as u32);
@@ -1179,8 +1204,9 @@ fn relation_kind_from_u8(v: u8) -> Result<crate::meta::RelationKind, WireError> 
 fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
     use crate::meta::{
         AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, CaptionMeta, CaptionTriple,
-        Chromaticity, Classification, HdrStaticMeta, Mask, MasteringDisplay, ObjectDetection,
-        Relation, Roi, Segmentation, TimecodeMeta, Tracking, WallClockMeta,
+        Chromaticity, Classification, HdrStaticMeta, Keypoint, Mask, MasteringDisplay,
+        ObjectDetection, OrientedDetection, Pose, Relation, Roi, Segmentation, TimecodeMeta,
+        Tracking, WallClockMeta,
     };
 
     let count = r.u8()?;
@@ -1241,6 +1267,41 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
                             },
                             id: r.u32()?,
                             label: r.u32()?,
+                        }),
+                        5 => {
+                            let bbox = BBox {
+                                x: r.f32()?,
+                                y: r.f32()?,
+                                w: r.f32()?,
+                                h: r.f32()?,
+                            };
+                            let label = r.u32()?;
+                            let confidence = r.f32()?;
+                            // No capacity from the peer's count: each keypoint
+                            // read fails at the end of the message instead.
+                            let mut keypoints = Vec::new();
+                            for _ in 0..r.u32()? {
+                                keypoints.push(Keypoint {
+                                    x: r.f32()?,
+                                    y: r.f32()?,
+                                    confidence: r.f32()?,
+                                });
+                            }
+                            AnalyticsNode::Pose(Pose {
+                                bbox,
+                                label,
+                                confidence,
+                                keypoints,
+                            })
+                        }
+                        6 => AnalyticsNode::OrientedDetection(OrientedDetection {
+                            cx: r.f32()?,
+                            cy: r.f32()?,
+                            w: r.f32()?,
+                            h: r.f32()?,
+                            angle_radians: r.f32()?,
+                            label: r.u32()?,
+                            confidence: r.f32()?,
                         }),
                         _ => return Err(WireError::BadTag),
                     };
@@ -1919,6 +1980,60 @@ mod tests {
                 assert_eq!(seg.mask.sample(2, 1), Some(60));
                 assert_eq!(seg.mask.sample(3, 0), None, "outside the mask width");
                 assert_eq!(a.rois().next().expect("roi node").id, 9);
+            }
+            other => panic!("expected DataFrame, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn pose_and_oriented_detection_nodes_round_trip() {
+        use crate::meta::{AnalyticsMeta, AnalyticsNode, BBox, Keypoint, OrientedDetection, Pose};
+        let mut analytics = AnalyticsMeta::new();
+        analytics.push(AnalyticsNode::Pose(Pose {
+            bbox: BBox {
+                x: 0.1,
+                y: 0.2,
+                w: 0.3,
+                h: 0.4,
+            },
+            label: 0,
+            confidence: 0.8,
+            keypoints: alloc::vec![
+                Keypoint {
+                    x: 0.15,
+                    y: 0.25,
+                    confidence: 0.9,
+                },
+                Keypoint {
+                    x: 0.35,
+                    y: 0.55,
+                    confidence: 0.1,
+                },
+            ],
+        }));
+        analytics.push(AnalyticsNode::OrientedDetection(OrientedDetection {
+            cx: 0.5,
+            cy: 0.6,
+            w: 0.2,
+            h: 0.05,
+            angle_radians: 0.7,
+            label: 3,
+            confidence: 0.6,
+        }));
+
+        let mut meta = FrameMetaSet::new();
+        meta.attach(analytics.clone());
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta,
+        };
+        match roundtrip(&PipelinePacket::DataFrame(frame)) {
+            PipelinePacket::DataFrame(got) => {
+                let a = got.meta.get::<AnalyticsMeta>().expect("analytics survived");
+                assert_eq!(a.nodes, analytics.nodes);
             }
             other => panic!("expected DataFrame, got {other:?}"),
         }

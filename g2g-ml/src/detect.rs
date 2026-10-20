@@ -7,9 +7,12 @@
 //! box channels then `C` class scores, across `A` anchors), applies a
 //! confidence threshold and per-class non-maximum suppression, and attaches an
 //! [`AnalyticsMeta`] of [`ObjectDetection`]s to the frame, which it forwards
-//! unchanged (an identity pass-through carrying metadata). Box coordinates are
-//! normalized to `[0, 1]` by the model input size, so they survive a downstream
-//! scale / crop without a rewrite.
+//! unchanged (an identity pass-through carrying metadata). The `head` property
+//! switches to a `-pose` export (`[1, 5 + 3K, A]`, emitting [`Pose`]s) or an
+//! `-obb` export (`[1, 4 + C + 1, A]`, emitting [`OrientedDetection`]s). Box
+//! coordinates are normalized to `[0, 1]` by the model input size, or by the
+//! picture when `picture-width` / `picture-height` say the model input was a
+//! letterbox of it, so they survive a downstream scale / crop without a rewrite.
 //!
 //! Pure Rust, no inference engine; gated behind the `analytics` feature (which
 //! pulls `g2g-core/metadata`).
@@ -20,14 +23,67 @@ use core::pin::Pin;
 use crate::tensor_bytes::finite_f32_from_le_bytes;
 
 use g2g_core::{
-    AnalyticsMeta, AsyncElement, BBox, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    ObjectDetection, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    TensorDType,
+    AnalyticsMeta, AnalyticsNode, AsyncElement, BBox, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, G2gError, Keypoint, ObjectDetection, OrientedDetection, OutputSink,
+    PipelinePacket, Pose, PropError, PropKind, PropValue, PropertySpec, TensorDType,
 };
 
 /// Model input resolution assumed when neither the properties nor a video link
 /// give one.
 const DEFAULT_INPUT_SIZE: f32 = 640.0;
+
+/// Box channels at the front of every YOLO head: centre x, centre y, width,
+/// height, in model input pixels.
+const BOX_CHANNELS: usize = 4;
+/// A pose keypoint is three channels: x, y, visibility.
+const KEYPOINT_CHANNELS: usize = 3;
+
+/// Which YOLO export layout the model output follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Head {
+    Detect,
+    Pose,
+    Obb,
+}
+
+/// The `head` property's values, each one `Head::from_name` accepts.
+const HEAD_NICKS: &str = "detect | pose | obb";
+
+impl Head {
+    fn from_name(name: &str) -> Option<Head> {
+        match name {
+            "detect" => Some(Head::Detect),
+            "pose" => Some(Head::Pose),
+            "obb" => Some(Head::Obb),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Head::Detect => "detect",
+            Head::Pose => "pose",
+            Head::Obb => "obb",
+        }
+    }
+
+    /// The class and trailing-channel counts of a `channels`-wide output, `None`
+    /// when this head cannot read that width. Pose has one person score then
+    /// `K` keypoints, OBB has its classes then one angle channel.
+    fn split(self, channels: usize) -> Option<(usize, usize)> {
+        let after_box = channels.checked_sub(BOX_CHANNELS)?;
+        match self {
+            Head::Detect if after_box >= 1 => Some((after_box, 0)),
+            Head::Pose => {
+                let keypoint_channels = after_box.checked_sub(1)?;
+                (keypoint_channels > 0 && keypoint_channels % KEYPOINT_CHANNELS == 0)
+                    .then_some((1, keypoint_channels))
+            }
+            Head::Obb if after_box >= 2 => Some((after_box - 1, 1)),
+            _ => None,
+        }
+    }
+}
 
 /// # Example
 ///
@@ -53,6 +109,11 @@ pub struct DetectionPostprocess {
     /// Which attached tensor to decode when the frame carries several. Empty
     /// takes the only one.
     tensor_name: String,
+    head: Head,
+    /// Size of the picture the model input was letterboxed from. Zero for both
+    /// means the input was a plain stretch of the picture.
+    picture_w: u32,
+    picture_h: u32,
     input_caps: Option<Caps>,
     configured: bool,
     emitted: u64,
@@ -70,6 +131,9 @@ impl DetectionPostprocess {
             channels: 0,
             anchors: 0,
             tensor_name: String::new(),
+            head: Head::Detect,
+            picture_w: 0,
+            picture_h: 0,
             input_caps: None,
             configured: false,
             emitted: 0,
@@ -118,8 +182,9 @@ impl DetectionPostprocess {
         self.emitted
     }
 
-    /// Accept an F32 tensor of rank-3 shape `[1, 4 + C, A]` with `C >= 1`.
-    fn parse_shape(caps: &Caps) -> Option<(usize, usize)> {
+    /// Accept an F32 tensor of rank-3 shape `[1, channels, A]` whose channel
+    /// count `head` can read.
+    fn parse_shape(head: Head, caps: &Caps) -> Option<(usize, usize)> {
         let Caps::Tensor {
             dtype: TensorDType::F32,
             shape,
@@ -128,23 +193,48 @@ impl DetectionPostprocess {
         else {
             return None;
         };
-        Self::parse_dims(shape.dims())
+        Self::parse_dims(head, shape.dims())
     }
 
-    /// The `(4 + C, A)` of a YOLO output shape `[1, 4 + C, A]`.
-    fn parse_dims(dims: &[u32]) -> Option<(usize, usize)> {
+    /// The `(channels, A)` of a YOLO output shape `[1, channels, A]`.
+    fn parse_dims(head: Head, dims: &[u32]) -> Option<(usize, usize)> {
         match dims {
-            [1, ch, a] if *ch >= 5 && *a >= 1 => Some((*ch as usize, *a as usize)),
+            [1, ch, a] if *a >= 1 && head.split(*ch as usize).is_some() => {
+                Some((*ch as usize, *a as usize))
+            }
             _ => None,
         }
+    }
+
+    /// How model input pixels map onto the picture. Letterboxed only when both
+    /// `picture-*` sizes are set: `configure_pipeline` and `process` refuse one
+    /// without the other.
+    fn picture_mapping(&self) -> PictureMapping {
+        let (input_w, input_h) = self.normalize_size();
+        if self.picture_w == 0 || self.picture_h == 0 {
+            return PictureMapping::stretch(input_w, input_h);
+        }
+        PictureMapping::letterbox(
+            input_w,
+            input_h,
+            self.picture_w as f32,
+            self.picture_h as f32,
+        )
+    }
+
+    fn check_picture_size(&self) -> Result<(), G2gError> {
+        if (self.picture_w == 0) != (self.picture_h == 0) {
+            return Err(G2gError::NotConfigured);
+        }
+        Ok(())
     }
 
     /// The two link shapes this element decodes on: a tensor frame (the model
     /// output IS the frame), or a video frame carrying the model output as a
     /// `TensorMeta` (`ortinfer attach-tensor=true`). Either way the packet is
     /// forwarded unchanged with an `AnalyticsMeta` added.
-    fn accepts(caps: &Caps) -> bool {
-        Self::parse_shape(caps).is_some() || matches!(caps, Caps::RawVideo { .. })
+    fn accepts(head: Head, caps: &Caps) -> bool {
+        Self::parse_shape(head, caps).is_some() || matches!(caps, Caps::RawVideo { .. })
     }
 
     /// The `channels * anchors` little-endian f32 values of a model output.
@@ -170,48 +260,228 @@ impl DetectionPostprocess {
     ///
     /// [`process`]: AsyncElement::process
     pub fn detect(&self, values: &[f32]) -> Vec<ObjectDetection> {
-        let (input_w, input_h) = self.normalize_size();
-        let boxes = decode_anchors(
-            values,
-            AnchorLayout {
-                anchors: self.anchors,
-                classes: self.channels.saturating_sub(4),
-                extra: 0,
-                input_w,
-                input_h,
-            },
-            self.conf_threshold,
-        );
-        suppress_overlaps(boxes, self.iou_threshold)
+        let layout = AnchorLayout {
+            anchors: self.anchors,
+            classes: self.channels.saturating_sub(BOX_CHANNELS),
+            extra: 0,
+        };
+        let picture = self.picture_mapping();
+        suppress_overlaps(
+            decode_anchors(values, layout, self.conf_threshold),
+            self.iou_threshold,
+        )
+        .into_iter()
+        .map(|b| ObjectDetection {
+            bbox: picture.bbox(b.detection.bbox),
+            ..b.detection
+        })
+        .collect()
+    }
+
+    /// Decode a channel-major `-pose` output `[1, 5 + 3K, A]` into people with
+    /// `K` keypoints each. One class, so suppression is class-agnostic.
+    fn poses(&self, values: &[f32], layout: AnchorLayout) -> Vec<Pose> {
+        let picture = self.picture_mapping();
+        suppress_overlaps(
+            decode_anchors(values, layout, self.conf_threshold),
+            self.iou_threshold,
+        )
+        .into_iter()
+        .map(|b| Pose {
+            bbox: picture.bbox(b.detection.bbox),
+            label: b.detection.label,
+            confidence: b.detection.confidence,
+            keypoints: b
+                .extra
+                .as_chunks::<KEYPOINT_CHANNELS>()
+                .0
+                .iter()
+                .map(|&[x, y, confidence]| picture.keypoint(x, y, confidence))
+                .collect(),
+        })
+        .collect()
+    }
+
+    /// Decode a channel-major `-obb` output `[1, 4 + C + 1, A]`, whose last
+    /// channel is each box's angle in radians.
+    fn oriented_detections(&self, values: &[f32], layout: AnchorLayout) -> Vec<OrientedDetection> {
+        let candidates = decode_anchors(values, layout, self.conf_threshold)
             .into_iter()
-            .map(|b| b.detection)
+            .map(|b| {
+                let bbox = b.detection.bbox;
+                OrientedDetection {
+                    cx: bbox.x + bbox.w / 2.0,
+                    cy: bbox.y + bbox.h / 2.0,
+                    w: bbox.w,
+                    h: bbox.h,
+                    angle_radians: b.extra[0],
+                    label: b.detection.label,
+                    confidence: b.detection.confidence,
+                }
+            })
+            .collect();
+        let picture = self.picture_mapping();
+        suppress_rotated_overlaps(candidates, self.iou_threshold)
+            .into_iter()
+            .map(|o| picture.oriented(o))
             .collect()
+    }
+
+    /// Decode `values` as the configured head into the frame's analytics graph.
+    fn analyze(&self, values: &[f32]) -> Result<AnalyticsMeta, G2gError> {
+        self.check_picture_size()?;
+        let (classes, extra) = self
+            .head
+            .split(self.channels)
+            .ok_or(G2gError::CapsMismatch)?;
+        let layout = AnchorLayout {
+            anchors: self.anchors,
+            classes,
+            extra,
+        };
+        let mut analytics = AnalyticsMeta::new();
+        match self.head {
+            Head::Detect => {
+                for d in self.detect(values) {
+                    analytics.add_detection(d);
+                }
+            }
+            Head::Pose => {
+                for p in self.poses(values, layout) {
+                    analytics.push(AnalyticsNode::Pose(p));
+                }
+            }
+            Head::Obb => {
+                for o in self.oriented_detections(values, layout) {
+                    analytics.push(AnalyticsNode::OrientedDetection(o));
+                }
+            }
+        }
+        Ok(analytics)
+    }
+}
+
+/// Maps model input pixels to normalized `[0, 1]` picture coordinates as
+/// `(v - pad) / span`. A stretched picture fills the input (no pad, the span is
+/// the input size). A letterboxed one sits centred at the largest scale that
+/// fits, as Ultralytics `LetterBox(center=True, auto=False)` places it
+/// (ultralytics/data/augment.py), and its boxes and keypoints are clipped to the
+/// picture as `clip_boxes` / `clip_coords` do (ultralytics/utils/ops.py).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PictureMapping {
+    pad_x: f32,
+    pad_y: f32,
+    span_x: f32,
+    span_y: f32,
+    clip_to_picture: bool,
+}
+
+impl PictureMapping {
+    pub(crate) fn stretch(input_w: f32, input_h: f32) -> Self {
+        Self {
+            pad_x: 0.0,
+            pad_y: 0.0,
+            span_x: input_w,
+            span_y: input_h,
+            clip_to_picture: false,
+        }
+    }
+
+    /// Ultralytics rounds the resized size and the pad to whole pixels, which
+    /// moves a point by under one model input pixel from this exact placement.
+    fn letterbox(input_w: f32, input_h: f32, picture_w: f32, picture_h: f32) -> Self {
+        let scale = (input_w / picture_w).min(input_h / picture_h);
+        let span_x = picture_w * scale;
+        let span_y = picture_h * scale;
+        Self {
+            pad_x: (input_w - span_x) / 2.0,
+            pad_y: (input_h - span_y) / 2.0,
+            span_x,
+            span_y,
+            clip_to_picture: true,
+        }
+    }
+
+    fn x(&self, model_x: f32) -> f32 {
+        (model_x - self.pad_x) / self.span_x
+    }
+
+    fn y(&self, model_y: f32) -> f32 {
+        (model_y - self.pad_y) / self.span_y
+    }
+
+    fn clip(&self, v: f32) -> f32 {
+        if self.clip_to_picture {
+            v.clamp(0.0, 1.0)
+        } else {
+            v
+        }
+    }
+
+    /// A box in model input pixels (top-left corner and size) as a normalized
+    /// picture box.
+    pub(crate) fn bbox(&self, model: BBox) -> BBox {
+        if !self.clip_to_picture {
+            return BBox {
+                x: self.x(model.x),
+                y: self.y(model.y),
+                w: model.w / self.span_x,
+                h: model.h / self.span_y,
+            };
+        }
+        let x0 = self.clip(self.x(model.x));
+        let y0 = self.clip(self.y(model.y));
+        let x1 = self.clip(self.x(model.x + model.w));
+        let y1 = self.clip(self.y(model.y + model.h));
+        BBox {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        }
+    }
+
+    fn keypoint(&self, model_x: f32, model_y: f32, confidence: f32) -> Keypoint {
+        Keypoint {
+            x: self.clip(self.x(model_x)),
+            y: self.clip(self.y(model_y)),
+            confidence,
+        }
+    }
+
+    /// Ultralytics leaves rotated boxes unclipped (`scale_boxes` with
+    /// `xywh=True` returns before `clip_boxes`), so this does too.
+    fn oriented(&self, model: OrientedDetection) -> OrientedDetection {
+        OrientedDetection {
+            cx: self.x(model.cx),
+            cy: self.y(model.cy),
+            w: model.w / self.span_x,
+            h: model.h / self.span_y,
+            ..model
+        }
     }
 }
 
 /// How to read one YOLO channel-major output tensor `[1, 4 + classes + extra,
 /// anchors]`: the 4 box channels, the class scores, then `extra` trailing
 /// channels a head other than plain detection carries (the mask coefficients of
-/// a `-seg` export). `input_w` / `input_h` are the model input size the box
-/// coordinates are normalized against.
+/// a `-seg` export, the keypoints of a `-pose` one, the angle of an `-obb` one).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AnchorLayout {
     pub anchors: usize,
     pub classes: usize,
     pub extra: usize,
-    pub input_w: f32,
-    pub input_h: f32,
 }
 
-/// One anchor's decoded box plus its trailing non-class channel values (empty
-/// for a plain detector).
+/// One anchor's decoded box, in model input pixels, plus its trailing
+/// non-class channel values (empty for a plain detector).
 #[derive(Debug, Clone)]
 pub(crate) struct AnchorBox {
     pub detection: ObjectDetection,
     pub extra: Vec<f32>,
 }
 
-/// Decode a flat channel-major output tensor into normalized boxes above
+/// Decode a flat channel-major output tensor into model-pixel boxes above
 /// `conf_threshold` (pre-NMS). An input shorter than the layout describes yields
 /// nothing rather than indexing past its end.
 pub(crate) fn decode_anchors(
@@ -220,7 +490,7 @@ pub(crate) fn decode_anchors(
     conf_threshold: f32,
 ) -> Vec<AnchorBox> {
     let a = layout.anchors;
-    let channels = 4 + layout.classes + layout.extra;
+    let channels = BOX_CHANNELS + layout.classes + layout.extra;
     let needed = channels.checked_mul(a);
     if layout.classes == 0 || needed.is_none_or(|n| n > values.len()) {
         return Vec::new();
@@ -235,21 +505,21 @@ pub(crate) fn decode_anchors(
         let mut best_label = 0u32;
         let mut best_score = f32::MIN;
         for cls in 0..layout.classes {
-            let s = values[(4 + cls) * a + ai];
+            let s = values[(BOX_CHANNELS + cls) * a + ai];
             if s > best_score {
                 best_score = s;
                 best_label = cls as u32;
             }
         }
         if best_score >= conf_threshold {
-            let first_extra = 4 + layout.classes;
+            let first_extra = BOX_CHANNELS + layout.classes;
             out.push(AnchorBox {
                 detection: ObjectDetection {
                     bbox: BBox {
-                        x: (cx - w / 2.0) / layout.input_w,
-                        y: (cy - h / 2.0) / layout.input_h,
-                        w: w / layout.input_w,
-                        h: h / layout.input_h,
+                        x: cx - w / 2.0,
+                        y: cy - h / 2.0,
+                        w,
+                        h,
                     },
                     label: best_label,
                     confidence: best_score,
@@ -285,6 +555,69 @@ pub(crate) fn suppress_overlaps(mut boxes: Vec<AnchorBox>, iou_threshold: f32) -
     kept
 }
 
+/// Ultralytics' rotated-box suppression (`non_max_suppression` with
+/// `rotated=True` calls `TorchNMS.fast_nms` with `batch_probiou`,
+/// ultralytics/utils/nms.py): Fast-NMS, which drops a box that overlaps any
+/// higher-scoring same-class box, even one that was itself dropped.
+fn suppress_rotated_overlaps(
+    mut boxes: Vec<OrientedDetection>,
+    iou_threshold: f32,
+) -> Vec<OrientedDetection> {
+    boxes.sort_by(|x, y| {
+        y.confidence
+            .partial_cmp(&x.confidence)
+            .unwrap_or(core::cmp::Ordering::Equal)
+    });
+    (0..boxes.len())
+        .filter(|&i| {
+            !boxes[..i]
+                .iter()
+                .any(|k| k.label == boxes[i].label && probiou(k, &boxes[i]) > iou_threshold)
+        })
+        .map(|i| boxes[i])
+        .collect()
+}
+
+/// `batch_probiou` in ultralytics/utils/metrics.py adds this to each
+/// denominator and logarithm argument.
+const PROBIOU_EPS: f32 = 1e-7;
+/// `batch_probiou` clamps the Bhattacharyya distance to this.
+const PROBIOU_MAX_DISTANCE: f32 = 100.0;
+/// A uniform spread over a length `l` has variance `l^2 / 12`.
+const UNIFORM_VARIANCE_DIVISOR: f32 = 12.0;
+
+/// The covariance `[[a, c], [c, b]]` of the Gaussian a rotated box stands for
+/// (`_get_covariance_matrix` in ultralytics/utils/metrics.py).
+fn box_covariance(o: &OrientedDetection) -> (f32, f32, f32) {
+    let along_w = o.w * o.w / UNIFORM_VARIANCE_DIVISOR;
+    let along_h = o.h * o.h / UNIFORM_VARIANCE_DIVISOR;
+    let (sin, cos) = o.angle_radians.sin_cos();
+    (
+        along_w * cos * cos + along_h * sin * sin,
+        along_w * sin * sin + along_h * cos * cos,
+        (along_w - along_h) * cos * sin,
+    )
+}
+
+/// Ultralytics' probabilistic IoU of two rotated boxes (`batch_probiou`,
+/// ultralytics/utils/metrics.py): each box is a Gaussian and the overlap is
+/// `1 - sqrt(1 - exp(-bd))`, `bd` their Bhattacharyya distance
+/// `t1 + t2 + t3`, with `t1 = ((a1+a2)(y1-y2)^2 + (b1+b2)(x1-x2)^2) / (4 D)`,
+/// `t2 = (c1+c2)(x2-x1)(y1-y2) / (2 D)`, `D = (a1+a2)(b1+b2) - (c1+c2)^2`, and
+/// `t3 = ln(D / (4 sqrt(det1 det2))) / 2`.
+fn probiou(p: &OrientedDetection, q: &OrientedDetection) -> f32 {
+    let (a1, b1, c1) = box_covariance(p);
+    let (a2, b2, c2) = box_covariance(q);
+    let (a, b, c) = (a1 + a2, b1 + b2, c1 + c2);
+    let joint = a * b - c * c;
+    let t1 = (a * (p.cy - q.cy).powi(2) + b * (p.cx - q.cx).powi(2)) / (joint + PROBIOU_EPS) * 0.25;
+    let t2 = (c * (q.cx - p.cx) * (p.cy - q.cy)) / (joint + PROBIOU_EPS) * 0.5;
+    let determinants = (a1 * b1 - c1 * c1).max(0.0) * (a2 * b2 - c2 * c2).max(0.0);
+    let t3 = (joint / (4.0 * determinants.sqrt() + PROBIOU_EPS) + PROBIOU_EPS).ln() * 0.5;
+    let distance = (t1 + t2 + t3).clamp(PROBIOU_EPS, PROBIOU_MAX_DISTANCE);
+    1.0 - (1.0 - (-distance).exp() + PROBIOU_EPS).sqrt()
+}
+
 impl AsyncElement for DetectionPostprocess {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -292,7 +625,7 @@ impl AsyncElement for DetectionPostprocess {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        if Self::accepts(upstream_caps) {
+        if Self::accepts(self.head, upstream_caps) {
             Ok(upstream_caps.clone())
         } else {
             Err(G2gError::CapsMismatch)
@@ -301,8 +634,9 @@ impl AsyncElement for DetectionPostprocess {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         // Identity: the frame passes through unchanged; only metadata is added.
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| {
-            if Self::accepts(input) {
+        let head = self.head;
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            if Self::accepts(head, input) {
                 CapsSet::one(input.clone())
             } else {
                 CapsSet::from_alternatives(Vec::new())
@@ -311,12 +645,13 @@ impl AsyncElement for DetectionPostprocess {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if !Self::accepts(absolute_caps) {
+        if !Self::accepts(self.head, absolute_caps) {
             return Err(G2gError::CapsMismatch);
         }
+        self.check_picture_size()?;
         // On a video link the shape is not in the caps; it comes off each
         // frame's TensorMeta instead.
-        if let Some((channels, anchors)) = Self::parse_shape(absolute_caps) {
+        if let Some((channels, anchors)) = Self::parse_shape(self.head, absolute_caps) {
             self.channels = channels;
             self.anchors = anchors;
         }
@@ -349,6 +684,21 @@ impl AsyncElement for DetectionPostprocess {
                 self.tensor_name = String::from(value.as_str().ok_or(PropError::Type)?);
                 Ok(())
             }
+            "head" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                self.head = Head::from_name(name).ok_or(PropError::Value)?;
+                Ok(())
+            }
+            "picture-width" | "picture-height" => {
+                let v = value.as_uint().ok_or(PropError::Type)?;
+                let v = u32::try_from(v).map_err(|_| PropError::Value)?;
+                if name == "picture-width" {
+                    self.picture_w = v;
+                } else {
+                    self.picture_h = v;
+                }
+                Ok(())
+            }
             "input-width" | "input-height" => {
                 let v = value.as_uint().ok_or(PropError::Type)?;
                 // The size divides the box coordinates, so zero has no meaning.
@@ -373,6 +723,9 @@ impl AsyncElement for DetectionPostprocess {
             "input-width" => Some(PropValue::Uint(self.normalize_size().0 as u64)),
             "input-height" => Some(PropValue::Uint(self.normalize_size().1 as u64)),
             "tensor-name" => Some(PropValue::Str(self.tensor_name.clone())),
+            "head" => Some(PropValue::Str(String::from(self.head.name()))),
+            "picture-width" => Some(PropValue::Uint(self.picture_w as u64)),
+            "picture-height" => Some(PropValue::Uint(self.picture_h as u64)),
             _ => None,
         }
     }
@@ -403,16 +756,12 @@ impl AsyncElement for DetectionPostprocess {
                         if tensor.dtype != TensorDType::F32 {
                             return Err(G2gError::CapsMismatch);
                         }
-                        let (channels, anchors) =
-                            Self::parse_dims(tensor.shape.dims()).ok_or(G2gError::CapsMismatch)?;
+                        let (channels, anchors) = Self::parse_dims(self.head, tensor.shape.dims())
+                            .ok_or(G2gError::CapsMismatch)?;
                         let values = Self::read_f32(&tensor.data, channels, anchors)?;
                         self.channels = channels;
                         self.anchors = anchors;
-                        let detections = self.detect(&values);
-                        let mut analytics = AnalyticsMeta::new();
-                        for d in detections {
-                            analytics.add_detection(d);
-                        }
+                        let analytics = self.analyze(&values)?;
                         frame.meta.attach(analytics);
                         self.emitted += 1;
                         out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -422,12 +771,7 @@ impl AsyncElement for DetectionPostprocess {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let values = Self::read_f32(slice, self.channels, self.anchors)?;
-
-                    let detections = self.detect(&values);
-                    let mut analytics = AnalyticsMeta::new();
-                    for d in detections {
-                        analytics.add_detection(d);
-                    }
+                    let analytics = self.analyze(&values)?;
                     // Attach the graph and forward the (unchanged) tensor frame.
                     frame.meta.attach(analytics);
                     self.emitted += 1;
@@ -436,7 +780,7 @@ impl AsyncElement for DetectionPostprocess {
                 // Control packets pass through; a per-input caps change re-parses
                 // the shape so the decoder tracks `C` / `A`.
                 PipelinePacket::CapsChanged(caps) => {
-                    if let Some((ch, a)) = Self::parse_shape(&caps) {
+                    if let Some((ch, a)) = Self::parse_shape(self.head, &caps) {
                         self.channels = ch;
                         self.anchors = a;
                     }
@@ -464,9 +808,10 @@ impl AsyncElement for DetectionPostprocess {
     }
 }
 
-/// Settable properties: the two thresholds and the model input size box
-/// coordinates are normalized against, so a `gst-launch` line can tune the
-/// decoder without the builder.
+/// Settable properties: the two thresholds, the model input size box
+/// coordinates are normalized against, the head layout and the letterboxed
+/// picture size, so a `gst-launch` line can tune the decoder without the
+/// builder.
 static DETECT_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "conf-threshold",
@@ -493,6 +838,25 @@ static DETECT_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "which attached tensor to decode when the frame carries several",
     ),
+    PropertySpec::new(
+        "head",
+        PropKind::Str,
+        "YOLO export the tensor comes from: boxes, pose keypoints or oriented boxes",
+    )
+    .with_enum_values(HEAD_NICKS)
+    .with_default("detect"),
+    PropertySpec::new(
+        "picture-width",
+        PropKind::Uint,
+        "width of the picture the model input was letterboxed from, 0 for a plain stretch",
+    )
+    .with_default("0"),
+    PropertySpec::new(
+        "picture-height",
+        PropKind::Uint,
+        "height of the picture the model input was letterboxed from, 0 for a plain stretch",
+    )
+    .with_default("0"),
 ];
 
 /// A tensor caps carries a concrete shape (the model's `[1, 4 + C, A]`), so
@@ -841,7 +1205,8 @@ mod tests {
         );
         assert_eq!(got[1].0, 1, "kept the distinct class-1 detection");
 
-        // Box 0 is normalized: x = (100 - 20)/640.
+        // Box 0 is normalized: x = (100 - 20)/640, with no picture size set.
+        assert_eq!(det.get_property("picture-width"), Some(PropValue::Uint(0)));
         let d0 = meta.detections().find(|d| d.label == 0).unwrap();
         assert!((d0.bbox.x - (80.0 / 640.0)).abs() < 1e-6);
         assert!((d0.bbox.w - (40.0 / 640.0)).abs() < 1e-6);
@@ -900,5 +1265,216 @@ mod tests {
             layout: TensorLayout::Nchw,
         };
         assert!(det.intercept_caps(&flat).is_err());
+    }
+
+    /// Tolerance for coordinates that pass through one f32 division.
+    const COORDINATE_TOLERANCE: f32 = 1e-6;
+
+    fn assert_close(got: f32, want: f32, what: &str) {
+        assert!(
+            (got - want).abs() < COORDINATE_TOLERANCE,
+            "{what}: got {got}, want {want}"
+        );
+    }
+
+    /// A 1280x640 picture letterboxed into a 640x640 input: scale 0.5, so the
+    /// picture spans 640x320 model pixels with 160 rows of pad above and below.
+    fn wide_picture_letterbox() -> PictureMapping {
+        PictureMapping::letterbox(640.0, 640.0, 1280.0, 640.0)
+    }
+
+    #[test]
+    fn a_box_touching_the_letterboxed_picture_edge_maps_to_zero_and_one() {
+        let picture = wide_picture_letterbox();
+        let whole = picture.bbox(BBox {
+            x: 0.0,
+            y: 160.0,
+            w: 640.0,
+            h: 320.0,
+        });
+        assert_eq!(
+            whole,
+            BBox {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0
+            }
+        );
+        // A box reaching into the top pad is clipped at the picture's top edge.
+        let overhanging = picture.bbox(BBox {
+            x: 320.0,
+            y: 100.0,
+            w: 64.0,
+            h: 100.0,
+        });
+        assert_eq!(overhanging.y, 0.0);
+        assert_close(
+            overhanging.h,
+            40.0 / 320.0,
+            "height left inside the picture",
+        );
+        assert_close(overhanging.x, 0.5, "x untouched by the vertical pad");
+    }
+
+    #[tokio::test]
+    async fn pose_keypoints_land_where_the_tensor_says_through_the_letterbox() {
+        let mut det = DetectionPostprocess::new(0.5, 0.5).with_input_size(640, 640);
+        det.set_property("head", PropValue::Str("pose".into()))
+            .unwrap();
+        det.set_property("picture-width", PropValue::Uint(1280))
+            .unwrap();
+        det.set_property("picture-height", PropValue::Uint(640))
+            .unwrap();
+        // [1, 5 + 3 * 2, 3]: box, person score, then two keypoints as x, y,
+        // visibility rows. Only anchor 0 scores above threshold.
+        det.configure_pipeline(&tensor_caps(11, 3)).unwrap();
+        let frame = tensor_frame(&[
+            [320.0, 0.0, 0.0],
+            [320.0, 0.0, 0.0],
+            [64.0, 0.0, 0.0],
+            [64.0, 0.0, 0.0],
+            [0.9, 0.1, 0.1],
+            [160.0, 0.0, 0.0],
+            [240.0, 0.0, 0.0],
+            [0.8, 0.0, 0.0],
+            [480.0, 0.0, 0.0],
+            [400.0, 0.0, 0.0],
+            [0.3, 0.0, 0.0],
+        ]);
+        let mut sink = MetaSink::default();
+        det.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+
+        let meta = sink.last.expect("frame carries AnalyticsMeta");
+        assert_eq!(meta.detections().count(), 0, "a pose head emits poses only");
+        let poses: Vec<&Pose> = meta.poses().collect();
+        assert_eq!(poses.len(), 1);
+        let pose = poses[0];
+        assert_close(pose.confidence, 0.9, "person score");
+        assert_close(pose.bbox.x, 288.0 / 640.0, "box left");
+        assert_close(pose.bbox.y, (288.0 - 160.0) / 320.0, "box top");
+        assert_close(pose.bbox.w, 64.0 / 640.0, "box width");
+        assert_close(pose.bbox.h, 64.0 / 320.0, "box height");
+        assert_eq!(pose.keypoints.len(), 2);
+        let want = [(0.25, 0.25, 0.8), (0.75, 0.75, 0.3)];
+        for (keypoint, (x, y, confidence)) in pose.keypoints.iter().zip(want) {
+            assert_close(keypoint.x, x, "keypoint x");
+            assert_close(keypoint.y, y, "keypoint y");
+            assert_close(keypoint.confidence, confidence, "keypoint visibility");
+        }
+    }
+
+    #[tokio::test]
+    async fn obb_reads_the_angle_and_probiou_keeps_the_higher_of_two_near_twins() {
+        let mut det = DetectionPostprocess::new(0.5, 0.5).with_input_size(640, 640);
+        det.set_property("head", PropValue::Str("obb".into()))
+            .unwrap();
+        // [1, 4 + 1 + 1, 3]: anchors 0 and 1 are near-identical rotated boxes,
+        // anchor 2 sits far away.
+        det.configure_pipeline(&tensor_caps(6, 3)).unwrap();
+        let frame = tensor_frame(&[
+            [100.0, 101.0, 400.0],
+            [100.0, 100.0, 400.0],
+            [80.0, 80.0, 40.0],
+            [20.0, 20.0, 40.0],
+            [0.8, 0.9, 0.7],
+            [0.5, 0.52, 1.0],
+        ]);
+        let mut sink = MetaSink::default();
+        det.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+
+        let meta = sink.last.expect("frame carries AnalyticsMeta");
+        let mut boxes: Vec<OrientedDetection> = meta.oriented_detections().copied().collect();
+        boxes.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+        assert_eq!(boxes.len(), 2, "the lower-scoring twin was suppressed");
+        assert_close(boxes[0].confidence, 0.9, "kept the higher twin");
+        assert_close(boxes[0].angle_radians, 0.52, "angle from the last channel");
+        assert_close(boxes[0].cx, 101.0 / 640.0, "centre x");
+        assert_close(boxes[0].w, 80.0 / 640.0, "width");
+        assert_close(boxes[1].angle_radians, 1.0, "the far box keeps its angle");
+    }
+
+    /// Ultralytics' Fast-NMS drops a box overlapping any higher-scoring one,
+    /// even one that was itself dropped: in a chain of three where only
+    /// neighbours overlap, only the first survives.
+    #[test]
+    fn rotated_suppression_drops_a_box_whose_suppressor_was_dropped() {
+        let at = |cx: f32, confidence: f32| OrientedDetection {
+            cx,
+            cy: 100.0,
+            w: 80.0,
+            h: 20.0,
+            angle_radians: 0.0,
+            label: 0,
+            confidence,
+        };
+        let (first, second, third) = (at(100.0, 0.9), at(130.0, 0.8), at(160.0, 0.7));
+        let iou_threshold = 0.45;
+        assert!(probiou(&first, &second) > iou_threshold);
+        assert!(probiou(&second, &third) > iou_threshold);
+        assert!(probiou(&first, &third) < iou_threshold);
+        let kept = suppress_rotated_overlaps(vec![third, first, second], iou_threshold);
+        assert_eq!(kept, vec![first]);
+    }
+
+    #[test]
+    fn head_layouts_reject_widths_the_head_cannot_read() {
+        let mut det = DetectionPostprocess::new(0.5, 0.5);
+        det.set_property("head", PropValue::Str("pose".into()))
+            .unwrap();
+        // 9 - 5 = 4 keypoint channels is not a whole number of keypoints.
+        assert!(det.intercept_caps(&tensor_caps(9, 3)).is_err());
+        assert!(det.configure_pipeline(&tensor_caps(9, 3)).is_err());
+        assert!(det.intercept_caps(&tensor_caps(8, 3)).is_ok());
+
+        det.set_property("head", PropValue::Str("obb".into()))
+            .unwrap();
+        // Box plus angle with no class channel between them.
+        assert!(det.intercept_caps(&tensor_caps(5, 3)).is_err());
+        assert!(det.intercept_caps(&tensor_caps(6, 3)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_pose_head_rejects_a_meta_tensor_of_the_wrong_width() {
+        let mut det = DetectionPostprocess::new(0.5, 0.5);
+        det.set_property("head", PropValue::Str("pose".into()))
+            .unwrap();
+        det.configure_pipeline(&rgba_caps(4, 4)).unwrap();
+        // Six channels is a detect layout, one keypoint channel short of a pose.
+        let frame = video_frame_with_tensor(&[[0.0; 3]; 6], 16);
+        let mut sink = MetaSink::default();
+        assert!(matches!(
+            det.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await,
+            Err(G2gError::CapsMismatch)
+        ));
+    }
+
+    #[test]
+    fn half_a_picture_size_is_refused() {
+        let mut det = DetectionPostprocess::new(0.5, 0.5);
+        det.set_property("picture-width", PropValue::Uint(1280))
+            .unwrap();
+        assert!(matches!(
+            det.configure_pipeline(&tensor_caps(6, 3)),
+            Err(G2gError::NotConfigured)
+        ));
+    }
+
+    #[test]
+    fn every_declared_head_nick_names_a_head() {
+        let spec = DETECT_PROPS
+            .iter()
+            .find(|p| p.name == "head")
+            .expect("head is declared");
+        let nicks: Vec<&str> = spec.enum_nicks().collect();
+        assert_eq!(nicks.len(), 3);
+        for nick in nicks {
+            assert_eq!(Head::from_name(nick).map(Head::name), Some(nick));
+        }
     }
 }

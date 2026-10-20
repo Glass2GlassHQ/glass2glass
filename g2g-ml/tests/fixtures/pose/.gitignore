@@ -1,0 +1,7 @@
+# Built on demand by gen.py (tools/pose-obb-fixture.sh), not committed.
+*.pt
+model.onnx
+sample.jpg
+input_f32.bin
+expected.txt
+__pycache__/

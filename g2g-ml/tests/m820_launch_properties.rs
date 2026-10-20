@@ -317,6 +317,48 @@ async fn conf_threshold_property_changes_what_is_detected() {
     );
 }
 
+#[cfg(feature = "analytics")]
+#[test]
+fn detectionpostprocess_head_and_picture_size_round_trip() {
+    use g2g_ml::detect::DetectionPostprocess;
+
+    let mut e = DetectionPostprocess::new(0.25, 0.45);
+    for name in ["head", "picture-width", "picture-height"] {
+        assert!(declares(e.properties(), name), "declares {name}");
+    }
+    assert_eq!(
+        e.get_property("head"),
+        Some(PropValue::Str("detect".into()))
+    );
+    assert_eq!(e.get_property("picture-width"), Some(PropValue::Uint(0)));
+    for head in ["pose", "obb", "detect"] {
+        e.set_property("head", PropValue::Str(head.into())).unwrap();
+        assert_eq!(e.get_property("head"), Some(PropValue::Str(head.into())));
+    }
+    e.set_property("picture-width", PropValue::Uint(1920))
+        .unwrap();
+    e.set_property("picture-height", PropValue::Uint(1080))
+        .unwrap();
+    assert_eq!(e.get_property("picture-width"), Some(PropValue::Uint(1920)));
+    assert_eq!(
+        e.get_property("picture-height"),
+        Some(PropValue::Uint(1080))
+    );
+
+    assert_eq!(
+        e.set_property("head", PropValue::Str("segment".into())),
+        Err(PropError::Value)
+    );
+    assert_eq!(
+        e.get_property("head"),
+        Some(PropValue::Str("detect".into()))
+    );
+    assert_eq!(
+        e.set_property("picture-width", PropValue::Uint(u64::MAX)),
+        Err(PropError::Value)
+    );
+}
+
 #[cfg(feature = "wgpu")]
 #[test]
 fn wgpupreprocess_gpu_output_round_trips() {

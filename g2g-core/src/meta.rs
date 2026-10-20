@@ -765,6 +765,39 @@ mod on {
         pub label: u32,
     }
 
+    /// One body keypoint of a [`Pose`]: its normalized `[0, 1]` position in the
+    /// picture and the model's visibility score for it.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Keypoint {
+        pub x: f32,
+        pub y: f32,
+        pub confidence: f32,
+    }
+
+    /// A detected person (or other skeleton) with its keypoints, in the order
+    /// the model defines them (17 COCO body points for a YOLO `-pose` model).
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Pose {
+        pub bbox: BBox,
+        pub label: u32,
+        pub confidence: f32,
+        pub keypoints: Vec<Keypoint>,
+    }
+
+    /// A rotated box: centre `(cx, cy)` and size `(w, h)` normalized by the
+    /// picture's width and height, turned by `angle_radians` about the centre.
+    /// The angle is as a YOLO `-obb` model emits it, clockwise in image axes.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct OrientedDetection {
+        pub cx: f32,
+        pub cy: f32,
+        pub w: f32,
+        pub h: f32,
+        pub angle_radians: f32,
+        pub label: u32,
+        pub confidence: f32,
+    }
+
     /// A node in the [`AnalyticsMeta`] relation graph.
     #[derive(Debug, Clone, PartialEq)]
     #[non_exhaustive]
@@ -774,6 +807,8 @@ mod on {
         Tracking(Tracking),
         Segmentation(Segmentation),
         Roi(Roi),
+        Pose(Pose),
+        OrientedDetection(OrientedDetection),
     }
 
     /// The kind of a directed edge between two analytics nodes.
@@ -853,6 +888,22 @@ mod on {
         pub fn detections(&self) -> impl Iterator<Item = &ObjectDetection> {
             self.nodes.iter().filter_map(|n| match n {
                 AnalyticsNode::Detection(d) => Some(d),
+                _ => None,
+            })
+        }
+
+        /// Iterate the pose nodes.
+        pub fn poses(&self) -> impl Iterator<Item = &Pose> {
+            self.nodes.iter().filter_map(|n| match n {
+                AnalyticsNode::Pose(p) => Some(p),
+                _ => None,
+            })
+        }
+
+        /// Iterate the oriented-box nodes.
+        pub fn oriented_detections(&self) -> impl Iterator<Item = &OrientedDetection> {
+            self.nodes.iter().filter_map(|n| match n {
+                AnalyticsNode::OrientedDetection(o) => Some(o),
                 _ => None,
             })
         }
