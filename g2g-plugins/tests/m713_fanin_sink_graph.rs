@@ -13,7 +13,7 @@ use std::sync::Arc;
 use g2g_core::fanout::{MultiInputElement, ReverseChannel};
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 use g2g_core::runtime::run_graph_threaded;
-use g2g_core::runtime::{run_graph, GraphNode};
+use g2g_core::runtime::{run_graph, run_graph_observed, GraphNode, NodeRole, Observer};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, Graph, OutputSink,
     PipelineClock, PipelinePacket, PushOutcome, Reconfigure,
@@ -380,4 +380,44 @@ async fn threaded_runner_matches_cooperative() {
         );
         assert_eq!(thr_tallies.eos[pad].load(Ordering::SeqCst), 1);
     }
+}
+
+// a frame counter that sums the edges into sink nodes (the canary's) must see the session as one
+#[tokio::test]
+async fn fanin_sink_reports_as_a_sink_node() {
+    let tallies = PadTallies::new(2);
+    let mut g: Graph<GraphNode> = Graph::new();
+    let s0 = g.add_source(GraphNode::source(VideoTestSrc::new(8, 8, 30, 4)));
+    let s1 = g.add_source(GraphNode::source(VideoTestSrc::new(8, 8, 30, 3)));
+    let session = g.add_fanin_sink(GraphNode::muxer(FakeSession::new(2, tallies.clone())), 2);
+    g.link(s0, session.input(0)).unwrap();
+    g.link(s1, session.input(1)).unwrap();
+
+    let obs = Observer::new();
+    let stats = run_graph_observed(g, &ZeroClock, 4, &obs, None)
+        .await
+        .expect("terminal fan-in runs observed");
+    assert_eq!(stats.frames_consumed, 7);
+    let snap = obs.snapshot();
+    let sinks: Vec<_> = snap
+        .nodes
+        .iter()
+        .filter(|node| node.role == NodeRole::Sink)
+        .collect();
+    assert_eq!(
+        sinks.len(),
+        1,
+        "the session is the one sink: {:?}",
+        snap.nodes
+    );
+    let into_session: u64 = snap
+        .edges
+        .iter()
+        .filter(|edge| edge.to == sinks[0].id)
+        .map(|edge| edge.counts.packets)
+        .sum();
+    assert!(
+        into_session >= 7,
+        "{into_session} packets reached the session"
+    );
 }

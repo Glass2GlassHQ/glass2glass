@@ -46,7 +46,9 @@ impl From<NodeKind> for NodeRole {
             NodeKind::Transform => NodeRole::Transform,
             NodeKind::Sink => NodeRole::Sink,
             NodeKind::Tee(_) => NodeRole::Tee,
-            NodeKind::Muxer(_) | NodeKind::FaninSink(_) => NodeRole::Muxer,
+            NodeKind::Muxer(_) => NodeRole::Muxer,
+            // a terminal fan-in is where its inputs' packets end, so counts into it are sink counts
+            NodeKind::FaninSink(_) => NodeRole::Sink,
             NodeKind::FanoutSrc(_) => NodeRole::Source,
         }
     }

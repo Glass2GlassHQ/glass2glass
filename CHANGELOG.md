@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1684: a terminal fan-in element (`rtspclientsink`, `webrtcsessionsink`, `livekitsink`) reports the `sink` telemetry role, so observers summing packets into sinks count its frames.
 - M1683: `hlssrc location=X ! decodebin name=d` decodes each muxed stream of the playlist on its own `d.` branch.
 - M1682: a bare `d.` or `s.` fan-out branch reads the first free stream its first element takes, as gst links a pad by caps.
 - M1681: a fan-out stream no `d.` or `s.` branch reads is dropped and the linked branches play, as gst leaves its pad unlinked.
