@@ -717,6 +717,15 @@ pub struct H265SlicePoc {
     pub slice_pic_order_cnt_lsb: u32,
     pub is_irap: bool,
     pub is_idr: bool,
+    pub temporal_id: u8,
+    pub no_output_of_prior_pics_flag: bool,
+    // 1 when the PPS does not code it
+    pub pic_output_flag: bool,
+}
+
+// `TemporalId` of an H.265 NAL unit: `nuh_temporal_id_plus1 - 1` (7.4.2.2)
+pub(crate) fn h265_temporal_id(nal: &[u8]) -> u8 {
+    nal.get(1).map_or(0, |byte| (byte & 0x7).saturating_sub(1))
 }
 
 /// Parse the picture-order-count prefix of an H.265 VCL NAL, two-byte header and
@@ -734,7 +743,7 @@ pub fn parse_h265_slice_poc(
         return None; // not a VCL NAL
     }
     let mut br = BitReader::skipping_emulation_prevention(&nal[2..]);
-    parse_h265_slice_poc_bits(&mut br, nal_unit_type, sps, pps)
+    parse_h265_slice_poc_bits(&mut br, nal_unit_type, h265_temporal_id(nal), sps, pps)
 }
 
 /// The bit-level half of [`parse_h265_slice_poc`], over a reader of the
@@ -744,6 +753,7 @@ pub fn parse_h265_slice_poc(
 pub(crate) fn parse_h265_slice_poc_bits(
     br: &mut BitReader<'_>,
     nal_unit_type: u8,
+    temporal_id: u8,
     sps: &H265PocContext,
     pps: &[H265PpsPoc],
 ) -> Option<H265SlicePoc> {
@@ -755,12 +765,11 @@ pub(crate) fn parse_h265_slice_poc_bits(
             nal_unit_type,
             is_irap,
             is_idr,
+            temporal_id,
             ..H265SlicePoc::default()
         });
     }
-    if is_irap {
-        br.read_bit()?; // no_output_of_prior_pics_flag
-    }
+    let no_output_of_prior_pics_flag = is_irap && br.read_bit()? == 1;
     let slice_pic_parameter_set_id = br.read_ue()?;
     if slice_pic_parameter_set_id > u32::from(u8::MAX) {
         return None;
@@ -775,9 +784,7 @@ pub(crate) fn parse_h265_slice_poc_bits(
         br.read_bit()?; // slice_reserved_flag[i]
     }
     let slice_type = br.read_ue()?;
-    if active.output_flag_present_flag {
-        br.read_bit()?; // pic_output_flag
-    }
+    let pic_output_flag = !active.output_flag_present_flag || br.read_bit()? == 1;
     if sps.separate_colour_plane_flag {
         br.read_bits(2)?; // colour_plane_id
     }
@@ -796,6 +803,9 @@ pub(crate) fn parse_h265_slice_poc_bits(
         slice_pic_order_cnt_lsb,
         is_irap,
         is_idr,
+        temporal_id,
+        no_output_of_prior_pics_flag,
+        pic_output_flag,
     })
 }
 
@@ -833,25 +843,58 @@ pub fn h265_nal_is_reference(nal_unit_type: u8) -> bool {
     }
 }
 
+// H.265 NAL unit types (Table 7-1) the order count derivation tells apart
+const H265_NAL_END_OF_SEQUENCE: u8 = 36;
+const H265_NAL_RADL_R: u8 = 7;
+const H265_NAL_RASL_R: u8 = 9;
+const H265_NAL_BLA_W_LP: u8 = 16;
+const H265_NAL_BLA_N_LP: u8 = 18;
+const H265_NAL_CRA: u8 = 21;
+
+// a picture that can be prevTid0Pic: not RASL, RADL or a sub-layer non-reference picture (8.3.1)
+fn h265_is_prev_tid0_candidate(slice: &H265SlicePoc) -> bool {
+    let nal_unit_type = slice.nal_unit_type;
+    let leading = nal_unit_type == H265_NAL_RADL_R || nal_unit_type == H265_NAL_RASL_R;
+    slice.temporal_id == 0 && h265_nal_is_reference(nal_unit_type) && !leading
+}
+
+// `NoRaslOutputFlag` (8.1.3) marks an IRAP that starts a coded video sequence
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct H265PictureOrder {
+    pub pic_order_cnt: i32,
+    pub no_rasl_output_flag: bool,
+}
+
 /// H.265 picture-order-count derivation state, carried across the pictures of
 /// one stream in decoding order (H.265 8.3.1, the H.264 type-0 scheme).
 #[derive(Debug, Clone, Default)]
 pub struct H265PocState {
     prev_poc_msb: i32,
     prev_poc_lsb: i32,
+    started: bool,
+    after_end_of_sequence: bool,
 }
 
 impl H265PocState {
-    /// The picture order count of the picture `slice` opens, advancing the state.
-    pub fn compute(&mut self, sps: &H265PocContext, slice: &H265SlicePoc) -> i32 {
-        if slice.is_idr {
-            self.prev_poc_msb = 0;
-            self.prev_poc_lsb = 0;
-            return 0;
-        }
+    // the next picture, an IRAP, starts a new coded video sequence
+    pub fn end_of_sequence(&mut self) {
+        self.after_end_of_sequence = true;
+    }
+
+    /// The order of the picture `slice` opens, advancing the state.
+    pub fn compute(&mut self, sps: &H265PocContext, slice: &H265SlicePoc) -> H265PictureOrder {
+        let nal_unit_type = slice.nal_unit_type;
+        let is_bla = (H265_NAL_BLA_W_LP..=H265_NAL_BLA_N_LP).contains(&nal_unit_type);
+        let first_in_sequence = !self.started || self.after_end_of_sequence;
+        let no_rasl_output_flag =
+            slice.is_idr || is_bla || (nal_unit_type == H265_NAL_CRA && first_in_sequence);
+        self.started = true;
+        self.after_end_of_sequence = false;
         let max_lsb = 1i32 << sps.log2_max_pic_order_cnt_lsb;
         let lsb = slice.slice_pic_order_cnt_lsb as i32;
-        let poc_msb = if lsb < self.prev_poc_lsb && (self.prev_poc_lsb - lsb) >= max_lsb / 2 {
+        let poc_msb = if slice.is_irap && no_rasl_output_flag {
+            0
+        } else if lsb < self.prev_poc_lsb && (self.prev_poc_lsb - lsb) >= max_lsb / 2 {
             self.prev_poc_msb.saturating_add(max_lsb)
         } else if lsb > self.prev_poc_lsb && (lsb - self.prev_poc_lsb) > max_lsb / 2 {
             self.prev_poc_msb.saturating_sub(max_lsb)
@@ -859,13 +902,14 @@ impl H265PocState {
             self.prev_poc_msb
         };
         let poc = i64::from(poc_msb).saturating_add(i64::from(lsb));
-        // A TemporalId-0 reference picture (not RASL / RADL / SLNR) updates the
-        // prev state; sub-layer non-reference types leave it alone.
-        if h265_nal_is_reference(slice.nal_unit_type) {
+        if h265_is_prev_tid0_candidate(slice) {
             self.prev_poc_msb = poc_msb;
             self.prev_poc_lsb = lsb;
         }
-        clamp_poc(poc)
+        H265PictureOrder {
+            pic_order_cnt: clamp_poc(poc),
+            no_rasl_output_flag,
+        }
     }
 }
 
@@ -954,6 +998,9 @@ impl AccessUnitPoc {
                 continue;
             }
             let nal_unit_type = (nal[0] >> 1) & 0x3F;
+            if nal_unit_type == H265_NAL_END_OF_SEQUENCE {
+                self.h265.end_of_sequence();
+            }
             if nal_unit_type == 34 {
                 let rbsp = strip_emulation_prevention(&nal[2..]);
                 if let Some((pps, _, _)) = parse_h265_pps_poc_bits(&mut BitReader::new(&rbsp)) {
@@ -966,7 +1013,7 @@ impl AccessUnitPoc {
                 if !slice.first_slice_segment_in_pic_flag {
                     continue;
                 }
-                poc = Some(self.h265.compute(&sps.h265_context(), &slice));
+                poc = Some(self.h265.compute(&sps.h265_context(), &slice).pic_order_cnt);
             }
         }
         poc
@@ -1180,5 +1227,68 @@ mod tests {
             let _ = parse_h264_slice_poc(&nal, &sps, &[H264PpsPoc::default()]);
         }
         assert!(parse_h264_slice_poc(&[0x41, 0x88], &sps, &[H264PpsPoc::default()]).is_none());
+    }
+
+    const H265_NAL_TRAIL_R: u8 = 1;
+    const H265_NAL_IDR_W_RADL: u8 = 19;
+
+    fn h265_picture(
+        nal_unit_type: u8,
+        slice_pic_order_cnt_lsb: u32,
+        temporal_id: u8,
+    ) -> H265SlicePoc {
+        H265SlicePoc {
+            first_slice_segment_in_pic_flag: true,
+            nal_unit_type,
+            slice_pic_order_cnt_lsb,
+            is_irap: (16..=23).contains(&nal_unit_type),
+            is_idr: nal_unit_type == H265_NAL_IDR_W_RADL,
+            temporal_id,
+            ..H265SlicePoc::default()
+        }
+    }
+
+    // max lsb 16
+    const H265_SMALL_LSB: H265PocContext = H265PocContext {
+        log2_max_pic_order_cnt_lsb: 4,
+        separate_colour_plane_flag: false,
+    };
+
+    #[test]
+    fn h265_sequence_start_resets_the_msb() {
+        let mut state = H265PocState::default();
+        let mut order = |slice: H265SlicePoc| state.compute(&H265_SMALL_LSB, &slice);
+        order(h265_picture(H265_NAL_IDR_W_RADL, 0, 0));
+        // lsb 6, 12 then 4 wraps the msb to 16
+        order(h265_picture(H265_NAL_TRAIL_R, 6, 0));
+        order(h265_picture(H265_NAL_TRAIL_R, 12, 0));
+        assert_eq!(
+            order(h265_picture(H265_NAL_TRAIL_R, 4, 0)).pic_order_cnt,
+            20
+        );
+        // a BLA restarts the sequence at its own lsb
+        let bla = order(h265_picture(H265_NAL_BLA_W_LP, 12, 0));
+        assert_eq!(bla.pic_order_cnt, 12);
+        assert!(bla.no_rasl_output_flag);
+        // a CRA in the middle of the sequence keeps counting
+        let cra = order(h265_picture(H265_NAL_CRA, 2, 0));
+        assert_eq!(cra.pic_order_cnt, 18);
+        assert!(!cra.no_rasl_output_flag);
+        state.end_of_sequence();
+        let cra_after_end = state.compute(&H265_SMALL_LSB, &h265_picture(H265_NAL_CRA, 10, 0));
+        assert_eq!(cra_after_end.pic_order_cnt, 10);
+        assert!(cra_after_end.no_rasl_output_flag);
+    }
+
+    #[test]
+    fn h265_prev_tid0_pic_skips_higher_layers_and_leading_pictures() {
+        let mut state = H265PocState::default();
+        let mut order = |slice: H265SlicePoc| state.compute(&H265_SMALL_LSB, &slice).pic_order_cnt;
+        order(h265_picture(H265_NAL_IDR_W_RADL, 0, 0));
+        order(h265_picture(H265_NAL_TRAIL_R, 6, 0));
+        // neither may become prevTid0Pic, so the msb stays relative to lsb 6
+        order(h265_picture(H265_NAL_TRAIL_R, 14, 1));
+        order(h265_picture(H265_NAL_RASL_R, 13, 0));
+        assert_eq!(order(h265_picture(H265_NAL_TRAIL_R, 2, 0)), 2);
     }
 }

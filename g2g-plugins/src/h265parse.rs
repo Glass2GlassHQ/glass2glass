@@ -364,6 +364,17 @@ fn parse_vui_framerate(
     if let Some(signal) = crate::vui::read_vui_signal_type(br)? {
         tail.colorimetry = signal.colorimetry();
     }
+    skip_vui_display_fields(br)?;
+    if br.read_bit()? != 1 {
+        return None; // vui_timing_info_present_flag
+    }
+    let num_units_in_tick = br.read_bits(32)?;
+    let time_scale = br.read_bits(32)?;
+    framerate_q16_from_fraction(time_scale, num_units_in_tick)
+}
+
+// the VUI fields between `video_signal_type` and `vui_timing_info_present_flag`
+fn skip_vui_display_fields(br: &mut BitReader) -> Option<()> {
     if br.read_bit()? == 1 {
         // chroma_loc_info_present_flag
         br.read_ue()?;
@@ -379,12 +390,127 @@ fn parse_vui_framerate(
         br.read_ue()?;
         br.read_ue()?;
     }
-    if br.read_bit()? != 1 {
-        return None; // vui_timing_info_present_flag
+    Some(())
+}
+
+// the rest of `vui_parameters()` (E.2.1) after `video_signal_type`
+#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+pub(crate) fn skip_h265_vui_tail(br: &mut BitReader, sps_max_sub_layers_minus1: u32) -> Option<()> {
+    skip_vui_display_fields(br)?;
+    // vui_timing_info_present_flag
+    if br.read_bit()? == 1 {
+        br.read_bits(32)?; // vui_num_units_in_tick
+        br.read_bits(32)?; // vui_time_scale
+        if br.read_bit()? == 1 {
+            br.read_ue()?; // vui_num_ticks_poc_diff_one_minus1
+        }
+        if br.read_bit()? == 1 {
+            skip_h265_hrd_parameters(br, sps_max_sub_layers_minus1)?;
+        }
     }
-    let num_units_in_tick = br.read_bits(32)?;
-    let time_scale = br.read_bits(32)?;
-    framerate_q16_from_fraction(time_scale, num_units_in_tick)
+    // bitstream_restriction_flag
+    if br.read_bit()? == 1 {
+        br.read_bit()?; // tiles_fixed_structure_flag
+        br.read_bit()?; // motion_vectors_over_pic_boundaries_flag
+        br.read_bit()?; // restricted_ref_pic_lists_flag
+        for _ in 0..5 {
+            // min_spatial_segmentation_idc, max_bytes_per_pic_denom,
+            // max_bits_per_min_cu_denom, log2_max_mv_length_horizontal / vertical
+            br.read_ue()?;
+        }
+    }
+    Some(())
+}
+
+// a CPB count past 32 means a desynced parse (E.3.2)
+const H265_MAX_CPB_COUNT: u32 = 32;
+
+// `hrd_parameters(1, maxNumSubLayersMinus1)` (E.2.2)
+#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+fn skip_h265_hrd_parameters(br: &mut BitReader, max_sub_layers_minus1: u32) -> Option<()> {
+    let nal_hrd_parameters_present_flag = br.read_bit()? == 1;
+    let vcl_hrd_parameters_present_flag = br.read_bit()? == 1;
+    let mut sub_pic_hrd_params_present_flag = false;
+    if nal_hrd_parameters_present_flag || vcl_hrd_parameters_present_flag {
+        sub_pic_hrd_params_present_flag = br.read_bit()? == 1;
+        if sub_pic_hrd_params_present_flag {
+            br.read_bits(8)?; // tick_divisor_minus2
+            br.read_bits(5)?; // du_cpb_removal_delay_increment_length_minus1
+            br.read_bit()?; // sub_pic_cpb_params_in_pic_timing_sei_flag
+            br.read_bits(5)?; // dpb_output_delay_du_length_minus1
+        }
+        br.read_bits(4)?; // bit_rate_scale
+        br.read_bits(4)?; // cpb_size_scale
+        if sub_pic_hrd_params_present_flag {
+            br.read_bits(4)?; // cpb_size_du_scale
+        }
+        br.read_bits(5)?; // initial_cpb_removal_delay_length_minus1
+        br.read_bits(5)?; // au_cpb_removal_delay_length_minus1
+        br.read_bits(5)?; // dpb_output_delay_length_minus1
+    }
+    for _ in 0..=max_sub_layers_minus1 {
+        let fixed_pic_rate_general_flag = br.read_bit()? == 1;
+        let fixed_pic_rate_within_cvs_flag = fixed_pic_rate_general_flag || br.read_bit()? == 1;
+        let mut low_delay_hrd_flag = false;
+        if fixed_pic_rate_within_cvs_flag {
+            br.read_ue()?; // elemental_duration_in_tc_minus1
+        } else {
+            low_delay_hrd_flag = br.read_bit()? == 1;
+        }
+        let cpb_cnt_minus1 = if low_delay_hrd_flag { 0 } else { br.read_ue()? };
+        if cpb_cnt_minus1 >= H265_MAX_CPB_COUNT {
+            return None;
+        }
+        let present = [
+            nal_hrd_parameters_present_flag,
+            vcl_hrd_parameters_present_flag,
+        ];
+        for _ in present.into_iter().filter(|&present| present) {
+            // sub_layer_hrd_parameters()
+            for _ in 0..=cpb_cnt_minus1 {
+                br.read_ue()?; // bit_rate_value_minus1
+                br.read_ue()?; // cpb_size_value_minus1
+                if sub_pic_hrd_params_present_flag {
+                    br.read_ue()?; // cpb_size_du_value_minus1
+                    br.read_ue()?; // bit_rate_du_value_minus1
+                }
+                br.read_bit()?; // cbr_flag
+            }
+        }
+    }
+    Some(())
+}
+
+// whether the SPS extensions after the VUI (7.3.2.2.1) turn on range extension or SCC tools
+#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct H265SpsExtensions {
+    pub range_extension_tools: bool,
+    pub screen_content_coding: bool,
+}
+
+#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+pub(crate) fn read_h265_sps_extensions(br: &mut BitReader) -> Option<H265SpsExtensions> {
+    // sps_extension_present_flag
+    if br.read_bit()? == 0 {
+        return Some(H265SpsExtensions::default());
+    }
+    let sps_range_extension_flag = br.read_bit()? == 1;
+    br.read_bit()?; // sps_multilayer_extension_flag
+    br.read_bit()?; // sps_3d_extension_flag
+    let sps_scc_extension_flag = br.read_bit()? == 1;
+    br.read_bits(4)?; // sps_extension_4bits
+    let mut range_extension_tools = false;
+    if sps_range_extension_flag {
+        // transform_skip_rotation_enabled_flag through cabac_bypass_alignment_enabled_flag
+        for _ in 0..9 {
+            range_extension_tools |= br.read_bit()? == 1;
+        }
+    }
+    Some(H265SpsExtensions {
+        range_extension_tools,
+        screen_content_coding: sps_scc_extension_flag,
+    })
 }
 
 // sps_max_sub_layers_minus1 is at most 6
@@ -423,6 +549,8 @@ pub(crate) struct H265SpsMiddle {
     pub max_transform_hierarchy_depth_intra: u32,
     pub scaling_list_enabled_flag: bool,
     pub sps_scaling_list_data_present_flag: bool,
+    // the default lists when the SPS enables scaling lists without coding them
+    pub scaling_lists: Option<H265ScalingLists>,
     pub amp_enabled_flag: bool,
     pub sample_adaptive_offset_enabled_flag: bool,
     pub pcm_enabled_flag: bool,
@@ -485,9 +613,11 @@ pub(crate) fn read_h265_sps_middle(
     middle.scaling_list_enabled_flag = br.read_bit()? == 1;
     if middle.scaling_list_enabled_flag {
         middle.sps_scaling_list_data_present_flag = br.read_bit()? == 1;
-        if middle.sps_scaling_list_data_present_flag {
-            skip_scaling_list_data(br)?;
-        }
+        middle.scaling_lists = Some(if middle.sps_scaling_list_data_present_flag {
+            read_scaling_list_data(br)?
+        } else {
+            H265ScalingLists::default()
+        });
     }
     middle.amp_enabled_flag = br.read_bit()? == 1;
     middle.sample_adaptive_offset_enabled_flag = br.read_bit()? == 1;
@@ -529,27 +659,104 @@ pub(crate) fn read_h265_sps_middle(
     Some(())
 }
 
-/// Skip `scaling_list_data()` (H.265 7.3.4): 4 size classes x 6 matrices (2 for
-/// 32x32), each either predicted (one ue) or explicit (an optional DC delta and
-/// `coefNum` signed deltas).
-fn skip_scaling_list_data(br: &mut BitReader) -> Option<()> {
-    for size_id in 0..4u32 {
-        let matrices = if size_id == 3 { 2 } else { 6 };
-        for _ in 0..matrices {
-            if br.read_bit()? == 0 {
-                br.read_ue()?; // scaling_list_pred_matrix_id_delta
-            } else {
-                let coef_num = 64u32.min(1 << (4 + (size_id << 1)));
-                if size_id > 1 {
-                    br.read_se()?; // scaling_list_dc_coef_minus8
+// Table 7-6, in coded (up-right diagonal) order
+const DEFAULT_INTRA_SCALING_LIST: [u8; 64] = [
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 17, 16, 17, 16, 17, 18, 17, 18, 18, 17, 18, 21, 19, 20,
+    21, 20, 19, 21, 24, 22, 22, 24, 24, 22, 22, 24, 25, 25, 27, 30, 27, 25, 25, 29, 31, 35, 35, 31,
+    29, 36, 41, 44, 41, 36, 47, 54, 54, 47, 65, 70, 65, 88, 88, 115,
+];
+const DEFAULT_INTER_SCALING_LIST: [u8; 64] = [
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 17, 17, 17, 17, 17, 18, 18, 18, 18, 18, 18, 20, 20, 20,
+    20, 20, 20, 20, 24, 24, 24, 24, 24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 25, 28, 28, 28, 28, 28,
+    28, 33, 33, 33, 33, 33, 41, 41, 41, 41, 54, 54, 54, 71, 71, 91,
+];
+const FLAT_SCALING_FACTOR: u8 = 16;
+// 4x4, 8x8, 16x16 and 32x32
+const SCALING_LIST_SIZES: usize = 4;
+// six matrices per size, two for 32x32 outside 4:4:4
+const SCALING_LIST_MATRICES: usize = 6;
+const SCALING_LIST_32X32_MATRICES: usize = 2;
+const SCALING_LIST_32X32_SIZE_ID: usize = 3;
+// the first intra matrix id is 0, the first inter one 3
+const SCALING_LIST_FIRST_INTER_MATRIX: usize = 3;
+
+// `ScalingList[sizeId][matrixId][i]` of H.265 7.4.5, `i` in coded (up-right
+// diagonal) order, and a 4x4 list uses the first 16 entries
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct H265ScalingLists {
+    pub coefficients: [[[u8; 64]; SCALING_LIST_MATRICES]; SCALING_LIST_SIZES],
+    // `scaling_list_dc_coef_minus8 + 8` of the 16x16 and 32x32 lists
+    pub dc_coefficients: [[u8; SCALING_LIST_MATRICES]; 2],
+}
+
+impl Default for H265ScalingLists {
+    fn default() -> Self {
+        let mut coefficients =
+            [[[FLAT_SCALING_FACTOR; 64]; SCALING_LIST_MATRICES]; SCALING_LIST_SIZES];
+        for size in coefficients.iter_mut().skip(1) {
+            for (matrix_id, list) in size.iter_mut().enumerate() {
+                *list = if matrix_id < SCALING_LIST_FIRST_INTER_MATRIX {
+                    DEFAULT_INTRA_SCALING_LIST
+                } else {
+                    DEFAULT_INTER_SCALING_LIST
+                };
+            }
+        }
+        // the two coded 32x32 lists are one intra, one inter
+        coefficients[SCALING_LIST_32X32_SIZE_ID][1] = DEFAULT_INTER_SCALING_LIST;
+        Self {
+            coefficients,
+            dc_coefficients: [[FLAT_SCALING_FACTOR; SCALING_LIST_MATRICES]; 2],
+        }
+    }
+}
+
+// H.265 7.3.4
+pub(crate) fn read_scaling_list_data(br: &mut BitReader) -> Option<H265ScalingLists> {
+    let mut lists = H265ScalingLists::default();
+    for size_id in 0..SCALING_LIST_SIZES {
+        let matrices = if size_id == SCALING_LIST_32X32_SIZE_ID {
+            SCALING_LIST_32X32_MATRICES
+        } else {
+            SCALING_LIST_MATRICES
+        };
+        let dc_index = size_id.checked_sub(2);
+        for matrix_id in 0..matrices {
+            let scaling_list_pred_mode_flag = br.read_bit()? == 1;
+            if !scaling_list_pred_mode_flag {
+                let scaling_list_pred_matrix_id_delta = br.read_ue()? as usize;
+                // a zero delta keeps the default list this matrix starts with
+                if scaling_list_pred_matrix_id_delta == 0 {
+                    continue;
                 }
-                for _ in 0..coef_num {
-                    br.read_se()?; // scaling_list_delta_coef
+                let reference = matrix_id.checked_sub(scaling_list_pred_matrix_id_delta)?;
+                lists.coefficients[size_id][matrix_id] = lists.coefficients[size_id][reference];
+                if let Some(dc) = dc_index {
+                    lists.dc_coefficients[dc][matrix_id] = lists.dc_coefficients[dc][reference];
                 }
+                continue;
+            }
+            let coef_num = 64usize.min(1 << (4 + (size_id << 1)));
+            let mut next_coef = 8i32;
+            if let Some(dc) = dc_index {
+                let scaling_list_dc_coef_minus8 = br.read_se()?;
+                if !(-7..=247).contains(&scaling_list_dc_coef_minus8) {
+                    return None;
+                }
+                next_coef = scaling_list_dc_coef_minus8 + 8;
+                lists.dc_coefficients[dc][matrix_id] = next_coef as u8;
+            }
+            for coefficient in &mut lists.coefficients[size_id][matrix_id][..coef_num] {
+                let scaling_list_delta_coef = br.read_se()?;
+                if !(-128..=127).contains(&scaling_list_delta_coef) {
+                    return None;
+                }
+                next_coef = (next_coef + scaling_list_delta_coef + 256) % 256;
+                *coefficient = next_coef as u8;
             }
         }
     }
-    Some(())
+    Some(lists)
 }
 
 /// Number of constraint / reserved flag bytes in a general
@@ -676,7 +883,7 @@ pub(crate) fn read_profile_tier_level(
 /// `inter_ref_pic_set_prediction_flag == 0`), sidestepping the driver-facing
 /// ambiguity of the predicted form; the parser here only needs the pic counts
 /// to cross the RPS list on the way to the VUI (M663).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct H265ShortTermRps {
     pub num_negative_pics: u8,
     pub num_positive_pics: u8,
