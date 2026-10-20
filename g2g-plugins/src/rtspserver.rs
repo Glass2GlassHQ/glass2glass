@@ -15,7 +15,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::textencoding::base64_encode;
+use crate::sdp::{h264_media_section, session_description};
 
 /// What the I/O layer should do after a request, beyond sending the response.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,32 +61,46 @@ impl RtspRequest {
     /// bytes consumed. `None` if `buf` does not yet hold a full request (no
     /// header terminator, or the body has not fully arrived).
     pub fn parse(buf: &[u8]) -> Option<(RtspRequest, usize)> {
+        let message = RtspMessage::parse(buf)?;
+        let mut parts = message.start_line.split(' ');
+        let method = parts.next()?.to_string();
+        let uri = parts.next()?.to_string();
+        Some((
+            RtspRequest {
+                method,
+                uri,
+                cseq: message.cseq(),
+                transport: message.header("Transport").map(str::to_string),
+                content_length: message.body.len(),
+                body: message.body.to_vec(),
+            },
+            message.consumed,
+        ))
+    }
+}
+
+// one complete request or response framed out of a byte buffer
+#[derive(Debug)]
+pub(crate) struct RtspMessage<'a> {
+    pub(crate) start_line: &'a str,
+    headers: Vec<(&'a str, &'a str)>,
+    pub(crate) body: &'a [u8],
+    pub(crate) consumed: usize,
+}
+
+impl<'a> RtspMessage<'a> {
+    pub(crate) fn parse(buf: &'a [u8]) -> Option<Self> {
         let header_end = find_double_crlf(buf)?;
         let head = core::str::from_utf8(&buf[..header_end]).ok()?;
         let mut lines = head.split("\r\n");
-
-        let request_line = lines.next()?;
-        let mut parts = request_line.split(' ');
-        let method = parts.next()?.to_string();
-        let uri = parts.next()?.to_string();
-
-        let mut cseq = 0u32;
-        let mut transport = None;
-        let mut content_length = 0usize;
-        for line in lines {
-            let Some((key, value)) = line.split_once(':') else {
-                continue;
-            };
-            let value = value.trim();
-            // RTSP header names are case-insensitive.
-            if key.eq_ignore_ascii_case("CSeq") {
-                cseq = value.parse().unwrap_or(0);
-            } else if key.eq_ignore_ascii_case("Transport") {
-                transport = Some(value.to_string());
-            } else if key.eq_ignore_ascii_case("Content-Length") {
-                content_length = value.parse().unwrap_or(0);
-            }
-        }
+        let start_line = lines.next()?;
+        let headers: Vec<(&str, &str)> = lines
+            .filter_map(|line| line.split_once(':'))
+            .map(|(key, value)| (key.trim(), value.trim()))
+            .collect();
+        let content_length: usize = find_header(&headers, "Content-Length")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
 
         let body_start = header_end + 4; // past the "\r\n\r\n"
                                          // saturating so a crafted Content-Length can't overflow the offset math
@@ -95,19 +109,38 @@ impl RtspRequest {
         if buf.len() < body_end {
             return None; // body not fully arrived
         }
-        let body = buf[body_start..body_end].to_vec();
-        Some((
-            RtspRequest {
-                method,
-                uri,
-                cseq,
-                transport,
-                content_length,
-                body,
-            },
-            body_end,
-        ))
+        Some(RtspMessage {
+            start_line,
+            headers,
+            body: &buf[body_start..body_end],
+            consumed: body_end,
+        })
     }
+
+    pub(crate) fn header(&self, name: &str) -> Option<&'a str> {
+        find_header(&self.headers, name)
+    }
+
+    pub(crate) fn headers_named<'s>(&'s self, name: &'s str) -> impl Iterator<Item = &'a str> + 's {
+        self.headers
+            .iter()
+            .filter(move |(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| *value)
+    }
+
+    pub(crate) fn cseq(&self) -> u32 {
+        self.header("CSeq")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    }
+}
+
+// RTSP header names are case-insensitive
+fn find_header<'a>(headers: &[(&'a str, &'a str)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| *value)
 }
 
 /// Build the SDP an RTSP server offers for one H.264 stream over RTP/AVP at the
@@ -121,44 +154,7 @@ impl RtspRequest {
 /// in-band keyframe. Without them the media line is offered bare, which is what
 /// a client tuning in on Annex-B in-band parameter sets needs anyway.
 pub fn sdp_h264(payload_type: u8, sps: Option<&[u8]>, pps: Option<&[u8]>) -> String {
-    let pt = payload_type & 0x7F;
-    let mut sdp = format!(
-        "v=0\r\n\
-         o=- 0 0 IN IP4 0.0.0.0\r\n\
-         s=g2g\r\n\
-         c=IN IP4 0.0.0.0\r\n\
-         t=0 0\r\n\
-         m=video 0 RTP/AVP {pt}\r\n\
-         a=rtpmap:{pt} H264/90000\r\n",
-    );
-    if let Some(fmtp) = h264_fmtp(pt, sps, pps) {
-        sdp.push_str(&fmtp);
-    }
-    sdp.push_str("a=control:streamid=0\r\n");
-    sdp
-}
-
-/// The RFC 6184 §8.1 `a=fmtp` line for an H.264 stream: `packetization-mode=1`
-/// (the packetizer emits single-NAL and FU-A packets), the base64 parameter
-/// sets, and the profile / level the SPS declares. `None` when either parameter
-/// set is missing or the SPS is too short to carry
-/// `profile_idc / profile_iop / level_idc`, so a malformed stream leaves the
-/// offer bare rather than advertising a profile nothing can honour.
-fn h264_fmtp(payload_type: u8, sps: Option<&[u8]>, pps: Option<&[u8]>) -> Option<String> {
-    let (sps, pps) = (sps?, pps?);
-    // profile_idc, profile_iop (the constraint-set flags), level_idc: the three
-    // bytes after the NAL header byte.
-    let profile_level = sps.get(1..4)?;
-    let mut hex = String::with_capacity(6);
-    for b in profile_level {
-        hex.push_str(&format!("{b:02X}"));
-    }
-    Some(format!(
-        "a=fmtp:{payload_type} packetization-mode=1; \
-         sprop-parameter-sets={},{}; profile-level-id={hex}\r\n",
-        base64_encode(sps),
-        base64_encode(pps),
-    ))
+    session_description(&[h264_media_section(payload_type, sps, pps, 0)])
 }
 
 /// Sans-IO RTSP server responder for one session.
@@ -283,7 +279,9 @@ impl RtspResponder {
                         RtspEvent::SetupInterleaved { rtp_channel: rtp_ch, rtcp_channel: rtcp_ch },
                     );
                 }
-                self.client_rtp_port = req.transport.as_deref().and_then(parse_client_rtp_port);
+                self.client_rtp_port = req.transport
+                    .as_deref()
+                    .and_then(|t| parse_rtp_port(t, "client_port="));
                 let transport = format!(
                     "RTP/AVP;unicast;client_port={}-{};server_port={}-{};ssrc={:08X}",
                     self.client_rtp_port.unwrap_or(0),
@@ -369,10 +367,11 @@ fn find_double_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-/// Pull the first port of a `client_port=RTP-RTCP` pair out of a Transport
-/// header (`RTP/AVP;unicast;client_port=5000-5001`).
-fn parse_client_rtp_port(transport: &str) -> Option<u16> {
-    let after = transport.split("client_port=").nth(1)?;
+/// Pull the first port of a `client_port=RTP-RTCP` (or `server_port=`) pair out
+/// of a Transport header (`RTP/AVP;unicast;client_port=5000-5001`). `key` names
+/// the parameter, `=` included.
+pub(crate) fn parse_rtp_port(transport: &str, key: &str) -> Option<u16> {
+    let after = transport.split(key).nth(1)?;
     let range = after.split(';').next()?;
     let first = range.split('-').next()?;
     first.trim().parse().ok()
@@ -384,7 +383,7 @@ fn parse_client_rtp_port(transport: &str) -> Option<u16> {
 /// token so a UDP Transport that (unusually) carried an `interleaved=` param is
 /// not misread as interleaved. A single `interleaved=N` (no RTCP channel)
 /// defaults the RTCP channel to `N + 1`.
-fn parse_interleaved_channels(transport: &str) -> Option<(u8, u8)> {
+pub(crate) fn parse_interleaved_channels(transport: &str) -> Option<(u8, u8)> {
     // The lower transport is the third `/`-token of the profile (RTP/AVP/TCP).
     let is_tcp = transport
         .split(';')
@@ -403,6 +402,37 @@ fn parse_interleaved_channels(transport: &str) -> Option<(u8, u8)> {
         None => rtp_ch.saturating_add(1),
     };
     Some((rtp_ch, rtcp_ch))
+}
+
+/// RFC 2326 §10.12 interleaved frame: `$`, channel, 16-bit length, then the packet.
+pub const INTERLEAVED_MARKER: u8 = b'$';
+pub const INTERLEAVED_HEADER_LEN: usize = 4;
+
+// an RTP packet is always well under the 64 KiB the length field holds
+pub fn push_interleaved(out: &mut Vec<u8>, channel: u8, packet: &[u8]) {
+    out.push(INTERLEAVED_MARKER);
+    out.push(channel);
+    out.extend_from_slice(&(packet.len() as u16).to_be_bytes());
+    out.extend_from_slice(packet);
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct InterleavedFrame<'a> {
+    pub channel: u8,
+    pub packet: &'a [u8],
+    pub consumed: usize,
+}
+
+// the `$` frame at the front of `buf`, None while it has not fully arrived
+pub fn interleaved_frame(buf: &[u8]) -> Option<InterleavedFrame<'_>> {
+    let header = buf.get(..INTERLEAVED_HEADER_LEN)?;
+    let len = usize::from(u16::from_be_bytes([header[2], header[3]]));
+    let consumed = INTERLEAVED_HEADER_LEN + len;
+    Some(InterleavedFrame {
+        channel: header[1],
+        packet: buf.get(INTERLEAVED_HEADER_LEN..consumed)?,
+        consumed,
+    })
 }
 
 #[cfg(test)]

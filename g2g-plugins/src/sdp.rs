@@ -14,17 +14,24 @@
 //!
 //! Never trust the stream: an unmappable encoding, a malformed base64 parameter
 //! set, or a missing field yields `None` / no geometry rather than a guess.
+//!
+//! The writer side ([`session_description`] and the per-codec media sections)
+//! builds the offers g2g sends: the RTSP server's DESCRIBE body and the
+//! `rtspclientsink` ANNOUNCE body.
 
 use core::num::NonZeroU8;
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use g2g_core::caps::framerate_q16_from_fraction;
+use g2g_core::mediaclock::MediaClock;
 use g2g_core::{AudioFormat, Caps, Dim, Rate, VideoCodec};
 
 use crate::nalparse::NalCodec;
-use crate::textencoding::base64_decode;
+use crate::rtppay::{AAC_AU_INDEX_BITS, AAC_AU_SIZE_BITS};
+use crate::textencoding::{base64_decode, base64_encode, hex_encode};
 
 /// One media section's raw SDP fields, before any codec interpretation: the
 /// `m=` line plus the attributes under it, with the session-level connection
@@ -351,6 +358,137 @@ fn parse_q16_fps(s: &str) -> Option<u32> {
     }
     let q16 = whole_q16.checked_add(framerate_q16_from_fraction(num, den)?)?;
     (q16 > 0).then_some(q16)
+}
+
+const VIDEO_CLOCK_HZ: u32 = MediaClock::VIDEO_RATE_HZ;
+// RFC 7587 fixes the Opus rtpmap at 48 kHz and two channels whatever the stream carries
+pub const OPUS_CLOCK_HZ: u32 = 48_000;
+const OPUS_RTPMAP_CHANNELS: u8 = 2;
+
+pub fn session_description(media_sections: &[String]) -> String {
+    let mut sdp = String::from(
+        "v=0\r\n\
+         o=- 0 0 IN IP4 0.0.0.0\r\n\
+         s=g2g\r\n\
+         c=IN IP4 0.0.0.0\r\n\
+         t=0 0\r\n",
+    );
+    for section in media_sections {
+        sdp.push_str(section);
+    }
+    sdp
+}
+
+// the media section's control path, relative to the session URL
+pub fn stream_control(stream_id: usize) -> String {
+    format!("streamid={stream_id}")
+}
+
+fn media_section(
+    kind: &str,
+    payload_type: u8,
+    rtpmap: &str,
+    fmtp: Option<String>,
+    stream_id: usize,
+) -> String {
+    let pt = payload_type & 0x7F;
+    let mut section = format!("m={kind} 0 RTP/AVP {pt}\r\na=rtpmap:{pt} {rtpmap}\r\n");
+    if let Some(fmtp) = fmtp {
+        section.push_str(&format!("a=fmtp:{pt} {fmtp}\r\n"));
+    }
+    section.push_str(&format!("a=control:{}\r\n", stream_control(stream_id)));
+    section
+}
+
+pub fn h264_media_section(
+    payload_type: u8,
+    sps: Option<&[u8]>,
+    pps: Option<&[u8]>,
+    stream_id: usize,
+) -> String {
+    media_section(
+        "video",
+        payload_type,
+        &format!("H264/{VIDEO_CLOCK_HZ}"),
+        h264_fmtp(sps, pps),
+        stream_id,
+    )
+}
+
+/// The RFC 6184 §8.1 `a=fmtp` parameters for an H.264 stream: `packetization-mode=1`
+/// (the packetizer emits single-NAL and FU-A packets), the base64 parameter
+/// sets, and the profile / level the SPS declares. `None` when either parameter
+/// set is missing or the SPS is too short to carry
+/// `profile_idc / profile_iop / level_idc`, so a malformed stream leaves the
+/// offer bare rather than advertising a profile nothing can honour.
+fn h264_fmtp(sps: Option<&[u8]>, pps: Option<&[u8]>) -> Option<String> {
+    let (sps, pps) = (sps?, pps?);
+    // profile_idc, profile_iop (the constraint-set flags), level_idc: the three
+    // bytes after the NAL header byte.
+    let profile_level = sps.get(1..4)?;
+    let mut hex = String::with_capacity(6);
+    for b in profile_level {
+        hex.push_str(&format!("{b:02X}"));
+    }
+    Some(format!(
+        "packetization-mode=1; sprop-parameter-sets={},{}; profile-level-id={hex}",
+        base64_encode(sps),
+        base64_encode(pps),
+    ))
+}
+
+// RFC 7798 §7.1 parameter sets, as ffmpeg writes them
+pub fn h265_media_section(
+    payload_type: u8,
+    vps: &[u8],
+    sps: &[u8],
+    pps: &[u8],
+    stream_id: usize,
+) -> String {
+    let fmtp = format!(
+        "sprop-vps={}; sprop-sps={}; sprop-pps={}",
+        base64_encode(vps),
+        base64_encode(sps),
+        base64_encode(pps),
+    );
+    media_section(
+        "video",
+        payload_type,
+        &format!("H265/{VIDEO_CLOCK_HZ}"),
+        Some(fmtp),
+        stream_id,
+    )
+}
+
+pub fn aac_media_section(
+    payload_type: u8,
+    audio_specific_config: &[u8],
+    sample_rate: u32,
+    channels: u8,
+    stream_id: usize,
+) -> String {
+    let fmtp = format!(
+        "profile-level-id=1;mode=AAC-hbr;sizelength={AAC_AU_SIZE_BITS};indexlength={AAC_AU_INDEX_BITS};indexdeltalength={AAC_AU_INDEX_BITS}; config={}",
+        hex_encode(audio_specific_config),
+    );
+    media_section(
+        "audio",
+        payload_type,
+        &format!("MPEG4-GENERIC/{sample_rate}/{channels}"),
+        Some(fmtp),
+        stream_id,
+    )
+}
+
+pub fn opus_media_section(payload_type: u8, channels: u8, stream_id: usize) -> String {
+    let fmtp = (channels == OPUS_RTPMAP_CHANNELS).then(|| String::from("sprop-stereo=1"));
+    media_section(
+        "audio",
+        payload_type,
+        &format!("opus/{OPUS_CLOCK_HZ}/{OPUS_RTPMAP_CHANNELS}"),
+        fmtp,
+        stream_id,
+    )
 }
 
 #[cfg(test)]

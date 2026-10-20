@@ -49,7 +49,8 @@ use crate::filesink::io_err;
 use crate::rtcp;
 use crate::rtppay::RtpH264Packetizer;
 use crate::rtspserver::{
-    sdp_h264, RtspEvent, RtspRequest, RtspResponder, DEFAULT_SESSION_TIMEOUT_SECS,
+    interleaved_frame, push_interleaved, sdp_h264, RtspEvent, RtspRequest, RtspResponder,
+    DEFAULT_SESSION_TIMEOUT_SECS, INTERLEAVED_HEADER_LEN, INTERLEAVED_MARKER,
 };
 
 /// Default dynamic RTP payload type for H.264.
@@ -58,9 +59,6 @@ const DEFAULT_PAYLOAD_TYPE: u8 = 96;
 const DEFAULT_MAX_PAYLOAD: usize = 1400;
 /// TCP read buffer for RTSP control requests.
 const CTRL_BUF: usize = 8192;
-/// RFC 2326 §10.12 interleaved frame: `$`, channel, 16-bit length, then the packet.
-const INTERLEAVED_MARKER: u8 = b'$';
-const INTERLEAVED_HEADER_LEN: usize = 4;
 const RTP_SEQUENCE_RANGE: core::ops::Range<usize> = 2..4;
 /// Cap on buffered-but-unparsed control bytes. A real RTSP request (even an
 /// ANNOUNCE carrying SDP) is far smaller; the bound reaps a client that drips a
@@ -156,14 +154,11 @@ impl Client {
             // so the binary is not misread as a request, and count it as
             // keepalive activity.
             if self.pending.first() == Some(&INTERLEAVED_MARKER) {
-                if self.pending.len() < 4 {
-                    break; // frame header not fully arrived
-                }
-                let len = u16::from_be_bytes([self.pending[2], self.pending[3]]) as usize;
-                if self.pending.len() < 4 + len {
-                    break;
-                }
-                self.pending.drain(..4 + len);
+                let Some(frame) = interleaved_frame(&self.pending) else {
+                    break; // frame not fully arrived
+                };
+                let consumed = frame.consumed;
+                self.pending.drain(..consumed);
                 self.last_activity_ns = g2g_core::metrics::monotonic_ns();
                 continue;
             }
@@ -834,14 +829,6 @@ impl PadTemplates for RtspServerSink {
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([PadTemplate::sink(CapsSet::one(h264_any()))])
     }
-}
-
-// an RTP packet is always well under the 64 KiB the length field holds
-fn push_interleaved(out: &mut Vec<u8>, channel: u8, packet: &[u8]) {
-    out.push(INTERLEAVED_MARKER);
-    out.push(channel);
-    out.extend_from_slice(&(packet.len() as u16).to_be_bytes());
-    out.extend_from_slice(packet);
 }
 
 #[cfg(test)]

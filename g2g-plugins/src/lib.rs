@@ -476,7 +476,7 @@ mod paddedrows;
 // fmtp parameter-set geometry), so an RTP receiver configures from the SDP a
 // sender publishes instead of a declared hint. no_std+alloc.
 pub mod sdp;
-// Sans-IO H.264 RTP packetizer (RFC 3550 + 6184), the live-egress foundation.
+// Sans-IO RTP packetizers (H.264, H.265, AAC, Opus), the live-egress foundation.
 pub mod rtppay;
 // Sans-IO H.264 RTP depayloader, the receive-side inverse of rtppay.
 pub mod rtpdepay;
@@ -879,6 +879,8 @@ pub mod rtspserversink;
 pub mod rtspserversrc;
 #[cfg(feature = "rtsp-server")]
 pub mod rtspserversrcn;
+// Sans-IO RTSP publishing client: requests, responses and the auth answer.
+pub mod rtspclient;
 
 // Sans-IO SRT (Secure Reliable Transport) wire layer + handshake + ARQ (always
 // compiled); the tokio caller sink / listener source sit behind the `srt` feature.
