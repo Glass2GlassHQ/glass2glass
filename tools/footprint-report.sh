@@ -41,6 +41,15 @@ MAX_STATIC_RAM=0
 AUDIO_MAX_ROM=12288
 AUDIO_MAX_STACK=8192
 AUDIO_MAX_STATIC_RAM=0
+# Keyword graph (one clip -> log-mel -> int8 quantize -> MicroFlow micro_speech
+# model): measured 2026-10 at 69164 ROM / 0 static / 116312 stack (RISC-V
+# 72476 / 0 / 116352). The
+# 31680-byte input clip and the model's 16 KB of weights are most of the ROM.
+# The clip, log-mel and feature rings (41 KB) and the log-mel element's tables
+# and FFT scratch are most of the stack.
+KEYWORD_MAX_ROM=81920
+KEYWORD_MAX_STACK=131072
+KEYWORD_MAX_STATIC_RAM=0
 
 echo "== building g2g-noalloc for $TARGET =="
 rustup target add "$TARGET" >/dev/null 2>&1 || true
@@ -98,6 +107,8 @@ report_entry "Heap-free video pipeline" g2g_noalloc_run "$AR" arm "$TARGET" \
   "$ARM_OUT/noalloc.elf" "$MAX_ROM" "$MAX_STACK" "$MAX_STATIC_RAM"
 report_entry "Flagship audio graph" g2g_audio_run "$AR" arm "$TARGET" \
   "$ARM_OUT/audio.elf" "$AUDIO_MAX_ROM" "$AUDIO_MAX_STACK" "$AUDIO_MAX_STATIC_RAM"
+report_entry "Keyword graph" g2g_keyword_run "$AR" arm "$TARGET" \
+  "$ARM_OUT/keyword.elf" "$KEYWORD_MAX_ROM" "$KEYWORD_MAX_STACK" "$KEYWORD_MAX_STATIC_RAM"
 
 # RISC-V footprint (M656): the same heap-free video pipeline linked for a bare
 # RISC-V target (riscv32imafc, the ESP32-P4 class), proving the footprint
@@ -121,5 +132,7 @@ report_entry "Heap-free video pipeline" g2g_noalloc_run "$RV_AR" riscv "$RV_TARG
 # 2026-07 at 10852 ROM / 0 static / 6432 stack, within the ARM audio budgets.
 report_entry "Flagship audio graph" g2g_audio_run "$RV_AR" riscv "$RV_TARGET" \
   "$RV_OUT/audio.elf" "$AUDIO_MAX_ROM" "$AUDIO_MAX_STACK" "$AUDIO_MAX_STATIC_RAM"
+report_entry "Keyword graph" g2g_keyword_run "$RV_AR" riscv "$RV_TARGET" \
+  "$RV_OUT/keyword.elf" "$KEYWORD_MAX_ROM" "$KEYWORD_MAX_STACK" "$KEYWORD_MAX_STATIC_RAM"
 
 exit "$STATUS"

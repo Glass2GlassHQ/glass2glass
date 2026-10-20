@@ -216,6 +216,24 @@ steps, and emits a u8 NHWC tensor. `Int8Quantize` also takes that u8 tensor,
 reading each pixel as `p / 255` like the host inference elements normalize RGBA,
 so a model with scale 1/255 and zero point -128 gets `p - 128`.
 
+The keyword graph puts these together as one static pipeline
+(`noalloc-pipeline::keyword`): a one-clip capture of a spoken "yes" ->
+`LogMelSpectrogram` (49 windows, 40 bands) -> `Int8Quantize` -> a digest stage
+-> `TensorInference` over the MicroFlow-compiled micro_speech model, four
+keyword scores out. Its features and scores on the host are pinned in
+`g2g-mcu/tests/fixtures/keyword` (`features.i8`, `scores.f32le`), and the same
+graph reproduces them bit for bit on QEMU's Cortex-M4 (`examples/g2g-qemu`'s
+`keyword` bin, in `tools/qemu-check.sh`). `g2g-noalloc` exports it as
+`g2g_keyword_run`, so the zero-allocator and zero-panic symbol proofs cover
+MicroFlow's generated code on both `thumbv7em` and RISC-V, and it has a
+footprint budget row: 69164 B ROM, 0 B static RAM, 116312 B stack on
+`thumbv7em`. The 31680-byte clip and the 16 KB of model weights are most of
+the ROM, and the clip, log-mel and feature rings (41 KB) plus the log-mel
+element's tables and FFT scratch are most of the stack. The graph runs as one
+future, into which LLVM inlines MicroFlow's operators with their constant
+shapes, so nalgebra's index bounds checks fold away. `tools/noalloc-check.sh`
+fails if one stays.
+
 ## RTOS executors and C integration
 
 The same pipeline runs under a real Embassy task (`examples/g2g-embassy`, the

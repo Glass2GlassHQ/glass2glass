@@ -17,5 +17,9 @@ g2g-core = { path = "../../g2g-core", default-features = false }
 # The real SPI display element (M629): the pipeline's sink is an
 # `SpiDisplaySink` over a stub bus, so every proof (no-alloc, panic-free,
 # footprint, QEMU execution) covers an actual peripheral element.
-g2g-mcu = { path = "../../g2g-mcu" }
+g2g-mcu = { path = "../../g2g-mcu", features = ["microflow"] }
+# The keyword graph's model struct comes from MicroFlow's `#[model]` macro, whose
+# expansion names `microflow::` and `nalgebra::` paths.
+microflow = "0.1.3"
+nalgebra = { version = "0.32", default-features = false }
 embedded-hal = "1"

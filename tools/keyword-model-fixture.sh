@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Regenerate the keyword-spotting model fixtures in g2g-mcu/tests/fixtures/keyword:
 # speech.tflite (the TFLite Micro micro_speech model as MicroFlow 0.1.3 ships it),
-# its ONNX twin speech.onnx (tf2onnx, QDQ int8), and quantization.txt (the input
-# and output tensor scale and zero point). The files are committed because
-# MicroFlow's proc macro reads the .tflite at compile time, and they are small.
+# its ONNX twin speech.onnx (tf2onnx, QDQ int8), quantization.txt (the input
+# and output tensor scale and zero point), and yes.s16le, the one-clip input of
+# the keyword graph (espeak-ng 1.51 saying "yes", 150 ms in, 15840 samples at
+# 16 kHz). The
+# files are committed because MicroFlow's proc macro reads the .tflite at
+# compile time, and they are small. features.i8 and scores.f32le in the same
+# directory are not written here: they are the keyword graph's pinned output
+# on the host (examples/noalloc-pipeline/tests/keyword.rs).
 #
-# Needs uv, curl and network.
+# Needs uv, curl, ffmpeg, espeak-ng and network.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -37,5 +42,10 @@ interpreter = tf.lite.Interpreter(model_path=sys.argv[1])
 (scale_out, zero_out), = [d["quantization"] for d in interpreter.get_output_details()]
 print(f"input_scale {scale_in!r}\ninput_zero_point {zero_in}\noutput_scale {scale_out!r}\noutput_zero_point {zero_out}")
 ' "$FIX/speech.tflite" > "$FIX/quantization.txt"
+
+espeak-ng -v en-us -s 140 -w "$WORK/yes.wav" "yes"
+ffmpeg -v error -y -i "$WORK/yes.wav" \
+  -af "aresample=16000,adelay=150,apad=whole_len=15840,atrim=end_sample=15840" \
+  -f s16le -ac 1 "$FIX/yes.s16le"
 
 echo "fixtures written to $FIX"
