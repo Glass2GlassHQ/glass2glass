@@ -234,6 +234,18 @@ future, into which LLVM inlines MicroFlow's operators with their constant
 shapes, so nalgebra's index bounds checks fold away. `tools/noalloc-check.sh`
 fails if one stays.
 
+The host side of the check is `g2g-ml/tests/m1705_mcu_keyword_ort.rs`. It runs
+the same clip through the `g2g-mcu` elements on the host, asserts the features
+and the MicroFlow scores equal the pinned files, asserts the scores equal the
+TFLite 2.15 reference interpreter's (`tflite_scores.i8`), and runs the
+tf2onnx ONNX twin of the model on ONNX Runtime. The twin computes in float
+between its quantize and dequantize nodes, so its int8 scores land within 5
+output steps of MicroFlow's (`[-128, -50, -4, -74]` against
+`[-128, -45, -8, -75]`, a tolerance of 6). Both comparisons are persisted as
+`Oracle` evidence for `tensorinference`. The test uses an ONNX Runtime session
+directly because `OrtInference` takes only a `[1, 3, H, W]` input and the
+keyword model takes `[1, 1960]`.
+
 ## RTOS executors and C integration
 
 The same pipeline runs under a real Embassy task (`examples/g2g-embassy`, the

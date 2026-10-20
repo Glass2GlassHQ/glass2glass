@@ -63,16 +63,13 @@ Highest leverage first:
   - **Comparison.** The same graph with g2g on Linux and with GStreamer on the
     smallest Linux board: ROM, RAM and boot time beside the MCU numbers.
   - Add the same conformance and timing evidence for an NXP i.MX RT board.
-- **TinyML inference on MCU.** A heap-free inference `StaticTransform` behind a
-  trait seam like `JpegDecoder`, `Caps::Tensor` in and out, its tensor arena
-  in static memory. Backends: MicroFlow (pure Rust, `no_std`, `.tflite`), and
-  ExecuTorch (CMSIS-NN, Ethos-U) and LiteRT for Microcontrollers through a C
-  bridge like `CH264Encoder`.
-  - **Preprocessing elements.** Heap-free log-mel features for audio, resize
-    and int8 quantization for vision.
-  - **Host and device check.** Run one graph on the host through g2g-ml's ORT
-    and on the MCU: preprocessing bit-exact, model output within the
-    quantization tolerance, persisted as conformance evidence.
+- **TinyML inference on MCU.** Add ExecuTorch (CMSIS-NN, Ethos-U) and LiteRT
+  for Microcontrollers backends to `TensorInference` through a C bridge like
+  `CH264Encoder`, each holding its tensor arena in static memory.
+  - **Host and device check on silicon.** Reproduce the keyword graph's pinned
+    features and scores (`g2g-mcu/tests/fixtures/keyword`) on a real Cortex-M
+    board, and run the model's ONNX twin through `OrtInference`, which takes
+    only a `[1, 3, H, W]` input today.
   - **Keyword spotting on the H753.** Live microphone -> 16 kHz -> log-mel ->
     int8 keyword model -> smoothed detection out over UART or RTP.
   - **Camera detector on an STM32N6 board.** The Rust-native NPU target:

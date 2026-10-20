@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1705: the MCU keyword graph's MicroFlow scores match the TFLite interpreter exactly and ONNX Runtime within 5 int8 steps, persisted as `Oracle` evidence.
 - M1704: a heap-free keyword-spotting graph runs bit-exact on QEMU Cortex-M4 under the no-heap, panic-free and footprint proofs.
 - M1703: heap-free `ImageResize` and u8 input to `Int8Quantize`, the vision front end of an MCU model.
 - M1702: heap-free `LogMelSpectrogram` and `Int8Quantize` transforms in `g2g-mcu`, the audio front end of an MCU keyword model.

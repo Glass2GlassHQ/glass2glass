@@ -5,9 +5,9 @@ use g2g_core::frame::Frame;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::{drive_ready, run_source_transform_sink, Chain, StaticSink, StaticTransform};
 use g2g_mcu::{
-    FrameGrabber, GrabberSrc, Int8Quantize, LogMelSettings, LogMelSpectrogram, MicroFlowModel,
-    TensorInference,
+    FrameGrabber, GrabberSrc, Int8Quantize, LogMelSpectrogram, MicroFlowModel, TensorInference,
 };
+use g2g_mcu::logmel::MICRO_SPEECH_SETTINGS;
 use microflow::model;
 
 // rustc runs from this crate's directory, and the macro reads the path as given.
@@ -21,24 +21,14 @@ const EXPECTED_SCORE_BYTES: &[u8; KEYWORDS * SCORE_BYTES] =
     include_bytes!("../../../g2g-mcu/tests/fixtures/keyword/scores.f32le");
 
 const MELS: usize = 40;
-const FEATURES: usize = 1960;
+const FEATURES: usize = MICRO_SPEECH_SETTINGS.frames * MELS;
 pub const KEYWORDS: usize = 4;
 const SCORE_BYTES: usize = 4;
-const CLIP_BYTES: usize = 15_840 * 2;
+const CLIP_BYTES: usize = MICRO_SPEECH_SETTINGS.clip_samples() * 2;
 const LOG_MEL_BYTES: usize = FEATURES * 4;
 // One clip, so the frame period only stamps PTS 0.
 const CLIP_INTERVAL_NS: u64 = 1_000_000_000;
 
-// The micro_speech front end: 49 windows of 30 ms every 20 ms at 16 kHz, 40 mel
-// bands between 125 Hz and 7.5 kHz.
-const SETTINGS: LogMelSettings = LogMelSettings {
-    sample_rate: 16_000,
-    window_samples: 480,
-    hop_samples: 320,
-    frames: FEATURES / MELS,
-    lowest_frequency: 125.0,
-    highest_frequency: 7_500.0,
-};
 // speech.tflite's input tensor quantization, as quantization.txt records it.
 pub const INPUT_SCALE: f32 = 0.101_715_684;
 pub const INPUT_ZERO_POINT: i32 = -128;
@@ -150,7 +140,7 @@ async fn run_keyword_async() -> Option<KeywordRun> {
     // SAFETY (every `with_ring` below): the rings are locals of this function
     // and outlive the pipeline run, which drains before returning.
     let log_mel =
-        unsafe { LogMelSpectrogram::<MELS, 1, LOG_MEL_BYTES>::with_ring(SETTINGS, &log_mel_ring) }
+        unsafe { LogMelSpectrogram::<MELS, 1, LOG_MEL_BYTES>::with_ring(MICRO_SPEECH_SETTINGS, &log_mel_ring) }
             .ok()?;
     // SAFETY: as above.
     let quantize = unsafe {

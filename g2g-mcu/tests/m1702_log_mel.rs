@@ -5,22 +5,17 @@ use std::f64::consts::PI;
 use g2g_core::error::G2gError;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::{StaticTransform, TensorDType, TensorLayout, TensorShape};
-use g2g_mcu::logmel::FFT_SIZE;
+use g2g_mcu::logmel::{FFT_SIZE, MICRO_SPEECH_SETTINGS};
 use g2g_mcu::{Int8Quantize, LogMelSettings, LogMelSpectrogram, TensorFormat};
 use util::{block_on, frame_of, le_bytes, payload};
 
 const MELS: usize = 40;
 const FRAMES: usize = 4;
-// The micro_speech front end: 30 ms windows every 20 ms at 16 kHz, 125 Hz to 7.5 kHz.
 const SETTINGS: LogMelSettings = LogMelSettings {
-    sample_rate: 16_000,
-    window_samples: 480,
-    hop_samples: 320,
     frames: FRAMES,
-    lowest_frequency: 125.0,
-    highest_frequency: 7_500.0,
+    ..MICRO_SPEECH_SETTINGS
 };
-const CLIP_SAMPLES: usize = (FRAMES - 1) * 320 + 480;
+const CLIP_SAMPLES: usize = SETTINGS.clip_samples();
 const FEATURE_BYTES: usize = FRAMES * MELS * 4;
 // Well under one int8 step of the keyword model's input scale (about 0.1).
 const TOLERANCE: f64 = 0.01;

@@ -425,6 +425,16 @@ no-heap targets (MISRA, certification processes).
 - **ARM and RISC-V.** The no-alloc core and `g2g-mcu` build unchanged for
   `riscv32imafc` (ESP32-P4 class). The symbol proofs and the footprint report
   run on both `thumbv7em` and RISC-V.
+- **TinyML inference.** `TensorInference` runs a model on each `Caps::Tensor`
+  frame through a `TensorModel` backend seam, output into a static ring slot.
+  The `microflow` feature compiles a `.tflite` into Rust at build time with
+  [MicroFlow](https://github.com/matteocarnelos/microflow-rs), so the model
+  needs no allocator and no arena. `LogMelSpectrogram`, `ImageResize` and
+  `Int8Quantize` are the heap-free audio and vision front ends. A keyword graph
+  (spoken clip -> log-mel -> int8 -> the TFLite Micro `micro_speech` model)
+  gives the same features and scores on the host and on emulated Cortex-M4,
+  scores equal to the TFLite interpreter's and within 5 int8 steps of ONNX
+  Runtime on the model's ONNX twin.
 - **Reference deterministic-audio graph.** `capture -> convert -> resample ->
   mix -> encode -> RTP` as one static heap-free pipeline, fully fixed-point,
   so its RTP wire bytes are bit-exact on every target. Pinned by a host test
@@ -479,7 +489,7 @@ output byte-for-byte, checked in CI for both catalogs by
 | Crate | Role | Profile |
 | :--- | :--- | :--- |
 | `g2g-core` | Traits, `Frame` / `PipelinePacket`, caps algebra, clock, runner, static element model. | `no_std`, `alloc` optional |
-| `g2g-mcu` | Heap-free MCU peripheral elements (SPI display, camera / PCM capture, I2C sensor, UART, G.711 / ADPCM codecs, hardware JPEG / H.264 seams, RTP egress + ingress, jitter buffer, fault-recovery watchdog) over `embedded-hal` and C-callback seams. | `no_std`, no alloc |
+| `g2g-mcu` | Heap-free MCU peripheral elements (SPI display, camera / PCM capture, I2C sensor, UART, G.711 / ADPCM codecs, hardware JPEG / H.264 seams, RTP egress + ingress, jitter buffer, fault-recovery watchdog, TinyML inference with log-mel / resize / int8 preprocessing) over `embedded-hal` and C-callback seams. | `no_std`, no alloc |
 | `g2g-mcugen` | Host graph compiler: a declarative MCU graph (YAML / JSON) to a monomorphized heap-free static pipeline. | `std` (host tool) |
 | `g2g-plugin` | SDK for dynamically loadable plugins: same-toolchain (`declare_plugin!` + ABI tag) and the frozen C ABI v2 for cross-toolchain Rust and plain-C plugins. | `no_std + alloc` |
 | `g2g-plugins` | Sources, sinks, and transforms (RTSP, RTP, HTTP / HLS / DASH / RTMP, V4L2 / PipeWire / MF capture, ffmpeg, VAAPI, MF, VideoToolbox, MediaCodec, Wayland, KMS, WASAPI, ALSA / PulseAudio / PipeWire audio, compositor, Embassy, web), container mux / demux, codec parsers and encoders, the tag system, and the `gst-launch` text DSL. | mixed |

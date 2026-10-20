@@ -8,7 +8,8 @@
 # files are committed because MicroFlow's proc macro reads the .tflite at
 # compile time, and they are small. features.i8 and scores.f32le in the same
 # directory are not written here: they are the keyword graph's pinned output
-# on the host (examples/noalloc-pipeline/tests/keyword.rs).
+# on the host (examples/noalloc-pipeline/tests/keyword.rs). tflite_scores.i8 is
+# the TFLite 2.15 reference interpreter's int8 output for features.i8.
 #
 # Needs uv, curl, ffmpeg, espeak-ng and network.
 set -euo pipefail
@@ -47,5 +48,15 @@ espeak-ng -v en-us -s 140 -w "$WORK/yes.wav" "yes"
 ffmpeg -v error -y -i "$WORK/yes.wav" \
   -af "aresample=16000,adelay=150,apad=whole_len=15840,atrim=end_sample=15840" \
   -f s16le -ac 1 "$FIX/yes.s16le"
+
+"$VENV/bin/python" -I -c '
+import sys, numpy as np, tensorflow as tf
+interpreter = tf.lite.Interpreter(model_path=sys.argv[1])
+interpreter.allocate_tensors()
+features = np.fromfile(sys.argv[2], dtype=np.int8).reshape(interpreter.get_input_details()[0]["shape"])
+interpreter.set_tensor(interpreter.get_input_details()[0]["index"], features)
+interpreter.invoke()
+interpreter.get_tensor(interpreter.get_output_details()[0]["index"]).tofile(sys.argv[3])
+' "$FIX/speech.tflite" "$FIX/features.i8" "$FIX/tflite_scores.i8"
 
 echo "fixtures written to $FIX"

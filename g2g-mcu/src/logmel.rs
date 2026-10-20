@@ -24,8 +24,19 @@ pub struct LogMelSettings {
     pub highest_frequency: f32,
 }
 
+// The TFLite Micro micro_speech front end: 49 windows of 30 ms every 20 ms at
+// 16 kHz, between 125 Hz and 7.5 kHz.
+pub const MICRO_SPEECH_SETTINGS: LogMelSettings = LogMelSettings {
+    sample_rate: 16_000,
+    window_samples: 480,
+    hop_samples: 320,
+    frames: 49,
+    lowest_frequency: 125.0,
+    highest_frequency: 7_500.0,
+};
+
 impl LogMelSettings {
-    pub fn clip_samples(&self) -> usize {
+    pub const fn clip_samples(&self) -> usize {
         self.frames
             .saturating_sub(1)
             .saturating_mul(self.hop_samples)
