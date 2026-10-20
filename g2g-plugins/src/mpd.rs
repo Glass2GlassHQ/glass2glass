@@ -207,6 +207,14 @@ pub struct Mpd {
     pub suggested_presentation_delay_secs: Option<f64>,
     /// The presentation's Periods, in order. Always non-empty.
     pub periods: Vec<Period>,
+    /// The `UTCTiming` elements, in manifest order.
+    pub utc_timings: Vec<UtcTiming>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UtcTiming {
+    pub scheme_id_uri: String,
+    pub value: String,
 }
 
 /// One `Period`: a self-contained stretch of the presentation with its own
@@ -732,6 +740,16 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
             .attribute("suggestedPresentationDelay")
             .and_then(parse_iso_duration),
         periods,
+        utc_timings: root
+            .children()
+            .filter(|n| n.is_element() && n.has_tag_name("UTCTiming"))
+            .filter_map(|n| {
+                Some(UtcTiming {
+                    scheme_id_uri: String::from(n.attribute("schemeIdUri")?),
+                    value: String::from(n.attribute("value")?),
+                })
+            })
+            .collect(),
     })
 }
 
@@ -1004,7 +1022,7 @@ fn parse_iso_duration(s: &str) -> Option<f64> {
 /// `-HH:MM` zone offset, or naive = UTC) to unix seconds. Manifest input, so
 /// every field is range-checked and anything malformed yields `None` rather
 /// than a bogus live-edge anchor.
-fn parse_xs_datetime(s: &str) -> Option<f64> {
+pub(crate) fn parse_xs_datetime(s: &str) -> Option<f64> {
     let (date, rest) = s.trim().split_once('T')?;
     let mut ymd = date.split('-');
     let year: i64 = ymd.next()?.parse().ok()?;
