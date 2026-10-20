@@ -214,10 +214,10 @@ pub use meta::OnlyOnGate;
 pub use meta::{
     blob_decoder, canonical_blob_header, decode_blob, frame_carries, AnalyticsMeta, AnalyticsNode,
     BBox, BatchMeta, BatchStream, Blob, BlobDecoder, BlobMeta, CaptionMeta, CaptionTriple,
-    Chromaticity, Classification, DecodedBlob, FrameMeta, HdrStaticMeta, Mask, MasteringDisplay,
-    NamedTensor, ObjectDetection, Propagation, Relation, RelationKind, Roi, Segmentation,
-    TensorMeta, TimecodeMeta, Tracking, Transform, WallClockMeta, BLOB_DECODERS,
-    CARRIES_DETECTIONS,
+    Chromaticity, Classification, DecodedBlob, FrameMeta, HdrStaticMeta, Keypoint, Mask,
+    MasteringDisplay, NamedTensor, ObjectDetection, OrientedDetection, Pose, Propagation, Relation,
+    RelationKind, Roi, Segmentation, TensorMeta, TimecodeMeta, Tracking, Transform, WallClockMeta,
+    BLOB_DECODERS, CARRIES_DETECTIONS,
 };
 #[cfg(feature = "alloc")]
 pub use property::{

@@ -130,10 +130,8 @@ Highest leverage first:
 - **AV1 film grain chroma.** Match dav1d's chroma grain on libaom's
   `-aom-params film-grain-test=1` parameters: a 320x180 clip encoded with them
   differs from dav1d in 41 to 66 chroma bytes per frame, its luma is exact.
-- **Cost-based decoder auto-plug (possibility).** Choose the auto-plug chain
-  with the lowest total cost, summing a per-element cost and a per-frame
-  memory-domain conversion cost scaled by resolution. Today the shortest chain
-  always wins, so a `System` sink gets a software decoder even for 4K HEVC.
+- Report the picture size from the MP4, Matroska and MPEG-TS parse-time probes,
+  so the cost-based decoder choice applies to those containers.
 
 ## CUDA / display
 
@@ -382,13 +380,3 @@ unless it says otherwise.
 - D3D11 decoder surface import into `WgpuPreprocess` (bind the surface directly
   into the compute pass, the Windows counterpart of the dma-buf import).
 - Run the QNN and CoreML execution providers on Qualcomm and Apple hardware.
-- **Pose and OBB heads in `detectionpostprocess`.** Decode the `-pose`
-  keypoints and the `-obb` rotation angle into their own metadata records, and
-  carry letterbox padding offsets so boxes land right on a non-square input.
-- GPU builds for `whispertranscribe` and `llamachat`: forward the `cuda` and
-  `vulkan` flags of `whisper-rs` / `llama-cpp-2` as g2g-ml features, and expose
-  `n-gpu-layers` on `llamachat` once a build exists that honours it.
-- Multi-turn `llamachat`: keep the conversation across frames (a bounded
-  history with a `reset` property) instead of one fresh context per frame.
-- Benchmark `ortinfer` against a hosted `pyelement` running the same ONNX model
-  on the 3060, to show where the native path wins and by how much.

@@ -579,8 +579,8 @@ cargo clippy --workspace --all-targets
 | `OrtInference` (+ CUDA / TensorRT / DirectML / OpenVINO / ROCm / MIGraphX EPs, `execution-provider=` on the launch line) | `ort`, `cuda`, `tensorrt`, `directml`, `openvino`, `rocm`, `migraphx` (in `g2g-ml`) | onnxruntime (`openvino` / `rocm` / `migraphx` register only on an ONNX Runtime built with them) |
 | `ExecutorchInference` (a `.pte` model on ExecuTorch's portable CPU kernels) | `executorch` (in `g2g-ml`) | ExecuTorch 1.5.1 static libs (`tools/executorch-build.sh`, `EXECUTORCH_RS_EXECUTORCH_LIB_DIR`) |
 | `BurnInference` (linear layer, or an ONNX topology imported by `burn-onnx` codegen) | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
-| `WhisperTranscribe` (16 kHz mono f32 in, timed text segments out, whisper.cpp) | `whisper` (in `g2g-ml`) | whisper.cpp built from source (cmake, libclang) |
-| `LlamaChat` (one chat turn per text frame on a GGUF model, llama.cpp) | `llama` (in `g2g-ml`) | llama.cpp built from source (cmake, libclang) |
+| `WhisperTranscribe` (16 kHz mono f32 in, timed text segments out, whisper.cpp) | `whisper`, `whisper-cuda`, `whisper-vulkan` (in `g2g-ml`) | whisper.cpp built from source (cmake, libclang), plus nvcc or the Vulkan headers and `glslc` for the GPU features |
+| `LlamaChat` (one chat turn per text frame on a GGUF model, llama.cpp; `history-turns` keeps a conversation, `reset` clears it) | `llama`, `llama-cuda`, `llama-vulkan` (in `g2g-ml`) | llama.cpp built from source (cmake, libclang), plus nvcc, or the Vulkan headers, `glslc` and SPIRV-Headers, for the GPU features |
 | `WgpuPreprocess` (NV12 / YUYV system bytes, a dma-buf, or a GPU texture in, NCHW tensor out) | `wgpu`, `dmabuf-wgpu`, `mediacodec-wgpu` (in `g2g-ml`) | wgpu (Vulkan for the dma-buf import) |
 | Embassy / RTOS pool + clock | `embassy`, `embassy-link` | none |
 | Browser elements | `web`, `web-codecs` | `wasm32-unknown-unknown` |
@@ -832,6 +832,10 @@ factories when their feature is enabled. `autovideosink` / `autoaudiosink`
 resolve to whichever sink is built, falling back to `fakesink` so a tutorial
 line runs headless.
 
+When the input's picture size is known, as for a raw `.h264` / `.hevc` file,
+`decodebin` picks the decoder with the lowest measured per-frame cost, download
+included, so 4K HEVC into a CPU sink takes `nvdec` and 1080p keeps `ffmpegdec`.
+
 `G2G_PLUGIN_FEATURE_RANK` steers auto-plugging with the syntax of GStreamer's
 `GST_PLUGIN_FEATURE_RANK`. `G2G_PLUGIN_FEATURE_RANK=vulkanvideodec:max` makes
 `decodebin` pick the Vulkan decoder, and `ffmpegdec:none` removes `ffmpegdec`.
@@ -844,7 +848,9 @@ registry: `g2g_ml::register(&mut reg)` (the `launch` feature) adds `ortinfer`,
 `executorchinfer`, `wgpupreprocess`, `detectionpostprocess`, `ortsegment` (instance
 segmentation), `whispertranscribe` and `llamachat`, so
 `... ! ortinfer model=yolov8n.onnx ! detectionpostprocess conf-threshold=0.3 ! ...`
-parses.
+parses. `detectionpostprocess head=pose` or `head=obb` decodes a YOLO `-pose` or
+`-obb` export into keypoints or rotated boxes, and `picture-width` /
+`picture-height` map coordinates back through a letterboxed model input.
 
 ### Camera → encode → RTP egress over UDP
 

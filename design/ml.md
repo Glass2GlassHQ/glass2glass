@@ -305,19 +305,57 @@ transcribed in one whisper call, so text arrives one window late; the remainder
 is transcribed at EOS, padded to the one second whisper.cpp needs. `language`
 (whisper's names, or `auto`), `translate` and `threads` map onto whisper's full
 params. The `whisper-rs` crate builds whisper.cpp from its vendored source with
-cmake, CPU kernels only (each of its GPU flags needs that SDK at build time).
+cmake, CPU kernels only under `whisper`.
 
 `LlamaChat` (`g2g-ml/src/llamachat.rs`, `llama` feature, launch name
 `llamachat`) answers each UTF-8 text frame as one chat turn on a GGUF model and
-emits the reply as a text frame with the input's timing. Turns are independent:
-every frame starts a fresh llama context holding the `system-prompt` and that
-frame's text, so `textdigest ! llamachat` yields one answer per digest. A model
-with a chat template gets the two messages through it; one without gets them
-joined as a raw completion prompt. `max-tokens`, `context-size` (prompt plus
-reply, checked before decoding), `temperature` (`0` is greedy) with `seed`, and
-`threads` are the knobs. The `llama-cpp-2` crate builds llama.cpp from its
-vendored source with OpenMP; the backend initialises once per process and is
-shared by every element.
+emits the reply as a text frame with the input's timing. By default turns are
+independent: every frame starts a fresh llama context holding the
+`system-prompt` and that frame's text, so `textdigest ! llamachat` yields one
+answer per digest. A model with a chat template gets the messages through it;
+one without gets their contents joined by newlines as a raw completion prompt.
+`max-tokens`, `context-size` (prompt plus reply, checked before decoding),
+`temperature` (`0` is greedy) with `seed`, and `threads` are the knobs. The
+`llama-cpp-2` crate builds llama.cpp from its vendored source with OpenMP; the
+backend initialises once per process and is shared by every element.
+
+`history-turns=N` turns it into a conversation. The element keeps the last N
+user and assistant exchanges and renders them between the system prompt and the
+new text, through the chat template when the model has one. One llama context
+then stays alive across frames, along with the list of tokens in its KV cache.
+Each turn tokenizes the whole rendered prompt, keeps the cached tokens it shares
+as a prefix, removes the rest from the KV cache and decodes only the remainder,
+so a turn that appends to the conversation pays for its new tokens alone. When
+the prompt plus `max-tokens` exceeds `context-size`, the oldest exchange is
+dropped and the prompt rendered again, down to none, after which the prompt
+alone failing to fit is an error as before. Once N exchanges are kept, each new
+one pushes the oldest out, the shared prefix shrinks to the system prompt and the
+turn decodes the whole window again. A change of `context-size` or `threads`
+makes a new context, and loading a model drops it. `reset=true` clears the kept
+exchanges and reads back `false`. `history-turns=0` (the default) keeps no
+context between frames.
+
+GPU kernels come from four features: `whisper-cuda` and `whisper-vulkan` turn on
+`whisper-rs`'s `cuda` / `vulkan` (whisper.cpp built with `GGML_CUDA` /
+`GGML_VULKAN`), `llama-cuda` and `llama-vulkan` turn on `llama-cpp-2`'s. CUDA
+needs nvcc and the toolkit at build time, Vulkan needs the loader, headers and
+`glslc`, and llama.cpp's Vulkan backend also needs the SPIRV-Headers CMake
+package. Both build scripts pass `CMAKE_*` environment variables to cmake, so
+`CMAKE_CUDA_ARCHITECTURES=86` builds the CUDA kernels for one GPU generation
+only and `CMAKE_BUILD_PARALLEL_LEVEL` caps the compile jobs (llama.cpp's build
+script uses every core when it is unset). `llama-cuda` also needs
+`CMAKE_CUDA_FLAGS=-Xcompiler=-fPIC`: llama-cpp-sys-2 compiles the CUDA objects
+without it, and linking them into a position-independent executable fails
+(whisper-rs-sys sets the flag itself). Neither build script reruns when a
+`CMAKE_*` variable changes, so changing one needs `cargo clean -p` on that crate.
+With a GPU feature, `whispertranscribe`
+gains `use-gpu` (default true, `false` keeps whisper.cpp on the CPU) and
+`gpu-device` (default 0, the index among the GPU devices ggml lists; whisper.cpp
+falls back to the CPU past the last one), and `llamachat` gains `n-gpu-layers`.
+Its default, -1, is llama.cpp's own `llama_model_default_params()` value and
+means every layer; `0` keeps the model on the CPU. All three are fixed when the
+model loads, so setting one after `model=` loads the model again. CI builds the
+CPU kernels only.
 
 The test models are fetched, not committed: `tools/whisper-fixture.sh` (the
 quantized tiny.en model and whisper.cpp's jfk.wav sample) and
@@ -402,9 +440,10 @@ pixel-derived meta while a scale, crop or copy keeps it. It is off by default, s
 the RTOS baseline pays nothing and `FrameMetaSet` is a ZST.
 
 The standard `AnalyticsMeta` is the `GstAnalyticsRelationMeta` analog: a relation
-graph of `ObjectDetection`, `Classification` and `Tracking` nodes plus directed
-edges, so a detector to tracker to classifier to overlay chain reads results by
-node kind and traversal instead of re-deriving joins through tensor offsets.
+graph of `ObjectDetection`, `Classification`, `Tracking`, `Segmentation`,
+`Roi`, `Pose` and `OrientedDetection` nodes plus directed edges, so a detector
+to tracker to classifier to overlay chain reads results by node kind and
+traversal instead of re-deriving joins through tensor offsets.
 Bounding boxes are normalized to `[0,1]`, so they survive a downstream resample
 without a coordinate rewrite.
 
@@ -413,6 +452,33 @@ without a coordinate rewrite.
 `g2g-ml::DetectionPostprocess` (`analytics` feature) decodes a YOLOv8-style
 `[1, 4+C, A]` output tensor, applying a confidence threshold and per-class NMS,
 into `ObjectDetection`s, attaches an `AnalyticsMeta`, and forwards the frame.
+
+The `head` property picks the Ultralytics YOLOv8/11 export layout, all
+channel-major with the four box channels `cx, cy, w, h` first:
+
+- `detect` (default): `[1, 4+C, A]`, `C` class scores, giving `ObjectDetection`
+  nodes.
+- `pose`: `[1, 5+3K, A]`, one person score then `K` keypoints as `x, y,
+  visibility` rows, giving `Pose` nodes whose `Keypoint`s carry the visibility
+  as their confidence. NMS is class-agnostic.
+- `obb`: `[1, 4+C+1, A]`, the class scores then the angle in radians as the last
+  channel, giving `OrientedDetection` nodes (normalised centre and size, the
+  angle as the model emits it). Suppression is Ultralytics' Fast-NMS on its
+  `probiou` Gaussian overlap, per class, computed in model input pixels.
+
+A channel count the head cannot read (a pose width where `ch - 5` is not a
+positive multiple of 3, an OBB width with no class channel) fails negotiation.
+
+Coordinates leave the decoder normalised to the picture. With `picture-width`
+and `picture-height` at 0 the model input is taken as a plain stretch of the
+picture, so a model pixel `v` maps to `v / input`. Setting both says the input
+was letterboxed the Ultralytics way (`LetterBox(center=True, auto=False)`):
+`scale = min(input_w / picture_w, input_h / picture_h)`, the picture centred
+with `pad = (input - picture * scale) / 2` on each axis, and `v` maps to
+`(v - pad) / (picture * scale)`. Boxes and keypoints are then clipped to
+`[0, 1]` as Ultralytics clips them, oriented boxes are not. Setting only one of
+the two is refused. NMS runs before the mapping, in model pixels, so it matches
+Ultralytics' order.
 
 `g2g-ml::OrtSegmentation` (`ort` plus `analytics`) runs a YOLO `-seg` export,
 Ultralytics YOLOv8-seg or YOLO11-seg, and attaches `Segmentation` plus `Roi`

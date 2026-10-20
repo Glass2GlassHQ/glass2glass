@@ -476,6 +476,7 @@ jobs:
         run: |
           export EXECUTORCH_RS_EXECUTORCH_LIB_DIR="$HOME/executorch/cmake-out"
           cargo test -p g2g-ml --locked --features executorch,analytics,launch --test executorch_inference --test m820_launch_properties
+          cargo test -p g2g-ml --locked --features executorch,analytics,launch --lib -- detect:: segmentation::
       # the execution providers that build against the stock ONNX Runtime
       # download (tensorrt needs the CUDA download); each fails loud at load here.
       # m1705 checks the MCU keyword graph against ONNX Runtime on the CPU.
