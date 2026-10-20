@@ -52,6 +52,7 @@
 //! decode/display host (decode dGPU, present iGPU) a cross-device copy is
 //! unavoidable and Tier A is the honest path.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::annexb::{length_prefixed_to_annexb, parse_avcc, parse_hvcc, prepend_param_sets};
