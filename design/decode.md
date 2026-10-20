@@ -867,10 +867,26 @@ pictures to retire, which is what x264 does for its B-pyramid. Reading the
 marking means walking past the reference-list modification and the prediction
 weight table first, so `poc::parse_h264_slice_marking` continues the shared slice
 parse through them and returns the operations as `H264RefPicMarking`,
-fixed-capacity so the header stays `Copy`. The DPB applies the short-term
-operations and refuses a long-term operation rather than keep feeding the driver
-a reference the stream has retired. Running the sliding window regardless
-diverges from the reference set the driver builds its L0 / L1 lists against.
+fixed-capacity so the header stays `Copy`. The DPB applies every marking
+operation of 8.2.5.4, long-term ones included: a long-term picture carries
+`used_for_long_term_reference` and its `LongTermFrameIdx` as the FrameNum in the
+driver's reference info, and MMCO 5 resets the POC state and frame_num and
+starts a new reorder group. A frame_num gap under
+`gaps_in_frame_num_value_allowed_flag` makes the 8.2.5.2 non-existing frames
+sliding-window entries with no DPB slot, never passed to the driver. Running
+the sliding window regardless diverges from the reference set the driver builds
+its L0 / L1 lists against.
+
+Parameter sets are kept by id. The decoder parses each slice against its SPS
+and PPS tables and recreates only the `VkVideoSessionParametersKHR` when a
+picture's sets differ from what the session holds, after draining the ring, so a
+PPS re-sent with new content before a non-IDR picture keeps the DPB. The
+element rebuilds the session only when the SPS shape changes (extent, crop,
+reference count, chroma, bit depth). POC type 1 carries its offset cycle into
+the std SPS, `PicOrderCnt` goes to the driver as the real top and bottom field
+counts, and the H.264 reorder hold falls back to the level-derived
+`MaxDpbFrames` from `h264parse::sps_reorder_frames` when the SPS has no VUI
+`max_num_reorder_frames`.
 
 ### B-frames and display order
 
@@ -1130,9 +1146,13 @@ official one.
 | :--- | ---: | ---: | ---: |
 | `ffmpegdec` | 130 / 135 | 135 / 188 | 0 / 240 |
 | `nvdec` | 129 / 135 | 141 / 188 | 202 / 240 |
-| `vulkanvideodec` | 58 / 135 | 104 / 188 | 2 / 240 |
+| `vulkanvideodec` | 99 / 135 (2026-10-20) | 113 / 188 (2026-10-20) | 2 / 240 |
 | `dav1ddec` | | | 238 / 240 |
 | `rav1ddec` | | | 238 / 240 |
 
 The H.264 failures every backend shares are the Extended-profile FMO and SP
-slice vectors, which ffmpeg does not decode either.
+slice vectors, which ffmpeg does not decode either. Every `vulkanvideodec`
+H.264 failure is a nonzero exit naming the coding tool: field pictures are
+refused at the slice header (MBAFF frame pictures decode), FMO at the PPS and
+SP slices at the slice header, so a stream the decoder cannot handle never ends
+as an empty or wrong success.

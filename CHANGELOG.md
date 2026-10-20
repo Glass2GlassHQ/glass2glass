@@ -11,6 +11,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1716: `tools/ortinfer-bench.sh` times `ortinfer` against the hosted gst-python-ml detector on the same YOLO11m model.
 - M1713: `detectionpostprocess` decodes YOLO pose and oriented-box heads and maps coordinates back through a letterboxed input.
 - M1718: `decodebin` picks the cheapest decode chain by measured per-frame cost when the input's picture size is known.
+- M1717: `vulkanvideodec` decodes 99 of 135 JVT H.264 vectors bit-exact and refuses field-coded, FMO and SP streams with a named error.
 - M1709: the hardware, platform and AV1 decoders carry each access unit's metadata to its decoded picture.
 - M1710: `rtspclientsink`, the RTSP server ingest and the WebRTC elements carry each frame's capture time.
 - M1711: `tracker` adds a persistent ByteTrack id to each `AnalyticsMeta` detection.
