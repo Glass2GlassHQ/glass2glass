@@ -4848,6 +4848,7 @@ fn h264_picture_order(
             poc: stored_field_order_counts[0].min(stored_field_order_counts[1]),
             pic_output_flag: true,
             discards_prior_pictures: false,
+            dpb: None,
         },
         field_order_counts,
         stored_field_order_counts,
@@ -9585,6 +9586,7 @@ impl VulkanVideoDevice {
             session_sets: H265ParameterSetTable::of(ps),
             replaced_parameters: None,
             poc: crate::poc::H265PocState::default(),
+            end_of_sequence_pending: false,
             skip_rasl: false,
         })
     }
@@ -10133,9 +10135,30 @@ pub struct PictureMeta {
     // false for an H.265 picture decoded only as a reference (`pic_output_flag`)
     pub pic_output_flag: bool,
     // an H.265 `no_output_of_prior_pics_flag` at a sequence start: the pictures
-    // still waiting for output are dropped
+    // still waiting for output are dropped (C.5.2.2)
     pub discards_prior_pictures: bool,
+    // the H.265 DPB once this picture is decoded, which bumps waiting pictures
+    // out when it is full (C.5.2.3)
+    pub dpb: Option<H265DpbOccupancy>,
 }
+
+/// The reference pictures an H.265 DPB holds right after a picture decodes,
+/// the decoded picture included, and the `sps_max_dec_pic_buffering` it may hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct H265DpbOccupancy {
+    reference_pocs: [i32; MAX_DPB_SLOTS],
+    reference_count: usize,
+    capacity: usize,
+}
+
+impl H265DpbOccupancy {
+    fn references(&self) -> &[i32] {
+        &self.reference_pocs[..self.reference_count]
+    }
+}
+
+// the `num-dpb-slots` ceiling, past every codec's reference count
+const MAX_DPB_SLOTS: usize = 32;
 
 /// A multi-frame H.264 decoder driving a real DPB: it decodes P (and, given a
 /// stream, B) frames by tracking reference pictures across access units, unlike
@@ -11902,6 +11925,8 @@ pub struct H265DpbDecoder {
     replaced_parameters: Option<alloc::boxed::Box<ReplacedSessionParameters>>,
     /// Picture-order-count derivation, carried across pictures in decoding order.
     poc: crate::poc::H265PocState,
+    // an end-of-sequence NAL unit ended the last access unit, before any next picture
+    end_of_sequence_pending: bool,
     /// Whether the RASL leading pictures associated with the most recent IRAP are
     /// discarded (the IRAP's `NoRaslOutputFlag`). After a random-access tune-in
     /// (a seek that reset us to a CRA), the CRA's RASL followers reference pre-CRA
@@ -11946,6 +11971,7 @@ impl H265DpbDecoder {
         self.core.abort_ring();
         self.refs.fill(None);
         self.poc = crate::poc::H265PocState::default();
+        self.end_of_sequence_pending = false;
         // The next IRAP sets this; a stray RASL before any IRAP is not skipped.
         self.skip_rasl = false;
         self.core.first = true;
@@ -12147,7 +12173,6 @@ impl H265DpbDecoder {
     ) -> Result<alloc::vec::Vec<H265Picture<'s>>, VulkanVideoError> {
         let mut pictures = alloc::vec::Vec::new();
         let mut current: Option<H265Picture<'s>> = None;
-        let mut follows_end_of_sequence = false;
 
         for nal in nal_units_any(stream) {
             if nal.len() < 2 || h265_nal_layer_id(nal) != 0 {
@@ -12161,7 +12186,7 @@ impl H265DpbDecoder {
                 nal_unit_type,
                 H265_NAL_END_OF_SEQUENCE | H265_NAL_END_OF_BITSTREAM
             ) {
-                follows_end_of_sequence = true;
+                self.end_of_sequence_pending = true;
                 continue;
             }
             if !h265_is_slice(nal_unit_type) {
@@ -12180,7 +12205,7 @@ impl H265DpbDecoder {
                     header,
                     slices: alloc::vec::Vec::new(),
                     sets,
-                    follows_end_of_sequence: core::mem::take(&mut follows_end_of_sequence),
+                    follows_end_of_sequence: core::mem::take(&mut self.end_of_sequence_pending),
                 })
                 .slices
                 .push(nal);
@@ -12258,10 +12283,10 @@ impl H265DpbDecoder {
             frame_num: 0,
             poc: order.pic_order_cnt,
             pic_output_flag: hdr.pic_output_flag,
-            // the end of sequence already output every earlier picture
+            // a CRA starting a sequence infers NoOutputOfPriorPicsFlag 1 (C.5.2.2)
             discards_prior_pictures: starts_sequence
-                && hdr.no_output_of_prior_pics_flag
-                && !picture.follows_end_of_sequence,
+                && (hdr.no_output_of_prior_pics_flag || hdr.is_cra()),
+            dpb: None,
         };
         (meta, order)
     }
@@ -12294,7 +12319,7 @@ impl H265DpbDecoder {
             return Ok(None);
         }
         self.bind_parameter_sets(&picture.sets)?;
-        let (meta, order) = self.picture_meta(picture);
+        let (mut meta, order) = self.picture_meta(picture);
         let poc = order.pic_order_cnt;
         let no_rasl_output = order.no_rasl_output_flag;
         // Associate this IRAP's RASL followers with its NoRaslOutputFlag: after a
@@ -12425,6 +12450,17 @@ impl H265DpbDecoder {
         self.refs[target] = Some(H265RefPic {
             poc,
             is_long_term: false,
+        });
+        let mut reference_pocs = [0; MAX_DPB_SLOTS];
+        let mut reference_count = 0;
+        for (slot, reference) in reference_pocs.iter_mut().zip(self.refs.iter().flatten()) {
+            *slot = reference.poc;
+            reference_count += 1;
+        }
+        meta.dpb = Some(H265DpbOccupancy {
+            reference_pocs,
+            reference_count,
+            capacity: picture.sets.sps.max_dec_pic_buffering(),
         });
         Ok(Some((target, meta)))
     }
@@ -14538,6 +14574,14 @@ impl core::fmt::Debug for DecodeSessionKind {
 /// `show_existing_frame` / `order_hint`, not a monotonic POC) stays in coding
 /// order. Generic over the payload so the same logic could serve the GPU-texture
 /// path if that becomes AU-streamed.
+/// What one [`ReorderBuffer::push`] releases: pictures to emit in display order,
+/// and pictures dropped without output.
+#[derive(Debug)]
+struct ReorderRelease<T> {
+    output: alloc::vec::Vec<T>,
+    dropped: alloc::vec::Vec<T>,
+}
+
 struct ReorderBuffer<T> {
     /// Held pictures, each `(cvs, poc, payload)`. Small (<= `max_hold` within a
     /// CVS), so a Vec + linear min-scan beats a heap.
@@ -14563,20 +14607,51 @@ impl<T> ReorderBuffer<T> {
 
     /// Push one decoded picture (in decode order) and return the pictures now
     /// ready to emit, in display order. A keyframe first releases the whole
-    /// previous CVS (all submitted), then joins the new CVS; within a CVS the
-    /// buffer bumps the lowest-key picture while it exceeds `max_hold`.
-    fn push(&mut self, is_keyframe: bool, poc: i32, payload: T) -> alloc::vec::Vec<T> {
-        let mut out = alloc::vec::Vec::new();
-        if is_keyframe && self.started {
-            out.append(&mut self.take_sorted());
+    /// previous CVS (all submitted), or drops it on an H.265
+    /// `no_output_of_prior_pics_flag`, then joins the new CVS. Within a CVS the
+    /// buffer bumps the lowest-key picture while it holds more than `max_hold`,
+    /// or while an H.265 DPB holding the waiting pictures besides its references
+    /// is over capacity (C.5.2.3). A picture with `pic_output_flag` 0 is dropped.
+    fn push(&mut self, meta: &PictureMeta, payload: T) -> ReorderRelease<T> {
+        let mut release = ReorderRelease {
+            output: alloc::vec::Vec::new(),
+            dropped: alloc::vec::Vec::new(),
+        };
+        if meta.is_keyframe && self.started {
+            let previous = self.take_sorted();
+            if meta.discards_prior_pictures {
+                release.dropped = previous;
+            } else {
+                release.output = previous;
+            }
             self.cvs += 1;
         }
         self.started = true;
-        self.pending.push((self.cvs, poc, payload));
-        while self.pending.len() > self.max_hold {
-            out.push(self.pop_min());
+        if meta.pic_output_flag {
+            self.pending.push((self.cvs, meta.poc, payload));
+        } else {
+            release.dropped.push(payload);
         }
-        out
+        while !self.pending.is_empty()
+            && (self.pending.len() > self.max_hold || self.dpb_over_capacity(meta.dpb))
+        {
+            release.output.push(self.pop_min());
+        }
+        release
+    }
+
+    // waiting pictures that are no longer references still take DPB room
+    fn dpb_over_capacity(&self, dpb: Option<H265DpbOccupancy>) -> bool {
+        let Some(dpb) = dpb else {
+            return false;
+        };
+        let references = dpb.references();
+        let waiting_only = self
+            .pending
+            .iter()
+            .filter(|(cvs, poc, _)| *cvs != self.cvs || !references.contains(poc))
+            .count();
+        references.len() + waiting_only > dpb.capacity
     }
 
     /// Release everything held, in display order (end of stream / a reconfig
@@ -15316,19 +15391,14 @@ impl VulkanVideoDec {
                     poc: 0,
                     pic_output_flag: true,
                     discards_prior_pictures: false,
+                    dpb: None,
                 },
             ));
-            if meta.discards_prior_pictures {
-                for (held_timing, _) in self.reorder.flush() {
-                    self.input_stamps.take(held_timing.pts_ns);
-                }
+            let release = self.reorder.push(&meta, (timing, f));
+            for (dropped_timing, _) in release.dropped {
+                self.input_stamps.take(dropped_timing.pts_ns);
             }
-            if !meta.pic_output_flag {
-                self.input_stamps.take(timing.pts_ns);
-                continue;
-            }
-            let ready = self.reorder.push(meta.is_keyframe, meta.poc, (timing, f));
-            for (t, rf) in ready {
+            for (t, rf) in release.output {
                 self.emit_one_nv12(t, rf, out).await?;
             }
         }
@@ -15731,14 +15801,14 @@ impl AsyncElement for VulkanVideoDec {
 
                     // If this AU triggered a reconfig, emit the previous decoder's
                     // flushed tail (old geometry) before decoding the new keyframe.
-                    // On the reorder path, drain the reorder buffer too: the old
-                    // coded video sequence is complete, so it releases in display
-                    // order before the new-geometry sequence begins.
+                    // On the reorder path the tail joins the reorder buffer, and
+                    // the new decoder's first picture, which starts a coded video
+                    // sequence, releases it in display order or drops it (H.265
+                    // NoOutputOfPriorPicsFlag).
                     if !self.reconfig_tail.is_empty() {
                         let tail = core::mem::take(&mut self.reconfig_tail);
                         if self.reorder_enabled {
                             self.emit_reordered(tail, out).await?;
-                            self.drain_reorder(out).await?;
                         } else {
                             self.emit_nv12_frames(tail, out).await?;
                         }
@@ -15781,20 +15851,11 @@ impl AsyncElement for VulkanVideoDec {
                                 .map_err(decode_refused)?;
                             let mut ready = alloc::vec::Vec::new();
                             for (meta, tex) in metas.into_iter().zip(textures) {
-                                if meta.discards_prior_pictures {
-                                    for (held_timing, _) in self.reorder_tex.flush() {
-                                        self.input_stamps.take(held_timing.pts_ns);
-                                    }
+                                let release = self.reorder_tex.push(&meta, (src_timing, tex));
+                                for (dropped_timing, _) in release.dropped {
+                                    self.input_stamps.take(dropped_timing.pts_ns);
                                 }
-                                if !meta.pic_output_flag {
-                                    self.input_stamps.take(src_timing.pts_ns);
-                                    continue;
-                                }
-                                ready.extend(self.reorder_tex.push(
-                                    meta.is_keyframe,
-                                    meta.poc,
-                                    (src_timing, tex),
-                                ));
+                                ready.extend(release.output);
                             }
                             self.emit_textures(ready, out).await?;
                         }
@@ -17243,6 +17304,7 @@ mod tests {
                 poc: 0,
                 pic_output_flag: true,
                 discards_prior_pictures: false,
+                dpb: None,
             },
             field_order_counts: [0, 0],
             stored_field_order_counts: [0, 0],
