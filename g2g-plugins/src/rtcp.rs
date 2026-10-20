@@ -14,7 +14,7 @@
 
 use alloc::vec::Vec;
 
-use g2g_core::rtp::RtpSequenceExtender;
+use g2g_core::rtp::{RtpHeader, RtpSequenceExtender};
 use g2g_core::time::ns_to_ticks;
 
 use crate::bereader::{be_u16, be_u32, be_u64};
@@ -185,6 +185,25 @@ pub fn build_sender_report(
     }
     patch_length(&mut out, 0);
     out
+}
+
+// the RFC 3550 sender counters of one SSRC: media packets and their payload octets, wrapping as the SR fields do
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SenderCounters {
+    pub packets: u32,
+    pub octets: u32,
+}
+
+impl SenderCounters {
+    pub fn count(&mut self, packet: &[u8]) {
+        let payload_len = RtpHeader::parse(packet).map_or(0, |parsed| parsed.payload_len);
+        self.packets = self.packets.wrapping_add(1);
+        self.octets = self.octets.wrapping_add(payload_len as u32);
+    }
+
+    pub fn sender_report(&self, ssrc: u32, ntp: u64, rtp_ts: u32) -> Vec<u8> {
+        build_sender_report(ssrc, ntp, rtp_ts, self.packets, self.octets, &[])
+    }
 }
 
 /// The current time as a 64-bit NTP timestamp (seconds since 1900 in the high

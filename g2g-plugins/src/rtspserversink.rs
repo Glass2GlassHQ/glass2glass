@@ -43,8 +43,6 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, VideoCodec,
 };
 
-use g2g_core::rtp::RTP_HEADER_LEN;
-
 use crate::filesink::io_err;
 use crate::rtcp;
 use crate::rtppay::RtpH264Packetizer;
@@ -101,8 +99,7 @@ struct Client {
     /// This player's own RTP sequence numbering, armed at PLAY.
     next_sequence: Option<u16>,
     /// RFC 3550 sender counters for this player's RTP session.
-    rtp_packets: u32,
-    rtp_octets: u32,
+    sender_counters: rtcp::SenderCounters,
     last_rtp_ts: u32,
     last_sr_ns: u64,
     /// Last control-channel or RTCP activity, for session-timeout reaping.
@@ -121,8 +118,7 @@ impl Client {
             interleaved: None,
             rtcp_channel: None,
             next_sequence: None,
-            rtp_packets: 0,
-            rtp_octets: 0,
+            sender_counters: rtcp::SenderCounters::default(),
             last_rtp_ts: 0,
             last_sr_ns: 0,
             last_activity_ns: g2g_core::metrics::monotonic_ns(),
@@ -239,13 +235,8 @@ impl Client {
                 sent += 1;
             }
         }
-        // SR sender counters: media packets and their payload octets (past the
-        // 12-byte RTP header).
         for packet in packets.iter() {
-            self.rtp_packets = self.rtp_packets.wrapping_add(1);
-            self.rtp_octets = self
-                .rtp_octets
-                .wrapping_add(packet.len().saturating_sub(RTP_HEADER_LEN) as u32);
+            self.sender_counters.count(packet);
         }
         Ok(sent)
     }
@@ -560,14 +551,9 @@ impl RtspServerSink {
                 i += 1;
                 continue;
             }
-            let sr = rtcp::build_sender_report(
-                self.ssrc,
-                rtcp::ntp_now(),
-                c.last_rtp_ts,
-                c.rtp_packets,
-                c.rtp_octets,
-                &[],
-            );
+            let sr = c
+                .sender_counters
+                .sender_report(self.ssrc, rtcp::ntp_now(), c.last_rtp_ts);
             match c.send_rtcp(rtcp_socket, &sr).await {
                 Ok(sent) => {
                     if sent {

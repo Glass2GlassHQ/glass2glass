@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket as StdUdpSocket};
 
-use g2g_core::rtp::{CaptureTimeExtensionIds, RtpHeader};
+use g2g_core::rtp::CaptureTimeExtensionIds;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
@@ -242,8 +242,7 @@ pub struct UdpSink {
     last_sr_ns: u64,
     /// Media packets / payload octets sent on `ssrc` (the SR sender counters;
     /// FEC and RTX ride other SSRCs and do not count here). Wrap as RFC fields.
-    rtp_packets: u32,
-    rtp_octets: u32,
+    sender_counters: rtcp::SenderCounters,
     /// The most recent media RTP timestamp, reported in the SR alongside NTP now.
     last_rtp_ts: u32,
     /// Extra destinations from the `clients` property. Non-empty replaces the
@@ -289,8 +288,7 @@ impl UdpSink {
             bytestream: None,
             rtcp_sr_interval_ns: None,
             last_sr_ns: 0,
-            rtp_packets: 0,
-            rtp_octets: 0,
+            sender_counters: rtcp::SenderCounters::default(),
             last_rtp_ts: 0,
             packets_sent: 0,
             bytes_sent: 0,
@@ -956,12 +954,7 @@ impl AsyncElement for UdpSink {
                         let reached = self.send_datagram(pkt).await?;
                         sent += reached;
                         bytes += reached * pkt.len() as u64;
-                        // SR sender counters: this SSRC's media packets and
-                        // their RTP payload octets (past the header and any
-                        // header extension).
-                        let payload_len = RtpHeader::parse(pkt).map_or(0, |p| p.payload_len);
-                        self.rtp_packets = self.rtp_packets.wrapping_add(1);
-                        self.rtp_octets = self.rtp_octets.wrapping_add(payload_len as u32);
+                        self.sender_counters.count(pkt);
                     }
                     // Repair packets follow the media they protect.
                     for repair in &fec_packets {
@@ -997,13 +990,10 @@ impl AsyncElement for UdpSink {
                     if let Some(interval) = self.rtcp_sr_interval_ns {
                         let now = g2g_core::metrics::monotonic_ns();
                         if now.saturating_sub(self.last_sr_ns) >= interval {
-                            let sr = rtcp::build_sender_report(
+                            let sr = self.sender_counters.sender_report(
                                 self.ssrc,
                                 rtcp::ntp_now(),
                                 self.last_rtp_ts,
-                                self.rtp_packets,
-                                self.rtp_octets,
-                                &[],
                             );
                             self.send_datagram(&sr).await?;
                             self.last_sr_ns = now;

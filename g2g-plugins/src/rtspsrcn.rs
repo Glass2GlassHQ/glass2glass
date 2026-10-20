@@ -46,10 +46,12 @@ use g2g_core::{
 };
 
 use crate::g711::{G711_CLOCK_RATE_HZ, G711_DEFAULT_CHANNELS};
-use crate::rtspclient::{transports_from_flags, transports_to_flags, LowerTransport};
+use crate::rtspclient::{
+    transports_from_flags, transports_to_flags, LowerTransport, ReconnectPolicy, ReconnectState,
+};
 use crate::rtspsrc::{
     connect_describe, placeholder_framerate, video_caps_for, video_codec, video_stream_index,
-    with_placeholder_framerate, ReconnectPolicy, ReconnectState,
+    with_placeholder_framerate,
 };
 
 /// User-Agent sent on DESCRIBE / SETUP unless `user-agent` overrides it. Also
@@ -567,7 +569,7 @@ static RTSPSRCN_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "reconnect",
         PropKind::Uint,
-        "max reconnect attempts after a session failure (0 = no reconnect)",
+        "max reconnect attempts after each loss of a session that carried media (0 = no reconnect)",
     )
     .with_default("0"),
     PropertySpec::new(
@@ -775,12 +777,17 @@ async fn run_rtsp_n(src: &mut RtspSrcN, out: &mut dyn MultiOutputSink) -> Result
     let mut retry = ReconnectState::new(&src.reconnect);
 
     loop {
+        let emitted_before: u64 = state.iter().map(|port| port.emitted).sum();
         let mut session_max_pts = pts_base_ns;
         let outcome = run_session(src, out, &mut state, pts_base_ns, &mut session_max_pts).await;
         match outcome {
             SessionOutcome::LimitReached | SessionOutcome::GracefulEnd => break,
             SessionOutcome::DownstreamError(e) => return Err(e),
             SessionOutcome::NetworkError(e) => {
+                let emitted_after: u64 = state.iter().map(|port| port.emitted).sum();
+                if emitted_after > emitted_before {
+                    retry.recovered(&src.reconnect);
+                }
                 let Some(backoff_ms) = retry.next_delay_ms(&src.reconnect) else {
                     return Err(e);
                 };

@@ -6,6 +6,11 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1699: `rtspsrc` and `rtspsrcn` restart the `reconnect` budget after each session that carried media.
+- M1698: `rtspclientsink` sends keepalives and sender reports from a session timer, so a stalled upstream keeps the session.
+- M1697: `rtspclientsink reconnect=N` republishes from the next keyframe after the server drops the session.
+- M1696: `rtspclientsink` sends a GET_PARAMETER or OPTIONS keepalive ahead of the session timeout, as gst does.
+- M1695: `rtspclientsink` sends an RTCP sender report per stream every `rtcp-sr-interval`, on one NTP mapping of PTS.
 - M1705: the MCU keyword graph's MicroFlow scores match the TFLite interpreter exactly and ONNX Runtime within 5 int8 steps, persisted as `Oracle` evidence.
 - M1704: a heap-free keyword-spotting graph runs bit-exact on QEMU Cortex-M4 under the no-heap, panic-free and footprint proofs.
 - M1703: heap-free `ImageResize` and u8 input to `Int8Quantize`, the vision front end of an MCU model.
