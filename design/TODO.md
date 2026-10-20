@@ -120,10 +120,11 @@ Highest leverage first:
   and the Chromium AV1 suites the keyframe decodes exactly and the first inter
   frame differs from dav1d, on both NVIDIA and RADV. 10-bit vectors fail to
   reach `I420_10LE`.
-- **`VulkanVideoDec` H.265 conformance.** 113 of 188 HEVC vectors pass against
-  141 for `nvdec`. The 31 HEVC_V1 vectors `nvdec` passes are the fix list; the
-  RExt vectors past the hardware's profiles must refuse with a named error
-  (`Bitdepth_A/B` and `TSCTX_8bit/10bit` end in `DEVICE_LOST` today).
+- **`VulkanVideoDec` conformance residue.** `WPP_D_ericsson` (wavefront
+  parallel processing on a picture one CTB wide, with dependent slice segments)
+  is refused, though ffmpeg's Vulkan decoder decodes it on the same GPU: find
+  what differs in the submission. On RADV, `MR4_TANDBERG_C` and
+  `MR5_TANDBERG_C` (H.264) repeat an earlier picture at 22 output positions.
 - **AV1 spatial layers.** `av1-1-b8-22-svc-L2T1` and `L2T2` differ from the
   reference through `dav1ddec` and `rav1ddec`.
 - **HEVC through `ffmpegdec`.** 53 of 188 HEVC vectors fail through

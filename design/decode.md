@@ -831,11 +831,29 @@ pointer: profile-tier-level, DPB manager, short-term RPS list.
 
 `H265DpbDecoder` decodes pixels: per-picture slice-segment-header parse
 (`parse_h265_slice_header`), picture-order-count per 8.3.1,
-reference-picture-set DPB management with every IRAP a clean reset, and the
-reference-slot lists (`RefPicSetStCurrBefore/After`, POC-keyed reference info)
-handed to `vkCmdDecodeVideoKHR`, reusing the H.264 DPB machinery. The whole
-fixture of IDR and CRA GOPs decodes bit-exact against the ffmpeg software decoder
-on the 3060, also straight to GPU-resident RGBA `wgpu::Texture`s.
+reference-picture-set DPB management, and the reference-slot lists
+(`RefPicSetStCurrBefore/After`, POC-keyed reference info) handed to
+`vkCmdDecodeVideoKHR`, reusing the H.264 DPB machinery. The whole fixture of
+IDR and CRA GOPs decodes bit-exact against the ffmpeg software decoder on the
+3060, also straight to GPU-resident RGBA `wgpu::Texture`s.
+
+The decoder keeps the newest VPS, SPS and PPS of each id and parses each slice
+against the sets its PPS names. When a picture's sets differ from the ones its
+session parameters hold, it creates new session parameters, draining the ring
+first. The element rebuilds the session only when the active SPS of an access
+unit's first slice changes the picture size, conformance window, DPB size or
+bit depth, and that SPS can be activated by a slice in an access unit that
+carries no SPS. Scaling lists, coded or default, and non-uniform tile widths go
+into the Std SPS and PPS. The DPB is sized from the highest sub-layer's
+`sps_max_dec_pic_buffering`. Every decoded picture stays a short-term reference
+until a later reference-picture set drops it, so sub-layer non-reference
+pictures still serve higher sub-layers. Output follows C.5.2: the reorder
+buffer bumps on `sps_max_num_reorder_pics` or when the references plus the
+waiting pictures exceed the DPB. It drops pictures with `pic_output_flag` 0. At
+an IRAP that starts a coded video sequence it drops the waiting pictures on
+`no_output_of_prior_pics_flag`, or on a CRA. An end-of-sequence NAL makes the
+next CRA start a sequence, which skips its RASL pictures and resets the
+order-count MSB.
 
 NVIDIA's Vulkan HEVC slice-header parser needs a 3-byte start code (`00 00 01`).
 A 4-byte one breaks every non-IDR slice, while the IDR tolerates it via the
@@ -1146,7 +1164,7 @@ official one.
 | :--- | ---: | ---: | ---: |
 | `ffmpegdec` | 130 / 135 | 135 / 188 | 0 / 240 |
 | `nvdec` | 129 / 135 | 141 / 188 | 202 / 240 |
-| `vulkanvideodec` | 99 / 135 (2026-10-20) | 113 / 188 (2026-10-20) | 2 / 240 |
+| `vulkanvideodec` | 99 / 135 (2026-10-20) | 146 / 188 (2026-10-20) | 2 / 240 |
 | `dav1ddec` | | | 238 / 240 |
 | `rav1ddec` | | | 238 / 240 |
 
@@ -1156,3 +1174,11 @@ H.264 failure is a nonzero exit naming the coding tool: field pictures are
 refused at the slice header (MBAFF frame pictures decode), FMO at the PPS and
 SP slices at the slice header, so a stream the decoder cannot handle never ends
 as an empty or wrong success.
+
+Every `vulkanvideodec` H.265 failure is also a nonzero exit naming the coding
+tool, raised when the parameter sets parse, before the driver sees the stream.
+The sessions are Main and Main 10, so a chroma format other than 4:2:0, a bit
+depth above 10, unequal luma and chroma depths, and SPS or PPS range extension
+or screen content tools are all refused. Wavefront parallel processing on a
+picture one coding tree block wide is refused too. RADV (Rembrandt, pinned with
+`VK_DRIVER_FILES`) gives the same 146 of 188 and 97 of 135 for H.264.
