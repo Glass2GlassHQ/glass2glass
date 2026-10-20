@@ -76,6 +76,7 @@ use core::pin::Pin;
 use crate::cvnv12::{
     pack_nv12_locked, CvBufferOwner, K_CV_PIXEL_FORMAT_420F, K_CV_PIXEL_FORMAT_420V,
 };
+use crate::inputstamp::{InputStamp, PendingInputStamps};
 
 /// One decoded frame the output callback captured: packed to tight NV12 bytes
 /// (the default), or the decoder's retained `CVPixelBuffer` unread (`cv-output`
@@ -182,6 +183,7 @@ pub struct VtDecode {
     /// `CVPixelBuffer`s (`MemoryDomain::CvPixelBuffer`) instead of packing NV12
     /// bytes to system memory.
     cv_output: bool,
+    input_stamps: PendingInputStamps,
     emitted: u64,
     segment: Segment,
 }
@@ -223,6 +225,7 @@ impl VtDecode {
             last_caps: None,
             input_framerate: Rate::Any,
             cv_output: false,
+            input_stamps: PendingInputStamps::default(),
             emitted: 0,
             segment: Segment::new(),
         }
@@ -266,7 +269,7 @@ impl VtDecode {
 
     /// Decode one Annex-B access unit, packing any produced NV12 frames into the
     /// state collector for `process` to drain.
-    fn feed(&mut self, au: &[u8], pts_ns: u64) -> Result<(), G2gError> {
+    fn feed(&mut self, au: &[u8], pts_ns: u64, stamp: InputStamp) -> Result<(), G2gError> {
         // VideoToolbox builds the format description from the parameter sets, so
         // pull them out of the access unit and (re)build the session on a
         // keyframe; until the first parameter sets arrive there is nothing to
@@ -298,6 +301,7 @@ impl VtDecode {
         if avcc.is_empty() {
             return Ok(()); // parameter-set-only access unit, nothing to decode
         }
+        self.input_stamps.insert(pts_ns, stamp);
 
         // SAFETY: `state.session` is live; `avcc` outlives the synchronous
         // decode + wait; the refcon points at the boxed collector that lives as
@@ -416,7 +420,7 @@ impl AsyncElement for VtDecode {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    self.feed(slice, frame.timing.pts_ns)?;
+                    self.feed(slice, frame.timing.pts_ns, InputStamp::of(&frame))?;
                     // Drain whatever the callback packed.
                     let decoded = match self.state.as_mut() {
                         Some(st) => core::mem::take(&mut st.collector.frames),
@@ -462,6 +466,7 @@ impl AsyncElement for VtDecode {
                         st.collector.frames.clear();
                         st.collector.error = None;
                     }
+                    self.input_stamps = PendingInputStamps::default();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
@@ -509,6 +514,7 @@ impl VtDecode {
                 ..
             } => (*width, *height, *pts_ns),
         };
+        let input = self.input_stamps.take(pts_ns);
         if !self.segment.presents(pts_ns) {
             return Ok(());
         }
@@ -550,10 +556,11 @@ impl VtDecode {
                 dts_ns: pts_ns,
                 duration_ns: 0,
                 capture_ns: pts_ns,
+                arrival_ns: input.arrival_ns,
                 ..FrameTiming::default()
             },
             sequence: self.emitted,
-            meta: Default::default(),
+            meta: input.meta,
         };
         self.emitted += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;

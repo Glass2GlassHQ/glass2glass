@@ -23,6 +23,7 @@
 
 use ash::vk;
 
+use crate::inputstamp::{InputStamp, PendingInputStamps};
 use g2g_core::frame::Frame;
 use g2g_core::g2g_error;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedWgpuTexture, SystemSlice};
@@ -13834,6 +13835,7 @@ pub struct VulkanVideoDec {
     /// ring retirement order). Drained by `Eos`, cleared by `Flush`. Unused on the
     /// GPU-texture path, which stays synchronous (one picture in, its frames out).
     pending_timings: alloc::collections::VecDeque<FrameTiming>,
+    input_stamps: PendingInputStamps,
     /// A mid-stream reconfig (`ensure_decoder` rebuilding for a new resolution)
     /// flushes the OUTGOING decoder's pipelined tail here before it drops, so those
     /// frames are not lost; `process` emits them (against the old geometry) before
@@ -13996,6 +13998,7 @@ impl VulkanVideoDec {
             out_format: None,
             emit_wgpu: false,
             pending_timings: alloc::collections::VecDeque::new(),
+            input_stamps: PendingInputStamps::default(),
             reconfig_tail: alloc::vec::Vec::new(),
             reorder_enabled: false,
             pending_meta: alloc::collections::VecDeque::new(),
@@ -14279,6 +14282,7 @@ impl VulkanVideoDec {
         f: Nv12Frame,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
+        let input = self.input_stamps.take(src_timing.pts_ns);
         if !self.segment.presents(src_timing.pts_ns) {
             return Ok(());
         }
@@ -14300,7 +14304,7 @@ impl VulkanVideoDec {
             domain: MemoryDomain::System(SystemSlice::from_boxed(f.into_data())),
             timing: self.out_timing(&src_timing),
             sequence: self.emitted,
-            meta: Default::default(),
+            meta: input.meta,
         };
         self.emitted += 1;
         out.push(PipelinePacket::DataFrame(out_frame)).await?;
@@ -14376,6 +14380,7 @@ impl VulkanVideoDec {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         for (timing, tex) in textures {
+            let input = self.input_stamps.take(timing.pts_ns);
             if !self.segment.presents(timing.pts_ns) {
                 continue;
             }
@@ -14446,7 +14451,7 @@ impl VulkanVideoDec {
                 domain,
                 timing: self.out_timing(&timing),
                 sequence: self.emitted,
-                meta: Default::default(),
+                meta: input.meta,
             };
             self.emitted += 1;
             out.push(PipelinePacket::DataFrame(out_frame)).await?;
@@ -14746,6 +14751,8 @@ impl AsyncElement for VulkanVideoDec {
                         // No SPS/PPS yet (a leading non-keyframe AU); skip it.
                         return Ok(());
                     }
+                    self.input_stamps
+                        .insert(src_timing.pts_ns, InputStamp::of(&frame));
 
                     // If this AU triggered a reconfig, emit the previous decoder's
                     // flushed tail (old geometry) before decoding the new keyframe.
@@ -14919,6 +14926,7 @@ impl AsyncElement for VulkanVideoDec {
                         dec.reset();
                     }
                     self.pending_timings.clear();
+                    self.input_stamps = PendingInputStamps::default();
                     self.pending_meta.clear();
                     self.reorder.reset();
                     self.reorder_tex.reset();

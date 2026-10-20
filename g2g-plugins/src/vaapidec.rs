@@ -82,6 +82,7 @@ use cros_codecs::video_frame::generic_dma_video_frame::GenericDmaVideoFrame;
 use cros_codecs::video_frame::{VideoFrame, UV_PLANE, Y_PLANE};
 use cros_codecs::{BlockingMode, Fourcc, Resolution};
 
+use crate::inputstamp::{InputStamp, PendingInputStamps};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::{
@@ -212,6 +213,7 @@ pub struct VaapiDec<C: VaapiCodec> {
     /// instead of being repacked into tight rows.
     #[cfg(feature = "metadata")]
     keep_row_padding: bool,
+    input_stamps: PendingInputStamps,
     configured: bool,
     emitted: u64,
     segment: Segment,
@@ -259,6 +261,7 @@ impl<C: VaapiCodec> VaapiDec<C> {
             pending_reconfigure: None,
             #[cfg(feature = "metadata")]
             keep_row_padding: false,
+            input_stamps: PendingInputStamps::default(),
             configured: false,
             emitted: 0,
             segment: Segment::new(),
@@ -555,6 +558,8 @@ impl<C: VaapiCodec> AsyncElement for VaapiDec<C> {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let slice = frame.domain.require_system_slice(C::LOG_CATEGORY)?;
+                    self.input_stamps
+                        .insert(frame.timing.pts_ns, InputStamp::of(&frame));
                     self.feed_access_unit(slice, frame.timing.pts_ns, &mut decoded)?;
                 }
                 PipelinePacket::CapsChanged(c) => {
@@ -575,6 +580,7 @@ impl<C: VaapiCodec> AsyncElement for VaapiDec<C> {
                         d.flush()
                             .map_err(|_| G2gError::Hardware(HardwareError::V4l2(0)))?;
                     }
+                    self.input_stamps = PendingInputStamps::default();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                     return Ok(());
@@ -592,6 +598,7 @@ impl<C: VaapiCodec> AsyncElement for VaapiDec<C> {
             }
 
             for d in decoded {
+                let input = self.input_stamps.take(d.pts_ns);
                 if !self.segment.presents(d.pts_ns) {
                     continue;
                 }
@@ -621,10 +628,11 @@ impl<C: VaapiCodec> AsyncElement for VaapiDec<C> {
                         dts_ns: d.pts_ns,
                         duration_ns: 0,
                         capture_ns: d.pts_ns,
+                        arrival_ns: input.arrival_ns,
                         ..FrameTiming::default()
                     },
                     sequence: self.emitted,
-                    meta: Default::default(),
+                    meta: input.meta,
                 };
                 #[cfg(feature = "metadata")]
                 if let Some(layout) = d.layout {

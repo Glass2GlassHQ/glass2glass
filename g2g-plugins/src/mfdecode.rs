@@ -57,9 +57,11 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 
+use crate::inputstamp::{InputStamp, PendingInputStamps};
 use crate::mfcommon::{
-    feed_sample, make_input_sample, mf_err, output_provides_samples, pack_u32_pair, process_output,
-    read_sample_bytes, sample_time_ns, send_drain_command, unpack_u32_pair, OutputPull,
+    feed_sample, make_input_sample, mf_err, mf_ticks_to_ns, ns_to_mf_ticks,
+    output_provides_samples, pack_u32_pair, process_output, read_sample_bytes, sample_time_ns,
+    send_drain_command, unpack_u32_pair, OutputPull,
 };
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
@@ -159,6 +161,7 @@ pub struct MfDecode {
     /// declared `DerivedOutput` closure and the decode-time output
     /// geometry. See `ffmpegdec.rs` for the same field with full notes.
     input_caps: Option<Caps>,
+    input_stamps: PendingInputStamps,
     emitted: u64,
     segment: Segment,
     /// M12 / W1: the downstream consumer's allocation proposal, recorded in
@@ -196,6 +199,7 @@ impl MfDecode {
             use_d3d11: false,
             last_caps: None,
             input_caps: None,
+            input_stamps: PendingInputStamps::default(),
             emitted: 0,
             segment: Segment::new(),
             requested_alloc: None,
@@ -249,9 +253,13 @@ impl MfDecode {
         &mut self,
         data: &[u8],
         pts_ns: u64,
+        stamp: InputStamp,
         decoded: &mut Vec<DecodedPicture>,
     ) -> Result<(), G2gError> {
         let sample = make_input_sample(data, pts_ns)?;
+        // the decoded sample carries the pts back rounded down to 100 ns ticks
+        self.input_stamps
+            .insert(mf_ticks_to_ns(ns_to_mf_ticks(pts_ns)), stamp);
         feed_sample(self, &sample, Self::transform, |element| {
             element.drain(decoded)
         })
@@ -422,7 +430,12 @@ impl AsyncElement for MfDecode {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    self.feed(slice, frame.timing.pts_ns, &mut decoded)?;
+                    self.feed(
+                        slice,
+                        frame.timing.pts_ns,
+                        InputStamp::of(&frame),
+                        &mut decoded,
+                    )?;
                 }
                 PipelinePacket::CapsChanged(c) => {
                     // M16 workaround #3 Phase A: validate + record.
@@ -457,6 +470,7 @@ impl AsyncElement for MfDecode {
                                 .map_err(mf_err)?;
                         }
                     }
+                    self.input_stamps = PendingInputStamps::default();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                     return Ok(());
@@ -479,6 +493,7 @@ impl AsyncElement for MfDecode {
                 _ => Rate::Any,
             };
             for d in decoded {
+                let input = self.input_stamps.take(d.pts_ns);
                 if !self.segment.presents(d.pts_ns) {
                     continue;
                 }
@@ -515,10 +530,11 @@ impl AsyncElement for MfDecode {
                         dts_ns: d.pts_ns,
                         duration_ns: 0,
                         capture_ns: d.pts_ns,
+                        arrival_ns: input.arrival_ns,
                         ..FrameTiming::default()
                     },
                     sequence: self.emitted,
-                    meta: Default::default(),
+                    meta: input.meta,
                 };
                 self.emitted += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;

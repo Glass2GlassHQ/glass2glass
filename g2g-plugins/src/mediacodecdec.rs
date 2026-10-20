@@ -59,6 +59,7 @@ use g2g_core::{
 use g2g_core::{PropError, PropKind, PropValue, PropertySpec};
 
 use crate::annexb::{h264_parameter_sets, h265_parameter_sets};
+use crate::inputstamp::{InputStamp, PendingInputStamps};
 use crate::mediacodec_common::{queue_input, BUFFER_FLAG_END_OF_STREAM, MAX_OUTPUT_POLLS};
 
 use alloc::boxed::Box;
@@ -135,6 +136,7 @@ pub struct MediaCodecDec {
     state: Option<CodecState>,
     last_caps: Option<Caps>,
     input_caps: Option<Caps>,
+    input_stamps: PendingInputStamps,
     emitted: u64,
     segment: Segment,
     /// M304 probe hook: an owned reference to the first decoded frame's backing
@@ -192,6 +194,7 @@ impl MediaCodecDec {
             state: None,
             last_caps: None,
             input_caps: None,
+            input_stamps: PendingInputStamps::default(),
             emitted: 0,
             segment: Segment::new(),
             #[cfg(feature = "mediacodec-wgpu")]
@@ -418,13 +421,17 @@ impl MediaCodecDec {
         &mut self,
         au: &[u8],
         pts_ns: u64,
+        stamp: InputStamp,
         out: &mut Vec<DecodedFrame>,
     ) -> Result<(), G2gError> {
         self.ensure_codec(au)?;
         if self.state.is_none() {
             return Ok(()); // pre-keyframe: nothing to decode yet
         }
-        self.queue_input(au, pts_ns / 1000, 0)?;
+        let pts_us = pts_ns / 1000;
+        // the decoded image carries the microsecond pts back in nanoseconds
+        self.input_stamps.insert(pts_us * 1000, stamp);
+        self.queue_input(au, pts_us, 0)?;
         self.pump_output(out, false)
     }
 
@@ -629,7 +636,12 @@ impl AsyncElement for MediaCodecDec {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    self.feed(slice, frame.timing.pts_ns, &mut decoded)?;
+                    self.feed(
+                        slice,
+                        frame.timing.pts_ns,
+                        InputStamp::of(&frame),
+                        &mut decoded,
+                    )?;
                 }
                 PipelinePacket::CapsChanged(c) => {
                     // Two callers, like FfmpegVideoDec: an input CapsChanged from
@@ -657,6 +669,7 @@ impl AsyncElement for MediaCodecDec {
                     if let Some(st) = self.state.as_ref() {
                         let _ = st.codec.flush();
                     }
+                    self.input_stamps = PendingInputStamps::default();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                     return Ok(());
@@ -713,6 +726,7 @@ impl AsyncElement for MediaCodecDec {
                         )
                     }
                 };
+                let input = self.input_stamps.take(pts_ns);
                 if !self.segment.presents(pts_ns) {
                     continue;
                 }
@@ -728,10 +742,11 @@ impl AsyncElement for MediaCodecDec {
                         dts_ns: pts_ns,
                         duration_ns: 0,
                         capture_ns: pts_ns,
+                        arrival_ns: input.arrival_ns,
                         ..FrameTiming::default()
                     },
                     sequence: self.emitted,
-                    meta: Default::default(),
+                    meta: input.meta,
                 };
                 self.emitted += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;

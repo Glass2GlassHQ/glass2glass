@@ -92,6 +92,22 @@ pub mod audioresample;
 mod fft;
 // Front-read queue shared by the elements that cut fixed-size blocks from a stream.
 mod fifobuffer;
+// Input metadata a decoder carries to the picture each access unit decodes to.
+#[cfg(any(
+    all(target_os = "linux", feature = "ffmpeg"),
+    all(target_os = "linux", feature = "nvdec"),
+    all(target_os = "linux", feature = "vaapi"),
+    all(
+        any(target_os = "linux", target_os = "windows"),
+        feature = "vulkan-video"
+    ),
+    feature = "dav1d",
+    feature = "rav1d",
+    all(target_os = "android", feature = "mediacodec"),
+    all(target_os = "macos", feature = "vtdecode"),
+    all(target_os = "windows", feature = "mf-decode"),
+))]
+mod inputstamp;
 // `audioreverse`: the audio half of reverse playback, the analog of `areverse`.
 pub mod audioreverse;
 pub mod audiotestsrc;

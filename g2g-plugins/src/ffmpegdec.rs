@@ -116,12 +116,12 @@ use ffmpeg::Dictionary;
 use ffmpeg::Error as FfError;
 use ffmpeg_next as ffmpeg;
 
+use crate::inputstamp::{InputStamp, PendingInputStamps};
 use crate::yuv::downsample_chroma_420;
 use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::{OwnedCudaBuffer, SystemSlice};
-use g2g_core::meta::FrameMetaSet;
 use g2g_core::{
     g2g_warn, AllocationParams, AsyncElement, BufferPool, Caps, CapsConstraint, CapsSet,
     ConfigureOutcome, CudaKeepAlive, Dim, ElementMetadata, FrameTiming, G2gError, HardwareError,
@@ -129,17 +129,6 @@ use g2g_core::{
     PooledBuffer, ProResVariant, PropError, PropKind, PropValue, PropertySpec, PushOutcome,
     QosMessage, Rate, RawVideoFormat, Segment, VideoCodec,
 };
-
-/// Cap on pending input-pts -> arrival entries, so frames the decoder drops
-/// (never echoing their pts back) can't grow the map without bound.
-const MAX_PENDING_ARRIVALS: usize = 1024;
-
-// what an output picture inherits from the access unit it decodes
-#[derive(Debug, Default)]
-struct InputStamp {
-    arrival_ns: u64,
-    meta: FrameMetaSet,
-}
 
 /// Default cap on the pictures one QoS report can put into non-reference skip
 /// mode: a second at 30 fps, long enough to absorb a stall, short enough that
@@ -554,9 +543,8 @@ pub struct FfmpegVideoDec {
     input_caps: Option<Caps>,
     /// Map input pts -> input arrival_ns and metadata. Survives the B-frame
     /// reordering libavcodec does internally because we key on pts,
-    /// which the codec layer echoes verbatim. Bounded by
-    /// [`MAX_PENDING_ARRIVALS`] so decoder-dropped frames can't leak.
-    pts_to_input: alloc::collections::BTreeMap<u64, InputStamp>,
+    /// which the codec layer echoes verbatim.
+    pts_to_input: PendingInputStamps,
     /// `CUcontext` (as `u64`) of the CUDA hwdevice created for the
     /// `NvdecCuda` backend, extracted at `configure_pipeline`. `0` for the
     /// system-memory backends. Stamped onto every emitted `OwnedCudaBuffer`
@@ -669,7 +657,7 @@ impl FfmpegVideoDec {
             live: true,
             thread_delay_frames: 0,
             input_caps: None,
-            pts_to_input: alloc::collections::BTreeMap::new(),
+            pts_to_input: PendingInputStamps::default(),
             cuda_context: 0,
             requested_alloc: None,
             vaapi_device: None,
@@ -1022,7 +1010,7 @@ impl FfmpegVideoDec {
 /// element on the sync path and off the moved bundle under `offload`.
 struct DecodeState<'a> {
     decoder: &'a mut ffmpeg::decoder::Video,
-    pts_to_input: &'a mut alloc::collections::BTreeMap<u64, InputStamp>,
+    pts_to_input: &'a mut PendingInputStamps,
     pack_pool: &'a mut PackPool,
     #[cfg(feature = "ffmpeg-long-tail")]
     converter: &'a mut crate::ffmpegtagged::FormatConverter,
@@ -1043,7 +1031,7 @@ struct DecodeConfig {
 #[cfg(feature = "offload")]
 struct OffloadDecode {
     decoder: Option<ffmpeg::decoder::Video>,
-    pts_to_input: alloc::collections::BTreeMap<u64, InputStamp>,
+    pts_to_input: PendingInputStamps,
     pack_pool: PackPool,
     #[cfg(feature = "ffmpeg-long-tail")]
     converter: crate::ffmpegtagged::FormatConverter,
@@ -1080,15 +1068,7 @@ fn feed_access_unit_into(
     // nanoseconds straight through.
     packet.set_pts(Some(pts_ns as i64));
     packet.set_dts(Some(pts_ns as i64));
-    if input.arrival_ns != 0 || !input.meta.is_empty() {
-        state.pts_to_input.insert(pts_ns, input);
-        // A decoder-dropped frame never echoes its pts back, so its entry
-        // would linger; cap the map and evict the oldest, losing only a
-        // latency sample for a frame the decoder discarded.
-        while state.pts_to_input.len() > MAX_PENDING_ARRIVALS {
-            state.pts_to_input.pop_first();
-        }
-    }
+    state.pts_to_input.insert(pts_ns, input);
 
     let rejected = match state.decoder.send_packet(&packet) {
         Ok(()) => 0,
@@ -1185,7 +1165,7 @@ fn drain_frames_into(
                         resolved,
                     )
                 };
-                let input = state.pts_to_input.remove(&pts_ns).unwrap_or_default();
+                let input = state.pts_to_input.take(pts_ns);
                 decoded.push(DecodedPicture {
                     payload,
                     width,
@@ -1935,10 +1915,7 @@ impl AsyncElement for FfmpegVideoDec {
                         let cfg = self.decode_config();
                         let packet = self.access_unit_packet(au, &frame)?;
                         let pts_ns = frame.timing.pts_ns;
-                        let input = InputStamp {
-                            arrival_ns: frame.timing.arrival_ns,
-                            meta: frame.meta.clone(),
-                        };
+                        let input = InputStamp::of(&frame);
                         let mut bundle = OffloadDecode {
                             decoder: self.decoder.take(),
                             pts_to_input: core::mem::take(&mut self.pts_to_input),
@@ -1989,10 +1966,7 @@ impl AsyncElement for FfmpegVideoDec {
                         undecodable = self.feed_access_unit(
                             packet,
                             frame.timing.pts_ns,
-                            InputStamp {
-                                arrival_ns: frame.timing.arrival_ns,
-                                meta: frame.meta.clone(),
-                            },
+                            InputStamp::of(&frame),
                             &mut decoded,
                         )?;
                     }
@@ -2043,7 +2017,7 @@ impl AsyncElement for FfmpegVideoDec {
                     if let Some(d) = self.decoder.as_mut() {
                         d.flush();
                     }
-                    self.pts_to_input.clear();
+                    self.pts_to_input = PendingInputStamps::default();
                     self.last_caps = None;
                     self.push_downstream(out, PipelinePacket::Flush).await?;
                     return Ok(());

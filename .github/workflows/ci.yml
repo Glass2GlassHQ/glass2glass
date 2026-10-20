@@ -223,6 +223,8 @@ jobs:
         run: cargo test -p g2g-plugins --locked --features ffmpeg --lib
       - name: decoder pipeline-depth guard
         run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1109_decoder_depth -- --nocapture
+      - name: decoder keeps each access unit's metadata
+        run: cargo test -p g2g-plugins --locked --features ffmpeg,metadata --test m1709_decoder_meta
       - name: test g2g-plugins (ffmpeg encoder colorimetry)
         run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1124_encoder_colorimetry
       - name: TS audio codec auto-plug selection

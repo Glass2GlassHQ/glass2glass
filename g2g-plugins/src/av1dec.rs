@@ -20,7 +20,8 @@ macro_rules! av1_decoder {
         use alloc::boxed::Box;
         use alloc::vec::Vec;
 
-        use g2g_core::frame::Frame;
+        use crate::inputstamp::{InputStamp, PendingInputStamps};
+        use g2g_core::frame::{Frame, FrameTiming};
         use g2g_core::memory::SystemSlice;
         use g2g_core::{
             AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
@@ -40,8 +41,13 @@ macro_rules! av1_decoder {
             colorimetry: g2g_core::Colorimetry,
         }
 
-        /// Decoded pictures from one fed unit: each shape with its packed pixels.
-        type DecodedFrames = Vec<(OutputShape, Vec<u8>)>;
+        struct DecodedPicture {
+            shape: OutputShape,
+            pts_ns: u64,
+            pixels: Vec<u8>,
+        }
+
+        type DecodedFrames = Vec<DecodedPicture>;
 
         // every format `pic_format` yields, I420 first so an unconstrained link fixes to it
         const OUTPUT_FORMATS: [RawVideoFormat; 9] = [
@@ -91,9 +97,10 @@ macro_rules! av1_decoder {
             out: Option<OutputShape>,
             sequence: u64,
             configured: bool,
-            /// Timing of the newest input unit, stamped onto the reorder-delayed
-            /// pictures the EOS drain emits (their own units' stamps are gone).
-            last_timing: g2g_core::frame::FrameTiming,
+            /// Timing of the newest input unit, whose fields other than pts the
+            /// EOS drain's pictures take.
+            last_timing: FrameTiming,
+            input_stamps: PendingInputStamps,
             segment: Segment,
         }
 
@@ -123,7 +130,8 @@ macro_rules! av1_decoder {
                     out: None,
                     sequence: 0,
                     configured: false,
-                    last_timing: g2g_core::frame::FrameTiming::default(),
+                    last_timing: FrameTiming::default(),
+                    input_stamps: PendingInputStamps::default(),
                     segment: Segment::new(),
                 }
             }
@@ -156,10 +164,12 @@ macro_rules! av1_decoder {
             fn feed(
                 decoder: &mut Decoder,
                 unit: Vec<u8>,
+                pts_ns: u64,
                 input_colorimetry: g2g_core::Colorimetry,
             ) -> Result<DecodedFrames, G2gError> {
                 let mut frames = Vec::new();
-                let mut send = decoder.send_data(unit, None, None, None);
+                // the backend echoes this timestamp on the picture the unit decodes to
+                let mut send = decoder.send_data(unit, None, Some(pts_ns as i64), None);
                 loop {
                     Self::drain_ready(decoder, &mut frames, input_colorimetry)?;
                     match send {
@@ -190,7 +200,12 @@ macro_rules! av1_decoder {
                                 height: pic.height(),
                                 colorimetry: merge_colorimetry(input_colorimetry, &pic),
                             };
-                            frames.push((shape, pack_planar(&pic, format)?));
+                            let pts_ns = pic.timestamp().ok_or(G2gError::CapsMismatch)? as u64;
+                            frames.push(DecodedPicture {
+                                shape,
+                                pts_ns,
+                                pixels: pack_planar(&pic, format)?,
+                            });
                         }
                         Err(e) if e.is_again() => return Ok(()),
                         Err(_) => return Err(G2gError::CapsMismatch),
@@ -198,28 +213,38 @@ macro_rules! av1_decoder {
                 }
             }
 
-            /// Push `frames` as caps-checked output at `timing`, the shared tail
-            /// of the per-unit decode and the EOS drain.
+            /// Push `frames` as caps-checked output, each at its own pts with the
+            /// other fields of `timing`, the shared tail of the per-unit decode
+            /// and the EOS drain.
             async fn emit(
                 &mut self,
                 frames: DecodedFrames,
-                timing: g2g_core::frame::FrameTiming,
+                timing: FrameTiming,
                 out: &mut dyn OutputSink,
             ) -> Result<(), G2gError> {
-                if !self.segment.presents(timing.pts_ns) {
-                    return Ok(());
-                }
-                for (shape, pixels) in frames {
-                    if self.out != Some(shape) {
-                        out.push(PipelinePacket::CapsChanged(self.output_caps(shape)))
-                            .await?;
-                        self.out = Some(shape);
+                for picture in frames {
+                    let input = self.input_stamps.take(picture.pts_ns);
+                    if !self.segment.presents(picture.pts_ns) {
+                        continue;
                     }
-                    let decoded = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
-                        timing,
-                        self.sequence,
-                    );
+                    if self.out != Some(picture.shape) {
+                        out.push(PipelinePacket::CapsChanged(self.output_caps(picture.shape)))
+                            .await?;
+                        self.out = Some(picture.shape);
+                    }
+                    let decoded = Frame {
+                        domain: MemoryDomain::System(SystemSlice::from_boxed(
+                            picture.pixels.into_boxed_slice(),
+                        )),
+                        timing: FrameTiming {
+                            pts_ns: picture.pts_ns,
+                            dts_ns: picture.pts_ns,
+                            arrival_ns: input.arrival_ns,
+                            ..timing
+                        },
+                        sequence: self.sequence,
+                        meta: input.meta,
+                    };
                     self.sequence += 1;
                     out.push(PipelinePacket::DataFrame(decoded)).await?;
                 }
@@ -358,9 +383,15 @@ macro_rules! av1_decoder {
                     match packet {
                         PipelinePacket::DataFrame(frame) => {
                             let slice = frame.domain.require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                            self.input_stamps.insert(frame.timing.pts_ns, InputStamp::of(&frame));
                             let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
                             let unit = slice.to_vec();
-                            let frames = Self::feed(decoder, unit, self.input_colorimetry)?;
+                            let frames = Self::feed(
+                                decoder,
+                                unit,
+                                frame.timing.pts_ns,
+                                self.input_colorimetry,
+                            )?;
                             self.last_timing = frame.timing;
                             self.emit(frames, frame.timing, out).await?;
                         }

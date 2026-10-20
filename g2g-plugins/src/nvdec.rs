@@ -56,6 +56,7 @@ use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use crate::inputstamp::{InputStamp, PendingInputStamps};
 use g2g_core::g2g_error;
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{CudaKeepAlive, DomainSet, MemoryDomainKind, OwnedCudaBuffer};
@@ -103,6 +104,7 @@ pub struct NvDec {
     /// Callback shuttle on the heap so its address is stable as the runner moves
     /// the element; the parser holds a raw pointer to it as user-data.
     state: Box<DecoderState>,
+    input_stamps: PendingInputStamps,
     emitted: u64,
     segment: Segment,
     /// Caps of the last frame emitted; a decoded frame whose format / geometry
@@ -238,6 +240,7 @@ impl NvDec {
                 ready: Vec::new(),
                 error: None,
             }),
+            input_stamps: PendingInputStamps::default(),
             emitted: 0,
             segment: Segment::new(),
             last_caps: None,
@@ -529,6 +532,7 @@ impl NvDec {
             return Ok(());
         }
         for f in frames {
+            let input = self.input_stamps.take(f.pts_ns);
             if !self.segment.presents(f.pts_ns) {
                 continue;
             }
@@ -568,15 +572,17 @@ impl NvDec {
             } else {
                 MemoryDomain::Cuda(f.buffer)
             };
-            let frame = g2g_core::frame::Frame::new(
+            let frame = g2g_core::frame::Frame {
                 domain,
-                g2g_core::FrameTiming {
+                timing: g2g_core::FrameTiming {
                     pts_ns: f.pts_ns,
                     dts_ns: f.pts_ns,
+                    arrival_ns: input.arrival_ns,
                     ..Default::default()
                 },
-                self.emitted,
-            );
+                sequence: self.emitted,
+                meta: input.meta,
+            };
             self.emitted += 1;
             out.push(PipelinePacket::DataFrame(frame)).await?;
         }
@@ -1124,6 +1130,8 @@ impl AsyncElement for NvDec {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    self.input_stamps
+                        .insert(frame.timing.pts_ns, InputStamp::of(&frame));
                     let frames = self.parse(slice, frame.timing.pts_ns, false)?;
                     self.emit(frames, out).await?;
                 }
