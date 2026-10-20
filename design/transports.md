@@ -761,6 +761,22 @@ publisher publishes none, emits the init object as the first frame, then each
 media object as it comes into order. `track-name` picks a track other than the
 catalog's first.
 
+A namespace ending in `.hang` is read as hang (draft-lcurley-moq-hang), the
+packaging moq.dev's relay carries, which is also how the reference `moq` CLI
+picks its catalog format. Its `catalog.json` track names WebCodecs renditions,
+so `moqtsrc` opens the session at negotiation, reads the catalog, and offers
+H.264 or H.265 caps for the chosen video rendition: `track-name`, else the
+highest `preference` among the enabled renditions, then the highest bitrate.
+Each object of the legacy container is a QUIC varint timestamp in microseconds,
+which becomes the frame's PTS, followed by the access unit. A rendition with a
+`description` (an `avcC` or `hvcC`) carries length-prefixed NALs, converted to
+Annex-B with the parameter sets put in front of each keyframe. An object with an
+empty payload only marks the previous frame's end and is dropped. The `cmaf` and
+`loc` containers, renditions in another broadcast, audio, and codecs other than
+H.264 / H.265 are refused at negotiation. The fixture under
+`g2g-plugins/tests/fixtures/hang/` is recorded off a `moq-relay` by
+`tools/hang-fixture.sh`.
+
 ### Reassembly
 
 A subgroup is its own unidirectional QUIC stream, so a track's streams arrive
