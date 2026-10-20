@@ -381,7 +381,9 @@ for a video-only stream. A launch line declares the count by linking pads:
 `rtspsrcn name=s location=... s. ! ... s. ! ...`. gst's `rtspsrc` has a pad per
 stream, so `rtspsrc` is registered both as the `RtspSrc` source and as this
 fan-out source, and the parser builds the fan-out form when more than one of its
-pads is linked. Pads follow link order, video first, where gst links them by caps.
+pads is linked, or when the one linked branch does not take video. The fan-out
+form always has a second pad, audio unless `onvif-metadata` takes it, and each bare `s.` takes the first free
+pad whose kind its first element takes, as gst links a pad by caps.
 
 ### OnvifSrc
 

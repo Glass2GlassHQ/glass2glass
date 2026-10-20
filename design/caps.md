@@ -829,10 +829,25 @@ as before.
   (`Registry::register_uri_fanout`). The hook's head, a byte source plus demuxer or a
   session source such as `RtspSrcN`, becomes the `d` node, and each reference
   decodes the port its pad request names: `d.video_N` / `d.audio_N` by kind,
-  `d.src_N` or the Nth bare `d.` by position. A URI no hook claims takes the
+  `d.src_N` by position. A bare `d.` takes the first port no other reference
+  took whose kind the branch's first element declares on its sink pad (any kind
+  when it declares none), as gst-launch's delayed link tries each new pad against
+  the waiting branches in the order they are written. Named references claim
+  their ports first. A URI no hook claims takes the
   single-stream expansion, its last node named `d`. The decode target of every
   fan-out port, here and behind `decodebin name=d`, follows the port's caps rather
   than the pad request, so a bare `d.` on an audio port decodes to raw audio.
+  `decodebin name=d` hooks (`Registry::register_decodebin_select`) build a port
+  per stream the file carries, and the references pick theirs the same way. When
+  no hook reads the upstream's `location` as a file, a URI fan-out hook that
+  answers it with a byte source plus demuxer (an HLS playlist behind `hlssrc` or
+  `httpsrc`) supplies the demuxer, and its byte source replaces the line's, with
+  the line's properties applied to it. Anything else fails
+  `DecodebinFanoutUpstream`. A
+  port no reference reads, here, behind `decodebin name=d` and on a fan-out
+  source such as `rtspsrc name=s`, ends in a `fakesink` undecoded, where gst
+  leaves the pad unlinked. A session source still sets that track up, as gst's
+  `rtspsrc` does.
 
 - **playbin (multi-stream front door)** (`std`). Beyond the
   single-stream expansion, g2g's `playbin` can split a container into *all* its

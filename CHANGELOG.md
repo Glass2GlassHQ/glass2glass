@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1683: `hlssrc location=X ! decodebin name=d` decodes each muxed stream of the playlist on its own `d.` branch.
+- M1682: a bare `d.` or `s.` fan-out branch reads the first free stream its first element takes, as gst links a pad by caps.
+- M1681: a fan-out stream no `d.` or `s.` branch reads is dropped and the linked branches play, as gst leaves its pad unlinked.
+- M1680: the `rtsp://` probe of `uridecodebin` and `playbin` runs when the line is parsed inside a tokio runtime.
 - M1673: `dashsrc`, `hlssrc` and `httpsrc` fail with the new `HardwareError::Http` carrying the status a server refused a request with.
 - M1672: `moqtsrc` plays the H.264 or H.265 video of a `.hang` broadcast, the packaging moq.dev's public relay carries.
 - M1671: `dashsrc` stops a live `@duration` Period at its end and joins the Period holding the live edge.

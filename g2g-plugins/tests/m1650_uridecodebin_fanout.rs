@@ -92,7 +92,7 @@ fn a_pad_the_uri_does_not_carry_is_refused() {
     );
 }
 
-// the hook DESCRIBEs the stream at parse time, so the line is parsed outside a runtime
+// the hook DESCRIBEs the stream at parse time
 #[cfg(feature = "rtsp")]
 #[test]
 fn an_rtsp_uri_fans_out_to_video_and_audio() {
