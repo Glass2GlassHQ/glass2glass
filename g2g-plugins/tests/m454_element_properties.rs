@@ -267,6 +267,39 @@ fn analyticsoverlay_mask_alpha() {
     assert_eq!(e.get_property("mask-alpha"), Some(PropValue::Uint(255)));
 }
 
+// M1711: the ByteTrack thresholds and the lost-track buffer, from their declared
+// defaults to a set value and back out.
+#[cfg(feature = "analytics")]
+#[test]
+fn tracker_properties() {
+    use g2g_core::PropError;
+    use g2g_plugins::tracker::Tracker;
+    let mut e = Tracker::new();
+    let settings = [
+        ("track-high-thresh", PropValue::Double(0.5)),
+        ("track-low-thresh", PropValue::Double(0.2)),
+        ("new-track-thresh", PropValue::Double(0.6)),
+        ("match-thresh", PropValue::Double(0.7)),
+        ("track-buffer", PropValue::Uint(90)),
+    ];
+    for (name, value) in settings {
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "{name}"
+        );
+        e.set_property(name, value.clone()).unwrap();
+        assert_eq!(e.get_property(name), Some(value), "{name}");
+    }
+    assert!(
+        matches!(
+            e.set_property("match-thresh", PropValue::Double(1.5)),
+            Err(PropError::Value)
+        ),
+        "a cost limit past 1 is refused"
+    );
+}
+
 #[test]
 fn textoverlay_color_packs_argb() {
     use g2g_plugins::textoverlay::TextOverlay;

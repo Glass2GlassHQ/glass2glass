@@ -1001,6 +1001,12 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("analyticsoverlay", Vec::new(), || {
         Box::new(crate::analyticsoverlay::AnalyticsOverlay::new())
     }));
+    // ByteTrack multi-object tracker (M1711): adds a persistent track id to each
+    // detection, e.g. `... ! detectionpostprocess ! tracker ! analyticsoverlay show-track=true`.
+    #[cfg(feature = "analytics")]
+    reg.register_launch(LaunchFactory::new("tracker", Vec::new(), || {
+        Box::new(crate::tracker::Tracker::new())
+    }));
     // Metadata record tools (M1176): `metasink` writes one JSON line per frame
     // and posts it on the bus, `metareplay` puts such a file back onto the frames
     // it was recorded from. The replay is caps-driven (no pad templates): it
@@ -2632,6 +2638,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "rtmpsrc" => "rtmp";
         "rtmpsink" => "rtmp";
         "analyticsoverlay" => "analytics";
+        "tracker" => "analytics";
         "metasink" => "analytics-json";
         "metareplay" => "analytics-json";
         "mqttsink" => "mqtt";

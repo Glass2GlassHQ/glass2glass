@@ -571,6 +571,7 @@ cargo clippy --workspace --all-targets
 | `PngDec` / `PngEnc` (pure Rust) | `png` | none |
 | `WebPDec` (lossy + lossless, pure Rust) | `webp` | none |
 | `AnalyticsOverlay` (CPU) / `VelloAnalyticsOverlay` (GPU) (detection boxes, segmentation masks, ROIs) / `WgpuSink` | `analytics`, `vello-overlay`, `wgpu-sink` | wgpu (GPU variants) |
+| `Tracker` (ByteTrack: a persistent track id on each detection) | `analytics` | none |
 | `MetaSink` / `MetaReplay` (one JSON line per frame: detections, blobs, text; replay onto frames) / `AnalyticsAlert` (rules, cooldown, `alert` blob, webhook) / `AlertRecorder` (a clip around each alert) | `analytics-json` | none |
 | `MqttSink` (the same record per frame, published to an MQTT topic) / `MqttSrc` (each message on a topic filter as a text frame) | `mqtt` | none |
 | `EmbeddingSink` (sqlite index of embedding vectors, searchable from `pyml-mcp`) | `embedding-index` | none (sqlite bundled) |
@@ -892,6 +893,10 @@ g2g-launch -v udpsrc port=5004 ntp-64-id=5 ! ffmpegdec ! fakesink
 # sender
 g2g-launch videotestsrc ! clocksync ! x264enc ! udpsink host=192.0.2.10 port=5004 ntp-64-id=5
 ```
+
+`rtspclientsink` takes the same two properties and announces them in its SDP,
+so `rtspserversrc` reads the ids from the ANNOUNCE. The WebRTC elements carry
+`abs-capture-time` with no property to set.
 
 A `udpsrc` given an SDP (`sdp=stream.sdp`) takes the ids from its `a=extmap`
 lines. Every sink of the receiving pipeline posts `BusMessage::FrameIdentity`

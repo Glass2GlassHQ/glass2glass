@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1709: the hardware, platform and AV1 decoders carry each access unit's metadata to its decoded picture.
+- M1710: `rtspclientsink`, the RTSP server ingest and the WebRTC elements carry each frame's capture time.
+- M1711: `tracker` adds a persistent ByteTrack id to each `AnalyticsMeta` detection.
+- M1712: `CTensorModel` runs a C inference runtime as a `TensorModel` through one callback, with no allocation.
 - M1708: `rtspclientsink` reconnects from its session task, so a session dropped during a stall is back before the next frame.
 - M1699: `rtspsrc` and `rtspsrcn` restart the `reconnect` budget after each session that carried media.
 - M1698: `rtspclientsink` sends keepalives and sender reports from a session timer, so a stalled upstream keeps the session.

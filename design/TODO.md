@@ -63,9 +63,8 @@ Highest leverage first:
   - **Comparison.** The same graph with g2g on Linux and with GStreamer on the
     smallest Linux board: ROM, RAM and boot time beside the MCU numbers.
   - Add the same conformance and timing evidence for an NXP i.MX RT board.
-- **TinyML inference on MCU.** Add ExecuTorch (CMSIS-NN, Ethos-U) and LiteRT
-  for Microcontrollers backends to `TensorInference` through a C bridge like
-  `CH264Encoder`, each holding its tensor arena in static memory.
+- **TinyML inference on MCU.** Run ExecuTorch (CMSIS-NN, Ethos-U) and LiteRT
+  for Microcontrollers through `CTensorModel` on real boards.
   - **Host and device check on silicon.** Reproduce the keyword graph's pinned
     features and scores (`g2g-mcu/tests/fixtures/keyword`) on a real Cortex-M
     board, and run the model's ONNX twin through `OrtInference`, which takes
@@ -265,13 +264,6 @@ Highest leverage first:
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 
-- **Capture time on the other RTP paths.** Write and read the
-  `abs-capture-time` and `ntp-64` header extensions on the WebRTC elements
-  (str0m's `AbsoluteCaptureTime` plus an `ntp-64` mapping) and on the RTSP
-  server ingest, taking the ids from the session's SDP.
-- **Metadata through hardware decoders.** Carry a frame's metadata through
-  `nvdec`, `vaapidec`, the Vulkan decoders and the platform decoders by PTS,
-  so a capture time reaches the sink after a hardware decode.
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
 
 ## Clock-synchronised presentation
@@ -390,12 +382,6 @@ unless it says otherwise.
 - D3D11 decoder surface import into `WgpuPreprocess` (bind the surface directly
   into the compute pass, the Windows counterpart of the dma-buf import).
 - Run the QNN and CoreML execution providers on Qualcomm and Apple hardware.
-- **Standalone `tracker` element.** A ByteTrack-style multi-object tracker
-  that consumes `AnalyticsMeta` detections from any detector and adds a track id
-  to each: Kalman box prediction, IoU matching, two-stage association on high
-  and low confidence boxes, a new-track confidence gate and a lost-track age.
-  Pure Rust, no dependencies, so `... ! detectionpostprocess ! tracker ! ...`
-  gives the YOLO tracking the hosted Python element gets from Ultralytics.
 - **Pose and OBB heads in `detectionpostprocess`.** Decode the `-pose`
   keypoints and the `-obb` rotation angle into their own metadata records, and
   carry letterbox padding offsets so boxes land right on a non-square input.

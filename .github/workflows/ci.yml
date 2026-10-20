@@ -231,7 +231,7 @@ jobs:
         run: cargo test -p g2g-plugins --locked --features ffmpeg,opus --test m753_ts_audio_codecs --test m757_ac3_flac
       # ffmpeg packetizes the A/V fixture as RTP, the job with its CLI is where these run
       - name: RTSP video and audio pads
-        run: cargo test -p g2g-plugins --locked --features ffmpeg,rtsp --test m1650_uridecodebin_fanout --test m1652_rtspsrc_stream_pads --test m1680_rtsp_probe_in_runtime --test m1681_fanout_unlinked_streams --test m1682_fanout_links_by_caps
+        run: cargo test -p g2g-plugins --locked --features ffmpeg,rtsp,rtsp-server,rtsp-client-sink,metadata --test m1650_uridecodebin_fanout --test m1652_rtspsrc_stream_pads --test m1680_rtsp_probe_in_runtime --test m1681_fanout_unlinked_streams --test m1682_fanout_links_by_caps --test m1710_capture_time_paths
       # Needs the ffmpeg + ffprobe CLIs for its fixtures and its reference peer.
       - name: discovery vs ffprobe
         run: cargo test -p g2g-plugins --locked --features tooling-json --test m1107_discover
@@ -665,6 +665,7 @@ jobs:
           cargo test -p g2g-plugins --locked --features webrtc --test m784_duplex_new_track
           cargo test -p g2g-plugins --locked --features webrtc --test m785_duplex_track_remove
           cargo test -p g2g-plugins --locked --features webrtc --test m1014_duplex_renegotiation
+          cargo test -p g2g-plugins --locked --features webrtc,metadata --test m1710_capture_time_paths
           cargo test -p g2g-core --locked --features std,runtime,multi-thread --test m1014_dynamic_duplex
 
   # Windows platform build: Media Foundation decode/encode/AAC, WASAPI audio,

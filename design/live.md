@@ -518,6 +518,15 @@ with the `abs-capture-time-id` and `ntp-64-id` properties on `udpsink` and
 `udpsrc`, or through the `a=extmap` lines of the SDP given to `udpsrc`. Either
 extension can run alone.
 
+RTSP carries both extensions too. `rtspclientsink` takes the same two
+properties and writes one `a=extmap` line per id into each video section of its
+ANNOUNCE, and the RTSP server ingest reads the ids from the H.264 section of the
+ANNOUNCE it receives. The WebRTC elements carry `abs-capture-time` only, with no
+property: every `RtcConfig` maps it, and str0m takes the peer's id from its SDP.
+They do not carry `ntp-64` because str0m has no public writer for an extension
+outside its own list. str0m converts the time through `f64` seconds, so it
+arrives within a microsecond.
+
 The wire code is in `g2g-core`'s `rtp` module, so the MCU and every packetizer
 share it. `RtpHeader::write_with_extensions` writes the one-byte form when
 every id is 14 or below and the two-byte form otherwise.
@@ -532,8 +541,10 @@ does by default. The time is the frame's `WallClockMeta` when it has one,
 otherwise the moment the frame entered the sender's pipeline (`arrival_ns`)
 read on the Unix clock. The shared receive loop reads the extension off each
 packet and attaches a `WallClockMeta` to the access unit with the same RTP
-timestamp. `ffmpegdec` keys each input's metadata by PTS and puts it on the
-picture that PTS decodes to, so the capture time survives a software decode.
+timestamp. `ffmpegdec`, `nvdec`, `vaapidec`, `vulkanvideodec`, the AV1
+decoders and the platform decoders key each input's metadata and arrival time
+by PTS in `PendingInputStamps` and put them on the picture that PTS decodes
+to, so the capture time survives a software or hardware decode.
 
 The graph runner's sink arm reports on every frame that carries a
 `WallClockMeta`, whatever the sink. A capture time already seen among the last
