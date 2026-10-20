@@ -208,6 +208,10 @@ pub enum ParseError {
     /// A bare `d.` branch of a fan-out found no free stream of a kind its first
     /// element takes.
     NoFanoutStream { element: String, consumer: String },
+    /// A `decodebin name=d` fan-out follows an element that is neither a file of a
+    /// container g2g demuxes nor a source whose location a URI fan-out probes (the
+    /// element and its location are named).
+    DecodebinFanoutUpstream(String),
 }
 
 impl From<GraphError> for ParseError {
@@ -328,6 +332,10 @@ impl core::fmt::Display for ParseError {
             ParseError::NoFanoutStream { element, consumer } => {
                 write!(f, "{element}: no free stream of a kind {consumer} takes")
             }
+            ParseError::DecodebinFanoutUpstream(upstream) => write!(
+                f,
+                "decodebin name=d fans out behind a file of a container g2g demuxes or an HLS playlist source, not behind {upstream} (for an rtsp:// stream use uridecodebin uri=... name=d or rtspsrc name=s)"
+            ),
             ParseError::NoDecodeChain(caps) => {
                 write!(f, "decodebin: no decoder chain from {caps} to raw (no decoder feature compiled in, or a container that needs a demuxer)")
             }
@@ -2769,7 +2777,8 @@ fn build_graph(
     // multi-output demuxer (stored like a demux-select node so it fans out on its
     // own pads), and records each port's elementary caps so the wiring below splices
     // a decoder onto every port (the decode-per-port that makes it `decodebin`, not a
-    // bare demuxer).
+    // bare demuxer). Behind a network source the URI's fan-out supplies the demuxer
+    // and its source replaces the line's.
     let mut decode_fanout_caps: Vec<Option<Vec<Caps>>> = (0..specs.len()).map(|_| None).collect();
     // Which port each link out of a fan-out node reads, filled for every node
     // whose ports are matched to its branches.
@@ -2785,19 +2794,43 @@ fn build_graph(
         if !is_decodebin(&specs[ei].name) || out_deg[ei] == 0 || prebuilt[ei].is_some() {
             continue;
         }
-        let Some(location) = links
+        let upstream = links
             .iter()
             .find(|(_, d, _, _)| *d == ei)
-            .and_then(|(s, _, _, _)| prop(&specs[*s], "location"))
-        else {
-            continue;
+            .map(|(s, _, _, _)| *s)
+            .ok_or(ParseError::DecodebinNoUpstream)?;
+        let upstream_spec = &specs[upstream];
+        let location = prop(upstream_spec, "location");
+        let unsupported = || {
+            ParseError::DecodebinFanoutUpstream(match location {
+                Some(location) => alloc::format!("{} location={location}", upstream_spec.name),
+                None => upstream_spec.name.clone(),
+            })
         };
-        let Some((demux, caps)) = registry
+        let location = location.ok_or_else(unsupported)?;
+        let probed_file = registry
             .decodebin_select_hooks()
             .iter()
-            .find_map(|hook| hook(location))
-        else {
-            continue;
+            .find_map(|hook| hook(location));
+        let (demux, caps) = match probed_file {
+            Some(found) => found,
+            None if in_deg[upstream] == 0 => {
+                let Some(UriFanout {
+                    head:
+                        UriFanoutHead::Demux {
+                            mut source, demux, ..
+                        },
+                    ports,
+                }) = uri_fanout(registry, location)?
+                else {
+                    return Err(unsupported());
+                };
+                apply_props(&mut source, &upstream_spec.name, &upstream_spec.props)?;
+                prebuilt[upstream] =
+                    Some((PrebuiltNode::Source(source), upstream_spec.instance.clone()));
+                (demux, ports.into_iter().map(|port| port.caps).collect())
+            }
+            None => return Err(unsupported()),
         };
         let kinds: Vec<StreamType> = caps.iter().map(StreamType::of).collect();
         fanout_links[ei] = Some(FanoutLinks {

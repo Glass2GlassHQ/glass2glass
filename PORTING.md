@@ -70,8 +70,11 @@ auto-plugs a demuxer plus a decoder per requested pad, so each `d.` branch gets 
 frames without naming the parser/decoder. Same `d.video_0` / `d.audio_0` / `d.` pad
 grammar as the raw demuxer fan-out above; the difference is `decodebin` decodes,
 `matroskademux`/`qtdemux` hand you the elementary stream. (g2g resolves the pads by
-probing at parse time rather than gst's runtime `pad-added`, so it's file sources
-feeding a multi-stream container.)
+probing at parse time rather than gst's runtime `pad-added`, so it's a file source
+feeding a multi-stream container, or `hlssrc` on a playlist of muxed streams, the
+g2g form of gst's `souphttpsrc ! hlsdemux ! decodebin name=d`. Behind any other
+source the parse fails and names it, and `uridecodebin uri=X name=d` is the line
+to use.)
 
 **`uridecodebin uri=X name=d` fans out** the same way for any URI a fan-out probe
 understands: a local file, `rtsp://` (video and audio off one session), and HLS

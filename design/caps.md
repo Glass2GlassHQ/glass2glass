@@ -838,7 +838,12 @@ as before.
   fan-out port, here and behind `decodebin name=d`, follows the port's caps rather
   than the pad request, so a bare `d.` on an audio port decodes to raw audio.
   `decodebin name=d` hooks (`Registry::register_decodebin_select`) build a port
-  per stream the file carries, and the references pick theirs the same way. A
+  per stream the file carries, and the references pick theirs the same way. When
+  no hook reads the upstream's `location` as a file, a URI fan-out hook that
+  answers it with a byte source plus demuxer (an HLS playlist behind `hlssrc` or
+  `httpsrc`) supplies the demuxer, and its byte source replaces the line's, with
+  the line's properties applied to it. Anything else fails
+  `DecodebinFanoutUpstream`. A
   port no reference reads, here, behind `decodebin name=d` and on a fan-out
   source such as `rtspsrc name=s`, ends in a `fakesink` undecoded, where gst
   leaves the pad unlinked. A session source still sets that track up, as gst's
