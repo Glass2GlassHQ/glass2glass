@@ -533,6 +533,8 @@ jobs:
         run: |
           cargo test -p g2g-mcu --locked
           cargo check -p g2g-mcu --locked --target thumbv7em-none-eabihf
+          cargo test -p g2g-mcu --locked --features microflow --test m1701_microflow
+          cargo check -p g2g-mcu --locked --features microflow --target thumbv7em-none-eabihf
       # Emulated Cortex-M execution proof (M628): boot the exact g2g-noalloc
       # pipeline (linked as an rlib into a bare-metal cortex-m-rt binary) on
       # QEMU's MPS2-AN386 Cortex-M4 and assert the on-target checksum via the
