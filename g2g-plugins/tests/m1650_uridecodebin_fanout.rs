@@ -29,6 +29,7 @@ const DEADLINE: Duration = Duration::from_secs(20);
 // the fixture is a fraction of a second long, so a file run checks that each branch decodes at all
 const FILE_FRAMES: usize = 1;
 // a live run checks that both tracks keep flowing, not just a first frame each
+#[cfg(feature = "rtsp")]
 const LIVE_FRAMES: usize = 10;
 
 fn assert_both_branches_decode(head: &str, enough: usize) {
