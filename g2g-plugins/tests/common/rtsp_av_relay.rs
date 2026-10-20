@@ -1,14 +1,16 @@
 // ffmpeg packetizes a fixture's video and audio as RTP, this answers RTSP and relays each
 // track interleaved on its own channel pair, so a test plays an A/V stream from a real packetizer
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 const MAX_DATAGRAM: usize = 65536;
-const SDP_POLL: Duration = Duration::from_millis(50);
+const SDP_DEADLINE: Duration = Duration::from_secs(15);
+// ffmpeg prints each SDP it has so far under this header once a muxer starts
+const SDP_HEADER: &str = "SDP:\n";
 // ffmpeg writes the media sections in the order of its outputs: video, then audio
 const TRACK_MEDIA: [&str; 2] = ["m=video", "m=audio"];
 const TRACK_CONTROL: &str = "trackID=";
@@ -34,7 +36,6 @@ pub(crate) fn serve_av_fixture(fixture: &str) -> AvRelay {
         .iter()
         .map(|socket| socket.local_addr().unwrap().port())
         .collect();
-    let sdp_path = std::env::temp_dir().join(format!("g2g-av-relay-{}.sdp", ports[0]));
     let mut command = Command::new("ffmpeg");
     command
         .args([
@@ -46,23 +47,19 @@ pub(crate) fn serve_av_fixture(fixture: &str) -> AvRelay {
             "-1",
         ])
         .arg("-i")
-        .arg(fixture)
-        .arg("-sdp_file")
-        .arg(&sdp_path);
+        .arg(fixture);
     for (map, port) in ["0:v", "0:a"].iter().zip(&ports) {
         command
             .args(["-map", map, "-c", "copy", "-f", "rtp"])
             .arg(format!("rtp://127.0.0.1:{port}"));
     }
-    let ffmpeg = command.stdin(Stdio::null()).spawn().expect("spawn ffmpeg");
-    let sdp = loop {
-        match std::fs::read_to_string(&sdp_path) {
-            Ok(text) if TRACK_MEDIA.iter().all(|media| text.contains(media)) => break text,
-            _ => std::thread::sleep(SDP_POLL),
-        }
-    };
-    let _ = std::fs::remove_file(&sdp_path);
-    let sdp = with_track_controls(&sdp);
+    let mut ffmpeg = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn ffmpeg");
+    let stdout = ffmpeg.stdout.take().expect("ffmpeg's stdout is piped");
+    let sdp = with_track_controls(&read_full_sdp(stdout));
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind rtsp");
     let port = listener.local_addr().unwrap().port();
@@ -77,6 +74,34 @@ pub(crate) fn serve_av_fixture(fixture: &str) -> AvRelay {
         url: format!("rtsp://127.0.0.1:{port}/stream"),
         ffmpeg,
     }
+}
+
+// ffmpeg 6 prints a video-only SDP as the first muxer starts, the last print lists both tracks
+fn read_full_sdp(mut stdout: ChildStdout) -> String {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let mut chunk = [0u8; 4096];
+        let mut sent = false;
+        // the pipe stays open until ffmpeg exits so a later print cannot kill it with SIGPIPE
+        while let Ok(len @ 1..) = stdout.read(&mut chunk) {
+            if sent {
+                continue;
+            }
+            text.push_str(&String::from_utf8_lossy(&chunk[..len]));
+            let Some(start) = text.rfind(SDP_HEADER) else {
+                continue;
+            };
+            let sdp = text[start + SDP_HEADER.len()..].trim_end();
+            if TRACK_MEDIA.iter().all(|media| sdp.contains(media)) {
+                let _ = sender.send(sdp.to_string());
+                sent = true;
+            }
+        }
+    });
+    receiver
+        .recv_timeout(SDP_DEADLINE)
+        .expect("ffmpeg prints an SDP with both tracks")
 }
 
 // ffmpeg's SDP names no control URL, and two tracks need one each to be set up apart
