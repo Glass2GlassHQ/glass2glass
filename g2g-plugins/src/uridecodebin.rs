@@ -2526,16 +2526,11 @@ fn name_undecodable_tagged(
 /// against a live server, not in CI (like the RTSP / WHIP paths).
 #[cfg(feature = "hls")]
 fn blocking_get_text(url: &str) -> Option<alloc::string::String> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-    let client = reqwest::Client::new();
-    rt.block_on(crate::fetch::get_text(
-        &client,
-        url,
-        crate::fetch::MAX_MANIFEST_BYTES,
-    ))
+    block_on_own_thread(|| async {
+        let client = reqwest::Client::new();
+        crate::fetch::get_text(&client, url, crate::fetch::MAX_MANIFEST_BYTES).await
+    })
+    .ok()?
     .ok()
 }
 
@@ -2543,17 +2538,33 @@ fn blocking_get_text(url: &str) -> Option<alloc::string::String> {
 /// the byte sibling of [`blocking_get_text`]. `None` on any failure.
 #[cfg(feature = "hls")]
 fn blocking_get_bytes(url: &str) -> Option<Vec<u8>> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-    let client = reqwest::Client::new();
-    rt.block_on(crate::fetch::get_bytes(
-        &client,
-        url,
-        crate::fetch::MAX_SEGMENT_BYTES,
-    ))
+    block_on_own_thread(|| async {
+        let client = reqwest::Client::new();
+        crate::fetch::get_bytes(&client, url, crate::fetch::MAX_SEGMENT_BYTES).await
+    })
+    .ok()?
     .ok()
+}
+
+// parse-time hooks can run inside the caller's runtime, where block_on panics
+#[cfg(any(feature = "rtsp", feature = "hls"))]
+pub(crate) fn block_on_own_thread<F: core::future::Future>(
+    make_future: impl FnOnce() -> F + Send,
+) -> std::io::Result<F::Output>
+where
+    F::Output: Send,
+{
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                Ok(runtime.block_on(make_future()))
+            })
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
 }
 
 /// The MPEG-TS elementary-stream selector for an HLS discovered stream, or `None`

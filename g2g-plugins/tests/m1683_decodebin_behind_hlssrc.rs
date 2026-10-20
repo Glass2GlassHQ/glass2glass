@@ -19,7 +19,6 @@ const SINKS: [&str; 2] = ["video", "audio"];
 const FIRST_FRAME: usize = 1;
 const DEADLINE: Duration = Duration::from_secs(20);
 
-// the playlists are fetched at parse time, so the line is parsed outside a runtime
 #[test]
 fn decodebin_fans_out_the_streams_of_an_hls_playlist() {
     let line = format!(
