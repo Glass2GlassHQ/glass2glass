@@ -33,21 +33,12 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::tensor::quantize;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
     PropValue, PropertySpec, TensorDType, TensorLayout, TensorShape,
 };
-
-/// Round half away from zero without `f32::round` (which is std / libm only; the
-/// baseline is `no_std`). Quantization tolerates either rounding rule.
-fn round_to_i32(v: f32) -> i32 {
-    if v >= 0.0 {
-        (v + 0.5) as i32
-    } else {
-        (v - 0.5) as i32
-    }
-}
 
 /// The clamp range of an integer quantization dtype.
 fn int_range(dtype: TensorDType) -> Option<(i32, i32)> {
@@ -74,7 +65,7 @@ pub fn quantize_f32(
     Some(
         src.iter()
             .map(|&x| {
-                let q = (round_to_i32(x / scale) + zero_point).clamp(lo, hi);
+                let q = quantize(x, scale, zero_point).clamp(lo, hi);
                 q as u8
             })
             .collect(),

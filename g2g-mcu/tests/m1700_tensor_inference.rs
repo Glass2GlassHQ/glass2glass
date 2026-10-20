@@ -62,9 +62,9 @@ fn runs_the_model_into_a_ring_slot_and_keeps_timing() {
     let output_ring: StaticLendRing<1, OUTPUT_BYTES> = StaticLendRing::new();
     // SAFETY: the rings outlive every frame in this test.
     let mut element = unsafe { TensorInference::with_ring(&mut model, &output_ring) };
-    assert_eq!(element.input_caps(), INPUT.caps());
+    assert_eq!(element.input_format().caps(), INPUT.caps());
     assert_eq!(
-        element.output_caps(),
+        element.output_format().caps(),
         Caps::Tensor {
             dtype: TensorDType::F32,
             shape: TensorShape::new([1, 2]),

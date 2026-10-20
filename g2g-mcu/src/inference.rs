@@ -52,12 +52,12 @@ impl<'r, M: TensorModel, const N: usize, const BYTES: usize> TensorInference<'r,
         Self { model, ring }
     }
 
-    pub fn input_caps(&self) -> Caps {
-        self.model.input().caps()
+    pub fn input_format(&self) -> TensorFormat {
+        self.model.input()
     }
 
-    pub fn output_caps(&self) -> Caps {
-        self.model.output().caps()
+    pub fn output_format(&self) -> TensorFormat {
+        self.model.output()
     }
 }
 

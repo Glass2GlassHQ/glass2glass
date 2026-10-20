@@ -35,7 +35,7 @@ fn speech_model_through_tensor_inference_matches_microflow() {
         TensorInference::with_ring(MicroFlowModel::new(Speech::predict_quantized), &ring)
     };
     assert_eq!(
-        element.input_caps(),
+        element.input_format().caps(),
         Caps::Tensor {
             dtype: TensorDType::I8,
             shape: TensorShape::new([1, FEATURES as u32]),
@@ -43,7 +43,7 @@ fn speech_model_through_tensor_inference_matches_microflow() {
         }
     );
     assert_eq!(
-        element.output_caps(),
+        element.output_format().caps(),
         Caps::Tensor {
             dtype: TensorDType::F32,
             shape: TensorShape::new([1, KEYWORDS as u32]),

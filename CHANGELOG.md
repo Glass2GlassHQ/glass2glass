@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1702: heap-free `LogMelSpectrogram` and `Int8Quantize` transforms in `g2g-mcu`, the audio front end of an MCU keyword model.
 - M1701: the `microflow` feature of `g2g-mcu` runs a MicroFlow-compiled `.tflite` model as a `TensorInference` backend.
 - M1700: `TensorInference`, a heap-free `g2g-mcu` inference transform over a `TensorModel` backend seam, `Caps::Tensor` in and out.
 - M1684: a terminal fan-in element (`rtspclientsink`, `webrtcsessionsink`, `livekitsink`) reports the `sink` telemetry role, so observers summing packets into sinks count its frames.

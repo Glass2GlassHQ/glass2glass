@@ -32,6 +32,21 @@ use crate::caps::TensorDType;
 /// heap, keeping the `no_std` / RTOS baseline allocation-free.
 pub const MAX_TENSOR_RANK: usize = 6;
 
+// Rounds half away from zero, since `f32::round` needs std.
+pub fn round_to_i32(value: f32) -> i32 {
+    if value >= 0.0 {
+        (value + 0.5) as i32
+    } else {
+        (value - 0.5) as i32
+    }
+}
+
+// The affine quantization `round(value / scale) + zero_point`, before the
+// caller clamps it to its integer type.
+pub fn quantize(value: f32, scale: f32, zero_point: i32) -> i32 {
+    round_to_i32(value / scale).saturating_add(zero_point)
+}
+
 /// An n-dimensional strided view over a byte buffer. See the module docs. The
 /// view owns no memory; it indexes a `&[u8]` supplied at read time (the backing
 /// of the [`MemoryDomain`](crate::memory) it travels with).

@@ -23,10 +23,12 @@ pub mod hwjpeg;
 pub mod inference;
 pub mod jitter;
 mod lend;
+pub mod logmel;
 #[cfg(feature = "microflow")]
 pub mod microflow_backend;
 pub mod mixer;
 pub mod pcm;
+pub mod quantize;
 pub mod resample;
 pub mod resample_tables;
 pub mod rtp;
@@ -45,10 +47,12 @@ pub use hwh264::{H264EncodeInfo, H264Encoder, HwH264Enc};
 pub use hwjpeg::{HwJpegDec, JpegDecoder, JpegImageInfo, JpegSubsampling};
 pub use inference::{TensorFormat, TensorInference, TensorModel};
 pub use jitter::JitterBuffer;
+pub use logmel::{LogMelSettings, LogMelSpectrogram};
 #[cfg(feature = "microflow")]
 pub use microflow_backend::MicroFlowModel;
 pub use mixer::Mixer;
 pub use pcm::{PcmConvert, PcmSink, PcmWriter};
+pub use quantize::Int8Quantize;
 pub use resample::{Resampler, SampleRate};
 pub use rtp::{PacketSender, RtpSink};
 pub use rtprecv::{PacketReceiver, RtpSrc};

@@ -7,6 +7,7 @@
 //! the stream's `(Kr, Kb)` in `g2g-core`; no coefficient is written out
 //! anywhere else.
 
+use g2g_core::tensor::round_to_i32;
 use g2g_core::{Colorimetry, YuvConversion};
 
 /// The integer coefficients are `round(coefficient * 256)`, so each dot product
@@ -27,16 +28,6 @@ pub(crate) const SAMPLE_MAX: i32 = 255;
 const LIMITED_LUMA_FLOOR: i32 = 16;
 const LIMITED_LUMA_SPAN: f32 = 219.0;
 const LIMITED_CHROMA_SPAN: f32 = 224.0;
-
-/// Round to nearest, away from zero. `f32::round` is `std`-only, and this crate
-/// is `no_std`.
-fn round_to_i32(v: f32) -> i32 {
-    if v >= 0.0 {
-        (v + 0.5) as i32
-    } else {
-        (v - 0.5) as i32
-    }
-}
 
 /// `c . (r, g, b)` in the 8-bit fixed point of the matrix rows, rounded.
 fn fixed_point_dot(c: [i32; 3], r: i32, g: i32, b: i32) -> i32 {

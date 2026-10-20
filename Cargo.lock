@@ -4148,6 +4148,7 @@ dependencies = [
  "embedded-hal 1.0.0",
  "g2g-core",
  "g2g-plugins",
+ "libm",
  "microflow",
  "nalgebra",
 ]
