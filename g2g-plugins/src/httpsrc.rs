@@ -112,9 +112,13 @@ impl HttpSrc {
 }
 
 /// reqwest transport / status failures map to a hardware-ish I/O error; the run
-/// fails loud and the pipeline surfaces it.
-fn http_err(_e: reqwest::Error) -> G2gError {
-    G2gError::Hardware(HardwareError::Other)
+/// fails loud and the pipeline surfaces it, naming the HTTP status when the
+/// server answered with one.
+pub(crate) fn http_err(e: reqwest::Error) -> G2gError {
+    match e.status() {
+        Some(status) => G2gError::Hardware(HardwareError::Http(status.as_u16())),
+        None => G2gError::Hardware(HardwareError::Other),
+    }
 }
 
 impl SourceLoop for HttpSrc {

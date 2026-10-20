@@ -29,11 +29,11 @@ impl g2g_core::log::LogSource for FetchLog {
 }
 
 /// reqwest transport / status failures map to a hardware-ish I/O error; the run
-/// fails loud and the pipeline surfaces it. The URL and status only survive in
-/// the log line: `G2gError` cannot carry them.
+/// fails loud and the pipeline surfaces it with the HTTP status. The URL only
+/// survives in the log line: `G2gError` cannot carry it.
 pub(crate) fn net_err(e: reqwest::Error) -> G2gError {
     g2g_core::g2g_warn!(&FetchLog, "http fetch failed: {e}");
-    G2gError::Hardware(HardwareError::Other)
+    crate::httpsrc::http_err(e)
 }
 
 /// A response body that exceeds its negotiated cap is treated as a (loud) I/O

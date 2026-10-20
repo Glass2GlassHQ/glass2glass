@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1673: `dashsrc`, `hlssrc` and `httpsrc` fail with the new `HardwareError::Http` carrying the status a server refused a request with.
 - M1672: `moqtsrc` plays the H.264 or H.265 video of a `.hang` broadcast, the packaging moq.dev's public relay carries.
 - M1671: `dashsrc` stops a live `@duration` Period at its end and joins the Period holding the live edge.
 - M1642: `decklinkaudiosink` plays 48 kHz S16LE or S32LE PCM in 2, 8 or 16 channels on the device of its `decklinkvideosink`.

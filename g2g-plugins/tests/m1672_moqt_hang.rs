@@ -81,7 +81,7 @@ async fn serve_recording(mut server: web_transport_quinn::Server) -> impl Sized 
             })
             .await;
         if track == CATALOG_TRACK {
-            serve_group(&session, alias, 0, &[catalog.clone()]).await;
+            serve_group(&session, alias, 0, std::slice::from_ref(&catalog)).await;
         } else {
             for (group, objects) in &groups {
                 serve_group(&session, alias, *group, objects).await;
