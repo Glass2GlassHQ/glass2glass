@@ -330,7 +330,7 @@ impl SourceLoop for RtspSrc {
             PropertySpec::new(
                 "reconnect",
                 PropKind::Uint,
-                "max reconnect attempts after a session failure (0 = no reconnect)",
+                "max reconnect attempts after each loss of a session that carried media (0 = no reconnect)",
             )
             .with_default("0"),
             PropertySpec::new(
@@ -516,6 +516,9 @@ async fn run_rtsp(src: &mut RtspSrc, out: &mut dyn OutputSink) -> Result<u64, G2
                 return Err(e);
             }
             SessionOutcome::NetworkError(e) => {
+                if total_emitted > emitted_before {
+                    retry.recovered(&src.reconnect);
+                }
                 let Some(backoff_ms) = retry.next_delay_ms(&src.reconnect) else {
                     return Err(e);
                 };

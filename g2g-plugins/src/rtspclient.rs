@@ -428,6 +428,11 @@ impl ReconnectState {
         }
     }
 
+    // a session that carried media again ends the loss, so the next loss gets every attempt
+    pub(crate) fn recovered(&mut self, policy: &ReconnectPolicy) {
+        *self = Self::new(policy);
+    }
+
     /// Milliseconds to wait before the next attempt, or `None` once
     /// `max_attempts` retries have been handed out.
     pub(crate) fn next_delay_ms(&mut self, policy: &ReconnectPolicy) -> Option<u64> {
@@ -528,6 +533,32 @@ mod tests {
             ))
             .expect("session present");
         assert_eq!(requests.session_timeout_s(), 30);
+    }
+
+    #[cfg(any(feature = "rtsp", feature = "rtsp-client-sink"))]
+    #[test]
+    fn each_recovered_loss_gets_the_whole_reconnect_budget() {
+        let policy = ReconnectPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: DEFAULT_INITIAL_BACKOFF_MS,
+            max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
+        };
+        let mut retry = ReconnectState::new(&policy);
+        assert_eq!(
+            retry.next_delay_ms(&policy),
+            Some(DEFAULT_INITIAL_BACKOFF_MS)
+        );
+        retry.recovered(&policy);
+        assert_eq!(
+            retry.next_delay_ms(&policy),
+            Some(DEFAULT_INITIAL_BACKOFF_MS),
+            "the second loss retries from the first backoff"
+        );
+        assert_eq!(
+            retry.next_delay_ms(&policy),
+            None,
+            "within one loss the budget holds"
+        );
     }
 
     #[test]

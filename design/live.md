@@ -668,7 +668,8 @@ from the `ReconnectPolicy` `rtspsrc` uses. Attempts are made when a frame
 arrives after the backoff, the budget of N starts again with each loss, and a
 video pad sends nothing on the new session until a keyframe. Errors a retry
 cannot fix, a bad `location` or an AAC access unit too large for RTP, still
-fail the element.
+fail the element. `rtspsrc` and `rtspsrcn` share `ReconnectState` and also
+give each loss the whole budget once the session before it carried media.
 
 Validated against mediamtx 1.21: ffprobe, ffmpeg and gst `rtspsrc` decode the
 published streams back over both transports and both auth schemes, its API
