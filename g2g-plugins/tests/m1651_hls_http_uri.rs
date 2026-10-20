@@ -19,7 +19,6 @@ const SINKS: [&str; 2] = ["video", "audio"];
 const FIRST_FRAME: usize = 1;
 const DEADLINE: Duration = Duration::from_secs(20);
 
-// the hook fetches the playlists at parse time, so the line is parsed outside a runtime
 #[test]
 fn an_http_playlist_uri_fans_out_to_video_and_audio() {
     let line = format!(
@@ -35,6 +34,30 @@ fn an_http_playlist_uri_fans_out_to_video_and_audio() {
         counts.iter().all(|&count| count >= FIRST_FRAME),
         "decoded frames per branch {SINKS:?}: {counts:?}"
     );
+}
+
+// canary, MCP and g2g-launch parse lines from inside a tokio runtime
+#[test]
+fn an_http_playlist_uri_parses_inside_a_runtime() {
+    let line = format!(
+        "uridecodebin uri={} name=d d. ! fakesink name={} d. ! fakesink name={}",
+        serve_vod_playlist(),
+        SINKS[0],
+        SINKS[1]
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build a runtime");
+    let graph = runtime
+        .block_on(async { parse_launch(&default_registry(), &line) })
+        .unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
+    for sink in SINKS {
+        assert!(
+            graph.node_by_name(sink).is_some(),
+            "no `{sink}` branch in `{line}`"
+        );
+    }
 }
 
 #[test]

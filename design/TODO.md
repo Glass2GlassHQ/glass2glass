@@ -167,6 +167,9 @@ Highest leverage first:
 
 ## Adaptive streaming (HLS / DASH)
 
+- **DASH live:** hold back `SegmentTimeline` and `SegmentList` entries of a
+  live Period until each is available, as the `@duration` window already is.
+- **DASH live:** the UDP `ntp` and `sntp` `UTCTiming` schemes.
 - **HLS / CENC:** the multi-key shapes (`senc` v1/v2, multi-key `seig`
   entries) stay declined fail-loud: the 23001-7:2023 syntax is paywalled and
   the two available sources (the MPEG proposal and GPAC) contradict each

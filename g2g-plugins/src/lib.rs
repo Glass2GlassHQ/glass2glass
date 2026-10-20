@@ -1385,6 +1385,8 @@ pub mod rtmpsrc;
 
 // DASH MPD parser and the DashSrc segment source.
 #[cfg(feature = "dash")]
+mod dashclock;
+#[cfg(feature = "dash")]
 pub mod dashsrc;
 #[cfg(feature = "dash")]
 pub mod mpd;

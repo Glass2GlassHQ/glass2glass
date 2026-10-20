@@ -494,19 +494,9 @@ fn declared_audio_caps(format: AudioFormat, params: Option<&AudioParameters>) ->
 /// the graph exists. `None` when the server is unreachable or offers no
 /// H.264 / H.265 video.
 pub fn blocking_probe_tracks(url: &str, user_agent: &str) -> Option<RtspTracks> {
-    // a runtime cannot block_on inside the caller's runtime, so it gets a thread of its own
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .ok()?;
-                rt.block_on(probe_tracks(url, user_agent))
-            })
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-    })
+    crate::uridecodebin::block_on_own_thread(|| probe_tracks(url, user_agent))
+        .ok()
+        .flatten()
 }
 
 /// DESCRIBE `url` and report the tracks g2g can play from it: the first

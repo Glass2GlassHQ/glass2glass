@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1692: a live `dashsrc` computes segment availability on the server clock its MPD's `UTCTiming` element measures.
+- M1691: a live `dashsrc` entering a Period waits for its first segment instead of requesting segments not yet available.
+- M1690: the HLS playlist fetch of `uridecodebin`, `playbin` and `decodebin` runs when the line is parsed inside a tokio runtime.
 - M1685: `g2g-launch` and `g2g-launch-py` print the `running...` progress line only when stderr is a terminal.
 - M1684: a terminal fan-in element (`rtspclientsink`, `webrtcsessionsink`, `livekitsink`) reports the `sink` telemetry role, so observers summing packets into sinks count its frames.
 - M1683: `hlssrc location=X ! decodebin name=d` decodes each muxed stream of the playlist on its own `d.` branch.

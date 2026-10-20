@@ -22,6 +22,12 @@
 //! ahead of its nominal completion, so a chunked low-latency packager's newest
 //! segment is fetched while it is still being written.
 //!
+//! That wall clock is the server's: the local clock plus the offset measured
+//! from the first `UTCTiming` source whose scheme is supported (`direct`,
+//! `http-head`, `http-xsdate`, `http-iso`, `http-ntp`), re-measured every 30
+//! minutes, or every 30 seconds after a failed measurement, as gst's
+//! `dashdemux` does.
+//!
 //! Segment times are period-relative presentation times: a template's
 //! `@presentationTimeOffset` is already off them (`$Time$` URLs keep the media
 //! value), so seek targets and the boundary `Segment` are on the same timeline
@@ -60,6 +66,7 @@ use g2g_core::{
 };
 
 use crate::abr::BandwidthEstimator;
+use crate::dashclock::{local_now_unix, RequestSpan, ServerClock};
 use crate::fetch::{
     byte_frame, get_bytes, get_range_bytes, get_response, get_text, net_err, resolve_url,
     MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
@@ -76,12 +83,18 @@ use crate::mpd::{
 /// defaults its `presentation-delay` property to 10s, so match that.
 const DEFAULT_PRESENTATION_DELAY_MS: u64 = 10_000;
 
-/// Wall clock as unix seconds, the reference the MPD's `availabilityStartTime`
-/// is expressed against.
-fn now_unix() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64())
+async fn fetch_manifest(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<(Mpd, RequestSpan), G2gError> {
+    let sent_unix = local_now_unix();
+    let text = get_text(client, url, MAX_MANIFEST_BYTES).await?;
+    let request = RequestSpan {
+        sent_unix,
+        answered_unix: local_now_unix(),
+    };
+    let mpd = parse(&text).map_err(|_| G2gError::CapsMismatch)?;
+    Ok((mpd, request))
 }
 
 /// Convert a time in `timescale` units to nanoseconds.
@@ -154,9 +167,8 @@ async fn stream_segment_chunks(
 /// every ABR switch.
 ///
 /// A live `@duration` Representation instead takes its segments from the
-/// wall-clock window (`live`), falling back to the static resolution when the
-/// window is empty (a `SegmentTimeline`, which lists its own window, or a Period
-/// whose first segment is not complete yet).
+/// wall-clock window (`live`), which is empty until the Period's first segment
+/// is complete. A `SegmentTimeline` lists its own window.
 async fn load_rep(
     client: &reqwest::Client,
     base: &str,
@@ -182,11 +194,10 @@ async fn load_rep(
             init,
         ));
     }
-    if let Some(edge) = live {
-        let segs = rep.live_segments(edge, now_unix, period_end_secs(total_secs));
-        if !segs.is_empty() {
-            return Ok((segs, rep.timescale(), init));
-        }
+    if let Some(segs) =
+        live.and_then(|edge| rep.live_segments(edge, now_unix, period_end_secs(total_secs)))
+    {
+        return Ok((segs, rep.timescale(), init));
     }
     Ok((rep.resolved_segments(total_secs), rep.timescale(), init))
 }
@@ -436,10 +447,12 @@ impl SourceLoop for DashSrc {
             let client = reqwest::Client::new();
             let cap = (self.max_bandwidth != 0).then_some(self.max_bandwidth);
 
-            let mut mpd = {
-                let text = get_text(&client, &self.url, MAX_MANIFEST_BYTES).await?;
-                parse(&text).map_err(|_| G2gError::CapsMismatch)?
-            };
+            let (mut mpd, manifest_request) = fetch_manifest(&client, &self.url).await?;
+            // every live availability is computed on the server's clock
+            let mut clock = ServerClock::default();
+            if mpd.dynamic {
+                clock.poll(&client, &mpd, manifest_request).await;
+            }
 
             let mut sequence = 0u64;
             // Duration-keyed prebuffer window (0 = pass-through); init segments
@@ -478,7 +491,8 @@ impl SourceLoop for DashSrc {
             // manifest reload (a reload continues from `last_time`).
             let mut positioned = false;
             if mpd.dynamic {
-                period_idx = mpd.live_period_index(now_unix(), self.presentation_delay_secs(&mpd));
+                period_idx =
+                    mpd.live_period_index(clock.now_unix(), self.presentation_delay_secs(&mpd));
             }
             'manifest: loop {
                 let period = &mpd.periods[period_idx];
@@ -502,7 +516,7 @@ impl SourceLoop for DashSrc {
                     .ok_or(G2gError::CapsMismatch)?;
                 let mut cur_rep_id = rep.id.clone();
                 let span_secs = period_span_secs(&mpd, period_idx);
-                let loaded_unix = now_unix();
+                let loaded_unix = clock.now_unix();
                 let (mut segs, mut timescale, mut init) =
                     load_rep(&client, &base, rep, span_secs, edge.as_ref(), loaded_unix).await?;
                 // the next live Period can be listed before this one has ended
@@ -637,7 +651,7 @@ impl SourceLoop for DashSrc {
                                 {
                                     if best.id != cur_rep_id {
                                         cur_rep_id = best.id.clone();
-                                        let switched_unix = now_unix();
+                                        let switched_unix = clock.now_unix();
                                         let (s, ts, ini) = load_rep(
                                             &client,
                                             &base,
@@ -701,8 +715,11 @@ impl SourceLoop for DashSrc {
                 };
                 tokio::time::sleep(core::time::Duration::from_millis(interval_ms.max(1))).await;
                 let playing_start_secs = mpd.periods[period_idx].start_secs;
-                let text = get_text(&client, &self.url, MAX_MANIFEST_BYTES).await?;
-                mpd = parse(&text).map_err(|_| G2gError::CapsMismatch)?;
+                let manifest_request;
+                (mpd, manifest_request) = fetch_manifest(&client, &self.url).await?;
+                if mpd.dynamic {
+                    clock.poll(&client, &mpd, manifest_request).await;
+                }
                 // Periods that aged out of the window drop off the front, so the
                 // one playing is found by its start, not its old index.
                 period_idx = mpd

@@ -207,6 +207,14 @@ pub struct Mpd {
     pub suggested_presentation_delay_secs: Option<f64>,
     /// The presentation's Periods, in order. Always non-empty.
     pub periods: Vec<Period>,
+    /// The `UTCTiming` elements, in manifest order.
+    pub utc_timings: Vec<UtcTiming>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UtcTiming {
+    pub scheme_id_uri: String,
+    pub value: String,
 }
 
 /// One `Period`: a self-contained stretch of the presentation with its own
@@ -503,25 +511,31 @@ impl Representation {
     }
 
     /// The media segments a dynamic `@duration` Representation offers at
-    /// wall-clock `now_unix` (the live profile). Empty for any other addressing,
-    /// or before this Period's first segment is complete.
+    /// wall-clock `now_unix` (the live profile), empty before this Period's
+    /// first segment is complete. `None` for any other addressing, which lists
+    /// its own segments.
     pub fn live_segments(
         &self,
         edge: &LiveEdge,
         now_unix: f64,
         period_secs: Option<f64>,
-    ) -> Vec<ResolvedSegment> {
+    ) -> Option<Vec<ResolvedSegment>> {
         let SegmentSource::Template(t) = &self.source else {
-            return Vec::new();
+            return None;
         };
-        t.live_segments(edge, now_unix, period_secs)
-            .into_iter()
-            .map(|s| ResolvedSegment {
-                url: t.media_url(&self.id, s),
-                byte_range: None,
-                time: t.presentation_time(s.time),
-            })
-            .collect()
+        if !t.timeline.is_empty() {
+            return None;
+        }
+        Some(
+            t.live_segments(edge, now_unix, period_secs)
+                .into_iter()
+                .map(|s| ResolvedSegment {
+                    url: t.media_url(&self.id, s),
+                    byte_range: None,
+                    time: t.presentation_time(s.time),
+                })
+                .collect(),
+        )
     }
 
     pub fn lists_period_end(
@@ -726,6 +740,16 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
             .attribute("suggestedPresentationDelay")
             .and_then(parse_iso_duration),
         periods,
+        utc_timings: root
+            .children()
+            .filter(|n| n.is_element() && n.has_tag_name("UTCTiming"))
+            .filter_map(|n| {
+                Some(UtcTiming {
+                    scheme_id_uri: String::from(n.attribute("schemeIdUri")?),
+                    value: String::from(n.attribute("value")?),
+                })
+            })
+            .collect(),
     })
 }
 
@@ -998,7 +1022,7 @@ fn parse_iso_duration(s: &str) -> Option<f64> {
 /// `-HH:MM` zone offset, or naive = UTC) to unix seconds. Manifest input, so
 /// every field is range-checked and anything malformed yields `None` rather
 /// than a bogus live-edge anchor.
-fn parse_xs_datetime(s: &str) -> Option<f64> {
+pub(crate) fn parse_xs_datetime(s: &str) -> Option<f64> {
     let (date, rest) = s.trim().split_once('T')?;
     let mut ymd = date.split('-');
     let year: i64 = ymd.next()?.parse().ok()?;
@@ -1628,7 +1652,7 @@ mod tests {
             tmpl.live_available(&edge, AST_UNIX + 7.0, None),
             Some((4, 6))
         );
-        let segs = rep.live_segments(&edge, AST_UNIX + 7.0, None);
+        let segs = rep.live_segments(&edge, AST_UNIX + 7.0, None).unwrap();
         let urls: Vec<&str> = segs.iter().map(|s| s.url.as_str()).collect();
         assert_eq!(
             urls,
@@ -1655,7 +1679,10 @@ mod tests {
         );
         // Nothing at all before the presentation starts.
         assert_eq!(tmpl.live_available(&edge, AST_UNIX - 60.0, None), None);
-        assert!(rep.live_segments(&edge, AST_UNIX - 60.0, None).is_empty());
+        assert_eq!(
+            rep.live_segments(&edge, AST_UNIX - 60.0, None),
+            Some(Vec::new())
+        );
     }
 
     #[test]
@@ -1759,7 +1786,7 @@ mod tests {
         let mpd = parse(FFMPEG_LIVE_MPD).unwrap();
         let rep = &mpd.periods[0].representations[0];
         let edge = mpd.live_edge(&mpd.periods[0], 1.0).unwrap();
-        let segs = rep.live_segments(&edge, AST_UNIX + 7.0, None); // indices 4..=6
+        let segs = rep.live_segments(&edge, AST_UNIX + 7.0, None).unwrap(); // indices 4..=6
         let ts = rep.timescale();
 
         // 1s of delay = the newest complete segment only.
