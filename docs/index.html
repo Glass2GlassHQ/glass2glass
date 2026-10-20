@@ -1475,6 +1475,8 @@ g2g-launch videotestsrc num-buffers=8 ! \
         const row = element('div', 'status-row');
         const state = pipeline.up_now === null ? '' : pipeline.up_now ? 'up' : 'down';
         row.append(element('span', 'status-dot ' + state));
+        // a canary image built before it reported its launch lines has no launch
+        if (pipeline.launch) row.title = pipeline.launch;
         row.append(element('span', 'status-id', pipeline.id));
         row.append(element('span', 'status-tier', pipeline.tier));
         const days = element('div', 'status-days');
