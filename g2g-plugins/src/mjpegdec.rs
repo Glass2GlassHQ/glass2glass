@@ -640,13 +640,14 @@ impl AsyncElement for MjpegDec {
                         out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
                         self.declared_caps = Some(caps);
                     }
-                    let decoded = Frame::new(
+                    let mut decoded = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(
                             picture.pixels.into_boxed_slice(),
                         )),
                         frame.timing,
                         self.sequence,
                     );
+                    decoded.meta = frame.meta;
                     self.sequence += 1;
                     out.push(PipelinePacket::DataFrame(decoded)).await?;
                 }
