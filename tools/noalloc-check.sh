@@ -71,7 +71,7 @@ check_target() {
   fi
 
   # Sanity: the pipeline entry symbols must exist, so we proved something real.
-  for sym in g2g_noalloc_run g2g_audio_run; do
+  for sym in g2g_noalloc_run g2g_audio_run g2g_keyword_run; do
     if ! grep -q "$sym" <<<"$syms"; then
       echo "FAIL ($target): $sym symbol missing; the pipeline was eliminated, nothing proven"
       exit 1
@@ -105,7 +105,8 @@ fi
 echo "== validating the flagship audio graph (noalloc-pipeline tests) =="
 cargo test --manifest-path "$ROOT/examples/noalloc-pipeline/Cargo.toml" --quiet
 
-echo "PASS: g2g-noalloc links the video pipeline AND the flagship audio graph"
-echo "      (capture->convert->resample->mix->encode->RTP) with zero allocator"
+echo "PASS: g2g-noalloc links the video pipeline, the flagship audio graph"
+echo "      (capture->convert->resample->mix->encode->RTP) and the keyword graph"
+echo "      (log-mel->int8 quantize->MicroFlow model) with zero allocator"
 echo "      symbols and zero panic symbols on BOTH ${TARGETS[*]}."
 echo "      The heap-free + panic-free guarantees hold at link time, cross-ISA."

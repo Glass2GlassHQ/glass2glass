@@ -31,6 +31,7 @@
 #![no_std]
 
 pub mod audio;
+pub mod keyword;
 
 // Re-exported so the leaf proof binaries (g2g-qemu and friends) need no
 // direct g2g-core dependency for the executor.

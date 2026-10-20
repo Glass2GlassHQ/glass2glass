@@ -282,6 +282,14 @@ same directory as whole archives.
 The test fixture `g2g-ml/tests/fixtures/affine_2x_plus_1.pte` is an exported
 `x * 2 + 1` model, checked in next to its generator `export_affine.py`.
 
+### Microcontrollers
+
+A heap-free int8 model runs on a microcontroller through `g2g-mcu`'s
+`TensorInference`, with MicroFlow compiling a `.tflite` into Rust at build
+time, and `LogMelSpectrogram`, `ImageResize` and `Int8Quantize` as the
+preprocessing. The design and its host, ONNX Runtime and Cortex-M checks are in
+[embedded.md](embedded.md#tinyml-inference).
+
 ### whisper.cpp and llama.cpp
 
 Two elements run speech and language models rather than the `[1, 3, H, W]`

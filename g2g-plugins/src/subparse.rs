@@ -31,6 +31,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::tensor::round_to_i32;
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
@@ -1084,16 +1085,6 @@ fn positive_length(token: &str) -> Option<f32> {
 /// on the `no_std` baseline).
 fn round_to_u32(v: f32) -> u32 {
     (v + 0.5) as u32
-}
-
-/// Round a float to the nearest whole number, away from zero at the halfway
-/// point.
-fn round_to_i32(v: f32) -> i32 {
-    if v < 0.0 {
-        -((-v + 0.5) as i32)
-    } else {
-        (v + 0.5) as i32
-    }
 }
 
 /// The part of a comma-separated CSS value before the first separating comma. A

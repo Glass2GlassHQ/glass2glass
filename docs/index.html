@@ -806,7 +806,7 @@
             <div class="crate-card">
                 <div class="crate-name">g2g-mcu</div>
                 <div class="crate-tag">no OS, no heap</div>
-                <p>Microcontroller peripheral elements over <code>embedded-hal</code>: displays, frame grabbers, audio out, sensors, hardware codecs.</p>
+                <p>Microcontroller peripheral elements over <code>embedded-hal</code>: displays, frame grabbers, audio out, sensors, hardware codecs, and small TensorFlow Lite models compiled into the firmware.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-mcugen</div>
@@ -927,10 +927,10 @@
             <div class="feature-card">
                 <span class="f-icon">&#129504;</span>
                 <h3>Inference</h3>
-                <p class="f-lead">Preprocess, run the model, and postprocess without the pixels leaving the GPU. The same path runs on Android.</p>
+                <p class="f-lead">Preprocess, run the model, and postprocess without the pixels leaving the GPU. The same path runs on Android. On a microcontroller, a small int8 model runs with no heap.</p>
                 <div class="chip-group">
                     <span class="chip-label">Engines</span>
-                    <div class="chip-row"><span class="chip">OrtInference</span><span class="chip">ExecutorchInference</span><span class="chip">BurnInference</span><span class="chip">WgpuInference</span><span class="chip">TensorBatcher</span></div>
+                    <div class="chip-row"><span class="chip">OrtInference</span><span class="chip">ExecutorchInference</span><span class="chip">BurnInference</span><span class="chip">WgpuInference</span><span class="chip">TensorInference</span><span class="chip">TensorBatcher</span></div>
                 </div>
                 <span class="feature-tag tag-ml">ML</span>
             </div>

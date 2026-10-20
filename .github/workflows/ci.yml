@@ -475,9 +475,10 @@ jobs:
           export EXECUTORCH_RS_EXECUTORCH_LIB_DIR="$HOME/executorch/cmake-out"
           cargo test -p g2g-ml --locked --features executorch,analytics,launch --test executorch_inference --test m820_launch_properties
       # the execution providers that build against the stock ONNX Runtime
-      # download (tensorrt needs the CUDA download); each fails loud at load here
+      # download (tensorrt needs the CUDA download); each fails loud at load here.
+      # m1705 checks the MCU keyword graph against ONNX Runtime on the CPU.
       - name: test g2g-ml (ort execution providers)
-        run: cargo test -p g2g-ml --locked --features openvino,rocm,migraphx,launch --test ort_execution_providers --test m820_launch_properties
+        run: cargo test -p g2g-ml --locked --features openvino,rocm,migraphx,launch --test ort_execution_providers --test m820_launch_properties --test m1705_mcu_keyword_ort
       # whisper.cpp and llama.cpp build from their vendored sources (cmake); the
       # test models are fetched (33 MB), cached by the fetch scripts' hashes
       - name: cache whisper + llama fixtures
@@ -532,6 +533,8 @@ jobs:
         run: |
           cargo test -p g2g-mcu --locked
           cargo check -p g2g-mcu --locked --target thumbv7em-none-eabihf
+          cargo test -p g2g-mcu --locked --features microflow --test m1701_microflow
+          cargo check -p g2g-mcu --locked --features microflow --target thumbv7em-none-eabihf
       # Emulated Cortex-M execution proof (M628): boot the exact g2g-noalloc
       # pipeline (linked as an rlib into a bare-metal cortex-m-rt binary) on
       # QEMU's MPS2-AN386 Cortex-M4 and assert the on-target checksum via the

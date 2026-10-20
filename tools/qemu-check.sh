@@ -118,6 +118,20 @@ echo "$OUT6"
 grep -q "g2g-sensor: uart-bytes=32 OK" <<<"$OUT6" \
   || { echo "FAIL: expected banner missing from the sensor QEMU run"; exit 1; }
 
+# TinyML proof: the keyword graph (log-mel -> int8 quantize -> the
+# MicroFlow-compiled micro_speech model) runs on the Cortex-M ISA, and its
+# features digest and scores equal the host run pinned in
+# g2g-mcu/tests/fixtures/keyword bit for bit. Built by the same `cargo build`.
+KEYWORD_ELF="$ROOT/examples/g2g-qemu/target/$TARGET/release/keyword"
+
+echo "== running the keyword-spotting graph on QEMU MPS2-AN386 =="
+OUT7="$(timeout 120 $QEMU -machine mps2-an386 -cpu cortex-m4 -nographic \
+  -semihosting-config enable=on,target=native -kernel "$KEYWORD_ELF")"
+echo "$OUT7"
+
+grep -q "g2g-keyword: features and scores bit-exact with the host OK" <<<"$OUT7" \
+  || { echo "FAIL: expected banner missing from the keyword QEMU run"; exit 1; }
+
 echo "PASS: the g2g-noalloc pipeline executed on an emulated Cortex-M4, both"
 echo "      on the bare single-poll executor and under a real Embassy task"
 echo "      (64 frames through the camera seam + SPI display element, wire"
@@ -129,4 +143,5 @@ echo "      dead peripheral within bounds (M652: runtime fault recovery), and"
 echo "      the RX chain reconstructed an ordered PCM stream from a reordered"
 echo "      RTP wire through the jitter buffer (M653: receive direction), and"
 echo "      an I2C SHT3x sensor read + CRC + conversion streamed out a UART"
-echo "      (M654: I2C sensor + UART peripheral breadth)."
+echo "      (M654: I2C sensor + UART peripheral breadth), and the keyword"
+echo "      graph's int8 features and model scores matched the host bit for bit."
