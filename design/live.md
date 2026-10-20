@@ -643,11 +643,11 @@ session's streams, after its first frame and then every `rtcp-sr-interval`
 (5 s), spread over 0.5 to 1.5 times the interval as RFC 3550 does. The report's
 NTP time is the wall-clock time of PTS zero, fixed when the session starts, plus
 the frame's PTS, so a player lines the streams up by PTS. Reports go out on
-channel `2 * pad + 1` or to the server's RTCP port. A timer task spawned for
-each session sends the reports and keepalives that fall due between frames and
-drains the control connection, so a stalled upstream still keeps the session,
-and an error it meets ends the session on the next frame. The task and the
-element share the session behind a `tokio::sync::Mutex`. It sleeps until the
+channel `2 * pad + 1` or to the server's RTCP port. A task spawned for each
+session sends the reports and keepalives that fall due between frames and
+drains the control connection, so a stalled upstream still keeps the session.
+The task and the element share the session behind a `tokio::sync::Mutex`. It
+sleeps until the
 next due report or keepalive, but no longer than half the report interval,
 which is the soonest a report made due by a frame sent meanwhile can fall due.
 
@@ -662,19 +662,23 @@ RTSP requests.
 
 `reconnect=N` (0 by default, gst's `rtspclientsink` has no reconnect) makes a
 lost session non-fatal: a failed send, a closed control connection or a failed
-first publish drops frames while the element retries the whole OPTIONS to RECORD
-handshake, with the `reconnect-backoff` doubling up to `reconnect-backoff-max`
-from the `ReconnectPolicy` `rtspsrc` uses. Attempts are made when a frame
-arrives after the backoff, the budget of N starts again with each loss, and a
-video pad sends nothing on the new session until a keyframe. Errors a retry
-cannot fix, a bad `location` or an AAC access unit too large for RTP, still
-fail the element. `rtspsrc` and `rtspsrcn` share `ReconnectState` and also
-give each loss the whole budget once the session before it carried media.
+first publish drops frames while the session task retries the whole OPTIONS to
+RECORD handshake, with the `reconnect-backoff` doubling up to
+`reconnect-backoff-max` from the `ReconnectPolicy` `rtspsrc` uses. The task
+sleeps out the backoff itself, so a session lost while upstream is stalled is
+back before the next frame. The budget of N starts again with each loss, the
+new session keeps the first session's NTP time of PTS zero, and a video pad
+sends nothing on it until a keyframe. When the budget runs out the next frame
+or EOS fails the element. Errors a retry cannot fix, a bad `location` or an AAC
+access unit too large for RTP, fail it at once. `rtspsrc` and `rtspsrcn` share
+`ReconnectState` and also give each loss the whole budget once the session
+before it carried media.
 
 Validated against mediamtx 1.21: ffprobe, ffmpeg and gst `rtspsrc` decode the
 published streams back over both transports and both auth schemes, its API
 counts the sender reports in `inboundRTCPPackets`, and a `podman restart` of the
-server is followed by a new publishing session within a second. The tests run
+server is followed by a new publishing session within a second, also while the
+source sends nothing. The tests run
 against `RtspServerSrc` and a scripted recorder.
 
 ## SRT

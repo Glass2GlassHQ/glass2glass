@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::net::TcpListener as StdTcpListener;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use md5::{Digest, Md5};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -288,6 +288,7 @@ async fn h264_published_over_udp_reaches_the_record_server_intact() {
 #[derive(Default)]
 struct RecordedPublish {
     announced_sdp: String,
+    announced_at: Option<Instant>,
     // RTP packets by interleaved channel, in arrival order
     channels: BTreeMap<u8, Vec<Vec<u8>>>,
     requests: Vec<String>,
@@ -371,6 +372,7 @@ async fn record_one_publisher(
             }
             if request.method == "ANNOUNCE" {
                 recorded.announced_sdp = String::from_utf8(request.body.clone()).unwrap();
+                recorded.announced_at = Some(Instant::now());
             }
             let (response, event) = responder.handle_request(&request);
             conn.write_all(&response).await.unwrap();
@@ -901,6 +903,70 @@ async fn a_dropped_connection_republishes_from_the_next_keyframe() {
         depayloaded_video(&second),
         frames[KEYFRAME_AFTER_DROP..],
         "the new session starts at a keyframe"
+    );
+    assert!(second.torn_down, "EOS tears the new session down");
+}
+
+// upstream sends one frame and then nothing for this long, and the recorder closes partway through
+const SILENCE_BEFORE_RESUME: Duration = Duration::from_secs(3);
+const RECORDER_CLOSES_AFTER: Duration = Duration::from_millis(500);
+
+#[tokio::test]
+async fn a_connection_dropped_during_a_stall_is_republished_before_upstream_resumes() {
+    let DroppedConnectionPublish {
+        listener,
+        mut sink,
+        pads,
+    } = dropped_connection_publish(1).await;
+    // the session task checks the connection every half report interval, well inside the silence
+    sink.set_property(
+        "rtcp-sr-interval",
+        PropValue::Uint(STALL_REPORT_INTERVAL_MS),
+    )
+    .expect("interval");
+    let recorders = async {
+        let first = tokio::time::timeout(
+            RECORDER_CLOSES_AFTER,
+            record_one_publisher(&listener, None, recorder_responder(), None),
+        )
+        .await;
+        assert!(
+            first.is_err(),
+            "the first session was still up at the close"
+        );
+        record_one_publisher(&listener, None, recorder_responder(), None).await
+    };
+    let send = async {
+        let mut discard = Capture::default();
+        let frames = &pads[0].frames;
+        sink.configure_pipeline(VIDEO_PAD, &pads[0].caps)?;
+        let (data, pts_ns) = &frames[0];
+        sink.process(VIDEO_PAD, data_frame(data.clone(), *pts_ns), &mut discard)
+            .await?;
+        tokio::time::sleep(SILENCE_BEFORE_RESUME).await;
+        let resumed_at = Instant::now();
+        for (data, pts_ns) in &frames[1..] {
+            sink.process(VIDEO_PAD, data_frame(data.clone(), *pts_ns), &mut discard)
+                .await?;
+            tokio::time::sleep(RECONNECT_TEST_PACE).await;
+        }
+        end_streams(&mut sink, pads.len()).await?;
+        Ok::<_, G2gError>(resumed_at)
+    };
+    let (second, published) =
+        tokio::time::timeout(SERVER_DEADLINE, async { tokio::join!(recorders, send) })
+            .await
+            .expect("both sessions finish");
+    let resumed_at = published.expect("the publish survives the drop");
+    let announced_at = second.announced_at.expect("a new session is announced");
+    assert!(
+        announced_at < resumed_at,
+        "the new session is announced before upstream resumes"
+    );
+    assert_eq!(
+        depayloaded_video(&second),
+        gop_frames()[KEYFRAME_AFTER_DROP..],
+        "the first keyframe after the silence opens the new session"
     );
     assert!(second.torn_down, "EOS tears the new session down");
 }

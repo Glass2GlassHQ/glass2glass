@@ -547,6 +547,8 @@ struct SessionStream {
     counters: SenderCounters,
     next_report_ns: u64,
     last_sent: Option<SentFrame>,
+    // a republished session's video starts at a keyframe
+    awaiting_keyframe: bool,
 }
 
 // the last frame a stream sent, whose timestamps a sender report pairs
@@ -573,15 +575,10 @@ struct PublishSession {
     // the wall-clock time of PTS zero, so every stream's sender reports share one NTP mapping
     pts_zero_unix_ns: i64,
     report_interval_ns: u64,
-    // what stopped the timer task, reported on the next frame
-    timer_failure: Option<PublishError>,
 }
 
 impl PublishSession {
     async fn send(&mut self, input: usize, frame: &[u8], pts_ns: u64) -> Result<(), PublishError> {
-        if let Some(failure) = self.timer_failure.take() {
-            return Err(failure);
-        }
         self.control.discard_inbound()?;
         let stream = &mut self.streams[input];
         let rtp_timestamp = rtp_timestamp_at_clock(pts_ns, u64::from(stream.clock_rate));
@@ -597,6 +594,7 @@ impl PublishSession {
             rtp_timestamp,
             pts_ns,
         });
+        stream.awaiting_keyframe = false;
         self.report_if_due(input).await
     }
 
@@ -674,37 +672,97 @@ impl PublishSession {
     }
 }
 
+#[derive(Debug)]
+enum SessionLink {
+    Up(Box<PublishSession>),
+    // frames are dropped while the session task reconnects
+    Reconnecting,
+    // the reconnect attempts ran out, the next frame fails the element
+    Failed(G2gError),
+}
+
+impl SessionLink {
+    // only the session task takes the link down, and it runs the timers only while the link is up
+    fn live_session(&mut self) -> &mut PublishSession {
+        match self {
+            SessionLink::Up(session) => session,
+            SessionLink::Reconnecting | SessionLink::Failed(_) => {
+                unreachable!("session timers run on a reconnecting link")
+            }
+        }
+    }
+}
+
 // keepalives and sender reports run on a timer so a stalled upstream keeps the session
-async fn run_session_timers(session: Arc<Mutex<PublishSession>>) {
+async fn keep_session(link: &Mutex<SessionLink>) -> PublishError {
     loop {
-        let wake_ns = session.lock().await.next_timer_ns();
+        let wake_ns = link.lock().await.live_session().next_timer_ns();
         let delay_ns = wake_ns.saturating_sub(monotonic_ns());
         tokio::time::sleep(Duration::from_nanos(delay_ns)).await;
-        let mut session = session.lock().await;
-        if let Err(failure) = session.on_timer().await {
-            session.timer_failure = Some(failure);
-            return;
+        let mut link = link.lock().await;
+        if let Err(error) = link.live_session().on_timer().await {
+            *link = SessionLink::Reconnecting;
+            return error;
         }
+    }
+}
+
+// republishes a lost session without waiting for a frame
+async fn run_session(
+    link: Arc<Mutex<SessionLink>>,
+    parameters: Arc<SessionParameters>,
+    mut loss: Option<PublishError>,
+) {
+    loop {
+        if let Some(error) = loss {
+            let republished = parameters.republish(error).await;
+            let mut link = link.lock().await;
+            match republished {
+                Ok(session) => *link = SessionLink::Up(Box::new(session)),
+                Err(error) => {
+                    *link = SessionLink::Failed(error);
+                    return;
+                }
+            }
+        }
+        loss = Some(keep_session(&link).await);
     }
 }
 
 #[derive(Debug)]
 struct LiveSession {
-    session: Arc<Mutex<PublishSession>>,
-    timers: JoinHandle<()>,
+    link: Arc<Mutex<SessionLink>>,
+    parameters: Arc<SessionParameters>,
+    task: JoinHandle<()>,
 }
 
 impl LiveSession {
-    fn start(session: PublishSession) -> Self {
-        let session = Arc::new(Mutex::new(session));
-        let timers = tokio::spawn(run_session_timers(session.clone()));
-        Self { session, timers }
+    fn start(session: PublishSession, parameters: Arc<SessionParameters>) -> Self {
+        Self::spawn(SessionLink::Up(Box::new(session)), parameters, None)
+    }
+
+    fn reconnect(parameters: Arc<SessionParameters>, error: PublishError) -> Self {
+        Self::spawn(SessionLink::Reconnecting, parameters, Some(error))
+    }
+
+    fn spawn(
+        link: SessionLink,
+        parameters: Arc<SessionParameters>,
+        loss: Option<PublishError>,
+    ) -> Self {
+        let link = Arc::new(Mutex::new(link));
+        let task = tokio::spawn(run_session(link.clone(), parameters.clone(), loss));
+        Self {
+            link,
+            parameters,
+            task,
+        }
     }
 }
 
 impl Drop for LiveSession {
     fn drop(&mut self) {
-        self.timers.abort();
+        self.task.abort();
     }
 }
 
@@ -838,14 +896,6 @@ struct Pad {
     codec: Option<StreamCodec>,
     config: Option<StreamConfig>,
     ended: bool,
-    // a new session's video starts at a keyframe
-    awaiting_keyframe: bool,
-}
-
-#[derive(Debug)]
-struct Outage {
-    retry: ReconnectState,
-    next_attempt_ns: u64,
 }
 
 #[derive(Debug)]
@@ -853,7 +903,6 @@ enum PublishState {
     // frames wait here until every pad has described its stream
     Holding(Vec<HeldFrame>),
     Live(LiveSession),
-    Down(Outage),
 }
 
 #[derive(Debug)]
@@ -863,8 +912,8 @@ struct HeldFrame {
     data: Vec<u8>,
 }
 
-#[derive(Debug)]
-pub struct RtspClientSink {
+#[derive(Debug, Clone)]
+struct PublishSettings {
     location: String,
     transports: Vec<LowerTransport>,
     user_id: Option<String>,
@@ -874,20 +923,37 @@ pub struct RtspClientSink {
     keep_alive: bool,
     report_interval_ms: u64,
     reconnect: ReconnectPolicy,
-    pads: Vec<Pad>,
-    state: PublishState,
     log_name: LogName,
 }
 
-impl LogSource for RtspClientSink {
+impl LogSource for PublishSettings {
     fn log_category(&self) -> &'static str {
-        short_type_name::<Self>()
+        short_type_name::<RtspClientSink>()
     }
     fn log_instance(&self) -> Option<&str> {
         self.log_name.instance()
     }
     fn log_category_override(&self) -> Option<&str> {
         self.log_name.category()
+    }
+}
+
+#[derive(Debug)]
+pub struct RtspClientSink {
+    settings: PublishSettings,
+    pads: Vec<Pad>,
+    state: PublishState,
+}
+
+impl LogSource for RtspClientSink {
+    fn log_category(&self) -> &'static str {
+        self.settings.log_category()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.settings.log_instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.settings.log_category_override()
     }
 }
 
@@ -951,43 +1017,7 @@ static RTSP_CLIENT_SINK_PROPS: &[PropertySpec] = &[
     .with_default("5000"),
 ];
 
-impl RtspClientSink {
-    pub fn new(inputs: usize, location: impl Into<String>) -> Self {
-        Self {
-            location: location.into(),
-            transports: Vec::from([LowerTransport::Tcp]),
-            user_id: None,
-            user_pw: String::new(),
-            user_agent: DEFAULT_USER_AGENT.to_string(),
-            tcp_timeout_us: DEFAULT_TCP_TIMEOUT_US,
-            keep_alive: true,
-            report_interval_ms: DEFAULT_REPORT_INTERVAL_MS,
-            reconnect: ReconnectPolicy {
-                max_attempts: 0,
-                initial_backoff_ms: DEFAULT_INITIAL_BACKOFF_MS,
-                max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
-            },
-            pads: (0..inputs).map(|_| Pad::default()).collect(),
-            state: PublishState::Holding(Vec::new()),
-            log_name: LogName::new(),
-        }
-    }
-
-    pub fn with_protocols(mut self, transports: Vec<LowerTransport>) -> Self {
-        self.transports = transports;
-        self
-    }
-
-    pub fn with_credentials(
-        mut self,
-        user_id: impl Into<String>,
-        user_pw: impl Into<String>,
-    ) -> Self {
-        self.user_id = Some(user_id.into());
-        self.user_pw = user_pw.into();
-        self
-    }
-
+impl PublishSettings {
     fn tcp_timeout(&self) -> Option<Duration> {
         (self.tcp_timeout_us > 0).then(|| Duration::from_micros(self.tcp_timeout_us))
     }
@@ -999,6 +1029,10 @@ impl RtspClientSink {
             PublishError::TimedOut => G2gError::Timeout,
             _ => G2gError::Hardware(HardwareError::Other),
         }
+    }
+
+    fn retries(&self, error: &PublishError) -> bool {
+        error.is_transient() && self.reconnect.max_attempts > 0
     }
 
     // a refused SETUP moves on to the next transport `protocols` lists
@@ -1026,26 +1060,33 @@ impl RtspClientSink {
         }
         Err(PublishError::NoTransports)
     }
+}
 
-    async fn start_session(
-        &self,
-        configs: &[StreamConfig],
-        first_pts_ns: u64,
-    ) -> Result<PublishSession, PublishError> {
-        let target = publish_target(&self.location)?;
-        let timeout = self.tcp_timeout();
+// what every session of one publish is opened from
+#[derive(Debug)]
+struct SessionParameters {
+    settings: PublishSettings,
+    configs: Vec<StreamConfig>,
+    pts_zero_unix_ns: i64,
+}
+
+impl SessionParameters {
+    async fn open(&self) -> Result<PublishSession, PublishError> {
+        let settings = &self.settings;
+        let target = publish_target(&settings.location)?;
+        let timeout = settings.tcp_timeout();
         let stream = within(
             timeout,
             TcpStream::connect((target.host.as_str(), target.port)),
         )
         .await?;
-        let credentials = self.user_id.clone().map(|user| Credentials {
+        let credentials = settings.user_id.clone().map(|user| Credentials {
             user,
-            password: self.user_pw.clone(),
+            password: settings.user_pw.clone(),
         });
         let mut control = ControlConnection {
             stream,
-            requests: RtspPublishRequests::new(self.user_agent.clone(), credentials),
+            requests: RtspPublishRequests::new(settings.user_agent.clone(), credentials),
             inbound: Vec::new(),
             timeout,
         };
@@ -1054,10 +1095,11 @@ impl RtspClientSink {
         let options = control.exchange("OPTIONS", &url, &[], b"").await?;
         require_ok("OPTIONS", &options)?;
 
-        let payload_types = (0..configs.len())
+        let payload_types = (0..self.configs.len())
             .map(payload_type)
             .collect::<Result<Vec<u8>, _>>()?;
-        let sections: Vec<String> = configs
+        let sections: Vec<String> = self
+            .configs
             .iter()
             .zip(&payload_types)
             .enumerate()
@@ -1075,15 +1117,15 @@ impl RtspClientSink {
         require_ok("ANNOUNCE", &announce)?;
 
         let mut chosen: Option<LowerTransport> = None;
-        let mut streams = Vec::with_capacity(configs.len());
-        for (i, (config, pt)) in configs.iter().zip(&payload_types).enumerate() {
+        let mut streams = Vec::with_capacity(self.configs.len());
+        for (i, (config, pt)) in self.configs.iter().zip(&payload_types).enumerate() {
             let control_url = format!("{url}/{}", stream_control(i));
             // the first stream settles the transport the rest of the session uses
             let candidates = match chosen {
                 Some(transport) => Vec::from([transport]),
-                None => self.transports.clone(),
+                None => settings.transports.clone(),
             };
-            let (destination, transport) = self
+            let (destination, transport) = settings
                 .setup_with_fallback(&mut control, &control_url, i, &candidates)
                 .await?;
             chosen = Some(transport);
@@ -1096,6 +1138,7 @@ impl RtspClientSink {
                 counters: SenderCounters::default(),
                 next_report_ns: 0,
                 last_sent: None,
+                awaiting_keyframe: false,
             });
         }
 
@@ -1108,7 +1151,7 @@ impl RtspClientSink {
         } else {
             "OPTIONS"
         };
-        let keepalive = self.keep_alive.then(|| Keepalive {
+        let keepalive = settings.keep_alive.then(|| Keepalive {
             method: keepalive_method,
             interval_ns: keepalive_interval_s(control.requests.session_timeout_s())
                 .max(MIN_KEEPALIVE_INTERVAL_S)
@@ -1121,10 +1164,86 @@ impl RtspClientSink {
             keepalive,
             streams,
             cname: format!("g2g-{:08x}", random_u32()),
-            pts_zero_unix_ns: unix_time_ns().saturating_sub_unsigned(first_pts_ns),
-            report_interval_ns: self.report_interval_ms * NS_PER_MS,
-            timer_failure: None,
+            pts_zero_unix_ns: self.pts_zero_unix_ns,
+            report_interval_ns: settings.report_interval_ms * NS_PER_MS,
         })
+    }
+
+    // the budget of `reconnect` attempts starts again with each loss
+    async fn republish(&self, mut error: PublishError) -> Result<PublishSession, G2gError> {
+        let settings = &self.settings;
+        let mut retry = ReconnectState::new(&settings.reconnect);
+        loop {
+            let delay_ms = retry
+                .next_delay_ms(&settings.reconnect)
+                .filter(|_| error.is_transient());
+            let Some(delay_ms) = delay_ms else {
+                return Err(settings.publish_failed(error));
+            };
+            g2g_warn!(
+                settings,
+                "publishing to {} failed: {error}, reconnect {}/{} in {delay_ms} ms",
+                settings.location,
+                retry.attempt,
+                settings.reconnect.max_attempts
+            );
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            match self.open().await {
+                Ok(mut session) => {
+                    g2g_info!(
+                        settings,
+                        "republishing to {} after {} attempts",
+                        settings.location,
+                        retry.attempt
+                    );
+                    for stream in &mut session.streams {
+                        stream.awaiting_keyframe = true;
+                    }
+                    return Ok(session);
+                }
+                Err(e) => error = e,
+            }
+        }
+    }
+}
+
+impl RtspClientSink {
+    pub fn new(inputs: usize, location: impl Into<String>) -> Self {
+        Self {
+            settings: PublishSettings {
+                location: location.into(),
+                transports: Vec::from([LowerTransport::Tcp]),
+                user_id: None,
+                user_pw: String::new(),
+                user_agent: DEFAULT_USER_AGENT.to_string(),
+                tcp_timeout_us: DEFAULT_TCP_TIMEOUT_US,
+                keep_alive: true,
+                report_interval_ms: DEFAULT_REPORT_INTERVAL_MS,
+                reconnect: ReconnectPolicy {
+                    max_attempts: 0,
+                    initial_backoff_ms: DEFAULT_INITIAL_BACKOFF_MS,
+                    max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
+                },
+                log_name: LogName::new(),
+            },
+            pads: (0..inputs).map(|_| Pad::default()).collect(),
+            state: PublishState::Holding(Vec::new()),
+        }
+    }
+
+    pub fn with_protocols(mut self, transports: Vec<LowerTransport>) -> Self {
+        self.settings.transports = transports;
+        self
+    }
+
+    pub fn with_credentials(
+        mut self,
+        user_id: impl Into<String>,
+        user_pw: impl Into<String>,
+    ) -> Self {
+        self.settings.user_id = Some(user_id.into());
+        self.settings.user_pw = user_pw.into();
+        self
     }
 
     async fn on_frame(&mut self, input: usize, frame: &[u8], pts_ns: u64) -> Result<(), G2gError> {
@@ -1166,12 +1285,14 @@ impl RtspClientSink {
         }
         let mut held = core::mem::take(held);
         held.sort_by_key(|frame| frame.pts_ns);
-        match self
-            .start_session(&self.stream_configs(), held[0].pts_ns)
-            .await
-        {
-            Ok(session) => self.state = PublishState::Live(LiveSession::start(session)),
-            Err(e) => return self.lose_session(e),
+        let parameters = Arc::new(SessionParameters {
+            settings: self.settings.clone(),
+            configs: self.stream_configs(),
+            pts_zero_unix_ns: unix_time_ns().saturating_sub_unsigned(held[0].pts_ns),
+        });
+        match parameters.open().await {
+            Ok(session) => self.state = PublishState::Live(LiveSession::start(session, parameters)),
+            Err(e) => return self.lose_session(parameters, e),
         }
         for frame in held {
             self.publish(frame.input, &frame.data, frame.pts_ns).await?;
@@ -1187,75 +1308,49 @@ impl RtspClientSink {
     }
 
     async fn publish(&mut self, input: usize, frame: &[u8], pts_ns: u64) -> Result<(), G2gError> {
-        let pad = &self.pads[input];
-        let video_codec = pad.config.as_ref().and_then(StreamConfig::video_codec);
+        let video_codec = self.pads[input]
+            .config
+            .as_ref()
+            .and_then(StreamConfig::video_codec);
         let opens_stream = video_codec.is_none_or(|codec| au_is_keyframe(codec, frame));
-        if pad.awaiting_keyframe && !opens_stream {
-            return Ok(());
-        }
-        if let PublishState::Down(outage) = &self.state {
-            if monotonic_ns() < outage.next_attempt_ns {
-                return Ok(());
-            }
-            let retry = outage.retry.clone();
-            match self.start_session(&self.stream_configs(), pts_ns).await {
-                Ok(session) => {
-                    g2g_info!(
-                        self,
-                        "republishing to {} after {} attempts",
-                        self.location,
-                        retry.attempt
-                    );
-                    self.state = PublishState::Live(LiveSession::start(session));
-                }
-                Err(e) => return self.schedule_reconnect(retry, e),
-            }
-        }
         let PublishState::Live(live) = &mut self.state else {
             return Ok(());
         };
-        let sent = live.session.lock().await.send(input, frame, pts_ns).await;
-        match sent {
-            Ok(()) => {
-                self.pads[input].awaiting_keyframe = false;
-                Ok(())
+        let mut link = live.link.lock().await;
+        let session = match &mut *link {
+            SessionLink::Up(session) => session,
+            SessionLink::Reconnecting => return Ok(()),
+            SessionLink::Failed(error) => {
+                let error = error.clone();
+                drop(link);
+                self.state = PublishState::Holding(Vec::new());
+                return Err(error);
             }
-            Err(e) => self.lose_session(e),
+        };
+        if session.streams[input].awaiting_keyframe && !opens_stream {
+            return Ok(());
         }
+        let Err(error) = session.send(input, frame, pts_ns).await else {
+            return Ok(());
+        };
+        // aborted under the lock, before the old task can run on the dead session
+        live.task.abort();
+        drop(link);
+        let parameters = live.parameters.clone();
+        self.lose_session(parameters, error)
     }
 
     // errors only when the policy has no attempt left for this loss
-    fn lose_session(&mut self, error: PublishError) -> Result<(), G2gError> {
-        let retry = ReconnectState::new(&self.reconnect);
-        self.schedule_reconnect(retry, error)
-    }
-
-    fn schedule_reconnect(
+    fn lose_session(
         &mut self,
-        mut retry: ReconnectState,
+        parameters: Arc<SessionParameters>,
         error: PublishError,
     ) -> Result<(), G2gError> {
-        let delay_ms = retry
-            .next_delay_ms(&self.reconnect)
-            .filter(|_| error.is_transient());
-        let Some(delay_ms) = delay_ms else {
+        if !parameters.settings.retries(&error) {
             self.state = PublishState::Holding(Vec::new());
-            return Err(self.publish_failed(error));
-        };
-        g2g_warn!(
-            self,
-            "publishing to {} failed: {error}, reconnect {}/{} in {delay_ms} ms",
-            self.location,
-            retry.attempt,
-            self.reconnect.max_attempts
-        );
-        self.state = PublishState::Down(Outage {
-            retry,
-            next_attempt_ns: monotonic_ns().saturating_add(delay_ms.saturating_mul(NS_PER_MS)),
-        });
-        for pad in &mut self.pads {
-            pad.awaiting_keyframe = true;
+            return Err(parameters.settings.publish_failed(error));
         }
+        self.state = PublishState::Live(LiveSession::reconnect(parameters, error));
         Ok(())
     }
 
@@ -1275,10 +1370,17 @@ impl RtspClientSink {
         let PublishState::Live(live) = &mut self.state else {
             return Ok(());
         };
-        live.timers.abort();
-        let result = live.session.lock().await.teardown().await;
+        live.task.abort();
+        let result = match &mut *live.link.lock().await {
+            SessionLink::Up(session) => session
+                .teardown()
+                .await
+                .map_err(|e| live.parameters.settings.publish_failed(e)),
+            SessionLink::Reconnecting => Ok(()),
+            SessionLink::Failed(error) => Err(error.clone()),
+        };
         self.state = PublishState::Holding(Vec::new());
-        result.map_err(|e| self.publish_failed(e))
+        result
     }
 }
 
@@ -1299,11 +1401,11 @@ impl MultiInputElement for RtspClientSink {
         Self: 'a;
 
     fn set_instance_name(&mut self, name: String) {
-        self.log_name.set_instance(name);
+        self.settings.log_name.set_instance(name);
     }
 
     fn set_log_category(&mut self, category: String) {
-        self.log_name.set_category(category);
+        self.settings.log_name.set_category(category);
     }
 
     fn input_domains(&self) -> g2g_core::memory::DomainSet {
@@ -1385,30 +1487,35 @@ impl MultiInputElement for RtspClientSink {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         let text = || value.as_str().map(str::to_string).ok_or(PropError::Type);
         match name {
-            "location" => self.location = text()?,
-            "protocols" => self.transports = transports_from_flags(&value)?,
-            "user-id" => self.user_id = Some(text()?).filter(|id| !id.is_empty()),
-            "user-pw" => self.user_pw = text()?,
-            "user-agent" => self.user_agent = text()?,
-            "tcp-timeout" => self.tcp_timeout_us = value.as_uint().ok_or(PropError::Type)?,
-            "do-rtsp-keep-alive" => self.keep_alive = value.as_bool().ok_or(PropError::Type)?,
+            "location" => self.settings.location = text()?,
+            "protocols" => self.settings.transports = transports_from_flags(&value)?,
+            "user-id" => self.settings.user_id = Some(text()?).filter(|id| !id.is_empty()),
+            "user-pw" => self.settings.user_pw = text()?,
+            "user-agent" => self.settings.user_agent = text()?,
+            "tcp-timeout" => {
+                self.settings.tcp_timeout_us = value.as_uint().ok_or(PropError::Type)?
+            }
+            "do-rtsp-keep-alive" => {
+                self.settings.keep_alive = value.as_bool().ok_or(PropError::Type)?
+            }
             "rtcp-sr-interval" => {
                 let ms = value.as_uint().ok_or(PropError::Type)?;
                 if !(1..=MAX_REPORT_INTERVAL_MS).contains(&ms) {
                     return Err(PropError::Value);
                 }
-                self.report_interval_ms = ms;
+                self.settings.report_interval_ms = ms;
             }
             "reconnect" => {
                 let attempts = value.as_uint().ok_or(PropError::Type)?;
-                self.reconnect.max_attempts =
+                self.settings.reconnect.max_attempts =
                     u32::try_from(attempts).map_err(|_| PropError::Value)?;
             }
             "reconnect-backoff" => {
-                self.reconnect.initial_backoff_ms = value.as_uint().ok_or(PropError::Type)?
+                self.settings.reconnect.initial_backoff_ms =
+                    value.as_uint().ok_or(PropError::Type)?
             }
             "reconnect-backoff-max" => {
-                self.reconnect.max_backoff_ms = value.as_uint().ok_or(PropError::Type)?
+                self.settings.reconnect.max_backoff_ms = value.as_uint().ok_or(PropError::Type)?
             }
             _ => return Err(PropError::Unknown),
         }
@@ -1418,17 +1525,23 @@ impl MultiInputElement for RtspClientSink {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         let text = |s: &str| Some(PropValue::Str(s.to_string()));
         match name {
-            "location" => text(&self.location),
-            "protocols" => Some(transports_to_flags(&self.transports)),
-            "user-id" => text(self.user_id.as_deref().unwrap_or("")),
-            "user-pw" => text(&self.user_pw),
-            "user-agent" => text(&self.user_agent),
-            "tcp-timeout" => Some(PropValue::Uint(self.tcp_timeout_us)),
-            "do-rtsp-keep-alive" => Some(PropValue::Bool(self.keep_alive)),
-            "rtcp-sr-interval" => Some(PropValue::Uint(self.report_interval_ms)),
-            "reconnect" => Some(PropValue::Uint(u64::from(self.reconnect.max_attempts))),
-            "reconnect-backoff" => Some(PropValue::Uint(self.reconnect.initial_backoff_ms)),
-            "reconnect-backoff-max" => Some(PropValue::Uint(self.reconnect.max_backoff_ms)),
+            "location" => text(&self.settings.location),
+            "protocols" => Some(transports_to_flags(&self.settings.transports)),
+            "user-id" => text(self.settings.user_id.as_deref().unwrap_or("")),
+            "user-pw" => text(&self.settings.user_pw),
+            "user-agent" => text(&self.settings.user_agent),
+            "tcp-timeout" => Some(PropValue::Uint(self.settings.tcp_timeout_us)),
+            "do-rtsp-keep-alive" => Some(PropValue::Bool(self.settings.keep_alive)),
+            "rtcp-sr-interval" => Some(PropValue::Uint(self.settings.report_interval_ms)),
+            "reconnect" => Some(PropValue::Uint(u64::from(
+                self.settings.reconnect.max_attempts,
+            ))),
+            "reconnect-backoff" => {
+                Some(PropValue::Uint(self.settings.reconnect.initial_backoff_ms))
+            }
+            "reconnect-backoff-max" => {
+                Some(PropValue::Uint(self.settings.reconnect.max_backoff_ms))
+            }
             _ => None,
         }
     }

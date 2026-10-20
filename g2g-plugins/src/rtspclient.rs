@@ -429,6 +429,7 @@ impl ReconnectState {
     }
 
     // a session that carried media again ends the loss, so the next loss gets every attempt
+    #[cfg(feature = "rtsp")]
     pub(crate) fn recovered(&mut self, policy: &ReconnectPolicy) {
         *self = Self::new(policy);
     }
@@ -535,7 +536,7 @@ mod tests {
         assert_eq!(requests.session_timeout_s(), 30);
     }
 
-    #[cfg(any(feature = "rtsp", feature = "rtsp-client-sink"))]
+    #[cfg(feature = "rtsp")]
     #[test]
     fn each_recovered_loss_gets_the_whole_reconnect_budget() {
         let policy = ReconnectPolicy {

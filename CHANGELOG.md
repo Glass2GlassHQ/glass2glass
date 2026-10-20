@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1708: `rtspclientsink` reconnects from its session task, so a session dropped during a stall is back before the next frame.
 - M1699: `rtspsrc` and `rtspsrcn` restart the `reconnect` budget after each session that carried media.
 - M1698: `rtspclientsink` sends keepalives and sender reports from a session timer, so a stalled upstream keeps the session.
 - M1697: `rtspclientsink reconnect=N` republishes from the next keyframe after the server drops the session.
