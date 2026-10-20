@@ -833,6 +833,12 @@ as before.
   single-stream expansion, its last node named `d`. The decode target of every
   fan-out port, here and behind `decodebin name=d`, follows the port's caps rather
   than the pad request, so a bare `d.` on an audio port decodes to raw audio.
+  `decodebin name=d` hooks (`Registry::register_decodebin_select`) build a port
+  per stream the file carries, and the references pick theirs the same way. A
+  port no reference reads, here, behind `decodebin name=d` and on a fan-out
+  source such as `rtspsrc name=s`, ends in a `fakesink` undecoded, where gst
+  leaves the pad unlinked. A session source still sets that track up, as gst's
+  `rtspsrc` does.
 
 - **playbin (multi-stream front door)** (`std`). Beyond the
   single-stream expansion, g2g's `playbin` can split a container into *all* its

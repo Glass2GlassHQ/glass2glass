@@ -79,7 +79,8 @@ understands: a local file, `rtsp://` (video and audio off one session), and HLS
 it). `uridecodebin uri=rtsp://cam/stream name=d  d. ! videoconvert ! autovideosink
 d. ! audioconvert ! autoaudiosink` runs unchanged. Bare `d.` refs take the ports
 in order, video first, where gst links them by caps. When the audio branch comes
-first, name the pads the way `uridecodebin3` does (`d.video_0`, `d.audio_0`).
+first, name the pads the way `uridecodebin3` does (`d.video_0`, `d.audio_0`). A
+stream no `d.` reads is dropped and the rest play, as gst leaves its pad unlinked.
 
 **`rtspsrc name=s` has a pad per stream**, as in gst: `rtspsrc name=s
 location=rtsp://cam/stream  s. ! h264parse ! avdec_h264 ! ...  s. ! aacparse !

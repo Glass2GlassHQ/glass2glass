@@ -2763,45 +2763,62 @@ fn build_graph(
     // multi-output demuxer (stored like a demux-select node so it fans out on its
     // own pads), and records each port's elementary caps so the wiring below splices
     // a decoder onto every port (the decode-per-port that makes it `decodebin`, not a
-    // bare demuxer). Declining hooks leave it unbuilt (a loud error at node build).
+    // bare demuxer).
     let mut decode_fanout_caps: Vec<Option<Vec<Caps>>> = (0..specs.len()).map(|_| None).collect();
-    if !registry.decodebin_select_hooks().is_empty() {
-        for ei in 0..specs.len() {
-            if !is_decodebin(&specs[ei].name) || out_deg[ei] == 0 || prebuilt[ei].is_some() {
-                continue;
-            }
-            let Some(location) = links
-                .iter()
-                .find(|(_, d, _, _)| *d == ei)
-                .and_then(|(s, _, _, _)| prop(&specs[*s], "location"))
-            else {
-                continue;
-            };
-            for hook in registry.decodebin_select_hooks() {
-                if let Some((demux, caps)) = hook(location, &demux_pads[ei]) {
-                    demux_select_node[ei] = Some(demux);
-                    decode_fanout_caps[ei] = Some(caps);
-                    break;
-                }
-            }
+    // Which port each link out of a fan-out node reads, filled for every node
+    // whose ports are matched to its branches.
+    let mut fanout_links: Vec<Option<FanoutLinks>> = (0..specs.len()).map(|_| None).collect();
+    for ei in 0..specs.len() {
+        if !is_decodebin(&specs[ei].name) || out_deg[ei] == 0 || prebuilt[ei].is_some() {
+            continue;
         }
+        let Some(location) = links
+            .iter()
+            .find(|(_, d, _, _)| *d == ei)
+            .and_then(|(s, _, _, _)| prop(&specs[*s], "location"))
+        else {
+            continue;
+        };
+        let Some((demux, caps)) = registry
+            .decodebin_select_hooks()
+            .iter()
+            .find_map(|hook| hook(location))
+        else {
+            continue;
+        };
+        let kinds: Vec<StreamType> = caps.iter().map(StreamType::of).collect();
+        fanout_links[ei] = Some(FanoutLinks {
+            port_of_link: fanout_link_ports(
+                &specs[ei].name,
+                &kinds,
+                &demux_pads[ei],
+                &output_pad_names[ei],
+            )?,
+            ports: kinds.len(),
+        });
+        demux_select_node[ei] = Some(demux);
+        decode_fanout_caps[ei] = Some(caps);
     }
     // `uridecodebin name=d` fan-out: the hook probed every port, so each `d.`
     // reference picks its port here and the wiring below decodes it.
-    let mut uri_fanout_port_of_ref: Vec<Option<Vec<u8>>> = alloc::vec![None; specs.len()];
     for ei in 0..specs.len() {
         let Some((PrebuiltNode::UriFanout(fanout), _)) = &prebuilt[ei] else {
             continue;
         };
-        uri_fanout_port_of_ref[ei] = Some(uri_fanout_ports(
-            &fanout.ports,
-            &demux_pads[ei],
-            &output_pad_names[ei],
-        )?);
+        let kinds: Vec<StreamType> = fanout.ports.iter().map(|p| p.stream_type).collect();
+        fanout_links[ei] = Some(FanoutLinks {
+            port_of_link: fanout_link_ports(
+                &specs[ei].name,
+                &kinds,
+                &demux_pads[ei],
+                &output_pad_names[ei],
+            )?,
+            ports: kinds.len(),
+        });
         decode_fanout_caps[ei] = Some(fanout.ports.iter().map(|p| p.caps.clone()).collect());
     }
     let is_select: Vec<bool> = (0..specs.len())
-        .map(|ei| demux_select_node[ei].is_some() || uri_fanout_port_of_ref[ei].is_some())
+        .map(|ei| demux_select_node[ei].is_some() || fanout_links[ei].is_some())
         .collect();
     // a name registered both ways (`rtspsrc`) is the fan-out form only when several pads are linked
     let is_fanout_src = |ei: usize| {
@@ -2866,20 +2883,33 @@ fn build_graph(
         let node = if is_tee(ei) {
             graph.add_tee(out_deg[ei] as u8).node()
         } else if is_fanout_src(ei) {
-            // Terminal fan-out source (M727): 0 inputs, one output per named
-            // pad reference (`s. ! ...`). The element's intrinsic port count
-            // must match the linked outputs. Properties are applied first: one
-            // of them may pick the pad set (`rtspsrcn onvif-metadata=true`
-            // swaps the audio pad for the metadata one).
+            // Terminal fan-out source (M727): 0 inputs, one output per pad the
+            // element has, each pad reference (`s. ! ...`) matched to one of
+            // them. Properties are applied first: one of them may pick the pad
+            // set (`rtspsrcn onvif-metadata=true` swaps the audio pad for the
+            // metadata one).
             let mut src = registry
                 .make_fanout_src(&spec.name, out_deg[ei])
                 .ok_or_else(|| ParseError::UnknownElement(spec.name.clone()))?;
             apply_props(&mut src, &spec.name, &spec.props)?;
-            if src.output_count() != out_deg[ei] {
-                return Err(ParseError::UnknownInputPad(spec.name.clone()));
-            }
+            // a pad whose caps are not known before the run takes any branch
+            let kinds: Vec<StreamType> = (0..src.output_count())
+                .map(|port| {
+                    src.output_caps(port)
+                        .map_or(StreamType::Unknown, |caps| StreamType::of(&caps))
+                })
+                .collect();
+            fanout_links[ei] = Some(FanoutLinks {
+                port_of_link: fanout_link_ports(
+                    &spec.name,
+                    &kinds,
+                    &demux_pads[ei],
+                    &output_pad_names[ei],
+                )?,
+                ports: kinds.len(),
+            });
             graph
-                .add_fanout_src(GraphNodeRef::FanoutSource(src), out_deg[ei] as u8)
+                .add_fanout_src(GraphNodeRef::FanoutSource(src), kinds.len() as u8)
                 .node()
         } else if in_deg[ei] == 0 {
             let src = build_source(registry, &spec.name, &spec.props)?;
@@ -2946,8 +2976,11 @@ fn build_graph(
             let demux = demux_select_node[ei]
                 .take()
                 .expect("select demux built above");
+            let ports = fanout_links[ei]
+                .as_ref()
+                .map_or(out_deg[ei], |fanout| fanout.ports);
             graph
-                .add_demux(GraphNodeRef::Demux(demux), out_deg[ei] as u8)
+                .add_demux(GraphNodeRef::Demux(demux), ports as u8)
                 .node()
         } else if is_demux(ei) {
             let mut demux = registry
@@ -3017,9 +3050,9 @@ fn build_graph(
         } else if is_tee(s) || is_demux(s) || is_select[s] || is_fanout_src(s) {
             let ordinal = tee_next[s];
             tee_next[s] += 1;
-            let index = uri_fanout_port_of_ref[s]
+            let index = fanout_links[s]
                 .as_ref()
-                .map_or(ordinal, |ports| ports[ordinal as usize]);
+                .map_or(ordinal, |fanout| fanout.port_of_link[ordinal as usize]);
             PadId {
                 node: node_s,
                 index,
@@ -3065,6 +3098,20 @@ fn build_graph(
             }
         }
         graph.link_full(src, dst, policy, capacity)?;
+    }
+    // gst leaves a stream no branch links unlinked and plays the rest, so it ends here
+    for (ei, fanout) in fanout_links.iter().enumerate() {
+        let (Some(fanout), Some(node)) = (fanout, node_of[ei]) else {
+            continue;
+        };
+        for index in 0..fanout.ports as u8 {
+            if fanout.port_of_link.contains(&index) {
+                continue;
+            }
+            let sink = build_element(registry, UNLINKED_STREAM_SINK, &[])?;
+            let sink = graph.add_sink(GraphNodeRef::Element(sink));
+            graph.link(PadId { node, index }, sink)?;
+        }
     }
 
     Ok(graph)
@@ -3392,13 +3439,21 @@ fn name_node(
     Ok(())
 }
 
+const UNLINKED_STREAM_SINK: &str = "fakesink";
+
+struct FanoutLinks {
+    port_of_link: Vec<u8>,
+    ports: usize,
+}
+
 // `d.video_1` reads the second video port, `d.src_1` and the second bare `d.` the second port
-fn uri_fanout_ports(
-    ports: &[UriFanoutPort],
+fn fanout_link_ports(
+    element: &str,
+    kinds: &[StreamType],
     requests: &[PadRequest],
     pad_names: &[&str],
 ) -> Result<Vec<u8>, ParseError> {
-    let mut taken = alloc::vec![false; ports.len()];
+    let mut taken = alloc::vec![false; kinds.len()];
     let mut chosen = Vec::with_capacity(requests.len());
     for (request, pad) in requests.iter().zip(pad_names) {
         let kind = match request.kind {
@@ -3407,15 +3462,15 @@ fn uri_fanout_ports(
             PadKind::Text => Some(StreamType::Text),
             PadKind::Any => None,
         };
-        let port = ports
+        let port = kinds
             .iter()
             .enumerate()
-            .filter(|(_, port)| kind.is_none_or(|kind| port.stream_type == kind))
+            .filter(|(_, port_kind)| kind.is_none_or(|kind| **port_kind == kind))
             .nth(request.index)
             .map(|(index, _)| index)
             .filter(|&index| !core::mem::replace(&mut taken[index], true))
             .ok_or_else(|| ParseError::UnknownOutputPad {
-                element: "uridecodebin".to_string(),
+                element: element.to_string(),
                 pad: pad.to_string(),
             })?;
         chosen.push(port as u8);

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1681: a fan-out stream no `d.` or `s.` branch reads is dropped and the linked branches play, as gst leaves its pad unlinked.
 - M1680: the `rtsp://` probe of `uridecodebin` and `playbin` runs when the line is parsed inside a tokio runtime.
 - M1652: `rtspsrc name=s` with several linked pads plays a pad per stream off one session, as gst's `rtspsrc` does.
 - M1651: an `http://` or `https://` URL ending in `.m3u8` is an HLS URI for `uridecodebin` and `playbin`.

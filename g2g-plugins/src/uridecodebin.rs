@@ -884,7 +884,7 @@ fn build_ps_subpicture_overlay(
 #[cfg(feature = "std")]
 fn ps_select(
     location: &str,
-    pads: &[PadRequest],
+    select: impl FnOnce(&[PadKind]) -> Option<Vec<usize>>,
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     let prefix = read_prefix(location)?;
     let demux = probe_ps(&prefix);
@@ -913,7 +913,7 @@ fn ps_select(
             format: g2g_core::SubPictureFormat::VobSub,
         });
     }
-    let sel = resolve_pads(&kinds, pads)?;
+    let sel = select(&kinds)?;
     let ports: Vec<_> = sel.iter().map(|&i| streams[i]).collect();
     let caps: Vec<Caps> = sel.iter().map(|&i| caps[i].clone()).collect();
     Some((Box::new(crate::psdemux::PsDemuxN::new(ports)), caps))
@@ -927,18 +927,15 @@ pub fn ps_demux_select(
     pads: &[PadRequest],
 ) -> Option<Box<dyn DynMultiOutputElement>> {
     (name == "mpegpsdemux")
-        .then(|| ps_select(location, pads).map(|(d, _)| d))
+        .then(|| ps_select(location, |kinds| resolve_pads(kinds, pads)).map(|(d, _)| d))
         .flatten()
 }
 
 /// `decodebin` fan-out over a program stream file (M929): the demuxer + per-port
 /// caps.
 #[cfg(feature = "std")]
-pub fn ps_decodebin_select(
-    location: &str,
-    pads: &[PadRequest],
-) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
-    ps_select(location, pads)
+pub fn ps_decodebin_select(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    ps_select(location, every_stream)
 }
 
 /// Bare-`decodebin` primary-stream hook for MPEG program streams (M929): the
@@ -1698,6 +1695,11 @@ fn resolve_pads(kinds: &[PadKind], pads: &[PadRequest]) -> Option<Vec<usize>> {
         .collect()
 }
 
+#[cfg(feature = "std")]
+fn every_stream(kinds: &[PadKind]) -> Option<Vec<usize>> {
+    Some((0..kinds.len()).collect())
+}
+
 /// Probe a Matroska file and build a [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN) with
 /// one port per pad request, returning the demuxer plus each selected port's
 /// elementary caps (M482). Shared by `matroskademux` demux-select (M476, drops the
@@ -1706,7 +1708,7 @@ fn resolve_pads(kinds: &[PadKind], pads: &[PadRequest]) -> Option<Vec<usize>> {
 #[cfg(feature = "std")]
 fn mkv_select(
     location: &str,
-    pads: &[PadRequest],
+    select: impl FnOnce(&[PadKind]) -> Option<Vec<usize>>,
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     let prefix = read_prefix(location)?;
     let mut demux = crate::matroska::MatroskaDemuxer::new();
@@ -1732,7 +1734,7 @@ fn mkv_select(
     if infos.is_empty() {
         return None;
     }
-    let sel = resolve_pads(&kinds, pads)?;
+    let sel = select(&kinds)?;
     let streams: Vec<_> = sel.iter().map(|&i| infos[i].stream).collect();
     let caps: Vec<Caps> = sel.iter().map(|&i| infos[i].caps.clone()).collect();
     Some((Box::new(crate::mkvdemux::MkvDemuxN::new(streams)), caps))
@@ -1747,17 +1749,14 @@ pub fn mkv_demux_select(
     pads: &[PadRequest],
 ) -> Option<Box<dyn DynMultiOutputElement>> {
     (name == "matroskademux")
-        .then(|| mkv_select(location, pads).map(|(d, _)| d))
+        .then(|| mkv_select(location, |kinds| resolve_pads(kinds, pads)).map(|(d, _)| d))
         .flatten()
 }
 
 /// `decodebin` fan-out over a Matroska file (M482): the demuxer + per-port caps.
 #[cfg(feature = "std")]
-pub fn mkv_decodebin_select(
-    location: &str,
-    pads: &[PadRequest],
-) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
-    mkv_select(location, pads)
+pub fn mkv_decodebin_select(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    mkv_select(location, every_stream)
 }
 
 /// The `oggdemux stream=` name of an Ogg mapping g2g reads, or `None` for one
@@ -1870,15 +1869,21 @@ pub fn ogg_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, P
     Ok(ogg_probe(uri).map(|probe| probe.fanout()))
 }
 
+/// `decodebin` fan-out over an Ogg file (M1596): the demuxer + per-port caps.
+#[cfg(feature = "std")]
+pub fn ogg_decodebin_select(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    ogg_select(location, every_stream)
+}
+
 /// Probe an Ogg file and build an [`OggDemuxN`](crate::oggdemux::OggDemuxN) with
-/// one port per pad request (M790), plus the per-port caps the `decodebin`
+/// one port per selected stream (M790), plus the per-port caps the `decodebin`
 /// fan-out plugs a decoder from (M1596). `audio_k` / `video_k` (or a bare `d.`)
 /// picks the k-th logical bitstream of that kind in the grouped file. Declines
 /// a non-Ogg file or an unsatisfiable request.
 #[cfg(feature = "std")]
-pub fn ogg_decodebin_select(
+fn ogg_select(
     location: &str,
-    pads: &[PadRequest],
+    select: impl FnOnce(&[PadKind]) -> Option<Vec<usize>>,
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     let prefix = read_prefix(location)?;
     let mut demux = crate::ogg::OggDemuxer::new();
@@ -1897,7 +1902,7 @@ pub fn ogg_decodebin_select(
             }
         })
         .collect();
-    let sel = resolve_pads(&kinds, pads)?;
+    let sel = select(&kinds)?;
     let ports = sel.iter().map(|&k| streams[k].port).collect();
     // the placeholders the demux negotiates with, as `ogg_primary_stream` plugs from
     let caps: Vec<Caps> = sel
@@ -1916,7 +1921,7 @@ pub fn ogg_demux_select(
     pads: &[PadRequest],
 ) -> Option<Box<dyn DynMultiOutputElement>> {
     (name == "oggdemux")
-        .then(|| ogg_decodebin_select(location, pads).map(|(d, _)| d))
+        .then(|| ogg_select(location, |kinds| resolve_pads(kinds, pads)).map(|(d, _)| d))
         .flatten()
 }
 
@@ -1926,7 +1931,7 @@ pub fn ogg_demux_select(
 #[cfg(feature = "std")]
 fn ts_select(
     location: &str,
-    pads: &[PadRequest],
+    select: impl FnOnce(&[PadKind]) -> Option<Vec<usize>>,
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     let prefix = read_prefix(location)?;
     let infos = crate::tsdemux::forwardable_streams(&ts_tables_from_prefix(&prefix));
@@ -1945,7 +1950,7 @@ fn ts_select(
             }
         })
         .collect();
-    let sel = resolve_pads(&kinds, pads)?;
+    let sel = select(&kinds)?;
     let streams: Vec<_> = sel.iter().map(|&i| infos[i].stream).collect();
     let caps: Vec<Caps> = sel.iter().map(|&i| infos[i].caps.clone()).collect();
     Some((Box::new(crate::tsdemux::TsDemuxN::new(streams)), caps))
@@ -1959,7 +1964,7 @@ pub fn ts_demux_select(
     pads: &[PadRequest],
 ) -> Option<Box<dyn DynMultiOutputElement>> {
     (name == "tsdemux")
-        .then(|| ts_select(location, pads).map(|(d, _)| d))
+        .then(|| ts_select(location, |kinds| resolve_pads(kinds, pads)).map(|(d, _)| d))
         .flatten()
 }
 
@@ -1977,11 +1982,8 @@ pub fn ts_demux_caps_select(
 
 /// `decodebin` fan-out over an MPEG-TS file (M482): the demuxer + per-port caps.
 #[cfg(feature = "std")]
-pub fn ts_decodebin_select(
-    location: &str,
-    pads: &[PadRequest],
-) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
-    ts_select(location, pads)
+pub fn ts_decodebin_select(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    ts_select(location, every_stream)
 }
 
 /// Bare-`decodebin` primary-stream hook for MPEG-TS (M746): a `filesrc
@@ -2350,7 +2352,7 @@ pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
 #[cfg(feature = "std")]
 fn mp4_select(
     location: &str,
-    pads: &[PadRequest],
+    select: impl FnOnce(&[PadKind]) -> Option<Vec<usize>>,
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     let moov = read_mp4_top_level_box(location, b"moov")?;
     // Selection order: A/V tracks first, then subtitle (`tx3g`/`wvtt`/`stpp`)
@@ -2375,7 +2377,7 @@ fn mp4_select(
     if infos.is_empty() {
         return None;
     }
-    let sel = resolve_pads(&kinds, pads)?;
+    let sel = select(&kinds)?;
     let caps: Vec<Caps> = sel.iter().map(|&i| infos[i].caps.clone()).collect();
     let ports: Vec<_> = sel
         .iter()
@@ -2395,17 +2397,14 @@ pub fn mp4_demux_select(
     pads: &[PadRequest],
 ) -> Option<Box<dyn DynMultiOutputElement>> {
     (name == "qtdemux")
-        .then(|| mp4_select(location, pads).map(|(d, _)| d))
+        .then(|| mp4_select(location, |kinds| resolve_pads(kinds, pads)).map(|(d, _)| d))
         .flatten()
 }
 
 /// `decodebin` fan-out over an MP4 file (M482): the demuxer + per-port caps.
 #[cfg(feature = "std")]
-pub fn mp4_decodebin_select(
-    location: &str,
-    pads: &[PadRequest],
-) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
-    mp4_select(location, pads)
+pub fn mp4_decodebin_select(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    mp4_select(location, every_stream)
 }
 
 /// Probe an AVI file and build an [`AviDemuxN`](crate::avidemux::AviDemuxN) with
@@ -2414,7 +2413,7 @@ pub fn mp4_decodebin_select(
 #[cfg(feature = "std")]
 fn avi_select(
     location: &str,
-    pads: &[PadRequest],
+    select: impl FnOnce(&[PadKind]) -> Option<Vec<usize>>,
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     let prefix = read_prefix(location)?;
     let infos = crate::avidemux::forwardable_streams(&prefix);
@@ -2431,7 +2430,7 @@ fn avi_select(
             }
         })
         .collect();
-    let sel = resolve_pads(&kinds, pads)?;
+    let sel = select(&kinds)?;
     let ports: Vec<_> = sel.iter().map(|&i| infos[i].clone()).collect();
     let caps: Vec<Caps> = ports.iter().map(|p| p.caps.clone()).collect();
     Some((Box::new(crate::avidemux::AviDemuxN::new(ports)), caps))
@@ -2445,17 +2444,14 @@ pub fn avi_demux_select(
     pads: &[PadRequest],
 ) -> Option<Box<dyn DynMultiOutputElement>> {
     (name == "avidemux")
-        .then(|| avi_select(location, pads).map(|(d, _)| d))
+        .then(|| avi_select(location, |kinds| resolve_pads(kinds, pads)).map(|(d, _)| d))
         .flatten()
 }
 
 /// `decodebin` fan-out over an AVI file (M1071): the demuxer + per-port caps.
 #[cfg(feature = "std")]
-pub fn avi_decodebin_select(
-    location: &str,
-    pads: &[PadRequest],
-) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
-    avi_select(location, pads)
+pub fn avi_decodebin_select(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    avi_select(location, every_stream)
 }
 
 /// Bare-`decodebin` primary-stream hook for AVI (M1071):
