@@ -135,7 +135,8 @@ pub struct DecodedVideoFrame {
 /// only to outlive the decoder, never read directly.
 enum Inner {
     H264 {
-        decoder: H264DpbDecoder,
+        // boxed: the H.264 decoder is larger than the other variants
+        decoder: Box<H264DpbDecoder>,
         _session: H264DecodeSession,
     },
     H265 {
@@ -229,7 +230,7 @@ impl VulkanStreamDecoder {
                 let decoder = device.create_h264_dpb_decoder(&session, &ps)?;
                 Ok(Self {
                     inner: Inner::H264 {
-                        decoder,
+                        decoder: Box::new(decoder),
                         _session: session,
                     },
                     width,
@@ -317,7 +318,7 @@ impl VulkanStreamDecoder {
                 let decoder = device.create_h264_dpb_decoder_gpu(&session, &ps)?;
                 Ok(Self {
                     inner: Inner::H264 {
-                        decoder,
+                        decoder: Box::new(decoder),
                         _session: session,
                     },
                     width,
