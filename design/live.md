@@ -643,15 +643,20 @@ session's streams, after its first frame and then every `rtcp-sr-interval`
 (5 s), spread over 0.5 to 1.5 times the interval as RFC 3550 does. The report's
 NTP time is the wall-clock time of PTS zero, fixed when the session starts, plus
 the frame's PTS, so a player lines the streams up by PTS. Reports go out on
-channel `2 * pad + 1` or to the server's RTCP port, and are sent only when a
-frame arrives.
+channel `2 * pad + 1` or to the server's RTCP port. A timer task spawned for
+each session sends the reports and keepalives that fall due between frames and
+drains the control connection, so a stalled upstream still keeps the session,
+and an error it meets ends the session on the next frame. The task and the
+element share the session behind a `tokio::sync::Mutex`. It sleeps until the
+next due report or keepalive, but no longer than half the report interval,
+which is the soonest a report made due by a frame sent meanwhile can fall due.
 
 With `do-rtsp-keep-alive` (on by default) the session is kept alive the way gst
 does it: a GET_PARAMETER, or an OPTIONS when the OPTIONS answer does not list
 GET_PARAMETER, goes out ahead of the `Session: id;timeout=N` timeout (60 s when
 the server names none), 5 s early from a 20 s timeout, 20% early from 5 s and
-1 s early below that. Like the reports it is checked when a frame arrives, and
-its answer is dropped with the server's RTCP. mediamtx keeps a RECORD session
+1 s early below that, and never more often than once a second. Its answer is
+dropped with the server's RTCP. mediamtx keeps a RECORD session
 alive on the media alone, so the keepalive matters only for servers that count
 RTSP requests.
 

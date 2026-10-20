@@ -5,12 +5,15 @@ use core::time::Duration;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use std::net::{IpAddr, SocketAddr};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 use g2g_core::log::{io_err, short_type_name, LogName, LogSource};
 use g2g_core::mediaclock::MediaClock;
@@ -63,6 +66,8 @@ const DEFAULT_REPORT_INTERVAL_MS: u64 = 5_000;
 const MAX_REPORT_INTERVAL_MS: u64 = 60_000;
 const NS_PER_MS: u64 = 1_000_000;
 const NS_PER_SECOND: u64 = 1_000_000_000;
+// gst's margin leaves nothing of a one-second timeout, and a zero interval sends keepalives back to back
+const MIN_KEEPALIVE_INTERVAL_S: u64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamCodec {
@@ -541,6 +546,14 @@ struct SessionStream {
     destination: MediaDestination,
     counters: SenderCounters,
     next_report_ns: u64,
+    last_sent: Option<SentFrame>,
+}
+
+// the last frame a stream sent, whose timestamps a sender report pairs
+#[derive(Debug, Clone, Copy)]
+struct SentFrame {
+    rtp_timestamp: u32,
+    pts_ns: u64,
 }
 
 #[derive(Debug)]
@@ -560,15 +573,19 @@ struct PublishSession {
     // the wall-clock time of PTS zero, so every stream's sender reports share one NTP mapping
     pts_zero_unix_ns: i64,
     report_interval_ns: u64,
+    // what stopped the timer task, reported on the next frame
+    timer_failure: Option<PublishError>,
 }
 
 impl PublishSession {
     async fn send(&mut self, input: usize, frame: &[u8], pts_ns: u64) -> Result<(), PublishError> {
+        if let Some(failure) = self.timer_failure.take() {
+            return Err(failure);
+        }
         self.control.discard_inbound()?;
-        self.keep_alive().await?;
         let stream = &mut self.streams[input];
-        let timestamp = rtp_timestamp_at_clock(pts_ns, u64::from(stream.clock_rate));
-        let packets = stream.packetizer.packetize(frame, timestamp)?;
+        let rtp_timestamp = rtp_timestamp_at_clock(pts_ns, u64::from(stream.clock_rate));
+        let packets = stream.packetizer.packetize(frame, rtp_timestamp)?;
         for packet in &packets {
             stream.counters.count(packet);
         }
@@ -576,20 +593,57 @@ impl PublishSession {
             .destination
             .deliver(&mut self.control, PacketKind::Rtp, &packets)
             .await?;
+        stream.last_sent = Some(SentFrame {
+            rtp_timestamp,
+            pts_ns,
+        });
+        self.report_if_due(input).await
+    }
 
+    async fn report_if_due(&mut self, index: usize) -> Result<(), PublishError> {
+        let stream = &mut self.streams[index];
+        let Some(sent) = stream.last_sent else {
+            return Ok(());
+        };
         let now = monotonic_ns();
         if now < stream.next_report_ns {
             return Ok(());
         }
         stream.next_report_ns = now.saturating_add(randomized_interval_ns(self.report_interval_ns));
-        let ntp = ntp_from_unix_nanos(self.pts_zero_unix_ns.saturating_add_unsigned(pts_ns))
+        let ntp = ntp_from_unix_nanos(self.pts_zero_unix_ns.saturating_add_unsigned(sent.pts_ns))
             .ok_or(PublishError::TimestampOutsideNtpRange)?;
-        let mut report = stream.counters.sender_report(stream.ssrc, ntp, timestamp);
+        let mut report = stream
+            .counters
+            .sender_report(stream.ssrc, ntp, sent.rtp_timestamp);
         report.extend(build_sdes_cname(stream.ssrc, &self.cname));
         stream
             .destination
             .deliver(&mut self.control, PacketKind::Rtcp, &[report])
             .await
+    }
+
+    async fn on_timer(&mut self) -> Result<(), PublishError> {
+        self.control.discard_inbound()?;
+        self.keep_alive().await?;
+        for index in 0..self.streams.len() {
+            self.report_if_due(index).await?;
+        }
+        Ok(())
+    }
+
+    // capped at half the report interval, the soonest a frame sent meanwhile can make a report due
+    fn next_timer_ns(&self) -> u64 {
+        let keepalive = self
+            .keepalive
+            .as_ref()
+            .map(|k| k.last_request_ns.saturating_add(k.interval_ns));
+        let reports = self
+            .streams
+            .iter()
+            .filter(|stream| stream.last_sent.is_some())
+            .map(|stream| stream.next_report_ns);
+        let cap = monotonic_ns().saturating_add(self.report_interval_ns / 2);
+        keepalive.into_iter().chain(reports).fold(cap, u64::min)
     }
 
     // the answer is read and dropped with the server's RTCP, as gst does not wait for it either
@@ -617,6 +671,40 @@ impl PublishSession {
         let url = self.request_url.clone();
         let response = self.control.exchange("TEARDOWN", &url, &[], b"").await?;
         Ok(require_ok("TEARDOWN", &response)?)
+    }
+}
+
+// keepalives and sender reports run on a timer so a stalled upstream keeps the session
+async fn run_session_timers(session: Arc<Mutex<PublishSession>>) {
+    loop {
+        let wake_ns = session.lock().await.next_timer_ns();
+        let delay_ns = wake_ns.saturating_sub(monotonic_ns());
+        tokio::time::sleep(Duration::from_nanos(delay_ns)).await;
+        let mut session = session.lock().await;
+        if let Err(failure) = session.on_timer().await {
+            session.timer_failure = Some(failure);
+            return;
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LiveSession {
+    session: Arc<Mutex<PublishSession>>,
+    timers: JoinHandle<()>,
+}
+
+impl LiveSession {
+    fn start(session: PublishSession) -> Self {
+        let session = Arc::new(Mutex::new(session));
+        let timers = tokio::spawn(run_session_timers(session.clone()));
+        Self { session, timers }
+    }
+}
+
+impl Drop for LiveSession {
+    fn drop(&mut self) {
+        self.timers.abort();
     }
 }
 
@@ -764,7 +852,7 @@ struct Outage {
 enum PublishState {
     // frames wait here until every pad has described its stream
     Holding(Vec<HeldFrame>),
-    Live(Box<PublishSession>),
+    Live(LiveSession),
     Down(Outage),
 }
 
@@ -1007,6 +1095,7 @@ impl RtspClientSink {
                 destination,
                 counters: SenderCounters::default(),
                 next_report_ns: 0,
+                last_sent: None,
             });
         }
 
@@ -1022,6 +1111,7 @@ impl RtspClientSink {
         let keepalive = self.keep_alive.then(|| Keepalive {
             method: keepalive_method,
             interval_ns: keepalive_interval_s(control.requests.session_timeout_s())
+                .max(MIN_KEEPALIVE_INTERVAL_S)
                 .saturating_mul(NS_PER_SECOND),
             last_request_ns: monotonic_ns(),
         });
@@ -1033,6 +1123,7 @@ impl RtspClientSink {
             cname: format!("g2g-{:08x}", random_u32()),
             pts_zero_unix_ns: unix_time_ns().saturating_sub_unsigned(first_pts_ns),
             report_interval_ns: self.report_interval_ms * NS_PER_MS,
+            timer_failure: None,
         })
     }
 
@@ -1079,7 +1170,7 @@ impl RtspClientSink {
             .start_session(&self.stream_configs(), held[0].pts_ns)
             .await
         {
-            Ok(session) => self.state = PublishState::Live(Box::new(session)),
+            Ok(session) => self.state = PublishState::Live(LiveSession::start(session)),
             Err(e) => return self.lose_session(e),
         }
         for frame in held {
@@ -1115,15 +1206,16 @@ impl RtspClientSink {
                         self.location,
                         retry.attempt
                     );
-                    self.state = PublishState::Live(Box::new(session));
+                    self.state = PublishState::Live(LiveSession::start(session));
                 }
                 Err(e) => return self.schedule_reconnect(retry, e),
             }
         }
-        let PublishState::Live(session) = &mut self.state else {
+        let PublishState::Live(live) = &mut self.state else {
             return Ok(());
         };
-        match session.send(input, frame, pts_ns).await {
+        let sent = live.session.lock().await.send(input, frame, pts_ns).await;
+        match sent {
             Ok(()) => {
                 self.pads[input].awaiting_keyframe = false;
                 Ok(())
@@ -1180,10 +1272,11 @@ impl RtspClientSink {
         if !self.pads.iter().all(|pad| pad.ended) {
             return Ok(());
         }
-        let PublishState::Live(session) = &mut self.state else {
+        let PublishState::Live(live) = &mut self.state else {
             return Ok(());
         };
-        let result = session.teardown().await;
+        live.timers.abort();
+        let result = live.session.lock().await.teardown().await;
         self.state = PublishState::Holding(Vec::new());
         result.map_err(|e| self.publish_failed(e))
     }

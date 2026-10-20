@@ -731,6 +731,72 @@ async fn keepalives_go_out_ahead_of_the_session_timeout() {
     );
 }
 
+// upstream sends one frame and then nothing for this long, several keepalive and report intervals
+const STALL: Duration = Duration::from_secs(5);
+const STALL_REPORT_INTERVAL_MS: u64 = 1_000;
+// a randomized interval is at most one and a half times nominal, so the stall holds at least this many more
+const REPORTS_WITHIN_STALL: usize = 3;
+
+#[tokio::test]
+async fn a_stalled_upstream_still_gets_keepalives_and_sender_reports() {
+    let (listener, location) = recorder_listener().await;
+    let mut sink = RtspClientSink::new(1, location);
+    sink.set_property(
+        "rtcp-sr-interval",
+        PropValue::Uint(STALL_REPORT_INTERVAL_MS),
+    )
+    .expect("interval");
+    let responder = recorder_responder().with_session_timeout_secs(SHORT_SESSION_TIMEOUT_S);
+    let recorder = async {
+        tokio::time::timeout(
+            SERVER_DEADLINE,
+            record_one_publisher(&listener, None, responder, None),
+        )
+        .await
+        .expect("recorder finishes")
+    };
+    let send = async {
+        let mut discard = Capture::default();
+        sink.configure_pipeline(VIDEO_PAD, &h264_caps())?;
+        sink.process(VIDEO_PAD, data_frame(access_unit(0), 0), &mut discard)
+            .await?;
+        tokio::time::sleep(STALL).await;
+        end_streams(&mut sink, 1).await
+    };
+    let (recorded, published) = tokio::join!(recorder, send);
+    published.expect("publish and teardown");
+
+    let keepalives = recorded
+        .requests
+        .iter()
+        .filter(|head| head.starts_with("GET_PARAMETER "))
+        .count();
+    assert!(
+        keepalives >= KEEPALIVES_WITHIN_TEST,
+        "keepalives go out with no frames arriving: {keepalives}"
+    );
+    let reports: Vec<SenderReport> = recorded.channels[&interleaved_rtcp_channel(VIDEO_PAD)]
+        .iter()
+        .map(|compound| sender_report(compound))
+        .collect();
+    assert!(
+        reports.len() > REPORTS_WITHIN_STALL,
+        "reports keep going with no frames arriving: {reports:?}"
+    );
+    let media_packets = recorded.channels[&interleaved_rtp_channel(VIDEO_PAD)].len();
+    for report in &reports {
+        assert_eq!(report.packet_count as usize, media_packets);
+        assert_eq!(
+            report.rtp_ts, reports[0].rtp_ts,
+            "the last frame's timestamp"
+        );
+        assert_eq!(
+            report.ntp, reports[0].ntp,
+            "the same point on the NTP mapping"
+        );
+    }
+}
+
 #[tokio::test]
 async fn do_rtsp_keep_alive_false_sends_none() {
     assert!(keepalive_requests(false).await.is_empty());
