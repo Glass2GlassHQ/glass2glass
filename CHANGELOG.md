@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1673: `dashsrc`, `hlssrc` and `httpsrc` fail with the new `HardwareError::Http` carrying the status a server refused a request with.
+- M1672: `moqtsrc` plays the H.264 or H.265 video of a `.hang` broadcast, the packaging moq.dev's public relay carries.
+- M1671: `dashsrc` stops a live `@duration` Period at its end and joins the Period holding the live edge.
 - M1661: `rtspclientsink` publishes H.264, H.265, AAC and Opus pads to an RTSP server over TCP-interleaved or UDP, with Basic or Digest auth.
 - M1660: RTP packetizers for H.265, AAC and Opus, an SDP writer shared with the RTSP server, and a sans-IO RTSP publishing client.
 - M1652: `rtspsrc name=s` with several linked pads plays a pad per stream off one session, as gst's `rtspsrc` does.

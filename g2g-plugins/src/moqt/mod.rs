@@ -24,6 +24,8 @@
 //!   objects in order and is shared by both drafts.
 //! - [`catalog`]: the JSON track list, written by the publisher and read by the
 //!   subscriber.
+//! - [`hang`]: the moq.dev catalog and its legacy container, read by the
+//!   subscriber.
 //! - [`session`]: the SETUP exchange and the live control / data streams.
 //! - [`subscriber`]: the session driver and per-track subscription state the
 //!   subscribing elements share.
@@ -36,6 +38,7 @@ pub mod coding;
 pub mod data;
 pub mod datagram;
 pub mod fetch;
+pub mod hang;
 pub mod message;
 pub mod reassembly;
 pub mod session;

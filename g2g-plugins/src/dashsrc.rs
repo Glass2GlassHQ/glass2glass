@@ -50,10 +50,11 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::log::LogSource;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
-    BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    g2g_debug, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
     PropertySpec, Seek, Segment,
 };
@@ -162,6 +163,7 @@ async fn load_rep(
     rep: &Representation,
     total_secs: f64,
     live: Option<&LiveEdge>,
+    now_unix: f64,
 ) -> Result<
     (
         Vec<ResolvedSegment>,
@@ -181,7 +183,7 @@ async fn load_rep(
         ));
     }
     if let Some(edge) = live {
-        let segs = rep.live_segments(edge, now_unix());
+        let segs = rep.live_segments(edge, now_unix, period_end_secs(total_secs));
         if !segs.is_empty() {
             return Ok((segs, rep.timescale(), init));
         }
@@ -206,6 +208,10 @@ fn period_span_secs(mpd: &Mpd, idx: usize) -> f64 {
         }
     }
     (mpd.duration_secs - period.start_secs).max(0.0)
+}
+
+fn period_end_secs(span_secs: f64) -> Option<f64> {
+    (span_secs > 0.0).then_some(span_secs)
 }
 
 /// The running-time span of Period `idx`: its declared span, else the media
@@ -388,6 +394,12 @@ fn segment_for_time(segs: &[ResolvedSegment], timescale: u32, target_ns: u64) ->
     (chosen, chosen_start)
 }
 
+impl LogSource for DashSrc {
+    fn log_category(&self) -> &'static str {
+        "dashsrc"
+    }
+}
+
 impl SourceLoop for DashSrc {
     type RunFuture<'a>
         = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
@@ -465,6 +477,9 @@ impl SourceLoop for DashSrc {
             // Live playback positions itself once per Period, not on every
             // manifest reload (a reload continues from `last_time`).
             let mut positioned = false;
+            if mpd.dynamic {
+                period_idx = mpd.live_period_index(now_unix(), self.presentation_delay_secs(&mpd));
+            }
             'manifest: loop {
                 let period = &mpd.periods[period_idx];
                 // Segment URIs resolve against the Period's BaseURL, itself
@@ -487,8 +502,16 @@ impl SourceLoop for DashSrc {
                     .ok_or(G2gError::CapsMismatch)?;
                 let mut cur_rep_id = rep.id.clone();
                 let span_secs = period_span_secs(&mpd, period_idx);
+                let loaded_unix = now_unix();
                 let (mut segs, mut timescale, mut init) =
-                    load_rep(&client, &base, rep, span_secs, edge.as_ref()).await?;
+                    load_rep(&client, &base, rep, span_secs, edge.as_ref(), loaded_unix).await?;
+                // the next live Period can be listed before this one has ended
+                let lists_period_end = |rep: &Representation, at_unix: f64| {
+                    edge.as_ref().is_none_or(|e| {
+                        rep.lists_period_end(e, at_unix, period_end_secs(span_secs))
+                    })
+                };
+                let mut period_listed_whole = lists_period_end(rep, loaded_unix);
 
                 // A new Period restarts stream time at its own first segment
                 // while running time carries on where the previous one ended.
@@ -543,6 +566,7 @@ impl SourceLoop for DashSrc {
                     if !init_emitted {
                         if let Some((init_url, init_range)) = &init {
                             let url = seg_url(&base, init_url);
+                            g2g_debug!(self, "init segment {url}");
                             let bytes = fetch_segment(&client, &url, *init_range).await?;
                             if !bytes.is_empty() {
                                 window.admit(bytes, 0);
@@ -571,6 +595,7 @@ impl SourceLoop for DashSrc {
                                 };
                                 last_dur_ns = duration_ns;
                                 let url = seg_url(&base, &seg.url);
+                                g2g_debug!(self, "segment {url}");
                                 let t0 = g2g_core::metrics::monotonic_ns();
                                 // Low latency: read the body as a stream and push
                                 // each CMAF chunk as it lands. The prebuffer window
@@ -612,14 +637,17 @@ impl SourceLoop for DashSrc {
                                 {
                                     if best.id != cur_rep_id {
                                         cur_rep_id = best.id.clone();
+                                        let switched_unix = now_unix();
                                         let (s, ts, ini) = load_rep(
                                             &client,
                                             &base,
                                             best,
                                             span_secs,
                                             edge.as_ref(),
+                                            switched_unix,
                                         )
                                         .await?;
+                                        period_listed_whole = lists_period_end(best, switched_unix);
                                         segs = s;
                                         timescale = ts;
                                         init = ini;
@@ -646,7 +674,7 @@ impl SourceLoop for DashSrc {
                 // This Period is played out. A following Period continues the
                 // presentation: carry the running time over, restart the
                 // per-Period state, and re-enter with the boundary pending.
-                if period_idx + 1 < mpd.periods.len() {
+                if period_idx + 1 < mpd.periods.len() && period_listed_whole {
                     period_base_ns = period_base_ns.saturating_add(period_span_ns(
                         &mpd,
                         period_idx,

@@ -84,4 +84,6 @@ pub enum HardwareError {
     DeckLink(i32),
     // a vendor library loaded at runtime is not installed, named by its file name
     LibraryNotFound(&'static str),
+    // the status of an HTTP response that was not a success, such as 429 or 404
+    Http(u16),
 }

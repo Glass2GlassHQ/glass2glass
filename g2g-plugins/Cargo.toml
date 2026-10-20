@@ -158,10 +158,10 @@ webtransport = ["std", "tokio/net", "tokio/io-util", "tokio/time", "dep:web-tran
 # subscriber, layered on the M901 WebTransport carrier. The dialect is the IETF
 # draft (version 0xff000010, the WebTransport subprotocol `moqt-16`), which is
 # what Cloudflare's `moq-relay-ietf` runs; no crate implements it, so the wire
-# layer is in-tree. Adds no dependency beyond the carrier's, plus tokio's `rt`
-# for the reader tasks and `macros` for the subscriber's control/data select.
+# layer is in-tree. Adds tokio's `rt` for the reader tasks and `macros` for the
+# subscriber's control/data select, plus serde_json for the hang catalog.
 # Implies std + `webtransport`.
-moqt = ["webtransport", "tokio/rt", "tokio/sync", "tokio/macros"]
+moqt = ["webtransport", "tokio/rt", "tokio/sync", "tokio/macros", "dep:serde", "dep:serde_json"]
 # Live pipeline dashboard: `g2g-launch --observe <port>` runs the pipeline while
 # streaming its `Observer` telemetry + bus events as JSON over a WebSocket, served
 # alongside the static dashboard page on one port. Reuses the remote-ws WS stack

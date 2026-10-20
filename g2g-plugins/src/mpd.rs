@@ -300,9 +300,15 @@ impl SegmentTemplate {
     /// still inside `timeShiftBufferDepth` and the newest available one. Segment
     /// `i` covers presentation time `[i*d, (i+1)*d)` and is complete `(i+1)*d`
     /// after the Period anchor, `@availabilityTimeOffset` seconds earlier when
-    /// the packager publishes it chunked. `None` before the first available
+    /// the packager publishes it chunked. A Period with an end (`period_secs`)
+    /// offers nothing past its last segment. `None` before the first available
     /// segment exists, or for a `SegmentTimeline` (which lists its own window).
-    pub fn live_available(&self, edge: &LiveEdge, now_unix: f64) -> Option<(u64, u64)> {
+    pub fn live_available(
+        &self,
+        edge: &LiveEdge,
+        now_unix: f64,
+        period_secs: Option<f64>,
+    ) -> Option<(u64, u64)> {
         if !self.timeline.is_empty() {
             return None;
         }
@@ -314,7 +320,10 @@ impl SegmentTemplate {
         let early = self.availability_time_offset.unwrap_or(0.0).clamp(0.0, d);
         // `as u64` saturates at 0 for a negative / NaN elapsed, and the checked
         // decrement then reports "nothing available yet" instead of wrapping.
-        let last = (((elapsed + early) / d) as u64).checked_sub(1)?;
+        let mut last = (((elapsed + early) / d) as u64).checked_sub(1)?;
+        if let Some(final_index) = self.final_index(period_secs) {
+            last = last.min(final_index);
+        }
         let first = match edge.time_shift_secs {
             // Fully inside the window: the segment starts no earlier than the
             // depth allows, so round the boundary up.
@@ -324,13 +333,35 @@ impl SegmentTemplate {
         Some((first.min(last), last))
     }
 
+    fn final_index(&self, period_secs: Option<f64>) -> Option<u64> {
+        self.segment_count(period_secs?).checked_sub(1)
+    }
+
+    pub fn live_offers_period_end(
+        &self,
+        edge: &LiveEdge,
+        now_unix: f64,
+        period_secs: Option<f64>,
+    ) -> bool {
+        let Some(final_index) = self.final_index(period_secs) else {
+            return false;
+        };
+        self.live_available(edge, now_unix, period_secs)
+            .is_some_and(|(_, last)| last == final_index)
+    }
+
     /// The `@duration` live profile's available segments at `now_unix`, newest
     /// window last, each carrying its `$Number$` and its media-timeline `$Time$`
     /// (segment `i` starts at `@presentationTimeOffset + i*d`). Bounded by
     /// [`MAX_SEGMENTS`] so an ancient `availabilityStartTime` cannot force an
     /// unbounded allocation.
-    pub fn live_segments(&self, edge: &LiveEdge, now_unix: f64) -> Vec<SegmentRef> {
-        let Some((first, last)) = self.live_available(edge, now_unix) else {
+    pub fn live_segments(
+        &self,
+        edge: &LiveEdge,
+        now_unix: f64,
+        period_secs: Option<f64>,
+    ) -> Vec<SegmentRef> {
+        let Some((first, last)) = self.live_available(edge, now_unix, period_secs) else {
             return Vec::new();
         };
         let count = (last - first).saturating_add(1).min(MAX_SEGMENTS);
@@ -474,11 +505,16 @@ impl Representation {
     /// The media segments a dynamic `@duration` Representation offers at
     /// wall-clock `now_unix` (the live profile). Empty for any other addressing,
     /// or before this Period's first segment is complete.
-    pub fn live_segments(&self, edge: &LiveEdge, now_unix: f64) -> Vec<ResolvedSegment> {
+    pub fn live_segments(
+        &self,
+        edge: &LiveEdge,
+        now_unix: f64,
+        period_secs: Option<f64>,
+    ) -> Vec<ResolvedSegment> {
         let SegmentSource::Template(t) = &self.source else {
             return Vec::new();
         };
-        t.live_segments(edge, now_unix)
+        t.live_segments(edge, now_unix, period_secs)
             .into_iter()
             .map(|s| ResolvedSegment {
                 url: t.media_url(&self.id, s),
@@ -486,6 +522,21 @@ impl Representation {
                 time: t.presentation_time(s.time),
             })
             .collect()
+    }
+
+    pub fn lists_period_end(
+        &self,
+        edge: &LiveEdge,
+        now_unix: f64,
+        period_secs: Option<f64>,
+    ) -> bool {
+        match &self.source {
+            SegmentSource::Template(t) if t.timeline.is_empty() => {
+                t.live_offers_period_end(edge, now_unix, period_secs)
+            }
+            // a timeline, list or index names every segment it has
+            _ => true,
+        }
     }
 
     /// The `SegmentBase` when this Representation is `sidx`-indexed single-file;
@@ -596,6 +647,17 @@ impl Period {
 }
 
 impl Mpd {
+    pub fn live_period_index(&self, now_unix: f64, presentation_delay_secs: f64) -> usize {
+        let Some(availability_start) = self.availability_start_unix else {
+            return 0;
+        };
+        let playing_secs = now_unix - presentation_delay_secs - availability_start;
+        self.periods
+            .iter()
+            .rposition(|p| p.start_secs <= playing_secs)
+            .unwrap_or(0)
+    }
+
     /// The wall-clock live parameters for `period`, or `None` for a static
     /// manifest / one without an `availabilityStartTime`. `presentation_delay`
     /// is resolved by the caller (`suggestedPresentationDelay`, an override, or
@@ -1562,8 +1624,11 @@ mod tests {
 
         // 7s in: segments 0..=6 (0-based) are complete (segment i finishes at
         // (i+1)s); the 3s depth keeps the last three of them.
-        assert_eq!(tmpl.live_available(&edge, AST_UNIX + 7.0), Some((4, 6)));
-        let segs = rep.live_segments(&edge, AST_UNIX + 7.0);
+        assert_eq!(
+            tmpl.live_available(&edge, AST_UNIX + 7.0, None),
+            Some((4, 6))
+        );
+        let segs = rep.live_segments(&edge, AST_UNIX + 7.0, None);
         let urls: Vec<&str> = segs.iter().map(|s| s.url.as_str()).collect();
         assert_eq!(
             urls,
@@ -1583,11 +1648,14 @@ mod tests {
         // before the first segment completes, exactly one segment at 1.5s in.
         let mut nominal = tmpl.clone();
         nominal.availability_time_offset = None;
-        assert_eq!(nominal.live_available(&edge, AST_UNIX + 0.5), None);
-        assert_eq!(nominal.live_available(&edge, AST_UNIX + 1.5), Some((0, 0)));
+        assert_eq!(nominal.live_available(&edge, AST_UNIX + 0.5, None), None);
+        assert_eq!(
+            nominal.live_available(&edge, AST_UNIX + 1.5, None),
+            Some((0, 0))
+        );
         // Nothing at all before the presentation starts.
-        assert_eq!(tmpl.live_available(&edge, AST_UNIX - 60.0), None);
-        assert!(rep.live_segments(&edge, AST_UNIX - 60.0).is_empty());
+        assert_eq!(tmpl.live_available(&edge, AST_UNIX - 60.0, None), None);
+        assert!(rep.live_segments(&edge, AST_UNIX - 60.0, None).is_empty());
     }
 
     #[test]
@@ -1598,11 +1666,14 @@ mod tests {
 
         // 6.98s in, 1s segments: segment 6 (0-based) completes at 7s, but the
         // 0.967s availabilityTimeOffset publishes it from 6.033s.
-        assert_eq!(tmpl.live_available(&edge, AST_UNIX + 6.98), Some((4, 6)));
+        assert_eq!(
+            tmpl.live_available(&edge, AST_UNIX + 6.98, None),
+            Some((4, 6))
+        );
         let mut nominal = tmpl.clone();
         nominal.availability_time_offset = None;
         assert_eq!(
-            nominal.live_available(&edge, AST_UNIX + 6.98),
+            nominal.live_available(&edge, AST_UNIX + 6.98, None),
             Some((4, 5)),
             "without the offset only complete segments are available"
         );
@@ -1613,11 +1684,17 @@ mod tests {
         for early in [1e9, f64::INFINITY] {
             let mut wide = tmpl.clone();
             wide.availability_time_offset = Some(early);
-            assert_eq!(wide.live_available(&edge, AST_UNIX + 6.98), Some((4, 6)));
-            assert_eq!(wide.live_available(&edge, AST_UNIX + 0.5), Some((0, 0)));
+            assert_eq!(
+                wide.live_available(&edge, AST_UNIX + 6.98, None),
+                Some((4, 6))
+            );
+            assert_eq!(
+                wide.live_available(&edge, AST_UNIX + 0.5, None),
+                Some((0, 0))
+            );
             // The clamp is exactly one segment, so nothing opens before the anchor.
-            assert_eq!(wide.live_available(&edge, AST_UNIX - 0.001), None);
-            assert_eq!(wide.live_available(&edge, AST_UNIX - 60.0), None);
+            assert_eq!(wide.live_available(&edge, AST_UNIX - 0.001, None), None);
+            assert_eq!(wide.live_available(&edge, AST_UNIX - 60.0, None), None);
         }
     }
 
@@ -1630,7 +1707,10 @@ mod tests {
             time_shift_secs: None,
             presentation_delay_secs: 1.0,
         };
-        assert_eq!(tmpl.live_available(&edge, AST_UNIX + 7.0), Some((0, 6)));
+        assert_eq!(
+            tmpl.live_available(&edge, AST_UNIX + 7.0, None),
+            Some((0, 6))
+        );
     }
 
     #[test]
@@ -1644,7 +1724,34 @@ mod tests {
             time_shift_secs: Some(3.0),
             presentation_delay_secs: 1.0,
         };
-        assert_eq!(tmpl.live_available(&edge, AST_UNIX + 7.0), Some((0, 1)));
+        assert_eq!(
+            tmpl.live_available(&edge, AST_UNIX + 7.0, None),
+            Some((0, 1))
+        );
+    }
+
+    #[test]
+    fn a_period_end_caps_the_live_window() {
+        let mpd = parse(FFMPEG_LIVE_MPD).unwrap();
+        let tmpl = mpd.periods[0].representations[0].template().unwrap();
+        let edge = mpd.live_edge(&mpd.periods[0], 1.0).unwrap();
+        let now = AST_UNIX + 7.0;
+        let (_, open_last) = tmpl.live_available(&edge, now, None).unwrap();
+        let ended_secs = open_last as f64;
+        let (_, ended_last) = tmpl.live_available(&edge, now, Some(ended_secs)).unwrap();
+        assert_eq!(
+            ended_last,
+            tmpl.segment_count(ended_secs) - 1,
+            "the last segment offered is the Period's last"
+        );
+        assert!(tmpl.live_offers_period_end(&edge, now, Some(ended_secs)));
+        let running_secs = ended_secs * 4.0;
+        assert_eq!(
+            tmpl.live_available(&edge, now, Some(running_secs)),
+            tmpl.live_available(&edge, now, None)
+        );
+        assert!(!tmpl.live_offers_period_end(&edge, now, Some(running_secs)));
+        assert!(!tmpl.live_offers_period_end(&edge, now, None));
     }
 
     #[test]
@@ -1652,7 +1759,7 @@ mod tests {
         let mpd = parse(FFMPEG_LIVE_MPD).unwrap();
         let rep = &mpd.periods[0].representations[0];
         let edge = mpd.live_edge(&mpd.periods[0], 1.0).unwrap();
-        let segs = rep.live_segments(&edge, AST_UNIX + 7.0); // indices 4..=6
+        let segs = rep.live_segments(&edge, AST_UNIX + 7.0, None); // indices 4..=6
         let ts = rep.timescale();
 
         // 1s of delay = the newest complete segment only.

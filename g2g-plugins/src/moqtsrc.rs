@@ -8,7 +8,9 @@
 //!
 //! It is the inverse of [`MoqtSink`](crate::moqtsink), and plays either side's
 //! broadcast: Cloudflare's `moq-pub` and `moqtsink` publish the same track
-//! layout.
+//! layout. A namespace ending in `.hang` is a moq.dev hang broadcast instead
+//! (see [`hang`](crate::moqt::hang)): its `catalog.json` is read at negotiation
+//! and the chosen video rendition comes out as H.264 or H.265 access units.
 //!
 //! - the `.catalog` track names the media tracks and the init track. Without it
 //!   (`catalog=false`, or a publisher that omits it) the defaults are the
@@ -39,18 +41,20 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use g2g_core::frame::Frame;
 use g2g_core::log::LogSource;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    g2g_warn, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 use crate::moqt::catalog::CatalogTrack;
+use crate::moqt::hang::{self, HangVideoTrack};
 use crate::moqt::parse_versions;
 use crate::moqt::subscriber::{
-    byte_frame, connect, select_track, session_err, Pumped, SubscriberConfig,
+    byte_frame, connect, select_track, session_err, AnyDriver, Pumped, SubscriberConfig,
 };
 
 /// Subscribes to a MoQ Transport broadcast and emits its fMP4 byte stream.
@@ -80,6 +84,15 @@ pub struct MoqtSrc {
     catchup_objects: u64,
     groups_dropped: u64,
     objects_dropped: u64,
+    // opened at negotiation, since the catalog decides the caps
+    hang: Option<HangSession>,
+    configured_caps: Option<Caps>,
+}
+
+#[derive(Debug)]
+struct HangSession {
+    driver: AnyDriver,
+    track: HangVideoTrack,
 }
 
 impl Default for MoqtSrc {
@@ -106,6 +119,8 @@ impl MoqtSrc {
             catchup_objects: 0,
             groups_dropped: 0,
             objects_dropped: 0,
+            hang: None,
+            configured_caps: None,
         }
     }
 
@@ -170,6 +185,108 @@ impl MoqtSrc {
             encoding: ByteStreamEncoding::IsoBmff,
         }
     }
+
+    fn reads_hang(&self) -> bool {
+        hang::is_hang_broadcast(&self.cfg.namespace)
+    }
+
+    async fn open_hang(&mut self) -> Result<Caps, G2gError> {
+        if let Some(session) = &self.hang {
+            return Ok(hang_caps(&session.track));
+        }
+        let mut driver = connect(&self.cfg).await?;
+        let at = driver.subscribe(hang::CATALOG_TRACK, false).await?;
+        let Some(catalog) = driver.first_object(at).await? else {
+            driver.shutdown().await;
+            return Err(session_err());
+        };
+        let track = match hang::select_video_track(&catalog, &self.track_name) {
+            Ok(track) => track,
+            Err(e) => {
+                g2g_warn!(self, "{}: {e}", self.cfg.namespace);
+                driver.shutdown().await;
+                return Err(G2gError::CapsMismatch);
+            }
+        };
+        let caps = hang_caps(&track);
+        self.hang = Some(HangSession { driver, track });
+        Ok(caps)
+    }
+
+    async fn run_hang(&mut self, out: &mut dyn OutputSink) -> Result<u64, G2gError> {
+        let caps = self
+            .configured_caps
+            .clone()
+            .ok_or(G2gError::NotConfigured)?;
+        let HangSession { mut driver, track } = self.hang.take().ok_or(G2gError::NotConfigured)?;
+        let media = driver
+            .subscribe_media(&track.track, self.cfg.catchup_groups)
+            .await?;
+        out.push(PipelinePacket::CapsChanged(caps)).await?;
+        let emitted = self
+            .pump_media(&mut driver, media, out, 0, &mut |object, sequence| {
+                let unit = hang::access_unit(&track, &object).map_err(|e| {
+                    g2g_warn!(self, "{}: {e}", track.track);
+                    G2gError::CapsMismatch
+                })?;
+                Ok(unit.map(|unit| {
+                    let mut frame = byte_frame(unit.annexb, sequence);
+                    frame.timing.pts_ns = unit.pts_ns;
+                    frame.timing.keyframe = unit.keyframe;
+                    frame
+                }))
+            })
+            .await?;
+        self.finish_run(driver, media, &track.track, emitted).await;
+        out.push(PipelinePacket::Eos).await?;
+        Ok(emitted)
+    }
+
+    // pushes the media objects `to_frame` keeps until the stream or num-buffers ends
+    async fn pump_media(
+        &self,
+        driver: &mut AnyDriver,
+        media: usize,
+        out: &mut dyn OutputSink,
+        mut emitted: u64,
+        to_frame: &mut dyn FnMut(Vec<u8>, u64) -> Result<Option<Frame>, G2gError>,
+    ) -> Result<u64, G2gError> {
+        loop {
+            while emitted < self.num_buffers {
+                let Some(payload) = driver.state().subs[media].next_payload() else {
+                    break;
+                };
+                if let Some(frame) = to_frame(payload, emitted)? {
+                    out.push(PipelinePacket::DataFrame(frame)).await?;
+                    emitted += 1;
+                }
+            }
+            if emitted >= self.num_buffers || driver.state().subs[media].drained() {
+                return Ok(emitted);
+            }
+            match driver.pump().await? {
+                Pumped::Applied => {}
+                // A silent relay is the end of the stream: the publisher is
+                // gone, and this is what bounds a live subscription that
+                // nothing else stops.
+                Pumped::Ended | Pumped::TimedOut => return Ok(emitted),
+            }
+        }
+    }
+
+    async fn finish_run(&mut self, mut driver: AnyDriver, media: usize, track: &str, emitted: u64) {
+        let stats = driver.state().subs[media].reassembler.stats();
+        self.catchup_objects = driver.state().subs[media].fetch_objects;
+        driver.shutdown().await;
+        self.selected_track = String::from(track);
+        self.objects_received = emitted;
+        self.groups_dropped = stats.groups_dropped;
+        self.objects_dropped = stats.objects_dropped;
+    }
+}
+
+fn hang_caps(track: &HangVideoTrack) -> Caps {
+    crate::typefind::elementary_video_caps(track.codec)
 }
 
 impl LogSource for MoqtSrc {
@@ -185,26 +302,36 @@ impl SourceLoop for MoqtSrc {
         Self: 'a;
 
     type CapsFuture<'a>
-        = core::future::Ready<Result<Caps, G2gError>>
+        = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
     where
         Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(Self::output_caps()))
+        Box::pin(async move {
+            if self.reads_hang() {
+                return self.open_hang().await;
+            }
+            Ok(Self::output_caps())
+        })
     }
 
-    fn caps_constraint<'a>(
-        &'a mut self,
-    ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
-            Self::output_caps(),
-        ))))
+    async fn caps_constraint(&mut self) -> Result<CapsConstraint<'_>, G2gError> {
+        let caps = self.intercept_caps().await?;
+        Ok(CapsConstraint::Produces(CapsSet::one(caps)))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if *absolute_caps != Self::output_caps() {
+        let accepted = match &self.hang {
+            Some(session) => matches!(
+                absolute_caps,
+                Caps::CompressedVideo { codec, .. } if *codec == session.track.codec
+            ),
+            None => !self.reads_hang() && *absolute_caps == Self::output_caps(),
+        };
+        if !accepted {
             return Err(G2gError::CapsMismatch);
         }
+        self.configured_caps = Some(absolute_caps.clone());
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -216,6 +343,9 @@ impl SourceLoop for MoqtSrc {
             }
             if crate::numbuffers::finished_at_zero_limit(self.num_buffers, out).await? {
                 return Ok(0);
+            }
+            if self.reads_hang() {
+                return self.run_hang(out).await;
             }
             let mut driver = connect(&self.cfg).await?;
 
@@ -244,37 +374,14 @@ impl SourceLoop for MoqtSrc {
                 .await?;
             out.push(PipelinePacket::DataFrame(byte_frame(init, 0)))
                 .await?;
-            let mut emitted = 1u64;
 
-            let limit = self.num_buffers;
-            loop {
-                while emitted < limit {
-                    let Some(payload) = driver.state().subs[media].next_payload() else {
-                        break;
-                    };
-                    out.push(PipelinePacket::DataFrame(byte_frame(payload, emitted)))
-                        .await?;
-                    emitted += 1;
-                }
-                if emitted >= limit || driver.state().subs[media].drained() {
-                    break;
-                }
-                match driver.pump().await? {
-                    Pumped::Applied => {}
-                    // A silent relay is the end of the stream: the publisher is
-                    // gone, and this is what bounds a live subscription that
-                    // nothing else stops.
-                    Pumped::Ended | Pumped::TimedOut => break,
-                }
-            }
-
-            let stats = driver.state().subs[media].reassembler.stats();
-            self.catchup_objects = driver.state().subs[media].fetch_objects;
-            driver.shutdown().await;
-            self.selected_track = selected.name;
-            self.objects_received = emitted;
-            self.groups_dropped = stats.groups_dropped;
-            self.objects_dropped = stats.objects_dropped;
+            let emitted = self
+                .pump_media(&mut driver, media, out, 1, &mut |payload, sequence| {
+                    Ok(Some(byte_frame(payload, sequence)))
+                })
+                .await?;
+            self.finish_run(driver, media, &selected.name, emitted)
+                .await;
             out.push(PipelinePacket::Eos).await?;
             Ok(emitted)
         })
@@ -284,7 +391,7 @@ impl SourceLoop for MoqtSrc {
         ElementMetadata::new(
             "MoQ Transport source",
             "Source/Network",
-            "Subscribes to an IETF MoQ Transport broadcast over WebTransport and emits its fragmented-MP4 stream",
+            "Subscribes to an IETF MoQ Transport broadcast over WebTransport and emits its fragmented-MP4 stream, or the video of a hang broadcast",
             "g2g",
         )
     }
@@ -368,24 +475,24 @@ static MOQTSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "track-name",
         PropKind::Str,
-        "media track to play; empty takes the catalog's first track",
+        "media track to play; empty takes the catalog's first track, or a hang broadcast's preferred video rendition",
     ),
     PropertySpec::new(
         "init-track-name",
         PropKind::Str,
-        "track carrying the ftyp+moov init segment, when the catalog names none",
+        "track carrying the ftyp+moov init segment, when the catalog names none (a .hang broadcast has none)",
     )
     .with_default("0.mp4"),
     PropertySpec::new(
         "catalog-track-name",
         PropKind::Str,
-        "track carrying the JSON catalog",
+        "track carrying the JSON catalog (a .hang broadcast reads catalog.json)",
     )
     .with_default(".catalog"),
     PropertySpec::new(
         "catalog",
         PropKind::Bool,
-        "read the catalog track to discover the tracks",
+        "read the catalog track to discover the tracks (a .hang broadcast always reads it)",
     )
     .with_default("true"),
     PropertySpec::new(
@@ -446,7 +553,14 @@ static MOQTSRC_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for MoqtSrc {
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::source(CapsSet::one(MoqtSrc::output_caps()))])
+        let hang_codecs = hang::VIDEO_CODECS
+            .iter()
+            .map(|codec| crate::typefind::elementary_video_caps(*codec));
+        Vec::from([PadTemplate::source(CapsSet::from_alternatives(
+            core::iter::once(MoqtSrc::output_caps())
+                .chain(hang_codecs)
+                .collect(),
+        ))])
     }
 }
 
