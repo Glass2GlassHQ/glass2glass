@@ -136,10 +136,25 @@ cuda-wgpu-e2e = ["cuda-wgpu", "g2g-plugins/cuda", "g2g-plugins/ffmpeg"]
 # builds whisper.cpp from its vendored source (cmake + a C++ toolchain, libclang
 # for the bindings), CPU kernels only here.
 whisper = ["std", "dep:whisper-rs"]
+# whisper.cpp with its CUDA kernels (nvcc and the CUDA toolkit at build time,
+# found under /usr/local/cuda or /opt/cuda). Adds the `use-gpu` and
+# `gpu-device` properties.
+whisper-cuda = ["whisper", "whisper-rs/cuda"]
+# whisper.cpp with its Vulkan kernels (the Vulkan loader, headers and `glslc` at
+# build time). Same properties as `whisper-cuda`.
+whisper-vulkan = ["whisper", "whisper-rs/vulkan"]
 # llama.cpp text generation via the `llama-cpp-2` crate: LlamaChat answers each
 # text frame as one chat turn on a GGUF model. Builds llama.cpp from the vendored
 # source (cmake + C++ toolchain + libclang), CPU kernels with OpenMP.
 llama = ["std", "dep:llama-cpp-2"]
+# llama.cpp with its CUDA kernels (nvcc and the CUDA toolkit at build time).
+# Build with CMAKE_CUDA_FLAGS=-Xcompiler=-fPIC: llama-cpp-sys-2 compiles the
+# CUDA objects without it and the test and binary links fail. Adds the
+# `n-gpu-layers` property.
+llama-cuda = ["llama", "llama-cpp-2/cuda"]
+# llama.cpp with its Vulkan kernels (the Vulkan loader, headers, `glslc` and the
+# SPIRV-Headers CMake package at build time). Same property as `llama-cuda`.
+llama-vulkan = ["llama", "llama-cpp-2/vulkan"]
 
 [dependencies]
 g2g-core = { workspace = true }
@@ -155,8 +170,8 @@ burn = { version = "0.21", optional = true, default-features = false, features =
 # reach g2g_plugins::cudawgpu. The [dev-dependencies] entry below additionally
 # pulls it (default features) for the end-to-end tests.
 g2g-plugins = { workspace = true, optional = true }
-# whisper.cpp bindings (whisper feature). No GPU features: the crate's cuda /
-# vulkan / metal flags each need that SDK at build time.
+# whisper.cpp bindings (whisper feature, GPU kernels through whisper-cuda /
+# whisper-vulkan).
 whisper-rs = { version = "0.16.0", optional = true }
 # llama.cpp bindings (llama feature). Default features keep OpenMP and the
 # `common` helpers the chat template path uses.

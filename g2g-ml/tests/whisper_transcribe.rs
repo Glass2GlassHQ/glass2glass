@@ -6,6 +6,8 @@
 //! ```powershell
 //! cargo test -p g2g-ml --features whisper --test whisper_transcribe
 //! ```
+//!
+//! With `whisper-cuda` or `whisper-vulkan` the same tests run on the GPU.
 
 #![cfg(feature = "whisper")]
 
@@ -186,6 +188,15 @@ fn only_16k_mono_f32_is_accepted() {
     assert_eq!(element.intercept_caps(&s16), Err(G2gError::CapsMismatch));
 }
 
+fn transcript(segments: &[(String, u64, u64)]) -> String {
+    segments
+        .iter()
+        .map(|(text, _, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 #[tokio::test]
 async fn the_whole_sample_is_transcribed_at_eos() {
     let Some((model, samples)) = fixtures() else {
@@ -196,12 +207,7 @@ async fn the_whole_sample_is_transcribed_at_eos() {
         .with_chunk_seconds(WINDOW_LONGER_THAN_SAMPLE_SECONDS);
     let segments = run(&mut element, &samples, 0).await;
     assert!(!segments.is_empty(), "no segments");
-    let text = segments
-        .iter()
-        .map(|(text, _, _)| text.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
+    let text = transcript(&segments);
     assert!(text.contains(EXPECTED_PHRASE), "transcript was: {text}");
     let sample_ns = samples.len() as u64 * NS_PER_SECOND / u64::from(SAMPLE_RATE);
     for (text, pts_ns, duration_ns) in &segments {
@@ -243,12 +249,7 @@ async fn windows_are_transcribed_as_they_fill_and_stamped_on_the_input_timeline(
         segments.windows(2).all(|pair| pair[0].1 <= pair[1].1),
         "segment timestamps go backwards: {segments:?}"
     );
-    let text = segments
-        .iter()
-        .map(|(text, _, _)| text.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
+    let text = transcript(&segments);
     assert!(text.contains("country"), "transcript was: {text}");
 }
 
@@ -293,4 +294,49 @@ fn properties_round_trip_and_a_bad_model_is_a_bad_value() {
         ),
         "no model, no run"
     );
+}
+
+#[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+#[test]
+fn gpu_defaults_follow_whisper_rs() {
+    let defaults = whisper_rs::WhisperContextParameters::default();
+    let element = WhisperTranscribe::new();
+    let declared = |name: &str| {
+        element
+            .properties()
+            .iter()
+            .find(|spec| spec.name == name)
+            .and_then(|spec| spec.default)
+            .unwrap_or_else(|| panic!("{name} declares no default"))
+    };
+    assert_eq!(
+        element.get_property("use-gpu"),
+        Some(PropValue::Bool(defaults.use_gpu))
+    );
+    assert_eq!(declared("use-gpu"), defaults.use_gpu.to_string());
+    assert_eq!(
+        element.get_property("gpu-device"),
+        Some(PropValue::Uint(u64::try_from(defaults.gpu_device).unwrap()))
+    );
+    assert_eq!(declared("gpu-device"), defaults.gpu_device.to_string());
+}
+
+#[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+#[tokio::test]
+async fn turning_the_gpu_off_after_load_reloads_on_the_cpu() {
+    let Some((model, samples)) = fixtures() else {
+        return;
+    };
+    let mut element = WhisperTranscribe::from_file(model.to_str().unwrap())
+        .expect("model loads")
+        .with_chunk_seconds(WINDOW_LONGER_THAN_SAMPLE_SECONDS);
+    element
+        .set_property("use-gpu", PropValue::Bool(false))
+        .expect("reloads");
+    assert_eq!(
+        element.get_property("use-gpu"),
+        Some(PropValue::Bool(false))
+    );
+    let text = transcript(&run(&mut element, &samples, 0).await);
+    assert!(text.contains(EXPECTED_PHRASE), "transcript was: {text}");
 }

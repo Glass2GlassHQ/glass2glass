@@ -1,24 +1,29 @@
 //! Text generation on llama.cpp (`llama` feature, design/ml.md).
 //!
 //! `LlamaChat` answers each UTF-8 `Caps::Text` frame as one chat turn on a GGUF
-//! model and emits the reply as a text frame with the input's timing. Turns are
-//! independent: every frame starts a fresh context holding only the system
-//! prompt and that frame's text, so a digest stream (`textdigest ! llamachat`)
-//! gets one answer per digest with no history between them. A model with a chat
-//! template gets the system and user messages through it; one without gets the
-//! system prompt and the text as a raw completion prompt.
+//! model and emits the reply as a text frame with the input's timing. By default
+//! turns are independent: every frame starts a fresh context holding only the
+//! system prompt and that frame's text, so a digest stream (`textdigest !
+//! llamachat`) gets one answer per digest with no history between them. With
+//! `history-turns=N` the last N exchanges go ahead of the new text and one
+//! context stays alive, so a turn feeds only the tokens its KV cache lacks. A
+//! model with a chat template gets the messages through it; one without gets
+//! them joined as a raw completion prompt.
 
 use core::future::Future;
 use core::num::NonZeroU32;
 use core::pin::Pin;
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, SystemSlice};
@@ -38,12 +43,18 @@ const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TEMPERATURE_TEXT: &str = "0.0";
 const SYSTEM_ROLE: &str = "system";
 const USER_ROLE: &str = "user";
+const ASSISTANT_ROLE: &str = "assistant";
 /// The one sequence every token of a turn belongs to.
 const SEQUENCE_ID: i32 = 0;
 /// `sample` index for the logits of the last token decoded.
 const LAST_TOKEN_LOGITS: i32 = -1;
-/// What separates the system prompt from the text in a raw completion prompt.
-const RAW_PROMPT_SEPARATOR: &str = "\n";
+/// What separates the messages in a raw completion prompt.
+pub const RAW_PROMPT_SEPARATOR: &str = "\n";
+/// llama.cpp's `n_gpu_layers` value for every layer, its default.
+#[cfg(any(feature = "llama-cuda", feature = "llama-vulkan"))]
+const EVERY_GPU_LAYER: i64 = -1;
+#[cfg(any(feature = "llama-cuda", feature = "llama-vulkan"))]
+const EVERY_GPU_LAYER_TEXT: &str = "-1";
 
 /// The backend can be started once per process.
 fn backend() -> Result<&'static LlamaBackend, G2gError> {
@@ -52,6 +63,29 @@ fn backend() -> Result<&'static LlamaBackend, G2gError> {
         .get_or_init(|| LlamaBackend::init().map_err(|error| error.to_string()))
         .as_ref()
         .map_err(|error| llama_err(error))
+}
+
+/// One user message and the reply to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exchange {
+    pub user: String,
+    pub assistant: String,
+}
+
+/// The context kept across turns while history is on.
+struct Conversation {
+    context: LlamaContext<'static>,
+    /// The tokens in the KV cache, by position.
+    cached_tokens: Vec<LlamaToken>,
+    context_size: u32,
+    threads: u32,
+}
+
+/// What one turn sampled.
+struct Generated {
+    text: String,
+    /// Every sampled token the context decoded, so the end-of-generation token is absent.
+    tokens: Vec<LlamaToken>,
 }
 
 /// Answers each text frame as one chat turn on a GGUF model.
@@ -75,6 +109,12 @@ pub struct LlamaChat {
     temperature: f64,
     seed: u32,
     threads: u32,
+    history_turns: u32,
+    history: VecDeque<Exchange>,
+    #[cfg(any(feature = "llama-cuda", feature = "llama-vulkan"))]
+    gpu_layers: Option<u32>,
+    // declared before `model` so its context drops before the model it points into
+    conversation: Option<Conversation>,
     model: Option<LlamaModel>,
     sequence: u64,
     caps_emitted: bool,
@@ -93,6 +133,8 @@ impl core::fmt::Debug for LlamaChat {
             .field("temperature", &self.temperature)
             .field("seed", &self.seed)
             .field("threads", &self.threads)
+            .field("history_turns", &self.history_turns)
+            .field("history", &self.history)
             .field("loaded", &self.model.is_some())
             .finish_non_exhaustive()
     }
@@ -115,6 +157,11 @@ impl LlamaChat {
             temperature: DEFAULT_TEMPERATURE,
             seed: 0,
             threads: 0,
+            history_turns: 0,
+            history: VecDeque::new(),
+            #[cfg(any(feature = "llama-cuda", feature = "llama-vulkan"))]
+            gpu_layers: None,
+            conversation: None,
             model: None,
             sequence: 0,
             caps_emitted: false,
@@ -169,14 +216,59 @@ impl LlamaChat {
         self
     }
 
+    /// Keep the last `turns` exchanges and feed them ahead of each new text,
+    /// `0` for independent turns (the `history-turns` property).
+    pub fn with_history_turns(mut self, turns: u32) -> Self {
+        self.set_history_turns(turns);
+        self
+    }
+
+    fn set_history_turns(&mut self, turns: u32) {
+        self.history_turns = turns;
+        self.trim_history();
+        if turns == 0 {
+            self.conversation = None;
+        }
+    }
+
+    fn trim_history(&mut self) {
+        while self.history.len() > self.history_turns as usize {
+            self.history.pop_front();
+        }
+    }
+
+    /// The exchanges the next turn feeds ahead of its text, oldest first.
+    pub fn history(&self) -> &VecDeque<Exchange> {
+        &self.history
+    }
+
+    /// Forget the kept exchanges (the `reset` property).
+    pub fn reset(&mut self) {
+        self.history.clear();
+    }
+
+    #[cfg(not(any(feature = "llama-cuda", feature = "llama-vulkan")))]
+    fn model_params(&self) -> LlamaModelParams {
+        LlamaModelParams::default()
+    }
+
+    #[cfg(any(feature = "llama-cuda", feature = "llama-vulkan"))]
+    fn model_params(&self) -> LlamaModelParams {
+        match self.gpu_layers {
+            Some(layers) => LlamaModelParams::default().with_n_gpu_layers(layers),
+            None => LlamaModelParams::default(),
+        }
+    }
+
     fn load_model(&mut self, path: &str) -> Result<(), G2gError> {
         // the crate's loader debug-asserts the path exists
         if !std::path::Path::new(path).is_file() {
             return Err(llama_err(&format_args!("no model file at {path}")));
         }
         let backend = backend()?;
-        let model = LlamaModel::load_from_file(backend, path, &LlamaModelParams::default())
+        let model = LlamaModel::load_from_file(backend, path, &self.model_params())
             .map_err(|error| llama_err(&error))?;
+        self.conversation = None;
         self.model = Some(model);
         self.model_path = Some(String::from(path));
         Ok(())
@@ -188,29 +280,102 @@ impl LlamaChat {
         }
     }
 
-    /// The prompt as the model's chat template renders the system and user
-    /// messages, or the two joined raw when the model has none.
-    fn prompt(&self, model: &LlamaModel, text: &str) -> Result<String, G2gError> {
-        let Ok(template) = model.chat_template(None) else {
-            if self.system_prompt.is_empty() {
-                return Ok(String::from(text));
-            }
-            return Ok([self.system_prompt.as_str(), text].join(RAW_PROMPT_SEPARATOR));
-        };
+    /// The system prompt, the kept exchanges and `text` as role and content,
+    /// in order.
+    fn messages<'a>(&'a self, text: &'a str) -> Vec<(&'static str, &'a str)> {
         let mut messages = Vec::new();
         if !self.system_prompt.is_empty() {
-            messages.push(
-                LlamaChatMessage::new(String::from(SYSTEM_ROLE), self.system_prompt.clone())
-                    .map_err(|error| llama_err(&error))?,
-            );
+            messages.push((SYSTEM_ROLE, self.system_prompt.as_str()));
         }
-        messages.push(
-            LlamaChatMessage::new(String::from(USER_ROLE), String::from(text))
-                .map_err(|error| llama_err(&error))?,
-        );
+        for exchange in &self.history {
+            messages.push((USER_ROLE, exchange.user.as_str()));
+            messages.push((ASSISTANT_ROLE, exchange.assistant.as_str()));
+        }
+        messages.push((USER_ROLE, text));
+        messages
+    }
+
+    /// The prompt as the model's chat template renders the messages, or their
+    /// contents joined raw when the model has none.
+    fn prompt(&self, model: &LlamaModel, text: &str) -> Result<String, G2gError> {
+        let messages = self.messages(text);
+        let Ok(template) = model.chat_template(None) else {
+            let contents: Vec<&str> = messages.iter().map(|(_, content)| *content).collect();
+            return Ok(contents.join(RAW_PROMPT_SEPARATOR));
+        };
+        let messages = messages
+            .into_iter()
+            .map(|(role, content)| {
+                LlamaChatMessage::new(String::from(role), String::from(content))
+                    .map_err(|error| llama_err(&error))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         model
             .apply_chat_template(&template, &messages, true)
             .map_err(|error| llama_err(&error))
+    }
+
+    fn prompt_tokens(&self, text: &str) -> Result<Vec<LlamaToken>, G2gError> {
+        let model = self.model.as_ref().ok_or(G2gError::NotConfigured)?;
+        let prompt = self.prompt(model, text)?;
+        Ok(model.vocab().tokenize(prompt.as_bytes(), true, true))
+    }
+
+    /// The prompt tokens for `text`, after dropping the oldest exchanges until
+    /// the prompt and a full reply fit the context.
+    fn fitted_prompt_tokens(&mut self, text: &str) -> Result<Vec<LlamaToken>, G2gError> {
+        loop {
+            let prompt_tokens = self.prompt_tokens(text)?;
+            if prompt_tokens.len() + self.max_tokens as usize <= self.context_size as usize {
+                return Ok(prompt_tokens);
+            }
+            if self.history.pop_front().is_none() {
+                g2g_core::g2g_error!(
+                    g2g_core::log::Target::category(LOG_CATEGORY),
+                    "prompt of {} tokens plus max-tokens={} exceeds context-size={}",
+                    prompt_tokens.len(),
+                    self.max_tokens,
+                    self.context_size
+                );
+                return Err(G2gError::Hardware(HardwareError::Other));
+            }
+        }
+    }
+
+    fn context_params(&self) -> LlamaContextParams {
+        let params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(self.context_size))
+            .with_n_batch(self.context_size);
+        if self.threads == 0 {
+            return params;
+        }
+        let threads = i32::try_from(self.threads).unwrap_or(i32::MAX);
+        params.with_n_threads(threads).with_n_threads_batch(threads)
+    }
+
+    /// The kept context when its settings still match, else a new empty one.
+    fn kept_conversation(&mut self) -> Result<Conversation, G2gError> {
+        if let Some(conversation) = self.conversation.take() {
+            if conversation.context_size == self.context_size
+                && conversation.threads == self.threads
+            {
+                return Ok(conversation);
+            }
+        }
+        let model = self.model.as_ref().ok_or(G2gError::NotConfigured)?;
+        let context = model
+            .new_context(backend()?, self.context_params())
+            .map_err(|error| llama_err(&error))?;
+        // SAFETY: llama.cpp keeps its own pointer to the model, valid until `self.model` drops or
+        // is replaced, and the `conversation` field is cleared or dropped before either happens.
+        let context =
+            unsafe { core::mem::transmute::<LlamaContext<'_>, LlamaContext<'static>>(context) };
+        Ok(Conversation {
+            context,
+            cached_tokens: Vec::new(),
+            context_size: self.context_size,
+            threads: self.threads,
+        })
     }
 
     fn sampler(&self) -> LlamaSampler {
@@ -223,39 +388,55 @@ impl LlamaChat {
         ])
     }
 
-    /// One turn: the reply to `text`.
-    pub fn answer(&self, text: &str) -> Result<String, G2gError> {
-        let backend = backend()?;
-        let model = self.model.as_ref().ok_or(G2gError::NotConfigured)?;
-        let prompt = self.prompt(model, text)?;
-        let vocab = model.vocab();
-        let prompt_tokens = vocab.tokenize(prompt.as_bytes(), true, true);
-        let context_size = self.context_size as usize;
-        if prompt_tokens.len() + self.max_tokens as usize > context_size {
-            g2g_core::g2g_error!(
-                g2g_core::log::Target::category(LOG_CATEGORY),
-                "prompt of {} tokens plus max-tokens={} exceeds context-size={}",
-                prompt_tokens.len(),
-                self.max_tokens,
-                self.context_size
-            );
-            return Err(G2gError::Hardware(HardwareError::Other));
+    /// One turn: the reply to `text`, after the kept exchanges when
+    /// `history-turns` is above zero.
+    pub fn answer(&mut self, text: &str) -> Result<String, G2gError> {
+        let prompt_tokens = self.fitted_prompt_tokens(text)?;
+        if self.history_turns == 0 {
+            let model = self.model.as_ref().ok_or(G2gError::NotConfigured)?;
+            let mut context = model
+                .new_context(backend()?, self.context_params())
+                .map_err(|error| llama_err(&error))?;
+            return Ok(self.generate(&mut context, &prompt_tokens, 0)?.text);
         }
 
-        let mut params = LlamaContextParams::default()
-            .with_n_ctx(NonZeroU32::new(self.context_size))
-            .with_n_batch(self.context_size);
-        if self.threads > 0 {
-            let threads = i32::try_from(self.threads).unwrap_or(i32::MAX);
-            params = params.with_n_threads(threads).with_n_threads_batch(threads);
-        }
-        let mut context = model
-            .new_context(backend, params)
+        let mut conversation = self.kept_conversation()?;
+        let shared = conversation
+            .cached_tokens
+            .iter()
+            .zip(&prompt_tokens)
+            .take_while(|(cached, wanted)| cached == wanted)
+            .count();
+        // the last prompt token is fed again even when cached, its logits pick the first reply token
+        let reused = shared.min(prompt_tokens.len().saturating_sub(1));
+        let first_stale = u32::try_from(reused).map_err(|error| llama_err(&error))?;
+        conversation
+            .context
+            .kv_cache_seq_rm(SEQUENCE_ID, Some(first_stale), None)
             .map_err(|error| llama_err(&error))?;
+        let generated = self.generate(&mut conversation.context, &prompt_tokens, reused)?;
+        conversation.cached_tokens = [prompt_tokens, generated.tokens].concat();
+        self.conversation = Some(conversation);
+        self.history.push_back(Exchange {
+            user: String::from(text),
+            assistant: generated.text.clone(),
+        });
+        self.trim_history();
+        Ok(generated.text)
+    }
 
-        let mut batch = LlamaBatch::new(context_size, 1);
+    /// Decode `prompt_tokens` from position `reused` on, then sample the reply.
+    fn generate(
+        &self,
+        context: &mut LlamaContext<'_>,
+        prompt_tokens: &[LlamaToken],
+        reused: usize,
+    ) -> Result<Generated, G2gError> {
+        let model = self.model.as_ref().ok_or(G2gError::NotConfigured)?;
+        let vocab = model.vocab();
+        let mut batch = LlamaBatch::new(self.context_size as usize, 1);
         let last = prompt_tokens.len().saturating_sub(1);
-        for (position, token) in prompt_tokens.iter().enumerate() {
+        for (position, token) in prompt_tokens.iter().enumerate().skip(reused) {
             batch
                 .add(*token, position as i32, &[SEQUENCE_ID], position == last)
                 .map_err(|error| llama_err(&error))?;
@@ -266,9 +447,10 @@ impl LlamaChat {
 
         let mut sampler = self.sampler();
         let mut reply = Vec::new();
+        let mut tokens = Vec::new();
         let first_reply_position = prompt_tokens.len() as i32;
         for position in (first_reply_position..).take(self.max_tokens as usize) {
-            let token = sampler.sample(&context, LAST_TOKEN_LOGITS);
+            let token = sampler.sample(context, LAST_TOKEN_LOGITS);
             if vocab.is_eog(token) {
                 break;
             }
@@ -280,8 +462,12 @@ impl LlamaChat {
             context
                 .decode(&mut batch)
                 .map_err(|error| llama_err(&error))?;
+            tokens.push(token);
         }
-        Ok(String::from(String::from_utf8_lossy(&reply).trim()))
+        Ok(Generated {
+            text: String::from(String::from_utf8_lossy(&reply).trim()),
+            tokens,
+        })
     }
 
     async fn reply_to(&mut self, frame: &Frame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
@@ -437,6 +623,31 @@ impl AsyncElement for LlamaChat {
                 self.threads = u32::try_from(threads).map_err(|_| PropError::Value)?;
                 Ok(())
             }
+            "history-turns" => {
+                let turns = value.as_uint().ok_or(PropError::Type)?;
+                self.set_history_turns(u32::try_from(turns).map_err(|_| PropError::Value)?);
+                Ok(())
+            }
+            "reset" => {
+                if value.as_bool().ok_or(PropError::Type)? {
+                    self.reset();
+                }
+                Ok(())
+            }
+            #[cfg(any(feature = "llama-cuda", feature = "llama-vulkan"))]
+            "n-gpu-layers" => {
+                let layers = value.as_int().ok_or(PropError::Type)?;
+                self.gpu_layers = if layers == EVERY_GPU_LAYER {
+                    None
+                } else {
+                    Some(u32::try_from(layers).map_err(|_| PropError::Value)?)
+                };
+                // the layer split is fixed at load, so a loaded model loads again
+                match self.model_path.clone() {
+                    Some(path) => self.load_model(&path).map_err(|_| PropError::Value),
+                    None => Ok(()),
+                }
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -450,6 +661,12 @@ impl AsyncElement for LlamaChat {
             "temperature" => Some(PropValue::Double(self.temperature)),
             "seed" => Some(PropValue::Uint(u64::from(self.seed))),
             "threads" => Some(PropValue::Uint(u64::from(self.threads))),
+            "history-turns" => Some(PropValue::Uint(u64::from(self.history_turns))),
+            "reset" => Some(PropValue::Bool(false)),
+            #[cfg(any(feature = "llama-cuda", feature = "llama-vulkan"))]
+            "n-gpu-layers" => Some(PropValue::Int(
+                self.gpu_layers.map_or(EVERY_GPU_LAYER, i64::from),
+            )),
             _ => None,
         }
     }
@@ -501,4 +718,23 @@ static LLAMA_PROPS: &[PropertySpec] = &[
         "decode threads, 0 for llama.cpp's default",
     )
     .with_default("0"),
+    PropertySpec::new(
+        "history-turns",
+        PropKind::Uint,
+        "exchanges kept and fed ahead of each new text, 0 for independent turns",
+    )
+    .with_default("0"),
+    PropertySpec::new(
+        "reset",
+        PropKind::Bool,
+        "set true to forget the kept exchanges, reads back false",
+    )
+    .with_default("false"),
+    #[cfg(any(feature = "llama-cuda", feature = "llama-vulkan"))]
+    PropertySpec::new(
+        "n-gpu-layers",
+        PropKind::Int,
+        "model layers offloaded to the GPU, -1 for every layer",
+    )
+    .with_default(EVERY_GPU_LAYER_TEXT),
 ];

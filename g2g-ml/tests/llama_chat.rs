@@ -6,6 +6,8 @@
 //! ```powershell
 //! cargo test -p g2g-ml --features llama --test llama_chat
 //! ```
+//!
+//! With `llama-cuda` or `llama-vulkan` the same tests run on the GPU.
 
 #![cfg(feature = "llama")]
 
@@ -15,14 +17,19 @@ use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{G2gError, PropError, PropValue};
-use g2g_ml::llamachat::LlamaChat;
+use g2g_ml::llamachat::{Exchange, LlamaChat, RAW_PROMPT_SEPARATOR};
 
 const MODEL: &str = "stories260K.gguf";
 const PROMPT: &str = "Once upon a time";
+const SECOND_PROMPT: &str = "The dog ran to the park";
+const THIRD_PROMPT: &str = "Then it started to rain";
+const KEPT_TURNS: u32 = 2;
 const LONG_REPLY_TOKENS: u32 = 32;
 const SHORT_REPLY_TOKENS: u32 = 4;
 /// Too small for the prompt plus any reply.
 const TINY_CONTEXT: u32 = 8;
+/// Room for one long exchange, not two.
+const ONE_EXCHANGE_CONTEXT: u32 = 2 * LONG_REPLY_TOKENS;
 const NS_PER_SECOND: u64 = 1_000_000_000;
 
 fn model_path() -> Option<String> {
@@ -74,7 +81,7 @@ fn greedy_replies_are_deterministic_and_capped_by_max_tokens() {
     let Some(model) = model_path() else {
         return;
     };
-    let element = LlamaChat::from_file(&model)
+    let mut element = LlamaChat::from_file(&model)
         .expect("model loads")
         .with_max_tokens(LONG_REPLY_TOKENS);
     let long = element.answer(PROMPT).expect("reply");
@@ -100,7 +107,7 @@ fn a_prompt_that_does_not_fit_the_context_fails_loud() {
     let Some(model) = model_path() else {
         return;
     };
-    let element = LlamaChat::from_file(&model)
+    let mut element = LlamaChat::from_file(&model)
         .expect("model loads")
         .with_context_size(TINY_CONTEXT)
         .with_max_tokens(TINY_CONTEXT);
@@ -164,6 +171,9 @@ fn properties_round_trip_and_a_bad_model_is_a_bad_value() {
         .unwrap();
     element.set_property("seed", PropValue::Uint(42)).unwrap();
     element.set_property("threads", PropValue::Uint(3)).unwrap();
+    element
+        .set_property("history-turns", PropValue::Uint(4))
+        .unwrap();
     assert_eq!(
         element.set_property("context-size", PropValue::Uint(0)),
         Err(PropError::Value)
@@ -194,6 +204,10 @@ fn properties_round_trip_and_a_bad_model_is_a_bad_value() {
     );
     assert_eq!(element.get_property("seed"), Some(PropValue::Uint(42)));
     assert_eq!(element.get_property("threads"), Some(PropValue::Uint(3)));
+    assert_eq!(
+        element.get_property("history-turns"),
+        Some(PropValue::Uint(4))
+    );
     assert!(
         matches!(
             element.configure_pipeline(&LlamaChat::text_caps()),
@@ -201,4 +215,157 @@ fn properties_round_trip_and_a_bad_model_is_a_bad_value() {
         ),
         "no model, no run"
     );
+}
+
+fn long_chat(model: &str) -> LlamaChat {
+    LlamaChat::from_file(model)
+        .expect("model loads")
+        .with_max_tokens(LONG_REPLY_TOKENS)
+}
+
+/// The reply a history-less element gives to the raw prompt the kept turns render to.
+fn reply_to_rendered(model: &str, turns: &[&str]) -> String {
+    long_chat(model)
+        .answer(&turns.join(RAW_PROMPT_SEPARATOR))
+        .expect("reply")
+}
+
+#[test]
+fn kept_exchanges_go_ahead_of_the_new_text() {
+    let Some(model) = model_path() else {
+        return;
+    };
+    let mut chat = long_chat(&model).with_history_turns(KEPT_TURNS);
+    let first = chat.answer(PROMPT).expect("first reply");
+    let second = chat.answer(SECOND_PROMPT).expect("second reply");
+    assert_eq!(
+        chat.history().iter().cloned().collect::<Vec<_>>(),
+        [
+            Exchange {
+                user: PROMPT.into(),
+                assistant: first.clone()
+            },
+            Exchange {
+                user: SECOND_PROMPT.into(),
+                assistant: second.clone()
+            },
+        ]
+    );
+    // the second turn decodes only its new tokens, and must match a full recompute
+    assert_eq!(
+        second,
+        reply_to_rendered(&model, &[PROMPT, &first, SECOND_PROMPT]),
+        "the second turn did not see the first exchange"
+    );
+    assert_ne!(
+        second,
+        long_chat(&model).answer(SECOND_PROMPT).expect("reply"),
+        "the history did not change the answer"
+    );
+
+    let third = chat.answer(THIRD_PROMPT).expect("third reply");
+    assert_eq!(
+        third,
+        reply_to_rendered(
+            &model,
+            &[PROMPT, &first, SECOND_PROMPT, &second, THIRD_PROMPT]
+        ),
+        "the third turn did not see both kept exchanges"
+    );
+    let users: Vec<&str> = chat.history().iter().map(|e| e.user.as_str()).collect();
+    assert_eq!(
+        users,
+        [SECOND_PROMPT, THIRD_PROMPT],
+        "more than the kept number of exchanges stays"
+    );
+}
+
+#[test]
+fn reset_forgets_the_kept_exchanges() {
+    let Some(model) = model_path() else {
+        return;
+    };
+    let mut chat = long_chat(&model).with_history_turns(KEPT_TURNS);
+    chat.answer(SECOND_PROMPT).expect("first reply");
+    chat.set_property("reset", PropValue::Bool(true)).unwrap();
+    assert!(chat.history().is_empty());
+    assert_eq!(chat.get_property("reset"), Some(PropValue::Bool(false)));
+    assert_eq!(
+        chat.answer(PROMPT).expect("reply"),
+        long_chat(&model).answer(PROMPT).expect("reply"),
+        "the forgotten exchange still shaped the answer"
+    );
+}
+
+#[test]
+fn an_exchange_that_no_longer_fits_the_context_is_dropped() {
+    let Some(model) = model_path() else {
+        return;
+    };
+    let mut chat = long_chat(&model)
+        .with_context_size(ONE_EXCHANGE_CONTEXT)
+        .with_history_turns(KEPT_TURNS);
+    chat.answer(PROMPT).expect("first reply");
+    let second = chat.answer(SECOND_PROMPT).expect("second reply");
+    let users: Vec<&str> = chat.history().iter().map(|e| e.user.as_str()).collect();
+    assert_eq!(
+        users,
+        [SECOND_PROMPT],
+        "the exchange that did not fit stays"
+    );
+    assert_eq!(
+        second,
+        long_chat(&model)
+            .with_context_size(ONE_EXCHANGE_CONTEXT)
+            .answer(SECOND_PROMPT)
+            .expect("reply")
+    );
+}
+
+#[test]
+fn no_history_keeps_turns_independent() {
+    let Some(model) = model_path() else {
+        return;
+    };
+    let mut chat = long_chat(&model);
+    let alone = chat.answer(SECOND_PROMPT).expect("reply");
+    chat.answer(PROMPT).expect("reply");
+    assert!(chat.history().is_empty());
+    assert_eq!(chat.answer(SECOND_PROMPT).expect("reply"), alone);
+}
+
+#[cfg(any(feature = "llama-cuda", feature = "llama-vulkan"))]
+#[test]
+fn every_layer_is_offloaded_by_default_and_zero_keeps_the_model_on_the_cpu() {
+    let default_layers = llama_cpp_2::model::params::LlamaModelParams::default().n_gpu_layers();
+    let mut element = LlamaChat::new();
+    let declared = element
+        .properties()
+        .iter()
+        .find(|spec| spec.name == "n-gpu-layers")
+        .and_then(|spec| spec.default)
+        .expect("n-gpu-layers declares a default");
+    assert_eq!(declared, default_layers.to_string());
+    assert_eq!(
+        element.get_property("n-gpu-layers"),
+        Some(PropValue::Int(i64::from(default_layers)))
+    );
+    assert_eq!(
+        element.set_property("n-gpu-layers", PropValue::Int(-2)),
+        Err(PropError::Value)
+    );
+    let Some(model) = model_path() else {
+        return;
+    };
+    element
+        .set_property("model", PropValue::Str(model.clone()))
+        .unwrap();
+    let mut on_gpu = element.with_max_tokens(LONG_REPLY_TOKENS);
+    let gpu_reply = on_gpu.answer(PROMPT).expect("reply");
+    on_gpu
+        .set_property("n-gpu-layers", PropValue::Int(0))
+        .expect("reloads");
+    assert_eq!(on_gpu.get_property("n-gpu-layers"), Some(PropValue::Int(0)));
+    let cpu_reply = on_gpu.answer(PROMPT).expect("reply");
+    assert!(!gpu_reply.is_empty() && !cpu_reply.is_empty());
 }

@@ -85,6 +85,11 @@ pub struct WhisperTranscribe {
     translate: bool,
     chunk_seconds: f64,
     threads: u32,
+    #[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+    use_gpu: bool,
+    /// Index among the GPU devices ggml lists.
+    #[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+    gpu_device: i32,
     model: Option<LoadedWhisper>,
     pcm: Vec<f32>,
     /// Input-timeline time of `pcm[0]`.
@@ -103,12 +108,18 @@ impl Default for WhisperTranscribe {
 impl WhisperTranscribe {
     /// A model-less element; `model=` (or [`Self::from_file`]) loads one.
     pub fn new() -> Self {
+        #[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+        let gpu_defaults = WhisperContextParameters::default();
         Self {
             model_path: None,
             language: String::from(DEFAULT_LANGUAGE),
             translate: false,
             chunk_seconds: DEFAULT_CHUNK_SECONDS,
             threads: 0,
+            #[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+            use_gpu: gpu_defaults.use_gpu,
+            #[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+            gpu_device: gpu_defaults.gpu_device,
             model: None,
             pcm: Vec::new(),
             chunk_start_ns: 0,
@@ -152,9 +163,21 @@ impl WhisperTranscribe {
         self
     }
 
+    #[cfg(not(any(feature = "whisper-cuda", feature = "whisper-vulkan")))]
+    fn context_params(&self) -> WhisperContextParameters<'static> {
+        WhisperContextParameters::default()
+    }
+
+    #[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+    fn context_params(&self) -> WhisperContextParameters<'static> {
+        let mut params = WhisperContextParameters::default();
+        params.use_gpu(self.use_gpu).gpu_device(self.gpu_device);
+        params
+    }
+
     fn load_model(&mut self, path: &str) -> Result<(), G2gError> {
-        let context = WhisperContext::new_with_params(path, WhisperContextParameters::default())
-            .map_err(whisper_err)?;
+        let context =
+            WhisperContext::new_with_params(path, self.context_params()).map_err(whisper_err)?;
         let state = context.create_state().map_err(whisper_err)?;
         self.model = Some(LoadedWhisper {
             _context: context,
@@ -162,6 +185,15 @@ impl WhisperTranscribe {
         });
         self.model_path = Some(String::from(path));
         Ok(())
+    }
+
+    /// The device choice is fixed at load, so a loaded model loads again.
+    #[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+    fn reload_model(&mut self) -> Result<(), PropError> {
+        match self.model_path.clone() {
+            Some(path) => self.load_model(&path).map_err(|_| PropError::Value),
+            None => Ok(()),
+        }
     }
 
     /// The one input format: 16 kHz mono f32.
@@ -443,6 +475,17 @@ impl AsyncElement for WhisperTranscribe {
                 self.threads = u32::try_from(threads).map_err(|_| PropError::Value)?;
                 Ok(())
             }
+            #[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+            "use-gpu" => {
+                self.use_gpu = value.as_bool().ok_or(PropError::Type)?;
+                self.reload_model()
+            }
+            #[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+            "gpu-device" => {
+                let device = value.as_uint().ok_or(PropError::Type)?;
+                self.gpu_device = i32::try_from(device).map_err(|_| PropError::Value)?;
+                self.reload_model()
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -454,6 +497,10 @@ impl AsyncElement for WhisperTranscribe {
             "translate" => Some(PropValue::Bool(self.translate)),
             "chunk-seconds" => Some(PropValue::Double(self.chunk_seconds)),
             "threads" => Some(PropValue::Uint(u64::from(self.threads))),
+            #[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+            "use-gpu" => Some(PropValue::Bool(self.use_gpu)),
+            #[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+            "gpu-device" => u64::try_from(self.gpu_device).ok().map(PropValue::Uint),
             _ => None,
         }
     }
@@ -492,6 +539,20 @@ static WHISPER_PROPS: &[PropertySpec] = &[
         "threads",
         PropKind::Uint,
         "decoder threads, 0 for whisper.cpp's default",
+    )
+    .with_default("0"),
+    #[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+    PropertySpec::new(
+        "use-gpu",
+        PropKind::Bool,
+        "run on a GPU, false keeps whisper.cpp on the CPU",
+    )
+    .with_default("true"),
+    #[cfg(any(feature = "whisper-cuda", feature = "whisper-vulkan"))]
+    PropertySpec::new(
+        "gpu-device",
+        PropKind::Uint,
+        "index of the GPU to run on, whisper.cpp falls back to the CPU past the last one",
     )
     .with_default("0"),
 ];
