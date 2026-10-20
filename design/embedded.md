@@ -209,6 +209,13 @@ about 1e-5. `Int8Quantize` maps an f32 tensor to int8 with the model's input
 scale and zero point, `round(x / scale) + zero_point` saturated, the formula
 `g2g_core::tensor::quantize` that the host `TensorConvert` also uses.
 
+For vision, `ImageResize` scales a packed 8-bit image of one to four channels
+to the model's input size with bilinear interpolation on half-pixel centres, the
+placement TFLite's and OpenCV's resize use, in integer math with 1/2048 weight
+steps, and emits a u8 NHWC tensor. `Int8Quantize` also takes that u8 tensor,
+reading each pixel as `p / 255` like the host inference elements normalize RGBA,
+so a model with scale 1/255 and zero point -128 gets `p - 128`.
+
 ## RTOS executors and C integration
 
 The same pipeline runs under a real Embassy task (`examples/g2g-embassy`, the

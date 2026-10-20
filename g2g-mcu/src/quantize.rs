@@ -7,6 +7,10 @@ use g2g_core::{StaticTransform, TensorDType};
 use crate::inference::TensorFormat;
 use crate::lend::lend_converted;
 
+// A u8 input is pixels, read as p / 255 like the host inference elements
+// normalize RGBA.
+const PIXEL_MAXIMUM: f32 = 255.0;
+
 pub struct Int8Quantize<'r, const N: usize, const BYTES: usize> {
     input: TensorFormat,
     scale: f32,
@@ -35,7 +39,7 @@ impl<'r, const N: usize, const BYTES: usize> Int8Quantize<'r, N, BYTES> {
         zero_point: i32,
         ring: &'r StaticLendRing<N, BYTES>,
     ) -> Result<Self, G2gError> {
-        let valid = input.dtype == TensorDType::F32
+        let valid = matches!(input.dtype, TensorDType::F32 | TensorDType::U8)
             && scale.is_finite()
             && scale > 0.0
             && (i8::MIN as i32..=i8::MAX as i32).contains(&zero_point);
@@ -66,7 +70,10 @@ impl<const N: usize, const BYTES: usize> StaticTransform for Int8Quantize<'_, N,
         if tensor.len() != self.input.byte_len() {
             return Err(G2gError::CapsMismatch);
         }
-        let (scale, zero_point) = (self.scale, self.zero_point);
+        let (scale, zero_point, dtype) = (self.scale, self.zero_point, self.input.dtype);
+        let to_int8 = move |value: f32| {
+            quantize(value, scale, zero_point).clamp(i8::MIN as i32, i8::MAX as i32) as i8 as u8
+        };
         // SAFETY: the constructor established the ring-outlives-frames
         // contract (`new`: 'static, `with_ring`: the caller's contract).
         unsafe {
@@ -75,14 +82,17 @@ impl<const N: usize, const BYTES: usize> StaticTransform for Int8Quantize<'_, N,
                 &input,
                 self.input.shape.elements(),
                 |tensor, out| {
+                    if dtype == TensorDType::U8 {
+                        for (quantized, &pixel) in out.iter_mut().zip(tensor) {
+                            *quantized = to_int8(f32::from(pixel) / PIXEL_MAXIMUM);
+                        }
+                        return;
+                    }
                     for (quantized, bytes) in out.iter_mut().zip(tensor.chunks_exact(4)) {
                         let &[b0, b1, b2, b3] = bytes else {
                             continue;
                         };
-                        let value = f32::from_le_bytes([b0, b1, b2, b3]);
-                        let clamped = quantize(value, scale, zero_point)
-                            .clamp(i8::MIN as i32, i8::MAX as i32);
-                        *quantized = clamped as i8 as u8;
+                        *quantized = to_int8(f32::from_le_bytes([b0, b1, b2, b3]));
                     }
                 },
             )
