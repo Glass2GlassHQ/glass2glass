@@ -12193,6 +12193,13 @@ impl H265DpbDecoder {
     /// added or replaced since the last picture means new session parameters,
     /// since existing entries cannot be updated in place.
     fn bind_parameter_sets(&mut self, sets: &H265ParameterSets) -> Result<(), VulkanVideoError> {
+        // the DPB images are sized for the session's SPS, a picture of another size
+        // loses the device
+        if sets.sps.session_shape() != self.session_shape {
+            return Err(VulkanVideoError::StreamRefused(
+                "H.265 SPS changes the picture size or DPB size within one decode session",
+            ));
+        }
         let session_sets = &self.session_sets;
         let bound = session_sets.vps.get(&sets.vps.vps_video_parameter_set_id) == Some(&sets.vps)
             && session_sets.sps.get(&sets.sps.sps_seq_parameter_set_id) == Some(&sets.sps)
@@ -12413,12 +12420,12 @@ impl H265DpbDecoder {
             picture, poc, target, &active, &before, &after, &lt, to_system,
         )?;
 
-        if h265_is_reference(hdr.nal_unit_type) {
-            self.refs[target] = Some(H265RefPic {
-                poc,
-                is_long_term: false,
-            });
-        }
+        // every decoded picture is a short-term reference until a later RPS drops
+        // it (8.3.2): a sub-layer non-reference picture still serves higher sub-layers
+        self.refs[target] = Some(H265RefPic {
+            poc,
+            is_long_term: false,
+        });
         Ok(Some((target, meta)))
     }
 
@@ -14608,42 +14615,31 @@ impl<T> ReorderBuffer<T> {
     }
 }
 
-/// The sets a new H.265 session is built from: the last SPS `au` carries, a PPS
-/// naming it (the AU's own first) and its VPS, looked up in `sets`, which holds
-/// `au`'s sets on top of the stream's earlier ones. `None` when `au` carries no
-/// SPS or the PPS / VPS it needs has not arrived.
-fn h265_sets_for_session(sets: &H265ParameterSetTable, au: &[u8]) -> Option<H265ParameterSets> {
-    let mut sps_id = None;
-    let mut au_pps_ids = alloc::vec::Vec::new();
-    for nal in nal_units_any(au) {
-        let [header, _, payload @ ..] = nal else {
-            continue;
-        };
-        if h265_nal_layer_id(nal) != 0 {
-            continue;
-        }
-        let rbsp = strip_emulation_prevention(payload);
-        let mut br = BitReader::new(&rbsp);
-        match (header >> 1) & 0x3F {
-            H265_NAL_SPS => {
-                let (head, _) = crate::h265parse::parse_h265_sps_head(&rbsp)?;
-                sps_id = Some(u8::try_from(head.sps_seq_parameter_set_id).ok()?);
-            }
-            H265_NAL_PPS => au_pps_ids.push(u8::try_from(br.read_ue()?).ok()?),
-            _ => {}
-        }
+/// The sets the first slice of `au` is coded with, looked up in `sets`, which
+/// holds `au`'s sets on top of the stream's earlier ones. `None` when `au`
+/// carries no slice, or no parameter set has arrived yet.
+fn h265_sets_for_session(
+    sets: &H265ParameterSetTable,
+    au: &[u8],
+) -> Result<Option<H265ParameterSets>, VulkanVideoError> {
+    let first_slice = nal_units_any(au).find(|nal| {
+        nal.len() >= 2 && h265_nal_layer_id(nal) == 0 && h265_is_slice((nal[0] >> 1) & 0x3F)
+    });
+    let Some(slice) = first_slice else {
+        return Ok(None);
+    };
+    if sets.pps.is_empty() {
+        return Ok(None);
     }
-    let sps = sets.sps.get(&sps_id?)?;
-    let pps = au_pps_ids
-        .iter()
-        .filter_map(|id| sets.pps.get(id))
-        .chain(sets.pps.values())
-        .find(|pps| pps.pps_seq_parameter_set_id == sps.sps_seq_parameter_set_id)?;
-    let vps = sets.vps.get(&sps.sps_video_parameter_set_id)?;
-    Some(H265ParameterSets {
-        vps: vps.clone(),
-        sps: sps.clone(),
-        pps: pps.clone(),
+    sets.active(h265_slice_pic_parameter_set_id(slice)?)
+        .map(Some)
+}
+
+fn h265_carries_parameter_sets(au: &[u8]) -> bool {
+    nal_units_any(au).any(|nal| {
+        nal.len() >= 2
+            && h265_nal_layer_id(nal) == 0
+            && (H265_NAL_VPS..=H265_NAL_PPS).contains(&((nal[0] >> 1) & 0x3F))
     })
 }
 
@@ -15041,7 +15037,8 @@ impl VulkanVideoDec {
         // sets re-sent on a keyframe) keep the session without parsing them again,
         // any change rebuilds.
         let fp = parameter_set_fingerprint(self.codec, au);
-        if built && self.ps_fingerprint == fp {
+        // an AU without parameter sets can still switch H.265 sessions through its slice's PPS
+        if built && !fp.is_empty() && self.ps_fingerprint == fp {
             return Ok(true);
         }
 
@@ -15094,15 +15091,25 @@ impl VulkanVideoDec {
                 )
             }
             VideoCodec::H265 => {
-                // the sets this AU adds to the ones the stream sent before
-                let mut sets = match &self.decoder {
-                    Some(DpbDecoderKind::H265(decoder)) => decoder.parsed_sets.clone(),
-                    _ => H265ParameterSetTable::default(),
+                let previous_sets = match &self.decoder {
+                    Some(DpbDecoderKind::H265(decoder)) => Some(&decoder.parsed_sets),
+                    _ => None,
                 };
-                sets.insert_all(au).map_err(decode_refused)?;
-                let Some(ps) = h265_sets_for_session(&sets, au) else {
-                    // No SPS here: keep decoding if already built (a
-                    // non-keyframe AU), else wait for the keyframe that carries it.
+                // the sets this AU adds to the ones the stream sent before
+                let au_sets = if h265_carries_parameter_sets(au) {
+                    let mut sets = previous_sets.cloned().unwrap_or_default();
+                    sets.insert_all(au).map_err(decode_refused)?;
+                    Some(sets)
+                } else {
+                    None
+                };
+                let Some(sets) = au_sets.as_ref().or(previous_sets) else {
+                    return Ok(built);
+                };
+                // a slice can switch to an SPS of another shape with no SPS in its AU
+                let Some(ps) = h265_sets_for_session(sets, au).map_err(decode_refused)? else {
+                    // no slice or no parameter set yet: keep decoding if already
+                    // built, else wait for the keyframe that carries them
                     return Ok(built);
                 };
                 let stream_colorimetry = g2g_core::Colorimetry::from_cicp(
@@ -15125,6 +15132,7 @@ impl VulkanVideoDec {
                 let width = ps.sps.pic_width_in_luma_samples;
                 let height = ps.sps.pic_height_in_luma_samples;
                 let reorder_bound = ps.sps.max_num_reorder_pics();
+                let parsed_sets = sets.clone();
                 let std = to_std_h265_params(&ps);
                 let session = device
                     .create_h265_session(&std, width, height)
@@ -15134,7 +15142,7 @@ impl VulkanVideoDec {
                     || device.create_h265_dpb_decoder_gpu(&session, &ps),
                     || device.create_h265_dpb_decoder(&session, &ps),
                 )?;
-                decoder.parsed_sets = sets;
+                decoder.parsed_sets = parsed_sets;
                 let reorder_bound = Some(reorder_bound.min(decoder.dpb_slots()));
                 (
                     DecodeSessionKind::H265(session),
