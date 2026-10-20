@@ -653,9 +653,23 @@ the server names none), 5 s early from a 20 s timeout, 20% early from 5 s and
 1 s early below that. Like the reports it is checked when a frame arrives, and
 its answer is dropped with the server's RTCP. mediamtx keeps a RECORD session
 alive on the media alone, so the keepalive matters only for servers that count
-RTSP requests. Validated against mediamtx 1.21 (ffprobe, ffmpeg and gst `rtspsrc`
-decode the published streams back, over both transports and both auth schemes)
-and against `RtspServerSrc` in tests.
+RTSP requests.
+
+`reconnect=N` (0 by default, gst's `rtspclientsink` has no reconnect) makes a
+lost session non-fatal: a failed send, a closed control connection or a failed
+first publish drops frames while the element retries the whole OPTIONS to RECORD
+handshake, with the `reconnect-backoff` doubling up to `reconnect-backoff-max`
+from the `ReconnectPolicy` `rtspsrc` uses. Attempts are made when a frame
+arrives after the backoff, the budget of N starts again with each loss, and a
+video pad sends nothing on the new session until a keyframe. Errors a retry
+cannot fix, a bad `location` or an AAC access unit too large for RTP, still
+fail the element.
+
+Validated against mediamtx 1.21: ffprobe, ffmpeg and gst `rtspsrc` decode the
+published streams back over both transports and both auth schemes, its API
+counts the sender reports in `inboundRTCPPackets`, and a `podman restart` of the
+server is followed by a new publishing session within a second. The tests run
+against `RtspServerSrc` and a scripted recorder.
 
 ## SRT
 

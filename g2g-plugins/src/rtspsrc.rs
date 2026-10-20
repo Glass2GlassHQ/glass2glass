@@ -53,81 +53,14 @@ use g2g_core::{
 };
 
 use crate::rtspclient::LowerTransport;
-use crate::rtspclient::{transports_from_flags, transports_to_flags};
-
-/// Reconnect policy for [`RtspSrc`]. Off by default: a session failure
-/// surfaces as `G2gError::Hardware` and the source ends. When enabled,
-/// the source retries up to `max_attempts` times with exponential backoff
-/// between `initial_backoff_ms` and `max_backoff_ms`. A `PipelinePacket::Flush`
-/// is emitted to downstream between sessions to signal the discontinuity
-/// (the decoder flushes its state, the sink resets `last_sequence`).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ReconnectPolicy {
-    pub(crate) max_attempts: u32,
-    pub(crate) initial_backoff_ms: u64,
-    pub(crate) max_backoff_ms: u64,
-}
-
-impl ReconnectPolicy {
-    pub(crate) const DISABLED: Self = Self {
-        max_attempts: 0,
-        initial_backoff_ms: 0,
-        max_backoff_ms: 0,
-    };
-
-    /// Fill the backoff bounds a bare `with_reconnect(n)` / `reconnect=n`
-    /// leaves at zero, so a caller that only asks for retries gets the
-    /// documented 250 ms .. 5 s doubling.
-    pub(crate) fn fill_backoff_defaults(&mut self) {
-        if self.initial_backoff_ms == 0 {
-            self.initial_backoff_ms = DEFAULT_INITIAL_BACKOFF_MS;
-        }
-        if self.max_backoff_ms == 0 {
-            self.max_backoff_ms = DEFAULT_MAX_BACKOFF_MS;
-        }
-    }
-}
+use crate::rtspclient::{
+    transports_from_flags, transports_to_flags, ReconnectPolicy, ReconnectState,
+};
 
 // log category shared by RtspSrc and RtspSrcN
 const LOG_CATEGORY: &str = "rtspsrc";
 // highest frame rate the negotiation placeholder accepts
 const MAX_PLACEHOLDER_FPS: u32 = 240;
-/// Wait before the first retry when only an attempt count was asked for.
-const DEFAULT_INITIAL_BACKOFF_MS: u64 = 250;
-/// Cap on the doubling retry backoff.
-const DEFAULT_MAX_BACKOFF_MS: u64 = 5_000;
-
-/// Retry counter for one [`ReconnectPolicy`], shared by the probe loop, the
-/// session loop, and [`RtspSrcN`](crate::rtspsrcn::RtspSrcN)'s loop so all
-/// three count attempts and double the backoff the same way.
-#[derive(Debug)]
-pub(crate) struct ReconnectState {
-    /// Retries taken so far, for the log line.
-    pub(crate) attempt: u32,
-    backoff_ms: u64,
-}
-
-impl ReconnectState {
-    pub(crate) fn new(policy: &ReconnectPolicy) -> Self {
-        Self {
-            attempt: 0,
-            backoff_ms: policy.initial_backoff_ms.max(1),
-        }
-    }
-
-    /// Milliseconds to wait before the next attempt, or `None` once
-    /// `max_attempts` retries have been handed out.
-    pub(crate) fn next_delay_ms(&mut self, policy: &ReconnectPolicy) -> Option<u64> {
-        if self.attempt >= policy.max_attempts {
-            return None;
-        }
-        self.attempt += 1;
-        let wait = self.backoff_ms;
-        self.backoff_ms = wait.saturating_mul(2).min(policy.max_backoff_ms.max(wait));
-        Some(wait)
-    }
-}
-
 /// Post-SETUP retina session stashed by `intercept_caps`, consumed by
 /// `run`'s first session attempt so the server isn't asked for two
 /// DESCRIBE / SETUP round-trips at startup. Reconnect attempts after

@@ -325,10 +325,12 @@ impl DigestGate {
 }
 
 // one publisher against g2g's RTSP responder, recording what it announces and sends
+// with `drop_from_timestamp`, the connection closes at the first RTP packet stamped at or after it
 async fn record_one_publisher(
-    listener: tokio::net::TcpListener,
+    listener: &tokio::net::TcpListener,
     gate: Option<DigestGate>,
     mut responder: RtspResponder,
+    drop_from_timestamp: Option<u32>,
 ) -> RecordedPublish {
     let (mut conn, _) = listener.accept().await.expect("publisher connects");
     let mut recorded = RecordedPublish::default();
@@ -342,6 +344,10 @@ async fn record_one_publisher(
                 };
                 let (channel, packet, consumed) =
                     (frame.channel, frame.packet.to_vec(), frame.consumed);
+                let is_rtp = channel % 2 == 0;
+                if is_rtp && drop_from_timestamp.is_some_and(|ts| rtp_timestamp(&packet) >= ts) {
+                    return recorded;
+                }
                 recorded.channels.entry(channel).or_default().push(packet);
                 pending.drain(..consumed);
                 continue;
@@ -401,7 +407,7 @@ async fn publish_and_record(
     let recorder = async {
         tokio::time::timeout(
             SERVER_DEADLINE,
-            record_one_publisher(listener, gate, responder),
+            record_one_publisher(&listener, gate, responder, None),
         )
         .await
         .expect("recorder finishes")
@@ -730,6 +736,124 @@ async fn do_rtsp_keep_alive_false_sends_none() {
     assert!(keepalive_requests(false).await.is_empty());
 }
 
+const P_SLICE_NAL_HEADER: u8 = 0x41;
+// the frame the server drops the connection at, and the next keyframe after it
+const DROPPED_FRAME: usize = 2;
+const KEYFRAME_AFTER_DROP: usize = 5;
+const RECONNECT_TEST_PACE: Duration = Duration::from_millis(20);
+
+// an IDR opens the stream and the frame after the drop, P slices fill the rest
+fn gop_frames() -> Vec<Vec<u8>> {
+    (0..ACCESS_UNITS)
+        .map(|i| match i {
+            0 | KEYFRAME_AFTER_DROP => access_unit(i),
+            _ => annex_b(&[&[P_SLICE_NAL_HEADER, i as u8, 0x9A]]),
+        })
+        .collect()
+}
+
+fn depayloaded_video(recorded: &RecordedPublish) -> Vec<Vec<u8>> {
+    let mut depayloader = RtpH264Depayloader::new();
+    recorded
+        .channels
+        .get(&interleaved_rtp_channel(VIDEO_PAD))
+        .into_iter()
+        .flatten()
+        .filter_map(|packet| depayloader.depacketize(packet))
+        .map(|access_unit| access_unit.data)
+        .collect()
+}
+
+struct DroppedConnectionPublish {
+    listener: tokio::net::TcpListener,
+    sink: RtspClientSink,
+    pads: [PadFrames; 1],
+}
+
+async fn dropped_connection_publish(reconnect_attempts: u64) -> DroppedConnectionPublish {
+    let (listener, location) = recorder_listener().await;
+    let mut sink = RtspClientSink::new(1, location);
+    sink.set_property("reconnect", PropValue::Uint(reconnect_attempts))
+        .expect("reconnect");
+    sink.set_property("reconnect-backoff", PropValue::Uint(1))
+        .expect("backoff");
+    let pads = [PadFrames {
+        caps: h264_caps(),
+        frames: gop_frames()
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| (f, i as u64 * FRAME_PERIOD_NS))
+            .collect(),
+    }];
+    DroppedConnectionPublish {
+        listener,
+        sink,
+        pads,
+    }
+}
+
+async fn record_until_the_drop(listener: &tokio::net::TcpListener) -> RecordedPublish {
+    let drop_at = rtp_timestamp_of_frame(DROPPED_FRAME);
+    record_one_publisher(listener, None, recorder_responder(), Some(drop_at)).await
+}
+
+fn rtp_timestamp_of_frame(index: usize) -> u32 {
+    (index as u64 * FRAME_PERIOD_NS * u64::from(MediaClock::VIDEO_RATE_HZ) / NS_PER_SECOND) as u32
+}
+
+#[tokio::test]
+async fn a_dropped_connection_republishes_from_the_next_keyframe() {
+    let DroppedConnectionPublish {
+        listener,
+        mut sink,
+        pads,
+    } = dropped_connection_publish(1).await;
+    let recorders = async {
+        let first = record_until_the_drop(&listener).await;
+        let second = record_one_publisher(&listener, None, recorder_responder(), None).await;
+        (first, second)
+    };
+    let send = async {
+        publish_frames(&mut sink, &pads, RECONNECT_TEST_PACE).await?;
+        end_streams(&mut sink, pads.len()).await
+    };
+    let ((first, second), published) =
+        tokio::time::timeout(SERVER_DEADLINE, async { tokio::join!(recorders, send) })
+            .await
+            .expect("both sessions finish");
+    published.expect("the publish survives the drop");
+    let frames = gop_frames();
+    assert_eq!(depayloaded_video(&first), frames[..DROPPED_FRAME]);
+    assert!(
+        second
+            .requests
+            .iter()
+            .any(|head| head.starts_with("ANNOUNCE ")),
+        "a new session is announced"
+    );
+    assert_eq!(
+        depayloaded_video(&second),
+        frames[KEYFRAME_AFTER_DROP..],
+        "the new session starts at a keyframe"
+    );
+    assert!(second.torn_down, "EOS tears the new session down");
+}
+
+#[tokio::test]
+async fn without_reconnect_a_dropped_connection_fails_the_publish() {
+    let DroppedConnectionPublish {
+        listener,
+        mut sink,
+        pads,
+    } = dropped_connection_publish(0).await;
+    let send = async {
+        publish_frames(&mut sink, &pads, RECONNECT_TEST_PACE).await?;
+        end_streams(&mut sink, pads.len()).await
+    };
+    let (_, published) = tokio::join!(record_until_the_drop(&listener), send);
+    assert!(published.is_err());
+}
+
 #[tokio::test]
 async fn digest_challenge_is_answered_on_every_request() {
     let gate = DigestGate {
@@ -782,6 +906,9 @@ fn launch_line_properties_reach_the_element() {
         ("tcp-timeout", "5000000"),
         ("rtcp-sr-interval", "2500"),
         ("do-rtsp-keep-alive", "false"),
+        ("reconnect", "3"),
+        ("reconnect-backoff", "100"),
+        ("reconnect-backoff-max", "2000"),
     ];
     let assignments: Vec<String> = settings.iter().map(|(k, v)| format!("{k}={v}")).collect();
     parse_launch(

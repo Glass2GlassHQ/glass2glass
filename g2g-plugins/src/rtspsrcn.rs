@@ -46,10 +46,12 @@ use g2g_core::{
 };
 
 use crate::g711::{G711_CLOCK_RATE_HZ, G711_DEFAULT_CHANNELS};
-use crate::rtspclient::{transports_from_flags, transports_to_flags, LowerTransport};
+use crate::rtspclient::{
+    transports_from_flags, transports_to_flags, LowerTransport, ReconnectPolicy, ReconnectState,
+};
 use crate::rtspsrc::{
     connect_describe, placeholder_framerate, video_caps_for, video_codec, video_stream_index,
-    with_placeholder_framerate, ReconnectPolicy, ReconnectState,
+    with_placeholder_framerate,
 };
 
 /// User-Agent sent on DESCRIBE / SETUP unless `user-agent` overrides it. Also
