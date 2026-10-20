@@ -431,6 +431,31 @@ tracker should treat specially, related to its `Segmentation` by `Contains`. The
 decode is pure Rust (`g2g-ml::segmentation`), so an `ort-web` caller in the
 browser that already holds both outputs reuses it without an element.
 
+### Tracking
+
+`g2g-plugins::tracker::Tracker` (`tracker`, `analytics` feature) is ByteTrack
+(Zhang et al. 2022) over the `ObjectDetection` nodes of each frame. Every
+detection on a confirmed track gets a `Tracking { object_id }` node and a
+`Detection -Tracks-> Tracking` relation, the shape the hosted Python element
+writes and `analyticsoverlay show-track=true` draws. Nothing else on the frame
+changes, and a frame with no `AnalyticsMeta` passes through without advancing
+the tracker, so a detector that skips frames does not age the tracks.
+
+Each track is a constant-velocity Kalman filter over box centre, aspect ratio and
+height in normalised coordinates, with the SORT noise terms. A frame first
+matches every confirmed track, lost ones included, against detections at or
+above `track-high-thresh` on the cost `1 - IoU x confidence` under
+`match-thresh`. The tracks tracked last frame that are still unmatched then try
+the low band above `track-low-thresh` on `1 - IoU` under 0.5. Assignment is
+Kuhn-Munkres with the lapjv cost-limit extension, so a pair is made only when it
+is cheaper than leaving both sides unmatched. A leftover detection at or above
+`new-track-thresh` starts a track, which takes its id on its second consecutive
+match (on the first frame of the stream at once). A track unmatched for more than
+`track-buffer` frames is dropped. Ids count up from 1 and are never reused.
+Matching ignores the class label, as ByteTrack does, so a detector that
+flips an object's class keeps its id. The property defaults are Ultralytics'
+`bytetrack.yaml`, so ids follow the hosted Python path.
+
 ### Records
 
 `g2g-plugins::metasink` (`analytics-json` feature) writes one JSON line per frame:
