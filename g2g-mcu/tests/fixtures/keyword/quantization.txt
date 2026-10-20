@@ -1,0 +1,4 @@
+input_scale 0.10171568393707275
+input_zero_point -128
+output_scale 0.00390625
+output_zero_point -128

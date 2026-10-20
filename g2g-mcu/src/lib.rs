@@ -23,6 +23,8 @@ pub mod hwjpeg;
 pub mod inference;
 pub mod jitter;
 mod lend;
+#[cfg(feature = "microflow")]
+pub mod microflow_backend;
 pub mod mixer;
 pub mod pcm;
 pub mod resample;
@@ -43,6 +45,8 @@ pub use hwh264::{H264EncodeInfo, H264Encoder, HwH264Enc};
 pub use hwjpeg::{HwJpegDec, JpegDecoder, JpegImageInfo, JpegSubsampling};
 pub use inference::{TensorFormat, TensorInference, TensorModel};
 pub use jitter::JitterBuffer;
+#[cfg(feature = "microflow")]
+pub use microflow_backend::MicroFlowModel;
 pub use mixer::Mixer;
 pub use pcm::{PcmConvert, PcmSink, PcmWriter};
 pub use resample::{Resampler, SampleRate};
