@@ -261,6 +261,15 @@ desktop NVIDIA box, a Windows D3D12 GPU, an Android phone NPU, and the Qualcomm
 and Apple NPUs all run the same element with the EP picked per platform, the
 architectural answer to MediaPipe's runtime CPU and GPU delegate switch.
 
+`tools/ortinfer-bench.sh` times `ortinfer` on the CUDA execution provider
+against the same YOLO11m ONNX model hosted through `pyelement` from
+gst-python-ml, both over `data/people.mp4` on the one box, and prints each
+run's frame count, fps, wall ms per frame and peak RSS. On the RTX 3060 on
+2026-10-20 the hosted path was the faster one, 38 fps against 27 for the native
+element at the same 1.26 GB peak RSS, two runs each. The runner's per-element
+p50 and p99 read the same 33.55 ms on every run, one histogram bucket, so the
+fps column is the number to read.
+
 ### ExecuTorch
 
 `ExecutorchInference` (`g2g-ml/src/executorchinfer.rs`, `executorch` feature,
