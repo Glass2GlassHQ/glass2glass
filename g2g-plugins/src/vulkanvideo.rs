@@ -1480,6 +1480,12 @@ impl H265ParameterSetTable {
             .vps
             .get(&sps.sps_video_parameter_set_id)
             .ok_or(MISSING)?;
+        // decodes wrong here (JCT-VC WPP_D), so it is refused
+        if pps.entropy_coding_sync_enabled_flag == 1 && sps.picture_width_in_ctbs() == 1 {
+            return Err(VulkanVideoError::StreamRefused(
+                "H.265 wavefront parallel processing on a picture one coding tree block wide is not supported",
+            ));
+        }
         Ok(H265ParameterSets {
             vps: vps.clone(),
             sps: sps.clone(),
@@ -11884,6 +11890,15 @@ impl H265Sps {
     fn max_dec_pic_buffering(&self) -> usize {
         usize::from(self.max_dec_pic_buffering_minus1[usize::from(self.sps_max_sub_layers_minus1)])
             + 1
+    }
+
+    // PicWidthInCtbsY (7-15)
+    fn picture_width_in_ctbs(&self) -> u32 {
+        let log2_ctb_size = u32::from(self.log2_min_luma_coding_block_size_minus3)
+            + 3
+            + u32::from(self.log2_diff_max_min_luma_coding_block_size);
+        self.pic_width_in_luma_samples
+            .div_ceil(1u32.checked_shl(log2_ctb_size).unwrap_or(u32::MAX))
     }
 
     // `sps_max_num_reorder_pics` of the highest sub-layer, the bound the output process uses
