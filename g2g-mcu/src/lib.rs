@@ -41,7 +41,9 @@ pub mod videoconvert;
 pub mod watchdog;
 
 pub use adpcm::{AdpcmDec, AdpcmEnc, ImaState};
-pub use cffi::{CFrameGrabber, CH264Encoder, CPacketSender, CaptureFn, EncodeFn, SendFn};
+pub use cffi::{
+    CFrameGrabber, CH264Encoder, CPacketSender, CTensorModel, CaptureFn, EncodeFn, InferFn, SendFn,
+};
 pub use g711::{G711Dec, G711Enc, Law};
 pub use grabber::{FrameGrabber, GrabberSrc};
 pub use hwh264::{H264EncodeInfo, H264Encoder, HwH264Enc};

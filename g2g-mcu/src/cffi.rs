@@ -3,7 +3,8 @@
 //! Rust. The board keeps its C DMA/capture routine and its C network stack; it
 //! registers them as function pointers, and g2g calls them each frame across
 //! [`CFrameGrabber`] (the [`FrameGrabber`] capture seam) and [`CPacketSender`]
-//! (the [`PacketSender`] egress seam).
+//! (the [`PacketSender`] egress seam), and a C inference runtime runs each
+//! tensor across [`CTensorModel`] (the [`TensorModel`] seam).
 //!
 //! This is the inverse direction of the existing C ABI: `examples/g2g-freertos`
 //! links the whole pipeline as a Rust static library the C app *calls into*;
@@ -26,6 +27,7 @@ use g2g_core::rtp::RTP_HEADER_LEN;
 
 use crate::grabber::FrameGrabber;
 use crate::hwh264::{H264EncodeInfo, H264Encoder};
+use crate::inference::{TensorFormat, TensorModel};
 use crate::rtp::PacketSender;
 
 /// A C capture callback: fill up to `len` bytes at `buf` with one frame and
@@ -170,6 +172,89 @@ impl H264Encoder for CH264Encoder {
 impl fmt::Debug for CH264Encoder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CH264Encoder").finish_non_exhaustive()
+    }
+}
+
+/// A C inference callback: run the model once on `input_len` bytes at `input`
+/// and write exactly `output_len` bytes at `output`. Return `0` on success or a
+/// negative value on a runtime fault. The firmware's inference runtime sits
+/// behind this pointer; `ctx` is its opaque handle, and its tensor arena and
+/// interpreter state stay in the firmware's own static memory.
+pub type InferFn = unsafe extern "C" fn(
+    ctx: *mut c_void,
+    input: *const u8,
+    input_len: usize,
+    output: *mut u8,
+    output_len: usize,
+) -> i32;
+
+/// A [`TensorModel`] backed by a C inference callback: the zero-Rust inference
+/// seam. [`TensorInference`] hands each input tensor to the firmware's C
+/// runtime through this pointer and publishes the output tensor it writes.
+///
+/// [`TensorInference`]: crate::inference::TensorInference
+pub struct CTensorModel {
+    run: InferFn,
+    ctx: *mut c_void,
+    input: TensorFormat,
+    output: TensorFormat,
+}
+
+impl CTensorModel {
+    /// Wrap a C inference callback, its opaque context, and the model's input
+    /// and output tensor formats.
+    ///
+    /// # Safety
+    /// `run` must stay a valid function for the life of this model and `ctx` a
+    /// valid handle to pass it; each call must write no more than `output_len`
+    /// bytes at `output` and return `0` (or a negative fault code).
+    pub unsafe fn new(
+        run: InferFn,
+        ctx: *mut c_void,
+        input: TensorFormat,
+        output: TensorFormat,
+    ) -> Self {
+        Self {
+            run,
+            ctx,
+            input,
+            output,
+        }
+    }
+}
+
+impl TensorModel for CTensorModel {
+    fn input(&self) -> TensorFormat {
+        self.input
+    }
+
+    fn output(&self) -> TensorFormat {
+        self.output
+    }
+
+    async fn run(&mut self, input: &[u8], output: &mut [u8]) -> Result<(), G2gError> {
+        // SAFETY: the constructor's contract: `run` is a valid function over
+        // `ctx`; it reads `input_len` bytes at `input` and writes at most
+        // `output_len` bytes at `output`.
+        let rc = unsafe {
+            (self.run)(
+                self.ctx,
+                input.as_ptr(),
+                input.len(),
+                output.as_mut_ptr(),
+                output.len(),
+            )
+        };
+        if rc < 0 {
+            return Err(G2gError::Hardware(HardwareError::Peripheral));
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for CTensorModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CTensorModel").finish_non_exhaustive()
     }
 }
 

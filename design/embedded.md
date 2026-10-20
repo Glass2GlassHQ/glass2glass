@@ -184,6 +184,14 @@ holds it itself, since a compiled backend keeps its intermediates on the stack
 and has no arena. `input_caps` and `output_caps` give the app the
 `Caps::Tensor` of each side for wiring a static graph.
 
+A vendor runtime written in C or C++, such as ExecuTorch with CMSIS-NN or
+Ethos-U kernels or LiteRT for Microcontrollers, links into the firmware and is
+called through `g2g-mcu::cffi::CTensorModel`. The firmware registers one
+`InferFn` pointer, an opaque context and the two `TensorFormat`s, and each frame
+calls the pointer once with the input tensor and the ring slot for the output.
+A negative return is `HardwareError::Peripheral`. The runtime's arena is its
+own static memory behind the context, and g2g allocates nothing.
+
 The first backend is MicroFlow (`microflow` feature), a pure-Rust `no_std`
 TinyML compiler whose `#[model("x.tflite")]` proc macro turns a TFLite model
 into Rust at build time, every tensor a fixed-size nalgebra matrix, so it needs
