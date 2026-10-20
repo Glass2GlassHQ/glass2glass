@@ -829,7 +829,11 @@ as before.
   (`Registry::register_uri_fanout`). The hook's head, a byte source plus demuxer or a
   session source such as `RtspSrcN`, becomes the `d` node, and each reference
   decodes the port its pad request names: `d.video_N` / `d.audio_N` by kind,
-  `d.src_N` or the Nth bare `d.` by position. A URI no hook claims takes the
+  `d.src_N` by position. A bare `d.` takes the first port no other reference
+  took whose kind the branch's first element declares on its sink pad (any kind
+  when it declares none), as gst-launch's delayed link tries each new pad against
+  the waiting branches in the order they are written. Named references claim
+  their ports first. A URI no hook claims takes the
   single-stream expansion, its last node named `d`. The decode target of every
   fan-out port, here and behind `decodebin name=d`, follows the port's caps rather
   than the pad request, so a bare `d.` on an audio port decodes to raw audio.

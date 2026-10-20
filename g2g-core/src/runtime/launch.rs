@@ -205,6 +205,9 @@ pub enum ParseError {
     },
     /// `source` is the decodebin's file location, else its upstream element
     NoStreamOfKind { source: String, kind: StreamType },
+    /// A bare `d.` branch of a fan-out found no free stream of a kind its first
+    /// element takes.
+    NoFanoutStream { element: String, consumer: String },
 }
 
 impl From<GraphError> for ParseError {
@@ -321,6 +324,9 @@ impl core::fmt::Display for ParseError {
             }
             ParseError::NoStreamOfKind { source, kind } => {
                 write!(f, "decodebin: {source} has no {} stream to decode", kind.name())
+            }
+            ParseError::NoFanoutStream { element, consumer } => {
+                write!(f, "{element}: no free stream of a kind {consumer} takes")
             }
             ParseError::NoDecodeChain(caps) => {
                 write!(f, "decodebin: no decoder chain from {caps} to raw (no decoder feature compiled in, or a container that needs a demuxer)")
@@ -2768,6 +2774,13 @@ fn build_graph(
     // Which port each link out of a fan-out node reads, filled for every node
     // whose ports are matched to its branches.
     let mut fanout_links: Vec<Option<FanoutLinks>> = (0..specs.len()).map(|_| None).collect();
+    let consumers_of = |ei: usize| -> Vec<&str> {
+        links
+            .iter()
+            .filter(|(s, _, _, _)| *s == ei)
+            .map(|(_, d, _, _)| specs[*d].name.as_str())
+            .collect()
+    };
     for ei in 0..specs.len() {
         if !is_decodebin(&specs[ei].name) || out_deg[ei] == 0 || prebuilt[ei].is_some() {
             continue;
@@ -2789,10 +2802,12 @@ fn build_graph(
         let kinds: Vec<StreamType> = caps.iter().map(StreamType::of).collect();
         fanout_links[ei] = Some(FanoutLinks {
             port_of_link: fanout_link_ports(
+                registry,
                 &specs[ei].name,
                 &kinds,
                 &demux_pads[ei],
                 &output_pad_names[ei],
+                &consumers_of(ei),
             )?,
             ports: kinds.len(),
         });
@@ -2808,10 +2823,12 @@ fn build_graph(
         let kinds: Vec<StreamType> = fanout.ports.iter().map(|p| p.stream_type).collect();
         fanout_links[ei] = Some(FanoutLinks {
             port_of_link: fanout_link_ports(
+                registry,
                 &specs[ei].name,
                 &kinds,
                 &demux_pads[ei],
                 &output_pad_names[ei],
+                &consumers_of(ei),
             )?,
             ports: kinds.len(),
         });
@@ -2820,12 +2837,20 @@ fn build_graph(
     let is_select: Vec<bool> = (0..specs.len())
         .map(|ei| demux_select_node[ei].is_some() || fanout_links[ei].is_some())
         .collect();
-    // a name registered both ways (`rtspsrc`) is the fan-out form only when several pads are linked
+    // the single-stream form of a name registered both ways (`rtspsrc`) serves one
+    // linked pad whose consumer takes the kind that form makes
+    let single_source_serves = |ei: usize| {
+        let made = registry
+            .declared_output_caps(&specs[ei].name)
+            .map(|caps| StreamType::of(&caps));
+        out_deg[ei] <= 1
+            && registry.is_source(&specs[ei].name)
+            && consumers_of(ei)
+                .iter()
+                .all(|consumer| made.is_none_or(|kind| consumer_takes(registry, consumer, kind)))
+    };
     let is_fanout_src = |ei: usize| {
-        let name = &specs[ei].name;
-        in_deg[ei] == 0
-            && registry.is_fanout_src(name)
-            && (out_deg[ei] > 1 || !registry.is_source(name))
+        in_deg[ei] == 0 && registry.is_fanout_src(&specs[ei].name) && !single_source_serves(ei)
     };
     // Auto-tee (M473): a non-tee, non-demux node whose single output fans out to
     // several consumers gets an implicit `tee` spliced in below, so a gst-launch
@@ -2901,10 +2926,12 @@ fn build_graph(
                 .collect();
             fanout_links[ei] = Some(FanoutLinks {
                 port_of_link: fanout_link_ports(
+                    registry,
                     &spec.name,
                     &kinds,
                     &demux_pads[ei],
                     &output_pad_names[ei],
+                    &consumers_of(ei),
                 )?,
                 ports: kinds.len(),
             });
@@ -3446,16 +3473,33 @@ struct FanoutLinks {
     ports: usize,
 }
 
-// `d.video_1` reads the second video port, `d.src_1` and the second bare `d.` the second port
+// an element with no declared sink caps takes any stream, and a stream of unknown kind goes to any element
+fn consumer_takes(registry: &Registry, consumer: &str, kind: StreamType) -> bool {
+    kind == StreamType::Unknown
+        || registry.declared_input_caps(consumer).is_none_or(|set| {
+            set.alternatives()
+                .iter()
+                .any(|caps| StreamType::of(caps) == kind)
+        })
+}
+
+// `d.video_1` reads the second video port and `d.src_1` the second port. A bare `d.` takes
+// the first free port its consumer takes, as gst-launch's delayed link picks a pad by caps.
 fn fanout_link_ports(
+    registry: &Registry,
     element: &str,
     kinds: &[StreamType],
     requests: &[PadRequest],
     pad_names: &[&str],
+    consumers: &[&str],
 ) -> Result<Vec<u8>, ParseError> {
     let mut taken = alloc::vec![false; kinds.len()];
-    let mut chosen = Vec::with_capacity(requests.len());
+    let mut named: Vec<Option<usize>> = Vec::with_capacity(requests.len());
     for (request, pad) in requests.iter().zip(pad_names) {
+        if pad.is_empty() {
+            named.push(None);
+            continue;
+        }
         let kind = match request.kind {
             PadKind::Video => Some(StreamType::Video),
             PadKind::Audio => Some(StreamType::Audio),
@@ -3473,9 +3517,30 @@ fn fanout_link_ports(
                 element: element.to_string(),
                 pad: pad.to_string(),
             })?;
-        chosen.push(port as u8);
+        named.push(Some(port));
     }
-    Ok(chosen)
+    named
+        .into_iter()
+        .zip(consumers)
+        .map(|(port, consumer)| {
+            let port = match port {
+                Some(port) => port,
+                None => {
+                    let port = (0..kinds.len())
+                        .find(|&port| {
+                            !taken[port] && consumer_takes(registry, consumer, kinds[port])
+                        })
+                        .ok_or_else(|| ParseError::NoFanoutStream {
+                            element: element.to_string(),
+                            consumer: consumer.to_string(),
+                        })?;
+                    taken[port] = true;
+                    port
+                }
+            };
+            Ok(port as u8)
+        })
+        .collect()
 }
 
 fn add_uri_fanout_head(

@@ -77,18 +77,18 @@ feeding a multi-stream container.)
 understands: a local file, `rtsp://` (video and audio off one session), and HLS
 (`hls://`, or an `http(s)://` URL ending in `.m3u8`, as gst's `uridecodebin` takes
 it). `uridecodebin uri=rtsp://cam/stream name=d  d. ! videoconvert ! autovideosink
-d. ! audioconvert ! autoaudiosink` runs unchanged. Bare `d.` refs take the ports
-in order, video first, where gst links them by caps. When the audio branch comes
-first, name the pads the way `uridecodebin3` does (`d.video_0`, `d.audio_0`). A
-stream no `d.` reads is dropped and the rest play, as gst leaves its pad unlinked.
+d. ! audioconvert ! autoaudiosink` runs unchanged. A bare `d.` takes the first
+free stream its first element takes, as gst links a pad by caps, so the audio
+branch can come first. An element that declares no sink caps (`fakesink`) takes
+the next stream in order. A stream no `d.` reads is dropped and the rest play, as gst leaves its pad unlinked.
 
 **`rtspsrc name=s` has a pad per stream**, as in gst: `rtspsrc name=s
 location=rtsp://cam/stream  s. ! h264parse ! avdec_h264 ! ...  s. ! aacparse !
-avdec_aac ! ...` plays video on the first linked pad and audio on the second, off
-one session. g2g's `rtspsrc` depayloads itself, so drop gst's `rtph264depay` /
-`rtpmp4gdepay`. Link video first: g2g assigns these pads in link order, not by
-caps. With one pad linked it is the video-only source. `rtspsrcn` is the same
-multi-pad element under its own name.
+avdec_aac ! ...` plays the video and the audio off one session, each branch on the
+pad its first element takes, in either order. g2g's `rtspsrc` depayloads itself,
+so drop gst's `rtph264depay` / `rtpmp4gdepay`. One video branch is the video-only
+source, one audio branch reads the audio pad and drops the video. `rtspsrcn` is
+the same multi-pad element under its own name.
 
 **Named input / request pads** let a fan-in reference its inputs by name in any
 order: `d.video_0 ! ... ! o.video   d.text_0 ! o.text   textoverlay name=o ! ...`
