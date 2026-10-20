@@ -307,8 +307,15 @@ fn parse_vui(br: &mut BitReader) -> (Colorimetry, H264VuiTail) {
 /// one exception, returning 0: it pins output order to decode order by spec, a
 /// proof rather than a declaration. `None` if there is no parseable SPS.
 ///
-/// Consumed by the libavcodec decoder (`ffmpegdec`), so gated like it.
-#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+/// Consumed by the libavcodec decoder (`ffmpegdec`) and `vulkanvideodec`, so
+/// gated like them.
+#[cfg(any(
+    all(target_os = "linux", feature = "ffmpeg"),
+    all(
+        any(target_os = "linux", target_os = "windows"),
+        feature = "vulkan-video"
+    )
+))]
 pub(crate) fn sps_reorder_frames(au: &[u8]) -> Option<u8> {
     for nal in crate::annexb::nal_units_any(au) {
         if nal.first().map(|b| b & 0x1F) != Some(7) {
@@ -323,7 +330,13 @@ pub(crate) fn sps_reorder_frames(au: &[u8]) -> Option<u8> {
 }
 
 /// Parse an SPS RBSP (post NAL-header byte) for its level-derived reorder depth.
-#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+#[cfg(any(
+    all(target_os = "linux", feature = "ffmpeg"),
+    all(
+        any(target_os = "linux", target_os = "windows"),
+        feature = "vulkan-video"
+    )
+))]
 fn parse_sps_reorder(rbsp: &[u8]) -> Option<u8> {
     // Baseline (profile 66) is not special-cased to zero: some JVT conformance
     // vectors declare Baseline yet still carry pictures libavcodec reorders (it
@@ -347,7 +360,13 @@ fn parse_sps_reorder(rbsp: &[u8]) -> Option<u8> {
 
 /// `MaxDpbMbs` for an H.264 level (Table A-1), in macroblocks. The reorder /
 /// DPB frame bound is this divided by the frame size in macroblocks.
-#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+#[cfg(any(
+    all(target_os = "linux", feature = "ffmpeg"),
+    all(
+        any(target_os = "linux", target_os = "windows"),
+        feature = "vulkan-video"
+    )
+))]
 fn max_dpb_mbs(level_idc: u8) -> u32 {
     match level_idc {
         0..=10 => 396,
