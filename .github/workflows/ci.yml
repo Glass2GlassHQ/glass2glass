@@ -228,7 +228,7 @@ jobs:
       - name: test g2g-plugins (ffmpeg encoder colorimetry)
         run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1124_encoder_colorimetry
       - name: TS audio codec auto-plug selection
-        run: cargo test -p g2g-plugins --locked --features ffmpeg,opus --test m753_ts_audio_codecs --test m757_ac3_flac
+        run: cargo test -p g2g-plugins --locked --features ffmpeg,opus --test m753_ts_audio_codecs --test m757_ac3_flac --test m1731_ts_loas_aac
       # ffmpeg packetizes the A/V fixture as RTP, the job with its CLI is where these run
       - name: RTSP video and audio pads
         run: cargo test -p g2g-plugins --locked --features ffmpeg,rtsp,rtsp-server,rtsp-client-sink,metadata --test m1650_uridecodebin_fanout --test m1652_rtspsrc_stream_pads --test m1680_rtsp_probe_in_runtime --test m1681_fanout_unlinked_streams --test m1682_fanout_links_by_caps --test m1710_capture_time_paths
@@ -874,6 +874,8 @@ jobs:
       # continuity errors and measures the constant bitrate from the PCRs.
       - name: MPEG-TS broadcast mux oracles (mpegtsmux vs ffprobe + TSDuck)
         run: cargo test -p g2g-plugins --locked --features std --test m1249_ts_mux_broadcast -- --nocapture
+      - name: LOAS AAC in MPEG-TS (tsmux vs ffprobe + gst)
+        run: cargo test -p g2g-plugins --locked --features std --test m1731_ts_loas_aac -- --nocapture
       # FLV both ways (M662): flvdemux's extracted elementary streams decoded
       # standalone by ffmpeg; flvmux's native FLV probed + decoded by ffmpeg.
       - name: FLV oracles (flvmux + flvdemux vs ffmpeg)
