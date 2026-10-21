@@ -2000,11 +2000,14 @@ impl AsyncElement for FfmpegVideoDec {
                             if self.output_format() == OutputFormat::Auto
                                 && matches!(self.codec_kind, Some(VideoCodec::Tagged(_)))
                             {
-                                self.requested_output_format = match format {
+                                let packed_rgb = match format {
                                     RawVideoFormat::Rgba8 => Some(OutputFormat::Rgba),
                                     RawVideoFormat::Rgb8 => Some(OutputFormat::Rgb),
                                     _ => None,
                                 };
+                                if packed_rgb.is_some() {
+                                    self.requested_output_format = packed_rgb;
+                                }
                             }
                             self.push_downstream(out, PipelinePacket::CapsChanged(c.clone()))
                                 .await?;

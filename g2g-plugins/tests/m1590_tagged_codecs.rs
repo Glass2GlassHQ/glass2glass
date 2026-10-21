@@ -14,6 +14,8 @@ const QTRLE_MOV: &str = "tagged_qtrle_ima4.mov";
 const GSM_WAV: &str = "tagged_gsm_ms.wav";
 // a fate-suite Screenpresso AVI cut inside its second frame, which libavcodec rejects
 const SCREENPRESSO_CUT_AVI: &str = "tagged_screenpresso_cut.avi";
+// two 32x16 frames of HuffYUV 4:2:2 in AVI, beside ffmpeg's yuv422p decode
+const HUFFYUV_422_AVI: &str = "tagged_huffyuv_422.avi";
 // every fixture carries 8 kHz mono audio
 const AUDIO_CAPS: &str = "audio/x-raw,format=S16LE,rate=8000,channels=1";
 
@@ -71,6 +73,28 @@ async fn a_cut_frame_the_decoder_rejects_does_not_stop_the_stream() {
     )
     .await;
     assert_eq!(decoded, expected(&format!("{SCREENPRESSO_CUT_AVI}.rgba")));
+}
+
+// the solve picks I420 for a 4:2:2 tagged codec, and the decoder keeps its own chroma for videoconvert
+#[tokio::test]
+async fn a_tagged_4_2_2_codec_decodes_behind_a_converter() {
+    const WIDTH: usize = 32;
+    const HEIGHT: usize = 16;
+    let luma = WIDTH * HEIGHT;
+    let decoded = decode(
+        &fixture(HUFFYUV_422_AVI),
+        "videoconvert ! video/x-raw,format=I420",
+        "huffyuv",
+    )
+    .await;
+    let reference = expected(&format!("{HUFFYUV_422_AVI}.y42b"));
+    let i420_frame = luma * 3 / 2;
+    let y42b_frame = luma * 2;
+    assert_eq!(decoded.len() / i420_frame, reference.len() / y42b_frame);
+    // a 4:2:2 to 4:2:0 conversion leaves the luma plane as decoded
+    for (frame, expected_frame) in decoded.chunks(i420_frame).zip(reference.chunks(y42b_frame)) {
+        assert_eq!(frame[..luma], expected_frame[..luma]);
+    }
 }
 
 #[tokio::test]
