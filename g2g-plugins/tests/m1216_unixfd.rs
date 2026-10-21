@@ -12,8 +12,10 @@
 mod collect_sink;
 use collect_sink::CollectSink;
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command};
@@ -35,7 +37,9 @@ use g2g_plugins::appsrc::register_appsrc;
 use g2g_plugins::dmabufmap::DmaBufReadMap;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::scmfd;
-use g2g_plugins::unixfd::{UnixFdSink, UnixFdSrc};
+use g2g_plugins::unixfd::{
+    UnixFdSink, UnixFdSrc, MAX_UNRELEASED_BUFFERS, MEMFD_POOL_CAPACITY, RELEASE_WAIT_TIMEOUT,
+};
 use g2g_plugins::unixfdwire::{
     caps_payload, gst_video_format, release_payload, Memory, NewBuffer, SocketType, VideoMeta,
     VideoPlane, CLOCK_TIME_NONE, COMMAND_CAPS, COMMAND_EOS, COMMAND_NEW_BUFFER,
@@ -51,6 +55,7 @@ const FRAME_BYTES: usize = ROW_BYTES * HEIGHT as usize;
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 const FRAME_PERIOD_NS: u64 = NANOS_PER_SECOND / FRAMERATE as u64;
 const FRAMES: u64 = 12;
+const FRAMES_PAST_POOL: u64 = MEMFD_POOL_CAPACITY as u64 + FRAMES;
 /// Both ends sample the clock offset per frame, a few reads apart.
 const PTS_TOLERANCE_NS: u64 = 1_000_000;
 /// A receiver that starts after the sender sees its first frames clamped to
@@ -133,14 +138,16 @@ fn timing(index: u64) -> FrameTiming {
     }
 }
 
-fn system_frame(index: u64) -> PipelinePacket {
+fn system_packet(bytes: Vec<u8>, index: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(
-            frame_bytes(index).into_boxed_slice(),
-        )),
+        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
         timing(index),
         index,
     ))
+}
+
+fn system_frame(index: u64) -> PipelinePacket {
+    system_packet(frame_bytes(index), index)
 }
 
 fn memfd_holding(bytes: &[u8]) -> OwnedFd {
@@ -486,6 +493,193 @@ async fn the_sink_holds_a_buffer_until_the_client_releases_it() {
         second_watch.share_count(),
         1,
         "a dropped client releases what it held"
+    );
+}
+
+fn read_new_buffer(stream: &UnixStream) -> (NewBuffer, std::fs::File) {
+    loop {
+        let (command, payload, mut fds) = read_message(stream);
+        if command == COMMAND_CAPS {
+            continue;
+        }
+        assert_eq!(command, COMMAND_NEW_BUFFER);
+        assert_eq!(fds.len(), 1, "one fd per memory");
+        let buffer = NewBuffer::decode(&payload).expect("a well-formed buffer");
+        return (buffer, std::fs::File::from(fds.remove(0)));
+    }
+}
+
+fn memory_bytes(buffer: &NewBuffer, memfd: &std::fs::File) -> Vec<u8> {
+    let memory = &buffer.memories[0];
+    let mut bytes = vec![0u8; memory.size as usize];
+    memfd
+        .read_exact_at(&mut bytes, memory.offset)
+        .expect("read the memfd");
+    bytes
+}
+
+fn inode(memfd: &std::fs::File) -> u64 {
+    memfd.metadata().expect("stat the memfd").ino()
+}
+
+// A raw client reads each payload and releases it before the next is sent. It
+// keeps every received memfd open, so no inode number is handed out twice.
+async fn sent_through_a_releasing_client(payloads: &[Vec<u8>]) -> Vec<(Vec<u8>, std::fs::File)> {
+    let socket = unique_path("pool");
+    let caps = rgba_caps(WIDTH, HEIGHT);
+    let mut sink = UnixFdSink::new(socket.display().to_string());
+    sink.configure_pipeline(&caps).expect("the sink binds");
+    let client = UnixStream::connect(&socket).expect("connect");
+    let mut out = CollectSink::default();
+    let mut received = Vec::new();
+    for (index, payload) in payloads.iter().enumerate() {
+        sink.process(system_packet(payload.clone(), index as u64), &mut out)
+            .await
+            .expect("send a frame");
+        let (buffer, memfd) = read_new_buffer(&client);
+        received.push((memory_bytes(&buffer, &memfd), memfd));
+        write_message(
+            &client,
+            COMMAND_RELEASE_BUFFER,
+            &release_payload(buffer.id),
+            &[],
+        );
+    }
+    received
+}
+
+#[tokio::test]
+async fn a_released_memfd_carries_the_next_frame() {
+    let payloads: Vec<Vec<u8>> = (0..FRAMES_PAST_POOL).map(frame_bytes).collect();
+    let received = sent_through_a_releasing_client(&payloads).await;
+    assert_eq!(received.len(), payloads.len());
+    for (index, ((bytes, _), payload)) in received.iter().zip(&payloads).enumerate() {
+        assert_eq!(bytes, payload, "frame {index}");
+    }
+    let inodes: HashSet<u64> = received.iter().map(|(_, memfd)| inode(memfd)).collect();
+    assert_eq!(inodes.len(), 1, "every frame reuses the first memfd");
+}
+
+#[tokio::test]
+async fn a_memfd_is_reused_only_for_a_frame_that_fits() {
+    let small = frame_bytes(0);
+    let large = frame_bytes(1).repeat(2);
+    let received =
+        sent_through_a_releasing_client(&[small.clone(), large.clone(), small.clone()]).await;
+    let [(first_bytes, first), (second_bytes, second), (third_bytes, third)] = received.as_slice()
+    else {
+        panic!("three frames arrive, not {}", received.len());
+    };
+    assert_eq!(
+        (first_bytes, second_bytes, third_bytes),
+        (&small, &large, &small)
+    );
+    assert_ne!(
+        inode(first),
+        inode(second),
+        "the small memfd cannot hold the large frame"
+    );
+    let second_size = second.metadata().expect("stat the memfd").len();
+    assert!(
+        second_size >= large.len() as u64,
+        "memfd of {second_size} bytes"
+    );
+    assert_eq!(
+        inode(second),
+        inode(third),
+        "the large memfd holds the small frame"
+    );
+}
+
+// The client reads nothing and releases nothing, so the frame past the cap
+// waits out the timeout and then drops it.
+#[tokio::test]
+async fn a_client_that_never_releases_is_dropped_after_the_wait() {
+    let socket = unique_path("never_release");
+    let caps = rgba_caps(WIDTH, HEIGHT);
+    let mut sink = UnixFdSink::new(socket.display().to_string());
+    sink.configure_pipeline(&caps).expect("the sink binds");
+    let _client = UnixStream::connect(&socket).expect("connect");
+    let mut out = CollectSink::default();
+    let held = MAX_UNRELEASED_BUFFERS as u64;
+    let mut watches = Vec::new();
+    for index in 0..held {
+        let dmabuf = padded_dmabuf(index);
+        watches.push(dmabuf.clone());
+        sink.process(dmabuf_frame(dmabuf, index), &mut out)
+            .await
+            .expect("send a frame the client holds");
+    }
+    assert!(
+        watches.iter().all(|watch| watch.share_count() == 2),
+        "the client holds every frame"
+    );
+
+    let started = tokio::time::Instant::now();
+    tokio::time::timeout(
+        RELEASE_WAIT_TIMEOUT + RUN_DEADLINE,
+        sink.process(dmabuf_frame(padded_dmabuf(held), held), &mut out),
+    )
+    .await
+    .expect("the sink stops waiting")
+    .expect("dropping the client does not fail the sink");
+    let waited = started.elapsed();
+    assert!(waited >= RELEASE_WAIT_TIMEOUT, "waited {waited:?}");
+    assert_eq!(sink.get_property("num-clients"), Some(PropValue::Uint(0)));
+    assert!(
+        watches.iter().all(|watch| watch.share_count() == 1),
+        "a dropped client releases what it held"
+    );
+}
+
+// Checks each frame against `frame_bytes` in arrival order, then drops it so
+// the source releases it.
+#[derive(Debug, Default)]
+struct CheckingOutput {
+    frames: u64,
+    corrupted: Vec<u64>,
+}
+
+impl OutputSink for CheckingOutput {
+    fn poll_push(
+        &mut self,
+        _cx: &mut Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> Poll<Result<PushOutcome, G2gError>> {
+        if let Some(PipelinePacket::DataFrame(frame)) = packet.take() {
+            let expected = frame_bytes(self.frames);
+            if frame.domain.as_system_slice() != Some(expected.as_slice()) {
+                self.corrupted.push(self.frames);
+            }
+            self.frames += 1;
+        }
+        Poll::Ready(Ok(PushOutcome::Accepted))
+    }
+}
+
+#[tokio::test]
+async fn frames_past_the_pool_arrive_intact() {
+    let caps = rgba_caps(WIDTH, HEIGHT);
+    let (mut sink, mut source) = connected_pair(SocketType::Path, "pool_loopback");
+    sink.configure_pipeline(&caps).expect("the sink binds");
+    let packets = (0..FRAMES_PAST_POOL).map(system_frame).collect();
+    let mut out = CheckingOutput::default();
+    let (_, received) = tokio::time::timeout(RUN_DEADLINE, async {
+        tokio::join!(
+            feed(&mut sink, &caps, packets),
+            receive_into(&mut source, &mut out)
+        )
+    })
+    .await
+    .expect("the loopback finishes");
+    let (_, count) = received.expect("the source runs");
+
+    assert_eq!(count, FRAMES_PAST_POOL);
+    assert_eq!(out.frames, FRAMES_PAST_POOL);
+    assert!(
+        out.corrupted.is_empty(),
+        "corrupted frames {:?}",
+        out.corrupted
     );
 }
 
@@ -896,7 +1090,8 @@ async fn unixfdsrc_reads_gst_unixfdsink() {
     );
 }
 
-/// g2g sends, gst receives and writes the bytes out.
+/// g2g sends, gst receives and writes the bytes out, over more frames than the
+/// memfd pool holds.
 #[tokio::test]
 #[ignore = "needs gst-launch-1.0 with gst-plugins-bad"]
 async fn unixfdsink_feeds_gst_unixfdsrc() {
@@ -912,7 +1107,7 @@ async fn unixfdsink_feeds_gst_unixfdsrc() {
     ))
     .spawn()
     .expect("gst-launch-1.0 is on PATH");
-    let packets = (0..FRAMES).map(system_frame).collect();
+    let packets = (0..FRAMES_PAST_POOL).map(system_frame).collect();
     tokio::time::timeout(GST_DEADLINE, feed(&mut sink, &caps, packets))
         .await
         .expect("the sender finishes");
@@ -920,6 +1115,6 @@ async fn unixfdsink_feeds_gst_unixfdsrc() {
     waiter.await.expect("the gst peer ends");
     drop(sink);
 
-    let expected: Vec<u8> = (0..FRAMES).flat_map(frame_bytes).collect();
+    let expected: Vec<u8> = (0..FRAMES_PAST_POOL).flat_map(frame_bytes).collect();
     assert!(std::fs::read(&output).expect("read the gst output") == expected);
 }

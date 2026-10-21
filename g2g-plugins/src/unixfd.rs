@@ -4,9 +4,12 @@
 //! [`crate::unixfdwire`].
 //!
 //! The sink listens on a unix socket and serves any number of clients. A
-//! dma-buf frame goes out as its own fd, a system frame is copied into a fresh
-//! memfd. Each client holds every buffer it was sent until it answers with
-//! RELEASE_BUFFER or disconnects.
+//! dma-buf frame goes out as its own fd, a system frame is copied into a memfd
+//! taken from a pool, as in gst. Each client holds every buffer it was sent
+//! until it answers with RELEASE_BUFFER or disconnects. A memfd no client holds
+//! any more goes back to the pool and carries a later frame that fits in it.
+//! When no free memfd fits, the smallest free one is closed and a new one is
+//! made, as gst's allocator does, so the sink never waits on the pool.
 //!
 //! The source connects, takes its caps from the first CAPS command, and maps
 //! each memfd read-only into a system frame without copying. The release goes
@@ -19,10 +22,13 @@
 //! subtracts its own base time. Without an elected clock either end stands in
 //! the monotonic clock with the base time taken when it starts.
 //!
-//! Three deviations from gst. The sink sends its caps once the first frame says
-//! whether they carry `memory:DMABuf`, rather than on accept. A system frame
-//! gets a fresh memfd instead of one from a pool. The source retries its
-//! connect for [`CONNECT_RETRY_WINDOW`], so either side can start first.
+//! Four deviations from gst. The sink sends its caps once the first frame says
+//! whether they carry `memory:DMABuf`, rather than on accept. The pool keeps at
+//! most [`MEMFD_POOL_CAPACITY`] free memfds, where gst keeps every one. A client
+//! holding [`MAX_UNRELEASED_BUFFERS`] buffers gets [`RELEASE_WAIT_TIMEOUT`] to
+//! release one before the sink drops it, where gst keeps sending and holding.
+//! The source retries its connect for [`CONNECT_RETRY_WINDOW`], so either side
+//! can start first.
 
 use core::ffi::{c_void, CStr};
 use core::future::Future;
@@ -82,6 +88,11 @@ pub const CONNECT_RETRY_WINDOW: Duration = Duration::from_secs(5);
 const CONNECT_RETRY_GAP: Duration = Duration::from_millis(20);
 /// How often the source looks for dma-buf frames downstream has dropped.
 const DMABUF_RELEASE_POLL: Duration = Duration::from_millis(5);
+// above the forty frames of x264's default lookahead, which a gst encoder behind unixfdsrc holds
+pub const MAX_UNRELEASED_BUFFERS: usize = 64;
+// one client releases at most MAX_UNRELEASED_BUFFERS at once, so a larger free list never fills
+pub const MEMFD_POOL_CAPACITY: usize = MAX_UNRELEASED_BUFFERS;
+pub const RELEASE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn raw_video_geometry(caps: &Caps) -> Option<(RawVideoFormat, usize, usize)> {
     match caps {
@@ -112,18 +123,77 @@ fn descriptor_size(fd: RawFd) -> Result<u64, G2gError> {
     u64::try_from(stat.st_size).map_err(|_| protocol_error("descriptor reports a negative size"))
 }
 
-fn memfd_holding(bytes: &[u8], size: usize) -> Result<OwnedFd, G2gError> {
-    // SAFETY: the name is a NUL-terminated literal and the flag is a documented
-    // memfd_create bit.
-    let raw = unsafe { libc::memfd_create(MEMFD_NAME.as_ptr(), libc::MFD_CLOEXEC) };
-    if raw < 0 {
-        return Err(io_err(std::io::Error::last_os_error()));
+#[derive(Debug)]
+struct Memfd {
+    file: std::fs::File,
+    size: usize,
+}
+
+impl Memfd {
+    fn create(size: usize) -> Result<Self, G2gError> {
+        // SAFETY: the name is a NUL-terminated literal and the flag is a documented
+        // memfd_create bit.
+        let raw = unsafe { libc::memfd_create(MEMFD_NAME.as_ptr(), libc::MFD_CLOEXEC) };
+        if raw < 0 {
+            return Err(io_err(std::io::Error::last_os_error()));
+        }
+        // SAFETY: memfd_create returned a fresh descriptor nothing else owns.
+        let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(raw) });
+        file.set_len(size as u64).map_err(io_err)?;
+        Ok(Self { file, size })
     }
-    // SAFETY: memfd_create returned a fresh descriptor nothing else owns.
-    let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(raw) });
-    file.set_len(size as u64).map_err(io_err)?;
-    file.write_all_at(bytes, 0).map_err(io_err)?;
-    Ok(file.into())
+}
+
+#[derive(Debug, Default)]
+struct MemfdPool {
+    free: Vec<Memfd>,
+    sent: Vec<Arc<Memfd>>,
+}
+
+impl MemfdPool {
+    fn take(&mut self, size: usize) -> Result<Arc<Memfd>, G2gError> {
+        self.reclaim();
+        let fitting = self.free.iter().position(|memfd| memfd.size >= size);
+        let memfd = match fitting {
+            Some(index) => self.free.swap_remove(index),
+            None => {
+                self.close_smallest();
+                Memfd::create(size)?
+            }
+        };
+        let memfd = Arc::new(memfd);
+        self.sent.push(Arc::clone(&memfd));
+        Ok(memfd)
+    }
+
+    // gst closes the smallest when none fits, so the sizes converge on what the stream needs
+    fn close_smallest(&mut self) {
+        let smallest = self
+            .free
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, memfd)| memfd.size)
+            .map(|(index, _)| index);
+        if let Some(index) = smallest {
+            self.free.swap_remove(index);
+        }
+    }
+
+    fn reclaim(&mut self) {
+        for memfd in core::mem::take(&mut self.sent) {
+            match Arc::try_unwrap(memfd) {
+                Ok(memfd) if self.free.len() < MEMFD_POOL_CAPACITY => self.free.push(memfd),
+                Ok(_closed_past_capacity) => {}
+                Err(held) => self.sent.push(held),
+            }
+        }
+    }
+
+    // a memfd still held closes on its last release instead of coming back, as after a gst flush
+    fn flush(&mut self) {
+        self.free.clear();
+        self.sent.clear();
+    }
 }
 
 fn video_meta(
@@ -154,10 +224,10 @@ fn padded_offsets_and_strides(planes: Vec<PaddedPlane>) -> impl Iterator<Item = 
 }
 
 /// What keeps a sent buffer's memory alive until every client releases it.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum SentMemory {
-    DmaBuf { _frame: Frame },
-    Memfd { _memfd: OwnedFd },
+    DmaBuf { _frame: Arc<Frame> },
+    Memfd { _memfd: Arc<Memfd> },
 }
 
 #[derive(Debug)]
@@ -165,7 +235,7 @@ struct Client {
     stream: Socket,
     received: Vec<u8>,
     sent_caps: Option<String>,
-    held: Vec<(u64, Arc<SentMemory>)>,
+    held: Vec<(u64, SentMemory)>,
 }
 
 impl Client {
@@ -223,6 +293,22 @@ impl Client {
             }
         }
     }
+
+    // false means the client is finished with, as from read_releases
+    async fn wait_for_room(&mut self) -> bool {
+        while self.held.len() >= MAX_UNRELEASED_BUFFERS {
+            let Ok(mut ready) = self.stream.readable().await else {
+                return false;
+            };
+            // cleared before the read, so a release landing after it wakes the next wait
+            ready.clear_ready();
+            drop(ready);
+            if !self.read_releases() {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// Send one command to every client, after the caps if a client has not seen
@@ -233,7 +319,7 @@ async fn send_to_clients(
     command: u32,
     payload: &[u8],
     fds: &[RawFd],
-    held: Option<(u64, &Arc<SentMemory>)>,
+    held: Option<(u64, &SentMemory)>,
 ) {
     let mut index = 0;
     while index < clients.len() {
@@ -249,7 +335,7 @@ async fn send_to_clients(
             continue;
         }
         if let Some((id, memory)) = held {
-            client.held.push((id, Arc::clone(memory)));
+            client.held.push((id, memory.clone()));
         }
         index += 1;
     }
@@ -278,6 +364,7 @@ pub struct UnixFdSink {
     dmabuf_input: Option<bool>,
     clock: Option<ClockSync>,
     next_buffer_id: u64,
+    memfd_pool: MemfdPool,
 }
 
 impl Default for UnixFdSink {
@@ -294,6 +381,7 @@ impl Default for UnixFdSink {
             dmabuf_input: None,
             clock: None,
             next_buffer_id: FIRST_BUFFER_ID,
+            memfd_pool: MemfdPool::default(),
         }
     }
 }
@@ -416,6 +504,7 @@ impl UnixFdSink {
         if !dmabuf && self.min_memory_size < 0 {
             return Err(G2gError::UnsupportedDomain);
         }
+        self.wait_for_releases().await;
         while self.wait_for_connection && self.clients.is_empty() {
             self.wait_for_client().await?;
         }
@@ -436,10 +525,28 @@ impl UnixFdSink {
         Ok(())
     }
 
-    fn encode_frame(
-        &mut self,
-        frame: Frame,
-    ) -> Result<(NewBuffer, Arc<SentMemory>, RawFd), G2gError> {
+    // a client still at the cap when the deadline passes is dropped with what it holds
+    async fn wait_for_releases(&mut self) {
+        let deadline = tokio::time::Instant::now() + RELEASE_WAIT_TIMEOUT;
+        let mut index = 0;
+        while index < self.clients.len() {
+            let waited =
+                tokio::time::timeout_at(deadline, self.clients[index].wait_for_room()).await;
+            if matches!(waited, Ok(true)) {
+                index += 1;
+                continue;
+            }
+            if waited.is_err() {
+                g2g_core::g2g_warn!(
+                    g2g_core::log::Target::category("unixfdsink"),
+                    "dropping a client that held {MAX_UNRELEASED_BUFFERS} buffers for {RELEASE_WAIT_TIMEOUT:?} without a release"
+                );
+            }
+            self.clients.swap_remove(index);
+        }
+    }
+
+    fn encode_frame(&mut self, frame: Frame) -> Result<(NewBuffer, SentMemory, RawFd), G2gError> {
         let caps = self.caps.as_ref().ok_or(G2gError::NotConfigured)?;
         let clock = clock_or_monotonic(&mut self.clock);
         let (base_time, latency) = (clock.base_time(), clock.path_latency_min_ns());
@@ -480,13 +587,19 @@ impl UnixFdSink {
                     let planes = padded_planes(format, width, height, 0, dmabuf.stride as usize)?;
                     video_meta(format, width, height, padded_offsets_and_strides(planes))
                 });
-                (Arc::new(SentMemory::DmaBuf { _frame: frame }), fd)
+                (
+                    SentMemory::DmaBuf {
+                        _frame: Arc::new(frame),
+                    },
+                    fd,
+                )
             }
             domain => {
                 let bytes = domain.require_system_bytes(g2g_core::log::short_type_name::<Self>())?;
                 let minimum = usize::try_from(self.min_memory_size).unwrap_or(usize::MAX);
                 let allocated = bytes.len().max(minimum);
-                let memfd = memfd_holding(&bytes, allocated)?;
+                let memfd = self.memfd_pool.take(allocated)?;
+                memfd.file.write_all_at(&bytes, 0).map_err(io_err)?;
                 buffer.memories.push(Memory {
                     size: bytes.len() as u64,
                     offset: 0,
@@ -504,8 +617,8 @@ impl UnixFdSink {
                     };
                     video_meta(format, width, height, planes.into_iter())
                 });
-                let fd = memfd.as_raw_fd();
-                (Arc::new(SentMemory::Memfd { _memfd: memfd }), fd)
+                let fd = memfd.file.as_raw_fd();
+                (SentMemory::Memfd { _memfd: memfd }, fd)
             }
         };
         Ok((buffer, memory, fd))
@@ -597,6 +710,10 @@ impl AsyncElement for UnixFdSink {
             match packet {
                 PipelinePacket::DataFrame(frame) => self.send_frame(frame).await,
                 PipelinePacket::CapsChanged(caps) => {
+                    // as gst, new caps can mean a new frame size or no copy at all
+                    if self.caps.as_ref() != Some(&caps) {
+                        self.memfd_pool.flush();
+                    }
                     self.caps = Some(caps);
                     self.refresh_caps().await
                 }
@@ -641,6 +758,7 @@ impl AsyncElement for UnixFdSink {
                     return Err(PropError::Value);
                 }
                 self.min_memory_size = size;
+                self.memfd_pool.flush();
                 Ok(())
             }
             "num-clients" => Err(PropError::ReadOnly),
