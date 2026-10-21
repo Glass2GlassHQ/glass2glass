@@ -31,9 +31,12 @@
 
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
-    extract_h265_parameter_sets, open_h265_decode_device, to_std_h265_params, ColorMatrix,
-    TransferFunction, VideoColorSpace, VulkanVideoDevice, VulkanVideoError,
+    extract_h265_parameter_sets, open_h265_decode_device, to_std_h265_params, TransferFunction,
+    VideoColorSpace, VulkanVideoDevice, VulkanVideoError,
 };
+
+mod vulkan_ref;
+use vulkan_ref::{luma_weights, rgba16f_to_rgb};
 
 const PQ: &[u8] = include_bytes!("fixtures/h265_640x480_pq.hevc");
 const HLG: &[u8] = include_bytes!("fixtures/h265_640x480_hlg.hevc");
@@ -148,53 +151,11 @@ fn le16(b: &[u8], i: usize) -> u16 {
     u16::from_le_bytes([b[2 * i], b[2 * i + 1]])
 }
 
-fn half_to_f32(h: u16) -> f32 {
-    let sign = (h >> 15) & 1;
-    let exp = (h >> 10) & 0x1f;
-    let mant = h & 0x3ff;
-    let bits = match exp {
-        0 if mant == 0 => (sign as u32) << 31,
-        0 => {
-            let mut e = -14i32;
-            let mut m = mant as u32;
-            while m & 0x400 == 0 {
-                m <<= 1;
-                e -= 1;
-            }
-            m &= 0x3ff;
-            ((sign as u32) << 31) | (((e + 127) as u32) << 23) | (m << 13)
-        }
-        0x1f => ((sign as u32) << 31) | (0xff << 23) | ((mant as u32) << 13),
-        _ => {
-            ((sign as u32) << 31) | (((exp as i32 - 15 + 127) as u32) << 23) | ((mant as u32) << 13)
-        }
-    };
-    f32::from_bits(bits)
-}
-
-fn rgba16f_to_rgb(bytes: &[u8]) -> Vec<[f32; 3]> {
-    assert_eq!(bytes.len(), W * H * 8);
-    (0..W * H)
-        .map(|p| {
-            let o = p * 4;
-            [
-                half_to_f32(le16(bytes, o)),
-                half_to_f32(le16(bytes, o + 1)),
-                half_to_f32(le16(bytes, o + 2)),
-            ]
-        })
-        .collect()
-}
-
 /// 10-bit `G10X6` NV12 -> the ycbcr conversion result (nonlinear R'G'B' in [0,1]),
 /// matching the fixed-function narrow-range BT.2020 conversion (nearest chroma).
 fn nv12_10bit_to_rgb(luma: &[u8], chroma: &[u8], color: VideoColorSpace) -> Vec<[f32; 3]> {
     let cw = W / 2;
-    let (kr, kb) = match color.matrix {
-        ColorMatrix::Bt601 => (0.299f32, 0.114f32),
-        ColorMatrix::Bt709 => (0.2126, 0.0722),
-        ColorMatrix::Bt2020Ncl => (0.2627, 0.0593),
-    };
+    let (kr, kb) = luma_weights(color.matrix);
     let kg = 1.0 - kr - kb;
     let (y_off, y_span, c_off, c_span) = if color.full_range {
         (0.0, 1023.0, 512.0, 1023.0)
@@ -360,7 +321,7 @@ fn run_codec(stream: &[u8], xfer: u32, label: &str) {
         .decode_all_to_textures(stream)
         .expect("passthrough textures")
         .iter()
-        .map(|t| rgba16f_to_rgb(&device.read_rgba_texture(t)))
+        .map(|t| rgba16f_to_rgb(&device.read_rgba_texture(t), (W, H)))
         .collect();
 
     // Tone-mapped textures.
@@ -377,7 +338,7 @@ fn run_codec(stream: &[u8], xfer: u32, label: &str) {
     for (i, t) in texes.iter().enumerate() {
         assert_eq!(t.format(), wgpu::TextureFormat::Rgba16Float);
         assert_eq!((t.width(), t.height()), (W as u32, H as u32));
-        let gpu = rgba16f_to_rgb(&device.read_rgba_texture(t));
+        let gpu = rgba16f_to_rgb(&device.read_rgba_texture(t), (W, H));
         // Matches the CPU pipeline (tolerance: linear-vs-nearest chroma + f16,
         // amplified through the tone curve).
         let (mut sum, mut n, mut worst) = (0.0f64, 0u64, 0.0f32);

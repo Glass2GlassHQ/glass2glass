@@ -31,9 +31,12 @@
 use g2g_core::runtime::block_on;
 use g2g_plugins::vulkanvideo::{
     extract_av1_sequence_header, extract_h265_parameter_sets, open_av1_decode_device,
-    open_h265_decode_device, to_std_av1_seq_header, to_std_h265_params, ColorMatrix,
-    VideoColorSpace, VulkanVideoDevice, VulkanVideoError,
+    open_h265_decode_device, to_std_av1_seq_header, to_std_h265_params, VideoColorSpace,
+    VulkanVideoDevice, VulkanVideoError,
 };
+
+mod vulkan_ref;
+use vulkan_ref::{luma_weights, rgba16f_to_rgb};
 
 const HEVC: &[u8] = include_bytes!("fixtures/h265_640x480_main10.hevc");
 const AV1: &[u8] = include_bytes!("fixtures/av1_640x480_10bit.obu");
@@ -43,42 +46,6 @@ const H: usize = 480;
 /// Little-endian 16-bit sample `i` from a byte plane.
 fn le16(b: &[u8], i: usize) -> u16 {
     u16::from_le_bytes([b[2 * i], b[2 * i + 1]])
-}
-
-/// IEEE half -> f32 (the `Rgba16Float` readback is packed halfs).
-fn half_to_f32(h: u16) -> f32 {
-    let sign = (h >> 15) & 1;
-    let exp = (h >> 10) & 0x1f;
-    let mant = h & 0x3ff;
-    let bits = match exp {
-        0 if mant == 0 => (sign as u32) << 31,
-        0 => {
-            // Subnormal: normalize.
-            let mut e = -14i32;
-            let mut m = mant as u32;
-            while m & 0x400 == 0 {
-                m <<= 1;
-                e -= 1;
-            }
-            m &= 0x3ff;
-            ((sign as u32) << 31) | (((e + 127) as u32) << 23) | (m << 13)
-        }
-        0x1f => ((sign as u32) << 31) | (0xff << 23) | ((mant as u32) << 13),
-        _ => {
-            ((sign as u32) << 31) | (((exp as i32 - 15 + 127) as u32) << 23) | ((mant as u32) << 13)
-        }
-    };
-    f32::from_bits(bits)
-}
-
-/// The `(Kr, Kb)` luma weights of a matrix (`Kg = 1 - Kr - Kb`), mirroring the
-/// private `VideoColorSpace::luma_weights` the converter uses.
-fn luma_weights(m: ColorMatrix) -> (f32, f32) {
-    match m {
-        ColorMatrix::Bt601 => (0.299, 0.114),
-        ColorMatrix::Bt709 => (0.2126, 0.0722),
-        ColorMatrix::Bt2020Ncl => (0.2627, 0.0593),
-    }
 }
 
 /// CPU reference: a 10-bit (`G10X6`) NV12 luma+chroma pair -> per-pixel RGB in
@@ -115,25 +82,6 @@ fn nv12_10bit_to_rgb(luma: &[u8], chroma: &[u8], color: VideoColorSpace) -> Vec<
         }
     }
     out
-}
-
-/// Decode an `Rgba16Float` readback (8 bytes/texel, 4 halfs) to per-pixel RGB.
-fn rgba16f_to_rgb(bytes: &[u8]) -> Vec<[f32; 3]> {
-    assert_eq!(
-        bytes.len(),
-        W * H * 8,
-        "Rgba16Float readback is 8 bytes/pixel"
-    );
-    (0..W * H)
-        .map(|p| {
-            let o = p * 8;
-            [
-                half_to_f32(le16(bytes, o / 2)),
-                half_to_f32(le16(bytes, o / 2 + 1)),
-                half_to_f32(le16(bytes, o / 2 + 2)),
-            ]
-        })
-        .collect()
 }
 
 /// `Some(device)` or `None` on a decode-support gap (no adapter / codec / queue).
@@ -224,7 +172,7 @@ fn ten_bit_gpu_texture_hevc_and_av1() {
                 "frame {i} not 10-bit RGBA16F"
             );
             assert_eq!((t.width(), t.height()), (W as u32, H as u32));
-            let rgb = rgba16f_to_rgb(&device.read_rgba_texture(t));
+            let rgb = rgba16f_to_rgb(&device.read_rgba_texture(t), (W, H));
             // Real content: luma spans a range (a failed decode is flat).
             let (mut lo, mut hi) = (f32::MAX, f32::MIN);
             for px in &rgb {
@@ -309,7 +257,7 @@ fn ten_bit_gpu_texture_hevc_and_av1() {
                 "AV1 frame {i} not RGBA16F"
             );
             assert_eq!((t.width(), t.height()), (W as u32, H as u32));
-            let rgb = rgba16f_to_rgb(&device.read_rgba_texture(t));
+            let rgb = rgba16f_to_rgb(&device.read_rgba_texture(t), (W, H));
             let (mut lo, mut hi) = (f32::MAX, f32::MIN);
             for px in &rgb {
                 let l = px[0] + px[1] + px[2];
