@@ -1254,6 +1254,22 @@ with `@availabilityTimeOffset` publishing each segment that many seconds before
 its nominal completion, clamped to one segment duration so a chunked packager's
 in-progress segment is reachable but nothing beyond it.
 
+Every addressing mode but SegmentBase is held to the same availability rule. A
+segment is fetched once `availabilityStartTime` plus `Period@start` plus its end,
+less the clamped `@availabilityTimeOffset`, has passed on the server clock. The
+`@duration` profile, each `SegmentTimeline` `<S>` entry and a `SegmentList` are
+stretches of equal-length segments, so one window computation serves all three.
+A negative `@r` repeats to the next entry's `@t`, else the Period end, else until
+the clock stops it. The server clock comes from the first supported `UTCTiming`
+element that answers. The `ntp` and `sntp` schemes send one NTP v4 client request
+over UDP with a one second timeout.
+
+A media segment or live reload that fails with a transport error, 5xx, 404 or 425
+is retried three times with a 250 ms doubling backoff, gst adaptivedemux2's
+`max-retries` default, in both `DashSrc` and `HlsSrc`. On a live DASH segment,
+repeated 404 or 425 answers count against that budget at most once per segment
+duration. Startup manifest and playlist fetches do not retry.
+
 A multi-Period live MPD is played as gst's `dashdemux2` plays it. Playback joins
 the Period holding now minus the presentation delay. A Period with an end, its
 `@duration` or the next Period's `@start`, offers `ceil(span / d)` segments

@@ -435,9 +435,10 @@ inside the picture and give the last luma column or row the last chroma sample o
 the way back. `videoscale` and `videoconvertscale` map chroma positions through
 the luma scale rather than the chroma plane's own, so the rounded-up sample count
 does not shift the chroma grid. `videocrop` and `aspectratiocrop` keep their even
-insets and crop an odd frame plane by plane. `videoflip` still refuses an odd
-subsampled frame, since mirroring an odd extent needs a chroma resample its remap
-does not do.
+insets and crop an odd frame plane by plane. `videoflip` remaps each plane at its
+own size, the chroma plane at its rounded-up size with no resample, as GStreamer's
+`videoflip` and ffmpeg's `hflip` / `vflip` / `transpose` do, and matches ffmpeg
+byte for byte.
 
 ### The negotiation lifecycle
 

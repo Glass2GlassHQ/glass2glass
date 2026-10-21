@@ -954,9 +954,22 @@ are mmap-verified in the receiving process.
 message is an 8-byte `{type, payload_size}` header with the buffer's fds
 attached through `scmfd`, one per memory, then the payload: the caps string, a
 buffer with its memories and serialized metas, a release, or EOS. The sink sends
-a dma-buf frame as its own fd and copies a system frame into a fresh memfd, and
-writes a `GstVideoMeta` for raw video so a gst reader sees the real strides. It
-holds every buffer per client until that client releases it or disconnects.
+a dma-buf frame as its own fd and copies a system frame into a memfd, and writes
+a `GstVideoMeta` for raw video so a gst reader sees the real strides. It holds
+every buffer per client until that client releases it or disconnects.
+
+The memfds come from a pool, following gst's flow. A memfd returns to the pool
+once every client has released it. A frame takes the first free memfd that fits,
+and when none fits the smallest free one is closed and a new one is made, so the
+sink never waits on the pool. The pool keeps at most `MEMFD_POOL_CAPACITY` (64)
+free memfds and is flushed on a caps or `min-memory-size` change. A client
+holding more than `MAX_HELD_MEMFDS` (64) unreleased memfds makes the sink close
+its own fd of the oldest and drop it from the pool. The client's fd keeps the
+bytes, and a later release of that buffer is accepted. This bounds what the sink
+holds for a receiver that never releases, without blocking a receiver like gst
+`filesink` that releases only after buffering. A dma-buf frame that carries a
+sync fd is refused, because gst's wire has exactly one fd per memory and no
+fence field.
 
 The source maps a memfd read-only into a foreign `SystemSlice` with no copy, and
 the slice's free callback queues the release, so the sink keeps the buffer until

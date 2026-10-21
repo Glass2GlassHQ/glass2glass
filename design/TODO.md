@@ -136,8 +136,10 @@ Highest leverage first:
 
 - **RTP over QUIC (RoQ):** implement after the draft becomes an RFC with an
   assigned ALPN. Candidate peers: mengelbart/roq (Go), meetecho/imquic.
-- **`unixfdsink`:** reuse memfds from a pool for system frames, and carry a
-  dma-buf frame's GPU sync fd.
+- **`unixfdsink`:** carry a dma-buf frame's GPU fence. GStreamer's wire has no
+  fence slot, and the fd `WgpuToDmaBuf` exports is a timeline semaphore that poll
+  cannot wait on, so this needs a `vkWaitSemaphores` wait in the sink or a
+  pollable sync_file from the exporter.
 - **RIST:** link bonding (`bonding-addresses`, broadcast and round-robin),
   multicast, and the Main Profile sequence-number extension (`ristrtpext` /
   `ristrtpdeext`); interop against librist's `ristsender` / `ristreceiver`.
@@ -155,9 +157,6 @@ Highest leverage first:
 
 ## Adaptive streaming (HLS / DASH)
 
-- **DASH live:** hold back `SegmentTimeline` and `SegmentList` entries of a
-  live Period until each is available, as the `@duration` window already is.
-- **DASH live:** the UDP `ntp` and `sntp` `UTCTiming` schemes.
 - **HLS / CENC:** the multi-key shapes (`senc` v1/v2, multi-key `seig`
   entries) stay declined fail-loud: the 23001-7:2023 syntax is paywalled and
   the two available sources (the MPEG proposal and GPAC) contradict each
@@ -238,12 +237,6 @@ Highest leverage first:
 
 ## Transforms and effects
 
-- **Odd-size `videoflip`.** It refuses an odd width or height for the
-  subsampled formats; mirror and rotate them with the chroma resampled, since
-  the unpaired chroma column or row moves to the other edge.
-- **Odd-size NV12 on `WgpuPreprocess` imports.** It refuses an odd NV12 width
-  or height on its texture and dma-buf import paths, because an import carries
-  one row stride for both planes.
 - **`textoverlay` font backend:** font-variation axes beyond `wght` on the
   shaped horizontal path (cosmic-text exposes only weight); vertical-mode
   shaping if cosmic-text ever grows writing modes.

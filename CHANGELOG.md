@@ -6,6 +6,12 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1726: wgpupreprocess imports odd-size NV12 GPU textures, packed or two-plane, and odd-size NV12 dma-bufs whose stride holds a chroma row.
+- M1725: videoflip flips and rotates odd-size subsampled frames plane by plane, matching ffmpeg byte for byte.
+- M1765: DashSrc and HlsSrc retry a media segment or live playlist reload that fails with a transport error, 5xx, 404 or 425 before ending the run.
+- M1733: DashSrc measures the server clock from the ntp and sntp UTCTiming schemes and falls through to the next UTCTiming element when one fails.
+- M1732: a live DASH SegmentTimeline or SegmentList entry is fetched only once its availability time has passed, and a negative @r repeats to the next entry or the Period end.
+- M1736: unixfdsink reuses memfds from a bounded pool once receivers release them, and stops holding a client's oldest memfds past 64 unreleased.
 - M1727: decodebin and playbin weigh decoders by the picture size of MP4, Matroska and MPEG-TS input.
 - M1766: an HTTP request that fails before a response status names the failed stage, such as a refused connection, instead of a generic hardware error.
 - M1721: `VulkanVideoDec` outputs an odd-size picture on the two-plane `NV12` / `P010` texture as an even-rounded texture carrying the picture size, and `wgpudownload` reads it at the picture size.

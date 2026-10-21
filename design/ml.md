@@ -89,8 +89,15 @@ NV12 planes into it device to device, and the wgpu device travels on the frame's
 keep-alive so `WgpuPreprocess` adopts it, the device-identity pattern. The whole
 `NVDEC -> CudaToWgpu -> WgpuPreprocess -> WgpuInference` chain is validated on an
 RTX 3060, matching a CPU reference with no PCIe download. An odd-size frame
-crosses the bridge in that packed layout, while `WgpuPreprocess` and `WgpuSink`
-refuse odd NV12 geometry at negotiation.
+crosses the bridge in that packed layout.
+
+The `WgpuPreprocess` texture import takes an odd NV12 size: a packed R8Uint
+texture is `packed_nv12_extent`, a two-plane texture may be rounded up to even
+past the picture, and both shaders read only the negotiated picture, so the
+tensor equals the storage-buffer path's. A dma-buf carries one row stride for
+every row, chroma included (the `RawVideoFormat::row_stride` convention), so an
+odd-width NV12 dma-buf is read when that stride holds the chroma row, one byte
+wider than the luma row, and refused when it does not.
 
 Shared images are recycled from a reuse pool. The Vulkan image, its CUDA import
 and the `wgpu::Texture` are allocated once and returned to a free list when the
