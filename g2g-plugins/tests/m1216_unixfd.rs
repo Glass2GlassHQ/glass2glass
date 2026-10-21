@@ -37,9 +37,7 @@ use g2g_plugins::appsrc::register_appsrc;
 use g2g_plugins::dmabufmap::DmaBufReadMap;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::scmfd;
-use g2g_plugins::unixfd::{
-    UnixFdSink, UnixFdSrc, MAX_UNRELEASED_BUFFERS, MEMFD_POOL_CAPACITY, RELEASE_WAIT_TIMEOUT,
-};
+use g2g_plugins::unixfd::{UnixFdSink, UnixFdSrc, MAX_HELD_MEMFDS, MEMFD_POOL_CAPACITY};
 use g2g_plugins::unixfdwire::{
     caps_payload, gst_video_format, release_payload, Memory, NewBuffer, SocketType, VideoMeta,
     VideoPlane, CLOCK_TIME_NONE, COMMAND_CAPS, COMMAND_EOS, COMMAND_NEW_BUFFER,
@@ -591,45 +589,73 @@ async fn a_memfd_is_reused_only_for_a_frame_that_fits() {
     );
 }
 
-// The client reads nothing and releases nothing, so the frame past the cap
-// waits out the timeout and then drops it.
+// The client releases nothing until it holds FRAMES memfds past the cap, so
+// the sink forgets the oldest FRAMES and only the rest carry later frames.
 #[tokio::test]
-async fn a_client_that_never_releases_is_dropped_after_the_wait() {
-    let socket = unique_path("never_release");
+async fn a_client_past_the_hold_cap_keeps_its_oldest_memfds() {
+    let socket = unique_path("hold_cap");
     let caps = rgba_caps(WIDTH, HEIGHT);
     let mut sink = UnixFdSink::new(socket.display().to_string());
     sink.configure_pipeline(&caps).expect("the sink binds");
-    let _client = UnixStream::connect(&socket).expect("connect");
+    let client = UnixStream::connect(&socket).expect("connect");
     let mut out = CollectSink::default();
-    let held = MAX_UNRELEASED_BUFFERS as u64;
-    let mut watches = Vec::new();
+    let held = MAX_HELD_MEMFDS as u64 + FRAMES;
+    let mut first = Vec::new();
     for index in 0..held {
-        let dmabuf = padded_dmabuf(index);
-        watches.push(dmabuf.clone());
-        sink.process(dmabuf_frame(dmabuf, index), &mut out)
+        sink.process(system_frame(index), &mut out)
             .await
             .expect("send a frame the client holds");
+        let (buffer, memfd) = read_new_buffer(&client);
+        assert_eq!(memory_bytes(&buffer, &memfd), frame_bytes(index));
+        first.push((buffer, memfd));
     }
-    assert!(
-        watches.iter().all(|watch| watch.share_count() == 2),
-        "the client holds every frame"
+    assert_eq!(
+        sink.get_property("num-clients"),
+        Some(PropValue::Uint(1)),
+        "the sink keeps a client that holds on"
     );
+    for (buffer, _) in &first {
+        write_message(
+            &client,
+            COMMAND_RELEASE_BUFFER,
+            &release_payload(buffer.id),
+            &[],
+        );
+    }
 
-    let started = tokio::time::Instant::now();
-    tokio::time::timeout(
-        RELEASE_WAIT_TIMEOUT + RUN_DEADLINE,
-        sink.process(dmabuf_frame(padded_dmabuf(held), held), &mut out),
-    )
-    .await
-    .expect("the sink stops waiting")
-    .expect("dropping the client does not fail the sink");
-    let waited = started.elapsed();
-    assert!(waited >= RELEASE_WAIT_TIMEOUT, "waited {waited:?}");
-    assert_eq!(sink.get_property("num-clients"), Some(PropValue::Uint(0)));
-    assert!(
-        watches.iter().all(|watch| watch.share_count() == 1),
-        "a dropped client releases what it held"
+    let mut later_inodes = Vec::new();
+    for index in held..held + FRAMES {
+        sink.process(system_frame(index), &mut out)
+            .await
+            .expect("send a later frame");
+        let (buffer, memfd) = read_new_buffer(&client);
+        assert_eq!(memory_bytes(&buffer, &memfd), frame_bytes(index));
+        later_inodes.push(inode(&memfd));
+        write_message(
+            &client,
+            COMMAND_RELEASE_BUFFER,
+            &release_payload(buffer.id),
+            &[],
+        );
+    }
+    assert_eq!(
+        sink.get_property("num-clients"),
+        Some(PropValue::Uint(1)),
+        "a release of a forgotten buffer is accepted"
     );
+    let (forgotten, kept) = first.split_at(FRAMES as usize);
+    let kept_inodes: HashSet<u64> = kept.iter().map(|(_, memfd)| inode(memfd)).collect();
+    assert!(
+        later_inodes.iter().all(|later| kept_inodes.contains(later)),
+        "later frames reuse kept memfds: {later_inodes:?}"
+    );
+    for (index, (buffer, memfd)) in forgotten.iter().enumerate() {
+        assert_eq!(
+            memory_bytes(buffer, memfd),
+            frame_bytes(index as u64),
+            "forgotten frame {index} is left alone"
+        );
+    }
 }
 
 // Checks each frame against `frame_bytes` in arrival order, then drops it so

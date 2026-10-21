@@ -24,9 +24,9 @@
 //!
 //! Four deviations from gst. The sink sends its caps once the first frame says
 //! whether they carry `memory:DMABuf`, rather than on accept. The pool keeps at
-//! most [`MEMFD_POOL_CAPACITY`] free memfds, where gst keeps every one. A client
-//! holding [`MAX_UNRELEASED_BUFFERS`] buffers gets [`RELEASE_WAIT_TIMEOUT`] to
-//! release one before the sink drops it, where gst keeps sending and holding.
+//! most [`MEMFD_POOL_CAPACITY`] free memfds, where gst keeps every one. Past
+//! [`MAX_HELD_MEMFDS`] unreleased memfds a client holds, the sink closes its fd
+//! of the oldest and never reuses that memfd, where gst holds every one.
 //! The source retries its connect for [`CONNECT_RETRY_WINDOW`], so either side
 //! can start first.
 
@@ -89,10 +89,9 @@ const CONNECT_RETRY_GAP: Duration = Duration::from_millis(20);
 /// How often the source looks for dma-buf frames downstream has dropped.
 const DMABUF_RELEASE_POLL: Duration = Duration::from_millis(5);
 // above the forty frames of x264's default lookahead, which a gst encoder behind unixfdsrc holds
-pub const MAX_UNRELEASED_BUFFERS: usize = 64;
-// one client releases at most MAX_UNRELEASED_BUFFERS at once, so a larger free list never fills
-pub const MEMFD_POOL_CAPACITY: usize = MAX_UNRELEASED_BUFFERS;
-pub const RELEASE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const MAX_HELD_MEMFDS: usize = 64;
+// one client releases at most MAX_HELD_MEMFDS at once, so a larger free list never fills
+pub const MEMFD_POOL_CAPACITY: usize = MAX_HELD_MEMFDS;
 
 fn raw_video_geometry(caps: &Caps) -> Option<(RawVideoFormat, usize, usize)> {
     match caps {
@@ -189,6 +188,11 @@ impl MemfdPool {
         }
     }
 
+    // a forgotten memfd closes on its last release instead of coming back
+    fn forget(&mut self, memfd: &Arc<Memfd>) {
+        self.sent.retain(|sent| !Arc::ptr_eq(sent, memfd));
+    }
+
     // a memfd still held closes on its last release instead of coming back, as after a gst flush
     fn flush(&mut self) {
         self.free.clear();
@@ -227,7 +231,7 @@ fn padded_offsets_and_strides(planes: Vec<PaddedPlane>) -> impl Iterator<Item = 
 #[derive(Debug, Clone)]
 enum SentMemory {
     DmaBuf { _frame: Arc<Frame> },
-    Memfd { _memfd: Arc<Memfd> },
+    Memfd { memfd: Arc<Memfd> },
 }
 
 #[derive(Debug)]
@@ -236,6 +240,8 @@ struct Client {
     received: Vec<u8>,
     sent_caps: Option<String>,
     held: Vec<(u64, SentMemory)>,
+    // every buffer up to this id is released or forgotten
+    forgotten_through: Option<u64>,
 }
 
 impl Client {
@@ -245,7 +251,30 @@ impl Client {
             received: Vec::new(),
             sent_caps: None,
             held: Vec::new(),
+            forgotten_through: None,
         }
+    }
+
+    // returns the memfd forgotten past MAX_HELD_MEMFDS, whose bytes the client's own fd keeps
+    fn hold(&mut self, id: u64, memory: &SentMemory) -> Option<Arc<Memfd>> {
+        self.held.push((id, memory.clone()));
+        let held_memfds = || {
+            self.held
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (held_id, held))| match held {
+                    SentMemory::Memfd { memfd } => Some((index, *held_id, memfd)),
+                    SentMemory::DmaBuf { .. } => None,
+                })
+        };
+        if held_memfds().count() <= MAX_HELD_MEMFDS {
+            return None;
+        }
+        let (index, oldest_id, oldest) = held_memfds().min_by_key(|(_, held_id, _)| *held_id)?;
+        let oldest = Arc::clone(oldest);
+        self.held.swap_remove(index);
+        self.forgotten_through = Some(oldest_id);
+        Some(oldest)
     }
 
     async fn send_caps_if_stale(&mut self, caps: Option<&str>) -> std::io::Result<()> {
@@ -281,10 +310,13 @@ impl Client {
                         let Some(id) = decode_release(&payload) else {
                             return false;
                         };
-                        let Some(index) = self.held.iter().position(|(held, _)| *held == id) else {
-                            return false;
-                        };
-                        self.held.swap_remove(index);
+                        let held = self.held.iter().position(|(held, _)| *held == id);
+                        let forgotten = self.forgotten_through.is_some_and(|through| id <= through);
+                        match (held, forgotten) {
+                            (Some(index), _) => drop(self.held.swap_remove(index)),
+                            (None, true) => {}
+                            (None, false) => return false,
+                        }
                     }
                     Ok(Some((COMMAND_NEW_BUFFER | COMMAND_CAPS, _))) => return false,
                     // gst ignores a command it does not know, the protocol may grow
@@ -293,26 +325,11 @@ impl Client {
             }
         }
     }
-
-    // false means the client is finished with, as from read_releases
-    async fn wait_for_room(&mut self) -> bool {
-        while self.held.len() >= MAX_UNRELEASED_BUFFERS {
-            let Ok(mut ready) = self.stream.readable().await else {
-                return false;
-            };
-            // cleared before the read, so a release landing after it wakes the next wait
-            ready.clear_ready();
-            drop(ready);
-            if !self.read_releases() {
-                return false;
-            }
-        }
-        true
-    }
 }
 
 /// Send one command to every client, after the caps if a client has not seen
 /// them yet. A client the send fails on is dropped, releasing what it held.
+/// Returns the memfds clients forgot to make room.
 async fn send_to_clients(
     clients: &mut Vec<Client>,
     caps: Option<&str>,
@@ -320,7 +337,8 @@ async fn send_to_clients(
     payload: &[u8],
     fds: &[RawFd],
     held: Option<(u64, &SentMemory)>,
-) {
+) -> Vec<Arc<Memfd>> {
+    let mut forgotten_memfds = Vec::new();
     let mut index = 0;
     while index < clients.len() {
         let client = &mut clients[index];
@@ -335,10 +353,11 @@ async fn send_to_clients(
             continue;
         }
         if let Some((id, memory)) = held {
-            client.held.push((id, memory.clone()));
+            forgotten_memfds.extend(client.hold(id, memory));
         }
         index += 1;
     }
+    forgotten_memfds
 }
 
 /// # Example
@@ -504,7 +523,6 @@ impl UnixFdSink {
         if !dmabuf && self.min_memory_size < 0 {
             return Err(G2gError::UnsupportedDomain);
         }
-        self.wait_for_releases().await;
         while self.wait_for_connection && self.clients.is_empty() {
             self.wait_for_client().await?;
         }
@@ -513,7 +531,7 @@ impl UnixFdSink {
         }
         let (buffer, memory, fd) = self.encode_frame(frame)?;
         let caps = self.caps_text()?;
-        send_to_clients(
+        let forgotten = send_to_clients(
             &mut self.clients,
             caps.as_deref(),
             COMMAND_NEW_BUFFER,
@@ -522,28 +540,10 @@ impl UnixFdSink {
             Some((buffer.id, &memory)),
         )
         .await;
-        Ok(())
-    }
-
-    // a client still at the cap when the deadline passes is dropped with what it holds
-    async fn wait_for_releases(&mut self) {
-        let deadline = tokio::time::Instant::now() + RELEASE_WAIT_TIMEOUT;
-        let mut index = 0;
-        while index < self.clients.len() {
-            let waited =
-                tokio::time::timeout_at(deadline, self.clients[index].wait_for_room()).await;
-            if matches!(waited, Ok(true)) {
-                index += 1;
-                continue;
-            }
-            if waited.is_err() {
-                g2g_core::g2g_warn!(
-                    g2g_core::log::Target::category("unixfdsink"),
-                    "dropping a client that held {MAX_UNRELEASED_BUFFERS} buffers for {RELEASE_WAIT_TIMEOUT:?} without a release"
-                );
-            }
-            self.clients.swap_remove(index);
+        for memfd in &forgotten {
+            self.memfd_pool.forget(memfd);
         }
+        Ok(())
     }
 
     fn encode_frame(&mut self, frame: Frame) -> Result<(NewBuffer, SentMemory, RawFd), G2gError> {
@@ -618,7 +618,7 @@ impl UnixFdSink {
                     video_meta(format, width, height, planes.into_iter())
                 });
                 let fd = memfd.file.as_raw_fd();
-                (SentMemory::Memfd { _memfd: memfd }, fd)
+                (SentMemory::Memfd { memfd }, fd)
             }
         };
         Ok((buffer, memory, fd))
