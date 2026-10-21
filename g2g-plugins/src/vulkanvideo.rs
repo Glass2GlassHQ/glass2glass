@@ -2438,8 +2438,7 @@ impl Default for Av1RefFrames {
     }
 }
 
-// The values load_previous() (spec 7.21) copies from the primary reference frame
-// when a frame header does not code them again.
+// what load_previous() (spec 7.21) copies from the primary reference frame
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Av1InheritedParams {
     pub loop_filter_ref_deltas: [i8; AV1_NUM_REF_FRAMES],
@@ -2449,8 +2448,7 @@ pub struct Av1InheritedParams {
     pub gm_params: [[i32; 6]; AV1_NUM_REF_FRAMES],
 }
 
-// setup_past_independence() (spec 7.20) values, what a frame with
-// primary_ref_frame == PRIMARY_REF_NONE starts from.
+// the setup_past_independence() (spec 7.20) values
 impl Default for Av1InheritedParams {
     fn default() -> Self {
         Self {
@@ -2929,7 +2927,7 @@ fn av1_tile_layout(
 // grain is synthesized here on the decoded NV12, bit-for-bit with the ffmpeg /
 // dav1d software decoder. Ported from the re_rav1d `filmgrain.rs` / `fg_apply.rs`
 // scalar reference (the same crate g2g uses for `Rav1dDec`), specialized to
-// 8-bit 4:2:0.
+// 4:2:0 at 8 or 10 bits.
 
 const AV1_FRAME_TYPE_INTER: u8 = 1;
 const FG_GRAIN_WIDTH: usize = 82;
@@ -3200,10 +3198,17 @@ fn fg_get_random(bits: u8, state: &mut u32) -> i32 {
     ((*state >> (16 - bits as u32)) & ((1 << bits) - 1)) as i32
 }
 
-/// Generate the luma grain template (spec 7.18.3.3), 8-bit.
-fn fg_generate_grain_y(fg: &Av1FilmGrain, buf: &mut FgGrainLut) {
+// 8-bit grain is -128..=127
+fn fg_grain_range(bit_depth: u8) -> (i32, i32) {
+    let center = 128 << (bit_depth - 8);
+    (-center, center - 1)
+}
+
+/// Generate the luma grain template (spec 7.18.3.3).
+fn fg_generate_grain_y(fg: &Av1FilmGrain, buf: &mut FgGrainLut, bit_depth: u8) {
     let mut seed = fg.seed as u32;
-    let shift = 4 + fg.grain_scale_shift;
+    let shift = 4 - (bit_depth - 8) + fg.grain_scale_shift;
+    let (grain_min, grain_max) = fg_grain_range(bit_depth);
     let ar_lag = fg.ar_coeff_lag;
     for row in buf[..FG_GRAIN_HEIGHT].iter_mut() {
         for v in row[..FG_GRAIN_WIDTH].iter_mut() {
@@ -3228,7 +3233,7 @@ fn fg_generate_grain_y(fg: &Av1FilmGrain, buf: &mut FgGrainLut) {
             }
             let cur = buf[y + FG_AR_PAD][x + FG_AR_PAD] as i32;
             let grain = cur + fg_round2(sum, fg.ar_coeff_shift);
-            buf[y + FG_AR_PAD][x + FG_AR_PAD] = grain.clamp(-128, 127) as i16;
+            buf[y + FG_AR_PAD][x + FG_AR_PAD] = grain.clamp(grain_min, grain_max) as i16;
         }
     }
 }
@@ -3239,9 +3244,11 @@ fn fg_generate_grain_uv_420(
     buf: &mut FgGrainLut,
     buf_y: &FgGrainLut,
     uv: usize,
+    bit_depth: u8,
 ) {
     let mut seed = (fg.seed as u32) ^ if uv != 0 { 0x49d8 } else { 0xb524 };
-    let shift = 4 + fg.grain_scale_shift;
+    let shift = 4 - (bit_depth - 8) + fg.grain_scale_shift;
+    let (grain_min, grain_max) = fg_grain_range(bit_depth);
     let ar_lag = fg.ar_coeff_lag;
     for row in buf[..FG_SUB_GRAIN_HEIGHT].iter_mut() {
         for v in row[..FG_SUB_GRAIN_WIDTH].iter_mut() {
@@ -3279,20 +3286,20 @@ fn fg_generate_grain_uv_420(
             }
             let cur = buf[y + FG_AR_PAD][x + FG_AR_PAD] as i32;
             let grain = cur + fg_round2(sum, fg.ar_coeff_shift);
-            buf[y + FG_AR_PAD][x + FG_AR_PAD] = grain.clamp(-128, 127) as i16;
+            buf[y + FG_AR_PAD][x + FG_AR_PAD] = grain.clamp(grain_min, grain_max) as i16;
         }
     }
 }
 
-/// Build the 8-bit scaling LUT from the piecewise-linear points (fg_apply.rs).
-fn fg_generate_scaling(points: &[[u8; 2]]) -> [u8; 256] {
-    let mut scaling = [0u8; 256];
-    if points.is_empty() {
+/// Build the scaling LUT, one entry per sample value at `bit_depth`, from the
+/// piecewise-linear points (fg_apply.rs).
+fn fg_generate_scaling(points: &[[u8; 2]], bit_depth: u8) -> alloc::vec::Vec<u8> {
+    let shift_x = bit_depth - 8;
+    let mut scaling = alloc::vec![0u8; 1usize << bit_depth];
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
         return scaling;
-    }
-    for s in scaling[..points[0][0] as usize].iter_mut() {
-        *s = points[0][1];
-    }
+    };
+    scaling[..(first[0] as usize) << shift_x].fill(first[1]);
     for w in points.windows(2) {
         let bx = w[0][0] as usize;
         let by = w[0][1] as isize;
@@ -3303,13 +3310,27 @@ fn fg_generate_scaling(points: &[[u8; 2]]) -> [u8; 256] {
         let delta = dy * ((0x10000 + (dx as isize >> 1)) / dx as isize);
         let mut d = 0x8000isize;
         for x in 0..dx {
-            scaling[bx + x] = (by + (d >> 16)) as u8;
+            scaling[(bx + x) << shift_x] = (by + (d >> 16)) as u8;
             d += delta;
         }
     }
-    let n = points[points.len() - 1][0] as usize;
-    for s in scaling[n..].iter_mut() {
-        *s = points[points.len() - 1][1];
+    scaling[(last[0] as usize) << shift_x..].fill(last[1]);
+    // above 8 bits the entries between the interpolated ones are filled linearly
+    let pad = 1usize << shift_x;
+    if pad > 1 {
+        let rounding = (pad >> 1) as isize;
+        for w in points.windows(2) {
+            let bx = (w[0][0] as usize) << shift_x;
+            let ex = (w[1][0] as usize) << shift_x;
+            for x in (bx..ex).step_by(pad) {
+                let range = scaling[x + pad] as isize - scaling[x] as isize;
+                let mut r = rounding;
+                for n in 1..pad {
+                    r += range;
+                    scaling[x + n] = (scaling[x] as isize + (r >> shift_x)) as u8;
+                }
+            }
+        }
     }
     scaling
 }
@@ -3334,6 +3355,15 @@ fn fg_sample_lut(
     grain[offy + y + (FG_BLOCK_SIZE >> suby) * by][offx + x + (FG_BLOCK_SIZE >> subx) * bx] as i32
 }
 
+// `restricted_max` is the 8-bit top of the restricted range
+fn fg_sample_range(fg: &Av1FilmGrain, bit_depth: u8, restricted_max: i32) -> (i32, i32) {
+    if fg.clip_to_restricted_range {
+        (16 << (bit_depth - 8), restricted_max << (bit_depth - 8))
+    } else {
+        (0, (1 << bit_depth) - 1)
+    }
+}
+
 /// Per-row grain seed pair (spec 7.18.3.5).
 fn fg_row_seed(rows: usize, row_num: usize, base_seed: u16) -> [u32; 2] {
     let mut seed = [0u32; 2];
@@ -3345,35 +3375,33 @@ fn fg_row_seed(rows: usize, row_num: usize, base_seed: u16) -> [u32; 2] {
     seed
 }
 
-/// Apply luma grain to one 32-row band (`fgy_32x32xn`), planar 8-bit.
+/// Apply luma grain to one 32-row band (`fgy_32x32xn`), planar samples.
 // `rows` (1 or 2) indexes two offset sub-arrays in lockstep; a range loop is clearest.
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 fn fg_apply_y_band(
     fg: &Av1FilmGrain,
-    dst: &mut [u8],
-    src: &[u8],
+    dst: &mut [u16],
+    src: &[u16],
     w: usize,
     stride: usize,
-    scaling: &[u8; 256],
+    scaling: &[u8],
     grain: &FgGrainLut,
     bh: usize,
     row_num: usize,
     band_y0: usize,
+    bit_depth: u8,
 ) {
     let rows = 1 + (fg.overlap_flag && row_num > 0) as usize;
-    let (min_v, max_v) = if fg.clip_to_restricted_range {
-        (16, 235)
-    } else {
-        (0, 255)
-    };
+    let (grain_min, grain_max) = fg_grain_range(bit_depth);
+    let (min_v, max_v) = fg_sample_range(fg, bit_depth, 235);
     let mut seed = fg_row_seed(rows, row_num, fg.seed);
     let mut offsets = [[0i32; 2]; 2];
     static WT: [[i32; 2]; 2] = [[27, 17], [17, 27]];
-    let noise_y = |sv: u8, g: i32| -> u8 {
+    let noise_y = |sv: u16, g: i32| -> u16 {
         let noise = fg_round2(scaling[sv as usize] as i32 * g, fg.scaling_shift);
-        (sv as i32 + noise).clamp(min_v, max_v) as u8
+        (sv as i32 + noise).clamp(min_v, max_v) as u16
     };
-    let px = |buf: &[u8], x: usize, y: usize| buf[(band_y0 + y) * stride + x];
+    let px = |buf: &[u16], x: usize, y: usize| buf[(band_y0 + y) * stride + x];
     for bx in (0..w).step_by(FG_BLOCK_SIZE) {
         let bw = core::cmp::min(FG_BLOCK_SIZE, w - bx);
         if fg.overlap_flag && bx != 0 {
@@ -3403,7 +3431,7 @@ fn fg_apply_y_band(
             for x in 0..xstart {
                 let g = fg_sample_lut(grain, &offsets, 0, 0, 0, 0, x, y);
                 let old = fg_sample_lut(grain, &offsets, 0, 0, 1, 0, x, y);
-                let g = fg_round2(old * WT[x][0] + g * WT[x][1], 5).clamp(-128, 127);
+                let g = fg_round2(old * WT[x][0] + g * WT[x][1], 5).clamp(grain_min, grain_max);
                 dst[(band_y0 + y) * stride + bx + x] = noise_y(px(src, bx + x, y), g);
             }
         }
@@ -3411,55 +3439,55 @@ fn fg_apply_y_band(
             for x in xstart..bw {
                 let g = fg_sample_lut(grain, &offsets, 0, 0, 0, 0, x, y);
                 let old = fg_sample_lut(grain, &offsets, 0, 0, 0, 1, x, y);
-                let g = fg_round2(old * WT[y][0] + g * WT[y][1], 5).clamp(-128, 127);
+                let g = fg_round2(old * WT[y][0] + g * WT[y][1], 5).clamp(grain_min, grain_max);
                 dst[(band_y0 + y) * stride + bx + x] = noise_y(px(src, bx + x, y), g);
             }
             for x in 0..xstart {
                 let top = fg_sample_lut(grain, &offsets, 0, 0, 0, 1, x, y);
                 let old = fg_sample_lut(grain, &offsets, 0, 0, 1, 1, x, y);
-                let top = fg_round2(old * WT[x][0] + top * WT[x][1], 5).clamp(-128, 127);
+                let top = fg_round2(old * WT[x][0] + top * WT[x][1], 5).clamp(grain_min, grain_max);
                 let g = fg_sample_lut(grain, &offsets, 0, 0, 0, 0, x, y);
                 let old = fg_sample_lut(grain, &offsets, 0, 0, 1, 0, x, y);
-                let g = fg_round2(old * WT[x][0] + g * WT[x][1], 5).clamp(-128, 127);
-                let g = fg_round2(top * WT[y][0] + g * WT[y][1], 5).clamp(-128, 127);
+                let g = fg_round2(old * WT[x][0] + g * WT[x][1], 5).clamp(grain_min, grain_max);
+                let g = fg_round2(top * WT[y][0] + g * WT[y][1], 5).clamp(grain_min, grain_max);
                 dst[(band_y0 + y) * stride + bx + x] = noise_y(px(src, bx + x, y), g);
             }
         }
     }
 }
 
-/// Apply chroma grain to one band (`fguv_32x32xn`), planar 8-bit 4:2:0. `uv` = 0
+/// Apply chroma grain to one band (`fguv_32x32xn`), planar 4:2:0 samples. `uv` = 0
 /// (Cb) / 1 (Cr). `luma` is the full grain-free luma plane; `scaling` is the plane's
 /// (or luma's, when `chroma_scaling_from_luma`) scaling LUT.
 // `rows` (1 or 2) indexes two offset sub-arrays in lockstep; a range loop is clearest.
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 fn fg_apply_uv_band_420(
     fg: &Av1FilmGrain,
-    dst: &mut [u8],
-    src: &[u8],
+    dst: &mut [u16],
+    src: &[u16],
     cw: usize,
     cstride: usize,
-    luma: &[u8],
+    luma: &[u16],
     lstride: usize,
-    scaling: &[u8; 256],
+    scaling: &[u8],
     grain: &FgGrainLut,
     bh: usize,
     row_num: usize,
     band_cy0: usize,
     uv: usize,
     is_id: bool,
+    bit_depth: u8,
 ) {
     let rows = 1 + (fg.overlap_flag && row_num > 0) as usize;
-    let (min_v, max_v) = if fg.clip_to_restricted_range {
-        (16, if is_id { 235 } else { 240 })
-    } else {
-        (0, 255)
-    };
+    let bitdepth_min_8 = bit_depth - 8;
+    let sample_max = (1i32 << bit_depth) - 1;
+    let (grain_min, grain_max) = fg_grain_range(bit_depth);
+    let (min_v, max_v) = fg_sample_range(fg, bit_depth, if is_id { 235 } else { 240 });
     let mut seed = fg_row_seed(rows, row_num, fg.seed);
     let mut offsets = [[0i32; 2]; 2];
     static WT: [[[i32; 2]; 2]; 2] = [[[27, 17], [17, 27]], [[23, 22], [0, 0]]];
     // luma co-located to chroma (bx,by) for 4:2:0: 2x2 average.
-    let noise_uv = |sv: u8, g: i32, lx: usize, ly: usize| -> u8 {
+    let noise_uv = |sv: u16, g: i32, lx: usize, ly: usize| -> u16 {
         let l0 = luma[(band_cy0 * 2 + ly * 2) * lstride + lx * 2] as i32;
         // dav1d repeats the last luma column of an odd-width frame
         let right = (lx * 2 + 1).min(lstride - 1);
@@ -3469,12 +3497,12 @@ fn fg_apply_uv_band_420(
             avg
         } else {
             let combined = avg * fg.uv_luma_mult[uv] + sv as i32 * fg.uv_mult[uv];
-            ((combined >> 6) + fg.uv_offset[uv]).clamp(0, 255)
+            ((combined >> 6) + (fg.uv_offset[uv] << bitdepth_min_8)).clamp(0, sample_max)
         };
         let noise = fg_round2(scaling[val as usize] as i32 * g, fg.scaling_shift);
-        (sv as i32 + noise).clamp(min_v, max_v) as u8
+        (sv as i32 + noise).clamp(min_v, max_v) as u16
     };
-    let px = |buf: &[u8], x: usize, y: usize| buf[(band_cy0 + y) * cstride + x];
+    let px = |buf: &[u16], x: usize, y: usize| buf[(band_cy0 + y) * cstride + x];
     let bsz = FG_BLOCK_SIZE >> 1; // subsampled block width/height (16)
     for bx in (0..cw).step_by(bsz) {
         let bw = core::cmp::min(bsz, cw - bx);
@@ -3504,7 +3532,8 @@ fn fg_apply_uv_band_420(
             for x in 0..xstart {
                 let g = fg_sample_lut(grain, &offsets, 1, 1, 0, 0, x, y);
                 let old = fg_sample_lut(grain, &offsets, 1, 1, 1, 0, x, y);
-                let g = fg_round2(old * WT[1][x][0] + g * WT[1][x][1], 5).clamp(-128, 127);
+                let g =
+                    fg_round2(old * WT[1][x][0] + g * WT[1][x][1], 5).clamp(grain_min, grain_max);
                 dst[(band_cy0 + y) * cstride + bx + x] = noise_uv(px(src, bx + x, y), g, bx + x, y);
             }
         }
@@ -3512,86 +3541,93 @@ fn fg_apply_uv_band_420(
             for x in xstart..bw {
                 let g = fg_sample_lut(grain, &offsets, 1, 1, 0, 0, x, y);
                 let old = fg_sample_lut(grain, &offsets, 1, 1, 0, 1, x, y);
-                let g = fg_round2(old * WT[1][y][0] + g * WT[1][y][1], 5).clamp(-128, 127);
+                let g =
+                    fg_round2(old * WT[1][y][0] + g * WT[1][y][1], 5).clamp(grain_min, grain_max);
                 dst[(band_cy0 + y) * cstride + bx + x] = noise_uv(px(src, bx + x, y), g, bx + x, y);
             }
             for x in 0..xstart {
                 let top = fg_sample_lut(grain, &offsets, 1, 1, 0, 1, x, y);
                 let old = fg_sample_lut(grain, &offsets, 1, 1, 1, 1, x, y);
-                let top = fg_round2(old * WT[1][x][0] + top * WT[1][x][1], 5).clamp(-128, 127);
+                let top =
+                    fg_round2(old * WT[1][x][0] + top * WT[1][x][1], 5).clamp(grain_min, grain_max);
                 let g = fg_sample_lut(grain, &offsets, 1, 1, 0, 0, x, y);
                 let old = fg_sample_lut(grain, &offsets, 1, 1, 1, 0, x, y);
-                let g = fg_round2(old * WT[1][x][0] + g * WT[1][x][1], 5).clamp(-128, 127);
-                let g = fg_round2(top * WT[1][y][0] + g * WT[1][y][1], 5).clamp(-128, 127);
+                let g =
+                    fg_round2(old * WT[1][x][0] + g * WT[1][x][1], 5).clamp(grain_min, grain_max);
+                let g =
+                    fg_round2(top * WT[1][y][0] + g * WT[1][y][1], 5).clamp(grain_min, grain_max);
                 dst[(band_cy0 + y) * cstride + bx + x] = noise_uv(px(src, bx + x, y), g, bx + x, y);
             }
         }
     }
 }
 
-/// Synthesize + apply AV1 film grain to a decoded NV12 frame in place (8-bit 4:2:0),
-/// matching dav1d. The frame is the grain-free reconstruction from the hardware
-/// decoder; `fg` is the resolved (ref-copied if needed) grain params.
+/// Synthesize + apply AV1 film grain to a decoded NV12 / P010 frame in place
+/// (4:2:0), matching dav1d. The frame is the grain-free reconstruction from the
+/// hardware decoder; `fg` is the resolved (ref-copied if needed) grain params.
 fn apply_film_grain_nv12(frame: &mut Nv12Frame, fg: &Av1FilmGrain, is_id: bool) {
     if !fg.apply_grain {
         return;
     }
-    // 8-bit only: the grain synthesis indexes the planes as one byte per sample.
-    // A 10-bit grain stream is left grain-free rather than corrupted (10-bit grain
-    // is a follow-up alongside the 10-bit RGB path).
-    if frame.bit_depth != 8 {
-        return;
-    }
+    let bit_depth = frame.bit_depth;
     let w = frame.width as usize;
     let h = frame.height as usize;
     let cw = w.div_ceil(2);
-    let ch = h.div_ceil(2);
 
     // Grain templates.
     let mut grain_y: alloc::boxed::Box<FgGrainLut> =
         alloc::boxed::Box::new([[0i16; FG_GRAIN_WIDTH]; FG_GRAIN_HEIGHT + 1]);
-    fg_generate_grain_y(fg, &mut grain_y);
+    fg_generate_grain_y(fg, &mut grain_y, bit_depth);
     let mut grain_cb: alloc::boxed::Box<FgGrainLut> =
         alloc::boxed::Box::new([[0i16; FG_GRAIN_WIDTH]; FG_GRAIN_HEIGHT + 1]);
     let mut grain_cr: alloc::boxed::Box<FgGrainLut> =
         alloc::boxed::Box::new([[0i16; FG_GRAIN_WIDTH]; FG_GRAIN_HEIGHT + 1]);
     if fg.num_uv_points[0] != 0 || fg.chroma_scaling_from_luma {
-        fg_generate_grain_uv_420(fg, &mut grain_cb, &grain_y, 0);
+        fg_generate_grain_uv_420(fg, &mut grain_cb, &grain_y, 0, bit_depth);
     }
     if fg.num_uv_points[1] != 0 || fg.chroma_scaling_from_luma {
-        fg_generate_grain_uv_420(fg, &mut grain_cr, &grain_y, 1);
+        fg_generate_grain_uv_420(fg, &mut grain_cr, &grain_y, 1, bit_depth);
     }
 
     // Scaling LUTs.
-    let scaling_y = fg_generate_scaling(&fg.y_points[..fg.num_y_points]);
-    let scaling_cb = fg_generate_scaling(&fg.uv_points[0][..fg.num_uv_points[0]]);
-    let scaling_cr = fg_generate_scaling(&fg.uv_points[1][..fg.num_uv_points[1]]);
+    let scaling_y = fg_generate_scaling(&fg.y_points[..fg.num_y_points], bit_depth);
+    let scaling_cb = fg_generate_scaling(&fg.uv_points[0][..fg.num_uv_points[0]], bit_depth);
+    let scaling_cr = fg_generate_scaling(&fg.uv_points[1][..fg.num_uv_points[1]], bit_depth);
 
-    let (luma, chroma) = frame.planes_mut();
-    // Luma: apply in 32-row bands over a copy of the grain-free source.
+    let (luma_bytes, chroma_bytes) = frame.planes_mut();
+    // The chroma grain reads the grain-free luma, so luma is grained into a copy.
+    let grain_free_luma = two_plane_samples(luma_bytes, bit_depth);
     if fg.num_y_points != 0 {
-        let src_y = luma.to_vec();
+        let mut luma = grain_free_luma.clone();
         let rows = h.div_ceil(FG_BLOCK_SIZE);
         for row in 0..rows {
             let band_y0 = row * FG_BLOCK_SIZE;
             let bh = core::cmp::min(h - band_y0, FG_BLOCK_SIZE);
             fg_apply_y_band(
-                fg, luma, &src_y, w, w, &scaling_y, &grain_y, bh, row, band_y0,
+                fg,
+                &mut luma,
+                &grain_free_luma,
+                w,
+                w,
+                &scaling_y,
+                &grain_y,
+                bh,
+                row,
+                band_y0,
+                bit_depth,
             );
         }
+        store_two_plane_samples(&luma, luma_bytes, bit_depth);
     }
 
     if fg.num_uv_points[0] == 0 && fg.num_uv_points[1] == 0 && !fg.chroma_scaling_from_luma {
         return;
     }
 
-    // De-interleave NV12 chroma into planar Cb / Cr, apply, re-interleave.
-    let mut cb = alloc::vec![0u8; cw * ch];
-    let mut cr = alloc::vec![0u8; cw * ch];
-    for i in 0..cw * ch {
-        cb[i] = chroma[2 * i];
-        cr[i] = chroma[2 * i + 1];
-    }
+    // De-interleave the chroma plane into planar Cb / Cr, apply, re-interleave.
+    let chroma = two_plane_samples(chroma_bytes, bit_depth);
+    let mut cb: alloc::vec::Vec<u16> = chroma.iter().step_by(2).copied().collect();
+    let mut cr: alloc::vec::Vec<u16> = chroma.iter().skip(1).step_by(2).copied().collect();
     let rows = h.div_ceil(FG_BLOCK_SIZE);
     for (uv, (plane, gr)) in [(&mut cb, &*grain_cb), (&mut cr, &*grain_cr)]
         .into_iter()
@@ -3613,13 +3649,55 @@ fn apply_film_grain_nv12(frame: &mut Nv12Frame, fg: &Av1FilmGrain, is_id: bool) 
             let luma_band = core::cmp::min(h - row * FG_BLOCK_SIZE, FG_BLOCK_SIZE);
             let bh = (luma_band + 1) >> 1;
             fg_apply_uv_band_420(
-                fg, plane, &src, cw, cw, luma, w, scaling, gr, bh, row, band_cy0, uv, is_id,
+                fg,
+                plane,
+                &src,
+                cw,
+                cw,
+                &grain_free_luma,
+                w,
+                scaling,
+                gr,
+                bh,
+                row,
+                band_cy0,
+                uv,
+                is_id,
+                bit_depth,
             );
         }
     }
-    for i in 0..cw * ch {
-        chroma[2 * i] = cb[i];
-        chroma[2 * i + 1] = cr[i];
+    let interleaved: alloc::vec::Vec<u16> = cb
+        .iter()
+        .zip(&cr)
+        .flat_map(|(&blue, &red)| [blue, red])
+        .collect();
+    store_two_plane_samples(&interleaved, chroma_bytes, bit_depth);
+}
+
+// above 8 bits a sample is a little-endian word with the value in its top bits
+fn two_plane_samples(bytes: &[u8], bit_depth: u8) -> alloc::vec::Vec<u16> {
+    if bit_depth == 8 {
+        return bytes.iter().map(|&byte| u16::from(byte)).collect();
+    }
+    let unused_low_bits = 16 - u32::from(bit_depth);
+    bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]) >> unused_low_bits)
+        .collect()
+}
+
+// The inverse of `two_plane_samples`.
+fn store_two_plane_samples(samples: &[u16], bytes: &mut [u8], bit_depth: u8) {
+    if bit_depth == 8 {
+        for (byte, &sample) in bytes.iter_mut().zip(samples) {
+            *byte = sample as u8;
+        }
+        return;
+    }
+    let unused_low_bits = 16 - u32::from(bit_depth);
+    for (pair, &sample) in bytes.chunks_exact_mut(2).zip(samples) {
+        pair.copy_from_slice(&(sample << unused_low_bits).to_le_bytes());
     }
 }
 
@@ -3815,8 +3893,7 @@ fn parse_av1_cdef(
     }
     cdef.damping_minus_3 = br.read_bits(2)? as u8;
     cdef.bits = br.read_bits(2)? as u8;
-    // The secondary strengths stay as coded (0..=3): the Vulkan Std fields carry
-    // the syntax element and the driver maps a coded 3 to strength 4 itself.
+    // secondary strengths stay as coded, the driver maps a coded 3 to strength 4
     for i in 0..(1usize << cdef.bits) {
         cdef.y_pri[i] = br.read_bits(4)? as u8;
         cdef.y_sec[i] = br.read_bits(2)? as u8;
@@ -4004,7 +4081,7 @@ fn parse_av1_global_motion(
         return Some(gm);
     }
     // Reference frames LAST(1)..=ALTREF(7).
-    for r#ref in 1..AV1_NUM_REF_FRAMES {
+    for (r#ref, prev) in previous_gm_params.iter().enumerate().skip(1) {
         let mut gm_type = AV1_GM_IDENTITY;
         let is_global = br.read_bit()? == 1;
         if is_global {
@@ -4021,7 +4098,6 @@ fn parse_av1_global_motion(
             }
         }
         gm.gm_type[r#ref] = gm_type;
-        let prev = previous_gm_params[r#ref];
         let mut read =
             |idx: usize| read_global_param(br, gm_type, idx, prev[idx], allow_high_precision_mv);
         if gm_type >= AV1_GM_ROTZOOM {
@@ -4396,12 +4472,11 @@ pub fn parse_av1_frame_header(
         br.read_bit()? == 1
     };
 
-    // setup_past_independence() or load_previous() (spec 5.9.2). A primary
-    // reference naming an empty slot is a malformed stream.
+    // setup_past_independence() or load_previous() (spec 5.9.2)
     let previous = if fh.primary_ref_frame == AV1_PRIMARY_REF_NONE {
         Av1InheritedParams::default()
     } else {
-        let slot = usize::try_from(fh.ref_frame_idx[fh.primary_ref_frame as usize]).ok()?;
+        let slot = fh.ref_frame_idx[fh.primary_ref_frame as usize] as usize;
         if !refs.valid[slot] {
             return None;
         }
@@ -13016,10 +13091,9 @@ impl Av1DpbDecoder {
                     (phys, fg)
                 }
             };
-            // Grain is synthesized on the CPU only for 8-bit (`apply_film_grain_nv12`
-            // leaves 10-bit grain-free, as the system `decode_all` does), and the CPU
-            // upload path is 8-bit only; a 10-bit grain frame therefore takes the
+            // The CPU upload path is 8-bit only, so a 10-bit grain frame takes the
             // grain-free GPU convert, same as any other 10-bit slot.
+            // TODO: synthesize 10-bit grain on the texture path too.
             if fg.apply_grain && self.core.bit_depth == 8 {
                 out.push(self.core.grained_picture_to_texture(slot, &fg, is_id)?);
             } else {
@@ -13452,9 +13526,7 @@ fn av1_ref_info(st: &Av1SlotState) -> vk::native::StdVideoDecodeAV1ReferenceInfo
     }
 }
 
-// RefFrameSignBias (spec 7.8) as the Vulkan bitmask: bit n for reference name n,
-// set when that reference follows the current frame in display order.
-// `order_hints` is indexed by reference name, as the picture info's OrderHints.
+// RefFrameSignBias as the Vulkan bitmask, `order_hints` indexed by reference name
 fn av1_ref_frame_sign_bias(
     order_hints: &[u8; AV1_NUM_REF_FRAMES],
     current_order_hint: u8,
@@ -13462,8 +13534,11 @@ fn av1_ref_frame_sign_bias(
 ) -> u8 {
     let mut mask = 0u8;
     for (name, &hint) in order_hints.iter().enumerate().skip(1) {
-        let distance =
-            av1_relative_dist(order_hint_bits, i32::from(hint), i32::from(current_order_hint));
+        let distance = av1_relative_dist(
+            order_hint_bits,
+            i32::from(hint),
+            i32::from(current_order_hint),
+        );
         if distance > 0 {
             mask |= 1 << name;
         }
@@ -16973,13 +17048,34 @@ mod tests {
         let current_order_hint = 4;
         // INTRA, then LAST..ALTREF: four references before the frame, three after
         let order_hints = [0, 3, 2, 1, 0, 5, 6, 8];
-        let first_future_name = 5;
-        let expected =
-            (first_future_name..AV1_NUM_REF_FRAMES).fold(0u8, |mask, name| mask | 1 << name);
+        // bits 5, 6 and 7: BWDREF, ALTREF2 and ALTREF
+        let expected = 0b1110_0000;
         assert_eq!(
             av1_ref_frame_sign_bias(&order_hints, current_order_hint, order_hint_bits),
             expected
         );
+    }
+
+    #[test]
+    fn ten_bit_grain_scaling_keeps_the_eight_bit_points_on_every_fourth_entry() {
+        // the cb points of the libaom film-grain-test=1 vector
+        let points = [
+            [16, 0],
+            [20, 64],
+            [28, 88],
+            [60, 104],
+            [90, 136],
+            [105, 160],
+            [134, 168],
+            [168, 208],
+        ];
+        let eight_bit = fg_generate_scaling(&points, 8);
+        let ten_bit = fg_generate_scaling(&points, 10);
+        assert_eq!(eight_bit.len(), 1 << 8);
+        assert_eq!(ten_bit.len(), 1 << 10);
+        for (value, &scaling) in eight_bit.iter().enumerate() {
+            assert_eq!(ten_bit[value << 2], scaling, "8-bit value {value}");
+        }
     }
 
     #[test]
@@ -16990,8 +17086,7 @@ mod tests {
         let mut w = BitWriter::default();
         w.write_bit(1); // uniform_tile_spacing_flag
         w.write_bit(1); // increment_tile_cols_log2
-        w.write_bit(0); // stop at tile_cols_log2 = 1
-        // one superblock row codes no tile_rows_log2 bits
+        w.write_bit(0); // stop at tile_cols_log2 = 1, one superblock row codes no rows
         w.write_bits(0, 1); // context_update_tile_id
         w.write_bits(0, 2); // tile_size_bytes_minus_1
         let bytes = w.into_bytes();
