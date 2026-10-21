@@ -178,7 +178,11 @@ pub(crate) fn pcm_alternatives(format: AudioFormat) -> Vec<Caps> {
 pub(crate) fn is_pcm(format: AudioFormat) -> bool {
     matches!(
         format,
-        AudioFormat::PcmU8 | AudioFormat::PcmS16Le | AudioFormat::PcmS24Le | AudioFormat::PcmS32Le
+        AudioFormat::PcmU8
+            | AudioFormat::PcmS16Le
+            | AudioFormat::PcmS24Le
+            | AudioFormat::PcmS32Le
+            | AudioFormat::PcmF32Le
     )
 }
 

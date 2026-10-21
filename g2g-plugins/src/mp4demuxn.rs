@@ -42,7 +42,8 @@ use g2g_core::{
 
 use crate::fmp4::{
     clip_stored_pcm, parse_all_tracks, parse_chapters, parse_fragments_multi,
-    parse_progressive_multi, starts_with_param_set, Sample, TrackHeader, TrackKind,
+    parse_progressive_multi, starts_with_param_set, unsupported_pcm_layout, vorbis_headers,
+    Sample, TrackHeader, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 use crate::uncompressedvideo::{raw_video_frame_bytes, warn_short_raw_video_frame};
@@ -275,8 +276,10 @@ pub fn unsupported_sample_entries(data: &[u8]) -> Vec<alloc::string::String> {
             let entry_type = stsd.get(STSD_FIRST_ENTRY_TYPE)?;
             let entry: alloc::string::String =
                 entry_type.iter().map(|&byte| char::from(byte)).collect();
-            Some(match entry_type {
-                b"encv" | b"enca" => alloc::format!("{entry} (encrypted)"),
+            let pcm_layout = stsd.get(STSD_ENTRIES_AT..).and_then(unsupported_pcm_layout);
+            Some(match (entry_type, pcm_layout) {
+                (b"encv" | b"enca", _) => alloc::format!("{entry} (encrypted)"),
+                (_, Some(layout)) => alloc::format!("{entry} {layout}"),
                 _ => entry,
             })
         })
@@ -287,6 +290,7 @@ pub fn unsupported_sample_entries(data: &[u8]) -> Vec<alloc::string::String> {
 const TKHD_V0_TRACK_ID: usize = 12;
 const TKHD_V1_TRACK_ID: usize = 20;
 const HDLR_HANDLER_TYPE: core::ops::Range<usize> = 8..12;
+const STSD_ENTRIES_AT: usize = 8;
 const STSD_FIRST_ENTRY_TYPE: core::ops::Range<usize> = 12..16;
 
 /// The subtitle (timed-text) tracks an MP4 carries (M412): one [`Mp4StreamInfo`]
@@ -856,9 +860,9 @@ impl Mp4DemuxN {
             }
 
             let mut data = sample.annexb;
-            // An Opus, raw AAC or tagged track's config goes downstream as its own
-            // frame ahead of the samples, so it is built here and pushed below.
-            let mut lead_config = None;
+            // An Opus, Vorbis, raw AAC or tagged track's config goes downstream as
+            // frames of its own ahead of the samples, so they are built here and pushed below.
+            let mut lead_frames: Vec<Vec<u8>> = Vec::new();
             match kind {
                 // a tagged codec's whole sample entry leads it as a frame of its own
                 Some(TrackKind::Video {
@@ -867,7 +871,7 @@ impl Mp4DemuxN {
                     ..
                 }) => {
                     if self.need_config[port] {
-                        lead_config = param_sets.first().cloned();
+                        lead_frames.extend(param_sets.first().cloned());
                     }
                 }
                 Some(TrackKind::Audio {
@@ -876,7 +880,7 @@ impl Mp4DemuxN {
                     ..
                 }) => {
                     if self.need_config[port] {
-                        lead_config = Some(config.clone());
+                        lead_frames.push(config.clone());
                     }
                 }
                 // Prepend out-of-band parameter sets to the first video frame if
@@ -903,7 +907,18 @@ impl Mp4DemuxN {
                     ..
                 }) => {
                     if self.need_config[port] && !config.is_empty() {
-                        lead_config = Some(config.clone());
+                        lead_frames.push(config.clone());
+                    }
+                }
+                // the three Vorbis headers lead the packets, the way `OggDemux` forwards them
+                Some(TrackKind::Audio {
+                    format: AudioFormat::Vorbis,
+                    config,
+                    ..
+                }) => {
+                    if self.need_config[port] {
+                        let headers = vorbis_headers(config).expect("read with the track");
+                        lead_frames.extend(headers.into_iter().map(<[u8]>::to_vec));
                     }
                 }
                 Some(TrackKind::Audio {
@@ -912,7 +927,7 @@ impl Mp4DemuxN {
                     ..
                 }) if is_raw_aac_config(config) => {
                     if self.need_config[port] {
-                        lead_config = Some(config.clone());
+                        lead_frames.push(config.clone());
                     }
                 }
                 // ADTS-frame every AAC access unit from the track's ASC, so the
@@ -948,7 +963,7 @@ impl Mp4DemuxN {
             }
             self.need_config[port] = false;
 
-            if let Some(head) = lead_config {
+            for head in lead_frames {
                 let frame = self.next_frame(head, FrameTiming::default());
                 out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
             }

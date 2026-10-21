@@ -926,21 +926,22 @@ fn unread_audio_entry(
     Ok(None)
 }
 
-// The QuickTime sound description fields mov.c reads to cut a coded track into
-// packets and set up its decoder. Offsets count from the entry payload.
-#[cfg(feature = "ffmpeg-long-tail")]
+// The QuickTime sound description fields mov.c reads to cut a track into
+// packets, lay out its PCM and set up its decoder. Offsets count from the entry payload.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SoundDescription {
+    pub version: u16,
     pub channels: u16,
     pub sample_bits: u16,
     // 0 when the entry leaves the rate to the media timescale
     pub sample_rate: u32,
     pub samples_per_frame: u32,
     pub bytes_per_frame: u32,
+    // the version 2 formatSpecificFlags, 0 for the older versions
+    pub format_flags: u32,
     pub children_at: usize,
 }
 
-#[cfg(feature = "ffmpeg-long-tail")]
 impl SoundDescription {
     pub(crate) fn parse(payload: &[u8], fourcc: u32) -> Result<Self, G2gError> {
         const V1_SAMPLES_PER_FRAME: usize = 28;
@@ -948,17 +949,20 @@ impl SoundDescription {
         const V2_SAMPLE_RATE: usize = 32;
         const V2_CHANNELS: usize = 40;
         const V2_SAMPLE_BITS: usize = 48;
+        const V2_FORMAT_FLAGS: usize = 52;
         const V2_BYTES_PER_FRAME: usize = 56;
         const V2_SAMPLES_PER_FRAME: usize = 60;
         let mut description = SoundDescription {
+            version: sound_entry_u16(payload, SOUND_ENTRY_VERSION)?,
             channels: sound_entry_u16(payload, SOUND_ENTRY_CHANNELS)?,
             sample_bits: sound_entry_u16(payload, SOUND_ENTRY_SAMPLE_BITS)?,
             sample_rate: u32::from(sound_entry_u16(payload, SOUND_ENTRY_SAMPLE_RATE)?),
             samples_per_frame: 0,
             bytes_per_frame: 0,
+            format_flags: 0,
             children_at: sound_entry_children_at(payload)?,
         };
-        match sound_entry_u16(payload, SOUND_ENTRY_VERSION)? {
+        match description.version {
             1 => {
                 description.samples_per_frame = be32(payload, V1_SAMPLES_PER_FRAME)?;
                 description.bytes_per_frame = be32(payload, V1_BYTES_PER_FRAME)?;
@@ -971,6 +975,7 @@ impl SoundDescription {
                     .map_err(|_| G2gError::CapsMismatch)?;
                 description.sample_bits = u16::try_from(be32(payload, V2_SAMPLE_BITS)?)
                     .map_err(|_| G2gError::CapsMismatch)?;
+                description.format_flags = be32(payload, V2_FORMAT_FLAGS)?;
                 description.bytes_per_frame = be32(payload, V2_BYTES_PER_FRAME)?;
                 description.samples_per_frame = be32(payload, V2_SAMPLES_PER_FRAME)?;
             }
@@ -1043,8 +1048,16 @@ fn parse_audio_entry(
             None,
         )));
     }
-    if let Some(kind) = boxes(entries).find_map(|(fourcc, entry)| quicktime_pcm(fourcc, entry)) {
-        return kind.map(|kind| Some((kind, None)));
+    if let Some((pcm, description)) = quicktime_pcm_entry(entries) {
+        // a layout no AudioFormat carries skips the track, which `unsupported_pcm_layout` names
+        let Ok((format, stored_pcm)) = pcm else {
+            return Ok(None);
+        };
+        let kind = quicktime_pcm_track(format, stored_pcm, &description)?;
+        return Ok(Some((kind, None)));
+    }
+    if let Some(vorbis) = find_box(entries, b"msVo") {
+        return Ok(Some((vorbis_track(vorbis, timescale)?, None)));
     }
     if let Some(mp3) = find_box(entries, b".mp3") {
         let channels = sound_entry_channels(mp3)?;
@@ -1126,45 +1139,198 @@ fn sound_entry_channels(entry: &[u8]) -> Result<u8, G2gError> {
     }
 }
 
-// a QuickTime PCM sample entry, at its sound description's rate rather than the media timescale
-fn quicktime_pcm(fourcc: &[u8; 4], entry: &[u8]) -> Option<Result<TrackKind, G2gError>> {
-    let bits = sound_entry_u16(entry, SOUND_ENTRY_SAMPLE_BITS).ok()?;
-    let (format, stored_pcm) = quicktime_pcm_format(fourcc, bits)?;
-    let read = || {
-        if sound_entry_u16(entry, SOUND_ENTRY_VERSION)? == SOUND_ENTRY_VERSION_2 {
-            return Err(G2gError::CapsMismatch);
-        }
-        let sample_rate = u32::from(sound_entry_u16(entry, SOUND_ENTRY_SAMPLE_RATE)?);
-        if sample_rate == 0 {
-            return Err(G2gError::CapsMismatch);
-        }
-        Ok(TrackKind::Audio {
-            format,
-            channels: sound_entry_channels(entry)?,
-            sample_rate,
-            config: Vec::new(),
-            stored_pcm: Some(stored_pcm),
-        })
-    };
-    Some(read())
+// the first PCM sample entry in an `stsd`'s list, with its graph format or the layout no AudioFormat carries
+fn quicktime_pcm_entry(
+    entries: &[u8],
+) -> Option<(Result<(AudioFormat, StoredPcm), PcmLayout>, SoundDescription)> {
+    boxes(entries).find_map(|(fourcc, entry)| {
+        let description = SoundDescription::parse(entry, u32::from_le_bytes(*fourcc)).ok()?;
+        Some((
+            quicktime_pcm_format(fourcc, &description, entry)?,
+            description,
+        ))
+    })
 }
 
-// QuickTime names its PCM sample entries with AIFC's compression types, except `twos` and `raw `
-fn quicktime_pcm_format(fourcc: &[u8; 4], bits: u16) -> Option<(AudioFormat, StoredPcm)> {
+// the PCM layout of a QuickTime sound entry that no AudioFormat carries
+pub(crate) fn unsupported_pcm_layout(entries: &[u8]) -> Option<PcmLayout> {
+    quicktime_pcm_entry(entries)?.0.err()
+}
+
+// a QuickTime PCM track, at its sound description's rate rather than the media timescale
+fn quicktime_pcm_track(
+    format: AudioFormat,
+    stored_pcm: StoredPcm,
+    description: &SoundDescription,
+) -> Result<TrackKind, G2gError> {
+    let channels = u8::try_from(description.channels)
+        .ok()
+        .filter(|channels| *channels > 0)
+        .ok_or(G2gError::CapsMismatch)?;
+    if description.sample_rate == 0 {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(TrackKind::Audio {
+        format,
+        channels,
+        sample_rate: description.sample_rate,
+        config: Vec::new(),
+        stored_pcm: Some(stored_pcm),
+    })
+}
+
+// QuickTime names its PCM entries with AIFC's compression types, `twos`, `raw `, the `in` / `fl` types and `lpcm`
+fn quicktime_pcm_format(
+    fourcc: &[u8; 4],
+    description: &SoundDescription,
+    entry: &[u8],
+) -> Option<Result<(AudioFormat, StoredPcm), PcmLayout>> {
     const RAW_UNSIGNED_BITS: u16 = 8;
     const RAW_BIG_ENDIAN_BITS: u16 = 16;
+    let bits = description.sample_bits;
     let aiff = |compression: [u8; 4]| {
         let (format, big_endian) = audio_from_comm(bits, Some(compression))?;
-        Some((format, StoredPcm::Aiff { big_endian }))
+        Some(Ok((format, StoredPcm::Aiff { big_endian })))
+    };
+    // the fourcc fixes the sample type, which ffmpeg writes in a version 1 entry whose bit depth field says 16
+    let typed = |bits: u32, float: bool| {
+        let layout = PcmLayout {
+            bits,
+            float,
+            signed: true,
+            big_endian: !enda_little_endian(entry, description),
+            packed: true,
+        };
+        Some(layout.graph_format())
     };
     match fourcc {
-        b"raw " if bits == RAW_UNSIGNED_BITS => Some((AudioFormat::PcmU8, StoredPcm::Unsigned8)),
+        b"raw " if bits == RAW_UNSIGNED_BITS => {
+            Some(Ok((AudioFormat::PcmU8, StoredPcm::Unsigned8)))
+        }
         // AIFC's `NONE` is signed big-endian
         b"raw " if bits == RAW_BIG_ENDIAN_BITS => aiff(*b"NONE"),
         b"twos" => aiff(*b"NONE"),
         b"sowt" | b"alaw" | b"ulaw" => aiff(*fourcc),
+        b"in24" => typed(24, false),
+        b"in32" => typed(32, false),
+        b"fl32" => typed(32, true),
+        b"fl64" => typed(64, true),
+        b"lpcm" => Some(lpcm_layout(description).graph_format()),
         _ => None,
     }
+}
+
+// an `enda` atom inside the entry's `wave` atom holding 1 marks little-endian samples, as mov.c reads it
+fn enda_little_endian(entry: &[u8], description: &SoundDescription) -> bool {
+    entry
+        .get(description.children_at..)
+        .and_then(|children| find_path(children, &[b"wave", b"enda"]))
+        .is_some_and(|enda| enda.get(1) == Some(&1))
+}
+
+// kAudioFormatFlagIsFloat, IsBigEndian and IsSignedInteger in a version 2 entry's formatSpecificFlags
+const LPCM_FLAG_FLOAT: u32 = 0x1;
+const LPCM_FLAG_BIG_ENDIAN: u32 = 0x2;
+const LPCM_FLAG_SIGNED: u32 = 0x4;
+
+fn lpcm_layout(description: &SoundDescription) -> PcmLayout {
+    let bits = u32::from(description.sample_bits);
+    let flags = description.format_flags;
+    let frame_bytes = bits / 8 * u32::from(description.channels);
+    PcmLayout {
+        bits,
+        float: flags & LPCM_FLAG_FLOAT != 0,
+        signed: flags & LPCM_FLAG_SIGNED != 0,
+        big_endian: flags & LPCM_FLAG_BIG_ENDIAN != 0,
+        // the packet sizes say whether samples sit back to back, whatever the IsPacked flag claims
+        packed: bits % 8 == 0
+            && description.bytes_per_frame == frame_bytes
+            && description.samples_per_frame == 1,
+    }
+}
+
+// how a QuickTime PCM entry stores its samples
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PcmLayout {
+    bits: u32,
+    float: bool,
+    signed: bool,
+    big_endian: bool,
+    // one frame per packet, each frame its samples back to back
+    packed: bool,
+}
+
+impl PcmLayout {
+    fn graph_format(self) -> Result<(AudioFormat, StoredPcm), PcmLayout> {
+        let format = match (self.float, self.signed, self.bits) {
+            _ if !self.packed => return Err(self),
+            (true, _, 32) => AudioFormat::PcmF32Le,
+            (false, _, 8) => AudioFormat::PcmU8,
+            (false, true, 16) => AudioFormat::PcmS16Le,
+            (false, true, 24) => AudioFormat::PcmS24Le,
+            (false, true, 32) => AudioFormat::PcmS32Le,
+            _ => return Err(self),
+        };
+        let stored = match (format, self.signed) {
+            (AudioFormat::PcmU8, false) => StoredPcm::Unsigned8,
+            _ => StoredPcm::Aiff {
+                big_endian: self.big_endian,
+            },
+        };
+        Ok((format, stored))
+    }
+}
+
+impl core::fmt::Display for PcmLayout {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let kind = match (self.float, self.signed) {
+            (true, _) => "float",
+            (false, true) => "signed",
+            (false, false) => "unsigned",
+        };
+        let order = if self.big_endian {
+            "big-endian"
+        } else {
+            "little-endian"
+        };
+        write!(f, "{}-bit {kind} {order} PCM", self.bits)?;
+        if !self.packed {
+            f.write_str(" in padded frames")?;
+        }
+        Ok(())
+    }
+}
+
+// ffmpeg's QuickTime Vorbis entry keeps the Xiph-laced headers in a `glbl` atom, as Matroska's CodecPrivate does
+fn vorbis_track(entry: &[u8], timescale: u32) -> Result<TrackKind, G2gError> {
+    let description = SoundDescription::parse(entry, u32::from_le_bytes(*b"msVo"))?;
+    let channels = u8::try_from(description.channels)
+        .ok()
+        .filter(|channels| *channels > 0)
+        .ok_or(G2gError::CapsMismatch)?;
+    let config = entry
+        .get(description.children_at..)
+        .and_then(|children| find_box(children, b"glbl"))
+        .filter(|laced| vorbis_headers(laced).is_some())
+        .ok_or(G2gError::CapsMismatch)?;
+    Ok(TrackKind::Audio {
+        format: AudioFormat::Vorbis,
+        channels,
+        sample_rate: timescale,
+        config: config.to_vec(),
+        stored_pcm: None,
+    })
+}
+
+// the identification, comment and setup headers of a Xiph-laced Vorbis config, none when it holds anything else
+pub(crate) fn vorbis_headers(laced: &[u8]) -> Option<Vec<&[u8]>> {
+    const HEADER_TYPES: [u8; 3] = [0x01, 0x03, 0x05];
+    let packets = crate::matroska::split_xiph_codec_private(laced)?;
+    let well_formed = packets.len() == HEADER_TYPES.len()
+        && packets.iter().zip(HEADER_TYPES).all(|(packet, kind)| {
+            packet.first() == Some(&kind) && packet[1..].starts_with(b"vorbis")
+        });
+    well_formed.then_some(packets)
 }
 
 // esds objectTypeIndication of MPEG-2 and MPEG-1 audio (MP3) in an `mp4a` entry

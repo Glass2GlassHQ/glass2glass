@@ -38,7 +38,8 @@ use crate::codectag::{
 };
 use crate::fmp4::{
     clip_stored_pcm, parse_all_tracks, parse_fragments_multi, parse_progressive_multi,
-    prepend_param_sets, starts_with_param_set, track_framerate_q16, Sample, TrackHeader, TrackKind,
+    prepend_param_sets, starts_with_param_set, track_framerate_q16, vorbis_headers, Sample,
+    TrackHeader, TrackKind,
 };
 use crate::mkvdemux::{prores_stream_from_str, prores_stream_str};
 use crate::mp4box::find_box;
@@ -86,8 +87,10 @@ const AUDIO_STREAM_NAMES: &[(&str, AudioFormat)] = &[
     ("pcm-s16le", AudioFormat::PcmS16Le),
     ("pcm-s24le", AudioFormat::PcmS24Le),
     ("pcm-s32le", AudioFormat::PcmS32Le),
+    ("pcm-f32le", AudioFormat::PcmF32Le),
     ("alaw", AudioFormat::Alaw),
     ("mulaw", AudioFormat::Mulaw),
+    ("vorbis", AudioFormat::Vorbis),
 ];
 
 pub(crate) fn mp4_audio_stream_str(format: AudioFormat) -> Option<String> {
@@ -257,12 +260,20 @@ impl Mp4Demux {
         // Opus config leads the audio in-band (M791), the `OggDemux` convention,
         // so the decoder trims the pre-skip; AAC is self-describing once ADTS-framed,
         // except the object types ADTS cannot carry, which go raw behind their config.
-        // A tagged codec's whole sample entry leads it the same way.
+        // A tagged codec's whole sample entry leads it the same way, and Vorbis
+        // leads with its three headers as `OggDemux` forwards them.
         let raw_aac = *format == AudioFormat::Aac && is_raw_aac_config(config);
         let tagged = matches!(format, AudioFormat::Tagged(_));
-        if (*format == AudioFormat::Opus && !config.is_empty()) || raw_aac || tagged {
+        let lead_frames = if *format == AudioFormat::Vorbis {
+            vorbis_headers(config).expect("read with the track")
+        } else if (*format == AudioFormat::Opus && !config.is_empty()) || raw_aac || tagged {
+            Vec::from([config.as_slice()])
+        } else {
+            Vec::new()
+        };
+        for head in lead_frames {
             out.push(PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(config.clone().into_boxed_slice())),
+                MemoryDomain::System(SystemSlice::from_boxed(head.into())),
                 FrameTiming::default(),
                 self.sequence,
             )))
@@ -589,7 +600,7 @@ impl AsyncElement for Mp4Demux {
 static MP4DEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | vp8 | mjpeg | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq (the video track by codec) | raw-i420 | raw-yuy2 | raw-uyvy | raw-v210 (the uncompressed video track by layout) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | alaw | mulaw (the audio track by format) | video-mov-<fourcc> | audio-mov-<fourcc> (a codec known only by its sample entry, with ffmpeg-long-tail)",
+    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | vp8 | mjpeg | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq (the video track by codec) | raw-i420 | raw-yuy2 | raw-uyvy | raw-v210 (the uncompressed video track by layout) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | pcm-f32le | alaw | mulaw | vorbis (the audio track by format) | video-mov-<fourcc> | audio-mov-<fourcc> (a codec known only by its sample entry, with ffmpeg-long-tail)",
 )];
 
 impl PadTemplates for Mp4Demux {
