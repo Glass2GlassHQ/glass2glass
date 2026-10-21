@@ -222,7 +222,9 @@ fn start_broker(port: u16) -> (BrokerProcess, Arc<Mutex<Vec<String>>>) {
     while TcpStream::connect(("127.0.0.1", port)).is_err() {
         assert!(
             Instant::now() < deadline,
-            "the broker listens within the timeout"
+            "the broker listens within the timeout, exit status {:?}, log: {:?}",
+            child.try_wait(),
+            log.lock().expect("log lock")
         );
         std::thread::sleep(Duration::from_millis(20));
     }

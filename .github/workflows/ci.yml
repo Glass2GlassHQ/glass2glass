@@ -287,6 +287,8 @@ jobs:
             clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
             libva-dev libdrm-dev libgbm-dev libvpx-dev libpipewire-0.3-dev \
             mosquitto mosquitto-clients ninja-build
+          # the apparmor package's mosquitto profile reads config only from /etc/mosquitto, and m1179 writes its broker config to /tmp
+          if [ -f /etc/apparmor.d/mosquitto ]; then sudo apparmor_parser -R /etc/apparmor.d/mosquitto; fi
       # g2g-launch-py links libpython (pyo3), for the docs step below.
       - uses: actions/setup-python@v5
         with:
