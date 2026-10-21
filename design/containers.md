@@ -460,16 +460,17 @@ Block frames with scaled timestamps. `MkvDemux` wraps it with a per-codec
 `MkvStream` selection, H.264 / H.265 / VP8 / VP9 / AV1 / MJPEG video and AAC /
 Opus / AC-3 / FLAC / Vorbis / PCM audio, defaulting to VP9. An `A_PCM/*` track
 takes the PCM format its byte order and `BitDepth` name, the `WAVEFORMATEX`
-table WAV and AVI use, and big-endian samples are swapped at demux. A PCM or
-bitmap-subtitle track under a `ContentEncoding` the demuxer cannot undo fails
-the stream. A track's `ContentEncodings` chain is undone at demux, highest
+table WAV and AVI use, and big-endian samples are swapped at demux. A track's `ContentEncodings` chain is undone at demux, highest
 `ContentEncodingOrder` first, on the blocks and on the `CodecPrivate` as each
 step's scope names: zlib, header stripping, and with `matroska-compression`
 bzip2 (`libbz2-rs-sys`) and LZO1X (`lzo`). A block that does not decode or
 decodes past 16 MiB is dropped, and so is a `CodecPrivate` past 1 MiB. An
 encryption with no supplied key, an unknown algorithm, a scope naming the next encoding, a repeated
-order or a chain over eight steps flags the track `unsupported_encoding`, and its
-blocks forward as stored. With `matroska-decrypt`, `with_content_keys` on
+order or a chain over eight steps flags the track `unsupported_encoding`. The
+parser still returns its blocks as stored, but selecting a flagged track in
+`MkvDemux` or `MkvDemuxN` fails the stream before any of its frames go out, and
+`forwardable_streams` and `subtitle_streams` leave it out, so playbin never plugs
+it. With `matroska-decrypt`, `with_content_keys` on
 `MatroskaDemuxer`, `MkvDemux` and `MkvDemuxN` maps each 16-byte
 `ContentEncKeyID` to its AES-128 key, resolved when `Tracks` parses. A WebM
 Encryption step (ContentEncAlgo 5, AES-CTR, block scope only) is undone in its
