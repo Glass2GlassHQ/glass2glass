@@ -47,7 +47,7 @@ fn a_64x48_clip_decodes() {
         // RADV reports a 64x64 minimum, and H.264 below it decodes wrong
         assert!(matches!(
             device.create_h264_session(&ps, WIDTH, HEIGHT),
-            Err(VulkanVideoError::UnsupportedStream)
+            Err(VulkanVideoError::StreamRefused(_))
         ));
         return;
     }

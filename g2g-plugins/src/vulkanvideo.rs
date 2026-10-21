@@ -88,18 +88,7 @@ impl VulkanVideoCodec {
             Self::Av1 => ash::khr::video_decode_av1::NAME,
         }
     }
-
-    // below the device minimum H.264 decodes wrong or loses the device and AV1 decodes gray
-    fn smallest_decodable_extent(self, caps: &VulkanVideoDecodeCaps) -> (u32, u32) {
-        match self {
-            Self::H265 => SMALLEST_PICTURE_EXTENT,
-            Self::H264 | Self::Av1 => caps.min_coded_extent,
-        }
-    }
 }
-
-// H.265 decodes padded up to the device minimum, so any picture size works
-const SMALLEST_PICTURE_EXTENT: (u32, u32) = (1, 1);
 
 /// Decode capabilities of a Vulkan physical device for one codec profile.
 ///
@@ -7908,35 +7897,22 @@ impl VulkanVideoDevice {
         }
     }
 
-    fn refuse_undecodable_extent(
-        &self,
-        codec: VulkanVideoCodec,
-        width: u32,
-        height: u32,
-    ) -> Result<(), VulkanVideoError> {
-        let (min_width, min_height) = codec.smallest_decodable_extent(&self.caps);
+    // below the device minimum H.264 and H.265 decode wrong or lose the device, AV1 decodes gray
+    fn refuse_undecodable_extent(&self, width: u32, height: u32) -> Result<(), VulkanVideoError> {
+        let (min_width, min_height) = self.caps.min_coded_extent;
         if width < min_width || height < min_height {
-            return Err(VulkanVideoError::UnsupportedStream);
+            return Err(VulkanVideoError::StreamRefused(
+                "the picture is smaller than the GPU's minimum decode size",
+            ));
         }
         Ok(())
     }
 
-    /// The extent every picture resource is bound at for a stream of `max_w` x
-    /// `max_h`, and the picture size the stream's own crop then applies to. They differ when the
-    /// stream is smaller than the device's minimum coded extent: a picture
-    /// resource must stay inside the device's coded-extent range, so the picture
-    /// is decoded at the minimum and cropped on the way out. Only H.265 gets here
-    /// below the minimum, the other codecs are refused first.
-    fn session_extents(&self, max_w: u32, max_h: u32) -> ((u32, u32), (u32, u32)) {
-        let output = (
+    fn session_coded_extent(&self, max_w: u32, max_h: u32) -> (u32, u32) {
+        (
             max_w.min(self.caps.max_coded_extent.0),
             max_h.min(self.caps.max_coded_extent.1),
-        );
-        let coded = (
-            output.0.max(self.caps.min_coded_extent.0),
-            output.1.max(self.caps.min_coded_extent.1),
-        );
-        (coded, output)
+        )
     }
 
     /// The extent every image a decode session writes must be created at for a
@@ -7981,9 +7957,9 @@ impl VulkanVideoDevice {
 
     /// Create an H.264 decode session + parameters for `ps`, whose coded pictures
     /// are `max_w`x`max_h` (clamped to the device's maximum coded extent). The output
-    /// is the SPS frame crop of that picture, and a crop reaching outside it or a
-    /// picture below the device's minimum coded extent is
-    /// [`VulkanVideoError::UnsupportedStream`]. Session parameter creation
+    /// is the SPS frame crop of that picture, and a crop reaching outside it is
+    /// [`VulkanVideoError::UnsupportedStream`], a picture below the device's
+    /// minimum coded extent [`VulkanVideoError::StreamRefused`]. Session parameter creation
     /// validates the `Std*` SPS/PPS mapping.
     pub fn create_h264_session(
         &self,
@@ -7991,19 +7967,19 @@ impl VulkanVideoDevice {
         max_w: u32,
         max_h: u32,
     ) -> Result<H264DecodeSession, VulkanVideoError> {
-        self.refuse_undecodable_extent(VulkanVideoCodec::H264, max_w, max_h)?;
+        self.refuse_undecodable_extent(max_w, max_h)?;
         let prof = h264_profile();
         // H.264 decode is 8-bit here (High profile, NV12); High 10 is out of scope.
         let (picture_format, reference_format) = self.session_picture_formats(&prof.profile, 8)?;
 
-        let ((w, h), picture) = self.session_extents(max_w, max_h);
+        let (w, h) = self.session_coded_extent(max_w, max_h);
         // a field-coded stream counts crop rows in pairs of field rows
         let fields_per_frame = ps.sps.fields_per_frame();
         let CropRectangle {
             offset: output_offset,
             extent: (out_w, out_h),
         } = crop_rectangle(
-            picture,
+            (w, h),
             (
                 CHROMA_420_CROP_UNIT,
                 CHROMA_420_CROP_UNIT.saturating_mul(fields_per_frame),
@@ -8108,7 +8084,7 @@ impl VulkanVideoDevice {
         max_w: u32,
         max_h: u32,
     ) -> Result<H265DecodeSession, VulkanVideoError> {
-        self.refuse_undecodable_extent(VulkanVideoCodec::H265, max_w, max_h)?;
+        self.refuse_undecodable_extent(max_w, max_h)?;
         // 10-bit HEVC (Main 10) selects the Main 10 profile + the G10X6 output
         // format; 8-bit is Main + NV12. The decoder built over this session derives
         // the same bit depth from the SPS, so its profile / DPB images match.
@@ -8117,12 +8093,12 @@ impl VulkanVideoDevice {
         let (picture_format, reference_format) =
             self.session_picture_formats(&prof.profile, bit_depth)?;
 
-        let ((w, h), picture) = self.session_extents(max_w, max_h);
+        let (w, h) = self.session_coded_extent(max_w, max_h);
         let CropRectangle {
             offset: output_offset,
             extent: (out_w, out_h),
         } = crop_rectangle(
-            picture,
+            (w, h),
             (CHROMA_420_CROP_UNIT, CHROMA_420_CROP_UNIT),
             [
                 std.sps.conf_win_left_offset,
@@ -8226,7 +8202,7 @@ impl VulkanVideoDevice {
         max_w: u32,
         max_h: u32,
     ) -> Result<Av1DecodeSession, VulkanVideoError> {
-        self.refuse_undecodable_extent(VulkanVideoCodec::Av1, max_w, max_h)?;
+        self.refuse_undecodable_extent(max_w, max_h)?;
         // AV1 Main profile covers 8 and 10-bit; the colour config carries the depth.
         // A 10-bit stream selects the G10X6 output format (same as HEVC Main 10).
         let bit_depth = std._color.BitDepth;
@@ -8234,7 +8210,7 @@ impl VulkanVideoDevice {
         let (picture_format, reference_format) =
             self.session_picture_formats(&prof.profile, bit_depth)?;
 
-        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h);
+        let (w, h) = self.session_coded_extent(max_w, max_h);
         let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
@@ -8324,7 +8300,7 @@ impl VulkanVideoDevice {
             picture_format,
             reference_format,
             coded_extent: (w, h),
-            output_extent: (out_w, out_h),
+            output_extent: (w, h),
             output_offset: (0, 0),
             _std: own_std,
         })
@@ -9840,7 +9816,7 @@ impl VulkanVideoDevice {
             ref_slot: [None; AV1_NUM_REF_FRAMES],
             phys_state: alloc::vec![None; num_slots],
             seq: seq.clone(),
-            smallest_frame_extent: VulkanVideoCodec::Av1.smallest_decodable_extent(&self.caps),
+            smallest_frame_extent: self.caps.min_coded_extent,
         })
     }
 }
@@ -10475,8 +10451,7 @@ struct DpbCore {
     session: vk::VideoSessionKHR,
     parameters: vk::VideoSessionParametersKHR,
     coded_extent: (u32, u32),
-    /// The picture size handed back: the stream's crop of `coded_extent`, minus any
-    /// padding the device's minimum coded extent forced. Every copy out of a
+    /// The picture size handed back: the stream's crop of `coded_extent`. Every copy out of a
     /// picture uses this, from the crop offset the readback and converter hold.
     output_extent: (u32, u32),
     /// Extent the DPB slot images were created at: `coded_extent` rounded up to
@@ -15143,7 +15118,7 @@ impl VulkanVideoDec {
             let Ok(selected) = block_on(select_decode_adapter(vulkan_codec, None)) else {
                 continue;
             };
-            let (min_width, min_height) = vulkan_codec.smallest_decodable_extent(&selected.caps);
+            let (min_width, min_height) = selected.caps.min_coded_extent;
             let (max_width, max_height) = selected.caps.max_coded_extent;
             alternatives.push(Caps::CompressedVideo {
                 codec,

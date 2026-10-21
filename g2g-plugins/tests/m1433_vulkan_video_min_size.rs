@@ -9,8 +9,9 @@ use g2g_core::runtime::block_on;
 use g2g_core::{Caps, Dim, G2gError};
 use g2g_plugins::ivfdemux::IvfDemux;
 use g2g_plugins::vulkanvideo::{
-    extract_h264_parameter_sets, open_av1_decode_device, open_h264_decode_device,
-    VulkanVideoDevice, VulkanVideoError,
+    extract_h264_parameter_sets, extract_h265_parameter_sets, open_av1_decode_device,
+    open_h264_decode_device, open_h265_decode_device, to_std_h265_params, VulkanVideoDevice,
+    VulkanVideoError,
 };
 
 #[path = "common/ivf.rs"]
@@ -147,10 +148,34 @@ fn an_h264_session_below_the_device_minimum_is_refused() {
     let ps = extract_h264_parameter_sets(H264_CLIP).expect("parse SPS+PPS");
     assert!(matches!(
         device.create_h264_session(&ps, narrower, min_height),
-        Err(VulkanVideoError::UnsupportedStream)
+        Err(VulkanVideoError::StreamRefused(_))
     ));
     device
         .create_h264_session(&ps, min_width, min_height)
+        .expect("a session at the device minimum");
+}
+
+const H265_CLIP: &[u8] = include_bytes!("fixtures/h265_640x480.h265");
+
+#[test]
+fn an_h265_session_below_the_device_minimum_is_refused() {
+    let _gpu = gpu_lock();
+    let Some(device) = usable(block_on(open_h265_decode_device())) else {
+        return;
+    };
+    let (min_width, min_height) = device.caps().min_coded_extent;
+    let Some(narrower) = min_width.checked_sub(1).filter(|&width| width > 0) else {
+        eprintln!("skip: the device decodes any H.265 width");
+        return;
+    };
+    let ps = extract_h265_parameter_sets(H265_CLIP).expect("parse VPS+SPS+PPS");
+    let std = to_std_h265_params(&ps);
+    assert!(matches!(
+        device.create_h265_session(&std, narrower, min_height),
+        Err(VulkanVideoError::StreamRefused(_))
+    ));
+    device
+        .create_h265_session(&std, min_width, min_height)
         .expect("a session at the device minimum");
 }
 
