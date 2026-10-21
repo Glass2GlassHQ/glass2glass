@@ -47,8 +47,11 @@ pub(crate) fn raw_video_format(fourcc: [u8; 4]) -> Option<RawVideoFormat> {
 pub(crate) enum RawVideoStorage {
     Tight,
     // packed rows four bytes apart when the frame holds them, else tight, the way libavcodec reads an AVI
-    AviRows { bottom_up: bool },
+    AviRows {
+        bottom_up: bool,
+    },
     // packed rows as far apart as the sample size spreads them, since QuickTime writers pad rows differently
+    #[cfg(feature = "std")]
     QuickTimeRows,
     // I420 with the V plane stored ahead of the U plane
     Yv12,
@@ -84,6 +87,7 @@ pub(crate) fn avi_raw_video(
 }
 
 // QuickTime `raw ` video, whose depth names its pixel layout
+#[cfg(feature = "std")]
 pub(crate) fn quicktime_raw_video(depth: u16) -> Option<(RawVideoFormat, RawVideoStorage)> {
     match depth {
         24 => Some((RawVideoFormat::Rgb8, RawVideoStorage::QuickTimeRows)),
@@ -122,6 +126,7 @@ pub(crate) fn copy_raw_video_frame(
             };
             copy_rows(stored, row, stride, rows, bottom_up)
         }
+        #[cfg(feature = "std")]
         RawVideoStorage::QuickTimeRows => {
             let stride = stored.len().checked_div(rows)?;
             copy_rows(stored, row_bytes(format, columns), stride, rows, false)
@@ -300,6 +305,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn quicktime_rows_take_their_stride_from_the_sample_size() {
         let (format, storage) = quicktime_raw_video(24).expect("depth 24");
@@ -324,6 +330,7 @@ mod tests {
     #[test]
     fn other_depths_of_the_raw_layouts_are_not_read() {
         assert_eq!(avi_raw_video([0; 4], 16, true), None);
+        #[cfg(feature = "std")]
         assert_eq!(quicktime_raw_video(16), None);
     }
 }
