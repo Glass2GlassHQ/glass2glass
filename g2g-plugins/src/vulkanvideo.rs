@@ -5491,6 +5491,7 @@ const READBACK_PLANE_ALIGNMENT: u64 = 4;
 // where the two planes of the `width` x `height` picture at `image_offset` land in a host-visible readback buffer
 #[derive(Debug, Clone, Copy)]
 struct ReadbackLayout {
+    image_offset: (u32, u32),
     luma_image_offset: vk::Offset3D,
     chroma_image_offset: vk::Offset3D,
     width: u32,
@@ -5516,6 +5517,7 @@ impl ReadbackLayout {
             .ok_or(VulkanVideoError::UnsupportedStream)?;
         let [luma_image_offset, chroma_image_offset] = two_plane_image_offsets(image_offset)?;
         Ok(Self {
+            image_offset,
             luma_image_offset,
             chroma_image_offset,
             width,
@@ -5528,6 +5530,15 @@ impl ReadbackLayout {
 
     fn len(&self) -> u64 {
         self.chroma_offset + self.chroma_len
+    }
+
+    // a picture at the same image offset coded at another size
+    fn resized(
+        &self,
+        bit_depth: u8,
+        (width, height): (u32, u32),
+    ) -> Result<Self, VulkanVideoError> {
+        Self::new(bit_depth, self.image_offset, width, height)
     }
 
     // the coded image holds the chroma of an odd last column and row
@@ -10034,7 +10045,6 @@ impl VulkanVideoDevice {
             phys_state: alloc::vec![None; num_slots],
             seq: seq.clone(),
             smallest_frame_extent: self.caps.min_coded_extent,
-            largest_frame_extent: self.caps.max_coded_extent,
         })
     }
 }
@@ -10115,12 +10125,18 @@ impl DecodedPicture {
     }
 }
 
+// where one picture's planes land in the readback buffer
+#[derive(Debug, Clone, Copy)]
+struct ReadbackRegion {
+    offset: u64,
+    layout: ReadbackLayout,
+}
+
 /// One readback copy of a decoded picture into the host-visible buffer.
 #[derive(Debug, Clone, Copy)]
 struct PictureCopy {
     picture: DecodedPicture,
-    /// Byte offset of this copy's region in the readback buffer.
-    offset: u64,
+    region: ReadbackRegion,
     /// Stage and access the picture's writes are made available from.
     after: (vk::PipelineStageFlags2, vk::AccessFlags2),
     /// Stage the restored DPB layout is handed off to.
@@ -10647,8 +10663,7 @@ unsafe impl Send for MappedPointer {}
 #[derive(Debug)]
 struct InFlightDecode {
     dpb_slot: usize,
-    w: u32,
-    h: u32,
+    region: ReadbackRegion,
 }
 
 /// Codec-independent Vulkan Video decode plumbing shared by every `*DpbDecoder`
@@ -10947,9 +10962,10 @@ impl DpbCore {
 
             // The chroma plane is interleaved CbCr at half resolution, packed after
             // luma in this region of the readback buffer.
-            let regions = self
-                .readback_layout
-                .copy_regions(copy.offset, |aspect| picture.layers(aspect));
+            let regions = copy
+                .region
+                .layout
+                .copy_regions(copy.region.offset, |aspect| picture.layers(aspect));
             dev.cmd_copy_image_to_buffer(
                 cb,
                 picture.image,
@@ -10980,10 +10996,10 @@ impl DpbCore {
     /// slot image (plus UNDEFINED -> DST on the paired output image in the
     /// distinct model), begin/decode/end video coding, the session `RESET` control
     /// when `issue_reset`, and, for the system path, an NV12 copy out of the
-    /// picture image into `self.readback` at `readback_offset`. A coincide slot is
+    /// picture image into `self.readback` at `readback`. A coincide slot is
     /// returned to DPB layout after that copy so it stays a reference; a distinct
     /// output image is never a reference and is left as the copy found it.
-    /// `readback_offset == None` is the texture path: no copy, the picture image
+    /// `readback == None` is the texture path: no copy, the picture image
     /// left in its post-decode layout for the compute pass. Records but does not
     /// submit.
     ///
@@ -10998,7 +11014,7 @@ impl DpbCore {
         decode_info: &vk::VideoDecodeInfoKHR,
         target: usize,
         issue_reset: bool,
-        readback_offset: Option<u64>,
+        readback: Option<ReadbackRegion>,
     ) -> Result<(), vk::Result> {
         let dev = &self.raw_device;
         let slot = &self.slots[target];
@@ -11077,12 +11093,12 @@ impl DpbCore {
             // buffer at this slot's region, then return the slot to the decode
             // layout. The texture path leaves the slot in DPB layout and samples
             // it on the compute queue instead.
-            if let Some(offset) = readback_offset {
+            if let Some(region) = readback {
                 self.record_picture_copy(
                     cb,
                     PictureCopy {
                         picture,
-                        offset,
+                        region,
                         after: (
                             vk::PipelineStageFlags2::VIDEO_DECODE_KHR,
                             vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR,
@@ -11103,23 +11119,22 @@ impl DpbCore {
     /// control on the first operation (or after a reset). This is the shared,
     /// codec-agnostic GPU command path for all `*DpbDecoder`s.
     ///
-    /// `to_system == false` (texture path) is synchronous: it waits the decode
+    /// `readback_extent == None` (texture path) is synchronous: it waits the decode
     /// fence before returning, leaving the slot in `VIDEO_DECODE_DPB_KHR` layout
-    /// for the compute pass. `to_system == true` (NV12 path) is pipelined through
-    /// the decode ring: it retires the oldest in-flight slot if the ring is full
-    /// (reading its frame into `self.ready`) and records + submits this picture
-    /// without waiting.
+    /// for the compute pass. `readback_extent == Some` (NV12 path, the picture's
+    /// size) is pipelined through the decode ring: it retires the oldest in-flight
+    /// slot if the ring is full (reading its frame into `self.ready`) and records +
+    /// submits this picture without waiting.
     fn record_and_submit(
         &mut self,
         begin_info: &vk::VideoBeginCodingInfoKHR,
         decode_info: &vk::VideoDecodeInfoKHR,
         target: usize,
-        to_system: bool,
+        readback_extent: Option<(u32, u32)>,
     ) -> Result<(), VulkanVideoError> {
-        if to_system {
-            self.submit_ring(begin_info, decode_info, target)
-        } else {
-            self.submit_texture(begin_info, decode_info, target)
+        match readback_extent {
+            Some(extent) => self.submit_ring(begin_info, decode_info, target, extent),
+            None => self.submit_texture(begin_info, decode_info, target),
         }
     }
 
@@ -11246,7 +11261,9 @@ impl DpbCore {
         begin_info: &vk::VideoBeginCodingInfoKHR,
         decode_info: &vk::VideoDecodeInfoKHR,
         target: usize,
+        extent: (u32, u32),
     ) -> Result<(), VulkanVideoError> {
+        let layout = self.readback_layout_at(extent)?;
         // a copy on another queue may still be reading the picture this decode overwrites
         if self.copy_pool.is_some() {
             let mut waited_slots = alloc::vec![target];
@@ -11261,11 +11278,13 @@ impl DpbCore {
             self.retire_slot(idx)?;
         }
         let issue_reset = self.first;
-        let offset = idx as u64 * self.readback_stride;
+        let region = ReadbackRegion {
+            offset: idx as u64 * self.readback_stride,
+            layout,
+        };
         let cb = self.ring[idx].cb;
         let fence = self.ring[idx].fence;
         let copy = self.ring[idx].copy;
-        let (w, h) = self.output_extent;
 
         // SAFETY: the slot's command buffers are in the reset state (their previous
         // submission was waited when the slot was retired above, or they are
@@ -11276,14 +11295,14 @@ impl DpbCore {
             // The copy rides in the decode's own command buffer unless it has to run
             // on another queue, where it becomes a second submission chained on the
             // slot's semaphore.
-            let inline_offset = copy.is_none().then_some(offset);
+            let inline_region = copy.is_none().then_some(region);
             self.record_decode(
                 cb,
                 begin_info,
                 decode_info,
                 target,
                 issue_reset,
-                inline_offset,
+                inline_region,
             )
             .map_err(VulkanVideoError::QueryFailed)?;
             let dev = &self.raw_device;
@@ -11296,7 +11315,7 @@ impl DpbCore {
                     dev.queue_submit(self.decode_queue, core::slice::from_ref(&submit), fence)
                 }
                 Some((copy_cb, sem)) => {
-                    self.record_copy_command_buffer(copy_cb, target, offset)
+                    self.record_copy_command_buffer(copy_cb, target, region)
                         .map_err(VulkanVideoError::QueryFailed)?;
                     let signal = [sem];
                     let decode_submit = vk::SubmitInfo::default()
@@ -11335,31 +11354,35 @@ impl DpbCore {
         }
         self.ring[idx].in_flight = Some(InFlightDecode {
             dpb_slot: target,
-            w,
-            h,
+            region,
         });
         self.ring_next = (idx + 1) % DECODE_RING_DEPTH;
         self.first = false;
         Ok(())
     }
 
-    /// Read one decoded NV12 frame out of the readback buffer at a given ring
-    /// slot's byte `offset` (`readback_stride` apart per slot). The copy that
+    /// Read one decoded NV12 frame out of `region` of the readback buffer (ring
+    /// slots lie `readback_stride` apart). The copy that
     /// filled this region must already have completed (its fence waited).
-    fn read_back_nv12_at(
-        &self,
-        offset: u64,
-        w: u32,
-        h: u32,
-    ) -> Result<Nv12Frame, VulkanVideoError> {
-        // SAFETY: `readback_mapped` maps all of readback_mem, which holds
-        // `readback_layout.len()` bytes at `offset` written by the completed copy.
-        let frame = unsafe {
-            self.readback_layout
-                .read_frame(self.readback_mapped.0.add(offset as usize), self.bit_depth)
-        };
-        debug_assert_eq!((frame.width, frame.height), (w, h));
-        Ok(frame)
+    fn read_back_nv12(&self, region: ReadbackRegion) -> Nv12Frame {
+        // SAFETY: `readback_mapped` maps all of readback_mem, and the completed copy
+        // wrote `region.layout.len()` bytes at `region.offset`, inside one ring slot
+        // since `readback_layout_at` bounds the layout by the session's.
+        unsafe {
+            region.layout.read_frame(
+                self.readback_mapped.0.add(region.offset as usize),
+                self.bit_depth,
+            )
+        }
+    }
+
+    // the readback of a picture coded at `extent`, at most the session's output extent
+    fn readback_layout_at(&self, extent: (u32, u32)) -> Result<ReadbackLayout, VulkanVideoError> {
+        let (max_width, max_height) = self.output_extent;
+        if extent.0 > max_width || extent.1 > max_height {
+            return Err(VulkanVideoError::UnsupportedStream);
+        }
+        self.readback_layout.resized(self.bit_depth, extent)
     }
 
     /// Wait on ring slot `idx`'s in-flight decode and read its NV12 frame into
@@ -11377,8 +11400,7 @@ impl DpbCore {
             dev.wait_for_fences(&[fence], true, u64::MAX)
                 .map_err(VulkanVideoError::QueryFailed)?
         };
-        let offset = idx as u64 * self.readback_stride;
-        let frame = self.read_back_nv12_at(offset, inf.w, inf.h)?;
+        let frame = self.read_back_nv12(inf.region);
         self.ready.push_back(frame);
         Ok(())
     }
@@ -11390,9 +11412,16 @@ impl DpbCore {
     /// back from `readback` region 0. A coincide slot is returned to DPB layout so it
     /// stays a valid reference. Only valid on a system-path core (picture images
     /// carry `TRANSFER_SRC`); the caller must ensure no decode into the slot is in
-    /// flight (the reordered path is synchronous).
-    fn read_picture_nv12(&mut self, slot: usize) -> Result<Nv12Frame, VulkanVideoError> {
-        let (w, h) = self.output_extent;
+    /// flight (the reordered path is synchronous). `extent` is the picture's size.
+    fn read_picture_nv12(
+        &mut self,
+        slot: usize,
+        extent: (u32, u32),
+    ) -> Result<Nv12Frame, VulkanVideoError> {
+        let region = ReadbackRegion {
+            offset: 0,
+            layout: self.readback_layout_at(extent)?,
+        };
         // SAFETY: the pool the command buffer comes from has no in-flight buffers
         // (both paths wait every submission), and the picture image is idle (the
         // reordered path waits every decode). The copy fills readback region 0,
@@ -11414,7 +11443,7 @@ impl DpbCore {
                     (self.decode_queue, cb)
                 }
             };
-            self.record_copy_command_buffer(cb, slot, 0)
+            self.record_copy_command_buffer(cb, slot, region)
                 .map_err(VulkanVideoError::QueryFailed)?;
             let fence = dev
                 .create_fence(&vk::FenceCreateInfo::default(), None)
@@ -11427,7 +11456,7 @@ impl DpbCore {
             dev.destroy_fence(fence, None);
             r.map_err(VulkanVideoError::QueryFailed)?;
         }
-        self.read_back_nv12_at(0, w, h)
+        Ok(self.read_back_nv12(region))
     }
 
     /// Record a standalone readback copy of slot `slot`'s picture into `cb`,
@@ -11441,12 +11470,12 @@ impl DpbCore {
         &self,
         cb: vk::CommandBuffer,
         slot: usize,
-        offset: u64,
+        region: ReadbackRegion,
     ) -> Result<(), vk::Result> {
         let dev = &self.raw_device;
         let copy = PictureCopy {
             picture: self.decoded_picture(slot),
-            offset,
+            region,
             after: (
                 vk::PipelineStageFlags2::ALL_COMMANDS,
                 vk::AccessFlags2::empty(),
@@ -11559,10 +11588,11 @@ impl DpbCore {
     fn grained_picture_to_texture(
         &mut self,
         slot: usize,
+        extent: (u32, u32),
         fg: &Av1FilmGrain,
         is_id: bool,
     ) -> Result<wgpu::Texture, VulkanVideoError> {
-        let mut frame = self.read_picture_nv12(slot)?;
+        let mut frame = self.read_picture_nv12(slot, extent)?;
         apply_film_grain_nv12(&mut frame, fg, is_id);
         let color = self.color;
         let gpu = self.gpu.as_ref().ok_or(VulkanVideoError::NoComputeQueue)?;
@@ -12191,8 +12221,12 @@ impl H264DpbDecoder {
 
         // Record + submit the decode (barriers, begin/decode/end coding, optional
         // NV12 readback) via the shared codec-agnostic core.
-        self.core
-            .record_and_submit(&begin_info, &decode_info, target, to_system)
+        self.core.record_and_submit(
+            &begin_info,
+            &decode_info,
+            target,
+            to_system.then_some(self.core.output_extent),
+        )
     }
 }
 
@@ -13022,8 +13056,12 @@ impl H265DpbDecoder {
 
         // Record + submit the decode (barriers, begin/decode/end coding, optional
         // NV12 readback) via the shared codec-agnostic core.
-        self.core
-            .record_and_submit(&begin_info, &decode_info, target, to_system)
+        self.core.record_and_submit(
+            &begin_info,
+            &decode_info,
+            target,
+            to_system.then_some(self.core.output_extent),
+        )
     }
 }
 
@@ -13050,12 +13088,15 @@ struct Av1SlotState {
 }
 
 impl Av1SlotState {
-    // the driver reads an AV1 frame's size from its picture resource extent only
-    fn coded_extent(&self) -> vk::Extent2D {
-        vk::Extent2D {
-            width: self.upscaled_width,
-            height: self.frame_height,
-        }
+    // the driver reads an AV1 frame's size from its picture resource extent only,
+    // and dav1d outputs the frame at this size too
+    fn coded_extent(&self) -> (u32, u32) {
+        (self.upscaled_width, self.frame_height)
+    }
+
+    fn picture_resource_extent(&self) -> vk::Extent2D {
+        let (width, height) = self.coded_extent();
+        vk::Extent2D { width, height }
     }
 }
 
@@ -13082,7 +13123,6 @@ pub struct Av1DpbDecoder {
     phys_state: alloc::vec::Vec<Option<Av1SlotState>>,
     seq: Av1SequenceHeader,
     smallest_frame_extent: (u32, u32),
-    largest_frame_extent: (u32, u32),
 }
 
 impl core::fmt::Debug for Av1DpbDecoder {
@@ -13399,7 +13439,8 @@ impl Av1DpbDecoder {
                 Av1Op::Decode { frame, output } => {
                     if let Some((target, fh)) = self.decode_frame_into_slot(&frame, false)? {
                         if fh.show_frame && output {
-                            let mut frame = self.core.read_picture_nv12(target)?;
+                            let extent = self.decoded_extent(target);
+                            let mut frame = self.core.read_picture_nv12(target, extent)?;
                             apply_film_grain_nv12(&mut frame, &fh.film_grain, is_id);
                             out.push(frame);
                         }
@@ -13410,7 +13451,8 @@ impl Av1DpbDecoder {
                     if !output {
                         continue;
                     }
-                    let mut frame = self.core.read_picture_nv12(phys)?;
+                    let extent = self.decoded_extent(phys);
+                    let mut frame = self.core.read_picture_nv12(phys, extent)?;
                     let fg = self.phys_state[phys]
                         .map(|s| s.film_grain)
                         .unwrap_or_default();
@@ -13479,7 +13521,6 @@ impl Av1DpbDecoder {
         // system `decode_all`: an `update_grain == 0` frame's coefficients are already
         // folded in by `decode_frame_into_slot`; `show_existing` reuses the stored
         // per-slot grain.
-        let (w, h) = self.core.output_extent;
         let is_id = self.seq.color.matrix_coefficients == 0;
         let mut out = alloc::vec::Vec::new();
         for op in ops {
@@ -13501,9 +13542,14 @@ impl Av1DpbDecoder {
                     (phys, fg)
                 }
             };
+            let extent = self.decoded_extent(slot);
             if fg.apply_grain {
-                out.push(self.core.grained_picture_to_texture(slot, &fg, is_id)?);
+                out.push(
+                    self.core
+                        .grained_picture_to_texture(slot, extent, &fg, is_id)?,
+                );
             } else {
+                let (w, h) = extent;
                 // SAFETY: `slot` is an already-decoded, idle DPB slot (the reorder
                 // path is synchronous); an unchained convert (null wait) restores it.
                 out.push(unsafe { self.core.convert_picture_unchained(slot, w, h)? });
@@ -13558,6 +13604,13 @@ impl Av1DpbDecoder {
         Ok(frames)
     }
 
+    // the size the picture in `slot` was coded at, which is also its output size
+    fn decoded_extent(&self, slot: usize) -> (u32, u32) {
+        self.phys_state[slot]
+            .expect("a decoded slot has state")
+            .coded_extent()
+    }
+
     /// Build the reference-frame context the frame-header parse needs from the
     /// current DPB mapping.
     fn ref_frames(&self) -> Av1RefFrames {
@@ -13594,9 +13647,10 @@ impl Av1DpbDecoder {
         if fh.frame_width < min_width || fh.frame_height < min_height {
             return Err(VulkanVideoError::UnsupportedStream);
         }
-        // the sequence maximum may exceed the device's, so the session was clamped
-        let (max_width, max_height) = self.largest_frame_extent;
-        if fh.frame_width > max_width || fh.frame_height > max_height {
+        // the session is the sequence maximum clamped to the device's, and every
+        // picture resource is bound inside it
+        let (max_width, max_height) = self.core.coded_extent;
+        if fh.upscaled_width > max_width || fh.frame_height > max_height {
             return Err(VulkanVideoError::UnsupportedStream);
         }
 
@@ -13718,7 +13772,6 @@ impl Av1DpbDecoder {
         &mut self,
         payload: &[u8],
     ) -> Result<Option<wgpu::Texture>, VulkanVideoError> {
-        let (w, h) = self.core.output_extent;
         // Chain the decode to its ycbcr conversion via `sem_dc` (see the H.264
         // sibling); the decode is async and its bitstream held until convert done.
         self.core.chain_next = true;
@@ -13729,6 +13782,7 @@ impl Av1DpbDecoder {
             self.core.chain_next = false;
             return Ok(None);
         };
+        let (w, h) = self.decoded_extent(target);
         // SAFETY: target slot just decoded, SAMPLED + CONCURRENT (GPU mode); its
         // decode signals `sem_dc` which convert waits.
         let tex = unsafe { self.core.convert_picture_chained(target, w, h) }?;
@@ -13802,21 +13856,21 @@ impl Av1DpbDecoder {
             picres.push(
                 vk::VideoPictureResourceInfoKHR::default()
                     .coded_offset(vk::Offset2D { x: 0, y: 0 })
-                    .coded_extent(reference.coded_extent())
+                    .coded_extent(reference.picture_resource_extent())
                     .base_array_layer(0)
                     .image_view_binding(self.core.slots[p].view),
             );
         }
         let picres_target = vk::VideoPictureResourceInfoKHR::default()
             .coded_offset(vk::Offset2D { x: 0, y: 0 })
-            .coded_extent(state.coded_extent())
+            .coded_extent(state.picture_resource_extent())
             .base_array_layer(0)
             .image_view_binding(self.core.slots[target].view);
         // The image the driver writes the picture to: the slot itself on the
         // coincide model, the slot's paired output image on the distinct one.
         let picres_output = vk::VideoPictureResourceInfoKHR::default()
             .coded_offset(vk::Offset2D { x: 0, y: 0 })
-            .coded_extent(state.coded_extent())
+            .coded_extent(state.picture_resource_extent())
             .base_array_layer(0)
             .image_view_binding(self.core.picture_view(target));
 
@@ -13868,8 +13922,12 @@ impl Av1DpbDecoder {
 
         // Record + submit the decode (barriers, begin/decode/end coding, optional
         // NV12 readback) via the shared codec-agnostic core.
-        self.core
-            .record_and_submit(&begin_info, &decode_info, target, to_system)
+        self.core.record_and_submit(
+            &begin_info,
+            &decode_info,
+            target,
+            to_system.then_some(state.coded_extent()),
+        )
     }
 }
 
