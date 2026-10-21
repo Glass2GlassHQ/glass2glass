@@ -977,17 +977,17 @@ fn build_and_run(
     };
 
     pw::init();
-    let mainloop = pw::main_loop::MainLoop::new(None).map_err(|_| -1)?;
-    let context = pw::context::Context::new(&mainloop).map_err(|_| -1)?;
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|_| -1)?;
+    let context = pw::context::ContextRc::new(&mainloop, None).map_err(|_| -1)?;
     // A portal grant lives on the remote the portal opened for us, never on the
     // session's own, so the node id only means anything over that fd.
     let (core, portal_node, restore_token) = match portal {
         Some((remote_fd, node_id, restore_token)) => (
-            context.connect_fd(remote_fd, None).map_err(|_| -1)?,
+            context.connect_fd_rc(remote_fd, None).map_err(|_| -1)?,
             Some(node_id),
             restore_token,
         ),
-        None => (context.connect(None).map_err(|_| -1)?, None, None),
+        None => (context.connect_rc(None).map_err(|_| -1)?, None, None),
     };
 
     // media.type is what the session manager's policy matches on, so it has to
@@ -1005,9 +1005,8 @@ fn build_and_run(
         // behind a crate feature this build does not enable
         props.insert("target.object", target);
     }
-    // Rc so the recycling timer can reach the stream the listener is built on.
-    let stream =
-        Rc::new(pw::stream::Stream::new(&core, "g2g-pipewirevideosrc", props).map_err(|_| -1)?);
+    // StreamRc so the recycling timer can reach the stream the listener is built on.
+    let stream = pw::stream::StreamRc::new(core, "g2g-pipewirevideosrc", props).map_err(|_| -1)?;
 
     let held: HeldBuffers = Rc::new(RefCell::new(Vec::new()));
     let user_data = UserData {
@@ -1104,7 +1103,7 @@ fn build_and_run(
     let _recycle_timer = match policy.io_mode {
         IoMode::MemoryMap => None,
         IoMode::DmaBuf => {
-            let recycle_stream = Rc::clone(&stream);
+            let recycle_stream = stream.clone();
             let recycle_held = Rc::clone(&held);
             let timer = mainloop.loop_().add_timer(move |_| {
                 requeue_released(&recycle_stream, &mut recycle_held.borrow_mut());
@@ -1151,7 +1150,7 @@ fn take_mapped_rows(
 }
 
 /// Copy one mapped buffer out: the `mmap` path's frame.
-fn copy_mapped_frame(stream: &pw::stream::StreamRef, user_data: &mut UserData) {
+fn copy_mapped_frame(stream: &pw::stream::Stream, user_data: &mut UserData) {
     let Some(negotiated) = user_data.negotiated.as_ref() else {
         return; // no usable format: drop the buffer rather than guess
     };
@@ -1212,7 +1211,7 @@ fn copy_mapped_frame(stream: &pw::stream::StreamRef, user_data: &mut UserData) {
 /// is gone. The descriptor handed on is a `dup` of the producer's, so downstream
 /// owns what its [`OwnedDmaBuf`] closes while the buffer itself is only recycled
 /// here.
-fn share_dmabuf_frame(stream: &pw::stream::StreamRef, user_data: &mut UserData) {
+fn share_dmabuf_frame(stream: &pw::stream::Stream, user_data: &mut UserData) {
     // Take back whatever downstream finished with, so the producer keeps buffers
     // even when this callback goes on to hold one.
     requeue_released(stream, &mut user_data.held.borrow_mut());
@@ -1303,7 +1302,7 @@ unsafe fn read_blocks(buffer: *mut pw_sys::pw_buffer) -> Vec<DataBlock> {
 }
 
 /// Hand the producer back every held buffer whose frame downstream has released.
-fn requeue_released(stream: &pw::stream::StreamRef, held: &mut Vec<HeldBuffer>) {
+fn requeue_released(stream: &pw::stream::Stream, held: &mut Vec<HeldBuffer>) {
     retire_released(held, |buffer| {
         // SAFETY: `buffer` came from this stream's dequeue and has not been queued
         // back yet; the frame's last share is gone, so nothing is reading it.

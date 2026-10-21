@@ -397,8 +397,8 @@ fn build_and_run(
 ) -> Result<(), i32> {
     let stride = cfg.stride;
     pw::init();
-    let mainloop = pw::main_loop::MainLoop::new(None).map_err(|_| -1)?;
-    let context = pw::context::Context::new(&mainloop).map_err(|_| -1)?;
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|_| -1)?;
+    let context = pw::context::ContextBox::new(mainloop.loop_(), None).map_err(|_| -1)?;
     let core = context.connect(None).map_err(|_| -1)?;
 
     let mut props = pw::properties::properties! {
@@ -411,7 +411,7 @@ fn build_and_run(
         // behind a crate feature this build does not enable
         props.insert("target.object", cfg.target.as_str());
     }
-    let stream = pw::stream::Stream::new(&core, "g2g-pipewiresrc", props).map_err(|_| -1)?;
+    let stream = pw::stream::StreamBox::new(&core, "g2g-pipewiresrc", props).map_err(|_| -1)?;
 
     let error_tx = audio_tx.clone();
     let drift = cfg.clock.clone();
@@ -493,7 +493,7 @@ fn build_and_run(
 /// The callback runs once per graph quantum (~47 Hz at 1024 frames / 48 kHz),
 /// so the trace is throttled to [`CLOCK_LOG_INTERVAL_NS`]; `last_log_ns` carries
 /// the caller's stamp of the last line.
-fn discipline_clock(stream: &pw::stream::StreamRef, clock: &DriftClock, last_log_ns: &mut u64) {
+fn discipline_clock(stream: &pw::stream::Stream, clock: &DriftClock, last_log_ns: &mut u64) {
     let local_ns = clock.reference_now();
     let Some(time) = crate::pwaudio::stream_time(stream) else {
         return;

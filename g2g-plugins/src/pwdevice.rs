@@ -254,8 +254,8 @@ fn device_from_global(obj: &GlobalObject<&DictRef>) -> Option<Device> {
 
 fn probe_main() -> Result<Vec<Device>, G2gError> {
     pw::init();
-    let mainloop = pw::main_loop::MainLoop::new(None).map_err(|_| pw_error())?;
-    let context = pw::context::Context::new(&mainloop).map_err(|_| pw_error())?;
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|_| pw_error())?;
+    let context = pw::context::ContextBox::new(mainloop.loop_(), None).map_err(|_| pw_error())?;
     let core = context.connect(None).map_err(|_| pw_error())?;
     let registry = core.get_registry().map_err(|_| pw_error())?;
 
@@ -306,8 +306,8 @@ fn watch_main(
     ready: &std::sync::mpsc::SyncSender<Result<(), G2gError>>,
 ) -> Result<(), G2gError> {
     pw::init();
-    let mainloop = pw::main_loop::MainLoop::new(None).map_err(|_| pw_error())?;
-    let context = pw::context::Context::new(&mainloop).map_err(|_| pw_error())?;
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|_| pw_error())?;
+    let context = pw::context::ContextBox::new(mainloop.loop_(), None).map_err(|_| pw_error())?;
     let core = context.connect(None).map_err(|_| pw_error())?;
     let registry = core.get_registry().map_err(|_| pw_error())?;
 

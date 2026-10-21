@@ -120,7 +120,7 @@ pub(crate) fn format_pod_bytes(format: AudioFormat, channels: u32, rate: u32) ->
 /// The stream's current `pw_time`, `None` when the probe fails. Call only
 /// while `stream` is live (inside its own process callback, or with the
 /// loop locked): the raw pointer is read without a lifetime tie.
-pub(crate) fn stream_time(stream: &pipewire::stream::StreamRef) -> Option<pipewire::sys::pw_time> {
+pub(crate) fn stream_time(stream: &pipewire::stream::Stream) -> Option<pipewire::sys::pw_time> {
     // SAFETY: zero is a valid bit pattern for `pw_time` (plain numeric fields);
     // the call only writes into it.
     let mut time: pipewire::sys::pw_time =
