@@ -34,12 +34,15 @@ linux-full = [
     "wayland-sink", "gl-sink", "kms-sink", "wgpu-sink", "wgpu-present", "vello-overlay", "analytics",
     "analytics-json", "mqtt", "embedding-index",
     "declarative-yaml", "script-rhai", "observe", "mcp", "tui", "latency-bench",
-    "matroska-compression",
+    "matroska-compression", "matroska-decrypt",
 ]
 std = ["g2g-core/std", "dep:tokio"]
 # bzip2 and lzo `ContentEncoding` decompression in the Matroska demuxer. Both
 # crates are pure Rust and no_std, so the feature does not imply std.
 matroska-compression = ["dep:libbz2-rs-sys", "dep:lzo"]
+# AES-CTR decryption of WebM Encryption tracks in the Matroska demuxer, keyed by
+# ContentEncKeyID. aes and ctr are no_std, so the feature does not imply std.
+matroska-decrypt = ["dep:aes", "dep:ctr"]
 multi-thread = ["g2g-core/multi-thread", "dep:libc"]
 # Element-level cooperative offload (M760): a heavy synchronous element moves
 # its per-frame compute onto tokio's blocking pool (`offload::run_blocking`), so

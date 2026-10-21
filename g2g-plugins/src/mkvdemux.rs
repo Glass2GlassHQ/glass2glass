@@ -258,7 +258,14 @@ impl MkvDemux {
     /// its EBML header. The codec / caps and posted tags are unchanged (same
     /// file), so `last_caps` / `tags` are kept (no redundant re-emit).
     fn reset_parser(&mut self) {
-        self.demux = MatroskaDemuxer::new();
+        self.demux.reset();
+    }
+
+    // the AES key for each ContentEncKeyID of a WebM Encryption track
+    #[cfg(feature = "matroska-decrypt")]
+    pub fn with_content_keys(mut self, keys: &[([u8; 16], [u8; 16])]) -> Self {
+        self.demux = core::mem::take(&mut self.demux).with_content_keys(keys);
+        self
     }
 
     /// Select which elementary stream to forward (default [`MkvStream::Vp9`]).
@@ -646,7 +653,7 @@ impl MkvDemux {
         }
         g2g_error!(
             Target::category("mkvdemux"),
-            "{} track declares a ContentEncoding this demuxer cannot undo (encryption, or bzip2 / lzo without matroska-compression)",
+            "{} track declares a ContentEncoding this demuxer cannot undo (encryption without its content key, or bzip2 / lzo without matroska-compression)",
             mkv_stream_str(self.stream)
         );
         Err(G2gError::CapsMismatch)
@@ -1567,6 +1574,13 @@ impl MkvDemuxN {
             stream_select: None,
             emitted: 0,
         }
+    }
+
+    // the AES key for each ContentEncKeyID of a WebM Encryption track
+    #[cfg(feature = "matroska-decrypt")]
+    pub fn with_content_keys(mut self, keys: &[([u8; 16], [u8; 16])]) -> Self {
+        self.demux = core::mem::take(&mut self.demux).with_content_keys(keys);
+        self
     }
 
     /// Attach the pipeline bus so the container's `StreamCollection` (M376) and

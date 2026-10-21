@@ -30,11 +30,12 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::log::Target;
 #[cfg(feature = "ffmpeg-long-tail")]
 use g2g_core::TagNamespace;
 use g2g_core::{
-    AudioFormat, Chapter, CodecTag, ProResVariant, RawVideoFormat, SubPictureFormat, Tag, TagList,
-    TextFormat,
+    g2g_warn, AudioFormat, Chapter, CodecTag, ProResVariant, RawVideoFormat, SubPictureFormat, Tag,
+    TagList, TextFormat,
 };
 
 use crate::dvbsub::{page_id_blob, parse_page_ids, segment_span, PageIds, DEFAULT_SUBTITLING_TYPE};
@@ -90,6 +91,10 @@ const ID_CONTENT_COMPRESSION: u32 = 0x5034;
 const ID_CONTENT_COMP_ALGO: u32 = 0x4254;
 const ID_CONTENT_COMP_SETTINGS: u32 = 0x4255;
 const ID_CONTENT_ENCRYPTION: u32 = 0x5035;
+const ID_CONTENT_ENC_ALGO: u32 = 0x47E1;
+const ID_CONTENT_ENC_KEY_ID: u32 = 0x47E2;
+const ID_CONTENT_ENC_AES_SETTINGS: u32 = 0x47E7;
+const ID_AES_SETTINGS_CIPHER_MODE: u32 = 0x47E8;
 const ID_CHANNELS: u32 = 0x009F;
 const ID_SAMPLING_FREQ: u32 = 0x00B5;
 const ID_BIT_DEPTH: u32 = 0x6264;
@@ -335,6 +340,11 @@ const MAX_CONTENT_ENCODINGS: usize = 8;
 const SCOPE_BLOCK: u64 = 1;
 const SCOPE_CODEC_PRIVATE: u64 = 2;
 
+const TYPE_COMPRESSION: u64 = 0;
+const TYPE_ENCRYPTION: u64 = 1;
+const CONTENT_ENC_ALGO_AES: u64 = 5;
+const AES_CIPHER_MODE_CTR: u64 = 1;
+
 // one `ContentCompAlgo` this demuxer undoes
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ContentCompression {
@@ -364,6 +374,102 @@ impl ContentCompression {
             }
         }
     }
+}
+
+// one `ContentEncoding` step this demuxer undoes
+#[derive(Debug, Clone)]
+enum ContentDecoding {
+    Decompress(ContentCompression),
+    #[cfg(feature = "matroska-decrypt")]
+    Decrypt(AesKey),
+}
+
+impl ContentDecoding {
+    fn undo(&self, stored: &[u8], limit: usize) -> Option<Vec<u8>> {
+        match self {
+            ContentDecoding::Decompress(compression) => compression.decode(stored, limit),
+            #[cfg(feature = "matroska-decrypt")]
+            ContentDecoding::Decrypt(key) => decrypt_webm_frame(stored, key),
+        }
+    }
+}
+
+#[cfg(feature = "matroska-decrypt")]
+#[derive(Clone, Copy)]
+struct AesKey([u8; 16]);
+
+// the key bytes never reach a log
+#[cfg(feature = "matroska-decrypt")]
+impl core::fmt::Debug for AesKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("AesKey(..)")
+    }
+}
+
+// bits of the signal byte that leads every frame of a WebM Encryption track
+#[cfg(feature = "matroska-decrypt")]
+const SIGNAL_ENCRYPTED: u8 = 0x01;
+#[cfg(feature = "matroska-decrypt")]
+const SIGNAL_PARTITIONED: u8 = 0x02;
+// a second signal byte follows, which no version of the format defines yet
+#[cfg(feature = "matroska-decrypt")]
+const SIGNAL_EXTENDED: u8 = 0x80;
+#[cfg(feature = "matroska-decrypt")]
+const WEBM_IV_LEN: usize = 8;
+#[cfg(feature = "matroska-decrypt")]
+const PARTITION_OFFSET_LEN: usize = 4;
+
+// `None` when the signal byte, the IV or the partition table is malformed
+#[cfg(feature = "matroska-decrypt")]
+fn decrypt_webm_frame(stored: &[u8], key: &AesKey) -> Option<Vec<u8>> {
+    let (&signal, rest) = stored.split_first()?;
+    if signal & SIGNAL_EXTENDED != 0 {
+        return None;
+    }
+    if signal & SIGNAL_ENCRYPTED == 0 {
+        // only an encrypted frame can be partitioned
+        return (signal & SIGNAL_PARTITIONED == 0).then(|| rest.to_vec());
+    }
+    let (iv, rest) = rest.split_first_chunk::<WEBM_IV_LEN>()?;
+    let mut counter_block = [0u8; 16];
+    counter_block[..WEBM_IV_LEN].copy_from_slice(iv);
+    if signal & SIGNAL_PARTITIONED == 0 {
+        let mut frame = rest.to_vec();
+        let whole = (0, frame.len());
+        crate::aes_ctr::apply_aes128_ctr(&mut frame, [whole], &key.0, &counter_block);
+        return Some(frame);
+    }
+    let (&partition_count, rest) = rest.split_first()?;
+    // the u8 count bounds the table at 1020 bytes
+    let (partition_table, frame) =
+        rest.split_at_checked(usize::from(partition_count) * PARTITION_OFFSET_LEN)?;
+    let sections = encrypted_sections(partition_table, frame.len())?;
+    let mut frame = frame.to_vec();
+    crate::aes_ctr::apply_aes128_ctr(&mut frame, sections, &key.0, &counter_block);
+    Some(frame)
+}
+
+// the offsets cut the frame into clear and encrypted sections in turn, a clear one first
+#[cfg(feature = "matroska-decrypt")]
+fn encrypted_sections(
+    partition_table: &[u8],
+    frame_len: usize,
+) -> Option<impl Iterator<Item = (usize, usize)> + '_> {
+    let bounds = move || {
+        let offsets = partition_table
+            .chunks_exact(PARTITION_OFFSET_LEN)
+            .map(|offset| {
+                u32::from_be_bytes([offset[0], offset[1], offset[2], offset[3]]) as usize
+            });
+        core::iter::once(0)
+            .chain(offsets)
+            .chain(core::iter::once(frame_len))
+    };
+    let sections = move || bounds().zip(bounds().skip(1));
+    if sections().any(|(start, end)| end < start) {
+        return None;
+    }
+    Some(sections().skip(1).step_by(2))
 }
 
 // the next output buffer size: three times the last, as ffmpeg's matroskadec grows it
@@ -461,33 +567,39 @@ fn unlzo(stored: &[u8], limit: usize) -> Option<Vec<u8>> {
 // the steps that decode a track's blocks and its `CodecPrivate`, highest `ContentEncodingOrder` first
 #[derive(Debug, Default)]
 struct ContentEncodingChains {
-    block: Vec<ContentCompression>,
-    codec_private: Vec<ContentCompression>,
+    block: Vec<ContentDecoding>,
+    codec_private: Vec<ContentDecoding>,
 }
 
 #[derive(Debug)]
 struct ContentEncodingStep {
     order: u64,
     scope: u64,
-    compression: ContentCompression,
+    decoding: ContentDecoding,
 }
 
-fn undo_encodings(chain: &[ContentCompression], stored: Vec<u8>, limit: usize) -> Option<Vec<u8>> {
+// the `ContentDecoding::Decrypt` for a `ContentEncKeyID`, `None` without its key
+type ContentKeyLookup<'a> = &'a dyn Fn(&[u8]) -> Option<ContentDecoding>;
+
+fn undo_encodings(chain: &[ContentDecoding], stored: Vec<u8>, limit: usize) -> Option<Vec<u8>> {
     chain
         .iter()
-        .try_fold(stored, |data, step| step.decode(&data, limit))
+        .try_fold(stored, |data, step| step.undo(&data, limit))
 }
 
 /// Read a `TrackEntry`'s `ContentEncodings` (M910). `None` when any step is one
 /// this demuxer does not undo, so the track is flagged rather than its encoded
 /// bytes forwarded as if they were the bitstream.
-fn parse_content_encodings(data: &[u8]) -> Option<ContentEncodingChains> {
+fn parse_content_encodings(
+    data: &[u8],
+    content_key: ContentKeyLookup<'_>,
+) -> Option<ContentEncodingChains> {
     let mut steps = Vec::new();
     for (_, encoding) in children(data).filter(|(id, _)| *id == ID_CONTENT_ENCODING) {
         if steps.len() == MAX_CONTENT_ENCODINGS {
             return None;
         }
-        steps.push(parse_content_encoding(encoding)?);
+        steps.push(parse_content_encoding(encoding, content_key)?);
     }
     // RFC 9559 undoes the highest order first and requires each order to be unique
     steps.sort_unstable_by_key(|step| core::cmp::Reverse(step.order));
@@ -497,42 +609,63 @@ fn parse_content_encodings(data: &[u8]) -> Option<ContentEncodingChains> {
     let mut chains = ContentEncodingChains::default();
     for step in steps {
         if step.scope & SCOPE_BLOCK != 0 {
-            chains.block.push(step.compression.clone());
+            chains.block.push(step.decoding.clone());
         }
         if step.scope & SCOPE_CODEC_PRIVATE != 0 {
-            chains.codec_private.push(step.compression);
+            chains.codec_private.push(step.decoding);
         }
     }
     Some(chains)
 }
 
-fn parse_content_encoding(encoding: &[u8]) -> Option<ContentEncodingStep> {
+fn parse_content_encoding(
+    encoding: &[u8],
+    content_key: ContentKeyLookup<'_>,
+) -> Option<ContentEncodingStep> {
     // Defaults per the spec: order 0, scope 1 (block data), type 0 (compression).
     let mut order = 0u64;
     let mut scope = SCOPE_BLOCK;
-    let mut enc_type = 0u64;
+    let mut enc_type = TYPE_COMPRESSION;
     let mut compression: Option<&[u8]> = None;
-    let mut encrypted = false;
+    let mut encryption: Option<&[u8]> = None;
     for (id, body) in children(encoding) {
         match id {
             ID_CONTENT_ENCODING_ORDER => order = read_uint(body),
             ID_CONTENT_ENCODING_SCOPE => scope = read_uint(body),
             ID_CONTENT_ENCODING_TYPE => enc_type = read_uint(body),
             ID_CONTENT_COMPRESSION => compression = Some(body),
-            ID_CONTENT_ENCRYPTION => encrypted = true,
+            ID_CONTENT_ENCRYPTION => encryption = Some(body),
             _ => {}
         }
     }
     // scope 0 is out of range and bit 4 (the next encoding) is one players do not support
     let undoable_scope = scope != 0 && scope & !(SCOPE_BLOCK | SCOPE_CODEC_PRIVATE) == 0;
-    if !undoable_scope || enc_type != 0 || encrypted {
+    if !undoable_scope {
         return None;
     }
-    // A ContentEncoding of type compression with no ContentCompression element
-    // still means compression, with every default: algo 0, zlib.
+    let decoding = match (enc_type, encryption) {
+        // A ContentEncoding of type compression with no ContentCompression element
+        // still means compression, with every default: algo 0, zlib.
+        (TYPE_COMPRESSION, None) => {
+            ContentDecoding::Decompress(parse_content_compression(compression.unwrap_or(&[]))?)
+        }
+        // WebM Encryption lays out a signal byte and IV on frames only, never on a CodecPrivate
+        (TYPE_ENCRYPTION, Some(encryption)) if scope == SCOPE_BLOCK => {
+            parse_content_encryption(encryption, content_key)?
+        }
+        _ => return None,
+    };
+    Some(ContentEncodingStep {
+        order,
+        scope,
+        decoding,
+    })
+}
+
+fn parse_content_compression(compression: &[u8]) -> Option<ContentCompression> {
     let mut algo = 0u64;
     let mut settings: &[u8] = &[];
-    for (id, body) in children(compression.unwrap_or(&[])) {
+    for (id, body) in children(compression) {
         match id {
             ID_CONTENT_COMP_ALGO => algo = read_uint(body),
             ID_CONTENT_COMP_SETTINGS => settings = body,
@@ -551,29 +684,76 @@ fn parse_content_encoding(encoding: &[u8]) -> Option<ContentEncodingStep> {
         // bzip2 (1) and lzo (2) without matroska-compression, an unknown algo, an absurd stripping
         _ => return None,
     };
-    Some(ContentEncodingStep {
-        order,
-        scope,
-        compression,
-    })
+    Some(compression)
+}
+
+// WebM Encryption's AES-CTR is the only encryption with a defined frame layout
+fn parse_content_encryption(
+    encryption: &[u8],
+    content_key: ContentKeyLookup<'_>,
+) -> Option<ContentDecoding> {
+    let mut algo = 0u64;
+    let mut key_id: &[u8] = &[];
+    // WebM Encryption predates ContentEncAESSettings and is CTR without it
+    let mut cipher_mode = AES_CIPHER_MODE_CTR;
+    for (id, body) in children(encryption) {
+        match id {
+            ID_CONTENT_ENC_ALGO => algo = read_uint(body),
+            ID_CONTENT_ENC_KEY_ID => key_id = body,
+            ID_CONTENT_ENC_AES_SETTINGS => {
+                for (id, body) in children(body) {
+                    if id == ID_AES_SETTINGS_CIPHER_MODE {
+                        cipher_mode = read_uint(body);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if algo != CONTENT_ENC_ALGO_AES || cipher_mode != AES_CIPHER_MODE_CTR {
+        return None;
+    }
+    content_key(key_id)
+}
+
+#[derive(Debug)]
+struct TrackBlockDecoding {
+    track: u64,
+    chain: Vec<ContentDecoding>,
+    dropped_block_logged: bool,
 }
 
 /// Undo each frame's track encoding in place, dropping a block whose payload
-/// does not decode (a malformed zlib stream), like a malformed lacing.
-fn decode_encodings(frames: &mut Vec<MkvFrame>, encodings: &[(u64, Vec<ContentCompression>)]) {
+/// does not decode (a malformed zlib stream, a malformed encryption signal byte,
+/// IV or partition table), like a malformed lacing.
+fn decode_encodings(frames: &mut Vec<MkvFrame>, encodings: &mut [TrackBlockDecoding]) {
     if encodings.is_empty() {
         return;
     }
     frames.retain_mut(|f| {
-        let Some((_, chain)) = encodings.iter().find(|(n, _)| *n == f.track) else {
+        let Some(decoding) = encodings.iter_mut().find(|d| d.track == f.track) else {
             return true;
         };
-        match undo_encodings(chain, core::mem::take(&mut f.data), MAX_INFLATED_BLOCK_LEN) {
+        match undo_encodings(
+            &decoding.chain,
+            core::mem::take(&mut f.data),
+            MAX_INFLATED_BLOCK_LEN,
+        ) {
             Some(data) => {
                 f.data = data;
                 true
             }
-            None => false,
+            None => {
+                if !decoding.dropped_block_logged {
+                    decoding.dropped_block_logged = true;
+                    g2g_warn!(
+                        Target::category("mkvdemux"),
+                        "track {} drops blocks whose ContentEncoding does not undo",
+                        f.track
+                    );
+                }
+                false
+            }
         }
     });
 }
@@ -597,7 +777,8 @@ pub struct MkvTrack {
     /// timestamps.
     pub default_duration_ns: u64,
     /// Whether the track declares a `ContentEncoding` this demuxer cannot undo
-    /// (an encryption, an unknown algorithm, bzip2 / lzo without the
+    /// (an encryption without its content key or without the `matroska-decrypt`
+    /// feature, an unknown algorithm, bzip2 / lzo without the
     /// `matroska-compression` feature, a scope naming the next encoding). Such
     /// blocks forward as the file stored them, so a consumer of a flagged track
     /// would be reading encoded bytes as a bitstream. A chain of the other steps
@@ -649,7 +830,9 @@ pub struct MatroskaDemuxer {
     /// Per-track `ContentEncoding` chain (track number, steps), kept beside
     /// `tracks` for the same reason as `codec_privates`. Only tracks whose blocks
     /// carry one are stored; their blocks are decoded before they are queued.
-    block_encodings: Vec<(u64, Vec<ContentCompression>)>,
+    block_encodings: Vec<TrackBlockDecoding>,
+    #[cfg(feature = "matroska-decrypt")]
+    content_keys: Vec<([u8; 16], AesKey)>,
     // the `CodecID` of each audio or video track whose codec is `MkvCodec::Other`
     unmapped_codec_ids: Vec<String>,
     tags: TagList,
@@ -701,6 +884,8 @@ impl MatroskaDemuxer {
             tracks: Vec::new(),
             codec_privates: Vec::new(),
             block_encodings: Vec::new(),
+            #[cfg(feature = "matroska-decrypt")]
+            content_keys: Vec::new(),
             unmapped_codec_ids: Vec::new(),
             tags: TagList::new(),
             track_tags: Vec::new(),
@@ -713,6 +898,38 @@ impl MatroskaDemuxer {
             cues: Vec::new(),
             cues_index_pos: None,
             completed: Vec::new(),
+        }
+    }
+
+    // a WebM Encryption track whose ContentEncKeyID has a key here decrypts, any other stays flagged
+    #[cfg(feature = "matroska-decrypt")]
+    pub fn with_content_keys(mut self, keys: &[([u8; 16], [u8; 16])]) -> Self {
+        self.content_keys = keys.iter().map(|(id, key)| (*id, AesKey(*key))).collect();
+        self
+    }
+
+    #[cfg(feature = "matroska-decrypt")]
+    fn content_decryption(&self, key_id: &[u8]) -> Option<ContentDecoding> {
+        self.content_keys
+            .iter()
+            .rev()
+            .find(|(id, _)| id[..] == *key_id)
+            .map(|(_, key)| ContentDecoding::Decrypt(*key))
+    }
+
+    #[cfg(not(feature = "matroska-decrypt"))]
+    fn content_decryption(&self, _key_id: &[u8]) -> Option<ContentDecoding> {
+        None
+    }
+
+    // a fresh parser for a re-scan from offset 0 that keeps the content keys
+    pub fn reset(&mut self) {
+        #[cfg(feature = "matroska-decrypt")]
+        let content_keys = core::mem::take(&mut self.content_keys);
+        *self = Self::new();
+        #[cfg(feature = "matroska-decrypt")]
+        {
+            self.content_keys = content_keys;
         }
     }
 
@@ -933,7 +1150,7 @@ impl MatroskaDemuxer {
                                 self.timestamp_scale,
                                 &self.tracks,
                             );
-                            decode_encodings(&mut frames, &self.block_encodings);
+                            decode_encodings(&mut frames, &mut self.block_encodings);
                             self.completed.extend(frames);
                         }
                         self.consume(total);
@@ -991,7 +1208,10 @@ impl MatroskaDemuxer {
                         }
                     }
                     ID_TRACKS => {
-                        for parsed in parse_tracks(&self.buf.as_slice()[header..total]) {
+                        let content_key = |key_id: &[u8]| self.content_decryption(key_id);
+                        for parsed in
+                            parse_tracks(&self.buf.as_slice()[header..total], &content_key)
+                        {
                             self.tracks.push(parsed.track);
                             if !parsed.codec_private.is_empty() {
                                 self.codec_privates
@@ -1002,8 +1222,11 @@ impl MatroskaDemuxer {
                                     .push((parsed.track.number, parsed.tags));
                             }
                             if !parsed.block_encodings.is_empty() {
-                                self.block_encodings
-                                    .push((parsed.track.number, parsed.block_encodings));
+                                self.block_encodings.push(TrackBlockDecoding {
+                                    track: parsed.track.number,
+                                    chain: parsed.block_encodings,
+                                    dropped_block_logged: false,
+                                });
                             }
                             if let Some(codec_id) = parsed.unmapped_codec_id {
                                 self.unmapped_codec_ids.push(codec_id);
@@ -1362,15 +1585,15 @@ struct ParsedTrack {
     tags: TagList,
     /// The track's block `ContentEncoding` chain, kept beside `track` so
     /// `MkvTrack` stays `Copy` (the header-stripping settings are owned bytes).
-    block_encodings: Vec<ContentCompression>,
+    block_encodings: Vec<ContentDecoding>,
     unmapped_codec_id: Option<String>,
 }
 
-fn parse_tracks(body: &[u8]) -> Vec<ParsedTrack> {
+fn parse_tracks(body: &[u8], content_key: ContentKeyLookup<'_>) -> Vec<ParsedTrack> {
     let mut tracks = Vec::new();
     for (id, entry) in children(body) {
         if id == ID_TRACK_ENTRY {
-            if let Some(t) = parse_track_entry(entry) {
+            if let Some(t) = parse_track_entry(entry, content_key) {
                 tracks.push(t);
             }
         }
@@ -1391,7 +1614,7 @@ fn bounded_string(data: &[u8]) -> Option<&str> {
     core::str::from_utf8(data).ok()
 }
 
-fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
+fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<ParsedTrack> {
     let mut number = 0u64;
     let mut uid = 0u64;
     let mut name: Option<&str> = None;
@@ -1442,7 +1665,7 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
                     }
                 }
             }
-            ID_CONTENT_ENCODINGS => encodings = parse_content_encodings(data),
+            ID_CONTENT_ENCODINGS => encodings = parse_content_encodings(data, content_key),
             _ => {} // TrackType is implied by the CodecID prefix; FlagLacing etc. ignored
         }
     }
@@ -3503,6 +3726,152 @@ mod tests {
             assert!(!d.tracks()[0].unsupported_encoding, "scope {scope}");
             assert_eq!(d.codec_private(1), Some(&private[..]), "scope {scope}");
             assert_eq!(d.take_frames()[0].data, block, "scope {scope}");
+        }
+    }
+
+    #[cfg(feature = "matroska-decrypt")]
+    const TEST_KEY_ID: [u8; 16] = [7; 16];
+    #[cfg(feature = "matroska-decrypt")]
+    const TEST_KEY: [u8; 16] = [9; 16];
+    #[cfg(feature = "matroska-decrypt")]
+    const TEST_IV: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+
+    // one encryption `ContentEncoding` body, WebM Encryption's AES-CTR unless `cipher_mode` says otherwise
+    #[cfg(feature = "matroska-decrypt")]
+    fn encryption_step(order: u64, scope: u64, cipher_mode: u64) -> Vec<u8> {
+        let encryption = [
+            elem(&[0x47, 0xE1], &uint_body(CONTENT_ENC_ALGO_AES)),
+            elem(&[0x47, 0xE2], &TEST_KEY_ID),
+            elem(&[0x47, 0xE7], &elem(&[0x47, 0xE8], &uint_body(cipher_mode))),
+        ]
+        .concat();
+        [
+            elem(&[0x50, 0x31], &uint_body(order)),
+            elem(&[0x50, 0x32], &uint_body(scope)),
+            elem(&[0x50, 0x33], &uint_body(TYPE_ENCRYPTION)),
+            elem(&[0x50, 0x35], &encryption),
+        ]
+        .concat()
+    }
+
+    #[cfg(feature = "matroska-decrypt")]
+    fn decrypted_frames(entry_children: &[u8], block: &[u8]) -> (bool, Vec<Vec<u8>>) {
+        let mut d = MatroskaDemuxer::new().with_content_keys(&[(TEST_KEY_ID, TEST_KEY)]);
+        d.push_data(&encoded_file(b"V_VP9", entry_children, block));
+        let flagged = d.tracks()[0].unsupported_encoding;
+        (
+            flagged,
+            d.take_frames().into_iter().map(|f| f.data).collect(),
+        )
+    }
+
+    #[cfg(feature = "matroska-decrypt")]
+    fn partitioned_block(partition_count: u8, offsets: &[u32], frame: &[u8]) -> Vec<u8> {
+        let mut block = vec![SIGNAL_ENCRYPTED | SIGNAL_PARTITIONED];
+        block.extend_from_slice(&TEST_IV);
+        block.push(partition_count);
+        for offset in offsets {
+            block.extend_from_slice(&offset.to_be_bytes());
+        }
+        block.extend_from_slice(frame);
+        block
+    }
+
+    #[cfg(feature = "matroska-decrypt")]
+    #[test]
+    fn drops_an_encrypted_frame_with_a_malformed_header() {
+        let encryption = chained_encodings(&[encryption_step(0, SCOPE_BLOCK, AES_CIPHER_MODE_CTR)]);
+        let frame = [0xAA; 8];
+        let well_formed = partitioned_block(2, &[2, 4], &frame);
+        let (flagged, frames) = decrypted_frames(&encryption, &well_formed);
+        assert!(!flagged);
+        assert_eq!(frames.len(), 1, "the control frame decrypts");
+        assert_eq!(frames[0][..2], frame[..2], "the first section is clear");
+        assert_eq!(frames[0][4..], frame[4..], "the last section is clear");
+        assert_ne!(
+            frames[0][2..4],
+            frame[2..4],
+            "the middle section is deciphered"
+        );
+
+        let mut extended = well_formed.clone();
+        extended[0] |= SIGNAL_EXTENDED;
+        let truncated_iv = [&[SIGNAL_ENCRYPTED][..], &TEST_IV[..5]].concat();
+        let truncated_table = partitioned_block(2, &[2], &[]);
+        let descending = partitioned_block(2, &[4, 2], &frame);
+        let past_the_frame = partitioned_block(1, &[9], &frame);
+        let oversized_count = partitioned_block(u8::MAX, &[2, 4], &frame);
+        let cases = [
+            ("a second signal byte", extended),
+            (
+                "partitioned but not encrypted",
+                vec![SIGNAL_PARTITIONED, 0xAA],
+            ),
+            ("a truncated IV", truncated_iv),
+            ("a truncated partition table", truncated_table),
+            ("descending offsets", descending),
+            ("an offset past the frame", past_the_frame),
+            ("a partition count past the block", oversized_count),
+        ];
+        for (name, block) in cases {
+            let (flagged, frames) = decrypted_frames(&encryption, &block);
+            assert!(!flagged, "{name}");
+            assert!(frames.is_empty(), "{name} drops the frame");
+        }
+    }
+
+    // reserved signal bits are ignored, as the format requires
+    #[cfg(feature = "matroska-decrypt")]
+    #[test]
+    fn a_clear_frame_in_an_encrypted_track_passes_through() {
+        let encryption = chained_encodings(&[encryption_step(0, SCOPE_BLOCK, AES_CIPHER_MODE_CTR)]);
+        let payload = b"an unencrypted frame";
+        for signal in [0x00, 0x10] {
+            let (flagged, frames) =
+                decrypted_frames(&encryption, &[&[signal][..], payload].concat());
+            assert!(!flagged);
+            assert_eq!(frames, [payload.to_vec()], "signal {signal:#x}");
+        }
+    }
+
+    // a CBC cipher mode, an encrypted CodecPrivate and a key id without a key all stay flagged
+    #[cfg(feature = "matroska-decrypt")]
+    #[test]
+    fn flags_an_encryption_it_cannot_undo() {
+        let stored = b"stored bytes";
+        let cases = [
+            ("cbc", encryption_step(0, SCOPE_BLOCK, 2)),
+            (
+                "codec private scope",
+                encryption_step(0, SCOPE_BLOCK | SCOPE_CODEC_PRIVATE, AES_CIPHER_MODE_CTR),
+            ),
+        ];
+        for (name, step) in cases {
+            let (flagged, frames) = decrypted_frames(&chained_encodings(&[step]), stored);
+            assert!(flagged, "{name}");
+            assert_eq!(frames, [stored.to_vec()], "{name}");
+        }
+
+        let encryption = chained_encodings(&[encryption_step(0, SCOPE_BLOCK, AES_CIPHER_MODE_CTR)]);
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&encoded_file(b"V_VP9", &encryption, stored));
+        assert!(d.tracks()[0].unsupported_encoding, "no key");
+        assert_eq!(d.take_frames()[0].data, stored);
+    }
+
+    // the encryption (order 1) comes off before the header strip (order 0) goes back on
+    #[cfg(feature = "matroska-decrypt")]
+    #[test]
+    fn undoes_an_encryption_in_its_chain_order() {
+        let header = b"- ";
+        let payload = b"- a subtitle line, header-stripped and then encrypted.";
+        let stored = [&[0x00][..], &payload[header.len()..]].concat();
+        let strip = compression_step(0, SCOPE_BLOCK, 3, header);
+        let encryption = encryption_step(1, SCOPE_BLOCK, AES_CIPHER_MODE_CTR);
+        for steps in [[strip.clone(), encryption.clone()], [encryption, strip]] {
+            let (flagged, frames) = decrypted_frames(&chained_encodings(&steps), &stored);
+            assert!(!flagged);
+            assert_eq!(frames, [payload.to_vec()]);
         }
     }
 

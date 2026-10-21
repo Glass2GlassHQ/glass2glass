@@ -1,0 +1,27 @@
+#format: frame checksums
+#version: 2
+#hash: MD5
+#extradata 0,                              19, d6d61e18d84ec84d12baee22856531bb
+#software: Lavf62.12.103
+#tb 0: 1/1000
+#media_type 0: audio
+#codec_id 0: opus
+#sample_rate 0: 48000
+#channel_layout_name 0: mono
+#stream#, dts,        pts, duration,     size, hash
+0,         -7,         -7,       20,      115, 23a65a60c8cb00eb7668bb1ca89e6bd3, S=1,       10, edace68fd204eb5d02d383eda0ea841a
+0,         14,         14,       20,       73, 985a72feefb42346e2f7eeb190188620
+0,         34,         34,       20,       77, c8c0c41bd5cec2a2774bd989a42e2ee6
+0,         54,         54,       20,       79, 4ff7108ba725f3183c7739ed44802cc4
+0,         74,         74,       20,       81, de109fdbeb4f7292dc442f62ac347446
+0,         94,         94,       20,       78, 16def8a2d19499a69b7331f403a1ea5e
+0,        114,        114,       20,       76, 76f4ecf9b2dc8ea1e4ea946a1af8de75
+0,        134,        134,       20,       70, 78b5cadb526b3359af6939fd06557da2
+0,        154,        154,       20,       75, 49fcce3a991b57a96f601c4d7855e657
+0,        174,        174,       20,       70, 5e728374e11c8e1816241c1973300a3c
+0,        194,        194,       20,       71, 28b107e83e3b00b14d8a08a3adc23dc5
+0,        214,        214,       20,       78, 9ac7a80495fecf7daa98cefdd8b04d21
+0,        234,        234,       20,       73, 8cebac372ac81f02bd4165e68e3711a0
+0,        254,        254,       20,       73, 5baf8dedaff37a3a0140349418f9c3a7
+0,        274,        274,       20,       76, 46d94bf76e602cfae9bd202c25ac4911
+0,        294,        294,        7,       60, 6d7f3fa020b5e00ec0fec4d917e84852, S=1,       10, 1fe696152ad8cd4091f17d37e2de5e69

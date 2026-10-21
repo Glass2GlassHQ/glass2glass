@@ -21,6 +21,8 @@ use std::sync::{Arc, Mutex};
 
 use g2g_core::G2gError;
 
+#[cfg(any(feature = "hls", feature = "mp4-cenc"))]
+use crate::aes_ctr::apply_aes128_ctr;
 use crate::mp4box::{be32, be64, find_box};
 
 /// The Common Encryption scheme a track's `schm` names.
@@ -724,26 +726,22 @@ pub(crate) fn decrypt_sample(
         return Ok(());
     }
     // `cenc` (AES-CTR) and `cbc1` (AES-CBC) both run one continuous cipher over
-    // the sample's protected bytes, skipping the clear runs, so those gather the
-    // ranges first. `cens` gathers too, but only the pattern's encrypted blocks:
-    // its counter advances over those alone. `cbcs` restarts from the IV at each
-    // protected range, so it works range by range.
+    // the sample's protected bytes, skipping the clear runs. `cens` does too, but
+    // only over the pattern's encrypted blocks: its counter advances over those
+    // alone. `cbcs` restarts from the IV at each protected range, so it works
+    // range by range.
     let ranges = protected_ranges(buf.len(), &crypt.subsamples).ok_or(G2gError::CapsMismatch)?;
     let pattern = (crypt.crypt_byte_block, crypt.skip_byte_block);
     match crypt.scheme {
-        CencScheme::Cenc => gathered(buf, &ranges, |g| {
-            ctr_decrypt(g, key, &crypt.iv);
-        }),
+        CencScheme::Cenc => apply_aes128_ctr(buf, ranges, key, &crypt.iv),
         CencScheme::Cens => {
             // With no pattern `cens` is `cenc`: the whole protected range, trailing
             // partial block included.
             let blocks = match pattern {
-                (0, _) | (_, 0) => ranges.clone(),
+                (0, _) | (_, 0) => ranges,
                 (c, s) => pattern_blocks(&ranges, c, s),
             };
-            gathered(buf, &blocks, |g| {
-                ctr_decrypt(g, key, &crypt.iv);
-            });
+            apply_aes128_ctr(buf, blocks, key, &crypt.iv);
         }
         CencScheme::Cbc1 => gathered(buf, &ranges, |g| {
             cbc_decrypt_blocks(g, key, &crypt.iv, 0, 0);
@@ -761,15 +759,6 @@ pub(crate) fn decrypt_sample(
         }
     }
     Ok(())
-}
-
-/// AES-CTR over `g` from `iv` as the initial counter block. A short per-sample IV
-/// has already been zero-extended into the low half, which is the block counter.
-#[cfg(any(feature = "hls", feature = "mp4-cenc"))]
-fn ctr_decrypt(g: &mut [u8], key: &[u8; 16], iv: &[u8; 16]) {
-    use aes::cipher::{KeyIvInit, StreamCipher};
-    type Ctr = ctr::Ctr128BE<aes::Aes128>;
-    Ctr::new(&(*key).into(), &(*iv).into()).apply_keystream(g);
 }
 
 /// The extents a crypt:skip block pattern encrypts within each protected range,
@@ -802,8 +791,8 @@ fn pattern_blocks(ranges: &[(usize, usize)], crypt: u8, skip: u8) -> Vec<(usize,
 }
 
 /// Run `cipher` over the sample's protected bytes as one contiguous buffer, then
-/// scatter them back: the schemes whose cipher state carries across subsamples
-/// (the `cenc` counter, the `cbc1` chain) need the protected bytes adjacent.
+/// scatter them back: the `cbc1` chain carries across subsamples, so it needs the
+/// protected bytes adjacent.
 #[cfg(any(feature = "hls", feature = "mp4-cenc"))]
 fn gathered(buf: &mut [u8], ranges: &[(usize, usize)], cipher: impl FnOnce(&mut [u8])) {
     let mut g: Vec<u8> = ranges
