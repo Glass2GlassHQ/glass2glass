@@ -467,9 +467,19 @@ the stream. A track's `ContentEncodings` chain is undone at demux, highest
 step's scope names: zlib, header stripping, and with `matroska-compression`
 bzip2 (`libbz2-rs-sys`) and LZO1X (`lzo`). A block that does not decode or
 decodes past 16 MiB is dropped, and so is a `CodecPrivate` past 1 MiB. An
-encryption, an unknown algorithm, a scope naming the next encoding, a repeated
+encryption with no supplied key, an unknown algorithm, a scope naming the next encoding, a repeated
 order or a chain over eight steps flags the track `unsupported_encoding`, and its
-blocks forward as stored. MJPEG is `V_MJPEG` or a
+blocks forward as stored. With `matroska-decrypt`, `with_content_keys` on
+`MatroskaDemuxer`, `MkvDemux` and `MkvDemuxN` maps each 16-byte
+`ContentEncKeyID` to its AES-128 key, resolved when `Tracks` parses. A WebM
+Encryption step (ContentEncAlgo 5, AES-CTR, block scope only) is undone in its
+chain position: the signal byte, the 8-byte IV and, on a partitioned frame, the
+partition table are removed, and the encrypted sections, alternating with clear
+ones from a clear first section, are deciphered with one counter run across them.
+A frame with the extension bit, a partition bit without the encryption bit, a
+short IV or table, or descending or out-of-frame offsets is dropped and logged
+once per track. A frame with the encryption bit clear passes through. `aes_ctr`
+is the AES-CTR shared with Common Encryption. MJPEG is `V_MJPEG` or a
 `V_MS/VFW/FOURCC` track whose BITMAPINFOHEADER names `MJPG`. A Vorbis or
 `V_THEORA` track's `CodecPrivate` Xiph-laces the three headers, which go in
 band as three packets ahead of the first block. A Vorbis track's blocks go

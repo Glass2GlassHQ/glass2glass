@@ -212,8 +212,6 @@ Highest leverage first:
   `UriSource.has_clean_aperture` and show the whole picture.
 - **MPEG-2 in MP4:** an `mp4v` entry with an MPEG-2 objectTypeIndication (what
   ffmpeg writes) is declined, so decodebin reports "no decoder for mp4v".
-- **Matroska `ContentEncryption`:** decrypt encrypted tracks, which forward as
-  stored and flagged `unsupported_encoding`.
 
 ## Codecs
 
