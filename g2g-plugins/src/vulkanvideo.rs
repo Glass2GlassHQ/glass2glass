@@ -1991,7 +1991,9 @@ fn to_std_h265_vps(
 
 // OBU types (AV1 spec 6.2.2). Only the ones this decoder path inspects.
 const OBU_SEQUENCE_HEADER: u8 = 1;
+const OBU_TEMPORAL_DELIMITER: u8 = 2;
 const OBU_FRAME_HEADER: u8 = 3;
+const OBU_TILE_GROUP: u8 = 4;
 const OBU_FRAME: u8 = 6;
 
 // AV1 frame types (spec 6.8.2). KEY is the one the header parse emits directly;
@@ -2839,21 +2841,26 @@ fn finish_tile_info(
     })
 }
 
-/// Parse the tile-group header + per-tile size prefixes of an `OBU_FRAME` payload
-/// (spec 5.11.1 `tile_group_obu`), returning each tile's byte offset (from the
-/// payload start) and its size, which is exactly what the driver's `pTileOffsets`
-/// / `pTileSizes` expect. The byte-aligned frame header occupies the first
-/// `header_byte_len` bytes; the single tile group that follows an `OBU_FRAME`
-/// covers the whole frame (`tg_start == 0`, `tg_end == NumTiles - 1`), which every
-/// `OBU_FRAME` satisfies by bitstream conformance. Every length read from the
-/// stream is validated against the payload bounds (untrusted input): a malformed
-/// prefix or an out-of-range tile returns `None` rather than reading past the end.
-/// A single-tile frame yields one entry pointing at the data right after the
-/// header, matching the pre-multi-tile behaviour.
+// a `tile_group_obu` and the offset it starts at in the decode bitstream buffer
+#[derive(Debug, Clone, Copy)]
+struct Av1TileGroupBytes<'s> {
+    buffer_offset: usize,
+    bytes: &'s [u8],
+}
+
+/// Parse the tile-group headers + per-tile size prefixes of a frame's tile groups
+/// (spec 5.11.1 `tile_group_obu`), returning each tile's byte offset in the
+/// decode bitstream buffer and its size, which is exactly what the driver's
+/// `pTileOffsets` / `pTileSizes` expect. An `OBU_FRAME` carries one tile group
+/// after its byte-aligned header; a frame split into `OBU_FRAME_HEADER` +
+/// `OBU_TILE_GROUP`s carries one per tile-group OBU. The groups must cover the
+/// frame's tiles in order, each starting where the previous one ended, and end
+/// on its last tile. Every length read from the stream is validated against the
+/// group bounds (untrusted input): a malformed prefix, an out-of-range tile or a
+/// gap in the tile numbering returns `None` rather than reading past the end.
 fn av1_tile_layout(
-    payload: &[u8],
+    tile_groups: &[Av1TileGroupBytes<'_>],
     tile: &Av1TileInfo,
-    header_byte_len: usize,
 ) -> Option<(alloc::vec::Vec<u32>, alloc::vec::Vec<u32>)> {
     let num_tiles = (tile.tile_cols as usize).checked_mul(tile.tile_rows as usize)?;
     if num_tiles == 0 || num_tiles > (AV1_MAX_TILE_COLS * AV1_MAX_TILE_ROWS) as usize {
@@ -2864,48 +2871,49 @@ fn av1_tile_layout(
         return None;
     }
 
-    // tile_group_obu() header: an optional tile_start_and_end_present_flag +
-    // tg_start / tg_end, then byte_alignment() before the first tile.
-    let tg = payload.get(header_byte_len..)?;
-    let mut br = BitReader::new(tg);
-    let mut tg_start = 0u32;
-    let mut tg_end = (num_tiles - 1) as u32;
-    if num_tiles > 1 && br.read_bit()? == 1 {
-        let tile_bits = tile.tile_cols_log2 + tile.tile_rows_log2;
-        tg_start = br.read_bits(tile_bits)?;
-        tg_end = br.read_bits(tile_bits)?;
-    }
-    // Only the whole-frame single tile group (as in every OBU_FRAME) is handled.
-    if tg_start != 0 || tg_end as usize != num_tiles - 1 {
-        return None;
-    }
-    let tg_header_bytes = br.bit_pos().div_ceil(8);
-
     let mut offsets = alloc::vec::Vec::with_capacity(num_tiles);
     let mut sizes = alloc::vec::Vec::with_capacity(num_tiles);
-    // `cursor` is a byte offset from the payload start.
-    let mut cursor = header_byte_len.checked_add(tg_header_bytes)?;
-    for tile_num in 0..num_tiles {
-        let tile_size = if tile_num == num_tiles - 1 {
-            // The last tile takes whatever remains of the tile group.
-            payload.len().checked_sub(cursor)?
-        } else {
-            // le(TileSizeBytes): little-endian tile_size_minus_1.
-            let prefix = payload.get(cursor..cursor.checked_add(tsb)?)?;
-            let mut v = 0u64;
-            for (i, &b) in prefix.iter().enumerate() {
-                v |= (b as u64) << (8 * i);
-            }
-            cursor = cursor.checked_add(tsb)?;
-            (v as usize).checked_add(1)?
-        };
-        let end = cursor.checked_add(tile_size)?;
-        if end > payload.len() {
+    for group in tile_groups {
+        // tile_group_obu() header: an optional tile_start_and_end_present_flag +
+        // tg_start / tg_end, then byte_alignment() before the first tile.
+        let mut br = BitReader::new(group.bytes);
+        let mut tg_start = 0usize;
+        let mut tg_end = num_tiles - 1;
+        if num_tiles > 1 && br.read_bit()? == 1 {
+            let tile_bits = tile.tile_cols_log2 + tile.tile_rows_log2;
+            tg_start = br.read_bits(tile_bits)? as usize;
+            tg_end = br.read_bits(tile_bits)? as usize;
+        }
+        if tg_start != offsets.len() || tg_end < tg_start || tg_end >= num_tiles {
             return None;
         }
-        offsets.push(cursor as u32);
-        sizes.push(tile_size as u32);
-        cursor = end;
+        // `cursor` is a byte offset from the tile group start.
+        let mut cursor = br.bit_pos().div_ceil(8);
+        for tile_num in tg_start..=tg_end {
+            let tile_size = if tile_num == tg_end {
+                // The last tile takes whatever remains of the tile group.
+                group.bytes.len().checked_sub(cursor)?
+            } else {
+                // le(TileSizeBytes): little-endian tile_size_minus_1.
+                let prefix = group.bytes.get(cursor..cursor.checked_add(tsb)?)?;
+                let mut v = 0u64;
+                for (i, &b) in prefix.iter().enumerate() {
+                    v |= (b as u64) << (8 * i);
+                }
+                cursor = cursor.checked_add(tsb)?;
+                (v as usize).checked_add(1)?
+            };
+            let end = cursor.checked_add(tile_size)?;
+            if end > group.bytes.len() {
+                return None;
+            }
+            offsets.push(u32::try_from(group.buffer_offset.checked_add(cursor)?).ok()?);
+            sizes.push(u32::try_from(tile_size).ok()?);
+            cursor = end;
+        }
+    }
+    if offsets.len() != num_tiles {
+        return None;
     }
     Some((offsets, sizes))
 }
@@ -3671,8 +3679,10 @@ fn two_plane_samples(bytes: &[u8], bit_depth: u8) -> alloc::vec::Vec<u16> {
     }
     let unused_low_bits = 16 - u32::from(bit_depth);
     bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]) >> unused_low_bits)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| u16::from_le_bytes(pair) >> unused_low_bits)
         .collect()
 }
 
@@ -3685,8 +3695,8 @@ fn store_two_plane_samples(samples: &[u16], bytes: &mut [u8], bit_depth: u8) {
         return;
     }
     let unused_low_bits = 16 - u32::from(bit_depth);
-    for (pair, &sample) in bytes.chunks_exact_mut(2).zip(samples) {
-        pair.copy_from_slice(&(sample << unused_low_bits).to_le_bytes());
+    for (pair, &sample) in bytes.as_chunks_mut::<2>().0.iter_mut().zip(samples) {
+        *pair = (sample << unused_low_bits).to_le_bytes();
     }
 }
 
@@ -12836,6 +12846,16 @@ struct Av1SlotState {
     film_grain: Av1FilmGrain,
 }
 
+impl Av1SlotState {
+    // the driver reads an AV1 frame's size from its picture resource extent only
+    fn coded_extent(&self) -> vk::Extent2D {
+        vk::Extent2D {
+            width: self.upscaled_width,
+            height: self.frame_height,
+        }
+    }
+}
+
 /// A multi-frame AV1 Vulkan Video decoder with full reference management, the
 /// AV1 sibling of [`H265DpbDecoder`]. AV1's DPB is a set of up to
 /// `NUM_REF_FRAMES` (8) reference frames addressed by `ref_frame_idx`; each
@@ -12871,12 +12891,197 @@ impl core::fmt::Debug for Av1DpbDecoder {
     }
 }
 
-/// One display-order-relevant operation from an AV1 bitstream walk. An `OBU_FRAME`
-/// carries a coded frame to decode; an `OBU_FRAME_HEADER` with `show_existing_frame`
-/// re-displays a stored reference without decoding.
+/// One display-order-relevant operation from an AV1 bitstream walk. An `OBU_FRAME`,
+/// or an `OBU_FRAME_HEADER` with the `OBU_TILE_GROUP`s after it, carries a coded
+/// frame to decode; an `OBU_FRAME_HEADER` with `show_existing_frame` re-displays a
+/// stored reference without decoding. `output` is set on the last shown frame of
+/// each temporal unit, the only one emitted.
 enum Av1Op<'s> {
-    Decode(&'s [u8]),
-    ShowExisting(&'s [u8]),
+    Decode {
+        frame: Av1CodedFrame<'s>,
+        output: bool,
+    },
+    ShowExisting {
+        payload: &'s [u8],
+        output: bool,
+    },
+}
+
+enum Av1CodedFrame<'s> {
+    // an `OBU_FRAME` payload, the tile group follows the byte-aligned header
+    Combined(&'s [u8]),
+    Split {
+        header: &'s [u8],
+        tile_groups: alloc::vec::Vec<&'s [u8]>,
+    },
+}
+
+impl Av1Op<'_> {
+    fn mark_output(&mut self) {
+        match self {
+            Av1Op::Decode { output, .. } | Av1Op::ShowExisting { output, .. } => *output = true,
+        }
+    }
+
+    fn repeats_split_header(&self, header_payload: &[u8]) -> bool {
+        match self {
+            Av1Op::Decode {
+                frame:
+                    Av1CodedFrame::Split {
+                        header,
+                        tile_groups,
+                    },
+                ..
+            } => tile_groups.is_empty() || *header == header_payload,
+            _ => false,
+        }
+    }
+}
+
+impl<'s> Av1CodedFrame<'s> {
+    fn header(&self) -> &'s [u8] {
+        match self {
+            Av1CodedFrame::Combined(payload) => payload,
+            Av1CodedFrame::Split { header, .. } => header,
+        }
+    }
+
+    // the byte ranges written to the bitstream buffer, back to back, and where
+    // each tile group lands in it
+    fn bitstream_layout(
+        &self,
+        header_byte_len: usize,
+    ) -> Option<(
+        alloc::vec::Vec<&'s [u8]>,
+        alloc::vec::Vec<Av1TileGroupBytes<'s>>,
+    )> {
+        match self {
+            Av1CodedFrame::Combined(payload) => {
+                let group = Av1TileGroupBytes {
+                    buffer_offset: header_byte_len,
+                    bytes: payload.get(header_byte_len..)?,
+                };
+                Some((alloc::vec![*payload], alloc::vec![group]))
+            }
+            Av1CodedFrame::Split {
+                header,
+                tile_groups,
+            } => {
+                let mut units = alloc::vec::Vec::with_capacity(1 + tile_groups.len());
+                units.push(*header);
+                let mut groups = alloc::vec::Vec::with_capacity(tile_groups.len());
+                let mut buffer_offset = header.len();
+                for &bytes in tile_groups {
+                    units.push(bytes);
+                    groups.push(Av1TileGroupBytes {
+                        buffer_offset,
+                        bytes,
+                    });
+                    buffer_offset = buffer_offset.checked_add(bytes.len())?;
+                }
+                Some((units, groups))
+            }
+        }
+    }
+}
+
+/// Walk the bitstream into an ordered op list (`OBU_FRAME`, or `OBU_FRAME_HEADER`
+/// plus `OBU_TILE_GROUP`s -> `Decode`, an `OBU_FRAME_HEADER` with
+/// `show_existing_frame` -> `ShowExisting`) and report whether it needs the
+/// reorder-aware path (any `show_existing_frame`, any coded frame with
+/// `show_frame == 0`, i.e. an alt-ref, any split frame, or a temporal unit with
+/// more than one shown frame). Only the last shown frame of a temporal unit is
+/// marked for output: in a scalable stream that is its highest spatial layer,
+/// as aomdec and dav1d with `all_layers` off emit. A temporal unit ends at a
+/// temporal delimiter or the end of `stream`. The pipelined
+/// [`Av1DpbDecoder::decode_push`] keeps its own `split_frames`.
+fn av1_scan_ops<'s>(
+    stream: &'s [u8],
+    seq: &Av1SequenceHeader,
+) -> Result<(alloc::vec::Vec<Av1Op<'s>>, bool), VulkanVideoError> {
+    let mut ops: alloc::vec::Vec<Av1Op<'s>> = alloc::vec::Vec::new();
+    // Film grain is synthesized per displayed frame on the reorder-aware path
+    // (the hardware decode is grain-free), so a grain stream routes through it
+    // even when decode order == display order.
+    let mut needs_reorder = seq.film_grain_params_present;
+    // index into `ops` of the split frame whose tile groups are still arriving
+    let mut collecting: Option<usize> = None;
+    // index into `ops` of the latest shown frame of the current temporal unit
+    let mut last_shown: Option<usize> = None;
+    for obu in av1_obus(stream) {
+        match obu.obu_type {
+            OBU_TEMPORAL_DELIMITER => {
+                collecting = None;
+                if let Some(index) = last_shown.take() {
+                    ops[index].mark_output();
+                }
+            }
+            OBU_FRAME => {
+                collecting = None;
+                let lead = parse_av1_frame_lead(obu.payload, seq)
+                    .ok_or(VulkanVideoError::UnsupportedStream)?;
+                if lead.show_frame {
+                    needs_reorder |= last_shown.replace(ops.len()).is_some();
+                } else {
+                    needs_reorder = true;
+                }
+                ops.push(Av1Op::Decode {
+                    frame: Av1CodedFrame::Combined(obu.payload),
+                    output: false,
+                });
+            }
+            OBU_FRAME_HEADER => {
+                // spec 7.5: a frame header before the frame's last tile group
+                // is a copy of it
+                let repeats_collecting_header =
+                    collecting.is_some_and(|index| ops[index].repeats_split_header(obu.payload));
+                if repeats_collecting_header {
+                    continue;
+                }
+                collecting = None;
+                let lead = parse_av1_frame_lead(obu.payload, seq)
+                    .ok_or(VulkanVideoError::UnsupportedStream)?;
+                needs_reorder = true;
+                if lead.show_frame {
+                    last_shown = Some(ops.len());
+                }
+                if lead.show_existing_frame {
+                    ops.push(Av1Op::ShowExisting {
+                        payload: obu.payload,
+                        output: false,
+                    });
+                    continue;
+                }
+                collecting = Some(ops.len());
+                ops.push(Av1Op::Decode {
+                    frame: Av1CodedFrame::Split {
+                        header: obu.payload,
+                        tile_groups: alloc::vec::Vec::new(),
+                    },
+                    output: false,
+                });
+            }
+            OBU_TILE_GROUP => {
+                let Some(Av1Op::Decode {
+                    frame: Av1CodedFrame::Split { tile_groups, .. },
+                    ..
+                }) = collecting.and_then(|index| ops.get_mut(index))
+                else {
+                    return Err(VulkanVideoError::UnsupportedStream);
+                };
+                tile_groups.push(obu.payload);
+            }
+            // OBU_REDUNDANT_FRAME_HEADER repeats a frame header already read
+            _ => {}
+        }
+    }
+    if let Some(index) = last_shown {
+        ops[index].mark_output();
+    }
+    if ops.is_empty() {
+        return Err(VulkanVideoError::NoDecodableSlice);
+    }
+    Ok((ops, needs_reorder))
 }
 
 impl Av1DpbDecoder {
@@ -12923,7 +13128,7 @@ impl Av1DpbDecoder {
         let submitted = frames.len();
         let mut out = alloc::vec::Vec::new();
         for payload in frames {
-            self.decode_frame_into_slot(payload, true)?;
+            self.decode_frame_into_slot(&Av1CodedFrame::Combined(payload), true)?;
             while let Some(f) = self.core.ready.pop_front() {
                 out.push(f);
             }
@@ -12950,7 +13155,7 @@ impl Av1DpbDecoder {
         &mut self,
         stream: &[u8],
     ) -> Result<alloc::vec::Vec<Nv12Frame>, VulkanVideoError> {
-        let (ops, needs_reorder) = self.scan_ops(stream)?;
+        let (ops, needs_reorder) = av1_scan_ops(stream, &self.seq)?;
         if !needs_reorder {
             let (_, mut out) = self.decode_push(stream)?;
             out.extend(self.decode_flush()?);
@@ -12972,7 +13177,7 @@ impl Av1DpbDecoder {
         &mut self,
         stream: &[u8],
     ) -> Result<alloc::vec::Vec<Nv12Frame>, VulkanVideoError> {
-        let (ops, _) = self.scan_ops(stream)?;
+        let (ops, _) = av1_scan_ops(stream, &self.seq)?;
         self.decode_ops(ops)
     }
 
@@ -12988,17 +13193,20 @@ impl Av1DpbDecoder {
         let mut out = alloc::vec::Vec::new();
         for op in ops {
             match op {
-                Av1Op::Decode(payload) => {
-                    if let Some((target, fh)) = self.decode_frame_into_slot(payload, false)? {
-                        if fh.show_frame {
+                Av1Op::Decode { frame, output } => {
+                    if let Some((target, fh)) = self.decode_frame_into_slot(&frame, false)? {
+                        if fh.show_frame && output {
                             let mut frame = self.core.read_picture_nv12(target)?;
                             apply_film_grain_nv12(&mut frame, &fh.film_grain, is_id);
                             out.push(frame);
                         }
                     }
                 }
-                Av1Op::ShowExisting(payload) => {
+                Av1Op::ShowExisting { payload, output } => {
                     let phys = self.show_existing_slot(payload)?;
+                    if !output {
+                        continue;
+                    }
                     let mut frame = self.core.read_picture_nv12(phys)?;
                     let fg = self.phys_state[phys]
                         .map(|s| s.film_grain)
@@ -13021,11 +13229,15 @@ impl Av1DpbDecoder {
         if self.core.gpu.is_none() {
             return Err(VulkanVideoError::NoComputeQueue);
         }
-        let (ops, needs_reorder) = self.scan_ops(stream)?;
+        let (ops, needs_reorder) = av1_scan_ops(stream, &self.seq)?;
         if !needs_reorder {
             let mut out = alloc::vec::Vec::with_capacity(ops.len());
             for op in ops {
-                if let Av1Op::Decode(payload) = op {
+                if let Av1Op::Decode {
+                    frame: Av1CodedFrame::Combined(payload),
+                    ..
+                } = op
+                {
                     if let Some(tex) = self.decode_frame_to_texture(payload)? {
                         out.push(tex);
                     }
@@ -13047,7 +13259,7 @@ impl Av1DpbDecoder {
         if self.core.gpu.is_none() {
             return Err(VulkanVideoError::NoComputeQueue);
         }
-        let (ops, _) = self.scan_ops(stream)?;
+        let (ops, _) = av1_scan_ops(stream, &self.seq)?;
         self.decode_ops_to_textures(ops)
     }
 
@@ -13069,12 +13281,17 @@ impl Av1DpbDecoder {
         let mut out = alloc::vec::Vec::new();
         for op in ops {
             let (slot, fg) = match op {
-                Av1Op::Decode(payload) => match self.decode_frame_into_slot(payload, false)? {
-                    Some((target, fh)) if fh.show_frame => (target, fh.film_grain),
-                    _ => continue,
-                },
-                Av1Op::ShowExisting(payload) => {
+                Av1Op::Decode { frame, output } => {
+                    match self.decode_frame_into_slot(&frame, false)? {
+                        Some((target, fh)) if fh.show_frame && output => (target, fh.film_grain),
+                        _ => continue,
+                    }
+                }
+                Av1Op::ShowExisting { payload, output } => {
                     let phys = self.show_existing_slot(payload)?;
+                    if !output {
+                        continue;
+                    }
                     let fg = self.phys_state[phys]
                         .map(|s| s.film_grain)
                         .unwrap_or_default();
@@ -13093,52 +13310,6 @@ impl Av1DpbDecoder {
             }
         }
         Ok(out)
-    }
-
-    /// Walk the bitstream into an ordered op list (`OBU_FRAME` -> `Decode`, an
-    /// `OBU_FRAME_HEADER` with `show_existing_frame` -> `ShowExisting`) and report
-    /// whether it needs the reorder-aware path (any `show_existing_frame`, or any
-    /// coded frame with `show_frame == 0`, i.e. an alt-ref). A bare `OBU_FRAME_HEADER`
-    /// that is not `show_existing` implies a separate `OBU_TILE_GROUP`, which is not
-    /// handled (rejected). Only the whole-stream `decode_all*` entry points use this;
-    /// the pipelined [`decode_push`](Self::decode_push) keeps its own `split_frames`.
-    fn scan_ops<'s>(
-        &self,
-        stream: &'s [u8],
-    ) -> Result<(alloc::vec::Vec<Av1Op<'s>>, bool), VulkanVideoError> {
-        let mut ops = alloc::vec::Vec::new();
-        // Film grain is synthesized per displayed frame on the reorder-aware path
-        // (the hardware decode is grain-free), so a grain stream routes through it
-        // even when decode order == display order.
-        let mut needs_reorder = self.seq.film_grain_params_present;
-        for obu in av1_obus(stream) {
-            match obu.obu_type {
-                OBU_FRAME => {
-                    let lead = parse_av1_frame_lead(obu.payload, &self.seq)
-                        .ok_or(VulkanVideoError::UnsupportedStream)?;
-                    if !lead.show_frame {
-                        needs_reorder = true;
-                    }
-                    ops.push(Av1Op::Decode(obu.payload));
-                }
-                OBU_FRAME_HEADER => {
-                    let lead = parse_av1_frame_lead(obu.payload, &self.seq)
-                        .ok_or(VulkanVideoError::UnsupportedStream)?;
-                    if !lead.show_existing_frame {
-                        // A frame header with no tile data implies a separate
-                        // OBU_TILE_GROUP, not handled.
-                        return Err(VulkanVideoError::UnsupportedStream);
-                    }
-                    needs_reorder = true;
-                    ops.push(Av1Op::ShowExisting(obu.payload));
-                }
-                _ => {}
-            }
-        }
-        if ops.is_empty() {
-            return Err(VulkanVideoError::NoDecodableSlice);
-        }
-        Ok((ops, needs_reorder))
     }
 
     /// Resolve a `show_existing_frame` header to the physical DPB slot it displays,
@@ -13208,15 +13379,15 @@ impl Av1DpbDecoder {
         r
     }
 
-    /// Parse + decode one frame OBU into a free DPB slot; returns the decoded slot
+    /// Parse + decode one coded frame into a free DPB slot; returns the decoded slot
     /// index and the parsed header. Shared by the system + texture paths.
     fn decode_frame_into_slot(
         &mut self,
-        payload: &[u8],
+        frame: &Av1CodedFrame<'_>,
         to_system: bool,
     ) -> Result<Option<(usize, Av1FrameHeader)>, VulkanVideoError> {
         let refs = self.ref_frames();
-        let mut fh = parse_av1_frame_header(payload, &self.seq, &refs)
+        let mut fh = parse_av1_frame_header(frame.header(), &self.seq, &refs)
             .ok_or(VulkanVideoError::UnsupportedStream)?;
         // a frame can be coded smaller than its sequence's maximum size
         let (min_width, min_height) = self.smallest_frame_extent;
@@ -13250,7 +13421,7 @@ impl Av1DpbDecoder {
             }
         }
 
-        // An OBU_FRAME carries tile data, so it can never be a show_existing_frame
+        // A coded frame carries tile data, so it can never be a show_existing_frame
         // (that is a bare OBU_FRAME_HEADER, routed to `show_existing_slot` by the
         // reorder path). Guard defensively.
         if fh.show_existing_frame {
@@ -13297,10 +13468,13 @@ impl Av1DpbDecoder {
             }
         }
 
-        // Tile data: one tile follows the byte-aligned header directly; a tiled
-        // frame's per-tile offsets + sizes come from the tile-group size prefixes.
-        let (tile_offsets, tile_sizes) = av1_tile_layout(payload, &fh.tile, fh.header_byte_len)
+        // Tile data: the frame's bytes go into the bitstream buffer back to back,
+        // and the per-tile offsets + sizes come from the tile-group size prefixes.
+        let (bitstream_units, tile_groups) = frame
+            .bitstream_layout(fh.header_byte_len)
             .ok_or(VulkanVideoError::UnsupportedStream)?;
+        let (tile_offsets, tile_sizes) =
+            av1_tile_layout(&tile_groups, &fh.tile).ok_or(VulkanVideoError::UnsupportedStream)?;
 
         // The decoded slot's reference state.
         let state = Av1SlotState {
@@ -13324,7 +13498,7 @@ impl Av1DpbDecoder {
             target,
             &active,
             &name_slots,
-            payload,
+            &bitstream_units,
             &tile_offsets,
             &tile_sizes,
             to_system,
@@ -13348,7 +13522,9 @@ impl Av1DpbDecoder {
         // Chain the decode to its ycbcr conversion via `sem_dc` (see the H.264
         // sibling); the decode is async and its bitstream held until convert done.
         self.core.chain_next = true;
-        let Some((target, _fh)) = self.decode_frame_into_slot(payload, false)? else {
+        let Some((target, _fh)) =
+            self.decode_frame_into_slot(&Av1CodedFrame::Combined(payload), false)?
+        else {
             // No decode happened; drop the unconsumed chain flag.
             self.core.chain_next = false;
             return Ok(None);
@@ -13370,18 +13546,17 @@ impl Av1DpbDecoder {
         target: usize,
         active: &[usize],
         name_slots: &[i32; 7],
-        bitstream_data: &[u8],
+        bitstream_units: &[&[u8]],
         tile_offsets: &[u32],
         tile_sizes: &[u32],
         to_system: bool,
     ) -> Result<(), VulkanVideoError> {
-        let (w, h) = self.core.coded_extent;
         let num_refs = active.len();
 
-        // The frame OBU payload as it came, no start code.
+        // The frame's OBU payloads as they came, no start code.
         let (bitstream, buf_size, _) =
             self.core
-                .write_bitstream(to_system, &[], &[bitstream_data], &self.profile.profile)?;
+                .write_bitstream(to_system, &[], bitstream_units, &self.profile.profile)?;
 
         // AV1 picture info (points at the owned Std sub-structs in `std_pic`).
         let mut av1_pic = vk::VideoDecodeAV1PictureInfoKHR::default()
@@ -13423,33 +13598,25 @@ impl Av1DpbDecoder {
         let mut picres: alloc::vec::Vec<vk::VideoPictureResourceInfoKHR> =
             alloc::vec::Vec::with_capacity(num_refs);
         for &p in active {
+            let reference = self.phys_state[p].expect("active reference has state");
             picres.push(
                 vk::VideoPictureResourceInfoKHR::default()
                     .coded_offset(vk::Offset2D { x: 0, y: 0 })
-                    .coded_extent(vk::Extent2D {
-                        width: w,
-                        height: h,
-                    })
+                    .coded_extent(reference.coded_extent())
                     .base_array_layer(0)
                     .image_view_binding(self.core.slots[p].view),
             );
         }
         let picres_target = vk::VideoPictureResourceInfoKHR::default()
             .coded_offset(vk::Offset2D { x: 0, y: 0 })
-            .coded_extent(vk::Extent2D {
-                width: w,
-                height: h,
-            })
+            .coded_extent(state.coded_extent())
             .base_array_layer(0)
             .image_view_binding(self.core.slots[target].view);
         // The image the driver writes the picture to: the slot itself on the
         // coincide model, the slot's paired output image on the distinct one.
         let picres_output = vk::VideoPictureResourceInfoKHR::default()
             .coded_offset(vk::Offset2D { x: 0, y: 0 })
-            .coded_extent(vk::Extent2D {
-                width: w,
-                height: h,
-            })
+            .coded_extent(state.coded_extent())
             .base_array_layer(0)
             .image_view_binding(self.core.picture_view(target));
 
@@ -16795,6 +16962,169 @@ mod tests {
         assert_eq!(read(&[0x24]), Some((0x24, 1)));
         // Truncated (continuation bit set, no next byte) => None.
         assert_eq!(read(&[0x80]), None);
+    }
+
+    // av1-1-b8-22-svc-L2T2 cut to two temporal units, each a base and an
+    // enhancement layer frame split into a frame header and tile groups
+    const SPATIAL_LAYERS_IVF: &[u8] =
+        include_bytes!("../tests/fixtures/av1-1-b8-22-svc-L2T2_2tu.ivf");
+
+    fn spatial_layers_stream() -> alloc::vec::Vec<u8> {
+        let demuxed = crate::testutil::run(
+            &mut crate::ivfdemux::IvfDemux::new(),
+            &Caps::ByteStream {
+                encoding: g2g_core::ByteStreamEncoding::Ivf,
+            },
+            &[SPATIAL_LAYERS_IVF],
+        );
+        crate::testutil::data_bytes(&demuxed.packets)
+    }
+
+    // each OBU of `stream` with its full bytes, header included
+    fn obus_with_headers(stream: &[u8]) -> alloc::vec::Vec<(u8, &[u8])> {
+        let mut start = 0;
+        av1_obus(stream)
+            .into_iter()
+            .map(|obu| {
+                let end =
+                    obu.payload.as_ptr() as usize - stream.as_ptr() as usize + obu.payload.len();
+                let bytes = &stream[start..end];
+                start = end;
+                (obu.obu_type, bytes)
+            })
+            .collect()
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct SplitFrameSummary<'s> {
+        header: &'s [u8],
+        tile_groups: alloc::vec::Vec<&'s [u8]>,
+        output: bool,
+    }
+
+    fn decode_ops_summary<'s>(ops: &[Av1Op<'s>]) -> alloc::vec::Vec<SplitFrameSummary<'s>> {
+        ops.iter()
+            .map(|op| match op {
+                Av1Op::Decode {
+                    frame:
+                        Av1CodedFrame::Split {
+                            header,
+                            tile_groups,
+                        },
+                    output,
+                } => SplitFrameSummary {
+                    header,
+                    tile_groups: tile_groups.clone(),
+                    output: *output,
+                },
+                _ => panic!("the fixture codes only split frames"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn av1_split_frames_gather_their_tile_groups_and_output_the_top_layer() {
+        let stream = spatial_layers_stream();
+        let seq = extract_av1_sequence_header(&stream).expect("seq header");
+        let (ops, needs_reorder) = av1_scan_ops(&stream, &seq).expect("scan");
+        assert!(needs_reorder, "split frames take the op-walk");
+        let summary = decode_ops_summary(&ops);
+
+        let obus = av1_obus(&stream);
+        let count = |obu_type: u8| obus.iter().filter(|o| o.obu_type == obu_type).count();
+        assert_eq!(summary.len(), count(OBU_FRAME_HEADER));
+        let gathered: usize = summary.iter().map(|frame| frame.tile_groups.len()).sum();
+        assert_eq!(gathered, count(OBU_TILE_GROUP));
+        assert!(summary.iter().all(|frame| !frame.tile_groups.is_empty()));
+
+        // the last frame of each temporal unit is its highest spatial layer
+        let temporal_units = count(OBU_TEMPORAL_DELIMITER);
+        let frames_per_unit = summary.len() / temporal_units;
+        assert!(frames_per_unit > 1, "the fixture is not layered");
+        let outputs: alloc::vec::Vec<bool> = summary.iter().map(|frame| frame.output).collect();
+        let expected: alloc::vec::Vec<bool> = (0..summary.len())
+            .map(|index| index % frames_per_unit == frames_per_unit - 1)
+            .collect();
+        assert_eq!(outputs, expected);
+
+        // the key frame's tiles land inside the bytes written for it, in order
+        let Av1Op::Decode { frame, .. } = &ops[0] else {
+            panic!("first op decodes");
+        };
+        let fh = parse_av1_frame_header(frame.header(), &seq, &Av1RefFrames::default())
+            .expect("key frame header");
+        let (units, groups) = frame
+            .bitstream_layout(fh.header_byte_len)
+            .expect("bitstream layout");
+        let (offsets, sizes) = av1_tile_layout(&groups, &fh.tile).expect("tile layout");
+        assert_eq!(
+            offsets.len(),
+            (fh.tile.tile_cols * fh.tile.tile_rows) as usize
+        );
+        assert!(groups.len() > 1, "the key frame has one tile group");
+        let written: usize = units.iter().map(|unit| unit.len()).sum();
+        let mut previous_end = 0;
+        for (&offset, &size) in offsets.iter().zip(&sizes) {
+            assert!(offset as usize >= previous_end, "tiles overlap");
+            previous_end = (offset + size) as usize;
+        }
+        assert!(previous_end <= written);
+        // a tile layout missing its last group leaves tiles uncovered
+        assert!(av1_tile_layout(&groups[..groups.len() - 1], &fh.tile).is_none());
+    }
+
+    #[test]
+    fn av1_repeated_frame_headers_do_not_start_a_second_picture() {
+        const OBU_REDUNDANT_FRAME_HEADER: u8 = 7;
+        const OBU_TYPE_BITS: u8 = 0x78;
+        let stream = spatial_layers_stream();
+        let seq = extract_av1_sequence_header(&stream).expect("seq header");
+        // a copy of each frame header after its first tile group, and a redundant
+        // frame header after its last
+        let mut repeated = alloc::vec::Vec::new();
+        let mut header: &[u8] = &[];
+        let mut tile_groups_seen = 0;
+        let obus = obus_with_headers(&stream);
+        for (index, &(obu_type, bytes)) in obus.iter().enumerate() {
+            repeated.extend_from_slice(bytes);
+            if obu_type == OBU_FRAME_HEADER {
+                header = bytes;
+                tile_groups_seen = 0;
+            }
+            if obu_type != OBU_TILE_GROUP {
+                continue;
+            }
+            tile_groups_seen += 1;
+            if tile_groups_seen == 1 {
+                repeated.extend_from_slice(header);
+            }
+            let last_of_frame = obus
+                .get(index + 1)
+                .is_none_or(|&(next, _)| next != OBU_TILE_GROUP);
+            if last_of_frame {
+                let mut redundant = header.to_vec();
+                redundant[0] = (redundant[0] & !OBU_TYPE_BITS) | (OBU_REDUNDANT_FRAME_HEADER << 3);
+                repeated.extend_from_slice(&redundant);
+            }
+        }
+        let (plain, _) = av1_scan_ops(&stream, &seq).expect("scan");
+        let (copied, _) = av1_scan_ops(&repeated, &seq).expect("scan with copies");
+        assert_eq!(decode_ops_summary(&copied), decode_ops_summary(&plain));
+    }
+
+    #[test]
+    fn av1_a_tile_group_without_a_frame_header_is_refused() {
+        let stream = spatial_layers_stream();
+        let seq = extract_av1_sequence_header(&stream).expect("seq header");
+        let stray: alloc::vec::Vec<u8> = obus_with_headers(&stream)
+            .into_iter()
+            .filter(|&(obu_type, _)| obu_type != OBU_FRAME_HEADER)
+            .flat_map(|(_, bytes)| bytes.iter().copied())
+            .collect();
+        assert!(matches!(
+            av1_scan_ops(&stray, &seq),
+            Err(VulkanVideoError::UnsupportedStream)
+        ));
     }
 
     /// The frame / frame-header OBU payloads in the fixture, in decoding order.

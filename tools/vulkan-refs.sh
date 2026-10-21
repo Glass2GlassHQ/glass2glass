@@ -34,6 +34,7 @@ FIXTURES=(
   "h264_304x180_crop.h264 yuv420p"
   "h265_320x180.hevc yuv420p"
   "h265_304x180_main10_crop.hevc yuv420p10le"
+  "av1-1-b8-22-svc-L2T2_2tu.ivf yuv420p"
 )
 
 if [ "$#" -ne 1 ]; then
