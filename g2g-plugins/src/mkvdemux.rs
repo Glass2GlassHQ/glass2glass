@@ -56,7 +56,7 @@ use crate::codectag::{tagged_stream_name, TaggedStream};
 
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::demuxseek::{Admit, DemuxSeek};
-use crate::matroska::{MatroskaDemuxer, MkvCodec};
+use crate::matroska::{MatroskaDemuxer, MkvCodec, MkvTrack};
 use crate::typefind::{framerate_within_placeholder, with_picture_size, PLACEHOLDER_FRAMERATE};
 use crate::uncompressedvideo::{
     raw_video_caps, raw_video_formats, raw_video_frame_bytes, raw_video_placeholder_caps,
@@ -409,11 +409,7 @@ impl MkvDemux {
 
     // the first track of the codec, a second one stays out of the output
     fn selected_track(demux: &MatroskaDemuxer, stream: MkvStream) -> Option<u64> {
-        demux
-            .tracks()
-            .iter()
-            .find(|t| codec_to_stream(t.codec) == Some(stream))
-            .map(|t| t.number)
+        selected_track_entry(demux, stream).map(|t| t.number)
     }
 
     /// The concrete caps for `stream` in `demux` once Tracks has been parsed, with
@@ -630,35 +626,6 @@ impl MkvDemux {
         resolve_stream_id(&self.demux, id)
     }
 
-    /// Refuse a bitmap-subtitle or PCM track whose `ContentEncoding` the demuxer
-    /// cannot undo (an encryption, bzip2 / lzo without `matroska-compression`):
-    /// its blocks are encoded bytes rather than SPU packets, DVB segments or
-    /// samples, so forwarding them would feed garbage downstream. Tracks whose
-    /// encodings are decoded at demux pass. Only the subpicture and PCM
-    /// selections are checked; the other codecs' handling of an undecodable
-    /// encoding is unchanged.
-    fn reject_undecodable_encoding(&self) -> Result<(), G2gError> {
-        let checked = matches!(
-            self.stream,
-            MkvStream::VobSub | MkvStream::DvbSub | MkvStream::Pgs | MkvStream::Pcm(_)
-        );
-        if !checked
-            || !self
-                .demux
-                .tracks()
-                .iter()
-                .any(|t| codec_to_stream(t.codec) == Some(self.stream) && t.unsupported_encoding)
-        {
-            return Ok(());
-        }
-        g2g_error!(
-            Target::category("mkvdemux"),
-            "{} track declares a ContentEncoding this demuxer cannot undo (encryption without its content key, or bzip2 / lzo without matroska-compression)",
-            mkv_stream_str(self.stream)
-        );
-        Err(G2gError::CapsMismatch)
-    }
-
     /// Emit a `CapsChanged` once the selected track's concrete caps are known,
     /// then forward each demuxed frame of that stream.
     async fn emit_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
@@ -673,7 +640,7 @@ impl MkvDemux {
         // Fall back to the file's actual video track when the default (Vp9)
         // selection is absent, so autoplug of a VP8 / AV1 / H.264 WebM works.
         self.auto_select_video_track();
-        self.reject_undecodable_encoding()?;
+        reject_undecodable_encoding(&self.demux, self.stream)?;
         if let Some(caps) = self.concrete_caps() {
             if self.last_caps.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -1073,6 +1040,30 @@ pub struct MkvStreamInfo {
     pub video: bool,
 }
 
+fn selected_track_entry(demux: &MatroskaDemuxer, stream: MkvStream) -> Option<&MkvTrack> {
+    demux
+        .tracks()
+        .iter()
+        .find(|t| codec_to_stream(t.codec) == Some(stream))
+}
+
+/// Refuse a selected track whose `ContentEncoding` the demuxer cannot undo (an
+/// encryption without its content key, bzip2 / lzo without
+/// `matroska-compression`, an unknown algorithm): its blocks are the stored
+/// encoded bytes, and forwarding them would hand them downstream as the clear
+/// bitstream. Tracks whose encodings are decoded at demux pass.
+fn reject_undecodable_encoding(demux: &MatroskaDemuxer, stream: MkvStream) -> Result<(), G2gError> {
+    if !selected_track_entry(demux, stream).is_some_and(|t| t.unsupported_encoding) {
+        return Ok(());
+    }
+    g2g_error!(
+        Target::category("mkvdemux"),
+        "{} track declares a ContentEncoding this demuxer cannot undo (encryption without its content key, or bzip2 / lzo without matroska-compression)",
+        mkv_stream_str(stream)
+    );
+    Err(G2gError::CapsMismatch)
+}
+
 // the audio and video streams whose track declares a ContentEncoding the demuxer cannot undo
 pub fn encoded_streams(demux: &MatroskaDemuxer) -> Vec<MkvStream> {
     demux
@@ -1086,7 +1077,8 @@ pub fn encoded_streams(demux: &MatroskaDemuxer) -> Vec<MkvStream> {
 
 /// The forwardable elementary streams a parsed Matroska container carries, in
 /// track order (M382): one [`MkvStreamInfo`] per track whose codec maps to an
-/// [`MkvStream`] (an unmappable track is dropped). `demux` must have parsed its
+/// [`MkvStream`] (an unmappable track, or one whose `ContentEncoding` the demuxer
+/// cannot undo, is dropped). `demux` must have parsed its
 /// `Tracks` element (feed a file prefix first); returns empty for a
 /// non-Matroska or not-yet-parsed input, which the `playbin` hook reads as
 /// "decline, fall through to single-stream playbin".
@@ -1094,6 +1086,7 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
     demux
         .tracks()
         .iter()
+        .filter(|t| !t.unsupported_encoding)
         .filter_map(|t| {
             let stream = codec_to_stream(t.codec)?;
             // Subtitle tracks reach the graph through the overlay branch
@@ -1158,7 +1151,8 @@ fn is_subtitle(stream: MkvStream) -> bool {
 }
 
 /// The subtitle tracks a parsed Matroska container carries, in track order
-/// (M415): one [`MkvStreamInfo`] per timed-text or bitmap-subtitle track. The
+/// (M415): one [`MkvStreamInfo`] per timed-text or bitmap-subtitle track whose
+/// `ContentEncoding` the demuxer undoes. The
 /// read-side complement of [`forwardable_streams`] (which is A/V-only): the
 /// subtitle-overlay `playbin` builder pairs these with the A/V streams to plug an
 /// overlay onto the video branch (the MKV sibling of
@@ -1167,6 +1161,7 @@ pub fn subtitle_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
     demux
         .tracks()
         .iter()
+        .filter(|t| !t.unsupported_encoding)
         .filter_map(|t| {
             let stream = codec_to_stream(t.codec)?;
             if !is_subtitle(stream) {
@@ -1742,6 +1737,9 @@ impl MultiOutputElement for MkvDemuxN {
                     // Honor an app selection before routing this batch, so a re-map
                     // (and its re-armed CapsChanged) takes effect for the frames now.
                     self.apply_stream_selection();
+                    for &stream in &self.ports {
+                        reject_undecodable_encoding(&self.demux, stream)?;
+                    }
                     for f in self.demux.take_frames() {
                         let Some(port) = self.port_for_codec(f.codec).filter(|&port| {
                             MkvDemux::selected_track(&self.demux, self.ports[port]) == Some(f.track)
