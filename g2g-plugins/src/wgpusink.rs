@@ -39,8 +39,8 @@ use g2g_core::{
 
 use crate::clock::wait_to_present;
 use crate::gpu::{
-    nv12_plane_views, packed_nv12_extent, read_texture_plane, texture_holds_picture, texture_layout,
-    texture_of, GpuContext, WgpuTextureLayout,
+    nv12_plane_views, packed_nv12_extent, read_texture_plane, texture_holds_picture,
+    texture_layout, texture_of, GpuContext, WgpuTextureLayout,
 };
 use crate::yuvmatrix::YuvToRgbWeights;
 

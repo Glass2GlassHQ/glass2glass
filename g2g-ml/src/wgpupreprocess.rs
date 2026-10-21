@@ -1764,8 +1764,13 @@ pub async fn nv12_to_gpu_texture(
     // each plane is its own region. write_texture has no 256-byte bytes_per_row
     // constraint (it stages internally), so the unaligned widths are fine.
     for (bytes, origin_row, region_width, rows) in [
-        (&nv12[..], 0, width, height),
-        (&nv12[chroma_offset as usize..], height, chroma_stride, chroma_rows),
+        (nv12, 0, width, height),
+        (
+            &nv12[chroma_offset as usize..],
+            height,
+            chroma_stride,
+            chroma_rows,
+        ),
     ] {
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
