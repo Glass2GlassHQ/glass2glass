@@ -1363,6 +1363,9 @@ pub mod opusenc;
 // Vorbis decode, pure Rust via symphonia. Gated behind the `vorbis` feature.
 #[cfg(feature = "vorbis")]
 pub mod vorbisdec;
+// Vorbis I channel order, shared by opusdec mapping family 1 and vorbisdec.
+#[cfg(any(feature = "opus", feature = "vorbis"))]
+mod vorbischannels;
 // WebRTC echo cancellation, noise suppression and gain control, pure Rust via
 // sonora. Gated behind the `webrtcdsp` feature.
 #[cfg(feature = "webrtcdsp")]

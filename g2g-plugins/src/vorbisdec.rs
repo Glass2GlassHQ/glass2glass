@@ -30,6 +30,7 @@ use g2g_core::{
 };
 
 use crate::pcmclip::clip_pcm_to_segment;
+use crate::vorbischannels::vorbis_layout;
 
 use symphonia_codec_vorbis::VorbisDecoder;
 use symphonia_core::audio::GenericAudioBufferRef;
@@ -122,11 +123,14 @@ impl VorbisDec {
     }
 
     fn output_caps(&self) -> Caps {
+        // symphonia already permutes the Vorbis order into this layout's interleave order
+        let channel_layout = vorbis_layout(self.channels)
+            .map_or(g2g_core::ChannelLayout::UNSPECIFIED, |(layout, _)| layout);
         Caps::Audio {
             format: AudioFormat::PcmS16Le,
             channels: self.channels,
             sample_rate: self.sample_rate,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            channel_layout,
         }
     }
 
@@ -358,5 +362,93 @@ impl PadTemplates for VorbisDec {
                 channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oggdemux::OggDemux;
+    use crate::testutil::{data_bytes, first_caps, run};
+    use g2g_core::{ByteStreamEncoding, ChannelLayout, PropValue};
+
+    // libvorbis 5.1: a tone on each channel in turn, a tenth of a second each, in layout order
+    const SURROUND_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/vorbis_5_1_48k.ogg");
+    const SURROUND_SAMPLE_RATE: u32 = 48_000;
+    const TONE_SLOT_SAMPLES: usize = SURROUND_SAMPLE_RATE as usize / 10;
+
+    fn vorbis_packets(ogg: &[u8]) -> Vec<Vec<u8>> {
+        let mut demux = OggDemux::new();
+        demux
+            .set_property("stream", PropValue::Str("vorbis".into()))
+            .unwrap();
+        let demuxed = run(
+            &mut demux,
+            &Caps::ByteStream {
+                encoding: ByteStreamEncoding::Ogg,
+            },
+            &[ogg],
+        );
+        demuxed
+            .packets
+            .iter()
+            .filter_map(|packet| match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    Some(frame.domain.require_system_slice("test").unwrap().to_vec())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn surround_plays_each_channel_on_its_labelled_speaker() {
+        let packets = vorbis_packets(SURROUND_FIXTURE);
+        let buffers: Vec<&[u8]> = packets.iter().map(Vec::as_slice).collect();
+        let decoded = run(
+            &mut VorbisDec::new(),
+            &Caps::Audio {
+                format: AudioFormat::Vorbis,
+                channels: ANY_CHANNELS,
+                sample_rate: ANY_SAMPLE_RATE,
+                channel_layout: ChannelLayout::UNSPECIFIED,
+            },
+            &buffers,
+        );
+        let layout = ChannelLayout::SURROUND_5_1;
+        assert_eq!(
+            first_caps(&decoded.packets),
+            Some(Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: layout.channels(),
+                sample_rate: SURROUND_SAMPLE_RATE,
+                channel_layout: layout,
+            })
+        );
+        let channels = usize::from(layout.channels());
+        let samples: Vec<i16> = data_bytes(&decoded.packets)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&bytes| i16::from_le_bytes(bytes))
+            .collect();
+        for slot in 0..channels {
+            // the middle half of the slot, clear of the transform overlap with its neighbours
+            let slot_start = slot * TONE_SLOT_SAMPLES;
+            let middle = slot_start + TONE_SLOT_SAMPLES / 4..slot_start + TONE_SLOT_SAMPLES * 3 / 4;
+            let energy = |channel: usize| -> f64 {
+                middle
+                    .clone()
+                    .map(|frame| f64::from(samples[frame * channels + channel]))
+                    .map(|sample| sample * sample)
+                    .sum()
+            };
+            let loudest = (0..channels).max_by(|&a, &b| energy(a).total_cmp(&energy(b)));
+            assert_eq!(
+                loudest,
+                Some(slot),
+                "the tone of slot {slot} plays on channel {slot}"
+            );
+        }
     }
 }
