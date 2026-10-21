@@ -989,6 +989,15 @@ subtracts its own base time.
 same pixels, so a rendered or decoded GPU frame leaves the process with no CPU
 copy. Feed the output to `DmaBufSink`.
 
+`WgpuToDmaBuf` stamps one stride for every row. An input carrying a
+`PlaneLayout` goes out in that layout. A tightly packed input goes out at
+`RawVideoFormat::row_stride(width)`. When that differs from the tight rows, as
+for odd-width NV12 or I420 where the chroma row is one byte wider than the luma
+row, a compute pass pads the rows into the export slot, because buffer copies
+need 4-byte-aligned offsets. The tight input is first copied into a STORAGE
+scratch buffer, since producer buffers carry no STORAGE usage. P010 has no
+`row_stride`, so odd-width P010 stays refused.
+
 `wgpuupload` (the `wgpu-sink` feature) is how a system frame gets there. It copies
 the tight bytes into a `wgpu::Buffer` with `COPY_SRC | COPY_DST` usage, created
 mapped and sized up to wgpu's 4-byte copy alignment, and the frame keeps the exact
