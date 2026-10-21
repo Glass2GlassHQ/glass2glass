@@ -101,10 +101,9 @@ macro_rules! write_rgb_tensor {
 }
 
 /// The uniform every pipeline binds: the frame geometry, where the input pixels
-/// sit in their buffer (`stride` = input row stride, `base` = byte offset of the
-/// first luma byte), and the six YUV -> RGB weights the stream's caps
-/// colorimetry resolves to. The texture pipelines read only the geometry and
-/// the weights.
+/// sit in their buffer (see [`InputLayout`]), and the six YUV -> RGB weights the
+/// stream's caps colorimetry resolves to. The texture pipelines read only the
+/// geometry and the weights.
 macro_rules! dims_struct {
     () => {
         r#"
@@ -113,6 +112,8 @@ struct Dims {
     height: u32,
     stride: u32,
     base: u32,
+    chroma_stride: u32,
+    chroma_base: u32,
     luma_gain: f32,
     luma_floor: f32,
     red_from_cr: f32,
@@ -153,7 +154,7 @@ macro_rules! yuv_to_rgb {
 /// bindings and the colour math, is shared, hence a macro rather than a const:
 /// `concat!` splices the sample step in at compile time.
 ///
-/// `dims.stride` / `dims.base` locate the pixels inside the input buffer: a
+/// `dims.stride` / `dims.base` locate the first plane inside the input buffer: a
 /// system-memory frame is tightly packed from byte 0 (`stride` = the format's tight
 /// row bytes, `base == 0`), an imported dma-buf can have a padded row stride and a
 /// nonzero plane offset (M990). The output tensor is always tightly packed.
@@ -188,12 +189,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     };
 }
 
-/// NV12 input: `h` luma rows, then interleaved Cb,Cr rows at half height, all at
-/// the same row stride.
+/// NV12 input: `h` luma rows, then `ceil(h/2)` rows of interleaved Cb,Cr pairs
+/// starting at `dims.chroma_base`, one pair per 2x2 block. The chroma row has its
+/// own stride because in the tight layout it is one byte wider than an odd luma row.
 const SHADER: &str = yuv_shader!(
     r#"
     let yv = load_byte(row + x);
-    let uv_index = dims.base + stride * h + (y / 2u) * stride + (x / 2u) * 2u;
+    let uv_index = dims.chroma_base + (y / 2u) * dims.chroma_stride + (x / 2u) * 2u;
     let cb = load_byte(uv_index) - 128.0;
     let cr = load_byte(uv_index + 1u) - 128.0;
 "#
@@ -319,12 +321,13 @@ pub fn nv12_to_rgb_tensor_tagged(
     let weights = YuvToRgbWeights::new(colorimetry);
     let area = width * height;
     let uv_base = area;
+    let uv_stride = width.div_ceil(2) * 2;
     let byte = |i: usize| nv12[i] as f32;
     let mut out = vec![0f32; 3 * area];
     for y in 0..height {
         for x in 0..width {
             let li = y * width + x;
-            let uvi = uv_base + (y / 2) * width + (x / 2) * 2;
+            let uvi = uv_base + (y / 2) * uv_stride + (x / 2) * 2;
             let rgb = yuv_rgb(
                 &weights,
                 byte(li),
@@ -405,16 +408,25 @@ fn any_geometry(format: RawVideoFormat) -> Caps {
     }
 }
 
-/// Whether the compute pass can read `format` at this geometry: 4:2:0 chroma
-/// needs both dimensions even, packed 4:2:2 only an even width.
-fn geometry_ok(format: RawVideoFormat, width: u32, height: u32) -> bool {
+/// Whether the compute pass can read `format` at this geometry: NV12 at any size
+/// (the last chroma column and row of an odd size cover a single luma column or
+/// row), packed 4:2:2 only at an even width. An imported NV12 frame still needs
+/// an even size, see [`import_geometry_ok`].
+fn geometry_ok(format: RawVideoFormat, width: u32) -> bool {
     match format {
-        RawVideoFormat::Nv12 => width.is_multiple_of(2) && height.is_multiple_of(2),
+        RawVideoFormat::Nv12 => true,
         RawVideoFormat::Yuyv => width.is_multiple_of(2),
         #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
         RawVideoFormat::Rgba8 => true,
         _ => false,
     }
+}
+
+/// Whether an imported frame (a GPU texture or a dma-buf) can be read at the
+/// negotiated size. NV12 needs an even size: an import carries one row stride for
+/// both planes, so it cannot describe the tight layout's wider chroma row.
+fn import_geometry_ok(format: RawVideoFormat, width: u32, height: u32) -> bool {
+    format != RawVideoFormat::Nv12 || (width.is_multiple_of(2) && height.is_multiple_of(2))
 }
 
 /// The storage-buffer compute shader that reads `format`'s bytes. `None` for a
@@ -424,6 +436,67 @@ fn shader_for(format: RawVideoFormat) -> Option<&'static str> {
         RawVideoFormat::Nv12 => Some(SHADER),
         RawVideoFormat::Yuyv => Some(YUYV_SHADER),
         _ => None,
+    }
+}
+
+// Byte positions of the input planes in their buffer, YUYV leaves the chroma pair zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InputLayout {
+    stride: u32,
+    base: u32,
+    chroma_stride: u32,
+    chroma_base: u32,
+}
+
+impl InputLayout {
+    // The texture shaders address texels, so they read none of these.
+    const TEXTURE: InputLayout = InputLayout {
+        stride: 0,
+        base: 0,
+        chroma_stride: 0,
+        chroma_base: 0,
+    };
+
+    // g2g-core's unpadded system-memory layout, planes back to back from byte 0.
+    fn tight(format: RawVideoFormat, width: u32, height: u32) -> Result<Self, G2gError> {
+        let stride = format
+            .plane_stride(0, width)
+            .ok_or(G2gError::CapsMismatch)?;
+        if format.plane_count() == 1 {
+            return Ok(InputLayout {
+                stride,
+                base: 0,
+                chroma_stride: 0,
+                chroma_base: 0,
+            });
+        }
+        let chroma_base = format
+            .plane_offset(1, width, height)
+            .and_then(|offset| u32::try_from(offset).ok())
+            .ok_or(G2gError::CapsMismatch)?;
+        Ok(InputLayout {
+            stride,
+            base: 0,
+            chroma_stride: format
+                .plane_stride(1, width)
+                .ok_or(G2gError::CapsMismatch)?,
+            chroma_base,
+        })
+    }
+
+    // A dma-buf has one stride for every row, the chroma rows follow the luma rows.
+    #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+    fn uniform(stride: u32, base: u32, height: u32) -> Result<Self, G2gError> {
+        let chroma_base = stride
+            .checked_mul(height)
+            .and_then(|luma| luma.checked_add(base))
+            .ok_or(G2gError::CapsMismatch)?;
+        Ok(InputLayout {
+            stride,
+            base,
+            chroma_stride: stride,
+            chroma_base,
+        })
     }
 }
 
@@ -439,8 +512,7 @@ struct Gpu {
     input_buf: wgpu::Buffer,
     out_buf: wgpu::Buffer,
     staging: Arc<ReadbackStaging>,
-    /// Input row stride, one half of what the dims uniform says.
-    stride: u32,
+    layout: InputLayout,
     input_len: usize,
     out_bytes: usize,
 }
@@ -605,7 +677,7 @@ impl WgpuPreprocess {
         gpu.queue.write_buffer(
             &gpu.dims_buf,
             0,
-            &dims_bytes(self.width, self.height, gpu.stride, 0, self.colorimetry),
+            &dims_bytes(self.width, self.height, gpu.layout, self.colorimetry),
         );
 
         let mut encoder = gpu
@@ -651,7 +723,7 @@ impl WgpuPreprocess {
         gpu.queue.write_buffer(
             &gpu.dims_buf,
             0,
-            &dims_bytes(self.width, self.height, gpu.stride, 0, self.colorimetry),
+            &dims_bytes(self.width, self.height, gpu.layout, self.colorimetry),
         );
 
         let frame_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -735,6 +807,9 @@ impl WgpuPreprocess {
     /// tensor. Any other format under a `WgpuNv12Texture` is a producer bug, not
     /// something to guess at.
     fn dispatch_nv12_texture(&mut self, owner: &WgpuNv12Texture) -> Result<MemoryDomain, G2gError> {
+        if !import_geometry_ok(RawVideoFormat::Nv12, self.width, self.height) {
+            return Err(G2gError::CapsMismatch);
+        }
         match texture_layout(owner.texture()) {
             Some(WgpuTextureLayout::PackedNv12) => {
                 self.ensure_tex_gpu(owner.device(), owner.queue());
@@ -765,7 +840,12 @@ impl WgpuPreprocess {
         tg.queue.write_buffer(
             &tg.dims_buf,
             0,
-            &dims_bytes(self.width, self.height, self.width, 0, self.colorimetry),
+            &dims_bytes(
+                self.width,
+                self.height,
+                InputLayout::TEXTURE,
+                self.colorimetry,
+            ),
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let layout = tg.pipeline.get_bind_group_layout(0);
@@ -827,7 +907,12 @@ impl WgpuPreprocess {
         tg.queue.write_buffer(
             &tg.dims_buf,
             0,
-            &dims_bytes(self.width, self.height, self.width, 0, self.colorimetry),
+            &dims_bytes(
+                self.width,
+                self.height,
+                InputLayout::TEXTURE,
+                self.colorimetry,
+            ),
         );
         let [luma, chroma] = nv12_plane_views(texture);
         let layout = tg.pipeline.get_bind_group_layout(0);
@@ -980,6 +1065,9 @@ impl WgpuPreprocess {
         use g2g_plugins::dmabufwgpu::create_import_device_on;
 
         let shader = shader_for(self.format).ok_or(G2gError::CapsMismatch)?;
+        if !import_geometry_ok(self.format, self.width, self.height) {
+            return Err(G2gError::CapsMismatch);
+        }
         let plane_bytes = self
             .format
             .frame_bytes(u64::from(dmabuf.stride), u64::from(self.height))
@@ -1032,7 +1120,12 @@ impl WgpuPreprocess {
         ig.queue.write_buffer(
             &ig.dims_buf,
             0,
-            &dims_bytes(self.width, self.height, stride, base, self.colorimetry),
+            &dims_bytes(
+                self.width,
+                self.height,
+                InputLayout::uniform(stride, base, self.height)?,
+                self.colorimetry,
+            ),
         );
         let layout = ig.pipeline.get_bind_group_layout(0);
         let bind_group = ig.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1220,7 +1313,7 @@ impl AsyncElement for WgpuPreprocess {
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 ..
-            } if geometry_ok(*format, *w, *h) => CapsSet::one(Caps::Tensor {
+            } if geometry_ok(*format, *w) => CapsSet::one(Caps::Tensor {
                 dtype: TensorDType::F32,
                 shape: TensorShape::new([1, 3, *h, *w]),
                 layout: TensorLayout::Nchw,
@@ -1240,7 +1333,7 @@ impl AsyncElement for WgpuPreprocess {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        if !geometry_ok(*format, *w, *h) {
+        if !geometry_ok(*format, *w) {
             return Err(G2gError::CapsMismatch);
         }
         self.width = *w;
@@ -1418,9 +1511,9 @@ async fn build_gpu(
     colorimetry: Colorimetry,
 ) -> Result<Gpu, G2gError> {
     let source = shader_for(format).ok_or(G2gError::CapsMismatch)?;
-    let stride = format.row_stride(width).ok_or(G2gError::CapsMismatch)?;
+    let input_layout = InputLayout::tight(format, width, height)?;
     let input_len = format
-        .frame_bytes(u64::from(stride), u64::from(height))
+        .unpadded_frame_bytes(width, height)
         .ok_or(G2gError::CapsMismatch)? as usize;
 
     let instance = wgpu::Instance::default();
@@ -1457,11 +1550,10 @@ async fn build_gpu(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    // System memory is tightly packed from byte 0.
     queue.write_buffer(
         &dims_buf,
         0,
-        &dims_bytes(width, height, stride, 0, colorimetry),
+        &dims_bytes(width, height, input_layout, colorimetry),
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1505,36 +1597,39 @@ async fn build_gpu(
         input_buf,
         out_buf,
         staging: Arc::default(),
-        stride,
+        layout: input_layout,
         input_len,
         out_bytes,
     })
 }
 
-/// Size of the `Dims` uniform: four `u32` plus the six `f32` weights, rounded
-/// up to the 16-byte multiple WGSL gives a uniform struct.
+/// Size of the `Dims` uniform: six `u32` plus the six `f32` weights, already
+/// the 16-byte multiple WGSL gives a uniform struct.
 const DIMS_BYTES: usize = 48;
+
+const DIMS_WEIGHTS_OFFSET: usize = 24;
 
 /// The `Dims` uniform every pipeline binds, laid out as the WGSL struct
 /// `dims_struct!` declares: the frame geometry, where the input pixels sit in
-/// their buffer (`stride` = input row stride, `base` = byte offset of the first
-/// luma byte), then the YUV -> RGB weights `colorimetry` resolves to. The
+/// their buffer, then the YUV -> RGB weights `colorimetry` resolves to. The
 /// texture pipelines read only the geometry and the weights.
 fn dims_bytes(
     width: u32,
     height: u32,
-    stride: u32,
-    base: u32,
+    layout: InputLayout,
     colorimetry: Colorimetry,
 ) -> [u8; DIMS_BYTES] {
     let weights = YuvToRgbWeights::new(colorimetry);
     let mut dims = [0u8; DIMS_BYTES];
-    for (slot, value) in dims
-        .as_chunks_mut::<4>()
-        .0
-        .iter_mut()
-        .zip([width, height, stride, base])
-    {
+    let geometry = [
+        width,
+        height,
+        layout.stride,
+        layout.base,
+        layout.chroma_stride,
+        layout.chroma_base,
+    ];
+    for (slot, value) in dims.as_chunks_mut::<4>().0.iter_mut().zip(geometry) {
         slot.copy_from_slice(&value.to_le_bytes());
     }
     let floats = [
@@ -1545,7 +1640,12 @@ fn dims_bytes(
         weights.green_from_cr,
         weights.blue_from_cb,
     ];
-    for (slot, value) in dims[16..].as_chunks_mut::<4>().0.iter_mut().zip(floats) {
+    for (slot, value) in dims[DIMS_WEIGHTS_OFFSET..]
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(floats)
+    {
         slot.copy_from_slice(&value.to_le_bytes());
     }
     dims
@@ -1587,7 +1687,7 @@ fn build_import_gpu(
     queue.write_buffer(
         &dims_buf,
         0,
-        &dims_bytes(width, height, width, 0, colorimetry),
+        &dims_bytes(width, height, InputLayout::TEXTURE, colorimetry),
     );
 
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1845,25 +1945,28 @@ mod tests {
     }
 
     /// The uniform the shaders read has to lay the weights out where the WGSL
-    /// struct declares them: four `u32` of geometry, then the six floats.
+    /// struct declares them: six `u32` of geometry, then the six floats.
     #[test]
     fn the_dims_uniform_carries_the_caps_weights() {
-        let bytes = dims_bytes(640, 480, 640, 0, Colorimetry::BT709);
+        let layout = InputLayout::tight(RawVideoFormat::Nv12, 641, 481).unwrap();
+        let bytes = dims_bytes(641, 481, layout, Colorimetry::BT709);
+        let word_at = |offset: usize| {
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
+        };
         let float_at = |offset: usize| {
             f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
         };
         let weights = YuvToRgbWeights::new(Colorimetry::BT709);
-        assert_eq!(
-            u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
-            640,
-            "width first"
-        );
-        assert_eq!(float_at(16), weights.luma_gain);
-        assert_eq!(float_at(20), weights.luma_floor);
-        assert_eq!(float_at(24), weights.red_from_cr);
-        assert_eq!(float_at(36), weights.blue_from_cb);
+        assert_eq!(word_at(0), 641, "width first");
+        assert_eq!(word_at(8), 641, "an odd luma row is the width");
+        assert_eq!(word_at(16), 642, "the chroma row holds the last pair");
+        assert_eq!(word_at(20), 641 * 481, "chroma follows the luma plane");
+        assert_eq!(float_at(24), weights.luma_gain);
+        assert_eq!(float_at(28), weights.luma_floor);
+        assert_eq!(float_at(32), weights.red_from_cr);
+        assert_eq!(float_at(44), weights.blue_from_cb);
         // BT.601's uniform differs, so the shader really sees the caps.
-        assert_ne!(bytes, dims_bytes(640, 480, 640, 0, Colorimetry::BT601));
+        assert_ne!(bytes, dims_bytes(641, 481, layout, Colorimetry::BT601));
     }
 
     /// The colorimetry reaches the element from the negotiated caps.
@@ -1883,21 +1986,49 @@ mod tests {
     }
 
     #[test]
-    fn configure_requires_even_nv12_geometry() {
+    fn configure_takes_odd_nv12_geometry() {
         let mut e = WgpuPreprocess::new();
         let odd = Caps::RawVideo {
             format: RawVideoFormat::Nv12,
             width: Dim::Fixed(3),
-            height: Dim::Fixed(2),
+            height: Dim::Fixed(5),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
-        assert_eq!(
-            e.configure_pipeline(&odd).err(),
-            Some(G2gError::CapsMismatch),
-            "4:2:0 needs even dims"
-        );
-        assert!(!e.configured);
+        e.configure_pipeline(&odd)
+            .expect("the storage-buffer path reads an odd NV12 size");
+        assert!(e.configured);
+    }
+
+    // A 3x3 frame in the tight layout: 9 luma bytes, then two chroma rows of two
+    // Cb,Cr pairs each, so the chroma row is 4 bytes against a 3-byte luma row.
+    #[test]
+    fn reference_reads_the_tight_chroma_row_at_an_odd_width() {
+        let (width, height) = (3usize, 3usize);
+        let luma = [100u8; 9];
+        let chroma = [60u8, 200, 70, 190, 80, 180, 90, 170];
+        let nv12: Vec<u8> = luma.iter().chain(&chroma).copied().collect();
+        let tensor = nv12_to_rgb_tensor(&nv12, width, height);
+        let weights = YuvToRgbWeights::new(Colorimetry::UNKNOWN);
+        let area = width * height;
+        let pixel = |index: usize| {
+            [
+                tensor[index],
+                tensor[area + index],
+                tensor[2 * area + index],
+            ]
+        };
+        let expected = |pair: usize| {
+            yuv_rgb(
+                &weights,
+                f32::from(luma[0]),
+                f32::from(chroma[2 * pair]) - CHROMA_NEUTRAL,
+                f32::from(chroma[2 * pair + 1]) - CHROMA_NEUTRAL,
+            )
+        };
+        assert_eq!(pixel(2), expected(1), "last column of the first row");
+        assert_eq!(pixel(6), expected(2), "first column of the last row");
+        assert_eq!(pixel(8), expected(3), "last column of the last row");
     }
 }
