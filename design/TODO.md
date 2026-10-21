@@ -128,9 +128,6 @@ Highest leverage first:
   NVIDIA Turing cannot decode it at all (minimum H.265 coded extent 144x144).
   Also on RADV, `MR4_TANDBERG_C` and `MR5_TANDBERG_C` (H.264) repeat an earlier
   picture at 22 output positions.
-- **AV1 size changes.** `av1-1-b8-03-sizeup` and `sizedown` lose pictures
-  across their mid-stream size changes through `dav1ddec` and `rav1ddec`
-  (sizeup decodes 5 small pictures short of ffmpeg's output).
 
 ## CUDA / display
 

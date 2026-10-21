@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1773: `dav1ddec` and `rav1ddec` keep their in-flight pictures across a mid-stream reconfigure, and `av1parse` stops releasing temporal units early once its input has split one.
 - M1770: an MP4 / MOV video track with a clean aperture (clap) box decodes cropped to it through decodebin, matching ffmpeg, and a bare videocrop crops to a frame's CropMeta.
 - M1768: h264parse / h265parse no longer drop slice bytes from a TS stream whose PES packets split access units (Apple's HLS examples).
 - M1729: avidemux reads BI_RGB, YV12 and Y800 / GREY, qtdemux reads `raw ` RGB and ARGB, via new GRAY8 / BGR / BGRx / ARGB raw formats.

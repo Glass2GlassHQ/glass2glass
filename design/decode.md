@@ -1188,8 +1188,8 @@ official one.
 | `ffmpegdec` | 130 / 135 | 172 / 188 (2026-10-20) | 0 / 240 |
 | `nvdec` | 129 / 135 | 141 / 188 | 202 / 240 |
 | `vulkanvideodec` | 99 / 135 (2026-10-20) | 146 / 188 (2026-10-20) | 201 / 240 (2026-10-21) |
-| `dav1ddec` | | | 238 / 240 |
-| `rav1ddec` | | | 238 / 240 |
+| `dav1ddec` | | | 240 / 240 (2026-10-21) |
+| `rav1ddec` | | | 240 / 240 (2026-10-21) |
 
 The H.264 failures every backend shares are the Extended-profile FMO and SP
 slice vectors, which ffmpeg does not decode either. Every `vulkanvideodec`
@@ -1212,8 +1212,13 @@ Both software AV1 decoders open the backend with `all_layers` off, so a scalable
 stream outputs one picture per temporal unit at its highest spatial layer
 (operating point 0). This is what aomdec, ffmpeg's libdav1d wrapper and the
 conformance md5s produce. GStreamer's `dav1ddec` has no property for it, so g2g
-exposes none. Measured on hercules on 2026-10-21, `dav1ddec` and `rav1ddec` each
-miss only `av1-1-b8-03-sizeup` and `sizedown`.
+exposes none.
+
+A mid-stream `configure_pipeline` (the runner calls it on every input
+`CapsChanged`, for example av1parse refining the picture size) keeps the backend
+decoder, so pictures still held by frame threading are not lost. av1parse turns
+off early release of the trailing temporal unit for good once one input buffer
+begins inside a unit, the same rule as the H.264 / H.265 access-unit framer.
 
 Every `vulkanvideodec` H.265 failure is also a nonzero exit naming the coding
 tool, raised when the parameter sets parse, before the driver sees the stream.
