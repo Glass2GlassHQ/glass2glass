@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1793: `mjpegdec` decodes RGB-coded JPEGs.
 - M1791: MP4 demuxing reads MPEG-1 and MPEG-2 video in an mp4v entry.
 - M1790: `Registry::build_uridecodebin`, `gapless_playbin` and a single-stream `fallbacksrc` crop an MP4 clean aperture.
 - M1789: a lone `playbin` plays through the `video-sink` and `audio-sink` its line names.

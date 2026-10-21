@@ -351,9 +351,32 @@ impl MjpegDec {
         }
         let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
         let mut dec = JpegDecoder::new_with_options(ZCursor::new(jpeg), opts);
+        dec.decode_headers().map_err(|_| G2gError::CapsMismatch)?;
+        if dec.input_colorspace() == Some(ColorSpace::RGB) {
+            return self.decode_zune_rgb(jpeg);
+        }
         let rgba = dec.decode().map_err(|_| G2gError::CapsMismatch)?;
         let info = dec.info().ok_or(G2gError::CapsMismatch)?;
         let (w, h) = (info.width as u32, info.height as u32);
+        Ok((self.rgba_to_out(rgba, w, h)?, w, h))
+    }
+
+    // zune-jpeg has no RGB to RGBA mapping for an RGB-coded JPEG, only RGB to RGB
+    fn decode_zune_rgb(&self, jpeg: &[u8]) -> Result<(Vec<u8>, u32, u32), G2gError> {
+        let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
+        let mut dec = JpegDecoder::new_with_options(ZCursor::new(jpeg), opts);
+        let rgb = dec.decode().map_err(|_| G2gError::CapsMismatch)?;
+        let info = dec.info().ok_or(G2gError::CapsMismatch)?;
+        let (w, h) = (info.width as u32, info.height as u32);
+        let rgba = crate::videoconvert::convert(
+            &rgb,
+            RawVideoFormat::Rgb8,
+            RawVideoFormat::Rgba8,
+            w as usize,
+            h as usize,
+            g2g_core::Colorimetry::SRGB,
+        )
+        .into_vec();
         Ok((self.rgba_to_out(rgba, w, h)?, w, h))
     }
 

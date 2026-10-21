@@ -20,6 +20,8 @@ const RED16: &[u8] = include_bytes!("data/red16.jpg");
 /// A 16x16 single-component (grayscale) JPEG gradient, authored with `cjpeg
 /// -grayscale`: it has no YCbCr identity path, so it exercises the RGBA fallback.
 const GRAY16: &[u8] = include_bytes!("data/gray16.jpg");
+// cjpeg -rgb of a 16x16 image where red is x * 16, green is y * 16 and blue is 255 - x * 8
+const RGB16: &[u8] = include_bytes!("data/rgb16.jpg");
 
 #[derive(Default)]
 struct CaptureSink {
@@ -202,6 +204,28 @@ async fn grayscale_jpeg_decodes_through_the_rgba_fallback() {
         i420[..luma].iter().any(|&y| y != i420[0]),
         "the luma gradient survives the I420 path"
     );
+}
+
+#[tokio::test]
+async fn rgb_coded_jpeg_decodes_to_rgba() {
+    const SIDE: usize = 16;
+    const TOLERANCE: i32 = 4;
+    let rgba = decode_once(RGB16, RawVideoFormat::Rgba8).await;
+    assert_eq!(rgba.len(), SIDE * SIDE * 4);
+    for (i, px) in rgba.as_chunks::<4>().0.iter().enumerate() {
+        let (x, y) = ((i % SIDE) as i32, (i / SIDE) as i32);
+        let authored = [x * 16, y * 16, 255 - x * 8];
+        for channel in 0..3 {
+            assert!(
+                (px[channel] as i32 - authored[channel]).abs() <= TOLERANCE,
+                "pixel ({x}, {y}) is {px:?}, authored {authored:?}"
+            );
+        }
+        assert_eq!(px[3], 255, "opaque alpha");
+    }
+
+    let i420 = decode_once(RGB16, RawVideoFormat::I420).await;
+    assert_eq!(i420.len(), SIDE * SIDE * 3 / 2, "planar 4:2:0 byte size");
 }
 
 /// M1570: the same JPEG with its DHT segments cut, the way motion JPEG in AVI
