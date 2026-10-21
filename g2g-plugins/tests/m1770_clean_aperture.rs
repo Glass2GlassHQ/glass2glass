@@ -8,12 +8,14 @@
 use std::path::PathBuf;
 
 use g2g_core::graph::Graph;
+use g2g_core::runtime::is_raw_video;
 use g2g_core::runtime::{
     parse_launch, run_graph_observed, GraphNode, GraphNodeRef, LaunchFactory, Observer,
     TelemetrySnapshot,
 };
-use g2g_core::{PipelineClock, RawVideoFormat};
+use g2g_core::{DotAnnotations, PipelineClock, RawVideoFormat};
 use g2g_plugins::filesink::FileSink;
+use g2g_plugins::gaplesssrc::gapless_playbin;
 use g2g_plugins::registry::default_registry;
 
 // tools/clean-aperture-fixture.sh writes each fixture and ffmpeg's default decode of it
@@ -275,4 +277,63 @@ async fn decodebin_crops_av1_in_mp4_to_the_clean_aperture() {
 async fn decodebin_crops_mpeg4_part2_in_mp4_to_the_clean_aperture() {
     let (decoded, snapshot) = run_line("decodebin-mpeg4", decodebin_line(&MPEG4)).await;
     assert_cropped_as_ffmpeg_does(&MPEG4, &decoded, &snapshot);
+}
+
+const BUILDER_MAX_DEPTH: usize = 6;
+
+#[tokio::test]
+async fn build_uridecodebin_crops_to_the_clean_aperture() {
+    let (decoded, snapshot) = run("build-uridecodebin", |out| {
+        default_registry()
+            .build_uridecodebin(
+                &format!("file://{}", H264.file),
+                FileSink::new(out),
+                &is_raw_video,
+                BUILDER_MAX_DEPTH,
+            )
+            .expect("builds the uridecodebin graph")
+    })
+    .await;
+    assert_cropped_as_ffmpeg_does(&H264, &decoded, &snapshot);
+}
+
+#[tokio::test]
+async fn gapless_playbin_crops_every_item() {
+    let uri = format!("file://{}", H264.file);
+    let (decoded, snapshot) = run("gapless", |out| {
+        let (graph, controller) = gapless_playbin(
+            &default_registry(),
+            &[&uri, &uri],
+            FileSink::new(out),
+            &is_raw_video,
+            BUILDER_MAX_DEPTH,
+        )
+        .expect("builds the gapless graph");
+        // the playlist ends after the second item
+        controller.finish();
+        graph
+    })
+    .await;
+    assert_carried_cropped_caps(&snapshot);
+    assert!(
+        decoded == reference(&H264).repeat(2),
+        "both items are cropped to ffmpeg's pixels"
+    );
+}
+
+// the fallback branch is a timed generator, so the graph is read instead of run
+#[test]
+fn a_single_stream_fallbacksrc_crops_its_main_source() {
+    let line = format!("fallbacksrc uri=file://{} ! fakesink", H264.file);
+    let graph =
+        parse_launch(&default_registry(), &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
+    let dot = graph.to_dot(
+        "pipeline",
+        |node| graph.element(node).map(|e| e.log_category().to_string()),
+        &DotAnnotations::default(),
+    );
+    assert!(
+        dot.contains("label=\"VideoCrop\""),
+        "the main branch has a videocrop: {dot}"
+    );
 }

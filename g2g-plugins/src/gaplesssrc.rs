@@ -32,6 +32,7 @@ use alloc::boxed::Box;
 
 use g2g_core::runtime::{
     select2, DynSourceLoop, Either, GaplessController, GraphNode, Registry, SourceLoop, UriError,
+    UriSource,
 };
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, G2gError, Graph, OutputSink, PipelinePacket, PushOutcome,
@@ -354,12 +355,19 @@ pub fn gapless_playbin<Sk: AsyncElement + 'static>(
         .split_first()
         .ok_or(GaplessPlaybinError::EmptyPlaylist)?;
     let first = reg.build_uri_source(first)?;
+    let mut has_clean_aperture = first.has_clean_aperture;
     let ctl = GaplessController::new();
     for uri in rest {
-        ctl.enqueue(reg.build_uri_source(uri)?.source);
+        let next = reg.build_uri_source(uri)?;
+        has_clean_aperture |= next.has_clean_aperture;
+        ctl.enqueue(next.source);
     }
-    let gapless = GaplessSrc::new(first.source, ctl.clone());
-    let graph =
-        reg.build_source_decodebin(Box::new(gapless), &first.caps, sink, target, max_depth)?;
+    // one decode chain plays every item, and `videocrop` leaves a frame with no crop rectangle whole
+    let gapless = UriSource {
+        source: Box::new(GaplessSrc::new(first.source, ctl.clone())),
+        caps: first.caps,
+        has_clean_aperture,
+    };
+    let graph = reg.build_source_decodebin(gapless, sink, target, max_depth)?;
     Ok((graph, ctl))
 }

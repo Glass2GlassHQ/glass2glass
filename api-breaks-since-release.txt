@@ -26,5 +26,6 @@ function_parameter_count_changed: g2g_core::runtime::find_chain_with now takes 6
 inherent_method_missing: Registry::primary_stream
 method_parameter_count_changed: g2g_core::QosTracker::judge_frame takes 3 parameters
 method_parameter_count_changed: g2g_core::qos::QosTracker::judge_frame takes 3 parameters
+method_parameter_count_changed: g2g_core::runtime::Registry::build_source_decodebin takes 5 parameters
 trait_method_missing: method absorbs_orientation of trait AsyncElement
 trait_method_missing: method absorbs_orientation of trait DynAsyncElement

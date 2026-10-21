@@ -1275,7 +1275,8 @@ fn wire_av_ports(
                 .ok_or_else(|| ParseError::UnknownElement(sinks.video.to_string()))?;
             let vsnk = graph.add_sink(GraphNodeRef::Element(sink));
             let head = deinterlace_into(graph, vsnk)?;
-            reg.decodebin_port(graph, pad, head, port, &is_raw_video, PLAYBIN_MAX_DEPTH)?;
+            reg.decodebin_port(graph, pad, head, port, &is_raw_video, PLAYBIN_MAX_DEPTH)
+                .map_err(|e| map_decode_err(&port.caps, e))?;
         } else {
             wire_audio_branch(reg, sinks, graph, pad, &port.caps)?;
         }
@@ -1344,7 +1345,8 @@ fn wire_overlay_av(
                 port,
                 &is_raw_video,
                 PLAYBIN_MAX_DEPTH,
-            )?;
+            )
+            .map_err(|e| map_decode_err(&port.caps, e))?;
         } else {
             wire_audio_branch(reg, sinks, graph, demux.out(i as u8), &port.caps)?;
         }
@@ -1434,7 +1436,8 @@ fn wire_cc_overlay(
         video,
         &is_raw_video,
         PLAYBIN_MAX_DEPTH,
-    )?;
+    )
+    .map_err(|e| map_decode_err(video_caps, e))?;
 
     // Caption branch: CcExtract (compressed video in, Text{Utf8} cues out) feeds
     // the overlay text pad, fed in turn by a re-framing parser when the codec has

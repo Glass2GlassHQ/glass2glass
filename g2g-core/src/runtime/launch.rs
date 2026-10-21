@@ -78,7 +78,7 @@ use crate::property::{PropError, PropValue, PropertySpec, ValueError};
 use crate::runtime::autoplug::{
     is_raw_audio, is_raw_video, ContainerStreams, FallbackSourceRole, FallbacksrcSourceFactory,
     FanoutRebuild, PadKind, PadRequest, PlaybinSinks, PrimaryStream, Registry, RestartPolicy,
-    UriError, UriFanout, UriFanoutHead, UriFanoutPort, UriRebuild,
+    UriError, UriFanout, UriFanoutHead, UriFanoutPort, UriRebuild, UriSource,
 };
 use crate::runtime::parse_scope::ParseScope;
 use crate::runtime::{
@@ -1088,10 +1088,7 @@ fn expand_decodebin(
                         });
                     }
                     if crops_to_clean_aperture {
-                        new_chain.push(Item::Prebuilt {
-                            node: PrebuiltNode::Element(registry.clean_aperture_crop()?),
-                            name: None,
-                        });
+                        new_chain.push(clean_aperture_crop_item(registry)?);
                     }
                     upstream = None;
                 }
@@ -2112,27 +2109,38 @@ impl<'a> FallbacksrcSourceOrigin<'a> {
         policy: RestartPolicy,
         role: FallbackSourceRole,
         unblock: Option<UnblockHandle>,
-    ) -> Result<(Box<dyn DynSourceLoop>, Caps), ParseError> {
+    ) -> Result<UriSource, ParseError> {
         match self {
             Self::Uri(uri) => {
                 let built = registry
                     .build_uri_source(uri)
                     .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
-                let source =
-                    restartable_uri_source(registry, built.source, uri, policy, role, unblock)?;
-                Ok((source, built.caps))
+                Ok(UriSource {
+                    source: restartable_uri_source(
+                        registry,
+                        built.source,
+                        uri,
+                        policy,
+                        role,
+                        unblock,
+                    )?,
+                    ..built
+                })
             }
             Self::Factory(factory) => {
                 let (source, caps) = factory.build();
-                let source = restartable_source(
-                    registry,
-                    source,
-                    factory.rebuilder(),
-                    policy,
-                    role,
-                    unblock,
-                );
-                Ok((source, caps))
+                Ok(UriSource {
+                    source: restartable_source(
+                        registry,
+                        source,
+                        factory.rebuilder(),
+                        policy,
+                        role,
+                        unblock,
+                    ),
+                    caps,
+                    has_clean_aperture: false,
+                })
             }
         }
     }
@@ -2244,8 +2252,8 @@ fn expand_fallbacksrc(
     let preferred = consumer.map_or(MemoryDomainKind::System, |name| {
         registry.declared_memory_preference(name)
     });
-    let (source, source_caps) =
-        main.build(registry, restart, FallbackSourceRole::Main, unblock.clone())?;
+    let main_source = main.build(registry, restart, FallbackSourceRole::Main, unblock.clone())?;
+    let source_caps = &main_source.caps;
     // The kind is decided by which target the search reaches, so the dummy
     // fallback is the right generator and a fallback source decodes to the same
     // shape. Video first: a container carrying both is a video stream here.
@@ -2255,7 +2263,7 @@ fn expand_fallbacksrc(
         registry.autoplug_avoiding(caps, target, DECODEBIN_MAX_DEPTH, preferred, avoided)
     };
     let video = enable_video
-        .then(|| plug(&source_caps, video_target))
+        .then(|| plug(source_caps, video_target))
         .flatten();
     let (decoders, target, kind) = match video {
         Some(decoders) => (
@@ -2265,7 +2273,7 @@ fn expand_fallbacksrc(
         ),
         None => {
             let decoders = enable_audio
-                .then(|| plug(&source_caps, audio_target))
+                .then(|| plug(source_caps, audio_target))
                 .flatten()
                 .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{source_caps:?}")))?;
             (
@@ -2278,7 +2286,7 @@ fn expand_fallbacksrc(
 
     let mut main = Vec::with_capacity(decoders.len() + 2);
     main.push(Item::Prebuilt {
-        node: PrebuiltNode::Source(source),
+        node: PrebuiltNode::Source(main_source.source),
         name: Some(alloc::format!("{switch_name}{FALLBACK_MAIN_SOURCE_SUFFIX}")),
     });
     for decoder in decoders {
@@ -2286,6 +2294,9 @@ fn expand_fallbacksrc(
             node: PrebuiltNode::Element(decoder),
             name: None,
         });
+    }
+    if main_source.has_clean_aperture {
+        main.push(clean_aperture_crop_item(registry)?);
     }
     main.push(Item::Element(ElementSpec {
         name: FALLBACK_SWITCH.to_string(),
@@ -2305,12 +2316,11 @@ fn expand_fallbacksrc(
     let mut fallback: Chain = Vec::new();
     match fallback_source {
         Some(origin) => {
-            let (source, caps) =
-                origin.build(registry, restart, FallbackSourceRole::Fallback, unblock)?;
-            let decoders = plug(&caps, target)
-                .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
+            let built = origin.build(registry, restart, FallbackSourceRole::Fallback, unblock)?;
+            let decoders = plug(&built.caps, target)
+                .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{:?}", built.caps)))?;
             fallback.push(Item::Prebuilt {
-                node: PrebuiltNode::Source(source),
+                node: PrebuiltNode::Source(built.source),
                 name: Some(alloc::format!(
                     "{switch_name}{FALLBACK_FALLBACK_SOURCE_SUFFIX}"
                 )),
@@ -2320,6 +2330,9 @@ fn expand_fallbacksrc(
                     node: PrebuiltNode::Element(decoder),
                     name: None,
                 });
+            }
+            if built.has_clean_aperture {
+                fallback.push(clean_aperture_crop_item(registry)?);
             }
         }
         None => {
@@ -2451,10 +2464,7 @@ fn expand_uri_sources(
                 });
             }
             if built.has_clean_aperture {
-                new_chain.push(Item::Prebuilt {
-                    node: PrebuiltNode::Element(registry.clean_aperture_crop()?),
-                    name: None,
-                });
+                new_chain.push(clean_aperture_crop_item(registry)?);
             }
             // `d.` references read the decoded stream, so the name goes on the last node
             if !is_playbin {
@@ -3165,7 +3175,7 @@ fn build_graph(
                     StreamType::Audio => &is_raw_audio,
                     _ => &is_raw_video,
                 };
-                registry.decodebin_port(&mut graph, src, dst, port, target, DECODEBIN_MAX_DEPTH)?;
+                plug_port_decode(registry, &mut graph, src, dst, port, target)?;
                 continue;
             }
         }
@@ -3854,23 +3864,23 @@ fn build_fallbacksrc_fanout(
             })
         }
         (None, Some(origin @ FallbacksrcSourceOrigin::Factory(_))) => {
-            let (source, caps) = origin.build(
+            let built = origin.build(
                 registry,
                 settings.restart,
                 FallbackSourceRole::Fallback,
                 settings.unblock.clone(),
             )?;
-            let port = single_fallback_port(registry, &ports, &caps)
-                .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
-            let src = graph.add_source(GraphNodeRef::Source(source));
+            let port = single_fallback_port(registry, &ports, &built.caps)
+                .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{:?}", built.caps)))?;
+            let src = graph.add_source(GraphNodeRef::Source(built.source));
             name_node(&mut graph, &mut names, src, fallback_name)?;
             Some(FanoutFallback::OnePort {
                 pad: src.into(),
                 port,
                 stream: UriFanoutPort {
-                    stream_type: StreamType::of(&caps),
-                    caps,
-                    has_clean_aperture: false,
+                    stream_type: StreamType::of(&built.caps),
+                    caps: built.caps,
+                    has_clean_aperture: built.has_clean_aperture,
                 },
             })
         }
@@ -3893,13 +3903,13 @@ fn build_fallbacksrc_fanout(
         if let Some(category) = &spec.log_category {
             graph.set_node_log_category(switch.node(), category.clone());
         }
-        registry.decodebin_port(
+        plug_port_decode(
+            registry,
             &mut graph,
             main_pads[i],
             switch.input(0),
             port,
             &kind.raw,
-            DECODEBIN_MAX_DEPTH,
         )?;
         // The k-th main port of a kind pairs with the k-th fallback port of that
         // kind, so a two-track container's second audio stream backs the second
@@ -3918,13 +3928,13 @@ fn build_fallbacksrc_fanout(
             None => None,
         };
         match matching {
-            Some((pad, stream)) => registry.decodebin_port(
+            Some((pad, stream)) => plug_port_decode(
+                registry,
                 &mut graph,
                 pad,
                 switch.input(1),
                 stream,
                 &kind.raw,
-                DECODEBIN_MAX_DEPTH,
             )?,
             None => plug_dummy(registry, &mut graph, switch.input(1), kind)?,
         }
@@ -3945,6 +3955,29 @@ fn build_fallbacksrc_fanout(
         graph.link(switch.output(), head)?;
     }
     Ok(Some(graph))
+}
+
+// the decode chain from the pad that carries `port` to `to`, or the parse fails naming its caps
+fn plug_port_decode(
+    registry: &Registry,
+    graph: &mut Graph<GraphNode>,
+    from: PadId,
+    to: PadId,
+    port: &UriFanoutPort,
+    target: &dyn Fn(&Caps) -> bool,
+) -> Result<(), ParseError> {
+    registry
+        .decodebin_port(graph, from, to, port, target, DECODEBIN_MAX_DEPTH)
+        .map_err(|_| ParseError::NoDecodeChain(alloc::format!("{:?}", port.caps)))?;
+    Ok(())
+}
+
+// a bare `videocrop` for after the decoder of a stream whose pictures carry a crop rectangle
+fn clean_aperture_crop_item(registry: &Registry) -> Result<Item, ParseError> {
+    Ok(Item::Prebuilt {
+        node: PrebuiltNode::Element(registry.clean_aperture_crop()?),
+        name: None,
+    })
 }
 
 /// Build the dummy fallback branch for one kind (black frames or silence behind

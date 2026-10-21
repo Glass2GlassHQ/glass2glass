@@ -2844,24 +2844,20 @@ mod factory {
             port: &UriFanoutPort,
             target: &dyn Fn(&Caps) -> bool,
             max_depth: usize,
-        ) -> Result<(), ParseError> {
+        ) -> Result<Vec<NodeId>, DecodebinError> {
             let to: PadId = match port.has_clean_aperture {
                 true => {
-                    let crop =
-                        graph.add_transform(GraphNodeRef::Element(self.clean_aperture_crop()?));
-                    graph.link(crop, to).map_err(ParseError::Graph)?;
+                    // without the crop element no chain reaches the cropped picture
+                    let crop = self
+                        .clean_aperture_crop()
+                        .map_err(|_| DecodebinError::NoChain)?;
+                    let crop = graph.add_transform(GraphNodeRef::Element(crop));
+                    graph.link(crop, to)?;
                     crop.into()
                 }
                 false => to.into(),
             };
             self.decodebin(graph, from, to, &port.caps, target, max_depth)
-                .map_err(|e| match e {
-                    DecodebinError::NoChain => {
-                        ParseError::NoDecodeChain(format!("{:?}", port.caps))
-                    }
-                    DecodebinError::Graph(e) => ParseError::Graph(e),
-                })?;
-            Ok(())
         }
 
         // with no inset set, `videocrop` cuts each picture to the crop rectangle its frame carries
@@ -3206,28 +3202,31 @@ mod factory {
             target: &dyn Fn(&Caps) -> bool,
             max_depth: usize,
         ) -> Result<Graph<GraphNode>, UriError> {
-            let built = self.build_uri_source(uri)?;
-            self.build_source_decodebin(built.source, &built.caps, sink, target, max_depth)
+            self.build_source_decodebin(self.build_uri_source(uri)?, sink, target, max_depth)
         }
 
         /// Auto-plug `source -> chain -> sink` from an *already constructed*
-        /// source whose output is `source_caps`, the lower half of
+        /// source and what it produces, the lower half of
         /// [`build_uridecodebin`](Self::build_uridecodebin) factored out so a
         /// caller that built (or wrapped) its own source can still get the decode
         /// chain auto-plugged. A gapless playlist source (`GaplessSrc`) uses this
         /// to splice its decode chain without the URI-handler step.
         pub fn build_source_decodebin<Sk: AsyncElement + 'static>(
             &self,
-            source: Box<dyn DynSourceLoop>,
-            source_caps: &Caps,
+            source: UriSource,
             sink: Sk,
             target: &dyn Fn(&Caps) -> bool,
             max_depth: usize,
         ) -> Result<Graph<GraphNode>, UriError> {
+            let port = UriFanoutPort {
+                stream_type: crate::stream::StreamType::of(&source.caps),
+                caps: source.caps,
+                has_clean_aperture: source.has_clean_aperture,
+            };
             let mut graph: Graph<GraphNode> = Graph::new();
-            let src = graph.add_source(GraphNodeRef::Source(source));
+            let src = graph.add_source(GraphNodeRef::Source(source.source));
             let snk = graph.add_sink(GraphNodeRef::element(sink));
-            self.decodebin(&mut graph, src, snk, source_caps, target, max_depth)?;
+            self.decodebin_port(&mut graph, src, snk, &port, target, max_depth)?;
             Ok(graph)
         }
 
