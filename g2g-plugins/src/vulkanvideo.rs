@@ -2383,9 +2383,7 @@ pub fn to_std_av1_seq_header(seq: &Av1SequenceHeader) -> StdAv1Params {
 // its sub-parses) must be read here. Every value is cross-checked against ffmpeg
 // `trace_headers` on the real fixture. Reference-loaded state (loop-filter deltas
 // / segmentation / global motion carried from the primary reference frame when a
-// field is not re-coded) uses the AV1 defaults, correct for streams that never
-// change those from frame to frame (the fixture); a general implementation would
-// thread the per-slot saved state, tracked as a follow-up.
+// field is not re-coded) comes from the per-slot `Av1InheritedParams`.
 
 // AV1 reference-frame constants (spec 3, 6.10.24).
 const AV1_NUM_REF_FRAMES: usize = 8;
@@ -2422,6 +2420,7 @@ pub struct Av1RefFrames {
     pub frame_height: [u32; AV1_NUM_REF_FRAMES],
     pub render_width: [u32; AV1_NUM_REF_FRAMES],
     pub render_height: [u32; AV1_NUM_REF_FRAMES],
+    pub inherited: [Av1InheritedParams; AV1_NUM_REF_FRAMES],
 }
 
 impl Default for Av1RefFrames {
@@ -2434,6 +2433,32 @@ impl Default for Av1RefFrames {
             frame_height: [0; AV1_NUM_REF_FRAMES],
             render_width: [0; AV1_NUM_REF_FRAMES],
             render_height: [0; AV1_NUM_REF_FRAMES],
+            inherited: [Av1InheritedParams::default(); AV1_NUM_REF_FRAMES],
+        }
+    }
+}
+
+// The values load_previous() (spec 7.21) copies from the primary reference frame
+// when a frame header does not code them again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Av1InheritedParams {
+    pub loop_filter_ref_deltas: [i8; AV1_NUM_REF_FRAMES],
+    pub loop_filter_mode_deltas: [i8; 2],
+    pub segmentation_feature_enabled: [u8; AV1_NUM_REF_FRAMES],
+    pub segmentation_feature_data: [[i16; 8]; AV1_NUM_REF_FRAMES],
+    pub gm_params: [[i32; 6]; AV1_NUM_REF_FRAMES],
+}
+
+// setup_past_independence() (spec 7.20) values, what a frame with
+// primary_ref_frame == PRIMARY_REF_NONE starts from.
+impl Default for Av1InheritedParams {
+    fn default() -> Self {
+        Self {
+            loop_filter_ref_deltas: AV1_DEFAULT_LF_REF_DELTAS,
+            loop_filter_mode_deltas: [0, 0],
+            segmentation_feature_enabled: [0; AV1_NUM_REF_FRAMES],
+            segmentation_feature_data: [[0; 8]; AV1_NUM_REF_FRAMES],
+            gm_params: [av1_default_warp_params(); AV1_NUM_REF_FRAMES],
         }
     }
 }
@@ -2580,6 +2605,19 @@ pub struct Av1FrameHeader {
     pub header_byte_len: usize,
 }
 
+impl Av1FrameHeader {
+    // what the reference update process (spec 7.20) saves for a later load_previous()
+    pub fn inherited_params(&self) -> Av1InheritedParams {
+        Av1InheritedParams {
+            loop_filter_ref_deltas: self.lf.ref_deltas,
+            loop_filter_mode_deltas: self.lf.mode_deltas,
+            segmentation_feature_enabled: self.seg.feature_enabled,
+            segmentation_feature_data: self.seg.feature_data,
+            gm_params: self.gm.gm_params,
+        }
+    }
+}
+
 /// `su(n)`: an `n`-bit value read MSB-first, then sign-extended from its top bit
 /// (AV1 spec 4.10.6).
 fn read_su(br: &mut BitReader, n: u32) -> Option<i32> {
@@ -2682,7 +2720,9 @@ fn parse_av1_tile_info(
         let mut i = 0u32;
         while start < sb_cols {
             mi_col_starts.push((start << sb_shift).min(mi_cols) as u16);
-            width_in_sbs_minus_1.push((tile_width_sb - 1) as u16);
+            // the last tile column keeps only the superblocks left over
+            let width_sb = tile_width_sb.min(sb_cols - start);
+            width_in_sbs_minus_1.push((width_sb - 1) as u16);
             start += tile_width_sb;
             i += 1;
         }
@@ -2704,7 +2744,8 @@ fn parse_av1_tile_info(
         let mut j = 0u32;
         while startr < sb_rows {
             mi_row_starts.push((startr << sb_shift).min(mi_rows) as u16);
-            height_in_sbs_minus_1.push((tile_height_sb - 1) as u16);
+            let height_sb = tile_height_sb.min(sb_rows - startr);
+            height_in_sbs_minus_1.push((height_sb - 1) as u16);
             startr += tile_height_sb;
             j += 1;
         }
@@ -3643,9 +3684,12 @@ const AV1_SEG_FEATURE_MAX: [i32; AV1_SEG_LVL_MAX] = [255, 63, 63, 63, 63, 7, 0, 
 /// `segmentation_params()` (spec 5.9.14). `primary_ref_none` selects the
 /// setup-past-independence defaults (no update-data path). When segmentation is
 /// enabled without re-coding the data (inter, primary ref present), the feature
-/// values would be loaded from the primary reference; this uses defaults, which
-/// is correct for streams that do not change segmentation across frames.
-fn parse_av1_segmentation(br: &mut BitReader, primary_ref_none: bool) -> Option<Av1Segmentation> {
+/// values come from `previous`, the primary reference frame's saved values.
+fn parse_av1_segmentation(
+    br: &mut BitReader,
+    primary_ref_none: bool,
+    previous: &Av1InheritedParams,
+) -> Option<Av1Segmentation> {
     let enabled = br.read_bit()? == 1;
     let mut seg = Av1Segmentation {
         enabled,
@@ -3669,7 +3713,10 @@ fn parse_av1_segmentation(br: &mut BitReader, primary_ref_none: bool) -> Option<
         }
         seg.update_data = br.read_bit()? == 1;
     }
-    if seg.update_data {
+    if !seg.update_data {
+        seg.feature_enabled = previous.segmentation_feature_enabled;
+        seg.feature_data = previous.segmentation_feature_data;
+    } else {
         for s in 0..AV1_NUM_REF_FRAMES {
             for (j, &bits) in AV1_SEG_FEATURE_BITS.iter().enumerate() {
                 let feature_value;
@@ -3696,25 +3743,28 @@ fn parse_av1_segmentation(br: &mut BitReader, primary_ref_none: bool) -> Option<
     Some(seg)
 }
 
-/// `loop_filter_params()` (spec 5.9.11). Uses the setup-past-independence default
-/// deltas (correct when they are never re-coded across frames, as in the fixture).
+/// `loop_filter_params()` (spec 5.9.11). Deltas a frame does not re-code keep
+/// `previous`, the primary reference frame's saved values.
 fn parse_av1_loop_filter(
     br: &mut BitReader,
     num_planes: u8,
     coded_lossless: bool,
     allow_intrabc: bool,
+    previous: &Av1InheritedParams,
 ) -> Option<Av1LoopFilter> {
     let mut lf = Av1LoopFilter {
         level: [0; 4],
         sharpness: 0,
         delta_enabled: true,
         delta_update: false,
-        ref_deltas: AV1_DEFAULT_LF_REF_DELTAS,
-        mode_deltas: [0, 0],
+        ref_deltas: previous.loop_filter_ref_deltas,
+        mode_deltas: previous.loop_filter_mode_deltas,
     };
     if coded_lossless || allow_intrabc {
-        // Filtering disabled; deltas stay at their defaults.
+        // Filtering disabled; the spec resets the deltas to their defaults.
         lf.delta_enabled = false;
+        lf.ref_deltas = AV1_DEFAULT_LF_REF_DELTAS;
+        lf.mode_deltas = [0, 0];
         return Some(lf);
     }
     lf.level[0] = br.read_bits(6)? as u8;
@@ -3765,20 +3815,14 @@ fn parse_av1_cdef(
     }
     cdef.damping_minus_3 = br.read_bits(2)? as u8;
     cdef.bits = br.read_bits(2)? as u8;
+    // The secondary strengths stay as coded (0..=3): the Vulkan Std fields carry
+    // the syntax element and the driver maps a coded 3 to strength 4 itself.
     for i in 0..(1usize << cdef.bits) {
         cdef.y_pri[i] = br.read_bits(4)? as u8;
-        let mut sec = br.read_bits(2)? as u8;
-        if sec == 3 {
-            sec += 1;
-        }
-        cdef.y_sec[i] = sec;
+        cdef.y_sec[i] = br.read_bits(2)? as u8;
         if num_planes > 1 {
             cdef.uv_pri[i] = br.read_bits(4)? as u8;
-            let mut usec = br.read_bits(2)? as u8;
-            if usec == 3 {
-                usec += 1;
-            }
-            cdef.uv_sec[i] = usec;
+            cdef.uv_sec[i] = br.read_bits(2)? as u8;
         }
     }
     Some(cdef)
@@ -3853,7 +3897,13 @@ fn parse_av1_loop_restoration(
 
 /// Decode one global-motion parameter (spec 5.9.25 read_global_param + the
 /// signed-subexp helpers 5.9.26-5.9.28), relative to `ref_val`.
-fn read_global_param(br: &mut BitReader, gm_type: u8, idx: usize, ref_val: i32) -> Option<i32> {
+fn read_global_param(
+    br: &mut BitReader,
+    gm_type: u8,
+    idx: usize,
+    ref_val: i32,
+    allow_high_precision_mv: bool,
+) -> Option<i32> {
     // Bit width per parameter (spec 5.9.25).
     const GM_ABS_TRANS_BITS: u32 = 12;
     const GM_ABS_TRANS_ONLY_BITS: u32 = 9;
@@ -3863,16 +3913,16 @@ fn read_global_param(br: &mut BitReader, gm_type: u8, idx: usize, ref_val: i32) 
     const GM_TRANS_ONLY_PREC_BITS: u32 = 3;
     const WARPEDMODEL_PREC_BITS: u32 = 16;
 
-    let (abs_bits, prec_bits) = if idx < 2 {
-        if gm_type == AV1_GM_TRANSLATION {
-            let allow_hp_bits = 0; // set by caller via ref_val path; hp handled below
-            let _ = allow_hp_bits;
-            (GM_ABS_TRANS_ONLY_BITS, GM_TRANS_ONLY_PREC_BITS)
-        } else {
-            (GM_ABS_TRANS_BITS, GM_TRANS_PREC_BITS)
-        }
-    } else {
+    let (abs_bits, prec_bits) = if idx >= 2 {
         (GM_ABS_ALPHA_BITS, GM_ALPHA_PREC_BITS)
+    } else if gm_type == AV1_GM_TRANSLATION {
+        let precision_reduction = u32::from(!allow_high_precision_mv);
+        (
+            GM_ABS_TRANS_ONLY_BITS - precision_reduction,
+            GM_TRANS_ONLY_PREC_BITS - precision_reduction,
+        )
+    } else {
+        (GM_ABS_TRANS_BITS, GM_TRANS_PREC_BITS)
     };
     let prec_diff = WARPEDMODEL_PREC_BITS - prec_bits;
     let round = if idx % 3 == 2 {
@@ -3907,9 +3957,9 @@ fn inverse_recenter(r: u32, v: u32) -> u32 {
     if v > 2 * r {
         v
     } else if v & 1 != 0 {
-        r + ((v + 1) >> 1)
+        r - ((v + 1) >> 1)
     } else {
-        r - (v >> 1)
+        r + (v >> 1)
     }
 }
 
@@ -3937,9 +3987,14 @@ fn decode_subexp(br: &mut BitReader, num_syms: u32) -> Option<u32> {
     }
 }
 
-/// `global_motion_params()` (spec 5.9.24). Uses identity as the "previous"
-/// reference model (correct when global motion is not carried across frames).
-fn parse_av1_global_motion(br: &mut BitReader, frame_is_intra: bool) -> Option<Av1GlobalMotion> {
+/// `global_motion_params()` (spec 5.9.24). `previous_gm_params` is PrevGmParams:
+/// the primary reference frame's saved models, identity without one.
+fn parse_av1_global_motion(
+    br: &mut BitReader,
+    frame_is_intra: bool,
+    allow_high_precision_mv: bool,
+    previous_gm_params: &[[i32; 6]; AV1_NUM_REF_FRAMES],
+) -> Option<Av1GlobalMotion> {
     let identity = av1_default_warp_params();
     let mut gm = Av1GlobalMotion {
         gm_type: [AV1_GM_IDENTITY; AV1_NUM_REF_FRAMES],
@@ -3966,22 +4021,23 @@ fn parse_av1_global_motion(br: &mut BitReader, frame_is_intra: bool) -> Option<A
             }
         }
         gm.gm_type[r#ref] = gm_type;
-        // "Previous" params default to identity (no cross-frame carry here).
-        let prev = identity;
+        let prev = previous_gm_params[r#ref];
+        let mut read =
+            |idx: usize| read_global_param(br, gm_type, idx, prev[idx], allow_high_precision_mv);
         if gm_type >= AV1_GM_ROTZOOM {
-            gm.gm_params[r#ref][2] = read_global_param(br, gm_type, 2, prev[2])?;
-            gm.gm_params[r#ref][3] = read_global_param(br, gm_type, 3, prev[3])?;
+            gm.gm_params[r#ref][2] = read(2)?;
+            gm.gm_params[r#ref][3] = read(3)?;
             if gm_type == AV1_GM_AFFINE {
-                gm.gm_params[r#ref][4] = read_global_param(br, gm_type, 4, prev[4])?;
-                gm.gm_params[r#ref][5] = read_global_param(br, gm_type, 5, prev[5])?;
+                gm.gm_params[r#ref][4] = read(4)?;
+                gm.gm_params[r#ref][5] = read(5)?;
             } else {
                 gm.gm_params[r#ref][4] = -gm.gm_params[r#ref][3];
                 gm.gm_params[r#ref][5] = gm.gm_params[r#ref][2];
             }
         }
         if gm_type >= AV1_GM_TRANSLATION {
-            gm.gm_params[r#ref][0] = read_global_param(br, gm_type, 0, prev[0])?;
-            gm.gm_params[r#ref][1] = read_global_param(br, gm_type, 1, prev[1])?;
+            gm.gm_params[r#ref][0] = read(0)?;
+            gm.gm_params[r#ref][1] = read(1)?;
         }
     }
     Some(gm)
@@ -4340,10 +4396,26 @@ pub fn parse_av1_frame_header(
         br.read_bit()? == 1
     };
 
+    // setup_past_independence() or load_previous() (spec 5.9.2). A primary
+    // reference naming an empty slot is a malformed stream.
+    let previous = if fh.primary_ref_frame == AV1_PRIMARY_REF_NONE {
+        Av1InheritedParams::default()
+    } else {
+        let slot = usize::try_from(fh.ref_frame_idx[fh.primary_ref_frame as usize]).ok()?;
+        if !refs.valid[slot] {
+            return None;
+        }
+        refs.inherited[slot]
+    };
+
     // tile_info + quant + segmentation.
     fh.tile = parse_av1_tile_info(&mut br, fh.mi_cols, fh.mi_rows, seq.use_128x128_superblock)?;
     fh.quant = parse_av1_quantization(&mut br, num_planes, seq.color.separate_uv_delta_q)?;
-    fh.seg = parse_av1_segmentation(&mut br, fh.primary_ref_frame == AV1_PRIMARY_REF_NONE)?;
+    fh.seg = parse_av1_segmentation(
+        &mut br,
+        fh.primary_ref_frame == AV1_PRIMARY_REF_NONE,
+        &previous,
+    )?;
 
     // delta_q_params()
     if fh.quant.base_q_idx > 0 {
@@ -4381,7 +4453,13 @@ pub fn parse_av1_frame_header(
     fh.all_lossless = coded_lossless && fh.frame_width == fh.upscaled_width;
 
     // loop_filter + cdef + lr.
-    fh.lf = parse_av1_loop_filter(&mut br, num_planes, fh.coded_lossless, fh.allow_intrabc)?;
+    fh.lf = parse_av1_loop_filter(
+        &mut br,
+        num_planes,
+        fh.coded_lossless,
+        fh.allow_intrabc,
+        &previous,
+    )?;
     fh.cdef = parse_av1_cdef(
         &mut br,
         num_planes,
@@ -4431,7 +4509,12 @@ pub fn parse_av1_frame_header(
         };
     fh.reduced_tx_set = br.read_bit()? == 1;
 
-    fh.gm = parse_av1_global_motion(&mut br, fh.frame_is_intra)?;
+    fh.gm = parse_av1_global_motion(
+        &mut br,
+        fh.frame_is_intra,
+        fh.allow_high_precision_mv,
+        &previous.gm_params,
+    )?;
 
     // film_grain_params() (spec 5.9.30): parsed into `fh.film_grain`. The hardware
     // decoder produces the grain-free reconstruction; grain is synthesized on the
@@ -12674,6 +12757,9 @@ struct Av1SlotState {
     order_hint: u8,
     frame_type: u8,
     saved_order_hints: [u8; AV1_NUM_REF_FRAMES],
+    // bit n set when reference name n lies after this frame in display order
+    ref_frame_sign_bias: u8,
+    inherited: Av1InheritedParams,
     disable_frame_end_update_cdf: bool,
     segmentation_enabled: bool,
     upscaled_width: u32,
@@ -13051,6 +13137,7 @@ impl Av1DpbDecoder {
                     r.frame_height[v] = st.frame_height;
                     r.render_width[v] = st.render_width;
                     r.render_height[v] = st.render_height;
+                    r.inherited[v] = st.inherited;
                 }
             }
         }
@@ -13109,6 +13196,15 @@ impl Av1DpbDecoder {
                 order_hints[i + 1] = refs.order_hint[v];
             }
         }
+        let ref_frame_sign_bias = if fh.frame_is_intra {
+            0
+        } else {
+            av1_ref_frame_sign_bias(
+                &order_hints,
+                fh.order_hint,
+                u32::from(self.seq.order_hint_bits),
+            )
+        };
         let std_pic = to_std_av1_picture_info(&fh, order_hints);
 
         // Physical slot for this frame: one not currently a reference.
@@ -13137,8 +13233,24 @@ impl Av1DpbDecoder {
         let (tile_offsets, tile_sizes) = av1_tile_layout(payload, &fh.tile, fh.header_byte_len)
             .ok_or(VulkanVideoError::UnsupportedStream)?;
 
+        // The decoded slot's reference state.
+        let state = Av1SlotState {
+            order_hint: fh.order_hint,
+            frame_type: fh.frame_type,
+            saved_order_hints: order_hints,
+            ref_frame_sign_bias,
+            inherited: fh.inherited_params(),
+            disable_frame_end_update_cdf: fh.disable_frame_end_update_cdf,
+            segmentation_enabled: fh.seg.enabled,
+            upscaled_width: fh.upscaled_width,
+            frame_height: fh.frame_height,
+            render_width: fh.render_width,
+            render_height: fh.render_height,
+            film_grain: fh.film_grain,
+        };
+
         self.submit_decode_av1(
-            &fh,
+            &state,
             &std_pic,
             target,
             &active,
@@ -13149,19 +13261,7 @@ impl Av1DpbDecoder {
             to_system,
         )?;
 
-        // Record the decoded slot's reference state and apply refresh_frame_flags.
-        let state = Av1SlotState {
-            order_hint: fh.order_hint,
-            frame_type: fh.frame_type,
-            saved_order_hints: order_hints,
-            disable_frame_end_update_cdf: fh.disable_frame_end_update_cdf,
-            segmentation_enabled: fh.seg.enabled,
-            upscaled_width: fh.upscaled_width,
-            frame_height: fh.frame_height,
-            render_width: fh.render_width,
-            render_height: fh.render_height,
-            film_grain: fh.film_grain,
-        };
+        // Apply refresh_frame_flags.
         self.phys_state[target] = Some(state);
         for v in 0..AV1_NUM_REF_FRAMES {
             if fh.refresh_frame_flags & (1 << v) != 0 {
@@ -13196,7 +13296,7 @@ impl Av1DpbDecoder {
     #[allow(clippy::too_many_arguments)]
     fn submit_decode_av1(
         &mut self,
-        fh: &Av1FrameHeader,
+        state: &Av1SlotState,
         std_pic: &StdAv1PictureInfo,
         target: usize,
         active: &[usize],
@@ -13230,20 +13330,11 @@ impl Av1DpbDecoder {
             std_refs.push(av1_ref_info(&st));
         }
         let cur_state = Av1SlotState {
-            order_hint: fh.order_hint,
-            frame_type: fh.frame_type,
             // The setup slot's SavedOrderHints are left zero (ffmpeg passes NULL
             // for the current frame); they matter only when the slot is later
             // used as a reference, where they are filled from the saved state.
             saved_order_hints: [0; AV1_NUM_REF_FRAMES],
-            disable_frame_end_update_cdf: fh.disable_frame_end_update_cdf,
-            segmentation_enabled: fh.seg.enabled,
-            upscaled_width: fh.upscaled_width,
-            frame_height: fh.frame_height,
-            render_width: fh.render_width,
-            render_height: fh.render_height,
-            // Not used by `av1_ref_info` (grain is an output-time process).
-            film_grain: Av1FilmGrain::default(),
+            ..*state
         };
         let std_cur = av1_ref_info(&cur_state);
 
@@ -13355,10 +13446,29 @@ fn av1_ref_info(st: &Av1SlotState) -> vk::native::StdVideoDecodeAV1ReferenceInfo
     vk::native::StdVideoDecodeAV1ReferenceInfo {
         flags,
         frame_type: st.frame_type,
-        RefFrameSignBias: 0,
+        RefFrameSignBias: st.ref_frame_sign_bias,
         OrderHint: st.order_hint,
         SavedOrderHints: st.saved_order_hints,
     }
+}
+
+// RefFrameSignBias (spec 7.8) as the Vulkan bitmask: bit n for reference name n,
+// set when that reference follows the current frame in display order.
+// `order_hints` is indexed by reference name, as the picture info's OrderHints.
+fn av1_ref_frame_sign_bias(
+    order_hints: &[u8; AV1_NUM_REF_FRAMES],
+    current_order_hint: u8,
+    order_hint_bits: u32,
+) -> u8 {
+    let mut mask = 0u8;
+    for (name, &hint) in order_hints.iter().enumerate().skip(1) {
+        let distance =
+            av1_relative_dist(order_hint_bits, i32::from(hint), i32::from(current_order_hint));
+        if distance > 0 {
+            mask |= 1 << name;
+        }
+    }
+    mask
 }
 
 /// A random-access ("pull") H.264 / H.265 player over a Vulkan Video decoder: it
@@ -16745,9 +16855,156 @@ mod tests {
                 if fh.refresh_frame_flags & (1 << slot) != 0 {
                     refs.order_hint[slot] = fh.order_hint;
                     refs.frame_type[slot] = fh.frame_type;
+                    refs.inherited[slot] = fh.inherited_params();
                 }
             }
         }
+    }
+
+    // global_motion_params() of av1-1-b8-00-quantizer-00 frame 1 (ffmpeg
+    // trace_headers): LAST is a rotzoom model whose params 2, 3, 0 and 1 code the
+    // subexp values 14, 16, 125 and 9, every other reference is identity.
+    fn libaom_rotzoom_global_motion() -> alloc::vec::Vec<u8> {
+        let mut w = BitWriter::default();
+        w.write_bits(0b11, 2); // is_global, is_rot_zoom
+        w.write_bits(0b10_110, 5);
+        w.write_bits(0b110_0000, 7);
+        w.write_bits(0b11110_111101, 11);
+        w.write_bits(0b10_001, 5);
+        w.write_bits(0, 6); // is_global for LAST2..ALTREF
+        w.into_bytes()
+    }
+
+    #[test]
+    fn av1_global_motion_recentres_each_param_on_the_previous_model() {
+        let identity = [av1_default_warp_params(); AV1_NUM_REF_FRAMES];
+        let bytes = libaom_rotzoom_global_motion();
+        let gm = parse_av1_global_motion(&mut BitReader::new(&bytes), false, true, &identity)
+            .expect("global motion parses");
+        // Spec 5.9.28 recentres an odd subexp value v on r as r - (v + 1) / 2 and
+        // an even one as r + v / 2, r being the previous model's value. Against
+        // identity that is +7 and +8 for the two alpha terms (kept at 15 bits of
+        // precision, one bit below WARPEDMODEL_PREC_BITS) and -63 and -5 for the
+        // translations (6 bits, ten below).
+        let one = 1 << AV1_WARPEDMODEL_PREC_BITS;
+        let alpha = one + (7 << 1);
+        let beta = 8 << 1;
+        assert_eq!(gm.gm_type[1], AV1_GM_ROTZOOM);
+        assert_eq!(
+            gm.gm_params[1],
+            [-63 << 10, -5 << 10, alpha, beta, -beta, alpha]
+        );
+        assert!(gm.gm_type[2..].iter().all(|&t| t == AV1_GM_IDENTITY));
+    }
+
+    #[test]
+    fn av1_global_motion_codes_params_relative_to_the_primary_reference() {
+        let identity = [av1_default_warp_params(); AV1_NUM_REF_FRAMES];
+        let bytes = libaom_rotzoom_global_motion();
+        let previous = parse_av1_global_motion(&mut BitReader::new(&bytes), false, true, &identity)
+            .expect("global motion parses")
+            .gm_params;
+        // the same rotzoom model again, each param coding a subexp value of 0
+        let mut w = BitWriter::default();
+        w.write_bits(0b11, 2);
+        for _ in 0..4 {
+            w.write_bits(0, 4);
+        }
+        w.write_bits(0, 6);
+        let bytes = w.into_bytes();
+        let gm = parse_av1_global_motion(&mut BitReader::new(&bytes), false, true, &previous)
+            .expect("global motion parses");
+        assert_eq!(gm.gm_params[1], previous[1]);
+    }
+
+    #[test]
+    fn av1_cdef_secondary_strengths_stay_as_coded() {
+        let coded_secondary_strength = 3;
+        let mut w = BitWriter::default();
+        w.write_bits(0, 2); // cdef_damping_minus_3
+        w.write_bits(0, 2); // cdef_bits: one strength entry
+        w.write_bits(1, 4); // cdef_y_pri_strength
+        w.write_bits(coded_secondary_strength, 2);
+        w.write_bits(2, 4); // cdef_uv_pri_strength
+        w.write_bits(coded_secondary_strength, 2);
+        let bytes = w.into_bytes();
+        let cdef = parse_av1_cdef(&mut BitReader::new(&bytes), 3, true, false, false)
+            .expect("cdef parses");
+        assert_eq!(u32::from(cdef.y_sec[0]), coded_secondary_strength);
+        assert_eq!(u32::from(cdef.uv_sec[0]), coded_secondary_strength);
+    }
+
+    #[test]
+    fn av1_uncoded_deltas_and_segment_features_come_from_the_primary_reference() {
+        // any values that differ from the setup_past_independence defaults
+        let mut previous = Av1InheritedParams::default();
+        previous.loop_filter_ref_deltas[1] = 5;
+        previous.loop_filter_mode_deltas = [2, -2];
+        previous.segmentation_feature_enabled[3] = 1;
+        previous.segmentation_feature_data[3][0] = -20;
+
+        let mut w = BitWriter::default();
+        for _ in 0..4 {
+            w.write_bits(4, 6); // loop_filter_level[0..4]
+        }
+        w.write_bits(0, 3); // loop_filter_sharpness
+        w.write_bit(1); // loop_filter_delta_enabled
+        w.write_bit(0); // loop_filter_delta_update
+        let bytes = w.into_bytes();
+        let lf = parse_av1_loop_filter(&mut BitReader::new(&bytes), 3, false, false, &previous)
+            .expect("loop filter parses");
+        assert_eq!(lf.ref_deltas, previous.loop_filter_ref_deltas);
+        assert_eq!(lf.mode_deltas, previous.loop_filter_mode_deltas);
+
+        let mut w = BitWriter::default();
+        w.write_bit(1); // segmentation_enabled
+        w.write_bit(0); // segmentation_update_map
+        w.write_bit(0); // segmentation_update_data
+        let bytes = w.into_bytes();
+        let seg = parse_av1_segmentation(&mut BitReader::new(&bytes), false, &previous)
+            .expect("segmentation parses");
+        assert_eq!(seg.feature_enabled, previous.segmentation_feature_enabled);
+        assert_eq!(seg.feature_data, previous.segmentation_feature_data);
+    }
+
+    #[test]
+    fn av1_sign_bias_marks_the_references_after_the_current_frame() {
+        let order_hint_bits = 7;
+        let current_order_hint = 4;
+        // INTRA, then LAST..ALTREF: four references before the frame, three after
+        let order_hints = [0, 3, 2, 1, 0, 5, 6, 8];
+        let first_future_name = 5;
+        let expected =
+            (first_future_name..AV1_NUM_REF_FRAMES).fold(0u8, |mask, name| mask | 1 << name);
+        assert_eq!(
+            av1_ref_frame_sign_bias(&order_hints, current_order_hint, order_hint_bits),
+            expected
+        );
+    }
+
+    #[test]
+    fn av1_uniform_tiles_give_the_last_column_the_leftover_superblocks() {
+        // three 64x64 superblock columns split into two tile columns
+        let superblock_columns = 3;
+        let mi_per_superblock = 16;
+        let mut w = BitWriter::default();
+        w.write_bit(1); // uniform_tile_spacing_flag
+        w.write_bit(1); // increment_tile_cols_log2
+        w.write_bit(0); // stop at tile_cols_log2 = 1
+        // one superblock row codes no tile_rows_log2 bits
+        w.write_bits(0, 1); // context_update_tile_id
+        w.write_bits(0, 2); // tile_size_bytes_minus_1
+        let bytes = w.into_bytes();
+        let tile = parse_av1_tile_info(
+            &mut BitReader::new(&bytes),
+            superblock_columns * mi_per_superblock,
+            mi_per_superblock,
+            false,
+        )
+        .expect("tile info parses");
+        assert_eq!(tile.tile_cols, 2);
+        // two superblocks, then the one left over
+        assert_eq!(tile.width_in_sbs_minus_1, [1, 0]);
     }
 
     /// A 2x2 NV12 frame with a constant (Y, Cb, Cr) sample, for exercising the
