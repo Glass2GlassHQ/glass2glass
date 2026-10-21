@@ -1149,6 +1149,31 @@ fn take_mapped_rows(
     Some((packed, 0))
 }
 
+// GStreamer's pipewiresink sends each plane of a planar frame as its own block
+fn take_plane_blocks(
+    planes: &mut [spa::buffer::Data],
+    layout: &PlaneLayout,
+) -> Option<(Vec<u8>, usize)> {
+    let plane_bytes_and_strides = planes
+        .iter_mut()
+        .map(|data| {
+            let chunk = data.chunk();
+            let (offset, size) = (chunk.offset(), chunk.size());
+            let stride = usize::try_from(chunk.stride()).ok()?;
+            Some((chunk_bytes(data.data()?, offset, size)?, stride))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut packed = Vec::with_capacity(layout.frame_bytes());
+    layout.copy_planes_tight(&plane_bytes_and_strides, &mut packed)?;
+    Some((packed, 0))
+}
+
+fn chunk_bytes(mapped: &[u8], offset: u32, size: u32) -> Option<&[u8]> {
+    let start = usize::try_from(offset).ok()?;
+    let end = start.checked_add(usize::try_from(size).ok()?)?;
+    mapped.get(start..end)
+}
+
 /// Copy one mapped buffer out: the `mmap` path's frame.
 fn copy_mapped_frame(stream: &pw::stream::Stream, user_data: &mut UserData) {
     let Some(negotiated) = user_data.negotiated.as_ref() else {
@@ -1157,41 +1182,46 @@ fn copy_mapped_frame(stream: &pw::stream::Stream, user_data: &mut UserData) {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
     };
-    let datas = buffer.datas_mut();
-    if datas.is_empty() {
-        return;
-    }
-    let data = &mut datas[0];
-    let (offset, size, stride) = {
-        let chunk = data.chunk();
-        (
-            chunk.offset() as usize,
-            chunk.size() as usize,
-            usize::try_from(chunk.stride()).unwrap_or(0),
-        )
+    let taken = match buffer.datas_mut() {
+        [] => return,
+        [data] => {
+            let (offset, size, stride) = {
+                let chunk = data.chunk();
+                (
+                    chunk.offset() as usize,
+                    chunk.size() as usize,
+                    usize::try_from(chunk.stride()).unwrap_or(0),
+                )
+            };
+            // An empty chunk is a normal tick (the node produced nothing), not a
+            // malformed buffer.
+            if size == 0 {
+                return;
+            }
+            let Some(mapped) = data.data() else {
+                return;
+            };
+            let fits = offset
+                .checked_add(size)
+                .is_some_and(|end| end <= mapped.len());
+            fits.then(|| {
+                take_mapped_rows(
+                    &mapped[offset..offset + size],
+                    &negotiated.info,
+                    &negotiated.layout,
+                    stride,
+                    user_data.policy.keep_row_padding,
+                )
+            })
+            .flatten()
+        }
+        planes => {
+            if planes.iter().all(|data| data.chunk().size() == 0) {
+                return;
+            }
+            take_plane_blocks(planes, &negotiated.layout)
+        }
     };
-    // An empty chunk is a normal tick (the node produced nothing), not a
-    // malformed buffer.
-    if size == 0 {
-        return;
-    }
-    let Some(mapped) = data.data() else {
-        return;
-    };
-    let fits = offset
-        .checked_add(size)
-        .is_some_and(|end| end <= mapped.len());
-    let taken = fits
-        .then(|| {
-            take_mapped_rows(
-                &mapped[offset..offset + size],
-                &negotiated.info,
-                &negotiated.layout,
-                stride,
-                user_data.policy.keep_row_padding,
-            )
-        })
-        .flatten();
     let Some((bytes, first_stride)) = taken else {
         // The buffer disagrees with the negotiated geometry: fail the
         // capture instead of pushing a malformed frame downstream.
@@ -1412,6 +1442,83 @@ mod tests {
                 None
             );
         }
+    }
+
+    // 4x2 I420 written one block per plane at a padded pitch, returned with the
+    // tight frame and each plane's stride
+    fn padded_i420_planes() -> (Vec<Vec<u8>>, Vec<u8>, [usize; 3]) {
+        let strides = [8, 4, 4];
+        let shapes = [(4, 2), (2, 1), (2, 1)];
+        let mut tight = Vec::new();
+        let mut planes = Vec::new();
+        for (plane, ((row_bytes, rows), stride)) in shapes.iter().zip(strides).enumerate() {
+            let mut padded = Vec::new();
+            for row in 0..*rows {
+                let picture: Vec<u8> = (0..*row_bytes as u8)
+                    .map(|i| (plane as u8) * 64 + (row as u8) * 16 + i)
+                    .collect();
+                tight.extend_from_slice(&picture);
+                padded.extend_from_slice(&picture);
+                padded.resize(padded.len() + stride - row_bytes, 0xff);
+            }
+            planes.push(padded);
+        }
+        (planes, tight, strides)
+    }
+
+    fn i420_layout() -> PlaneLayout {
+        PlaneLayout::new(RawVideoFormat::I420, 4, 2).expect("a layout")
+    }
+
+    #[test]
+    fn plane_blocks_pack_into_one_tight_frame() {
+        let (planes, tight, strides) = padded_i420_planes();
+        let blocks: Vec<(&[u8], usize)> = planes
+            .iter()
+            .zip(strides)
+            .map(|(bytes, stride)| (bytes.as_slice(), stride))
+            .collect();
+        let mut packed = Vec::new();
+        assert_eq!(
+            i420_layout().copy_planes_tight(&blocks, &mut packed),
+            Some(())
+        );
+        assert_eq!(packed, tight);
+    }
+
+    #[test]
+    fn plane_blocks_that_disagree_with_the_geometry_are_rejected() {
+        let (planes, _, strides) = padded_i420_planes();
+        let layout = i420_layout();
+        let blocks = |strides: [usize; 3], luma_len: usize| -> Vec<(&[u8], usize)> {
+            let mut blocks: Vec<(&[u8], usize)> = planes
+                .iter()
+                .zip(strides)
+                .map(|(bytes, stride)| (bytes.as_slice(), stride))
+                .collect();
+            blocks[0].0 = &planes[0][..luma_len];
+            blocks
+        };
+        let full_luma = planes[0].len();
+        let stride_under_the_row = blocks([3, strides[1], strides[2]], full_luma);
+        let luma_short_of_its_rows = blocks(strides, full_luma - strides[0]);
+        let one_plane_missing = blocks(strides, full_luma)[..2].to_vec();
+        for rejected in [
+            stride_under_the_row,
+            luma_short_of_its_rows,
+            one_plane_missing,
+        ] {
+            assert_eq!(layout.copy_planes_tight(&rejected, &mut Vec::new()), None);
+        }
+    }
+
+    #[test]
+    fn a_chunk_reaching_past_its_mapping_is_rejected() {
+        let mapped = [0u8; 16];
+        assert_eq!(chunk_bytes(&mapped, 4, 12), Some(&mapped[4..]));
+        assert_eq!(chunk_bytes(&mapped, 4, 13), None);
+        assert_eq!(chunk_bytes(&mapped, 17, 0), None);
+        assert_eq!(chunk_bytes(&mapped, u32::MAX, u32::MAX), None);
     }
 
     #[test]

@@ -427,6 +427,30 @@ impl PlaneLayout {
     pub(crate) fn copy_tight(&self, src: &[u8], stride: usize, dst: &mut Vec<u8>) -> Option<()> {
         crate::paddedrows::pack_tight(src, self.format, self.width, self.height, stride, dst)
     }
+
+    pub(crate) fn copy_planes_tight(
+        &self,
+        plane_bytes_and_strides: &[(&[u8], usize)],
+        dst: &mut Vec<u8>,
+    ) -> Option<()> {
+        let shapes = self.planes();
+        if plane_bytes_and_strides.len() != shapes.len() {
+            return None;
+        }
+        for (&(bytes, stride), (row_bytes, rows, _)) in plane_bytes_and_strides.iter().zip(shapes) {
+            // a producer that reports no stride packs its rows tightly
+            let stride = if stride == 0 { row_bytes } else { stride };
+            if stride < row_bytes {
+                return None;
+            }
+            for row in 0..rows {
+                let start = stride.checked_mul(row)?;
+                let end = start.checked_add(row_bytes)?;
+                dst.extend_from_slice(bytes.get(start..end)?);
+            }
+        }
+        Some(())
+    }
 }
 
 #[cfg(test)]
