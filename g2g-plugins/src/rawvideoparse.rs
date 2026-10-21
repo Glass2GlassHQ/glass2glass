@@ -903,7 +903,7 @@ mod tests {
     fn refuses_an_unnamed_format_and_an_absurd_geometry() {
         let mut parser = RawVideoParse::new();
         assert_eq!(
-            parser.set_property("format", PropValue::Str("GRAY8".into())),
+            parser.set_property("format", PropValue::Str("GRAY16_LE".into())),
             Err(PropError::Value)
         );
         assert_eq!(
