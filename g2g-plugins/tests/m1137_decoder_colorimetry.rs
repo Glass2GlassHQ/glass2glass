@@ -230,6 +230,11 @@ mod av1 {
                     .await
                     .expect("decode the temporal unit");
             }
+            // frame threading holds pictures back, more of them on a host with more cores
+            decoder
+                .process(PipelinePacket::Eos, &mut sink)
+                .await
+                .expect("drain the decoder");
             assert_eq!(
                 sink.announced_colorimetry(),
                 Some(Colorimetry::BT2020),
