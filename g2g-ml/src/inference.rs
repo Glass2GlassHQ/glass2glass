@@ -517,13 +517,16 @@ impl<B: InferenceBackend> g2g_core::PadTemplates for Inference<B> {
 mod tests {
     use super::*;
 
+    #[cfg(any(feature = "offload", feature = "analytics"))]
     use g2g_core::PushOutcome;
 
+    #[cfg(any(feature = "offload", feature = "analytics"))]
     #[derive(Default)]
     struct CollectSink {
         packets: Vec<PipelinePacket>,
     }
 
+    #[cfg(any(feature = "offload", feature = "analytics"))]
     impl OutputSink for CollectSink {
         fn poll_push(
             &mut self,
