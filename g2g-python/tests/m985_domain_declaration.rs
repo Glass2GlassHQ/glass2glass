@@ -261,6 +261,6 @@ fn cuda_frames_and_format_are_runtime_properties() {
 
     // A format g2g does not model is refused rather than silently kept.
     assert!(element
-        .set_property("format", PropValue::Str("GRAY8".into()))
+        .set_property("format", PropValue::Str("GRAY16_LE".into()))
         .is_err());
 }
