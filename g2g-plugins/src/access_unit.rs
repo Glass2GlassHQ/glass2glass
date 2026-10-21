@@ -59,6 +59,8 @@ pub(crate) struct AccessUnitFramer {
     /// access-unit-per-buffer upstream (RTP depayloaders, the mp4 / TS demuxers)
     /// earns it within two buffers, a raw byte stream never does.
     aligned_runs: u8,
+    // one buffer that begins inside an access unit proves later ones can open on one by chance
+    input_splits_access_units: bool,
 }
 
 impl AccessUnitFramer {
@@ -72,6 +74,7 @@ impl AccessUnitFramer {
             seen_picture: false,
             head_timing: FrameTiming::default(),
             aligned_runs: 0,
+            input_splits_access_units: false,
         }
     }
 
@@ -125,20 +128,20 @@ impl AccessUnitFramer {
         }
 
         self.scan(classify);
+        if self.access_unit_starts.binary_search(&boundary).is_err() {
+            self.input_splits_access_units = true;
+        } else if boundary > 0 {
+            // The first start code of a buffer would always open an access unit
+            // on its own, so only a buffer after buffered bytes counts.
+            self.aligned_runs = self.aligned_runs.saturating_add(1);
+        }
         if self.access_unit_starts.is_empty() {
             return Vec::new();
         }
-        // The first start code of a buffer would always open an access unit on
-        // its own, so this needs the bytes before it.
-        if boundary > 0 {
-            if self.access_unit_starts.binary_search(&boundary).is_ok() {
-                self.aligned_runs = self.aligned_runs.saturating_add(1);
-            } else {
-                self.aligned_runs = 0;
-            }
-        }
 
-        let complete_through = if self.aligned_runs >= ACCESS_UNIT_ALIGNED_CONFIRMATIONS {
+        let release_trailing = !self.input_splits_access_units
+            && self.aligned_runs >= ACCESS_UNIT_ALIGNED_CONFIRMATIONS;
+        let complete_through = if release_trailing {
             self.pending.len()
         } else if let [_, .., last] = self.access_unit_starts[..] {
             last
@@ -410,6 +413,32 @@ mod tests {
         // held until two buffers in a row start an access unit, then released with its buffer
         assert_eq!(pushed, vec![0, 1, 2, 1]);
         assert!(framer.finish().is_none());
+    }
+
+    #[test]
+    fn buffers_that_split_access_units_never_release_one_early() {
+        let pictures: Vec<Vec<u8>> = (1..=7).map(picture).collect();
+        let split = pictures[0].len() / 2;
+        let head = |n: usize| pictures[n][..split].to_vec();
+        let tail = |n: usize| pictures[n][split..].to_vec();
+        // one split buffer, then two that open on a picture, the shape of Apple's HLS PES packets
+        let buffers = [
+            [pictures[0].clone(), head(1)].concat(),
+            [tail(1), head(2)].concat(),
+            tail(2),
+            pictures[3].clone(),
+            pictures[4].clone(),
+            head(5),
+            [tail(5), pictures[6].clone()].concat(),
+        ];
+        let mut framer = AccessUnitFramer::new(false);
+        let mut emitted = Vec::new();
+        for buffer in &buffers {
+            emitted.extend(framer.push(buffer, timing(0), mpeg_classify));
+        }
+        emitted.extend(framer.finish());
+        let emitted: Vec<Vec<u8>> = emitted.into_iter().map(|(au, _)| au).collect();
+        assert_eq!(emitted, pictures);
     }
 
     #[test]
