@@ -4,7 +4,9 @@
 # Each file holds two testsrc2 frames, with ffmpeg's decode of it to the same
 # pixel format beside it. ffmpeg's avi muxer writes BI_RGB top-down with rows
 # padded to four bytes, and GStreamer's avimux writes it bottom-up, so the 17x16
-# files come from gst-launch-1.0. ffmpeg's mov muxer pads `raw ` rows to two
+# files come from gst-launch-1.0. avimux also pads each I420 plane's rows to four
+# bytes, which ffmpeg reads as pixels, so that file's reference is GStreamer's
+# own avidemux output. ffmpeg's mov muxer pads `raw ` rows to two
 # bytes, which ffmpeg's own decoder then reads as unpadded, so the odd-width RGB
 # file's reference is the frames ffmpeg encoded rather than its decode.
 set -euo pipefail
@@ -35,6 +37,8 @@ ffmpeg_file avi_bgra_7x5.avi 7 5 bgra avi
 decode avi_bgra_7x5.avi bgra
 ffmpeg_file avi_yv12_7x5.avi 7 5 yuv420p avi -vtag YV12
 decode avi_yv12_7x5.avi yuv420p
+ffmpeg_file avi_i420_7x5.avi 7 5 yuv420p avi
+decode avi_i420_7x5.avi yuv420p
 ffmpeg_file avi_y800_7x5.avi 7 5 gray avi -vtag Y800
 decode avi_y800_7x5.avi gray
 ffmpeg_file avi_grey_7x5.avi 7 5 gray avi -vtag GREY
@@ -49,6 +53,15 @@ done
 decode avi_gst_bgr_17x16.avi bgr24
 decode avi_gst_bgrx_17x16.avi bgra
 decode avi_gst_gray8_17x16.avi gray
+
+gst-launch-1.0 -q videotestsrc num-buffers=$frames pattern=smpte \
+    ! "video/x-raw,format=I420,width=17,height=16,framerate=1/1" \
+    ! avimux ! filesink location="$fixtures/avi_gst_i420_17x16.avi"
+gst_y4m="$(mktemp --suffix=.y4m)"
+gst-launch-1.0 -q filesrc location="$fixtures/avi_gst_i420_17x16.avi" ! avidemux ! y4menc \
+    ! filesink location="$gst_y4m"
+ffmpeg -v error -y -i "$gst_y4m" -f rawvideo "$fixtures/avi_gst_i420_17x16.avi.yuv420p"
+rm "$gst_y4m"
 
 ffmpeg_file mov_rgb24_6x5.mov 6 5 rgb24 mov
 decode mov_rgb24_6x5.mov rgb24

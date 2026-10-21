@@ -8,12 +8,15 @@ use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_plugins::registry::default_registry;
 
 // (two-frame file from `tools/raw-video-fixtures.sh`, the demuxer, the stream it selects, the reference beside the file)
-const LAYOUTS: [(&str, &str, &str, &str); 11] = [
+const LAYOUTS: [(&str, &str, &str, &str); 13] = [
     ("avi_bgr24_7x5.avi", "avidemux", "raw-bgr", "bgr24"),
     ("avi_gst_bgr_17x16.avi", "avidemux", "raw-bgr", "bgr24"),
     ("avi_bgra_7x5.avi", "avidemux", "raw-bgrx", "bgra"),
     ("avi_gst_bgrx_17x16.avi", "avidemux", "raw-bgrx", "bgra"),
     ("avi_yv12_7x5.avi", "avidemux", "raw-i420", "yuv420p"),
+    ("avi_i420_7x5.avi", "avidemux", "raw-i420", "yuv420p"),
+    // ffmpeg reads this file's four-byte plane row padding as pixels, so it is checked against GStreamer's avidemux
+    ("avi_gst_i420_17x16.avi", "avidemux", "raw-i420", "yuv420p"),
     ("avi_y800_7x5.avi", "avidemux", "raw-gray8", "gray"),
     ("avi_grey_7x5.avi", "avidemux", "raw-gray8", "gray"),
     ("avi_gst_gray8_17x16.avi", "avidemux", "raw-gray8", "gray"),

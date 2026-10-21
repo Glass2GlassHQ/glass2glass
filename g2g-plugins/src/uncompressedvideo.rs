@@ -52,11 +52,13 @@ pub(crate) enum RawVideoStorage {
     QuickTimeRows,
     // I420 with the V plane stored ahead of the U plane
     Yv12,
+    // planar rows padded to four bytes per plane when the frame is exactly that size, as GStreamer's avimux writes them, else tight
+    AviPlaneRows,
 }
 
 const AVI_ROW_ALIGN: usize = 4;
 
-// the AVI layouts outside the shared fourcc table: BI_RGB at 24 and 32 bits, YV12 and the 8-bit gray fourccs
+// the AVI layouts the shared fourcc table does not cover: BI_RGB at 24 and 32 bits, I420, YV12 and the 8-bit gray fourccs
 pub(crate) fn avi_raw_video(
     compression: [u8; 4],
     bit_count: u16,
@@ -70,6 +72,7 @@ pub(crate) fn avi_raw_video(
         // biCompression BI_RGB
         (&[0, 0, 0, 0], 24) => Some((RawVideoFormat::Bgr8, rows)),
         (&[0, 0, 0, 0], 32) => Some((RawVideoFormat::Bgrx8, rows)),
+        (b"I420" | b"IYUV", _) => Some((RawVideoFormat::I420, RawVideoStorage::AviPlaneRows)),
         (b"YV12", _) => Some((RawVideoFormat::I420, RawVideoStorage::Yv12)),
         // only BI_RGB rows run bottom-up
         (b"Y800" | b"GREY", _) => Some((
@@ -123,7 +126,52 @@ pub(crate) fn copy_raw_video_frame(
             let stride = stored.len().checked_div(rows)?;
             copy_rows(stored, row_bytes(format, columns), stride, rows, false)
         }
+        RawVideoStorage::AviPlaneRows => {
+            let planes = avi_aligned_planes(format, columns, rows)?;
+            let aligned_len = planes.iter().try_fold(0usize, |len, plane| {
+                len.checked_add(plane.stride.checked_mul(plane.rows)?)
+            })?;
+            if stored.len() != aligned_len {
+                return copy_raw_video_frame(format, RawVideoStorage::Tight, width, height, stored);
+            }
+            let mut frame = Vec::with_capacity(frame_byte_size(format, width, height));
+            let mut offset = 0;
+            for plane in planes {
+                let end = offset + plane.stride * plane.rows;
+                let plane_rows = copy_rows(
+                    &stored[offset..end],
+                    plane.row,
+                    plane.stride,
+                    plane.rows,
+                    false,
+                )?;
+                frame.extend_from_slice(&plane_rows);
+                offset = end;
+            }
+            Some(frame)
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AlignedPlane {
+    row: usize,
+    stride: usize,
+    rows: usize,
+}
+
+fn avi_aligned_planes(
+    format: RawVideoFormat,
+    columns: usize,
+    rows: usize,
+) -> Option<Vec<AlignedPlane>> {
+    (0..format.plane_count())
+        .map(|plane| {
+            let (_, row, rows) = tight_plane(format, plane, columns, rows)?;
+            let stride = row.checked_next_multiple_of(AVI_ROW_ALIGN)?;
+            Some(AlignedPlane { row, stride, rows })
+        })
+        .collect()
 }
 
 // `rows` rows of `row` bytes, read `stride` bytes apart, the bottom one first when `bottom_up`

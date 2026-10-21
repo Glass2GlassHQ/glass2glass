@@ -385,9 +385,10 @@ fn parse_video_format(strh: &[u8], strf: &[u8]) -> Option<(AviStreamKind, Vec<u8
         return None;
     }
     let bit_count = read_u16(strf, BITMAPINFO_BIT_COUNT_AT)?;
-    let raw = crate::uncompressedvideo::raw_video_format(compression)
-        .map(|format| (format, RawVideoStorage::Tight))
-        .or_else(|| avi_raw_video(compression, bit_count, signed_height > 0));
+    let raw = avi_raw_video(compression, bit_count, signed_height > 0).or_else(|| {
+        crate::uncompressedvideo::raw_video_format(compression)
+            .map(|format| (format, RawVideoStorage::Tight))
+    });
     if let Some((format, storage)) = raw {
         return Some((
             AviStreamKind::RawVideo {
