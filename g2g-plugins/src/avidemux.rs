@@ -42,7 +42,7 @@ use crate::codectag::{
     audio_from_stream_name, audio_stream_name, video_from_stream_name, video_stream_name,
 };
 use crate::uncompressedvideo::{
-    raw_video_caps, raw_video_formats, raw_video_frame_bytes, raw_video_placeholder_caps,
+    copy_raw_video_frame, raw_video_caps, raw_video_formats, raw_video_placeholder_caps,
     raw_video_stream_from_str, raw_video_stream_str, warn_short_raw_video_frame,
 };
 
@@ -201,6 +201,7 @@ fn nego_caps(kind: &AviStreamKind) -> Option<(Caps, bool)> {
             format,
             width,
             height,
+            ..
         } => Some((
             raw_video_caps(
                 *format,
@@ -362,16 +363,18 @@ fn deframe(stream: &AviStream, h264: &H264Config, data: &[u8], first: bool) -> O
             format: AudioFormat::Aac,
             ..
         } => adts_from_asc(&stream.codec_config, data).unwrap_or_else(|| Vec::from(data)),
+        // the copy out of the file also puts the rows and planes in the graph's order
         AviStreamKind::RawVideo {
             format,
             width,
             height,
+            storage,
         } => {
-            let Some(pixels) = raw_video_frame_bytes(*format, *width, *height, data.len()) else {
+            let Some(frame) = copy_raw_video_frame(*format, *storage, *width, *height, data) else {
                 warn_short_raw_video_frame("avidemux", *format, *width, *height, data.len());
                 return None;
             };
-            Vec::from(&data[..pixels])
+            frame
         }
         _ => Vec::from(data),
     })

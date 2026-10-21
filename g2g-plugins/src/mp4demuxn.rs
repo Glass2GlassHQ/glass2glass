@@ -110,6 +110,7 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
             format,
             width,
             height,
+            ..
         } => (
             crate::uncompressedvideo::raw_video_caps(
                 *format,
@@ -944,10 +945,12 @@ impl Mp4DemuxN {
                 // MP3 frames carry their own headers, and the sample parse already
                 // turned PCM into the graph's byte layout
                 Some(TrackKind::Audio { .. }) => {}
+                // the sample parse already put the rows in the graph's layout
                 Some(TrackKind::RawVideo {
                     format,
                     width,
                     height,
+                    ..
                 }) => {
                     let Some(pixels) = raw_video_frame_bytes(*format, *width, *height, data.len())
                     else {

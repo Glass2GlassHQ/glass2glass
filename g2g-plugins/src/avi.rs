@@ -29,6 +29,8 @@ use alloc::vec::Vec;
 use g2g_core::caps::greatest_common_divisor;
 use g2g_core::{AudioFormat, G2gError, RawVideoFormat, Tag, TagList, VideoCodec};
 
+use crate::uncompressedvideo::{avi_raw_video, RawVideoStorage};
+
 use crate::riff::{
     chunk_len, chunks, chunks_to_cut, padded_len, put_chunk, put_chunk_header, read_fourcc,
     read_u16, read_u32, Chunk, FourCc, CHUNK_HEADER_LEN, FOURCC_LEN, LIST_FOURCC, RIFF_FOURCC,
@@ -76,6 +78,7 @@ const STRH_MIN_LEN: usize = STRH_SAMPLE_SIZE + 4;
 /// Field offsets in a video `strf` (`BITMAPINFOHEADER`).
 const BITMAPINFO_WIDTH: usize = 4;
 const BITMAPINFO_HEIGHT: usize = 8;
+const BITMAPINFO_BIT_COUNT_AT: usize = 14;
 const BITMAPINFO_COMPRESSION: usize = 16;
 /// A `BITMAPINFOHEADER` is 40 bytes; anything past it is codec extradata.
 const BITMAPINFO_LEN: usize = 40;
@@ -155,6 +158,7 @@ pub(crate) enum AviStreamKind {
         format: RawVideoFormat,
         width: u32,
         height: u32,
+        storage: RawVideoStorage,
     },
     Audio {
         format: AudioFormat,
@@ -366,24 +370,31 @@ fn printable_fourcc(fourcc: &FourCc) -> Option<String> {
 /// A video stream's geometry and codec from its `BITMAPINFOHEADER`, plus the
 /// extradata past it (H.264 parameter sets when the writer put them there).
 /// `biCompression` falls back to the `strh` `fccHandler` some writers fill in
-/// instead. A negative `biHeight` means a bottom-up image, which changes no
-/// decoded geometry, so the magnitude is what travels.
+/// instead. The sign of `biHeight` says which way the rows run (positive is
+/// bottom-up), which changes no decoded geometry, so the magnitude is what
+/// travels and an uncompressed RGB stream records the row order.
 fn parse_video_format(strh: &[u8], strf: &[u8]) -> Option<(AviStreamKind, Vec<u8>)> {
     if strf.len() < BITMAPINFO_LEN {
         return None;
     }
     let compression = read_fourcc(strf, BITMAPINFO_COMPRESSION)?;
     let width = read_u32(strf, BITMAPINFO_WIDTH)?;
-    let height = (read_u32(strf, BITMAPINFO_HEIGHT)? as i32).unsigned_abs();
+    let signed_height = read_u32(strf, BITMAPINFO_HEIGHT)? as i32;
+    let height = signed_height.unsigned_abs();
     if width == 0 || height == 0 {
         return None;
     }
-    if let Some(format) = crate::uncompressedvideo::raw_video_format(compression) {
+    let bit_count = read_u16(strf, BITMAPINFO_BIT_COUNT_AT)?;
+    let raw = crate::uncompressedvideo::raw_video_format(compression)
+        .map(|format| (format, RawVideoStorage::Tight))
+        .or_else(|| avi_raw_video(compression, bit_count, signed_height > 0));
+    if let Some((format, storage)) = raw {
         return Some((
             AviStreamKind::RawVideo {
                 format,
                 width,
                 height,
+                storage,
             },
             Vec::new(),
         ));

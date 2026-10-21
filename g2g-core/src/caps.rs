@@ -2123,6 +2123,14 @@ pub enum RawVideoFormat {
     R210,
     // planar 10-bit RGB in the plane order G, B, R, each sample in the low bits of a little-endian u16
     Gbr10Le,
+    // 8-bit luma only, one byte per pixel
+    Gray8,
+    // packed 8-bit RGB with the blue byte first
+    Bgr8,
+    // BGRA whose fourth byte carries no alpha
+    Bgrx8,
+    // packed 8-bit RGBA with the alpha byte first
+    Argb8,
 }
 
 impl RawVideoFormat {
@@ -2150,6 +2158,10 @@ impl RawVideoFormat {
             RawVideoFormat::V210 => "v210",
             RawVideoFormat::R210 => "r210",
             RawVideoFormat::Gbr10Le => "GBR_10LE",
+            RawVideoFormat::Gray8 => "GRAY8",
+            RawVideoFormat::Bgr8 => "BGR",
+            RawVideoFormat::Bgrx8 => "BGRx",
+            RawVideoFormat::Argb8 => "ARGB",
         }
     }
 
@@ -2243,7 +2255,11 @@ impl RawVideoFormat {
             | RawVideoFormat::Yuyv
             | RawVideoFormat::Uyvy
             | RawVideoFormat::V210
-            | RawVideoFormat::R210 => self.plane_stride(0, width),
+            | RawVideoFormat::R210
+            | RawVideoFormat::Gray8
+            | RawVideoFormat::Bgr8
+            | RawVideoFormat::Bgrx8
+            | RawVideoFormat::Argb8 => self.plane_stride(0, width),
             RawVideoFormat::Nv12 | RawVideoFormat::I420 => width.div_ceil(2).checked_mul(2),
             _ => None,
         }
@@ -2264,7 +2280,11 @@ impl RawVideoFormat {
             | RawVideoFormat::Yuyv
             | RawVideoFormat::Uyvy
             | RawVideoFormat::V210
-            | RawVideoFormat::R210 => Some(luma),
+            | RawVideoFormat::R210
+            | RawVideoFormat::Gray8
+            | RawVideoFormat::Bgr8
+            | RawVideoFormat::Bgrx8
+            | RawVideoFormat::Argb8 => Some(luma),
             RawVideoFormat::Nv12 | RawVideoFormat::I420 => {
                 luma.checked_add(stride.checked_mul(height.div_ceil(2))?)
             }
@@ -2285,7 +2305,11 @@ impl RawVideoFormat {
             | RawVideoFormat::Yuyv
             | RawVideoFormat::Uyvy
             | RawVideoFormat::V210
-            | RawVideoFormat::R210 => 1,
+            | RawVideoFormat::R210
+            | RawVideoFormat::Gray8
+            | RawVideoFormat::Bgr8
+            | RawVideoFormat::Bgrx8
+            | RawVideoFormat::Argb8 => 1,
             RawVideoFormat::Nv12 | RawVideoFormat::P010 => 2,
             RawVideoFormat::I420
             | RawVideoFormat::I420p10
@@ -2308,9 +2332,14 @@ impl RawVideoFormat {
     /// pixels are not a whole number of bytes.
     pub const fn pixel_stride(self) -> Option<usize> {
         match self {
-            RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 | RawVideoFormat::R210 => Some(4),
-            RawVideoFormat::Rgb8 => Some(3),
+            RawVideoFormat::Rgba8
+            | RawVideoFormat::Bgra8
+            | RawVideoFormat::R210
+            | RawVideoFormat::Bgrx8
+            | RawVideoFormat::Argb8 => Some(4),
+            RawVideoFormat::Rgb8 | RawVideoFormat::Bgr8 => Some(3),
             RawVideoFormat::Yuyv | RawVideoFormat::Uyvy => Some(2),
+            RawVideoFormat::Gray8 => Some(1),
             _ => None,
         }
     }
@@ -2619,7 +2648,7 @@ pub enum TensorLayout {
 }
 
 #[cfg(all(test, feature = "alloc"))]
-pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 21] = [
+pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 25] = [
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
     RawVideoFormat::Rgba8,
@@ -2641,6 +2670,10 @@ pub(crate) const ALL_RAW_VIDEO_FORMATS: [RawVideoFormat; 21] = [
     RawVideoFormat::V210,
     RawVideoFormat::R210,
     RawVideoFormat::Gbr10Le,
+    RawVideoFormat::Gray8,
+    RawVideoFormat::Bgr8,
+    RawVideoFormat::Bgrx8,
+    RawVideoFormat::Argb8,
 ];
 
 #[cfg(test)]

@@ -38,7 +38,7 @@ use g2g_core::{
 
 /// Formats this element can both consume and produce. The convert `target`
 /// is always one of these.
-pub(crate) const FORMATS: [RawVideoFormat; 21] = [
+pub(crate) const FORMATS: [RawVideoFormat; 25] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Rgb8,
@@ -60,6 +60,10 @@ pub(crate) const FORMATS: [RawVideoFormat; 21] = [
     RawVideoFormat::V210,
     RawVideoFormat::R210,
     RawVideoFormat::Gbr10Le,
+    RawVideoFormat::Gray8,
+    RawVideoFormat::Bgr8,
+    RawVideoFormat::Bgrx8,
+    RawVideoFormat::Argb8,
 ];
 
 /// # Example
@@ -613,11 +617,13 @@ fn convert_strided(
         }
         // The pairs that read their input where it lies, whatever its pitch.
         (Rgba8, Bgra8) | (Bgra8, Rgba8) => swizzle_rb(src, w, h, src_stride),
-        // RGB carries no alpha, so it rides the packed 4-byte paths: widen on
-        // the way in, narrow on the way out.
-        (Rgb8, Rgba8) => widen_rgb(src, w, h, src_stride),
-        (Rgb8, _) => convert_strided(
-            &widen_rgb(src, w, h, src_stride),
+        // The other packed RGB layouts ride the RGBA paths: unpacked to RGBA on
+        // the way in, packed from it on the way out.
+        (_, Rgba8) if packed_rgb_layout(from).is_some() => {
+            unpack_to_rgba(src, from, w, h, src_stride)
+        }
+        _ if packed_rgb_layout(from).is_some() => convert_strided(
+            &unpack_to_rgba(src, from, w, h, src_stride),
             Rgba8,
             to,
             (w, h),
@@ -625,9 +631,10 @@ fn convert_strided(
             matrix,
             hub,
         ),
-        (Rgba8, Rgb8) => narrow_rgba(src, w, h, src_stride),
-        (_, Rgb8) => narrow_rgba(
+        (Rgba8, _) if packed_rgb_layout(to).is_some() => pack_from_rgba(src, to, w, h, src_stride),
+        _ if packed_rgb_layout(to).is_some() => pack_from_rgba(
             &convert_strided(src, from, Rgba8, (w, h), src_stride, matrix, hub),
+            to,
             w,
             h,
             w * 4,
@@ -851,6 +858,8 @@ fn scale_depth(v: i32, from_d: u8, to_d: u8) -> i32 {
     (((v as i64 * tm + fm / 2) / fm) as i32).clamp(0, tm as i32)
 }
 
+const NEUTRAL_CHROMA_8: i32 = 128;
+
 /// Unpack any format to full-resolution (4:4:4) planar Y, U, V plus the working
 /// bit depth: RGB is color-converted to 8-bit YUV; YUYV / NV12 / the planar family
 /// are read at their own depth with chroma replicated up to full resolution.
@@ -894,6 +903,15 @@ fn to_hub(
                     (y[i], u[i], v[i]) = (luma as i32, cu as i32, cv as i32);
                 }
             }
+            8
+        }
+        // luma alone, with neutral chroma
+        RawVideoFormat::Gray8 => {
+            for (luma, &sample) in y.iter_mut().zip(&src[..n]) {
+                *luma = i32::from(sample);
+            }
+            u.fill(NEUTRAL_CHROMA_8);
+            v.fill(NEUTRAL_CHROMA_8);
             8
         }
         RawVideoFormat::Nv12 | RawVideoFormat::P010 => {
@@ -1005,6 +1023,7 @@ fn from_hub(
             }
             dst.into_boxed_slice()
         }
+        RawVideoFormat::Gray8 => y.iter().map(|&luma| depth.get(luma) as u8).collect(),
         RawVideoFormat::Nv12 | RawVideoFormat::P010 => {
             let (cw, ch) = chroma_420_size(w, h);
             let semi_planar = SemiPlanar::of(to);
@@ -1393,25 +1412,77 @@ fn swizzle_rb(src: &[u8], w: usize, h: usize, src_stride: usize) -> Box<[u8]> {
     dst.into_boxed_slice()
 }
 
-/// RGB -> RGBA: copy each pixel's three bytes and add an opaque alpha.
-fn widen_rgb(src: &[u8], w: usize, h: usize, src_stride: usize) -> Box<[u8]> {
+// byte offsets of red, green, blue and, where it carries one, alpha in one pixel of a packed RGB format
+#[derive(Clone, Copy)]
+struct PackedRgbLayout {
+    pixel_bytes: usize,
+    red: usize,
+    green: usize,
+    blue: usize,
+    alpha: Option<usize>,
+}
+
+// the packed RGB formats that convert through RGBA, none for RGBA itself and every other format
+fn packed_rgb_layout(format: RawVideoFormat) -> Option<PackedRgbLayout> {
+    let layout = |pixel_bytes, red, green, blue, alpha| PackedRgbLayout {
+        pixel_bytes,
+        red,
+        green,
+        blue,
+        alpha,
+    };
+    match format {
+        RawVideoFormat::Rgb8 => Some(layout(3, 0, 1, 2, None)),
+        RawVideoFormat::Bgr8 => Some(layout(3, 2, 1, 0, None)),
+        RawVideoFormat::Bgrx8 => Some(layout(4, 2, 1, 0, None)),
+        RawVideoFormat::Argb8 => Some(layout(4, 1, 2, 3, Some(0))),
+        _ => None,
+    }
+}
+
+// a format with no alpha unpacks opaque
+fn unpack_to_rgba(
+    src: &[u8],
+    from: RawVideoFormat,
+    w: usize,
+    h: usize,
+    src_stride: usize,
+) -> Box<[u8]> {
+    let layout = packed_rgb_layout(from).expect("a packed RGB format");
     let mut dst = Vec::with_capacity(w * h * 4);
     for y in 0..h {
-        let row = y * src_stride;
-        for px in src[row..row + w * 3].as_chunks::<3>().0 {
-            dst.extend_from_slice(&[px[0], px[1], px[2], 255]);
+        let row = &src[y * src_stride..y * src_stride + w * layout.pixel_bytes];
+        for pixel in row.chunks_exact(layout.pixel_bytes) {
+            let alpha = layout.alpha.map_or(u8::MAX, |at| pixel[at]);
+            dst.extend_from_slice(&[
+                pixel[layout.red],
+                pixel[layout.green],
+                pixel[layout.blue],
+                alpha,
+            ]);
         }
     }
     dst.into_boxed_slice()
 }
 
-/// RGBA -> RGB: drop each pixel's alpha.
-fn narrow_rgba(src: &[u8], w: usize, h: usize, src_stride: usize) -> Box<[u8]> {
-    let mut dst = Vec::with_capacity(w * h * 3);
-    for y in 0..h {
-        let row = y * src_stride;
-        for px in src[row..row + w * 4].as_chunks::<4>().0 {
-            dst.extend_from_slice(&px[..3]);
+// the byte a BGRx pixel does not use is written opaque
+fn pack_from_rgba(
+    src: &[u8],
+    to: RawVideoFormat,
+    w: usize,
+    h: usize,
+    src_stride: usize,
+) -> Box<[u8]> {
+    let layout = packed_rgb_layout(to).expect("a packed RGB format");
+    let mut dst = vec![u8::MAX; w * h * layout.pixel_bytes];
+    let pixels = dst.chunks_exact_mut(layout.pixel_bytes);
+    let rgba = (0..h).flat_map(|y| src[y * src_stride..y * src_stride + w * 4].as_chunks::<4>().0);
+    for (pixel, [red, green, blue, alpha]) in pixels.zip(rgba) {
+        pixel[layout.red] = *red;
+        pixel[layout.green] = *green;
+        pixel[layout.blue] = *blue;
+        if let Some(at) = layout.alpha {
+            pixel[at] = *alpha;
         }
     }
     dst.into_boxed_slice()
@@ -1758,6 +1829,58 @@ mod tests {
         let src = [1u8, 2, 3, 4, 5, 6, 7, 8];
         let out = swizzle_rb(&src, 2, 1, 8);
         assert_eq!(&out[..], &[3, 2, 1, 4, 7, 6, 5, 8]);
+    }
+
+    #[test]
+    fn packed_rgb_layouts_place_each_channel_and_convert_back() {
+        const RED: u8 = 10;
+        const GREEN: u8 = 20;
+        const BLUE: u8 = 30;
+        const ALPHA: u8 = 40;
+        const OPAQUE: u8 = u8::MAX;
+        let rgba = [RED, GREEN, BLUE, ALPHA];
+        for (format, pixel, alpha_back) in [
+            (RawVideoFormat::Bgr8, alloc::vec![BLUE, GREEN, RED], OPAQUE),
+            (RawVideoFormat::Bgrx8, alloc::vec![BLUE, GREEN, RED, OPAQUE], OPAQUE),
+            (RawVideoFormat::Argb8, alloc::vec![ALPHA, RED, GREEN, BLUE], ALPHA),
+        ] {
+            let packed = convert(&rgba, RawVideoFormat::Rgba8, format, 1, 1, Colorimetry::UNKNOWN);
+            assert_eq!(&packed[..], &pixel[..], "{format:?}");
+            let back = convert(&packed, format, RawVideoFormat::Rgba8, 1, 1, Colorimetry::UNKNOWN);
+            assert_eq!(&back[..], &[RED, GREEN, BLUE, alpha_back], "{format:?}");
+            let swapped = convert(&packed, format, RawVideoFormat::Bgra8, 1, 1, Colorimetry::UNKNOWN);
+            assert_eq!(&swapped[..], &[BLUE, GREEN, RED, alpha_back], "{format:?}");
+        }
+    }
+
+    #[test]
+    fn gray_converts_through_i420_unchanged_with_neutral_chroma() {
+        for (w, h) in GEOMETRIES {
+            let (w, h) = (w as usize, h as usize);
+            let gray: Vec<u8> = (0..w * h).map(|index| (index * 7) as u8).collect();
+            let i420 = convert(
+                &gray,
+                RawVideoFormat::Gray8,
+                RawVideoFormat::I420,
+                w,
+                h,
+                Colorimetry::UNKNOWN,
+            );
+            assert_eq!(&i420[..w * h], &gray[..], "luma {w}x{h}");
+            assert!(
+                i420[w * h..].iter().all(|&chroma| i32::from(chroma) == NEUTRAL_CHROMA_8),
+                "chroma {w}x{h}"
+            );
+            let back = convert(
+                &i420,
+                RawVideoFormat::I420,
+                RawVideoFormat::Gray8,
+                w,
+                h,
+                Colorimetry::UNKNOWN,
+            );
+            assert_eq!(&back[..], &gray[..], "{w}x{h}");
+        }
     }
 
     #[test]

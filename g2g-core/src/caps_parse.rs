@@ -550,6 +550,10 @@ pub fn parse_raw_format(s: &str) -> Option<RawVideoFormat> {
         "v210" => RawVideoFormat::V210,
         "r210" => RawVideoFormat::R210,
         "gbr_10le" => RawVideoFormat::Gbr10Le,
+        "gray8" => RawVideoFormat::Gray8,
+        "bgr" => RawVideoFormat::Bgr8,
+        "bgrx" => RawVideoFormat::Bgrx8,
+        "argb" => RawVideoFormat::Argb8,
         _ => return None,
     })
 }

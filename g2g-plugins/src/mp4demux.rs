@@ -394,6 +394,7 @@ impl Mp4Demux {
             format,
             width,
             height,
+            ..
         } = video.kind
         else {
             return Err(G2gError::CapsMismatch);

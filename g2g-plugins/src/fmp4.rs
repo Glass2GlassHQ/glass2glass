@@ -37,6 +37,7 @@ use crate::mp4box::{
 use crate::opusparse::{opus_head_from_dops, parse_opus_head};
 use crate::pcmclip::clip_pcm_to_segment;
 use crate::pcmendian::convert_wire_layout;
+use crate::uncompressedvideo::{copy_raw_video_frame, quicktime_raw_video, RawVideoStorage};
 
 #[derive(Debug)]
 pub(crate) struct Header {
@@ -313,6 +314,7 @@ pub(crate) enum TrackKind {
         format: RawVideoFormat,
         width: u32,
         height: u32,
+        storage: RawVideoStorage,
     },
     Audio {
         format: AudioFormat,
@@ -806,7 +808,13 @@ fn parse_video_entry(
     } else if let Some((format, entry)) = boxes(entries).find_map(|(fourcc, entry)| {
         Some((crate::uncompressedvideo::raw_video_format(*fourcc)?, entry))
     }) {
-        return Ok(Some((raw_video_track(format, entry)?, None)));
+        return Ok(Some((raw_video_track(format, RawVideoStorage::Tight, entry)?, None)));
+    } else if let Some((format, storage, entry)) = find_box(entries, b"raw ").and_then(|entry| {
+        let depth = entry.get(VISUAL_SAMPLE_ENTRY_DEPTH_AT..VISUAL_SAMPLE_ENTRY_DEPTH_AT + 2)?;
+        let (format, storage) = quicktime_raw_video(u16::from_be_bytes([depth[0], depth[1]]))?;
+        Some((format, storage, entry))
+    }) {
+        return Ok(Some((raw_video_track(format, storage, entry)?, None)));
     } else if visual_sample_entry(entries) {
         // A well-formed VisualSampleEntry naming a codec we do not read: decline
         // so the rest of the file still demuxes.
@@ -836,8 +844,14 @@ fn mezzanine_codec(fourcc: [u8; 4]) -> Option<VideoCodec> {
 // VisualSampleEntry: reserved, data_reference_index and pre_defined fields, then width and height
 const VISUAL_SAMPLE_ENTRY_WIDTH_AT: usize = 24;
 const VISUAL_SAMPLE_ENTRY_HEIGHT_AT: usize = 26;
+// past the resolutions, frame count and 32-byte compressor name
+const VISUAL_SAMPLE_ENTRY_DEPTH_AT: usize = 74;
 
-fn raw_video_track(format: RawVideoFormat, entry: &[u8]) -> Result<TrackKind, G2gError> {
+fn raw_video_track(
+    format: RawVideoFormat,
+    storage: RawVideoStorage,
+    entry: &[u8],
+) -> Result<TrackKind, G2gError> {
     let dimension = |at: usize| -> Result<u32, G2gError> {
         let bytes = entry.get(at..at + 2).ok_or(G2gError::CapsMismatch)?;
         match u16::from_be_bytes([bytes[0], bytes[1]]) {
@@ -849,7 +863,27 @@ fn raw_video_track(format: RawVideoFormat, entry: &[u8]) -> Result<TrackKind, G2
         format,
         width: dimension(VISUAL_SAMPLE_ENTRY_WIDTH_AT)?,
         height: dimension(VISUAL_SAMPLE_ENTRY_HEIGHT_AT)?,
+        storage,
     })
+}
+
+// a sample as the graph's tight top-down frame, one too short for that left as stored for the demuxer to drop
+fn raw_video_sample(stored: &[u8], framing: RawVideoFraming) -> Vec<u8> {
+    let RawVideoFraming {
+        format,
+        storage,
+        width,
+        height,
+    } = framing;
+    copy_raw_video_frame(format, storage, width, height, stored).unwrap_or_else(|| stored.to_vec())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RawVideoFraming {
+    format: RawVideoFormat,
+    storage: RawVideoStorage,
+    width: u32,
+    height: u32,
 }
 
 // a sample entry no reader here takes goes on under its fourcc, its whole entry leading the samples
@@ -1700,7 +1734,20 @@ pub(crate) fn parse_fragments_multi(
                 let keyframe = fragment_video_keyframe(*codec, sample.timing.sync, &annexb);
                 (annexb, keyframe)
             }
-            TrackKind::RawVideo { .. } => (bytes.into_owned(), true),
+            TrackKind::RawVideo {
+                format,
+                width,
+                height,
+                storage,
+            } => {
+                let framing = RawVideoFraming {
+                    format: *format,
+                    storage: *storage,
+                    width: *width,
+                    height: *height,
+                };
+                (raw_video_sample(&bytes, framing), true)
+            }
             // Audio access units are stored verbatim; each is a sync point.
             TrackKind::Audio {
                 format,
@@ -1835,6 +1882,7 @@ enum SampleFraming {
     WvttText,
     ClosedCaption(ClosedCaptionFormat),
     Pcm(PcmFraming),
+    RawVideo(RawVideoFraming),
     // a coded QuickTime sound track, which an stts of unit durations stores by chunk
     #[cfg(feature = "ffmpeg-long-tail")]
     QuickTimeChunks(SoundDescription),
@@ -1857,7 +1905,18 @@ impl SampleFraming {
                 codec: VideoCodec::Tagged(_),
                 ..
             } => SampleFraming::TaggedVideo,
-            TrackKind::Video { .. } | TrackKind::RawVideo { .. } => SampleFraming::PassThrough,
+            TrackKind::Video { .. } => SampleFraming::PassThrough,
+            TrackKind::RawVideo {
+                format,
+                width,
+                height,
+                storage,
+            } => SampleFraming::RawVideo(RawVideoFraming {
+                format: *format,
+                storage: *storage,
+                width: *width,
+                height: *height,
+            }),
             TrackKind::Audio {
                 format,
                 channels,
@@ -2083,6 +2142,7 @@ fn parse_progressive_track(
             SampleFraming::Tx3gText => deframe_tx3g(raw),
             SampleFraming::WvttText => deframe_wvtt(raw),
             SampleFraming::ClosedCaption(format) => deframe_cc(raw, format),
+            SampleFraming::RawVideo(framing) => raw_video_sample(raw, framing),
             SampleFraming::Pcm(_) => unreachable!("PCM tracks return per chunk above"),
             #[cfg(feature = "ffmpeg-long-tail")]
             SampleFraming::QuickTimeChunks(_) => raw.to_vec(),
@@ -4141,6 +4201,7 @@ mod tests {
             format,
             width,
             height,
+            ..
         } = kind
         else {
             panic!("2vuy is uncompressed");
