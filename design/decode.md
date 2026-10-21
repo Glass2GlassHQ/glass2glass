@@ -34,6 +34,14 @@ or follows a `Flush` or `Segment`. Those pictures reference pictures before the
 random access point that the decoder never received (`NoRaslOutputFlag == 1`,
 H.265 8.1.3). RASL pictures of any other CRA decode normally and pass through.
 
+The access-unit framer behind `h264parse`, `h265parse` and the MPEG video parsers
+releases a buffer's trailing access unit at once only while every buffer so far
+has begun on an access-unit start, at least two in a row. One buffer that begins
+inside an access unit turns that off for the rest of the stream, and the framer
+goes back to holding each access unit until the next one starts. MPEG-TS muxers
+like Apple's fill each PES to a packet boundary, so a PES can begin with the
+previous picture's last bytes while some PES still open on a picture by chance.
+
 ## VaapiDec (Linux VAAPI, cros-codecs)
 
 `VaapiDec<C>` (`g2g-plugins/src/vaapidec.rs`, feature `vaapi`,

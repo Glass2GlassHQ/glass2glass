@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1768: h264parse / h265parse no longer drop slice bytes from a TS stream whose PES packets split access units (Apple's HLS examples).
 - M1729: avidemux reads BI_RGB, YV12 and Y800 / GREY, qtdemux reads `raw ` RGB and ARGB, via new GRAY8 / BGR / BGRx / ARGB raw formats.
 - M1728: qtdemux reads QuickTime `in24` / `in32` / `fl32` PCM, version 2 `lpcm` and `msVo` Vorbis, and names the PCM layouts it cannot carry.
 - M1767: `wgputodmabuf` exports a tight odd-width NV12 or I420 frame at the core row stride instead of refusing it.
