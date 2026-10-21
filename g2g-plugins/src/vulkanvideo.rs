@@ -6829,6 +6829,177 @@ impl YcbcrConverter {
         }
     }
 
+    // `frame` takes the pass a decoded slot takes, from a staging image of the
+    // slots' format and extent
+    fn output_uploaded(
+        &self,
+        output: TextureOutput,
+        frame: &Nv12Frame,
+    ) -> Result<wgpu::Texture, VulkanVideoError> {
+        let dev = &self.raw_device;
+        let err = VulkanVideoError::QueryFailed;
+        let layout = ReadbackLayout::new(
+            frame.bit_depth,
+            self.picture_offset,
+            frame.width,
+            frame.height,
+        )?;
+        let mut staging = UploadStaging {
+            raw_device: dev,
+            buffer: vk::Buffer::null(),
+            buffer_memory: vk::DeviceMemory::null(),
+            image: vk::Image::null(),
+            image_memory: vk::DeviceMemory::null(),
+        };
+        let buffer_ci = vk::BufferCreateInfo::default()
+            .size(layout.len())
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        // SAFETY: valid create info; `staging` destroys the buffer.
+        staging.buffer = unsafe { dev.create_buffer(&buffer_ci, None) }.map_err(err)?;
+        // SAFETY: fresh buffer.
+        let requirements = unsafe { dev.get_buffer_memory_requirements(staging.buffer) };
+        let memory_type = find_memory_type(
+            &self.mem_props,
+            requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+        .ok_or(VulkanVideoError::ExtensionUnsupported)?;
+        let allocate_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirements.size)
+            .memory_type_index(memory_type);
+        // SAFETY: allocate, bind and fill the fresh buffer; the mapping covers the
+        // `layout.len()` bytes both plane writes stay inside, and nothing reads the
+        // buffer until the submission below.
+        unsafe {
+            staging.buffer_memory = dev.allocate_memory(&allocate_info, None).map_err(err)?;
+            dev.bind_buffer_memory(staging.buffer, staging.buffer_memory, 0)
+                .map_err(err)?;
+            let mapped = dev
+                .map_memory(
+                    staging.buffer_memory,
+                    0,
+                    layout.len(),
+                    vk::MemoryMapFlags::empty(),
+                )
+                .map_err(err)?
+                .cast::<u8>();
+            let bytes = core::slice::from_raw_parts_mut(mapped, layout.len() as usize);
+            bytes[..frame.luma().len()].copy_from_slice(frame.luma());
+            let chroma_offset = layout.chroma_offset as usize;
+            bytes[chroma_offset..chroma_offset + frame.chroma().len()]
+                .copy_from_slice(frame.chroma());
+            dev.unmap_memory(staging.buffer_memory);
+        }
+
+        let image_ci = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(self.nv12_format)
+            .extent(vk::Extent3D {
+                width: self.slot_extent.0,
+                height: self.slot_extent.1,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(
+                vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::TRANSFER_DST
+                    | vk::ImageUsageFlags::TRANSFER_SRC,
+            )
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        // SAFETY: valid create info; `staging` destroys the image and its memory.
+        unsafe {
+            staging.image = dev.create_image(&image_ci, None).map_err(err)?;
+            staging.image_memory = alloc_bind_image_raw(
+                dev,
+                &self.mem_props,
+                staging.image,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )?;
+        }
+
+        let regions = layout.copy_regions(0, |aspect| vk::ImageSubresourceLayers {
+            aspect_mask: aspect,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        });
+        // SAFETY: `self.cb` is idle (every pass waits its fence); the copy reads the
+        // filled buffer into the fresh image, and the closing barrier leaves the
+        // image in `PictureSource::Uploaded`'s layout, visible to both readers.
+        unsafe {
+            let begin = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            dev.begin_command_buffer(self.cb, &begin).map_err(err)?;
+            let to_write = vk::ImageMemoryBarrier::default()
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(staging.image)
+                .subresource_range(layer_range(0));
+            dev.cmd_pipeline_barrier(
+                self.cb,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_write],
+            );
+            dev.cmd_copy_buffer_to_image(
+                self.cb,
+                staging.buffer,
+                staging.image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &regions,
+            );
+            let to_read = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::TRANSFER_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(PictureSource::Uploaded.layout())
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(staging.image)
+                .subresource_range(layer_range(0));
+            dev.cmd_pipeline_barrier(
+                self.cb,
+                vk::PipelineStageFlags::TRANSFER,
+                YCBCR_WAIT_STAGE | PICTURE_COPY_WAIT_STAGE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_read],
+            );
+            dev.end_command_buffer(self.cb).map_err(err)?;
+            self.submit_and_wait(vk::Semaphore::null(), PICTURE_COPY_WAIT_STAGE)
+                .map_err(err)?;
+        }
+        let picture = DecodedPicture {
+            image: staging.image,
+            layer: 0,
+            source: PictureSource::Uploaded,
+        };
+        // SAFETY: the upload above finished, so the staging image is idle in its
+        // source's layout on the compute queue's device; `output` waits its own
+        // fence before `staging` frees the image.
+        unsafe {
+            self.output(
+                output,
+                picture,
+                frame.width,
+                frame.height,
+                vk::Semaphore::null(),
+            )
+        }
+    }
+
     /// Record the plane-wise copy of the decoded picture `src` into `dst`: `src`
     /// decoded layout -> transfer-src (and back when `source` asks), `dst`
     /// undefined -> transfer-dst -> shader-read for wgpu sampling.
@@ -6944,6 +7115,29 @@ impl YcbcrConverter {
             dev.end_command_buffer(cb)?;
         }
         Ok(())
+    }
+}
+
+// the buffer and image `YcbcrConverter::output_uploaded` creates, null until made
+struct UploadStaging<'d> {
+    raw_device: &'d ash::Device,
+    buffer: vk::Buffer,
+    buffer_memory: vk::DeviceMemory,
+    image: vk::Image,
+    image_memory: vk::DeviceMemory,
+}
+
+impl Drop for UploadStaging<'_> {
+    fn drop(&mut self) {
+        // SAFETY: each handle is null or was created from `raw_device`, and no
+        // submission reads it (`output_uploaded` waits every pass); destroying a
+        // null handle is a no-op.
+        unsafe {
+            self.raw_device.destroy_image(self.image, None);
+            self.raw_device.free_memory(self.image_memory, None);
+            self.raw_device.destroy_buffer(self.buffer, None);
+            self.raw_device.free_memory(self.buffer_memory, None);
+        }
     }
 }
 
@@ -9868,6 +10062,8 @@ enum PictureSource {
     /// The distinct decode output image, never a reference, so whatever layout
     /// the reader leaves it in is discarded by the next decode.
     DecodeOutput,
+    // a picture the CPU wrote into a staging image, freed after the read
+    Uploaded,
 }
 
 impl PictureSource {
@@ -9876,6 +10072,7 @@ impl PictureSource {
         match self {
             Self::DpbSlotRestored | Self::DpbSlotFinal => vk::ImageLayout::VIDEO_DECODE_DPB_KHR,
             Self::DecodeOutput => vk::ImageLayout::VIDEO_DECODE_DST_KHR,
+            Self::Uploaded => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         }
     }
 
@@ -11355,8 +11552,10 @@ impl DpbCore {
     /// grain must not touch the DPB reference), grain is synthesized on the CPU
     /// bit-for-bit with dav1d (`apply_film_grain_nv12`, the same path the system
     /// `decode_all` uses), and the result is uploaded to an RGBA or two-plane NV12
-    /// texture. Grain streams take the reorder path, so this is only ever an idle
-    /// slot (no decode into it in flight).
+    /// texture. A 10-bit picture is uploaded to a staging image instead and takes
+    /// the GPU pass a grain-free 10-bit slot takes, to `Rgba16Float` or P010.
+    /// Grain streams take the reorder path, so this is only ever an idle slot (no
+    /// decode into it in flight).
     fn grained_picture_to_texture(
         &mut self,
         slot: usize,
@@ -11367,6 +11566,10 @@ impl DpbCore {
         apply_film_grain_nv12(&mut frame, fg, is_id);
         let color = self.color;
         let gpu = self.gpu.as_ref().ok_or(VulkanVideoError::NoComputeQueue)?;
+        // the CPU conversion and two-plane upload below are 8-bit only
+        if frame.bit_depth > 8 {
+            return gpu.converter.output_uploaded(gpu.output, &frame);
+        }
         let device = &gpu.converter.wgpu_device;
         let queue = &gpu.wgpu_queue;
         Ok(match gpu.output {
@@ -13298,10 +13501,7 @@ impl Av1DpbDecoder {
                     (phys, fg)
                 }
             };
-            // The CPU upload path is 8-bit only, so a 10-bit grain frame takes the
-            // grain-free GPU convert, same as any other 10-bit slot.
-            // TODO: synthesize 10-bit grain on the texture path too.
-            if fg.apply_grain && self.core.bit_depth == 8 {
+            if fg.apply_grain {
                 out.push(self.core.grained_picture_to_texture(slot, &fg, is_id)?);
             } else {
                 // SAFETY: `slot` is an already-decoded, idle DPB slot (the reorder
