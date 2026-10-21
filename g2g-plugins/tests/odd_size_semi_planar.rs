@@ -7,6 +7,7 @@ use ffmpeg_tool::have_ffmpeg;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use g2g_core::meta::Orientation;
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{Colorimetry, PipelineClock, RawVideoFormat};
 use g2g_plugins::appsink::{register_appsink_pull, Pull};
@@ -420,5 +421,88 @@ async fn an_ffmpeg_nv12_frame_composites_unchanged() {
         )
         .await;
         assert_eq!(out, frame, "{width}x{height}");
+    }
+}
+
+// the subsampled formats videoflip takes, by ffmpeg pixel format
+const FLIP_FORMATS: [(RawVideoFormat, &str); 7] = [
+    (RawVideoFormat::Nv12, "nv12"),
+    (RawVideoFormat::I420, "yuv420p"),
+    (RawVideoFormat::I420p10, "yuv420p10le"),
+    (RawVideoFormat::I420p12, "yuv420p12le"),
+    (RawVideoFormat::I422, "yuv422p"),
+    (RawVideoFormat::I422p10, "yuv422p10le"),
+    (RawVideoFormat::I422p12, "yuv422p12le"),
+];
+
+// each videoflip method with the ffmpeg filter that does the same remap
+const FLIP_METHODS: [(Orientation, &str, &str); 7] = [
+    (Orientation::HorizontalMirror, "horizontal-flip", "hflip"),
+    (Orientation::VerticalMirror, "vertical-flip", "vflip"),
+    (Orientation::Rotate180, "rotate-180", "hflip,vflip"),
+    (Orientation::Rotate90Cw, "clockwise", "transpose=clock"),
+    (
+        Orientation::Rotate90Ccw,
+        "counterclockwise",
+        "transpose=cclock",
+    ),
+    (
+        Orientation::Transpose,
+        "upper-left-diagonal",
+        "transpose=cclock_flip",
+    ),
+    (
+        Orientation::Transverse,
+        "upper-right-diagonal",
+        "transpose=clock_flip",
+    ),
+];
+
+// every sample holds its own index, wrapped to the format's bit depth
+fn numbered_frame(format: RawVideoFormat, width: u32, height: u32) -> Vec<u8> {
+    let bytes = format.unpadded_frame_bytes(width, height).unwrap() as usize;
+    let bytes_per_sample = format.bytes_per_sample();
+    let sample_count = bytes / bytes_per_sample;
+    let sample_limit = 1usize << format.bit_depth();
+    (0..sample_count)
+        .flat_map(|index| {
+            let sample = (index % sample_limit) as u16;
+            sample.to_le_bytes().into_iter().take(bytes_per_sample)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn videoflip_flips_an_odd_frame_like_ffmpeg() {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg not present: skipping");
+        return;
+    }
+    for (width, height) in CONVERT_SIZES {
+        for (format, pixel_format) in FLIP_FORMATS {
+            let frame = numbered_frame(format, width, height);
+            let asymmetric_chroma = format
+                .chroma_shift()
+                .is_some_and(|(horizontal, vertical)| horizontal != vertical);
+            for (orientation, method, filter) in FLIP_METHODS {
+                // a transposed 4:2:2 picture is not a 4:2:2 layout, videoflip refuses it
+                if orientation.swaps_dims() && asymmetric_chroma {
+                    continue;
+                }
+                let label = format!("{pixel_format} {width}x{height} {method}");
+                let out = launch_one_frame(
+                    &frame,
+                    format.gst_name(),
+                    (width, height),
+                    &format!("videoflip method={method}"),
+                    &format!("flip_{pixel_format}_{width}x{height}_{method}"),
+                )
+                .await;
+                let reference =
+                    ffmpeg_filter(&frame, width, height, pixel_format, filter, pixel_format);
+                assert_eq!(out.len(), reference.len(), "{label}");
+                assert!(out == reference, "{label}: differs from ffmpeg");
+            }
+        }
     }
 }

@@ -4,11 +4,10 @@
 //! remap.
 //!
 //! The quarter rotations and the two diagonal mirrors swap width and height;
-//! `Rotate180` and the axis mirrors keep the geometry. 4:2:0 (`Nv12`, `I420`)
-//! needs even input dims: mirroring an odd extent moves the unpaired chroma
-//! column or row to the other edge, which needs a chroma resample this remap
-//! does not do, so odd dims fail negotiation/configure loud. Packed formats
-//! (`Rgba8`, `Bgra8`) take any dims. CPU-only `no_std` baseline.
+//! `Rotate180` and the axis mirrors keep the geometry. Each plane is remapped
+//! at its own size, so an odd extent flips the subsampled chroma plane at its
+//! rounded-up size with no chroma resample, as GStreamer's `videoflip` and
+//! ffmpeg's `hflip` / `vflip` / `transpose` do. CPU-only `no_std` baseline.
 //!
 //! When the sink downstream answers the first push with
 //! `Reconfigure::AbsorbOrientation` (M1058), the frame goes through untouched
@@ -23,7 +22,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::pixel::{even_dims_required, frame_byte_size, planar_planes, tight_plane};
+use crate::pixel::{frame_byte_size, planar_planes, tight_plane};
 use alloc::string::String;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
@@ -105,11 +104,6 @@ impl VideoFlip {
             return Err(G2gError::CapsMismatch);
         };
         if !FORMATS.contains(format) || *w == 0 || *h == 0 {
-            return Err(G2gError::CapsMismatch);
-        }
-        // a remap cannot move the unpaired chroma column or row of an odd extent
-        let (ew, eh) = even_dims_required(*format);
-        if (ew && *w % 2 != 0) || (eh && *h % 2 != 0) {
             return Err(G2gError::CapsMismatch);
         }
         // A 90-degree rotation transposes the frame, swapping the horizontal and
@@ -319,8 +313,8 @@ impl AsyncElement for VideoFlip {
 
     /// Native `DerivedOutput`: any supported raw input maps to the same format
     /// and framerate, with width and height swapped for the 90-degree
-    /// rotations and preserved otherwise. The 4:2:0 even-dim check is deferred
-    /// to configure where input dims are absolute.
+    /// rotations and preserved otherwise. The 4:2:2 transpose check is deferred
+    /// to configure.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let swaps = self.method.swaps_dims();
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
@@ -644,7 +638,7 @@ fn transform_plane(
 const NV12_CHROMA_PAIR_BYTES: usize = 2;
 
 /// Flip one frame by `method`, preserving `format`. `src` is validated to hold
-/// the input frame; dims are even when the format is 4:2:0.
+/// the input frame.
 fn flip(
     src: &[u8],
     format: RawVideoFormat,
@@ -837,17 +831,15 @@ mod tests {
     }
 
     #[test]
-    fn configure_rejects_odd_yuv420_and_compressed() {
-        // odd-width 4:2:0 fails.
-        let mut f = VideoFlip::new(Orientation::Rotate90Cw);
-        assert_eq!(
-            f.configure_pipeline(&nv12_caps(5, 4))
-                .expect_err("odd width for 4:2:0"),
-            G2gError::CapsMismatch
-        );
-        // even 4:2:0 is accepted.
-        let mut f = VideoFlip::new(Orientation::Rotate90Cw);
-        assert!(f.configure_pipeline(&nv12_caps(4, 4)).is_ok());
+    fn configure_accepts_odd_subsampled_sizes() {
+        for (width, height) in [(5, 4), (4, 3), (5, 3)] {
+            let mut f = VideoFlip::new(Orientation::Rotate90Cw);
+            assert!(f.configure_pipeline(&nv12_caps(width, height)).is_ok());
+            let mut f = VideoFlip::new(Orientation::HorizontalMirror);
+            assert!(f
+                .configure_pipeline(&planar_caps(RawVideoFormat::I422, width, height))
+                .is_ok());
+        }
         // packed RGBA at any dims is accepted.
         let mut f = VideoFlip::new(Orientation::Rotate180);
         assert!(f.configure_pipeline(&rgba_caps(5, 3)).is_ok());
