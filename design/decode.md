@@ -1102,6 +1102,13 @@ in order. A frame header that arrives before the frame's last tile group is a co
 (spec 7.5) and is skipped, as is every `OBU_REDUNDANT_FRAME_HEADER`. Only the last
 shown frame of each temporal unit is emitted, which in a scalable stream is its
 highest spatial layer, the output of aomdec and dav1d with `all_layers` off. The
+OBU walk first drops every OBU outside operating point 0 (spec 5.3.1: an OBU with
+an extension header whose `temporal_id` or `spatial_id` is not in
+`operating_point_idc[0]`), as dav1d and aomdec do by default. Each frame is read
+back and converted at its own `UpscaledWidth x FrameHeight`, the size dav1d
+outputs, so a frame coded below the sequence size leaves at that size behind a
+`CapsChanged`. The readback layout is per picture, bounded by the session's
+output extent, and a frame larger than the session is refused. The
 driver takes an AV1 frame's size only from the picture resource `codedExtent`, so
 each frame and each reference is bound at its own `UpscaledWidth x FrameHeight`:
 the base layer of `svc-L2T1` is 640x360 under the 1280x720 layer that predicts

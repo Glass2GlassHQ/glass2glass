@@ -113,11 +113,6 @@ Highest leverage first:
 ## Receive / decode
 
 - **`VulkanVideoDec` residuals.** Run the `vulkanvideo` GPU tests on Intel ANV.
-- **`VulkanVideoDec` AV1 operating point.** Drop OBUs outside operating point 0,
-  which needs the OBU extension's temporal and spatial ids from `av1parse`.
-- **`VulkanVideoDec` AV1 frames coded below the sequence size** decode at their
-  own size but are read back at the session output size: emit them at their own
-  size.
 - **`VulkanVideoDec` conformance residue on RADV.** `WPP_D_ericsson` (64 wide,
   wavefront parallel processing with dependent slice segments) decodes wrong
   through g2g on RADV while ffmpeg's Vulkan decoder decodes it bit-exact there

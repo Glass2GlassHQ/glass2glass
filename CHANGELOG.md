@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1787: `vulkanvideodec` emits AV1 frames coded below the sequence size at their own size.
+- M1786: `vulkanvideodec` drops AV1 OBUs outside operating point 0.
 - M1792: `matroskademux` and its multi-output form fail the stream on any selected track whose ContentEncoding they cannot undo, and playbin leaves such tracks out.
 - M1785: `matroskademux` decrypts WebM Encryption (AES-CTR) tracks with keys supplied per `ContentEncKeyID`, behind `matroska-decrypt`.
 - M1782: an MP4 clean aperture crops through mp4src, a bare uridecodebin, the uridecodebin / decodebin / fallbacksrc fan-outs and playbin, and survives av1parse and the start-code parsers.
