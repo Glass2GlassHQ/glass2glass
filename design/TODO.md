@@ -216,8 +216,11 @@ Highest leverage first:
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
-- **MP4 clean aperture:** crop to a `clap` box, which ffmpeg 8 applies by
-  default.
+- **MP4 clean aperture beyond decodebin:** a bare `uridecodebin uri=`, the
+  `uridecodebin` / `decodebin` fan-outs and `playbin` show the uncropped picture,
+  because none reads the clean-aperture flag (`Mp4Src` attaches no `CropMeta`,
+  `UriFanoutPort` carries only caps). `av1parse` and `startcodeparse` drop input
+  meta when re-framing, so AV1 or MPEG-2 in MP4 with a `clap` loses the crop.
 - **AVI I420 row padding:** GStreamer's `avimux` writes I420 with 4-byte-aligned
   rows, while g2g (like ffmpeg) reads I420 AVI as tight, so a GStreamer-written
   I420 AVI at a width that is not a multiple of 4 demuxes wrong.

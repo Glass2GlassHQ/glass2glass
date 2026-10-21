@@ -775,6 +775,20 @@ the swapchain and window for a turn that transposes the picture. Its processor
 caps are only known at the first frame, so a processor without rotation or mirror
 support fails that frame.
 
+### CropMeta
+
+`CropMeta` carries a `CropRectangle` (left, top, width, height in the stored
+picture's pixels), the part of the buffer meant to be shown. The MP4 demuxers
+attach it to every access unit of a track whose sample entry has a `clap` box,
+computed as ffmpeg's `mov_read_clap` does against the entry's own size (a
+malformed box is ignored with a warning). Decoders and the re-framing NAL parsers
+carry it to the decoded picture. `videocrop` with no inset set cuts the frame to
+it, rounding the origin and size down to whole chroma samples as ffmpeg's `crop`
+filter does, and `decodebin` adds that bare `videocrop` when the MP4
+primary-stream probe reports a clean aperture for the chosen track. It survives a
+colour convert and an encode, and is dropped by a scale or a crop, which move the
+pixels it counts in.
+
 ## The analytics overlay
 
 The visible end of the detector chain reads the `AnalyticsMeta` carried onto the
