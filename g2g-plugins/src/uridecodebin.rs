@@ -25,17 +25,17 @@ use alloc::boxed::Box;
 use g2g_core::log::short_type_name;
 use g2g_core::runtime::{DynMultiOutputElement, PadKind, PadRequest};
 use g2g_core::runtime::{DynSourceLoop, Uri, UriError, UriSource, UriSourceFactory};
-use g2g_core::{Caps, Dim, Rate, VideoCodec};
+use g2g_core::Caps;
 
 /// H.264 at any geometry: the media type the H.264 sources declare. Real
 /// dimensions ride in-band in the SPS and are resolved at negotiation.
-#[cfg(any(feature = "udp-ingress", feature = "rtsp", feature = "std"))]
+#[cfg(any(feature = "udp-ingress", feature = "rtsp"))]
 fn h264_any() -> Caps {
     Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width: Dim::Any,
-        height: Dim::Any,
-        framerate: Rate::Any,
+        codec: g2g_core::VideoCodec::H264,
+        width: g2g_core::Dim::Any,
+        height: g2g_core::Dim::Any,
+        framerate: g2g_core::Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
@@ -174,8 +174,8 @@ pub fn rtsp_track_fanout(url: &str, tracks: &crate::rtspsrcn::RtspTracks) -> Opt
 }
 
 /// `file:///path` -> the source matching what the file's header says it is: an
-/// ISO-BMFF file gets [`Mp4Src`](crate::mp4src::Mp4Src) (which demuxes its H.264
-/// track), anything else a [`FileSrc`](crate::filesrc::FileSrc) declaring the
+/// ISO-BMFF file gets [`Mp4Src`](crate::mp4src::Mp4Src) (which demuxes its first
+/// video track and declares that track's codec), anything else a [`FileSrc`](crate::filesrc::FileSrc) declaring the
 /// sniffed caps, so `decodebin` plugs the demux / parse chain that type needs.
 /// Content, not extension: a `.h264` elementary stream or an `.mkv` is not an
 /// MP4 and used to reach `Mp4Src` anyway. `rest` is the absolute path (the
@@ -191,11 +191,17 @@ pub fn file_handler() -> UriSourceFactory {
         match crate::typefind::sniff_caps(&prefix).ok_or(UriError::UnknownContent)? {
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::IsoBmff,
-            } => Ok(UriSource {
-                source: Box::new(crate::mp4src::Mp4Src::new(uri.rest)),
-                caps: h264_any(),
-                has_clean_aperture: mp4src_crops_clean_aperture(uri.rest),
-            }),
+            } => {
+                let mut source = crate::mp4src::Mp4Src::new(uri.rest);
+                let (caps, has_clean_aperture) = source
+                    .probe_stream()
+                    .map_err(|_| UriError::UnknownContent)?;
+                Ok(UriSource {
+                    source: Box::new(source),
+                    caps,
+                    has_clean_aperture: crops_clean_aperture(uri.rest, has_clean_aperture),
+                })
+            }
             caps => Ok(UriSource {
                 source: Box::new(crate::filesrc::FileSrc::new(uri.rest, caps.clone())),
                 caps,
@@ -267,9 +273,9 @@ pub fn v4l2_handler() -> UriSourceFactory {
             source: Box::new(crate::v4l2src::V4l2Src::new(uri.rest)),
             caps: Caps::RawVideo {
                 format: g2g_core::RawVideoFormat::Yuyv,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
+                width: g2g_core::Dim::Any,
+                height: g2g_core::Dim::Any,
+                framerate: g2g_core::Rate::Any,
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
@@ -446,15 +452,6 @@ fn mp4_ports(
             has_clean_aperture: crops_clean_aperture(location, cropped.contains(&track.track_id)),
         })
         .collect()
-}
-
-// the first track, the one Mp4Src forwards, read the way Mp4Src reads it
-#[cfg(feature = "std")]
-fn mp4src_crops_clean_aperture(path: &str) -> bool {
-    let has_clean_aperture = read_mp4_top_level_box(path, b"moov")
-        .and_then(|moov| crate::fmp4::parse_header(&moov).ok())
-        .is_some_and(|header| header.clean_aperture.is_some());
-    crops_clean_aperture(path, has_clean_aperture)
 }
 
 #[cfg(all(feature = "std", feature = "metadata"))]
@@ -2674,11 +2671,11 @@ fn hls_ts_stream(info: &crate::hlssrc::HlsStreamInfo) -> Option<crate::tsdemux::
     use crate::tsdemux::TsStream;
     match &info.caps {
         Caps::CompressedVideo {
-            codec: VideoCodec::H264,
+            codec: g2g_core::VideoCodec::H264,
             ..
         } => Some(TsStream::H264),
         Caps::CompressedVideo {
-            codec: VideoCodec::H265,
+            codec: g2g_core::VideoCodec::H265,
             ..
         } => Some(TsStream::H265),
         Caps::Audio {

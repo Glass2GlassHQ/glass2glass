@@ -112,6 +112,16 @@ impl Mp4Src {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
     }
+
+    // the probe a URI handler plugs the decode chain from, with whether the track has a clean aperture
+    pub(crate) fn probe_stream(&mut self) -> Result<(Caps, bool), G2gError> {
+        let caps = self.probe()?;
+        let has_clean_aperture = self
+            .header
+            .as_ref()
+            .is_some_and(|header| header.clean_aperture.is_some());
+        Ok((caps, has_clean_aperture))
+    }
 }
 
 impl SourceLoop for Mp4Src {

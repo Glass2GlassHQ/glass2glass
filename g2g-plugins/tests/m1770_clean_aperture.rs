@@ -136,6 +136,16 @@ fn decodebin_line(fixture: &Fixture) -> impl Fn(&str) -> String + '_ {
     }
 }
 
+fn uridecodebin_line(fixture: &Fixture) -> impl Fn(&str) -> String + '_ {
+    move |out| {
+        format!(
+            "uridecodebin uri=file://{} ! videoconvert ! video/x-raw,format=I420 \
+             ! filesink location={out}",
+            fixture.file
+        )
+    }
+}
+
 #[tokio::test]
 async fn decodebin_crops_to_the_clean_aperture_as_ffmpeg_does() {
     let (decoded, snapshot) = run_line("decodebin", decodebin_line(&H264)).await;
@@ -192,15 +202,20 @@ async fn mp4src_frames_carry_the_clean_aperture_to_a_bare_videocrop() {
 
 #[tokio::test]
 async fn a_bare_uridecodebin_crops_to_the_clean_aperture() {
-    let (decoded, snapshot) = run_line("uridecodebin", |out| {
-        format!(
-            "uridecodebin uri=file://{} ! videoconvert ! video/x-raw,format=I420 \
-             ! filesink location={out}",
-            H264.file
-        )
-    })
-    .await;
+    let (decoded, snapshot) = run_line("uridecodebin", uridecodebin_line(&H264)).await;
     assert_cropped_as_ffmpeg_does(&H264, &decoded, &snapshot);
+}
+
+#[tokio::test]
+async fn a_bare_uridecodebin_decodes_and_crops_av1_in_mp4() {
+    let (decoded, snapshot) = run_line("uridecodebin-av1", uridecodebin_line(&AV1)).await;
+    assert_cropped_as_ffmpeg_does(&AV1, &decoded, &snapshot);
+}
+
+#[tokio::test]
+async fn a_bare_uridecodebin_decodes_and_crops_mpeg4_part2_in_mp4() {
+    let (decoded, snapshot) = run_line("uridecodebin-mpeg4", uridecodebin_line(&MPEG4)).await;
+    assert_cropped_as_ffmpeg_does(&MPEG4, &decoded, &snapshot);
 }
 
 #[tokio::test]

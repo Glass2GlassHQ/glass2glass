@@ -204,3 +204,34 @@ async fn bare_decodebin_decodes_a_real_av1_mp4() {
     );
     let _ = std::fs::remove_file(&clip);
 }
+
+#[test]
+fn bare_uridecodebin_plugs_the_av1_decoder() {
+    let path = temp_path("av1-uri", "mp4");
+    std::fs::write(&path, mp4_with_av1_video()).unwrap();
+    let line = format!("uridecodebin uri=file://{} ! fakesink", path.display());
+    let names = chain_names(&line);
+    assert!(
+        names.iter().any(|n| n == "Rav1dDec"),
+        "the source declares the AV1 track, got {names:?}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+// tools/clean-aperture-fixture.sh writes it
+const AV1_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/av1_clean_aperture.mp4"
+);
+const AV1_FIXTURE_FRAMES: u64 = 3;
+
+#[tokio::test]
+async fn bare_uridecodebin_decodes_an_av1_mp4() {
+    let line = format!("uridecodebin uri=file://{AV1_FIXTURE} ! videoconvert ! fakesink");
+    let reg = default_registry();
+    let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .unwrap_or_else(|e| panic!("runs `{line}`: {e:?}"));
+    assert_eq!(stats.frames_consumed, AV1_FIXTURE_FRAMES, "every frame decodes");
+}
