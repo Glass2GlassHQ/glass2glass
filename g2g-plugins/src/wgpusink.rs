@@ -78,12 +78,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Fetch a pixel from a packed-NV12 R8Uint plane (`width x height*3/2`: Y rows,
-/// then interleaved CbCr). A uint texture is not filterable, so this fetches
-/// texels instead of sampling. The picture height comes from the texture (the
-/// packed plane is exactly 3/2 of it).
+/// Fetch a pixel from a packed-NV12 R8Uint plane ([`packed_nv12_extent`]: Y
+/// rows, then interleaved CbCr). A uint texture is not filterable, so this
+/// fetches texels instead of sampling. The picture size comes from the
+/// negotiated caps: at an odd width the texture is one column wider than the
+/// picture.
 const FRAGMENT_PACKED_NV12: &str = r#"
 @group(0) @binding(0) var nv12_tex: texture_2d<u32>;
+@group(0) @binding(1) var<uniform> picture_size: vec2<u32>;
 
 fn plane_value(x: u32, y: u32) -> f32 {
     return f32(textureLoad(nv12_tex, vec2<u32>(x, y), 0).r) / 255.0;
@@ -91,12 +93,10 @@ fn plane_value(x: u32, y: u32) -> f32 {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let packed = textureDimensions(nv12_tex);
-    let luma_height = packed.y * 2u / 3u;
-    let x = min(u32(in.uv.x * f32(packed.x)), packed.x - 1u);
-    let y = min(u32(in.uv.y * f32(luma_height)), luma_height - 1u);
+    let x = min(u32(in.uv.x * f32(picture_size.x)), picture_size.x - 1u);
+    let y = min(u32(in.uv.y * f32(picture_size.y)), picture_size.y - 1u);
     let chroma_x = (x / 2u) * 2u;
-    let chroma_y = luma_height + y / 2u;
+    let chroma_y = picture_size.y + y / 2u;
     return ycbcr_to_rgb(
         plane_value(x, y),
         plane_value(chroma_x, chroma_y),
@@ -113,16 +113,17 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 /// same whichever
 /// NV12 layout the producer hands it: a filtered sample lands a quarter of a
 /// chroma texel off the left-sited 4:2:0 grid and shifts colour across edges.
-/// The picture size comes from the luma plane.
+/// The picture size comes from the negotiated caps: a decoder may round the
+/// planes up to an even size.
 const FRAGMENT_MULTIPLANAR_NV12: &str = r#"
 @group(0) @binding(0) var luma_plane: texture_2d<f32>;
 @group(0) @binding(1) var chroma_plane: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> picture_size: vec2<u32>;
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let luma_size = textureDimensions(luma_plane);
-    let x = min(u32(in.uv.x * f32(luma_size.x)), luma_size.x - 1u);
-    let y = min(u32(in.uv.y * f32(luma_size.y)), luma_size.y - 1u);
+    let x = min(u32(in.uv.x * f32(picture_size.x)), picture_size.x - 1u);
+    let y = min(u32(in.uv.y * f32(picture_size.y)), picture_size.y - 1u);
     let chroma = textureLoad(chroma_plane, vec2<u32>(x / 2u, y / 2u), 0);
     return ycbcr_to_rgb(
         textureLoad(luma_plane, vec2<u32>(x, y), 0).r,
@@ -184,7 +185,8 @@ fn offscreen_texture(ctx: &GpuContext, width: u32, height: u32) -> wgpu::Texture
 }
 
 /// What a layout's fragment stage binds, in binding order: one texture per plane
-/// it reads, then a sampler when it filters instead of fetching texels. The
+/// it reads, then a sampler when it filters instead of fetching texels, then the
+/// picture size uniform when it indexes texels by the negotiated geometry. The
 /// pipeline's bind group layout and the per-frame bind group are both built from
 /// this, so the two cannot fall out of step.
 #[derive(Debug)]
@@ -192,7 +194,20 @@ struct BlitBindings {
     planes: u32,
     sample_type: wgpu::TextureSampleType,
     sampler: bool,
+    picture_size: bool,
 }
+
+impl BlitBindings {
+    fn sampler_binding(&self) -> u32 {
+        self.planes
+    }
+
+    fn picture_size_binding(&self) -> u32 {
+        self.planes + u32::from(self.sampler)
+    }
+}
+
+const PICTURE_SIZE_BYTES: u64 = 8;
 
 fn blit_bindings(layout: WgpuTextureLayout) -> BlitBindings {
     match layout {
@@ -200,11 +215,13 @@ fn blit_bindings(layout: WgpuTextureLayout) -> BlitBindings {
             planes: 1,
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
             sampler: true,
+            picture_size: false,
         },
         WgpuTextureLayout::PackedNv12 => BlitBindings {
             planes: 1,
             sample_type: wgpu::TextureSampleType::Uint,
             sampler: false,
+            picture_size: true,
         },
         // The plane views are float textures, but both NV12 stages fetch texels,
         // so neither binds a sampler.
@@ -212,6 +229,7 @@ fn blit_bindings(layout: WgpuTextureLayout) -> BlitBindings {
             planes: 2,
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
             sampler: false,
+            picture_size: true,
         },
     }
 }
@@ -254,9 +272,21 @@ impl BlitPipeline {
         }
         if bindings.sampler {
             entries.push(wgpu::BindGroupLayoutEntry {
-                binding: bindings.planes,
+                binding: bindings.sampler_binding(),
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+        }
+        if bindings.picture_size {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: bindings.picture_size_binding(),
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(PICTURE_SIZE_BYTES),
+                },
                 count: None,
             });
         }
@@ -304,35 +334,33 @@ impl BlitPipeline {
 /// Pixel format + geometry of the frames the sink was configured for.
 #[derive(Debug, Clone, Copy)]
 struct SourceLayout {
+    format: RawVideoFormat,
     layout: WgpuTextureLayout,
     width: u32,
     height: u32,
 }
 
 impl SourceLayout {
-    /// Texture format + size a system-memory frame of this layout uploads into,
-    /// and its packed row stride in bytes.
-    fn upload_geometry(&self) -> Result<(wgpu::TextureFormat, u32, u32, u32), G2gError> {
-        Ok(match self.layout {
-            WgpuTextureLayout::Rgba => (
-                wgpu::TextureFormat::Rgba8Unorm,
-                self.width,
-                self.height,
-                self.width * 4,
+    /// Texture format + size a system-memory frame of this layout uploads into.
+    fn upload_texture(&self) -> Result<(wgpu::TextureFormat, wgpu::Extent3d), G2gError> {
+        let (format, (width, height)) = match self.layout {
+            WgpuTextureLayout::Rgba => (wgpu::TextureFormat::Rgba8Unorm, (self.width, self.height)),
+            WgpuTextureLayout::PackedNv12 => (
+                wgpu::TextureFormat::R8Uint,
+                packed_nv12_extent(self.width, self.height),
             ),
-            WgpuTextureLayout::PackedNv12 => {
-                let (texture_width, texture_height) = packed_nv12_extent(self.width, self.height);
-                (
-                    wgpu::TextureFormat::R8Uint,
-                    texture_width,
-                    texture_height,
-                    self.width,
-                )
-            }
             // NV12 caps negotiate the packed layout, so a two-plane frame only
             // ever arrives as a GPU texture, never as bytes to upload.
             WgpuTextureLayout::MultiplanarNv12 => return Err(G2gError::UnsupportedDomain),
-        })
+        };
+        Ok((
+            format,
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        ))
     }
 }
 
@@ -374,14 +402,11 @@ fn source_layout(absolute_caps: &Caps) -> Result<SourceLayout, G2gError> {
         RawVideoFormat::Rgba8 => WgpuTextureLayout::Rgba,
         _ => return Err(G2gError::CapsMismatch),
     };
-    // NV12 chroma is subsampled: odd geometry has no well-defined plane.
-    if layout == WgpuTextureLayout::PackedNv12 && (width % 2 != 0 || height % 2 != 0) {
-        return Err(G2gError::CapsMismatch);
-    }
     if *width == 0 || *height == 0 {
         return Err(G2gError::CapsMismatch);
     }
     Ok(SourceLayout {
+        format: *format,
         layout,
         width: *width,
         height: *height,
@@ -394,6 +419,25 @@ fn source_layout(absolute_caps: &Caps) -> Result<SourceLayout, G2gError> {
 pub(crate) fn source_geometry(absolute_caps: &Caps) -> Result<(u32, u32), G2gError> {
     let source = source_layout(absolute_caps)?;
     Ok((source.width, source.height))
+}
+
+// the NV12 blits index texels by the negotiated picture size, not by the texture's
+fn texture_holds_picture(
+    texture: &wgpu::Texture,
+    layout: WgpuTextureLayout,
+    width: u32,
+    height: u32,
+) -> bool {
+    let size = (texture.width(), texture.height());
+    match layout {
+        // sampled whole and scaled to the target
+        WgpuTextureLayout::Rgba => true,
+        WgpuTextureLayout::PackedNv12 => size == packed_nv12_extent(width, height),
+        // a decoder may round its planes up to an even size
+        WgpuTextureLayout::MultiplanarNv12 => {
+            (size.0.div_ceil(2), size.1.div_ceil(2)) == (width.div_ceil(2), height.div_ceil(2))
+        }
+    }
 }
 
 // frames arrive gamma-encoded, an sRGB surface would encode them a second time
@@ -454,6 +498,7 @@ pub struct WgpuSink {
     /// Format of whatever the blits render into, needed to rebuild a pipeline.
     target_format: wgpu::TextureFormat,
     sampler: wgpu::Sampler,
+    picture_size: wgpu::Buffer,
     target: Target,
     /// Pixel format + geometry negotiated for the incoming frames, which a
     /// system-memory frame needs to be uploaded (a GPU frame carries its own).
@@ -529,6 +574,12 @@ impl WgpuSink {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let picture_size = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wgpu-sink-picture-size"),
+            size: PICTURE_SIZE_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Self {
             rgba_blit: BlitPipeline::build(
                 device,
@@ -552,6 +603,7 @@ impl WgpuSink {
             target_format,
             ctx,
             sampler,
+            picture_size,
             target,
             source: None,
             upload: None,
@@ -666,12 +718,9 @@ impl WgpuSink {
                 // or a format no blit here samples) is not presentable.
                 let texture = texture_of(owned).ok_or(G2gError::UnsupportedDomain)?;
                 let layout = texture_layout(texture).ok_or(G2gError::UnsupportedDomain)?;
-                // A two-plane texture carries the picture at its own size, so a
-                // mismatch with the negotiated geometry would sample the wrong
-                // plane extents.
-                if layout == WgpuTextureLayout::MultiplanarNv12 {
+                if layout != WgpuTextureLayout::Rgba {
                     let source = self.source.ok_or(G2gError::NotConfigured)?;
-                    if (texture.width(), texture.height()) != (source.width, source.height) {
+                    if !texture_holds_picture(texture, layout, source.width, source.height) {
                         return Err(G2gError::CapsMismatch);
                     }
                 }
@@ -690,19 +739,21 @@ impl WgpuSink {
         }
     }
 
-    /// Upload a packed system-memory frame into the sink's own texture in the
-    /// negotiated layout, then blit it.
+    /// Upload a tightly packed system-memory frame into the sink's own texture in
+    /// the negotiated layout, then blit it. Each plane is written as its own
+    /// region, stacked top to bottom, since an odd-width NV12 frame has luma and
+    /// chroma rows of different lengths.
     fn upload_system(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
         let source = self.source.ok_or(G2gError::NotConfigured)?;
-        let (format, width, rows, bytes_per_row) = source.upload_geometry()?;
-        if bytes.len() < (bytes_per_row as usize) * (rows as usize) {
+        let (texture_format, size) = source.upload_texture()?;
+        let (width, height) = (source.width, source.height);
+        let frame_bytes = source
+            .format
+            .unpadded_frame_bytes(width, height)
+            .ok_or(G2gError::CapsMismatch)?;
+        if (bytes.len() as u64) < frame_bytes {
             return Err(G2gError::CapsMismatch);
         }
-        let size = wgpu::Extent3d {
-            width,
-            height: rows,
-            depth_or_array_layers: 1,
-        };
         let texture = match &self.upload {
             Some(texture) => texture.clone(),
             None => {
@@ -712,7 +763,7 @@ impl WgpuSink {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format,
+                    format: texture_format,
                     usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 });
@@ -720,21 +771,48 @@ impl WgpuSink {
                 texture
             }
         };
-        self.ctx.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytes,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bytes_per_row),
-                rows_per_image: Some(rows),
-            },
-            size,
-        );
+        let texel_bytes = texture_format
+            .block_copy_size(None)
+            .ok_or(G2gError::UnsupportedDomain)?;
+        let mut plane_top = 0;
+        for plane in 0..source.format.plane_count() {
+            let stride = source
+                .format
+                .plane_stride(plane, width)
+                .ok_or(G2gError::CapsMismatch)?;
+            let rows = source
+                .format
+                .plane_rows(plane, height)
+                .ok_or(G2gError::CapsMismatch)?;
+            let offset = source
+                .format
+                .plane_offset(plane, width, height)
+                .ok_or(G2gError::CapsMismatch)?;
+            self.ctx.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: plane_top,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset,
+                    bytes_per_row: Some(stride),
+                    rows_per_image: Some(rows),
+                },
+                wgpu::Extent3d {
+                    width: stride / texel_bytes,
+                    height: rows,
+                    depth_or_array_layers: 1,
+                },
+            );
+            plane_top += rows;
+        }
         self.present(&texture, source.layout)
     }
 
@@ -766,8 +844,14 @@ impl WgpuSink {
             .collect();
         if bindings.sampler {
             entries.push(wgpu::BindGroupEntry {
-                binding: bindings.planes,
+                binding: bindings.sampler_binding(),
                 resource: wgpu::BindingResource::Sampler(&self.sampler),
+            });
+        }
+        if bindings.picture_size {
+            entries.push(wgpu::BindGroupEntry {
+                binding: bindings.picture_size_binding(),
+                resource: self.picture_size.as_entire_binding(),
             });
         }
         let bind_group = self
@@ -903,6 +987,11 @@ impl AsyncElement for WgpuSink {
         if let Caps::RawVideo { colorimetry, .. } = absolute_caps {
             self.set_nv12_colorimetry(*colorimetry);
         }
+        self.ctx.queue.write_buffer(
+            &self.picture_size,
+            0,
+            &[source.width.to_le_bytes(), source.height.to_le_bytes()].concat(),
+        );
         self.source = Some(source);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
