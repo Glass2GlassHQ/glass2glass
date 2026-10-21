@@ -461,6 +461,9 @@ jobs:
         run: cargo test -p g2g-plugins --locked --features dash --test m888_dash_cmaf_chunked --test m160_dashsrc --test m836_dash_live_multiperiod
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
+      # the runners have no GPU adapter, so the native GPU ML pipeline test is only compiled here
+      - name: check g2g-ml (native GPU ML pipeline test)
+        run: cargo check -p g2g-ml --locked --features wgpu,launch,ort --test native_ml_pipeline
       # the script pins the ExecuTorch version, so its hash keys the built libraries
       - name: cache executorch runtime
         uses: actions/cache@v4
