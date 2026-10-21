@@ -1632,7 +1632,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         in_edge: usize,
         mode: BranchMode,
     ) -> Result<usize, MutationError> {
-        advertise_orientation(&feed_rx, element.absorbs_orientation());
+        advertise_orientation(&feed_rx, element.absorbed_orientations());
         let node = self.nodes.len();
         let (done_tx, done_rx) = bounded(1);
         let properties = PropertyMailbox::new();

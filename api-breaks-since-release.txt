@@ -11,6 +11,7 @@ constructible_struct_adds_field: field ElementDesc.accepts_input
 constructible_struct_adds_field: field PrimaryStream.has_clean_aperture
 constructible_struct_adds_field: field QosMessage.taken_ns
 enum_discriminants_undefined_non_unit_variant: enum AudioFormat
+enum_unit_variant_changed_kind: variant Reconfigure::AbsorbOrientation
 enum_variant_added: variant NodeConstraint:BatchDemux
 enum_variant_added: variant NodeConstraint:BatchMuxer
 enum_variant_missing: variant CapsConstraint::LegacySink
@@ -25,3 +26,5 @@ function_parameter_count_changed: g2g_core::runtime::find_chain_with now takes 6
 inherent_method_missing: Registry::primary_stream
 method_parameter_count_changed: g2g_core::QosTracker::judge_frame takes 3 parameters
 method_parameter_count_changed: g2g_core::qos::QosTracker::judge_frame takes 3 parameters
+trait_method_missing: method absorbs_orientation of trait AsyncElement
+trait_method_missing: method absorbs_orientation of trait DynAsyncElement

@@ -209,7 +209,7 @@ fn chroma_aligned(
 fn held_back(outcome: PushOutcome) -> bool {
     matches!(
         outcome,
-        PushOutcome::Reconfigure(Reconfigure::AbsorbOrientation)
+        PushOutcome::Reconfigure(Reconfigure::AbsorbOrientation(_))
     )
 }
 

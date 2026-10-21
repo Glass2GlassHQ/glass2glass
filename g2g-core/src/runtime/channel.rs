@@ -1103,17 +1103,20 @@ pub struct SenderSink {
     strip_terminal: bool,
 }
 
-/// Tell the producer feeding `in_rx` that this sink applies an
-/// [`OrientationMeta`](crate::meta::OrientationMeta) itself, so a `videoflip`
-/// upstream attaches the descriptor instead of remapping pixels.
+/// Tell the producer feeding `in_rx` which orientations this sink applies from
+/// an [`OrientationMeta`](crate::meta::OrientationMeta) itself, so a `videoflip`
+/// upstream turning by one of them attaches the descriptor instead of remapping
+/// pixels. Nothing is sent when the set holds no turn besides `Identity`.
 ///
 /// Called while the runner is still wiring arms, not from inside the sink arm:
 /// the arms are polled source-first, so an advertisement made once the sink arm
 /// runs would arrive a linkful of already-rotated frames late.
 #[cfg(feature = "std")]
-pub(crate) fn advertise_orientation(in_rx: &LinkReceiver, absorbs: bool) {
-    if absorbs {
-        in_rx.request_reconfigure(crate::element::Reconfigure::AbsorbOrientation);
+pub(crate) fn advertise_orientation(in_rx: &LinkReceiver, absorbed: crate::meta::OrientationSet) {
+    use crate::meta::{Orientation, OrientationSet};
+    let only_identity: OrientationSet = [Orientation::Identity].into_iter().collect();
+    if absorbed != OrientationSet::EMPTY && absorbed != only_identity {
+        in_rx.request_reconfigure(Reconfigure::AbsorbOrientation(absorbed));
     }
 }
 
@@ -1305,7 +1308,7 @@ impl SenderSink {
         let r = self.link.reconfigure.take()?;
         let answered = match &r {
             Reconfigure::ForceKeyframe => self.reconfigure_answered.keyframe,
-            Reconfigure::AbsorbOrientation => self.reconfigure_answered.orientation,
+            Reconfigure::AbsorbOrientation(_) => self.reconfigure_answered.orientation,
             Reconfigure::Propose(_) | Reconfigure::Renegotiate => true,
         };
         if answered {
@@ -1313,7 +1316,7 @@ impl SenderSink {
             // because the pre-send check holds it back. Surfacing the same
             // signal after a send would have it resend a packet that already
             // crossed, so hold it for the next push's pre-send check instead.
-            if !pre_send && matches!(r, Reconfigure::AbsorbOrientation) {
+            if !pre_send && matches!(r, Reconfigure::AbsorbOrientation(_)) {
                 self.link.reconfigure.store(r);
                 return None;
             }
@@ -1616,6 +1619,7 @@ mod link_tests {
     use crate::element::OutputSinkExt;
     use crate::frame::{Frame, FrameTiming};
     use crate::memory::{MemoryDomain, SystemSlice};
+    use crate::meta::OrientationSet;
     use alloc::boxed::Box;
     use alloc::vec::Vec;
     use core::task::{Context, Poll, Waker};
@@ -1840,19 +1844,17 @@ mod link_tests {
             "an answered variant must not also travel upstream"
         );
 
-        down_rx.request_reconfigure(Reconfigure::AbsorbOrientation);
+        down_rx.request_reconfigure(Reconfigure::AbsorbOrientation(OrientationSet::ALL));
         let outcome = run_to_ready(adapter.push(dummy_frame())).expect("push ok");
         assert_eq!(
             outcome,
             PushOutcome::Accepted,
             "an unanswered variant is relayed, not surfaced"
         );
-        assert!(
-            matches!(
-                up_rx.reconfigure.take(),
-                Some(Reconfigure::AbsorbOrientation)
-            ),
-            "the advertisement must reach the upstream link"
+        assert_eq!(
+            up_rx.reconfigure.take(),
+            Some(Reconfigure::AbsorbOrientation(OrientationSet::ALL)),
+            "the advertisement must reach the upstream link with its set"
         );
         assert!(
             down_rx.try_recv().is_some(),
@@ -1877,12 +1879,12 @@ mod link_tests {
             },
         );
 
-        down_rx.request_reconfigure(Reconfigure::AbsorbOrientation);
+        down_rx.request_reconfigure(Reconfigure::AbsorbOrientation(OrientationSet::ALL));
         let outcome = run_to_ready(adapter.push(dummy_frame())).expect("push ok");
         assert!(
             matches!(
                 outcome,
-                PushOutcome::Reconfigure(Reconfigure::AbsorbOrientation)
+                PushOutcome::Reconfigure(Reconfigure::AbsorbOrientation(_))
             ),
             "the flip has to see the advertisement, got {outcome:?}"
         );
@@ -1907,7 +1909,7 @@ mod link_tests {
     fn an_eos_crosses_even_with_a_reconfigure_pending() {
         let (tx, rx) = link(2);
         let mut sink = SenderSink::new(tx);
-        rx.request_reconfigure(Reconfigure::AbsorbOrientation);
+        rx.request_reconfigure(Reconfigure::AbsorbOrientation(OrientationSet::ALL));
         let outcome = run_to_ready(sink.push(PipelinePacket::Eos)).expect("push ok");
         assert_eq!(outcome, PushOutcome::Accepted);
         assert!(
@@ -1929,7 +1931,7 @@ mod link_tests {
             orientation: false,
         };
 
-        rx.request_reconfigure(Reconfigure::AbsorbOrientation);
+        rx.request_reconfigure(Reconfigure::AbsorbOrientation(OrientationSet::ALL));
         let outcome = run_to_ready(adapter.push(dummy_frame())).expect("push ok");
         assert_eq!(outcome, PushOutcome::Accepted);
         assert!(rx.try_recv().is_some(), "the frame still crossed");
@@ -2184,14 +2186,23 @@ mod link_tests {
     #[cfg(feature = "std")]
     #[test]
     fn a_sink_that_applies_orientation_advertises_it_upstream() {
+        use crate::meta::Orientation;
         let (tx, rx) = link(2);
-        advertise_orientation(&rx, false);
+        advertise_orientation(&rx, OrientationSet::EMPTY);
         assert!(tx.reconfigure.take().is_none());
-        advertise_orientation(&rx, true);
-        assert!(matches!(
+        advertise_orientation(&rx, [Orientation::Identity].into_iter().collect());
+        assert!(
+            tx.reconfigure.take().is_none(),
+            "a sink that shows only the stored picture has no turn to offer"
+        );
+        let half_turn: OrientationSet = [Orientation::Identity, Orientation::Rotate180]
+            .into_iter()
+            .collect();
+        advertise_orientation(&rx, half_turn);
+        assert_eq!(
             tx.reconfigure.take(),
-            Some(Reconfigure::AbsorbOrientation)
-        ));
+            Some(Reconfigure::AbsorbOrientation(half_turn))
+        );
     }
 
     #[cfg(feature = "std")]

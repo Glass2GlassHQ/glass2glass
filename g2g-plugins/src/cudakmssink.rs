@@ -70,7 +70,7 @@ use khronos_egl as egl;
 
 use g2g_core::element::QosMessage;
 use g2g_core::memory::OwnedCudaBuffer;
-use g2g_core::meta::Orientation;
+use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
@@ -183,7 +183,7 @@ pub struct CudaKmsSink {
     /// drops.
     pacer: PresentationPacer,
     // set by the worker once it has read the primary plane
-    plane_shows_every_orientation: bool,
+    plane_orientations: OrientationSet,
 }
 
 impl core::fmt::Debug for CudaKmsSink {
@@ -218,7 +218,7 @@ impl CudaKmsSink {
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyHistogram::new()),
             pacer: PresentationPacer::for_video_sink(),
-            plane_shows_every_orientation: false,
+            plane_orientations: OrientationSet::EMPTY,
         }
     }
 
@@ -297,9 +297,13 @@ impl AsyncElement for CudaKmsSink {
     where
         Self: 'a;
 
-    // configure_pipeline sets up the worker before the runner asks, and one answer covers every turn
-    fn absorbs_orientation(&self) -> bool {
-        cfg!(feature = "metadata") && self.plane_shows_every_orientation
+    // configure_pipeline sets up the worker before the runner asks
+    fn absorbed_orientations(&self) -> OrientationSet {
+        if cfg!(feature = "metadata") {
+            self.plane_orientations
+        } else {
+            OrientationSet::EMPTY
+        }
     }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {
@@ -422,7 +426,7 @@ impl AsyncElement for CudaKmsSink {
         }
 
         let (tx, rx) = channel::<WorkerCmd>();
-        let (ready_tx, ready_rx) = channel::<Result<bool, ()>>();
+        let (ready_tx, ready_rx) = channel::<Result<OrientationSet, ()>>();
         let presented = Arc::clone(&self.frames_presented);
         let latency = Arc::clone(&self.latency);
         let device_path = self.device_path.clone();
@@ -447,8 +451,8 @@ impl AsyncElement for CudaKmsSink {
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
         // Wait for the worker to finish DRM/GBM/EGL/GL setup before accepting.
-        let plane_shows_every_orientation = match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(shows_every_orientation)) => shows_every_orientation,
+        let plane_orientations = match ready_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(plane_orientations)) => plane_orientations,
             _ => {
                 let _ = tx.send(WorkerCmd::Shutdown);
                 let _ = join.join();
@@ -461,7 +465,7 @@ impl AsyncElement for CudaKmsSink {
         self.width = w;
         self.height = h;
         self.colorimetry = colorimetry;
-        self.plane_shows_every_orientation = plane_shows_every_orientation;
+        self.plane_orientations = plane_orientations;
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -570,7 +574,7 @@ fn worker_main(
     rx: Receiver<WorkerCmd>,
     presented: Arc<AtomicU64>,
     latency: Arc<LatencyHistogram>,
-    ready_tx: &Sender<Result<bool, ()>>,
+    ready_tx: &Sender<Result<OrientationSet, ()>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut state = match WorkerState::setup(&device_path, width, height, colorimetry) {
         Ok(s) => s,
@@ -580,11 +584,11 @@ fn worker_main(
         }
     };
     // Setup done: let configure_pipeline proceed.
-    let plane_shows_every_orientation = state
+    let plane_orientations = state
         .plane_rotation
         .as_ref()
-        .is_some_and(PlaneRotation::shows_every_orientation);
-    let _ = ready_tx.send(Ok(plane_shows_every_orientation));
+        .map_or(OrientationSet::EMPTY, PlaneRotation::shown_orientations);
+    let _ = ready_tx.send(Ok(plane_orientations));
 
     loop {
         // Block for the next frame; a long idle is not an error (live sources
@@ -930,7 +934,10 @@ mod tests {
 
     #[test]
     fn absorbs_no_orientation_before_the_worker_reads_the_plane() {
-        assert!(!CudaKmsSink::new().absorbs_orientation());
+        assert_eq!(
+            CudaKmsSink::new().absorbed_orientations(),
+            OrientationSet::EMPTY
+        );
     }
 
     #[test]

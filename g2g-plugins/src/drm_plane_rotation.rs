@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use drm::control::{crtc, plane, property, Device as ControlDevice, ResourceHandles};
 use drm::ClientCapability;
 
-use g2g_core::meta::Orientation;
+use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::{G2gError, HardwareError};
 
 const ORIENTATIONS: [Orientation; 8] = [
@@ -30,10 +30,13 @@ pub(crate) struct PlaneRotation {
 }
 
 impl PlaneRotation {
-    pub(crate) fn shows_every_orientation(&self) -> bool {
+    pub(crate) fn shown_orientations(&self) -> OrientationSet {
         ORIENTATIONS
-            .iter()
-            .all(|&orientation| rotation_value(drm_rotation(orientation), &self.values).is_some())
+            .into_iter()
+            .filter(|&orientation| {
+                rotation_value(drm_rotation(orientation), &self.values).is_some()
+            })
+            .collect()
     }
 
     // The property value that shows `orientation`, None when the plane already shows it.
@@ -260,6 +263,17 @@ pub(crate) mod tests {
         ]))
     }
 
+    pub(crate) fn half_turns_and_axis_mirrors() -> OrientationSet {
+        [
+            Orientation::Identity,
+            Orientation::Rotate180,
+            Orientation::HorizontalMirror,
+            Orientation::VerticalMirror,
+        ]
+        .into_iter()
+        .collect()
+    }
+
     // The turn the plane shows for `rotation`: the reflection, then counter-clockwise turns.
     fn shown_orientation(rotation: DrmRotation) -> Orientation {
         let reflected = if rotation.reflect_x {
@@ -295,7 +309,10 @@ pub(crate) mod tests {
             rotation_value(drm_rotation(Orientation::Transpose), &values),
             Some(bit(&values, "reflect-x") | bit(&values, "rotate-90"))
         );
-        assert!(plane_with_every_value().shows_every_orientation());
+        assert_eq!(
+            plane_with_every_value().shown_orientations(),
+            OrientationSet::ALL
+        );
     }
 
     #[test]
@@ -320,7 +337,10 @@ pub(crate) mod tests {
             ),
             Some(bit(&without_reflect_x, "reflect-y") | bit(&without_reflect_x, "rotate-180"))
         );
-        assert!(fixture_plane_rotation(without_reflect_x).shows_every_orientation());
+        assert_eq!(
+            fixture_plane_rotation(without_reflect_x).shown_orientations(),
+            OrientationSet::ALL
+        );
     }
 
     #[test]
@@ -334,7 +354,7 @@ pub(crate) mod tests {
             plane.changed_value(Orientation::Rotate90Cw),
             Err(G2gError::CapsMismatch)
         );
-        assert!(!plane.shows_every_orientation());
+        assert_eq!(plane.shown_orientations(), half_turns_and_axis_mirrors());
     }
 
     #[test]

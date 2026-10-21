@@ -10,10 +10,11 @@
 //! ffmpeg's `hflip` / `vflip` / `transpose` do. CPU-only `no_std` baseline.
 //!
 //! When the sink downstream answers the first push with
-//! `Reconfigure::AbsorbOrientation` (M1058), the frame goes through untouched
-//! with an `OrientationMeta` on it instead and the output caps stay the input
-//! caps: the sink turns the picture at present time and the pixel work
-//! disappears.
+//! `Reconfigure::AbsorbOrientation` (M1058) and its set holds this element's
+//! method, the frame goes through untouched with an `OrientationMeta` on it
+//! instead and the output caps stay the input caps: the sink turns the picture
+//! at present time and the pixel work disappears. A method outside the set is
+//! still remapped here.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -28,6 +29,7 @@ use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::{SystemSlice, SystemView};
 pub use g2g_core::meta::Orientation;
+use g2g_core::meta::OrientationSet;
 use g2g_core::tensor::TensorView;
 use g2g_core::{g2g_info, g2g_trace};
 use g2g_core::{
@@ -67,10 +69,11 @@ pub struct VideoFlip {
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
-    /// Set once downstream answered a push with `Reconfigure::AbsorbOrientation`
-    /// (M1058): frames then pass through with an `OrientationMeta` attached and
-    /// the output caps are the input caps.
-    descriptor_mode: bool,
+    /// The orientations a downstream `Reconfigure::AbsorbOrientation` named
+    /// (M1058), empty until one arrives. While it holds `method`, frames pass
+    /// through with an `OrientationMeta` attached and the output caps are the
+    /// input caps.
+    absorbed_orientations: OrientationSet,
     /// Instance name assigned by the runner (M179), for this element's log lines.
     log_name: LogName,
 }
@@ -83,13 +86,18 @@ impl VideoFlip {
             configured: false,
             last_caps: None,
             emitted: 0,
-            descriptor_mode: false,
+            absorbed_orientations: OrientationSet::EMPTY,
             log_name: LogName::new(),
         }
     }
 
     pub fn method(&self) -> Orientation {
         self.method
+    }
+
+    // read per frame since `set_property` can change the method mid-stream
+    fn describes(&self) -> bool {
+        self.absorbed_orientations.contains(self.method)
     }
 
     fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
@@ -124,7 +132,7 @@ impl VideoFlip {
     /// diagonal mirrors transpose, the axis mirrors and 180 preserve. In
     /// descriptor mode nothing is remapped, so the geometry is the input's.
     fn output_dims(&self, w: u32, h: u32) -> (u32, u32) {
-        if self.method.swaps_dims() && !self.descriptor_mode {
+        if self.method.swaps_dims() && !self.describes() {
             (h, w)
         } else {
             (w, h)
@@ -248,10 +256,10 @@ impl VideoFlip {
         Ok(out_frame)
     }
 
-    /// Answer a downstream `AbsorbOrientation` seen on `outcome`: stop remapping
-    /// pixels, let the turn ride along as metadata instead, and re-announce the
-    /// output shape, which is now the input's. Returns false when `outcome` was
-    /// anything else.
+    /// Answer a downstream `AbsorbOrientation` seen on `outcome`: record the
+    /// set, and when it holds the method stop remapping pixels, let the turn ride
+    /// along as metadata instead, and re-announce the output shape, which is now
+    /// the input's. Returns false when `outcome` was anything else.
     ///
     /// The pre-send check holds the packet that carried the advertisement back
     /// rather than enqueuing it, so the caller has to send that packet again.
@@ -260,19 +268,24 @@ impl VideoFlip {
         out: &mut dyn OutputSink,
         outcome: PushOutcome,
     ) -> Result<bool, G2gError> {
-        if !matches!(
-            outcome,
-            PushOutcome::Reconfigure(Reconfigure::AbsorbOrientation)
-        ) {
+        let PushOutcome::Reconfigure(Reconfigure::AbsorbOrientation(absorbed)) = outcome else {
             return Ok(false);
-        }
-        if !self.descriptor_mode {
-            self.descriptor_mode = true;
-            g2g_info!(
-                self,
-                "downstream absorbs orientation: attaching {:?} instead of rotating",
-                self.method
-            );
+        };
+        if self.absorbed_orientations != absorbed {
+            self.absorbed_orientations = absorbed;
+            if self.describes() {
+                g2g_info!(
+                    self,
+                    "downstream absorbs orientation: attaching {:?} instead of rotating",
+                    self.method
+                );
+            } else {
+                g2g_info!(
+                    self,
+                    "downstream cannot apply {:?}: still rotating",
+                    self.method
+                );
+            }
         }
         // The shape announced before the switch was the rotated one, which no
         // frame will now carry: a display sink configured on it would open a
@@ -412,7 +425,7 @@ impl AsyncElement for VideoFlip {
                         }
                     }
 
-                    if !self.descriptor_mode {
+                    if !self.describes() {
                         let out_frame = self.flip_frame(&frame, format, in_w, in_h)?;
                         let outcome = out.push(PipelinePacket::DataFrame(out_frame)).await?;
                         if !self.absorb(out, outcome).await? {
@@ -420,9 +433,13 @@ impl AsyncElement for VideoFlip {
                             return Ok(());
                         }
                         // The remapped frame was held back, so `frame` is still
-                        // the one downstream is owed: send it as a descriptor.
+                        // the one downstream is owed, in the mode `absorb` left.
                     }
-                    let out_frame = self.describe(frame);
+                    let out_frame = if self.describes() {
+                        self.describe(frame)
+                    } else {
+                        self.flip_frame(&frame, format, in_w, in_h)?
+                    };
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }

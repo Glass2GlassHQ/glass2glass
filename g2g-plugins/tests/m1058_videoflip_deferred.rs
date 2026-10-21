@@ -4,9 +4,10 @@
 //! The sink advertises `Reconfigure::AbsorbOrientation` up its input link before
 //! the first frame is pulled. `VideoFlip` answers it by passing the buffer
 //! through with an `OrientationMeta` on it and announcing the *input* geometry,
-//! so no pixel is ever remapped. A sink that does not advertise gets the old
-//! eager behaviour, and a pass-through transform between the two relays the
-//! advertisement instead of swallowing it.
+//! so no pixel is ever remapped. A sink that does not advertise, or advertises a
+//! set without the flip's method, gets the old eager behaviour, and a
+//! pass-through transform between the two relays the advertisement instead of
+//! swallowing it.
 //!
 //! Needs the real `FrameMetaSet` (`metadata`) and the runners (`std`).
 #![cfg(all(feature = "std", feature = "metadata"))]
@@ -16,7 +17,7 @@ use core::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::Frame;
-use g2g_core::meta::{Orientation, OrientationMeta};
+use g2g_core::meta::{Orientation, OrientationMeta, OrientationSet};
 use g2g_core::runtime::{run_graph, run_source_transform_sink, GraphNodeRef};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, HardwareError,
@@ -92,26 +93,27 @@ struct Recording {
     caps_changes: Vec<Caps>,
 }
 
-/// A sink that records what really reached it, and, when `absorbs` is set, tells
-/// upstream it applies an `OrientationMeta` itself (what `WaylandSink` does with
-/// `set_buffer_transform`).
+/// A sink that records what really reached it, and tells upstream it applies an
+/// `OrientationMeta` itself for the orientations in `absorbed` (what
+/// `WaylandSink` does with `set_buffer_transform`).
 ///
 /// Strict on purpose: it sizes its buffer from the caps it was configured with
-/// and refuses a frame that does not match, so a missing or wrong mid-stream
-/// `CapsChanged` fails the run instead of passing silently.
+/// and refuses a frame that does not match, or that carries a turn outside
+/// `absorbed`, so a missing or wrong mid-stream `CapsChanged` or a descriptor it
+/// cannot apply fails the run instead of passing silently.
 #[derive(Debug)]
 struct RecordingSink {
-    absorbs: bool,
+    absorbed: OrientationSet,
     log: Arc<Mutex<Recording>>,
     caps: Option<Caps>,
 }
 
 impl RecordingSink {
-    fn new(absorbs: bool) -> (Self, Arc<Mutex<Recording>>) {
+    fn new(absorbed: OrientationSet) -> (Self, Arc<Mutex<Recording>>) {
         let log = Arc::new(Mutex::new(Recording::default()));
         (
             RecordingSink {
-                absorbs,
+                absorbed,
                 log: log.clone(),
                 caps: None,
             },
@@ -152,8 +154,8 @@ impl AsyncElement for RecordingSink {
         Ok(ConfigureOutcome::Accepted)
     }
 
-    fn absorbs_orientation(&self) -> bool {
-        self.absorbs
+    fn absorbed_orientations(&self) -> OrientationSet {
+        self.absorbed
     }
 
     fn process<'a>(
@@ -174,12 +176,16 @@ impl AsyncElement for RecordingSink {
                         return Err(G2gError::Hardware(HardwareError::Other));
                     }
                     let caps = self.caps.clone().ok_or(G2gError::NotConfigured)?;
+                    let orientation = frame
+                        .meta
+                        .get::<OrientationMeta>()
+                        .map(|meta| meta.orientation);
+                    if orientation.is_some_and(|turn| !self.absorbed.contains(turn)) {
+                        return Err(G2gError::CapsMismatch);
+                    }
                     self.log.lock().unwrap().frames.push(Received {
                         bytes,
-                        orientation: frame
-                            .meta
-                            .get::<OrientationMeta>()
-                            .map(|meta| meta.orientation),
+                        orientation,
                         caps,
                     });
                 }
@@ -190,11 +196,11 @@ impl AsyncElement for RecordingSink {
     }
 }
 
-/// `videotestsrc ! videoflip ! sink`, run on the graph runner.
-async fn run_flip_to(absorbs: bool) -> Recording {
+/// `videotestsrc ! videoflip method=<method> ! sink`, run on the graph runner.
+async fn run_flip_to(method: Orientation, absorbed: OrientationSet) -> Recording {
     let mut src = source(true);
-    let mut flip = VideoFlip::new(TURN);
-    let (mut sink, log) = RecordingSink::new(absorbs);
+    let mut flip = VideoFlip::new(method);
+    let (mut sink, log) = RecordingSink::new(absorbed);
 
     let mut graph: Graph<GraphNodeRef<'_>> = Graph::new();
     let src_id = graph.add_source(GraphNodeRef::source_ref(&mut src));
@@ -213,7 +219,7 @@ async fn run_flip_to(absorbs: bool) -> Recording {
 /// `videotestsrc ! sink`: the pixels the source produced, untouched.
 async fn run_source_only(shared: bool) -> Recording {
     let mut src = source(shared);
-    let (mut sink, log) = RecordingSink::new(false);
+    let (mut sink, log) = RecordingSink::new(OrientationSet::EMPTY);
 
     let mut graph: Graph<GraphNodeRef<'_>> = Graph::new();
     let src_id = graph.add_source(GraphNodeRef::source_ref(&mut src));
@@ -230,7 +236,7 @@ async fn run_source_only(shared: bool) -> Recording {
 #[tokio::test]
 async fn an_absorbing_sink_gets_the_descriptor_and_the_untouched_pixels() {
     let source_frames = run_source_only(true).await;
-    let deferred = run_flip_to(true).await;
+    let deferred = run_flip_to(TURN, OrientationSet::ALL).await;
 
     assert_eq!(
         deferred.frames.len(),
@@ -274,7 +280,7 @@ async fn an_absorbing_sink_gets_the_descriptor_and_the_untouched_pixels() {
 #[tokio::test]
 async fn a_sink_that_does_not_absorb_still_gets_the_rotation() {
     let source_frames = run_source_only(true).await;
-    let eager = run_flip_to(false).await;
+    let eager = run_flip_to(TURN, OrientationSet::EMPTY).await;
 
     assert_eq!(eager.frames.len(), FRAMES as usize);
     for (index, got) in eager.frames.iter().enumerate() {
@@ -291,14 +297,77 @@ async fn a_sink_that_does_not_absorb_still_gets_the_rotation() {
     }
 }
 
+/// A plane that shows only the stored picture and its half turn: a flip by the
+/// half turn defers, a quarter turn the sink cannot apply is still remapped.
+fn half_turn_only() -> OrientationSet {
+    [Orientation::Identity, Orientation::Rotate180]
+        .into_iter()
+        .collect()
+}
+
+#[tokio::test]
+async fn a_sink_defers_only_the_turns_it_advertises() {
+    let source_frames = run_source_only(true).await;
+    let half_turn = run_flip_to(Orientation::Rotate180, half_turn_only()).await;
+
+    assert_eq!(half_turn.frames.len(), FRAMES as usize);
+    for (index, (got, reference)) in half_turn
+        .frames
+        .iter()
+        .zip(source_frames.frames.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            got.orientation,
+            Some(Orientation::Rotate180),
+            "frame {index}"
+        );
+        assert_eq!(got.caps, rgba_caps(WIDTH, HEIGHT), "frame {index}");
+        assert_eq!(
+            got.bytes, reference.bytes,
+            "frame {index} reached the sink unrotated"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_turn_outside_the_advertised_set_is_remapped() {
+    let quarter_turn = run_flip_to(TURN, half_turn_only()).await;
+    let eager = run_flip_to(TURN, OrientationSet::EMPTY).await;
+
+    assert_eq!(quarter_turn.frames.len(), FRAMES as usize);
+    for (index, (got, rotated)) in quarter_turn
+        .frames
+        .iter()
+        .zip(eager.frames.iter())
+        .enumerate()
+    {
+        assert_eq!(got.orientation, None, "frame {index} carries no descriptor");
+        assert_eq!(
+            got.caps,
+            rgba_caps(HEIGHT, WIDTH),
+            "frame {index} arrived under the swapped geometry"
+        );
+        assert_eq!(got.bytes, rotated.bytes, "frame {index} was rotated here");
+    }
+    assert!(
+        quarter_turn
+            .caps_changes
+            .iter()
+            .all(|caps| *caps == rgba_caps(HEIGHT, WIDTH)),
+        "the sink is only told about the rotated shape: {:?}",
+        quarter_turn.caps_changes
+    );
+}
+
 /// The eager and the deferred run have to describe the same picture: rotating
 /// the deferred run's buffer by its own descriptor reproduces the eager run's
 /// bytes. Without this the two paths could each be self-consistent and still
 /// disagree about which way the picture turns.
 #[tokio::test]
 async fn the_descriptor_names_the_turn_the_eager_path_applies() {
-    let deferred = run_flip_to(true).await;
-    let eager = run_flip_to(false).await;
+    let deferred = run_flip_to(TURN, OrientationSet::ALL).await;
+    let eager = run_flip_to(TURN, OrientationSet::EMPTY).await;
 
     for (index, (described, rotated)) in deferred.frames.iter().zip(eager.frames.iter()).enumerate()
     {
@@ -334,7 +403,7 @@ async fn the_advertisement_relays_through_a_pass_through_transform() {
     let mut src = source(false);
     let mut flip = VideoFlip::new(TURN);
     let mut convert = VideoConvert::new(RawVideoFormat::Rgba8);
-    let (mut sink, log) = RecordingSink::new(true);
+    let (mut sink, log) = RecordingSink::new(OrientationSet::ALL);
 
     let mut graph: Graph<GraphNodeRef<'_>> = Graph::new();
     let src_id = graph.add_source(GraphNodeRef::source_ref(&mut src));
@@ -391,7 +460,7 @@ async fn the_advertisement_relays_through_a_pass_through_transform() {
 async fn the_linear_runner_advertises_too() {
     let mut src = source(true);
     let mut flip = VideoFlip::new(TURN);
-    let (mut sink, log) = RecordingSink::new(true);
+    let (mut sink, log) = RecordingSink::new(OrientationSet::ALL);
 
     run_source_transform_sink(&mut src, &mut flip, &mut sink, &NullClock, LINK_CAPACITY)
         .await

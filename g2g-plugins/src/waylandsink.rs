@@ -105,7 +105,7 @@ use crate::yuvmatrix::YuvRgbMatrix;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, SystemSlice};
-use g2g_core::meta::Orientation;
+use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
@@ -503,8 +503,12 @@ impl AsyncElement for WaylandSink {
     /// `wl_surface::set_buffer_transform`, so a `videoflip` upstream should
     /// attach an `OrientationMeta` rather than remap every pixel (M1058). Needs
     /// the `metadata` feature: without it a frame has nowhere to carry the turn.
-    fn absorbs_orientation(&self) -> bool {
-        cfg!(feature = "metadata")
+    fn absorbed_orientations(&self) -> OrientationSet {
+        if cfg!(feature = "metadata") {
+            OrientationSet::ALL
+        } else {
+            OrientationSet::EMPTY
+        }
     }
 
     /// Adopt the elected clock + base time so frames present at their PTS
@@ -1266,10 +1270,12 @@ mod tests {
     /// rotation deferred.
     #[test]
     fn advertises_that_it_absorbs_orientation() {
-        assert_eq!(
-            WaylandSink::new().absorbs_orientation(),
-            cfg!(feature = "metadata")
-        );
+        let expected = if cfg!(feature = "metadata") {
+            OrientationSet::ALL
+        } else {
+            OrientationSet::EMPTY
+        };
+        assert_eq!(WaylandSink::new().absorbed_orientations(), expected);
     }
 
     /// The sink converts on the CPU into `wl_shm`, so it has to tell a GPU decoder to

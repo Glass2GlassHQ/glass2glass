@@ -475,7 +475,7 @@ impl SourceLoop for ReconfigurableTestSrc {
             Reconfigure::Propose(c) => Ok(c),
             Reconfigure::Renegotiate
             | Reconfigure::ForceKeyframe
-            | Reconfigure::AbsorbOrientation => Err(G2gError::FixationFailed),
+            | Reconfigure::AbsorbOrientation(_) => Err(G2gError::FixationFailed),
         }
     }
 

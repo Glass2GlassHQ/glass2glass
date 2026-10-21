@@ -106,6 +106,33 @@ impl Orientation {
             Orientation::from_parts((4 - turns) % 4, false)
         }
     }
+
+    const fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+// a set of the eight orientations, one bit each
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrientationSet(u8);
+
+impl OrientationSet {
+    pub const EMPTY: OrientationSet = OrientationSet(0);
+    pub const ALL: OrientationSet = OrientationSet(u8::MAX);
+
+    pub const fn contains(self, orientation: Orientation) -> bool {
+        self.0 & orientation.bit() != 0
+    }
+}
+
+impl FromIterator<Orientation> for OrientationSet {
+    fn from_iter<I: IntoIterator<Item = Orientation>>(orientations: I) -> Self {
+        OrientationSet(
+            orientations
+                .into_iter()
+                .fold(0, |bits, orientation| bits | orientation.bit()),
+        )
+    }
 }
 
 // in stored-picture pixels, ungated since a demuxer reads it without the metadata feature

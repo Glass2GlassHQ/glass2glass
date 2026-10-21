@@ -153,7 +153,7 @@ pub(crate) fn any_geometry(format: RawVideoFormat) -> Caps {
 fn held_back(outcome: PushOutcome) -> bool {
     matches!(
         outcome,
-        PushOutcome::Reconfigure(Reconfigure::AbsorbOrientation)
+        PushOutcome::Reconfigure(Reconfigure::AbsorbOrientation(_))
     )
 }
 

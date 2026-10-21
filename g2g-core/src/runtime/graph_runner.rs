@@ -2392,7 +2392,7 @@ fn plan_arms<'a>(
             }
             (NodeKind::Sink, Some(GraphNodeRef::Element(element))) => {
                 let in_rx = in_rxs.pop().expect("sink input edge");
-                advertise_orientation(&in_rx, element.absorbs_orientation());
+                advertise_orientation(&in_rx, element.absorbed_orientations());
                 ArmPlan::Sink {
                     element,
                     io: SinkArmIo {

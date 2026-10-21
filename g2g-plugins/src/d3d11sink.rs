@@ -86,7 +86,7 @@ use crate::videoflip::frame_orientation;
 use crate::worker_ready::Handshake;
 use g2g_core::element::QosMessage;
 use g2g_core::frame::Frame;
-use g2g_core::meta::Orientation;
+use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
@@ -252,8 +252,12 @@ impl AsyncElement for D3D11Sink {
         Self: 'a;
 
     // the processor's rotation and mirror caps are read at the first frame, after the runner asks
-    fn absorbs_orientation(&self) -> bool {
-        cfg!(feature = "metadata")
+    fn absorbed_orientations(&self) -> OrientationSet {
+        if cfg!(feature = "metadata") {
+            OrientationSet::ALL
+        } else {
+            OrientationSet::EMPTY
+        }
     }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {
@@ -1035,10 +1039,12 @@ mod tests {
 
     #[test]
     fn absorbs_orientation_with_metadata() {
-        assert_eq!(
-            D3D11Sink::new().absorbs_orientation(),
-            cfg!(feature = "metadata")
-        );
+        let expected = if cfg!(feature = "metadata") {
+            OrientationSet::ALL
+        } else {
+            OrientationSet::EMPTY
+        };
+        assert_eq!(D3D11Sink::new().absorbed_orientations(), expected);
     }
 
     #[test]

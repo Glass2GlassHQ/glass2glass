@@ -9,6 +9,7 @@ use crate::error::G2gError;
 use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::PipelinePacket;
 use crate::memory::{DomainSet, MemoryDomainKind};
+use crate::meta::OrientationSet;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 
@@ -43,13 +44,13 @@ pub enum Reconfigure {
     /// analog.
     ForceKeyframe,
     /// The sink downstream applies an
-    /// `OrientationMeta` itself, so a rotation
-    /// upstream should attach the descriptor rather than remap the pixels. Sent
-    /// once by a display sink that can turn a buffer for free (a Wayland
-    /// `set_buffer_transform`, a KMS plane rotation) before the first frame is
-    /// pulled, and relayed past any transform that does not answer it (see
-    /// [`AsyncElement::handles_orientation`]).
-    AbsorbOrientation,
+    /// `OrientationMeta` itself for the orientations in the set, so a rotation
+    /// upstream by one of them should attach the descriptor rather than remap
+    /// the pixels. Sent once by a display sink that can turn a buffer for free
+    /// (a Wayland `set_buffer_transform`, a KMS plane rotation) before the first
+    /// frame is pulled, and relayed past any transform that does not answer it
+    /// (see [`AsyncElement::handles_orientation`]).
+    AbsorbOrientation(OrientationSet),
 }
 
 /// Downstream-originated quality-of-service signal: a synchronising sink dropped
@@ -374,15 +375,15 @@ pub trait AsyncElement: ElementBound {
         false
     }
 
-    /// Whether this sink applies an
-    /// `OrientationMeta` itself, i.e. it can
-    /// turn the picture for free at present time. The runner sends
-    /// [`Reconfigure::AbsorbOrientation`] up this sink's input link before the
-    /// first frame is pulled, so a `videoflip` upstream attaches the descriptor
-    /// instead of remapping pixels. Default `false`: the flip realizes the
-    /// rotation as it always did.
-    fn absorbs_orientation(&self) -> bool {
-        false
+    /// The orientations this sink applies from an
+    /// `OrientationMeta` itself, i.e. the ones it can
+    /// turn the picture by for free at present time. The runner sends
+    /// [`Reconfigure::AbsorbOrientation`] with this set up this sink's input
+    /// link before the first frame is pulled, so a `videoflip` upstream whose
+    /// method is in the set attaches the descriptor instead of remapping pixels.
+    /// Default empty: the flip realizes the rotation as it always did.
+    fn absorbed_orientations(&self) -> OrientationSet {
+        OrientationSet::EMPTY
     }
 
     /// Whether [`Reconfigure::AbsorbOrientation`] stops at this element instead
@@ -711,9 +712,9 @@ pub trait DynAsyncElement: ElementBound {
         false
     }
 
-    /// Dyn-safe mirror of [`AsyncElement::absorbs_orientation`] (M1058).
-    fn absorbs_orientation(&self) -> bool {
-        false
+    /// Dyn-safe mirror of [`AsyncElement::absorbed_orientations`] (M1058).
+    fn absorbed_orientations(&self) -> OrientationSet {
+        OrientationSet::EMPTY
     }
 
     /// Dyn-safe mirror of [`AsyncElement::handles_orientation`] (M1058).
@@ -933,8 +934,8 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::handles_bitrate_requests(self)
     }
 
-    fn absorbs_orientation(&self) -> bool {
-        AsyncElement::absorbs_orientation(self)
+    fn absorbed_orientations(&self) -> OrientationSet {
+        AsyncElement::absorbed_orientations(self)
     }
 
     fn handles_orientation(&self) -> bool {
@@ -1133,8 +1134,8 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
         (**self).handles_bitrate_requests()
     }
 
-    fn absorbs_orientation(&self) -> bool {
-        (**self).absorbs_orientation()
+    fn absorbed_orientations(&self) -> OrientationSet {
+        (**self).absorbed_orientations()
     }
 
     fn handles_orientation(&self) -> bool {

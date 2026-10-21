@@ -8,7 +8,7 @@
 //!
 //! The group table needs no features; the meta needs the real `FrameMetaSet`.
 
-use g2g_core::meta::Orientation;
+use g2g_core::meta::{Orientation, OrientationSet};
 
 /// Every member, in the order the property strings list them.
 const ALL: [Orientation; 8] = [
@@ -124,6 +124,22 @@ fn identity_is_the_unit_and_only_four_members_swap_dims() {
     ] {
         assert!(orientation.swaps_dims(), "{orientation:?}");
     }
+}
+
+#[test]
+fn an_orientation_set_holds_exactly_the_members_it_was_built_from() {
+    for member in ALL {
+        let set: OrientationSet = [member].into_iter().collect();
+        for orientation in ALL {
+            assert_eq!(set.contains(orientation), orientation == member);
+        }
+        assert!(OrientationSet::ALL.contains(member));
+        assert!(!OrientationSet::EMPTY.contains(member));
+    }
+    assert_eq!(
+        ALL.into_iter().collect::<OrientationSet>(),
+        OrientationSet::ALL
+    );
 }
 
 #[cfg(feature = "metadata")]

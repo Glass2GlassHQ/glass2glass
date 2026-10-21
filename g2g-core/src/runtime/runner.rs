@@ -727,7 +727,7 @@ where
     }
 
     let (link_tx, link_rx) = link(link_capacity);
-    advertise_orientation(&link_rx, AsyncElement::absorbs_orientation(sink));
+    advertise_orientation(&link_rx, AsyncElement::absorbed_orientations(sink));
 
     // M399: measured per-element telemetry for the sink (the linear runner's one
     // interior element with a `process()`); the source's cost surfaces as fill.

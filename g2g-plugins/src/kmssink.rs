@@ -61,7 +61,7 @@ use drm::Device;
 use g2g_core::element::QosMessage;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
-use g2g_core::meta::Orientation;
+use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
@@ -522,13 +522,14 @@ impl AsyncElement for KmsSink {
         DomainSet::only(MemoryDomainKind::System)
     }
 
-    // configure_pipeline opens the device before the runner asks, and one answer covers every turn
-    fn absorbs_orientation(&self) -> bool {
-        cfg!(feature = "metadata")
-            && self
-                .plane_rotation
-                .as_ref()
-                .is_some_and(PlaneRotation::shows_every_orientation)
+    // configure_pipeline opens the device before the runner asks
+    fn absorbed_orientations(&self) -> OrientationSet {
+        match &self.plane_rotation {
+            Some(plane_rotation) if cfg!(feature = "metadata") => {
+                plane_rotation.shown_orientations()
+            }
+            _ => OrientationSet::EMPTY,
+        }
     }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {
@@ -939,19 +940,33 @@ mod tests {
     }
 
     #[test]
-    fn absorbs_orientation_only_with_a_plane_that_shows_every_turn() {
+    fn absorbs_the_orientations_the_plane_shows() {
         use crate::drm_plane_rotation::tests::{
-            plane_with_every_value, plane_without_quarter_turns,
+            half_turns_and_axis_mirrors, plane_with_every_value, plane_without_quarter_turns,
+        };
+        let when_metadata_on = |set| {
+            if cfg!(feature = "metadata") {
+                set
+            } else {
+                OrientationSet::EMPTY
+            }
         };
         let mut sink = KmsSink::new();
-        assert!(
-            !sink.absorbs_orientation(),
+        assert_eq!(
+            sink.absorbed_orientations(),
+            OrientationSet::EMPTY,
             "no plane before the device opens"
         );
         sink.plane_rotation = Some(plane_without_quarter_turns());
-        assert!(!sink.absorbs_orientation());
+        assert_eq!(
+            sink.absorbed_orientations(),
+            when_metadata_on(half_turns_and_axis_mirrors())
+        );
         sink.plane_rotation = Some(plane_with_every_value());
-        assert_eq!(sink.absorbs_orientation(), cfg!(feature = "metadata"));
+        assert_eq!(
+            sink.absorbed_orientations(),
+            when_metadata_on(OrientationSet::ALL)
+        );
     }
 
     #[test]
