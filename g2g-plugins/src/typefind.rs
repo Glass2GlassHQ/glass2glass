@@ -586,7 +586,24 @@ fn sniff_annexb_video(header: &[u8]) -> Option<VideoCodec> {
 }
 
 // the header's SPS picture size in place of the placeholder range, so auto-plug can weigh it
-fn sized_by_sps(placeholder: &Caps, header: &[u8]) -> Option<Caps> {
+pub(crate) fn sized_by_sps(placeholder: &Caps, header: &[u8]) -> Option<Caps> {
+    let Caps::CompressedVideo { codec, .. } = placeholder else {
+        return None;
+    };
+    let geometry = match codec {
+        VideoCodec::H264 => H264Codec::extract_sps_info(header),
+        VideoCodec::H265 => H265Codec::extract_sps_info(header),
+        _ => None,
+    }?;
+    with_picture_size(placeholder, geometry.width, geometry.height)
+}
+
+// `None` for a size outside the placeholder's range or a placeholder that is not compressed video
+pub(crate) fn with_picture_size(
+    placeholder: &Caps,
+    picture_width: u32,
+    picture_height: u32,
+) -> Option<Caps> {
     let Caps::CompressedVideo {
         codec,
         width,
@@ -597,15 +614,10 @@ fn sized_by_sps(placeholder: &Caps, header: &[u8]) -> Option<Caps> {
     else {
         return None;
     };
-    let geometry = match codec {
-        VideoCodec::H264 => H264Codec::extract_sps_info(header),
-        VideoCodec::H265 => H265Codec::extract_sps_info(header),
-        _ => None,
-    }?;
     Some(Caps::CompressedVideo {
         codec: *codec,
-        width: width.intersect(&Dim::Fixed(geometry.width))?,
-        height: height.intersect(&Dim::Fixed(geometry.height))?,
+        width: width.intersect(&Dim::Fixed(picture_width))?,
+        height: height.intersect(&Dim::Fixed(picture_height))?,
         framerate: framerate.clone(),
         colorimetry: *colorimetry,
     })

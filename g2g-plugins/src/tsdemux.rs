@@ -49,6 +49,7 @@ use crate::mpegts::{
     TAG_KEY_SCHEDULE_EVENT_DURATION, TAG_KEY_SCHEDULE_EVENT_ID, TAG_KEY_SCHEDULE_EVENT_NAME,
     TAG_KEY_SCHEDULE_EVENT_START, TAG_KEY_SCHEDULE_EVENT_TEXT, TAG_KEY_SERVICE_PROVIDER,
 };
+use crate::typefind::sized_by_sps;
 
 /// The published stream id of an elementary stream: the id it takes in the
 /// `StreamCollection` (M386), and the id its per-stream tags post on (M872).
@@ -1119,7 +1120,7 @@ pub struct TsProbedStreams {
     pub unsupported: Vec<&'static str>,
 }
 
-// reads the PES units `demux` completed so far, to tell apart streams their stream_type leaves ambiguous
+// reads the PES units `demux` completed so far, to size video and tell apart ambiguous stream types
 pub fn probe_streams(demux: &mut TsDemuxer) -> TsProbedStreams {
     let units = demux.take_units();
     let first_payload = |pid: u16| {
@@ -1133,7 +1134,16 @@ pub fn probe_streams(demux: &mut TsDemuxer) -> TsProbedStreams {
         if let Some(codec) = unsupported_codec(es, first_payload(es.pid)) {
             probed.unsupported.push(codec);
         } else if let Some(stream) = es_to_ts_stream(es) {
-            probed.forwardable.push(stream_info(stream));
+            let mut info = stream_info(stream);
+            // the first SPS in the stream's PES units lets auto-plug weigh decoders by cost
+            if let Some(sized) = units
+                .iter()
+                .filter(|unit| unit.pid == es.pid)
+                .find_map(|unit| sized_by_sps(&info.caps, &unit.data))
+            {
+                info.caps = sized;
+            }
+            probed.forwardable.push(info);
         }
     }
     probed
@@ -2290,5 +2300,50 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    fn probed_video_caps(stream: &[u8]) -> Caps {
+        let mut demux = TsDemuxer::new();
+        TsPacketSplitter::new().push(stream, &mut demux);
+        probe_streams(&mut demux)
+            .forwardable
+            .into_iter()
+            .find(|info| info.video)
+            .expect("a video stream")
+            .caps
+    }
+
+    #[test]
+    fn probing_reads_the_video_picture_size_from_its_sps() {
+        const H264_FIXTURE_SIZE: (u32, u32) = (160, 120);
+        const H265_FIXTURE_SIZE: (u32, u32) = (3840, 2160);
+        for (stream, (width, height)) in [
+            (
+                include_bytes!("../tests/fixtures/av_h264_aac44100.ts").as_slice(),
+                H264_FIXTURE_SIZE,
+            ),
+            (
+                include_bytes!("../tests/fixtures/h265_3840x2160.ts").as_slice(),
+                H265_FIXTURE_SIZE,
+            ),
+        ] {
+            let caps = probed_video_caps(stream);
+            let (probed_width, probed_height, _) = caps.dims().expect("video caps");
+            assert_eq!(
+                (probed_width, probed_height),
+                (&Dim::Fixed(width), &Dim::Fixed(height))
+            );
+        }
+    }
+
+    #[test]
+    fn probing_video_without_an_sps_keeps_the_placeholder_size() {
+        let mut muxer = crate::mpegts::TsMuxer::with_streams(&[STREAM_TYPE_H264]);
+        let mut stream = muxer.push_au(&[0, 0, 0, 1, 0x65, 0x11], None, None, true);
+        stream.extend(muxer.push_au(&[0, 0, 0, 1, 0x01, 0x22], None, None, false));
+        assert_eq!(
+            probed_video_caps(&stream),
+            TsDemux::output_caps(TsStream::H264)
+        );
     }
 }

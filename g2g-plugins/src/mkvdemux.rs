@@ -57,7 +57,7 @@ use crate::codectag::{tagged_stream_name, TaggedStream};
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::matroska::{MatroskaDemuxer, MkvCodec};
-use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
+use crate::typefind::{framerate_within_placeholder, with_picture_size, PLACEHOLDER_FRAMERATE};
 use crate::uncompressedvideo::{
     raw_video_caps, raw_video_formats, raw_video_frame_bytes, raw_video_placeholder_caps,
     raw_video_stream_from_str, raw_video_stream_str, warn_short_raw_video_frame,
@@ -1124,6 +1124,10 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
                     sample_rate,
                     channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 },
+                // the track's pixel size lets auto-plug weigh decoders by cost
+                video @ Caps::CompressedVideo { .. } => {
+                    with_picture_size(&video, t.width, t.height).unwrap_or(video)
+                }
                 other => other,
             };
             Some(MkvStreamInfo {
@@ -1967,6 +1971,34 @@ mod tests {
             "a rate past the negotiated range"
         );
     }
+    #[test]
+    fn forwardable_video_streams_carry_the_track_picture_size() {
+        const AV1_FIXTURE_SIZE: (u32, u32) = (321, 181);
+        const H265_FIXTURE_SIZE: (u32, u32) = (3840, 2160);
+        for (file, (width, height)) in [
+            (
+                include_bytes!("../tests/fixtures/av1_321x181_24fps.mkv").as_slice(),
+                AV1_FIXTURE_SIZE,
+            ),
+            (
+                include_bytes!("../tests/fixtures/h265_3840x2160.mkv").as_slice(),
+                H265_FIXTURE_SIZE,
+            ),
+        ] {
+            let mut demux = MatroskaDemuxer::new();
+            demux.push_data(file);
+            let video = forwardable_streams(&demux)
+                .into_iter()
+                .find(|info| info.video)
+                .expect("a video track");
+            let (probed_width, probed_height, _) = video.caps.dims().expect("video caps");
+            assert_eq!(
+                (probed_width, probed_height),
+                (&Dim::Fixed(width), &Dim::Fixed(height))
+            );
+        }
+    }
+
     #[test]
     fn forwardable_streams_carry_concrete_audio_channels() {
         // An Opus decoder is created per channel count, so the playbin audio branch
