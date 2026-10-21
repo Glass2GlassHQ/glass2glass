@@ -39,14 +39,13 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use std::net::SocketAddr;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
@@ -64,12 +63,12 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::livekit_signal::{
-    access_token, candidate_from_init_json, candidate_init_json, signal_ws_url, AddTrackRequest,
-    IceSettings, IceTransportPolicy, SessionDescription, SignalRequest, SignalResponse,
-    SignalTarget, TrackSource, TrackType, VideoGrant, VideoLayer, VideoQuality,
-    ICE_TRANSPORT_POLICY_PROP, LIVEKIT_TURN_SERVER_PROP, TURN_PASS_PROP, TURN_USER_PROP,
+    candidate_from_init_json, candidate_init_json, ping_timestamp, recv_signal,
+    room_property_table, send_signal, AddTrackRequest, IceSettings, IceTransportPolicy,
+    RoomSettings, SessionDescription, SignalRequest, SignalResponse, SignalSocket, SignalTarget,
+    TrackSource, TrackType, VideoGrant, VideoLayer, VideoQuality, ICE_TRANSPORT_POLICY_PROP,
+    LIVEKIT_TURN_SERVER_PROP, TURN_PASS_PROP, TURN_USER_PROP,
 };
-use crate::livekitsrc::{recv_signal, send_signal};
 use crate::turn::TurnSet;
 use crate::webrtc_codec::{
     enable_tracks, frame_capture_time, sink_caps_alternatives, stamp_capture_time, Track,
@@ -79,7 +78,7 @@ use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_simulcast::{
     rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
-use crate::webrtc_util::{feed_datagram, non_empty, select_host_ip, send_transmit};
+use crate::webrtc_util::{feed_datagram, select_host_ip, send_transmit};
 
 /// Default bounded depth of the element->session media channel (per direction).
 const DEFAULT_QUEUE_DEPTH: usize = 256;
@@ -88,8 +87,8 @@ const DEFAULT_QUEUE_DEPTH: usize = 256;
 const TOKEN_TTL_SECS: u64 = 6 * 3600;
 
 /// A split LiveKit signalling WebSocket (client side is TLS-capable).
-type WsWrite = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
-type WsRead = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
+type WsWrite = SplitSink<SignalSocket, Message>;
+type WsRead = SplitStream<SignalSocket>;
 
 /// One encoded access unit handed to the session task, tagged with the m-line
 /// writer it targets (`mid` + an optional simulcast `rid`) and its track kind
@@ -126,14 +125,7 @@ struct PadSink {
 ///     .with_simulcast(2);
 /// ```
 pub struct LiveKitSink {
-    /// LiveKit signalling base URL, e.g. `ws://localhost:7880`.
-    url: String,
-    room: String,
-    identity: String,
-    api_key: String,
-    api_secret: String,
-    /// Pre-minted access token; when set, `api_key` / `api_secret` are unused.
-    token: Option<String>,
+    room_settings: RoomSettings,
     queue_depth: usize,
     /// Aggregate send-bitrate cap in bits/second (0 = uncapped), applied to the
     /// BWE estimate before the layer allocator budgets it.
@@ -164,9 +156,9 @@ impl LogSource for LiveKitSink {
 impl core::fmt::Debug for LiveKitSink {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LiveKitSink")
-            .field("url", &self.url)
-            .field("room", &self.room)
-            .field("identity", &self.identity)
+            .field("url", &self.room_settings.url)
+            .field("room", &self.room_settings.room)
+            .field("identity", &self.room_settings.identity)
             .field("track_count", &self.pads.input_count())
             .field("frames_sent", &self.frames_sent)
             .finish()
@@ -184,12 +176,7 @@ impl LiveKitSink {
         identity: impl Into<String>,
     ) -> Self {
         let mut s = Self {
-            url: url.into(),
-            room: room.into(),
-            identity: identity.into(),
-            api_key: String::new(),
-            api_secret: String::new(),
-            token: None,
+            room_settings: RoomSettings::new(url, room, identity),
             queue_depth: DEFAULT_QUEUE_DEPTH,
             max_send_bitrate: 0,
             pads: SimulcastPads::new(),
@@ -229,8 +216,8 @@ impl LiveKitSink {
 
     /// LiveKit API key + secret; the sink mints a publish-only access token.
     pub fn with_api_key(mut self, key: impl Into<String>, secret: impl Into<String>) -> Self {
-        self.api_key = key.into();
-        self.api_secret = secret.into();
+        self.room_settings.api_key = key.into();
+        self.room_settings.api_secret = secret.into();
         self
     }
 
@@ -256,7 +243,7 @@ impl LiveKitSink {
 
     /// Use a pre-minted access token instead of minting one from key + secret.
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
-        self.token = Some(token.into());
+        self.room_settings.token = Some(token.into());
         self
     }
 
@@ -279,50 +266,23 @@ impl LiveKitSink {
         self.pads.all_configured()
     }
 
-    /// The access token to present: the pre-minted one, or a freshly minted
-    /// publish-only token (join `room`, `canPublish`, `canSubscribe = false` so
-    /// the server makes the publisher PC primary and sends no subscriber offer).
-    fn access_token(&self) -> Result<String, G2gError> {
-        access_token(
-            self.token.as_deref(),
-            &self.api_key,
-            &self.api_secret,
-            &self.identity,
-            &VideoGrant::publisher(&self.room),
-            TOKEN_TTL_SECS,
-        )
+    /// A publish-only grant (join `room`, `canPublish`, `canSubscribe = false`
+    /// so the server makes the publisher PC primary and sends no subscriber
+    /// offer).
+    fn grant(&self) -> VideoGrant {
+        VideoGrant::publisher(&self.room_settings.room)
     }
 
     /// Run the LiveKit join + publish handshake and spawn the session task.
     /// Runs on the first frame, once every track kind is known.
     async fn start_session(&mut self) -> Result<(), G2gError> {
         let hw = || G2gError::Hardware(HardwareError::Other);
-        let token = self.access_token()?;
-        let ws_url = signal_ws_url(&self.url, &token, false);
-
-        let (ws, _resp) = connect_async(&ws_url).await.map_err(|e| {
-            g2g_warn!(self, "WebSocket connect to {} failed: {e}", self.url);
-            hw()
-        })?;
-        let mut ws = ws;
-
         // Phase A: the server's first envelope is the JoinResponse.
-        let join = loop {
-            match recv_signal(&mut ws).await? {
-                Some(SignalResponse::Join(j)) => break j,
-                Some(SignalResponse::Leave) | None => {
-                    g2g_warn!(self, "closed before JoinResponse");
-                    return Err(hw());
-                }
-                // Ignore anything before the join (none expected).
-                Some(_) => {}
-            }
-        };
-        let ping_interval = if join.ping_interval > 0 {
-            Duration::from_secs(join.ping_interval as u64)
-        } else {
-            Duration::from_secs(15)
-        };
+        let (mut ws, join) = self
+            .room_settings
+            .join(&self.grant(), TOKEN_TTL_SECS, false, self)
+            .await?;
+        let ping_interval = join.ping_period();
 
         // Video input pads in order (pad 0 = top layer), each a simulcast layer;
         // one shared video m-line groups them all, rids assigned high->low with
@@ -356,7 +316,7 @@ impl LiveKitSink {
 
         // The AddTrackRequest cid must equal the SDP msid track-id, so we choose
         // it and hand it to str0m as the track_id for that m-line.
-        let stream_id = format!("g2g-{}", self.identity);
+        let stream_id = format!("g2g-{}", self.room_settings.identity);
         let video_cid = format!("{stream_id}-video");
         let audio_cid = format!("{stream_id}-audio");
 
@@ -588,25 +548,7 @@ fn local_candidates(offer_sdp: &str) -> Vec<String> {
 
 /// Settable properties, so a `gst-launch` line can target a room without the
 /// builder.
-static LIVEKIT_PROPS: &[PropertySpec] = &[
-    PropertySpec::new(
-        "url",
-        PropKind::Str,
-        "LiveKit signalling URL (ws://host:7880)",
-    ),
-    PropertySpec::new("room", PropKind::Str, "room name to join"),
-    PropertySpec::new("identity", PropKind::Str, "participant identity"),
-    PropertySpec::new("api-key", PropKind::Str, "LiveKit API key (mints a token)"),
-    PropertySpec::new(
-        "api-secret",
-        PropKind::Str,
-        "LiveKit API secret (mints a token)",
-    ),
-    PropertySpec::new(
-        "token",
-        PropKind::Str,
-        "pre-minted access token (overrides api-key/secret)",
-    ),
+static LIVEKIT_PROPS: &[PropertySpec] = room_property_table![
     PropertySpec::new(
         "max-send-bitrate",
         PropKind::Uint,
@@ -751,17 +693,9 @@ impl MultiInputElement for LiveKitSink {
         if let Some(result) = self.ice.set_property(name, &value) {
             return result;
         }
-        let text = || value.as_str().ok_or(PropError::Type);
-        match name {
-            "url" => self.url = text()?.into(),
-            "room" => self.room = text()?.into(),
-            "identity" => self.identity = text()?.into(),
-            "api-key" => self.api_key = text()?.into(),
-            "api-secret" => self.api_secret = text()?.into(),
-            "token" => self.token = non_empty(text()?),
-            _ => return Err(PropError::Unknown),
-        }
-        Ok(())
+        self.room_settings
+            .set_property(name, &value)
+            .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
@@ -771,16 +705,7 @@ impl MultiInputElement for LiveKitSink {
         if let Some(value) = self.ice.get_property(name) {
             return Some(value);
         }
-        let v = match name {
-            "url" => self.url.clone(),
-            "room" => self.room.clone(),
-            "identity" => self.identity.clone(),
-            "api-key" => self.api_key.clone(),
-            "api-secret" => self.api_secret.clone(),
-            "token" => self.token.clone().unwrap_or_default(),
-            _ => return None,
-        };
-        Some(PropValue::Str(v))
+        self.room_settings.get_property(name)
     }
 }
 
@@ -985,12 +910,8 @@ async fn run_session(mut a: SessionArgs) {
                 }
             }
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(ping_at)) => {
-                let now_ms = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
                 let _ = a.ws_write
-                    .send(Message::Binary(SignalRequest::Ping(now_ms).encode()))
+                    .send(Message::Binary(SignalRequest::Ping(ping_timestamp()).encode()))
                     .await;
                 ping_at = Instant::now() + a.ping_interval;
             }
@@ -1090,23 +1011,27 @@ mod tests {
         assert!(s.intercept_caps(0, &h264_any()).is_ok());
     }
 
+    fn access_token(s: &LiveKitSink) -> Result<String, G2gError> {
+        s.room_settings.access_token(&s.grant(), TOKEN_TTL_SECS)
+    }
+
     #[test]
     fn access_token_prefers_preminted() {
         let s = LiveKitSink::new("ws://h:7880", "room", "id").with_token("PRE.MINTED.TOK");
-        assert_eq!(s.access_token().unwrap(), "PRE.MINTED.TOK");
+        assert_eq!(access_token(&s).unwrap(), "PRE.MINTED.TOK");
     }
 
     #[test]
     fn access_token_mints_from_key_secret() {
         let s = LiveKitSink::new("ws://h:7880", "room", "id").with_api_key("devkey", "secret");
-        let tok = s.access_token().unwrap();
+        let tok = access_token(&s).unwrap();
         assert_eq!(tok.split('.').count(), 3, "a minted JWT has three parts");
     }
 
     #[test]
     fn access_token_errors_without_credentials() {
         let s = LiveKitSink::new("ws://h:7880", "room", "id");
-        assert!(s.access_token().is_err());
+        assert!(access_token(&s).is_err());
     }
 
     #[test]
@@ -1124,7 +1049,7 @@ mod tests {
             Some(PropValue::Str("ws://srv:7880".into()))
         );
         assert_eq!(s.get_property("room"), Some(PropValue::Str("r2".into())));
-        assert_eq!(s.api_key, "k");
+        assert_eq!(s.room_settings.api_key, "k");
         s.set_property("ice-transport-policy", PropValue::Str("relay".into()))
             .unwrap();
         s.set_property("turn-server", PropValue::Str("turn:r:3478".into()))

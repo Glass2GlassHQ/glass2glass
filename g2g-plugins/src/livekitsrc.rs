@@ -31,12 +31,11 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use futures_util::{SinkExt, StreamExt};
-use tokio::net::{TcpStream, UdpSocket};
+use futures_util::StreamExt;
+use tokio::net::UdpSocket;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use str0m::change::SdpOffer;
 use str0m::crypto::from_feature_flags;
@@ -51,16 +50,17 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::livekit_signal::{
-    access_token, candidate_from_init_json, signal_ws_url, IceSettings, IceTransportPolicy,
-    LiveKitSignalLog, SessionDescription, SignalRequest, SignalResponse, SignalTarget, VideoGrant,
-    ICE_TRANSPORT_POLICY_PROP, LIVEKIT_TURN_SERVER_PROP, TURN_PASS_PROP, TURN_USER_PROP,
+    candidate_from_init_json, ping_timestamp, room_property_table, send_signal, IceSettings,
+    IceTransportPolicy, LiveKitSignalLog, RoomSettings, SessionDescription, SignalRequest,
+    SignalResponse, SignalSocket, SignalTarget, VideoGrant, ICE_TRANSPORT_POLICY_PROP,
+    LIVEKIT_TURN_SERVER_PROP, TURN_PASS_PROP, TURN_USER_PROP,
 };
 use crate::webrtc_codec::{
     enable_tracks, get_video_codec_property, opus_caps, set_video_codec_property, Track,
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
 use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
-use crate::webrtc_util::{non_empty, send_transmit};
+use crate::webrtc_util::send_transmit;
 
 /// Output port for the video track.
 const VIDEO_PORT: usize = 0;
@@ -82,12 +82,7 @@ const TOKEN_TTL_SECS: u64 = 3600;
 ///     .with_frame_limit(300);
 /// ```
 pub struct LiveKitSrc {
-    url: String,
-    room: String,
-    identity: String,
-    api_key: String,
-    api_secret: String,
-    token: Option<String>,
+    room_settings: RoomSettings,
     /// The video codec answered to the server's offer and emitted on output 0.
     video_codec: WebRtcVideoCodec,
     /// Stop after this many access units across both tracks and emit EOS
@@ -112,9 +107,9 @@ impl LogSource for LiveKitSrc {
 impl core::fmt::Debug for LiveKitSrc {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LiveKitSrc")
-            .field("url", &self.url)
-            .field("room", &self.room)
-            .field("identity", &self.identity)
+            .field("url", &self.room_settings.url)
+            .field("room", &self.room_settings.room)
+            .field("identity", &self.room_settings.identity)
             .finish()
     }
 }
@@ -130,12 +125,7 @@ impl LiveKitSrc {
         identity: impl Into<String>,
     ) -> Self {
         Self {
-            url: url.into(),
-            room: room.into(),
-            identity: identity.into(),
-            api_key: String::new(),
-            api_secret: String::new(),
-            token: None,
+            room_settings: RoomSettings::new(url, room, identity),
             video_codec: WebRtcVideoCodec::default(),
             frame_limit: u64::MAX,
             ice: IceSettings::default(),
@@ -145,8 +135,8 @@ impl LiveKitSrc {
 
     /// Mint the access token locally from an API key + secret.
     pub fn with_api_key(mut self, key: impl Into<String>, secret: impl Into<String>) -> Self {
-        self.api_key = key.into();
-        self.api_secret = secret.into();
+        self.room_settings.api_key = key.into();
+        self.room_settings.api_secret = secret.into();
         self
     }
 
@@ -179,7 +169,7 @@ impl LiveKitSrc {
 
     /// Use a pre-minted access token (LiveKit Cloud, external token service).
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
-        self.token = Some(token.into());
+        self.room_settings.token = Some(token.into());
         self
     }
 
@@ -190,50 +180,15 @@ impl LiveKitSrc {
         self
     }
 
-    fn access_token(&self) -> Result<String, G2gError> {
-        access_token(
-            self.token.as_deref(),
-            &self.api_key,
-            &self.api_secret,
-            &self.identity,
-            &VideoGrant::subscriber(self.room.clone()),
-            TOKEN_TTL_SECS,
-        )
+    fn grant(&self) -> VideoGrant {
+        VideoGrant::subscriber(self.room_settings.room.clone())
     }
-}
-
-/// Read the next server `SignalResponse`, skipping non-binary frames. `Ok(None)`
-/// on a clean close.
-pub(crate) async fn recv_signal(
-    ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
-) -> Result<Option<SignalResponse>, G2gError> {
-    loop {
-        match ws.next().await {
-            Some(Ok(Message::Binary(bytes))) => return Ok(SignalResponse::decode(&bytes)),
-            Some(Ok(Message::Close(_))) | None => return Ok(None),
-            Some(Ok(_)) => continue,
-            Some(Err(e)) => {
-                g2g_warn!(&LiveKitSignalLog, "signal recv failed: {e}");
-                return Err(G2gError::Hardware(HardwareError::Other));
-            }
-        }
-    }
-}
-
-pub(crate) async fn send_signal(
-    ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
-    req: &SignalRequest,
-) -> Result<(), G2gError> {
-    ws.send(Message::Binary(req.encode())).await.map_err(|e| {
-        g2g_warn!(&LiveKitSignalLog, "signal send failed: {e}");
-        G2gError::Hardware(HardwareError::Other)
-    })
 }
 
 /// Accept one server offer on the subscriber PC and send the answer back.
 pub(crate) async fn answer_offer(
     rtc: &mut Rtc,
-    ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    ws: &mut SignalSocket,
     sd: &SessionDescription,
 ) -> Result<(), G2gError> {
     let hw = || G2gError::Hardware(HardwareError::Other);
@@ -257,25 +212,7 @@ pub(crate) async fn answer_offer(
 
 /// Settable properties, so a `gst-launch` line can subscribe without the
 /// builder (`livekitsrc url=... room=... api-key=... api-secret=...`).
-static LIVEKITSRC_PROPS: &[PropertySpec] = &[
-    PropertySpec::new(
-        "url",
-        PropKind::Str,
-        "LiveKit signalling URL (ws:// or wss://)",
-    ),
-    PropertySpec::new("room", PropKind::Str, "room name to join"),
-    PropertySpec::new("identity", PropKind::Str, "participant identity"),
-    PropertySpec::new("api-key", PropKind::Str, "LiveKit API key (mints a token)"),
-    PropertySpec::new(
-        "api-secret",
-        PropKind::Str,
-        "LiveKit API secret (mints a token)",
-    ),
-    PropertySpec::new(
-        "token",
-        PropKind::Str,
-        "pre-minted access token (overrides api-key/secret)",
-    ),
+static LIVEKITSRC_PROPS: &[PropertySpec] = room_property_table![
     VIDEO_CODEC_PROP,
     PropertySpec::new(
         "num-buffers",
@@ -330,27 +267,16 @@ impl MultiOutputSource for LiveKitSrc {
         if let Some(result) = self.ice.set_property(name, &value) {
             return result;
         }
-        let text = || value.as_str().ok_or(PropError::Type);
-        match name {
-            "url" => self.url = text()?.into(),
-            "room" => self.room = text()?.into(),
-            "identity" => self.identity = text()?.into(),
-            "api-key" => self.api_key = text()?.into(),
-            "api-secret" => self.api_secret = text()?.into(),
-            "token" => self.token = non_empty(text()?),
-            _ => return Err(PropError::Unknown),
-        }
-        Ok(())
+        self.room_settings
+            .set_property(name, &value)
+            .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = self.room_settings.get_property(name) {
+            return Some(value);
+        }
         match name {
-            "url" => Some(PropValue::Str(self.url.clone())),
-            "room" => Some(PropValue::Str(self.room.clone())),
-            "identity" => Some(PropValue::Str(self.identity.clone())),
-            "api-key" => Some(PropValue::Str(self.api_key.clone())),
-            "api-secret" => Some(PropValue::Str(self.api_secret.clone())),
-            "token" => Some(PropValue::Str(self.token.clone().unwrap_or_default())),
             "video-codec" => Some(get_video_codec_property(self.video_codec)),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             _ => self.ice.get_property(name),
@@ -368,30 +294,11 @@ impl MultiOutputSource for LiveKitSrc {
             {
                 return Ok(0);
             }
-            let hw = || G2gError::Hardware(HardwareError::Other);
-            let token = self.access_token()?;
-            let ws_url = signal_ws_url(&self.url, &token, true);
-            let (mut ws, _resp) = connect_async(&ws_url).await.map_err(|e| {
-                g2g_warn!(self, "WebSocket connect to {} failed: {e}", self.url);
-                hw()
-            })?;
-
-            // The server's first envelope is the JoinResponse.
-            let join = loop {
-                match recv_signal(&mut ws).await? {
-                    Some(SignalResponse::Join(j)) => break j,
-                    Some(SignalResponse::Leave) | None => {
-                        g2g_warn!(self, "closed before JoinResponse");
-                        return Err(hw());
-                    }
-                    Some(_) => {}
-                }
-            };
-            let ping_interval = if join.ping_interval > 0 {
-                Duration::from_secs(join.ping_interval as u64)
-            } else {
-                Duration::from_secs(15)
-            };
+            let (mut ws, join) = self
+                .room_settings
+                .join(&self.grant(), TOKEN_TTL_SECS, true, &*self)
+                .await?;
+            let ping_interval = join.ping_period();
 
             let socket = UdpSocket::bind((crate::webrtc_util::select_host_ip(), 0))
                 .await
@@ -512,11 +419,7 @@ impl MultiOutputSource for LiveKitSrc {
                         refresh_at = Instant::now() + crate::turn::REFRESH_INTERVAL;
                     }
                     _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_ping)) => {
-                        let now_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as i64;
-                        let _ = send_signal(&mut ws, &SignalRequest::Ping(now_ms)).await;
+                        let _ = send_signal(&mut ws, &SignalRequest::Ping(ping_timestamp())).await;
                         next_ping = Instant::now() + ping_interval;
                     }
                     _ = tokio::time::sleep(timeout) => {
@@ -570,8 +473,17 @@ mod tests {
     #[test]
     fn token_requires_credentials() {
         let src = LiveKitSrc::new("ws://h:7880", "room", "id");
-        assert!(src.access_token().is_err());
+        let grant = src.grant();
+        assert!(src
+            .room_settings
+            .access_token(&grant, TOKEN_TTL_SECS)
+            .is_err());
         let src = src.with_token("tok");
-        assert_eq!(src.access_token().unwrap(), "tok");
+        assert_eq!(
+            src.room_settings
+                .access_token(&grant, TOKEN_TTL_SECS)
+                .unwrap(),
+            "tok"
+        );
     }
 }

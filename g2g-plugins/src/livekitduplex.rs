@@ -30,7 +30,6 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use tokio::net::UdpSocket;
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use str0m::change::{SdpAnswer, SdpPendingOffer};
@@ -41,18 +40,18 @@ use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 use g2g_core::fanout::{DuplexInbound, MultiDuplexSession};
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
-    g2g_warn, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, HardwareError,
-    MultiOutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ReverseChannel,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, HardwareError, MultiOutputSink,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ReverseChannel,
 };
 
 use crate::filesink::io_err;
 use crate::livekit_signal::{
-    access_token, candidate_from_init_json, signal_ws_url, AddTrackRequest, IceSettings,
-    IceTransportPolicy, SessionDescription, SignalRequest, SignalResponse, SignalTarget,
-    TrackSource, TrackType, VideoGrant, ICE_TRANSPORT_POLICY_PROP, LIVEKIT_TURN_SERVER_PROP,
-    TURN_PASS_PROP, TURN_USER_PROP,
+    candidate_from_init_json, ping_timestamp, room_property_table, send_signal, AddTrackRequest,
+    IceSettings, IceTransportPolicy, RoomSettings, SessionDescription, SignalRequest,
+    SignalResponse, SignalTarget, TrackSource, TrackType, VideoGrant, ICE_TRANSPORT_POLICY_PROP,
+    LIVEKIT_TURN_SERVER_PROP, TURN_PASS_PROP, TURN_USER_PROP,
 };
-use crate::livekitsrc::{answer_offer, recv_signal, send_signal};
+use crate::livekitsrc::answer_offer;
 use crate::webrtc_codec::{
     enable_tracks, frame_capture_time, get_video_codec_property, opus_caps,
     set_video_codec_property, sink_caps_alternatives, stamp_capture_time, Track, WebRtcVideoCodec,
@@ -71,25 +70,7 @@ const TOKEN_TTL_SECS: u64 = 3600;
 const UNLIMITED_BUFFERS_TEXT: &str = "-1";
 const MAX_BUFFERS_TEXT: &str = "9223372036854775807";
 
-static LIVEKITDUPLEX_PROPS: &[PropertySpec] = &[
-    PropertySpec::new(
-        "url",
-        PropKind::Str,
-        "LiveKit signalling URL (ws:// or wss://)",
-    ),
-    PropertySpec::new("room", PropKind::Str, "room name to join"),
-    PropertySpec::new("identity", PropKind::Str, "participant identity"),
-    PropertySpec::new("api-key", PropKind::Str, "LiveKit API key (mints a token)"),
-    PropertySpec::new(
-        "api-secret",
-        PropKind::Str,
-        "LiveKit API secret (mints a token)",
-    ),
-    PropertySpec::new(
-        "token",
-        PropKind::Str,
-        "pre-minted access token (overrides api-key/secret)",
-    ),
+static LIVEKITDUPLEX_PROPS: &[PropertySpec] = room_property_table![
     VIDEO_CODEC_PROP,
     PropertySpec::new(
         "num-buffers",
@@ -117,12 +98,7 @@ static LIVEKITDUPLEX_PROPS: &[PropertySpec] = &[
 ///     .with_frame_limit(300);
 /// ```
 pub struct LiveKitDuplex {
-    url: String,
-    room: String,
-    identity: String,
-    api_key: String,
-    api_secret: String,
-    token: Option<String>,
+    room_settings: RoomSettings,
     /// Track kind per send input pad, set in `configure_input`.
     inputs: Vec<Option<Track>>,
     /// The video codec answered on the subscriber PeerConnection and emitted
@@ -154,9 +130,9 @@ impl LogSource for LiveKitDuplex {
 impl core::fmt::Debug for LiveKitDuplex {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LiveKitDuplex")
-            .field("url", &self.url)
-            .field("room", &self.room)
-            .field("identity", &self.identity)
+            .field("url", &self.room_settings.url)
+            .field("room", &self.room_settings.room)
+            .field("identity", &self.room_settings.identity)
             .finish()
     }
 }
@@ -171,12 +147,7 @@ impl LiveKitDuplex {
         identity: impl Into<String>,
     ) -> Self {
         Self {
-            url: url.into(),
-            room: room.into(),
-            identity: identity.into(),
-            api_key: String::new(),
-            api_secret: String::new(),
-            token: None,
+            room_settings: RoomSettings::new(url, room, identity),
             inputs: alloc::vec![None; 2],
             video_codec: WebRtcVideoCodec::default(),
             reverse: (0..2).map(|_| ReverseChannel::new()).collect(),
@@ -197,8 +168,8 @@ impl LiveKitDuplex {
 
     /// Mint the access token locally from an API key + secret.
     pub fn with_api_key(mut self, key: impl Into<String>, secret: impl Into<String>) -> Self {
-        self.api_key = key.into();
-        self.api_secret = secret.into();
+        self.room_settings.api_key = key.into();
+        self.room_settings.api_secret = secret.into();
         self
     }
 
@@ -224,7 +195,7 @@ impl LiveKitDuplex {
 
     /// Use a pre-minted access token.
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
-        self.token = Some(token.into());
+        self.room_settings.token = Some(token.into());
         self
     }
 
@@ -235,22 +206,15 @@ impl LiveKitDuplex {
         self
     }
 
-    fn access_token(&self) -> Result<String, G2gError> {
-        access_token(
-            self.token.as_deref(),
-            &self.api_key,
-            &self.api_secret,
-            &self.identity,
-            &VideoGrant {
-                room_join: true,
-                room: self.room.clone(),
-                can_publish: true,
-                can_subscribe: true,
-                can_publish_data: false,
-                room_admin: false,
-            },
-            TOKEN_TTL_SECS,
-        )
+    fn grant(&self) -> VideoGrant {
+        VideoGrant {
+            room_join: true,
+            room: self.room_settings.room.clone(),
+            can_publish: true,
+            can_subscribe: true,
+            can_publish_data: false,
+            room_admin: false,
+        }
     }
 }
 
@@ -317,31 +281,16 @@ impl MultiDuplexSession for LiveKitDuplex {
         if let Some(result) = self.ice.set_property(name, &value) {
             return result;
         }
-        let text_slot = match name {
-            "url" => &mut self.url,
-            "room" => &mut self.room,
-            "identity" => &mut self.identity,
-            "api-key" => &mut self.api_key,
-            "api-secret" => &mut self.api_secret,
-            "token" => {
-                let token = value.as_str().ok_or(PropError::Type)?;
-                self.token = (!token.is_empty()).then(|| token.into());
-                return Ok(());
-            }
-            _ => return Err(PropError::Unknown),
-        };
-        *text_slot = value.as_str().ok_or(PropError::Type)?.into();
-        Ok(())
+        self.room_settings
+            .set_property(name, &value)
+            .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = self.room_settings.get_property(name) {
+            return Some(value);
+        }
         match name {
-            "url" => Some(PropValue::Str(self.url.clone())),
-            "room" => Some(PropValue::Str(self.room.clone())),
-            "identity" => Some(PropValue::Str(self.identity.clone())),
-            "api-key" => Some(PropValue::Str(self.api_key.clone())),
-            "api-secret" => Some(PropValue::Str(self.api_secret.clone())),
-            "token" => Some(PropValue::Str(self.token.clone().unwrap_or_default())),
             "video-codec" => Some(get_video_codec_property(self.video_codec)),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             "linger-ms" => Some(get_linger_ms_property(self.linger)),
@@ -365,24 +314,11 @@ impl MultiDuplexSession for LiveKitDuplex {
                 return Ok(0);
             }
             let hw = || G2gError::Hardware(HardwareError::Other);
-            let token = self.access_token()?;
-            let ws_url = signal_ws_url(&self.url, &token, true);
-            let (mut ws, _resp) = connect_async(&ws_url).await.map_err(|e| {
-                g2g_warn!(self, "WebSocket connect to {} failed: {e}", self.url);
-                hw()
-            })?;
-            let join = loop {
-                match recv_signal(&mut ws).await? {
-                    Some(SignalResponse::Join(j)) => break j,
-                    Some(SignalResponse::Leave) | None => return Err(hw()),
-                    Some(_) => {}
-                }
-            };
-            let ping_interval = if join.ping_interval > 0 {
-                Duration::from_secs(join.ping_interval as u64)
-            } else {
-                Duration::from_secs(15)
-            };
+            let (mut ws, join) = self
+                .room_settings
+                .join(&self.grant(), TOKEN_TTL_SECS, true, &*self)
+                .await?;
+            let ping_interval = join.ping_period();
 
             let host_ip = crate::webrtc_util::select_host_ip();
 
@@ -408,7 +344,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                 .gather(&mut pub_rtc, &pub_socket, &join, &*self)
                 .await?;
             let pub_local = pub_socket.local_addr().map_err(io_err)?;
-            let stream_id = format!("g2g-{}", self.identity);
+            let stream_id = format!("g2g-{}", self.room_settings.identity);
             let video_cid = format!("{stream_id}-video");
             let audio_cid = format!("{stream_id}-audio");
             let (offer_sdp, pending, send_video_mid, send_audio_mid): (
@@ -693,11 +629,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                         refresh_at = Instant::now() + crate::turn::REFRESH_INTERVAL;
                     }
                     _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_ping)) => {
-                        let now_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as i64;
-                        let _ = send_signal(&mut ws, &SignalRequest::Ping(now_ms)).await;
+                        let _ = send_signal(&mut ws, &SignalRequest::Ping(ping_timestamp())).await;
                         next_ping = Instant::now() + ping_interval;
                     }
                     _ = tokio::time::sleep(timeout) => {

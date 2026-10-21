@@ -988,6 +988,13 @@ pub mod kvswebrtcsink;
 pub mod kvswebrtcsrc;
 #[cfg(feature = "webrtc-livekit")]
 pub mod livekit_signal;
+// data-only room participants sending and receiving LiveKit user data packets
+#[cfg(feature = "webrtc-livekit")]
+mod livekitdata;
+#[cfg(feature = "webrtc-livekit")]
+pub mod livekitdatasink;
+#[cfg(feature = "webrtc-livekit")]
+pub mod livekitdatasrc;
 #[cfg(feature = "webrtc-livekit")]
 pub mod livekitduplex;
 #[cfg(feature = "webrtc-livekit")]

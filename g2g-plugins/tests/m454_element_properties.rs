@@ -4952,3 +4952,107 @@ fn wgpucompositor_gpu_output() {
         "the composite leaves as a texture"
     );
 }
+
+/// M1784: the room, topic and delivery knobs on `livekitdatasink`.
+#[cfg(feature = "webrtc-livekit")]
+#[test]
+fn livekitdatasink_properties() {
+    use g2g_plugins::livekitdatasink::LiveKitDataSink;
+    let mut sink = LiveKitDataSink::new("", "", "g2g-data");
+    for spec in sink
+        .properties()
+        .iter()
+        .filter(|spec| spec.default.is_some())
+    {
+        assert_eq!(
+            sink.get_property(spec.name),
+            Some(declared_default(sink.properties(), spec.name)),
+            "a fresh livekitdatasink reports the declared default of `{}`",
+            spec.name
+        );
+    }
+    for (name, value) in [
+        ("url", PropValue::Str(String::from("ws://127.0.0.1:7880"))),
+        ("room", PropValue::Str(String::from("demo"))),
+        ("identity", PropValue::Str(String::from("viewer"))),
+        ("api-key", PropValue::Str(String::from("devkey"))),
+        ("api-secret", PropValue::Str(String::from("secret"))),
+        ("token", PropValue::Str(String::from("a.b.c"))),
+        ("topic", PropValue::Str(String::from("input"))),
+        ("reliable", PropValue::Bool(false)),
+        (
+            "destination-identities",
+            PropValue::Str(String::from("publisher,recorder")),
+        ),
+        (
+            "ice-transport-policy",
+            PropValue::Str(String::from("relay")),
+        ),
+    ] {
+        assert!(declares(sink.properties(), name), "`{name}` is declared");
+        sink.set_property(name, value.clone()).unwrap();
+        assert_eq!(sink.get_property(name), Some(value), "`{name}` round-trips");
+    }
+    let reg = g2g_plugins::registry::default_registry();
+    assert!(
+        g2g_core::runtime::parse_launch(
+            &reg,
+            "videotestsrc num-buffers=2 ! livekitdatasink url=ws://127.0.0.1:7880 room=demo identity=viewer api-key=devkey api-secret=secret topic=input reliable=false destination-identities=publisher"
+        )
+        .is_ok(),
+        "a launch line setting the data knobs parses"
+    );
+}
+
+/// M1784: the room knobs on `livekitdatasrc`, plus its filters and limit.
+#[cfg(feature = "webrtc-livekit")]
+#[test]
+fn livekitdatasrc_properties() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::livekitdatasrc::LiveKitDataSrc;
+    let mut source = LiveKitDataSrc::new("", "", "g2g-data");
+    for spec in source
+        .properties()
+        .iter()
+        .filter(|spec| spec.default.is_some())
+    {
+        assert_eq!(
+            source.get_property(spec.name),
+            Some(declared_default(source.properties(), spec.name)),
+            "a fresh livekitdatasrc reports the declared default of `{}`",
+            spec.name
+        );
+    }
+    for (name, value) in [
+        ("url", PropValue::Str(String::from("ws://127.0.0.1:7880"))),
+        ("room", PropValue::Str(String::from("demo"))),
+        ("identity", PropValue::Str(String::from("publisher"))),
+        ("api-key", PropValue::Str(String::from("devkey"))),
+        ("api-secret", PropValue::Str(String::from("secret"))),
+        ("token", PropValue::Str(String::from("a.b.c"))),
+        ("topic", PropValue::Str(String::from("input"))),
+        ("sender-identity", PropValue::Str(String::from("viewer"))),
+        ("num-buffers", PropValue::Int(3)),
+        (
+            "turn-server",
+            PropValue::Str(String::from("turn:relay:3478")),
+        ),
+    ] {
+        assert!(declares(source.properties(), name), "`{name}` is declared");
+        source.set_property(name, value.clone()).unwrap();
+        assert_eq!(
+            source.get_property(name),
+            Some(value),
+            "`{name}` round-trips"
+        );
+    }
+    let reg = g2g_plugins::registry::default_registry();
+    assert!(
+        g2g_core::runtime::parse_launch(
+            &reg,
+            "livekitdatasrc url=ws://127.0.0.1:7880 room=demo identity=publisher api-key=devkey api-secret=secret topic=input sender-identity=viewer num-buffers=3 ! fakesink"
+        )
+        .is_ok(),
+        "a launch line setting the data knobs parses"
+    );
+}

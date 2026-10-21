@@ -2673,6 +2673,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "kvswebrtcsink" => "webrtc-kvs";
         "kvswebrtcsrc" => "webrtc-kvs";
         "livekitsrc" => "webrtc-livekit";
+        "livekitdatasink" => "webrtc-livekit";
+        "livekitdatasrc" => "webrtc-livekit";
         "httpsrc" => "http-src";
         "hlssrc" => "hls";
         "dashsrc" => "dash";
@@ -3539,6 +3541,28 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
         "livekitsrc",
         |_n| Box::new(crate::livekitsrc::LiveKitSrc::new("", "", "g2g-sub")),
+    ));
+    // LiveKit user data packets, one per frame each way, from data-only
+    // participants (`livekitdatasrc url=... room=... topic=input ! ...`).
+    #[cfg(feature = "webrtc-livekit")]
+    reg.register_launch(
+        LaunchFactory::of::<crate::livekitdatasink::LiveKitDataSink>("livekitdatasink", || {
+            Box::new(crate::livekitdatasink::LiveKitDataSink::new(
+                "", "", "g2g-data",
+            ))
+        }),
+    );
+    #[cfg(feature = "webrtc-livekit")]
+    reg.register_source(SourceFactory::new(
+        "livekitdatasrc",
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Raw,
+        },
+        || {
+            Box::new(crate::livekitdatasrc::LiveKitDataSrc::new(
+                "", "", "g2g-data",
+            ))
+        },
     ));
     // Same shape for the multi-track WHEP subscriber; `location` targets the
     // endpoint (`webrtcwhepsessionsrc name=s location=...`).

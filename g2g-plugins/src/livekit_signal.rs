@@ -25,19 +25,24 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use core::time::Duration;
+
+use futures_util::{SinkExt, StreamExt};
 use g2g_core::log::LogSource;
 use g2g_core::{
     g2g_info, g2g_warn, G2gError, HardwareError, PropError, PropKind, PropValue, PropertySpec,
 };
 use str0m::Rtc;
-use tokio::net::UdpSocket;
+use tokio::net::{TcpStream, UdpSocket};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use crate::turn::TurnSet;
-use crate::webrtc_util::add_ice_candidates;
 pub use crate::webrtc_util::IceTransportPolicy;
+use crate::webrtc_util::{add_ice_candidates, non_empty};
 pub(crate) use crate::webrtc_util::{ICE_TRANSPORT_POLICY_PROP, TURN_PASS_PROP, TURN_USER_PROP};
 
-/// `G2G_DEBUG=livekit-signal:...` names the signalling helpers the three LiveKit elements share.
+/// `G2G_DEBUG=livekit-signal:...` names the signalling helpers the LiveKit elements share.
 pub(crate) struct LiveKitSignalLog;
 
 impl LogSource for LiveKitSignalLog {
@@ -102,6 +107,25 @@ impl VideoGrant {
         }
     }
 
+    pub fn data_sender(room: impl Into<String>) -> Self {
+        Self {
+            can_publish_data: true,
+            ..Self::data_receiver(room)
+        }
+    }
+
+    // the server forwards data packets to every participant, subscriber or not
+    pub fn data_receiver(room: impl Into<String>) -> Self {
+        Self {
+            room_join: true,
+            room: room.into(),
+            can_publish: false,
+            can_subscribe: false,
+            can_publish_data: false,
+            room_admin: false,
+        }
+    }
+
     fn to_json(&self) -> String {
         let mut fields: Vec<String> = Vec::new();
         if self.room_join {
@@ -157,29 +181,188 @@ pub fn mint_token(
     format!("{signing_input}.{sig}")
 }
 
-// a configured token wins over minting one from the api key and secret
-pub(crate) fn access_token(
-    token: Option<&str>,
-    api_key: &str,
-    api_secret: &str,
-    identity: &str,
-    grant: &VideoGrant,
-    ttl_secs: u64,
-) -> Result<String, G2gError> {
-    if let Some(token) = token {
-        return Ok(token.to_string());
+#[derive(Debug, Clone)]
+pub(crate) struct RoomSettings {
+    pub url: String,
+    pub room: String,
+    pub identity: String,
+    pub api_key: String,
+    pub api_secret: String,
+    // when set, api_key and api_secret are unused
+    pub token: Option<String>,
+}
+
+impl RoomSettings {
+    pub(crate) fn new(
+        url: impl Into<String>,
+        room: impl Into<String>,
+        identity: impl Into<String>,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            room: room.into(),
+            identity: identity.into(),
+            api_key: String::new(),
+            api_secret: String::new(),
+            token: None,
+        }
     }
-    if api_key.is_empty() || api_secret.is_empty() {
-        g2g_warn!(&LiveKitSignalLog, "no token and no api-key/api-secret set");
-        return Err(G2gError::Hardware(HardwareError::Other));
+
+    pub(crate) fn set_property(
+        &mut self,
+        name: &str,
+        value: &PropValue,
+    ) -> Option<Result<(), PropError>> {
+        let slot = match name {
+            "url" => &mut self.url,
+            "room" => &mut self.room,
+            "identity" => &mut self.identity,
+            "api-key" => &mut self.api_key,
+            "api-secret" => &mut self.api_secret,
+            "token" => {
+                let token = value.as_str().ok_or(PropError::Type);
+                return Some(token.map(|token| self.token = non_empty(token)));
+            }
+            _ => return None,
+        };
+        let text = value.as_str().ok_or(PropError::Type);
+        Some(text.map(|text| *slot = text.into()))
     }
-    let now = std::time::SystemTime::now()
+
+    pub(crate) fn get_property(&self, name: &str) -> Option<PropValue> {
+        let text = match name {
+            "url" => self.url.clone(),
+            "room" => self.room.clone(),
+            "identity" => self.identity.clone(),
+            "api-key" => self.api_key.clone(),
+            "api-secret" => self.api_secret.clone(),
+            "token" => self.token.clone().unwrap_or_default(),
+            _ => return None,
+        };
+        Some(PropValue::Str(text))
+    }
+
+    pub(crate) fn access_token(
+        &self,
+        grant: &VideoGrant,
+        ttl_secs: u64,
+    ) -> Result<String, G2gError> {
+        if let Some(token) = &self.token {
+            return Ok(token.clone());
+        }
+        if self.api_key.is_empty() || self.api_secret.is_empty() {
+            g2g_warn!(&LiveKitSignalLog, "no token and no api-key/api-secret set");
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Ok(mint_token(
+            &self.api_key,
+            &self.api_secret,
+            &self.identity,
+            grant,
+            now,
+            ttl_secs,
+        ))
+    }
+
+    pub(crate) async fn join(
+        &self,
+        grant: &VideoGrant,
+        ttl_secs: u64,
+        auto_subscribe: bool,
+        log: &dyn LogSource,
+    ) -> Result<(SignalSocket, JoinResponse), G2gError> {
+        let hw = || G2gError::Hardware(HardwareError::Other);
+        let token = self.access_token(grant, ttl_secs)?;
+        let ws_url = signal_ws_url(&self.url, &token, auto_subscribe);
+        let (mut ws, _response) = connect_async(&ws_url).await.map_err(|e| {
+            g2g_warn!(log, "WebSocket connect to {} failed: {e}", self.url);
+            hw()
+        })?;
+        loop {
+            match recv_signal(&mut ws).await? {
+                Some(SignalResponse::Join(join)) => return Ok((ws, join)),
+                Some(SignalResponse::Leave) | None => {
+                    g2g_warn!(log, "closed before JoinResponse");
+                    return Err(hw());
+                }
+                Some(_) => {}
+            }
+        }
+    }
+}
+
+macro_rules! room_property_table {
+    ($($own:expr),* $(,)?) => {
+        &[
+            g2g_core::PropertySpec::new(
+                "url",
+                g2g_core::PropKind::Str,
+                "LiveKit signalling URL (ws:// or wss://)",
+            ),
+            g2g_core::PropertySpec::new("room", g2g_core::PropKind::Str, "room name to join"),
+            g2g_core::PropertySpec::new(
+                "identity",
+                g2g_core::PropKind::Str,
+                "participant identity",
+            ),
+            g2g_core::PropertySpec::new(
+                "api-key",
+                g2g_core::PropKind::Str,
+                "LiveKit API key (mints a token)",
+            ),
+            g2g_core::PropertySpec::new(
+                "api-secret",
+                g2g_core::PropKind::Str,
+                "LiveKit API secret (mints a token)",
+            ),
+            g2g_core::PropertySpec::new(
+                "token",
+                g2g_core::PropKind::Str,
+                "pre-minted access token (overrides api-key/secret)",
+            ),
+            $($own),*
+        ]
+    };
+}
+pub(crate) use room_property_table;
+
+pub(crate) type SignalSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// Read the next server `SignalResponse`, skipping non-binary frames. `Ok(None)`
+/// on a clean close.
+pub(crate) async fn recv_signal(ws: &mut SignalSocket) -> Result<Option<SignalResponse>, G2gError> {
+    loop {
+        match ws.next().await {
+            Some(Ok(Message::Binary(bytes))) => return Ok(SignalResponse::decode(&bytes)),
+            Some(Ok(Message::Close(_))) | None => return Ok(None),
+            Some(Ok(_)) => continue,
+            Some(Err(e)) => {
+                g2g_warn!(&LiveKitSignalLog, "signal recv failed: {e}");
+                return Err(G2gError::Hardware(HardwareError::Other));
+            }
+        }
+    }
+}
+
+pub(crate) async fn send_signal(
+    ws: &mut SignalSocket,
+    req: &SignalRequest,
+) -> Result<(), G2gError> {
+    ws.send(Message::Binary(req.encode())).await.map_err(|e| {
+        g2g_warn!(&LiveKitSignalLog, "signal send failed: {e}");
+        G2gError::Hardware(HardwareError::Other)
+    })
+}
+
+pub(crate) fn ping_timestamp() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    Ok(mint_token(
-        api_key, api_secret, identity, grant, now, ttl_secs,
-    ))
+        .as_millis() as i64
 }
 
 /// Minimal JSON string escaping (quotes, backslash, control chars) for the two
@@ -537,7 +720,7 @@ pub(crate) const LIVEKIT_TURN_SERVER_PROP: PropertySpec = PropertySpec::new(
     "TURN servers, comma-separated (host:port, turn:/turns: URI, or turn://user:pass@host); empty = the servers the JoinResponse hands out",
 );
 
-/// The ICE knobs the three LiveKit elements share, and the gathering they drive:
+/// The ICE knobs the LiveKit elements share, and the gathering they drive:
 /// host plus the JoinResponse's STUN under `all`, TURN allocations from
 /// `turn-server` or, when unset, from the JoinResponse's TURN entries.
 #[derive(Debug, Clone, Default)]
@@ -631,7 +814,17 @@ pub struct JoinResponse {
     pub participant_identity: String,
 }
 
+const DEFAULT_PING_PERIOD: Duration = Duration::from_secs(15);
+
 impl JoinResponse {
+    pub fn ping_period(&self) -> Duration {
+        if self.ping_interval > 0 {
+            Duration::from_secs(self.ping_interval as u64)
+        } else {
+            DEFAULT_PING_PERIOD
+        }
+    }
+
     /// The first STUN server offered, as the `host:port` the binding client takes.
     pub fn stun_server(&self) -> Option<String> {
         self.ice_servers
@@ -710,6 +903,111 @@ impl TrackPublishedResponse {
             }
         }
         r
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Data packets (livekit_models.proto DataPacket / UserPacket)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataPacketKind {
+    Reliable,
+    Lossy,
+}
+
+impl DataPacketKind {
+    fn wire(self) -> u64 {
+        match self {
+            DataPacketKind::Reliable => 0,
+            DataPacketKind::Lossy => 1,
+        }
+    }
+
+    fn from_wire(v: u64) -> Option<Self> {
+        match v {
+            0 => Some(DataPacketKind::Reliable),
+            1 => Some(DataPacketKind::Lossy),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserDataPacket {
+    pub kind: DataPacketKind,
+    pub payload: Vec<u8>,
+    pub topic: Option<String>,
+    // empty delivers to every participant
+    pub destination_identities: Vec<String>,
+    // the server fills this in on the packets it forwards
+    pub participant_identity: String,
+}
+
+impl UserDataPacket {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut user = Vec::new();
+        if !self.payload.is_empty() {
+            pb::put_len_field(&mut user, 2, &self.payload);
+        }
+        if let Some(topic) = &self.topic {
+            pb::put_string_field(&mut user, 4, topic);
+        }
+        let mut buf = Vec::new();
+        pb::put_varint_field(&mut buf, 1, self.kind.wire());
+        pb::put_len_field(&mut buf, 2, &user);
+        if !self.participant_identity.is_empty() {
+            pb::put_string_field(&mut buf, 4, &self.participant_identity);
+        }
+        for identity in &self.destination_identities {
+            pb::put_string_field(&mut buf, 5, identity);
+        }
+        buf
+    }
+
+    // None for a malformed buffer or a DataPacket carrying RPC, chat, streams or encryption
+    pub fn decode(buf: &[u8]) -> Option<Self> {
+        let mut packet = UserDataPacket {
+            kind: DataPacketKind::Reliable,
+            payload: Vec::new(),
+            topic: None,
+            destination_identities: Vec::new(),
+            participant_identity: String::new(),
+        };
+        let mut has_user = false;
+        let mut pos = 0;
+        while let Some(field) = pb::next_field(buf, &mut pos) {
+            match field {
+                pb::Field::Varint(1, v) => packet.kind = DataPacketKind::from_wire(v)?,
+                pb::Field::Len(2, user) => {
+                    has_user = true;
+                    let mut user_pos = 0;
+                    while let Some(user_field) = pb::next_field(user, &mut user_pos) {
+                        match user_field {
+                            pb::Field::Len(2, v) => packet.payload = v.to_vec(),
+                            pb::Field::Len(4, v) => {
+                                packet.topic = Some(String::from_utf8_lossy(v).into_owned())
+                            }
+                            _ => {}
+                        }
+                    }
+                    if user_pos != user.len() {
+                        return None;
+                    }
+                }
+                pb::Field::Len(4, v) => {
+                    packet.participant_identity = String::from_utf8_lossy(v).into_owned()
+                }
+                pb::Field::Len(5, v) => packet
+                    .destination_identities
+                    .push(String::from_utf8_lossy(v).into_owned()),
+                _ => {}
+            }
+        }
+        if pos != buf.len() || !has_user {
+            return None;
+        }
+        Some(packet)
     }
 }
 
@@ -1190,5 +1488,119 @@ mod tests {
             u,
             format!("ws://localhost:7880/rtc?access_token=TOKEN&auto_subscribe=false&protocol={PROTOCOL_VERSION}&sdk=go")
         );
+    }
+
+    // `DataPacket.SerializeToString()` from the livekit-protocol 1.1.27 Python package
+    const PYTHON_RELIABLE_PACKET: &[u8] =
+        include_bytes!("../tests/fixtures/livekit_datapacket_reliable.bin");
+    const PYTHON_LOSSY_PACKET: &[u8] =
+        include_bytes!("../tests/fixtures/livekit_datapacket_lossy.bin");
+    // what livekit-server 1.13.10 forwarded to a livekitdatasrc from a Python SDK sender
+    const FORWARDED_RELIABLE_PACKET: &[u8] =
+        include_bytes!("../tests/fixtures/livekit_datapacket_forwarded_reliable.bin");
+    const FORWARDED_LOSSY_PACKET: &[u8] =
+        include_bytes!("../tests/fixtures/livekit_datapacket_forwarded_lossy.bin");
+
+    #[test]
+    fn user_packet_encodes_like_the_python_sdk() {
+        let reliable = UserDataPacket {
+            kind: DataPacketKind::Reliable,
+            payload: b"\x00\x01\x7f\x80\xffkey:w".to_vec(),
+            topic: Some("input".into()),
+            destination_identities: alloc::vec!["publisher".into()],
+            participant_identity: String::new(),
+        };
+        let lossy = UserDataPacket {
+            kind: DataPacketKind::Lossy,
+            payload: b"mouse 12 -3".to_vec(),
+            topic: Some("input".into()),
+            destination_identities: Vec::new(),
+            participant_identity: String::new(),
+        };
+        assert_eq!(reliable.encode(), PYTHON_RELIABLE_PACKET);
+        assert_eq!(lossy.encode(), PYTHON_LOSSY_PACKET);
+        assert_eq!(
+            UserDataPacket::decode(PYTHON_RELIABLE_PACKET),
+            Some(reliable)
+        );
+        assert_eq!(UserDataPacket::decode(PYTHON_LOSSY_PACKET), Some(lossy));
+    }
+
+    #[test]
+    fn decodes_packets_the_server_forwards() {
+        let reliable = UserDataPacket::decode(FORWARDED_RELIABLE_PACKET).unwrap();
+        assert_eq!(reliable.kind, DataPacketKind::Reliable);
+        assert_eq!(reliable.payload, [0xe6]);
+        assert_eq!(reliable.topic.as_deref(), Some("input"));
+        assert_eq!(reliable.participant_identity, "py-sender");
+        assert_eq!(reliable.destination_identities, ["g2g-datasrc"]);
+        let lossy = UserDataPacket::decode(FORWARDED_LOSSY_PACKET).unwrap();
+        assert_eq!(lossy.kind, DataPacketKind::Lossy);
+        assert_eq!(lossy.payload, [0xca]);
+        assert_eq!(lossy.participant_identity, "py-sender");
+    }
+
+    #[test]
+    fn rejects_truncated_and_non_user_packets() {
+        for length in 0..FORWARDED_RELIABLE_PACKET.len() {
+            assert_eq!(
+                UserDataPacket::decode(&FORWARDED_RELIABLE_PACKET[..length]),
+                None,
+                "{length} bytes"
+            );
+        }
+        // a DataPacket carrying an RpcRequest (field 10) instead of a user packet
+        let mut rpc = Vec::new();
+        pb::put_len_field(&mut rpc, 10, b"\x0a\x01x");
+        assert_eq!(UserDataPacket::decode(&rpc), None);
+        let mut unknown_kind = Vec::new();
+        pb::put_varint_field(&mut unknown_kind, 1, 7);
+        pb::put_len_field(&mut unknown_kind, 2, &[]);
+        assert_eq!(UserDataPacket::decode(&unknown_kind), None);
+    }
+
+    #[test]
+    fn data_grants_never_subscribe() {
+        let sender = VideoGrant::data_sender("r").to_json();
+        let receiver = VideoGrant::data_receiver("r").to_json();
+        for json in [&sender, &receiver] {
+            assert!(json.contains("\"canPublish\":false"), "{json}");
+            assert!(json.contains("\"canSubscribe\":false"), "{json}");
+        }
+        assert!(sender.contains("\"canPublishData\":true"), "{sender}");
+        assert!(!receiver.contains("canPublishData"), "{receiver}");
+    }
+
+    #[test]
+    fn room_settings_properties_round_trip() {
+        let mut room = RoomSettings::new("ws://h:7880", "r", "id");
+        for name in ["url", "room", "identity", "api-key", "api-secret", "token"] {
+            let value = PropValue::Str(format!("{name}-value"));
+            assert_eq!(room.set_property(name, &value), Some(Ok(())));
+            assert_eq!(room.get_property(name), Some(value));
+        }
+        assert_eq!(
+            room.set_property("url", &PropValue::Uint(1)),
+            Some(Err(PropError::Type))
+        );
+        room.set_property("token", &PropValue::Str(String::new()));
+        assert_eq!(room.token, None);
+        assert_eq!(
+            room.set_property("topic", &PropValue::Str("t".into())),
+            None
+        );
+        assert_eq!(room.get_property("topic"), None);
+    }
+
+    #[test]
+    fn access_token_prefers_the_configured_token() {
+        let grant = VideoGrant::data_sender("r");
+        let mut room = RoomSettings::new("ws://h:7880", "r", "id");
+        assert!(room.access_token(&grant, 60).is_err());
+        room.api_key = "k".into();
+        room.api_secret = "s".into();
+        assert_eq!(room.access_token(&grant, 60).unwrap().split('.').count(), 3);
+        room.token = Some("tok".into());
+        assert_eq!(room.access_token(&grant, 60).unwrap(), "tok");
     }
 }
