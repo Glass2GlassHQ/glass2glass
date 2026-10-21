@@ -14,14 +14,54 @@ use raw_convert::read_fixture;
 
 // (fixture, the stream name selecting its track, the graph format, the suffix of ffmpeg's decode to it)
 const PCM_FIXTURES: [(&str, &str, AudioFormat, &str); 10] = [
-    ("mov_in24_be.mov", "pcm-s24le", AudioFormat::PcmS24Le, "s24le"),
-    ("mov_in24_le.mov", "pcm-s24le", AudioFormat::PcmS24Le, "s24le"),
-    ("mov_in32_le.mov", "pcm-s32le", AudioFormat::PcmS32Le, "s32le"),
-    ("mov_fl32_be.mov", "pcm-f32le", AudioFormat::PcmF32Le, "f32le"),
-    ("mov_fl32_le.mov", "pcm-f32le", AudioFormat::PcmF32Le, "f32le"),
-    ("mov_lpcm_s16le.mov", "pcm-s16le", AudioFormat::PcmS16Le, "s16le"),
-    ("mov_lpcm_s24be.mov", "pcm-s24le", AudioFormat::PcmS24Le, "s24le"),
-    ("mov_lpcm_f32be.mov", "pcm-f32le", AudioFormat::PcmF32Le, "f32le"),
+    (
+        "mov_in24_be.mov",
+        "pcm-s24le",
+        AudioFormat::PcmS24Le,
+        "s24le",
+    ),
+    (
+        "mov_in24_le.mov",
+        "pcm-s24le",
+        AudioFormat::PcmS24Le,
+        "s24le",
+    ),
+    (
+        "mov_in32_le.mov",
+        "pcm-s32le",
+        AudioFormat::PcmS32Le,
+        "s32le",
+    ),
+    (
+        "mov_fl32_be.mov",
+        "pcm-f32le",
+        AudioFormat::PcmF32Le,
+        "f32le",
+    ),
+    (
+        "mov_fl32_le.mov",
+        "pcm-f32le",
+        AudioFormat::PcmF32Le,
+        "f32le",
+    ),
+    (
+        "mov_lpcm_s16le.mov",
+        "pcm-s16le",
+        AudioFormat::PcmS16Le,
+        "s16le",
+    ),
+    (
+        "mov_lpcm_s24be.mov",
+        "pcm-s24le",
+        AudioFormat::PcmS24Le,
+        "s24le",
+    ),
+    (
+        "mov_lpcm_f32be.mov",
+        "pcm-f32le",
+        AudioFormat::PcmF32Le,
+        "f32le",
+    ),
     ("mov_lpcm_u8.mov", "pcm-u8", AudioFormat::PcmU8, "u8"),
     ("mov_lpcm_s8.mov", "pcm-u8", AudioFormat::PcmU8, "u8"),
 ];
@@ -45,11 +85,25 @@ async fn quicktime_pcm_entries_demux_to_ffmpegs_decode() {
         let mov = read_fixture(file);
         let expected = read_fixture(&format!("{file}.{decode}"));
         let single = demux_audio(&mov, stream).await;
-        assert_eq!(announced_format(&single), Some(format), "{file}: qtdemux caps");
-        assert!(single.frames.concat() == expected, "{file}: qtdemux samples");
+        assert_eq!(
+            announced_format(&single),
+            Some(format),
+            "{file}: qtdemux caps"
+        );
+        assert!(
+            single.frames.concat() == expected,
+            "{file}: qtdemux samples"
+        );
         let multi = demux_first_port(&mov).await;
-        assert_eq!(announced_format(&multi), Some(format), "{file}: Mp4DemuxN caps");
-        assert!(multi.frames.concat() == expected, "{file}: Mp4DemuxN samples");
+        assert_eq!(
+            announced_format(&multi),
+            Some(format),
+            "{file}: Mp4DemuxN caps"
+        );
+        assert!(
+            multi.frames.concat() == expected,
+            "{file}: Mp4DemuxN samples"
+        );
     }
 }
 
@@ -57,7 +111,10 @@ async fn quicktime_pcm_entries_demux_to_ffmpegs_decode() {
 fn a_pcm_layout_with_no_graph_format_is_left_out_and_named() {
     for (file, name) in REFUSED_FIXTURES {
         let mov = read_fixture(file);
-        assert!(forwardable_streams(&mov).is_empty(), "{file}: no track forwarded");
+        assert!(
+            forwardable_streams(&mov).is_empty(),
+            "{file}: no track forwarded"
+        );
         assert_eq!(unsupported_sample_entries(&mov), [name], "{file}");
     }
 }
@@ -68,7 +125,10 @@ const VORBIS_HEADER_TYPES: [u8; 3] = [0x01, 0x03, 0x05];
 const VORBIS_MAGIC: &[u8] = b"vorbis";
 
 fn assert_leads_with_vorbis_headers(demuxed: &Demuxed, what: &str) {
-    assert!(demuxed.frames.len() > VORBIS_HEADER_TYPES.len(), "{what}: headers and audio");
+    assert!(
+        demuxed.frames.len() > VORBIS_HEADER_TYPES.len(),
+        "{what}: headers and audio"
+    );
     for (frame, kind) in demuxed.frames.iter().zip(VORBIS_HEADER_TYPES) {
         assert_eq!(frame.first(), Some(&kind), "{what}: header order");
         assert!(frame[1..].starts_with(VORBIS_MAGIC), "{what}: header magic");
@@ -122,7 +182,10 @@ mod vorbis_decode {
             .map(|(ours, theirs)| (ours - theirs).abs())
             .max()
             .unwrap_or_default();
-        assert!(largest_difference <= 1, "off ffmpeg by {largest_difference}");
+        assert!(
+            largest_difference <= 1,
+            "off ffmpeg by {largest_difference}"
+        );
     }
 
     #[tokio::test]
@@ -142,7 +205,11 @@ mod vorbis_decode {
             .unwrap_or_else(|e| panic!("runs `{line}`: {e:?}"));
         let pcm = std::fs::read(&out).expect("the sink wrote its file");
         std::fs::remove_file(&out).ok();
-        assert_eq!(pcm.len(), TONE_SAMPLES * CHANNELS * S16_BYTES, "the presented samples");
+        assert_eq!(
+            pcm.len(),
+            TONE_SAMPLES * CHANNELS * S16_BYTES,
+            "the presented samples"
+        );
         assert_samples_agree(&pcm, &read_fixture(&format!("{VORBIS_FIXTURE}.s16le")));
     }
 }

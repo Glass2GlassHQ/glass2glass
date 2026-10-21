@@ -808,7 +808,10 @@ fn parse_video_entry(
     } else if let Some((format, entry)) = boxes(entries).find_map(|(fourcc, entry)| {
         Some((crate::uncompressedvideo::raw_video_format(*fourcc)?, entry))
     }) {
-        return Ok(Some((raw_video_track(format, RawVideoStorage::Tight, entry)?, None)));
+        return Ok(Some((
+            raw_video_track(format, RawVideoStorage::Tight, entry)?,
+            None,
+        )));
     } else if let Some((format, storage, entry)) = find_box(entries, b"raw ").and_then(|entry| {
         let depth = entry.get(VISUAL_SAMPLE_ENTRY_DEPTH_AT..VISUAL_SAMPLE_ENTRY_DEPTH_AT + 2)?;
         let (format, storage) = quicktime_raw_video(u16::from_be_bytes([depth[0], depth[1]]))?;
@@ -1173,10 +1176,11 @@ fn sound_entry_channels(entry: &[u8]) -> Result<u8, G2gError> {
     }
 }
 
-// the first PCM sample entry in an `stsd`'s list, with its graph format or the layout no AudioFormat carries
-fn quicktime_pcm_entry(
-    entries: &[u8],
-) -> Option<(Result<(AudioFormat, StoredPcm), PcmLayout>, SoundDescription)> {
+// the graph format a QuickTime PCM entry carries, or its layout when no AudioFormat does
+type PcmGraphFormat = Result<(AudioFormat, StoredPcm), PcmLayout>;
+
+// the first PCM sample entry in an `stsd`'s list
+fn quicktime_pcm_entry(entries: &[u8]) -> Option<(PcmGraphFormat, SoundDescription)> {
     boxes(entries).find_map(|(fourcc, entry)| {
         let description = SoundDescription::parse(entry, u32::from_le_bytes(*fourcc)).ok()?;
         Some((
@@ -1218,7 +1222,7 @@ fn quicktime_pcm_format(
     fourcc: &[u8; 4],
     description: &SoundDescription,
     entry: &[u8],
-) -> Option<Result<(AudioFormat, StoredPcm), PcmLayout>> {
+) -> Option<PcmGraphFormat> {
     const RAW_UNSIGNED_BITS: u16 = 8;
     const RAW_BIG_ENDIAN_BITS: u16 = 16;
     let bits = description.sample_bits;
@@ -1295,7 +1299,7 @@ pub(crate) struct PcmLayout {
 }
 
 impl PcmLayout {
-    fn graph_format(self) -> Result<(AudioFormat, StoredPcm), PcmLayout> {
+    fn graph_format(self) -> PcmGraphFormat {
         let format = match (self.float, self.signed, self.bits) {
             _ if !self.packed => return Err(self),
             (true, _, 32) => AudioFormat::PcmF32Le,

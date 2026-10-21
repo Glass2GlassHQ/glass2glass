@@ -1476,7 +1476,11 @@ fn pack_from_rgba(
     let layout = packed_rgb_layout(to).expect("a packed RGB format");
     let mut dst = vec![u8::MAX; w * h * layout.pixel_bytes];
     let pixels = dst.chunks_exact_mut(layout.pixel_bytes);
-    let rgba = (0..h).flat_map(|y| src[y * src_stride..y * src_stride + w * 4].as_chunks::<4>().0);
+    let rgba = (0..h).flat_map(|y| {
+        src[y * src_stride..y * src_stride + w * 4]
+            .as_chunks::<4>()
+            .0
+    });
     for (pixel, [red, green, blue, alpha]) in pixels.zip(rgba) {
         pixel[layout.red] = *red;
         pixel[layout.green] = *green;
@@ -1841,14 +1845,43 @@ mod tests {
         let rgba = [RED, GREEN, BLUE, ALPHA];
         for (format, pixel, alpha_back) in [
             (RawVideoFormat::Bgr8, alloc::vec![BLUE, GREEN, RED], OPAQUE),
-            (RawVideoFormat::Bgrx8, alloc::vec![BLUE, GREEN, RED, OPAQUE], OPAQUE),
-            (RawVideoFormat::Argb8, alloc::vec![ALPHA, RED, GREEN, BLUE], ALPHA),
+            (
+                RawVideoFormat::Bgrx8,
+                alloc::vec![BLUE, GREEN, RED, OPAQUE],
+                OPAQUE,
+            ),
+            (
+                RawVideoFormat::Argb8,
+                alloc::vec![ALPHA, RED, GREEN, BLUE],
+                ALPHA,
+            ),
         ] {
-            let packed = convert(&rgba, RawVideoFormat::Rgba8, format, 1, 1, Colorimetry::UNKNOWN);
+            let packed = convert(
+                &rgba,
+                RawVideoFormat::Rgba8,
+                format,
+                1,
+                1,
+                Colorimetry::UNKNOWN,
+            );
             assert_eq!(&packed[..], &pixel[..], "{format:?}");
-            let back = convert(&packed, format, RawVideoFormat::Rgba8, 1, 1, Colorimetry::UNKNOWN);
+            let back = convert(
+                &packed,
+                format,
+                RawVideoFormat::Rgba8,
+                1,
+                1,
+                Colorimetry::UNKNOWN,
+            );
             assert_eq!(&back[..], &[RED, GREEN, BLUE, alpha_back], "{format:?}");
-            let swapped = convert(&packed, format, RawVideoFormat::Bgra8, 1, 1, Colorimetry::UNKNOWN);
+            let swapped = convert(
+                &packed,
+                format,
+                RawVideoFormat::Bgra8,
+                1,
+                1,
+                Colorimetry::UNKNOWN,
+            );
             assert_eq!(&swapped[..], &[BLUE, GREEN, RED, alpha_back], "{format:?}");
         }
     }
@@ -1868,7 +1901,9 @@ mod tests {
             );
             assert_eq!(&i420[..w * h], &gray[..], "luma {w}x{h}");
             assert!(
-                i420[w * h..].iter().all(|&chroma| i32::from(chroma) == NEUTRAL_CHROMA_8),
+                i420[w * h..]
+                    .iter()
+                    .all(|&chroma| i32::from(chroma) == NEUTRAL_CHROMA_8),
                 "chroma {w}x{h}"
             );
             let back = convert(

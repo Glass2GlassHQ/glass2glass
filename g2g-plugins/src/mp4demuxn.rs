@@ -42,8 +42,8 @@ use g2g_core::{
 
 use crate::fmp4::{
     clip_stored_pcm, parse_all_tracks, parse_chapters, parse_fragments_multi,
-    parse_progressive_multi, starts_with_param_set, unsupported_pcm_layout, vorbis_headers,
-    Sample, TrackHeader, TrackKind,
+    parse_progressive_multi, starts_with_param_set, unsupported_pcm_layout, vorbis_headers, Sample,
+    TrackHeader, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 use crate::uncompressedvideo::{raw_video_frame_bytes, warn_short_raw_video_frame};

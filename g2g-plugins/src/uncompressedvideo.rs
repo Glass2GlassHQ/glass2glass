@@ -63,7 +63,10 @@ pub(crate) fn avi_raw_video(
     bottom_up: bool,
 ) -> Option<(RawVideoFormat, RawVideoStorage)> {
     let rows = RawVideoStorage::AviRows { bottom_up };
-    match (&compression.map(|byte| byte.to_ascii_uppercase()), bit_count) {
+    match (
+        &compression.map(|byte| byte.to_ascii_uppercase()),
+        bit_count,
+    ) {
         // biCompression BI_RGB
         (&[0, 0, 0, 0], 24) => Some((RawVideoFormat::Bgr8, rows)),
         (&[0, 0, 0, 0], 32) => Some((RawVideoFormat::Bgrx8, rows)),
@@ -243,7 +246,10 @@ mod tests {
             copy_raw_video_frame(format, storage, 1, 3, &tight),
             Some(tight.clone())
         );
-        assert_eq!(copy_raw_video_frame(format, storage, 1, 3, &tight[..2]), None);
+        assert_eq!(
+            copy_raw_video_frame(format, storage, 1, 3, &tight[..2]),
+            None
+        );
     }
 
     #[test]
@@ -252,10 +258,7 @@ mod tests {
         let mut padded = bottom_up_padded_rows();
         padded.reverse();
         let frame = copy_raw_video_frame(format, storage, 1, 3, &padded).expect("whole rows");
-        let rows: Vec<u8> = padded
-            .chunks(4)
-            .flat_map(|row| row[..3].to_vec())
-            .collect();
+        let rows: Vec<u8> = padded.chunks(4).flat_map(|row| row[..3].to_vec()).collect();
         assert_eq!(frame, rows);
     }
 
