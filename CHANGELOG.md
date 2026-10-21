@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1784: `livekitdatasink` and `livekitdatasrc` send and receive LiveKit user data packets as data-only room participants.
 - M1783: `matroskademux` undoes chained `ContentEncoding`s and a compressed `CodecPrivate`, plus bzip2 and lzo behind `matroska-compression`.
 - M1779: `pipewirevideosrc` captures planar frames sent as one data block per plane.
 - M1777: CI runs on Ubuntu 26.04 with rust-cache keyed on the runner image, pipewire-rs 0.10, and a vendored cros-libva that builds against libva 2.23.

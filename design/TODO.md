@@ -151,8 +151,9 @@ Highest leverage first:
 - **WebRTC.**
   - FEC is blocked upstream (str0m has no FEC payload; loss recovery is
     NACK/RTX).
-  - Data-channel loose end: a WHIP/SFU-signalled data channel vs the P2P
-    `SdpChannel` seam.
+  - A data channel signalled through a WHIP / WHEP session.
+  - Move the bevy-g2g input backchannel from its WebSocket side channel to
+    `livekitdatasink` / `livekitdatasrc`.
 
 ## Adaptive streaming (HLS / DASH)
 

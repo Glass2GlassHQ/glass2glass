@@ -288,6 +288,21 @@ Both are validated against a real LiveKit server, including an in-room
 sink-to-src A/V loopback and the same loopback over a TLS-terminated `wss://`
 proxy.
 
+`livekitdatasink` and `livekitdatasrc` join a LiveKit room as data-only
+participants: no tracks, a token with canPublish and canSubscribe false
+(canPublishData true on the sink). A participant that cannot subscribe is
+publisher-primary, and the server sends its downstream data on the primary peer
+connection, so both elements offer one publisher PeerConnection with the two
+channels the client SDKs create, `_reliable` (ordered) and `_lossy` (unordered,
+no retransmits), and send and receive on them. Each frame is one
+`DataPacket{user: UserPacket{payload, topic}}` with optional
+`destination_identities`, hand-encoded in `livekit_signal.rs`. The server fills in
+the sender identity and applies the destination filter. The src filters on topic
+and sender identity and emits one `ByteStream` frame per packet. The sink connects
+on the first frame and leaves on EOS once the server has acknowledged every queued
+packet. Room settings, token minting and the JoinResponse wait are one
+`RoomSettings::join` shared by every LiveKit element.
+
 `LiveKitDuplex` is the full participant. LiveKit has no sendrecv m-lines, so it
 runs both PeerConnections, a publisher it offers and a subscriber the server
 offers, in one loop over one socket, routing trickle by `SignalTarget`, exposed
