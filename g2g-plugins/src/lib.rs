@@ -180,8 +180,6 @@ pub mod startcodeparse;
 // Legacy video parsers over that core.
 pub mod mpeg4videoparse;
 pub mod mpegvideoparse;
-#[cfg(feature = "offload")]
-pub mod offload;
 pub mod opusparse;
 pub mod outputselector;
 pub mod poc;

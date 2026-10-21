@@ -276,8 +276,9 @@ worker thread with the element.
 cooperative default runner overlap one heavy synchronous stage without a
 per-arm thread. `run_graph` polls every arm inside one `JoinAll` future on a
 single task, so a runner-level `block_in_place` would park all arms, not just
-the heavy one: the offload has to be at the element. `g2g_plugins::offload::run_blocking`
-(behind the `offload = ["std", "tokio/rt"]` feature) moves a pure-compute closure
+the heavy one: the offload has to be at the element. `g2g_core::offload::run_blocking`
+(behind the `offload` feature of g2g-core, which g2g-plugins and g2g-ml forward
+as their own `offload` feature) moves a pure-compute closure
 onto `tokio::task::spawn_blocking` when a runtime handle exists (inline fallback
 otherwise) and awaits the `JoinHandle`. Only the calling element's arm suspends
 at that `await`; the `JoinAll` keeps polling the siblings, so the sink renders
@@ -288,7 +289,10 @@ convert, `waylandsink`'s NV12->XRGB convert). `ffmpegdec` moves its `!Send`
 libavcodec decoder + pts map into the closure by value and takes them back via an
 `OffloadDecode` bundle (`unsafe Send`, sound because the bundle is owned by the
 one blocking-pool thread until `run_blocking` hands it back, never aliased),
-holding the element's one-thread-at-a-time contract. Off-tokio executors
+holding the element's one-thread-at-a-time contract. `ortinfer`, `executorchinfer`
+and `ortsegment` move the loaded model and the frame into the closure by value
+the same way (both are `Send`), so the input conversion, the session run and
+the mask decode all leave the arm. Off-tokio executors
 (`no_std` / embassy / the park-based `block_on`) hit the inline fallback, so the
 path is transparent there. This is the lower-effort complement to
 `run_graph_threaded`: no thread-per-arm, just the one CPU-bound stage overlapped.

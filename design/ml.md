@@ -264,16 +264,18 @@ architectural answer to MediaPipe's runtime CPU and GPU delegate switch.
 `tools/ortinfer-bench.sh` times `ortinfer` on the CUDA execution provider
 against the same YOLO11m ONNX model hosted through `pyelement` from
 gst-python-ml, both over `data/people.mp4` on the one box, and prints each
-run's frame count, fps, wall ms per frame and peak RSS. On the RTX 3060 on
-2026-10-20, under the threaded runner, the native element ran at 43 fps against
-38 for the hosted one at the same 1.26 GB peak RSS. The runner matters: the
-hosted element does its Python work on its own OS thread, so decode and the
-CPU `videoconvert ! videoscale` stage (16 ms per frame on this clip) overlap
-with inference, while `ortinfer` runs the session inline on the element's arm.
-On the cooperative runner that holds every other element for the inference
-time, and the native path drops to 26 fps while the hosted one stays at 38.
-The runner's per-element p50 and p99 read the same 33.55 ms on every run, one
-histogram bucket, so the fps column is the number to read.
+run's frame count, fps, wall ms per frame and peak RSS. `RUNNER=cooperative`
+times the default runner instead of the threaded one. The hosted element does
+its Python work on its own OS thread, so decode and the CPU `videoconvert !
+videoscale` stage overlap with inference on either runner. `ortinfer` gets the
+same overlap from the `offload` feature: the model and the frame move onto
+tokio's blocking pool for the input conversion and the session run, so the
+cooperative runner keeps the other elements moving meanwhile. On an RTX 2080 Ti
+on 2026-10-20, three runs each, the native element ran at 34 fps on the
+cooperative runner before the offload and 61 after it, against 53 to 59 on the
+threaded runner either way and 51 for the hosted element everywhere. The
+runner's per-element p50 and p99 read 16.78 or 33.55 ms on every run, one
+histogram bucket apart, so the fps column is the number to read.
 
 ### ExecuTorch
 

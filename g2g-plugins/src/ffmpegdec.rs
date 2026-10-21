@@ -1925,7 +1925,7 @@ impl AsyncElement for FfmpegVideoDec {
                             decoded: Vec::new(),
                             result: Ok(0),
                         };
-                        bundle = crate::offload::run_blocking(move || {
+                        bundle = g2g_core::offload::run_blocking(move || {
                             let mut b = bundle;
                             b.result = match b.decoder.as_mut() {
                                 Some(decoder) => {

@@ -119,6 +119,9 @@ pub mod ptp;
 #[cfg(feature = "runtime")]
 pub mod bus;
 
+#[cfg(feature = "offload")]
+pub mod offload;
+
 #[cfg(feature = "runtime")]
 pub mod qos;
 

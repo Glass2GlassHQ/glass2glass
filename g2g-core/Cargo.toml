@@ -52,6 +52,10 @@ critical-section = ["portable-atomic/critical-section"]
 # g2g's logs. std-only (the tracing global dispatcher is); the no_std baseline
 # keeps its own sinks. Does not touch the hot path.
 tracing = ["std", "dep:tracing"]
+# Element-level cooperative offload: `offload::run_blocking` moves a heavy
+# synchronous closure onto tokio's blocking pool so the cooperative runner keeps
+# polling the sibling arms. Inline fallback off-tokio.
+offload = ["std", "dep:tokio"]
 
 [dependencies]
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"], optional = true }
@@ -59,6 +63,7 @@ arc-swap = { version = "1", optional = true }
 # The `tracing` facade (tracing feature). default-features off keeps it to the
 # event! macro + the std global dispatcher (no proc-macro attributes pulled).
 tracing = { version = "0.1", optional = true, default-features = false, features = ["std"] }
+tokio = { version = "1", optional = true, default-features = false, features = ["rt"] }
 # 64-bit atomics for the metrics histogram on targets without native AtomicU64
 # (Cortex-M, RISC-V32). Native where available (x86_64, aarch64); the default
 # `fallback` provides a lock-based AtomicU64 elsewhere, which the

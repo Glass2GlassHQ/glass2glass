@@ -23,6 +23,10 @@ launch = ["std", "g2g-core/runtime"]
 # model output tensor into AnalyticsMeta detections (no inference engine needed);
 # enables g2g-core's `metadata` feature so frames carry the typed graph.
 analytics = ["g2g-core/metadata"]
+# Run each frame's input conversion and session off the element's arm, on
+# tokio's blocking pool, so the cooperative runner keeps the other elements
+# moving during inference. Inline off-tokio.
+offload = ["std", "g2g-core/offload"]
 # Pure-Rust Burn backend with wgpu (design/README.md §5.2): BurnInference runs a
 # deterministic linear-layer inference on the GPU through burn's wgpu backend,
 # no C++ engine. Targets embedded / Wasm / RTOS / server alike.

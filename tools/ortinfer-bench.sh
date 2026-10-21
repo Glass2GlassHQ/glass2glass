@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # Runs the gst-python-ml people.mp4 clip through YOLO11m twice per side:
 # native `ortinfer execution-provider=cuda ! detectionpostprocess` and the hosted
-# gst-python-ml `ObjectDetector` on cuda:0, both in g2g-launch-py under the
-# threaded runner (ortinfer runs the session inline, so the cooperative runner
-# would stall decode and preprocessing during inference), and prints one row per
-# run from the run summary and /usr/bin/time.
+# gst-python-ml `ObjectDetector` on cuda:0, both in g2g-launch-py, and prints one
+# row per run from the run summary and /usr/bin/time.
 #
 # Build first (PYO3_PYTHON must be the venv the hosted element imports from):
 #   PYO3_PYTHON=$HOME/src/gst-python-ml/.venv/bin/python \
@@ -12,13 +10,19 @@
 #
 # G2G_PYML_DIR is the gst-python-ml checkout (default ~/src/gst-python-ml),
 # G2G_LAUNCH_PY the binary (default target/release/g2g-launch-py), RUNS the
-# runs per side (default 2).
+# runs per side (default 2), RUNNER `threaded` (default) or `cooperative`.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 pyml=${G2G_PYML_DIR:-$HOME/src/gst-python-ml}
 launch=${G2G_LAUNCH_PY:-$repo/target/release/g2g-launch-py}
 runs=${RUNS:-2}
+runner=${RUNNER:-threaded}
+case $runner in
+    threaded) runner_flag=--threads ;;
+    cooperative) runner_flag= ;;
+    *) echo "ortinfer-bench: RUNNER must be threaded or cooperative, not $runner" >&2; exit 1 ;;
+esac
 clip=$pyml/data/people.mp4
 model=$pyml/yolo11m.onnx
 # the size YOLO11m was exported at
@@ -49,7 +53,7 @@ measure() {
     local log=$scratch/$side-$run.log
     # word splitting of $pipeline is the launch line's own tokenization
     # shellcheck disable=SC2086
-    if ! /usr/bin/time -f 'peak-rss-kib %M' "$launch" --threads $pipeline >"$log" 2>&1; then
+    if ! /usr/bin/time -f 'peak-rss-kib %M' "$launch" $runner_flag $pipeline >"$log" 2>&1; then
         echo "ortinfer-bench: $side run $run failed, log follows" >&2
         cat "$log" >&2
         exit 1
@@ -64,7 +68,7 @@ measure() {
         }' "$log"
 }
 
-echo "$(date -I) $(hostname) $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1), load $(cut -d' ' -f1-3 /proc/loadavg)"
+echo "$(date -I) $(hostname) $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1), $runner runner, load $(cut -d' ' -f1-3 /proc/loadavg)"
 printf "%-7s %3s %6s %7s %13s %9s %9s %13s\n" side run frames fps "wall ms/frame" "p50 ms" "p99 ms" "peak RSS MiB"
 for run in $(seq "$runs"); do
     measure native "$run" Inference "$native"

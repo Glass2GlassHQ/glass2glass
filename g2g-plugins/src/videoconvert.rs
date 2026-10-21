@@ -414,7 +414,7 @@ impl AsyncElement for VideoConvert {
                         let converted = {
                             let owned: Vec<u8> = src[..needed].to_vec();
                             let mut hub = core::mem::take(&mut self.hub);
-                            let (converted, hub) = crate::offload::run_blocking(move || {
+                            let (converted, hub) = g2g_core::offload::run_blocking(move || {
                                 let converted = convert_strided(
                                     &owned,
                                     format,

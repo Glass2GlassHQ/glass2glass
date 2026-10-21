@@ -16,7 +16,8 @@ use g2g_core::{
 const INPUT_CHANNELS: usize = 3;
 
 pub trait InferenceBackend: Default + Debug + ElementBound {
-    type Model: LoadedModel + Debug + ElementBound;
+    // Send + 'static so the offload can move it to a blocking-pool thread and back
+    type Model: LoadedModel + Debug + ElementBound + Send + 'static;
 
     // every property the element declares, the base ones included
     const PROPERTIES: &'static [PropertySpec];
@@ -326,26 +327,21 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                         return Ok(());
                     }
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
                     let tensor_input = self.tensor_input;
-                    let model = self.model.as_mut().ok_or(G2gError::NotConfigured)?;
-                    let geometry = *model.geometry();
-                    let (bytes, dims) = if tensor_input {
-                        if geometry.input_dtype == TensorDType::F32 {
-                            model.run_f32(tensor_bytes_to_chw(
-                                slice,
-                                geometry.width,
-                                geometry.height,
-                            )?)?
-                        } else {
-                            model.run_int(int_tensor_bytes(slice, &geometry)?)?
-                        }
-                    } else {
-                        // RGBA8 -> normalized f32 NCHW RGB, then run the model.
-                        model.run_f32(rgba_to_nchw(slice, geometry.width, geometry.height)?)?
+                    // the model and the frame leave the element with the run and
+                    // come back with its result
+                    let model = self.model.take().ok_or(G2gError::NotConfigured)?;
+                    let run = move |mut model: B::Model| {
+                        let result = infer(&mut model, tensor_input, &frame);
+                        (model, frame, result)
                     };
+                    #[cfg(feature = "offload")]
+                    let (model, frame, result) =
+                        g2g_core::offload::run_blocking(move || run(model)).await;
+                    #[cfg(not(feature = "offload"))]
+                    let (model, frame, result) = run(model);
+                    self.model = Some(model);
+                    let (bytes, dims) = result?;
                     let shape = TensorShape::from_slice(&dims).ok_or(G2gError::CapsMismatch)?;
                     #[cfg(feature = "analytics")]
                     if self.attach_tensor {
@@ -430,6 +426,27 @@ impl<B: InferenceBackend> AsyncElement for Inference<B> {
     }
 }
 
+// one frame's input conversion and session run, the work that leaves the arm
+fn infer<M: LoadedModel>(
+    model: &mut M,
+    tensor_input: bool,
+    frame: &Frame,
+) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+    let slice = frame
+        .domain
+        .as_system_slice()
+        .ok_or(G2gError::UnsupportedDomain)?;
+    let geometry = *model.geometry();
+    if !tensor_input {
+        // RGBA8 -> normalized f32 NCHW RGB, then run the model.
+        return model.run_f32(rgba_to_nchw(slice, geometry.width, geometry.height)?);
+    }
+    if geometry.input_dtype == TensorDType::F32 {
+        return model.run_f32(tensor_bytes_to_chw(slice, geometry.width, geometry.height)?);
+    }
+    model.run_int(int_tensor_bytes(slice, &geometry)?)
+}
+
 // the leading `[1, 3, H, W]` one-byte elements of a quantized tensor frame
 fn int_tensor_bytes<'a>(bytes: &'a [u8], geometry: &ModelGeometry) -> Result<&'a [u8], G2gError> {
     let plane = (geometry.width as usize)
@@ -500,6 +517,151 @@ impl<B: InferenceBackend> g2g_core::PadTemplates for Inference<B> {
 mod tests {
     use super::*;
 
+    use g2g_core::PushOutcome;
+
+    #[derive(Default)]
+    struct CollectSink {
+        packets: Vec<PipelinePacket>,
+    }
+
+    impl OutputSink for CollectSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            self.packets.push(packet);
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+        }
+    }
+
+    /// The session runs off the element's arm: under a tokio runtime the model
+    /// runs on a blocking-pool thread, and with no runtime it runs inline. Both
+    /// ways the output tensor reaches the sink.
+    #[cfg(feature = "offload")]
+    mod offload {
+        use super::*;
+
+        use std::sync::{Arc, Mutex};
+        use std::thread::ThreadId;
+
+        use g2g_core::FrameTiming;
+
+        const SIDE: u32 = 2;
+        const OUTPUT: [u8; 4] = [1, 2, 3, 4];
+
+        #[derive(Debug, Default)]
+        struct ThreadBackend;
+
+        #[derive(Debug)]
+        struct ThreadModel {
+            geometry: ModelGeometry,
+            ran_on: Arc<Mutex<Option<ThreadId>>>,
+        }
+
+        impl InferenceBackend for ThreadBackend {
+            type Model = ThreadModel;
+            const PROPERTIES: &'static [PropertySpec] = BASE_PROPERTIES;
+
+            fn load(&self, _path: &str) -> Result<Self::Model, G2gError> {
+                unreachable!("the test installs its model directly")
+            }
+
+            fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
+                Err(PropError::Unknown)
+            }
+
+            fn get_property(&self, _name: &str) -> Option<PropValue> {
+                None
+            }
+        }
+
+        impl LoadedModel for ThreadModel {
+            fn geometry(&self) -> &ModelGeometry {
+                &self.geometry
+            }
+
+            fn run_f32(&mut self, chw: Vec<f32>) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+                assert_eq!(chw.len(), INPUT_CHANNELS * (SIDE * SIDE) as usize);
+                *self.ran_on.lock().unwrap() = Some(std::thread::current().id());
+                Ok((Box::new(OUTPUT), vec![1, OUTPUT.len() as u32]))
+            }
+
+            fn run_int(&mut self, _bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+                unreachable!("the test feeds RGBA")
+            }
+        }
+
+        fn element(ran_on: Arc<Mutex<Option<ThreadId>>>) -> Inference<ThreadBackend> {
+            let mut element = Inference::<ThreadBackend>::new();
+            element.model = Some(ThreadModel {
+                geometry: ModelGeometry {
+                    width: SIDE,
+                    height: SIDE,
+                    input_dtype: TensorDType::F32,
+                    output_shape: TensorShape::from_slice(&[1, OUTPUT.len() as u32]).unwrap(),
+                },
+                ran_on,
+            });
+            element.configured = true;
+            element
+        }
+
+        fn rgba_frame() -> PipelinePacket {
+            PipelinePacket::DataFrame(Frame {
+                domain: MemoryDomain::System(SystemSlice::from_boxed(
+                    vec![0u8; (SIDE * SIDE * 4) as usize].into_boxed_slice(),
+                )),
+                timing: FrameTiming::default(),
+                sequence: 0,
+                meta: Default::default(),
+            })
+        }
+
+        fn output_bytes(sink: &CollectSink) -> Vec<u8> {
+            let tensor = sink
+                .packets
+                .iter()
+                .find_map(|packet| match packet {
+                    PipelinePacket::DataFrame(frame) => frame.domain.as_system_slice(),
+                    _ => None,
+                })
+                .expect("the sink received the output tensor");
+            tensor.to_vec()
+        }
+
+        #[test]
+        fn runs_the_model_on_the_blocking_pool_under_tokio() {
+            let ran_on = Arc::new(Mutex::new(None));
+            let mut element = element(ran_on.clone());
+            let mut sink = CollectSink::default();
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(element.process(rgba_frame(), &mut sink))
+                .unwrap();
+            let ran_on = ran_on.lock().unwrap().expect("the model ran");
+            assert_ne!(ran_on, std::thread::current().id());
+            assert_eq!(output_bytes(&sink), OUTPUT);
+            assert!(
+                element.model.is_some(),
+                "the model came back to the element"
+            );
+        }
+
+        #[test]
+        fn runs_the_model_inline_without_a_runtime() {
+            let ran_on = Arc::new(Mutex::new(None));
+            let mut element = element(ran_on.clone());
+            let mut sink = CollectSink::default();
+            g2g_core::runtime::block_on(element.process(rgba_frame(), &mut sink)).unwrap();
+            let ran_on = ran_on.lock().unwrap().expect("the model ran");
+            assert_eq!(ran_on, std::thread::current().id());
+            assert_eq!(output_bytes(&sink), OUTPUT);
+        }
+    }
+
     fn lists_every_base_property<B: InferenceBackend>() {
         for base in BASE_PROPERTIES {
             assert!(
@@ -529,27 +691,10 @@ mod tests {
     /// since a forwarded frame has to match the negotiated output caps.
     #[cfg(feature = "analytics")]
     fn only_on_forwards_a_frame_without_the_blob<B: InferenceBackend>() {
-        use g2g_core::{BlobMeta, Dim, FrameTiming, PropError, PushOutcome, Rate};
+        use g2g_core::{BlobMeta, Dim, FrameTiming, PropError, Rate};
 
         const GATE: &str = "alert";
         const OTHER: &str = "embedding";
-
-        #[derive(Default)]
-        struct CollectSink {
-            packets: Vec<PipelinePacket>,
-        }
-
-        impl OutputSink for CollectSink {
-            fn poll_push(
-                &mut self,
-                _cx: &mut core::task::Context<'_>,
-                packet_slot: &mut Option<PipelinePacket>,
-            ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-                let packet = packet_slot.take().expect("poll_push without a packet");
-                self.packets.push(packet);
-                core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-            }
-        }
 
         fn frame_carrying(header: &str) -> Frame {
             let mut frame = Frame {

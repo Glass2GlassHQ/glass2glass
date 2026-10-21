@@ -4137,6 +4137,7 @@ dependencies = [
  "loom",
  "portable-atomic",
  "spin 0.9.9",
+ "tokio",
  "tracing",
  "web-time",
 ]

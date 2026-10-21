@@ -29,10 +29,11 @@ use core::pin::Pin;
 use ::ort::session::Session;
 use ::ort::value::Tensor;
 
+use g2g_core::frame::Frame;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
-    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
-    TensorDType, TensorLayout, TensorShape,
+    AnalyticsMeta, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
+    HardwareError, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    RawVideoFormat, TensorDType, TensorLayout, TensorShape,
 };
 
 use crate::model_dims::{input_geometry, static_output_dims};
@@ -265,6 +266,33 @@ impl SegModel {
     }
 }
 
+// one frame's input conversion, session run and mask decode, the work that
+// leaves the arm
+fn infer(
+    model: &mut SegModel,
+    tensor_input: bool,
+    thresholds: &SegmentationThresholds,
+    frame: &Frame,
+) -> Result<AnalyticsMeta, G2gError> {
+    let slice = frame
+        .domain
+        .as_system_slice()
+        .ok_or(G2gError::UnsupportedDomain)?;
+    let (width, height) = (model.geometry.input_width, model.geometry.input_height);
+    let chw = if tensor_input {
+        tensor_bytes_to_chw(slice, width, height)?
+    } else {
+        rgba_to_nchw(slice, width, height)?
+    };
+    let (boxes, protos) = model.run(chw)?;
+    Ok(decode_instances(
+        &model.geometry,
+        thresholds,
+        &boxes,
+        &protos,
+    ))
+}
+
 impl AsyncElement for OrtSegmentation {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -348,21 +376,23 @@ impl AsyncElement for OrtSegmentation {
                 return Err(G2gError::NotConfigured);
             }
             match packet {
-                PipelinePacket::DataFrame(mut frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
-                    let (width, height) = self.input_dims();
-                    let chw = if self.tensor_input {
-                        tensor_bytes_to_chw(slice, width, height)?
-                    } else {
-                        rgba_to_nchw(slice, width, height)?
-                    };
+                PipelinePacket::DataFrame(frame) => {
+                    let tensor_input = self.tensor_input;
                     let thresholds = self.thresholds;
-                    let model = self.model.as_mut().ok_or(G2gError::NotConfigured)?;
-                    let geometry = model.geometry;
-                    let (boxes, protos) = model.run(chw)?;
-                    let analytics = decode_instances(&geometry, &thresholds, &boxes, &protos);
+                    // the model and the frame leave the element with the run and
+                    // come back with its result
+                    let model = self.model.take().ok_or(G2gError::NotConfigured)?;
+                    let run = move |mut model: SegModel| {
+                        let result = infer(&mut model, tensor_input, &thresholds, &frame);
+                        (model, frame, result)
+                    };
+                    #[cfg(feature = "offload")]
+                    let (model, mut frame, result) =
+                        g2g_core::offload::run_blocking(move || run(model)).await;
+                    #[cfg(not(feature = "offload"))]
+                    let (model, mut frame, result) = run(model);
+                    self.model = Some(model);
+                    let analytics = result?;
                     // Attach the graph and forward the (unchanged) frame, so the
                     // picture and its masks reach the overlay together.
                     frame.meta.attach(analytics);

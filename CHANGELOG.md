@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1720: `ortinfer`, `executorchinfer` and `ortsegment` run the session on tokio's blocking pool under the `offload` feature, and `tools/ortinfer-bench.sh` takes `RUNNER=cooperative`.
 - M1714: `whisper-cuda`, `whisper-vulkan`, `llama-cuda` and `llama-vulkan` build the GPU kernels, with `use-gpu`, `gpu-device` and `n-gpu-layers` properties.
 - M1715: `llamachat history-turns=N` keeps the last N exchanges and one KV cache across frames, and `reset` clears them.
 - M1716: `tools/ortinfer-bench.sh` times `ortinfer` against the hosted gst-python-ml detector on the same YOLO11m model.

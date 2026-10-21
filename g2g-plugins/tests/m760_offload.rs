@@ -22,7 +22,7 @@ use g2g_core::runtime::{run_graph, run_source_transform_sink, GraphNode};
 use g2g_core::RawVideoFormat;
 use g2g_core::{Caps, G2gError, HardwareError, MemoryDomain, PipelineClock, PipelinePacket};
 
-use g2g_plugins::offload;
+use g2g_core::offload;
 use g2g_plugins::videoconvert::VideoConvert;
 use g2g_plugins::videotestsrc::VideoTestSrc;
 

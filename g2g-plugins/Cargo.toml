@@ -41,7 +41,7 @@ multi-thread = ["g2g-core/multi-thread", "dep:libc"]
 # its per-frame compute onto tokio's blocking pool (`offload::run_blocking`), so
 # the cooperative `run_graph` keeps servicing sibling arms while it runs, without
 # opting into `run_graph_threaded`. std + tokio's `rt` (spawn_blocking + Handle).
-offload = ["std", "tokio/rt"]
+offload = ["std", "g2g-core/offload"]
 # Declarative graph format (M578): load a `Graph` from a JSON document
 # (`declarative::from_json`), the structured sibling of the `gst-launch` text
 # parser. Pulls serde + serde_json; implies std (the Registry + loader are std).
