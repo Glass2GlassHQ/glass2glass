@@ -6,7 +6,7 @@
 
 use g2g_core::runtime::{parse_launch, ParseError};
 use g2g_core::stream::StreamType;
-use g2g_plugins::mpegts::{TsMuxer, STREAM_TYPE_AAC};
+use g2g_plugins::mpegts::TsMuxer;
 use g2g_plugins::registry::default_registry;
 
 fn launch_error(tag: &str, ext: &str, bytes: &[u8], consumer: &str) -> ParseError {
@@ -128,14 +128,75 @@ fn ts_names_a_stream_type_it_has_no_port_for() {
     assert_eq!(codecs, vec!["vvc".to_string()]);
 }
 
-#[test]
-fn ts_names_latm_labelled_as_adts() {
-    const LOAS_SYNC: [u8; 2] = [0x56, 0xE0];
-    let mut access_unit = LOAS_SYNC.to_vec();
-    access_unit.extend_from_slice(&[0; 30]);
-    let ts = ts_with_stream(STREAM_TYPE_AAC, &access_unit);
-    let codecs = missing_decoders("latm", "ts", &ts, "audioconvert");
-    assert_eq!(codecs, vec!["aac_latm".to_string()]);
+// some broadcasters label LOAS with the ADTS stream type
+#[cfg(feature = "ffmpeg")]
+mod loas_under_adts_stream_type {
+    use g2g_core::runtime::{parse_launch, run_graph};
+    use g2g_core::PipelineClock;
+    use g2g_plugins::mpegts::{TsDemuxer, TsMuxer, TsPacketSplitter, STREAM_TYPE_AAC};
+    use g2g_plugins::registry::default_registry;
+
+    // AAC-LC from ffmpeg's MPEG-TS muxer with `-mpegts_flags latm`, stream type 0x11
+    const LOAS_TS: &[u8] = include_bytes!("fixtures/aac_lc_stereo_48000_latm.ts");
+
+    // the fixture's PES payloads, remuxed under the ADTS stream type
+    fn relabelled_as_adts(loas_ts: &[u8]) -> Vec<u8> {
+        let mut demuxer = TsDemuxer::new();
+        let mut splitter = TsPacketSplitter::new();
+        splitter.push(loas_ts, &mut demuxer);
+        splitter.finish(&mut demuxer);
+        demuxer.flush();
+        let mut mux = TsMuxer::new(STREAM_TYPE_AAC);
+        demuxer
+            .take_units()
+            .iter()
+            .flat_map(|unit| mux.push_au(&unit.data, unit.pts_90khz, None, true))
+            .collect()
+    }
+
+    struct ZeroClock;
+    impl PipelineClock for ZeroClock {
+        fn now_ns(&self) -> u64 {
+            0
+        }
+    }
+
+    async fn decodebin_pcm(tag: &str, ts: &[u8]) -> Vec<u8> {
+        let scratch = |ext: &str| {
+            std::env::temp_dir().join(format!("g2g-m1577-{tag}-{}.{ext}", std::process::id()))
+        };
+        let (input, output) = (scratch("ts"), scratch("s16"));
+        std::fs::write(&input, ts).expect("write fixture");
+        let line = format!(
+            "filesrc location={} ! decodebin ! audioconvert \
+             ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! filesink location={}",
+            input.display(),
+            output.display()
+        );
+        let graph = parse_launch(&default_registry(), &line)
+            .unwrap_or_else(|error| panic!("`{line}` parses: {error}"));
+        run_graph(graph, &ZeroClock, 4)
+            .await
+            .unwrap_or_else(|error| panic!("`{line}` runs: {error:?}"));
+        let pcm = std::fs::read(&output).expect("decodebin wrote PCM");
+        std::fs::remove_file(&input).ok();
+        std::fs::remove_file(&output).ok();
+        pcm
+    }
+
+    #[tokio::test]
+    async fn plays_like_the_latm_stream_type() {
+        let relabelled = relabelled_as_adts(LOAS_TS);
+        let pcm = decodebin_pcm("latm-as-adts", &relabelled).await;
+        assert!(!pcm.is_empty(), "decodebin decodes LOAS under 0x0F to PCM");
+        let reference = decodebin_pcm("latm", LOAS_TS).await;
+        assert!(
+            pcm == reference,
+            "LOAS under 0x0F decodes as under 0x11 ({} bytes against {})",
+            pcm.len(),
+            reference.len()
+        );
+    }
 }
 
 #[test]

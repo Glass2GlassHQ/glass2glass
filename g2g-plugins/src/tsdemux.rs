@@ -298,8 +298,8 @@ pub enum TsStream {
     /// the PES payload carries them (start-code framed, no parse element).
     Mpeg2,
     /// The first AAC audio elementary stream: ADTS (stream_type 0x0F), or
-    /// LOAS/LATM (0x11), whose frames go out as the PES carries them for
-    /// `aacparse` to read.
+    /// LOAS/LATM (0x11, or 0x0F where a broadcaster mislabels it), whose frames
+    /// go out as the PES carries them for `aacparse` to read.
     Aac,
     /// The first MPEG-1/2 Audio (Layer II, `mp2`) elementary stream (stream_type
     /// 0x03 / 0x04).
@@ -1158,7 +1158,6 @@ pub fn probe_streams(demux: &mut TsDemuxer) -> TsProbedStreams {
 // ISO/IEC 13818-1 audio and video stream types no `TsStream` carries
 const UNSUPPORTED_STREAM_TYPES: [(u8, &str); 3] =
     [(0x21, "jpeg2000"), (0x33, "vvc"), (0x42, "cavs")];
-const LATM_CODEC: &str = "aac_latm";
 const DTS_CORE_SYNC: [u8; 4] = [0x7F, 0xFE, 0x80, 0x01];
 
 fn unsupported_codec(
@@ -1166,10 +1165,6 @@ fn unsupported_codec(
     first_payload: Option<&[u8]>,
 ) -> Option<&'static str> {
     match es.stream_type {
-        // some broadcasters label LATM with the ADTS stream type
-        STREAM_TYPE_AAC => first_payload
-            .is_some_and(crate::aacparse::opens_loas_frame)
-            .then_some(LATM_CODEC),
         STREAM_TYPE_PRIVATE_PES if es_to_ts_stream(es).is_none() => first_payload
             .is_some_and(|payload| payload.starts_with(&DTS_CORE_SYNC))
             .then_some("dts"),
