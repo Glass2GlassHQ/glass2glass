@@ -425,6 +425,93 @@ fn udpsrc_address_and_port() {
     );
 }
 
+// M1734 / M1735: the RIST bonding, multicast and header extension knobs, GStreamer's names
+#[cfg(feature = "rist")]
+#[test]
+fn rist_bonding_multicast_and_extension() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::ristsink::RistSink;
+    use g2g_plugins::ristsrc::RistSrc;
+    let shared = [
+        (
+            "bonding-addresses",
+            PropValue::Str("10.0.0.1:5004,10.0.0.2:5006/eth1".into()),
+        ),
+        ("multicast-iface", PropValue::Str("eth0".into())),
+        ("multicast-loopback", PropValue::Bool(true)),
+        ("multicast-ttl", PropValue::Int(16)),
+    ];
+    let sink_only = [
+        ("bonding-method", PropValue::Str("round-robin".into())),
+        ("drop-null-ts-packets", PropValue::Bool(true)),
+        ("sequence-number-extension", PropValue::Bool(true)),
+        ("seqnum-offset", PropValue::Int(65_000)),
+    ];
+
+    let mut sink = RistSink::default();
+    for (name, value) in shared.iter().chain(sink_only.iter()) {
+        let specs = sink.properties();
+        assert!(declares(specs, name), "ristsink declares `{name}`");
+        if specs.iter().any(|s| s.name == *name && s.default.is_some()) {
+            assert_eq!(sink.get_property(name), Some(declared_default(specs, name)));
+        }
+        sink.set_property(name, value.clone()).unwrap();
+        assert_eq!(sink.get_property(name).as_ref(), Some(value), "`{name}`");
+    }
+    let mut source = RistSrc::default();
+    for (name, value) in &shared {
+        let specs = source.properties();
+        assert!(declares(specs, name), "ristsrc declares `{name}`");
+        if specs.iter().any(|s| s.name == *name && s.default.is_some()) {
+            assert_eq!(
+                source.get_property(name),
+                Some(declared_default(specs, name))
+            );
+        }
+        source.set_property(name, value.clone()).unwrap();
+        assert_eq!(source.get_property(name).as_ref(), Some(value), "`{name}`");
+    }
+
+    // the first bonded link is what `address` / `port` / `multicast-iface` read
+    assert_eq!(
+        sink.get_property("address"),
+        Some(PropValue::Str("10.0.0.1".into()))
+    );
+    assert_eq!(sink.get_property("port"), Some(PropValue::Uint(5004)));
+    sink.set_property("port", PropValue::Uint(6000)).unwrap();
+    assert_eq!(
+        sink.get_property("bonding-addresses"),
+        Some(PropValue::Str(
+            "10.0.0.1:6000/eth0,10.0.0.2:5006/eth1".into()
+        ))
+    );
+    for refused in [
+        "",
+        "10.0.0.1",
+        "10.0.0.1:5005",
+        "10.0.0.1:5004,",
+        "10.0.0.1:5004/",
+    ] {
+        assert!(
+            sink.set_property("bonding-addresses", PropValue::Str(refused.into()))
+                .is_err(),
+            "`{refused}` is refused"
+        );
+    }
+    assert!(sink
+        .set_property("bonding-method", PropValue::Str("random".into()))
+        .is_err());
+    assert!(sink
+        .set_property("multicast-ttl", PropValue::Int(256))
+        .is_err());
+    assert!(sink
+        .set_property("seqnum-offset", PropValue::Int(65_536))
+        .is_err());
+    sink.set_property("seqnum-offset", PropValue::Int(-1))
+        .unwrap();
+    assert_eq!(sink.get_property("seqnum-offset"), Some(PropValue::Int(-1)));
+}
+
 #[cfg(feature = "srt")]
 #[test]
 fn srtsrc_latency_and_passphrase() {

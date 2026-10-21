@@ -6,6 +6,13 @@
 //! bit set) fills its gap. RR + SDES go back to the source address of the
 //! sender's last RTCP packet, and the stream ends once the sender's BYE has
 //! been drained. The GStreamer equivalent is `ristsrc ! rtpmp2tdepay`.
+//!
+//! `bonding-addresses` lists several links, each with its own sockets and
+//! RTCP. Their packets merge into one stream, the copies of a sequence number
+//! after the first dropped, and NACKs go out on every link, as in GStreamer. A
+//! multicast address joins the group and sends RTCP to it. The TR-06-2 RTP
+//! header extension comes off every packet and the null packets it deleted go
+//! back in, as GStreamer's `ristrtpdeext` inside its `ristsrc`.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -26,7 +33,9 @@ use g2g_core::{
 
 use crate::bytestream::{byte_frame, mpegts_caps};
 use crate::filesink::io_err;
-use crate::rist::{self, LinkSettings, NackScheduler, MP2T_PAYLOAD_TYPE};
+use crate::rist::{
+    self, LinkAddress, LinkSettings, NackScheduler, RistExtensionRemover, MP2T_PAYLOAD_TYPE,
+};
 use crate::rtcp::{self, ReceptionStats, RtcpPacket};
 use crate::rtpjitter::{JitterConfig, RtpJitterBuffer};
 
@@ -59,39 +68,115 @@ const NS_PER_MS: u64 = 1_000_000;
 /// ```
 #[derive(Debug)]
 pub struct RistSrc {
-    link: LinkSettings,
+    settings: LinkSettings,
     receiver_buffer_ms: u64,
     reorder_section_ms: u64,
     max_rtx_retries: u32,
     ssrc: u32,
-    media_socket: Option<StdUdpSocket>,
-    rtcp_socket: Option<StdUdpSocket>,
+    bound_links: Vec<BoundLink>,
 }
 
 impl Default for RistSrc {
     fn default() -> Self {
         let ssrc = rist::random_u32();
         Self {
-            link: LinkSettings::new(DEFAULT_ADDRESS, format!("g2g-{ssrc:08x}")),
+            settings: LinkSettings::new(DEFAULT_ADDRESS, format!("g2g-{ssrc:08x}")),
             receiver_buffer_ms: DEFAULT_RECEIVER_BUFFER_MS,
             reorder_section_ms: DEFAULT_REORDER_SECTION_MS,
             max_rtx_retries: DEFAULT_MAX_RTX_RETRIES,
             ssrc,
-            media_socket: None,
-            rtcp_socket: None,
+            bound_links: Vec::new(),
         }
     }
 }
 
-/// What the receive loop knows about the one sender it serves.
+#[derive(Debug, Clone, Copy)]
+enum RtcpDestination {
+    Group(SocketAddr),
+    // the source of the sender's last valid RTCP packet on the link
+    LastSender(Option<SocketAddr>),
+}
+
+impl RtcpDestination {
+    fn address(self) -> Option<SocketAddr> {
+        match self {
+            RtcpDestination::Group(group) => Some(group),
+            RtcpDestination::LastSender(sender) => sender,
+        }
+    }
+
+    fn on_sender_rtcp(&mut self, from: SocketAddr) {
+        if let RtcpDestination::LastSender(sender) = self {
+            *sender = Some(from);
+        }
+    }
+}
+
 #[derive(Debug)]
-struct SenderState {
+struct BoundLink {
+    media_socket: StdUdpSocket,
+    rtcp_socket: StdUdpSocket,
+    rtcp_destination: RtcpDestination,
+}
+
+impl BoundLink {
+    fn bind(settings: &LinkSettings, address: &LinkAddress) -> Result<Self, G2gError> {
+        let media_address = address.resolve().map_err(io_err)?;
+        let rtcp_port = media_address.port() + 1;
+        let ip = media_address.ip();
+        if ip.is_multicast() {
+            let media_local = rist::unspecified_address(media_address, media_address.port());
+            let rtcp_local = rist::unspecified_address(media_address, rtcp_port);
+            return Ok(Self {
+                media_socket: settings
+                    .link_socket(address, media_local, Some(ip))
+                    .map_err(io_err)?,
+                rtcp_socket: settings
+                    .link_socket(address, rtcp_local, Some(ip))
+                    .map_err(io_err)?,
+                rtcp_destination: RtcpDestination::Group(SocketAddr::new(ip, rtcp_port)),
+            });
+        }
+        let mut rtcp_address = media_address;
+        rtcp_address.set_port(rtcp_port);
+        Ok(Self {
+            media_socket: settings
+                .link_socket(address, media_address, None)
+                .map_err(io_err)?,
+            rtcp_socket: settings
+                .link_socket(address, rtcp_address, None)
+                .map_err(io_err)?,
+            rtcp_destination: RtcpDestination::LastSender(None),
+        })
+    }
+
+    fn start(self) -> Result<ReceiverLink, G2gError> {
+        Ok(ReceiverLink {
+            media_socket: tokio::net::UdpSocket::from_std(self.media_socket).map_err(io_err)?,
+            rtcp_socket: tokio::net::UdpSocket::from_std(self.rtcp_socket).map_err(io_err)?,
+            statistics: None,
+            rtcp_destination: self.rtcp_destination,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ReceiverLink {
+    media_socket: tokio::net::UdpSocket,
+    rtcp_socket: tokio::net::UdpSocket,
+    // what arrived on this link, from its first original packet on
+    statistics: Option<ReceptionStats>,
+    rtcp_destination: RtcpDestination,
+}
+
+/// What the receive loop knows about the one stream it serves, whichever link
+/// a packet came in on.
+#[derive(Debug)]
+struct StreamState {
     /// Original-packet SSRC, taken from the first original packet.
     media_ssrc: Option<u32>,
-    statistics: ReceptionStats,
-    /// Where RTCP goes: the source of the sender's last valid RTCP packet.
-    rtcp_address: Option<SocketAddr>,
     said_goodbye: bool,
+    extension_remover: RistExtensionRemover,
 }
 
 impl RistSrc {
@@ -99,26 +184,28 @@ impl RistSrc {
         self.receiver_buffer_ms * NS_PER_MS
     }
 
-    /// RR (with a report block once the stream is known) + SDES.
-    fn report(&self, sender: &mut SenderState, now_ns: u64) -> Vec<u8> {
-        let blocks: Vec<rtcp::ReportBlock> = sender
-            .media_ssrc
-            .map(|_| sender.statistics.report_block(now_ns))
+    /// RR (with a report block once the link has seen the stream) + SDES.
+    fn report(&self, statistics: &mut Option<ReceptionStats>, now_ns: u64) -> Vec<u8> {
+        let blocks: Vec<rtcp::ReportBlock> = statistics
+            .as_mut()
+            .map(|statistics| statistics.report_block(now_ns))
             .into_iter()
             .collect();
         let mut compound = rtcp::build_receiver_report(self.ssrc, &blocks);
-        compound.extend(rtcp::build_sdes_cname(self.ssrc, &self.link.cname));
+        compound.extend(rtcp::build_sdes_cname(self.ssrc, &self.settings.cname));
         compound
     }
 }
 
 /// Buffer one media datagram if it is RTP MP2T from the stream being received.
 /// An original packet adopts the stream on first sight, a retransmission only
-/// fills a gap in it.
+/// fills a gap in it. A copy of a sequence number already buffered, from
+/// another bonded link, is dropped by the jitter buffer.
 fn accept_media(
     datagram: &[u8],
     now_ns: u64,
-    sender: &mut SenderState,
+    stream: &mut StreamState,
+    statistics: &mut Option<ReceptionStats>,
     jitter: &mut RtpJitterBuffer,
 ) {
     let Some(parsed) = RtpHeader::parse(datagram) else {
@@ -128,20 +215,23 @@ fn accept_media(
     if header.payload_type != MP2T_PAYLOAD_TYPE {
         return;
     }
-    let stream = rist::media_ssrc(header.ssrc);
+    let media_ssrc = rist::media_ssrc(header.ssrc);
     let retransmission = rist::is_retransmission(header.ssrc);
-    match sender.media_ssrc {
+    match stream.media_ssrc {
         None if retransmission => return,
-        None => sender.media_ssrc = Some(stream),
-        Some(known) if known != stream => return,
+        None => stream.media_ssrc = Some(media_ssrc),
+        Some(known) if known != media_ssrc => return,
         Some(_) => {}
     }
+    let Some(stripped) = stream.extension_remover.strip(datagram) else {
+        return;
+    };
     if !retransmission {
-        sender
-            .statistics
+        statistics
+            .get_or_insert_with(|| ReceptionStats::new(0, MP2T_CLOCK_HZ))
             .on_rtp(header.ssrc, header.sequence, header.timestamp, now_ns);
     }
-    jitter.push(datagram, now_ns);
+    jitter.push(&stripped, now_ns);
 }
 
 impl SourceLoop for RistSrc {
@@ -166,15 +256,12 @@ impl SourceLoop for RistSrc {
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let media_address = self.link.media_address().map_err(io_err)?;
-        let mut rtcp_address = media_address;
-        rtcp_address.set_port(media_address.port() + 1);
-        let media_socket = StdUdpSocket::bind(media_address).map_err(io_err)?;
-        let rtcp_socket = StdUdpSocket::bind(rtcp_address).map_err(io_err)?;
-        media_socket.set_nonblocking(true).map_err(io_err)?;
-        rtcp_socket.set_nonblocking(true).map_err(io_err)?;
-        self.media_socket = Some(media_socket);
-        self.rtcp_socket = Some(rtcp_socket);
+        self.bound_links = self
+            .settings
+            .links()
+            .iter()
+            .map(|address| BoundLink::bind(&self.settings, address))
+            .collect::<Result<_, _>>()?;
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -206,6 +293,30 @@ impl SourceLoop for RistSrc {
             )
             .with_default("5004")
             .with_range("2", "65534"),
+            PropertySpec::new(
+                "bonding-addresses",
+                PropKind::Str,
+                "comma separated list of <address>:<port> to receive on, replacing address and port",
+            )
+            .with_default("0.0.0.0:5004"),
+            PropertySpec::new(
+                "multicast-iface",
+                PropKind::Str,
+                "network interface the multicast group is joined on",
+            ),
+            PropertySpec::new(
+                "multicast-loopback",
+                PropKind::Bool,
+                "deliver the RTCP sent to the multicast group to senders on this host too",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "multicast-ttl",
+                PropKind::Int,
+                "time-to-live of the RTCP sent to the multicast group",
+            )
+            .with_default("1")
+            .with_range("0", "255"),
             PropertySpec::new("receiver-buffer", PropKind::Uint, "buffering duration, ms")
                 .with_default("1000")
                 .with_range("0", "4294967295"),
@@ -240,7 +351,7 @@ impl SourceLoop for RistSrc {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        if let Some(result) = self.link.set_property(name, &value) {
+        if let Some(result) = self.settings.set_property(name, &value) {
             return result;
         }
         let target = match name {
@@ -262,7 +373,7 @@ impl SourceLoop for RistSrc {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
-        if let Some(value) = self.link.get_property(name) {
+        if let Some(value) = self.settings.get_property(name) {
             return Some(value);
         }
         match name {
@@ -275,10 +386,14 @@ impl SourceLoop for RistSrc {
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
-            let media_socket = self.media_socket.take().ok_or(G2gError::NotConfigured)?;
-            let rtcp_socket = self.rtcp_socket.take().ok_or(G2gError::NotConfigured)?;
-            let media_socket = tokio::net::UdpSocket::from_std(media_socket).map_err(io_err)?;
-            let rtcp_socket = tokio::net::UdpSocket::from_std(rtcp_socket).map_err(io_err)?;
+            let bound_links = core::mem::take(&mut self.bound_links);
+            if bound_links.is_empty() {
+                return Err(G2gError::NotConfigured);
+            }
+            let mut links = bound_links
+                .into_iter()
+                .map(BoundLink::start)
+                .collect::<Result<Vec<_>, _>>()?;
 
             out.push(PipelinePacket::CapsChanged(mpegts_caps())).await?;
 
@@ -293,11 +408,10 @@ impl SourceLoop for RistSrc {
                 buffer_ns,
                 self.max_rtx_retries,
             );
-            let mut sender = SenderState {
+            let mut stream = StreamState {
                 media_ssrc: None,
-                statistics: ReceptionStats::new(0, MP2T_CLOCK_HZ),
-                rtcp_address: None,
                 said_goodbye: false,
+                extension_remover: RistExtensionRemover::default(),
             };
             let timer_check = Duration::from_millis(rist::TIMER_CHECK_MS);
             let timer_check_ns = rist::TIMER_CHECK_MS * NS_PER_MS;
@@ -306,49 +420,67 @@ impl SourceLoop for RistSrc {
             let mut next_nack_check_ns = 0u64;
             let mut emitted = 0u64;
             loop {
-                let received =
-                    tokio::time::timeout(timer_check, media_socket.recv_from(&mut datagram)).await;
+                let media_sockets = links.iter().map(|link| &link.media_socket);
+                let readable =
+                    tokio::time::timeout(timer_check, rist::any_readable(media_sockets)).await;
+                if let Ok(Err(error)) = readable {
+                    return Err(io_err(error));
+                }
                 let now_ns = g2g_core::metrics::monotonic_ns();
-                match received {
-                    Ok(Ok((length, _))) => {
-                        accept_media(&datagram[..length], now_ns, &mut sender, &mut jitter)
+                // one datagram per link per pass, so a busy link cannot starve the others
+                for link in links.iter_mut() {
+                    match link.media_socket.try_recv_from(&mut datagram) {
+                        Ok((length, _)) => accept_media(
+                            &datagram[..length],
+                            now_ns,
+                            &mut stream,
+                            &mut link.statistics,
+                            &mut jitter,
+                        ),
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(error) if rist::is_peer_unreachable(&error) => {}
+                        Err(error) => return Err(io_err(error)),
                     }
-                    Ok(Err(error)) if !rist::is_peer_unreachable(&error) => {
-                        return Err(io_err(error))
-                    }
-                    _ => {}
                 }
 
-                loop {
-                    let (length, from) = match rtcp_socket.try_recv_from(&mut datagram) {
-                        Ok(received) => received,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                        Err(error) if rist::is_peer_unreachable(&error) => continue,
-                        Err(error) => return Err(io_err(error)),
-                    };
-                    let packets = rtcp::parse_compound(&datagram[..length]);
-                    if packets.is_empty() {
-                        continue;
-                    }
-                    sender.rtcp_address = Some(from);
-                    for packet in &packets {
-                        match packet {
-                            RtcpPacket::SenderReport { ssrc, ntp, .. }
-                                if sender.media_ssrc == Some(*ssrc) =>
-                            {
-                                sender.statistics.on_sender_report(*ntp, now_ns);
-                            }
-                            RtcpPacket::Bye { ssrc } => {
-                                let known = sender.media_ssrc;
-                                if known.is_some_and(|media| ssrc.contains(&media)) {
-                                    sender.said_goodbye = true;
+                for link in links.iter_mut() {
+                    loop {
+                        let (length, from) = match link.rtcp_socket.try_recv_from(&mut datagram) {
+                            Ok(received) => received,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(error) if rist::is_peer_unreachable(&error) => continue,
+                            Err(error) => return Err(io_err(error)),
+                        };
+                        let packets = rtcp::parse_compound(&datagram[..length]);
+                        if packets.is_empty() {
+                            continue;
+                        }
+                        link.rtcp_destination.on_sender_rtcp(from);
+                        for packet in &packets {
+                            match packet {
+                                RtcpPacket::SenderReport { ssrc, ntp, .. }
+                                    if stream.media_ssrc == Some(*ssrc) =>
+                                {
+                                    if let Some(statistics) = link.statistics.as_mut() {
+                                        statistics.on_sender_report(*ntp, now_ns);
+                                    }
                                 }
-                            }
-                            _ => {
-                                if let Some(response) = rist::rtt_echo_response(packet) {
-                                    let mut compound = self.report(&mut sender, now_ns);
-                                    compound.extend(response);
-                                    rtcp_socket.send_to(&compound, from).await.map_err(io_err)?;
+                                RtcpPacket::Bye { ssrc } => {
+                                    let known = stream.media_ssrc;
+                                    if known.is_some_and(|media| ssrc.contains(&media)) {
+                                        stream.said_goodbye = true;
+                                    }
+                                }
+                                _ => {
+                                    if let Some(response) = rist::rtt_echo_response(packet) {
+                                        let mut compound =
+                                            self.report(&mut link.statistics, now_ns);
+                                        compound.extend(response);
+                                        link.rtcp_socket
+                                            .send_to(&compound, from)
+                                            .await
+                                            .map_err(io_err)?;
+                                    }
                                 }
                             }
                         }
@@ -365,35 +497,45 @@ impl SourceLoop for RistSrc {
                         .await?;
                     emitted += 1;
                 }
-                if sender.said_goodbye && jitter.buffered() == 0 {
+                if stream.said_goodbye && jitter.buffered() == 0 {
                     out.push(PipelinePacket::Eos).await?;
                     return Ok(emitted);
                 }
 
-                let Some(rtcp_address) = sender.rtcp_address else {
+                let no_rtcp_destination = links
+                    .iter()
+                    .all(|link| link.rtcp_destination.address().is_none());
+                if no_rtcp_destination {
                     continue;
-                };
+                }
                 let mut nack = Vec::new();
                 if now_ns >= next_nack_check_ns {
                     next_nack_check_ns = now_ns + timer_check_ns;
                     let missing = jitter.missing_seqs();
                     let tracked = &missing[..missing.len().min(MAX_TRACKED_LOSSES)];
                     let requests = scheduler.due(tracked, now_ns, MAX_NACKED_PER_REPORT);
-                    if let (Some(media_ssrc), false) = (sender.media_ssrc, requests.is_empty()) {
+                    if let (Some(media_ssrc), false) = (stream.media_ssrc, requests.is_empty()) {
                         nack = rist::build_nack_feedback(self.ssrc, media_ssrc, &requests);
                     }
                 }
-                let report_due = last_report_ns
-                    .is_none_or(|last| now_ns.saturating_sub(last) >= self.link.rtcp_interval_ns());
+                let report_due = last_report_ns.is_none_or(|last| {
+                    now_ns.saturating_sub(last) >= self.settings.rtcp_interval_ns()
+                });
                 if !report_due && nack.is_empty() {
                     continue;
                 }
-                let mut compound = self.report(&mut sender, now_ns);
-                compound.extend(nack);
-                rtcp_socket
-                    .send_to(&compound, rtcp_address)
-                    .await
-                    .map_err(io_err)?;
+                // the NACK goes out on every link, whichever one carried the lost packet
+                for link in links.iter_mut() {
+                    let Some(destination) = link.rtcp_destination.address() else {
+                        continue;
+                    };
+                    let mut compound = self.report(&mut link.statistics, now_ns);
+                    compound.extend_from_slice(&nack);
+                    link.rtcp_socket
+                        .send_to(&compound, destination)
+                        .await
+                        .map_err(io_err)?;
+                }
                 last_report_ns = Some(now_ns);
             }
         })

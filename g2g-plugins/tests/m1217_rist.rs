@@ -12,34 +12,18 @@
 //! ```
 #![cfg(feature = "rist")]
 
-use std::collections::BTreeSet;
-use std::future::Future;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::process::{Child, Command};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::rtp::{RtpHeader, RTP_HEADER_LEN};
 use g2g_core::runtime::{parse_launch, run_simple_pipeline, LatencyProfile, SourceLoop};
-use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PropValue, PropertySpec,
-};
+use g2g_core::{AsyncElement, PropValue, PropertySpec};
 
-use g2g_plugins::bytestream::{
-    mpegts_caps, TS_DATAGRAM_PAYLOAD, TS_PACKETS_PER_DATAGRAM, TS_PACKET_SIZE,
-};
+use g2g_plugins::bytestream::{TS_DATAGRAM_PAYLOAD, TS_PACKET_SIZE};
 use g2g_plugins::filesink::FileSink;
 use g2g_plugins::gst_compat::{gst_equivalent, GstEquivalent};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::rist::{
-    self, NackScheduler, RetransmissionHistory, SequenceRange, MAX_RANGES_PER_NACK,
+    self, NackScheduler, RetransmissionHistory, SentOn, SequenceRange, MAX_RANGES_PER_NACK,
     MP2T_PAYLOAD_TYPE, RIST_APP_NAME, SUBTYPE_RANGE_NACK, SUBTYPE_RTT_ECHO_REQUEST,
     SUBTYPE_RTT_ECHO_RESPONSE,
 };
@@ -47,6 +31,13 @@ use g2g_plugins::ristsink::RistSink;
 use g2g_plugins::ristsrc::RistSrc;
 use g2g_plugins::rtcp::{self, RtcpPacket};
 use g2g_plugins::rtpjitter::{JitterConfig, RtpJitterBuffer};
+
+mod rist_common;
+use rist_common::{
+    assert_recovered_through, collect_from_gst, free_even_port, loopback, output_path, spawn_gst,
+    stop_gst, synthetic_ts, LossyRelay, PacedTsSource, RelayLog, ZeroClock, GST_BIND_WAIT,
+    GST_DEADLINE,
+};
 
 const MEDIA_SSRC: u32 = 0x1234_5670;
 const RECEIVER_SSRC: u32 = 0x0BAD_CAFE;
@@ -58,8 +49,6 @@ const SDES_CNAME_ITEM: u8 = 1;
 
 /// RTP packets the paced g2g sender emits.
 const SENT_RTP_PACKETS: usize = 60;
-/// Gap between two of them: wide enough that a scattered loss is seen alone.
-const SEND_INTERVAL: Duration = Duration::from_millis(2);
 /// Packet indices (from the first original) the relay drops on the g2g sender
 /// leg: a burst the receiver sees at once, so a range NACK is the shorter
 /// form, then scattered losses a generic NACK covers more cheaply.
@@ -76,288 +65,10 @@ const DROPPED_FROM_GST: &[u16] = &[
 /// Long enough for both ends to drain their buffers, short enough that a hang
 /// fails instead of stalling CI.
 const LOOPBACK_DEADLINE: Duration = Duration::from_secs(20);
-const GST_DEADLINE: Duration = Duration::from_secs(60);
-/// How long the GStreamer receiver gets to bind before g2g sends.
-const GST_BIND_WAIT: Duration = Duration::from_millis(1000);
-/// How often a relay thread wakes to check whether the test is over.
-const RELAY_POLL: Duration = Duration::from_millis(20);
-const MAX_DATAGRAM: usize = 65_507;
 /// Video frames the GStreamer sender encodes, and its encoder bitrate, sized
 /// so the stream runs well past [`DROPPED_FROM_GST`].
 const GST_VIDEO_FRAMES: u32 = 150;
 const GST_BITRATE: u32 = 2_000_000;
-
-struct ZeroClock;
-impl PipelineClock for ZeroClock {
-    fn now_ns(&self) -> u64 {
-        0
-    }
-}
-
-fn output_path(name: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(name);
-    let _ = std::fs::remove_file(&path);
-    path
-}
-
-/// TS packets with the sync byte and a byte pattern that differs per packet, so
-/// a lost or reordered one changes the received bytes.
-fn synthetic_ts(rtp_packets: usize) -> Vec<u8> {
-    const SYNC_BYTE: u8 = 0x47;
-    let packet_count = rtp_packets * TS_PACKETS_PER_DATAGRAM;
-    let mut stream = Vec::with_capacity(packet_count * TS_PACKET_SIZE);
-    for packet in 0..packet_count {
-        stream.push(SYNC_BYTE);
-        stream.extend((1..TS_PACKET_SIZE).map(|offset| (packet * 31 + offset) as u8));
-    }
-    stream
-}
-
-/// A source that hands out one RTP payload's worth of TS per frame, spaced
-/// [`SEND_INTERVAL`] apart like a live encoder.
-#[derive(Debug)]
-struct PacedTsSource {
-    stream: Vec<u8>,
-}
-
-impl SourceLoop for PacedTsSource {
-    type RunFuture<'a>
-        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
-    where
-        Self: 'a;
-
-    type CapsFuture<'a>
-        = core::future::Ready<Result<Caps, G2gError>>
-    where
-        Self: 'a;
-
-    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(mpegts_caps()))
-    }
-
-    fn caps_constraint<'a>(
-        &'a mut self,
-    ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(mpegts_caps()))))
-    }
-
-    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        Ok(ConfigureOutcome::Accepted)
-    }
-
-    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
-        Box::pin(async move {
-            let mut emitted = 0u64;
-            for chunk in self.stream.chunks(TS_DATAGRAM_PAYLOAD) {
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        chunk.to_vec().into_boxed_slice(),
-                    )),
-                    timing: FrameTiming {
-                        pts_ns: emitted * SEND_INTERVAL.as_nanos() as u64,
-                        ..FrameTiming::default()
-                    },
-                    sequence: emitted,
-                    meta: Default::default(),
-                };
-                out.push(PipelinePacket::DataFrame(frame)).await?;
-                emitted += 1;
-                tokio::time::sleep(SEND_INTERVAL).await;
-            }
-            out.push(PipelinePacket::Eos).await?;
-            Ok(emitted)
-        })
-    }
-}
-
-/// Two adjacent loopback UDP sockets, the first on an even port: a RIST
-/// media + RTCP pair.
-fn bound_even_port_pair() -> (UdpSocket, UdpSocket) {
-    loop {
-        let media = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind an ephemeral port");
-        let port = media.local_addr().expect("bound address").port();
-        if !port.is_multiple_of(2) || port == u16::MAX {
-            continue;
-        }
-        if let Ok(rtcp) = UdpSocket::bind((Ipv4Addr::LOCALHOST, port + 1)) {
-            return (media, rtcp);
-        }
-    }
-}
-
-/// An even port with the odd one above it free, released for an element to bind.
-fn free_even_port() -> u16 {
-    let (media, _rtcp) = bound_even_port_pair();
-    media.local_addr().expect("bound address").port()
-}
-
-fn loopback(port: u16) -> SocketAddr {
-    SocketAddr::from((Ipv4Addr::LOCALHOST, port))
-}
-
-/// What the relay saw cross it.
-#[derive(Debug, Default)]
-struct RelayLog {
-    /// The payloads of the original packets in arrival order, dropped ones too:
-    /// the byte stream the sender put on the wire.
-    sent_payloads: Vec<u8>,
-    dropped: Vec<u16>,
-    retransmitted: BTreeSet<u16>,
-    retransmissions: usize,
-    range_nacks: usize,
-    generic_nacks: usize,
-}
-
-/// A UDP forwarder between a RIST sender and receiver. It drops the media
-/// packets at the given indices once, passes every retransmission and every
-/// RTCP packet, and records the NACK forms the receiver sent back.
-struct LossyRelay {
-    media_port: u16,
-    log: Arc<Mutex<RelayLog>>,
-    stop: Arc<AtomicBool>,
-    workers: Vec<JoinHandle<()>>,
-}
-
-impl LossyRelay {
-    fn start(receiver_media: SocketAddr, dropped_indices: &'static [u16]) -> Self {
-        let (media_in, rtcp_in) = bound_even_port_pair();
-        let media_port = media_in.local_addr().expect("bound address").port();
-        let media_out = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind relay output");
-        let rtcp_out = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind relay output");
-        for socket in [&media_in, &rtcp_in, &rtcp_out] {
-            socket
-                .set_read_timeout(Some(RELAY_POLL))
-                .expect("read timeout");
-        }
-        let mut receiver_rtcp = receiver_media;
-        receiver_rtcp.set_port(receiver_media.port() + 1);
-
-        let log = Arc::new(Mutex::new(RelayLog::default()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let sender_rtcp: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
-        let mut workers = Vec::new();
-
-        let (worker_log, worker_stop) = (log.clone(), stop.clone());
-        workers.push(std::thread::spawn(move || {
-            let mut first_original: Option<u16> = None;
-            let mut datagram = vec![0u8; MAX_DATAGRAM];
-            while !worker_stop.load(Ordering::Relaxed) {
-                let Ok((length, _)) = media_in.recv_from(&mut datagram) else {
-                    continue;
-                };
-                let packet = &datagram[..length];
-                if let Some(parsed) = RtpHeader::parse(packet) {
-                    let header = parsed.header;
-                    let mut log = worker_log.lock().unwrap();
-                    if rist::is_retransmission(header.ssrc) {
-                        log.retransmissions += 1;
-                        log.retransmitted.insert(header.sequence);
-                    } else {
-                        let payload_end = parsed.payload_offset + parsed.payload_len;
-                        log.sent_payloads
-                            .extend_from_slice(&packet[parsed.payload_offset..payload_end]);
-                        let first = *first_original.get_or_insert(header.sequence);
-                        let index = header.sequence.wrapping_sub(first);
-                        if dropped_indices.contains(&index)
-                            && !log.dropped.contains(&header.sequence)
-                        {
-                            log.dropped.push(header.sequence);
-                            continue;
-                        }
-                    }
-                }
-                media_out
-                    .send_to(packet, receiver_media)
-                    .expect("relay media");
-            }
-        }));
-
-        let rtcp_in_back = rtcp_in.try_clone().expect("clone relay socket");
-        let rtcp_out_back = rtcp_out.try_clone().expect("clone relay socket");
-        let (forward_stop, forward_sender) = (stop.clone(), sender_rtcp.clone());
-        workers.push(std::thread::spawn(move || {
-            let mut datagram = vec![0u8; MAX_DATAGRAM];
-            while !forward_stop.load(Ordering::Relaxed) {
-                let Ok((length, from)) = rtcp_in.recv_from(&mut datagram) else {
-                    continue;
-                };
-                *forward_sender.lock().unwrap() = Some(from);
-                rtcp_out
-                    .send_to(&datagram[..length], receiver_rtcp)
-                    .expect("relay sender RTCP");
-            }
-        }));
-
-        let (back_log, back_stop) = (log.clone(), stop.clone());
-        workers.push(std::thread::spawn(move || {
-            let mut datagram = vec![0u8; MAX_DATAGRAM];
-            while !back_stop.load(Ordering::Relaxed) {
-                let Ok((length, _)) = rtcp_out_back.recv_from(&mut datagram) else {
-                    continue;
-                };
-                let compound = &datagram[..length];
-                {
-                    let mut log = back_log.lock().unwrap();
-                    for packet in rtcp::parse_compound(compound) {
-                        match packet {
-                            RtcpPacket::Nack { .. } => log.generic_nacks += 1,
-                            RtcpPacket::App {
-                                subtype: SUBTYPE_RANGE_NACK,
-                                name: RIST_APP_NAME,
-                                ..
-                            } => log.range_nacks += 1,
-                            _ => {}
-                        }
-                    }
-                }
-                let sender = *sender_rtcp.lock().unwrap();
-                if let Some(sender) = sender {
-                    rtcp_in_back
-                        .send_to(compound, sender)
-                        .expect("relay receiver RTCP");
-                }
-            }
-        }));
-
-        Self {
-            media_port,
-            log,
-            stop,
-            workers,
-        }
-    }
-
-    fn finish(self) -> RelayLog {
-        self.stop.store(true, Ordering::Relaxed);
-        for worker in self.workers {
-            worker.join().expect("relay thread");
-        }
-        Arc::try_unwrap(self.log)
-            .expect("relay threads are done")
-            .into_inner()
-            .unwrap()
-    }
-}
-
-/// Every dropped packet came back as a retransmission after the receiver
-/// asked for it.
-fn assert_recovered_through(log: &RelayLog, dropped: &[u16]) {
-    assert_eq!(
-        log.dropped.len(),
-        dropped.len(),
-        "the relay dropped the whole set"
-    );
-    for sequence in &log.dropped {
-        assert!(
-            log.retransmitted.contains(sequence),
-            "dropped packet {sequence} was retransmitted (SSRC low bit 1)"
-        );
-    }
-    assert!(
-        log.range_nacks + log.generic_nacks > 0,
-        "the receiver sent NACKs"
-    );
-}
 
 /// The g2g receiver sees the burst of losses at once and the scattered ones
 /// apart, so it must have used both NACK forms.
@@ -609,22 +320,36 @@ fn media_header(sequence: u16) -> RtpHeader {
     }
 }
 
+// a sender with one link sends everything on it
+const ONLY_LINK: usize = 0;
+
+fn packet_with_payload(sequence: u16, payload: u8) -> Vec<u8> {
+    let mut packet = media_header(sequence).to_bytes().to_vec();
+    packet.push(payload);
+    packet
+}
+
 #[test]
 fn the_history_resends_what_a_range_covers_across_the_sequence_wrap() {
     let mut history = RetransmissionHistory::new(u64::MAX);
     let first = u16::MAX - 1;
     let payloads: Vec<u8> = (0..4).collect();
     for (step, payload) in payloads.iter().enumerate() {
+        let sequence = first.wrapping_add(step as u16);
         history.record(
-            media_header(first.wrapping_add(step as u16)),
-            &[*payload],
+            sequence,
+            packet_with_payload(sequence, *payload),
+            SentOn::EveryLink,
             0,
         );
     }
-    let resent = history.retransmissions(&[SequenceRange {
-        start: first,
-        additional: payloads.len() as u16 - 1,
-    }]);
+    let resent = history.retransmissions(
+        &[SequenceRange {
+            start: first,
+            additional: payloads.len() as u16 - 1,
+        }],
+        ONLY_LINK,
+    );
     let resent_payloads: Vec<u8> = resent.iter().map(|packet| packet[RTP_HEADER_LEN]).collect();
     assert_eq!(resent_payloads, payloads);
     for packet in &resent {
@@ -636,25 +361,33 @@ fn the_history_resends_what_a_range_covers_across_the_sequence_wrap() {
         start: first.wrapping_sub(2),
         additional: 3,
     };
-    assert_eq!(history.retransmissions(&[reaches_into_history]).len(), 2);
+    assert_eq!(
+        history
+            .retransmissions(&[reaches_into_history], ONLY_LINK)
+            .len(),
+        2
+    );
     let everything = SequenceRange {
         start: 0,
         additional: u16::MAX,
     };
-    assert_eq!(history.retransmissions(&[everything]).len(), payloads.len());
+    assert_eq!(
+        history.retransmissions(&[everything], ONLY_LINK).len(),
+        payloads.len()
+    );
 }
 
 #[test]
 fn the_history_forgets_packets_older_than_the_sender_buffer() {
     let keep_ns = 1_000;
     let mut history = RetransmissionHistory::new(keep_ns);
-    history.record(media_header(0), &[0], 0);
-    history.record(media_header(1), &[1], keep_ns + 1);
+    history.record(0, packet_with_payload(0, 0), SentOn::EveryLink, 0);
+    history.record(1, packet_with_payload(1, 1), SentOn::EveryLink, keep_ns + 1);
     let all = SequenceRange {
         start: 0,
         additional: 1,
     };
-    let resent = history.retransmissions(&[all]);
+    let resent = history.retransmissions(&[all], ONLY_LINK);
     assert_eq!(resent.len(), 1, "the first packet aged out");
     assert_eq!(resent[0][RTP_HEADER_LEN], 1);
 }
@@ -697,9 +430,7 @@ fn a_loss_is_requested_after_the_reorder_section_then_retried_across_the_buffer(
 }
 
 fn rtp_packet(sequence: u16) -> Vec<u8> {
-    let mut packet = media_header(sequence).to_bytes().to_vec();
-    packet.push(sequence as u8);
-    packet
+    packet_with_payload(sequence, sequence as u8)
 }
 
 #[test]
@@ -873,7 +604,7 @@ async fn g2g_to_g2g_recovers_dropped_packets() {
     .await;
     let log = relay.finish();
     assert!(
-        log.sent_payloads == sent,
+        log.sent_payloads() == sent,
         "ristsink put the whole stream on the wire"
     );
     assert!(received == sent, "the received bytes equal the sent ones");
@@ -882,41 +613,6 @@ async fn g2g_to_g2g_recovers_dropped_packets() {
 }
 
 // ---- real-peer interop against gst-launch-1.0 (ignored: needs GStreamer) ----
-
-fn spawn_gst(description: &str) -> Child {
-    Command::new("gst-launch-1.0")
-        .arg("-q")
-        .args(description.split_whitespace())
-        .spawn()
-        .expect("gst-launch-1.0 is on PATH")
-}
-
-/// Neither GStreamer RIST element lets `gst-launch-1.0` exit on its own: the
-/// bins drop EOS. Stop the peer once its output is complete.
-fn stop_gst(mut child: Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-/// Wait for a live gst receiver to have written `expected` bytes, then stop it.
-fn collect_from_gst(mut child: Child, path: &Path, expected: usize) -> Vec<u8> {
-    let deadline = Instant::now() + GST_DEADLINE;
-    while Instant::now() < deadline {
-        let written = std::fs::metadata(path)
-            .map(|m| m.len() as usize)
-            .unwrap_or(0);
-        if written >= expected {
-            break;
-        }
-        assert!(
-            child.try_wait().expect("poll the gst peer").is_none(),
-            "the gst receiver exited early"
-        );
-        std::thread::sleep(RELAY_POLL);
-    }
-    stop_gst(child);
-    std::fs::read(path).expect("read what gst received")
-}
 
 /// gst sends, g2g receives: `videotestsrc ! openh264enc ! mpegtsmux ! rtpmp2tpay
 /// ! ristsink` through the relay into `ristsrc`, against the same TS written by a
@@ -955,13 +651,14 @@ async fn gst_ristsink_feeds_ristsrc_through_loss() {
 
     let muxed = std::fs::read(&reference).expect("read the TS gst muxed");
     let received = std::fs::read(&received_path).expect("read the TS g2g received");
+    let sent_payloads = log.sent_payloads();
     assert_eq!(
         received.len(),
-        log.sent_payloads.len(),
+        sent_payloads.len(),
         "every byte gst sent arrived"
     );
     assert!(
-        received == log.sent_payloads,
+        received == sent_payloads,
         "the received TS equals the sent one"
     );
     // `rtpmp2tpay` never sends the group of TS packets it holds at EOS.

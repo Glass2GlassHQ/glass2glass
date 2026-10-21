@@ -171,8 +171,8 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
         "`srtsink` is the only SRT sink and always calls out to a listener (`host` / `port`); \
          there is no listen-mode send",
     )),
-    // RIST: the retransmission and MP2T payloading gst splits into helper
-    // elements are inside `ristsink` / `ristsrc`.
+    // RIST: the retransmission, header extension, bonding dispatch and MP2T
+    // payloading gst splits into helper elements are inside `ristsink` / `ristsrc`.
     ("ristrtxsend", GstEquivalent::Unsupported(
         "retransmission is built into `ristsink`, and `sender-buffer` sizes its history",
     )),
@@ -181,15 +181,15 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
          `max-rtx-retries`",
     )),
     ("ristrtpext", GstEquivalent::Unsupported(
-        "the RIST header extension (sequence number extension, null packet deletion) is not \
-         implemented: `ristsink` speaks the Simple Profile without it",
+        "the RIST header extension is built into `ristsink`: set `sequence-number-extension` \
+         and `drop-null-ts-packets` on it",
     )),
     ("ristrtpdeext", GstEquivalent::Unsupported(
-        "the RIST header extension is not implemented: `ristsrc` speaks the Simple Profile \
-         without it",
+        "`ristsrc` removes the RIST header extension and puts deleted null packets back itself",
     )),
     ("roundrobin", GstEquivalent::Unsupported(
-        "RIST bonding is not implemented: `ristsink` sends over one link",
+        "RIST bonding is built into `ristsink`: list the links in `bonding-addresses` and set \
+         `bonding-method=round-robin`",
     )),
     ("rtpmp2tpay", GstEquivalent::Unsupported(
         "MPEG-TS RTP payloading is built into `ristsink`, so link `mpegtsmux` to it directly \
