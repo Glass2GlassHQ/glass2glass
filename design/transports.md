@@ -1203,12 +1203,12 @@ Multicast interop remains.
 ## RIST
 
 `ristsink` and `ristsrc` (`rist` feature) speak the VSF TR-06-1 Simple Profile,
-one link, interoperable with GStreamer's elements of the same names. The sink
+interoperable with GStreamer's elements of the same names. The sink
 takes an MPEG-TS byte stream and payloads it as RTP MP2T itself (payload type 33,
 90 kHz, seven TS packets per RTP packet as `rtpmp2tpay` does), and the source
 outputs the byte stream, so the gst `rtpmp2tpay ! ristsink` and `ristsrc !
-rtpmp2tdepay` pairs each collapse to one element. Bonding, the Main Profile
-header extension, null-packet deletion, tunnelling and encryption are not built.
+rtpmp2tdepay` pairs each collapse to one element. Tunnelling and encryption are
+not built.
 
 The wire pieces are sans-IO and always compiled. `rtcp.rs` builds and parses APP
 packets and the CNAME-only SDES every RIST compound carries. `rist.rs` holds the
@@ -1236,9 +1236,33 @@ to `max-rtx-retries` requests. The source reports `receiver-buffer` as live
 latency and ends once the sender's BYE has drained through the buffer. RTT
 echo requests are answered on both ends and never originated.
 
+Bonding follows GStreamer's `ristsink` / `ristsrc`. `bonding-addresses` lists
+the links, and `address`, `port` and `multicast-iface` set the first one. Each
+link has its own socket, RTCP and sender report counters. The sender either
+sends every packet on every link (`broadcast`) or one link after the other
+(`round-robin`). Its single retransmission history records which link carried
+each packet, so a NACK is answered only on the link it came in on, with packets
+that link carried. The receiver merges all links into one jitter buffer, which
+drops duplicate sequence numbers, keeps reception statistics per link, and sends
+RR and NACK on every link whose RTCP destination it knows. A multicast link
+binds the port on every interface with `SO_REUSEADDR`, joins the group, and
+sends RTCP to the group at port + 1.
+
+The TR-06-2 header extension (profile `RI`, one word: N/E flags, original TS
+packet count, 204-byte flag, the null-deletion bitmap of the first seven TS
+packets, and the high 16 bits of a 32-bit sequence number) is written by
+`ristsink` when `sequence-number-extension` or `drop-null-ts-packets` is set.
+`ristsrc` always strips it, restores null packets as `47 1F FF 10` plus zeros,
+and drops a packet more than 32767 behind the highest extended sequence number,
+as `ristrtpdeext` does.
+
 Validated through a relay that drops a burst and scattered media packets:
 g2g to g2g, GStreamer `ristsink` into `ristsrc`, and `ristsink` into GStreamer
 `ristsrc`, each byte-exact (the GStreamer interop tests are ignored without
-`gst-launch-1.0`). GStreamer's `rtpmp2tpay` never sends the last seven TS
+`gst-launch-1.0`). Bonding, multicast and the extension are validated g2g to
+g2g, both directions against GStreamer (`ristrtpext` / `ristrtpdeext` across the
+sequence wrap), and against librist's `ristsender` / `ristreceiver` (those legs
+skip without the peer). `ristreceiver` outputs both copies of every packet from
+two simple-profile inputs, so it is tested on one link. GStreamer's `rtpmp2tpay` never sends the last seven TS
 packets it holds at EOS, so its stream ends one RTP payload short of what
 `mpegtsmux` produced.

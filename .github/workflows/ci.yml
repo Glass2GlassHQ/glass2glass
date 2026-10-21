@@ -351,6 +351,10 @@ jobs:
       # lossy loopback relay. The gst interop legs are ignored here.
       - name: test g2g-plugins (rist)
         run: cargo test -p g2g-plugins --locked --features rist --test m1217_rist
+      # RIST bonding, multicast and the header extension (M1734, M1735). The gst
+      # and librist legs skip without their peer.
+      - name: test g2g-plugins (rist bonding)
+        run: cargo test -p g2g-plugins --locked --features rist --test m1734_rist_bonding
       # SRTP elements (M1098, M1099, M1101): the protected round trips under
       # every cipher and authentication pair, the drop paths, the session
       # controls and the properties. The gst interop legs are ignored here.

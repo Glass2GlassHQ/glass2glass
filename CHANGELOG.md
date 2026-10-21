@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1735: `ristsink` adds the RIST RTP header extension (`sequence-number-extension`, `drop-null-ts-packets`) and `ristsrc` removes it, restoring deleted null packets.
+- M1734: `ristsink` / `ristsrc` bond several links (`bonding-addresses`, broadcast or round-robin) and send or join multicast groups.
 - M1773: `dav1ddec` and `rav1ddec` keep their in-flight pictures across a mid-stream reconfigure, and `av1parse` stops releasing temporal units early once its input has split one.
 - M1770: an MP4 / MOV video track with a clean aperture (clap) box decodes cropped to it through decodebin, matching ffmpeg, and a bare videocrop crops to a frame's CropMeta.
 - M1768: h264parse / h265parse no longer drop slice bytes from a TS stream whose PES packets split access units (Apple's HLS examples).

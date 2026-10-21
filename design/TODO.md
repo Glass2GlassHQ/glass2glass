@@ -142,9 +142,6 @@ Highest leverage first:
   fence slot, and the fd `WgpuToDmaBuf` exports is a timeline semaphore that poll
   cannot wait on, so this needs a `vkWaitSemaphores` wait in the sink or a
   pollable sync_file from the exporter.
-- **RIST:** link bonding (`bonding-addresses`, broadcast and round-robin),
-  multicast, and the Main Profile sequence-number extension (`ristrtpext` /
-  `ristrtpdeext`); interop against librist's `ristsender` / `ristreceiver`.
 - **RTMP:** multiple NetStreams over one connection. Deferred by design: it needs
   a dynamic-arity multi-output `RtmpSrc` (the stream count is only known once the
   client `createStream`s at runtime), which collides with g2g's fixed-arity-from-caps
