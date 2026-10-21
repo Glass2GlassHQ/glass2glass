@@ -412,8 +412,8 @@ fn any_geometry(format: RawVideoFormat) -> Caps {
 
 /// Whether the compute pass can read `format` at this geometry: NV12 at any size
 /// (the last chroma column and row of an odd size cover a single luma column or
-/// row), packed 4:2:2 only at an even width. A dma-buf NV12 frame still needs
-/// an even size, see `dmabuf_geometry_ok`.
+/// row), packed 4:2:2 only at an even width. A dma-buf frame also needs a row
+/// stride that holds its widest row, see `dmabuf_stride_holds_every_row`.
 fn geometry_ok(format: RawVideoFormat, width: u32) -> bool {
     match format {
         RawVideoFormat::Nv12 => true,
@@ -424,12 +424,10 @@ fn geometry_ok(format: RawVideoFormat, width: u32) -> bool {
     }
 }
 
-/// Whether a dma-buf frame can be read at the negotiated size. NV12 needs an even
-/// size: an `OwnedDmaBuf` carries one row stride for both planes, so it cannot
-/// describe the tight layout's wider chroma row.
+// an odd-width NV12 chroma row is one byte wider than its luma row
 #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
-fn dmabuf_geometry_ok(format: RawVideoFormat, width: u32, height: u32) -> bool {
-    format != RawVideoFormat::Nv12 || (width.is_multiple_of(2) && height.is_multiple_of(2))
+fn dmabuf_stride_holds_every_row(format: RawVideoFormat, width: u32, stride: u32) -> bool {
+    format.row_stride(width).is_some_and(|row| stride >= row)
 }
 
 /// The storage-buffer compute shader that reads `format`'s bytes. `None` for a
@@ -1060,7 +1058,7 @@ impl WgpuPreprocess {
         use g2g_plugins::dmabufwgpu::create_import_device_on;
 
         let shader = shader_for(self.format).ok_or(G2gError::CapsMismatch)?;
-        if !dmabuf_geometry_ok(self.format, self.width, self.height) {
+        if !dmabuf_stride_holds_every_row(self.format, self.width, dmabuf.stride) {
             return Err(G2gError::CapsMismatch);
         }
         let plane_bytes = self
@@ -1895,6 +1893,20 @@ mod tests {
             Some(G2gError::CapsMismatch),
             "an odd width has no complete pixel pair"
         );
+    }
+
+    #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+    #[test]
+    fn an_odd_nv12_dmabuf_stride_has_to_hold_the_chroma_row() {
+        let format = RawVideoFormat::Nv12;
+        let (width, height) = (7, 5);
+        let luma_row = format.plane_stride(0, width).unwrap();
+        let chroma_row = format.plane_stride(1, width).unwrap();
+        assert!(!dmabuf_stride_holds_every_row(format, width, luma_row));
+        assert!(dmabuf_stride_holds_every_row(format, width, chroma_row));
+        let layout = InputLayout::uniform(chroma_row, 0, height).unwrap();
+        assert_eq!(layout.chroma_stride, chroma_row);
+        assert_eq!(layout.chroma_base, chroma_row * height);
     }
 
     /// M993: the import-adapter knob is settable by name, defaults to the choice a
