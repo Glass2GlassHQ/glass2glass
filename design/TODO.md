@@ -119,11 +119,15 @@ Highest leverage first:
 - **`VulkanVideoDec` AV1 10-bit film grain on the GPU-texture path.** Its CPU
   upload is 8-bit only, so a 10-bit grain frame on that path is output without
   grain.
-- **`VulkanVideoDec` conformance residue.** `WPP_D_ericsson` (wavefront
-  parallel processing on a picture one CTB wide, with dependent slice segments)
-  is refused, though ffmpeg's Vulkan decoder decodes it on the same GPU: find
-  what differs in the submission. On RADV, `MR4_TANDBERG_C` and
-  `MR5_TANDBERG_C` (H.264) repeat an earlier picture at 22 output positions.
+- **`VulkanVideoDec` conformance residue on RADV.** `WPP_D_ericsson` (64 wide,
+  wavefront parallel processing with dependent slice segments) decodes wrong
+  through g2g on RADV while ffmpeg's Vulkan decoder decodes it bit-exact there
+  (md5 f710612103f386c415be3e6300693451). The Std SPS, PPS and picture-info
+  fields Mesa's `get_h265_msg` reads and the slice bitstream match ffmpeg's on a
+  static read, so the difference needs an experiment loop on the RADV device.
+  NVIDIA Turing cannot decode it at all (minimum H.265 coded extent 144x144).
+  Also on RADV, `MR4_TANDBERG_C` and `MR5_TANDBERG_C` (H.264) repeat an earlier
+  picture at 22 output positions.
 - **AV1 size changes.** `av1-1-b8-03-sizeup` and `sizedown` lose pictures
   across their mid-stream size changes through `dav1ddec` and `rav1ddec`
   (sizeup decodes 5 small pictures short of ffmpeg's output).
