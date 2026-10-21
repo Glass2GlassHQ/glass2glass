@@ -211,6 +211,8 @@ pub struct StartCodeParse<C: StartCodeCodec> {
     /// Sample aspect ratio from the last sequence header, for the read-only
     /// `pixel-aspect-ratio` property (caps carry no field for it).
     pixel_aspect: Option<(u32, u32)>,
+    #[cfg(feature = "metadata")]
+    input_stamps: crate::inputstamp::PendingInputStamps,
     _codec: PhantomData<C>,
 }
 
@@ -224,6 +226,8 @@ impl<C: StartCodeCodec> Default for StartCodeParse<C> {
             config_interval: ConfigInterval::default(),
             cached_config: Vec::new(),
             pixel_aspect: None,
+            #[cfg(feature = "metadata")]
+            input_stamps: crate::inputstamp::PendingInputStamps::default(),
             _codec: PhantomData,
         }
     }
@@ -327,6 +331,11 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
             out.push(PipelinePacket::DataFrame(frame)).await?;
             return Ok(());
         };
+        #[cfg(feature = "metadata")]
+        self.input_stamps.insert(
+            frame.timing.pts_ns,
+            crate::inputstamp::InputStamp::of(&frame),
+        );
         for (au, timing) in self.framer.push(bytes, frame.timing, unit_role::<C>) {
             self.emit_au(au, timing, out).await?;
         }
@@ -348,11 +357,16 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
         self.refine_caps(&au, out).await?;
         timing.keyframe = C::au_is_keyframe(&au);
         let au = self.apply_config_interval(au, timing.pts_ns, timing.keyframe);
-        let frame = Frame::new(
+        #[allow(unused_mut)]
+        let mut frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
             timing,
             self.seq,
         );
+        #[cfg(feature = "metadata")]
+        {
+            frame.meta = self.input_stamps.take(timing.pts_ns).meta;
+        }
         self.seq += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
@@ -452,6 +466,10 @@ impl<C: StartCodeCodec> AsyncElement for StartCodeParse<C> {
                     // than splice pre-seek bytes onto the post-seek stream.
                     self.framer.clear();
                     self.caps.forget();
+                    #[cfg(feature = "metadata")]
+                    {
+                        self.input_stamps = crate::inputstamp::PendingInputStamps::default();
+                    }
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Segment(seg) => {

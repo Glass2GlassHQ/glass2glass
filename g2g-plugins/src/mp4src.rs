@@ -35,8 +35,8 @@ use g2g_core::{
 
 use crate::filesink::path_io_err;
 use crate::fmp4::{
-    fragment_framerate_q16, parse_all_tracks, parse_chapters, parse_fragments, parse_header,
-    parse_progressive, starts_with_param_set, Header, Sample, TrackKind,
+    clean_aperture_meta, fragment_framerate_q16, parse_all_tracks, parse_chapters, parse_fragments,
+    parse_header, parse_progressive, starts_with_param_set, Header, Sample, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
@@ -253,6 +253,7 @@ impl SourceLoop for Mp4Src {
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
             });
 
+            let meta = clean_aperture_meta(header.clean_aperture);
             let mut sequence = 0u64;
             // The next emitted frame is a (re)start: prepend the out-of-band
             // parameter sets if it lacks them, so a decoder can resume. Set again
@@ -389,7 +390,7 @@ impl SourceLoop for Mp4Src {
                         keyframe: s.keyframe, // MP4 sync-sample (stss) table
                     },
                     sequence,
-                    meta: Default::default(),
+                    meta: meta.clone(),
                 };
                 sequence += 1;
                 i += 1;

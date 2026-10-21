@@ -76,15 +76,14 @@ fn raw_audio() -> Caps {
 
 /// A `mem://` URI source stand-in (its identity is irrelevant to graph assembly,
 /// which never runs it): returns a placeholder source + the container byte caps.
-fn mem_uri_build(
-    _uri: &g2g_core::runtime::Uri,
-) -> Result<(Box<dyn g2g_core::runtime::DynSourceLoop>, Caps), UriError> {
-    Ok((
-        Box::new(g2g_plugins::videotestsrc::VideoTestSrc::new(8, 8, 30, 1)),
-        Caps::ByteStream {
+fn mem_uri_build(_uri: &g2g_core::runtime::Uri) -> Result<g2g_core::runtime::UriSource, UriError> {
+    Ok(g2g_core::runtime::UriSource {
+        source: Box::new(g2g_plugins::videotestsrc::VideoTestSrc::new(8, 8, 30, 1)),
+        caps: Caps::ByteStream {
             encoding: g2g_core::ByteStreamEncoding::Matroska,
         },
-    ))
+        has_clean_aperture: false,
+    })
 }
 
 /// A registry with the `mem://` URI handler and stub H.264 / AAC decoders (so the

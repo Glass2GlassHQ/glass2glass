@@ -59,6 +59,7 @@ pub(crate) struct Header {
     /// Common-encryption metadata from the init's `tenc` (plus any movie-level
     /// `seig` table), `None` for a clear track.
     pub(crate) cenc: Option<CencTrack>,
+    pub(crate) clean_aperture: Option<CropRectangle>,
 }
 
 /// In-place sample decryptor: given the crypto resolved for a sample (scheme, IV,
@@ -167,6 +168,7 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
         framerate_q16: constant_framerate_q16(stbl, timescale),
         param_sets,
         cenc: cenc_track(cenc, stbl)?,
+        clean_aperture: clean_aperture(entries),
     })
 }
 
@@ -411,21 +413,21 @@ pub(crate) struct EditGap {
     earlier_gaps_ns: u64,
 }
 
+#[cfg(feature = "metadata")]
+pub(crate) fn clean_aperture_meta(clean_aperture: Option<CropRectangle>) -> FrameMetaSet {
+    let mut meta = FrameMetaSet::new();
+    if let Some(rectangle) = clean_aperture {
+        meta.attach(g2g_core::meta::CropMeta { rectangle });
+    }
+    meta
+}
+
+#[cfg(not(feature = "metadata"))]
+pub(crate) fn clean_aperture_meta(_clean_aperture: Option<CropRectangle>) -> FrameMetaSet {
+    FrameMetaSet::new()
+}
+
 impl TrackHeader {
-    #[cfg(feature = "metadata")]
-    pub(crate) fn clean_aperture_meta(&self) -> FrameMetaSet {
-        let mut meta = FrameMetaSet::new();
-        if let Some(rectangle) = self.clean_aperture {
-            meta.attach(g2g_core::meta::CropMeta { rectangle });
-        }
-        meta
-    }
-
-    #[cfg(not(feature = "metadata"))]
-    pub(crate) fn clean_aperture_meta(&self) -> FrameMetaSet {
-        FrameMetaSet::new()
-    }
-
     // the stream time the edit list presents, on the timeline `edited_sample` moves samples to
     fn edit_segment(&self) -> Segment {
         Segment {

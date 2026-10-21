@@ -353,13 +353,13 @@ pub fn gapless_playbin<Sk: AsyncElement + 'static>(
     let (first, rest) = uris
         .split_first()
         .ok_or(GaplessPlaybinError::EmptyPlaylist)?;
-    let (first_src, caps) = reg.build_uri_source(first)?;
+    let first = reg.build_uri_source(first)?;
     let ctl = GaplessController::new();
     for uri in rest {
-        let (src, _caps) = reg.build_uri_source(uri)?;
-        ctl.enqueue(src);
+        ctl.enqueue(reg.build_uri_source(uri)?.source);
     }
-    let gapless = GaplessSrc::new(first_src, ctl.clone());
-    let graph = reg.build_source_decodebin(Box::new(gapless), &caps, sink, target, max_depth)?;
+    let gapless = GaplessSrc::new(first.source, ctl.clone());
+    let graph =
+        reg.build_source_decodebin(Box::new(gapless), &first.caps, sink, target, max_depth)?;
     Ok((graph, ctl))
 }

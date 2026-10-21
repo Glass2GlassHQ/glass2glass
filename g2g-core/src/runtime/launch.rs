@@ -1088,12 +1088,10 @@ fn expand_decodebin(
                         });
                     }
                     if crops_to_clean_aperture {
-                        new_chain.push(Item::Element(ElementSpec {
-                            name: "videocrop".to_string(),
-                            props: Vec::new(),
-                            instance: None,
-                            log_category: None,
-                        }));
+                        new_chain.push(Item::Prebuilt {
+                            node: PrebuiltNode::Element(registry.clean_aperture_crop()?),
+                            name: None,
+                        });
                     }
                     upstream = None;
                 }
@@ -2117,11 +2115,12 @@ impl<'a> FallbacksrcSourceOrigin<'a> {
     ) -> Result<(Box<dyn DynSourceLoop>, Caps), ParseError> {
         match self {
             Self::Uri(uri) => {
-                let (source, caps) = registry
+                let built = registry
                     .build_uri_source(uri)
                     .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
-                let source = restartable_uri_source(registry, source, uri, policy, role, unblock)?;
-                Ok((source, caps))
+                let source =
+                    restartable_uri_source(registry, built.source, uri, policy, role, unblock)?;
+                Ok((source, built.caps))
             }
             Self::Factory(factory) => {
                 let (source, caps) = factory.build();
@@ -2417,9 +2416,10 @@ fn expand_uri_sources(
                     continue;
                 }
             }
-            let (source, caps) = registry
+            let built = registry
                 .build_uri_source(uri)
                 .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
+            let caps = built.caps;
             // `playbin` names its own sink, a bare `uridecodebin` is followed by
             // one: either way the consumer's declared input memory picks the
             // decoder (M1018), as it does after a `decodebin`.
@@ -2441,12 +2441,18 @@ fn expand_uri_sources(
                 .autoplug_avoiding(&caps, &target, DECODEBIN_MAX_DEPTH, preferred, avoided)
                 .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
             new_chain.push(Item::Prebuilt {
-                node: PrebuiltNode::Source(source),
+                node: PrebuiltNode::Source(built.source),
                 name: None,
             });
             for dec in decoders {
                 new_chain.push(Item::Prebuilt {
                     node: PrebuiltNode::Element(dec),
+                    name: None,
+                });
+            }
+            if built.has_clean_aperture {
+                new_chain.push(Item::Prebuilt {
+                    node: PrebuiltNode::Element(registry.clean_aperture_crop()?),
                     name: None,
                 });
             }
@@ -2786,11 +2792,12 @@ fn build_graph(
     // `decodebin name=d` fan-out (M482): a `decodebin` node left unexpanded (it has
     // named refs) with a file source upstream probes the file, builds the
     // multi-output demuxer (stored like a demux-select node so it fans out on its
-    // own pads), and records each port's elementary caps so the wiring below splices
+    // own pads), and records what each port carries so the wiring below splices
     // a decoder onto every port (the decode-per-port that makes it `decodebin`, not a
     // bare demuxer). Behind a network source the URI's fan-out supplies the demuxer
     // and its source replaces the line's.
-    let mut decode_fanout_caps: Vec<Option<Vec<Caps>>> = (0..specs.len()).map(|_| None).collect();
+    let mut decode_fanout_ports: Vec<Option<Vec<UriFanoutPort>>> =
+        (0..specs.len()).map(|_| None).collect();
     // Which port each link out of a fan-out node reads, filled for every node
     // whose ports are matched to its branches.
     let mut fanout_links: Vec<Option<FanoutLinks>> = (0..specs.len()).map(|_| None).collect();
@@ -2823,7 +2830,7 @@ fn build_graph(
             .decodebin_select_hooks()
             .iter()
             .find_map(|hook| hook(location));
-        let (demux, caps) = match probed_file {
+        let (demux, ports) = match probed_file {
             Some(found) => found,
             None if in_deg[upstream] == 0 => {
                 let Some(UriFanout {
@@ -2839,11 +2846,14 @@ fn build_graph(
                 apply_props(&mut source, &upstream_spec.name, &upstream_spec.props)?;
                 prebuilt[upstream] =
                     Some((PrebuiltNode::Source(source), upstream_spec.instance.clone()));
-                (demux, ports.into_iter().map(|port| port.caps).collect())
+                (demux, ports)
             }
             None => return Err(unsupported()),
         };
-        let kinds: Vec<StreamType> = caps.iter().map(StreamType::of).collect();
+        let kinds: Vec<StreamType> = ports
+            .iter()
+            .map(|port| StreamType::of(&port.caps))
+            .collect();
         fanout_links[ei] = Some(FanoutLinks {
             port_of_link: fanout_link_ports(
                 registry,
@@ -2856,7 +2866,7 @@ fn build_graph(
             ports: kinds.len(),
         });
         demux_select_node[ei] = Some(demux);
-        decode_fanout_caps[ei] = Some(caps);
+        decode_fanout_ports[ei] = Some(ports);
     }
     // `uridecodebin name=d` fan-out: the hook probed every port, so each `d.`
     // reference picks its port here and the wiring below decodes it.
@@ -2876,7 +2886,7 @@ fn build_graph(
             )?,
             ports: kinds.len(),
         });
-        decode_fanout_caps[ei] = Some(fanout.ports.iter().map(|p| p.caps.clone()).collect());
+        decode_fanout_ports[ei] = Some(fanout.ports.clone());
     }
     let is_select: Vec<bool> = (0..specs.len())
         .map(|ei| demux_select_node[ei].is_some() || fanout_links[ei].is_some())
@@ -3146,25 +3156,16 @@ fn build_graph(
         // branch consumer instead of a bare link, so each `d.video_0` / `d.audio_0`
         // branch receives DECODED (raw) frames. A text port carries `Text{Utf8}`
         // already, so it links straight through (no codec).
-        if let Some(caps) = &decode_fanout_caps[s] {
-            let port = src.index as usize;
+        if let Some(ports) = &decode_fanout_ports[s] {
+            let port = &ports[src.index as usize];
             // the port's own caps say what it carries, a bare `d.` request does not
-            let kind = StreamType::of(&caps[port]);
+            let kind = StreamType::of(&port.caps);
             if kind != StreamType::Text {
                 let target: &dyn Fn(&Caps) -> bool = match kind {
                     StreamType::Audio => &is_raw_audio,
                     _ => &is_raw_video,
                 };
-                registry
-                    .decodebin(
-                        &mut graph,
-                        src,
-                        dst,
-                        &caps[port],
-                        target,
-                        DECODEBIN_MAX_DEPTH,
-                    )
-                    .map_err(|_| ParseError::NoDecodeChain(alloc::format!("{:?}", caps[port])))?;
+                registry.decodebin_port(&mut graph, src, dst, port, target, DECODEBIN_MAX_DEPTH)?;
                 continue;
             }
         }
@@ -3673,7 +3674,7 @@ enum FanoutFallback {
     OnePort {
         pad: PadId,
         port: usize,
-        caps: Caps,
+        stream: UriFanoutPort,
     },
 }
 
@@ -3861,7 +3862,11 @@ fn build_fallbacksrc_fanout(
             Some(FanoutFallback::OnePort {
                 pad: src.into(),
                 port,
-                caps,
+                stream: UriFanoutPort {
+                    stream_type: StreamType::of(&caps),
+                    caps,
+                    has_clean_aperture: false,
+                },
             })
         }
         (None, _) => None,
@@ -3883,13 +3888,13 @@ fn build_fallbacksrc_fanout(
         if let Some(category) = &spec.log_category {
             graph.set_node_log_category(switch.node(), category.clone());
         }
-        plug_decode(
-            registry,
+        registry.decodebin_port(
             &mut graph,
             main_pads[i],
             switch.input(0),
-            &port.caps,
-            kind,
+            port,
+            &kind.raw,
+            DECODEBIN_MAX_DEPTH,
         )?;
         // The k-th main port of a kind pairs with the k-th fallback port of that
         // kind, so a two-track container's second audio stream backs the second
@@ -3899,18 +3904,23 @@ fn build_fallbacksrc_fanout(
                 pads,
                 ports: fallback_ports,
             }) => nth_port_of_kind(fallback_ports, port.stream_type, branch.ordinal)
-                .map(|j| (pads[j], &fallback_ports[j].caps)),
+                .map(|j| (pads[j], &fallback_ports[j])),
             Some(FanoutFallback::OnePort {
                 pad,
                 port: backed,
-                caps,
-            }) => (*backed == i).then_some((*pad, caps)),
+                stream,
+            }) => (*backed == i).then_some((*pad, stream)),
             None => None,
         };
         match matching {
-            Some((pad, caps)) => {
-                plug_decode(registry, &mut graph, pad, switch.input(1), caps, kind)?
-            }
+            Some((pad, stream)) => registry.decodebin_port(
+                &mut graph,
+                pad,
+                switch.input(1),
+                stream,
+                &kind.raw,
+                DECODEBIN_MAX_DEPTH,
+            )?,
             None => plug_dummy(registry, &mut graph, switch.input(1), kind)?,
         }
         let mut head = {
@@ -3930,21 +3940,6 @@ fn build_fallbacksrc_fanout(
         graph.link(switch.output(), head)?;
     }
     Ok(Some(graph))
-}
-
-/// Auto-plug the decode chain from one demux port to one switch input.
-fn plug_decode(
-    registry: &Registry,
-    graph: &mut Graph<GraphNode>,
-    from: PadId,
-    to: PadId,
-    caps: &Caps,
-    kind: &FallbackKind,
-) -> Result<(), ParseError> {
-    registry
-        .decodebin(graph, from, to, caps, &kind.raw, DECODEBIN_MAX_DEPTH)
-        .map_err(|_| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
-    Ok(())
 }
 
 /// Build the dummy fallback branch for one kind (black frames or silence behind

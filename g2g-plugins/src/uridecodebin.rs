@@ -24,7 +24,7 @@ use alloc::boxed::Box;
 #[cfg(feature = "std")]
 use g2g_core::log::short_type_name;
 use g2g_core::runtime::{DynMultiOutputElement, PadKind, PadRequest};
-use g2g_core::runtime::{DynSourceLoop, Uri, UriError, UriSourceFactory};
+use g2g_core::runtime::{DynSourceLoop, Uri, UriError, UriSource, UriSourceFactory};
 use g2g_core::{Caps, Dim, Rate, VideoCodec};
 
 /// H.264 at any geometry: the media type the H.264 sources declare. Real
@@ -46,8 +46,11 @@ pub fn udp_handler() -> UriSourceFactory {
     UriSourceFactory::new("udp", |uri: &Uri| {
         // `rest` is the bare authority `host:port` for udp://.
         let addr = uri.rest.parse().map_err(|_| UriError::Malformed)?;
-        let src = crate::udpsrc::UdpSrc::new(addr);
-        Ok((Box::new(src) as Box<dyn DynSourceLoop>, h264_any()))
+        Ok(UriSource {
+            source: Box::new(crate::udpsrc::UdpSrc::new(addr)),
+            caps: h264_any(),
+            has_clean_aperture: false,
+        })
     })
 }
 
@@ -56,8 +59,11 @@ pub fn udp_handler() -> UriSourceFactory {
 #[cfg(feature = "rtsp")]
 pub fn rtsp_handler() -> UriSourceFactory {
     UriSourceFactory::new("rtsp", |uri: &Uri| {
-        let src = crate::rtspsrc::RtspSrc::new(uri.raw);
-        Ok((Box::new(src) as Box<dyn DynSourceLoop>, h264_any()))
+        Ok(UriSource {
+            source: Box::new(crate::rtspsrc::RtspSrc::new(uri.raw)),
+            caps: h264_any(),
+            has_clean_aperture: false,
+        })
     })
 }
 
@@ -83,7 +89,10 @@ pub fn build_rtsp_av_fanout(
         2,
     );
     let ports = [src.output(VIDEO_PORT as u8), src.output(AUDIO_PORT as u8)];
-    let av = [(tracks.video.clone(), true), (audio, false)];
+    let av = [
+        uncropped_port(tracks.video.clone(), true),
+        uncropped_port(audio, false),
+    ];
     wire_av_ports(reg, &mut graph, &ports, &av)?;
     Ok(Some(graph))
 }
@@ -158,14 +167,8 @@ pub fn rtsp_track_fanout(url: &str, tracks: &crate::rtspsrcn::RtspTracks) -> Opt
             rebuild: Box::new(move || Ok(session())),
         },
         ports: Vec::from([
-            UriFanoutPort {
-                caps: tracks.video.clone(),
-                stream_type: StreamType::Video,
-            },
-            UriFanoutPort {
-                caps: audio,
-                stream_type: StreamType::Audio,
-            },
+            uncropped_port(tracks.video.clone(), true),
+            uncropped_port(audio, false),
         ]),
     })
 }
@@ -188,14 +191,16 @@ pub fn file_handler() -> UriSourceFactory {
         match crate::typefind::sniff_caps(&prefix).ok_or(UriError::UnknownContent)? {
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::IsoBmff,
-            } => {
-                let src = crate::mp4src::Mp4Src::new(uri.rest);
-                Ok((Box::new(src) as Box<dyn DynSourceLoop>, h264_any()))
-            }
-            caps => {
-                let src = crate::filesrc::FileSrc::new(uri.rest, caps.clone());
-                Ok((Box::new(src) as Box<dyn DynSourceLoop>, caps))
-            }
+            } => Ok(UriSource {
+                source: Box::new(crate::mp4src::Mp4Src::new(uri.rest)),
+                caps: h264_any(),
+                has_clean_aperture: mp4src_crops_clean_aperture(uri.rest),
+            }),
+            caps => Ok(UriSource {
+                source: Box::new(crate::filesrc::FileSrc::new(uri.rest, caps.clone())),
+                caps,
+                has_clean_aperture: false,
+            }),
         }
     })
 }
@@ -221,18 +226,18 @@ pub fn hls_http_handlers() -> [UriSourceFactory; 2] {
 }
 
 #[cfg(feature = "hls")]
-fn hls_source(uri: &Uri) -> Result<(Box<dyn DynSourceLoop>, Caps), UriError> {
+fn hls_source(uri: &Uri) -> Result<UriSource, UriError> {
     if uri.rest.is_empty() {
         return Err(UriError::Malformed);
     }
     let url = hls_url(uri.scheme, uri.rest).ok_or(UriError::UnknownContent)?;
-    let src = crate::hlssrc::HlsSrc::new(url);
-    Ok((
-        Box::new(src) as Box<dyn DynSourceLoop>,
-        Caps::ByteStream {
+    Ok(UriSource {
+        source: Box::new(crate::hlssrc::HlsSrc::new(url)),
+        caps: Caps::ByteStream {
             encoding: g2g_core::ByteStreamEncoding::MpegTs,
         },
-    ))
+        has_clean_aperture: false,
+    })
 }
 
 #[cfg(feature = "hls")]
@@ -258,10 +263,9 @@ pub fn v4l2_handler() -> UriSourceFactory {
         if uri.rest.is_empty() {
             return Err(UriError::Malformed);
         }
-        let src = crate::v4l2src::V4l2Src::new(uri.rest);
-        Ok((
-            Box::new(src) as Box<dyn DynSourceLoop>,
-            Caps::RawVideo {
+        Ok(UriSource {
+            source: Box::new(crate::v4l2src::V4l2Src::new(uri.rest)),
+            caps: Caps::RawVideo {
                 format: g2g_core::RawVideoFormat::Yuyv,
                 width: Dim::Any,
                 height: Dim::Any,
@@ -269,7 +273,8 @@ pub fn v4l2_handler() -> UriSourceFactory {
                 interlace: g2g_core::Interlace::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
-        ))
+            has_clean_aperture: false,
+        })
     })
 }
 
@@ -389,7 +394,7 @@ fn byte_fanout(
     make: impl Fn() -> Box<dyn DynSourceLoop> + Send + 'static,
     encoding: ByteStreamEncoding,
     demux: Box<dyn DynMultiOutputElement>,
-    av: &[(Caps, bool)],
+    av: &[UriFanoutPort],
 ) -> UriFanout {
     UriFanout {
         head: UriFanoutHead::Demux {
@@ -397,17 +402,76 @@ fn byte_fanout(
             rebuild: Box::new(move || Ok((make(), Caps::ByteStream { encoding }))),
             demux,
         },
-        ports: av
-            .iter()
-            .map(|(caps, video)| UriFanoutPort {
-                caps: caps.clone(),
-                stream_type: match video {
-                    true => StreamType::Video,
-                    false => StreamType::Audio,
-                },
-            })
-            .collect(),
+        ports: av.to_vec(),
     }
+}
+
+#[cfg(feature = "std")]
+fn uncropped_port(caps: Caps, video: bool) -> UriFanoutPort {
+    UriFanoutPort {
+        caps,
+        stream_type: match video {
+            true => StreamType::Video,
+            false => StreamType::Audio,
+        },
+        has_clean_aperture: false,
+    }
+}
+
+// each port typed by its caps, as the decodebin fan-out reads them
+#[cfg(feature = "std")]
+fn uncropped_ports(caps: Vec<Caps>) -> Vec<UriFanoutPort> {
+    caps.into_iter()
+        .map(|caps| UriFanoutPort {
+            stream_type: StreamType::of(&caps),
+            caps,
+            has_clean_aperture: false,
+        })
+        .collect()
+}
+
+// `location` names the file in the warning a build without the metadata feature gives
+#[cfg(feature = "std")]
+fn mp4_ports(
+    location: &str,
+    moov: &[u8],
+    tracks: &[crate::mp4demuxn::Mp4StreamInfo],
+) -> Vec<UriFanoutPort> {
+    let cropped = crate::mp4demuxn::clean_aperture_tracks(moov);
+    tracks
+        .iter()
+        .map(|track| UriFanoutPort {
+            stream_type: StreamType::of(&track.caps),
+            caps: track.caps.clone(),
+            has_clean_aperture: crops_clean_aperture(location, cropped.contains(&track.track_id)),
+        })
+        .collect()
+}
+
+// the first track, the one Mp4Src forwards, read the way Mp4Src reads it
+#[cfg(feature = "std")]
+fn mp4src_crops_clean_aperture(path: &str) -> bool {
+    let has_clean_aperture = read_mp4_top_level_box(path, b"moov")
+        .and_then(|moov| crate::fmp4::parse_header(&moov).ok())
+        .is_some_and(|header| header.clean_aperture.is_some());
+    crops_clean_aperture(path, has_clean_aperture)
+}
+
+#[cfg(all(feature = "std", feature = "metadata"))]
+fn crops_clean_aperture(_location: &str, has_clean_aperture: bool) -> bool {
+    has_clean_aperture
+}
+
+// without the metadata feature no crop rectangle reaches a videocrop
+#[cfg(all(feature = "std", not(feature = "metadata")))]
+fn crops_clean_aperture(location: &str, has_clean_aperture: bool) -> bool {
+    if has_clean_aperture {
+        g2g_core::g2g_warn!(
+            g2g_core::log::Target::category("decodebin"),
+            "{location}: shows the whole picture of a track with a clean aperture, cropping it needs the metadata feature"
+        );
+    }
+    false
 }
 
 /// [`byte_fanout`] over a `file://` container: the path its byte source reads.
@@ -416,7 +480,7 @@ fn file_fanout(
     path: &str,
     encoding: ByteStreamEncoding,
     demux: Box<dyn DynMultiOutputElement>,
-    av: &[(Caps, bool)],
+    av: &[UriFanoutPort],
 ) -> UriFanout {
     let owned = path.to_string();
     byte_fanout(move || byte_source(&owned, encoding), encoding, demux, av)
@@ -454,10 +518,10 @@ fn mkv_probe(uri: &str) -> Option<MkvProbe> {
 impl MkvProbe {
     const ENCODING: ByteStreamEncoding = ByteStreamEncoding::Matroska;
 
-    fn av(&self) -> Vec<(Caps, bool)> {
+    fn av(&self) -> Vec<UriFanoutPort> {
         self.infos
             .iter()
-            .map(|i| (i.caps.clone(), i.video))
+            .map(|i| uncropped_port(i.caps.clone(), i.video))
             .collect()
     }
 
@@ -567,10 +631,10 @@ fn ts_probe(uri: &str) -> Option<TsProbe> {
 impl TsProbe {
     const ENCODING: ByteStreamEncoding = ByteStreamEncoding::MpegTs;
 
-    fn av(&self) -> Vec<(Caps, bool)> {
+    fn av(&self) -> Vec<UriFanoutPort> {
         self.infos
             .iter()
-            .map(|i| (i.caps.clone(), i.video))
+            .map(|i| uncropped_port(i.caps.clone(), i.video))
             .collect()
     }
 
@@ -670,10 +734,10 @@ fn ps_probe(uri: &str) -> Option<PsProbe> {
 impl PsProbe {
     const ENCODING: ByteStreamEncoding = ByteStreamEncoding::MpegPs;
 
-    fn av(&self) -> Vec<(Caps, bool)> {
+    fn av(&self) -> Vec<UriFanoutPort> {
         self.infos
             .iter()
-            .map(|i| (i.caps.clone(), i.video))
+            .map(|i| uncropped_port(i.caps.clone(), i.video))
             .collect()
     }
 
@@ -938,8 +1002,10 @@ pub fn ps_demux_select(
 /// `decodebin` fan-out over a program stream file (M929): the demuxer + per-port
 /// caps.
 #[cfg(feature = "std")]
-pub fn ps_decodebin_select(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
-    ps_select(location, every_stream)
+pub fn ps_decodebin_select(
+    location: &str,
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
+    ps_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 
 /// Bare-`decodebin` primary-stream hook for MPEG program streams (M929): the
@@ -1019,7 +1085,7 @@ fn wire_subtitle_overlay(
     reg: &Registry,
     graph: &mut Graph<GraphNode>,
     demux: g2g_core::graph::Demux,
-    av: &[(Caps, bool)],
+    av: &[UriFanoutPort],
     video_idx: usize,
     text_port: u8,
     text_caps: &Caps,
@@ -1132,7 +1198,7 @@ fn build_av_fanout(
     reg: &Registry,
     source: Box<dyn DynSourceLoop>,
     demux: Box<dyn DynMultiOutputElement>,
-    av: &[(Caps, bool)],
+    av: &[UriFanoutPort],
 ) -> Result<Graph<GraphNode>, ParseError> {
     let mut graph: Graph<GraphNode> = Graph::new();
     let src = graph.add_source(GraphNodeRef::Source(source));
@@ -1150,7 +1216,7 @@ fn wire_av_fanout(
     reg: &Registry,
     graph: &mut Graph<GraphNode>,
     demux: g2g_core::graph::Demux,
-    av: &[(Caps, bool)],
+    av: &[UriFanoutPort],
 ) -> Result<(), ParseError> {
     let ports: Vec<g2g_core::graph::PadId> = (0..av.len()).map(|i| demux.out(i as u8)).collect();
     wire_av_ports(reg, graph, &ports, av)
@@ -1166,20 +1232,19 @@ fn wire_av_ports(
     reg: &Registry,
     graph: &mut Graph<GraphNode>,
     ports: &[g2g_core::graph::PadId],
-    av: &[(Caps, bool)],
+    av: &[UriFanoutPort],
 ) -> Result<(), ParseError> {
-    for (i, (caps, video)) in av.iter().enumerate() {
-        let port = ports[i];
-        if *video {
+    for (i, port) in av.iter().enumerate() {
+        let pad = ports[i];
+        if port.stream_type == StreamType::Video {
             let sink = reg
                 .make_element("autovideosink")
                 .ok_or_else(|| ParseError::UnknownElement("autovideosink".to_string()))?;
             let vsnk = graph.add_sink(GraphNodeRef::Element(sink));
             let head = deinterlace_into(graph, vsnk)?;
-            reg.decodebin(graph, port, head, caps, &is_raw_video, PLAYBIN_MAX_DEPTH)
-                .map_err(|e| map_decode_err(caps, e))?;
+            reg.decodebin_port(graph, pad, head, port, &is_raw_video, PLAYBIN_MAX_DEPTH)?;
         } else {
-            wire_audio_branch(reg, graph, port, caps)?;
+            wire_audio_branch(reg, graph, pad, &port.caps)?;
         }
     }
     Ok(())
@@ -1207,7 +1272,7 @@ fn wire_overlay_av(
     reg: &Registry,
     graph: &mut Graph<GraphNode>,
     demux: g2g_core::graph::Demux,
-    av: &[(Caps, bool)],
+    av: &[UriFanoutPort],
     video_idx: usize,
     overlay: GraphNode,
 ) -> Result<g2g_core::graph::Muxer, ParseError> {
@@ -1235,20 +1300,19 @@ fn wire_overlay_av(
     // Each A/V track: the video one decodes into the overlay's RGBA8 convert
     // (through the auto deinterlacer, M935), the rest fan out to their own auto
     // sinks through the audio decode/convert chain.
-    for (i, (caps, _video)) in av.iter().enumerate() {
+    for (i, port) in av.iter().enumerate() {
         if i == video_idx {
             let head = deinterlace_into(graph, to_rgba)?;
-            reg.decodebin(
+            reg.decodebin_port(
                 graph,
                 demux.out(i as u8),
                 head,
-                caps,
+                port,
                 &is_raw_video,
                 PLAYBIN_MAX_DEPTH,
-            )
-            .map_err(|e| map_decode_err(caps, e))?;
+            )?;
         } else {
-            wire_audio_branch(reg, graph, demux.out(i as u8), caps)?;
+            wire_audio_branch(reg, graph, demux.out(i as u8), &port.caps)?;
         }
     }
     Ok(overlay)
@@ -1266,7 +1330,7 @@ fn build_cc_overlay(
     reg: &Registry,
     source: Box<dyn DynSourceLoop>,
     demux: Box<dyn DynMultiOutputElement>,
-    av: &[(Caps, bool)],
+    av: &[UriFanoutPort],
     video_idx: usize,
     cc: crate::ccextract::CcSource,
 ) -> Result<Graph<GraphNode>, ParseError> {
@@ -1290,7 +1354,7 @@ fn wire_cc_overlay(
     reg: &Registry,
     graph: &mut Graph<GraphNode>,
     demux: g2g_core::graph::Demux,
-    av: &[(Caps, bool)],
+    av: &[UriFanoutPort],
     video_idx: usize,
     cc: crate::ccextract::CcSource,
 ) -> Result<(), ParseError> {
@@ -1318,7 +1382,8 @@ fn wire_cc_overlay(
     let vsnk = graph.add_sink(GraphNodeRef::Element(vsink));
     graph.link(to_nv12, vsnk).map_err(ParseError::Graph)?;
 
-    let video_caps = &av[video_idx].0;
+    let video = &av[video_idx];
+    let video_caps = &video.caps;
     // Tee the compressed video: branch 0 decodes for display (through the auto
     // deinterlacer, M935), branch 1 captions.
     let tee = graph.add_tee(2);
@@ -1326,15 +1391,14 @@ fn wire_cc_overlay(
         .link(demux.out(video_idx as u8), tee.input())
         .map_err(ParseError::Graph)?;
     let display_head = deinterlace_into(graph, to_rgba)?;
-    reg.decodebin(
+    reg.decodebin_port(
         graph,
         tee.out(0),
         display_head,
-        video_caps,
+        video,
         &is_raw_video,
         PLAYBIN_MAX_DEPTH,
-    )
-    .map_err(|e| map_decode_err(video_caps, e))?;
+    )?;
 
     // Caption branch: CcExtract (compressed video in, Text{Utf8} cues out) feeds
     // the overlay text pad, fed in turn by a re-framing parser when the codec has
@@ -1371,9 +1435,9 @@ fn wire_cc_overlay(
     graph.link(tee.out(1), cc_head).map_err(ParseError::Graph)?;
 
     // Audio / other tracks fan out to their own sinks.
-    for (i, (caps, _video)) in av.iter().enumerate() {
+    for (i, port) in av.iter().enumerate() {
         if i != video_idx {
-            wire_audio_branch(reg, graph, demux.out(i as u8), caps)?;
+            wire_audio_branch(reg, graph, demux.out(i as u8), &port.caps)?;
         }
     }
     Ok(())
@@ -1415,11 +1479,13 @@ fn link_text_into_overlay(
 #[cfg(feature = "std")]
 fn build_mp4_subtitle_overlay(
     reg: &Registry,
-    path: &str,
-    av: &[crate::mp4demuxn::Mp4StreamInfo],
+    probe: &Mp4Probe,
     text: &crate::mp4demuxn::Mp4StreamInfo,
 ) -> Result<Graph<GraphNode>, ParseError> {
     use crate::mp4demuxn::{Mp4DemuxN, Mp4Port};
+
+    let path = probe.path.as_str();
+    let av = probe.infos.as_slice();
 
     let video_idx = av
         .iter()
@@ -1452,9 +1518,14 @@ fn build_mp4_subtitle_overlay(
     let demux = graph.add_demux(GraphNodeRef::demux(Mp4DemuxN::new(demux_ports)), outputs);
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
 
-    let av_caps: Vec<(Caps, bool)> = av.iter().map(|i| (i.caps.clone(), i.video)).collect();
     wire_subtitle_overlay(
-        reg, &mut graph, demux, &av_caps, video_idx, text_port, &text.caps,
+        reg,
+        &mut graph,
+        demux,
+        &probe.av(),
+        video_idx,
+        text_port,
+        &text.caps,
     )?;
     Ok(graph)
 }
@@ -1495,7 +1566,10 @@ fn build_mkv_subtitle_overlay(
     let demux = graph.add_demux(GraphNodeRef::demux(MkvDemuxN::new(stream_ports)), outputs);
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
 
-    let av_caps: Vec<(Caps, bool)> = av.iter().map(|i| (i.caps.clone(), i.video)).collect();
+    let av_caps: Vec<UriFanoutPort> = av
+        .iter()
+        .map(|i| uncropped_port(i.caps.clone(), i.video))
+        .collect();
     wire_subtitle_overlay(
         reg, &mut graph, demux, &av_caps, video_idx, text_port, &text.caps,
     )?;
@@ -1533,11 +1607,8 @@ fn mp4_probe(uri: &str) -> Option<Mp4Probe> {
 impl Mp4Probe {
     const ENCODING: ByteStreamEncoding = ByteStreamEncoding::IsoBmff;
 
-    fn av(&self) -> Vec<(Caps, bool)> {
-        self.infos
-            .iter()
-            .map(|i| (i.caps.clone(), i.video))
-            .collect()
+    fn av(&self) -> Vec<UriFanoutPort> {
+        mp4_ports(&self.path, &self.moov, &self.infos)
     }
 
     fn demux(&self) -> Box<dyn DynMultiOutputElement> {
@@ -1588,7 +1659,7 @@ pub fn mp4_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
             .map(Some);
         }
         if let Some(text) = crate::mp4demuxn::subtitle_streams(&probe.moov).first() {
-            return build_mp4_subtitle_overlay(reg, &probe.path, &probe.infos, text).map(Some);
+            return build_mp4_subtitle_overlay(reg, &probe, text).map(Some);
         }
     }
     build_av_fanout(
@@ -1760,8 +1831,10 @@ pub fn mkv_demux_select(
 
 /// `decodebin` fan-out over a Matroska file (M482): the demuxer + per-port caps.
 #[cfg(feature = "std")]
-pub fn mkv_decodebin_select(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
-    mkv_select(location, every_stream)
+pub fn mkv_decodebin_select(
+    location: &str,
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
+    mkv_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 
 /// The `oggdemux stream=` name of an Ogg mapping g2g reads, or `None` for one
@@ -1846,14 +1919,14 @@ impl OggProbe {
         // channels and rate the probe read: the decode chain is plugged against
         // the declaration, and the header's real shape arrives at runtime as the
         // port's `CapsChanged`.
-        let av: Vec<(Caps, bool)> = self
+        let av: Vec<UriFanoutPort> = self
             .streams
             .iter()
             .enumerate()
             .map(|(port, stream)| {
                 let caps = MultiOutputElement::port_output_caps(&demux, port)
                     .expect("the demuxer has a port per stream");
-                (caps, stream.is_video())
+                uncropped_port(caps, stream.is_video())
             })
             .collect();
         file_fanout(&self.path, Self::ENCODING, Box::new(demux), &av)
@@ -1876,8 +1949,10 @@ pub fn ogg_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, P
 
 /// `decodebin` fan-out over an Ogg file (M1596): the demuxer + per-port caps.
 #[cfg(feature = "std")]
-pub fn ogg_decodebin_select(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
-    ogg_select(location, every_stream)
+pub fn ogg_decodebin_select(
+    location: &str,
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
+    ogg_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 
 /// Probe an Ogg file and build an [`OggDemuxN`](crate::oggdemux::OggDemuxN) with
@@ -1987,8 +2062,10 @@ pub fn ts_demux_caps_select(
 
 /// `decodebin` fan-out over an MPEG-TS file (M482): the demuxer + per-port caps.
 #[cfg(feature = "std")]
-pub fn ts_decodebin_select(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
-    ts_select(location, every_stream)
+pub fn ts_decodebin_select(
+    location: &str,
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
+    ts_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 
 /// Bare-`decodebin` primary-stream hook for MPEG-TS (M746): a `filesrc
@@ -2108,21 +2185,11 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     }
     infos.sort_by_key(|i| !i.video);
     let cropped = crate::mp4demuxn::clean_aperture_tracks(&moov);
-    // without the metadata feature no crop rectangle reaches a videocrop
-    #[cfg(not(feature = "metadata"))]
-    let cropped = {
-        if !cropped.is_empty() {
-            g2g_core::g2g_warn!(
-                g2g_core::log::Target::category("decodebin"),
-                "{location}: shows the whole picture of a track with a clean aperture, cropping it needs the metadata feature"
-            );
-        }
-        Vec::<u32>::new()
-    };
     let streams = infos
         .into_iter()
         .filter_map(|info| {
-            let has_clean_aperture = cropped.contains(&info.track_id);
+            let has_clean_aperture =
+                crops_clean_aperture(location, cropped.contains(&info.track_id));
             let stream = match info.caps {
                 Caps::CompressedVideo { codec, .. } => {
                     crate::mp4demux::mp4_video_stream_str(codec)?
@@ -2378,7 +2445,7 @@ pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
 fn mp4_select(
     location: &str,
     select: impl FnOnce(&[PadKind]) -> Option<Vec<usize>>,
-) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
     let moov = read_mp4_top_level_box(location, b"moov")?;
     // Selection order: A/V tracks first, then subtitle (`tx3g`/`wvtt`/`stpp`)
     // tracks (M477), so a `d.text_0` request maps to the container's text track.
@@ -2403,15 +2470,18 @@ fn mp4_select(
         return None;
     }
     let sel = select(&kinds)?;
-    let caps: Vec<Caps> = sel.iter().map(|&i| infos[i].caps.clone()).collect();
-    let ports: Vec<_> = sel
+    let selected: Vec<_> = sel.iter().map(|&i| infos[i].clone()).collect();
+    let ports: Vec<_> = selected
         .iter()
-        .map(|&i| crate::mp4demuxn::Mp4Port {
-            track_id: infos[i].track_id,
-            caps: infos[i].caps.clone(),
+        .map(|info| crate::mp4demuxn::Mp4Port {
+            track_id: info.track_id,
+            caps: info.caps.clone(),
         })
         .collect();
-    Some((Box::new(crate::mp4demuxn::Mp4DemuxN::new(ports)), caps))
+    Some((
+        Box::new(crate::mp4demuxn::Mp4DemuxN::new(ports)),
+        mp4_ports(location, &moov, &selected),
+    ))
 }
 
 /// `qtdemux` explicit fan-out (M476).
@@ -2428,7 +2498,9 @@ pub fn mp4_demux_select(
 
 /// `decodebin` fan-out over an MP4 file (M482): the demuxer + per-port caps.
 #[cfg(feature = "std")]
-pub fn mp4_decodebin_select(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+pub fn mp4_decodebin_select(
+    location: &str,
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
     mp4_select(location, every_stream)
 }
 
@@ -2475,8 +2547,10 @@ pub fn avi_demux_select(
 
 /// `decodebin` fan-out over an AVI file (M1071): the demuxer + per-port caps.
 #[cfg(feature = "std")]
-pub fn avi_decodebin_select(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
-    avi_select(location, every_stream)
+pub fn avi_decodebin_select(
+    location: &str,
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
+    avi_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 
 /// Bare-`decodebin` primary-stream hook for AVI (M1071):
@@ -2633,7 +2707,7 @@ pub fn build_hls_ts_fanout(
     for s in streams.iter().filter(|s| s.uri.is_none()) {
         if let Some(ts) = hls_ts_stream(s) {
             ts_streams.push(ts);
-            port_infos.push((s.caps.clone(), s.video));
+            port_infos.push(uncropped_port(s.caps.clone(), s.video));
         }
     }
     if ts_streams.len() < 2 {
@@ -2668,7 +2742,7 @@ pub fn build_hls_fmp4_fanout(
     if infos.is_empty() {
         return Ok(None); // init segment carries no A/V track
     }
-    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
+    let av = mp4_ports(source_url, init, &infos);
     let demux_ports: Vec<_> = infos
         .iter()
         .map(|i| crate::mp4demuxn::Mp4Port {
@@ -2713,7 +2787,7 @@ pub fn build_hls_separate_fanout(
         reg,
         Box::new(crate::hlssrc::HlsSrc::new(master_url)),
         Box::new(TsDemuxN::new(Vec::from([vts]))),
-        &[(video.caps.clone(), true)],
+        &[uncropped_port(video.caps.clone(), true)],
     )?;
     // The separate audio rendition playlist, its own source -> demux -> audio
     // branch (decode -> convert -> resample -> sink), merged into the graph.
@@ -2727,7 +2801,7 @@ pub fn build_hls_separate_fanout(
         reg,
         Box::new(crate::hlssrc::HlsSrc::new(audio_url)),
         Box::new(TsDemuxN::new(Vec::from([TsStream::Aac]))),
-        &[(audio_caps, false)],
+        &[uncropped_port(audio_caps, false)],
     )?;
     graph.merge(audio_graph);
     Ok(Some(graph))
@@ -2768,14 +2842,14 @@ pub fn build_hls_subtitle_overlay(
 
     // The variant's muxed A/V streams (video + any muxed audio), in order.
     let mut ts_streams = Vec::new();
-    let mut av: Vec<(Caps, bool)> = Vec::new();
+    let mut av: Vec<UriFanoutPort> = Vec::new();
     for s in streams.iter().filter(|s| s.uri.is_none()) {
         if let Some(ts) = hls_ts_stream(s) {
             ts_streams.push(ts);
-            av.push((s.caps.clone(), s.video));
+            av.push(uncropped_port(s.caps.clone(), s.video));
         }
     }
-    let Some(video_idx) = av.iter().position(|(_, v)| *v) else {
+    let Some(video_idx) = av.iter().position(|p| p.stream_type == StreamType::Video) else {
         return Ok(None); // no routable muxed video to overlay onto
     };
     let outputs = ts_streams.len() as u8;
@@ -2846,7 +2920,7 @@ pub fn build_hls_separate_subtitle_overlay(
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
 
     // A video-only variant: one A/V entry, the video, at index 0.
-    let av = [(video.caps.clone(), true)];
+    let av = [uncropped_port(video.caps.clone(), true)];
     let overlay = wire_overlay_av(
         reg,
         &mut graph,
@@ -2915,14 +2989,14 @@ pub fn build_hls_ts_cc_overlay(
     cc: crate::ccextract::CcSource,
 ) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let mut ts_streams = Vec::new();
-    let mut av: Vec<(Caps, bool)> = Vec::new();
+    let mut av: Vec<UriFanoutPort> = Vec::new();
     for s in streams.iter().filter(|s| s.uri.is_none()) {
         if let Some(ts) = hls_ts_stream(s) {
             ts_streams.push(ts);
-            av.push((s.caps.clone(), s.video));
+            av.push(uncropped_port(s.caps.clone(), s.video));
         }
     }
-    let Some(video_idx) = av.iter().position(|(_, v)| *v) else {
+    let Some(video_idx) = av.iter().position(|p| p.stream_type == StreamType::Video) else {
         return Ok(None); // no routable muxed video to caption
     };
     let source = crate::hlssrc::HlsSrc::new(source_url);
@@ -2950,8 +3024,8 @@ pub fn build_hls_fmp4_cc_overlay(
     cc: crate::ccextract::CcSource,
 ) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let infos = crate::mp4demuxn::forwardable_streams(init);
-    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
-    let Some(video_idx) = av.iter().position(|(_, v)| *v) else {
+    let av = mp4_ports(source_url, init, &infos);
+    let Some(video_idx) = av.iter().position(|p| p.stream_type == StreamType::Video) else {
         return Ok(None); // init segment carries no video track to caption
     };
     let demux_ports: Vec<_> = infos
@@ -3002,7 +3076,7 @@ pub fn build_hls_separate_cc_overlay(
     let src = graph.add_source(GraphNodeRef::source(crate::hlssrc::HlsSrc::new(master_url)));
     let demux = graph.add_demux(GraphNodeRef::demux(TsDemuxN::new(Vec::from([vts]))), 1);
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
-    let av = [(video.caps.clone(), true)];
+    let av = [uncropped_port(video.caps.clone(), true)];
     wire_cc_overlay(reg, &mut graph, demux, &av, 0, cc)?;
 
     // The separate audio rendition: its own source -> demux -> audio branch, merged.
@@ -3016,7 +3090,7 @@ pub fn build_hls_separate_cc_overlay(
         reg,
         Box::new(crate::hlssrc::HlsSrc::new(audio_url)),
         Box::new(TsDemuxN::new(Vec::from([TsStream::Aac]))),
-        &[(audio_caps, false)],
+        &[uncropped_port(audio_caps, false)],
     )?;
     graph.merge(audio_graph);
     Ok(Some(graph))
@@ -3155,7 +3229,7 @@ pub fn hls_ts_uri_fanout(
     for stream in streams.iter().filter(|s| s.uri.is_none()) {
         if let Some(ts) = hls_ts_stream(stream) {
             ts_streams.push(ts);
-            av.push((stream.caps.clone(), stream.video));
+            av.push(uncropped_port(stream.caps.clone(), stream.video));
         }
     }
     if ts_streams.is_empty() {
@@ -3180,7 +3254,7 @@ pub fn hls_fmp4_uri_fanout(source_url: &str, init: &[u8]) -> Option<UriFanout> {
     if infos.is_empty() {
         return None;
     }
-    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
+    let av = mp4_ports(source_url, init, &infos);
     let ports: Vec<_> = infos
         .iter()
         .map(|i| crate::mp4demuxn::Mp4Port {

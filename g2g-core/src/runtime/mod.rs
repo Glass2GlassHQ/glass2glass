@@ -183,7 +183,7 @@ pub use autoplug::{
     MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream,
     PrimaryStreamHook, PropertyDoc, RankOverride, RankSpecError, Registry, RestartFanoutSourceHook,
     RestartPolicy, RestartSourceHook, SourceFactory, Uri, UriError, UriFanout, UriFanoutHead,
-    UriFanoutHook, UriFanoutPort, UriRebuild, UriSourceFactory,
+    UriFanoutHook, UriFanoutPort, UriRebuild, UriSource, UriSourceFactory,
 };
 
 #[cfg(feature = "std")]

@@ -266,15 +266,14 @@ async fn decodebin_with_params_splices_a_runnable_chain() {
 
 /// A `mem://` handler whose source is irrelevant: the playbin-graph test only
 /// assembles, it never runs.
-fn mem_uri_build(
-    _uri: &g2g_core::runtime::Uri,
-) -> Result<(Box<dyn g2g_core::runtime::DynSourceLoop>, Caps), UriError> {
-    Ok((
-        Box::new(VideoTestSrc::new(8, 8, 30, 1)),
-        Caps::ByteStream {
+fn mem_uri_build(_uri: &g2g_core::runtime::Uri) -> Result<g2g_core::runtime::UriSource, UriError> {
+    Ok(g2g_core::runtime::UriSource {
+        source: Box::new(VideoTestSrc::new(8, 8, 30, 1)),
+        caps: Caps::ByteStream {
             encoding: g2g_core::ByteStreamEncoding::Matroska,
         },
-    ))
+        has_clean_aperture: false,
+    })
 }
 
 #[test]

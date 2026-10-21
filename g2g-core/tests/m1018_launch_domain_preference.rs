@@ -11,7 +11,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::runtime::{
-    parse_launch, ElementFactory, LaunchFactory, Registry, SourceFactory, SourceLoop,
+    parse_launch, ElementFactory, LaunchFactory, Registry, SourceFactory, SourceLoop, UriSource,
     UriSourceFactory,
 };
 use g2g_core::{
@@ -191,7 +191,11 @@ fn registry() -> Registry {
             })
         }))
         .register_uri(UriSourceFactory::new("test", |_uri| {
-            Ok((Box::new(H264Source), h264()))
+            Ok(UriSource {
+                source: Box::new(H264Source),
+                caps: h264(),
+                has_clean_aperture: false,
+            })
         }));
     registry
 }

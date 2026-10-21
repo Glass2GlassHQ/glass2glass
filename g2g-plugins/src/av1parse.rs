@@ -68,6 +68,8 @@ pub struct Av1Parse {
     reframe: bool,
     framer: TemporalUnitFramer,
     reframed_sequence: u64,
+    #[cfg(feature = "metadata")]
+    input_stamps: crate::inputstamp::PendingInputStamps,
 }
 
 impl Av1Parse {
@@ -115,11 +117,16 @@ impl Av1Parse {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         self.refine_caps(&temporal_unit, out).await?;
-        let frame = Frame::new(
+        #[allow(unused_mut)]
+        let mut frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(temporal_unit.into_boxed_slice())),
             timing,
             self.reframed_sequence,
         );
+        #[cfg(feature = "metadata")]
+        {
+            frame.meta = self.input_stamps.take(timing.pts_ns).meta;
+        }
         self.reframed_sequence += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
@@ -198,6 +205,11 @@ impl AsyncElement for Av1Parse {
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                         return Ok(());
                     }
+                    #[cfg(feature = "metadata")]
+                    self.input_stamps.insert(
+                        frame.timing.pts_ns,
+                        crate::inputstamp::InputStamp::of(&frame),
+                    );
                     for (temporal_unit, timing) in self.framer.push(bytes, frame.timing)? {
                         self.emit_temporal_unit(temporal_unit, timing, out).await?;
                     }
@@ -209,6 +221,10 @@ impl AsyncElement for Av1Parse {
                 PipelinePacket::Flush => {
                     self.caps.forget();
                     self.framer = TemporalUnitFramer::default();
+                    #[cfg(feature = "metadata")]
+                    {
+                        self.input_stamps = crate::inputstamp::PendingInputStamps::default();
+                    }
                     out.push(PipelinePacket::Flush).await?;
                 }
                 // Segment is control: forward unchanged.
@@ -1290,6 +1306,46 @@ mod tests {
             units,
             "a unit-per-buffer upstream is not held back a frame"
         );
+    }
+
+    #[cfg(feature = "metadata")]
+    #[tokio::test]
+    async fn reframing_keeps_each_buffers_meta_on_the_unit_it_starts() {
+        use g2g_core::meta::{CropMeta, CropRectangle};
+        const UNIT_SPACING_NS: u64 = 1_000;
+        let crop = |index: u32| CropMeta {
+            rectangle: CropRectangle {
+                left: index,
+                top: 0,
+                width: 1,
+                height: 1,
+            },
+        };
+        let units = delimited_units(3);
+        let mut parse = Av1Parse::reframing();
+        parse.configure_pipeline(&av1_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        for (index, unit) in units.iter().enumerate() {
+            let mut frame = frame_with_bytes(index as u64, unit.clone());
+            frame.timing.pts_ns = index as u64 * UNIT_SPACING_NS;
+            frame.meta.attach(crop(index as u32));
+            parse
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        let crops: Vec<Option<CropMeta>> = sink
+            .packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::DataFrame(f) => Some(f.meta.get::<CropMeta>().copied()),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<Option<CropMeta>> =
+            (0..units.len() as u32).map(|i| Some(crop(i))).collect();
+        assert_eq!(crops, expected);
     }
 
     #[tokio::test]

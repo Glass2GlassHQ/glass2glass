@@ -35,13 +35,12 @@ fn raw_video() -> Caps {
 /// A `mem://` URI source stand-in (its identity is irrelevant to graph assembly,
 /// which never runs it): a placeholder source declaring H.264 output, so the
 /// per-playlist-item `build_uri_source` succeeds and the decode chain plugs.
-fn mem_uri_build(
-    _uri: &Uri,
-) -> Result<(Box<dyn g2g_core::runtime::DynSourceLoop>, Caps), UriError> {
-    Ok((
-        Box::new(g2g_plugins::videotestsrc::VideoTestSrc::new(8, 8, 30, 1)),
-        h264_any(),
-    ))
+fn mem_uri_build(_uri: &Uri) -> Result<g2g_core::runtime::UriSource, UriError> {
+    Ok(g2g_core::runtime::UriSource {
+        source: Box::new(g2g_plugins::videotestsrc::VideoTestSrc::new(8, 8, 30, 1)),
+        caps: h264_any(),
+        has_clean_aperture: false,
+    })
 }
 
 /// A registry with the `mem://` handler and a stub H.264 decoder (so the reused

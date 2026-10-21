@@ -999,7 +999,7 @@ impl Mp4DemuxN {
             };
             let mut frame = self.next_frame(data, timing);
             if let Some(track) = track {
-                frame.meta = track.clean_aperture_meta();
+                frame.meta = crate::fmp4::clean_aperture_meta(track.clean_aperture);
             }
             out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
         }

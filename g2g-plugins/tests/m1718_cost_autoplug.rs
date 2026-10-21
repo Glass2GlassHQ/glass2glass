@@ -87,13 +87,13 @@ fn a_container_file_plans_from_its_video_picture_size() {
 fn a_ts_file_fans_out_with_its_video_picture_size() {
     let (expected_width, expected_height) = UHD_HEVC_CONTAINER_DIMENSIONS;
     for name in [UHD_HEVC_TS, UHD_HEVC_ONE_FRAME_TS] {
-        let (_, port_caps) = ts_decodebin_select(&fixture_location(name))
+        let (_, ports) = ts_decodebin_select(&fixture_location(name))
             .unwrap_or_else(|| panic!("{name} demuxes"));
-        let video = port_caps
+        let video = ports
             .first()
             .unwrap_or_else(|| panic!("{name} has a video port"));
         assert_eq!(
-            fixed_size(video),
+            fixed_size(&video.caps),
             (Dim::Fixed(expected_width), Dim::Fixed(expected_height)),
             "{name}"
         );

@@ -1180,7 +1180,23 @@ mod factory {
 
     /// A URI handler's build function: parse a [`Uri`] into a constructed source
     /// plus the caps it produces (the `decodebin` input).
-    type UriSourceBuild = fn(&Uri) -> Result<(Box<dyn DynSourceLoop>, Caps), UriError>;
+    type UriSourceBuild = fn(&Uri) -> Result<UriSource, UriError>;
+
+    pub struct UriSource {
+        pub source: Box<dyn DynSourceLoop>,
+        pub caps: Caps,
+        // each decoded picture carries a crop rectangle, which a `videocrop` after the decoder applies
+        pub has_clean_aperture: bool,
+    }
+
+    impl core::fmt::Debug for UriSource {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("UriSource")
+                .field("caps", &self.caps)
+                .field("has_clean_aperture", &self.has_clean_aperture)
+                .finish_non_exhaustive()
+        }
+    }
 
     /// A URI-scheme handler: maps a parsed [`Uri`] to a constructed source and
     /// the source's declared output caps (the `decodebin` input). The analog of
@@ -1405,6 +1421,8 @@ mod factory {
     pub struct UriFanoutPort {
         pub caps: Caps,
         pub stream_type: crate::stream::StreamType,
+        // each decoded picture carries a crop rectangle, which a `videocrop` after the decoder applies
+        pub has_clean_aperture: bool,
     }
 
     /// What produces a [`UriFanout`]'s ports. A file container splits one byte
@@ -1585,13 +1603,13 @@ mod factory {
     /// keyed by an element name (a `decodebin` names no container): each registered
     /// hook probes the file and returns `Some` only for the container it parses, so
     /// the parser tries them in turn. It returns the multi-output demuxer with a
-    /// port per stream the file carries, plus each port's elementary caps, so the
+    /// port per stream the file carries, plus what each port carries, so the
     /// parser can match the line's branches to ports and auto-plug a decoder chain
     /// onto each (the demuxer emits elementary streams; `decodebin` decodes them to
     /// raw). `None` declines (a different container or an unreadable file).
     /// Registered via [`Registry::register_decodebin_select`].
     pub type DecodebinSelectHook =
-        fn(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)>;
+        fn(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)>;
 
     /// The single-stream demux + decode chain a bare (non-fan-out) `decodebin`
     /// should build for a file-backed container whose default single-stream demux
@@ -1631,6 +1649,8 @@ mod factory {
     /// M936) must name the stream even when a video track is present. Registered
     /// via [`Registry::register_primary_stream`].
     pub type PrimaryStreamHook = fn(location: &str, caps: &Caps) -> Option<ContainerStreams>;
+
+    const CLEAN_APERTURE_CROP: &str = "videocrop";
 
     const RANK_SPEC_EXCLUDED: &str = "none";
     const RANK_SPEC_MAX: &str = "max";
@@ -2799,6 +2819,41 @@ mod factory {
             Self::splice_chain(graph, from, to, elements)
         }
 
+        // a port whose pictures carry a crop rectangle gets a bare `videocrop` after its decoder
+        pub fn decodebin_port(
+            &self,
+            graph: &mut Graph<GraphNode>,
+            from: impl Into<PadId>,
+            to: impl Into<PadId>,
+            port: &UriFanoutPort,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+        ) -> Result<(), ParseError> {
+            let to: PadId = match port.has_clean_aperture {
+                true => {
+                    let crop =
+                        graph.add_transform(GraphNodeRef::Element(self.clean_aperture_crop()?));
+                    graph.link(crop, to).map_err(ParseError::Graph)?;
+                    crop.into()
+                }
+                false => to.into(),
+            };
+            self.decodebin(graph, from, to, &port.caps, target, max_depth)
+                .map_err(|e| match e {
+                    DecodebinError::NoChain => {
+                        ParseError::NoDecodeChain(format!("{:?}", port.caps))
+                    }
+                    DecodebinError::Graph(e) => ParseError::Graph(e),
+                })?;
+            Ok(())
+        }
+
+        // with no inset set, `videocrop` cuts each picture to the crop rectangle its frame carries
+        pub(crate) fn clean_aperture_crop(&self) -> Result<Box<dyn DynAsyncElement>, ParseError> {
+            self.make_element(CLEAN_APERTURE_CROP)
+                .ok_or_else(|| ParseError::UnknownElement(CLEAN_APERTURE_CROP.to_string()))
+        }
+
         /// The memory domain the decode chain's consumer wants, read off the
         /// element behind the `to` pad: the most-preferred domain of its declared
         /// [`input_domains`](crate::AsyncElement::input_domains) (GPU-resident
@@ -3098,10 +3153,7 @@ mod factory {
         /// [`build_uridecodebin`](Self::build_uridecodebin), exposed so the
         /// `uridecodebin` / `playbin` text-parser nodes can splice the source into
         /// a larger graph instead of getting a complete one.
-        pub fn build_uri_source(
-            &self,
-            uri: &str,
-        ) -> Result<(Box<dyn DynSourceLoop>, Caps), UriError> {
+        pub fn build_uri_source(&self, uri: &str) -> Result<UriSource, UriError> {
             let parsed = Uri::parse(uri).ok_or(UriError::Malformed)?;
             let handler = self
                 .uris
@@ -3127,7 +3179,7 @@ mod factory {
             let uri = String::from(uri);
             Ok(Box::new(move || {
                 let parsed = Uri::parse(&uri).ok_or(UriError::Malformed)?;
-                build(&parsed)
+                build(&parsed).map(|built| (built.source, built.caps))
             }))
         }
 
@@ -3138,8 +3190,8 @@ mod factory {
             target: &dyn Fn(&Caps) -> bool,
             max_depth: usize,
         ) -> Result<Graph<GraphNode>, UriError> {
-            let (source, output) = self.build_uri_source(uri)?;
-            self.build_source_decodebin(source, &output, sink, target, max_depth)
+            let built = self.build_uri_source(uri)?;
+            self.build_source_decodebin(built.source, &built.caps, sink, target, max_depth)
         }
 
         /// Auto-plug `source -> chain -> sink` from an *already constructed*
@@ -3191,7 +3243,7 @@ mod factory {
             if ports.is_empty() {
                 return Err(PlaybinGraphError::NoPorts);
             }
-            let (source, _byte_caps) = self.build_uri_source(uri)?;
+            let source = self.build_uri_source(uri)?.source;
             self.build_playbin_graph_with_source(source, demux, ports, max_depth)
         }
 
@@ -3210,7 +3262,7 @@ mod factory {
             if ports.is_empty() {
                 return Err(AutoplugError::NoPorts);
             }
-            let (source, _byte_caps) = self.build_uri_source(uri)?;
+            let source = self.build_uri_source(uri)?.source;
             let mut graph: Graph<GraphNode> = Graph::new();
             let src = graph.add_source(GraphNodeRef::Source(source));
             let outputs = ports.len() as u8;
@@ -3278,7 +3330,7 @@ pub use factory::{
     MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream,
     PrimaryStreamHook, PropertyDoc, RankOverride, RankSpecError, Registry, RestartFanoutSourceHook,
     RestartPolicy, RestartSourceHook, SourceFactory, Uri, UriError, UriFanout, UriFanoutHead,
-    UriFanoutHook, UriFanoutPort, UriRebuild, UriSourceFactory,
+    UriFanoutHook, UriFanoutPort, UriRebuild, UriSource, UriSourceFactory,
 };
 
 #[cfg(test)]
