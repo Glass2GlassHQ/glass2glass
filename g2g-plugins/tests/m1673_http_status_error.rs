@@ -127,9 +127,7 @@ async fn an_unreachable_http_stream_names_the_refused_connection() {
     let caps = Caps::ByteStream {
         encoding: ByteStreamEncoding::MpegTs,
     };
-    let src = g2g_plugins::httpsrc::HttpSrc::new(
-        format!("{}/stream.ts", refused_origin()),
-        caps.clone(),
-    );
+    let src =
+        g2g_plugins::httpsrc::HttpSrc::new(format!("{}/stream.ts", refused_origin()), caps.clone());
     assert_eq!(run_error(src, caps).await, refused_connection());
 }

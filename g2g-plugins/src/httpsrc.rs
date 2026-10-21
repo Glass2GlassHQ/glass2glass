@@ -128,7 +128,10 @@ pub(crate) fn http_err(e: reqwest::Error) -> G2gError {
     if let Some(status) = e.status() {
         return G2gError::Hardware(HardwareError::Http(status.as_u16()));
     }
-    match TRANSPORT_FAILURES.iter().find(|(failed_at, _)| failed_at(&e)) {
+    match TRANSPORT_FAILURES
+        .iter()
+        .find(|(failed_at, _)| failed_at(&e))
+    {
         Some((_, failure)) => G2gError::Hardware(HardwareError::HttpTransport(*failure)),
         None => G2gError::Hardware(HardwareError::Other),
     }
