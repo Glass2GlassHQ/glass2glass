@@ -541,9 +541,13 @@ struct TsProbe {
 }
 
 #[cfg(feature = "std")]
-fn ts_tables_from_prefix(prefix: &[u8]) -> crate::mpegts::TsDemuxer {
+fn ts_demuxer_from_prefix(prefix: &[u8]) -> crate::mpegts::TsDemuxer {
     let mut demuxer = crate::mpegts::TsDemuxer::new();
-    crate::mpegts::TsPacketSplitter::new().push(prefix, &mut demuxer);
+    let mut splitter = crate::mpegts::TsPacketSplitter::new();
+    splitter.push(prefix, &mut demuxer);
+    splitter.finish(&mut demuxer);
+    // the last PES unit has no next one to complete it, and a one-frame file has only that unit
+    demuxer.flush();
     demuxer
 }
 
@@ -552,7 +556,7 @@ fn ts_tables_from_prefix(prefix: &[u8]) -> crate::mpegts::TsDemuxer {
 #[cfg(feature = "std")]
 fn ts_probe(uri: &str) -> Option<TsProbe> {
     let (path, prefix) = open_file_prefix(uri)?;
-    let infos = crate::tsdemux::forwardable_streams(&ts_tables_from_prefix(&prefix));
+    let infos = crate::tsdemux::forwardable_streams(&mut ts_demuxer_from_prefix(&prefix));
     if infos.is_empty() {
         return None;
     }
@@ -1934,7 +1938,7 @@ fn ts_select(
     select: impl FnOnce(&[PadKind]) -> Option<Vec<usize>>,
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     let prefix = read_prefix(location)?;
-    let infos = crate::tsdemux::forwardable_streams(&ts_tables_from_prefix(&prefix));
+    let infos = crate::tsdemux::forwardable_streams(&mut ts_demuxer_from_prefix(&prefix));
     if infos.is_empty() {
         return None;
     }
@@ -2006,7 +2010,7 @@ pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams
         return None;
     }
     let prefix = read_prefix(location)?;
-    let mut probed = crate::tsdemux::probe_streams(&mut ts_tables_from_prefix(&prefix));
+    let mut probed = crate::tsdemux::probe_streams(&mut ts_demuxer_from_prefix(&prefix));
     if probed.forwardable.is_empty() && probed.unsupported.is_empty() {
         return None;
     }

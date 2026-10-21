@@ -1091,24 +1091,33 @@ pub struct TsStreamInfo {
 /// entry whose `stream_type` maps to a [`TsStream`]. `demux` must have parsed its
 /// PMT (feed a file prefix first);
 /// returns empty for a non-MPEG-TS or not-yet-parsed input, which the `playbin`
-/// hook reads as "decline, fall through".
-pub fn forwardable_streams(demux: &TsDemuxer) -> Vec<TsStreamInfo> {
+/// hook reads as "decline, fall through". It drains the PES units `demux`
+/// completed, and a video stream takes its picture size from the first SPS
+/// among them.
+pub fn forwardable_streams(demux: &mut TsDemuxer) -> Vec<TsStreamInfo> {
+    let units = demux.take_units();
     demux
         .streams()
         .iter()
-        .filter_map(es_to_ts_stream)
-        .map(stream_info)
+        .filter_map(|es| Some(stream_info(es_to_ts_stream(es)?, es.pid, &units)))
         .collect()
 }
 
-fn stream_info(stream: TsStream) -> TsStreamInfo {
+// the first SPS in the stream's PES units lets auto-plug weigh decoders by cost
+fn stream_info(stream: TsStream, pid: u16, units: &[EsUnit]) -> TsStreamInfo {
     let video = matches!(
         stream,
         TsStream::H264 | TsStream::H265 | TsStream::Mpeg2 | TsStream::Mpeg4Part2 | TsStream::Av1
     );
+    let placeholder = TsDemux::output_caps(stream);
+    let caps = units
+        .iter()
+        .filter(|unit| unit.pid == pid)
+        .find_map(|unit| sized_by_sps(&placeholder, &unit.data))
+        .unwrap_or(placeholder);
     TsStreamInfo {
         stream,
-        caps: TsDemux::output_caps(stream),
+        caps,
         video,
     }
 }
@@ -1134,15 +1143,7 @@ pub fn probe_streams(demux: &mut TsDemuxer) -> TsProbedStreams {
         if let Some(codec) = unsupported_codec(es, first_payload(es.pid)) {
             probed.unsupported.push(codec);
         } else if let Some(stream) = es_to_ts_stream(es) {
-            let mut info = stream_info(stream);
-            // the first SPS in the stream's PES units lets auto-plug weigh decoders by cost
-            if let Some(sized) = units
-                .iter()
-                .filter(|unit| unit.pid == es.pid)
-                .find_map(|unit| sized_by_sps(&info.caps, &unit.data))
-            {
-                info.caps = sized;
-            }
+            let info = stream_info(stream, es.pid, &units);
             probed.forwardable.push(info);
         }
     }
@@ -1774,7 +1775,7 @@ mod tests {
         let mut d = TsDemuxer::new();
         d.push_packet(&pat(0x1000));
         d.push_packet(&pmt2(0x100, STREAM_TYPE_MPEG4P2, 0x101, STREAM_TYPE_AAC));
-        let infos = forwardable_streams(&d);
+        let infos = forwardable_streams(&mut d);
         let v = infos
             .iter()
             .find(|i| i.stream == TsStream::Mpeg4Part2)
@@ -2121,7 +2122,7 @@ mod tests {
         for packet in stream.chunks(TS_PACKET_LEN) {
             probe.push_packet(packet);
         }
-        let streams: Vec<TsStream> = forwardable_streams(&probe)
+        let streams: Vec<TsStream> = forwardable_streams(&mut probe)
             .iter()
             .map(|info| info.stream)
             .collect();

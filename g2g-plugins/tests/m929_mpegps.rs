@@ -597,7 +597,7 @@ async fn mpeg2_video_in_a_transport_stream_reaches_the_mpeg2_selection() {
         }
         off += 188;
     }
-    let infos = g2g_plugins::tsdemux::forwardable_streams(&probe);
+    let infos = g2g_plugins::tsdemux::forwardable_streams(&mut probe);
     assert!(
         infos.iter().any(|i| i.stream == TsStream::Mpeg2
             && i.video

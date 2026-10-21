@@ -6,14 +6,20 @@ use g2g_core::runtime::SourceLoop;
 use g2g_core::{Caps, Dim, PropValue};
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::registry::default_registry;
+use g2g_plugins::uridecodebin::ts_decodebin_select;
 
 const SIZED_FIXTURE: &str = "h264_64x48_bframes.h264";
 const SIZED_FIXTURE_DIMENSIONS: (u32, u32) = (64, 48);
 // made by tools/cost-autoplug-fixtures.sh
-const UHD_HEVC_CONTAINER_FIXTURES: [&str; 3] = [
-    "h265_3840x2160.mp4",
-    "h265_3840x2160.mkv",
-    "h265_3840x2160.ts",
+const UHD_HEVC_MP4: &str = "h265_3840x2160.mp4";
+const UHD_HEVC_MKV: &str = "h265_3840x2160.mkv";
+const UHD_HEVC_TS: &str = "h265_3840x2160.ts";
+const UHD_HEVC_ONE_FRAME_TS: &str = "h265_3840x2160_one_frame.ts";
+const UHD_HEVC_CONTAINER_FIXTURES: [&str; 4] = [
+    UHD_HEVC_MP4,
+    UHD_HEVC_MKV,
+    UHD_HEVC_TS,
+    UHD_HEVC_ONE_FRAME_TS,
 ];
 const UHD_HEVC_CONTAINER_DIMENSIONS: (u32, u32) = (3840, 2160);
 
@@ -71,6 +77,23 @@ fn a_container_file_plans_from_its_video_picture_size() {
     for name in UHD_HEVC_CONTAINER_FIXTURES {
         assert_eq!(
             fixed_size(&container_video_caps(name)),
+            (Dim::Fixed(expected_width), Dim::Fixed(expected_height)),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_ts_file_fans_out_with_its_video_picture_size() {
+    let (expected_width, expected_height) = UHD_HEVC_CONTAINER_DIMENSIONS;
+    for name in [UHD_HEVC_TS, UHD_HEVC_ONE_FRAME_TS] {
+        let (_, port_caps) = ts_decodebin_select(&fixture_location(name))
+            .unwrap_or_else(|| panic!("{name} demuxes"));
+        let video = port_caps
+            .first()
+            .unwrap_or_else(|| panic!("{name} has a video port"));
+        assert_eq!(
+            fixed_size(video),
             (Dim::Fixed(expected_width), Dim::Fixed(expected_height)),
             "{name}"
         );
