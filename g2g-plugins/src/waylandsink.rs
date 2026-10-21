@@ -99,14 +99,13 @@ use smithay_client_toolkit::{
 use crate::clock::wait_to_present;
 use crate::pixel::{frame_byte_size, rgba_rb_offsets};
 use crate::videoconvert::yuv420_to_rgb_into;
+use crate::videoflip::frame_orientation;
 use crate::worker_ready::Handshake;
 use crate::yuvmatrix::YuvRgbMatrix;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, SystemSlice};
 use g2g_core::meta::Orientation;
-#[cfg(feature = "metadata")]
-use g2g_core::meta::OrientationMeta;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
@@ -1167,21 +1166,6 @@ delegate_registry!(WorkerState);
 // Orientation descriptor -> wl_surface buffer transform
 // =================================================================
 
-/// The turn an upstream `videoflip` left for us to apply, `Identity` when the
-/// frame carries no descriptor.
-#[cfg(feature = "metadata")]
-fn frame_orientation(frame: &Frame) -> Orientation {
-    frame
-        .meta
-        .get::<OrientationMeta>()
-        .map_or(Orientation::Identity, |m| m.orientation)
-}
-
-#[cfg(not(feature = "metadata"))]
-fn frame_orientation(_frame: &Frame) -> Orientation {
-    Orientation::Identity
-}
-
 /// The `wl_surface::set_buffer_transform` argument that makes the compositor
 /// display a buffer turned by `orientation`.
 ///
@@ -1278,8 +1262,8 @@ mod tests {
         );
     }
 
-    /// The sink is the one in-tree element that answers a `videoflip`'s
-    /// question, so this is what keeps the rotation deferred.
+    /// The sink answers a `videoflip`'s question, so this is what keeps the
+    /// rotation deferred.
     #[test]
     fn advertises_that_it_absorbs_orientation() {
         assert_eq!(

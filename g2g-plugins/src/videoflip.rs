@@ -288,6 +288,21 @@ impl VideoFlip {
     }
 }
 
+/// The turn an upstream `videoflip` left on `frame` for a sink to apply,
+/// `Identity` when the frame carries no descriptor.
+#[cfg(feature = "metadata")]
+pub fn frame_orientation(frame: &Frame) -> Orientation {
+    frame
+        .meta
+        .get::<g2g_core::meta::OrientationMeta>()
+        .map_or(Orientation::Identity, |m| m.orientation)
+}
+
+#[cfg(not(feature = "metadata"))]
+pub fn frame_orientation(_frame: &Frame) -> Orientation {
+    Orientation::Identity
+}
+
 impl AsyncElement for VideoFlip {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>

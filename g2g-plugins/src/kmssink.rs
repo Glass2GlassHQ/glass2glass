@@ -50,17 +50,20 @@ use std::os::unix::io::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use drm::buffer::{Buffer, DrmFourcc, DrmModifier, Handle as BufferHandle, PlanarBuffer};
 use drm::control::{
-    connector, crtc, framebuffer, Device as ControlDevice, Event, FbCmd2Flags, Mode, PageFlipFlags,
+    connector, crtc, framebuffer, plane, property, Device as ControlDevice, Event, FbCmd2Flags,
+    Mode, PageFlipFlags, ResourceHandles,
 };
-use drm::Device;
+use drm::{ClientCapability, Device};
 
 use g2g_core::element::QosMessage;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
+use g2g_core::meta::Orientation;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
@@ -70,6 +73,7 @@ use g2g_core::{
 };
 
 use crate::clock::wait_to_present;
+use crate::videoflip::frame_orientation;
 
 /// Thin wrapper over `/dev/dri/cardN` implementing the `drm` device traits
 /// via its owned file's borrowed fd. Same pattern the upstream `drm` crate
@@ -152,6 +156,169 @@ impl PlanarBuffer for Nv12Planar {
 /// the simple flip cadence v1 uses.
 const POOL_SIZE: usize = 2;
 
+const ORIENTATIONS: [Orientation; 8] = [
+    Orientation::Identity,
+    Orientation::Rotate90Cw,
+    Orientation::Rotate180,
+    Orientation::Rotate90Ccw,
+    Orientation::HorizontalMirror,
+    Orientation::VerticalMirror,
+    Orientation::Transpose,
+    Orientation::Transverse,
+];
+
+// The `rotation` property of the primary plane on the sink's CRTC.
+#[derive(Debug)]
+struct PlaneRotation {
+    plane: plane::Handle,
+    property: property::Handle,
+    // each value name the plane lists, with the bit it sets in the property
+    values: Vec<(String, u32)>,
+    // the property value as last read or written
+    value: u64,
+}
+
+// A plane rotation: an optional `reflect-x`, then counter-clockwise quarter turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DrmRotation {
+    counter_clockwise_quarter_turns: u8,
+    reflect_x: bool,
+}
+
+// The plane applies the rotation as given, where `set_buffer_transform` applies its inverse.
+fn drm_rotation(orientation: Orientation) -> DrmRotation {
+    let (counter_clockwise_quarter_turns, reflect_x) = match orientation {
+        Orientation::Identity => (0, false),
+        Orientation::Rotate90Ccw => (1, false),
+        Orientation::Rotate180 => (2, false),
+        Orientation::Rotate90Cw => (3, false),
+        Orientation::HorizontalMirror => (0, true),
+        Orientation::Transpose => (1, true),
+        Orientation::VerticalMirror => (2, true),
+        Orientation::Transverse => (3, true),
+    };
+    DrmRotation {
+        counter_clockwise_quarter_turns,
+        reflect_x,
+    }
+}
+
+const ROTATE_VALUE_NAMES: [&str; 4] = ["rotate-0", "rotate-90", "rotate-180", "rotate-270"];
+
+// The `rotation` property value for `rotation`, None when the plane lacks a bit it needs.
+fn rotation_value(rotation: DrmRotation, plane_values: &[(String, u32)]) -> Option<u64> {
+    let bit = |name: &str| {
+        plane_values
+            .iter()
+            .find(|(value_name, _)| value_name == name)
+            .and_then(|&(_, position)| 1u64.checked_shl(position))
+    };
+    let rotate = |quarter_turns: usize| bit(ROTATE_VALUE_NAMES[quarter_turns % 4]);
+    let quarter_turns = usize::from(rotation.counter_clockwise_quarter_turns);
+    if !rotation.reflect_x {
+        return rotate(quarter_turns);
+    }
+    // reflect-y is reflect-x followed by a half turn
+    let reflected_in_x = bit("reflect-x").zip(rotate(quarter_turns));
+    let reflected_in_y = || bit("reflect-y").zip(rotate(quarter_turns + 2));
+    reflected_in_x
+        .or_else(reflected_in_y)
+        .map(|(reflect, turn)| reflect | turn)
+}
+
+fn shows_every_orientation(plane_values: &[(String, u32)]) -> bool {
+    ORIENTATIONS
+        .iter()
+        .all(|&orientation| rotation_value(drm_rotation(orientation), plane_values).is_some())
+}
+
+// The value names of a bitmask property with the bit each one sets, as the kernel lists them.
+fn bitmask_values(card: &Card, property: property::Handle) -> Result<Vec<(String, u32)>, G2gError> {
+    let mut values = Vec::new();
+    let mut enums = Vec::new();
+    drm_ffi::mode::get_property(
+        card.as_fd(),
+        property.into(),
+        Some(&mut values),
+        Some(&mut enums),
+    )
+    .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    enums
+        .into_iter()
+        .map(|entry| {
+            let entry = property::EnumValue::from(entry);
+            let name = entry
+                .name()
+                .to_str()
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+            let position = u32::try_from(entry.value())
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+            Ok((String::from(name), position))
+        })
+        .collect()
+}
+
+// None when the primary plane on `crtc` has no `rotation` property.
+fn primary_plane_rotation(
+    card: &Card,
+    resources: &ResourceHandles,
+    crtc: crtc::Handle,
+) -> Result<Option<PlaneRotation>, G2gError> {
+    // a kernel without universal planes lists no primary plane
+    if card
+        .set_client_capability(ClientCapability::UniversalPlanes, true)
+        .is_err()
+    {
+        return Ok(None);
+    }
+    let planes = card
+        .plane_handles()
+        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    for plane in planes {
+        let info = card
+            .get_plane(plane)
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        if !resources
+            .filter_crtcs(info.possible_crtcs())
+            .contains(&crtc)
+        {
+            continue;
+        }
+        let properties = card
+            .get_properties(plane)
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        let mut primary = false;
+        let mut rotation = None;
+        for (&property, &value) in properties.iter() {
+            let property_info = card
+                .get_property(property)
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+            if property_info.name() == c"type" {
+                primary = property_info
+                    .value_type()
+                    .convert_value(value)
+                    .as_enum()
+                    .is_some_and(|plane_type| plane_type.name() == c"Primary");
+            } else if property_info.name() == c"rotation" {
+                rotation = Some((property, value));
+            }
+        }
+        if !primary {
+            continue;
+        }
+        let Some((property, value)) = rotation else {
+            return Ok(None);
+        };
+        return Ok(Some(PlaneRotation {
+            plane,
+            property,
+            values: bitmask_values(card, property)?,
+            value,
+        }));
+    }
+    Ok(None)
+}
+
 /// # Example
 ///
 /// ```no_run
@@ -198,6 +365,7 @@ pub struct KmsSink {
     /// already does: idle until the runner hands over a clock, and the default
     /// lateness bound is 20 ms.
     pacer: PresentationPacer,
+    plane_rotation: Option<PlaneRotation>,
 }
 
 impl core::fmt::Debug for KmsSink {
@@ -237,6 +405,7 @@ impl KmsSink {
             frames_presented: 0,
             latency: LatencyHistogram::new(),
             pacer: PresentationPacer::for_video_sink(),
+            plane_rotation: None,
         }
     }
 
@@ -320,8 +489,10 @@ impl KmsSink {
             .first()
             .copied()
             .ok_or(G2gError::Hardware(HardwareError::Other))?;
+        let plane_rotation = primary_plane_rotation(&card, &res, crtc_handle)?;
 
         self.card = Some(card);
+        self.plane_rotation = plane_rotation;
         self.connector = Some(con_handle);
         self.crtc = Some(crtc_handle);
         self.mode = Some(mode);
@@ -368,12 +539,13 @@ impl KmsSink {
     /// `set_crtc` (first frame) or `page_flip` (subsequent frames). On
     /// flip submission, drains the previous flip's completion event so we
     /// only overwrite buffers that are off scanout.
-    fn present(&mut self, nv12: &[u8]) -> Result<(), G2gError> {
+    fn present(&mut self, nv12: &[u8], orientation: Orientation) -> Result<(), G2gError> {
         // Drain a still-pending flip first; we must not overwrite the
         // buffer that the CRTC is still reading from.
         if self.flip_pending {
             self.wait_for_flip()?;
         }
+        self.apply_orientation(orientation)?;
 
         let back = (self.front + 1) % POOL_SIZE;
         let card = self.card.as_ref().ok_or(G2gError::NotConfigured)?;
@@ -406,6 +578,30 @@ impl KmsSink {
 
         self.front = back;
         self.frames_presented += 1;
+        Ok(())
+    }
+
+    fn apply_orientation(&mut self, orientation: Orientation) -> Result<(), G2gError> {
+        let Some(rotation) = self.plane_rotation.as_mut() else {
+            return match orientation {
+                Orientation::Identity => Ok(()),
+                _ => Err(G2gError::CapsMismatch),
+            };
+        };
+        let value = rotation_value(drm_rotation(orientation), &rotation.values)
+            .ok_or(G2gError::CapsMismatch)?;
+        if value == rotation.value {
+            return Ok(());
+        }
+        let card = self.card.as_ref().ok_or(G2gError::NotConfigured)?;
+        let crtc_handle = self.crtc.ok_or(G2gError::NotConfigured)?;
+        // a quarter turn on a lit plane fails the kernel's size check until set_crtc sizes it again
+        card.set_crtc(crtc_handle, None, (0, 0), &[], None)
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        self.crtc_set = false;
+        card.set_property(rotation.plane, rotation.property, value)
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        rotation.value = value;
         Ok(())
     }
 
@@ -498,6 +694,15 @@ impl AsyncElement for KmsSink {
     /// demand on a GPU producer.
     fn input_domains(&self) -> DomainSet {
         DomainSet::only(MemoryDomainKind::System)
+    }
+
+    // configure_pipeline opens the device before the runner asks, and one answer covers every turn
+    fn absorbs_orientation(&self) -> bool {
+        cfg!(feature = "metadata")
+            && self
+                .plane_rotation
+                .as_ref()
+                .is_some_and(|rotation| shows_every_orientation(&rotation.values))
     }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {
@@ -638,7 +843,9 @@ impl AsyncElement for KmsSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain, timing, .. }) => {
+                PipelinePacket::DataFrame(frame) => {
+                    let orientation = frame_orientation(&frame);
+                    let Frame { domain, timing, .. } = frame;
                     let slice =
                         domain.require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // PTS pacing: hold the frame until its deadline on the
@@ -649,7 +856,7 @@ impl AsyncElement for KmsSink {
                     if !wait_to_present(paced).await {
                         return Ok(());
                     }
-                    self.present(slice)?;
+                    self.present(slice, orientation)?;
                     // Record glass-to-glass latency after page-flip
                     // submission. Stamped frames only; unstamped
                     // (synthetic or arrival_ns=0) are skipped silently.
@@ -903,6 +1110,156 @@ mod tests {
             Some(g2g_core::BusMessage::Qos { dropped, .. }) => assert_eq!(dropped, 1),
             other => panic!("expected a Qos message, got {other:?}"),
         }
+    }
+
+    // Bit positions run opposite to the uapi header's, to catch a hardcoded bit.
+    fn plane_values(names: &[&str]) -> Vec<(String, u32)> {
+        names
+            .iter()
+            .rev()
+            .zip(0..)
+            .map(|(&name, position)| (String::from(name), position))
+            .collect()
+    }
+
+    const EVERY_VALUE: [&str; 6] = [
+        "rotate-0",
+        "rotate-90",
+        "rotate-180",
+        "rotate-270",
+        "reflect-x",
+        "reflect-y",
+    ];
+
+    fn bit(values: &[(String, u32)], name: &str) -> u64 {
+        let &(_, position) = values
+            .iter()
+            .find(|(value_name, _)| value_name == name)
+            .expect("the fixture lists the value");
+        1 << position
+    }
+
+    // Plane handles the sink never passes to a device.
+    fn fixture_plane_rotation(values: Vec<(String, u32)>) -> PlaneRotation {
+        PlaneRotation {
+            plane: drm::control::from_u32(1).expect("non-zero handle"),
+            property: drm::control::from_u32(2).expect("non-zero handle"),
+            value: bit(&values, "rotate-0"),
+            values,
+        }
+    }
+
+    // The turn the plane shows for `rotation`: the reflection, then counter-clockwise turns.
+    fn shown_orientation(rotation: DrmRotation) -> Orientation {
+        let reflected = if rotation.reflect_x {
+            Orientation::HorizontalMirror
+        } else {
+            Orientation::Identity
+        };
+        (0..rotation.counter_clockwise_quarter_turns).fold(reflected, |shown, _| {
+            shown.compose(Orientation::Rotate90Ccw)
+        })
+    }
+
+    // A quarter turn copied from waylandsink's inverted mapping fails here.
+    #[test]
+    fn plane_rotation_shows_the_descriptor() {
+        for orientation in ORIENTATIONS {
+            assert_eq!(
+                shown_orientation(drm_rotation(orientation)),
+                orientation,
+                "{orientation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rotation_value_reads_bits_from_the_plane() {
+        let values = plane_values(&EVERY_VALUE);
+        assert_eq!(
+            rotation_value(drm_rotation(Orientation::Rotate90Cw), &values),
+            Some(bit(&values, "rotate-270"))
+        );
+        assert_eq!(
+            rotation_value(drm_rotation(Orientation::Transpose), &values),
+            Some(bit(&values, "reflect-x") | bit(&values, "rotate-90"))
+        );
+        assert!(shows_every_orientation(&values));
+    }
+
+    #[test]
+    fn reflect_y_stands_in_for_reflect_x() {
+        let values = plane_values(&EVERY_VALUE);
+        assert_eq!(
+            rotation_value(drm_rotation(Orientation::HorizontalMirror), &values),
+            Some(bit(&values, "reflect-x") | bit(&values, "rotate-0"))
+        );
+
+        let without_reflect_x = plane_values(&[
+            "rotate-0",
+            "rotate-90",
+            "rotate-180",
+            "rotate-270",
+            "reflect-y",
+        ]);
+        assert_eq!(
+            rotation_value(
+                drm_rotation(Orientation::HorizontalMirror),
+                &without_reflect_x
+            ),
+            Some(bit(&without_reflect_x, "reflect-y") | bit(&without_reflect_x, "rotate-180"))
+        );
+        assert!(shows_every_orientation(&without_reflect_x));
+    }
+
+    #[test]
+    fn plane_without_quarter_turns_absorbs_nothing() {
+        let values = plane_values(&["rotate-0", "rotate-180", "reflect-x", "reflect-y"]);
+        assert_eq!(
+            rotation_value(drm_rotation(Orientation::Rotate180), &values),
+            Some(bit(&values, "rotate-180"))
+        );
+        assert_eq!(
+            rotation_value(drm_rotation(Orientation::Rotate90Cw), &values),
+            None
+        );
+
+        let mut sink = KmsSink::new();
+        sink.plane_rotation = Some(fixture_plane_rotation(values));
+        assert!(!sink.absorbs_orientation());
+    }
+
+    #[test]
+    fn absorbs_orientation_when_the_plane_shows_every_turn() {
+        let mut sink = KmsSink::new();
+        assert!(
+            !sink.absorbs_orientation(),
+            "no plane before the device opens"
+        );
+        sink.plane_rotation = Some(fixture_plane_rotation(plane_values(&EVERY_VALUE)));
+        assert_eq!(sink.absorbs_orientation(), cfg!(feature = "metadata"));
+    }
+
+    #[test]
+    fn plane_without_rotation_shows_only_the_stored_picture() {
+        let mut sink = KmsSink::new();
+        assert_eq!(sink.apply_orientation(Orientation::Identity), Ok(()));
+        assert_eq!(
+            sink.apply_orientation(Orientation::Rotate90Cw),
+            Err(G2gError::CapsMismatch)
+        );
+    }
+
+    #[test]
+    fn unchanged_rotation_makes_no_drm_call() {
+        // The sink has no card, so a DRM call fails with NotConfigured.
+        let mut sink = KmsSink::new();
+        sink.plane_rotation = Some(fixture_plane_rotation(plane_values(&EVERY_VALUE)));
+        assert_eq!(sink.apply_orientation(Orientation::Identity), Ok(()));
+        assert_eq!(
+            sink.apply_orientation(Orientation::Rotate180),
+            Err(G2gError::NotConfigured)
+        );
     }
 
     fn fmt_unused(_: &dyn core::fmt::Debug) {}

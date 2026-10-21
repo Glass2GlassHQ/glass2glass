@@ -52,32 +52,41 @@ use alloc::vec::Vec;
 use windows::core::{w, Interface};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
-    ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
-    D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
+    ID3D11Device, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1, ID3D11VideoDevice,
+    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
+    ID3D11VideoProcessorOutputView, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
+    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CAPS,
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_FEATURE_CAPS,
+    D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_MIRROR, D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ROTATION,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_ROTATION, D3D11_VIDEO_PROCESSOR_ROTATION_180,
+    D3D11_VIDEO_PROCESSOR_ROTATION_270, D3D11_VIDEO_PROCESSOR_ROTATION_90,
+    D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY, D3D11_VIDEO_PROCESSOR_STREAM,
     D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
     D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_UNSPECIFIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+    DXGI_ALPHA_MODE_UNSPECIFIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_RATIONAL,
+    DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIFactory2, IDXGISwapChain1, DXGI_PRESENT, DXGI_SCALING_STRETCH,
-    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
-    RegisterClassExW, TranslateMessage, CW_USEDEFAULT, MSG, PM_REMOVE, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    RegisterClassExW, SetWindowPos, TranslateMessage, CW_USEDEFAULT, MSG, PM_REMOVE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
+use crate::videoflip::frame_orientation;
 use crate::worker_ready::Handshake;
 use g2g_core::element::QosMessage;
 use g2g_core::frame::Frame;
+use g2g_core::meta::Orientation;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
@@ -105,6 +114,7 @@ enum WorkerCmd {
     Frame {
         texture: OwnedD3D11Texture,
         arrival_ns: u64,
+        orientation: Orientation,
         ack: tokio::sync::oneshot::Sender<()>,
     },
     Shutdown,
@@ -240,6 +250,11 @@ impl AsyncElement for D3D11Sink {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    // the processor's rotation and mirror caps are read at the first frame, after the runner asks
+    fn absorbs_orientation(&self) -> bool {
+        cfg!(feature = "metadata")
+    }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {
         Some(ClockCandidate::new(
@@ -384,7 +399,9 @@ impl AsyncElement for D3D11Sink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain, timing, .. }) => {
+                PipelinePacket::DataFrame(frame) => {
+                    let orientation = frame_orientation(&frame);
+                    let Frame { domain, timing, .. } = frame;
                     let MemoryDomain::D3D11Texture(texture) = domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
@@ -401,6 +418,7 @@ impl AsyncElement for D3D11Sink {
                     tx.send(WorkerCmd::Frame {
                         texture,
                         arrival_ns: timing.arrival_ns,
+                        orientation,
                         ack: ack_tx,
                     })
                     .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
@@ -458,6 +476,8 @@ struct GpuState {
     vp_enum: ID3D11VideoProcessorEnumerator,
     processor: ID3D11VideoProcessor,
     swapchain: IDXGISwapChain1,
+    // the turn the processor applies to the stream
+    orientation: Orientation,
 }
 
 fn worker_main(
@@ -482,9 +502,10 @@ fn worker_main(
             Ok(WorkerCmd::Frame {
                 texture,
                 arrival_ns,
+                orientation,
                 ack,
             }) => {
-                if let Err(e) = present_frame(&mut gpu, hwnd, &texture) {
+                if let Err(e) = present_frame(&mut gpu, hwnd, &texture, orientation) {
                     std::eprintln!("g2g-d3d11sink present error: {e:?}");
                 } else {
                     presented.fetch_add(1, Ordering::Relaxed);
@@ -633,6 +654,7 @@ fn init_gpu(device_ptr: u64, width: u32, height: u32, hwnd: HWND) -> Result<GpuS
             vp_enum,
             processor,
             swapchain,
+            orientation: Orientation::Identity,
         })
     }
 }
@@ -643,6 +665,7 @@ fn present_frame(
     gpu: &mut Option<GpuState>,
     hwnd: HWND,
     texture: &OwnedD3D11Texture,
+    orientation: Orientation,
 ) -> Result<(), G2gError> {
     if gpu.is_none() {
         *gpu = Some(init_gpu(
@@ -652,7 +675,8 @@ fn present_frame(
             hwnd,
         )?);
     }
-    let gpu = gpu.as_ref().unwrap();
+    let gpu = gpu.as_mut().unwrap();
+    apply_orientation(gpu, hwnd, texture, orientation)?;
 
     // SAFETY: the input texture is kept alive by `texture`'s keep-alive for the
     // duration of this call; all COM objects belong to the same device.
@@ -727,6 +751,123 @@ fn present_frame(
             .ok()
             .map_err(win_err)?;
     }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StreamOrientation {
+    rotation: D3D11_VIDEO_PROCESSOR_ROTATION,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+}
+
+// The processor rotates clockwise, assumed here to happen after the mirror.
+fn stream_orientation(orientation: Orientation) -> StreamOrientation {
+    let (rotation, flip_horizontal, flip_vertical) = match orientation {
+        Orientation::Identity => (D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY, false, false),
+        Orientation::Rotate90Cw => (D3D11_VIDEO_PROCESSOR_ROTATION_90, false, false),
+        Orientation::Rotate180 => (D3D11_VIDEO_PROCESSOR_ROTATION_180, false, false),
+        Orientation::Rotate90Ccw => (D3D11_VIDEO_PROCESSOR_ROTATION_270, false, false),
+        Orientation::HorizontalMirror => (D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY, true, false),
+        Orientation::VerticalMirror => (D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY, false, true),
+        Orientation::Transverse => (D3D11_VIDEO_PROCESSOR_ROTATION_90, true, false),
+        Orientation::Transpose => (D3D11_VIDEO_PROCESSOR_ROTATION_270, true, false),
+    };
+    StreamOrientation {
+        rotation,
+        flip_horizontal,
+        flip_vertical,
+    }
+}
+
+impl StreamOrientation {
+    fn rotates(self) -> bool {
+        self.rotation != D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY
+    }
+
+    fn mirrors(self) -> bool {
+        self.flip_horizontal || self.flip_vertical
+    }
+}
+
+fn has_feature(
+    caps: &D3D11_VIDEO_PROCESSOR_CAPS,
+    feature: D3D11_VIDEO_PROCESSOR_FEATURE_CAPS,
+) -> bool {
+    (caps.FeatureCaps & feature.0 as u32) != 0
+}
+
+fn apply_orientation(
+    gpu: &mut GpuState,
+    hwnd: HWND,
+    texture: &OwnedD3D11Texture,
+    orientation: Orientation,
+) -> Result<(), G2gError> {
+    if orientation == gpu.orientation {
+        return Ok(());
+    }
+    let previous = stream_orientation(gpu.orientation);
+    let next = stream_orientation(orientation);
+    // SAFETY: the enumerator, context and processor come from one device and stay on this thread.
+    unsafe {
+        let mut caps = D3D11_VIDEO_PROCESSOR_CAPS::default();
+        gpu.vp_enum
+            .GetVideoProcessorCaps(&mut caps)
+            .map_err(win_err)?;
+        let missing_rotation =
+            next.rotates() && !has_feature(&caps, D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ROTATION);
+        let missing_mirror =
+            next.mirrors() && !has_feature(&caps, D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_MIRROR);
+        if missing_rotation || missing_mirror {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        gpu.video_context.VideoProcessorSetStreamRotation(
+            &gpu.processor,
+            0,
+            next.rotates(),
+            next.rotation,
+        );
+        if next.mirrors() || previous.mirrors() {
+            let video_context1: ID3D11VideoContext1 = gpu.video_context.cast().map_err(win_err)?;
+            video_context1.VideoProcessorSetStreamMirror(
+                &gpu.processor,
+                0,
+                next.mirrors(),
+                next.flip_horizontal,
+                next.flip_vertical,
+            );
+        }
+    }
+    if orientation.swaps_dims() != gpu.orientation.swaps_dims() {
+        let (width, height) = if orientation.swaps_dims() {
+            (texture.height, texture.width)
+        } else {
+            (texture.width, texture.height)
+        };
+        // SAFETY: `present_frame` drops its buffer views, and `hwnd` was created on this thread.
+        unsafe {
+            gpu.swapchain
+                .ResizeBuffers(
+                    0,
+                    width,
+                    height,
+                    DXGI_FORMAT_UNKNOWN,
+                    DXGI_SWAP_CHAIN_FLAG(0),
+                )
+                .map_err(win_err)?;
+            SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            .map_err(win_err)?;
+        }
+    }
+    gpu.orientation = orientation;
     Ok(())
 }
 
@@ -852,6 +993,52 @@ mod tests {
         }
         assert!(types_can_link::<Nv12Source, D3D11Sink>());
         assert!(!types_can_link::<RgbaSource, D3D11Sink>());
+    }
+
+    // The turn the processor shows for `stream`, the mirror applied before the clockwise turns.
+    fn shown_orientation(stream: StreamOrientation) -> Orientation {
+        let mirrored = match (stream.flip_horizontal, stream.flip_vertical) {
+            (false, false) => Orientation::Identity,
+            (true, false) => Orientation::HorizontalMirror,
+            (false, true) => Orientation::VerticalMirror,
+            (true, true) => Orientation::Rotate180,
+        };
+        let quarter_turns = match stream.rotation {
+            D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY => 0,
+            D3D11_VIDEO_PROCESSOR_ROTATION_90 => 1,
+            D3D11_VIDEO_PROCESSOR_ROTATION_180 => 2,
+            D3D11_VIDEO_PROCESSOR_ROTATION_270 => 3,
+            other => panic!("not a rotation: {other:?}"),
+        };
+        (0..quarter_turns).fold(mirrored, |shown, _| shown.compose(Orientation::Rotate90Cw))
+    }
+
+    #[test]
+    fn stream_orientation_shows_the_descriptor() {
+        for orientation in [
+            Orientation::Identity,
+            Orientation::Rotate90Cw,
+            Orientation::Rotate180,
+            Orientation::Rotate90Ccw,
+            Orientation::HorizontalMirror,
+            Orientation::VerticalMirror,
+            Orientation::Transpose,
+            Orientation::Transverse,
+        ] {
+            assert_eq!(
+                shown_orientation(stream_orientation(orientation)),
+                orientation,
+                "{orientation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn absorbs_orientation_with_metadata() {
+        assert_eq!(
+            D3D11Sink::new().absorbs_orientation(),
+            cfg!(feature = "metadata")
+        );
     }
 
     #[test]

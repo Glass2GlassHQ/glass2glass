@@ -4216,6 +4216,7 @@ dependencies = [
  "dimpl",
  "dispatch2",
  "drm 0.15.0",
+ "drm-ffi 0.9.1",
  "drm-fourcc",
  "embassy-executor",
  "embassy-futures",
