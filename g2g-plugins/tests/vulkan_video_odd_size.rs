@@ -254,8 +254,41 @@ fn an_odd_size_picture_converts_to_an_rgba_texture() {
     }
 }
 
+/// The two-plane texture of an odd picture is one column and one row larger,
+/// since Vulkan and wgpu refuse an odd 4:2:0 image, and the frame carries the
+/// picture size beside it: `wgpudownload` reads the planes at that size, which
+/// is the tight NV12 layout the reference compares against.
+#[cfg(feature = "wgpu-sink")]
 #[test]
-fn the_two_plane_texture_output_refuses_an_odd_size() {
+fn the_two_plane_texture_output_carries_an_odd_picture_in_an_even_texture() {
+    use std::sync::Arc;
+
+    use g2g_core::frame::FrameTiming;
+    use g2g_core::memory::OwnedWgpuTexture;
+    use g2g_core::{
+        AsyncElement, Frame, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome, Rate,
+    };
+    use g2g_plugins::gpu::WgpuNv12Texture;
+    use g2g_plugins::wgpudownload::WgpuDownload;
+
+    #[derive(Default)]
+    struct CollectSink {
+        frames: Vec<Frame>,
+    }
+
+    impl OutputSink for CollectSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            if let Some(PipelinePacket::DataFrame(frame)) = packet_slot.take() {
+                self.frames.push(frame);
+            }
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+        }
+    }
+
     let _gpu = gpu_lock();
     let Some(device) = open_device() else {
         return;
@@ -268,13 +301,60 @@ fn the_two_plane_texture_output_refuses_an_odd_size() {
         eprintln!("skip: wgpu device lacks TEXTURE_FORMAT_NV12");
         return;
     }
+    let (width, height) = picture_size(CLIP);
     let session = session(&device, CLIP);
     let Some(mut decoder) = gpu_decoder(&device, &session, CLIP) else {
         return;
     };
     decoder.set_texture_output(TextureOutput::Nv12);
-    assert!(matches!(
-        decoder.decode_all_to_textures(CLIP),
-        Err(VulkanVideoError::UnsupportedStream)
-    ));
+    let textures = decoder
+        .decode_all_to_textures(CLIP)
+        .expect("decode odd-size stream to two-plane textures");
+    assert!(!textures.is_empty(), "no textures decoded");
+
+    let mut download = WgpuDownload::new();
+    download
+        .configure_pipeline(&Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        })
+        .expect("download configures");
+    let mut sink = CollectSink::default();
+    for (sequence, texture) in textures.into_iter().enumerate() {
+        assert_eq!(texture.format(), wgpu::TextureFormat::NV12);
+        assert_eq!(
+            (texture.width(), texture.height()),
+            (width + 1, height + 1),
+            "an odd picture gets an even-rounded texture"
+        );
+        let keep = Arc::new(WgpuNv12Texture::new(
+            device.wgpu_device.clone(),
+            device.wgpu_queue.clone(),
+            texture,
+        ));
+        let frame = Frame {
+            domain: MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(width, height, keep)),
+            timing: FrameTiming::default(),
+            sequence: sequence as u64,
+            meta: Default::default(),
+        };
+        block_on(download.process(PipelinePacket::DataFrame(frame), &mut sink))
+            .expect("download reads the picture");
+    }
+    let frames: Vec<Vec<u8>> = sink
+        .frames
+        .iter()
+        .map(|frame| {
+            let bytes = frame
+                .domain
+                .as_system_slice()
+                .expect("downloaded frame is system memory");
+            two_plane_to_planar(bytes, 8, (width, height))
+        })
+        .collect();
+    assert_frames_match_reference(&frames, RawVideoFormat::I420, (width, height), CLIP_FIXTURE);
 }

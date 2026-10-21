@@ -63,11 +63,12 @@ impl WgpuDownload {
 fn download_texture(owned: &OwnedWgpuTexture) -> Result<Vec<u8>, G2gError> {
     let owner = owned.keep_alive();
     let any = owner.as_any();
+    let picture = (owned.width, owned.height);
     if let Some(k) = any.downcast_ref::<WgpuTextureKeepAlive>() {
-        return read_texture_dq(k.device(), k.queue(), k.texture());
+        return read_texture_dq(k.device(), k.queue(), k.texture(), picture);
     }
     if let Some(k) = any.downcast_ref::<WgpuNv12Texture>() {
-        return read_texture_dq(k.device(), k.queue(), k.texture());
+        return read_texture_dq(k.device(), k.queue(), k.texture(), picture);
     }
     #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
     if let Some(k) = any.downcast_ref::<crate::mediacodec_wgpu::WgpuRgbaTexture>() {
@@ -76,10 +77,13 @@ fn download_texture(owned: &OwnedWgpuTexture) -> Result<Vec<u8>, G2gError> {
     Err(unreadable(MemoryDomainKind::WgpuTexture, owner))
 }
 
+// a two-plane texture may be even-rounded past an odd picture, so the planes
+// are read at the picture size, which is the tight NV12 / P010 layout
 fn read_texture_dq(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
+    (picture_width, picture_height): (u32, u32),
 ) -> Result<Vec<u8>, G2gError> {
     let format = texture.format();
     let Some(planes) = format.planes() else {
@@ -93,8 +97,8 @@ fn read_texture_dq(
             .ok_or_else(|| gpu_err(()))?;
         let (x_factor, y_factor) = format.subsampling_factors(Some(plane));
         let extent = (
-            texture.width().div_ceil(x_factor),
-            texture.height().div_ceil(y_factor),
+            picture_width.div_ceil(x_factor),
+            picture_height.div_ceil(y_factor),
         );
         out.extend(read_texture_plane(
             device, queue, texture, aspect, extent, bpp,

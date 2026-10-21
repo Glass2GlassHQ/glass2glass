@@ -676,9 +676,15 @@ even, so the readback copies `ceil(w/2) x ceil(h/2)` CbCr pairs out of them, the
 tight NV12 / P010 layout of the core caps, with the chroma plane starting on a
 4-byte boundary of the readback buffer as a copy on a transfer-only queue needs.
 Film grain repeats the last luma column for the chroma average of an odd width,
-as dav1d does. The RGBA outputs carry any size. The two-plane `NV12` / `P010`
-texture output refuses an odd size with `UnsupportedStream`, because Vulkan and
-wgpu both reject a 4:2:0 multi-planar image with an odd side.
+as dav1d does. The RGBA outputs carry any size. Vulkan and wgpu both reject a
+4:2:0 multi-planar image with an odd side, so the two-plane `NV12` / `P010`
+texture output of an odd picture is a texture one column or row larger, filled
+from the coded image (decoded samples past the picture edge, since the coded
+size is aligned) or left zero on the film-grain upload, and the frame's
+`OwnedWgpuTexture` / `OwnedVulkanTexture` carries the picture size. A consumer
+reads the picture at that size, never at the texture's: `wgpudownload` copies
+each plane at the picture extent, which gives the tight layout again, and
+`wgpusink` indexes both NV12 blits with the negotiated size.
 
 A driver reporting `DPB_AND_OUTPUT_COINCIDE` decodes into its reference slot, and
 one image per slot serves as both. A driver that does not, Mesa RADV for all

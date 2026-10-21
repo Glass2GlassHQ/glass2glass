@@ -5279,13 +5279,10 @@ fn format_bytes_per_sample(fmt: vk::Format) -> u64 {
     }
 }
 
-// wgpu and Vulkan both refuse a two-plane 4:2:0 texture with an odd side
-fn require_even_two_plane_texture(width: u32, height: u32) -> Result<(), VulkanVideoError> {
-    if width.is_multiple_of(2) && height.is_multiple_of(2) {
-        Ok(())
-    } else {
-        Err(VulkanVideoError::UnsupportedStream)
-    }
+// wgpu and Vulkan both refuse a two-plane 4:2:0 texture with an odd side, so an
+// odd picture goes out in a texture one column or row larger
+fn two_plane_texture_extent(width: u32, height: u32) -> (u32, u32) {
+    (width.div_ceil(2) * 2, height.div_ceil(2) * 2)
 }
 
 // H.264 and H.265 count a 4:2:0 crop in chroma samples, two luma samples each
@@ -6607,7 +6604,7 @@ impl YcbcrConverter {
         {
             return Err(VulkanVideoError::UnsupportedStream);
         }
-        require_even_two_plane_texture(w, h)?;
+        let (texture_w, texture_h) = two_plane_texture_extent(w, h);
         let dev = &self.raw_device;
         // SAFETY: contract above; the copy image is created here and moved into
         // wgpu on success (its drop callback frees it), freed here on failure.
@@ -6618,8 +6615,8 @@ impl YcbcrConverter {
                 .image_type(vk::ImageType::TYPE_2D)
                 .format(self.nv12_format)
                 .extent(vk::Extent3D {
-                    width: w,
-                    height: h,
+                    width: texture_w,
+                    height: texture_h,
                     depth: 1,
                 })
                 .mip_levels(1)
@@ -6649,7 +6646,7 @@ impl YcbcrConverter {
                 }
             };
             let submit_r = self
-                .record_copy_nv12(self.cb, picture, copy, w, h)
+                .record_copy_nv12(self.cb, picture, copy, texture_w, texture_h)
                 .and_then(|()| self.submit_and_wait(wait_sem, PICTURE_COPY_WAIT_STAGE));
             if let Err(e) = submit_r {
                 dev.destroy_image(copy, None);
@@ -6657,8 +6654,8 @@ impl YcbcrConverter {
                 return Err(VulkanVideoError::QueryFailed(e));
             }
             let size = wgpu::Extent3d {
-                width: w,
-                height: h,
+                width: texture_w,
+                height: texture_h,
                 depth_or_array_layers: 1,
             };
             crate::gpu::import_vk_image_as_wgpu_texture(
@@ -6681,8 +6678,10 @@ impl YcbcrConverter {
     ///
     /// # Safety
     /// `cb` must be recordable; `src` and `dst` must be valid two-plane images
-    /// on `self.raw_device`, `src` holding the `w` x `h` picture at
-    /// `picture_offset` and `dst` at least `w` x `h`.
+    /// on `self.raw_device`, `src` holding `w` x `h` even samples at
+    /// `picture_offset` (the coded image is aligned past an odd picture edge, so
+    /// the column and row beyond it are decoded samples) and `dst` at least
+    /// `w` x `h`.
     unsafe fn record_copy_nv12(
         &self,
         cb: vk::CommandBuffer,
@@ -14099,10 +14098,10 @@ fn nv12_to_two_plane_texture(
     frame: &Nv12Frame,
 ) -> Result<wgpu::Texture, VulkanVideoError> {
     debug_assert_eq!(frame.bit_depth, 8, "the grain upload is 8-bit NV12 only");
-    require_even_two_plane_texture(frame.width, frame.height)?;
+    let (texture_w, texture_h) = two_plane_texture_extent(frame.width, frame.height);
     let size = wgpu::Extent3d {
-        width: frame.width,
-        height: frame.height,
+        width: texture_w,
+        height: texture_h,
         depth_or_array_layers: 1,
     };
     let texture = wgpu_device.create_texture(&wgpu::TextureDescriptor {
@@ -14127,8 +14126,8 @@ fn nv12_to_two_plane_texture(
         (
             wgpu::TextureAspect::Plane1,
             frame.chroma(),
-            frame.width / 2,
-            frame.height / 2,
+            frame.width.div_ceil(2),
+            frame.height.div_ceil(2),
         ),
     ];
     for (aspect, bytes, width, height) in planes {
