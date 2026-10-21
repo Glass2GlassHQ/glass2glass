@@ -16,6 +16,7 @@ use g2g_core::{AsyncElement, AudioFormat, ByteStreamEncoding, Caps, MultiInputEl
 use g2g_plugins::aacparse::AacParse;
 use g2g_plugins::mp4demux::Mp4Demux;
 use g2g_plugins::mpegts::{TsDemuxer, TsPacketSplitter, STREAM_TYPE_AAC_LATM};
+use g2g_plugins::tsdemux::{TsDemux, TsStream};
 use g2g_plugins::tsmux::TsMux;
 use g2g_plugins::tsmuxn::TsMux as TsMuxN;
 
@@ -104,10 +105,21 @@ async fn check(object_type: ObjectType) {
             units,
             "{muxer}: the source access units, in order and unchanged"
         );
+
+        let demuxed = tsdemux_frames(ts.clone()).await;
         assert_eq!(
-            aacparse_caps(&carried).await,
+            demuxed, carried,
+            "{muxer}: TsDemux forwards each LOAS frame as its PES carries it"
+        );
+        let parsed = aacparse(&demuxed).await;
+        assert_eq!(
+            parsed.caps,
             [caps.clone()],
             "{muxer}: AacParse reads the source caps back from the LOAS frames"
+        );
+        assert_eq!(
+            parsed.frames, demuxed,
+            "{muxer}: AacParse forwards the LOAS frames unchanged"
         );
 
         let ts_path = scratch_path(object_type, muxer, "ts");
@@ -207,7 +219,39 @@ fn read_back(ts: &[u8], muxer: &str) -> Vec<Vec<u8>> {
         .collect()
 }
 
-async fn aacparse_caps(loas_frames: &[Vec<u8>]) -> Vec<Caps> {
+async fn tsdemux_frames(ts: Vec<u8>) -> Vec<Vec<u8>> {
+    let mut demux = TsDemux::new().with_stream(TsStream::Aac);
+    demux
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        })
+        .expect("configure");
+    let mut sink = CollectSink::default();
+    demux
+        .process(
+            PipelinePacket::DataFrame(Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
+                FrameTiming::default(),
+                0,
+            )),
+            &mut sink,
+        )
+        .await
+        .expect("demux");
+    demux
+        .process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("eos");
+    data_frames(&sink.packets)
+}
+
+#[derive(Debug)]
+struct Parsed {
+    caps: Vec<Caps>,
+    frames: Vec<Vec<u8>>,
+}
+
+async fn aacparse(loas_frames: &[Vec<u8>]) -> Parsed {
     let mut parse = AacParse::new();
     parse
         .configure_pipeline(&Caps::Audio {
@@ -231,13 +275,17 @@ async fn aacparse_caps(loas_frames: &[Vec<u8>]) -> Vec<Caps> {
             .await
             .expect("parse");
     }
-    sink.packets
-        .into_iter()
-        .filter_map(|packet| match packet {
-            PipelinePacket::CapsChanged(caps) => Some(caps),
-            _ => None,
-        })
-        .collect()
+    Parsed {
+        caps: sink
+            .packets
+            .iter()
+            .filter_map(|packet| match packet {
+                PipelinePacket::CapsChanged(caps) => Some(caps.clone()),
+                _ => None,
+            })
+            .collect(),
+        frames: data_frames(&sink.packets),
+    }
 }
 
 #[derive(Debug)]

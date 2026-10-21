@@ -41,13 +41,14 @@ use g2g_core::{
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::mpegts::{
     unwrap_metadata_au_cells, EitSlot, EsUnit, TsDemuxer, TsPacketSplitter, STREAM_TYPE_AAC,
-    STREAM_TYPE_AC3, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES,
-    STREAM_TYPE_MPEG1_AUDIO, STREAM_TYPE_MPEG1_VIDEO, STREAM_TYPE_MPEG2_AUDIO,
-    STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES, TAG_KEY_EVENT_DURATION,
-    TAG_KEY_EVENT_NAME, TAG_KEY_EVENT_START, TAG_KEY_EVENT_TEXT, TAG_KEY_NEXT_EVENT_DURATION,
-    TAG_KEY_NEXT_EVENT_NAME, TAG_KEY_NEXT_EVENT_START, TAG_KEY_NEXT_EVENT_TEXT,
-    TAG_KEY_SCHEDULE_EVENT_DURATION, TAG_KEY_SCHEDULE_EVENT_ID, TAG_KEY_SCHEDULE_EVENT_NAME,
-    TAG_KEY_SCHEDULE_EVENT_START, TAG_KEY_SCHEDULE_EVENT_TEXT, TAG_KEY_SERVICE_PROVIDER,
+    STREAM_TYPE_AAC_LATM, STREAM_TYPE_AC3, STREAM_TYPE_H264, STREAM_TYPE_H265,
+    STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO, STREAM_TYPE_MPEG1_VIDEO,
+    STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES,
+    TAG_KEY_EVENT_DURATION, TAG_KEY_EVENT_NAME, TAG_KEY_EVENT_START, TAG_KEY_EVENT_TEXT,
+    TAG_KEY_NEXT_EVENT_DURATION, TAG_KEY_NEXT_EVENT_NAME, TAG_KEY_NEXT_EVENT_START,
+    TAG_KEY_NEXT_EVENT_TEXT, TAG_KEY_SCHEDULE_EVENT_DURATION, TAG_KEY_SCHEDULE_EVENT_ID,
+    TAG_KEY_SCHEDULE_EVENT_NAME, TAG_KEY_SCHEDULE_EVENT_START, TAG_KEY_SCHEDULE_EVENT_TEXT,
+    TAG_KEY_SERVICE_PROVIDER,
 };
 use crate::typefind::sized_by_sps;
 
@@ -296,7 +297,9 @@ pub enum TsStream {
     /// 0x02). The broadcast and DVD video codec; access units are forwarded as
     /// the PES payload carries them (start-code framed, no parse element).
     Mpeg2,
-    /// The first AAC (ADTS) audio elementary stream.
+    /// The first AAC audio elementary stream: ADTS (stream_type 0x0F), or
+    /// LOAS/LATM (0x11), whose frames go out as the PES carries them for
+    /// `aacparse` to read.
     Aac,
     /// The first MPEG-1/2 Audio (Layer II, `mp2`) elementary stream (stream_type
     /// 0x03 / 0x04).
@@ -641,9 +644,11 @@ impl TsDemux {
     /// 'Opus' registration is checked separately, at PMT parse); Klv accepts the
     /// private PES 0x06 (the 'KLVA' registration likewise) and metadata-in-PES
     /// 0x15; Av1 accepts the private PES 0x06 (its registration likewise); Ac3
-    /// accepts ATSC 0x81 and the DVB private PES 0x06 (its AC-3 descriptor likewise).
+    /// accepts ATSC 0x81 and the DVB private PES 0x06 (its AC-3 descriptor likewise);
+    /// Aac accepts ADTS 0x0F and LOAS/LATM 0x11.
     fn accepts_stream_type(stream: TsStream, stream_type: u8) -> bool {
         match stream {
+            TsStream::Aac => stream_type == STREAM_TYPE_AAC || stream_type == STREAM_TYPE_AAC_LATM,
             TsStream::Mp2 => {
                 stream_type == STREAM_TYPE_MPEG1_AUDIO || stream_type == STREAM_TYPE_MPEG2_AUDIO
             }
