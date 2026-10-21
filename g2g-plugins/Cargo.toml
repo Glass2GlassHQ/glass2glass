@@ -424,9 +424,9 @@ cuda-gl = ["cuda", "dep:khronos-egl", "dep:glow", "dep:wayland-egl", "dep:smitha
 # CUDA-GL display sink on DRM/KMS (`CudaKmsSink`, M255): the tty / no-compositor
 # counterpart of cuda-gl. Same CUDA-GL interop + NV12->RGB shader, but EGL on a
 # GBM surface presented via DRM page-flips (no Wayland). Pulls khronos-egl, glow,
-# gbm (surface, no drm-support so it stays on our drm), drm + drm-fourcc.
+# gbm (surface, no drm-support so it stays on our drm), drm, drm-ffi + drm-fourcc.
 # Requires DRM master (tty / DRM lease). Linux + NVIDIA only.
-cuda-kms = ["cuda", "dep:khronos-egl", "dep:glow", "dep:gbm", "dep:drm", "dep:drm-fourcc"]
+cuda-kms = ["cuda", "dep:khronos-egl", "dep:glow", "dep:gbm", "dep:drm", "dep:drm-ffi", "dep:drm-fourcc"]
 # CUDA<->wgpu zero-copy interop (M220, the GPU keep-on-GPU pillar). `CudaToWgpu`
 # imports a Vulkan external-memory image into CUDA, copies the NVDEC NV12 planes
 # device->device into it, and hands it downstream as MemoryDomain::WgpuTexture

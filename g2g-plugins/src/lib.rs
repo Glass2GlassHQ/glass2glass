@@ -1529,6 +1529,10 @@ mod yuv;
 #[cfg(all(target_os = "linux", feature = "kms-sink"))]
 pub mod kmssink;
 
+// The primary plane's `rotation` property, shared by the two KMS display sinks.
+#[cfg(all(target_os = "linux", any(feature = "kms-sink", feature = "cuda-kms")))]
+mod drm_plane_rotation;
+
 // Timestamp burn-in (M1114): writes CLOCK_MONOTONIC nanoseconds into an I420
 // luma plane as a block strip, and decodes it back. The instrument the
 // same-metric latency bench measures both stacks with. Unix-only; needs libc.

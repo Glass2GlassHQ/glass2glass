@@ -70,6 +70,7 @@ use khronos_egl as egl;
 
 use g2g_core::element::QosMessage;
 use g2g_core::memory::OwnedCudaBuffer;
+use g2g_core::meta::Orientation;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
@@ -81,7 +82,9 @@ use g2g_core::{
 
 use crate::clock::wait_to_present;
 use crate::cuda::nv12_byte_size;
+use crate::drm_plane_rotation::{primary_plane_rotation, require_unrotated, PlaneRotation};
 use crate::glnv12::{GlMode, GlState};
+use crate::videoflip::frame_orientation;
 
 /// `EGL_PLATFORM_GBM_KHR` (khronos-egl 6 has no named constant for it).
 const EGL_PLATFORM_GBM_KHR: egl::Enum = 0x31D7;
@@ -98,6 +101,7 @@ enum WorkerCmd {
     Frame {
         buf: OwnedCudaBuffer,
         arrival_ns: u64,
+        orientation: Orientation,
         ack: tokio::sync::oneshot::Sender<()>,
     },
     Shutdown,
@@ -178,6 +182,8 @@ pub struct CudaKmsSink {
     /// until the runner hands over a clock, and the default lateness bound never
     /// drops.
     pacer: PresentationPacer,
+    // set by the worker once it has read the primary plane
+    plane_shows_every_orientation: bool,
 }
 
 impl core::fmt::Debug for CudaKmsSink {
@@ -212,6 +218,7 @@ impl CudaKmsSink {
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyHistogram::new()),
             pacer: PresentationPacer::for_video_sink(),
+            plane_shows_every_orientation: false,
         }
     }
 
@@ -289,6 +296,11 @@ impl AsyncElement for CudaKmsSink {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    // configure_pipeline sets up the worker before the runner asks, and one answer covers every turn
+    fn absorbs_orientation(&self) -> bool {
+        cfg!(feature = "metadata") && self.plane_shows_every_orientation
+    }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {
         Some(ClockCandidate::new(
@@ -410,7 +422,7 @@ impl AsyncElement for CudaKmsSink {
         }
 
         let (tx, rx) = channel::<WorkerCmd>();
-        let (ready_tx, ready_rx) = channel::<Result<(), ()>>();
+        let (ready_tx, ready_rx) = channel::<Result<bool, ()>>();
         let presented = Arc::clone(&self.frames_presented);
         let latency = Arc::clone(&self.latency);
         let device_path = self.device_path.clone();
@@ -435,20 +447,21 @@ impl AsyncElement for CudaKmsSink {
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
         // Wait for the worker to finish DRM/GBM/EGL/GL setup before accepting.
-        match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => {}
+        let plane_shows_every_orientation = match ready_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(shows_every_orientation)) => shows_every_orientation,
             _ => {
                 let _ = tx.send(WorkerCmd::Shutdown);
                 let _ = join.join();
                 return Err(G2gError::Hardware(HardwareError::Other));
             }
-        }
+        };
 
         self.cmd_tx = Some(tx);
         self.worker = Some(join);
         self.width = w;
         self.height = h;
         self.colorimetry = colorimetry;
+        self.plane_shows_every_orientation = plane_shows_every_orientation;
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -459,7 +472,9 @@ impl AsyncElement for CudaKmsSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain, timing, .. }) => {
+                PipelinePacket::DataFrame(frame) => {
+                    let orientation = frame_orientation(&frame);
+                    let Frame { domain, timing, .. } = frame;
                     // CUDA device memory only; a system frame means the chain
                     // forgot the NvdecCuda backend.
                     let MemoryDomain::Cuda(buf) = domain else {
@@ -478,6 +493,7 @@ impl AsyncElement for CudaKmsSink {
                     tx.send(WorkerCmd::Frame {
                         buf,
                         arrival_ns: timing.arrival_ns,
+                        orientation,
                         ack: ack_tx,
                     })
                     .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
@@ -535,6 +551,7 @@ struct WorkerState {
     card: Card,
     crtc: drm::control::crtc::Handle,
     connector: connector::Handle,
+    plane_rotation: Option<PlaneRotation>,
     mode: Mode,
     /// DRM framebuffers, cached by the GBM bo's gem handle (bos recur).
     fbs: BTreeMap<u32, framebuffer::Handle>,
@@ -553,7 +570,7 @@ fn worker_main(
     rx: Receiver<WorkerCmd>,
     presented: Arc<AtomicU64>,
     latency: Arc<LatencyHistogram>,
-    ready_tx: &Sender<Result<(), ()>>,
+    ready_tx: &Sender<Result<bool, ()>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut state = match WorkerState::setup(&device_path, width, height, colorimetry) {
         Ok(s) => s,
@@ -563,7 +580,11 @@ fn worker_main(
         }
     };
     // Setup done: let configure_pipeline proceed.
-    let _ = ready_tx.send(Ok(()));
+    let plane_shows_every_orientation = state
+        .plane_rotation
+        .as_ref()
+        .is_some_and(PlaneRotation::shows_every_orientation);
+    let _ = ready_tx.send(Ok(plane_shows_every_orientation));
 
     loop {
         // Block for the next frame; a long idle is not an error (live sources
@@ -572,9 +593,10 @@ fn worker_main(
             Ok(WorkerCmd::Frame {
                 buf,
                 arrival_ns,
+                orientation,
                 ack,
             }) => {
-                if let Err(e) = state.draw(&buf) {
+                if let Err(e) = state.draw(&buf, orientation) {
                     std::eprintln!("g2g-cudakmssink draw error: {e:?}");
                     // Release the producer so a transient error doesn't deadlock.
                     let _ = ack.send(());
@@ -621,6 +643,8 @@ impl WorkerState {
         let con_info = card.get_connector(connector, true)?;
         let mode = *con_info.modes().first().ok_or("connector has no modes")?;
         let crtc = *res.crtcs().first().ok_or("no DRM CRTC")?;
+        let plane_rotation = primary_plane_rotation(&card, &res, crtc)
+            .map_err(|e| alloc::format!("read the primary plane rotation: {e:?}"))?;
 
         // GBM device on a second handle to the same node, and a scanout surface.
         let gbm = GbmDevice::new(Card::open(device_path).map_err(|_| "open DRM card for GBM")?)?;
@@ -699,6 +723,7 @@ impl WorkerState {
             card,
             crtc,
             connector,
+            plane_rotation,
             mode,
             fbs: BTreeMap::new(),
             crtc_set: false,
@@ -710,7 +735,7 @@ impl WorkerState {
 
     /// Upload + draw the NV12 frame (shared `glnv12` path), swap the GBM surface,
     /// and scan out the new buffer via `set_crtc` (first frame) or `page_flip`.
-    fn draw(&mut self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
+    fn draw(&mut self, buf: &OwnedCudaBuffer, orientation: Orientation) -> Result<(), G2gError> {
         // CUDA upload + NV12->RGB draw (shared with the Wayland sink).
         self.gl.upload_and_draw(buf)?;
 
@@ -724,6 +749,7 @@ impl WorkerState {
         if self.flip_pending {
             self.wait_for_flip()?;
         }
+        self.apply_orientation(orientation)?;
 
         // SAFETY: a buffer was just rendered, so a front buffer is available.
         let bo = unsafe {
@@ -754,6 +780,18 @@ impl WorkerState {
         // The new bo is now (being) scanned out; dropping the previous front bo
         // releases it back to the GBM surface for reuse.
         self.front_bo = Some(bo);
+        Ok(())
+    }
+
+    fn apply_orientation(&mut self, orientation: Orientation) -> Result<(), G2gError> {
+        let Some(rotation) = self.plane_rotation.as_mut() else {
+            return require_unrotated(orientation);
+        };
+        let Some(value) = rotation.changed_value(orientation)? else {
+            return Ok(());
+        };
+        rotation.write(&self.card, self.crtc, value)?;
+        self.crtc_set = false;
         Ok(())
     }
 
@@ -888,6 +926,11 @@ mod tests {
             Err(G2gError::CapsMismatch) => {}
             other => panic!("expected CapsMismatch on odd dims, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn absorbs_no_orientation_before_the_worker_reads_the_plane() {
+        assert!(!CudaKmsSink::new().absorbs_orientation());
     }
 
     #[test]
