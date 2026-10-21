@@ -1162,7 +1162,7 @@ official one.
 
 | Decoder | H.264 JVT-AVC_V1 | H.265 HEVC_V1 + RExt | AV1-TEST-VECTORS |
 | :--- | ---: | ---: | ---: |
-| `ffmpegdec` | 130 / 135 | 135 / 188 | 0 / 240 |
+| `ffmpegdec` | 130 / 135 | 172 / 188 (2026-10-20) | 0 / 240 |
 | `nvdec` | 129 / 135 | 141 / 188 | 202 / 240 |
 | `vulkanvideodec` | 99 / 135 (2026-10-20) | 146 / 188 (2026-10-20) | 2 / 240 |
 | `dav1ddec` | | | 238 / 240 |
@@ -1182,3 +1182,10 @@ depth above 10, unequal luma and chroma depths, and SPS or PPS range extension
 or screen content tools are all refused. Wavefront parallel processing on a
 picture one coding tree block wide is refused too. RADV (Rembrandt, pinned with
 `VK_DRIVER_FILES`) gives the same 146 of 188 and 97 of 135 for H.264.
+
+`ffmpegdec`'s 16 HEVC misses are libavcodec's own: the ffmpeg command line on
+libavcodec 61 (ffmpeg 7.1) and 62 (ffmpeg 8.1) misses the same 16 vectors, the
+extended-precision and high-throughput 4:4:4 16-bit RExt streams, the 14-bit
+CABAC bypass-alignment ones, `Bitdepth_A` / `Bitdepth_B`, `TSUNEQBD_A`,
+`VPSSPSPPS_A` and `SAODBLK_A` / `SAODBLK_B`. The count is the same with the
+decoder pinned through `G2G_PLUGIN_FEATURE_RANK` and through plain `decodebin`.

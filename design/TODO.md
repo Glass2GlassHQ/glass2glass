@@ -127,8 +127,6 @@ Highest leverage first:
   `MR5_TANDBERG_C` (H.264) repeat an earlier picture at 22 output positions.
 - **AV1 spatial layers.** `av1-1-b8-22-svc-L2T1` and `L2T2` differ from the
   reference through `dav1ddec` and `rav1ddec`.
-- **HEVC through `ffmpegdec`.** 53 of 188 HEVC vectors fail through
-  `decodebin`, most of them Main 10 or RExt (4:2:2, 4:4:4, 12-bit and up).
 - **AV1 film grain chroma.** Match dav1d's chroma grain on libaom's
   `-aom-params film-grain-test=1` parameters: a 320x180 clip encoded with them
   differs from dav1d in 41 to 66 chroma bytes per frame, its luma is exact.
