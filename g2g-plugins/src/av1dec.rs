@@ -362,11 +362,15 @@ macro_rules! av1_decoder {
                     self.out = None;
                 }
                 self.input_colorimetry = *colorimetry;
-                let mut settings = Settings::new();
-                // aomdec and ffmpeg output only the highest spatial layer of each temporal unit
-                settings.set_all_layers(false);
-                self.decoder =
-                    Some(Decoder::with_settings(&settings).map_err(|_| G2gError::CapsMismatch)?);
+                // a mid-stream reconfigure keeps the decoder and the pictures it still holds
+                if self.decoder.is_none() {
+                    let mut settings = Settings::new();
+                    // aomdec and ffmpeg output only the highest spatial layer of each temporal unit
+                    settings.set_all_layers(false);
+                    self.decoder = Some(
+                        Decoder::with_settings(&settings).map_err(|_| G2gError::CapsMismatch)?,
+                    );
+                }
                 self.configured = true;
                 Ok(ConfigureOutcome::Accepted)
             }
