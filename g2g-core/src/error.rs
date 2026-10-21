@@ -86,4 +86,18 @@ pub enum HardwareError {
     LibraryNotFound(&'static str),
     // the status of an HTTP response that was not a success, such as 429 or 404
     Http(u16),
+    // an HTTP request that failed before any response status arrived
+    HttpTransport(HttpTransportFailure),
+}
+
+// the stage at which an HTTP request failed with no response status
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HttpTransportFailure {
+    Timeout,
+    Connect,
+    Request,
+    Body,
+    Decode,
+    Redirect,
 }

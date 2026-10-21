@@ -5,7 +5,7 @@ use std::net::TcpListener;
 use std::thread;
 
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{ByteStreamEncoding, Caps, G2gError, HardwareError};
+use g2g_core::{ByteStreamEncoding, Caps, G2gError, HardwareError, HttpTransportFailure};
 
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
@@ -50,6 +50,18 @@ fn http_status(status: u16) -> G2gError {
     G2gError::Hardware(HardwareError::Http(status))
 }
 
+// a port that was bound and released, so a connection to it is refused
+fn refused_origin() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    format!("http://127.0.0.1:{port}")
+}
+
+fn refused_connection() -> G2gError {
+    G2gError::Hardware(HardwareError::HttpTransport(HttpTransportFailure::Connect))
+}
+
 #[cfg(feature = "dash")]
 #[tokio::test]
 async fn a_refused_dash_manifest_names_its_status() {
@@ -88,4 +100,36 @@ async fn a_refused_http_stream_names_its_status() {
         );
         assert_eq!(run_error(src, caps).await, http_status(status));
     }
+}
+
+#[cfg(feature = "dash")]
+#[tokio::test]
+async fn an_unreachable_dash_manifest_names_the_refused_connection() {
+    let src = g2g_plugins::dashsrc::DashSrc::new(format!("{}/Manifest.mpd", refused_origin()));
+    let caps = Caps::ByteStream {
+        encoding: ByteStreamEncoding::IsoBmff,
+    };
+    assert_eq!(run_error(src, caps).await, refused_connection());
+}
+
+#[cfg(feature = "hls")]
+#[tokio::test]
+async fn an_unreachable_hls_playlist_names_the_refused_connection() {
+    let src = g2g_plugins::hlssrc::HlsSrc::new(format!("{}/index.m3u8", refused_origin()));
+    let caps = Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    };
+    assert_eq!(run_error(src, caps).await, refused_connection());
+}
+
+#[tokio::test]
+async fn an_unreachable_http_stream_names_the_refused_connection() {
+    let caps = Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    };
+    let src = g2g_plugins::httpsrc::HttpSrc::new(
+        format!("{}/stream.ts", refused_origin()),
+        caps.clone(),
+    );
+    assert_eq!(run_error(src, caps).await, refused_connection());
 }

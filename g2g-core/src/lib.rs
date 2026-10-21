@@ -199,7 +199,7 @@ pub use element::{
     AsyncElement, ConfigureOutcome, ElementBound, OutputSink, OutputSinkExt, PresentationStats,
     PushFuture, PushOutcome, QosMessage, Reconfigure,
 };
-pub use error::{G2gError, HardwareError};
+pub use error::{G2gError, HardwareError, HttpTransportFailure};
 #[cfg(feature = "alloc")]
 pub use format_element::{CapsConstraint, CapsPreferences, FormatElement};
 pub use frame::{Frame, FrameTiming, PipelinePacket};
