@@ -15,7 +15,7 @@ use g2g_core::{
 };
 use g2g_ml::wgpupreprocess::{
     gpu_available, nv12_to_gpu_texture, nv12_to_rgb_tensor, nv12_to_rgb_tensor_tagged,
-    WgpuBufferOwner, WgpuNv12Texture, WgpuPreprocess,
+    WgpuBufferOwner, WgpuPreprocess,
 };
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
@@ -452,98 +452,7 @@ async fn gpu_matrix_follows_the_caps_colorimetry() {
     assert!(apart > 1e-2, "BT.601 and BT.709 differ by only {apart}");
 }
 
-/// Bytes per texel of an NV12 chroma plane, Cb and Cr interleaved.
-const CHROMA_BYTES_PER_TEXEL: u32 = 2;
-
-/// The two-plane counterpart of `nv12_to_gpu_texture`: the same NV12 bytes in a
-/// `TextureFormat::NV12` texture of `width x height`, the layout a GPU decoder
-/// hands out. `None` when the adapter cannot make one.
-async fn nv12_to_two_plane_texture(nv12: &[u8], width: u32, height: u32) -> Option<MemoryDomain> {
-    let instance = wgpu::Instance::default();
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        })
-        .await
-        .ok()?;
-    if !adapter
-        .features()
-        .contains(wgpu::Features::TEXTURE_FORMAT_NV12)
-    {
-        return None;
-    }
-    let (device, queue) = adapter
-        .request_device(&wgpu::DeviceDescriptor {
-            label: Some("two-plane-nv12"),
-            required_features: wgpu::Features::TEXTURE_FORMAT_NV12,
-            required_limits: adapter.limits(),
-            ..Default::default()
-        })
-        .await
-        .ok()?;
-
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("two-plane-nv12"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::NV12,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    // Each plane is written on its own aspect: a whole-texture write has no
-    // single texel size to describe.
-    let luma_bytes = (width * height) as usize;
-    for (aspect, bytes, plane_width, plane_height, bytes_per_row) in [
-        (
-            wgpu::TextureAspect::Plane0,
-            &nv12[..luma_bytes],
-            width,
-            height,
-            width,
-        ),
-        (
-            wgpu::TextureAspect::Plane1,
-            &nv12[luma_bytes..],
-            width / 2,
-            height / 2,
-            (width / 2) * CHROMA_BYTES_PER_TEXEL,
-        ),
-    ] {
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect,
-            },
-            bytes,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bytes_per_row),
-                rows_per_image: Some(plane_height),
-            },
-            wgpu::Extent3d {
-                width: plane_width,
-                height: plane_height,
-                depth_or_array_layers: 1,
-            },
-        );
-    }
-
-    let owner = WgpuNv12Texture::new(device, queue, texture);
-    Some(MemoryDomain::WgpuTexture(g2g_core::OwnedWgpuTexture::new(
-        width,
-        height,
-        std::sync::Arc::new(owner),
-    )))
-}
+include!("util/two_plane_nv12.rs");
 
 /// The tensor `element` produces for one GPU-texture frame.
 async fn preprocess_texture(element: &mut WgpuPreprocess, domain: MemoryDomain) -> Vec<f32> {

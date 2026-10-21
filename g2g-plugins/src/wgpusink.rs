@@ -39,8 +39,8 @@ use g2g_core::{
 
 use crate::clock::wait_to_present;
 use crate::gpu::{
-    nv12_plane_views, packed_nv12_extent, read_texture_plane, texture_layout, texture_of,
-    GpuContext, WgpuTextureLayout,
+    nv12_plane_views, packed_nv12_extent, read_texture_plane, texture_holds_picture, texture_layout,
+    texture_of, GpuContext, WgpuTextureLayout,
 };
 use crate::yuvmatrix::YuvToRgbWeights;
 
@@ -419,25 +419,6 @@ fn source_layout(absolute_caps: &Caps) -> Result<SourceLayout, G2gError> {
 pub(crate) fn source_geometry(absolute_caps: &Caps) -> Result<(u32, u32), G2gError> {
     let source = source_layout(absolute_caps)?;
     Ok((source.width, source.height))
-}
-
-// the NV12 blits index texels by the negotiated picture size, not by the texture's
-fn texture_holds_picture(
-    texture: &wgpu::Texture,
-    layout: WgpuTextureLayout,
-    width: u32,
-    height: u32,
-) -> bool {
-    let size = (texture.width(), texture.height());
-    match layout {
-        // sampled whole and scaled to the target
-        WgpuTextureLayout::Rgba => true,
-        WgpuTextureLayout::PackedNv12 => size == packed_nv12_extent(width, height),
-        // a decoder may round its planes up to an even size
-        WgpuTextureLayout::MultiplanarNv12 => {
-            (size.0.div_ceil(2), size.1.div_ceil(2)) == (width.div_ceil(2), height.div_ceil(2))
-        }
-    }
 }
 
 // frames arrive gamma-encoded, an sRGB surface would encode them a second time

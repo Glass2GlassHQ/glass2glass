@@ -302,15 +302,34 @@ pub enum WgpuTextureLayout {
     /// RGB convert.
     PackedNv12,
     /// The two-plane `wgpu::TextureFormat::NV12` (8-bit) or
-    /// `wgpu::TextureFormat::P010` (10-bit) a GPU decoder hands out:
-    /// `width x height`, sampled through the [`nv12_plane_views`] pair, needing
-    /// the same YCbCr -> RGB convert.
+    /// `wgpu::TextureFormat::P010` (10-bit) a GPU decoder hands out: the
+    /// picture size rounded up to even, sampled through the [`nv12_plane_views`]
+    /// pair, needing the same YCbCr -> RGB convert.
     MultiplanarNv12,
 }
 
 // rows as wide as the chroma row, so an odd width leaves one unused byte after each luma row
 pub fn packed_nv12_extent(width: u32, height: u32) -> (u32, u32) {
     (2 * width.div_ceil(2), height + height.div_ceil(2))
+}
+
+// the NV12 consumers index texels by the negotiated picture size, not by the texture's
+pub fn texture_holds_picture(
+    texture: &wgpu::Texture,
+    layout: WgpuTextureLayout,
+    width: u32,
+    height: u32,
+) -> bool {
+    let size = (texture.width(), texture.height());
+    match layout {
+        // sampled whole and scaled to the target
+        WgpuTextureLayout::Rgba => true,
+        WgpuTextureLayout::PackedNv12 => size == packed_nv12_extent(width, height),
+        // a decoder may round its planes up to an even size
+        WgpuTextureLayout::MultiplanarNv12 => {
+            (size.0.div_ceil(2), size.1.div_ceil(2)) == (width.div_ceil(2), height.div_ceil(2))
+        }
+    }
 }
 
 /// The layout of `texture` from its format: the R8Uint single-channel plane the

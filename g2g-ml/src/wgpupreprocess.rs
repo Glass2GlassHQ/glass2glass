@@ -56,7 +56,9 @@ use g2g_core::{
 // naming it here.
 use crate::wgpu_transfer::{write_padded, ReadbackStaging};
 pub use g2g_plugins::gpu::WgpuNv12Texture;
-use g2g_plugins::gpu::{nv12_plane_views, packed_nv12_extent, texture_layout, WgpuTextureLayout};
+use g2g_plugins::gpu::{
+    nv12_plane_views, packed_nv12_extent, texture_holds_picture, texture_layout, WgpuTextureLayout,
+};
 use std::sync::Arc;
 // The one place the YUV <-> RGB coefficients are derived, shared with the CPU
 // converters and shaders in g2g-plugins so no two stages disagree.
@@ -214,9 +216,9 @@ const YUYV_SHADER: &str = yuv_shader!(
 );
 
 /// Surface-import variant of `SHADER` (M217): the NV12 frame arrives as an
-/// R8Uint texture of size `width x (height * 3/2)` holding the bytes in the
-/// standard NV12 layout (Y plane in rows `[0, h)`, interleaved Cb,Cr in rows
-/// `[h, h*3/2)`), so the byte at logical index `i` is texel `(i % w, i / w)`.
+/// R8Uint texture of `gpu::packed_nv12_extent` (Y plane in rows `[0, h)`,
+/// interleaved Cb,Cr in the `ceil(h/2)` rows after it, every row as wide as a
+/// chroma row, so an odd width leaves a spare byte after each luma row).
 /// `textureLoad` reads the exact integer byte (no sampler, no filtering), so the
 /// math and the output are identical to the storage-buffer path. `out` is the
 /// same f32 NCHW tensor.
@@ -410,8 +412,8 @@ fn any_geometry(format: RawVideoFormat) -> Caps {
 
 /// Whether the compute pass can read `format` at this geometry: NV12 at any size
 /// (the last chroma column and row of an odd size cover a single luma column or
-/// row), packed 4:2:2 only at an even width. An imported NV12 frame still needs
-/// an even size, see [`import_geometry_ok`].
+/// row), packed 4:2:2 only at an even width. A dma-buf NV12 frame still needs
+/// an even size, see `dmabuf_geometry_ok`.
 fn geometry_ok(format: RawVideoFormat, width: u32) -> bool {
     match format {
         RawVideoFormat::Nv12 => true,
@@ -422,10 +424,11 @@ fn geometry_ok(format: RawVideoFormat, width: u32) -> bool {
     }
 }
 
-/// Whether an imported frame (a GPU texture or a dma-buf) can be read at the
-/// negotiated size. NV12 needs an even size: an import carries one row stride for
-/// both planes, so it cannot describe the tight layout's wider chroma row.
-fn import_geometry_ok(format: RawVideoFormat, width: u32, height: u32) -> bool {
+/// Whether a dma-buf frame can be read at the negotiated size. NV12 needs an even
+/// size: an `OwnedDmaBuf` carries one row stride for both planes, so it cannot
+/// describe the tight layout's wider chroma row.
+#[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+fn dmabuf_geometry_ok(format: RawVideoFormat, width: u32, height: u32) -> bool {
     format != RawVideoFormat::Nv12 || (width.is_multiple_of(2) && height.is_multiple_of(2))
 }
 
@@ -805,22 +808,23 @@ impl WgpuPreprocess {
     /// texture is in (M1157): one packed R8Uint plane from the NV12 bridges, or
     /// the decoder's two-plane `TextureFormat::NV12`. Both produce the same
     /// tensor. Any other format under a `WgpuNv12Texture` is a producer bug, not
-    /// something to guess at.
+    /// something to guess at. Both shaders read only the negotiated picture, so
+    /// an odd size reads the picture region of a texture rounded up past it.
     fn dispatch_nv12_texture(&mut self, owner: &WgpuNv12Texture) -> Result<MemoryDomain, G2gError> {
-        if !import_geometry_ok(RawVideoFormat::Nv12, self.width, self.height) {
+        let texture = owner.texture();
+        let layout = texture_layout(texture).ok_or(G2gError::UnsupportedDomain)?;
+        if layout == WgpuTextureLayout::Rgba {
+            return Err(G2gError::UnsupportedDomain);
+        }
+        if !texture_holds_picture(texture, layout, self.width, self.height) {
             return Err(G2gError::CapsMismatch);
         }
-        match texture_layout(owner.texture()) {
-            Some(WgpuTextureLayout::PackedNv12) => {
-                self.ensure_tex_gpu(owner.device(), owner.queue());
-                self.dispatch_tex(owner)
-            }
-            Some(WgpuTextureLayout::MultiplanarNv12) => {
-                self.ensure_tex_planes_gpu(owner.device(), owner.queue());
-                self.dispatch_tex_planes(owner)
-            }
-            Some(WgpuTextureLayout::Rgba) | None => Err(G2gError::UnsupportedDomain),
+        if layout == WgpuTextureLayout::PackedNv12 {
+            self.ensure_tex_gpu(owner.device(), owner.queue());
+            return self.dispatch_tex(owner);
         }
+        self.ensure_tex_planes_gpu(owner.device(), owner.queue());
+        self.dispatch_tex_planes(owner)
     }
 
     /// Surface-import dispatch (M217): sample the incoming NV12 texture straight
@@ -831,10 +835,6 @@ impl WgpuPreprocess {
     fn dispatch_tex(&self, owner: &WgpuNv12Texture) -> Result<MemoryDomain, G2gError> {
         let tg = self.tex_gpu.as_ref().ok_or(G2gError::NotConfigured)?;
         let texture = owner.texture();
-        // The texture must hold the NV12 frame in the packed R8Uint layout.
-        if (texture.width(), texture.height()) != packed_nv12_extent(self.width, self.height) {
-            return Err(G2gError::CapsMismatch);
-        }
         // The texture is tightly packed from byte 0; only the colorimetry can
         // move under this pipeline, so rewrite the uniform per frame.
         tg.queue.write_buffer(
@@ -897,11 +897,6 @@ impl WgpuPreprocess {
             .as_ref()
             .ok_or(G2gError::NotConfigured)?;
         let texture = owner.texture();
-        // A two-plane texture carries the picture at its own size, chroma
-        // subsampling included, so the extents are the negotiated ones.
-        if texture.width() != self.width || texture.height() != self.height {
-            return Err(G2gError::CapsMismatch);
-        }
         // The planes are addressed by texel, so only the colorimetry can move
         // under this pipeline: rewrite the uniform per frame.
         tg.queue.write_buffer(
@@ -1065,7 +1060,7 @@ impl WgpuPreprocess {
         use g2g_plugins::dmabufwgpu::create_import_device_on;
 
         let shader = shader_for(self.format).ok_or(G2gError::CapsMismatch)?;
-        if !import_geometry_ok(self.format, self.width, self.height) {
+        if !dmabuf_geometry_ok(self.format, self.width, self.height) {
             return Err(G2gError::CapsMismatch);
         }
         let plane_bytes = self
@@ -1714,24 +1709,34 @@ fn build_import_gpu(
     }
 }
 
-/// Stand-in for a GPU NV12 decoder until one lands (M217): upload NV12 system
-/// bytes to a GPU R8Uint texture of size `width x (height * 3/2)` (the standard
-/// NV12 byte layout) on a fresh wgpu device, and return it as the
-/// `MemoryDomain::WgpuTexture` domain [`WgpuPreprocess`] surface-imports. A real
-/// GPU decoder (`DmaBuf`/`D3D11Texture`/CUDA import) produces this domain
-/// directly; this exists so the surface-import path is exercisable end-to-end.
+/// Stand-in for a GPU NV12 decoder until one lands (M217): upload tight NV12
+/// system bytes to a GPU R8Uint texture of `gpu::packed_nv12_extent` on a fresh
+/// wgpu device, and return it as the `MemoryDomain::WgpuTexture` domain
+/// [`WgpuPreprocess`] surface-imports. A real GPU decoder
+/// (`DmaBuf`/`D3D11Texture`/CUDA import) produces this domain directly; this
+/// exists so the surface-import path is exercisable end-to-end.
 pub async fn nv12_to_gpu_texture(
     nv12: &[u8],
     width: u32,
     height: u32,
 ) -> Result<MemoryDomain, G2gError> {
-    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+    let format = RawVideoFormat::Nv12;
+    let frame_bytes = format
+        .unpadded_frame_bytes(width, height)
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or(G2gError::CapsMismatch)?;
+    if nv12.len() < frame_bytes {
         return Err(G2gError::CapsMismatch);
     }
-    let tex_rows = height + height / 2;
-    if nv12.len() < (width * tex_rows) as usize {
+    let (texture_width, texture_height) = packed_nv12_extent(width, height);
+    let chroma_plane = (
+        format.plane_offset(1, width, height),
+        format.plane_stride(1, width),
+        format.plane_rows(1, height),
+    );
+    let (Some(chroma_offset), Some(chroma_stride), Some(chroma_rows)) = chroma_plane else {
         return Err(G2gError::CapsMismatch);
-    }
+    };
 
     let instance = wgpu::Instance::default();
     let adapter = instance
@@ -1746,8 +1751,8 @@ pub async fn nv12_to_gpu_texture(
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("nv12-surface"),
         size: wgpu::Extent3d {
-            width,
-            height: tex_rows,
+            width: texture_width,
+            height: texture_height,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -1757,27 +1762,37 @@ pub async fn nv12_to_gpu_texture(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    // write_texture has no 256-byte bytes_per_row constraint (it stages
-    // internally), so the unaligned NV12 width is fine.
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &nv12[..(width * tex_rows) as usize],
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(width),
-            rows_per_image: Some(tex_rows),
-        },
-        wgpu::Extent3d {
-            width,
-            height: tex_rows,
-            depth_or_array_layers: 1,
-        },
-    );
+    // The luma rows are one byte narrower than the texture at an odd width, so
+    // each plane is its own region. write_texture has no 256-byte bytes_per_row
+    // constraint (it stages internally), so the unaligned widths are fine.
+    for (bytes, origin_row, region_width, rows) in [
+        (&nv12[..], 0, width, height),
+        (&nv12[chroma_offset as usize..], height, chroma_stride, chroma_rows),
+    ] {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: origin_row,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(region_width),
+                rows_per_image: Some(rows),
+            },
+            wgpu::Extent3d {
+                width: region_width,
+                height: rows,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
 
     let owner = WgpuNv12Texture::new(device, queue, texture);
     Ok(MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
