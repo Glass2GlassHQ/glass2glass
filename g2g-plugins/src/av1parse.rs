@@ -192,7 +192,7 @@ impl AsyncElement for Av1Parse {
                         return Ok(());
                     };
                     let delimited_input =
-                        self.reframe && (!self.framer.is_empty() || opens_temporal_unit(bytes));
+                        self.reframe && (self.framer.started || opens_temporal_unit(bytes));
                     if !delimited_input {
                         self.refine_caps(bytes, out).await?;
                         out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -502,28 +502,29 @@ pub(crate) fn opens_obu_stream(data: &[u8]) -> bool {
 // the last unit waits for the next delimiter unless input proved one unit per buffer
 #[derive(Debug, Default)]
 struct TemporalUnitFramer {
-    // starts on a temporal delimiter whenever it is not empty
+    // starts on a unit start whenever it is not empty
     pending: Vec<u8>,
     // offset of the first OBU in `pending` not yet complete
     walked: usize,
-    // each delimiter in `pending` and the timing of the buffer it completed in
+    // each unit start in `pending` and the timing of the buffer it completed in
     unit_starts: Vec<(usize, FrameTiming)>,
     // consecutive buffers that began on a delimiter
     aligned_runs: u8,
+    // one buffer that begins inside a temporal unit proves later ones can open on one by chance
+    input_splits_temporal_units: bool,
+    // every buffer after the first delimited one goes through the framer
+    started: bool,
 }
 
 type FramedTemporalUnit = (Vec<u8>, FrameTiming);
 
 impl TemporalUnitFramer {
-    fn is_empty(&self) -> bool {
-        self.pending.is_empty()
-    }
-
     fn push(
         &mut self,
         bytes: &[u8],
         timing: FrameTiming,
     ) -> Result<Vec<FramedTemporalUnit>, G2gError> {
+        self.started = true;
         let boundary = self.pending.len();
         self.pending.extend_from_slice(bytes);
         while let Some(obu) = delimited_obu_at(&self.pending, self.walked)? {
@@ -532,16 +533,19 @@ impl TemporalUnitFramer {
             }
             self.walked = obu.end;
         }
-        // the first buffer opens a unit by construction
-        if boundary > 0 {
-            let opened_a_unit = self.unit_starts.iter().any(|&(start, _)| start == boundary);
-            self.aligned_runs = if opened_a_unit {
-                self.aligned_runs.saturating_add(1)
-            } else {
-                0
-            };
+        let opened_a_unit = self.unit_starts.iter().any(|&(start, _)| start == boundary);
+        if !opened_a_unit {
+            self.input_splits_temporal_units = true;
+            // the tail of a unit released early goes out on its own
+            if boundary == 0 {
+                self.unit_starts.insert(0, (0, timing));
+            }
+        } else if boundary > 0 {
+            // the first buffer opens a unit by construction
+            self.aligned_runs = self.aligned_runs.saturating_add(1);
         }
-        let aligned = self.aligned_runs >= TEMPORAL_UNIT_ALIGNED_CONFIRMATIONS
+        let aligned = !self.input_splits_temporal_units
+            && self.aligned_runs >= TEMPORAL_UNIT_ALIGNED_CONFIRMATIONS
             && self.walked == self.pending.len();
         let complete_through = if aligned {
             self.pending.len()
@@ -1286,6 +1290,58 @@ mod tests {
             units,
             "a unit-per-buffer upstream is not held back a frame"
         );
+    }
+
+    #[tokio::test]
+    async fn buffers_that_split_temporal_units_never_release_one_early() {
+        let units = delimited_units(7);
+        let delimiter_len = obu(OBU_TEMPORAL_DELIMITER, &[]).len();
+        let head = |n: usize| units[n][..delimiter_len].to_vec();
+        let tail = |n: usize| units[n][delimiter_len..].to_vec();
+        // one split buffer, then two that open on a unit
+        let buffers = [
+            [units[0].clone(), head(1)].concat(),
+            [tail(1), head(2)].concat(),
+            tail(2),
+            units[3].clone(),
+            units[4].clone(),
+            head(5),
+            [tail(5), units[6].clone()].concat(),
+        ];
+        let mut parse = Av1Parse::reframing();
+        parse.configure_pipeline(&av1_caps()).unwrap();
+        let mut sink = CollectSink::default();
+
+        push_each(&mut parse, &buffers, &mut sink).await;
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        assert_eq!(data_payloads(&sink), units);
+    }
+
+    #[tokio::test]
+    async fn the_tail_of_a_unit_released_early_keeps_its_bytes_and_stops_early_release() {
+        let units = delimited_units(5);
+        let delimiter_len = obu(OBU_TEMPORAL_DELIMITER, &[]).len();
+        let head = units[3][..delimiter_len].to_vec();
+        let tail = units[3][delimiter_len..].to_vec();
+        let buffers = [
+            units[0].clone(),
+            units[1].clone(),
+            units[2].clone(),
+            head.clone(),
+            [tail.clone(), units[4].clone()].concat(),
+        ];
+        let mut parse = Av1Parse::reframing();
+        parse.configure_pipeline(&av1_caps()).unwrap();
+        let mut sink = CollectSink::default();
+
+        push_each(&mut parse, &buffers, &mut sink).await;
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        let expected: Vec<Vec<u8>> = units[..3]
+            .iter()
+            .cloned()
+            .chain([head, tail, units[4].clone()])
+            .collect();
+        assert_eq!(data_payloads(&sink), expected);
     }
 
     #[tokio::test]
