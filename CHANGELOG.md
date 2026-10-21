@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1797: `videocrop` crops RGB, P010 and alpha frames, so a clean aperture no longer fails them.
+- M1796: a tagged codec's 4:2:2 or 4:4:4 output reaches a converter again.
 - M1795: embedded cover art reads into a `Tag::Image` from MP4, FLAC, VorbisComment and ID3.
 - M1794: `mjpegdec` decodes JPEGs zune-jpeg rejects through libavcodec.
 - M1793: `mjpegdec` decodes RGB-coded JPEGs.

@@ -24,7 +24,9 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::pixel::{chroma_420_size, even_dims_required, frame_byte_size, planar_planes};
+use crate::pixel::{
+    chroma_420_size, even_dims_required, frame_byte_size, planar_planes, tight_plane,
+};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -33,10 +35,14 @@ use g2g_core::{
     PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat, Reconfigure,
 };
 
-pub(crate) const FORMATS: [RawVideoFormat; 12] = [
+pub(crate) const FORMATS: [RawVideoFormat; 16] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
+    RawVideoFormat::Rgb8,
     RawVideoFormat::Nv12,
+    RawVideoFormat::P010,
+    RawVideoFormat::A420,
+    RawVideoFormat::A444p12,
     RawVideoFormat::I420,
     RawVideoFormat::I420p10,
     RawVideoFormat::I420p12,
@@ -503,18 +509,20 @@ pub(crate) fn crop(
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => {
             crop_plane(src, in_w, x, y, w, h, 4).into_boxed_slice()
         }
-        RawVideoFormat::Nv12 => {
-            let luma_in = in_w * in_h;
+        RawVideoFormat::Rgb8 => crop_plane(src, in_w, x, y, w, h, 3).into_boxed_slice(),
+        RawVideoFormat::Nv12 | RawVideoFormat::P010 => {
+            let bps = format.bytes_per_sample();
+            let luma_in = in_w * in_h * bps;
             let (chroma_w, chroma_h) = chroma_420_size(in_w, in_h);
-            let mut out = crop_plane(src, in_w, x, y, w, h, 1);
+            let mut out = crop_plane(src, in_w, x, y, w, h, bps);
             let chroma = crop_plane(
-                &src[luma_in..luma_in + chroma_w * chroma_h * 2],
+                &src[luma_in..luma_in + chroma_w * chroma_h * 2 * bps],
                 chroma_w,
                 x / 2,
                 y / 2,
                 w.div_ceil(2),
                 h.div_ceil(2),
-                2,
+                2 * bps,
             );
             out.extend_from_slice(&chroma);
             out.into_boxed_slice()
@@ -542,6 +550,11 @@ pub(crate) fn crop(
                     bps,
                 );
                 out.extend_from_slice(&plane);
+            }
+            if let Some(alpha) = f.alpha_plane() {
+                let (offset, _, _) = tight_plane(f, alpha, in_w, in_h).expect("frame size fits");
+                let plane = &src[offset..offset + in_w * in_h * bps];
+                out.extend_from_slice(&crop_plane(plane, in_w, x, y, w, h, bps));
             }
             out.into_boxed_slice()
         }
@@ -837,6 +850,21 @@ mod tests {
         assert_eq!(rd(8), 105);
         // V plane at byte 16; top-left 5 + 200 = 205.
         assert_eq!(rd(16), 205);
+    }
+
+    #[test]
+    fn crops_the_alpha_plane_of_a_4_4_4_alpha_frame() {
+        let (w, h) = (4usize, 4usize);
+        // Y, U, V, then alpha, each plane's samples offset so a mis-indexed plane is caught
+        let src: Vec<u8> = (0..4u16)
+            .flat_map(|plane| (0..(w * h) as u16).map(move |s| s + plane * 100))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let out = crop(&src, RawVideoFormat::A444p12, (w, h), (1, 1, 2, 2));
+        assert_eq!(out.len(), 4 * 2 * 2 * 2);
+        let sample = |at: usize| u16::from_le_bytes([out[at], out[at + 1]]);
+        // the alpha plane starts after three 2x2 planes of 2-byte samples, at source sample (1, 1) = 5
+        assert_eq!(sample(3 * 2 * 2 * 2), 305);
     }
 
     #[test]
