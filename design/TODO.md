@@ -202,11 +202,6 @@ Highest leverage first:
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
-- **MP4 clean aperture on the programmatic builders:** `Registry::build_uridecodebin`,
-  `gapless_playbin` and a single-stream `fallbacksrc uri=` ignore
-  `UriSource.has_clean_aperture` and show the whole picture.
-- **MPEG-2 in MP4:** an `mp4v` entry with an MPEG-2 objectTypeIndication (what
-  ffmpeg writes) is declined, so decodebin reports "no decoder for mp4v".
 
 ## Codecs
 

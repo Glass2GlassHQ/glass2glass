@@ -793,7 +793,9 @@ playbin hook builds from a probed stream adds that bare `videocrop` after the
 decoder when the stream reports a clean aperture: `PrimaryStream`,
 `UriFanoutPort` and `UriSource` each carry `has_clean_aperture`, and a fan-out
 port goes through `Registry::decodebin_port`. Without the `metadata` feature the
-probes clear the flag and log a warning. It survives a
+probes clear the flag and log a warning. `Registry::build_uridecodebin` /
+`build_source_decodebin`, `gapless_playbin` and a single-stream `fallbacksrc`
+add the same crop from `UriSource.has_clean_aperture`. It survives a
 colour convert and an encode, and is dropped by a scale or a crop, which move the
 pixels it counts in.
 

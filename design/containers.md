@@ -806,6 +806,9 @@ applies to Opus only.
 
 ## MP4 and fMP4
 
+An `mp4v` entry's objectTypeIndication picks the codec in one parse shared by
+every MP4 reader: 0x20 is MPEG-4 Part 2, 0x60-0x65 and 0x6A are MPEG-2 / MPEG-1.
+
 The intra-only editing codecs come from the QuickTime sample entry: `apco`,
 `apcs`, `apcn`, `apch`, `ap4h` and `ap4x` are `VideoCodec::ProRes` with the
 matching `ProResVariant`, `AVdn` and `AVdh` are `VideoCodec::DnxHd`. The variant

@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1791: MP4 demuxing reads MPEG-1 and MPEG-2 video in an mp4v entry.
+- M1790: `Registry::build_uridecodebin`, `gapless_playbin` and a single-stream `fallbacksrc` crop an MP4 clean aperture.
+- M1789: a lone `playbin` plays through the `video-sink` and `audio-sink` its line names.
+- M1788: a bare `uridecodebin` over an MP4 file declares its first video track's codec instead of H.264.
 - M1787: `vulkanvideodec` emits AV1 frames coded below the sequence size at their own size.
 - M1786: `vulkanvideodec` drops AV1 OBUs outside operating point 0.
 - M1792: `matroskademux` and its multi-output form fail the stream on any selected track whose ContentEncoding they cannot undo, and playbin leaves such tracks out.

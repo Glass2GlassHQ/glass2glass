@@ -818,7 +818,8 @@ as before.
   produces (geometry resolves at negotiation), which is all the chain search
   needs to pick the right decoder. The `file://` handler reads that type off the
   file's header (`typefind::sniff_caps`, M1025) rather than assuming one: an
-  ISO-BMFF file becomes a self-demuxing `Mp4Src`, anything else the sniff
+  ISO-BMFF file becomes a self-demuxing `Mp4Src`, probed through `Mp4Src` for the
+  first video track's caps and whether it has a clean aperture, anything else the sniff
   recognises a `FileSrc` declaring those caps, so an elementary stream or a
   non-MP4 container reaches the decode chain its content needs. When nothing
   matches at the first byte, the sniff scans the header for an ADTS, AC-3,
@@ -867,7 +868,9 @@ as before.
   only at runtime retype. The gst-launch front door is `playbin uri=X`:
   `parse_launch` routes a *lone* `playbin` to a registry `PlaybinHook`
   (`register_playbin`, a `Default`-friendly fn-pointer slot) that probes the
-  container and auto-builds the multi-stream graph. Cross-crate by design: the
+  container and auto-builds the multi-stream graph. The line's `video-sink` /
+  `audio-sink` reach the hook as `PlaybinSinks`, defaulting to `autovideosink` /
+  `autoaudiosink`. Cross-crate by design: the
   text DSL is core, the Matroska probe (`mkv_playbin`: read a bounded prefix,
   parse `Tracks`, one branch per `forwardable_streams` entry, video→autovideosink
   / audio→autoaudiosink) is `g2g-plugins`. The hook declines (`Ok(None)`) for a

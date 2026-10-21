@@ -629,7 +629,7 @@ jobs:
       # server on loopback (plain and gzip tracks). No camera needed.
       - name: test g2g-plugins (onvif metadata)
         run: |
-          cargo test -p g2g-plugins --locked --features onvif,rtsp --test m1151_onvif_metadata
+          cargo test -p g2g-plugins --locked --features onvif,rtsp,analytics,ffmpeg --test m1151_onvif_metadata
           cargo test -p g2g-plugins --locked --features onvif,rtsp --lib -- onvifmetadata rtspsrcn
       # Scripting surface (declarative JSON/YAML graphs + Rhai builder +
       # scriptelement + scriptrouter): the m578 suite builds text / scripts into
