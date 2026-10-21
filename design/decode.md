@@ -1179,7 +1179,7 @@ official one.
 | :--- | ---: | ---: | ---: |
 | `ffmpegdec` | 130 / 135 | 172 / 188 (2026-10-20) | 0 / 240 |
 | `nvdec` | 129 / 135 | 141 / 188 | 202 / 240 |
-| `vulkanvideodec` | 99 / 135 (2026-10-20) | 146 / 188 (2026-10-20) | 2 / 240 |
+| `vulkanvideodec` | 99 / 135 (2026-10-20) | 146 / 188 (2026-10-20) | 201 / 240 (2026-10-21) |
 | `dav1ddec` | | | 238 / 240 |
 | `rav1ddec` | | | 238 / 240 |
 
@@ -1189,6 +1189,16 @@ H.264 failure is a nonzero exit naming the coding tool: field pictures are
 refused at the slice header (MBAFF frame pictures decode), FMO at the PPS and
 SP slices at the slice header, so a stream the decoder cannot handle never ends
 as an empty or wrong success.
+
+`vulkanvideodec` decodes AV1-TEST-VECTORS at 201 / 240 on the RTX 3060 (NVIDIA)
+and 237 / 240 on RADV (Rembrandt), 2026-10-21. The NVIDIA gap is the 36
+`size-16..66` vectors below the device minimum coded extent, which decode on
+RADV. Both drivers refuse the three `svc` vectors because they split frames into
+`OBU_FRAME_HEADER` plus `OBU_TILE_GROUP`. The frame-header parse passes CDEF
+secondary strengths as coded and keeps each reference slot's loop-filter deltas,
+segmentation features and global-motion models for `load_previous()`. Film grain
+is synthesized on the CPU at 8 and 10 bits from the grain-free luma, bit-exact
+with dav1d.
 
 Every `vulkanvideodec` H.265 failure is also a nonzero exit naming the coding
 tool, raised when the parameter sets parse, before the driver sees the stream.

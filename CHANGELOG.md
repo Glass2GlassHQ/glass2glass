@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1724: VulkanVideoDec AV1 passes 201/240 AV1-TEST-VECTORS on NVIDIA and 237/240 on RADV (CDEF strengths, global motion, inherited reference state, 10-bit film grain).
 - M1731: tsmux and tsmuxn write ER AAC, ELD and USAC as LOAS/LATM (stream type 0x11), and tsdemux and ffmpegaudiodec play LOAS AAC.
 - M1726: wgpupreprocess imports odd-size NV12 GPU textures, packed or two-plane, and odd-size NV12 dma-bufs whose stride holds a chroma row.
 - M1725: videoflip flips and rotates odd-size subsampled frames plane by plane, matching ffmpeg byte for byte.

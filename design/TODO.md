@@ -112,10 +112,12 @@ Highest leverage first:
 ## Receive / decode
 
 - **`VulkanVideoDec` residuals.** Run the `vulkanvideo` GPU tests on Intel ANV.
-- **`VulkanVideoDec` AV1 inter frames.** On AV1-TEST-VECTORS (2 of 242 pass)
-  and the Chromium AV1 suites the keyframe decodes exactly and the first inter
-  frame differs from dav1d, on both NVIDIA and RADV. 10-bit vectors fail to
-  reach `I420_10LE`.
+- **`VulkanVideoDec` AV1 tile groups.** Decode frames split into
+  `OBU_FRAME_HEADER` plus `OBU_TILE_GROUP` and pick the output spatial layer, so
+  `svc-L1T2`, `L2T1` and `L2T2` decode instead of being refused.
+- **`VulkanVideoDec` AV1 10-bit film grain on the GPU-texture path.** Its CPU
+  upload is 8-bit only, so a 10-bit grain frame on that path is output without
+  grain.
 - **`VulkanVideoDec` conformance residue.** `WPP_D_ericsson` (wavefront
   parallel processing on a picture one CTB wide, with dependent slice segments)
   is refused, though ffmpeg's Vulkan decoder decodes it on the same GPU: find
@@ -123,9 +125,6 @@ Highest leverage first:
   `MR5_TANDBERG_C` (H.264) repeat an earlier picture at 22 output positions.
 - **AV1 spatial layers.** `av1-1-b8-22-svc-L2T1` and `L2T2` differ from the
   reference through `dav1ddec` and `rav1ddec`.
-- **AV1 film grain chroma.** Match dav1d's chroma grain on libaom's
-  `-aom-params film-grain-test=1` parameters: a 320x180 clip encoded with them
-  differs from dav1d in 41 to 66 chroma bytes per frame, its luma is exact.
 
 ## CUDA / display
 
