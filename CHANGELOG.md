@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1769: `vulkanvideodec` refuses H.265 below the GPU's minimum decode size, as it already did H.264 and AV1, and auto-plug decodes such streams in software.
 - M1735: `ristsink` adds the RIST RTP header extension (`sequence-number-extension`, `drop-null-ts-packets`) and `ristsrc` removes it, restoring deleted null packets.
 - M1734: `ristsink` / `ristsrc` bond several links (`bonding-addresses`, broadcast or round-robin) and send or join multicast groups.
 - M1773: `dav1ddec` and `rav1ddec` keep their in-flight pictures across a mid-stream reconfigure, and `av1parse` stops releasing temporal units early once its input has split one.

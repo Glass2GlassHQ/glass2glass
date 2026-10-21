@@ -657,19 +657,19 @@ geometries with `ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR`.
 
 Every image the session writes, DPB slot and decode output, is created at the
 picture extent rounded up to the device's `pictureAccessGranularity`, the unit in
-which a decode accesses a picture resource, and never below the device's minimum
-coded extent. The readback copy takes the picture's own extent back out of that
+which a decode accesses a picture resource. The readback copy takes the picture's own extent back out of that
 image, and the YCbCr compute pass is given the padded extent so its normalized
 coordinates still land on the picture's texels. The padding never reaches an
 output frame: `output_extent` is the picture size the caller gets, `coded_extent`
 the size every picture resource is bound at, which the spec requires to stay
 inside the device's coded-extent range.
 
-Below the device's minimum coded extent only H.265 decodes correctly that way.
-H.264 there comes out wrong on RADV or loses the device on NVIDIA, and AV1
-comes out flat gray on NVIDIA, whose AV1 minimum is 128x128. Session creation
-refuses an H.264 or AV1 stream below the minimum with `UnsupportedStream`, which
-the element reports as `CapsMismatch`. An AV1 frame can be coded smaller than its
+Below the device's minimum coded extent no codec decodes correctly. H.264 comes
+out wrong on RADV or loses the device on NVIDIA. AV1 comes out flat gray on
+NVIDIA, whose AV1 minimum is 128x128. H.265 comes out wrong on the RTX 2080 Ti,
+whose minimum is 144x144, though the RTX 3060 decodes it correctly. Session
+creation refuses a stream of any codec below the minimum with `StreamRefused`,
+which names the cause and which the element reports as `CapsMismatch`. An AV1 frame can be coded smaller than its
 sequence's maximum size, so the decoder also refuses each AV1 frame coded below
 the minimum. Auto-plug skips `vulkanvideodec` for the same sizes through an input
 check (`ElementFactory::accepting_input`), so `decodebin` takes a software
