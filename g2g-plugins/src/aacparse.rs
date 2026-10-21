@@ -369,6 +369,8 @@ const LATM_LENGTH_STEP: usize = 255;
 
 // audioMuxVersion 1 carries `asc` verbatim behind its bit length, with no parse of its end
 pub(crate) fn loas_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
+    // the config's byte padding counts as the fill bits ascLen allows
+    let asc_bits = u32::try_from(asc.len().checked_mul(8)?).ok()?;
     let mut w = BitWriter::default();
     w.write_bits(0, 1); // useSameStreamMux
     w.write_bits(1, 1); // audioMuxVersion
@@ -378,8 +380,7 @@ pub(crate) fn loas_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
     w.write_bits(0, 6); // numSubFrames
     w.write_bits(0, 4); // numProgram
     w.write_bits(0, 3); // numLayer
-    // ascLen: the config's byte padding counts as the fill bits the syntax allows
-    write_latm_value(&mut w, u32::try_from(asc.len().checked_mul(8)?).ok()?);
+    write_latm_value(&mut w, asc_bits); // ascLen
     for &byte in asc {
         w.write_bits(u32::from(byte), 8);
     }
@@ -855,27 +856,27 @@ fn parse_adts(au: &[u8]) -> Option<AacInfo> {
 /// Scan `au` for the first LOAS `AudioSyncStream` frame (syncword 0x2B7, 11 bits)
 /// and recover the AAC channel count and sample rate from the LATM
 /// `StreamMuxConfig`'s embedded `AudioSpecificConfig`. `None` if no frame parses.
-fn parse_loas(au: &[u8]) -> Option<AacInfo> {
-    let last = au.len().checked_sub(3)?;
-    for i in 0..=last {
-        if !opens_loas_frame(&au[i..]) {
-            continue;
-        }
-        // audioMuxLengthBytes: the 13 bits after the 11-bit syncword.
-        let mux_len = (((au[i + 1] & 0x1F) as usize) << 8) | au[i + 2] as usize;
-        let Some(payload) = au.get(i + 3..).and_then(|p| p.get(..mux_len)) else {
-            continue;
-        };
-        if let Some(info) = parse_audio_mux_element(payload) {
-            return Some(info);
-        }
-    }
-    None
+pub(crate) fn parse_loas(au: &[u8]) -> Option<AacInfo> {
+    (0..au.len()).find_map(|i| {
+        let frame = au[i..].get(..loas_frame_len(&au[i..])?)?;
+        parse_audio_mux_element(&frame[LOAS_HEADER_LEN..])
+    })
 }
 
 // syncword 0x2B7 byte-aligned: byte0 = 0x56, top 3 bits of byte1 = 111
 pub(crate) fn opens_loas_frame(data: &[u8]) -> bool {
     matches!(data, [0x56, second, ..] if second & 0xE0 == 0xE0)
+}
+
+// the bytes of the LOAS frame `data` opens on, its header included
+pub(crate) fn loas_frame_len(data: &[u8]) -> Option<usize> {
+    if !opens_loas_frame(data) {
+        return None;
+    }
+    let header = data.get(..LOAS_HEADER_LEN)?;
+    // audioMuxLengthBytes: the 13 bits after the 11-bit syncword
+    let element_len = (usize::from(header[1] & 0x1F) << 8) | usize::from(header[2]);
+    Some(LOAS_HEADER_LEN + element_len)
 }
 
 /// Parse a LATM `AudioMuxElement` (muxConfigPresent = 1, the LOAS case) far
@@ -1432,7 +1433,10 @@ mod tests {
             w.write_bits(u32::from(byte), 8);
         }
         let frame = loas_from_asc(&ELD_ASC, &w.into_bytes()).unwrap();
-        assert!(parse_adts(&frame).is_some(), "the frame holds an aligned ADTS header");
+        assert!(
+            parse_adts(&frame).is_some(),
+            "the frame holds an aligned ADTS header"
+        );
 
         let mut parse = AacParse::new();
         parse.configure_pipeline(&aac_caps()).unwrap();

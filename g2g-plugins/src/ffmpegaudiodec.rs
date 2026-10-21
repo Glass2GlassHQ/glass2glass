@@ -17,7 +17,9 @@
 //! and opens the decoder lazily (the AAC / MP2 / AC-3 decoders open eagerly at
 //! configure, their frames being self-describing). ER AAC, ELD and USAC have no
 //! ADTS form, so their raw access units arrive led by the AudioSpecificConfig as
-//! a frame of its own, which reopens the AAC decoder with it as extradata.
+//! a frame of its own, which reopens the AAC decoder with it as extradata. An AAC
+//! stream that opens on a LOAS frame (MPEG-TS stream type 0x11) reopens as
+//! libavcodec's LATM decoder, which takes each LOAS frame whole.
 //!
 //! Negotiation: the channel count and sample rate are only known once a frame
 //! decodes, so the element advertises a `PcmS16Le { ANY_CHANNELS, .. }` output at
@@ -79,6 +81,8 @@ pub struct FfmpegAudioDec {
     // the config frame that led the stream (a raw AAC stream's AudioSpecificConfig,
     // a tagged codec's container header), which a demuxer sends again after a flush
     lead_config: Option<Vec<u8>>,
+    // the AAC stream opened on a LOAS frame, so libavcodec's LATM decoder takes it
+    loas: bool,
     emitted: u64,
     /// Last emitted output caps, to suppress re-emitting an unchanged `CapsChanged`.
     last_out: Option<Caps>,
@@ -113,6 +117,7 @@ impl FfmpegAudioDec {
             format: AudioFormat::Aac,
             configured: false,
             lead_config: None,
+            loas: false,
             emitted: 0,
             last_out: None,
             segment: Segment::new(),
@@ -177,21 +182,44 @@ impl FfmpegAudioDec {
     /// bytes, the same setup [`FfmpegH264Dec`](crate::ffmpegdec) uses for parameter
     /// sets. Idempotent: a second call while open is a no-op.
     fn open_decoder(&mut self, extradata: Option<&[u8]>) -> Result<(), G2gError> {
+        let aac_info = match (self.format, extradata) {
+            (AudioFormat::Aac, Some(config)) => crate::aacparse::audio_specific_config_info(config),
+            _ => None,
+        };
+        self.open_codec(Self::codec_id(self.format), extradata, aac_info)
+    }
+
+    // libavcodec's LATM decoder sets no sample rate for ER AAC, so the context takes the first frame's rate
+    fn open_loas_decoder(&mut self, first_frame: &[u8]) -> Result<(), G2gError> {
+        let info = crate::aacparse::parse_loas(first_frame).ok_or_else(|| {
+            g2g_warn!(
+                Target::category(short_type_name::<Self>()),
+                "LOAS frame carries no AudioSpecificConfig this can read"
+            );
+            G2gError::CapsMismatch
+        })?;
+        self.decoder = None;
+        self.open_codec(Id::AAC_LATM, None, Some(info))?;
+        self.loas = true;
+        Ok(())
+    }
+
+    fn open_codec(
+        &mut self,
+        id: Id,
+        extradata: Option<&[u8]>,
+        aac_info: Option<crate::aacparse::AacInfo>,
+    ) -> Result<(), G2gError> {
         if self.decoder.is_some() {
             return Ok(());
         }
         ffmpeg::init().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        let codec = codec::decoder::find(Self::codec_id(self.format))
-            .ok_or(G2gError::Hardware(HardwareError::Other))?;
+        let codec = codec::decoder::find(id).ok_or(G2gError::Hardware(HardwareError::Other))?;
         let mut decoder_ctx = codec::decoder::new();
         if let Some(extradata) = extradata {
             crate::ffmpegdec::set_extradata(&mut decoder_ctx, extradata)?;
         }
         // without a channel count in the context, libavcodec's ER AAC decode returns frames with no buffer
-        let aac_info = match (self.format, extradata) {
-            (AudioFormat::Aac, Some(config)) => crate::aacparse::audio_specific_config_info(config),
-            _ => None,
-        };
         if let Some(info) = aac_info {
             // SAFETY: `decoder_ctx` is not yet opened, and its fresh channel
             // layout holds no allocated channel map for the default to overwrite.
@@ -363,6 +391,13 @@ impl AsyncElement for FfmpegAudioDec {
                             return Ok(());
                         }
                     }
+                    if self.format == AudioFormat::Aac
+                        && !self.loas
+                        && self.lead_config.is_none()
+                        && crate::aacparse::opens_loas_frame(buf)
+                    {
+                        self.open_loas_decoder(buf)?;
+                    }
                     // FLAC arrives container-framed (one frame per packet), led by
                     // the native `fLaC` STREAMINFO header the demuxer forwards
                     // in-band: take it as extradata and open the decoder, emitting
@@ -402,6 +437,7 @@ impl AsyncElement for FfmpegAudioDec {
                         let aus = match self.format {
                             AudioFormat::Mp2 | AudioFormat::Mp3 => mpa_frames(buf),
                             AudioFormat::Ac3 => ac3_frames(buf),
+                            _ if self.loas => loas_frames(buf),
                             _ if self.lead_config.is_some() => alloc::vec![buf],
                             _ => adts_frames(buf),
                         };
@@ -549,6 +585,19 @@ fn adts_frames(buf: &[u8]) -> Vec<&[u8]> {
         }
         frames.push(&buf[pos..pos + len]);
         pos += len;
+    }
+    frames
+}
+
+// one MPEG-TS PES can carry several LOAS frames, and a truncated tail is dropped
+fn loas_frames(buf: &[u8]) -> Vec<&[u8]> {
+    let mut frames = Vec::new();
+    let mut pos = 0;
+    while let Some(frame) = crate::aacparse::loas_frame_len(&buf[pos..])
+        .and_then(|len| buf.get(pos..pos.checked_add(len)?))
+    {
+        frames.push(frame);
+        pos += frame.len();
     }
     frames
 }

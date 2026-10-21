@@ -6,12 +6,13 @@
 #   aac_ld_stereo_48000.m4a    AAC-LD (object type 23), GStreamer's fdkaacenc
 #   aac_eld_stereo_48000.m4a   AAC-ELD (object type 39), the fdkaac program
 #   aac_usac_stereo_48000.m4a  USAC (object type 42), exhale
+#   aac_lc_stereo_48000_latm.ts  AAC-LC as LOAS in MPEG-TS, ffmpeg's own muxer
 #
 # fdkaacenc offers no ELD profile, so ELD comes from fdkaac (github.com/nu774/fdkaac)
 # built against the system libfdk-aac into $FDKAAC_PREFIX. exhale
 # (gitlab.com/ecodis/exhale) is built into $EXHALE_DIR.
 #
-# usage: tools/aac-loas-fixtures.sh [ld|eld|usac]...   (no argument: all three)
+# usage: tools/aac-loas-fixtures.sh [ld|eld|usac|lc_ts]...   (no argument: all four)
 set -euo pipefail
 
 fixtures="$(cd "$(dirname "$0")/.." && pwd)/g2g-plugins/tests/fixtures"
@@ -58,15 +59,20 @@ usac() {
     "$exhale" 3 "$work/sine.wav" "$fixtures/aac_usac_stereo_48000.m4a"
 }
 
+lc_ts() {
+    ffmpeg -v error -y -i "$work/sine.wav" -c:a aac -b:a 96k -f mpegts -mpegts_flags latm \
+        "$fixtures/aac_lc_stereo_48000_latm.ts"
+}
+
 kinds=("$@")
 if [ ${#kinds[@]} -eq 0 ]; then
-    kinds=(ld eld usac)
+    kinds=(ld eld usac lc_ts)
 fi
 sine_wav
 for kind in "${kinds[@]}"; do
     case "$kind" in
-        ld | eld | usac) "$kind" ;;
+        ld | eld | usac | lc_ts) "$kind" ;;
         *) echo "unknown fixture: $kind" >&2; exit 2 ;;
     esac
 done
-ls -l "$fixtures"/aac_*_stereo_48000.m4a
+ls -l "$fixtures"/aac_*_stereo_48000*

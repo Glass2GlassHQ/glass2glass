@@ -12,10 +12,15 @@ use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{AsyncElement, AudioFormat, ByteStreamEncoding, Caps, MultiInputElement, PropValue};
+use g2g_core::runtime::{parse_launch, run_graph};
+use g2g_core::{
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, MultiInputElement, PipelineClock,
+    PropValue,
+};
 use g2g_plugins::aacparse::AacParse;
 use g2g_plugins::mp4demux::Mp4Demux;
 use g2g_plugins::mpegts::{TsDemuxer, TsPacketSplitter, STREAM_TYPE_AAC_LATM};
+use g2g_plugins::registry::default_registry;
 use g2g_plugins::tsdemux::{TsDemux, TsStream};
 use g2g_plugins::tsmux::TsMux;
 use g2g_plugins::tsmuxn::TsMux as TsMuxN;
@@ -30,25 +35,34 @@ const LOAS_HEADER_LEN: usize = 3;
 // a PayloadLengthInfo byte of this value continues the length into the next byte
 const LATM_LENGTH_CONTINUES: usize = 255;
 
+// AAC-LC from ffmpeg's own MPEG-TS muxer with `-mpegts_flags latm`, made by tools/aac-loas-fixtures.sh
+const LC_LOAS_TS: &str = "aac_lc_stereo_48000_latm.ts";
+
 #[derive(Debug, Clone, Copy)]
 struct ObjectType {
     fixture: &'static str,
-    // ffmpeg's LATM decoder leaves the sample rate unset for ER AAC (LD, ELD), so its CLI decodes no LOAS of them
-    ffmpeg_decodes_loas: bool,
+    // libavcodec 62 (ffmpeg 8.1) fails on a USAC config inside LATM, so it neither decodes nor profiles one
+    libavcodec_decodes_loas: bool,
 }
 
 const AAC_LD: ObjectType = ObjectType {
     fixture: "aac_ld_stereo_48000.m4a",
-    ffmpeg_decodes_loas: false,
+    libavcodec_decodes_loas: true,
 };
 const AAC_ELD: ObjectType = ObjectType {
     fixture: "aac_eld_stereo_48000.m4a",
-    ffmpeg_decodes_loas: false,
+    libavcodec_decodes_loas: true,
 };
 const USAC: ObjectType = ObjectType {
     fixture: "aac_usac_stereo_48000.m4a",
-    ffmpeg_decodes_loas: true,
+    libavcodec_decodes_loas: false,
 };
+
+fn fixture_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
 
 #[tokio::test]
 async fn aac_ld_goes_into_mpeg_ts_as_loas() {
@@ -65,10 +79,26 @@ async fn usac_goes_into_mpeg_ts_as_loas() {
     check(USAC).await;
 }
 
+#[tokio::test]
+async fn ffmpeg_written_lc_loas_plays_through_decodebin() {
+    let ts = fixture_path(LC_LOAS_TS);
+    if !cfg!(feature = "ffmpeg") || !have_ffmpeg() {
+        eprintln!("no ffmpeg feature or no ffmpeg; skipping the LC decodebin leg");
+        return;
+    }
+    let reference = ffmpeg_pcm(&[], &ts, "s16le");
+    assert!(!reference.is_empty(), "ffmpeg decodes the LC fixture");
+    let decoded = decodebin_s16(&ts, &scratch_file("lc-latm", "s16"), 2, 48_000).await;
+    assert!(
+        decoded == reference,
+        "decodebin decodes ffmpeg's LOAS TS to ffmpeg's PCM ({} bytes against {})",
+        decoded.len(),
+        reference.len()
+    );
+}
+
 async fn check(object_type: ObjectType) {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(object_type.fixture);
+    let source = fixture_path(object_type.fixture);
     let Ok(file) = std::fs::read(&source) else {
         eprintln!(
             "{} is absent (tools/aac-loas-fixtures.sh makes it); skipping",
@@ -85,7 +115,9 @@ async fn check(object_type: ObjectType) {
         })
         .expect("the demuxer announces the track caps");
     let frames = data_frames(&packets);
-    let (config, units) = frames.split_first().expect("a config frame leads the track");
+    let (config, units) = frames
+        .split_first()
+        .expect("a config frame leads the track");
 
     let muxed = [
         ("tsmux", mux_single(demux(&file).await, &caps).await),
@@ -114,7 +146,7 @@ async fn check(object_type: ObjectType) {
         let parsed = aacparse(&demuxed).await;
         assert_eq!(
             parsed.caps,
-            [caps.clone()],
+            std::slice::from_ref(&caps),
             "{muxer}: AacParse reads the source caps back from the LOAS frames"
         );
         assert_eq!(
@@ -124,9 +156,11 @@ async fn check(object_type: ObjectType) {
 
         let ts_path = scratch_path(object_type, muxer, "ts");
         std::fs::write(&ts_path, &ts).expect("write the transport stream");
-        check_ffprobe(&source, &ts_path, muxer);
+        check_ffprobe(object_type, &source, &ts_path, muxer);
         check_gstreamer_parse(&ts_path, &caps, muxer);
-        check_decoded_pcm(object_type, &source, &ts_path, muxer);
+        if object_type.libavcodec_decodes_loas {
+            check_decoded_pcm(object_type, &source, &ts_path, &caps, muxer).await;
+        }
     }
 }
 
@@ -333,7 +367,11 @@ fn parse_loas(frame: &[u8]) -> LoasFrame {
         frame.len() - LOAS_HEADER_LEN,
         "one whole LOAS frame per PES"
     );
-    assert_eq!(bits.read(1), 0, "useSameStreamMux: the config rides every frame");
+    assert_eq!(
+        bits.read(1),
+        0,
+        "useSameStreamMux: the config rides every frame"
+    );
     assert_eq!(bits.read(1), 1, "audioMuxVersion");
     assert_eq!(bits.read(1), 0, "audioMuxVersionA");
     bits.latm_value(); // taraBufferFullness
@@ -366,8 +404,12 @@ fn parse_loas(frame: &[u8]) -> LoasFrame {
 
 fn scratch_path(object_type: ObjectType, muxer: &str, extension: &str) -> PathBuf {
     let stem = object_type.fixture.trim_end_matches(".m4a");
+    scratch_file(&format!("{stem}-{muxer}"), extension)
+}
+
+fn scratch_file(stem: &str, extension: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "g2g-m1731-{}-{stem}-{muxer}.{extension}",
+        "g2g-m1731-{}-{stem}.{extension}",
         std::process::id()
     ))
 }
@@ -395,21 +437,24 @@ fn ffprobe_stream(path: &Path) -> Vec<String> {
         .collect()
 }
 
-fn check_ffprobe(source: &Path, ts: &Path, muxer: &str) {
+fn check_ffprobe(object_type: ObjectType, source: &Path, ts: &Path, muxer: &str) {
     if !have_ffprobe() {
         eprintln!("ffprobe not present; skipping the ffprobe leg");
         return;
     }
-    let source_profile = ffprobe_stream(source)
-        .into_iter()
-        .find(|line| line.starts_with("profile="))
-        .expect("ffprobe names the source profile");
-    let ts_stream = ffprobe_stream(ts);
-    for expected in [
+    let mut expected = Vec::from([
         String::from("codec_name=aac_latm"),
         format!("codec_tag={STREAM_TYPE_AAC_LATM:#06x}"),
-        source_profile,
-    ] {
+    ]);
+    if object_type.libavcodec_decodes_loas {
+        expected.extend(
+            ffprobe_stream(source)
+                .into_iter()
+                .find(|line| line.starts_with("profile=")),
+        );
+    }
+    let ts_stream = ffprobe_stream(ts);
+    for expected in expected {
         assert!(
             ts_stream.contains(&expected),
             "{muxer}: ffprobe reports {expected}, got {ts_stream:?}"
@@ -445,7 +490,10 @@ fn check_gstreamer_parse(ts: &Path, caps: &Caps, muxer: &str) {
         .output()
         .expect("run gst-launch-1.0");
     let log = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{muxer}: GStreamer plays the stream: {log}");
+    assert!(
+        out.status.success(),
+        "{muxer}: GStreamer plays the stream: {log}"
+    );
     let expected = [
         String::from("stream-format=(string)loas"),
         format!("rate=(int){sample_rate}"),
@@ -459,14 +507,13 @@ fn check_gstreamer_parse(ts: &Path, caps: &Caps, muxer: &str) {
     );
 }
 
-// float samples keep the comparison free of any dither a conversion to integers adds
-fn ffmpeg_f32(input_args: &[&str], input: &Path) -> Vec<u8> {
+fn ffmpeg_pcm(input_args: &[&str], input: &Path, sample_format: &str) -> Vec<u8> {
     let out = Command::new("ffmpeg")
         .args(["-v", "error"])
         .args(input_args)
         .arg("-i")
         .arg(input)
-        .args(["-f", "f32le", "-"])
+        .args(["-f", sample_format, "-"])
         .output()
         .expect("run ffmpeg");
     assert!(
@@ -478,23 +525,68 @@ fn ffmpeg_f32(input_args: &[&str], input: &Path) -> Vec<u8> {
     out.stdout
 }
 
-fn check_decoded_pcm(object_type: ObjectType, source: &Path, ts: &Path, muxer: &str) {
+struct ZeroClock;
+impl PipelineClock for ZeroClock {
+    fn now_ns(&self) -> u64 {
+        0
+    }
+}
+
+// decodebin's PCM for `ts`, written to `out`
+async fn decodebin_s16(ts: &Path, out: &Path, channels: u8, sample_rate: u32) -> Vec<u8> {
+    let line = format!(
+        "filesrc location={} ! decodebin ! audioconvert \
+         ! audio/x-raw,format=S16LE,rate={sample_rate},channels={channels} \
+         ! filesink location={}",
+        ts.display(),
+        out.display()
+    );
+    let graph = parse_launch(&default_registry(), &line)
+        .unwrap_or_else(|error| panic!("`{line}` parses: {error}"));
+    run_graph(graph, &ZeroClock, 4)
+        .await
+        .unwrap_or_else(|error| panic!("`{line}` runs: {error:?}"));
+    std::fs::read(out).expect("decodebin wrote PCM")
+}
+
+// ffmpeg's CLI leaves the sample rate of ER AAC in LOAS unset, so decodebin and gst-libav decode it
+async fn check_decoded_pcm(
+    object_type: ObjectType,
+    source: &Path,
+    ts: &Path,
+    caps: &Caps,
+    muxer: &str,
+) {
     if !have_ffmpeg() {
         eprintln!("ffmpeg not present; skipping the decode legs");
         return;
     }
     // the TS carries every access unit, so the reference keeps the priming an edit list or iTunSMPB trims
-    let reference = ffmpeg_f32(
-        &["-ignore_editlist", "1", "-flags2", "+skip_manual"],
-        source,
-    );
-    assert!(!reference.is_empty(), "ffmpeg decodes the source");
-    if object_type.ffmpeg_decodes_loas {
+    let untrimmed = ["-ignore_editlist", "1", "-flags2", "+skip_manual"];
+    let Caps::Audio {
+        channels,
+        sample_rate,
+        ..
+    } = caps
+    else {
+        panic!("the demuxed track has audio caps");
+    };
+    if cfg!(feature = "ffmpeg") {
+        let reference = ffmpeg_pcm(&untrimmed, source, "s16le");
+        assert!(!reference.is_empty(), "ffmpeg decodes the source");
+        let pcm_path = scratch_path(object_type, muxer, "s16");
+        let decoded = decodebin_s16(ts, &pcm_path, *channels, *sample_rate).await;
         assert!(
-            ffmpeg_f32(&[], ts) == reference,
-            "{muxer}: ffmpeg decodes the TS to the source PCM"
+            decoded == reference,
+            "{muxer}: decodebin decodes the TS to the source PCM ({} bytes against {})",
+            decoded.len(),
+            reference.len()
         );
+    } else {
+        eprintln!("built without the ffmpeg feature; skipping the decodebin leg");
     }
+    // float samples keep the comparison free of the dither audioconvert adds going to integers
+    let reference = ffmpeg_pcm(&untrimmed, source, "f32le");
     if !have_gstreamer_element("avdec_aac_latm") {
         eprintln!("GStreamer avdec_aac_latm not present; skipping the GStreamer decode leg");
         return;

@@ -497,7 +497,7 @@ impl TsDemux {
             STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => {
                 (StreamType::Video, video(VideoCodec::Mpeg2))
             }
-            STREAM_TYPE_AAC => audio(AudioFormat::Aac),
+            STREAM_TYPE_AAC | STREAM_TYPE_AAC_LATM => audio(AudioFormat::Aac),
             STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => audio(AudioFormat::Mp2),
             // 0x06 is a generic private PES; only an 'Opus' registration marks it
             // as Opus (else g2g does not forward it).
@@ -1063,7 +1063,7 @@ fn es_to_ts_stream(es: &crate::mpegts::ElementaryStream) -> Option<TsStream> {
         STREAM_TYPE_H265 => Some(TsStream::H265),
         STREAM_TYPE_MPEG4P2 => Some(TsStream::Mpeg4Part2),
         STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => Some(TsStream::Mpeg2),
-        STREAM_TYPE_AAC => Some(TsStream::Aac),
+        STREAM_TYPE_AAC | STREAM_TYPE_AAC_LATM => Some(TsStream::Aac),
         STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => Some(TsStream::Mp2),
         STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => Some(TsStream::Opus),
         STREAM_TYPE_PRIVATE_PES if es.av1 => Some(TsStream::Av1),
@@ -1156,12 +1156,8 @@ pub fn probe_streams(demux: &mut TsDemuxer) -> TsProbedStreams {
 }
 
 // ISO/IEC 13818-1 audio and video stream types no `TsStream` carries
-const UNSUPPORTED_STREAM_TYPES: [(u8, &str); 4] = [
-    (0x11, LATM_CODEC),
-    (0x21, "jpeg2000"),
-    (0x33, "vvc"),
-    (0x42, "cavs"),
-];
+const UNSUPPORTED_STREAM_TYPES: [(u8, &str); 3] =
+    [(0x21, "jpeg2000"), (0x33, "vvc"), (0x42, "cavs")];
 const LATM_CODEC: &str = "aac_latm";
 const DTS_CORE_SYNC: [u8; 4] = [0x7F, 0xFE, 0x80, 0x01];
 
@@ -1553,7 +1549,7 @@ fn resolve_ts_stream_id(demux: &TsDemuxer, id: &str) -> Option<(u16, TsStream)> 
         STREAM_TYPE_MPEG4P2 => TsStream::Mpeg4Part2,
         STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => TsStream::Mpeg2,
         STREAM_TYPE_PRIVATE_PES if es.av1 => TsStream::Av1,
-        STREAM_TYPE_AAC => TsStream::Aac,
+        STREAM_TYPE_AAC | STREAM_TYPE_AAC_LATM => TsStream::Aac,
         _ => return None,
     };
     Some((pid, stream))

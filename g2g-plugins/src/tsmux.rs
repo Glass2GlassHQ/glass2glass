@@ -339,8 +339,8 @@ impl AacCarriage {
             Self::Loas(config) => Ok(is_leading_aac_config(config.as_slice(), frame)),
             Self::Adts => Ok(false),
             Self::Undecided => {
-                let raw_config = muxer_audio_specific_config(frame, muxer)?
-                    .filter(|_| is_raw_aac_config(frame));
+                let raw_config =
+                    muxer_audio_specific_config(frame, muxer)?.filter(|_| is_raw_aac_config(frame));
                 let leads_raw_stream = raw_config.is_some();
                 *self = raw_config.map_or(Self::Adts, Self::Loas);
                 Ok(leads_raw_stream)
@@ -361,16 +361,14 @@ impl AacCarriage {
         let Self::Loas(config) = self else {
             return Ok(Cow::Borrowed(frame));
         };
-        loas_from_asc(config, frame)
-            .map(Cow::Owned)
-            .ok_or_else(|| {
-                g2g_error!(
-                    Target::category(muxer),
-                    "AAC access unit of {} bytes exceeds the LOAS frame length",
-                    frame.len()
-                );
-                G2gError::CapsMismatch
-            })
+        loas_from_asc(config, frame).map(Cow::Owned).ok_or_else(|| {
+            g2g_error!(
+                Target::category(muxer),
+                "AAC access unit of {} bytes exceeds the LOAS frame length",
+                frame.len()
+            );
+            G2gError::CapsMismatch
+        })
     }
 }
 
@@ -992,7 +990,10 @@ mod tests {
         use crate::mpegts::{TsDemuxer, STREAM_TYPE_AAC_LATM, TS_PACKET_LEN};
         // AAC-ELD, 48 kHz, stereo
         const ELD_CONFIG: [u8; 4] = [0xF8, 0xE6, 0x40, 0x00];
-        let units = alloc::vec![alloc::vec![0x7Eu8, 0x89, 0xB4], alloc::vec![0x56, 0x78, 0x9A]];
+        let units = alloc::vec![
+            alloc::vec![0x7Eu8, 0x89, 0xB4],
+            alloc::vec![0x56, 0x78, 0x9A]
+        ];
 
         let mut mux = TsMux::new();
         mux.configure_pipeline(&Caps::Audio {
@@ -1012,7 +1013,11 @@ mod tests {
                 .await
                 .unwrap();
         }
-        assert_eq!(mux.emitted(), units.len() as u64, "the config is not multiplexed");
+        assert_eq!(
+            mux.emitted(),
+            units.len() as u64,
+            "the config is not multiplexed"
+        );
 
         let mut demuxer = TsDemuxer::new();
         for packet in ts_sink.frames.concat().chunks(TS_PACKET_LEN) {
