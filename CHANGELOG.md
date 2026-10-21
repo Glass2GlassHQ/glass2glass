@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1727: decodebin and playbin weigh decoders by the picture size of MP4, Matroska and MPEG-TS input.
 - M1766: an HTTP request that fails before a response status names the failed stage, such as a refused connection, instead of a generic hardware error.
 - M1721: `VulkanVideoDec` outputs an odd-size picture on the two-plane `NV12` / `P010` texture as an even-rounded texture carrying the picture size, and `wgpudownload` reads it at the picture size.
 - M1722: `WgpuSink` presents odd-size NV12 from system memory, packed textures and even-rounded two-plane textures.

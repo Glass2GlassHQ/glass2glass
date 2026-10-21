@@ -126,8 +126,6 @@ Highest leverage first:
 - **AV1 film grain chroma.** Match dav1d's chroma grain on libaom's
   `-aom-params film-grain-test=1` parameters: a 320x180 clip encoded with them
   differs from dav1d in 41 to 66 chroma bytes per frame, its luma is exact.
-- Report the picture size from the MP4, Matroska and MPEG-TS parse-time probes,
-  so the cost-based decoder choice applies to those containers.
 
 ## CUDA / display
 

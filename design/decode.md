@@ -339,6 +339,15 @@ rule is in [caps.md](caps.md)). The constants are one table in
 `g2g-plugins/src/registry.rs`, applied with `ElementFactory::cost` and
 `Registry::register_transfer_cost`.
 
+A container's picture size reaches the plan through the primary-stream hook's
+stream caps, read from the file's first 4 MiB. MP4 takes it from the sample
+entry and Matroska from the Tracks pixel size. MPEG-TS takes it from the first
+SPS in the video PID's PES units within the 4 MiB prefix. The last unit is
+completed at the end of the prefix, so a one-frame file is sized too. The
+decodebin primary-stream hook and the playbin / fan-out probe share this read.
+A size the prefix does not give, or one outside the 16..65535 placeholder range,
+leaves the stream unpriced, and the chain falls back to registration order.
+
 Measured on 2026-10-20 on a Ryzen 7 6800U with an RTX 3060, while other builds
 were running: a release `g2g-launch`, `filesrc ! decodebin ! fakesink` over a
 300-frame clip, wall time divided by frames.
