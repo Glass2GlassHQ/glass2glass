@@ -28,6 +28,7 @@ Highest leverage first:
 
 ## Architecture guarantees (validation-first)
 
+- **CI on Ubuntu 26.04.** The workflows pin `ubuntu-24.04` because `ubuntu-latest` moved to 26.04 (libavcodec 62) and a restored `rust-cache` kept ffmpeg-sys built against the 24.04 headers. Move to 26.04 with the cache keyed on the runner image, after checking the `-sys` crates (`cros-libva`, `libspa`) build against its headers.
 - **Grow the conformance matrix.** Persist evidence from the resource-owning
   tests still uncovered as they are validated (`vaapi` decode on Intel, the Android and
   macOS device paths). Get the device-tagged `Hardware` rows into CI by wiring a
