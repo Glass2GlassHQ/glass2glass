@@ -1052,6 +1052,9 @@ fn expand_decodebin(
                             .transpose()?,
                         None => None,
                     };
+                    let crops_to_clean_aperture = primary
+                        .as_ref()
+                        .is_some_and(|stream| stream.has_clean_aperture);
                     let chain_input = match primary {
                         Some(primary) => {
                             new_chain.push(Item::Element(ElementSpec {
@@ -1083,6 +1086,14 @@ fn expand_decodebin(
                             node: PrebuiltNode::Element(element),
                             name: None,
                         });
+                    }
+                    if crops_to_clean_aperture {
+                        new_chain.push(Item::Element(ElementSpec {
+                            name: "videocrop".to_string(),
+                            props: Vec::new(),
+                            instance: None,
+                            log_category: None,
+                        }));
                     }
                     upstream = None;
                 }

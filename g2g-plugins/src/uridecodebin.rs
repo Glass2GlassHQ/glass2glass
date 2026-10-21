@@ -970,6 +970,7 @@ pub fn ps_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams
             demux: "mpegpsdemux",
             props: stream_selection(crate::psdemux::ps_stream_to_str(info.stream)),
             caps: info.caps,
+            has_clean_aperture: false,
         })
         .collect();
     Some(ContainerStreams {
@@ -2023,6 +2024,7 @@ pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams
             demux: "tsdemux",
             props: stream_selection(crate::tsdemux::ts_stream_to_str(info.stream)),
             caps: info.caps,
+            has_clean_aperture: false,
         })
         .collect();
     Some(ContainerStreams {
@@ -2054,6 +2056,7 @@ pub fn flv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             demux: "flvdemux",
             props: stream_selection(crate::flvdemux::flv_stream_to_str(stream)),
             caps,
+            has_clean_aperture: false,
         })
         .collect();
     let unsupported = crate::flv::unsupported_codecs(&prefix);
@@ -2104,9 +2107,22 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
         return None;
     }
     infos.sort_by_key(|i| !i.video);
+    let cropped = crate::mp4demuxn::clean_aperture_tracks(&moov);
+    // without the metadata feature no crop rectangle reaches a videocrop
+    #[cfg(not(feature = "metadata"))]
+    let cropped = {
+        if !cropped.is_empty() {
+            g2g_core::g2g_warn!(
+                g2g_core::log::Target::category("decodebin"),
+                "{location}: shows the whole picture of a track with a clean aperture, cropping it needs the metadata feature"
+            );
+        }
+        Vec::<u32>::new()
+    };
     let streams = infos
         .into_iter()
         .filter_map(|info| {
+            let has_clean_aperture = cropped.contains(&info.track_id);
             let stream = match info.caps {
                 Caps::CompressedVideo { codec, .. } => {
                     crate::mp4demux::mp4_video_stream_str(codec)?
@@ -2121,6 +2137,7 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
                 demux: "qtdemux",
                 props: stream_selection(&stream),
                 caps: info.caps,
+                has_clean_aperture,
             })
         })
         .collect();
@@ -2172,6 +2189,7 @@ pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             demux: "matroskademux",
             props: stream_selection(&crate::mkvdemux::mkv_stream_str(info.stream)),
             caps: info.caps,
+            has_clean_aperture: false,
         })
         .collect();
     #[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
@@ -2211,6 +2229,7 @@ pub fn wav_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
                 demux: "wavparse",
                 props: tagged_wav_selection(&caps),
                 caps,
+                has_clean_aperture: false,
             }],
             unsupported: Vec::new(),
         },
@@ -2248,6 +2267,7 @@ pub fn ivf_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
         demux: "ivfdemux",
         props: Vec::new(),
         caps: crate::ivfdemux::IvfDemux::stream_caps(&prefix)?,
+        has_clean_aperture: false,
     };
     Some(ContainerStreams {
         streams: alloc::vec![stream],
@@ -2338,6 +2358,7 @@ pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
                 // The placeholder the demux declares for the decoder search (it
                 // refines the concrete header values via CapsChanged at runtime).
                 caps: crate::oggdemux::OggDemux::output_caps(ogg.port.codec),
+                has_clean_aperture: false,
             })
         })
         .collect();
@@ -2495,6 +2516,7 @@ pub fn avi_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
                 demux: "avidemux",
                 props: stream_selection(&stream),
                 caps: info.caps,
+                has_clean_aperture: false,
             })
         })
         .collect();

@@ -364,6 +364,7 @@ impl Mp4Demux {
             self.sequence += 1;
         }
         let mut need_param_sets = !matches!(codec, VideoCodec::Tagged(_));
+        let meta = video.clean_aperture_meta();
         for mut s in track_samples(&self.buffer, video)? {
             let mut annexb = core::mem::take(&mut s.annexb);
             // The moov's config-record parameter sets are out-of-band, so prepend
@@ -372,7 +373,8 @@ impl Mp4Demux {
                 annexb = prepend_param_sets(&annexb, param_sets, codec);
             }
             need_param_sets = false;
-            let frame = video_frame(annexb, &s, self.sequence);
+            let mut frame = video_frame(annexb, &s, self.sequence);
+            frame.meta = meta.clone();
             self.sequence += 1;
             out.push(PipelinePacket::DataFrame(frame)).await?;
         }
@@ -409,6 +411,7 @@ impl Mp4Demux {
         if edit != Segment::new() {
             out.push(PipelinePacket::Segment(edit)).await?;
         }
+        let meta = video.clean_aperture_meta();
         for mut s in track_samples(&self.buffer, video)? {
             let mut pixels = core::mem::take(&mut s.annexb);
             let Some(len) = raw_video_frame_bytes(format, width, height, pixels.len()) else {
@@ -416,7 +419,8 @@ impl Mp4Demux {
                 continue;
             };
             pixels.truncate(len);
-            let frame = video_frame(pixels, &s, self.sequence);
+            let mut frame = video_frame(pixels, &s, self.sequence);
+            frame.meta = meta.clone();
             self.sequence += 1;
             out.push(PipelinePacket::DataFrame(frame)).await?;
         }

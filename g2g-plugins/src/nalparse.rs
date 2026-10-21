@@ -135,6 +135,9 @@ pub struct NalParse<C: NalCodec> {
     /// consumer can convert the frame count to a duration.
     #[cfg(feature = "metadata")]
     sps_framerate: Option<u32>,
+    // each re-framed access unit takes the metadata of the input that opened it
+    #[cfg(feature = "metadata")]
+    input_stamps: crate::inputstamp::PendingInputStamps,
     _codec: PhantomData<C>,
 }
 
@@ -156,6 +159,8 @@ impl<C: NalCodec> Default for NalParse<C> {
             pic_timing: crate::sei::PicTimingContext::default(),
             #[cfg(feature = "metadata")]
             sps_framerate: None,
+            #[cfg(feature = "metadata")]
+            input_stamps: crate::inputstamp::PendingInputStamps::default(),
             _codec: PhantomData,
         }
     }
@@ -287,6 +292,11 @@ impl<C: NalCodec> NalParse<C> {
             out.push(PipelinePacket::DataFrame(frame)).await?;
             return Ok(());
         };
+        #[cfg(feature = "metadata")]
+        self.input_stamps.insert(
+            frame.timing.pts_ns,
+            crate::inputstamp::InputStamp::of(&frame),
+        );
         // Normalize to Annex-B: a length-prefixed stream is converted, an Annex-B
         // one is appended as-is. The framing is latched from the first frame, since
         // a mid-AU Annex-B continuation buffer (no leading start code) would
@@ -347,7 +357,10 @@ impl<C: NalCodec> NalParse<C> {
             self.seq,
         );
         #[cfg(feature = "metadata")]
-        self.attach_stream_meta(&mut frame, sei);
+        {
+            frame.meta = self.input_stamps.take(timing.pts_ns).meta;
+            self.attach_stream_meta(&mut frame, sei);
+        }
         self.seq += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
@@ -499,6 +512,10 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                     self.framer.clear();
                     self.caps.forget();
                     self.leading_rasl.restart();
+                    #[cfg(feature = "metadata")]
+                    {
+                        self.input_stamps = crate::inputstamp::PendingInputStamps::default();
+                    }
                     out.push(PipelinePacket::Flush).await?;
                 }
                 // A new segment may splice in a bitstream the decoder has no references for.

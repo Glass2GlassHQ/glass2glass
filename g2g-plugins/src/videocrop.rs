@@ -11,6 +11,9 @@
 //! 4:2:0 (`Nv12`, `I420`) needs even insets on all four edges, since chroma is
 //! subsampled 2x2; odd values fail negotiation/configure loud. The frame itself
 //! may be odd-sized: its last chroma column or row is cropped like any other.
+//! With every inset zero, a frame carrying a `CropMeta` (an MP4 clean aperture,
+//! M1770) is cut to its rectangle, the origin and size rounded down to whole
+//! chroma samples as ffmpeg's `crop` filter rounds them.
 //! Packed formats (`Rgba8`, `Bgra8`) crop at any inset. CPU-only `no_std`
 //! baseline.
 
@@ -144,6 +147,60 @@ impl VideoCrop {
             in_h - self.top - self.bottom,
         )
     }
+
+    #[cfg(feature = "metadata")]
+    fn frame_rect(
+        &self,
+        frame: &Frame,
+        format: RawVideoFormat,
+        in_w: u32,
+        in_h: u32,
+    ) -> Result<(u32, u32, u32, u32), G2gError> {
+        let crop = frame.meta.get::<g2g_core::meta::CropMeta>();
+        match crop {
+            Some(crop) if self.insets() == (0, 0, 0, 0) => {
+                chroma_aligned(crop.rectangle, format, in_w, in_h)
+            }
+            _ => Ok(self.rect(in_w, in_h)),
+        }
+    }
+
+    #[cfg(not(feature = "metadata"))]
+    fn frame_rect(
+        &self,
+        _frame: &Frame,
+        _format: RawVideoFormat,
+        in_w: u32,
+        in_h: u32,
+    ) -> Result<(u32, u32, u32, u32), G2gError> {
+        Ok(self.rect(in_w, in_h))
+    }
+}
+
+#[cfg(feature = "metadata")]
+fn chroma_aligned(
+    rectangle: g2g_core::meta::CropRectangle,
+    format: RawVideoFormat,
+    in_w: u32,
+    in_h: u32,
+) -> Result<(u32, u32, u32, u32), G2gError> {
+    let (even_width, even_height) = even_dims_required(format);
+    let align = |value: u32, even: bool| if even { value & !1 } else { value };
+    let (x, w) = (
+        align(rectangle.left, even_width),
+        align(rectangle.width, even_width),
+    );
+    let (y, h) = (
+        align(rectangle.top, even_height),
+        align(rectangle.height, even_height),
+    );
+    let fits = |origin: u32, size: u32, extent: u32| {
+        size > 0 && origin.checked_add(size).is_some_and(|end| end <= extent)
+    };
+    if !fits(x, w, in_w) || !fits(y, h, in_h) {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok((x, y, w, h))
 }
 
 /// Whether the pre-send check held the packet just pushed back rather than
@@ -251,7 +308,7 @@ impl AsyncElement for VideoCrop {
                     if src.len() < frame_byte_size(format, in_w, in_h) {
                         return Err(G2gError::CapsMismatch);
                     }
-                    let (x, y, w, h) = self.rect(in_w, in_h);
+                    let (x, y, w, h) = self.frame_rect(&frame, format, in_w, in_h)?;
                     let cropped = crop(
                         src,
                         format,
@@ -514,6 +571,158 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        }
+    }
+
+    #[cfg(all(feature = "metadata", feature = "std"))]
+    mod crop_meta {
+        use super::*;
+        use core::task::{Context, Poll};
+        use g2g_core::meta::{CropMeta, CropRectangle};
+        use g2g_core::runtime::block_on;
+        use g2g_core::{FrameTiming, PushOutcome};
+
+        const PICTURE: (u32, u32) = (64, 48);
+
+        #[derive(Debug, Default)]
+        struct Capture {
+            packets: Vec<PipelinePacket>,
+        }
+
+        impl OutputSink for Capture {
+            fn poll_push(
+                &mut self,
+                _cx: &mut Context<'_>,
+                packet_slot: &mut Option<PipelinePacket>,
+            ) -> Poll<Result<PushOutcome, G2gError>> {
+                self.packets
+                    .push(packet_slot.take().expect("poll_push without a packet"));
+                Poll::Ready(Ok(PushOutcome::Accepted))
+            }
+        }
+
+        fn i420_caps(w: u32, h: u32) -> Caps {
+            Caps::RawVideo {
+                format: RawVideoFormat::I420,
+                width: Dim::Fixed(w),
+                height: Dim::Fixed(h),
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            }
+        }
+
+        // every byte differs from its neighbours, so a misplaced crop shows
+        fn picture_bytes() -> Vec<u8> {
+            let (w, h) = PICTURE;
+            (0..frame_byte_size(RawVideoFormat::I420, w, h))
+                .map(|index| index as u8)
+                .collect()
+        }
+
+        fn frame_with(rectangle: CropRectangle) -> PipelinePacket {
+            let mut frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(picture_bytes().into_boxed_slice())),
+                FrameTiming::default(),
+                0,
+            );
+            frame.meta.attach(CropMeta { rectangle });
+            PipelinePacket::DataFrame(frame)
+        }
+
+        fn run(mut crop: VideoCrop, frames: Vec<PipelinePacket>) -> Result<Capture, G2gError> {
+            let (w, h) = PICTURE;
+            crop.configure_pipeline(&i420_caps(w, h))?;
+            let mut out = Capture::default();
+            for frame in frames {
+                block_on(crop.process(frame, &mut out))?;
+            }
+            Ok(out)
+        }
+
+        fn payload(packet: &PipelinePacket) -> &[u8] {
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    frame.domain.as_system_slice().expect("a system frame")
+                }
+                other => panic!("expected a frame, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn cuts_each_frame_to_its_crop_meta_on_whole_chroma_samples() {
+            // an odd origin and size, which 4:2:0 rounds down to (12, 4) and 44x32
+            let rectangle = CropRectangle {
+                left: 13,
+                top: 5,
+                width: 45,
+                height: 33,
+            };
+            let aligned = (12, 4, 44, 32);
+            let out = run(
+                VideoCrop::new(0, 0, 0, 0),
+                Vec::from([frame_with(rectangle), frame_with(rectangle)]),
+            )
+            .expect("the rectangle fits");
+            let [PipelinePacket::CapsChanged(caps), first, second] = &out.packets[..] else {
+                panic!("expected caps then two frames, got {:?}", out.packets);
+            };
+            assert_eq!(*caps, i420_caps(aligned.2, aligned.3));
+            let (w, h) = PICTURE;
+            let expected = crop(
+                &picture_bytes(),
+                RawVideoFormat::I420,
+                (w as usize, h as usize),
+                (
+                    aligned.0 as usize,
+                    aligned.1 as usize,
+                    aligned.2 as usize,
+                    aligned.3 as usize,
+                ),
+            );
+            assert_eq!(payload(first), &expected[..]);
+            assert_eq!(payload(second), &expected[..]);
+        }
+
+        #[test]
+        fn crop_properties_win_over_the_crop_meta() {
+            let inset = 2;
+            let rectangle = CropRectangle {
+                left: 12,
+                top: 4,
+                width: 44,
+                height: 32,
+            };
+            let out = run(
+                VideoCrop::new(inset, inset, inset, inset),
+                Vec::from([frame_with(rectangle)]),
+            )
+            .expect("the insets fit");
+            let (w, h) = PICTURE;
+            assert!(matches!(
+                &out.packets[..],
+                [PipelinePacket::CapsChanged(caps), PipelinePacket::DataFrame(_)]
+                    if *caps == i420_caps(w - 2 * inset, h - 2 * inset)
+            ));
+        }
+
+        #[test]
+        fn refuses_a_crop_meta_outside_the_picture() {
+            let (w, h) = PICTURE;
+            let past_the_right_edge = CropRectangle {
+                left: w / 2,
+                top: 0,
+                width: w,
+                height: h,
+            };
+            assert_eq!(
+                run(
+                    VideoCrop::new(0, 0, 0, 0),
+                    Vec::from([frame_with(past_the_right_edge)])
+                )
+                .expect_err("the rectangle overruns the picture"),
+                G2gError::CapsMismatch
+            );
         }
     }
 

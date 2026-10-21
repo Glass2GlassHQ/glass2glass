@@ -234,6 +234,18 @@ pub fn decodable_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
         .collect()
 }
 
+pub(crate) fn clean_aperture_tracks(data: &[u8]) -> Vec<u32> {
+    parse_all_tracks(data)
+        .map(|tracks| {
+            tracks
+                .iter()
+                .filter(|track| track.clean_aperture.is_some())
+                .map(|track| track.track_id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn unsupported_sample_entries(data: &[u8]) -> Vec<alloc::string::String> {
     use crate::mp4box::{be32, boxes, find_box, find_path};
     let forwarded: Vec<u32> = decodable_streams(data)
@@ -985,7 +997,10 @@ impl Mp4DemuxN {
             let Some((timing, data)) = clipped else {
                 continue;
             };
-            let frame = self.next_frame(data, timing);
+            let mut frame = self.next_frame(data, timing);
+            if let Some(track) = track {
+                frame.meta = track.clean_aperture_meta();
+            }
             out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
         }
         Ok(())

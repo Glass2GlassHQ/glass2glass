@@ -14,10 +14,12 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use g2g_core::caps::framerate_q16_from_fraction;
+use g2g_core::log::Target;
+use g2g_core::meta::{CropRectangle, FrameMetaSet};
 use g2g_core::time::ticks_to_ns;
 
 use g2g_core::{
-    AudioFormat, Chapter, ClosedCaptionFormat, FrameTiming, G2gError, ProResVariant,
+    g2g_warn, AudioFormat, Chapter, ClosedCaptionFormat, FrameTiming, G2gError, ProResVariant,
     RawVideoFormat, Segment, TagList, TextFormat, VideoCodec,
 };
 
@@ -398,6 +400,7 @@ pub(crate) struct TrackHeader {
     /// The `mvex/trex` default sample duration, size and flags, which a
     /// fragment falls back to when its `tfhd` does not declare them.
     pub(crate) trex_defaults: SampleDefaults,
+    pub(crate) clean_aperture: Option<CropRectangle>,
 }
 
 // media time between two edits, in ns
@@ -409,6 +412,20 @@ pub(crate) struct EditGap {
 }
 
 impl TrackHeader {
+    #[cfg(feature = "metadata")]
+    pub(crate) fn clean_aperture_meta(&self) -> FrameMetaSet {
+        let mut meta = FrameMetaSet::new();
+        if let Some(rectangle) = self.clean_aperture {
+            meta.attach(g2g_core::meta::CropMeta { rectangle });
+        }
+        meta
+    }
+
+    #[cfg(not(feature = "metadata"))]
+    pub(crate) fn clean_aperture_meta(&self) -> FrameMetaSet {
+        FrameMetaSet::new()
+    }
+
     // the stream time the edit list presents, on the timeline `edited_sample` moves samples to
     fn edit_segment(&self) -> Segment {
         Segment {
@@ -555,6 +572,10 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
     let stsd = find_box(stbl, b"stsd").ok_or(G2gError::CapsMismatch)?;
     let entries = stsd.get(8..).ok_or(G2gError::CapsMismatch)?;
 
+    let clean_aperture = match handler {
+        b"vide" | b"pict" => clean_aperture(entries),
+        _ => None,
+    };
     let (kind, cenc) = match handler {
         // A video sample entry we have no reader for is skipped like an unknown
         // handler: one unsupported track must not fail the whole file.
@@ -592,6 +613,7 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         media_stop: None,
         edit_gaps: Vec::new(),
         trex_defaults: SampleDefaults::default(),
+        clean_aperture,
     }))
 }
 
@@ -717,6 +739,78 @@ fn edit_list(trak: &[u8]) -> Vec<Edit> {
     (0..entry_count as usize)
         .map_while(|index| read_entry(8 + index * entry_len))
         .collect()
+}
+
+// visual sample entry: the fixed fields before its child boxes
+const VISUAL_SAMPLE_ENTRY_CHILDREN_AT: usize = 78;
+
+// the first sample entry's `clap` against the entry's own size, None for no box or one that cuts nothing
+fn clean_aperture(entries: &[u8]) -> Option<CropRectangle> {
+    let (_, entry) = boxes(entries).next()?;
+    let clap = find_box(entry.get(VISUAL_SAMPLE_ENTRY_CHILDREN_AT..)?, b"clap")?;
+    let dimension = |at: usize| {
+        let bytes = entry.get(at..at + 2)?;
+        Some(u32::from(u16::from_be_bytes([bytes[0], bytes[1]])))
+    };
+    let width = dimension(VISUAL_SAMPLE_ENTRY_WIDTH_AT)?;
+    let height = dimension(VISUAL_SAMPLE_ENTRY_HEIGHT_AT)?;
+    match clap_rectangle(clap, width, height) {
+        Ok(rectangle) => rectangle,
+        Err(_) => {
+            g2g_warn!(
+                Target::category("qtdemux"),
+                "ignored a clap box that does not fit the {width}x{height} picture"
+            );
+            None
+        }
+    }
+}
+
+// clap holds numerator and denominator pairs: aperture width, aperture height, horizontal and vertical centre offset
+fn clap_rectangle(clap: &[u8], width: u32, height: u32) -> Result<Option<CropRectangle>, G2gError> {
+    let field = |index: usize| be32(clap, index * 4).map(|value| value as i32);
+    let fraction =
+        |index: usize| -> Result<(i32, i32), G2gError> { Ok((field(index)?, field(index + 1)?)) };
+    let (left, right) =
+        clap_axis(width, fraction(0)?, fraction(4)?).ok_or(G2gError::CapsMismatch)?;
+    let (top, bottom) =
+        clap_axis(height, fraction(2)?, fraction(6)?).ok_or(G2gError::CapsMismatch)?;
+    if left == 0 && right == 0 && top == 0 && bottom == 0 {
+        return Ok(None);
+    }
+    Ok(Some(CropRectangle {
+        left,
+        top,
+        width: width - left - right,
+        height: height - top - bottom,
+    }))
+}
+
+// the pixels one axis of the aperture cuts before and after it, each edge truncated as ffmpeg's mov_read_clap does
+fn clap_axis(picture: u32, aperture: (i32, i32), offset: (i32, i32)) -> Option<(u32, u32)> {
+    let (aperture_numerator, aperture_denominator) =
+        (i128::from(aperture.0), i128::from(aperture.1));
+    let (offset_numerator, offset_denominator) = (i128::from(offset.0), i128::from(offset.1));
+    if aperture_numerator < 0 || aperture_denominator <= 0 || offset_denominator <= 0 {
+        return None;
+    }
+    let picture = i128::from(picture);
+    let denominator = 2 * aperture_denominator * offset_denominator;
+    let shift = 2 * aperture_denominator * offset_numerator;
+    let first = ((picture * aperture_denominator - aperture_numerator) * offset_denominator
+        + shift)
+        / denominator;
+    let last = (((picture - 2) * aperture_denominator + aperture_numerator) * offset_denominator
+        + shift)
+        / denominator;
+    if first < 0 || last < 0 || last > picture - 1 {
+        return None;
+    }
+    let after = picture - 1 - last;
+    if first + after >= picture {
+        return None;
+    }
+    Some((u32::try_from(first).ok()?, u32::try_from(after).ok()?))
 }
 
 /// The out-of-band config from an `av01` sample entry's `av1C` record (M779):
@@ -2979,6 +3073,7 @@ mod tests {
             media_stop: Some(second_end),
             edit_gaps: edit_gaps(&spans, MEDIA_TIMESCALE),
             trex_defaults: SampleDefaults::default(),
+            clean_aperture: None,
         };
         let gap_ns = ns(u64::from(SECOND_EDIT_MEDIA)) - ns(first_end);
         let segment = track.presentation_segment();
@@ -3012,6 +3107,91 @@ mod tests {
         assert!(!segment.presents(in_gap.pts_ns), "the gap is cut");
         assert_eq!(in_gap.dts_ns, ns(first_end));
     }
+    const CLAP_PICTURE: (u16, u16) = (64, 48);
+
+    fn clap_payload(fields: [i32; 8]) -> Vec<u8> {
+        fields
+            .iter()
+            .flat_map(|field| field.to_be_bytes())
+            .collect()
+    }
+
+    // one avc1 entry of the picture size, holding only the given clap payload
+    fn entries_with_clap(clap: &[u8]) -> Vec<u8> {
+        let (width, height) = CLAP_PICTURE;
+        let mut entry = alloc::vec![0u8; VISUAL_SAMPLE_ENTRY_CHILDREN_AT];
+        entry[VISUAL_SAMPLE_ENTRY_WIDTH_AT..VISUAL_SAMPLE_ENTRY_WIDTH_AT + 2]
+            .copy_from_slice(&width.to_be_bytes());
+        entry[VISUAL_SAMPLE_ENTRY_HEIGHT_AT..VISUAL_SAMPLE_ENTRY_HEIGHT_AT + 2]
+            .copy_from_slice(&height.to_be_bytes());
+        entry.extend_from_slice(&crate::mp4box::mp4_box(b"clap", clap));
+        crate::mp4box::mp4_box(b"avc1", &entry)
+    }
+
+    #[test]
+    fn reads_the_clean_aperture_as_ffmpeg_crops_it() {
+        // 45 columns centred on (64 - 1) / 2 + 3 = 34.5 span 12.5 to 56.5, truncated to 12 and 56,
+        // so 12 columns go on the left and 63 - 56 = 7 on the right.
+        // 33 rows centred on (48 - 1) / 2 - 2 = 21.5 span 5.5 to 37.5, so 5 rows go on top and 10 below.
+        let entries = entries_with_clap(&clap_payload([45, 1, 33, 1, 3, 1, -2, 1]));
+        assert_eq!(
+            clean_aperture(&entries),
+            Some(CropRectangle {
+                left: 12,
+                top: 5,
+                width: 45,
+                height: 33
+            })
+        );
+        // the same aperture in halves: 90/2 columns and 66/2 rows, offsets 6/2 and -4/2
+        let halves = entries_with_clap(&clap_payload([90, 2, 66, 2, 6, 2, -4, 2]));
+        assert_eq!(clean_aperture(&halves), clean_aperture(&entries));
+    }
+
+    #[test]
+    fn a_clean_aperture_of_the_whole_picture_cuts_nothing() {
+        let (width, height) = CLAP_PICTURE;
+        let whole = [i32::from(width), 1, i32::from(height), 1, 0, 1, 0, 1];
+        assert_eq!(
+            clean_aperture(&entries_with_clap(&clap_payload(whole))),
+            None
+        );
+    }
+
+    #[test]
+    fn refuses_a_clean_aperture_that_does_not_fit() {
+        let (width, height) = (u32::from(CLAP_PICTURE.0), u32::from(CLAP_PICTURE.1));
+        let wider_than_the_picture = i32::from(CLAP_PICTURE.0) + 2;
+        for (fields, case) in [
+            ([45, 0, 33, 1, 0, 1, 0, 1], "a zero aperture denominator"),
+            ([45, 1, 33, 1, 0, 0, 0, 1], "a zero offset denominator"),
+            ([45, 1, 33, 1, 0, -1, 0, 1], "a negative offset denominator"),
+            ([-45, 1, 33, 1, 0, 1, 0, 1], "a negative aperture"),
+            (
+                [wider_than_the_picture, 1, 33, 1, 0, 1, 0, 1],
+                "an aperture wider than the picture",
+            ),
+            ([45, 1, 33, 1, 20, 1, 0, 1], "an offset past the right edge"),
+            ([45, 1, 33, 1, 0, 1, -20, 1], "an offset past the top edge"),
+            ([0, 1, 33, 1, 0, 1, 0, 1], "an empty aperture"),
+        ] {
+            let clap = clap_payload(fields);
+            assert!(
+                clap_rectangle(&clap, width, height).is_err(),
+                "{case} is refused"
+            );
+            assert_eq!(
+                clean_aperture(&entries_with_clap(&clap)),
+                None,
+                "{case} crops nothing"
+            );
+        }
+        let truncated = clap_payload([45, 1, 33, 1, 3, 1, -2, 1]);
+        let truncated = &truncated[..truncated.len() - 1];
+        assert!(clap_rectangle(truncated, width, height).is_err());
+        assert_eq!(clean_aperture(&entries_with_clap(truncated)), None);
+    }
+
     use alloc::vec;
 
     /// The chunk splitter cuts a CMAF segment after every `mdat` whatever the

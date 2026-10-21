@@ -108,6 +108,15 @@ impl Orientation {
     }
 }
 
+// in stored-picture pixels, ungated since a demuxer reads it without the metadata feature
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CropRectangle {
+    pub left: u32,
+    pub top: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// How many planes a [`PlaneLayout`] describes. Four covers every format in
 /// the workspace (planar YUV with alpha is the widest).
 pub const MAX_PLANES: usize = 4;
@@ -1443,6 +1452,31 @@ mod on {
             match transform {
                 Transform::Crop => Propagation::Drop,
                 _ => Propagation::Keep,
+            }
+        }
+    }
+
+    // the part of the stored picture meant to be shown
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct CropMeta {
+        pub rectangle: super::CropRectangle,
+    }
+
+    impl FrameMeta for CropMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(*self)
+        }
+        // a scale or a crop moves the pixels the rectangle counts in
+        fn propagate(&self, transform: Transform) -> Propagation {
+            match transform {
+                Transform::Copy | Transform::Encode => Propagation::Keep,
+                Transform::Scale | Transform::Crop => Propagation::Drop,
             }
         }
     }

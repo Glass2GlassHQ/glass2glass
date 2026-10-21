@@ -1611,6 +1611,8 @@ mod factory {
         /// The elementary caps the demux emits for that stream, the auto-plug input
         /// for the decoder chain spliced after it.
         pub caps: Caps,
+        // each decoded picture carries a crop rectangle, which a `videocrop` after the decoder applies
+        pub has_clean_aperture: bool,
     }
 
     #[derive(Debug, Clone, Default)]

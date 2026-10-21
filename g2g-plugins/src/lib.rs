@@ -92,8 +92,9 @@ pub mod audioresample;
 mod fft;
 // Front-read queue shared by the elements that cut fixed-size blocks from a stream.
 mod fifobuffer;
-// Input metadata a decoder carries to the picture each access unit decodes to.
+// Input metadata a decoder or a re-framing parser carries to the unit it emits.
 #[cfg(any(
+    feature = "metadata",
     all(target_os = "linux", feature = "ffmpeg"),
     all(target_os = "linux", feature = "nvdec"),
     all(target_os = "linux", feature = "vaapi"),
