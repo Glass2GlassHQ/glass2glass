@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1782: an MP4 clean aperture crops through mp4src, a bare uridecodebin, the uridecodebin / decodebin / fallbacksrc fan-outs and playbin, and survives av1parse and the start-code parsers.
 - M1781: `vulkanvideodec` applies AV1 film grain to 10-bit pictures on the GPU-texture path.
 - M1780: `vulkanvideodec` decodes AV1 frames split into frame header and tile group OBUs and outputs the top spatial layer of a scalable stream.
 - M1784: `livekitdatasink` and `livekitdatasrc` send and receive LiveKit user data packets as data-only room participants.

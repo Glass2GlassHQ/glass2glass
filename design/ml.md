@@ -784,11 +784,16 @@ support fails that frame.
 picture's pixels), the part of the buffer meant to be shown. The MP4 demuxers
 attach it to every access unit of a track whose sample entry has a `clap` box,
 computed as ffmpeg's `mov_read_clap` does against the entry's own size (a
-malformed box is ignored with a warning). Decoders and the re-framing NAL parsers
-carry it to the decoded picture. `videocrop` with no inset set cuts the frame to
-it, rounding the origin and size down to whole chroma samples as ffmpeg's `crop`
-filter does, and `decodebin` adds that bare `videocrop` when the MP4
-primary-stream probe reports a clean aperture for the chosen track. It survives a
+malformed box is ignored with a warning). `Mp4Src` attaches it to its
+frames from the same parse of the first track. Decoders and the re-framing
+parsers (NAL, AV1, start-code) carry it to the decoded picture. `videocrop` with
+no inset set cuts the frame to it, rounding the origin and size down to whole
+chroma samples as ffmpeg's `crop` filter does. Every decode chain the parser or a
+playbin hook builds from a probed stream adds that bare `videocrop` after the
+decoder when the stream reports a clean aperture: `PrimaryStream`,
+`UriFanoutPort` and `UriSource` each carry `has_clean_aperture`, and a fan-out
+port goes through `Registry::decodebin_port`. Without the `metadata` feature the
+probes clear the flag and log a warning. It survives a
 colour convert and an encode, and is dropped by a scale or a crop, which move the
 pixels it counts in.
 
