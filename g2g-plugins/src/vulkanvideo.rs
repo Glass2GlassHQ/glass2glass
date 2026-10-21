@@ -7908,6 +7908,17 @@ impl VulkanVideoDevice {
         Ok(())
     }
 
+    // above the device maximum the session clamps the picture and decodes zeros
+    fn refuse_oversized_extent(&self, width: u32, height: u32) -> Result<(), VulkanVideoError> {
+        let (max_width, max_height) = self.caps.max_coded_extent;
+        if width > max_width || height > max_height {
+            return Err(VulkanVideoError::StreamRefused(
+                "the picture is larger than the GPU's maximum decode size",
+            ));
+        }
+        Ok(())
+    }
+
     fn session_coded_extent(&self, max_w: u32, max_h: u32) -> (u32, u32) {
         (
             max_w.min(self.caps.max_coded_extent.0),
@@ -7956,10 +7967,10 @@ impl VulkanVideoDevice {
     }
 
     /// Create an H.264 decode session + parameters for `ps`, whose coded pictures
-    /// are `max_w`x`max_h` (clamped to the device's maximum coded extent). The output
+    /// are `max_w`x`max_h`. The output
     /// is the SPS frame crop of that picture, and a crop reaching outside it is
-    /// [`VulkanVideoError::UnsupportedStream`], a picture below the device's
-    /// minimum coded extent [`VulkanVideoError::StreamRefused`]. Session parameter creation
+    /// [`VulkanVideoError::UnsupportedStream`], a picture outside the device's
+    /// coded extent range [`VulkanVideoError::StreamRefused`]. Session parameter creation
     /// validates the `Std*` SPS/PPS mapping.
     pub fn create_h264_session(
         &self,
@@ -7968,6 +7979,7 @@ impl VulkanVideoDevice {
         max_h: u32,
     ) -> Result<H264DecodeSession, VulkanVideoError> {
         self.refuse_undecodable_extent(max_w, max_h)?;
+        self.refuse_oversized_extent(max_w, max_h)?;
         let prof = h264_profile();
         // H.264 decode is 8-bit here (High profile, NV12); High 10 is out of scope.
         let (picture_format, reference_format) = self.session_picture_formats(&prof.profile, 8)?;
@@ -8085,6 +8097,7 @@ impl VulkanVideoDevice {
         max_h: u32,
     ) -> Result<H265DecodeSession, VulkanVideoError> {
         self.refuse_undecodable_extent(max_w, max_h)?;
+        self.refuse_oversized_extent(max_w, max_h)?;
         // 10-bit HEVC (Main 10) selects the Main 10 profile + the G10X6 output
         // format; 8-bit is Main + NV12. The decoder built over this session derives
         // the same bit depth from the SPS, so its profile / DPB images match.
@@ -9817,6 +9830,7 @@ impl VulkanVideoDevice {
             phys_state: alloc::vec![None; num_slots],
             seq: seq.clone(),
             smallest_frame_extent: self.caps.min_coded_extent,
+            largest_frame_extent: self.caps.max_coded_extent,
         })
     }
 }
@@ -12845,6 +12859,7 @@ pub struct Av1DpbDecoder {
     phys_state: alloc::vec::Vec<Option<Av1SlotState>>,
     seq: Av1SequenceHeader,
     smallest_frame_extent: (u32, u32),
+    largest_frame_extent: (u32, u32),
 }
 
 impl core::fmt::Debug for Av1DpbDecoder {
@@ -13206,6 +13221,11 @@ impl Av1DpbDecoder {
         // a frame can be coded smaller than its sequence's maximum size
         let (min_width, min_height) = self.smallest_frame_extent;
         if fh.frame_width < min_width || fh.frame_height < min_height {
+            return Err(VulkanVideoError::UnsupportedStream);
+        }
+        // the sequence maximum may exceed the device's, so the session was clamped
+        let (max_width, max_height) = self.largest_frame_extent;
+        if fh.frame_width > max_width || fh.frame_height > max_height {
             return Err(VulkanVideoError::UnsupportedStream);
         }
 

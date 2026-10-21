@@ -179,6 +179,28 @@ fn an_h265_session_below_the_device_minimum_is_refused() {
         .expect("a session at the device minimum");
 }
 
+#[test]
+fn sessions_above_the_device_maximum_are_refused() {
+    let _gpu = gpu_lock();
+    if let Some(device) = usable(block_on(open_h264_decode_device())) {
+        let (max_width, max_height) = device.caps().max_coded_extent;
+        let ps = extract_h264_parameter_sets(H264_CLIP).expect("parse SPS+PPS");
+        assert!(matches!(
+            device.create_h264_session(&ps, max_width, max_height + 1),
+            Err(VulkanVideoError::StreamRefused(_))
+        ));
+    }
+    if let Some(device) = usable(block_on(open_h265_decode_device())) {
+        let (max_width, max_height) = device.caps().max_coded_extent;
+        let ps = extract_h265_parameter_sets(H265_CLIP).expect("parse VPS+SPS+PPS");
+        let std = to_std_h265_params(&ps);
+        assert!(matches!(
+            device.create_h265_session(&std, max_width + 1, max_height),
+            Err(VulkanVideoError::StreamRefused(_))
+        ));
+    }
+}
+
 #[cfg(feature = "dav1d")]
 #[test]
 fn undersized_av1_autoplugs_a_software_decoder_with_vulkanvideodec_preferred() {
