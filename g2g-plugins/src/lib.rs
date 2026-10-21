@@ -308,7 +308,8 @@ pub(crate) static EGL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
         feature = "cuda-wgpu",
         feature = "vulkan-video",
         feature = "mediacodec-wgpu",
-        all(target_os = "linux", feature = "dmabuf-wgpu")
+        all(target_os = "linux", feature = "dmabuf-wgpu"),
+        all(target_os = "linux", any(feature = "cuda", feature = "vaapi"))
     )
 ))]
 pub(crate) static GPU_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
