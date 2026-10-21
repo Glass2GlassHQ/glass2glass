@@ -112,10 +112,6 @@ Highest leverage first:
 ## Receive / decode
 
 - **`VulkanVideoDec` residuals.** Run the `vulkanvideo` GPU tests on Intel ANV.
-- **`VulkanVideoDec` odd-size two-plane texture.** Hand out an odd-size picture
-  on the `NV12` / `P010` texture output, which Vulkan and wgpu refuse to create
-  with an odd side, for example as an even-rounded texture with the picture size
-  carried beside it.
 - **`VulkanVideoDec` AV1 inter frames.** On AV1-TEST-VECTORS (2 of 242 pass)
   and the Chromium AV1 suites the keyframe decodes exactly and the first inter
   frame differs from dav1d, on both NVIDIA and RADV. 10-bit vectors fail to
@@ -247,10 +243,9 @@ Highest leverage first:
 - **Odd-size `videoflip`.** It refuses an odd width or height for the
   subsampled formats; mirror and rotate them with the chroma resampled, since
   the unpaired chroma column or row moves to the other edge.
-- **Odd-size NV12 on the wgpu consumers.** `WgpuSink` and `WgpuPreprocess`
-  refuse an odd NV12 width or height: the sink's packed-NV12 blit takes the
-  picture width from the texture, and the preprocess storage-buffer shader reads
-  the chroma rows at the luma row stride.
+- **Odd-size NV12 on `WgpuPreprocess` imports.** It refuses an odd NV12 width
+  or height on its texture and dma-buf import paths, because an import carries
+  one row stride for both planes.
 - **`textoverlay` font backend:** font-variation axes beyond `wght` on the
   shaped horizontal path (cosmic-text exposes only weight); vertical-mode
   shaping if cosmic-text ever grows writing modes.

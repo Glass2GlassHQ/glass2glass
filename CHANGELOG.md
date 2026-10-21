@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1721: `VulkanVideoDec` outputs an odd-size picture on the two-plane `NV12` / `P010` texture as an even-rounded texture carrying the picture size, and `wgpudownload` reads it at the picture size.
+- M1722: `WgpuSink` presents odd-size NV12 from system memory, packed textures and even-rounded two-plane textures.
+- M1723: `wgpupreprocess` converts NV12 at an odd width or height from system memory.
 - M1720: `ortinfer`, `executorchinfer` and `ortsegment` run the session on tokio's blocking pool under the `offload` feature, and `tools/ortinfer-bench.sh` takes `RUNNER=cooperative`.
 - M1714: `whisper-cuda`, `whisper-vulkan`, `llama-cuda` and `llama-vulkan` build the GPU kernels, with `use-gpu`, `gpu-device` and `n-gpu-layers` properties.
 - M1715: `llamachat history-turns=N` keeps the last N exchanges and one KV cache across frames, and `reset` clears them.
