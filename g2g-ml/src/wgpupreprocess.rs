@@ -1432,9 +1432,10 @@ impl AsyncElement for WgpuPreprocess {
                     out.push(PipelinePacket::DataFrame(tensor)).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    // geometry and format are pinned at configure; a mid-stream
-                    // change to another format is a hard error.
-                    c.intersect(&any_geometry(self.format))?;
+                    // The runner calls `configure_pipeline` with the new input
+                    // first, so `c` is this element's solved output tensor caps.
+                    out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                    self.last_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
                     out.push(PipelinePacket::Flush).await?;
