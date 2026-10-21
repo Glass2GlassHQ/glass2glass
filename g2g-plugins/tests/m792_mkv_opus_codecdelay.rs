@@ -189,19 +189,44 @@ fn field<'a>(probed: &'a [(String, String)], key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("ffprobe reported {key}, got {probed:?}"))
 }
 
-/// ffmpeg's decode of `path` as raw interleaved 16-bit PCM.
+/// ffmpeg's decode of `path` as raw interleaved 16-bit PCM, which must be clean.
 fn decode_pcm(path: &PathBuf) -> Vec<u8> {
+    let decoded = decode_pcm_logged(path);
+    assert!(
+        decoded.log.is_empty(),
+        "ffmpeg decoded {} cleanly: {}",
+        path.display(),
+        decoded.log
+    );
+    decoded.pcm
+}
+
+/// ffmpeg's decode as raw interleaved 16-bit PCM, with the errors it logged.
+fn decode_pcm_logged(path: &PathBuf) -> FfmpegDecode {
     decode_raw(path, &[], "s16le", "pcm_s16le")
+}
+
+struct FfmpegDecode {
+    pcm: Vec<u8>,
+    // with each `@ 0x...` context address removed, so two runs compare equal
+    log: String,
 }
 
 /// The same decode through **libopus** as interleaved 32-bit float, the closest
 /// comparison to g2g's own decoder.
 #[cfg(feature = "opus")]
 fn decode_f32_libopus(path: &PathBuf) -> Vec<u8> {
-    decode_raw(path, &["-c:a", "libopus"], "f32le", "pcm_f32le")
+    let decoded = decode_raw(path, &["-c:a", "libopus"], "f32le", "pcm_f32le");
+    assert!(
+        decoded.log.is_empty(),
+        "ffmpeg decoded {} cleanly: {}",
+        path.display(),
+        decoded.log
+    );
+    decoded.pcm
 }
 
-fn decode_raw(path: &PathBuf, decoder: &[&str], format: &str, codec: &str) -> Vec<u8> {
+fn decode_raw(path: &PathBuf, decoder: &[&str], format: &str, codec: &str) -> FfmpegDecode {
     let out = Command::new("ffmpeg")
         .args(["-v", "error"])
         .args(decoder)
@@ -212,12 +237,29 @@ fn decode_raw(path: &PathBuf, decoder: &[&str], format: &str, codec: &str) -> Ve
         .expect("run ffmpeg");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        out.status.success() && err.is_empty(),
-        "ffmpeg decoded {} cleanly: {err}",
+        out.status.success(),
+        "ffmpeg decoded {}: {err}",
         path.display()
     );
     assert!(!out.stdout.is_empty(), "ffmpeg decoded some audio");
-    out.stdout
+    FfmpegDecode {
+        pcm: out.stdout,
+        log: err
+            .lines()
+            .map(without_context_address)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+fn without_context_address(line: &str) -> String {
+    match line.split_once(" @ 0x") {
+        Some((before, after)) => {
+            let rest = after.split_once(']').map_or("", |(_, rest)| rest);
+            format!("{before}]{rest}")
+        }
+        None => line.to_string(),
+    }
 }
 
 // --- Matroska element oracle -------------------------------------------------
@@ -478,8 +520,15 @@ async fn ogg_remuxed_into_mkv_keeps_the_sources_pre_skip_and_trim() {
     // A remux changes framing, never samples. Both remuxes decode to the same
     // thing, and the source's samples are a prefix: what is past them is the
     // 0.5 ms the millisecond BlockDuration grid cannot trim (see the module note).
-    let from_ours = decode_pcm(&out);
-    let from_theirs = decode_pcm(&reference);
+    // ffmpeg 8.0 logs an Opus packet header error on its own remux of this stream too
+    let ours_decoded = decode_pcm_logged(&out);
+    let theirs_decoded = decode_pcm_logged(&reference);
+    assert_eq!(
+        ours_decoded.log, theirs_decoded.log,
+        "ffmpeg logs the same decoding g2g's remux as its own"
+    );
+    let from_ours = ours_decoded.pcm;
+    let from_theirs = theirs_decoded.pcm;
     let from_src = decode_pcm(&src);
     assert_eq!(
         from_ours, from_theirs,
