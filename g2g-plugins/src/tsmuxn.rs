@@ -29,6 +29,7 @@
 use core::future::Future;
 use core::pin::Pin;
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -45,8 +46,8 @@ use g2g_core::{
 use crate::dvbsub::DEFAULT_PAGE_ID;
 use crate::mpegts::{TsMuxer, PES_CLOCK_HZ, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265};
 use crate::tsmux::{
-    is_av1, is_dvbsub, language_from_tags, opus_channels, reject_raw_aac, service_from_tags,
-    stream_type_for, DvbSubDecl, TsMuxSettings, MUX_PROPERTIES, UNDETERMINED_LANGUAGE,
+    is_av1, is_dvbsub, language_from_tags, opus_channels, service_from_tags, stream_type_for,
+    AacCarriage, DvbSubDecl, TsMuxSettings, MUX_PROPERTIES, UNDETERMINED_LANGUAGE,
 };
 
 /// Muxes N elementary streams into one MPEG-TS byte stream, in decode order.
@@ -103,6 +104,8 @@ pub struct TsMux {
     /// Per input: the channel count of an Opus pad, which declares the Opus
     /// descriptors and wraps its access units in the control header.
     opus: Vec<Option<u8>>,
+    // per input, how an AAC pad's frames are multiplexed, `None` for any other pad
+    aac: Vec<Option<AacCarriage>>,
 }
 
 impl TsMux {
@@ -127,6 +130,7 @@ impl TsMux {
             dvbsub_page_id: DEFAULT_PAGE_ID,
             av1: alloc::vec![false; inputs],
             opus: alloc::vec![None; inputs],
+            aac: alloc::vec![None; inputs],
         }
     }
 
@@ -381,6 +385,7 @@ impl MultiInputElement for TsMux {
         }
         self.av1[input] = is_av1(absolute_caps);
         self.opus[input] = opus_channels(absolute_caps);
+        self.aac[input] = (stream_type == STREAM_TYPE_AAC).then(AacCarriage::default);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -469,10 +474,16 @@ impl MultiInputElement for TsMux {
                         self.declare_subtitling(input);
                         return Ok(());
                     }
-                    if let (Some(STREAM_TYPE_AAC), Some(s)) =
-                        (self.stream_types[input], frame.domain.as_system_slice())
+                    // a raw AAC pad opens on its config, which rides every LOAS frame instead
+                    if let (Some(aac), Some(s)) =
+                        (self.aac[input].as_mut(), frame.domain.as_system_slice())
                     {
-                        reject_raw_aac(s, g2g_core::log::short_type_name::<Self>())?;
+                        if aac.consume_config(s, g2g_core::log::short_type_name::<Self>())? {
+                            if let Some(mux) = self.mux.as_mut() {
+                                mux.set_stream_latm(input);
+                            }
+                            return Ok(());
+                        }
                     }
                     self.agg.push(input, frame);
                 }
@@ -525,6 +536,9 @@ impl MultiInputElement for TsMux {
                     if let Some(channels) = self.opus[i] {
                         mux.set_stream_opus(i, channels);
                     }
+                    if self.aac[i].as_ref().is_some_and(AacCarriage::is_loas) {
+                        mux.set_stream_latm(i);
+                    }
                     let effective = self.effective_tags(i);
                     let language = language_from_tags(&effective);
                     // A DVB subtitle stream's language rides its
@@ -550,9 +564,12 @@ impl MultiInputElement for TsMux {
             // Drain every AU now safe to emit, in global decode order, writing each
             // to its stream's PID.
             while let Some((stream, frame)) = self.agg.take_earliest_by(decode_time_ns) {
-                let slice = frame
-                    .domain
-                    .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                let muxer = g2g_core::log::short_type_name::<Self>();
+                let slice = frame.domain.require_system_slice(muxer)?;
+                let access_unit = match &self.aac[stream] {
+                    Some(aac) => aac.access_unit(slice, muxer)?,
+                    None => Cow::Borrowed(slice),
+                };
                 let pts_90khz = ns_to_ticks(frame.timing.pts_ns, PES_CLOCK_HZ);
                 // A DTS rides the PES only for reordered video (dts_ns set and
                 // distinct from the PTS); 0 is the unset sentinel, equal adds nothing.
@@ -561,7 +578,7 @@ impl MultiInputElement for TsMux {
                     .then(|| ns_to_ticks(frame.timing.dts_ns, PES_CLOCK_HZ));
                 let ts = self.mux.as_mut().expect("built above").push_au_on(
                     stream,
-                    slice,
+                    &access_unit,
                     Some(pts_90khz),
                     dts_90khz,
                     frame.timing.keyframe,
@@ -885,6 +902,61 @@ mod tests {
             flagged,
             alloc::vec![0, 3 * FRAME_NS],
             "only the video IDRs are flagged, never an audio AU"
+        );
+    }
+
+    // the video pad builds the muxer before the AAC pad's config arrives
+    #[tokio::test]
+    async fn a_raw_aac_pad_is_declared_latm_after_the_muxer_is_built() {
+        use crate::mpegts::{TsDemuxer, STREAM_TYPE_AAC_LATM, TS_PACKET_LEN};
+        // AAC-ELD, 48 kHz, stereo
+        const ELD_CONFIG: [u8; 4] = [0xF8, 0xE6, 0x40, 0x00];
+        const FRAME_NS: u64 = 20_000_000;
+        const AUDIO_UNITS: u64 = 3;
+        let idr = alloc::vec![0u8, 0, 0, 1, 0x65, 0xAA];
+
+        let mut mux = TsMux::new(2);
+        mux.configure_pipeline(0, &h264_caps()).unwrap();
+        mux.configure_pipeline(1, &aac_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        mux.process(0, au_frame(idr.clone(), 0, true), &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, au_frame(ELD_CONFIG.to_vec(), 0, false), &mut sink)
+            .await
+            .unwrap();
+        for i in 0..AUDIO_UNITS {
+            let unit = alloc::vec![0x7Eu8, 0x89, i as u8];
+            mux.process(1, au_frame(unit, i * FRAME_NS, true), &mut sink)
+                .await
+                .unwrap();
+        }
+        mux.process(0, au_frame(idr, AUDIO_UNITS * FRAME_NS, true), &mut sink)
+            .await
+            .unwrap();
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+
+        let mut demuxer = TsDemuxer::new();
+        for packet in sink.bytes.chunks(TS_PACKET_LEN) {
+            demuxer.push_packet(packet);
+        }
+        demuxer.flush();
+        let stream_types: Vec<u8> = demuxer.streams().iter().map(|s| s.stream_type).collect();
+        assert_eq!(stream_types, [STREAM_TYPE_H264, STREAM_TYPE_AAC_LATM]);
+        let audio_pid = demuxer.streams()[1].pid;
+        let audio_units = demuxer
+            .take_units()
+            .into_iter()
+            .filter(|unit| unit.pid == audio_pid)
+            .count();
+        assert_eq!(
+            audio_units as u64, AUDIO_UNITS,
+            "the config frame is not multiplexed"
         );
     }
 }

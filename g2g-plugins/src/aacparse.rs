@@ -25,11 +25,11 @@
 //! Both AAC framings are handled: ADTS (the common elementary-stream sync) and
 //! LOAS/LATM (the MPEG-TS / broadcast `AudioSyncStream`), whose `StreamMuxConfig`
 //! embeds an `AudioSpecificConfig` the parser reads for the channel count and
-//! rate. The LATM path handles the common `audioMuxVersion == 0` layout and
-//! bails safely (caps unrefined, never wrong) on the rare version-1 / config-reuse
-//! variants. Neither framing needs exp-Golomb or emulation prevention, so this
-//! shares none of the `annexb` machinery the H.264 / H.265 parsers use (just a
-//! small local MSB-first bit reader for the LATM fields). A LATM stream is
+//! rate. The LATM path handles `audioMuxVersion` 0 and 1 and bails safely
+//! (caps unrefined, never wrong) on the config-reuse variants. Neither framing
+//! needs exp-Golomb or emulation prevention, so this shares none of the
+//! `annexb` machinery the H.264 / H.265 parsers use (just a small local
+//! MSB-first bit reader for the LATM fields). A LATM stream is
 //! forwarded buffer for buffer: its frames come from the broadcast container
 //! already, not from a byte stream this has to cut up.
 
@@ -358,6 +358,66 @@ pub(crate) fn adts_frame(
     Some(out)
 }
 
+// the LOAS header (ISO/IEC 14496-3 1.7.2): an 11-bit syncword, then a 13-bit length
+const LOAS_SYNC_WORD: u32 = 0x2B7;
+const LOAS_LENGTH_BITS: u32 = 13;
+const LOAS_HEADER_LEN: usize = 3;
+// a latmBufferFullness of all ones marks a variable-rate stream
+const LATM_VARIABLE_RATE_FULLNESS: u32 = 0xFF;
+// PayloadLengthInfo writes a payload length as this byte value per full step, then the rest
+const LATM_LENGTH_STEP: usize = 255;
+
+// audioMuxVersion 1 carries `asc` verbatim behind its bit length, with no parse of its end
+pub(crate) fn loas_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
+    let mut w = BitWriter::default();
+    w.write_bits(0, 1); // useSameStreamMux
+    w.write_bits(1, 1); // audioMuxVersion
+    w.write_bits(0, 1); // audioMuxVersionA
+    write_latm_value(&mut w, LATM_VARIABLE_RATE_FULLNESS); // taraBufferFullness
+    w.write_bits(1, 1); // allStreamsSameTimeFraming
+    w.write_bits(0, 6); // numSubFrames
+    w.write_bits(0, 4); // numProgram
+    w.write_bits(0, 3); // numLayer
+    // ascLen: the config's byte padding counts as the fill bits the syntax allows
+    write_latm_value(&mut w, u32::try_from(asc.len().checked_mul(8)?).ok()?);
+    for &byte in asc {
+        w.write_bits(u32::from(byte), 8);
+    }
+    w.write_bits(0, 3); // frameLengthType: a payload counted in bytes
+    w.write_bits(LATM_VARIABLE_RATE_FULLNESS, 8); // latmBufferFullness
+    w.write_bits(0, 1); // otherDataPresent
+    w.write_bits(0, 1); // crcCheckPresent
+    for _ in 0..au.len() / LATM_LENGTH_STEP {
+        w.write_bits(LATM_LENGTH_STEP as u32, 8);
+    }
+    w.write_bits((au.len() % LATM_LENGTH_STEP) as u32, 8);
+    for &byte in au {
+        w.write_bits(u32::from(byte), 8);
+    }
+    w.align_to_byte();
+    let element = w.into_bytes();
+    let length = u32::try_from(element.len())
+        .ok()
+        .filter(|&length| length < 1 << LOAS_LENGTH_BITS)?;
+    let header = (LOAS_SYNC_WORD << LOAS_LENGTH_BITS) | length;
+    let mut frame = Vec::with_capacity(LOAS_HEADER_LEN + element.len());
+    frame.extend_from_slice(&header.to_be_bytes()[size_of::<u32>() - LOAS_HEADER_LEN..]);
+    frame.extend_from_slice(&element);
+    Some(frame)
+}
+
+// LatmGetValue's coding: the byte count less one in two bits, then the value in that many bytes
+fn write_latm_value(w: &mut BitWriter, value: u32) {
+    let bytes = (u32::BITS - value.leading_zeros()).div_ceil(8).max(1);
+    w.write_bits(bytes - 1, 2);
+    w.write_bits(value, bytes * 8);
+}
+
+fn read_latm_value(r: &mut BitReader) -> Option<u32> {
+    let bytes = r.read_bits(2)? + 1;
+    r.read_bits(bytes * 8)
+}
+
 /// # Example
 ///
 /// ```no_run
@@ -542,7 +602,10 @@ impl AsyncElement for AacParse {
                 PipelinePacket::DataFrame(frame) => {
                     let bytes = frame.domain.as_system_slice().unwrap_or(&[]);
                     if self.framing == Framing::Undecided && !bytes.is_empty() {
-                        self.framing = if parse_adts(bytes).is_some() {
+                        // a LOAS payload is unaligned bits that can hold a valid ADTS header
+                        self.framing = if opens_loas_frame(bytes) && parse_loas(bytes).is_some() {
+                            Framing::Latm
+                        } else if parse_adts(bytes).is_some() {
                             Framing::Adts
                         } else if is_raw_aac_config(bytes) {
                             Framing::Raw
@@ -775,10 +838,11 @@ pub(crate) fn adts_header(buf: &[u8]) -> Option<AdtsHeader> {
     })
 }
 
-/// Recover the channel count and sample rate from either AAC framing: ADTS (the
-/// elementary-stream sync) first, then LOAS/LATM (the MPEG-TS / broadcast sync).
+/// Recover the channel count and sample rate from either AAC framing: LOAS/LATM
+/// (the MPEG-TS / broadcast sync) first, since its unaligned payload can hold a
+/// valid ADTS header, then ADTS (the elementary-stream sync).
 fn parse_aac(au: &[u8]) -> Option<AacInfo> {
-    parse_adts(au).or_else(|| parse_loas(au))
+    parse_loas(au).or_else(|| parse_adts(au))
 }
 
 /// Scan `au` for the first valid ADTS header and take its channel count and
@@ -815,23 +879,31 @@ pub(crate) fn opens_loas_frame(data: &[u8]) -> bool {
 }
 
 /// Parse a LATM `AudioMuxElement` (muxConfigPresent = 1, the LOAS case) far
-/// enough to reach the `AudioSpecificConfig`. Handles the common
-/// `audioMuxVersion == 0` layout; the rarer version-1 (variable-length values)
-/// and stream-mux-config reuse yield `None` (caps stay unrefined, never wrong).
+/// enough to reach the `AudioSpecificConfig`. Handles `audioMuxVersion` 0 and
+/// 1 (the version whose values carry their own byte counts); the undefined
+/// `audioMuxVersionA` 1 and stream-mux-config reuse yield `None` (caps stay
+/// unrefined, never wrong).
 fn parse_audio_mux_element(data: &[u8]) -> Option<AacInfo> {
     let mut r = BitReader::new(data);
     if r.read_bits(1)? == 1 {
         return None; // useSameStreamMux: reuses a prior config we did not retain
     }
     // StreamMuxConfig
-    if r.read_bits(1)? != 0 {
-        return None; // audioMuxVersion 1 (LatmGetValue lengths) not handled
+    let audio_mux_version = r.read_bits(1)?;
+    if audio_mux_version == 1 {
+        if r.read_bits(1)? != 0 {
+            return None; // audioMuxVersionA 1 has no defined syntax
+        }
+        read_latm_value(&mut r)?; // taraBufferFullness
     }
     r.read_bits(1)?; // allStreamsSameTimeFraming
     r.read_bits(6)?; // numSubFrames
     r.read_bits(4)?; // numProgram (only program 0 is parsed)
     r.read_bits(3)?; // numLayer of program 0 (only layer 0 is parsed)
                      // program 0, layer 0: useSameConfig is implied 0, so AudioSpecificConfig follows.
+    if audio_mux_version == 1 {
+        read_latm_value(&mut r)?; // ascLen
+    }
     parse_audio_specific_config(&mut r)
 }
 
@@ -1089,11 +1161,32 @@ mod tests {
     }
 
     #[test]
-    fn latm_audiomux_version_1_bails_safely() {
-        // Flip audioMuxVersion to 1: unsupported, so no (wrong) caps are produced.
+    fn latm_audio_mux_version_a_bails_safely() {
+        // Flip audioMuxVersion to 1: the allStreamsSameTimeFraming bit behind it
+        // then reads as audioMuxVersionA 1, which has no syntax, so no (wrong)
+        // caps are produced.
         let mut payload = latm_mux_element(2, 4, 2);
         payload[0] |= 0b0100_0000; // set bit 1 (audioMuxVersion) after useSameStreamMux
         assert!(parse_audio_mux_element(&payload).is_none());
+    }
+
+    // AAC-ELD, 48 kHz, stereo
+    const ELD_ASC: [u8; 4] = [0xF8, 0xE6, 0x40, 0x00];
+
+    #[test]
+    fn loas_from_asc_reads_back_as_version_1_latm() {
+        let frame = loas_from_asc(&ELD_ASC, &[0x7E, 0x89, 0xB4]).expect("a short unit frames");
+        assert!(opens_loas_frame(&frame));
+        let mux_len = (((frame[1] & 0x1F) as usize) << 8) | frame[2] as usize;
+        assert_eq!(mux_len, frame.len() - LOAS_HEADER_LEN);
+        let info = parse_aac(&frame).expect("the version 1 config parses");
+        assert_eq!((info.channels, info.sample_rate), (2, 48_000));
+    }
+
+    #[test]
+    fn loas_from_asc_refuses_a_frame_past_the_13_bit_length() {
+        let longest_element = (1 << LOAS_LENGTH_BITS) - 1;
+        assert!(loas_from_asc(&ELD_ASC, &vec![0; longest_element]).is_none());
     }
 
     #[test]
@@ -1324,6 +1417,45 @@ mod tests {
             })
         ));
         assert!(matches!(sink.packets[1], PipelinePacket::DataFrame(_)));
+    }
+
+    #[tokio::test]
+    async fn a_loas_frame_holding_an_adts_header_stays_latm() {
+        // 16 kHz mono, a header a byte scan accepts
+        const ADTS_HEADER: [u8; 7] = [0xFF, 0xF1, 0x60, 0x40, 0x00, 0xFF, 0xFC];
+        // bits ahead of the payload in a LOAS frame of a 4-byte config and a unit under 255 bytes
+        const PAYLOAD_START_BIT: u32 = LOAS_HEADER_LEN as u32 * 8 + 90;
+        let unaligned_by = 8 - PAYLOAD_START_BIT % 8;
+        let mut w = BitWriter::default();
+        w.write_bits(0, unaligned_by);
+        for byte in ADTS_HEADER {
+            w.write_bits(u32::from(byte), 8);
+        }
+        let frame = loas_from_asc(&ELD_ASC, &w.into_bytes()).unwrap();
+        assert!(parse_adts(&frame).is_some(), "the frame holds an aligned ADTS header");
+
+        let mut parse = AacParse::new();
+        parse.configure_pipeline(&aac_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        parse
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, frame.clone())),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            sink.packets[0],
+            PipelinePacket::CapsChanged(Caps::Audio {
+                channels: 2,
+                sample_rate: 48_000,
+                ..
+            })
+        ));
+        let PipelinePacket::DataFrame(forwarded) = &sink.packets[1] else {
+            panic!("the LOAS frame is forwarded");
+        };
+        assert_eq!(forwarded.domain.as_system_slice(), Some(frame.as_slice()));
     }
 
     #[tokio::test]

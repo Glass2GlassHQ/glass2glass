@@ -146,6 +146,8 @@ pub const STREAM_TYPE_MPEG1_VIDEO: u8 = 0x01;
 pub const STREAM_TYPE_MPEG2_VIDEO: u8 = 0x02;
 /// PMT `stream_type` for ADTS AAC audio.
 pub const STREAM_TYPE_AAC: u8 = 0x0F;
+// carries the AAC object types ADTS cannot signal (ER AAC, ELD, USAC)
+pub const STREAM_TYPE_AAC_LATM: u8 = 0x11;
 /// PMT `stream_type` for MPEG-1 Audio (Layer I/II/III, e.g. `mp2`).
 pub const STREAM_TYPE_MPEG1_AUDIO: u8 = 0x03;
 /// PMT `stream_type` for MPEG-2 Audio (the low-sample-rate extension of the above).
@@ -2533,6 +2535,17 @@ impl TsMuxer {
         self.set_private_identity(index, &descriptor);
         if let Some(s) = self.streams.get_mut(index) {
             s.opus = s.stream_type == STREAM_TYPE_PRIVATE_PES;
+        }
+    }
+
+    // the PMT goes out with the first access unit, so this only takes effect before it
+    pub fn set_stream_latm(&mut self, index: usize) {
+        if let Some(s) = self
+            .streams
+            .get_mut(index)
+            .filter(|s| s.stream_type == STREAM_TYPE_AAC)
+        {
+            s.stream_type = STREAM_TYPE_AAC_LATM;
         }
     }
 

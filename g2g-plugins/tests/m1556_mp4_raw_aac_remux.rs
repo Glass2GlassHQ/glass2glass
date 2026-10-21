@@ -1,7 +1,7 @@
 //! M1556: an AAC-ELD track demuxed as raw access units behind its
 //! AudioSpecificConfig remuxes into MP4 with that config as the `esds` and the
-//! units as the samples, and the MPEG-TS muxer refuses it rather than writing
-//! it as ADTS.
+//! units as the samples, and the MPEG-TS muxer writes it as LOAS rather than
+//! ADTS.
 #![cfg(feature = "std")]
 
 #[path = "common/audio_mp4.rs"]
@@ -11,11 +11,10 @@ mod collect_sink;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, G2gError, MultiInputElement, PropValue,
-};
+use g2g_core::{AsyncElement, AudioFormat, ByteStreamEncoding, Caps, MultiInputElement, PropValue};
 use g2g_plugins::mp4demux::Mp4Demux;
 use g2g_plugins::mp4muxn::Mp4MuxN;
+use g2g_plugins::mpegts::{TsDemuxer, TsPacketSplitter, STREAM_TYPE_AAC_LATM};
 use g2g_plugins::tsmux::TsMux;
 
 use audio_mp4::{access_units, progressive_eld_mp4, ELD_CONFIG};
@@ -180,20 +179,52 @@ async fn mp4mux_writes_the_eld_config_as_the_esds_and_the_raw_units_as_samples()
     );
 }
 
+// the LOAS syncword 0x2B7 in the top 11 bits
+fn opens_loas_frame(data: &[u8]) -> bool {
+    matches!(data, [0x56, second, ..] if second & 0xE0 == 0xE0)
+}
+
 #[tokio::test]
-async fn tsmux_refuses_the_raw_eld_stream() {
+async fn tsmux_writes_the_raw_eld_stream_as_loas() {
     let mut mux = TsMux::new();
     mux.configure_pipeline(&aac_caps()).expect("configure");
     let mut sink = CollectSink::default();
-    let mut outcome = Ok(());
     for packet in demux_eld().await {
-        outcome = mux.process(packet, &mut sink).await;
-        if outcome.is_err() {
-            break;
-        }
+        mux.process(packet, &mut sink).await.expect("mux");
     }
+    let ts: Vec<u8> = sink
+        .packets
+        .iter()
+        .filter_map(|packet| match packet {
+            PipelinePacket::DataFrame(frame) => frame.domain.as_system_slice(),
+            _ => None,
+        })
+        .flatten()
+        .copied()
+        .collect();
+
+    let mut demuxer = TsDemuxer::new();
+    let mut splitter = TsPacketSplitter::new();
+    splitter.push(&ts, &mut demuxer);
+    splitter.finish(&mut demuxer);
+    demuxer.flush();
+    assert_eq!(
+        demuxer
+            .streams()
+            .iter()
+            .map(|stream| stream.stream_type)
+            .collect::<Vec<_>>(),
+        [STREAM_TYPE_AAC_LATM],
+        "the PMT declares LATM"
+    );
+    let units = demuxer.take_units();
+    assert_eq!(
+        units.len(),
+        access_units().len(),
+        "one PES per raw unit, the config not among them"
+    );
     assert!(
-        matches!(outcome, Err(G2gError::CapsMismatch)),
-        "ADTS cannot carry ELD and no LOAS writer exists: {outcome:?}"
+        units.iter().all(|unit| opens_loas_frame(&unit.data)),
+        "every PES carries a LOAS frame"
     );
 }
