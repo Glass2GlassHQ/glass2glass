@@ -9,7 +9,7 @@ use g2g_core::{Caps, Dim, RawVideoFormat, VideoCodec};
 use g2g_plugins::streamdec::{VideoCodec as StreamCodec, VulkanStreamDecoder};
 use g2g_plugins::vulkanvideo::{
     extract_av1_sequence_header, open_av1_decode_device, to_std_av1_seq_header, Av1DecodeSession,
-    Av1DpbDecoder, TextureOutput, VulkanVideoDevice, VulkanVideoError,
+    Av1DpbDecoder, VulkanVideoDevice, VulkanVideoError,
 };
 
 mod vulkan_nv12_common;
@@ -262,6 +262,8 @@ fn an_odd_size_picture_converts_to_an_rgba_texture() {
 #[test]
 fn the_two_plane_texture_output_carries_an_odd_picture_in_an_even_texture() {
     use std::sync::Arc;
+
+    use g2g_plugins::vulkanvideo::TextureOutput;
 
     use g2g_core::frame::FrameTiming;
     use g2g_core::memory::OwnedWgpuTexture;
