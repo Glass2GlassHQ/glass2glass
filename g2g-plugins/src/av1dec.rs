@@ -29,7 +29,7 @@ macro_rules! av1_decoder {
             RawVideoFormat, Rate, Segment, VideoCodec,
         };
 
-        use $backend::{Decoder, PixelLayout, PlanarImageComponent, Picture};
+        use $backend::{Decoder, PixelLayout, PlanarImageComponent, Picture, Settings};
 
         /// The output shape one decoded picture fixes: pixel format, geometry, and
         /// how its samples map to colour.
@@ -362,7 +362,11 @@ macro_rules! av1_decoder {
                     self.out = None;
                 }
                 self.input_colorimetry = *colorimetry;
-                self.decoder = Some(Decoder::new().map_err(|_| G2gError::CapsMismatch)?);
+                let mut settings = Settings::new();
+                // aomdec and ffmpeg output only the highest spatial layer of each temporal unit
+                settings.set_all_layers(false);
+                self.decoder =
+                    Some(Decoder::with_settings(&settings).map_err(|_| G2gError::CapsMismatch)?);
                 self.configured = true;
                 Ok(ConfigureOutcome::Accepted)
             }
@@ -438,6 +442,59 @@ macro_rules! av1_decoder {
                         g2g_core::Colorimetry::UNKNOWN,
                     )),
                 ])
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+            use crate::ivfdemux::IvfDemux;
+            use crate::testutil::{first_caps, run, CollectSink};
+            use g2g_core::ByteStreamEncoding;
+
+            // av1-1-b8-22-svc-L2T2 cut to two temporal units, each a base and an enhancement layer
+            const SPATIAL_LAYERS_FIXTURE: &[u8] =
+                include_bytes!("../tests/fixtures/av1-1-b8-22-svc-L2T2_2tu.ivf");
+
+            #[test]
+            fn a_scalable_stream_decodes_to_its_highest_spatial_layer() {
+                let demuxed = run(
+                    &mut IvfDemux::new(),
+                    &Caps::ByteStream { encoding: ByteStreamEncoding::Ivf },
+                    &[SPATIAL_LAYERS_FIXTURE],
+                );
+                let coded = first_caps(&demuxed.packets).expect("the demuxer reports the stream");
+                let Caps::CompressedVideo { width, height, .. } = coded.clone() else {
+                    panic!("coded video caps, got {coded:?}");
+                };
+                let mut decoder = $ty::new();
+                decoder.configure_pipeline(&coded).unwrap();
+                let mut sink = CollectSink::default();
+                let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+                let mut temporal_units = 0;
+                for packet in demuxed.packets {
+                    temporal_units += usize::from(matches!(packet, PipelinePacket::DataFrame(_)));
+                    runtime.block_on(decoder.process(packet, &mut sink)).unwrap();
+                }
+                runtime.block_on(decoder.process(PipelinePacket::Eos, &mut sink)).unwrap();
+
+                let output_sizes: Vec<(Dim, Dim)> = sink
+                    .packets
+                    .iter()
+                    .filter_map(|packet| match packet {
+                        PipelinePacket::CapsChanged(Caps::RawVideo { width, height, .. }) => {
+                            Some((width.clone(), height.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(output_sizes, alloc::vec![(width, height)]);
+                let pictures = sink
+                    .packets
+                    .iter()
+                    .filter(|packet| matches!(packet, PipelinePacket::DataFrame(_)))
+                    .count();
+                assert_eq!(pictures, temporal_units, "one picture per temporal unit");
             }
         }
     };
