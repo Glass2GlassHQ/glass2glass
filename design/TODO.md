@@ -28,7 +28,7 @@ Highest leverage first:
 
 ## Architecture guarantees (validation-first)
 
-- **CI on Ubuntu 26.04.** The workflows pin `ubuntu-24.04` because `ubuntu-latest` moved to 26.04 (libavcodec 62) and a restored `rust-cache` kept ffmpeg-sys built against the 24.04 headers. Move to 26.04 with the cache keyed on the runner image, after checking the `-sys` crates (`cros-libva`, `libspa`) build against its headers.
+- **Drop the vendored `cros-libva`.** The workspace patches cros-libva 0.0.12 with the libva 2.23 VP9 fields, and `[patch]` does not reach crates.io users, so the published `vaapi` feature fails on libva 2.23. Remove the patch once a cros-codecs release accepts a cros-libva with upstream commit 5938445.
 - **Grow the conformance matrix.** Persist evidence from the resource-owning
   tests still uncovered as they are validated (`vaapi` decode on Intel, the Android and
   macOS device paths). Get the device-tagged `Hardware` rows into CI by wiring a
