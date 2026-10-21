@@ -735,8 +735,9 @@ hls = ["http-src", "dep:aes", "dep:cbc", "dep:ctr"]
 mp4-cenc = ["std", "dep:aes", "dep:cbc", "dep:ctr"]
 # DASH source (DashSrc): parses an MPD manifest (roxmltree), selects a
 # Representation (simple ABR), and streams its fMP4 init + media segments as a
-# `Caps::ByteStream{IsoBmff}` for `fmp4demux`. Builds on the http-src fetch layer.
-dash = ["http-src", "dep:roxmltree"]
+# `Caps::ByteStream{IsoBmff}` for `fmp4demux`. Builds on the http-src fetch layer,
+# plus a UDP socket for the NTP and SNTP `UTCTiming` schemes.
+dash = ["http-src", "dep:roxmltree", "tokio/net"]
 # Linux ALSA render sink (AlsaSink): plays interleaved PCM (PcmS16Le / PcmF32Le)
 # on an ALSA PCM device (`default` by default) via libasound. The Linux analog of
 # WasapiSink; blocking writes run on a dedicated worker thread. Pulls the `alsa`

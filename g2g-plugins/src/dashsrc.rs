@@ -25,7 +25,8 @@
 //!
 //! That wall clock is the server's: the local clock plus the offset measured
 //! from the first `UTCTiming` source whose scheme is supported (`direct`,
-//! `http-head`, `http-xsdate`, `http-iso`, `http-ntp`), re-measured every 30
+//! `http-head`, `http-xsdate`, `http-iso`, `http-ntp`, `ntp`, `sntp`) and that
+//! answers, the next one being tried when one fails. It is re-measured every 30
 //! minutes, or every 30 seconds after a failed measurement, as gst's
 //! `dashdemux` does.
 //!

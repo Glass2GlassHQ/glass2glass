@@ -34,7 +34,7 @@ const CLOCK_ESTIMATE_TOLERANCE_SECS: f64 = 0.05;
 // a segment published during the run is requested within a few reloads
 const PUBLISH_TO_REQUEST_BUDGET_SECS: f64 = 0.5;
 // listed first so the test also checks that an unsupported scheme is skipped
-const UNSUPPORTED_SCHEME: &str = "urn:mpeg:dash:utc:ntp:2014";
+const UNSUPPORTED_SCHEME: &str = "urn:example:utc:unsupported:2014";
 const DIRECT_SCHEME: &str = "urn:mpeg:dash:utc:direct:2014";
 
 fn live_mpd(availability_start_unix: f64, server_now_unix: f64) -> String {
