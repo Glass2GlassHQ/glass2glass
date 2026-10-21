@@ -22,6 +22,12 @@ const RED16: &[u8] = include_bytes!("data/red16.jpg");
 const GRAY16: &[u8] = include_bytes!("data/gray16.jpg");
 // cjpeg -rgb of a 16x16 image where red is x * 16, green is y * 16 and blue is 255 - x * 8
 const RGB16: &[u8] = include_bytes!("data/rgb16.jpg");
+// cjpeg -sample 3x1,1x1,1x1 of a 24x16 image where red is x * 10, green is y * 16 and blue is 255 - x * 10
+#[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+const SAMPLING3: &[u8] = include_bytes!("data/sampling3.jpg");
+// cjpeg -precision 12 of a 24x16 grey image whose value is x * 10
+#[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+const GRAY12: &[u8] = include_bytes!("data/gray12.jpg");
 
 #[derive(Default)]
 struct CaptureSink {
@@ -226,6 +232,36 @@ async fn rgb_coded_jpeg_decodes_to_rgba() {
 
     let i420 = decode_once(RGB16, RawVideoFormat::I420).await;
     assert_eq!(i420.len(), SIDE * SIDE * 3 / 2, "planar 4:2:0 byte size");
+}
+
+#[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+#[tokio::test]
+async fn jpegs_zune_rejects_decode_through_libavcodec() {
+    const WIDTH: usize = 24;
+    const HEIGHT: usize = 16;
+    // a third-width chroma plane loses up to 14 per channel in the ffmpeg CLI's decode too
+    const TOLERANCE: i32 = 16;
+    type AuthoredPixel = fn(i32, i32) -> [i32; 3];
+    let cases: [(&[u8], AuthoredPixel); 2] = [
+        (SAMPLING3, |x, y| [x * 10, y * 16, 255 - x * 10]),
+        (GRAY12, |x, _| [x * 10; 3]),
+    ];
+    for (jpeg, authored_at) in cases {
+        let rgba = decode_once(jpeg, RawVideoFormat::Rgba8).await;
+        assert_eq!(rgba.len(), WIDTH * HEIGHT * 4);
+        for (i, px) in rgba.as_chunks::<4>().0.iter().enumerate() {
+            let (x, y) = ((i % WIDTH) as i32, (i / WIDTH) as i32);
+            let authored = authored_at(x, y);
+            for channel in 0..3 {
+                assert!(
+                    (px[channel] as i32 - authored[channel]).abs() <= TOLERANCE,
+                    "pixel ({x}, {y}) is {px:?}, authored {authored:?}"
+                );
+            }
+        }
+        let i420 = decode_once(jpeg, RawVideoFormat::I420).await;
+        assert_eq!(i420.len(), WIDTH * HEIGHT * 3 / 2, "planar 4:2:0 byte size");
+    }
 }
 
 /// M1570: the same JPEG with its DHT segments cut, the way motion JPEG in AVI

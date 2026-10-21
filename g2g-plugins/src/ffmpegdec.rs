@@ -2676,7 +2676,13 @@ fn unpack_p010_to_planar10(dst: &mut [u8], frame: &FfVideo) {
 /// Write `rows` rows of `row_bytes` bytes from a strided source plane into `dst`,
 /// packing the rows contiguously. Sample bytes are copied verbatim, so a 16-bit
 /// destination keeps the source's little-endian layout.
-fn copy_plane_rows(dst: &mut [u8], src: &[u8], stride: usize, row_bytes: usize, rows: usize) {
+pub(crate) fn copy_plane_rows(
+    dst: &mut [u8],
+    src: &[u8],
+    stride: usize,
+    row_bytes: usize,
+    rows: usize,
+) {
     debug_assert_eq!(dst.len(), row_bytes * rows);
     for row in 0..rows {
         let s = row * stride;

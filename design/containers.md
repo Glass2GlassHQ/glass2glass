@@ -1373,6 +1373,12 @@ chunks, and emit one image per buffer with the geometry its header declares. The
 auto-plug chain splices the framer ahead of the decoder, which is what lets a
 `.jpg` be typed by content at all.
 
+`mjpegdec` decodes with the pure-Rust zune-jpeg. zune-jpeg has no RGB to RGBA
+mapping, so an RGB-coded JPEG decodes to RGB and `videoconvert` adds the alpha.
+On Linux with `ffmpeg-long-tail`, a JPEG zune-jpeg rejects, such as one with
+12-bit samples or a sampling factor of 3, is decoded by libavcodec's MJPEG
+decoder and converted to RGBA, then follows the same output path.
+
 Interlaced motion JPEG in AVI stores each frame as two JPEG images, one per
 field, each half the height the AVI header declares. `jpegparse` treats an image
 under three quarters of the upstream frame height as a field, the threshold

@@ -330,7 +330,14 @@ impl MjpegDec {
         if self.backend == JpegDecodeBackend::Mozjpeg {
             return self.decode_mozjpeg(&jpeg);
         }
-        self.decode_zune(&jpeg)
+        let decoded = self.decode_zune(&jpeg);
+        #[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+        if decoded.is_err() {
+            // zune-jpeg rejects some JPEGs libavcodec decodes, such as 12-bit samples or a sampling factor of 3
+            let (rgba, w, h) = decode_libavcodec_rgba(&jpeg)?;
+            return Ok((self.rgba_to_out(rgba, w, h)?, w, h));
+        }
+        decoded
     }
 
     fn decode_zune(&self, jpeg: &[u8]) -> Result<(Vec<u8>, u32, u32), G2gError> {
@@ -444,6 +451,39 @@ impl MjpegDec {
         started.finish().map_err(|_| G2gError::CapsMismatch)?;
         Ok((self.rgba_to_out(rgba, dw, dh)?, dw, dh))
     }
+}
+
+#[cfg(all(target_os = "linux", feature = "ffmpeg-long-tail"))]
+fn decode_libavcodec_rgba(jpeg: &[u8]) -> Result<(Vec<u8>, u32, u32), G2gError> {
+    use ffmpeg_next as ffmpeg;
+    let failed = |_: ffmpeg::Error| G2gError::CapsMismatch;
+    ffmpeg::init().map_err(failed)?;
+    let codec =
+        ffmpeg::codec::decoder::find(ffmpeg::codec::Id::MJPEG).ok_or(G2gError::CapsMismatch)?;
+    let mut decoder = ffmpeg::codec::decoder::new()
+        .open_as(codec)
+        .map_err(failed)?
+        .video()
+        .map_err(failed)?;
+    decoder
+        .send_packet(&ffmpeg::Packet::copy(jpeg))
+        .map_err(failed)?;
+    decoder.send_eof().map_err(failed)?;
+    let mut frame = ffmpeg::frame::Video::empty();
+    decoder.receive_frame(&mut frame).map_err(failed)?;
+    let rgba = crate::ffmpegtagged::FormatConverter::default()
+        .convert(&mut frame, ffmpeg::format::Pixel::RGBA)?;
+    let (w, h) = (rgba.width(), rgba.height());
+    let row_bytes = w as usize * 4;
+    let mut pixels = vec![0; row_bytes * h as usize];
+    crate::ffmpegdec::copy_plane_rows(
+        &mut pixels,
+        rgba.data(0),
+        rgba.stride(0),
+        row_bytes,
+        h as usize,
+    );
+    Ok((pixels, w, h))
 }
 
 /// How the decoded samples map to colour. A JFIF file is full-range BT.601 over
