@@ -717,6 +717,22 @@ libavcodec needs to output an ER AAC frame. USAC decodes only on libavcodec 62
 same stream from the FLV sequence header, the AVI `strf` config and the
 Matroska `CodecPrivate`.
 
+QuickTime PCM entries resolve to a layout (bits, float, signed, endian, packed),
+from the fourcc (`in24`, `in32`, `fl32` and `fl64`, with `enda` inside `wave`
+selecting little-endian) or from version 2 `lpcm` flags. A layout with no
+`AudioFormat` skips its track and is named by `unsupported_sample_entries`.
+Vorbis in `msVo` forwards its three Xiph-laced `glbl` headers in-band, as Ogg and
+Matroska do.
+
+Uncompressed tracks whose stored layout differs from the graph's tight top-down
+frame carry a `RawVideoStorage`, and the demuxer fixes the layout in the copy it
+already makes. For AVI, `BI_RGB` rows are 4-byte aligned when the chunk holds
+them, else tight, and run bottom-up for a positive `biHeight`; 24-bit is `BGR`,
+32-bit `BGRx`. `YV12` is delivered as I420 with its chroma planes swapped, and
+`Y800` / `GREY` as `GRAY8`. QuickTime `raw ` rows (depth 24 as `RGB`, 32 as
+`ARGB`) take their stride from the sample size, since writers pad them
+differently.
+
 QuickTime PCM sample entries (`twos`, `sowt`, `raw `, `alaw`, `ulaw`, version
 0 or 1 sound descriptions) map through the AIFC compression table, with `twos`
 read as AIFC's big-endian `NONE` and 8-bit `raw ` as unsigned. Their `stsz`

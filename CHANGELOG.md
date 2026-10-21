@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1729: avidemux reads BI_RGB, YV12 and Y800 / GREY, qtdemux reads `raw ` RGB and ARGB, via new GRAY8 / BGR / BGRx / ARGB raw formats.
+- M1728: qtdemux reads QuickTime `in24` / `in32` / `fl32` PCM, version 2 `lpcm` and `msVo` Vorbis, and names the PCM layouts it cannot carry.
 - M1767: `wgputodmabuf` exports a tight odd-width NV12 or I420 frame at the core row stride instead of refusing it.
 - M1772: WgpuPreprocess rebuilds its GPU buffers when the input size changes mid-stream.
 - M1737: kmssink and cudakmssink apply an OrientationMeta through the primary plane's rotation property and d3d11sink through the video processor's rotation and mirror, so a videoflip in front of them attaches the descriptor instead of remapping pixels.
