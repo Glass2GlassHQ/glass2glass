@@ -758,9 +758,18 @@ held back at all, since nothing sends one twice.
 and swaps the window's size hint for a turn that transposes the picture, with the
 buffer and its damage staying in buffer coordinates. The argument is the inverse
 of the descriptor, because `set_buffer_transform` names the transform already
-applied to the buffer and the compositor applies its inverse. `KmsSink` and
-`CudaKmsSink` do not advertise, so a flip in front of them keeps realizing the
-rotation.
+applied to the buffer and the compositor applies its inverse.
+
+`KmsSink` and `CudaKmsSink` absorb through the primary plane's `rotation`
+property, reading the value names and their bits from the plane and passing the
+descriptor as is, since the plane applies its rotation directly. They advertise
+only when the plane can show all eight turns, because the advertisement covers
+every turn at once, and turn the CRTC off and back on around a change so
+`set_crtc` sizes the plane for the new turn. `D3D11Sink` absorbs through
+`VideoProcessorSetStreamRotation` and `VideoProcessorSetStreamMirror`, and resizes
+the swapchain and window for a turn that transposes the picture. Its processor
+caps are only known at the first frame, so a processor without rotation or mirror
+support fails that frame.
 
 ## The analytics overlay
 

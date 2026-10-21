@@ -1200,6 +1200,13 @@ segmentation features and global-motion models for `load_previous()`. Film grain
 is synthesized on the CPU at 8 and 10 bits from the grain-free luma, bit-exact
 with dav1d.
 
+Both software AV1 decoders open the backend with `all_layers` off, so a scalable
+stream outputs one picture per temporal unit at its highest spatial layer
+(operating point 0). This is what aomdec, ffmpeg's libdav1d wrapper and the
+conformance md5s produce. GStreamer's `dav1ddec` has no property for it, so g2g
+exposes none. Measured on hercules on 2026-10-21, `dav1ddec` and `rav1ddec` each
+miss only `av1-1-b8-03-sizeup` and `sizedown`.
+
 Every `vulkanvideodec` H.265 failure is also a nonzero exit naming the coding
 tool, raised when the parameter sets parse, before the driver sees the stream.
 The sessions are Main and Main 10, so a chroma format other than 4:2:0, a bit

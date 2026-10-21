@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1737: kmssink and cudakmssink apply an OrientationMeta through the primary plane's rotation property and d3d11sink through the video processor's rotation and mirror, so a videoflip in front of them attaches the descriptor instead of remapping pixels.
+- M1739: `vorbisdec` labels its output channel layout, so 3- and 4-channel Vorbis no longer resolve to the 2.1 and 4.0 defaults.
+- M1738: `dav1ddec` and `rav1ddec` output only the highest spatial layer of a scalable AV1 stream, matching the reference md5s of `av1-1-b8-22-svc-L2T1` and `L2T2`.
 - M1771: WgpuPreprocess forwards its own output caps when the runner sends them, so RGBA -> NV12 -> scale -> preprocess -> inference chains run.
 - M1724: VulkanVideoDec AV1 passes 201/240 AV1-TEST-VECTORS on NVIDIA and 237/240 on RADV (CDEF strengths, global motion, inherited reference state, 10-bit film grain).
 - M1731: tsmux and tsmuxn write ER AAC, ELD and USAC as LOAS/LATM (stream type 0x11), and tsdemux and ffmpegaudiodec play LOAS AAC.

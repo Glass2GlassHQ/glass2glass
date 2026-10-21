@@ -855,6 +855,11 @@ edge, and the real count arrives via a `CapsChanged`. `OpusDec` rebuilds libopus
 for it, since the decoder is per-channel-count. A decode-to-PCM line therefore
 negotiates before the count is known.
 
+`vorbisdec` labels its PCM with the Vorbis I layout for the channel count
+(`vorbis_layout`, shared with `opusdec` mapping family 1). symphonia already
+permutes Vorbis order into that layout's interleave order, so no reorder happens
+in g2g.
+
 `AudioConvert` is caps-driven like `AudioResample`: a bare `audioconvert` takes
 its output format and channel count from a downstream capsfilter, such as a mono
 `channels=1` pin, and otherwise passes the input through. Its channel mixing is

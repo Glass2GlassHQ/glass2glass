@@ -123,8 +123,9 @@ Highest leverage first:
   is refused, though ffmpeg's Vulkan decoder decodes it on the same GPU: find
   what differs in the submission. On RADV, `MR4_TANDBERG_C` and
   `MR5_TANDBERG_C` (H.264) repeat an earlier picture at 22 output positions.
-- **AV1 spatial layers.** `av1-1-b8-22-svc-L2T1` and `L2T2` differ from the
-  reference through `dav1ddec` and `rav1ddec`.
+- **AV1 size changes.** `av1-1-b8-03-sizeup` and `sizedown` lose pictures
+  across their mid-stream size changes through `dav1ddec` and `rav1ddec`
+  (sizeup decodes 5 small pictures short of ffmpeg's output).
 
 ## CUDA / display
 
@@ -242,9 +243,9 @@ Highest leverage first:
   shaping if cosmic-text ever grows writing modes.
 - Add a carrier for non-default channel orders when a source needs an
   interleave order outside the per-count `ChannelLayout` convention.
-- Apply an `OrientationMeta` in `kmssink` (a DRM plane rotation) and on the
-  D3D11 VideoProcessor path, so those sinks advertise
-  `Reconfigure::AbsorbOrientation` too.
+- Let a sink absorb only the orientations its device supports (a KMS plane with
+  only rotate-0 and rotate-180), which needs a per-orientation
+  `absorbs_orientation`.
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 
