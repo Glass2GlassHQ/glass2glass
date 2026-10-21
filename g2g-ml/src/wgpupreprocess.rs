@@ -654,6 +654,21 @@ impl WgpuPreprocess {
         }
     }
 
+    // every pipeline and buffer below is sized to the configured geometry and format
+    fn drop_sized_gpu_resources(&mut self) {
+        self.gpu = None;
+        self.tex_gpu = None;
+        self.tex_planes_gpu = None;
+        #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+        {
+            self.tex_rgba_gpu = None;
+        }
+        #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+        {
+            self.dmabuf_gpu = None;
+        }
+    }
+
     async fn ensure_gpu(&mut self) -> Result<(), G2gError> {
         if self.gpu.is_some() {
             return Ok(());
@@ -1328,6 +1343,9 @@ impl AsyncElement for WgpuPreprocess {
         };
         if !geometry_ok(*format, *w) {
             return Err(G2gError::CapsMismatch);
+        }
+        if (self.width, self.height, self.format) != (*w, *h, *format) {
+            self.drop_sized_gpu_resources();
         }
         self.width = *w;
         self.height = *h;

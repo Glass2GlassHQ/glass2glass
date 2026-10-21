@@ -79,6 +79,10 @@ async fn preprocess(width: u32, height: u32, domain: MemoryDomain) -> Vec<f32> {
     element
         .configure_pipeline(&nv12_caps(width, height))
         .expect("an odd NV12 size configures");
+    preprocess_configured(&mut element, domain).await
+}
+
+async fn preprocess_configured(element: &mut WgpuPreprocess, domain: MemoryDomain) -> Vec<f32> {
     let frame = Frame {
         domain,
         timing: FrameTiming::default(),
@@ -173,5 +177,25 @@ async fn odd_two_plane_texture_import_matches_the_storage_buffer() {
                 "{width}x{height} element {index}: two-plane {planes} vs storage buffer {buffer}"
             );
         }
+    }
+}
+
+// the runner calls configure_pipeline again before the first frame at a new size
+#[tokio::test]
+async fn mid_stream_size_change_matches_the_storage_buffer() {
+    let _gpu = GPU_LOCK.lock().await;
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let mut element = WgpuPreprocess::new();
+    for (width, height) in ODD_SIZES {
+        element
+            .configure_pipeline(&nv12_caps(width, height))
+            .expect("the new NV12 size configures");
+        let nv12 = tight_nv12(width, height);
+        let after_change = preprocess_configured(&mut element, system_domain(nv12.clone())).await;
+        let fresh = preprocess(width, height, system_domain(nv12)).await;
+        assert_eq!(after_change, fresh, "{width}x{height}");
     }
 }
