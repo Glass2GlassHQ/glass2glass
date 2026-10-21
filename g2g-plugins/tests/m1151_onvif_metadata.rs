@@ -840,12 +840,14 @@ fn the_metadata_branch_graph_parses() {
 }
 
 /// The whole line the module documents, drawing the camera's objects over the
-/// decoded picture. `analyticsoverlay` needs the `analytics` feature.
-#[cfg(feature = "analytics")]
+/// decoded picture. `analyticsoverlay` needs the `analytics` feature and
+/// `avdec_h264` the ffmpeg one; a `decodebin` cannot follow `s.`, which names
+/// no element to take its input caps from.
+#[cfg(all(feature = "analytics", target_os = "linux", feature = "ffmpeg"))]
 #[test]
 fn the_analytics_overlay_graph_parses() {
     let line = "rtspsrcn location=rtsp://camera/stream onvif-metadata=true name=s \
-                s. ! decodebin ! videoconvert ! onvifmetadatacombiner name=c \
+                s. ! h264parse ! avdec_h264 ! videoconvert ! onvifmetadatacombiner name=c \
                 ! analyticsoverlay ! fakesink \
                 s. ! onvifmetadataparse ! c.";
     parse_line(line);

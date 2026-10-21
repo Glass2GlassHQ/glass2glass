@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! rtspsrcn onvif-metadata=true name=s
-//!   s. ! h264parse ! avdec ! videoconvert ! onvifmetadatacombiner name=c ! analyticsoverlay ! autovideosink
+//!   s. ! h264parse ! avdec_h264 ! videoconvert ! onvifmetadatacombiner name=c ! analyticsoverlay ! autovideosink
 //!   s. ! onvifmetadataparse ! c.
 //! ```
 //!
