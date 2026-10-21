@@ -268,7 +268,7 @@ fn strip_apev2(tail: &mut Vec<u8>) {
 fn write_apev2(tags: &TagList) -> Vec<u8> {
     let mut items = Vec::new();
     let mut count = 0u32;
-    for tag in tags.tags() {
+    for tag in tags.text_tags() {
         let key = ape_key(tag);
         if !key.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
             continue; // an APEv2 key is printable ASCII, nothing else fits

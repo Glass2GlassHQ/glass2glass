@@ -621,7 +621,7 @@ fn subpicture_gst_media_type(f: SubPictureFormat) -> &'static str {
 
 /// The GStreamer media type for a compressed video codec.
 #[cfg(feature = "alloc")]
-fn codec_gst_media_type(c: VideoCodec) -> String {
+pub(crate) fn codec_gst_media_type(c: VideoCodec) -> String {
     let media_type = match c {
         VideoCodec::H264 => "video/x-h264",
         VideoCodec::H265 => "video/x-h265",

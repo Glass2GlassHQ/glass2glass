@@ -199,6 +199,9 @@ Highest leverage first:
   instead of GStreamer's 'AV1G' once any demuxer reads the former (GStreamer's
   `tsdemux` activates no program for an 'AV01' stream, and ffmpeg's muxer writes
   no descriptor at all, so it identifies neither).
+- **Cover art writing:** write `Tag::Image` back as an MP4 `covr` item, a FLAC
+  `PICTURE` block, a VorbisComment `METADATA_BLOCK_PICTURE` field and an ID3
+  `APIC` frame.
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
@@ -244,6 +247,8 @@ Highest leverage first:
 ## Properties / introspection / DSL
 
 - A GUI / tooling introspection surface beyond the text dump.
+- `g2g-discover`: read audio-only MP4 and native FLAC / MP3 files, which it
+  cannot probe, so their tags show.
 
 ## GStreamer element coverage
 

@@ -177,10 +177,13 @@ fn frame_size(bytes: &[u8], version: u8) -> usize {
     }
 }
 
-/// Map one ID3v2 text frame to a [`Tag`], or `None` when the frame is not one
-/// this reads or its text is empty. A frame with a typed [`Tag`] variant becomes
+/// Map one ID3v2 text or picture frame to a [`Tag`], or `None` when the frame
+/// is not one this reads or its text is empty. A frame with a typed [`Tag`] variant becomes
 /// that variant; the rest keep their frame id as the key.
 fn frame_to_tag(id: &[u8], data: &[u8]) -> Option<Tag> {
+    if id == b"APIC" {
+        return picture_frame_tag(data);
+    }
     let text = decode_text(data)?;
     if text.is_empty() {
         return None;
@@ -201,6 +204,32 @@ fn frame_to_tag(id: &[u8], data: &[u8]) -> Option<Tag> {
         _ => return None,
     };
     Some(tag)
+}
+
+// an encoding byte, a terminated Latin-1 media type, a picture type byte, a terminated description, the picture
+fn picture_frame_tag(data: &[u8]) -> Option<Tag> {
+    const PICTURE_TYPE_LEN: usize = 1;
+    let (&encoding, rest) = data.split_first()?;
+    let media_type_len = rest.iter().position(|&byte| byte == 0)?;
+    let media_type = core::str::from_utf8(&rest[..media_type_len]).ok()?;
+    let description = rest.get(media_type_len + 1 + PICTURE_TYPE_LEN..)?;
+    let picture = after_terminated_text(description, encoding)?;
+    Tag::image(media_type, picture.to_vec())
+}
+
+// UTF-16 text ends on a zero code unit, the other encodings on a zero byte
+fn after_terminated_text(text: &[u8], encoding: u8) -> Option<&[u8]> {
+    match encoding {
+        ENCODING_UTF16_BOM | ENCODING_UTF16BE => {
+            let units = text.as_chunks::<2>().0;
+            let end = units.iter().position(|unit| *unit == [0, 0])?;
+            text.get((end + 1) * 2..)
+        }
+        _ => {
+            let end = text.iter().position(|&byte| byte == 0)?;
+            text.get(end + 1..)
+        }
+    }
 }
 
 /// The text frames with no typed [`Tag`] variant, which keep their frame id as
@@ -504,6 +533,31 @@ mod tests {
         // Not a tag, and a header cut short.
         assert_eq!(id3v2_len(b"\xff\xfb\x90\x00"), None);
         assert_eq!(id3v2_len(&tag[..ID3V2_HEADER_LEN - 1]), None);
+    }
+
+    #[test]
+    fn reads_an_attached_picture_frame() {
+        const FRONT_COVER: u8 = 3;
+        let jpeg = [0xFF, 0xD8, 0xFF, 0x00];
+        // a UTF-16 description ends on a zero code unit, so the JPEG's own zero byte stays picture data
+        let mut picture = vec![ENCODING_UTF16_BOM];
+        picture.extend_from_slice(b"image/jpeg\0");
+        picture.push(FRONT_COVER);
+        picture.extend_from_slice(&[0xFF, 0xFE, b'c', 0, 0, 0]);
+        picture.extend_from_slice(&jpeg);
+        let mut frames = frame(ID3V2_VERSION_2_4, b"APIC", 0, &picture);
+        frames.extend(latin1_frame(ID3V2_VERSION_2_4, b"TIT2", "Sine"));
+        let tags = parse_id3v2(&id3v2(ID3V2_VERSION_2_4, 0, &frames));
+        assert_eq!(
+            tags.tags(),
+            &[
+                Tag::Image {
+                    codec: g2g_core::VideoCodec::Mjpeg,
+                    data: jpeg.to_vec()
+                },
+                Tag::Title("Sine".into())
+            ]
+        );
     }
 
     #[test]

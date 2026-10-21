@@ -5,7 +5,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use g2g_core::{Chapter, G2gError, Tag, TagList};
+use g2g_core::{Chapter, G2gError, Tag, TagList, VideoCodec};
 
 use crate::bereader::{be_u16, be_u32, be_u64};
 
@@ -273,6 +273,10 @@ pub(crate) fn parse_ilst_tags(container: &[u8]) -> TagList {
             if let Some(tag) = freeform_tag(item) {
                 list.push(tag);
             }
+        } else if kind == b"covr" {
+            for picture in cover_art(item) {
+                list.push(picture);
+            }
         } else if let Some(numbers) = ilst_numbers(kind, item) {
             for tag in numbers {
                 list.push(tag);
@@ -282,6 +286,25 @@ pub(crate) fn parse_ilst_tags(container: &[u8]) -> TagList {
         }
     }
     list
+}
+
+// the well-known `data` types of a cover-art item that name a still-image codec
+const COVER_ART_CODECS: [(u32, VideoCodec); 2] = [(13, VideoCodec::Mjpeg), (14, VideoCodec::Png)];
+
+// a `covr` item holds one `data` box per picture
+fn cover_art(item: &[u8]) -> impl Iterator<Item = Tag> + '_ {
+    boxes(item)
+        .filter(|(kind, _)| *kind == b"data")
+        .filter_map(|(_, data)| {
+            let data_type = be32(data, 0).ok()?;
+            let (_, codec) = COVER_ART_CODECS
+                .iter()
+                .find(|(known, _)| *known == data_type)?;
+            Some(Tag::Image {
+                codec: *codec,
+                data: data.get(8..)?.to_vec(),
+            })
+        })
 }
 
 /// An item's `data` box as `(well-known type, value bytes)`. The body is
@@ -722,21 +745,39 @@ mod tests {
     }
 
     #[test]
-    fn skips_non_text_items_and_unknown_atoms() {
-        // a binary cover-art item (type 13 = JPEG) is dropped; an unknown text
-        // atom keeps its 4cc as the key.
-        let mut cover = 13u32.to_be_bytes().to_vec();
-        cover.extend_from_slice(&0u32.to_be_bytes());
-        cover.extend_from_slice(&[0xFF, 0xD8, 0xFF]);
-        let covr = mp4_box(b"covr", &mp4_box(b"data", &cover));
+    fn reads_cover_art_and_keeps_unknown_text_atoms() {
+        const JPEG_DATA_TYPE: u32 = 13;
+        const BMP_DATA_TYPE: u32 = 27;
+        let jpeg = [0xFF, 0xD8, 0xFF];
+        let picture = |data_type: u32, body: &[u8]| {
+            let mut data = data_type.to_be_bytes().to_vec();
+            data.extend_from_slice(&0u32.to_be_bytes());
+            data.extend_from_slice(body);
+            mp4_box(b"data", &data)
+        };
+        // one `data` box per picture, and a BMP has no still-image codec to name
+        let covr = mp4_box(
+            b"covr",
+            &[
+                picture(JPEG_DATA_TYPE, &jpeg),
+                picture(BMP_DATA_TYPE, b"BM"),
+            ]
+            .concat(),
+        );
         let moov = moov_with_tags(&[covr, text_item(b"keyw", "rust")]);
         let tags = parse_ilst_tags(find_box(&moov, b"moov").unwrap());
         assert_eq!(
             tags.tags(),
-            &[Tag::Other {
-                key: "keyw".into(),
-                value: "rust".into()
-            }]
+            &[
+                Tag::Image {
+                    codec: VideoCodec::Mjpeg,
+                    data: jpeg.to_vec()
+                },
+                Tag::Other {
+                    key: "keyw".into(),
+                    value: "rust".into()
+                }
+            ]
         );
     }
 

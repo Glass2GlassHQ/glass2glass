@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1795: embedded cover art reads into a `Tag::Image` from MP4, FLAC, VorbisComment and ID3.
 - M1794: `mjpegdec` decodes JPEGs zune-jpeg rejects through libavcodec.
 - M1793: `mjpegdec` decodes RGB-coded JPEGs.
 - M1791: MP4 demuxing reads MPEG-1 and MPEG-2 video in an mp4v entry.

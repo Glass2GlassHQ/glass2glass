@@ -2977,17 +2977,17 @@ fn is_track_entry_tag(tag: &Tag) -> bool {
 /// are skipped here, the `TrackEntry` carries them (M788).
 fn tags_element(tags: &TagList, track_tags: &[(usize, TagList)]) -> Vec<u8> {
     let mut body = Vec::new();
-    if !tags.is_empty() {
+    let whole_tags: Vec<&Tag> = tags.text_tags().collect();
+    if !whole_tags.is_empty() {
         let mut whole = elem_vec(ID_TARGETS, &[]);
-        for t in tags.tags() {
+        for t in whole_tags {
             whole.extend_from_slice(&simple_tag(t));
         }
         body.extend_from_slice(&elem_vec(ID_TAG, &whole));
     }
     for (index, list) in track_tags {
         let scoped: Vec<&Tag> = list
-            .tags()
-            .iter()
+            .text_tags()
             .filter(|t| !is_track_entry_tag(t))
             .collect();
         if scoped.is_empty() {

@@ -29,8 +29,14 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    AsyncElement, AudioFormat, BusHandle, BusMessage, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, Tag, TagList,
+};
+
+use crate::flactag::metadata_blocks;
+use crate::vorbiscomment::{
+    parse_comment_body, parse_flac_picture, FLAC_COMMENT_BLOCK_TYPE, FLAC_PICTURE_BLOCK_TYPE,
 };
 
 /// Sample rate / channel count out of the mandatory STREAMINFO block.
@@ -78,6 +84,8 @@ pub struct FlacParse {
     /// Per-channel samples emitted so far (the PTS accumulator).
     samples: u64,
     sequence: u64,
+    bus: Option<BusHandle>,
+    tags: TagList,
 }
 
 impl Default for FlacParse {
@@ -105,7 +113,20 @@ impl FlacParse {
             headers_sent: 0,
             samples: 0,
             sequence: 0,
+            bus: None,
+            tags: TagList::new(),
         }
+    }
+
+    // the stream's comments and pictures reach the application as a `BusMessage::Tag`
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
+    // the comments and pictures of the latest header, empty until one is parsed
+    pub fn tags(&self) -> &TagList {
+        &self.tags
     }
 
     /// Count of frames emitted (excluding the in-band header blocks).
@@ -166,6 +187,15 @@ impl FlacParse {
         Ok(())
     }
 
+    fn post_tags(&self) {
+        if let (Some(bus), false) = (&self.bus, self.tags.is_empty()) {
+            bus.try_post(BusMessage::Tag {
+                tags: self.tags.clone(),
+                program: None,
+            });
+        }
+    }
+
     /// Consume as much of `buf` as is settled: the header once its last
     /// metadata block is complete, then every frame whose end (the next
     /// validated sync) has arrived.
@@ -181,6 +211,11 @@ impl FlacParse {
             let caps = self.flac_caps();
             if caps_before.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps)).await?;
+            }
+            let tags = header_tags(&self.buf[..header_len])?;
+            if tags != self.tags {
+                self.tags = tags;
+                self.post_tags();
             }
             let header: Vec<u8> = self.buf.drain(..header_len).collect();
             self.headers_sent += 1;
@@ -201,6 +236,20 @@ impl FlacParse {
             self.emit(frame, out).await?;
         }
     }
+}
+
+fn header_tags(header: &[u8]) -> Result<TagList, G2gError> {
+    let blocks = metadata_blocks(header).ok_or(G2gError::CapsMismatch)?;
+    Ok(blocks
+        .iter()
+        .flat_map(|block| -> Vec<Tag> {
+            match block.kind {
+                FLAC_COMMENT_BLOCK_TYPE => parse_comment_body(block.body).tags().to_vec(),
+                FLAC_PICTURE_BLOCK_TYPE => parse_flac_picture(block.body).into_iter().collect(),
+                _ => Vec::new(),
+            }
+        })
+        .collect())
 }
 
 /// Byte length of the complete `fLaC` header (marker + all metadata blocks), or
@@ -478,5 +527,49 @@ impl PadTemplates for FlacParse {
             PadTemplate::sink(CapsSet::one(flac.clone())),
             PadTemplate::source(CapsSet::one(flac)),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flactag::FLAC_MARKER;
+    use crate::testutil::{flac_block, flac_picture_body, flac_streaminfo, run, STREAMINFO_TYPE};
+    use crate::vorbiscomment::vorbis_comment;
+
+    #[test]
+    fn reads_the_header_comments_and_pictures() {
+        let png = b"\x89PNG";
+        let comments: TagList = [Tag::Title("Sine".into())].into_iter().collect();
+        let mut stream = Vec::from(*FLAC_MARKER);
+        stream.extend(flac_block(STREAMINFO_TYPE, false, &flac_streaminfo()));
+        stream.extend(flac_block(
+            FLAC_COMMENT_BLOCK_TYPE,
+            false,
+            &vorbis_comment(&[], b"g2g", &comments),
+        ));
+        stream.extend(flac_block(
+            FLAC_PICTURE_BLOCK_TYPE,
+            true,
+            &flac_picture_body("image/png", png),
+        ));
+        let mut parser = FlacParse::new();
+        let caps = Caps::Audio {
+            format: AudioFormat::Flac,
+            channels: 0,
+            sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        };
+        run(&mut parser, &caps, &[&stream]);
+        assert_eq!(
+            parser.tags().tags(),
+            &[
+                Tag::Title("Sine".into()),
+                Tag::Image {
+                    codec: g2g_core::VideoCodec::Png,
+                    data: png.to_vec()
+                }
+            ]
+        );
     }
 }

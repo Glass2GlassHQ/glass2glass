@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 
 use crate::bereader::be_u24;
 
-use g2g_core::TagList;
+use g2g_core::{Tag, TagList};
 
 /// FLV tag type: an audio tag (codec-tagged audio data).
 const TAG_AUDIO: u8 = 8;
@@ -650,8 +650,9 @@ fn on_metadata_body(tags: &TagList) -> Vec<u8> {
     let mut b = Vec::new();
     write_amf0_string(&mut b, "onMetaData");
     b.push(AMF0_ECMA_ARRAY);
-    b.extend_from_slice(&(tags.tags().len() as u32).to_be_bytes());
-    for t in tags.tags() {
+    let text_tags: Vec<&Tag> = tags.text_tags().collect();
+    b.extend_from_slice(&(text_tags.len() as u32).to_be_bytes());
+    for t in text_tags {
         let (key, value) = (t.key(), t.value_string());
         // an object/array key is a raw (unmarked) length-prefixed string.
         b.extend_from_slice(&(key.len() as u16).to_be_bytes());

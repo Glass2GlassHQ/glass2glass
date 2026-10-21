@@ -96,3 +96,41 @@ pub(crate) fn roundtrip<M, P>(
     assert_eq!(first_caps(&parsed.packets), Some(audio));
     assert_eq!(data_bytes(&parsed.packets), samples);
 }
+
+// a FLAC PICTURE block body holding `picture` as a front cover with an empty description and geometry
+pub(crate) fn flac_picture_body(media_type: &str, picture: &[u8]) -> Vec<u8> {
+    const FRONT_COVER: u32 = 3;
+    const GEOMETRY_LEN: usize = 16;
+    let mut body = FRONT_COVER.to_be_bytes().to_vec();
+    body.extend_from_slice(&(media_type.len() as u32).to_be_bytes());
+    body.extend_from_slice(media_type.as_bytes());
+    body.extend_from_slice(&0u32.to_be_bytes());
+    body.extend_from_slice(&[0; GEOMETRY_LEN]);
+    body.extend_from_slice(&(picture.len() as u32).to_be_bytes());
+    body.extend_from_slice(picture);
+    body
+}
+
+pub(crate) const STREAMINFO_TYPE: u8 = 0;
+
+pub(crate) fn flac_block(kind: u8, last: bool, body: &[u8]) -> Vec<u8> {
+    use crate::flactag::FLAC_LAST_BLOCK;
+    let mut out = Vec::from([if last { FLAC_LAST_BLOCK | kind } else { kind }]);
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+    out.extend_from_slice(body);
+    out
+}
+
+/// STREAMINFO coding 44100 Hz stereo: a 20-bit rate at byte 10, then
+/// channels-1 in the 3 bits behind it.
+pub(crate) fn flac_streaminfo() -> Vec<u8> {
+    /// STREAMINFO's body is a fixed 34 bytes.
+    const STREAMINFO_LEN: usize = 34;
+    const SAMPLE_RATE: u32 = 44_100;
+    const CHANNELS: u8 = 2;
+    let mut body = alloc::vec![0u8; STREAMINFO_LEN];
+    body[10] = (SAMPLE_RATE >> 12) as u8;
+    body[11] = ((SAMPLE_RATE >> 4) & 0xFF) as u8;
+    body[12] = (((SAMPLE_RATE & 0x0F) as u8) << 4) | ((CHANNELS - 1) << 1);
+    body
+}

@@ -640,6 +640,14 @@ per-stream caps, in-band codec config and packet timing are one shared
 `StreamCollection` and posts each stream's VorbisComment as a `StreamTag` under
 the same ids.
 
+An embedded picture such as cover art travels as `Tag::Image`, the encoded
+image with its still-image codec, the way GStreamer carries it in its `image`
+tag rather than as a stream. MP4 `covr` items, FLAC `PICTURE` blocks, the
+VorbisComment `METADATA_BLOCK_PICTURE` field and ID3 `APIC` frames read into it,
+and a picture whose media type names no still-image codec is dropped. `flacparse`
+posts a native FLAC header's comments and pictures. The tag writers skip images
+through `TagList::text_tags`.
+
 ### oggmux
 
 `oggmux` is `g2g-plugins::ogg::OggPageWriter` plus the `OggMux` element, the

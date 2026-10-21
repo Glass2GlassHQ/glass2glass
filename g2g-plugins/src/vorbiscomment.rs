@@ -15,6 +15,9 @@ use alloc::vec::Vec;
 
 use g2g_core::{Tag, TagList};
 
+use crate::bereader::be_u32;
+use crate::textencoding::base64_decode;
+
 /// The vendor string written into a block this crate builds.
 pub(crate) const VENDOR: &[u8] = b"g2g";
 
@@ -25,6 +28,10 @@ pub(crate) const VORBIS_COMMENT_MAGIC: &[u8] = b"\x03vorbis";
 pub(crate) const OPUS_TAGS_MAGIC: &[u8] = b"OpusTags";
 /// FLAC metadata block type of a VORBIS_COMMENT block.
 pub(crate) const FLAC_COMMENT_BLOCK_TYPE: u8 = 4;
+/// FLAC metadata block type of a PICTURE block.
+pub(crate) const FLAC_PICTURE_BLOCK_TYPE: u8 = 6;
+// the field an Ogg stream carries a base64 FLAC PICTURE block in
+const PICTURE_FIELD_KEY: &str = "METADATA_BLOCK_PICTURE";
 /// A FLAC metadata block header: the type byte (top bit = last block) and a
 /// 24-bit big-endian body length.
 pub(crate) const FLAC_BLOCK_HEADER_LEN: usize = 4;
@@ -36,8 +43,9 @@ pub(crate) fn vorbis_comment(magic: &[u8], vendor: &[u8], tags: &TagList) -> Vec
     let mut p = Vec::from(magic);
     p.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
     p.extend_from_slice(vendor);
-    p.extend_from_slice(&(tags.len() as u32).to_le_bytes());
-    for tag in tags.tags() {
+    let text_tags: Vec<&Tag> = tags.text_tags().collect();
+    p.extend_from_slice(&(text_tags.len() as u32).to_le_bytes());
+    for tag in text_tags {
         let field = alloc::format!("{}={}", vorbis_key(tag), tag.value_string());
         p.extend_from_slice(&(field.len() as u32).to_le_bytes());
         p.extend_from_slice(field.as_bytes());
@@ -132,12 +140,40 @@ pub(crate) fn parse_comment_body(body: &[u8]) -> TagList {
         };
         pos = end;
         if let Ok(s) = core::str::from_utf8(field) {
-            if let Some((key, value)) = s.split_once('=') {
-                list.push(Tag::from_key_value(key, value));
+            match s.split_once('=') {
+                Some((key, value)) if key.eq_ignore_ascii_case(PICTURE_FIELD_KEY) => {
+                    if let Some(picture) =
+                        base64_decode(value).as_deref().and_then(parse_flac_picture)
+                    {
+                        list.push(picture);
+                    }
+                }
+                Some((key, value)) => list.push(Tag::from_key_value(key, value)),
+                None => {}
             }
         }
     }
     list
+}
+
+// a FLAC PICTURE block body: picture type, media type, description, geometry, then the picture, lengths big-endian
+pub(crate) fn parse_flac_picture(body: &[u8]) -> Option<Tag> {
+    const PICTURE_TYPE_LEN: usize = 4;
+    const LENGTH_LEN: usize = 4;
+    // width, height, colour depth and palette size
+    const GEOMETRY_LEN: usize = 16;
+    let media_type_len = be_u32(body, PICTURE_TYPE_LEN)? as usize;
+    let media_type_start = PICTURE_TYPE_LEN + LENGTH_LEN;
+    let media_type_end = media_type_start.checked_add(media_type_len)?;
+    let media_type = core::str::from_utf8(body.get(media_type_start..media_type_end)?).ok()?;
+    let description_len = be_u32(body, media_type_end)? as usize;
+    let data_len_at = (media_type_end + LENGTH_LEN)
+        .checked_add(description_len)?
+        .checked_add(GEOMETRY_LEN)?;
+    let data_len = be_u32(body, data_len_at)? as usize;
+    let data_start = data_len_at + LENGTH_LEN;
+    let data = body.get(data_start..data_start.checked_add(data_len)?)?;
+    Tag::image(media_type, data.to_vec())
 }
 
 #[cfg(test)]
@@ -181,6 +217,34 @@ mod tests {
         let opus = vorbis_comment(OPUS_TAGS_MAGIC, VENDOR, &TagList::new());
         // Magic, vendor length, vendor, field count: nothing after.
         assert_eq!(opus.len(), OPUS_TAGS_MAGIC.len() + 4 + VENDOR.len() + 4);
+    }
+
+    #[test]
+    fn reads_a_picture_field_and_writes_no_image() {
+        let jpeg = [0xFF, 0xD8, 0xFF];
+        let picture_field = Tag::Other {
+            key: PICTURE_FIELD_KEY.into(),
+            value: crate::textencoding::base64_encode(&crate::testutil::flac_picture_body(
+                "image/jpeg",
+                &jpeg,
+            )),
+        };
+        let written: TagList = [picture_field, Tag::Title("Sine".into())]
+            .into_iter()
+            .collect();
+        let read = parse_vorbis_comment(&vorbis_comment(OPUS_TAGS_MAGIC, VENDOR, &written));
+        assert_eq!(
+            read.tags(),
+            &[
+                Tag::Image {
+                    codec: g2g_core::VideoCodec::Mjpeg,
+                    data: jpeg.to_vec()
+                },
+                Tag::Title("Sine".into())
+            ]
+        );
+        let rewritten = parse_vorbis_comment(&vorbis_comment(OPUS_TAGS_MAGIC, VENDOR, &read));
+        assert_eq!(rewritten.tags(), &[Tag::Title("Sine".into())]);
     }
 
     /// Every prefix of a real block: nothing may panic, and no field is reported

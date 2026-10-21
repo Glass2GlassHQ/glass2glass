@@ -48,9 +48,9 @@ use crate::vorbiscomment::{
 };
 
 /// The 4 bytes a native FLAC stream opens with.
-const FLAC_MARKER: &[u8; 4] = b"fLaC";
+pub(crate) const FLAC_MARKER: &[u8; 4] = b"fLaC";
 /// Metadata block header bit 7: this is the last block before the audio.
-const FLAC_LAST_BLOCK: u8 = 0x80;
+pub(crate) const FLAC_LAST_BLOCK: u8 = 0x80;
 /// A metadata block's length field is 24 bits, so nothing longer can be written.
 const MAX_FLAC_BLOCK_LEN: usize = (1 << 24) - 1;
 
@@ -116,15 +116,15 @@ impl FlacTag {
 }
 
 /// One metadata block of a FLAC header, as it sits in the stream.
-struct MetadataBlock<'a> {
-    kind: u8,
-    body: &'a [u8],
+pub(crate) struct MetadataBlock<'a> {
+    pub(crate) kind: u8,
+    pub(crate) body: &'a [u8],
 }
 
 /// Split a complete FLAC header into its metadata blocks. `None` when a block
 /// header or body runs past the buffer, which [`complete_header_len`] has
 /// already ruled out for a header it accepted.
-fn metadata_blocks(header: &[u8]) -> Option<Vec<MetadataBlock<'_>>> {
+pub(crate) fn metadata_blocks(header: &[u8]) -> Option<Vec<MetadataBlock<'_>>> {
     if header.get(..FLAC_MARKER.len())? != FLAC_MARKER {
         return None;
     }
@@ -317,34 +317,14 @@ mod tests {
     use crate::flacparse::parse_streaminfo;
     use crate::vorbiscomment::parse_comment_body;
 
-    /// STREAMINFO's body is a fixed 34 bytes.
-    const STREAMINFO_LEN: usize = 34;
+    use crate::testutil::{flac_block as block, flac_streaminfo as streaminfo, STREAMINFO_TYPE};
+
     /// FLAC metadata block types this test builds around the comment one.
-    const STREAMINFO_TYPE: u8 = 0;
     const PADDING_TYPE: u8 = 1;
     /// The vendor string the incoming header declares, which the rewrite keeps.
     const UPSTREAM_VENDOR: &[u8] = b"reference libFLAC 1.4.3";
     /// Audio bytes standing in for the frames behind the header.
     const AUDIO: &[u8] = b"\xff\xf8\x69\x18 frame bytes";
-
-    fn block(kind: u8, last: bool, body: &[u8]) -> Vec<u8> {
-        let mut out = Vec::from([if last { FLAC_LAST_BLOCK | kind } else { kind }]);
-        out.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
-        out.extend_from_slice(body);
-        out
-    }
-
-    /// STREAMINFO coding 44100 Hz stereo: a 20-bit rate at byte 10, then
-    /// channels-1 in the 3 bits behind it.
-    fn streaminfo() -> Vec<u8> {
-        const SAMPLE_RATE: u32 = 44_100;
-        const CHANNELS: u8 = 2;
-        let mut body = alloc::vec![0u8; STREAMINFO_LEN];
-        body[10] = (SAMPLE_RATE >> 12) as u8;
-        body[11] = ((SAMPLE_RATE >> 4) & 0xFF) as u8;
-        body[12] = (((SAMPLE_RATE & 0x0F) as u8) << 4) | ((CHANNELS - 1) << 1);
-        body
-    }
 
     fn flac_stream(comment_tags: &TagList) -> Vec<u8> {
         let mut stream = Vec::from(*FLAC_MARKER);

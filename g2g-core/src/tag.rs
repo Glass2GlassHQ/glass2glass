@@ -33,6 +33,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::VideoCodec;
+
 /// One stream-metadata tag. The typed variants are the cross-container common
 /// keys (VorbisComment / Matroska / FLV `onMetaData` all define them under the
 /// same names); [`Tag::Number`] carries an integer-valued key (an MP4 `trkn` /
@@ -70,6 +72,11 @@ pub enum Tag {
         key: String,
         value: String,
     },
+    // an embedded picture such as cover art, still encoded, GStreamer's `image` tag
+    Image {
+        codec: VideoCodec,
+        data: Vec<u8>,
+    },
 }
 
 impl Tag {
@@ -101,6 +108,7 @@ impl Tag {
             Tag::Comment(_) => Cow::Borrowed("comment"),
             Tag::Number { key, .. } | Tag::Other { key, .. } => Cow::Borrowed(key),
             Tag::Freeform { namespace, key, .. } => Cow::Owned(format!("{namespace}:{key}")),
+            Tag::Image { .. } => Cow::Borrowed("image"),
         }
     }
 
@@ -118,7 +126,28 @@ impl Tag {
             | Tag::Freeform { value: v, .. }
             | Tag::Other { value: v, .. } => Cow::Borrowed(v),
             Tag::Number { value, .. } => Cow::Owned(format!("{value}")),
+            Tag::Image { codec, data } => Cow::Owned(format!(
+                "{}, {} bytes",
+                crate::caps::codec_gst_media_type(*codec),
+                data.len()
+            )),
         }
+    }
+
+    // `None` for a media type that names no still-image codec
+    pub fn image(media_type: &str, data: Vec<u8>) -> Option<Tag> {
+        // ID3 and FLAC writers also label JPEG as image/jpg
+        let media_type = if media_type.eq_ignore_ascii_case("image/jpg") {
+            "image/jpeg"
+        } else {
+            media_type
+        };
+        let codec = [VideoCodec::Mjpeg, VideoCodec::Png, VideoCodec::WebP]
+            .into_iter()
+            .find(|codec| {
+                crate::caps::codec_gst_media_type(*codec).eq_ignore_ascii_case(media_type)
+            })?;
+        Some(Tag::Image { codec, data })
     }
 
     /// Map a `key`/`value` pair to a typed tag, or [`Tag::Other`] when the key
@@ -173,6 +202,13 @@ impl TagList {
     /// The tags in insertion order.
     pub fn tags(&self) -> &[Tag] {
         &self.tags
+    }
+
+    // the tags a container with only text metadata fields can write
+    pub fn text_tags(&self) -> impl Iterator<Item = &Tag> {
+        self.tags
+            .iter()
+            .filter(|tag| !matches!(tag, Tag::Image { .. }))
     }
 }
 
@@ -281,6 +317,27 @@ mod tests {
         assert_eq!(f.key(), "com.apple.iTunes:MOOD");
         assert_eq!(f.value_string(), "calm");
         assert_eq!(Tag::Title("T".into()).key(), "title");
+    }
+
+    #[test]
+    fn images_carry_their_codec_and_stay_out_of_text_tags() {
+        let jpeg = Tag::image("image/jpg", Vec::from([0xFF, 0xD8, 0xFF])).expect("a JPEG");
+        assert_eq!(
+            jpeg,
+            Tag::Image {
+                codec: VideoCodec::Mjpeg,
+                data: Vec::from([0xFF, 0xD8, 0xFF])
+            }
+        );
+        assert_eq!(jpeg.key(), "image");
+        assert_eq!(jpeg.value_string(), "image/jpeg, 3 bytes");
+        assert_eq!(Tag::image("image/bmp", Vec::new()), None);
+        assert_eq!(Tag::image("-->", Vec::new()), None);
+        let list: TagList = [jpeg, Tag::Title("T".into())].into_iter().collect();
+        assert_eq!(
+            list.text_tags().collect::<Vec<_>>(),
+            [&Tag::Title("T".into())]
+        );
     }
 
     /// The conflict rule: the stream's tag wins for a key both scopes set, and a
