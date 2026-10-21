@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Software reference dumps for the Vulkan decode tests (M1182): one raw planar
 # ffmpeg decode per fixture, written as <fixture stem>.yuv into the output
-# directory, every decoded frame at its own size. Point G2G_VULKAN_REF_DIR at that directory and the tests compare
+# directory, every decoded frame once and at its own size. Point G2G_VULKAN_REF_DIR at that directory and the tests compare
 # their hardware output against these bit for bit instead of checking geometry
 # only.
 #
@@ -35,6 +35,7 @@ FIXTURES=(
   "h265_320x180.hevc yuv420p"
   "h265_304x180_main10_crop.hevc yuv420p10le"
   "av1-1-b8-22-svc-L2T2_2tu.ivf yuv420p"
+  "av1_320x256_l2t3_op0_base.ivf yuv420p"
   "av1_192x192_coded_96x96.ivf yuv420p"
 )
 
@@ -54,6 +55,6 @@ for entry in "${FIXTURES[@]}"; do
   read -r fixture pixel_format <<<"$entry"
   output="$OUTPUT_DIRECTORY/${fixture%.*}.yuv"
   ffmpeg -y -loglevel error -i "$FIXTURE_DIRECTORY/$fixture" \
-    -noautoscale -f rawvideo -pix_fmt "$pixel_format" "$output"
+    -fps_mode passthrough -noautoscale -f rawvideo -pix_fmt "$pixel_format" "$output"
   echo "$output $(stat -c '%s' "$output") bytes ($pixel_format)"
 done

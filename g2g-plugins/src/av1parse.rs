@@ -299,6 +299,8 @@ pub struct Av1SeqHeaderDetail {
     pub decoder_model_info_present_flag: bool,
     pub initial_display_delay_present_flag: bool,
     pub operating_points_cnt_minus_1: u8,
+    // the layers a decoder decodes by default, 0 for a stream without layers
+    pub operating_point_idc0: u16,
     pub frame_width_bits_minus_1: u8,
     pub frame_height_bits_minus_1: u8,
     pub tools: Av1SequenceTools,
@@ -413,13 +415,40 @@ fn obu_ranges(data: &[u8]) -> Option<Vec<ObuRange>> {
     Some(out)
 }
 
-/// One OBU of a temporal unit: its type and payload (past header and size).
+/// One OBU of a temporal unit: its type, its `obu_extension_header` ids when
+/// it carries one, and its payload (past header and size).
 // only the Vulkan decoder reads every field
 #[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Obu<'a> {
     pub obu_type: u8,
+    pub extension: Option<ObuExtension>,
     pub payload: &'a [u8],
+}
+
+#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ObuExtension {
+    pub temporal_id: u8,
+    pub spatial_id: u8,
+}
+
+#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+impl Obu<'_> {
+    // spec 5.3.1: a decoder drops every OBU outside its operating point's layers
+    pub(crate) fn in_operating_point(&self, operating_point_idc: u16) -> bool {
+        let Some(extension) = self.extension else {
+            return true;
+        };
+        let applies_to_every_layer =
+            matches!(self.obu_type, OBU_SEQUENCE_HEADER | OBU_TEMPORAL_DELIMITER);
+        if operating_point_idc == 0 || applies_to_every_layer {
+            return true;
+        }
+        let in_temporal_layer = (operating_point_idc >> extension.temporal_id) & 1 == 1;
+        let in_spatial_layer = (operating_point_idc >> (extension.spatial_id + 8)) & 1 == 1;
+        in_temporal_layer && in_spatial_layer
+    }
 }
 
 /// The OBUs of one temporal unit, empty when its framing is malformed.
@@ -430,9 +459,22 @@ pub(crate) fn obus(data: &[u8]) -> Vec<Obu<'_>> {
         .iter()
         .map(|o| Obu {
             obu_type: o.obu_type,
+            extension: obu_extension(data, o.start),
             payload: &data[o.payload..o.end],
         })
         .collect()
+}
+
+// `start` is an OBU `obu_ranges` accepted, so its extension byte is present
+fn obu_extension(data: &[u8], start: usize) -> Option<ObuExtension> {
+    let has_extension = (data[start] >> 2) & 1 == 1;
+    has_extension.then(|| {
+        let extension = data[start + 1];
+        ObuExtension {
+            temporal_id: extension >> 5,
+            spatial_id: (extension >> 3) & 3,
+        }
+    })
 }
 
 /// Whether a temporal unit carries a sequence-header OBU. The MP4 demuxers use
@@ -707,6 +749,7 @@ fn parse_sequence_header_at(payload: &[u8], strict: bool) -> Option<Av1SeqHeader
     let mut decoder_model_info_present = 0u32;
     let mut initial_display_delay_present = 0u32;
     let mut operating_points_cnt_minus_1 = 0u32;
+    let mut operating_point_idc0 = 0u16;
     if reduced_still_picture_header == 1 {
         level = br.read_bits(5)? as u8;
     } else {
@@ -729,7 +772,7 @@ fn parse_sequence_header_at(payload: &[u8], strict: bool) -> Option<Av1SeqHeader
         initial_display_delay_present = br.read_bit()?;
         operating_points_cnt_minus_1 = br.read_bits(5)?;
         for i in 0..=operating_points_cnt_minus_1 {
-            br.read_bits(12)?; // operating_point_idc[i]
+            let operating_point_idc = br.read_bits(12)? as u16;
             let seq_level_idx = br.read_bits(5)?;
             let seq_tier = if seq_level_idx > 7 {
                 br.read_bit()? // seq_tier[i]
@@ -738,6 +781,7 @@ fn parse_sequence_header_at(payload: &[u8], strict: bool) -> Option<Av1SeqHeader
             };
             if i == 0 {
                 // The first operating point is what `av1C` describes.
+                operating_point_idc0 = operating_point_idc;
                 level = seq_level_idx as u8;
                 tier = seq_tier as u8;
             }
@@ -803,6 +847,7 @@ fn parse_sequence_header_at(payload: &[u8], strict: bool) -> Option<Av1SeqHeader
         decoder_model_info_present_flag: decoder_model_info_present == 1,
         initial_display_delay_present_flag: initial_display_delay_present == 1,
         operating_points_cnt_minus_1: operating_points_cnt_minus_1 as u8,
+        operating_point_idc0,
         frame_width_bits_minus_1: frame_width_bits_minus_1 as u8,
         frame_height_bits_minus_1: frame_height_bits_minus_1 as u8,
         tools,
@@ -1552,6 +1597,7 @@ mod tests {
                 decoder_model_info_present_flag: false,
                 initial_display_delay_present_flag: false,
                 operating_points_cnt_minus_1: 0,
+                operating_point_idc0: 0,
                 frame_width_bits_minus_1: (bits_for(GEOMETRY.0 - 1) - 1) as u8,
                 frame_height_bits_minus_1: (bits_for(GEOMETRY.1 - 1) - 1) as u8,
                 tools,
@@ -1825,7 +1871,7 @@ mod tests {
     }
 
     #[test]
-    fn operating_points_take_level_and_tier_from_the_first() {
+    fn operating_points_take_level_tier_and_layers_from_the_first() {
         let mut w = BitWriter::default();
         w.write_bits(0, 3); // seq_profile
         w.write_bit(0); // still_picture
@@ -1845,7 +1891,9 @@ mod tests {
         w.write_bits(1, 5); // operating_points_cnt_minus_1
                             // the first point has a level with a tier bit, the second the highest without
         let (first_level, first_tier, second_level) = (9, 1, 7);
-        w.write_bits(0, 12); // operating_point_idc[0]
+        // temporal layers 0 and 1 of spatial layer 0, then temporal layer 0 alone
+        let (first_layers, second_layers) = (0x103, 0x101);
+        w.write_bits(first_layers, 12); // operating_point_idc[0]
         w.write_bits(first_level, 5);
         w.write_bit(first_tier);
         w.write_bit(1); // decoder_model_present_for_this_op[0]
@@ -1854,7 +1902,7 @@ mod tests {
         w.write_bit(1); // low_delay_mode_flag
         w.write_bit(1); // initial_display_delay_present_for_this_op[0]
         w.write_bits(3, 4); // initial_display_delay_minus_1[0]
-        w.write_bits(0, 12); // operating_point_idc[1]
+        w.write_bits(second_layers, 12); // operating_point_idc[1]
         w.write_bits(second_level, 5);
         w.write_bit(1); // decoder_model_present_for_this_op[1]
         w.write_bits(500, buffer_delay_length_minus_1 + 1); // decoder_buffer_delay
@@ -1868,6 +1916,7 @@ mod tests {
         expected.level = first_level as u8;
         expected.tier = first_tier as u8;
         let expected_detail = detail(&mut expected);
+        expected_detail.operating_point_idc0 = first_layers as u16;
         expected_detail.timing_info_present_flag = true;
         expected_detail.decoder_model_info_present_flag = true;
         expected_detail.initial_display_delay_present_flag = true;
@@ -1972,19 +2021,54 @@ mod tests {
             OBU_EXTENSION,
             0xAA,
         ]);
-        let walked: Vec<(u8, &[u8])> = obus(&unit)
+        let walked: Vec<(u8, Option<ObuExtension>, &[u8])> = obus(&unit)
             .iter()
-            .map(|obu| (obu.obu_type, obu.payload))
+            .map(|obu| (obu.obu_type, obu.extension, obu.payload))
             .collect();
+        let extension = Some(ObuExtension {
+            temporal_id: 1,
+            spatial_id: 0,
+        });
         assert_eq!(
             walked,
             vec![
-                (OBU_SEQUENCE_HEADER, &payload[..]),
-                (OBU_FRAME, &[0xAA][..])
+                (OBU_SEQUENCE_HEADER, extension, &payload[..]),
+                (OBU_FRAME, extension, &[0xAA][..])
             ]
         );
         let info = extract_seq_header(&unit).expect("sequence header parses");
         assert_eq!((info.width, info.height), GEOMETRY);
+    }
+
+    #[test]
+    fn operating_point_keeps_only_its_own_layers() {
+        // temporal layers 0 and 1 of spatial layer 0
+        const BASE_LAYER_TWO_RATES: u16 = 0x103;
+        let obu = |obu_type, temporal_id, spatial_id| Obu {
+            obu_type,
+            extension: Some(ObuExtension {
+                temporal_id,
+                spatial_id,
+            }),
+            payload: &[],
+        };
+        let kept = |obu: Obu<'_>| obu.in_operating_point(BASE_LAYER_TWO_RATES);
+        assert!(kept(obu(OBU_FRAME, 0, 0)));
+        assert!(kept(obu(OBU_FRAME, 1, 0)));
+        assert!(!kept(obu(OBU_FRAME, 2, 0)), "temporal layer 2 is outside");
+        assert!(!kept(obu(OBU_FRAME, 0, 1)), "spatial layer 1 is outside");
+        assert!(kept(obu(OBU_SEQUENCE_HEADER, 2, 1)));
+        assert!(kept(obu(OBU_TEMPORAL_DELIMITER, 2, 1)));
+        assert!(
+            obu(OBU_FRAME, 2, 1).in_operating_point(0),
+            "a stream without layers keeps every OBU"
+        );
+        let without_extension = Obu {
+            obu_type: OBU_FRAME,
+            extension: None,
+            payload: &[],
+        };
+        assert!(kept(without_extension));
     }
 
     #[test]

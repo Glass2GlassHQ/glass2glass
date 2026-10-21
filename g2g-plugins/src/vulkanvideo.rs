@@ -2000,7 +2000,18 @@ const OBU_FRAME: u8 = 6;
 // INTER / INTRA_ONLY / SWITCH are read as raw f(2) values.
 const AV1_FRAME_TYPE_KEY: u8 = 0;
 
-use crate::av1parse::{obus as av1_obus, SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS};
+use crate::av1parse::{obus as av1_obus, Obu, SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS};
+
+// the decoder decodes operating point 0, as dav1d and aomdec do by default
+fn av1_operating_point_obus<'s>(
+    stream: &'s [u8],
+    seq: &Av1SequenceHeader,
+) -> impl Iterator<Item = Obu<'s>> {
+    let operating_point_idc = seq.operating_point_idc0;
+    av1_obus(stream)
+        .into_iter()
+        .filter(move |obu| obu.in_operating_point(operating_point_idc))
+}
 
 /// Parsed AV1 color config (spec 5.5.2), the subset needed for the Std mapping.
 #[derive(Debug, Clone)]
@@ -2031,6 +2042,7 @@ pub struct Av1SequenceHeader {
     pub decoder_model_info_present_flag: bool,
     pub initial_display_delay_present_flag: bool,
     pub operating_points_cnt_minus_1: u8,
+    pub operating_point_idc0: u16,
     pub seq_level_idx0: u8,
     pub seq_tier0: u8,
     pub frame_width_bits_minus_1: u8,
@@ -2094,6 +2106,7 @@ pub fn parse_av1_sequence_header(payload: &[u8]) -> Option<Av1SequenceHeader> {
         decoder_model_info_present_flag: detail.decoder_model_info_present_flag,
         initial_display_delay_present_flag: detail.initial_display_delay_present_flag,
         operating_points_cnt_minus_1: detail.operating_points_cnt_minus_1,
+        operating_point_idc0: detail.operating_point_idc0,
         seq_level_idx0: header.level,
         seq_tier0: header.tier,
         frame_width_bits_minus_1: detail.frame_width_bits_minus_1,
@@ -13233,7 +13246,8 @@ impl<'s> Av1CodedFrame<'s> {
 /// `show_existing_frame` -> `ShowExisting`) and report whether it needs the
 /// reorder-aware path (any `show_existing_frame`, any coded frame with
 /// `show_frame == 0`, i.e. an alt-ref, any split frame, or a temporal unit with
-/// more than one shown frame). Only the last shown frame of a temporal unit is
+/// more than one shown frame). The walk skips every OBU outside operating
+/// point 0. Only the last shown frame of a temporal unit is
 /// marked for output: in a scalable stream that is its highest spatial layer,
 /// as aomdec and dav1d with `all_layers` off emit. A temporal unit ends at a
 /// temporal delimiter or the end of `stream`. The pipelined
@@ -13251,7 +13265,7 @@ fn av1_scan_ops<'s>(
     let mut collecting: Option<usize> = None;
     // index into `ops` of the latest shown frame of the current temporal unit
     let mut last_shown: Option<usize> = None;
-    for obu in av1_obus(stream) {
+    for obu in av1_operating_point_obus(stream, seq) {
         match obu.obu_type {
             OBU_TEMPORAL_DELIMITER => {
                 collecting = None;
@@ -13581,8 +13595,9 @@ impl Av1DpbDecoder {
         Ok(phys)
     }
 
-    /// Collect the frame OBU payloads (decoding order) for the pipelined fast path.
-    /// Only `OBU_FRAME` (combined frame header + tile group) is handled; a separate
+    /// Collect the frame OBU payloads (decoding order) of operating point 0 for the
+    /// pipelined fast path. Only `OBU_FRAME` (combined frame header + tile group)
+    /// is handled; a separate
     /// `OBU_FRAME_HEADER` (+ `OBU_TILE_GROUP`, or a `show_existing_frame`) is
     /// rejected here, so the pipelined path only runs on an all-shown stream (the
     /// reorder-aware [`decode_all`](Self::decode_all) handles the rest).
@@ -13591,7 +13606,7 @@ impl Av1DpbDecoder {
         stream: &'s [u8],
     ) -> Result<alloc::vec::Vec<&'s [u8]>, VulkanVideoError> {
         let mut frames = alloc::vec::Vec::new();
-        for obu in av1_obus(stream) {
+        for obu in av1_operating_point_obus(stream, &self.seq) {
             match obu.obu_type {
                 OBU_FRAME => frames.push(obu.payload),
                 OBU_FRAME_HEADER => return Err(VulkanVideoError::UnsupportedStream),

@@ -26,6 +26,11 @@ const HALF_CODED_SIZE: (u32, u32) = (96, 96);
 // the second pass starts on the key frame again, so the size returns to the sequence's
 const HALF_CODED_PASSES: usize = 2;
 
+// tools/av1-operating-point-fixture.sh: operating point 0 is the 160x128 base layer of a 320x256 sequence
+const BASE_LAYER_FIXTURE: &str = "av1_320x256_l2t3_op0_base.ivf";
+const BASE_LAYER_IVF: &[u8] = include_bytes!("fixtures/av1_320x256_l2t3_op0_base.ivf");
+const BASE_LAYER_SIZE: (u32, u32) = (160, 128);
+
 const AV1_BIT_DEPTH: u8 = 8;
 
 // libtest runs these in parallel and concurrent instance creation SIGSEGVs the NVIDIA loader
@@ -272,5 +277,22 @@ fn frames_coded_below_the_sequence_size_go_out_at_their_own_size() {
         HALF_CODED_PASSES,
         &expected_caps_sizes,
         &expected_frame_sizes,
+    );
+}
+
+#[test]
+fn a_base_layer_below_the_sequence_size_goes_out_at_its_own_size() {
+    // operating point 0 leaves every other temporal unit without a frame
+    const BASE_LAYER_PICTURES: usize = 3;
+    let _gpu = gpu_lock();
+    if !decodable(BASE_LAYER_SIZE) {
+        return;
+    }
+    assert_frames_keep_their_size(
+        BASE_LAYER_IVF,
+        BASE_LAYER_FIXTURE,
+        1,
+        &[BASE_LAYER_SIZE],
+        &[BASE_LAYER_SIZE; BASE_LAYER_PICTURES],
     );
 }

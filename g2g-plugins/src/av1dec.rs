@@ -500,6 +500,54 @@ macro_rules! av1_decoder {
                     .count();
                 assert_eq!(pictures, temporal_units, "one picture per temporal unit");
             }
+
+            // tools/av1-operating-point-fixture.sh: a 320x256 L2T3 stream whose operating
+            // point 0 is spatial layer 0 at temporal layers 0 and 1
+            const OPERATING_POINT_FIXTURE: &[u8] =
+                include_bytes!("../tests/fixtures/av1_320x256_l2t3_op0_base.ivf");
+            const BASE_LAYER_SIZE: (u32, u32) = (160, 128);
+            // temporal units 0, 2 and 4 carry temporal layers 0 and 1
+            const OPERATING_POINT_PICTURES: usize = 3;
+
+            #[test]
+            fn a_scalable_stream_decodes_operating_point_zero_only() {
+                let demuxed = run(
+                    &mut IvfDemux::new(),
+                    &Caps::ByteStream { encoding: ByteStreamEncoding::Ivf },
+                    &[OPERATING_POINT_FIXTURE],
+                );
+                let coded = first_caps(&demuxed.packets).expect("the demuxer reports the stream");
+                let mut decoder = $ty::new();
+                decoder.configure_pipeline(&coded).unwrap();
+                let mut sink = CollectSink::default();
+                let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+                for packet in demuxed.packets {
+                    runtime.block_on(decoder.process(packet, &mut sink)).unwrap();
+                }
+                runtime.block_on(decoder.process(PipelinePacket::Eos, &mut sink)).unwrap();
+
+                let output_sizes: Vec<(Dim, Dim)> = sink
+                    .packets
+                    .iter()
+                    .filter_map(|packet| match packet {
+                        PipelinePacket::CapsChanged(Caps::RawVideo { width, height, .. }) => {
+                            Some((width.clone(), height.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let (base_width, base_height) = BASE_LAYER_SIZE;
+                assert_eq!(
+                    output_sizes,
+                    alloc::vec![(Dim::Fixed(base_width), Dim::Fixed(base_height))]
+                );
+                let pictures = sink
+                    .packets
+                    .iter()
+                    .filter(|packet| matches!(packet, PipelinePacket::DataFrame(_)))
+                    .count();
+                assert_eq!(pictures, OPERATING_POINT_PICTURES);
+            }
         }
     };
 }
