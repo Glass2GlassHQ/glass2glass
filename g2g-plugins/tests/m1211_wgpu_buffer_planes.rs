@@ -447,14 +447,43 @@ async fn unaligned_tight_nv12_exports_unchanged() {
     assert_eq!(system_bytes(&frame), tight);
 }
 
-// one dma-buf stride cannot describe luma rows one byte narrower than the chroma rows
-#[test]
-fn odd_width_tight_nv12_export_is_refused() {
-    let frame_caps = caps(RawVideoFormat::Nv12, ODD_WIDTH, HEIGHT);
-    assert!(matches!(
-        WgpuToDmaBuf::new().configure_pipeline(&frame_caps),
-        Err(G2gError::CapsMismatch)
-    ));
+// one dma-buf stride covers the odd-width luma rows only once they are padded to the chroma row
+#[tokio::test]
+async fn odd_size_tight_frames_export_at_the_row_stride() {
+    let _gpu = GPU_LOCK.lock().await;
+    for format in [RawVideoFormat::Nv12, RawVideoFormat::I420] {
+        let size = format.unpadded_frame_bytes(ODD_WIDTH, ODD_HEIGHT).unwrap() as usize;
+        let tight: Vec<u8> = (0..size).map(|index| (index * 7 + 1) as u8).collect();
+        let mut export = WgpuToDmaBuf::new();
+        let Ok((device, queue)) = export.gpu().await else {
+            eprintln!("no Vulkan export device; skipping");
+            return;
+        };
+        let buffer = source_buffer(&device, &tight);
+        let frame_caps = caps(format, ODD_WIDTH, ODD_HEIGHT);
+        let exported = push_through(
+            &mut export,
+            &frame_caps,
+            MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(&device, &queue, buffer, size)),
+        )
+        .await
+        .expect("exports");
+        let MemoryDomain::DmaBuf(dmabuf) = &exported.domain else {
+            panic!("expected a dma-buf, got {:?}", exported.domain.kind());
+        };
+        assert_eq!(
+            Some(dmabuf.stride),
+            format.row_stride(ODD_WIDTH),
+            "{format:?}"
+        );
+        let reimported = push_through(&mut DmaBufToWgpu::new(), &frame_caps, exported.domain)
+            .await
+            .expect("re-imports");
+        let frame = push_through(&mut WgpuDownload::new(), &frame_caps, reimported.domain)
+            .await
+            .expect("downloads");
+        assert_eq!(system_bytes(&frame), tight, "{format:?}");
+    }
 }
 
 struct ZeroClock;

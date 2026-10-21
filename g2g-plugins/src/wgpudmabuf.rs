@@ -25,7 +25,10 @@
 //!
 //! A buffer carrying a [`PlaneLayout`](g2g_core::meta::PlaneLayout) (a padded
 //! import from [`DmaBufToWgpu`](crate::dmabufwgpu::DmaBufToWgpu)) is exported in
-//! that layout, its plane-0 stride and offset stamped on the dma-buf.
+//! that layout, its plane-0 stride and offset stamped on the dma-buf. A tightly
+//! packed buffer is exported at [`RawVideoFormat::row_stride`], one stride for
+//! every row: an odd-width NV12 or I420 frame, whose chroma row does not fit
+//! the tight luma stride, has its rows padded to it by a compute pass.
 //!
 //! # Lifetime
 //!
@@ -84,6 +87,7 @@ use g2g_core::{
 use crate::dmabufwgpu::{
     dmabuf_frame_caps, single_stride_layout, DmaBufWgpuBuffer, DMABUF_FRAME_FORMATS,
 };
+use crate::paddedrows::{padded_planes, PaddedPlane};
 use crate::wgpubuffer::{whole_word_size, PlainWgpuBuffer};
 
 fn gpu_err() -> G2gError {
@@ -103,6 +107,242 @@ struct ExportSlot {
 
 fn supported(format: RawVideoFormat) -> bool {
     DMABUF_FRAME_FORMATS.contains(&format)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ExportLayout {
+    offset: u32,
+    stride: u32,
+    // bytes the planes span with every row at `stride`
+    size: u64,
+    repack: Option<RowRepack>,
+}
+
+// P010 has no row_stride, and 0 is single_stride_layout's tight stride
+fn tight_input_export_stride(format: RawVideoFormat, width: u32) -> u32 {
+    format.row_stride(width).unwrap_or(0)
+}
+
+fn tight_input_export_layout(
+    format: RawVideoFormat,
+    width: u32,
+    height: u32,
+) -> Result<ExportLayout, G2gError> {
+    let (layout, size) = single_stride_layout(
+        format,
+        width,
+        height,
+        0,
+        tight_input_export_stride(format, width),
+    )
+    .ok_or(G2gError::CapsMismatch)?;
+    let stride = layout.plane(0).ok_or(G2gError::CapsMismatch)?.stride;
+    let (width_samples, height_rows) = (width as usize, height as usize);
+    let tight =
+        padded_planes(format, width_samples, height_rows, 0, 0).ok_or(G2gError::CapsMismatch)?;
+    let padded = padded_planes(format, width_samples, height_rows, 0, stride)
+        .ok_or(G2gError::CapsMismatch)?;
+    let repack = match tight == padded {
+        true => None,
+        false => Some(row_repack(&tight, &padded, size).ok_or(G2gError::CapsMismatch)?),
+    };
+    Ok(ExportLayout {
+        offset: 0,
+        stride: u32::try_from(stride).map_err(|_| G2gError::CapsMismatch)?,
+        size,
+        repack,
+    })
+}
+
+const REPACK_PLANES: usize = 3;
+// four words per plane, then plane count, destination size and two padding words
+const REPACK_PARAMETER_WORDS: usize = REPACK_PLANES * 4 + 4;
+const REPACK_WORKGROUP_WORDS: u32 = 256;
+
+#[derive(Debug, PartialEq, Eq)]
+struct RowRepack {
+    parameters: [u32; REPACK_PARAMETER_WORDS],
+    source_bytes: u64,
+}
+
+fn row_repack(
+    tight: &[PaddedPlane],
+    padded: &[PaddedPlane],
+    destination_bytes: u64,
+) -> Option<RowRepack> {
+    if tight.len() > REPACK_PLANES || tight.len() != padded.len() {
+        return None;
+    }
+    let mut parameters = [0u32; REPACK_PARAMETER_WORDS];
+    for (index, (source, destination)) in tight.iter().zip(padded).enumerate() {
+        let plane = [
+            destination.offset,
+            destination.stride,
+            source.offset,
+            source.row_bytes,
+        ];
+        for (word, value) in parameters[index * 4..].iter_mut().zip(plane) {
+            *word = u32::try_from(value).ok()?;
+        }
+    }
+    parameters[REPACK_PLANES * 4] = u32::try_from(tight.len()).ok()?;
+    parameters[REPACK_PLANES * 4 + 1] = u32::try_from(destination_bytes).ok()?;
+    let last = tight.last()?;
+    let source_bytes = last
+        .offset
+        .checked_add(last.row_bytes.checked_mul(last.rows)?)?;
+    Some(RowRepack {
+        parameters,
+        source_bytes: u64::try_from(source_bytes).ok()?,
+    })
+}
+
+// one invocation per destination word, row padding bytes are written as zero
+fn repack_shader_source() -> alloc::string::String {
+    alloc::format!(
+        r#"
+struct Plane {{
+    destination_offset: u32,
+    destination_stride: u32,
+    source_offset: u32,
+    row_bytes: u32,
+}}
+
+struct Repack {{
+    planes: array<Plane, {REPACK_PLANES}>,
+    plane_count: u32,
+    destination_size: u32,
+}}
+
+@group(0) @binding(0) var<uniform> repack: Repack;
+@group(0) @binding(1) var<storage, read> source: array<u32>;
+@group(0) @binding(2) var<storage, read_write> destination: array<u32>;
+
+fn destination_byte(position: u32) -> u32 {{
+    if position >= repack.destination_size {{
+        return 0u;
+    }}
+    var plane = repack.planes[0];
+    for (var index = 1u; index < repack.plane_count; index++) {{
+        if position >= repack.planes[index].destination_offset {{
+            plane = repack.planes[index];
+        }}
+    }}
+    let within = position - plane.destination_offset;
+    let column = within % plane.destination_stride;
+    if column >= plane.row_bytes {{
+        return 0u;
+    }}
+    let source_position = plane.source_offset + within / plane.destination_stride * plane.row_bytes + column;
+    return (source[source_position / 4u] >> (source_position % 4u * 8u)) & 0xffu;
+}}
+
+@compute @workgroup_size({REPACK_WORKGROUP_WORDS})
+fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {{
+    let word = id.y * groups.x * {REPACK_WORKGROUP_WORDS}u + id.x;
+    if word >= arrayLength(&destination) {{
+        return;
+    }}
+    var word_value = 0u;
+    for (var lane = 0u; lane < 4u; lane++) {{
+        word_value |= destination_byte(word * 4u + lane) << (lane * 8u);
+    }}
+    destination[word] = word_value;
+}}
+"#
+    )
+}
+
+#[derive(Debug)]
+struct RowRepacker {
+    pipeline: wgpu::ComputePipeline,
+    parameters: wgpu::Buffer,
+    // a copy of the tight input, since a producer's buffer has no STORAGE usage
+    source: wgpu::Buffer,
+}
+
+impl RowRepacker {
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        repack: &RowRepack,
+    ) -> Result<Self, G2gError> {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("dmabuf-export-repack"),
+            source: wgpu::ShaderSource::Wgsl(repack_shader_source().into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("dmabuf-export-repack"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let parameter_bytes: alloc::vec::Vec<u8> = repack
+            .parameters
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        let parameters = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dmabuf-export-repack-parameters"),
+            size: parameter_bytes.len() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&parameters, 0, &parameter_bytes);
+        let source = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dmabuf-export-repack-source"),
+            size: whole_word_size(repack.source_bytes).ok_or(G2gError::CapsMismatch)?,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Ok(Self {
+            pipeline,
+            parameters,
+            source,
+        })
+    }
+
+    fn record(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        input: &wgpu::Buffer,
+        destination: &wgpu::Buffer,
+    ) -> Result<(), G2gError> {
+        encoder.copy_buffer_to_buffer(input, 0, &self.source, 0, self.source.size());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("dmabuf-export-repack"),
+            layout: &self.pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.parameters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.source.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: destination.as_entire_binding(),
+                },
+            ],
+        });
+        let words = destination.size() / core::mem::size_of::<u32>() as u64;
+        let workgroups = u32::try_from(words.div_ceil(REPACK_WORKGROUP_WORDS.into()))
+            .map_err(|_| G2gError::CapsMismatch)?;
+        let columns = workgroups.min(device.limits().max_compute_workgroups_per_dimension);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("dmabuf-export-repack"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(columns, workgroups.div_ceil(columns), 1);
+        Ok(())
+    }
 }
 
 /// Recover the input `wgpu::Buffer` and the device and queue it lives on from a
@@ -184,6 +424,7 @@ pub struct WgpuToDmaBuf {
     sync_fd: Option<SyncFd>,
     /// Monotonic timeline value; frame N signals `signal_value` = N.
     signal_value: u64,
+    row_repacker: Option<RowRepacker>,
     /// The exportable buffers, all `ring_size` bytes, and the slot the next
     /// frame is copied into.
     ring: alloc::vec::Vec<ExportSlot>,
@@ -211,6 +452,7 @@ impl WgpuToDmaBuf {
             semaphore: None,
             sync_fd: None,
             signal_value: 0,
+            row_repacker: None,
             ring: alloc::vec::Vec::new(),
             ring_size: 0,
             next_slot: 0,
@@ -287,37 +529,56 @@ impl WgpuToDmaBuf {
     }
 
     /// The plane-0 offset and stride to stamp on the dma-buf and the bytes the
-    /// planes span: the input's own layout when it carries one, else tightly packed
-    /// planes. A layout whose later planes do not follow plane 0's stride cannot be
-    /// described by one dma-buf stride and offset, so it fails.
-    fn export_layout(&self, owned: &OwnedWgpuBuffer) -> Result<(u32, u32, u64), G2gError> {
-        let input = owned.plane_layout();
-        let (offset, stride) = match input.and_then(|layout| layout.plane(0)) {
-            Some(plane) => (plane.offset, plane.stride),
-            None => (0, 0),
+    /// planes span: the input's own layout when it carries one, else the tight
+    /// input's planes at [`tight_input_export_stride`], with the row repack that
+    /// pads them when that stride differs from the tight rows. A layout whose later
+    /// planes do not follow plane 0's stride cannot be described by one dma-buf
+    /// stride and offset, so it fails.
+    fn export_layout(&self, owned: &OwnedWgpuBuffer) -> Result<ExportLayout, G2gError> {
+        let Some(input) = owned.plane_layout() else {
+            return tight_input_export_layout(self.format, self.width, self.height);
         };
+        let first_plane = input.plane(0).ok_or(G2gError::CapsMismatch)?;
         let to_u32 = |value: usize| u32::try_from(value).map_err(|_| G2gError::CapsMismatch);
-        let (layout, size) = single_stride_layout(
-            self.format,
-            self.width,
-            self.height,
-            to_u32(offset)?,
-            to_u32(stride)?,
-        )
-        .ok_or(G2gError::CapsMismatch)?;
+        let (offset, stride) = (to_u32(first_plane.offset)?, to_u32(first_plane.stride)?);
+        let (layout, size) =
+            single_stride_layout(self.format, self.width, self.height, offset, stride)
+                .ok_or(G2gError::CapsMismatch)?;
         let follows_plane_0 = |input: &PlaneLayout| {
             input.count() == layout.count()
                 && (0..layout.count()).all(|plane| layout.plane(plane) == input.plane(plane))
         };
-        if !input.is_none_or(follows_plane_0) {
+        if !follows_plane_0(input) {
             return Err(G2gError::CapsMismatch);
         }
-        let first_plane = layout.plane(0).ok_or(G2gError::CapsMismatch)?;
-        Ok((
-            to_u32(first_plane.offset)?,
-            to_u32(first_plane.stride)?,
+        Ok(ExportLayout {
+            offset,
+            stride,
             size,
-        ))
+            repack: None,
+        })
+    }
+
+    fn encode_export(
+        &mut self,
+        input: &wgpu::Buffer,
+        destination: &wgpu::Buffer,
+        size: u64,
+        repack: Option<&RowRepack>,
+    ) -> Result<wgpu::CommandBuffer, G2gError> {
+        let device = self.device.clone().ok_or_else(gpu_err)?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let Some(repack) = repack else {
+            encoder.copy_buffer_to_buffer(input, 0, destination, 0, size);
+            return Ok(encoder.finish());
+        };
+        let repacker = match self.row_repacker.take() {
+            Some(repacker) => repacker,
+            None => RowRepacker::new(&device, self.queue.as_ref().ok_or_else(gpu_err)?, repack)?,
+        };
+        repacker.record(&device, &mut encoder, input, destination)?;
+        self.row_repacker = Some(repacker);
+        Ok(encoder.finish())
     }
 
     /// Create the persistent exportable timeline semaphore and export its fd, once.
@@ -444,10 +705,11 @@ impl AsyncElement for WgpuToDmaBuf {
             } => (*format, *w, *h),
             _ => return Err(G2gError::CapsMismatch),
         };
-        single_stride_layout(format, w, h, 0, 0).ok_or(G2gError::CapsMismatch)?;
+        tight_input_export_layout(format, w, h)?;
         self.format = format;
         self.width = w;
         self.height = h;
+        self.row_repacker = None;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -471,9 +733,17 @@ impl AsyncElement for WgpuToDmaBuf {
                         producer_buffer(owned).ok_or(G2gError::UnsupportedDomain)?;
                     self.adopt_device(device, queue)?;
 
-                    let (offset, stride, frame_size) = self.export_layout(owned)?;
-                    let size = whole_word_size(frame_size).ok_or(G2gError::CapsMismatch)?;
-                    if frame_size == 0 || (owned.len as u64) < frame_size || src.size() < size {
+                    let export = self.export_layout(owned)?;
+                    let size = whole_word_size(export.size).ok_or(G2gError::CapsMismatch)?;
+                    let input_bytes = export
+                        .repack
+                        .as_ref()
+                        .map_or(export.size, |repack| repack.source_bytes);
+                    let input_size = whole_word_size(input_bytes).ok_or(G2gError::CapsMismatch)?;
+                    if export.size == 0
+                        || (owned.len as u64) < input_bytes
+                        || src.size() < input_size
+                    {
                         return Err(G2gError::CapsMismatch);
                     }
 
@@ -491,17 +761,19 @@ impl AsyncElement for WgpuToDmaBuf {
                     let slot = self.next_export_slot(size)?;
                     let frame_fd = slot.fd.try_clone().map_err(|_| gpu_err())?;
                     let dst = slot.buffer.clone();
+                    let commands = self.encode_export(src, &dst, size, export.repack.as_ref())?;
                     let device = self.device.as_ref().unwrap();
                     let queue = self.queue.as_ref().unwrap();
-                    // SAFETY: `src` and `dst` are live buffers on `device` of at
-                    // least `size` bytes; `sync`, when set, names this device's
-                    // timeline semaphore.
-                    unsafe { copy_to_export(device, queue, src, &dst, size, sync)? };
+                    // SAFETY: `device` is the adopted export device and `queue`
+                    // its queue; `sync`, when set, names this device's timeline
+                    // semaphore.
+                    unsafe { submit_export(device, queue, commands, sync)? };
 
                     // SAFETY: `frame_fd` is a dup of the slot's dma-buf fd owned by
                     // this process; OwnedDmaBuf closes it once on drop.
-                    let mut dmabuf =
-                        unsafe { OwnedDmaBuf::from_raw(frame_fd.into_raw_fd(), stride, offset) };
+                    let mut dmabuf = unsafe {
+                        OwnedDmaBuf::from_raw(frame_fd.into_raw_fd(), export.stride, export.offset)
+                    };
                     if let (Some(sf), Some((_, value))) = (&self.sync_fd, sync) {
                         dmabuf = dmabuf.with_sync(sf.clone(), value);
                     }
@@ -744,7 +1016,7 @@ unsafe fn create_exportable(
     Ok((buffer, owned_fd))
 }
 
-/// Copy `size` bytes of `src` into the exportable `dst` on the GPU.
+/// Submit the `commands` that fill an exportable buffer on the GPU.
 ///
 /// Synchronisation depends on `sync`:
 /// - `None`: block on `device.poll(Wait)` until the copy finishes, so a
@@ -755,19 +1027,14 @@ unsafe fn create_exportable(
 ///
 /// # Safety
 /// `device` must be a Vulkan-backend wgpu device (carrying
-/// `VK_KHR_external_semaphore_fd` when `sync` is set), `src` and `dst` live
-/// buffers on it of at least `size` bytes, and `sem` (when set) a timeline
-/// semaphore on `device`.
-unsafe fn copy_to_export(
+/// `VK_KHR_external_semaphore_fd` when `sync` is set), `queue` its queue, and
+/// `sem` (when set) a timeline semaphore on `device`.
+unsafe fn submit_export(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    src: &wgpu::Buffer,
-    dst: &wgpu::Buffer,
-    size: u64,
+    commands: wgpu::CommandBuffer,
     sync: Option<(vk::Semaphore, u64)>,
 ) -> Result<(), G2gError> {
-    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    enc.copy_buffer_to_buffer(src, 0, dst, 0, size);
     match sync {
         Some((sem, value)) => {
             // Zero-stall: inject a timeline signal of `value` on the copy submit so
@@ -777,10 +1044,10 @@ unsafe fn copy_to_export(
             // semaphore on the device, signalled by the submit below.
             let hal_q = unsafe { queue.as_hal::<wgpu_hal::api::Vulkan>() }.ok_or_else(gpu_err)?;
             hal_q.add_signal_semaphore(sem, Some(value));
-            queue.submit([enc.finish()]);
+            queue.submit([commands]);
         }
         None => {
-            queue.submit([enc.finish()]);
+            queue.submit([commands]);
             // Wait for the copy so a consumer of the dma-buf sees finished pixels.
             device
                 .poll(wgpu::PollType::Wait {
@@ -798,6 +1065,7 @@ mod tests {
     use super::*;
     use crate::dmabufwgpu::{create_import_device, DmaBufImporter};
     use crate::testutil::CollectSink;
+    use alloc::vec::Vec;
     use g2g_core::frame::Frame;
     use g2g_core::{FrameTiming, Rate};
     use std::os::fd::BorrowedFd;
@@ -805,6 +1073,146 @@ mod tests {
 
     const SIDE: u32 = 4;
     const BYTES_PER_PIXEL: u32 = 4;
+
+    fn caps(format: RawVideoFormat, width: u32, height: u32) -> Caps {
+        Caps::RawVideo {
+            format,
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        }
+    }
+
+    fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, buffer: &wgpu::Buffer) -> Vec<u8> {
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("export-readback"),
+            size: buffer.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, buffer.size());
+        queue.submit([encoder.finish()]);
+        let slice = staging.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
+        receiver.recv().unwrap().unwrap();
+        slice.get_mapped_range().to_vec()
+    }
+
+    #[test]
+    fn only_a_tight_odd_width_frame_is_repacked() {
+        let (even_width, even_height) = crate::pixel::tests::GEOMETRIES[3];
+        for format in DMABUF_FRAME_FORMATS {
+            let layout = tight_input_export_layout(format, even_width, even_height).unwrap();
+            assert_eq!(layout.repack, None, "{format:?}");
+            assert_eq!(
+                Some(layout.stride),
+                format.plane_stride(0, even_width),
+                "{format:?}"
+            );
+        }
+        let (width, height) = crate::pixel::tests::GEOMETRIES[0];
+        let format = RawVideoFormat::Nv12;
+        let layout = tight_input_export_layout(format, width, height).unwrap();
+        let stride = format.row_stride(width).unwrap();
+        assert_eq!(layout.stride, stride);
+        assert_eq!(
+            Some(layout.size),
+            format.frame_bytes(stride.into(), height.into())
+        );
+        let repack = layout.repack.expect("odd-width luma rows are padded");
+        assert_eq!(
+            Some(repack.source_bytes),
+            format.unpadded_frame_bytes(width, height)
+        );
+    }
+
+    #[test]
+    fn an_odd_width_nv12_frame_exports_every_row_at_the_row_stride() {
+        let _gpu = crate::GPU_TEST_LOCK.blocking_lock();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut export = WgpuToDmaBuf::new();
+            let Ok((device, queue)) = export.gpu().await else {
+                std::eprintln!("skip: no Vulkan export device");
+                return;
+            };
+            let (width, height) = crate::pixel::tests::GEOMETRIES[0];
+            let format = RawVideoFormat::Nv12;
+            let tight_size = format.unpadded_frame_bytes(width, height).unwrap() as usize;
+            let pattern: Vec<u8> = (0..tight_size)
+                .map(|index| index.wrapping_mul(7).wrapping_add(3) as u8)
+                .collect();
+            let buffer_size = whole_word_size(tight_size as u64).unwrap();
+            let src = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("export-src"),
+                size: buffer_size,
+                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let mut words = pattern.clone();
+            words.resize(buffer_size as usize, 0);
+            queue.write_buffer(&src, 0, &words);
+            export
+                .configure_pipeline(&caps(format, width, height))
+                .unwrap();
+            let domain = MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(
+                &device, &queue, src, tight_size,
+            ));
+            let mut sink = CollectSink::default();
+            export
+                .process(
+                    PipelinePacket::DataFrame(Frame::new(domain, FrameTiming::default(), 0)),
+                    &mut sink,
+                )
+                .await
+                .unwrap();
+            let [PipelinePacket::DataFrame(Frame {
+                domain: MemoryDomain::DmaBuf(dmabuf),
+                ..
+            })] = sink.packets.as_slice()
+            else {
+                panic!("one dma-buf frame out");
+            };
+            let stride = format.row_stride(width).unwrap();
+            assert_eq!(dmabuf.stride, stride);
+            assert_eq!(dmabuf.offset, 0);
+
+            let exported = read_back(&device, &queue, &export.ring[0].buffer);
+            let stride = stride as usize;
+            let luma_row = format.plane_stride(0, width).unwrap() as usize;
+            for row in 0..height as usize {
+                assert_eq!(
+                    exported[row * stride..][..luma_row],
+                    pattern[row * luma_row..][..luma_row],
+                    "luma row {row}"
+                );
+            }
+            let chroma_row = format.plane_stride(1, width).unwrap() as usize;
+            let tight_chroma = format.plane_offset(1, width, height).unwrap() as usize;
+            let exported_chroma = stride * height as usize;
+            for row in 0..format.plane_rows(1, height).unwrap() as usize {
+                assert_eq!(
+                    exported[exported_chroma + row * stride..][..chroma_row],
+                    pattern[tight_chroma + row * chroma_row..][..chroma_row],
+                    "chroma row {row}"
+                );
+            }
+        });
+    }
 
     fn inode(dmabuf: &OwnedDmaBuf) -> u64 {
         // SAFETY: the fd is owned by `dmabuf`, alive for this call.
@@ -836,15 +1244,9 @@ mod tests {
                 usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            let caps = Caps::RawVideo {
-                format: RawVideoFormat::Rgba8,
-                width: Dim::Fixed(SIDE),
-                height: Dim::Fixed(SIDE),
-                framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            };
-            export.configure_pipeline(&caps).unwrap();
+            export
+                .configure_pipeline(&caps(RawVideoFormat::Rgba8, SIDE, SIDE))
+                .unwrap();
             let mut sink = CollectSink::default();
             for _ in 0..=EXPORT_RING_SLOTS {
                 let domain = MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(
