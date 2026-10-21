@@ -648,12 +648,12 @@ jobs:
       # mkv suites run in the conformance job instead (that is where ffmpeg is).
       - name: test g2g-plugins (matroska suites)
         run: >
-          cargo test -p g2g-plugins --locked --features observe,declarative-yaml
+          cargo test -p g2g-plugins --locked --features observe,declarative-yaml,matroska-compression
           --test m294_matroskamux_av --test m364_mkvdemux_seek
           --test m373_mkvdemux_cues_seek --test m374_mkvdemux_seekhead_prefetch
           --test m375_mkvmux_cues --test m378_mkvdemuxn --test m381_mkvdemuxn_select
           --test m415_playbin_mkv_subtitle --test m766_mkv_avcc_annexb
-          --test m770_mkv_seekhead
+          --test m770_mkv_seekhead --test m1783_mkv_content_encodings
       # Dev-tooling surface, sharing the feature set (and so the build) with the
       # step above: the live dashboard transport + edge preview (`observe`), the
       # live per-edge counters and fan-in preview taps, and the MCP server's

@@ -212,9 +212,8 @@ Highest leverage first:
   because none reads the clean-aperture flag (`Mp4Src` attaches no `CropMeta`,
   `UriFanoutPort` carries only caps). `av1parse` and `startcodeparse` drop input
   meta when re-framing, so AV1 or MPEG-2 in MP4 with a `clap` loses the crop.
-- **Matroska `ContentEncoding`:** chained encodings, bzip2 / lzo, and
-  `ContentEncryption` stay refused (blocks forward as stored, flagged
-  `unsupported_encoding`); zlib and header stripping are undone at demux.
+- **Matroska `ContentEncryption`:** decrypt encrypted tracks, which forward as
+  stored and flagged `unsupported_encoding`.
 
 ## Codecs
 

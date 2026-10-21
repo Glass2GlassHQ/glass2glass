@@ -462,7 +462,14 @@ Opus / AC-3 / FLAC / Vorbis / PCM audio, defaulting to VP9. An `A_PCM/*` track
 takes the PCM format its byte order and `BitDepth` name, the `WAVEFORMATEX`
 table WAV and AVI use, and big-endian samples are swapped at demux. A PCM or
 bitmap-subtitle track under a `ContentEncoding` the demuxer cannot undo fails
-the stream. MJPEG is `V_MJPEG` or a
+the stream. A track's `ContentEncodings` chain is undone at demux, highest
+`ContentEncodingOrder` first, on the blocks and on the `CodecPrivate` as each
+step's scope names: zlib, header stripping, and with `matroska-compression`
+bzip2 (`libbz2-rs-sys`) and LZO1X (`lzo`). A block that does not decode or
+decodes past 16 MiB is dropped, and so is a `CodecPrivate` past 1 MiB. An
+encryption, an unknown algorithm, a scope naming the next encoding, a repeated
+order or a chain over eight steps flags the track `unsupported_encoding`, and its
+blocks forward as stored. MJPEG is `V_MJPEG` or a
 `V_MS/VFW/FOURCC` track whose BITMAPINFOHEADER names `MJPG`. A Vorbis or
 `V_THEORA` track's `CodecPrivate` Xiph-laces the three headers, which go in
 band as three packets ahead of the first block. A Vorbis track's blocks go
