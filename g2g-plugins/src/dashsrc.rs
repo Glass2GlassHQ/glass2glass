@@ -13,11 +13,12 @@
 //! plays.
 //!
 //! Live (`type="dynamic"`, M836): the MPD is reloaded on its refresh period, and
-//! a `@duration` `SegmentTemplate` gets its available segment window from the
-//! wall clock against `availabilityStartTime` + `Period@start`, bounded by
-//! `timeShiftBufferDepth`. Playback starts `suggestedPresentationDelay` behind
-//! the live edge (see [`presentation_delay_secs`]) rather than replaying the
-//! whole window, which a `SegmentTimeline` window gets too. A template's
+//! every addressing mode but `SegmentBase` gets its available segment window
+//! from the wall clock against `availabilityStartTime` + `Period@start`, bounded
+//! by `timeShiftBufferDepth`: a `SegmentTimeline` or `SegmentList` entry listed
+//! ahead of its availability time is held back like a `@duration` segment
+//! (M1732). Playback starts `suggestedPresentationDelay` behind the live edge
+//! (see [`presentation_delay_secs`]) rather than replaying the whole window. An
 //! `@availabilityTimeOffset` moves each segment's availability that many seconds
 //! ahead of its nominal completion, so a chunked low-latency packager's newest
 //! segment is fetched while it is still being written.
@@ -166,9 +167,10 @@ async fn stream_segment_chunks(
 /// `sidx` carries the authoritative timescale. Used for the initial pick and on
 /// every ABR switch.
 ///
-/// A live `@duration` Representation instead takes its segments from the
-/// wall-clock window (`live`), which is empty until the Period's first segment
-/// is complete. A `SegmentTimeline` lists its own window.
+/// A live Representation instead takes its segments from the wall-clock window
+/// (`live`), which is empty until the Period's first segment is available: a
+/// `SegmentTimeline` or `SegmentList` entry is held back until its availability
+/// time just like a `@duration` segment.
 async fn load_rep(
     client: &reqwest::Client,
     base: &str,
@@ -543,8 +545,8 @@ impl SourceLoop for DashSrc {
                 }
 
                 // Live: start near the live edge rather than replaying the whole
-                // available window (the wall-clock window for @duration, the
-                // SegmentTimeline's own entries otherwise).
+                // available window (the wall-clock window, or every listed
+                // segment when the manifest has no availabilityStartTime).
                 let mut idx = 0usize;
                 if mpd.dynamic && !positioned && !segs.is_empty() {
                     idx = live_start_offset(&segs, timescale, (delay_secs * 1e9) as u64);

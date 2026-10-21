@@ -102,7 +102,7 @@ pub struct Sidx {
 /// a `mediaRange` byte range of the `BaseURL` resource, plus an `Initialization`.
 /// `@duration` / `@timescale` give per-segment timing (a nested `SegmentTimeline`
 /// is a follow-up).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SegmentList {
     /// `<Initialization sourceURL>`, empty when the init is a byte range of the
     /// `BaseURL` itself; `init_present` distinguishes "no init element" from it.
@@ -111,6 +111,7 @@ pub struct SegmentList {
     pub init_present: bool,
     pub duration: u64,
     pub timescale: u32,
+    pub availability_time_offset: Option<f64>,
     pub segments: Vec<SegmentUrl>,
 }
 
@@ -170,12 +171,132 @@ pub struct SegmentTemplate {
 const MAX_SEGMENTS: u64 = 1 << 20;
 
 /// One `SegmentTimeline` `<S>` entry: a media-timeline start time `t` (absent =
-/// continue from the previous entry), a duration `d`, and `r` additional repeats.
+/// continue from the previous entry), a duration `d`, and its `r` repeats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimelineEntry {
     pub t: Option<u64>,
     pub d: u64,
-    pub r: u64,
+    pub r: TimelineRepeat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineRepeat {
+    Times(u64),
+    // a negative `@r`
+    UntilNextEntryOrPeriodEnd,
+}
+
+// a stretch of equal-length segments: the `@duration` profile, one `<S>` entry, or a `SegmentList`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SegmentRun {
+    first_number: u64,
+    start_time: u64,
+    duration: u64,
+    // `None` runs on until the wall clock stops it
+    count: Option<u64>,
+}
+
+impl SegmentRun {
+    fn segment(&self, index: u64) -> SegmentRef {
+        SegmentRef {
+            number: self.first_number.saturating_add(index),
+            time: self
+                .start_time
+                .saturating_add(index.saturating_mul(self.duration)),
+        }
+    }
+}
+
+// the wall-clock position of a live Period and the availability rules applied to its segments
+#[derive(Debug, Clone, Copy)]
+struct LiveAvailability {
+    elapsed_secs: f64,
+    time_shift_secs: Option<f64>,
+    availability_time_offset_secs: f64,
+    timescale: u32,
+    presentation_time_offset: u64,
+}
+
+impl LiveAvailability {
+    fn new(
+        edge: &LiveEdge,
+        now_unix: f64,
+        availability_time_offset: Option<f64>,
+        timescale: u32,
+        presentation_time_offset: u64,
+    ) -> Self {
+        Self {
+            elapsed_secs: now_unix - edge.anchor_unix,
+            time_shift_secs: edge.time_shift_secs,
+            availability_time_offset_secs: availability_time_offset.unwrap_or(0.0),
+            timescale: timescale.max(1),
+            presentation_time_offset,
+        }
+    }
+
+    // indices of the first segment inside `timeShiftBufferDepth` and of the newest complete one
+    fn run_window(&self, run: &SegmentRun) -> Option<(u64, u64)> {
+        if run.duration == 0 {
+            return None;
+        }
+        let timescale = f64::from(self.timescale);
+        let segment_secs = run.duration as f64 / timescale;
+        let run_start_secs =
+            run.start_time.saturating_sub(self.presentation_time_offset) as f64 / timescale;
+        let elapsed = self.elapsed_secs - run_start_secs;
+        // Early availability is capped at one segment duration: the in-progress
+        // segment can be published chunked, but nothing beyond it exists yet, and
+        // the cap also keeps the window from opening before the anchor.
+        let early = self.availability_time_offset_secs.clamp(0.0, segment_secs);
+        // `as u64` saturates at 0 for a negative / NaN elapsed, and the checked
+        // decrement then reports "nothing available yet" instead of wrapping.
+        let mut last = (((elapsed + early) / segment_secs) as u64).checked_sub(1)?;
+        if let Some(count) = run.count {
+            last = last.min(count.checked_sub(1)?);
+        }
+        let first = match self.time_shift_secs {
+            // Fully inside the window: the segment starts no earlier than the
+            // depth allows, so round the boundary up.
+            Some(depth) => (((elapsed - depth) / segment_secs).ceil()) as u64,
+            None => 0,
+        };
+        Some((first, last))
+    }
+
+    // at most `MAX_SEGMENTS`, so an ancient `availabilityStartTime` cannot force a huge allocation
+    fn segments(&self, runs: &[SegmentRun]) -> Vec<SegmentRef> {
+        let mut out = Vec::new();
+        let mut newest = None;
+        for run in runs {
+            // a run that has not started publishing means no later one has either
+            let Some((first, last)) = self.run_window(run) else {
+                break;
+            };
+            newest = Some(run.segment(last));
+            if first > last {
+                continue;
+            }
+            let room = MAX_SEGMENTS.saturating_sub(out.len() as u64);
+            let count = (last - first).saturating_add(1).min(room);
+            out.extend((first..first.saturating_add(count)).map(|index| run.segment(index)));
+        }
+        // a depth shorter than the newest segment still offers that segment
+        if out.is_empty() {
+            out.extend(newest);
+        }
+        out
+    }
+
+    fn lists_final_segment(&self, runs: &[SegmentRun]) -> bool {
+        let Some(run) = runs.last() else {
+            return true;
+        };
+        let Some(final_index) = run.count.and_then(|count| count.checked_sub(1)) else {
+            return false;
+        };
+        self.run_window(run)
+            .is_some_and(|(_, last)| last == final_index)
+    }
 }
 
 /// One resolved media segment: its `$Number$` and its `$Time$` (media-timeline
@@ -237,8 +358,8 @@ pub struct Period {
 }
 
 /// The wall-clock parameters of a dynamic presentation, resolved for one Period.
-/// Turns "now" into the window of segments a live `@duration` `SegmentTemplate`
-/// currently offers, and the index playback should start at.
+/// Turns "now" into the window of segments a live Representation currently
+/// offers, and the index playback should start at.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LiveEdge {
     /// Unix seconds at which this Period's presentation time zero became
@@ -310,7 +431,10 @@ impl SegmentTemplate {
     /// after the Period anchor, `@availabilityTimeOffset` seconds earlier when
     /// the packager publishes it chunked. A Period with an end (`period_secs`)
     /// offers nothing past its last segment. `None` before the first available
-    /// segment exists, or for a `SegmentTimeline` (which lists its own window).
+    /// segment exists, or for a `SegmentTimeline` (whose entries
+    /// [`live_segments`] holds back by the same rule).
+    ///
+    /// [`live_segments`]: Self::live_segments
     pub fn live_available(
         &self,
         edge: &LiveEdge,
@@ -320,29 +444,86 @@ impl SegmentTemplate {
         if !self.timeline.is_empty() {
             return None;
         }
-        let d = self.nominal_segment_secs()?;
-        let elapsed = now_unix - edge.anchor_unix;
-        // Early availability is capped at one segment duration: the in-progress
-        // segment can be published chunked, but nothing beyond it exists yet, and
-        // the cap also keeps the window from opening before the anchor.
-        let early = self.availability_time_offset.unwrap_or(0.0).clamp(0.0, d);
-        // `as u64` saturates at 0 for a negative / NaN elapsed, and the checked
-        // decrement then reports "nothing available yet" instead of wrapping.
-        let mut last = (((elapsed + early) / d) as u64).checked_sub(1)?;
-        if let Some(final_index) = self.final_index(period_secs) {
-            last = last.min(final_index);
-        }
-        let first = match edge.time_shift_secs {
-            // Fully inside the window: the segment starts no earlier than the
-            // depth allows, so round the boundary up.
-            Some(depth) => (((elapsed - depth) / d).ceil()) as u64,
-            None => 0,
-        };
+        let run = self.duration_run(period_secs)?;
+        let (first, last) = self.live_availability(edge, now_unix).run_window(&run)?;
         Some((first.min(last), last))
     }
 
     fn final_index(&self, period_secs: Option<f64>) -> Option<u64> {
         self.segment_count(period_secs?).checked_sub(1)
+    }
+
+    fn live_availability(&self, edge: &LiveEdge, now_unix: f64) -> LiveAvailability {
+        LiveAvailability::new(
+            edge,
+            now_unix,
+            self.availability_time_offset,
+            self.timescale,
+            self.presentation_time_offset,
+        )
+    }
+
+    fn duration_run(&self, period_secs: Option<f64>) -> Option<SegmentRun> {
+        (self.duration != 0).then(|| SegmentRun {
+            first_number: self.start_number,
+            start_time: self.presentation_time_offset,
+            duration: self.duration,
+            count: self
+                .final_index(period_secs)
+                .map(|index| index.saturating_add(1)),
+        })
+    }
+
+    // a negative `@r` repeats up to the next entry's `@t`, else to the Period end, else without end
+    fn timeline_runs(&self, period_secs: Option<f64>) -> Vec<SegmentRun> {
+        let period_end_time = period_secs.map(|secs| {
+            self.presentation_time_offset
+                .saturating_add((secs * f64::from(self.timescale.max(1))) as u64)
+        });
+        let mut runs = Vec::new();
+        let mut number = self.start_number;
+        let mut time = 0u64;
+        for (position, entry) in self.timeline.iter().enumerate() {
+            if let Some(t) = entry.t {
+                time = t;
+            }
+            let count = match entry.r {
+                TimelineRepeat::Times(repeats) => Some(repeats.saturating_add(1)),
+                TimelineRepeat::UntilNextEntryOrPeriodEnd if entry.d == 0 => Some(1),
+                TimelineRepeat::UntilNextEntryOrPeriodEnd => {
+                    let end_time = match self.timeline.get(position + 1) {
+                        Some(next) => next.t,
+                        None => period_end_time,
+                    };
+                    end_time.map(|end| end.saturating_sub(time).div_ceil(entry.d))
+                }
+            };
+            let run = SegmentRun {
+                first_number: number,
+                start_time: time,
+                duration: entry.d,
+                count,
+            };
+            let Some(count) = count else {
+                // nothing after an open-ended repeat has a start time
+                runs.push(run);
+                break;
+            };
+            if count > 0 {
+                runs.push(run);
+            }
+            number = number.saturating_add(count);
+            time = time.saturating_add(count.saturating_mul(entry.d));
+        }
+        runs
+    }
+
+    fn live_runs(&self, period_secs: Option<f64>) -> Vec<SegmentRun> {
+        if self.timeline.is_empty() {
+            self.duration_run(period_secs).into_iter().collect()
+        } else {
+            self.timeline_runs(period_secs)
+        }
     }
 
     pub fn live_offers_period_end(
@@ -351,71 +532,71 @@ impl SegmentTemplate {
         now_unix: f64,
         period_secs: Option<f64>,
     ) -> bool {
-        let Some(final_index) = self.final_index(period_secs) else {
+        let runs = self.live_runs(period_secs);
+        if runs.is_empty() && self.timeline.is_empty() {
             return false;
-        };
-        self.live_available(edge, now_unix, period_secs)
-            .is_some_and(|(_, last)| last == final_index)
+        }
+        self.live_availability(edge, now_unix)
+            .lists_final_segment(&runs)
     }
 
-    /// The `@duration` live profile's available segments at `now_unix`, newest
-    /// window last, each carrying its `$Number$` and its media-timeline `$Time$`
-    /// (segment `i` starts at `@presentationTimeOffset + i*d`). Bounded by
-    /// [`MAX_SEGMENTS`] so an ancient `availabilityStartTime` cannot force an
-    /// unbounded allocation.
+    /// The live segments available at `now_unix`, newest window last, each
+    /// carrying its `$Number$` and its media-timeline `$Time$`. The `@duration`
+    /// profile's segment `i` starts at `@presentationTimeOffset + i*d`, and a
+    /// `SegmentTimeline` entry is held back by the same availability rule until
+    /// it is complete. Bounded by [`MAX_SEGMENTS`] so an ancient
+    /// `availabilityStartTime` cannot force an unbounded allocation.
     pub fn live_segments(
         &self,
         edge: &LiveEdge,
         now_unix: f64,
         period_secs: Option<f64>,
     ) -> Vec<SegmentRef> {
-        let Some((first, last)) = self.live_available(edge, now_unix, period_secs) else {
-            return Vec::new();
-        };
-        let count = (last - first).saturating_add(1).min(MAX_SEGMENTS);
-        (first..first.saturating_add(count))
-            .map(|i| SegmentRef {
-                number: self.start_number.saturating_add(i),
-                time: self
-                    .presentation_time_offset
-                    .saturating_add(i.saturating_mul(self.duration)),
-            })
-            .collect()
+        self.live_availability(edge, now_unix)
+            .segments(&self.live_runs(period_secs))
     }
 
     /// The ordered media segments for a VOD presentation of `total_secs`. Driven
     /// by the `SegmentTimeline` when present, else by `@duration`. Each carries
     /// its `$Number$` (from `startNumber`) and `$Time$` (the media-timeline start
     /// time, so the `@duration` profile counts from `@presentationTimeOffset` and
-    /// a `SegmentTimeline` uses its own `@t` values).
+    /// a `SegmentTimeline` uses its own `@t` values). A negative `@r` with neither
+    /// a following `@t` nor a `total_secs` to stop it lists its first segment only.
     pub fn segments(&self, total_secs: f64) -> Vec<SegmentRef> {
-        let mut out = Vec::new();
-        let mut number = self.start_number;
         if self.timeline.is_empty() {
             let count = self.segment_count(total_secs).min(MAX_SEGMENTS);
-            let mut time = self.presentation_time_offset;
-            for _ in 0..count {
-                out.push(SegmentRef { number, time });
-                number += 1;
-                time = time.saturating_add(self.duration);
-            }
-        } else {
-            let mut time = 0u64;
-            'timeline: for entry in &self.timeline {
-                if let Some(t) = entry.t {
-                    time = t;
-                }
-                for _ in 0..=entry.r {
-                    if out.len() as u64 >= MAX_SEGMENTS {
-                        break 'timeline;
-                    }
-                    out.push(SegmentRef { number, time });
-                    number += 1;
-                    time = time.saturating_add(entry.d);
-                }
-            }
+            return self.duration_run(None).map_or_else(Vec::new, |run| {
+                (0..count).map(|index| run.segment(index)).collect()
+            });
+        }
+        let mut out = Vec::new();
+        for run in self.timeline_runs((total_secs > 0.0).then_some(total_secs)) {
+            let room = MAX_SEGMENTS.saturating_sub(out.len() as u64);
+            let count = run.count.unwrap_or(1).min(room);
+            out.extend((0..count).map(|index| run.segment(index)));
         }
         out
+    }
+}
+
+impl SegmentList {
+    fn live_run(&self) -> Option<SegmentRun> {
+        (self.duration != 0 && !self.segments.is_empty()).then_some(SegmentRun {
+            first_number: 0,
+            start_time: 0,
+            duration: self.duration,
+            count: Some(self.segments.len() as u64),
+        })
+    }
+
+    fn live_availability(&self, edge: &LiveEdge, now_unix: f64) -> LiveAvailability {
+        LiveAvailability::new(
+            edge,
+            now_unix,
+            self.availability_time_offset,
+            self.timescale,
+            0,
+        )
     }
 }
 
@@ -510,32 +691,48 @@ impl Representation {
         }
     }
 
-    /// The media segments a dynamic `@duration` Representation offers at
-    /// wall-clock `now_unix` (the live profile), empty before this Period's
-    /// first segment is complete. `None` for any other addressing, which lists
-    /// its own segments.
+    /// The media segments a dynamic Representation offers at wall-clock
+    /// `now_unix`, empty before this Period's first segment is available: the
+    /// `@duration` window, or the `SegmentTimeline` / `SegmentList` entries whose
+    /// availability time has passed. `None` for `SegmentBase` and for a
+    /// `SegmentList` without `@duration`, which list their own segments.
     pub fn live_segments(
         &self,
         edge: &LiveEdge,
         now_unix: f64,
         period_secs: Option<f64>,
     ) -> Option<Vec<ResolvedSegment>> {
-        let SegmentSource::Template(t) = &self.source else {
-            return None;
-        };
-        if !t.timeline.is_empty() {
-            return None;
+        match &self.source {
+            SegmentSource::Template(t) => Some(
+                t.live_segments(edge, now_unix, period_secs)
+                    .into_iter()
+                    .map(|s| ResolvedSegment {
+                        url: t.media_url(&self.id, s),
+                        byte_range: None,
+                        time: t.presentation_time(s.time),
+                    })
+                    .collect(),
+            ),
+            SegmentSource::List(l) => {
+                let run = l.live_run()?;
+                Some(
+                    l.live_availability(edge, now_unix)
+                        .segments(&[run])
+                        .into_iter()
+                        .map(|s| {
+                            // the run numbers the list entries from 0
+                            let entry = &l.segments[s.number as usize];
+                            ResolvedSegment {
+                                url: entry.media.clone(),
+                                byte_range: entry.media_range,
+                                time: s.time,
+                            }
+                        })
+                        .collect(),
+                )
+            }
+            SegmentSource::Base(_) => None,
         }
-        Some(
-            t.live_segments(edge, now_unix, period_secs)
-                .into_iter()
-                .map(|s| ResolvedSegment {
-                    url: t.media_url(&self.id, s),
-                    byte_range: None,
-                    time: t.presentation_time(s.time),
-                })
-                .collect(),
-        )
     }
 
     pub fn lists_period_end(
@@ -545,11 +742,13 @@ impl Representation {
         period_secs: Option<f64>,
     ) -> bool {
         match &self.source {
-            SegmentSource::Template(t) if t.timeline.is_empty() => {
-                t.live_offers_period_end(edge, now_unix, period_secs)
-            }
-            // a timeline, list or index names every segment it has
-            _ => true,
+            SegmentSource::Template(t) => t.live_offers_period_end(edge, now_unix, period_secs),
+            SegmentSource::List(l) => l.live_run().is_none_or(|run| {
+                l.live_availability(edge, now_unix)
+                    .lists_final_segment(&[run])
+            }),
+            // an index names every segment it has
+            SegmentSource::Base(_) => true,
         }
     }
 
@@ -921,6 +1120,9 @@ fn parse_segment_list(sl: Node) -> SegmentList {
             .attribute("timescale")
             .and_then(|s| s.parse().ok())
             .unwrap_or(1),
+        availability_time_offset: sl
+            .attribute("availabilityTimeOffset")
+            .and_then(parse_availability_time_offset),
         segments,
     }
 }
@@ -937,17 +1139,28 @@ fn parse_dash_range(s: &str) -> Option<ByteRange> {
     })
 }
 
-/// Parse a `SegmentTimeline`'s `<S>` entries. A negative `@r` (live "repeat to
-/// period end") fails to parse as `u64` and falls back to 0; live is a follow-up.
+/// Parse a `SegmentTimeline`'s `<S>` entries. A negative `@r` repeats until the
+/// next entry's `@t` or the Period end; an unparsable one counts as no repeats.
 fn parse_timeline(tl: Node) -> Vec<TimelineEntry> {
     tl.children()
         .filter(|c| c.is_element() && c.has_tag_name("S"))
         .map(|s| TimelineEntry {
             t: s.attribute("t").and_then(|v| v.parse().ok()),
             d: s.attribute("d").and_then(|v| v.parse().ok()).unwrap_or(0),
-            r: s.attribute("r").and_then(|v| v.parse().ok()).unwrap_or(0),
+            r: s.attribute("r")
+                .map_or(TimelineRepeat::Times(0), parse_timeline_repeat),
         })
         .collect()
+}
+
+fn parse_timeline_repeat(value: &str) -> TimelineRepeat {
+    if let Ok(repeats) = value.parse::<u64>() {
+        return TimelineRepeat::Times(repeats);
+    }
+    if value.parse::<i64>().is_ok_and(|repeats| repeats < 0) {
+        return TimelineRepeat::UntilNextEntryOrPeriodEnd;
+    }
+    TimelineRepeat::Times(0)
 }
 
 /// An attribute on `node` or the nearest ancestor that carries it.
@@ -1153,7 +1366,7 @@ mod tests {
             timeline: Vec::from([TimelineEntry {
                 t: Some(0),
                 d: 1000,
-                r: u64::MAX,
+                r: TimelineRepeat::Times(u64::MAX),
             }]),
         };
         assert_eq!(timeline.segments(10.0).len() as u64, MAX_SEGMENTS);
@@ -1797,6 +2010,182 @@ mod tests {
         assert_eq!(live_start_offset(&segs, ts, 3_000_000_000), 0);
         assert_eq!(live_start_offset(&segs, ts, 60_000_000_000), 0);
         assert_eq!(live_start_offset(&[], ts, 1_000_000_000), 0);
+    }
+
+    const LIVE_TIME_SHIFT_DEPTH_SECS: u32 = 4;
+
+    // a dynamic MPD around `addressing`, anchored at `AST_UNIX`
+    fn live_mpd_with(addressing: &str) -> Mpd {
+        parse(&alloc::format!(
+            r#"<MPD type="dynamic" availabilityStartTime="2026-08-03T00:00:00Z"
+     timeShiftBufferDepth="PT{LIVE_TIME_SHIFT_DEPTH_SECS}S">
+  <Period id="0" start="PT0S"><AdaptationSet mimeType="video/mp4">{addressing}
+    <Representation id="v" bandwidth="1"/>
+  </AdaptationSet></Period>
+</MPD>"#
+        ))
+        .unwrap()
+    }
+
+    fn live_urls(mpd: &Mpd, now_unix: f64, period_secs: Option<f64>) -> Vec<String> {
+        let edge = mpd.live_edge(&mpd.periods[0], 1.0).unwrap();
+        mpd.periods[0].representations[0]
+            .live_segments(&edge, now_unix, period_secs)
+            .unwrap()
+            .into_iter()
+            .map(|segment| segment.url)
+            .collect()
+    }
+
+    fn lists_live_period_end(mpd: &Mpd, now_unix: f64, period_secs: Option<f64>) -> bool {
+        let edge = mpd.live_edge(&mpd.periods[0], 1.0).unwrap();
+        mpd.periods[0].representations[0].lists_period_end(&edge, now_unix, period_secs)
+    }
+
+    // two 2s entries then three 1s entries, the whole timeline listed ahead of the clock
+    const LIVE_TIMELINE: &str = r#"<SegmentTemplate media="seg-$Time$.m4s" timescale="1000">
+      <SegmentTimeline><S t="0" d="2000" r="1"/><S d="1000" r="2"/></SegmentTimeline>
+    </SegmentTemplate>"#;
+
+    #[test]
+    fn live_timeline_holds_back_entries_until_they_are_complete() {
+        let mpd = live_mpd_with(LIVE_TIMELINE);
+        assert!(live_urls(&mpd, AST_UNIX - 60.0, None).is_empty());
+        assert!(
+            live_urls(&mpd, AST_UNIX + 1.5, None).is_empty(),
+            "the first entry ends 2s in"
+        );
+        assert_eq!(live_urls(&mpd, AST_UNIX + 2.0, None), ["seg-0.m4s"]);
+        // 0, 2000 and 4000 are complete, the 4s depth drops the one starting at 0
+        assert_eq!(
+            live_urls(&mpd, AST_UNIX + 5.5, None),
+            ["seg-2000.m4s", "seg-4000.m4s"]
+        );
+        assert!(!lists_live_period_end(&mpd, AST_UNIX + 5.5, None));
+        assert!(lists_live_period_end(&mpd, AST_UNIX + 7.0, None));
+        // long after the last entry ends only the newest one is offered
+        assert_eq!(live_urls(&mpd, AST_UNIX + 60.0, None), ["seg-6000.m4s"]);
+    }
+
+    #[test]
+    fn live_timeline_availability_time_offset_publishes_an_entry_early() {
+        let mpd = live_mpd_with(&LIVE_TIMELINE.replace(
+            "timescale=\"1000\"",
+            "timescale=\"1000\" availabilityTimeOffset=\"0.5\"",
+        ));
+        // the 1s entry starting at 4000 ends at 5s and is published from 4.5s
+        assert_eq!(
+            live_urls(&mpd, AST_UNIX + 4.5, None),
+            ["seg-2000.m4s", "seg-4000.m4s"]
+        );
+        // the 2s entry starting at 0 is published no earlier than 1.5s
+        assert!(live_urls(&mpd, AST_UNIX + 1.4, None).is_empty());
+        assert_eq!(live_urls(&mpd, AST_UNIX + 1.5, None), ["seg-0.m4s"]);
+    }
+
+    const OPEN_ENDED_TIMELINE: &str = r#"<SegmentTemplate media="seg-$Number$.m4s" startNumber="1" timescale="1000">
+      <SegmentTimeline><S t="0" d="1000" r="-1"/></SegmentTimeline>
+    </SegmentTemplate>"#;
+
+    #[test]
+    fn live_negative_repeat_runs_on_with_the_clock() {
+        let mpd = live_mpd_with(OPEN_ENDED_TIMELINE);
+        assert_eq!(
+            mpd.periods[0].representations[0]
+                .template()
+                .unwrap()
+                .timeline[0]
+                .r,
+            TimelineRepeat::UntilNextEntryOrPeriodEnd
+        );
+        assert_eq!(
+            live_urls(&mpd, AST_UNIX + 3.5, None),
+            ["seg-1.m4s", "seg-2.m4s", "seg-3.m4s"]
+        );
+        // 100 segments are complete, the 4s depth keeps those starting from 96.5s
+        assert_eq!(
+            live_urls(&mpd, AST_UNIX + 100.5, None),
+            ["seg-98.m4s", "seg-99.m4s", "seg-100.m4s"]
+        );
+        assert!(!lists_live_period_end(&mpd, AST_UNIX + 100.5, None));
+
+        // a 5s Period stops the repeat at its fifth segment
+        let period_secs = Some(5.0);
+        assert_eq!(
+            live_urls(&mpd, AST_UNIX + 100.5, period_secs),
+            ["seg-5.m4s"]
+        );
+        assert!(!lists_live_period_end(&mpd, AST_UNIX + 4.5, period_secs));
+        assert!(lists_live_period_end(&mpd, AST_UNIX + 5.0, period_secs));
+    }
+
+    #[test]
+    fn negative_repeat_stops_at_the_next_entry_start() {
+        let mpd = live_mpd_with(
+            r#"<SegmentTemplate media="seg-$Time$.m4s" timescale="1000">
+      <SegmentTimeline><S t="0" d="1000" r="-1"/><S t="3000" d="2000"/></SegmentTimeline>
+    </SegmentTemplate>"#,
+        );
+        assert_eq!(
+            live_urls(&mpd, AST_UNIX + 5.0, None),
+            ["seg-1000.m4s", "seg-2000.m4s", "seg-3000.m4s"]
+        );
+        assert!(lists_live_period_end(&mpd, AST_UNIX + 5.0, None));
+    }
+
+    #[test]
+    fn vod_negative_repeat_fills_the_period() {
+        let mpd = live_mpd_with(OPEN_ENDED_TIMELINE);
+        let template = mpd.periods[0].representations[0].template().unwrap();
+        let numbers: Vec<u64> = template.segments(4.0).iter().map(|s| s.number).collect();
+        assert_eq!(numbers, [1, 2, 3, 4]);
+        assert_eq!(
+            template.segments(0.0).len(),
+            1,
+            "no end to stop the repeat lists its first segment"
+        );
+    }
+
+    // four 2s entries, all listed ahead of the clock
+    const LIVE_SEGMENT_LIST: &str = r#"<SegmentList duration="2" timescale="1">
+      <SegmentURL media="s0.m4s"/><SegmentURL media="s1.m4s"/>
+      <SegmentURL media="s2.m4s"/><SegmentURL media="s3.m4s"/>
+    </SegmentList>"#;
+
+    #[test]
+    fn live_segment_list_holds_back_entries_until_they_are_complete() {
+        let mpd = live_mpd_with(LIVE_SEGMENT_LIST);
+        assert!(live_urls(&mpd, AST_UNIX + 1.0, None).is_empty());
+        assert_eq!(live_urls(&mpd, AST_UNIX + 2.0, None), ["s0.m4s"]);
+        // s0, s1 and s2 are complete, the 4s depth keeps those starting from 2.5s
+        assert_eq!(live_urls(&mpd, AST_UNIX + 6.5, None), ["s2.m4s"]);
+        assert!(!lists_live_period_end(&mpd, AST_UNIX + 6.5, None));
+        let edge = mpd.live_edge(&mpd.periods[0], 1.0).unwrap();
+        let segments = mpd.periods[0].representations[0]
+            .live_segments(&edge, AST_UNIX + 8.0, None)
+            .unwrap();
+        let times: Vec<u64> = segments.iter().map(|s| s.time).collect();
+        assert_eq!(times, [4, 6], "list times accumulate by @duration");
+        assert!(lists_live_period_end(&mpd, AST_UNIX + 8.0, None));
+    }
+
+    #[test]
+    fn live_segment_list_availability_time_offset_publishes_an_entry_early() {
+        let mpd = live_mpd_with(&LIVE_SEGMENT_LIST.replace(
+            "timescale=\"1\"",
+            "timescale=\"1\" availabilityTimeOffset=\"1.5\"",
+        ));
+        assert_eq!(live_urls(&mpd, AST_UNIX + 6.5, None), ["s2.m4s", "s3.m4s"]);
+    }
+
+    #[test]
+    fn live_segment_list_without_duration_lists_every_entry() {
+        let mpd = live_mpd_with(&LIVE_SEGMENT_LIST.replace("duration=\"2\" ", ""));
+        let edge = mpd.live_edge(&mpd.periods[0], 1.0).unwrap();
+        assert_eq!(
+            mpd.periods[0].representations[0].live_segments(&edge, AST_UNIX + 1.0, None),
+            None
+        );
     }
 
     #[test]
