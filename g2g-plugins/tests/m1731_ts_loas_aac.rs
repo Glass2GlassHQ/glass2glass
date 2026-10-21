@@ -435,8 +435,11 @@ fn check_decoded_pcm(object_type: ObjectType, source: &Path, ts: &Path, muxer: &
         eprintln!("ffmpeg not present; skipping the decode legs");
         return;
     }
-    // the TS carries every access unit, so the reference keeps the samples an edit list trims
-    let reference = ffmpeg_f32(&["-ignore_editlist", "1"], source);
+    // the TS carries every access unit, so the reference keeps the priming an edit list or iTunSMPB trims
+    let reference = ffmpeg_f32(
+        &["-ignore_editlist", "1", "-flags2", "+skip_manual"],
+        source,
+    );
     assert!(!reference.is_empty(), "ffmpeg decodes the source");
     if object_type.ffmpeg_decodes_loas {
         assert!(

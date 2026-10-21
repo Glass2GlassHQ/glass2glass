@@ -38,7 +38,7 @@ eld() {
         pkg-config --exists fdk-aac
         rm -rf "$work/fdkaac"
         git clone --depth 1 --branch "$FDKAAC_TAG" https://github.com/nu774/fdkaac.git "$work/fdkaac"
-        (cd "$work/fdkaac" && autoreconf -i && ./configure --prefix="$FDKAAC_PREFIX" \
+        (cd "$work/fdkaac" && autoreconf -fi && ./configure --prefix="$FDKAAC_PREFIX" \
             && make -j"$(nproc)" && make install)
     fi
     "$FDKAAC_PREFIX/bin/fdkaac" -p 39 -b 64000 \
