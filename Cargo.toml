@@ -108,6 +108,7 @@ exclude = [
     # candidate crate never enters the workspace lockfile. Run via
     # tools/opus-rs-gate.sh.
     "tools/opus-rs-gate",
+    "g2g-plugins/vendor/cros-libva",
 ]
 
 [workspace.package]
@@ -130,6 +131,10 @@ g2g-core = { version = "0.9.0", path = "g2g-core", default-features = false }
 g2g-plugins = { version = "0.9.0", path = "g2g-plugins" }
 g2g-ml = { version = "0.9.0", path = "g2g-ml", default-features = false }
 g2g-mcu = { version = "0.9.0", path = "g2g-mcu", default-features = false }
+
+# cros-libva 0.0.12 misses two VP9 encode fields libva 2.23 added, and cros-codecs pins that exact version
+[patch.crates-io]
+cros-libva = { path = "g2g-plugins/vendor/cros-libva" }
 
 [workspace.lints.rust]
 # Treat every compiler warning as an error (the meson `-Werror` analog), so a
