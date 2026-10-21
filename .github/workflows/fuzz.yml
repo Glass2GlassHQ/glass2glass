@@ -17,13 +17,14 @@ env:
 
 jobs:
   fuzz:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
+          env-vars: ImageOS
           workspaces: g2g-plugins/fuzz
       - name: install cargo-fuzz
         run: cargo install cargo-fuzz --locked

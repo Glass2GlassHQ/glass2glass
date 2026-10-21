@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-latest, macos-latest]
+        os: [ubuntu-26.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     # a hung test otherwise burns the 360-minute default (10x-billed on macOS)
     timeout-minutes: 45
@@ -31,6 +31,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ImageOS
       - name: check (no_std default build)
         run: cargo check --workspace --locked
       - name: test (default features)
@@ -39,7 +41,7 @@ jobs:
   # Formatting: the workspace is rustfmt-clean, style pinned by rustfmt.toml.
   fmt:
     name: fmt
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -50,11 +52,13 @@ jobs:
   # a test calling a std-only helper breaks only the feature sets that lack std
   core-features:
     name: g2g-core lib tests per feature
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ImageOS
       - name: test g2g-core lib under each feature alone
         run: |
           for f in "" alloc std runtime metadata runtime,std dyn-slot; do
@@ -68,7 +72,7 @@ jobs:
   # pre-1.0 policy requires (minor), or this fails.
   semver:
     name: semver (g2g-core)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: obi1kenobi/cargo-semver-checks-action@v2
@@ -82,11 +86,13 @@ jobs:
   # result against the checked-in list.
   api-breaks:
     name: recorded api breaks (g2g-core)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ImageOS
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-semver-checks
@@ -97,13 +103,15 @@ jobs:
   # warnings.
   clippy:
     name: clippy
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ImageOS
       - run: cargo clippy --workspace --all-targets --locked
       # Intra-doc links rot silently: a renamed item, or one that moved behind a
       # feature, leaves a dead link nobody notices. The feature set is read out
@@ -130,7 +138,7 @@ jobs:
   # g2g-mcu's dev-dependency on g2g-plugins is a 1.92 crate.
   msrv:
     name: msrv 1.86 (embedded surface)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # rust-toolchain.toml (channel = stable) otherwise wins over the toolchain
     # the action makes default, and the job silently checks stable instead.
     # The exact name the action installs ("1.86" would be a separate rustup
@@ -143,6 +151,8 @@ jobs:
         with:
           targets: thumbv7em-none-eabihf
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ImageOS
       - name: check g2g-core (heap-free baseline, thumb cross, full host surface)
         run: |
           cargo check -p g2g-core --locked --no-default-features
@@ -167,11 +177,13 @@ jobs:
   # `ffmpeg-decode` job below rather than a union slot here.
   feature-unions:
     name: feature unions (rot guard)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ImageOS
       - name: install system libraries
         run: |
           sudo apt-get update
@@ -206,11 +218,13 @@ jobs:
   # ffmpeg CLI, so the encoder probe step keeps a skip from passing as green.
   ffmpeg-decode:
     name: ffmpeg decode (depth guard)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ImageOS
       - name: install libav* and the ffmpeg CLI
         run: |
           sudo apt-get update
@@ -245,7 +259,7 @@ jobs:
   #   ort (downloads ONNX Runtime binaries at build).
   features-linux:
     name: features (linux)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # one test binary per test file links all of linux-full, line tables alone fill the disk
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -262,6 +276,8 @@ jobs:
         with:
           targets: thumbv7em-none-eabihf
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ImageOS
       - name: install system libraries
         run: |
           sudo apt-get update
@@ -686,6 +702,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ImageOS
       # wgpu-sink also compiles the device-discovery assembly (devicemon +
       # gpudevice) on a real Windows toolchain.
       - name: check g2g-plugins (windows feature set)
@@ -713,6 +731,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ImageOS
       # wgpu-sink also compiles the device-discovery assembly (devicemon +
       # gpudevice) on a real macOS toolchain.
       - name: check g2g-plugins (macos platform features)
@@ -751,13 +771,15 @@ jobs:
   # separately). Mirrors the macOS decode track for Android.
   features-android:
     name: features (android)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ImageOS
       - name: check g2g-plugins (mediacodec)
         run: >
           cargo check -p g2g-plugins --locked --all-targets
@@ -794,11 +816,13 @@ jobs:
   # examples keep running, the language-neutral waist on top of g2g-capi.
   bindings:
     name: bindings (pyapi wheel + C/Python examples)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ImageOS
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -831,13 +855,15 @@ jobs:
   # have no GPU), so this job shows the interop tier only.
   conformance:
     name: conformance matrix (ffmpeg oracles + maturity)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     env:
       G2G_CONFORMANCE_LOG: ${{ github.workspace }}/g2g-conformance.tsv
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ImageOS
       - name: install ffmpeg (the reference peer)
         run: |
           sudo apt-get update
@@ -999,13 +1025,15 @@ jobs:
   # it is left to a dedicated embedded job.)
   wasm:
     name: wasm (g2g-core)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: ImageOS
       # `runtime` pulls `spin` (the core's no-feature build can't compile log.rs
       # without it); it builds on wasm32. Verified locally for the target.
       - run: cargo check -p g2g-core --locked --target wasm32-unknown-unknown --features runtime
