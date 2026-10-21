@@ -15137,7 +15137,7 @@ impl VulkanVideoDec {
         (!alternatives.is_empty()).then(|| CapsSet::from_alternatives(alternatives))
     }
 
-    pub(crate) fn accepts_input(input: &Caps) -> bool {
+    pub fn accepts_input(input: &Caps) -> bool {
         static HARDWARE_INPUT_CAPS: std::sync::OnceLock<CapsSet> = std::sync::OnceLock::new();
         // no Vulkan video device leaves the open caps for configure to fail on
         let hardware_input_caps = HARDWARE_INPUT_CAPS
