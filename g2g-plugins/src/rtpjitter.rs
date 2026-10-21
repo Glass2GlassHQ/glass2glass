@@ -83,6 +83,8 @@ pub struct RtpJitterBuffer {
     /// Next extended sequence to release; `None` until the first packet sets the
     /// baseline.
     next: Option<u64>,
+    // until the first release a packet before the baseline still fits in front of it
+    released_any: bool,
     sequence_extender: RtpSequenceExtender,
     /// Hold every packet `max_hold_ns` past its arrival, not only one behind a
     /// gap, so the output runs a constant delay behind the network.
@@ -107,6 +109,7 @@ impl RtpJitterBuffer {
             config,
             packets: BTreeMap::new(),
             next: None,
+            released_any: false,
             sequence_extender: RtpSequenceExtender::new(),
             constant_delay: false,
             stats: JitterStats::default(),
@@ -145,6 +148,7 @@ impl RtpJitterBuffer {
 
         match self.next {
             None => self.next = Some(ext),
+            Some(next) if ext < next && !self.released_any => self.next = Some(ext),
             Some(next) => {
                 if ext < next {
                     // Already released past this sequence: too late to use.
@@ -204,6 +208,7 @@ impl RtpJitterBuffer {
         self.stats.lost += head - next;
         let buf = self.packets.remove(&head).expect("head present");
         self.next = Some(head + 1);
+        self.released_any = true;
         Some(buf.data)
     }
 
@@ -348,6 +353,25 @@ mod tests {
             "depth cap forces release"
         );
         assert_eq!(jb.stats().lost, 1);
+    }
+
+    #[test]
+    fn a_packet_before_the_first_one_is_kept_until_the_first_release() {
+        let config = JitterConfig::new(50, 64);
+        let hold_ns = config.max_hold_ns;
+        let mut jb = RtpJitterBuffer::new(config).with_constant_delay();
+        // a second bonded link delivers 7 after 8 arrived on the first
+        jb.push(&pkt(8, 8), 0);
+        jb.push(&pkt(7, 7), 0);
+        let released: Vec<u8> = core::iter::from_fn(|| jb.pop(hold_ns).map(|p| tag(&p))).collect();
+        assert_eq!(released, alloc::vec![7, 8]);
+        assert_eq!(jb.stats().late, 0);
+        jb.push(&pkt(6, 6), hold_ns);
+        assert_eq!(
+            jb.stats().late,
+            1,
+            "after a release an earlier packet is late"
+        );
     }
 
     #[test]
