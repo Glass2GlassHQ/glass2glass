@@ -99,6 +99,10 @@ every row, chroma included (the `RawVideoFormat::row_stride` convention), so an
 odd-width NV12 dma-buf is read when that stride holds the chroma row, one byte
 wider than the luma row, and refused when it does not.
 
+The compute pipelines and buffers are sized to the configured geometry and
+format. A `configure_pipeline` that changes either drops them, and each path
+rebuilds on its next frame.
+
 Shared images are recycled from a reuse pool. The Vulkan image, its CUDA import
 and the `wgpu::Texture` are allocated once and returned to a free list when the
 downstream frame is released, through a drop guard on the emitted keep-alive, so
