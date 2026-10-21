@@ -1093,11 +1093,20 @@ BWDREF=0, ALTREF2=-1, ALTREF=-1]`. The ALTREF2 and ALTREF entries are -1, not 0.
 Defaulting them to 0 leaves in-loop deblocking mis-configured for compound blocks
 referencing the alt frames, a small residual on inter frames past the first.
 
-`av1_tile_layout` parses the `OBU_FRAME` tile-group header plus the per-tile
+`av1_tile_layout` parses each tile-group header plus the per-tile
 `TileSizeBytes` size prefixes into the driver's per-tile offset and size lists,
-and a 2x2 and a 4x4 libaom clip decode bit-exact on the 3060. A stream where
-decode order differs from display order takes a synchronous reorder-aware path:
-`scan_ops` builds the op list, non-shown alt-ref frames decode into the DPB
+and a 2x2 and a 4x4 libaom clip decode bit-exact on the 3060. A frame is an
+`OBU_FRAME` or an `OBU_FRAME_HEADER` followed by `OBU_TILE_GROUP`s, written to the
+bitstream buffer back to back, and its tile groups must cover the frame's tiles
+in order. A frame header that arrives before the frame's last tile group is a copy
+(spec 7.5) and is skipped, as is every `OBU_REDUNDANT_FRAME_HEADER`. Only the last
+shown frame of each temporal unit is emitted, which in a scalable stream is its
+highest spatial layer, the output of aomdec and dav1d with `all_layers` off. The
+driver takes an AV1 frame's size only from the picture resource `codedExtent`, so
+each frame and each reference is bound at its own `UpscaledWidth x FrameHeight`:
+the base layer of `svc-L2T1` is 640x360 under the 1280x720 layer that predicts
+from it. A stream where decode order differs from display order takes a
+synchronous reorder-aware path: `av1_scan_ops` builds the op list, non-shown alt-ref frames decode into the DPB
 without emitting, and each `show_existing_frame` emits the referenced stored slot
 at its display position.
 
@@ -1113,7 +1122,10 @@ the caps settled on: RGBA through the CPU convert, or a `TextureFormat::NV12`
 texture written one `write_texture` per plane aspect when the caps pinned the
 two-plane output. Grain is output-only, so the read-back leaves the DPB reference
 untouched and a grain-free displayed frame stays on the zero-copy GPU convert.
-Grain synthesis is 8-bit, so a 10-bit grain stream stays on the grain-free path.
+The CPU convert and two-plane upload are 8-bit. A grained 10-bit picture is
+uploaded instead into a staging image of the DPB slots' format and extent and
+takes the converter pass a grain-free 10-bit slot takes, to `Rgba16Float`
+(tone-mapped when enabled) or a P010 texture.
 
 `StdVideoAV1LoopRestoration::LoopRestorationSize` is the `1 + lr_unit_shift`
 encoding, not the pixel unit size, matching ffmpeg's Vulkan hwaccel. Getting it
@@ -1191,7 +1203,7 @@ official one.
 | :--- | ---: | ---: | ---: |
 | `ffmpegdec` | 130 / 135 | 172 / 188 (2026-10-20) | 0 / 240 |
 | `nvdec` | 129 / 135 | 141 / 188 | 202 / 240 |
-| `vulkanvideodec` | 99 / 135 (2026-10-20) | 142 / 188 (2026-10-21) | 201 / 240 (2026-10-21) |
+| `vulkanvideodec` | 99 / 135 (2026-10-20) | 142 / 188 (2026-10-21) | 204 / 240 (2026-10-21) |
 | `dav1ddec` | | | 240 / 240 (2026-10-21) |
 | `rav1ddec` | | | 240 / 240 (2026-10-21) |
 
@@ -1202,11 +1214,10 @@ refused at the slice header (MBAFF frame pictures decode), FMO at the PPS and
 SP slices at the slice header, so a stream the decoder cannot handle never ends
 as an empty or wrong success.
 
-`vulkanvideodec` decodes AV1-TEST-VECTORS at 201 / 240 on the RTX 3060 (NVIDIA)
-and 237 / 240 on RADV (Rembrandt), 2026-10-21. The NVIDIA gap is the 36
+`vulkanvideodec` decodes AV1-TEST-VECTORS at 204 / 240 on the RTX 3060 (NVIDIA)
+and 240 / 240 on RADV (Rembrandt), 2026-10-21. The NVIDIA gap is the 36
 `size-16..66` vectors below the device minimum coded extent, which decode on
-RADV. Both drivers refuse the three `svc` vectors because they split frames into
-`OBU_FRAME_HEADER` plus `OBU_TILE_GROUP`. The frame-header parse passes CDEF
+RADV. The frame-header parse passes CDEF
 secondary strengths as coded and keeps each reference slot's loop-filter deltas,
 segmentation features and global-motion models for `load_previous()`. Film grain
 is synthesized on the CPU at 8 and 10 bits from the grain-free luma, bit-exact

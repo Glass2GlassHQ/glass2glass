@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1781: `vulkanvideodec` applies AV1 film grain to 10-bit pictures on the GPU-texture path.
+- M1780: `vulkanvideodec` decodes AV1 frames split into frame header and tile group OBUs and outputs the top spatial layer of a scalable stream.
 - M1784: `livekitdatasink` and `livekitdatasrc` send and receive LiveKit user data packets as data-only room participants.
 - M1783: `matroskademux` undoes chained `ContentEncoding`s and a compressed `CodecPrivate`, plus bzip2 and lzo behind `matroska-compression`.
 - M1779: `pipewirevideosrc` captures planar frames sent as one data block per plane.
