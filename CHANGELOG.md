@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1776: `kmssink` and `cudakmssink` absorb the orientations their plane shows instead of all or none, and `videoflip` remaps any turn the sink cannot apply.
 - M1775: `avidemux` reads I420 written by GStreamer's `avimux`, whose plane rows are padded to four bytes.
 - M1774: `tsdemux` demuxes LOAS AAC carried under the ADTS stream type (0x0F), so `decodebin` plays it.
 - M1769: `vulkanvideodec` refuses H.265 below the GPU's minimum decode size, as it already did H.264 and AV1, and auto-plug decodes such streams in software.

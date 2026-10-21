@@ -236,9 +236,6 @@ Highest leverage first:
   shaping if cosmic-text ever grows writing modes.
 - Add a carrier for non-default channel orders when a source needs an
   interleave order outside the per-count `ChannelLayout` convention.
-- Let a sink absorb only the orientations its device supports (a KMS plane with
-  only rotate-0 and rotate-180), which needs a per-orientation
-  `absorbs_orientation`.
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 

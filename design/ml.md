@@ -732,9 +732,10 @@ working in display coordinates applies it itself. It survives a scale or a colou
 convert (`Propagation::Keep`) and dies under a crop, whose rectangle is chosen in
 the coordinates the turn has not been applied to yet.
 
-A sink that can apply it says so with `AsyncElement::absorbs_orientation`, and
-each runner's sink arm sends `Reconfigure::AbsorbOrientation` up that sink's input
-link while the arms are still being wired, before any frame is pulled. The
+A sink that can apply it names the orientations it applies with
+`AsyncElement::absorbed_orientations`, an `OrientationSet`, and each runner's sink
+arm sends `Reconfigure::AbsorbOrientation` with that set up the sink's input link,
+skipping a set with no turn besides `Identity`, while the arms are still being wired, before any frame is pulled. The
 advertisement travels the reverse channel the same way a keyframe request does,
 but the relay decision is per variant (`ReconfigureAnswered`): a transform relays
 it toward the source unless `handles_orientation` says it answers the signal
@@ -745,7 +746,9 @@ between the flip and the sink delays the switch by the frames already in flight.
 Nothing is lost, they arrive rotated.
 
 `VideoFlip` sees the advertisement as `PushOutcome::Reconfigure` from its own
-push. The pre-send check holds that packet back rather than enqueuing it, so the
+push. It keeps the set and switches to the descriptor only while the set contains
+its method, checked per frame since `method` can change at runtime, so a method
+outside the set is still remapped. The pre-send check holds that packet back rather than enqueuing it, so the
 flip re-announces the output caps, now the input's with no dimension swap, and
 sends the packet again as a descriptor: the buffer goes through in the same memory
 domain with `OrientationMeta` attached, composed with any turn already on the
@@ -757,7 +760,7 @@ surfaces from the pre-send check, since a post-send one is held for the next pus
 or the producer would resend a packet that already crossed, and an `Eos` is never
 held back at all, since nothing sends one twice.
 
-`WaylandSink` is the sink that absorbs today. It maps the descriptor to a
+`WaylandSink` absorbs every turn. It maps the descriptor to a
 `wl_surface::set_buffer_transform` argument, re-issued only when the turn changes,
 and swaps the window's size hint for a turn that transposes the picture, with the
 buffer and its damage staying in buffer coordinates. The argument is the inverse
@@ -767,9 +770,9 @@ applied to the buffer and the compositor applies its inverse.
 `KmsSink` and `CudaKmsSink` absorb through the primary plane's `rotation`
 property, reading the value names and their bits from the plane and passing the
 descriptor as is, since the plane applies its rotation directly. They advertise
-only when the plane can show all eight turns, because the advertisement covers
-every turn at once, and turn the CRTC off and back on around a change so
-`set_crtc` sizes the plane for the new turn. `D3D11Sink` absorbs through
+the turns the plane can show, so a plane with only rotate-0 and rotate-180 absorbs
+the half turn and leaves quarter turns to the flip, and they turn the CRTC off and back on around a change so
+`set_crtc` sizes the plane for the new turn. `D3D11Sink` absorbs every turn through
 `VideoProcessorSetStreamRotation` and `VideoProcessorSetStreamMirror`, and resizes
 the swapchain and window for a turn that transposes the picture. Its processor
 caps are only known at the first frame, so a processor without rotation or mirror
