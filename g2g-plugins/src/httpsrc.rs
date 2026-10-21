@@ -111,8 +111,10 @@ impl HttpSrc {
     }
 }
 
+type FailedAt = fn(&reqwest::Error) -> bool;
+
 // timeout comes first because a connect that times out also reports is_connect
-const TRANSPORT_FAILURES: [(fn(&reqwest::Error) -> bool, HttpTransportFailure); 6] = [
+const TRANSPORT_FAILURES: [(FailedAt, HttpTransportFailure); 6] = [
     (reqwest::Error::is_timeout, HttpTransportFailure::Timeout),
     (reqwest::Error::is_connect, HttpTransportFailure::Connect),
     (reqwest::Error::is_body, HttpTransportFailure::Body),
