@@ -458,6 +458,8 @@ pub(crate) fn parse_hvcc(hvcc: &[u8]) -> Result<DecoderConfigRecord, G2gError> {
 /// Whether the access unit already opens with a parameter-set NAL (so the
 /// config-record sets need not be prepended): H.264 SPS(7), H.265 VPS(32),
 /// AV1 a sequence-header OBU anywhere in the temporal unit.
+const MPEG2_SEQUENCE_HEADER_START: [u8; 4] = [0, 0, 1, 0xB3];
+
 pub(crate) fn starts_with_param_set(annexb: &[u8], codec: VideoCodec) -> bool {
     if codec == VideoCodec::Av1 {
         return crate::av1parse::has_sequence_header(annexb);
@@ -470,6 +472,9 @@ pub(crate) fn starts_with_param_set(annexb: &[u8], codec: VideoCodec) -> bool {
             _ => false,
         };
     }
+    if codec == VideoCodec::Mpeg2 {
+        return annexb.starts_with(&MPEG2_SEQUENCE_HEADER_START);
+    }
     if annexb.len() <= 4 || annexb[..4] != [0, 0, 0, 1] {
         return false;
     }
@@ -481,8 +486,8 @@ pub(crate) fn starts_with_param_set(annexb: &[u8], codec: VideoCodec) -> bool {
 
 /// Prepend the out-of-band config-record parameter sets to `annexb` (the first
 /// access unit). H.264/H.265 sets are raw NAL bodies, so each gets a 4-byte
-/// Annex-B start code; MPEG-4 Part 2's single set (the esds VOL header, which
-/// carries its own 3-byte start codes) and AV1's (the `av1C` configOBUs, whole
+/// Annex-B start code; an MPEG-4 Part 2 or MPEG-2 set (the esds VOL or sequence
+/// header, which carries its own 3-byte start codes) and AV1's (the `av1C` configOBUs, whole
 /// size-delimited OBUs) are prepended verbatim. Shared by the progressive and
 /// fragmented MP4 demuxers and the FLV demuxer.
 pub(crate) fn prepend_param_sets(
@@ -492,7 +497,10 @@ pub(crate) fn prepend_param_sets(
 ) -> Vec<u8> {
     let mut out = Vec::new();
     for set in param_sets {
-        if !matches!(codec, VideoCodec::Mpeg4Part2 | VideoCodec::Av1) {
+        if !matches!(
+            codec,
+            VideoCodec::Mpeg4Part2 | VideoCodec::Mpeg2 | VideoCodec::Av1
+        ) {
             out.extend_from_slice(&[0, 0, 0, 1]);
         }
         out.extend_from_slice(set);

@@ -36,7 +36,8 @@ use g2g_core::{
 use crate::filesink::path_io_err;
 use crate::fmp4::{
     clean_aperture_meta, fragment_framerate_q16, parse_all_tracks, parse_chapters, parse_fragments,
-    parse_header, parse_progressive, starts_with_param_set, Header, Sample, TrackKind,
+    parse_header, parse_progressive, prepend_param_sets, starts_with_param_set, Header, Sample,
+    TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
@@ -377,13 +378,7 @@ impl SourceLoop for Mp4Src {
                 if need_param_sets && !starts_with_param_set(&annexb, header.codec) {
                     // out-of-band parameter sets: prepend so a decoder can
                     // start (our own writer keeps them in-band).
-                    let mut with_sets = Vec::new();
-                    for set in &header.param_sets {
-                        with_sets.extend_from_slice(&[0, 0, 0, 1]);
-                        with_sets.extend_from_slice(set);
-                    }
-                    with_sets.extend_from_slice(&annexb);
-                    annexb = with_sets;
+                    annexb = prepend_param_sets(&annexb, &header.param_sets, header.codec);
                 }
                 need_param_sets = false;
                 position = s.pts_ns;

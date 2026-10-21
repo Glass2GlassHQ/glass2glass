@@ -44,6 +44,16 @@ const AV1: Fixture = Fixture {
         "/tests/fixtures/av1_clean_aperture.mp4.yuv420p"
     ),
 };
+const MPEG2: Fixture = Fixture {
+    file: concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/mpeg2_clean_aperture.mp4"
+    ),
+    reference: concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/mpeg2_clean_aperture.mp4.yuv420p"
+    ),
+};
 const MPEG4: Fixture = Fixture {
     file: concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -271,6 +281,32 @@ async fn playbin_crops_its_video_branch() {
 async fn decodebin_crops_av1_in_mp4_to_the_clean_aperture() {
     let (decoded, snapshot) = run_line("decodebin-av1", decodebin_line(&AV1)).await;
     assert_cropped_as_ffmpeg_does(&AV1, &decoded, &snapshot);
+}
+
+// qtdemux, Mp4Src and Mp4DemuxN each read the mp4v entry
+#[tokio::test]
+async fn decodebin_crops_mpeg2_in_mp4_to_the_clean_aperture() {
+    let (decoded, snapshot) = run_line("decodebin-mpeg2", decodebin_line(&MPEG2)).await;
+    assert_cropped_as_ffmpeg_does(&MPEG2, &decoded, &snapshot);
+}
+
+#[tokio::test]
+async fn a_bare_uridecodebin_decodes_and_crops_mpeg2_in_mp4() {
+    let (decoded, snapshot) = run_line("uridecodebin-mpeg2", uridecodebin_line(&MPEG2)).await;
+    assert_cropped_as_ffmpeg_does(&MPEG2, &decoded, &snapshot);
+}
+
+#[tokio::test]
+async fn the_decodebin_fan_out_decodes_and_crops_mpeg2_in_mp4() {
+    let (decoded, snapshot) = run_line("decodebin-fanout-mpeg2", |out| {
+        format!(
+            "filesrc location={} ! decodebin name=d  d.video_0 ! videoconvert \
+             ! video/x-raw,format=I420 ! filesink location={out}",
+            MPEG2.file
+        )
+    })
+    .await;
+    assert_cropped_as_ffmpeg_does(&MPEG2, &decoded, &snapshot);
 }
 
 #[tokio::test]

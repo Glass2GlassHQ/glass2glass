@@ -42,8 +42,8 @@ use g2g_core::{
 
 use crate::fmp4::{
     clip_stored_pcm, parse_all_tracks, parse_chapters, parse_fragments_multi,
-    parse_progressive_multi, starts_with_param_set, unsupported_pcm_layout, vorbis_headers, Sample,
-    TrackHeader, TrackKind,
+    parse_progressive_multi, prepend_param_sets, starts_with_param_set, unsupported_pcm_layout,
+    vorbis_headers, Sample, TrackHeader, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 use crate::uncompressedvideo::{raw_video_frame_bytes, warn_short_raw_video_frame};
@@ -902,13 +902,7 @@ impl Mp4DemuxN {
                     codec, param_sets, ..
                 }) => {
                     if self.need_config[port] && !starts_with_param_set(&data, *codec) {
-                        let mut with = Vec::new();
-                        for set in param_sets {
-                            with.extend_from_slice(&[0, 0, 0, 1]);
-                            with.extend_from_slice(set);
-                        }
-                        with.extend_from_slice(&data);
-                        data = with;
+                        data = prepend_param_sets(&data, param_sets, *codec);
                     }
                 }
                 // Opus packets are stored raw; the `dOps`-derived `OpusHead`

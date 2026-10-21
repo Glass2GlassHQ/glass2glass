@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regenerate the g2g-plugins/tests/fixtures/<codec>_clean_aperture.* fixtures
-# and ffmpeg's decode of each. Pass the codecs to regenerate (h264, av1, mpeg4),
-# or none for all three.
+# and ffmpeg's decode of each. Pass the codecs to regenerate (h264, av1, mpeg2,
+# mpeg4), or none for all four.
 #
 # ffmpeg's mov and mp4 muxers write no clap box, so the script muxes three
 # testsrc2 frames and inserts one into the first sample entry of the video track.
@@ -18,9 +18,10 @@ encode_arguments() {
     case "$1" in
     h264) echo "h264_clean_aperture.mov -c:v libx264 -bf 0 -pix_fmt yuv420p -f mov" ;;
     av1) echo "av1_clean_aperture.mp4 -c:v libaom-av1 -cpu-used 8 -pix_fmt yuv420p -f mp4" ;;
+    mpeg2) echo "mpeg2_clean_aperture.mp4 -c:v mpeg2video -bf 0 -pix_fmt yuv420p -f mp4" ;;
     mpeg4) echo "mpeg4_clean_aperture.mp4 -c:v mpeg4 -bf 0 -pix_fmt yuv420p -f mp4" ;;
     *)
-        echo "unknown codec $1, expected h264, av1 or mpeg4" >&2
+        echo "unknown codec $1, expected h264, av1, mpeg2 or mpeg4" >&2
         exit 2
         ;;
     esac
@@ -91,7 +92,7 @@ PY
 
 codecs=("$@")
 if [ ${#codecs[@]} -eq 0 ]; then
-    codecs=(h264 av1 mpeg4)
+    codecs=(h264 av1 mpeg2 mpeg4)
 fi
 for codec in "${codecs[@]}"; do
     read -r name encode <<<"$(encode_arguments "$codec")"

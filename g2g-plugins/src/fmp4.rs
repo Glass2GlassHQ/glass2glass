@@ -120,22 +120,8 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
         let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
         (VideoCodec::H265, parse_hvcc(hvcc)?.parameter_sets, None)
     } else if let Some(mp4v) = find_box(entries, b"mp4v") {
-        // MPEG-4 Part 2: the mp4v visual sample entry nests an esds carrying the
-        // VOL header as its DecoderSpecificInfo. Confirm objectTypeIndication
-        // 0x20 (Visual ISO/IEC 14496-2) so another mp4v-boxed codec is rejected.
-        let children = mp4v.get(78..).ok_or(G2gError::CapsMismatch)?;
-        let esds = find_box(children, b"esds").ok_or(G2gError::CapsMismatch)?;
-        let (oti, dsi) = parse_esds_decoder_config(esds)?;
-        if oti != 0x20 {
-            return Err(G2gError::CapsMismatch);
-        }
-        // The VOL header is the single config blob (empty if carried in-band).
-        let sets = if dsi.is_empty() {
-            Vec::new()
-        } else {
-            Vec::from([dsi])
-        };
-        (VideoCodec::Mpeg4Part2, sets, None)
+        let (codec, sets) = mp4v_codec(mp4v)?.ok_or(G2gError::CapsMismatch)?;
+        (codec, sets, None)
     } else if let Some(av01) = find_box(entries, b"av01") {
         (VideoCodec::Av1, parse_av1c_config(av01)?, None)
     } else if let Some(encv) = find_box(entries, b"encv") {
@@ -879,24 +865,11 @@ fn parse_video_entry(
     {
         (VideoCodec::Mjpeg, Vec::new(), None)
     } else if let Some(mp4v) = find_box(entries, b"mp4v") {
-        // MPEG-4 Part 2: the mp4v visual sample entry nests an esds carrying the
-        // VOL header as its DecoderSpecificInfo. Confirm objectTypeIndication
-        // 0x20 (Visual ISO/IEC 14496-2) so another mp4v-boxed codec is declined.
-        let children = mp4v.get(78..).ok_or(G2gError::CapsMismatch)?;
-        let esds = find_box(children, b"esds").ok_or(G2gError::CapsMismatch)?;
-        let (oti, dsi) = parse_esds_decoder_config(esds)?;
-        if oti != 0x20 {
-            // Another codec in an mp4v box (ffmpeg writes MJPEG-in-MP4 this way,
-            // objectTypeIndication 0x6C): a valid entry we have no reader for.
-            return Ok(None);
+        match mp4v_codec(mp4v)? {
+            Some((codec, sets)) => (codec, sets, None),
+            // a valid entry we have no reader for
+            None => return Ok(None),
         }
-        // The VOL header is the single config blob (empty if carried in-band).
-        let sets = if dsi.is_empty() {
-            Vec::new()
-        } else {
-            Vec::from([dsi])
-        };
-        (VideoCodec::Mpeg4Part2, sets, None)
     } else if let Some(av01) = find_box(entries, b"av01") {
         (VideoCodec::Av1, parse_av1c_config(av01)?, None)
     } else if let Some(codec) = boxes(entries).find_map(|(fourcc, _)| mezzanine_codec(*fourcc)) {
@@ -930,6 +903,37 @@ fn parse_video_entry(
         },
         cenc,
     )))
+}
+
+// ISO/IEC 14496-1 objectTypeIndication values of an `mp4v` entry's decoder config
+const MPEG4_VISUAL_OBJECT_TYPE: u8 = 0x20;
+// the simple, main, SNR, spatial, high and 4:2:2 profiles
+const MPEG2_VISUAL_OBJECT_TYPES: core::ops::RangeInclusive<u8> = 0x60..=0x65;
+const MPEG1_VISUAL_OBJECT_TYPE: u8 = 0x6A;
+
+// a sample entry's codec and the config blobs it carries out of band
+type EntryCodec = (VideoCodec, Vec<Vec<u8>>);
+
+// None for an objectTypeIndication g2g has no codec for (ffmpeg writes MJPEG-in-MP4 as 0x6C)
+fn mp4v_codec(mp4v: &[u8]) -> Result<Option<EntryCodec>, G2gError> {
+    let children = mp4v
+        .get(VISUAL_SAMPLE_ENTRY_CHILDREN_AT..)
+        .ok_or(G2gError::CapsMismatch)?;
+    let esds = find_box(children, b"esds").ok_or(G2gError::CapsMismatch)?;
+    let (object_type, decoder_config) = parse_esds_decoder_config(esds)?;
+    let codec = match object_type {
+        MPEG4_VISUAL_OBJECT_TYPE => VideoCodec::Mpeg4Part2,
+        // one codec in g2g, as one decoder plays both
+        MPEG1_VISUAL_OBJECT_TYPE => VideoCodec::Mpeg2,
+        object_type if MPEG2_VISUAL_OBJECT_TYPES.contains(&object_type) => VideoCodec::Mpeg2,
+        _ => return Ok(None),
+    };
+    // the VOL or sequence header, empty when the stream carries it in-band
+    let sets = match decoder_config.is_empty() {
+        true => Vec::new(),
+        false => Vec::from([decoder_config]),
+    };
+    Ok(Some((codec, sets)))
 }
 
 // the intra-only editing codecs, each frame decodable alone
@@ -3685,6 +3689,12 @@ mod tests {
             parse_header(&build(0x21)).is_err(),
             "non-Visual objectTypeIndication rejected"
         );
+        // the MPEG-2 Visual profiles of ISO/IEC 14496-1, then MPEG-1 Visual
+        for object_type in [0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x6A] {
+            let header = parse_header(&build(object_type))
+                .unwrap_or_else(|e| panic!("objectTypeIndication {object_type:#x}: {e:?}"));
+            assert_eq!(header.codec, VideoCodec::Mpeg2, "{object_type:#x}");
+        }
     }
 
     /// MPEG-4 Part 2 config framing differs from H.264/H.265: the VOL header
