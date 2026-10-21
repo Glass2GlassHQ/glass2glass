@@ -140,8 +140,10 @@ fn reference_rgb(bytes: &[u8], width: u32, height: u32) -> Vec<[u8; 3]> {
 }
 
 fn rendered_rgb(rgba: &[u8]) -> Vec<[u8; 3]> {
-    rgba.chunks_exact(RGBA_PIXEL_BYTES)
-        .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+    rgba.as_chunks::<RGBA_PIXEL_BYTES>()
+        .0
+        .iter()
+        .map(|[red, green, blue, _]| [*red, *green, *blue])
         .collect()
 }
 
@@ -280,6 +282,11 @@ fn odd_two_plane_nv12_matches_the_packed_render() {
         .contains(wgpu::Features::TEXTURE_FORMAT_NV12)
     {
         eprintln!("skip: wgpu device lacks TEXTURE_FORMAT_NV12");
+        return;
+    }
+    // wgpu's dx12 backend has no copy format for an NV12 plane and panics in write_texture
+    if ctx.adapter.get_info().backend == wgpu::Backend::Dx12 {
+        eprintln!("skip: dx12 cannot upload into NV12 planes");
         return;
     }
     for (width, height) in ODD_SIZES {
