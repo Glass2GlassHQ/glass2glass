@@ -2175,7 +2175,7 @@ pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     let mut unsupported = demux.unmapped_codec_ids().to_vec();
     unsupported.extend(encoded.into_iter().map(|stream| {
         alloc::format!(
-            "{} under a ContentEncoding (bzip2, lzo or encryption)",
+            "{} under a ContentEncoding g2g does not undo (encryption, or bzip2 / lzo without matroska-compression)",
             crate::mkvdemux::mkv_stream_str(stream)
         )
     }));

@@ -34,8 +34,12 @@ linux-full = [
     "wayland-sink", "gl-sink", "kms-sink", "wgpu-sink", "wgpu-present", "vello-overlay", "analytics",
     "analytics-json", "mqtt", "embedding-index",
     "declarative-yaml", "script-rhai", "observe", "mcp", "tui", "latency-bench",
+    "matroska-compression",
 ]
 std = ["g2g-core/std", "dep:tokio"]
+# bzip2 and lzo `ContentEncoding` decompression in the Matroska demuxer. Both
+# crates are pure Rust and no_std, so the feature does not imply std.
+matroska-compression = ["dep:libbz2-rs-sys", "dep:lzo"]
 multi-thread = ["g2g-core/multi-thread", "dep:libc"]
 # Element-level cooperative offload (M760): a heavy synchronous element moves
 # its per-frame compute onto tokio's blocking pool (`offload::run_blocking`), so
@@ -820,6 +824,11 @@ spin = { version = "0.9", default-features = false, features = ["mutex", "spin_m
 # `forbid(unsafe_code)`, and no_std with `with-alloc` alone, so it fits the
 # baseline; default-features off keeps its `std` off.
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+# bzip2 for `matroska-compression`: the pure-Rust libbzip2 port, no_std with only
+# its Rust-allocator feature
+libbz2-rs-sys = { version = "0.2.5", optional = true, default-features = false, features = ["rust-allocator"] }
+# LZO1X for `matroska-compression`, `forbid(unsafe_code)`, no_std without its `alloc` feature
+lzo = { version = "0.1.4", optional = true, default-features = false }
 # start-code search in the elementary-stream parsers, no_std with default features off
 memchr = { version = "2.8", default-features = false }
 # CLOCK_TAI via clock_gettime for the `ptp` feature (PtpSystemClock). Top-level

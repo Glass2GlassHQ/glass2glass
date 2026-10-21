@@ -624,11 +624,12 @@ impl MkvDemux {
     }
 
     /// Refuse a bitmap-subtitle or PCM track whose `ContentEncoding` the demuxer
-    /// cannot undo (bzip2 / lzo / encryption): its blocks are encoded bytes rather
-    /// than SPU packets, DVB segments or samples, so forwarding them would feed
-    /// garbage downstream. zlib and header-stripped tracks are decoded at demux
-    /// and pass. Only the subpicture and PCM selections are checked; the other
-    /// codecs' handling of an undecodable encoding is unchanged.
+    /// cannot undo (an encryption, bzip2 / lzo without `matroska-compression`):
+    /// its blocks are encoded bytes rather than SPU packets, DVB segments or
+    /// samples, so forwarding them would feed garbage downstream. Tracks whose
+    /// encodings are decoded at demux pass. Only the subpicture and PCM
+    /// selections are checked; the other codecs' handling of an undecodable
+    /// encoding is unchanged.
     fn reject_undecodable_encoding(&self) -> Result<(), G2gError> {
         let checked = matches!(
             self.stream,
@@ -645,7 +646,7 @@ impl MkvDemux {
         }
         g2g_error!(
             Target::category("mkvdemux"),
-            "{} track declares a ContentEncoding this demuxer cannot undo (bzip2 / lzo / encryption)",
+            "{} track declares a ContentEncoding this demuxer cannot undo (encryption, or bzip2 / lzo without matroska-compression)",
             mkv_stream_str(self.stream)
         );
         Err(G2gError::CapsMismatch)
@@ -2527,6 +2528,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "matroska-compression"))]
     #[tokio::test]
     async fn lzo_compressed_pcm_fails_instead_of_forwarding_packed_bytes() {
         const LZO_COMPRESSION_ALGORITHM: u64 = 2;
@@ -2551,6 +2553,28 @@ mod tests {
             Err(G2gError::CapsMismatch)
         );
         assert!(sink.frames.is_empty());
+    }
+
+    // python-lzo compressed the payload, in tools/mkv-content-encoding-fixtures.sh
+    #[cfg(feature = "matroska-compression")]
+    #[tokio::test]
+    async fn lzo_compressed_pcm_forwards_the_decoded_samples() {
+        const LZO_COMPRESSION_ALGORITHM: u64 = 2;
+        let samples = include_bytes!("../tests/fixtures/mkv_encoding_payload.txt");
+        let stored = include_bytes!("../tests/fixtures/mkv_encoding_payload.lzo");
+        let compression = elem(
+            &[0x50, 0x34],
+            &elem(&[0x42, 0x54], &uint_body(LZO_COMPRESSION_ALGORITHM)),
+        );
+        let encodings = elem(&[0x6D, 0x80], &elem(&[0x62, 0x40], &compression));
+        let mut sink = CaptureSink::default();
+        run(
+            MkvStream::Pcm(AudioFormat::PcmS16Le),
+            &pcm_file(b"A_PCM/INT/LIT", &encodings, stored),
+            &mut sink,
+        )
+        .await;
+        assert_eq!(sink.frames, alloc::vec![samples.to_vec()]);
     }
 
     fn subtitle_track(num: u64, codec: &[u8]) -> Vec<u8> {

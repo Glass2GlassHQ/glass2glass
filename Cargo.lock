@@ -4191,11 +4191,13 @@ dependencies = [
  "jpeg-encoder",
  "js-sys",
  "khronos-egl",
+ "libbz2-rs-sys",
  "libc",
  "libcamera",
  "libloading 0.8.9",
  "libpulse-binding",
  "libpulse-simple-binding",
+ "lzo",
  "md-5",
  "memchr",
  "miniz_oxide",
@@ -5463,6 +5465,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
+name = "libbz2-rs-sys"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34b357333733e8260735ba5894eb928c02ecc69c78715f01a8019e7fa7f2db4c"
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5796,6 +5804,12 @@ name = "lzma-rust2"
 version = "0.15.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e20f57f9918e5bd7bc58c22cdd70a6afc7375d4dd9683af5f2b34bd3d2bba619"
+
+[[package]]
+name = "lzo"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1574f8e322bb9d442095896ff66d126e521f5a85ef7d7343a269bb7d6eeb3f0b"
 
 [[package]]
 name = "mac_address"
