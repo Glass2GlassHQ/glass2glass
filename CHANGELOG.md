@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1778: `vulkanvideodec` refuses H.264 and H.265 streams and AV1 frames above the GPU's maximum decode size instead of decoding zeros.
 - M1776: `kmssink` and `cudakmssink` absorb the orientations their plane shows instead of all or none, and `videoflip` remaps any turn the sink cannot apply.
 - M1775: `avidemux` reads I420 written by GStreamer's `avimux`, whose plane rows are padded to four bytes.
 - M1774: `tsdemux` demuxes LOAS AAC carried under the ADTS stream type (0x0F), so `decodebin` plays it.

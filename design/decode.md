@@ -671,7 +671,11 @@ whose minimum is 144x144, though the RTX 3060 decodes it correctly. Session
 creation refuses a stream of any codec below the minimum with `StreamRefused`,
 which names the cause and which the element reports as `CapsMismatch`. An AV1 frame can be coded smaller than its
 sequence's maximum size, so the decoder also refuses each AV1 frame coded below
-the minimum. Auto-plug skips `vulkanvideodec` for the same sizes through an input
+the minimum. Above the device's maximum coded extent the session clamps the
+picture and decodes zeros, so session creation refuses an H.264 or H.265 stream
+larger than the maximum the same way (the RTX 3060's H.265 maximum is 8192,
+below `PICSIZE_A` / `PICSIZE_B` at 8440). An AV1 sequence maximum may exceed the
+device's while its frames do not, so AV1 is refused per frame instead. Auto-plug skips `vulkanvideodec` for the same sizes through an input
 check (`ElementFactory::accepting_input`), so `decodebin` takes a software
 decoder. The check compares an H.264 stream at its macroblock-aligned coded size,
 which is what the device minimum applies to. The check reads the decode capabilities of
@@ -1187,7 +1191,7 @@ official one.
 | :--- | ---: | ---: | ---: |
 | `ffmpegdec` | 130 / 135 | 172 / 188 (2026-10-20) | 0 / 240 |
 | `nvdec` | 129 / 135 | 141 / 188 | 202 / 240 |
-| `vulkanvideodec` | 99 / 135 (2026-10-20) | 146 / 188 (2026-10-20) | 201 / 240 (2026-10-21) |
+| `vulkanvideodec` | 99 / 135 (2026-10-20) | 142 / 188 (2026-10-21) | 201 / 240 (2026-10-21) |
 | `dav1ddec` | | | 240 / 240 (2026-10-21) |
 | `rav1ddec` | | | 240 / 240 (2026-10-21) |
 
@@ -1226,7 +1230,7 @@ The sessions are Main and Main 10, so a chroma format other than 4:2:0, a bit
 depth above 10, unequal luma and chroma depths, and SPS or PPS range extension
 or screen content tools are all refused. Wavefront parallel processing on a
 picture one coding tree block wide is refused too. RADV (Rembrandt, pinned with
-`VK_DRIVER_FILES`) gives the same 146 of 188 and 97 of 135 for H.264.
+`VK_DRIVER_FILES`) gave 146 of 188 for H.265 and 97 of 135 for H.264 on 2026-10-20.
 
 `ffmpegdec`'s 16 HEVC misses are libavcodec's own: the ffmpeg command line on
 libavcodec 61 (ffmpeg 7.1) and 62 (ffmpeg 8.1) misses the same 16 vectors, the
