@@ -748,7 +748,7 @@ each audio or video stream its demuxer cannot forward (an AVI fourcc, a Matroska
 `CodecID`, an MP4 sample entry), and when no listed stream fits the consumer the
 expansion fails `NoStreamDecoder` naming them instead of plugging the demuxer's
 default port. The probes also read content the stream type leaves ambiguous:
-the first TS PES payload (LATM behind the ADTS stream type, DTS in a bare private
+the first TS PES payload (DTS in a bare private
 PES), the first PS video payload (AVS), a WAV `fmt ` chunk's format tag, an
 undoable Matroska `ContentEncoding`, an encrypted or unframable-AAC MP4 track, a
 compressed `cmov` or a track-less HEIF file. An `unsupported_codec_primary_stream`

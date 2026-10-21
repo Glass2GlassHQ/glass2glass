@@ -204,9 +204,6 @@ Highest leverage first:
   instead of GStreamer's 'AV1G' once any demuxer reads the former (GStreamer's
   `tsdemux` activates no program for an 'AV01' stream, and ffmpeg's muxer writes
   no descriptor at all, so it identifies neither).
-- **LOAS under stream type 0x0F:** `unsupported_codec` still refuses LOAS
-  carried under the ADTS stream type (M1577's `aac_latm` name), though
-  `ffmpegaudiodec` now decodes LOAS: drop that refusal and invert its test.
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
@@ -215,9 +212,6 @@ Highest leverage first:
   because none reads the clean-aperture flag (`Mp4Src` attaches no `CropMeta`,
   `UriFanoutPort` carries only caps). `av1parse` and `startcodeparse` drop input
   meta when re-framing, so AV1 or MPEG-2 in MP4 with a `clap` loses the crop.
-- **AVI I420 row padding:** GStreamer's `avimux` writes I420 with 4-byte-aligned
-  rows, while g2g (like ffmpeg) reads I420 AVI as tight, so a GStreamer-written
-  I420 AVI at a width that is not a multiple of 4 demuxes wrong.
 - **Matroska `ContentEncoding`:** chained encodings, bzip2 / lzo, and
   `ContentEncryption` stay refused (blocks forward as stored, flagged
   `unsupported_encoding`); zlib and header stripping are undone at demux.

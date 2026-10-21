@@ -728,7 +728,9 @@ Uncompressed tracks whose stored layout differs from the graph's tight top-down
 frame carry a `RawVideoStorage`, and the demuxer fixes the layout in the copy it
 already makes. For AVI, `BI_RGB` rows are 4-byte aligned when the chunk holds
 them, else tight, and run bottom-up for a positive `biHeight`; 24-bit is `BGR`,
-32-bit `BGRx`. `YV12` is delivered as I420 with its chroma planes swapped, and
+32-bit `BGRx`. `YV12` is delivered as I420 with its chroma planes swapped. An `I420` / `IYUV`
+chunk whose size equals each plane's rows padded to four bytes (GStreamer's
+`avimux`) is packed tight, any other size reads tight, and
 `Y800` / `GREY` as `GRAY8`. QuickTime `raw ` rows (depth 24 as `RGB`, 32 as
 `ARGB`) take their stride from the sample size, since writers pad them
 differently.
@@ -759,7 +761,7 @@ LOAS/LATM (0x11) with audioMuxVersion 1. The StreamMuxConfig repeats in every
 frame, and the config sits verbatim behind its bit length, so the muxer never
 parses ELDSpecificConfig or UsacConfig. The carriage is fixed by each pad's first
 frame, and the PMT entry switches to 0x11 before the tables first go out. On the
-read side, `TsStream::Aac` takes 0x0F and 0x11 and forwards LOAS frames as the
+read side, `TsStream::Aac` takes 0x0F and 0x11, LOAS under either, and forwards LOAS frames as the
 PES carries them, and `aacparse` reads both LATM versions. `ffmpegaudiodec` opens
 libavcodec's LATM decoder when the first buffer is a LOAS frame, seeds it with
 the config's rate and channel count, and decodes each LOAS frame whole. ffmpeg
