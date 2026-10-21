@@ -81,6 +81,7 @@ mod fanout {
         let reg = g2g_plugins::registry::default_registry();
         let graph = build_rtsp_av_fanout(
             &reg,
+            &g2g_core::runtime::PlaybinSinks::AUTO,
             DEFAULT_FEED_URL,
             &tracks(Some(Caps::Audio {
                 format: AudioFormat::Aac,
@@ -105,11 +106,15 @@ mod fanout {
         let url =
             std::env::var("G2G_RTSP_AV_TEST_URL").unwrap_or_else(|_| DEFAULT_FEED_URL.to_string());
         let reg = g2g_plugins::registry::default_registry();
-        let graph = g2g_plugins::uridecodebin::rtsp_playbin(&reg, &url)
-            .expect("the hook assembles")
-            .unwrap_or_else(|| {
-                panic!("the hook declined {url}: no A/V feed there (is mediamtx running?)")
-            });
+        let graph = g2g_plugins::uridecodebin::rtsp_playbin(
+            &reg,
+            &g2g_core::runtime::PlaybinSinks::AUTO,
+            &url,
+        )
+        .expect("the hook assembles")
+        .unwrap_or_else(|| {
+            panic!("the hook declined {url}: no A/V feed there (is mediamtx running?)")
+        });
         assert_eq!(graph.node_count(), 10);
         assert_eq!(graph.edges().len(), 9);
     }
@@ -118,9 +123,14 @@ mod fanout {
     fn a_video_only_stream_declines_to_the_single_pad_source() {
         let reg = g2g_plugins::registry::default_registry();
         assert!(
-            build_rtsp_av_fanout(&reg, DEFAULT_FEED_URL, &tracks(None))
-                .expect("the fan-out assembles")
-                .is_none(),
+            build_rtsp_av_fanout(
+                &reg,
+                &g2g_core::runtime::PlaybinSinks::AUTO,
+                DEFAULT_FEED_URL,
+                &tracks(None)
+            )
+            .expect("the fan-out assembles")
+            .is_none(),
             "without audio the hook must decline so rtsp_handler plugs RtspSrc"
         );
     }

@@ -145,9 +145,14 @@ fn discovers_renditions_and_fans_out_a_muxed_ts_variant() {
     // branch adds audioconvert + audioresample (the M422+ chain) so the sink sees a
     // fixed PCM format: video(decoder+sink) + audio(decoder+convert+resample+sink).
     let reg = registry();
-    let graph = build_hls_ts_fanout(&reg, "https://example.com/master.m3u8", &streams)
-        .expect("fan-out builds")
-        .expect("two muxed streams fan out");
+    let graph = build_hls_ts_fanout(
+        &reg,
+        &g2g_core::runtime::PlaybinSinks::AUTO,
+        "https://example.com/master.m3u8",
+        &streams,
+    )
+    .expect("fan-out builds")
+    .expect("two muxed streams fan out");
     assert_eq!(
         graph.node_count(),
         9,
@@ -166,7 +171,13 @@ fn declines_a_single_stream_variant() {
     // handler (Ok(None)).
     let reg = registry();
     let streams = vec![muxed(StreamType::Video, h264_any(), true)];
-    let graph = build_hls_ts_fanout(&reg, "https://example.com/v.m3u8", &streams).unwrap();
+    let graph = build_hls_ts_fanout(
+        &reg,
+        &g2g_core::runtime::PlaybinSinks::AUTO,
+        "https://example.com/v.m3u8",
+        &streams,
+    )
+    .unwrap();
     assert!(graph.is_none(), "a lone video stream does not fan out");
 }
 
@@ -187,7 +198,13 @@ fn ignores_separate_audio_renditions_for_the_ts_demuxer() {
             language: Some("en".into()),
         },
     ];
-    let graph = build_hls_ts_fanout(&reg, "https://example.com/v.m3u8", &streams).unwrap();
+    let graph = build_hls_ts_fanout(
+        &reg,
+        &g2g_core::runtime::PlaybinSinks::AUTO,
+        "https://example.com/v.m3u8",
+        &streams,
+    )
+    .unwrap();
     assert!(
         graph.is_none(),
         "separate-rendition audio is not fanned through TsDemuxN"
@@ -215,6 +232,7 @@ fn separate_audio_rendition_builds_two_source_chains() {
     let reg = registry();
     let graph = build_hls_separate_fanout(
         &reg,
+        &g2g_core::runtime::PlaybinSinks::AUTO,
         "https://example.com/master.m3u8",
         &streams,
         "https://example.com/a/en.m3u8",
@@ -337,9 +355,14 @@ fn fmp4_init() -> Vec<u8> {
 #[test]
 fn fmp4_variant_fans_out_via_mp4demuxn() {
     let reg = registry();
-    let graph = build_hls_fmp4_fanout(&reg, "https://example.com/master.m3u8", &fmp4_init())
-        .expect("fmp4 fan-out builds")
-        .expect("two tracks fan out");
+    let graph = build_hls_fmp4_fanout(
+        &reg,
+        &g2g_core::runtime::PlaybinSinks::AUTO,
+        "https://example.com/master.m3u8",
+        &fmp4_init(),
+    )
+    .expect("fmp4 fan-out builds")
+    .expect("two tracks fan out");
     // Audio track goes through the M422+ branch (decoder+convert+resample+sink),
     // the video one through the M935 auto deinterlace: source + demux +
     // video(decoder+deinterlace+sink) + audio(decoder+convert+resample+sink).

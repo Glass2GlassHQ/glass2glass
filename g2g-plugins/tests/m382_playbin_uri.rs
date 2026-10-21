@@ -312,7 +312,7 @@ fn non_lone_playbin_is_not_hooked() {
     reg.register_launch(LaunchFactory::of::<NullSink>("fakesink", || {
         Box::new(NullSink)
     }));
-    reg.register_playbin(|_, _| panic!("hook must not fire for a non-lone playbin"));
+    reg.register_playbin(|_, _, _| panic!("hook must not fire for a non-lone playbin"));
 
     let err = parse_launch(&reg, "playbin ! fakesink").unwrap_err();
     // Two-element line, playbin with no uri -> the normal builder's MissingUri.

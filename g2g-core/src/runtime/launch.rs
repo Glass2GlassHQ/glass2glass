@@ -77,8 +77,8 @@ use crate::memory::MemoryDomainKind;
 use crate::property::{PropError, PropValue, PropertySpec, ValueError};
 use crate::runtime::autoplug::{
     is_raw_audio, is_raw_video, ContainerStreams, FallbackSourceRole, FallbacksrcSourceFactory,
-    FanoutRebuild, PadKind, PadRequest, PrimaryStream, Registry, RestartPolicy, UriError,
-    UriFanout, UriFanoutHead, UriFanoutPort, UriRebuild,
+    FanoutRebuild, PadKind, PadRequest, PlaybinSinks, PrimaryStream, Registry, RestartPolicy,
+    UriError, UriFanout, UriFanoutHead, UriFanoutPort, UriRebuild,
 };
 use crate::runtime::parse_scope::ParseScope;
 use crate::runtime::{
@@ -2425,7 +2425,7 @@ fn expand_uri_sources(
             // decoder (M1018), as it does after a `decodebin`.
             let sink = is_playbin.then(|| {
                 prop(&spec, "video-sink")
-                    .unwrap_or("autovideosink")
+                    .unwrap_or(PlaybinSinks::AUTO.video)
                     .to_string()
             });
             let consumer = match (&sink, items.peek()) {
@@ -3272,11 +3272,11 @@ pub fn parse_launch_avoiding(
     // per-stream decode -> auto sinks (multi-stream). Without a hook (or if it
     // declines, e.g. a non-Matroska file), fall through to build_graph, which
     // expands `playbin` to the single-stream pipeline (M196).
-    if let Some(uri) = lone_playbin_uri(&chains) {
+    if let Some((uri, sinks)) = lone_playbin(&chains) {
         // Try each registered hook (one per container type) until one handles the
         // URI; a hook returns Ok(None) to decline a container it does not parse.
         for hook in registry.playbin_hooks() {
-            if let Some(graph) = hook(registry, uri)? {
+            if let Some(graph) = hook(registry, &sinks, uri)? {
                 return Ok(splice_domain_converters(registry, graph));
             }
         }
@@ -3468,11 +3468,12 @@ fn splice_domain_converters(registry: &Registry, graph: Graph<GraphNode>) -> Gra
     }
 }
 
-/// The `uri=` of a pipeline that is a single bare `playbin uri=X` element (and
-/// nothing else), the M382 multi-stream auto-fan-out trigger. `None` for any
-/// other shape: a `playbin` mid-pipeline, alongside other elements, or without a
-/// `uri=` is left to the normal builder (the M196 single-stream expansion).
-fn lone_playbin_uri(chains: &[Chain]) -> Option<&str> {
+/// The `uri=` and sinks of a pipeline that is a single bare `playbin uri=X`
+/// element (and nothing else), the M382 multi-stream auto-fan-out trigger.
+/// `None` for any other shape: a `playbin` mid-pipeline, alongside other
+/// elements, or without a `uri=` is left to the normal builder (the M196
+/// single-stream expansion).
+fn lone_playbin(chains: &[Chain]) -> Option<(&str, PlaybinSinks<'_>)> {
     let [chain] = chains else { return None };
     let [Item::Element(spec)] = chain.as_slice() else {
         return None;
@@ -3480,7 +3481,11 @@ fn lone_playbin_uri(chains: &[Chain]) -> Option<&str> {
     if spec.name != "playbin" {
         return None;
     }
-    prop(spec, "uri")
+    let sinks = PlaybinSinks {
+        video: prop(spec, "video-sink").unwrap_or(PlaybinSinks::AUTO.video),
+        audio: prop(spec, "audio-sink").unwrap_or(PlaybinSinks::AUTO.audio),
+    };
+    Some((prop(spec, "uri")?, sinks))
 }
 
 /// The spec of a pipeline that is a single bare `fallbacksrc` (and nothing else),

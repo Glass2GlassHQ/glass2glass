@@ -115,6 +115,7 @@ fn builds_a_cross_source_subtitle_overlay() {
     let streams = vec![muxed_video()];
     let graph = g2g_plugins::uridecodebin::build_hls_subtitle_overlay(
         &reg,
+        &g2g_core::runtime::PlaybinSinks::AUTO,
         "https://h/master.m3u8",
         &streams,
         "https://h/subs/en.m3u8",
@@ -173,6 +174,7 @@ fn declines_without_a_muxed_video() {
     };
     let graph = g2g_plugins::uridecodebin::build_hls_subtitle_overlay(
         &reg,
+        &g2g_core::runtime::PlaybinSinks::AUTO,
         "https://h/master.m3u8",
         &[audio],
         "https://h/subs/en.m3u8",

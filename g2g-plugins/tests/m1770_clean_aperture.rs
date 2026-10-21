@@ -9,9 +9,11 @@ use std::path::PathBuf;
 
 use g2g_core::graph::Graph;
 use g2g_core::runtime::{
-    parse_launch, run_graph_observed, GraphNode, GraphNodeRef, Observer, TelemetrySnapshot,
+    parse_launch, run_graph_observed, GraphNode, GraphNodeRef, LaunchFactory, Observer,
+    TelemetrySnapshot,
 };
-use g2g_core::{DotAnnotations, PipelineClock, RawVideoFormat};
+use g2g_core::{PipelineClock, RawVideoFormat};
+use g2g_plugins::filesink::FileSink;
 use g2g_plugins::registry::default_registry;
 
 // tools/clean-aperture-fixture.sh writes each fixture and ffmpeg's default decode of it
@@ -183,9 +185,7 @@ async fn mp4src_frames_carry_the_clean_aperture_to_a_bare_videocrop() {
         let convert = graph.add_transform(GraphNodeRef::element(
             g2g_plugins::videoconvert::VideoConvert::new(RawVideoFormat::I420),
         ));
-        let sink = graph.add_sink(GraphNodeRef::element(g2g_plugins::filesink::FileSink::new(
-            out,
-        )));
+        let sink = graph.add_sink(GraphNodeRef::element(FileSink::new(out)));
         for (from, to) in [
             (source, decoder),
             (decoder, crop),
@@ -244,21 +244,25 @@ async fn the_decodebin_fan_out_crops_its_video_branch() {
     assert_cropped_as_ffmpeg_does(&H264, &decoded, &snapshot);
 }
 
-// playbin's video sink is whatever display sink the machine has, so the graph is read instead of run
-#[test]
-fn playbin_crops_its_video_branch() {
-    let line = format!("playbin uri=file://{}", H264.file);
-    let graph =
-        parse_launch(&default_registry(), &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
-    let dot = graph.to_dot(
-        "pipeline",
-        |node| graph.element(node).map(|e| e.log_category().to_string()),
-        &DotAnnotations::default(),
-    );
-    assert!(
-        dot.contains("label=\"VideoCrop\""),
-        "the video branch has a videocrop: {dot}"
-    );
+const PLAYBIN_TAG: &str = "playbin";
+const PLAYBIN_CAPTURE_SINK: &str = "m1770capturesink";
+
+#[tokio::test]
+async fn playbin_crops_its_video_branch() {
+    let (decoded, snapshot) = run(PLAYBIN_TAG, |_| {
+        let mut registry = default_registry();
+        // a launch factory takes no arguments, so the capture path is the one `run` reads
+        registry.register_launch(LaunchFactory::of::<FileSink>(PLAYBIN_CAPTURE_SINK, || {
+            Box::new(FileSink::new(output_path(PLAYBIN_TAG)))
+        }));
+        let line = format!(
+            "playbin uri=file://{} video-sink={PLAYBIN_CAPTURE_SINK}",
+            H264.file
+        );
+        parse_launch(&registry, &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"))
+    })
+    .await;
+    assert_cropped_as_ffmpeg_does(&H264, &decoded, &snapshot);
 }
 
 #[tokio::test]

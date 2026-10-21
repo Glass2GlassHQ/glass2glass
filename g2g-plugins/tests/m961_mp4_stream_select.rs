@@ -233,5 +233,8 @@ async fn bare_uridecodebin_decodes_an_av1_mp4() {
     let stats = run_graph(graph, &ZeroClock, 4)
         .await
         .unwrap_or_else(|e| panic!("runs `{line}`: {e:?}"));
-    assert_eq!(stats.frames_consumed, AV1_FIXTURE_FRAMES, "every frame decodes");
+    assert_eq!(
+        stats.frames_consumed, AV1_FIXTURE_FRAMES,
+        "every frame decodes"
+    );
 }

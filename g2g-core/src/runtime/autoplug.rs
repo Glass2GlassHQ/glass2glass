@@ -1404,7 +1404,7 @@ mod factory {
 
     /// A `playbin uri=X` auto-fan-out hook (M382): given the registry and the
     /// URI, probe the container and assemble a complete multi-stream
-    /// `source -> demux -> per-stream decode -> auto sink` graph, the auto
+    /// `source -> demux -> per-stream decode -> sink` graph, the auto
     /// counterpart of [`Registry::build_playbin_graph`]. `Ok(Some(graph))`
     /// handled it; `Ok(None)` declined (e.g. an unprobed scheme or a container
     /// the hook does not parse), so [`parse_launch`](crate::runtime::parse_launch)
@@ -1413,7 +1413,23 @@ mod factory {
     /// that owns the container parsing registers it via
     /// [`Registry::register_playbin`]. Cross-crate by design: the text DSL lives
     /// in core, the Matroska parsing in `g2g-plugins`.
-    pub type PlaybinHook = fn(&Registry, &str) -> Result<Option<Graph<GraphNode>>, ParseError>;
+    pub type PlaybinHook =
+        fn(&Registry, &PlaybinSinks<'_>, &str) -> Result<Option<Graph<GraphNode>>, ParseError>;
+
+    // the elements a `playbin` line's `video-sink` and `audio-sink` name
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct PlaybinSinks<'a> {
+        pub video: &'a str,
+        pub audio: &'a str,
+    }
+
+    impl PlaybinSinks<'static> {
+        // what a `playbin` plays through when its line names no sink
+        pub const AUTO: Self = Self {
+            video: "autovideosink",
+            audio: "autoaudiosink",
+        };
+    }
 
     /// One output port of a [`UriFanout`]: the elementary [`Caps`] the demuxer
     /// emits on it, and the kind of media it carries.
@@ -3327,10 +3343,11 @@ pub use factory::{
     declared_source_caps, AutoplugError, AutoplugParams, ContainerStreams, DecodebinError,
     DecodebinSelectHook, DemuxCapsSelectHook, DemuxFactory, DemuxSelectHook, ElementDoc,
     ElementFactory, FallbacksrcSourceFactory, FanoutRebuild, FanoutSrcFactory, LaunchFactory,
-    MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream,
-    PrimaryStreamHook, PropertyDoc, RankOverride, RankSpecError, Registry, RestartFanoutSourceHook,
-    RestartPolicy, RestartSourceHook, SourceFactory, Uri, UriError, UriFanout, UriFanoutHead,
-    UriFanoutHook, UriFanoutPort, UriRebuild, UriSource, UriSourceFactory,
+    MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PlaybinSinks,
+    PrimaryStream, PrimaryStreamHook, PropertyDoc, RankOverride, RankSpecError, Registry,
+    RestartFanoutSourceHook, RestartPolicy, RestartSourceHook, SourceFactory, Uri, UriError,
+    UriFanout, UriFanoutHead, UriFanoutHook, UriFanoutPort, UriRebuild, UriSource,
+    UriSourceFactory,
 };
 
 #[cfg(test)]

@@ -233,6 +233,38 @@ async fn playbin_fans_out_a_fragmented_mp4() {
 }
 
 #[tokio::test]
+async fn playbin_plays_through_the_sinks_its_line_names() {
+    let (path, uri) = temp_uri("named_sinks", &av_mp4().await);
+    let mut reg = registry();
+    reg.register_launch(LaunchFactory::of::<g2g_plugins::fakesink::FakeSink>(
+        "namedvideosink",
+        || Box::new(g2g_plugins::fakesink::FakeSink::new()),
+    ));
+    // never runs, so it never opens the path
+    reg.register_launch(LaunchFactory::of::<g2g_plugins::filesink::FileSink>(
+        "namedaudiosink",
+        || Box::new(g2g_plugins::filesink::FileSink::new("/dev/null")),
+    ));
+    let graph = parse_launch(
+        &reg,
+        &format!("playbin uri={uri} video-sink=namedvideosink audio-sink=namedaudiosink"),
+    )
+    .expect("mp4 playbin fans out");
+    std::fs::remove_file(&path).ok();
+    let sinks: Vec<String> = graph
+        .to_dot(
+            "pipeline",
+            |node| graph.element(node).map(|e| e.log_category().to_string()),
+            &g2g_core::DotAnnotations::default(),
+        )
+        .lines()
+        .filter(|line| line.contains("\"FakeSink\"") || line.contains("\"FileSink\""))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(sinks.len(), 2, "one named sink per branch: {sinks:?}");
+}
+
+#[tokio::test]
 async fn the_mp4_hook_handles_mp4_only() {
     let reg = registry();
 

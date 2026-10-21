@@ -163,6 +163,7 @@ fn muxed_ts_variant_overlays_in_sei_captions() {
     ];
     let graph = build_hls_ts_cc_overlay(
         &reg,
+        &g2g_core::runtime::PlaybinSinks::AUTO,
         "https://h/master.m3u8",
         &streams,
         CcSource::Cea608(Cea608Channel::Cc1),
@@ -211,6 +212,7 @@ fn separate_audio_variant_overlays_captions_across_sources() {
     let streams = vec![muxed(StreamType::Video, h264_any(), true)];
     let graph = build_hls_separate_cc_overlay(
         &reg,
+        &g2g_core::runtime::PlaybinSinks::AUTO,
         "https://h/master.m3u8",
         &streams,
         "https://h/audio/en.m3u8",
@@ -244,6 +246,7 @@ fn declines_without_a_muxed_video() {
     let streams = vec![muxed(StreamType::Audio, aac_any(), false)];
     let graph = build_hls_ts_cc_overlay(
         &reg,
+        &g2g_core::runtime::PlaybinSinks::AUTO,
         "https://h/master.m3u8",
         &streams,
         CcSource::Cea608(Cea608Channel::Cc1),
