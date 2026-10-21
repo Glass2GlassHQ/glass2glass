@@ -67,8 +67,8 @@ use g2g_core::{
 
 use crate::abr::BandwidthEstimator;
 use crate::fetch::{
-    byte_frame, get_bytes, get_range_bytes, get_text, get_text_query, resolve_url,
-    MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
+    byte_frame, get_bytes, get_bytes_retrying, get_range_bytes_retrying, get_text, get_text_query,
+    get_text_retrying, resolve_url, FetchRetry, MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
 };
 use crate::fmp4::{TrackHeader, TrackKind};
 use crate::hls::{parse, KeyMethod, MasterPlaylist, MediaPlaylist, MediaType, Playlist, Variant};
@@ -863,16 +863,25 @@ impl SourceLoop for HlsSrc {
                             let init_url = resolve_url(&media_url, map);
                             let bytes = match media.map_byte_range {
                                 Some(r) => {
-                                    get_range_bytes(
+                                    get_range_bytes_retrying(
                                         &client,
                                         &init_url,
                                         r.offset,
                                         r.length,
                                         MAX_SEGMENT_BYTES,
+                                        FetchRetry::BUDGETED,
                                     )
                                     .await?
                                 }
-                                None => get_bytes(&client, &init_url, MAX_SEGMENT_BYTES).await?,
+                                None => {
+                                    get_bytes_retrying(
+                                        &client,
+                                        &init_url,
+                                        MAX_SEGMENT_BYTES,
+                                        FetchRetry::BUDGETED,
+                                    )
+                                    .await?
+                                }
                             };
                             if text_mode {
                                 init_tracks = crate::fmp4::parse_all_tracks(&bytes).ok();
@@ -928,17 +937,24 @@ impl SourceLoop for HlsSrc {
                                 let t0 = g2g_core::metrics::monotonic_ns();
                                 let bytes = match part.byte_range {
                                     Some(r) => {
-                                        get_range_bytes(
+                                        get_range_bytes_retrying(
                                             &client,
                                             &part_url,
                                             r.offset,
                                             r.length,
                                             MAX_SEGMENT_BYTES,
+                                            FetchRetry::BUDGETED,
                                         )
                                         .await?
                                     }
                                     None => {
-                                        get_bytes(&client, &part_url, MAX_SEGMENT_BYTES).await?
+                                        get_bytes_retrying(
+                                            &client,
+                                            &part_url,
+                                            MAX_SEGMENT_BYTES,
+                                            FetchRetry::BUDGETED,
+                                        )
+                                        .await?
                                     }
                                 };
                                 g2g_debug!(
@@ -979,16 +995,25 @@ impl SourceLoop for HlsSrc {
                             let t0 = g2g_core::metrics::monotonic_ns();
                             let bytes = match segment.byte_range {
                                 Some(r) => {
-                                    get_range_bytes(
+                                    get_range_bytes_retrying(
                                         &client,
                                         &seg_url,
                                         r.offset,
                                         r.length,
                                         MAX_SEGMENT_BYTES,
+                                        FetchRetry::BUDGETED,
                                     )
                                     .await?
                                 }
-                                None => get_bytes(&client, &seg_url, MAX_SEGMENT_BYTES).await?,
+                                None => {
+                                    get_bytes_retrying(
+                                        &client,
+                                        &seg_url,
+                                        MAX_SEGMENT_BYTES,
+                                        FetchRetry::BUDGETED,
+                                    )
+                                    .await?
+                                }
                             };
                             // Measure the downloaded (pre-decrypt) size against wall time.
                             measured = Some((
@@ -1071,7 +1096,8 @@ impl SourceLoop for HlsSrc {
                                     let new_uri = best.uri.clone();
                                     let new_url = resolve_url(master_url, &new_uri);
                                     let text =
-                                        get_text(&client, &new_url, MAX_MANIFEST_BYTES).await?;
+                                        get_text_retrying(&client, &new_url, MAX_MANIFEST_BYTES)
+                                            .await?;
                                     if let Playlist::Media(m) =
                                         parse(&text).map_err(|_| G2gError::CapsMismatch)?
                                     {
@@ -1173,7 +1199,7 @@ impl SourceLoop for HlsSrc {
                         // A full interval behind: reload now, do not burst.
                         next_reload = Some(scheduled.max(now + interval / 2));
                         g2g_debug!(self, "timed reload after {} ms", interval_ms);
-                        get_text(&client, &media_url, MAX_MANIFEST_BYTES).await?
+                        get_text_retrying(&client, &media_url, MAX_MANIFEST_BYTES).await?
                     }
                 };
                 media = match parse(&text).map_err(|_| G2gError::CapsMismatch)? {

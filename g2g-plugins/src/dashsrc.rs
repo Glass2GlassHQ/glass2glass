@@ -70,8 +70,8 @@ use g2g_core::{
 use crate::abr::BandwidthEstimator;
 use crate::dashclock::{local_now_unix, RequestSpan, ServerClock};
 use crate::fetch::{
-    byte_frame, get_bytes, get_range_bytes, get_response, get_text, net_err, resolve_url,
-    MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
+    byte_frame, get_bytes_retrying, get_range_bytes_retrying, get_response_retrying, get_text,
+    get_text_retrying, net_err, resolve_url, FetchRetry, MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
 };
 use crate::fmp4::CmafChunker;
 use crate::mpd::{
@@ -85,17 +85,31 @@ use crate::mpd::{
 /// defaults its `presentation-delay` property to 10s, so match that.
 const DEFAULT_PRESENTATION_DELAY_MS: u64 = 10_000;
 
+// no retry, so a wrong URL fails the start at once
 async fn fetch_manifest(
     client: &reqwest::Client,
     url: &str,
 ) -> Result<(Mpd, RequestSpan), G2gError> {
     let sent_unix = local_now_unix();
     let text = get_text(client, url, MAX_MANIFEST_BYTES).await?;
+    parse_manifest(&text, sent_unix)
+}
+
+async fn reload_manifest(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<(Mpd, RequestSpan), G2gError> {
+    let sent_unix = local_now_unix();
+    let text = get_text_retrying(client, url, MAX_MANIFEST_BYTES).await?;
+    parse_manifest(&text, sent_unix)
+}
+
+fn parse_manifest(text: &str, sent_unix: f64) -> Result<(Mpd, RequestSpan), G2gError> {
     let request = RequestSpan {
         sent_unix,
         answered_unix: local_now_unix(),
     };
-    let mpd = parse(&text).map_err(|_| G2gError::CapsMismatch)?;
+    let mpd = parse(text).map_err(|_| G2gError::CapsMismatch)?;
     Ok((mpd, request))
 }
 
@@ -121,10 +135,14 @@ async fn fetch_segment(
     client: &reqwest::Client,
     url: &str,
     range: Option<ByteRange>,
+    retry: FetchRetry,
 ) -> Result<Vec<u8>, G2gError> {
     match range {
-        Some(r) => get_range_bytes(client, url, r.offset, r.length, MAX_SEGMENT_BYTES).await,
-        None => get_bytes(client, url, MAX_SEGMENT_BYTES).await,
+        Some(r) => {
+            get_range_bytes_retrying(client, url, r.offset, r.length, MAX_SEGMENT_BYTES, retry)
+                .await
+        }
+        None => get_bytes_retrying(client, url, MAX_SEGMENT_BYTES, retry).await,
     }
 }
 
@@ -139,8 +157,9 @@ async fn stream_segment_chunks(
     url: &str,
     out: &mut dyn OutputSink,
     sequence: &mut u64,
+    retry: FetchRetry,
 ) -> Result<usize, G2gError> {
-    let mut resp = get_response(client, url, MAX_SEGMENT_BYTES).await?;
+    let mut resp = get_response_retrying(client, url, MAX_SEGMENT_BYTES, retry).await?;
     let mut chunker = CmafChunker::new(MAX_SEGMENT_BYTES);
     let mut total = 0usize;
     while let Some(bytes) = resp.chunk().await.map_err(net_err)? {
@@ -189,7 +208,13 @@ async fn load_rep(
 > {
     let init = rep.init();
     if let Some(index_range) = rep.segment_base().map(|sb| sb.index_range) {
-        let idx_bytes = fetch_segment(client, &seg_url(base, ""), Some(index_range)).await?;
+        let idx_bytes = fetch_segment(
+            client,
+            &seg_url(base, ""),
+            Some(index_range),
+            FetchRetry::BUDGETED,
+        )
+        .await?;
         let sidx = parse_sidx(&idx_bytes).ok_or(G2gError::CapsMismatch)?;
         return Ok((
             sidx.subsegments(index_range.offset),
@@ -584,7 +609,9 @@ impl SourceLoop for DashSrc {
                         if let Some((init_url, init_range)) = &init {
                             let url = seg_url(&base, init_url);
                             g2g_debug!(self, "init segment {url}");
-                            let bytes = fetch_segment(&client, &url, *init_range).await?;
+                            let bytes =
+                                fetch_segment(&client, &url, *init_range, FetchRetry::BUDGETED)
+                                    .await?;
                             if !bytes.is_empty() {
                                 window.admit(bytes, 0);
                             }
@@ -613,6 +640,12 @@ impl SourceLoop for DashSrc {
                                 last_dur_ns = duration_ns;
                                 let url = seg_url(&base, &seg.url);
                                 g2g_debug!(self, "segment {url}");
+                                // a live origin answers 404 or 425 until it publishes the segment
+                                let retry = FetchRetry {
+                                    live_segment_duration: edge
+                                        .is_some()
+                                        .then(|| core::time::Duration::from_nanos(duration_ns)),
+                                };
                                 let t0 = g2g_core::metrics::monotonic_ns();
                                 // Low latency: read the body as a stream and push
                                 // each CMAF chunk as it lands. The prebuffer window
@@ -622,10 +655,11 @@ impl SourceLoop for DashSrc {
                                     && self.prebuffer_ms == 0
                                     && seg.byte_range.is_none()
                                 {
-                                    stream_segment_chunks(&client, &url, out, &mut sequence).await?
+                                    stream_segment_chunks(&client, &url, out, &mut sequence, retry)
+                                        .await?
                                 } else {
                                     let bytes =
-                                        fetch_segment(&client, &url, seg.byte_range).await?;
+                                        fetch_segment(&client, &url, seg.byte_range, retry).await?;
                                     let len = bytes.len();
                                     if !bytes.is_empty() {
                                         window.admit(bytes, duration_ns);
@@ -719,7 +753,7 @@ impl SourceLoop for DashSrc {
                 tokio::time::sleep(core::time::Duration::from_millis(interval_ms.max(1))).await;
                 let playing_start_secs = mpd.periods[period_idx].start_secs;
                 let manifest_request;
-                (mpd, manifest_request) = fetch_manifest(&client, &self.url).await?;
+                (mpd, manifest_request) = reload_manifest(&client, &self.url).await?;
                 if mpd.dynamic {
                     clock.poll(&client, &mpd, manifest_request).await;
                 }

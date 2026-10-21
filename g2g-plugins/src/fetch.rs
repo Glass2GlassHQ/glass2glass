@@ -1,6 +1,11 @@
 //! Shared HTTP fetch + URL helpers for the adaptive-streaming sources
 //! ([`HlsSrc`](crate::hlssrc), [`DashSrc`](crate::dashsrc)). Thin wrappers over
-//! `reqwest` plus the relative-URL resolution both need.
+//! `reqwest`, with bounded retries for media segments and live playlist reloads,
+//! plus the relative-URL resolution both need.
+
+use core::future::Future;
+use core::time::Duration;
+use std::time::Instant;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -44,43 +49,174 @@ fn body_too_large() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
 }
 
+// a failed fetch kept unmapped, so the retry decision reads the reqwest error itself
+#[derive(Debug)]
+enum FetchFailure {
+    Request(reqwest::Error),
+    BodyTooLarge,
+}
+
+impl FetchFailure {
+    fn into_error(self) -> G2gError {
+        match self {
+            FetchFailure::Request(error) => net_err(error),
+            FetchFailure::BodyTooLarge => body_too_large(),
+        }
+    }
+
+    fn retry_reason(&self) -> Option<RetryReason> {
+        let FetchFailure::Request(error) = self else {
+            return None;
+        };
+        match error.status() {
+            Some(reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::TOO_EARLY) => {
+                Some(RetryReason::NotPublishedYet)
+            }
+            Some(status) if status.is_server_error() => Some(RetryReason::ServerOrTransport),
+            Some(_) => None,
+            None => {
+                let transport = error.is_timeout()
+                    || error.is_connect()
+                    || error.is_request()
+                    || error.is_body();
+                transport.then_some(RetryReason::ServerOrTransport)
+            }
+        }
+    }
+}
+
+impl core::fmt::Display for FetchFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            FetchFailure::Request(error) => core::fmt::Display::fmt(error, f),
+            FetchFailure::BodyTooLarge => f.write_str("response body over its size cap"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryReason {
+    // 404 or 425: a live origin whose clock runs behind ours has not published it yet
+    NotPublishedYet,
+    ServerOrTransport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FetchRetry {
+    // a live segment's not-yet-published answers count against the budget once per this long at most
+    pub(crate) live_segment_duration: Option<Duration>,
+}
+
+impl FetchRetry {
+    pub(crate) const BUDGETED: Self = Self {
+        live_segment_duration: None,
+    };
+}
+
+// gst adaptivedemux2's `max-retries` default
+const MAX_FETCH_RETRIES: u32 = 3;
+// doubles per counted retry: 250, 500 and 1000 ms outlast a one second origin restart
+const FIRST_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+async fn with_retries<T, Attempt>(
+    url: &str,
+    retry: FetchRetry,
+    mut attempt: impl FnMut() -> Attempt,
+) -> Result<T, G2gError>
+where
+    Attempt: Future<Output = Result<T, FetchFailure>>,
+{
+    let mut counted_retries = 0u32;
+    let mut last_counted_not_published: Option<Instant> = None;
+    loop {
+        let failure = match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(failure) => failure,
+        };
+        let Some(reason) = failure.retry_reason() else {
+            return Err(failure.into_error());
+        };
+        let counts = match (retry.live_segment_duration, reason) {
+            (Some(segment_duration), RetryReason::NotPublishedYet) => {
+                last_counted_not_published.is_none_or(|at| at.elapsed() >= segment_duration)
+            }
+            _ => true,
+        };
+        if counts {
+            if counted_retries == MAX_FETCH_RETRIES {
+                return Err(failure.into_error());
+            }
+            counted_retries += 1;
+            if reason == RetryReason::NotPublishedYet {
+                last_counted_not_published = Some(Instant::now());
+            }
+        }
+        let delay = FIRST_RETRY_DELAY * 2u32.pow(counted_retries.saturating_sub(1));
+        g2g_core::g2g_warn!(
+            &FetchLog,
+            "{url}: {failure}, retry {counted_retries} of {MAX_FETCH_RETRIES} in {} ms",
+            delay.as_millis()
+        );
+        tokio::time::sleep(delay).await;
+    }
+}
+
 /// GET `url` and hand back the checked response, whose body the caller reads
 /// chunk by chunk (what [`get_bytes`] does, and what the DASH low-latency path
 /// consumes progressively). The `Content-Length` header (when present) is an
 /// early-out against `max`, but it is advisory: a server can omit or lie about
 /// it, so the caller still bounds what it accumulates.
-pub(crate) async fn get_response(
+async fn try_get_response(
     client: &reqwest::Client,
     url: &str,
     max: usize,
-) -> Result<reqwest::Response, G2gError> {
+) -> Result<reqwest::Response, FetchFailure> {
     let resp = client
         .get(url)
         .send()
         .await
-        .map_err(net_err)?
+        .map_err(FetchFailure::Request)?
         .error_for_status()
-        .map_err(net_err)?;
+        .map_err(FetchFailure::Request)?;
     if let Some(len) = resp.content_length() {
         if len > max as u64 {
-            return Err(body_too_large());
+            return Err(FetchFailure::BodyTooLarge);
         }
     }
     Ok(resp)
 }
 
+// retries only until the response head arrives, the body is read by the caller
+#[cfg(feature = "dash")]
+pub(crate) async fn get_response_retrying(
+    client: &reqwest::Client,
+    url: &str,
+    max: usize,
+    retry: FetchRetry,
+) -> Result<reqwest::Response, G2gError> {
+    with_retries(url, retry, || try_get_response(client, url, max)).await
+}
+
 /// Accumulate a response body, never allocating past `max` bytes: the running
-/// total over the streamed chunks is the real bound (see [`get_response`] for
+/// total over the streamed chunks is the real bound (see [`try_get_response`] for
 /// the advisory header check).
-async fn read_capped(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>, G2gError> {
+async fn read_capped(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>, FetchFailure> {
     let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(net_err)? {
+    while let Some(chunk) = resp.chunk().await.map_err(FetchFailure::Request)? {
         if body.len().saturating_add(chunk.len()) > max {
-            return Err(body_too_large());
+            return Err(FetchFailure::BodyTooLarge);
         }
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+async fn try_get_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    max: usize,
+) -> Result<Vec<u8>, FetchFailure> {
+    read_capped(try_get_response(client, url, max).await?, max).await
 }
 
 /// Fetch `url`, accumulating the body but never allocating past `max` bytes.
@@ -89,7 +225,18 @@ pub(crate) async fn get_bytes(
     url: &str,
     max: usize,
 ) -> Result<Vec<u8>, G2gError> {
-    read_capped(get_response(client, url, max).await?, max).await
+    try_get_bytes(client, url, max)
+        .await
+        .map_err(FetchFailure::into_error)
+}
+
+pub(crate) async fn get_bytes_retrying(
+    client: &reqwest::Client,
+    url: &str,
+    max: usize,
+    retry: FetchRetry,
+) -> Result<Vec<u8>, G2gError> {
+    with_retries(url, retry, || try_get_bytes(client, url, max)).await
 }
 
 /// Fetch the byte sub-range `[offset, offset + length)` of `url` via an HTTP
@@ -100,18 +247,18 @@ pub(crate) async fn get_bytes(
 /// non-range-capable origin still yields the right bytes.
 ///
 /// Used by HLS `#EXT-X-BYTERANGE` and DASH `SegmentList` byte-range addressing.
-pub(crate) async fn get_range_bytes(
+async fn try_get_range_bytes(
     client: &reqwest::Client,
     url: &str,
     offset: u64,
     length: u64,
     max: usize,
-) -> Result<Vec<u8>, G2gError> {
+) -> Result<Vec<u8>, FetchFailure> {
     if length == 0 {
         return Ok(Vec::new());
     }
     if length > max as u64 {
-        return Err(body_too_large());
+        return Err(FetchFailure::BodyTooLarge);
     }
     // Inclusive end per RFC 7233: bytes=offset-(offset+length-1).
     let end = offset.saturating_add(length).saturating_sub(1);
@@ -121,9 +268,9 @@ pub(crate) async fn get_range_bytes(
         .header(reqwest::header::RANGE, range)
         .send()
         .await
-        .map_err(net_err)?
+        .map_err(FetchFailure::Request)?
         .error_for_status()
-        .map_err(net_err)?;
+        .map_err(FetchFailure::Request)?;
     // 200 means the server ignored the Range and sent the whole resource; 206 is
     // exactly the requested span. Either way bound the accumulation by `max`.
     let range_ignored = resp.status() == reqwest::StatusCode::OK;
@@ -136,6 +283,20 @@ pub(crate) async fn get_range_bytes(
     Ok(body)
 }
 
+pub(crate) async fn get_range_bytes_retrying(
+    client: &reqwest::Client,
+    url: &str,
+    offset: u64,
+    length: u64,
+    max: usize,
+    retry: FetchRetry,
+) -> Result<Vec<u8>, G2gError> {
+    with_retries(url, retry, || {
+        try_get_range_bytes(client, url, offset, length, max)
+    })
+    .await
+}
+
 /// Capped text fetch: reuses [`get_bytes`] for the size bound, then decodes as
 /// UTF-8 (HLS playlists and DASH MPDs are UTF-8 by spec; a stray byte decodes
 /// lossily rather than failing the fetch, matching reqwest's `text()`).
@@ -145,6 +306,16 @@ pub(crate) async fn get_text(
     max: usize,
 ) -> Result<String, G2gError> {
     let bytes = get_bytes(client, url, max).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+// for a live playlist reload, which a failure must not end
+pub(crate) async fn get_text_retrying(
+    client: &reqwest::Client,
+    url: &str,
+    max: usize,
+) -> Result<String, G2gError> {
+    let bytes = get_bytes_retrying(client, url, max, FetchRetry::BUDGETED).await?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -171,7 +342,9 @@ pub(crate) async fn get_text_query(
         .map_err(net_err)?
         .error_for_status()
         .map_err(net_err)?;
-    let bytes = read_capped(resp, max).await?;
+    let bytes = read_capped(resp, max)
+        .await
+        .map_err(FetchFailure::into_error)?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
