@@ -688,6 +688,11 @@ and gstreamer, RFC 7845. Each container spells them differently and all three
 convert to the in-band convention, where the demuxer forwards the `OpusHead`
 ahead of the audio as a parameter set.
 
+`OpusDec` presents its output on the timeline without the pre-skip, as ffmpeg and
+gst report Opus. It clips to the segment on the container's timeline, which counts
+the pre-skip, then stamps each output frame at the container time of its first kept
+sample minus the `OpusHead` pre-skip, with the kept sample count as its duration.
+
 ### Ogg
 
 Pre-skip is codec config the decoder owns. `OggDemux` forwards the `OpusHead`
@@ -803,6 +808,10 @@ header it is about to write and pairs with the mapping's fixed 80 ms
 `SeekPreRoll`. Block timestamps are not shifted: the first Opus block sits at 0
 and `CodecDelay` tells the decoder what to discard, so a Matroska file starts at
 zero where the MP4 edit list makes `start_time` negative.
+A track whose `CodecDelay` differs from its pre-skip, or has none, has its blocks
+moved by the difference so the decoder's pre-skip shift lands on the block
+timestamps. Laced Opus frames with no `DefaultDuration` are spaced by their TOC
+duration.
 
 The end trim, with no granule to carry it, is the final block's
 `DiscardPadding`, which is nanoseconds and so survives the millisecond
@@ -1079,6 +1088,14 @@ no VC-1 decoder.
 `Caps::CompressedVideo` has no pixel-aspect field, so the sample aspect these
 three headers signal is surfaced as the read-only `pixel-aspect-ratio` property
 rather than in caps.
+
+`NalParse` and `StartCodeParse` in re-framing mode stamp the units their source
+left unstamped (0 from a byte source, or none) with the synthesis `TsDemux` uses:
+decode order plus the declared frame period, the picture order count for a
+reordering H.264 or H.265 stream, `temporal_reference` for MPEG-2. The first such
+unit opens the timeline at 0 and an IDR restarts it one period after the latest
+picture. A stream with no declared rate leaves later units unset (`PTS_NONE`),
+as gst's `h264parse` and `h265parse` do, and decoders pass that through.
 
 ## AV1 OBU streams
 
