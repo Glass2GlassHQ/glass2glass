@@ -107,6 +107,8 @@ pub struct NvDec {
     input_stamps: PendingInputStamps,
     emitted: u64,
     segment: Segment,
+    // the last access unit ended with an H.265 end of sequence NAL unit
+    after_end_of_sequence: bool,
     /// Caps of the last frame emitted; a decoded frame whose format / geometry
     /// differs (a mid-stream resolution or bit-depth change) re-announces.
     last_caps: Option<Caps>,
@@ -243,6 +245,7 @@ impl NvDec {
             input_stamps: PendingInputStamps::default(),
             emitted: 0,
             segment: Segment::new(),
+            after_end_of_sequence: false,
             last_caps: None,
             input_caps: None,
             max_display_delay: DEFAULT_MAX_DISPLAY_DELAY,
@@ -477,6 +480,39 @@ impl NvDec {
         cuchk(unsafe { ffi::cuvid_create_video_parser(&mut parser, &mut params) })?;
         self.parser = parser;
         Ok(())
+    }
+
+    // a CRA after an end of sequence drops the pictures still waiting for output,
+    // which NVDEC does only for a BLA with no_output_of_prior_pics_flag set
+    fn h265_cra_as_bla(&mut self, access_unit: &[u8]) -> Option<Vec<u8>> {
+        use crate::poc::{H265_NAL_BLA_W_LP, H265_NAL_CRA, H265_NAL_END_OF_SEQUENCE};
+        const NAL_TYPE_BITS: u8 = 0x7E;
+        const NO_OUTPUT_OF_PRIOR_PICS_FLAG: u8 = 0x40;
+        if self.state.codec_cuvid != ffi::CUDA_VIDEO_CODEC_HEVC {
+            return None;
+        }
+        let after_end_of_sequence = core::mem::replace(
+            &mut self.after_end_of_sequence,
+            crate::annexb::nal_units(access_unit)
+                .any(|nal| crate::annexb::h265_nal_type(nal) == Some(H265_NAL_END_OF_SEQUENCE)),
+        );
+        if !after_end_of_sequence {
+            return None;
+        }
+        let mut rewritten: Option<Vec<u8>> = None;
+        let mut from = 0;
+        while let Some((_, nal)) = crate::annexb::next_start_code(access_unit, from) {
+            from = nal;
+            let is_cra = crate::annexb::h265_nal_type(&access_unit[nal..]) == Some(H265_NAL_CRA);
+            // the flag is the second bit after the 2-byte NAL header
+            if !is_cra || access_unit.len() <= nal + 2 {
+                continue;
+            }
+            let bytes = rewritten.get_or_insert_with(|| access_unit.to_vec());
+            bytes[nal] = (bytes[nal] & !NAL_TYPE_BITS) | (H265_NAL_BLA_W_LP << 1);
+            bytes[nal + 2] |= NO_OUTPUT_OF_PRIOR_PICS_FLAG;
+        }
+        rewritten
     }
 
     fn destroy_parser(&mut self) {
@@ -1199,9 +1235,11 @@ impl AsyncElement for NvDec {
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     check_coding_tools(self.state.codec_cuvid, slice)?;
+                    let cra_as_bla = self.h265_cra_as_bla(slice);
+                    let access_unit = cra_as_bla.as_deref().unwrap_or(slice);
                     self.input_stamps
                         .insert(frame.timing.pts_ns, InputStamp::of(&frame));
-                    let frames = self.parse(slice, frame.timing.pts_ns, false)?;
+                    let frames = self.parse(access_unit, frame.timing.pts_ns, false)?;
                     self.emit(frames, out).await?;
                 }
                 PipelinePacket::Eos => {
@@ -1603,6 +1641,27 @@ mod tests {
             check_coding_tools(ffi::CUDA_VIDEO_CODEC_HEVC, HEVC_MAIN10),
             Ok(())
         );
+    }
+
+    #[test]
+    fn cra_after_end_of_sequence_becomes_bla_without_prior_pictures() {
+        let mut dec = NvDec::new();
+        dec.state.codec_cuvid = ffi::CUDA_VIDEO_CODEC_HEVC;
+        let trailing_picture_then_end_of_sequence =
+            [0, 0, 1, 0x02, 0x01, 0x80, 0, 0, 1, 0x48, 0x01];
+        // first_slice_segment_in_pic_flag 1, no_output_of_prior_pics_flag 0
+        let cra = [0, 0, 1, 0x2A, 0x01, 0x80];
+        let bla_without_prior_pictures = [0, 0, 1, 0x20, 0x01, 0xC0];
+        assert_eq!(dec.h265_cra_as_bla(&cra), None, "the first picture");
+        assert_eq!(
+            dec.h265_cra_as_bla(&trailing_picture_then_end_of_sequence),
+            None
+        );
+        assert_eq!(
+            dec.h265_cra_as_bla(&cra).as_deref(),
+            Some(&bla_without_prior_pictures[..])
+        );
+        assert_eq!(dec.h265_cra_as_bla(&cra), None, "a CRA inside a sequence");
     }
 
     #[test]

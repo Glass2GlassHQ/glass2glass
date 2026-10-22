@@ -844,12 +844,12 @@ pub fn h265_nal_is_reference(nal_unit_type: u8) -> bool {
 }
 
 // H.265 NAL unit types (Table 7-1) the order count derivation tells apart
-const H265_NAL_END_OF_SEQUENCE: u8 = 36;
+pub(crate) const H265_NAL_END_OF_SEQUENCE: u8 = 36;
 const H265_NAL_RADL_R: u8 = 7;
 const H265_NAL_RASL_R: u8 = 9;
-const H265_NAL_BLA_W_LP: u8 = 16;
+pub(crate) const H265_NAL_BLA_W_LP: u8 = 16;
 const H265_NAL_BLA_N_LP: u8 = 18;
-const H265_NAL_CRA: u8 = 21;
+pub(crate) const H265_NAL_CRA: u8 = 21;
 
 // a picture that can be prevTid0Pic: not RASL, RADL or a sub-layer non-reference picture (8.3.1)
 fn h265_is_prev_tid0_candidate(slice: &H265SlicePoc) -> bool {
