@@ -20,8 +20,9 @@
 //!
 //! AVI stores chunks in decode order and carries no presentation timestamps, so
 //! a stream's timing is reconstructed from `strh`: sample `n` starts at
-//! `n * dwScale / dwRate` seconds, where `n` counts chunks when `dwSampleSize`
-//! is 0 and `bytes / dwSampleSize` otherwise.
+//! `n * dwScale / dwRate` seconds, where `n` counts chunks for video (empty ones
+//! included) and for audio whose `dwSampleSize` is 0, and `bytes / dwSampleSize`
+//! otherwise.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -325,12 +326,18 @@ fn parse_strl(data: &[u8], range: core::ops::Range<usize>) -> Option<AviStream> 
         let codec = unsupported_codec_name(stream_type, strh, strf);
         (AviStreamKind::Unsupported { codec }, Vec::new())
     });
+    let declared_sample_size = read_u32(strh, STRH_SAMPLE_SIZE)?;
     Some(AviStream {
         kind,
         scale: read_u32(strh, STRH_SCALE)?,
         rate: read_u32(strh, STRH_RATE)?,
         start: read_u32(strh, STRH_START)?,
-        sample_size: read_u32(strh, STRH_SAMPLE_SIZE)?,
+        // a video chunk is one frame whatever `dwSampleSize` says, as gst and ffmpeg read it
+        sample_size: if stream_type == STREAM_TYPE_VIDEO {
+            0
+        } else {
+            declared_sample_size
+        },
         codec_config,
     })
 }
@@ -490,10 +497,10 @@ fn parse_info(data: &[u8], range: core::ops::Range<usize>) -> TagList {
 }
 
 /// Collect the data chunks of one `LIST movi`, descending into the `LIST rec `
-/// groups an interleaved file wraps them in. Empty chunks are dropped: a writer
-/// emits them as padding and no decoder has anything to do with them. A data
-/// chunk cut short by the end of the file is dropped too, unless it belongs to a
-/// long-tail video stream.
+/// groups an interleaved file wraps them in. An empty chunk is kept: it holds
+/// nothing to decode, but in a video stream it takes the next frame's time
+/// slot. A data chunk cut short by the end of the file is dropped, unless it
+/// belongs to a long-tail video stream.
 fn collect_movi(
     data: &[u8],
     range: core::ops::Range<usize>,
@@ -553,7 +560,7 @@ fn push_data_chunk(chunk: Chunk, stream_count: usize, out: &mut Vec<AviChunk>) {
     let Some(stream) = chunk_stream_number(chunk.id) else {
         return;
     };
-    if stream >= stream_count || chunk.body.is_empty() {
+    if stream >= stream_count {
         return;
     }
     let palette_change = chunk.id[2..] == *b"pc" && chunk.body.len() <= PALETTE_CHANGE_MAX_LEN;

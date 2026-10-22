@@ -465,6 +465,13 @@ fn emittable<'a>(
                 palette_changes[chunk.stream].extend(palette_change(bytes));
                 return None.into_iter().chain(None);
             }
+            if bytes.is_empty() {
+                // an empty video chunk is a dropped frame, which still takes its time slot
+                if !matches!(stream.kind, AviStreamKind::Audio { .. }) {
+                    positions[chunk.stream] += 1;
+                }
+                return None.into_iter().chain(None);
+            }
             let samples = stream.samples_in(bytes.len());
             let (pts_ns, duration_ns) = stream.timing(positions[chunk.stream], samples);
             positions[chunk.stream] += samples;
