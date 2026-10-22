@@ -202,6 +202,7 @@ pub struct StartCodeParse<C: StartCodeCodec> {
     caps: CapsRefinement,
     framer: AccessUnitFramer,
     seq: u64,
+    stream_pts: crate::video_pts_synth::ElementaryStreamPts,
     /// Configuration-header re-insertion cadence. Only meaningful for a codec
     /// whose [`StartCodeCodec::config_headers`] returns headers.
     config_interval: ConfigInterval,
@@ -223,6 +224,7 @@ impl<C: StartCodeCodec> Default for StartCodeParse<C> {
             caps: CapsRefinement::default(),
             framer: AccessUnitFramer::new(false),
             seq: 0,
+            stream_pts: Default::default(),
             config_interval: ConfigInterval::default(),
             cached_config: Vec::new(),
             pixel_aspect: None,
@@ -356,6 +358,9 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
         }
         self.refine_caps(&au, out).await?;
         timing.keyframe = C::au_is_keyframe(&au);
+        #[cfg(feature = "metadata")]
+        let input_pts_ns = timing.pts_ns;
+        timing.pts_ns = self.stream_pts.stamp(C::CODEC, &au, timing.pts_ns);
         let au = self.apply_config_interval(au, timing.pts_ns, timing.keyframe);
         #[allow(unused_mut)]
         let mut frame = Frame::new(
@@ -365,7 +370,7 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
         );
         #[cfg(feature = "metadata")]
         {
-            frame.meta = self.input_stamps.take(timing.pts_ns).meta;
+            frame.meta = self.input_stamps.take(input_pts_ns).meta;
         }
         self.seq += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;

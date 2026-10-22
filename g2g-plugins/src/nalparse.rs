@@ -109,6 +109,7 @@ pub struct NalParse<C: NalCodec> {
     framer: AccessUnitFramer,
     /// Monotonic sequence number for emitted re-framed access units.
     seq: u64,
+    stream_pts: crate::video_pts_synth::ElementaryStreamPts,
     /// Input framing, latched from the first frame (`Some(true)` = Annex-B start
     /// codes, `Some(false)` = length prefixes). Fixed for a stream, so decided
     /// once: a per-frame guess misclassifies a mid-AU Annex-B continuation buffer
@@ -149,6 +150,7 @@ impl<C: NalCodec> Default for NalParse<C> {
             reframe: false,
             framer: AccessUnitFramer::new(true),
             seq: 0,
+            stream_pts: Default::default(),
             input_is_annexb: None,
             config_interval: ConfigInterval::default(),
             leading_rasl: crate::h265parse::LeadingRaslFilter::default(),
@@ -347,6 +349,9 @@ impl<C: NalCodec> NalParse<C> {
         #[cfg(feature = "metadata")]
         let sei = crate::sei::parse_nals(nals.iter().copied(), C::CODEC, self.pic_timing);
         drop(nals);
+        #[cfg(feature = "metadata")]
+        let input_pts_ns = timing.pts_ns;
+        timing.pts_ns = self.stream_pts.stamp(C::CODEC, &au, timing.pts_ns);
         // Re-insert cached parameter sets before this AU when config-interval calls
         // for it (no-op at interval 0 or when the AU already carries them).
         let au = self.apply_config_interval(au, timing.pts_ns, timing.keyframe);
@@ -358,7 +363,7 @@ impl<C: NalCodec> NalParse<C> {
         );
         #[cfg(feature = "metadata")]
         {
-            frame.meta = self.input_stamps.take(timing.pts_ns).meta;
+            frame.meta = self.input_stamps.take(input_pts_ns).meta;
             self.attach_stream_meta(&mut frame, sei);
         }
         self.seq += 1;

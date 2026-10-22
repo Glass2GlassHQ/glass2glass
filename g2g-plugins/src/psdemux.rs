@@ -820,7 +820,7 @@ impl PsDemuxer {
             // untouched; `take_units` drops those anyway (mid-GOP tune-in).
             let Some(period_90) = self.completed[at]
                 .sequence
-                .and_then(|s| crate::mpegts::frame_period_90khz(s.framerate_q16))
+                .and_then(|s| crate::video_pts_synth::frame_period_90khz(s.framerate_q16))
             else {
                 continue;
             };

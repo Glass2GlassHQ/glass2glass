@@ -1066,8 +1066,9 @@ fn feed_access_unit_into(
     // libavcodec uses the packet's PTS verbatim; the unit is opaque to
     // the codec layer and is echoed back on the decoded frame. We feed
     // nanoseconds straight through.
-    packet.set_pts(Some(pts_ns as i64));
-    packet.set_dts(Some(pts_ns as i64));
+    let pts = (pts_ns != FrameTiming::PTS_NONE).then_some(pts_ns as i64);
+    packet.set_pts(pts);
+    packet.set_dts(pts);
     state.pts_to_input.insert(pts_ns, input);
 
     let rejected = match state.decoder.send_packet(&packet) {
@@ -1114,12 +1115,11 @@ fn drain_frames_into(
                         );
                     }
                 }
-                // libavcodec returns the PTS we fed in (or AV_NOPTS_VALUE
-                // = INT64_MIN if it could not propagate one); treat the
-                // sentinel as zero so we don't return a wild timestamp.
+                // libavcodec returns the PTS we fed in, or none when the
+                // packet carried none or it could not propagate one.
                 let pts_ns = match frame.pts() {
                     Some(p) if p >= 0 => p as u64,
-                    _ => 0,
+                    _ => FrameTiming::PTS_NONE,
                 };
                 let width = frame.width();
                 let height = frame.height();

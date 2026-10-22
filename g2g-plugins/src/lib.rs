@@ -685,6 +685,8 @@ pub mod tsmux;
 // elementary stream, the `.mpg` / `.vob` sibling of tsdemux.
 pub mod mpeg2video;
 pub mod psdemux;
+// Presentation times for video access units a container or byte source left unstamped.
+mod video_pts_synth;
 // Frame headers of the self-syncing audio bitstreams (AC-3, MPEG audio), shared
 // by the audio decoder's frame splitting, psdemux's frame realignment and
 // mpegaudioparse.

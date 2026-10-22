@@ -221,6 +221,8 @@ pub struct WavParse {
     in_data: bool,
     // None when the data chunk size is the streaming sentinel
     data_remaining: Option<usize>,
+    // bytes of the `data` chunk pushed so far, which time the next buffer
+    data_offset: u64,
     emitted: u64,
 }
 
@@ -307,7 +309,7 @@ impl WavParse {
                 out.push(PipelinePacket::CapsChanged(format.caps())).await?;
                 if matches!(format.format, AudioFormat::Tagged(_)) {
                     let header = core::mem::take(&mut self.tagged_header);
-                    self.push_frame(header, out).await?;
+                    self.push_frame(header, FrameTiming::default(), out).await?;
                 }
                 self.in_data = true;
                 break;
@@ -355,22 +357,49 @@ impl WavParse {
         if let Some(remaining) = &mut self.data_remaining {
             *remaining -= whole_frames;
         }
-        self.push_frame(samples, out).await
+        let start = self.data_offset;
+        self.data_offset = start.saturating_add(whole_frames as u64);
+        let timing = data_timing(start, self.data_offset, format.byte_rate);
+        self.push_frame(samples, timing, out).await
     }
 
     async fn push_frame(
         &mut self,
         bytes: Vec<u8>,
+        timing: FrameTiming,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming::default(),
+            timing,
             self.emitted,
         );
         self.emitted += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
+    }
+}
+
+// The `data` bytes from `start` to `end` at the header's byte rate, rounded up as gst's wavparse does.
+fn data_timing(start: u64, end: u64, byte_rate: u32) -> FrameTiming {
+    if byte_rate == 0 {
+        return FrameTiming {
+            pts_ns: FrameTiming::PTS_NONE,
+            ..FrameTiming::default()
+        };
+    }
+    let offset_ns = |offset: u64| -> u64 {
+        (u128::from(offset) * u128::from(NANOS_PER_SECOND))
+            .div_ceil(u128::from(byte_rate))
+            .try_into()
+            .unwrap_or(FrameTiming::PTS_NONE)
+    };
+    let pts_ns = offset_ns(start);
+    FrameTiming {
+        pts_ns,
+        dts_ns: pts_ns,
+        duration_ns: offset_ns(end).saturating_sub(pts_ns),
+        ..FrameTiming::default()
     }
 }
 
