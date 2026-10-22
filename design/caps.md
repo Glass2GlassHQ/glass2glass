@@ -758,6 +758,14 @@ gave it. Separately, when the element after the `decodebin` takes only raw video
 or only raw audio (its constraint names one kind) and the input decodes only to
 the other, the expansion fails `NoStreamOfKind`, so `decodebin ! videoconvert` on
 a FLAC file with cover art reports the missing video stream at launch.
+
+A demuxer the line names before `decodebin`, with no properties set, is treated
+like the one `decodebin` would plug. When the element before it is a local file,
+the hook lists that file's streams. If it would plug the same demuxer, the chosen
+stream's selection properties go onto the named demuxer and the decode chain
+plugs from that stream's caps. `fmp4demux` also accepts the whole-file
+`ByteStream{Mp4}` filesrc gives every ISO-BMFF file, but its pad template stays on
+`IsoBmff`, so auto-plugging still picks `qtdemux` for files.
 A `wav_primary_stream` hook plugs `wavparse` from the `fmt ` chunk's real format,
 so an IMA ADPCM WAV gets `adpcmdec`. A `mp4_primary_stream` sibling does the
 same for MP4, sniffing the `moov` and naming `qtdemux stream=aac` so an audio-only
