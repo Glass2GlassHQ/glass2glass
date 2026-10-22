@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use g2g_core::{Tag, TagList};
 
 /// The three bytes an ID3v2 tag opens with.
-const ID3V2_MAGIC: [u8; 3] = *b"ID3";
+pub(crate) const ID3V2_MAGIC: [u8; 3] = *b"ID3";
 /// ID3v2 header: magic, major version, revision, flags, 4 syncsafe size bytes.
 /// A stream's head has to hold this much before it can be told from audio.
 pub(crate) const ID3V2_HEADER_LEN: usize = 10;

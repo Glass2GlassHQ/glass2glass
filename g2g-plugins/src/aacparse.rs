@@ -433,6 +433,8 @@ pub struct AacParse {
     last_emitted_caps: Option<Caps>,
     headers_emitted: u64,
     framing: Framing,
+    // the buffers that arrived while the framing was undecided
+    undecided: Vec<Frame>,
     /// Unconsumed ADTS bytes, starting at stream offset `buf_offset`.
     buf: Vec<u8>,
     buf_offset: u64,
@@ -490,6 +492,69 @@ impl AacParse {
         if parse_id3v1(&self.buf[start..]).is_some() {
             self.buf.truncate(start);
         }
+    }
+
+    // The framing the held buffers show, `None` while they show none: a file can
+    // open on junk that runs past the first read before its first sync.
+    fn held_framing(&self) -> Option<Framing> {
+        // past this much, the stream is taken as LATM framed by its container
+        const MAX_UNDECIDED_BYTES: usize = 64 * 1024;
+        let held: Vec<u8> = self
+            .undecided
+            .iter()
+            .flat_map(|frame| frame.domain.as_system_slice().unwrap_or(&[]))
+            .copied()
+            .collect();
+        let first = self.undecided.first()?.domain.as_system_slice()?;
+        // a LOAS payload is unaligned bits that can hold a valid ADTS header
+        if opens_loas_frame(&held) && parse_loas(&held).is_some() {
+            Some(Framing::Latm)
+        } else if parse_adts(&held).is_some() {
+            Some(Framing::Adts)
+        } else if is_raw_aac_config(first) {
+            Some(Framing::Raw)
+        } else if held.len() > MAX_UNDECIDED_BYTES {
+            Some(Framing::Latm)
+        } else {
+            None
+        }
+    }
+
+    async fn forward_held(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        for frame in core::mem::take(&mut self.undecided) {
+            self.forward(frame, out).await?;
+        }
+        Ok(())
+    }
+
+    async fn forward(&mut self, frame: Frame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        let bytes = frame.domain.as_system_slice().unwrap_or(&[]);
+        match self.framing {
+            Framing::Adts => {
+                // A byte source stamps every chunk 0, so only a real
+                // time (a demuxer's) re-bases the counter.
+                if let Some(pts) = frame.timing.pts().filter(|pts| *pts != 0) {
+                    self.clock.note_chunk(
+                        self.buf_offset,
+                        self.buf_offset + self.buf.len() as u64,
+                        pts,
+                    );
+                }
+                self.buf.extend_from_slice(bytes);
+                self.drain(false, out).await?;
+            }
+            // raw access unit bytes can alias an ADTS or LOAS sync, so they are not scanned
+            Framing::Raw => {
+                out.push(PipelinePacket::DataFrame(frame)).await?;
+            }
+            Framing::Undecided | Framing::Latm => {
+                if let Some(info) = parse_aac(bytes) {
+                    self.announce(info.caps(), out).await?;
+                }
+                out.push(PipelinePacket::DataFrame(frame)).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Emit every access unit the buffer holds whole.
@@ -601,44 +666,15 @@ impl AsyncElement for AacParse {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let bytes = frame.domain.as_system_slice().unwrap_or(&[]);
-                    if self.framing == Framing::Undecided && !bytes.is_empty() {
-                        // a LOAS payload is unaligned bits that can hold a valid ADTS header
-                        self.framing = if opens_loas_frame(bytes) && parse_loas(bytes).is_some() {
-                            Framing::Latm
-                        } else if parse_adts(bytes).is_some() {
-                            Framing::Adts
-                        } else if is_raw_aac_config(bytes) {
-                            Framing::Raw
-                        } else {
-                            Framing::Latm
-                        };
+                    if self.framing != Framing::Undecided {
+                        return self.forward(frame, out).await;
                     }
-                    match self.framing {
-                        Framing::Adts => {
-                            // A byte source stamps every chunk 0, so only a real
-                            // time (a demuxer's) re-bases the counter.
-                            if let Some(pts) = frame.timing.pts().filter(|pts| *pts != 0) {
-                                self.clock.note_chunk(
-                                    self.buf_offset,
-                                    self.buf_offset + self.buf.len() as u64,
-                                    pts,
-                                );
-                            }
-                            self.buf.extend_from_slice(bytes);
-                            self.drain(false, out).await?;
-                        }
-                        // raw access unit bytes can alias an ADTS or LOAS sync, so they are not scanned
-                        Framing::Raw => {
-                            out.push(PipelinePacket::DataFrame(frame)).await?;
-                        }
-                        Framing::Undecided | Framing::Latm => {
-                            if let Some(info) = parse_aac(bytes) {
-                                self.announce(info.caps(), out).await?;
-                            }
-                            out.push(PipelinePacket::DataFrame(frame)).await?;
-                        }
-                    }
+                    self.undecided.push(frame);
+                    let Some(framing) = self.held_framing() else {
+                        return Ok(());
+                    };
+                    self.framing = framing;
+                    self.forward_held(out).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
                     out.push(PipelinePacket::CapsChanged(c)).await?;
@@ -646,6 +682,7 @@ impl AsyncElement for AacParse {
                 PipelinePacket::Flush => {
                     self.last_emitted_caps = None;
                     self.buf.clear();
+                    self.undecided.clear();
                     self.clock.clear_pending();
                     out.push(PipelinePacket::Flush).await?;
                 }
@@ -656,6 +693,10 @@ impl AsyncElement for AacParse {
                 // The last access unit ends at the end of the stream, so it has
                 // no successor to confirm its sync against.
                 PipelinePacket::Eos => {
+                    if self.framing == Framing::Undecided && !self.undecided.is_empty() {
+                        self.framing = Framing::Latm;
+                        self.forward_held(out).await?;
+                    }
                     if self.framing == Framing::Adts {
                         self.strip_id3v1();
                         self.drain(true, out).await?;
@@ -1366,6 +1407,38 @@ mod tests {
         stream.extend_from_slice(&build_adts(2, 4, 16, 2)[..10]);
         let (parse, _) = run(&[stream]).await;
         assert_eq!(parse.frames_emitted(), 2, "the half unit is not emitted");
+    }
+
+    #[tokio::test]
+    async fn keeps_the_unit_ahead_of_a_mid_stream_id3v2_tag() {
+        let tags: g2g_core::TagList = [g2g_core::Tag::Title("segment".into())]
+            .into_iter()
+            .collect();
+        let mut stream = build_adts(2, 4, 16, 0);
+        stream.extend(build_adts(2, 4, 16, 1));
+        stream.extend(crate::id3::write_id3v2(&tags, 4));
+        stream.extend(build_adts(2, 4, 16, 2));
+        let (parse, _) = run(&[stream]).await;
+        assert_eq!(
+            parse.frames_emitted(),
+            3,
+            "the tag confirms the unit before it"
+        );
+    }
+
+    #[tokio::test]
+    async fn junk_past_the_first_buffer_still_reaches_the_first_sync() {
+        // more junk than one read holds, so the first buffer shows no framing at all
+        let junk_buffers = [vec![0u8; 100], vec![0u8; 100]];
+        let mut stream = Vec::new();
+        for fill in 0..3u8 {
+            stream.extend(build_adts(2, 4, 16, fill));
+        }
+        let mut buffers = junk_buffers.to_vec();
+        buffers.push(stream);
+        let (parse, sink) = run(&buffers).await;
+        assert_eq!(parse.frames_emitted(), 3, "every unit behind the junk");
+        assert_eq!(data_frames(&sink).len(), 3, "the junk is not forwarded");
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@
 //! length, so a caller resynchronizes instead of mis-framing.
 
 use crate::bereader::{be_u24, be_u32};
+use crate::id3::{id3v2_len, ID3V2_HEADER_LEN, ID3V2_MAGIC};
 
 /// AC-3 syncword, the first two bytes of every syncframe.
 pub(crate) const AC3_SYNC: [u8; 2] = [0x0B, 0x77];
@@ -234,10 +235,16 @@ pub(crate) enum Located {
 /// buffer feeds the decoder noise. That is also how a parser resynchronizes after
 /// garbage. At `eos` the last frame has no successor to confirm it against, so a
 /// complete frame at the end of the stream is taken as it stands and a truncated
-/// one is left behind.
+/// one is left behind. An ID3v2 tag between frames confirms the frame before it
+/// and is skipped.
 pub(crate) fn locate_frame<H: SyncFrameHeader>(buf: &[u8], eos: bool) -> Located {
     let mut start = 0;
     while start + H::HEADER_LEN <= buf.len() {
+        // HLS segments of a bare audio stream each open on an ID3v2 tag
+        if let Some(tag_len) = id3v2_len(&buf[start..]).filter(|len| start + len <= buf.len()) {
+            start += tag_len;
+            continue;
+        }
         let Some(header) = H::parse(&buf[start..]) else {
             start += 1;
             continue;
@@ -252,15 +259,24 @@ pub(crate) fn locate_frame<H: SyncFrameHeader>(buf: &[u8], eos: bool) -> Located
             }
             return Located::NeedMore;
         }
-        match H::parse(&buf[end..]) {
-            Some(next) if header.confirms_sync(&next) => {
-                return Located::Frame {
-                    start,
-                    len: header.coded_bytes(),
+        let after = &buf[end..];
+        let confirmed = match H::parse(after) {
+            Some(next) => header.confirms_sync(&next),
+            None if after.starts_with(&ID3V2_MAGIC) && after.len() < ID3V2_HEADER_LEN => {
+                if !eos {
+                    return Located::NeedMore;
                 }
+                true
             }
-            _ => start += 1,
+            None => id3v2_len(after).is_some(),
+        };
+        if confirmed {
+            return Located::Frame {
+                start,
+                len: header.coded_bytes(),
+            };
         }
+        start += 1;
     }
     Located::NeedMore
 }
