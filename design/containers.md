@@ -810,8 +810,11 @@ and `CodecDelay` tells the decoder what to discard, so a Matroska file starts at
 zero where the MP4 edit list makes `start_time` negative.
 A track whose `CodecDelay` differs from its pre-skip, or has none, has its blocks
 moved by the difference so the decoder's pre-skip shift lands on the block
-timestamps. Laced Opus frames with no `DefaultDuration` are spaced by their TOC
-duration.
+timestamps. Laced frames take the track's `DefaultDuration`. Without one, Opus
+frames are spaced by their TOC duration and Vorbis frames by the lapped
+(previous + current) / 4 block size read from the `CodecPrivate` setup header,
+the previous size carried across blocks. `VorbisDec` stamps a packet that has a
+pts but no duration with that pts, as ffmpeg does.
 
 The end trim, with no granule to carry it, is the final block's
 `DiscardPadding`, which is nanoseconds and so survives the millisecond

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1829: Matroska Vorbis output takes each packet's own pts, and laced Vorbis frames take their lapped block durations.
 - M1823: avidemux counts empty video chunks as frame slots and reads every video chunk as one frame whatever dwSampleSize says.
 - M1835: `filesrc ! matroskademux ! decodebin` and `filesrc ! fmp4demux` on a fragmented file negotiate.
 - M1828: decoded Opus pts start after the pre-skip, and Matroska Opus lace frames take their own coded duration.
