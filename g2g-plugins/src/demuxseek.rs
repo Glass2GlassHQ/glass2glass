@@ -33,15 +33,30 @@ use alloc::vec::Vec;
 use core::iter::Chain;
 
 use g2g_core::runtime::SeekController;
-use g2g_core::Seek;
+use g2g_core::{Seek, Segment};
 
 // a stream without a keyframe for this many units releases them early, the segment still clips them
 const KEPT_UNITS_MAX: usize = 1024;
 
+// stream time counts from the stream start, as seek targets do, so a position read back seeks to itself
+pub(crate) fn with_stream_time(segment: Segment, stream_start_ns: u64) -> Segment {
+    Segment {
+        time: segment.start.saturating_sub(stream_start_ns),
+        ..segment
+    }
+}
+
+pub(crate) fn segment_from(start_pts_ns: u64, stream_start_ns: u64) -> Segment {
+    with_stream_time(
+        Segment::for_flush_seek(&Seek::flush_to(start_pts_ns), None),
+        stream_start_ns,
+    )
+}
+
 #[derive(Debug)]
 pub(crate) struct Admitted<U> {
-    // set when a seek completes: the caller sends a segment starting here before the units
-    pub(crate) segment_start_ns: Option<u64>,
+    // set when a seek completes: the caller sends it before the units
+    pub(crate) segment: Option<Segment>,
     units: Chain<alloc::vec::IntoIter<U>, core::option::IntoIter<U>>,
 }
 
@@ -54,9 +69,9 @@ impl<U> Admitted<U> {
         Self::release(None, Vec::new(), None)
     }
 
-    fn release(segment_start_ns: Option<u64>, kept: Vec<U>, unit: Option<U>) -> Self {
+    fn release(segment: Option<Segment>, kept: Vec<U>, unit: Option<U>) -> Self {
         Self {
-            segment_start_ns,
+            segment,
             units: kept.into_iter().chain(unit),
         }
     }
@@ -107,6 +122,8 @@ pub(crate) struct DemuxSeek<U> {
     // empty until the first keyframe after the flush, since nothing before it decodes
     kept: Vec<U>,
     stream_start_ns: Option<u64>,
+    // whether the stream since the last flush has its segment
+    opened: bool,
 }
 
 impl<U> Default for DemuxSeek<U> {
@@ -118,6 +135,7 @@ impl<U> Default for DemuxSeek<U> {
             keep_state: false,
             kept: Vec::new(),
             stream_start_ns: None,
+            opened: false,
         }
     }
 }
@@ -180,6 +198,16 @@ impl<U> DemuxSeek<U> {
         self.stream_start_ns
     }
 
+    // the segment a stream opens with, at its first unit or after a flush that was not a seek
+    pub(crate) fn opening_segment(&mut self, start_pts_ns: u64) -> Option<Segment> {
+        if self.opened {
+            return None;
+        }
+        self.opened = true;
+        let stream_start_ns = *self.stream_start_ns.get_or_insert(start_pts_ns);
+        Some(segment_from(start_pts_ns, stream_start_ns))
+    }
+
     /// The upstream stream length in bytes, when the source published one, so a
     /// caller guessing a byte offset can keep it below the end.
     pub(crate) fn upstream_len(&self) -> Option<u64> {
@@ -240,6 +268,7 @@ impl<U> DemuxSeek<U> {
             self.phase = Phase::Discarding { target };
         }
         self.kept.clear();
+        self.opened = false;
         true
     }
 
@@ -269,7 +298,12 @@ impl<U> DemuxSeek<U> {
             return Admitted::empty();
         }
         self.phase = Phase::Idle;
-        Admitted::release(Some(target_ns), core::mem::take(&mut self.kept), Some(unit))
+        self.opened = true;
+        Admitted::release(
+            Some(segment_from(target_ns, stream_start_ns)),
+            core::mem::take(&mut self.kept),
+            Some(unit),
+        )
     }
 }
 
@@ -282,7 +316,10 @@ mod tests {
     const TARGET_NS: u64 = 5_000;
 
     fn units(admitted: Admitted<u64>) -> (Option<u64>, Vec<u64>) {
-        (admitted.segment_start_ns, admitted.collect())
+        (
+            admitted.segment.map(|segment| segment.start),
+            admitted.collect(),
+        )
     }
 
     fn discarding_to_target(stream_start_ns: u64) -> DemuxSeek<u64> {
@@ -386,6 +423,26 @@ mod tests {
             units(s.admit(TARGET_NS + STREAM_START_NS, false, 2)),
             (Some(TARGET_NS + STREAM_START_NS), vec![0, 1, 2])
         );
+    }
+
+    #[test]
+    fn segments_count_stream_time_from_the_stream_start() {
+        const STREAM_START_NS: u64 = 1_000;
+        let mut s = discarding_to_target(STREAM_START_NS);
+        s.admit(STREAM_START_NS, true, 0);
+        let resume = s
+            .admit(TARGET_NS + STREAM_START_NS, false, 1)
+            .segment
+            .expect("the seek resumes");
+        assert_eq!(resume.to_stream_time(resume.start), Some(TARGET_NS));
+        assert_eq!(s.opening_segment(TARGET_NS), None, "the seek opened it");
+
+        s.on_flush();
+        let opening = s
+            .opening_segment(STREAM_START_NS)
+            .expect("a flush reopens the stream");
+        assert_eq!(opening.to_stream_time(STREAM_START_NS), Some(0));
+        assert_eq!(s.opening_segment(STREAM_START_NS), None);
     }
 
     #[test]

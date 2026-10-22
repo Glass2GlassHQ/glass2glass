@@ -2,7 +2,10 @@
 
 use std::process::{Command, Output};
 
+use g2g_core::runtime::{parse_launch, run_graph_with_progress, PipelineProgress};
+use g2g_core::PipelineClock;
 use g2g_plugins::checksumsink::checksum_line;
+use g2g_plugins::registry::default_registry;
 
 // all three fixtures: ffmpeg -f lavfi -i testsrc=size=64x48:rate=25:duration=3 -c:v libx264 -g 10 -keyint_min 10 -sc_threshold 0 -bf 0
 const MP4_FIXTURE: &str = concat!(
@@ -26,6 +29,8 @@ const NANOS_PER_MILLISECOND: u64 = 1_000_000;
 const FRAME_PERIOD_NS: u64 = NANOS_PER_SECOND / FRAME_RATE;
 // between the keyframes at 0.8 s and 1.2 s, and between two frames
 const SEEK_MILLISECONDS: u64 = 1_020;
+// g2g-launch's link capacity
+const LINK_CAPACITY: usize = 4;
 // ffmpeg -ss 1.02 -copyts -i <mp4 or mkv fixture> -frames:v 1 -f framemd5 -, the frame at 1.04
 // the TS fixture needs an output -ss 2.42 (first PTS plus 1.02), ffmpeg's input seek in it lands on the 1.2 s keyframe
 const FRAME_AFTER_SEEK_MD5: &str = "732b16a0536b40e66a6005fa0cca8569";
@@ -135,9 +140,9 @@ fn ts_seek_counts_the_target_from_the_first_pts() {
     assert_starts_at_the_frame_after_the_seek(&checksum_lines(&output), TS_FIRST_PTS_NS);
 }
 
-#[test]
-fn seek_counts_the_target_from_the_start_time() {
-    let mut pipelines: Vec<(String, &str)> = Vec::new();
+// each pipeline with the md5 ffmpeg gives for the first frame after the seek
+fn offset_pipelines() -> Vec<(String, &'static str)> {
+    let mut pipelines: Vec<(String, &'static str)> = Vec::new();
     for name in H264_OFFSET_FIXTURES {
         let location = offset_fixture(name);
         pipelines.push((
@@ -158,8 +163,13 @@ fn seek_counts_the_target_from_the_start_time() {
         ),
         VP8_OFFSET_FRAME_AFTER_SEEK_MD5,
     ));
+    pipelines
+}
+
+#[test]
+fn seek_counts_the_target_from_the_start_time() {
     let first_frame = first_frame_after_seek() as usize;
-    for (pipeline, ffmpeg_md5) in pipelines {
+    for (pipeline, ffmpeg_md5) in offset_pipelines() {
         let unseeked = checksum_lines(&launch(&[], &pipeline));
         let seeked = checksum_lines(&launch_with_seek(
             &seek_seconds(SEEK_MILLISECONDS),
@@ -174,6 +184,55 @@ fn seek_counts_the_target_from_the_start_time() {
             seeked[0].ends_with(ffmpeg_md5),
             "{pipeline}: {} is not ffmpeg's frame after the seek",
             seeked[0]
+        );
+    }
+}
+
+struct ZeroClock;
+
+impl PipelineClock for ZeroClock {
+    fn now_ns(&self) -> u64 {
+        0
+    }
+}
+
+// the position g2g reports once the run's last frame has reached the sink
+async fn final_position_ns(pipeline: &str) -> u64 {
+    let graph = parse_launch(&default_registry(), pipeline)
+        .unwrap_or_else(|err| panic!("parses `{pipeline}`: {err}"));
+    let progress = PipelineProgress::new();
+    run_graph_with_progress(graph, &ZeroClock, LINK_CAPACITY, &progress, None)
+        .await
+        .unwrap_or_else(|err| panic!("runs `{pipeline}`: {err:?}"));
+    progress.position().expect("a frame reached the sink")
+}
+
+fn nanoseconds_as_seconds(nanoseconds: u64) -> String {
+    format!(
+        "{}.{:09}",
+        nanoseconds / NANOS_PER_SECOND,
+        nanoseconds % NANOS_PER_SECOND
+    )
+}
+
+#[tokio::test]
+async fn a_position_read_back_seeks_to_its_frame() {
+    let mut pipelines: Vec<String> = offset_pipelines()
+        .into_iter()
+        .map(|(pipeline, _)| pipeline)
+        .collect();
+    pipelines.push(ts_pipeline());
+    for pipeline in pipelines {
+        let unseeked = checksum_lines(&launch(&[], &pipeline));
+        let position_ns = final_position_ns(&pipeline).await;
+        let seeked = checksum_lines(&launch_with_seek(
+            &nanoseconds_as_seconds(position_ns),
+            &pipeline,
+        ));
+        assert_eq!(
+            seeked,
+            unseeked[unseeked.len() - 1..],
+            "{pipeline}: a seek to the last frame's position {position_ns} gives that frame"
         );
     }
 }

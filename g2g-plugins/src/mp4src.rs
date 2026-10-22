@@ -33,6 +33,7 @@ use g2g_core::{
     Stream, StreamCollection, StreamType,
 };
 
+use crate::demuxseek::{segment_from, with_stream_time};
 use crate::filesink::path_io_err;
 use crate::fmp4::{
     clean_aperture_meta, every_sample_ends_by, fragment_framerate_q16, keyframe_index_for,
@@ -282,7 +283,10 @@ impl SourceLoop for Mp4Src {
             // The active playback segment (M211/M358). Open-ended until a seek
             // with a `stop` arrives; `segment_mode` tracks whether that seek
             // asked for SEGMENT looping (segment-done at `stop` instead of Eos).
-            let mut segment = Segment::new();
+            let stream_start_ns = stream_start_ns(&samples);
+            let mut segment = segment_from(stream_start_ns, stream_start_ns);
+            // goes out before the first frame unless a seek's segment did, a stream from 0 has the runner's
+            let mut opening_segment = Some(segment).filter(|opening| *opening != Segment::new());
             let mut segment_mode = false;
             // Stream-time playback has reached (last emitted PTS), so a
             // non-flushing `accumulate_seek` anchors its running-time base.
@@ -301,7 +305,7 @@ impl SourceLoop for Mp4Src {
                 // running-time base (no flush). Both snap to the keyframe at or
                 // before the target so a decoder resumes from a clean reference.
                 if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
-                    let seek = seek_from_stream_start(seek, stream_start_ns(&samples));
+                    let seek = seek_from_stream_start(seek, stream_start_ns);
                     let new_seg = if seek.is_flush() {
                         out.push(PipelinePacket::Flush).await?;
                         Segment::for_flush_seek(&seek, None)
@@ -311,6 +315,8 @@ impl SourceLoop for Mp4Src {
                         segment.position = segment.stop.map_or(position, |s| position.min(s));
                         segment.accumulate_seek(&seek, None)
                     };
+                    let new_seg = with_stream_time(new_seg, stream_start_ns);
+                    opening_segment = None;
                     segment = new_seg;
                     segment_mode = seek.flags.contains(SeekFlags::SEGMENT);
                     position = new_seg.start;
@@ -366,7 +372,7 @@ impl SourceLoop for Mp4Src {
                             // Anchor the next loop's accumulation at the segment
                             // end, so a gapless loop advances base by a full span.
                             position = done_pos;
-                            ctl.notify_segment_done(done_pos);
+                            ctl.notify_segment_done(done_pos.saturating_sub(stream_start_ns));
                             // Park (wakefully) until the app loops or shuts down.
                             loop {
                                 if ctl.has_pending() {
@@ -413,6 +419,9 @@ impl SourceLoop for Mp4Src {
                 i += 1;
                 if let Some(caps) = caps_announcement.take() {
                     out.push(PipelinePacket::CapsChanged(caps)).await?;
+                }
+                if let Some(seg) = opening_segment.take() {
+                    out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }

@@ -65,8 +65,8 @@ use g2g_core::{
     g2g_debug, g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding,
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
     LatencyReport, MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Seek, Segment,
-    Stream, StreamCollection, StreamType, TagList, VideoCodec,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Segment, Stream,
+    StreamCollection, StreamType, TagList, VideoCodec,
 };
 
 use crate::demuxseek::{Admitted, DemuxSeek};
@@ -528,8 +528,7 @@ impl OggDemux {
                     self.seek
                         .admit(timing.pts_ns, resync_point, (payload, timing))
                 };
-                if let Some(start) = admitted.segment_start_ns {
-                    let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+                if let Some(seg) = admitted.segment {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 for (payload, timing) in admitted {

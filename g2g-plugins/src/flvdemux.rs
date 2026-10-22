@@ -39,7 +39,7 @@ use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain,
     OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, Seek, Segment, Tag, TagList, VideoCodec,
+    PropertySpec, Rate, Tag, TagList, VideoCodec,
 };
 
 use crate::aacparse::{adts_from_asc, audio_specific_config_info, is_raw_aac_config};
@@ -321,13 +321,17 @@ impl FlvDemux {
             // M362 seek: hold units from the keyframe at/before the target (the
             // FLV frame-type flag) until the target, then a fresh segment and them.
             let admitted = self.seek.admit(u.pts_ns(), u.keyframe, u);
-            if let Some(start) = admitted.segment_start_ns {
-                let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+            if let Some(seg) = admitted.segment {
                 out.push(PipelinePacket::Segment(seg)).await?;
             }
             for u in admitted {
                 let pts_ns = u.pts_ns();
                 let dts_ns = u.dts_ns();
+                // Stream start: map the first emitted timestamp to running time 0,
+                // as every demuxer opens its stream.
+                if let Some(seg) = self.seek.opening_segment(pts_ns) {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
                 let data =
                     match u.codec {
                         FlvCodec::H264 => {

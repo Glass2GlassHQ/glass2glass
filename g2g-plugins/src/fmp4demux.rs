@@ -25,7 +25,7 @@ use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, Rate, Seek, Segment, VideoCodec,
+    PipelinePacket, Rate, VideoCodec,
 };
 
 use crate::cenc::CencTrack;
@@ -270,8 +270,7 @@ impl Fmp4Demux {
                         // M362 seek: hold samples from the keyframe at/before the
                         // target until the target, then a fresh segment and them.
                         let admitted = self.seek.admit(s.pts_ns, s.keyframe, s);
-                        if let Some(start) = admitted.segment_start_ns {
-                            let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+                        if let Some(seg) = admitted.segment {
                             out.push(PipelinePacket::Segment(seg)).await?;
                         }
                         for s in admitted {

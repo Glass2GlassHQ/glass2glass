@@ -169,10 +169,6 @@ pub struct MkvDemux {
     /// Whether the selected track's `CodecPrivate` has been forwarded in-band,
     /// once, before its first frame (see [`config_headers`]). Re-armed on a flush.
     config_sent: bool,
-    /// Set once a `Segment` has gone out, whether the stream-start one or a
-    /// seek's, so the first frame's timestamp maps to running time 0 and a paced
-    /// sink is not left holding it. Re-armed on a flush.
-    segment_sent: bool,
     /// Clones of the seek controllers (M374): the `Cues` prefetch consumes the app
     /// seek and drives the two-hop upstream byte-seek directly, so it needs the
     /// same channels `seek` holds. `None` unless `with_seek` wired them.
@@ -203,7 +199,6 @@ impl MkvDemux {
             stream_select: None,
             seek: DemuxSeek::default(),
             config_sent: false,
-            segment_sent: false,
             app: None,
             upstream: None,
             prefetch: CuePrefetch::Idle,
@@ -677,19 +672,15 @@ impl MkvDemux {
             // M362 seek: hold frames from the keyframe at/before the target (the
             // Matroska block keyframe flag) until the target, then a segment and them.
             let admitted = self.seek.admit(f.pts_ns, f.keyframe, f);
-            if let Some(start) = admitted.segment_start_ns {
-                let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+            if let Some(seg) = admitted.segment {
                 out.push(PipelinePacket::Segment(seg)).await?;
-                self.segment_sent = true;
             }
             for f in admitted {
                 // Stream start: map the first emitted timestamp to running time 0.
                 // Matroska normally starts at 0, so this is usually the identity, but
                 // a file cut from a live recording need not, and every demuxer opens
                 // its stream the same way.
-                if !self.segment_sent {
-                    self.segment_sent = true;
-                    let seg = Segment::for_flush_seek(&Seek::flush_to(f.pts_ns), None);
+                if let Some(seg) = self.seek.opening_segment(f.pts_ns) {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 // The track's decoder-init bytes go in band once, ahead of its first
@@ -871,7 +862,6 @@ impl AsyncElement for MkvDemux {
                     }
                     // a fresh decoder after the flush needs the header again.
                     self.config_sent = false;
-                    self.segment_sent = false;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {

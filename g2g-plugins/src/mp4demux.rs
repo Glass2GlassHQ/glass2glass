@@ -37,6 +37,7 @@ use crate::avidemux::{is_pcm, pcm_alternatives};
 use crate::codectag::{
     audio_from_stream_name, audio_stream_name, video_from_stream_name, video_stream_name,
 };
+use crate::demuxseek::segment_from;
 use crate::fmp4::{
     clip_stored_pcm, every_sample_ends_by, keyframe_index_for, parse_all_tracks,
     parse_fragments_multi, parse_progressive_multi, prepend_param_sets, starts_with_param_set,
@@ -500,23 +501,24 @@ fn seek_samples(
     edit: Segment,
     target_ns: Option<u64>,
 ) -> (Vec<Sample>, Segment) {
-    let Some(target_ns) = target_ns else {
-        return (samples, edit);
-    };
     // an edit list that starts presentation later moves the start time with it
-    let target_ns = target_ns.saturating_add(edit.start.max(stream_start_ns(&samples)));
-    let first = if every_sample_ends_by(&samples, target_ns) {
-        samples.len()
-    } else {
-        keyframe_index_for(&samples, target_ns)
+    let stream_start_ns = edit.start.max(stream_start_ns(&samples));
+    let start = match target_ns {
+        None => stream_start_ns,
+        Some(target_ns) => {
+            let target_ns = target_ns.saturating_add(stream_start_ns);
+            let first = if every_sample_ends_by(&samples, target_ns) {
+                samples.len()
+            } else {
+                keyframe_index_for(&samples, target_ns)
+            };
+            samples.drain(..first);
+            target_ns
+        }
     };
-    samples.drain(..first);
-    let start = edit.start.max(target_ns);
     let segment = Segment {
-        start,
-        time: edit.time.saturating_add(start - edit.start),
-        position: start,
-        ..edit
+        stop: edit.stop,
+        ..segment_from(start, stream_start_ns)
     };
     (samples, segment)
 }

@@ -381,12 +381,6 @@ pub struct TsDemux {
     /// has gone out in band ahead of the first display set or teletext line.
     /// Re-armed on a flush.
     config_sent: bool,
-    /// Set once a `Segment` has gone out, whether the stream-start one or a
-    /// seek's. A transport stream's PTS starts wherever the broadcaster's clock
-    /// was, so a capture or a mid-stream join opens at an arbitrary offset: the
-    /// first frame's PTS has to map to running time 0 or a paced sink holds
-    /// every frame until that wall-clock offset passes. Re-armed on a flush.
-    segment_sent: bool,
     /// MPEG-1/2 video only: whether a sequence header has been seen. Those
     /// pictures carry no geometry of their own, so a mid-GOP join hands
     /// libavcodec a stream it cannot size and it fails the lot ("invalid frame
@@ -419,7 +413,6 @@ impl TsDemux {
             seek: DemuxSeek::default(),
             opus_caps_emitted: false,
             config_sent: false,
-            segment_sent: false,
             mpeg2_tuned_in: false,
         }
     }
@@ -550,7 +543,6 @@ impl TsDemux {
         self.demux.set_program_number(self.program_number);
         self.opus_caps_emitted = false;
         self.config_sent = false;
-        self.segment_sent = false;
         self.mpeg2_tuned_in = false;
     }
 
@@ -741,10 +733,8 @@ impl TsDemux {
                 self.mpeg2_tuned_in = true;
             }
             let admitted = self.seek.admit(pts_ns, keyframe, u);
-            if let Some(start) = admitted.segment_start_ns {
-                let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+            if let Some(seg) = admitted.segment {
                 out.push(PipelinePacket::Segment(seg)).await?;
-                self.segment_sent = true;
             }
             for u in admitted {
                 let pts_ns = u.pts_90khz.map_or(0, ticks_90khz_to_ns);
@@ -754,9 +744,7 @@ impl TsDemux {
                 // Stream start: map the first emitted DTS to running time 0, since
                 // open-GOP B frames present before the first I frame. A seek's resume
                 // above already did that for its own case.
-                if !self.segment_sent {
-                    self.segment_sent = true;
-                    let seg = Segment::for_flush_seek(&Seek::flush_to(dts_ns), None);
+                if let Some(seg) = self.seek.opening_segment(dts_ns) {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 if self.stream == TsStream::Opus {
