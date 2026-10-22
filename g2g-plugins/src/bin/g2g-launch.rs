@@ -76,8 +76,10 @@
 //! adds the successful per-edge intersect / fixate narration on top. Both are
 //! read by `g2g_core::log::init_from_env`.
 
+use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::process;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "multi-thread")]
@@ -109,7 +111,6 @@ const LINK_CAPACITY: usize = 4;
 /// ended the run), and a slow reader must not stall an element posting one.
 const BUS_DEPTH: usize = 64;
 const NANOS_PER_MILLISECOND: f64 = 1.0e6;
-const BUS_DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy)]
@@ -802,13 +803,12 @@ fn main() {
         let recorder = opts.record_on_error.as_ref().map(|_| FlightRecorder::new());
         let live = has_live_source(&graph);
         let started = Instant::now();
-        // Poll the run future on a short timeout so the bus is drained before it
-        // fills, and print a liveness heartbeat once a second so a long-running
-        // (e.g. forever, the default `videotestsrc`) pipeline does not look hung.
-        // `timeout` only needs tokio's `time` feature (no `select!` macro). A
-        // pipeline shorter than a second stays quiet.
+        // Poll the run future together with the bus, so a message is drained as
+        // soon as it is posted (checksumsink waits on a full bus), and print a
+        // liveness heartbeat once a second so a long-running (e.g. forever, the
+        // default `videotestsrc`) pipeline does not look hung. A pipeline shorter
+        // than a second stays quiet.
         let mut printed_status = false;
-        let mut last_status = started;
         let mut failed: Option<String> = None;
         // the run future borrows the spawner for the whole run
         #[cfg(feature = "multi-thread")]
@@ -876,30 +876,31 @@ fn main() {
                     Some(&bus_handle),
                 ))
             };
-            loop {
-                match tokio::time::timeout(BUS_DRAIN_INTERVAL, &mut run).await {
-                    Ok(r) => break r,
-                    Err(_elapsed) => {
-                        drain_bus(&bus, opts.verbose, &mut failed);
-                        if !opts.quiet
-                            && std::io::stderr().is_terminal()
-                            && last_status.elapsed() >= STATUS_INTERVAL
-                        {
-                            last_status = Instant::now();
-                            let pos = match progress.position() {
-                                Some(ns) => format!("t={:.1}s", ns as f64 / 1.0e9),
-                                None => String::from("prerolling"),
-                            };
-                            eprint!(
-                                "\r  running... {pos} ({:.0}s wall)   ",
-                                started.elapsed().as_secs_f64()
-                            );
-                            let _ = std::io::stderr().flush();
-                            printed_status = true;
-                        }
+            let mut status_due = std::pin::pin!(tokio::time::sleep(STATUS_INTERVAL));
+            std::future::poll_fn(|cx| {
+                while let Poll::Ready(Some(message)) = std::pin::pin!(bus.recv()).poll(cx) {
+                    handle_bus_message(message, opts.verbose, &mut failed);
+                }
+                while status_due.as_mut().poll(cx).is_ready() {
+                    status_due
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + STATUS_INTERVAL);
+                    if !opts.quiet && std::io::stderr().is_terminal() {
+                        let pos = match progress.position() {
+                            Some(ns) => format!("t={:.1}s", ns as f64 / 1.0e9),
+                            None => String::from("prerolling"),
+                        };
+                        eprint!(
+                            "\r  running... {pos} ({:.0}s wall)   ",
+                            started.elapsed().as_secs_f64()
+                        );
+                        let _ = std::io::stderr().flush();
+                        printed_status = true;
                     }
                 }
-            }
+                run.as_mut().poll(cx)
+            })
+            .await
         });
         if printed_status {
             eprintln!(); // move off the \r status line before the summary
@@ -981,19 +982,23 @@ fn attach_launch_seek(graph: &mut Graph<GraphNode>, target_ns: u64) {
 /// gst-launch does, and under `-v` print each sink's frame-identity report.
 fn drain_bus(bus: &Bus, verbose: bool, failed: &mut Option<String>) {
     while let Some(message) = bus.try_recv() {
-        match message {
-            BusMessage::ElementError { element, .. } => *failed = Some(element),
-            BusMessage::Checksum { pts_ns, digest, .. } => {
-                println!(
-                    "{}",
-                    g2g_plugins::checksumsink::checksum_line(pts_ns, digest)
-                );
-            }
-            BusMessage::FrameIdentity { element, stats } if verbose => {
-                eprintln!("\r{}", frame_identity_line(&element, &stats));
-            }
-            _ => {}
+        handle_bus_message(message, verbose, failed);
+    }
+}
+
+fn handle_bus_message(message: BusMessage, verbose: bool, failed: &mut Option<String>) {
+    match message {
+        BusMessage::ElementError { element, .. } => *failed = Some(element),
+        BusMessage::Checksum { pts_ns, digest, .. } => {
+            println!(
+                "{}",
+                g2g_plugins::checksumsink::checksum_line(pts_ns, digest)
+            );
         }
+        BusMessage::FrameIdentity { element, stats } if verbose => {
+            eprintln!("\r{}", frame_identity_line(&element, &stats));
+        }
+        _ => {}
     }
 }
 
