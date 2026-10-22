@@ -77,6 +77,12 @@ extern "C" {
     pub(crate) fn cu_memcpy_dtoh(destination: *mut c_void, source: u64, size: usize) -> CuResult;
     #[link_name = "cuMemcpy2D_v2"]
     pub(crate) fn cu_memcpy_2d(copy: *const CudaMemcpy2D) -> CuResult;
+    #[cfg(feature = "nvdec")]
+    #[link_name = "cuGetErrorName"]
+    pub(crate) fn cu_get_error_name(
+        error: CuResult,
+        name: *mut *const core::ffi::c_char,
+    ) -> CuResult;
 }
 
 // CUDA-GL interop, the GL entry points live in libcuda itself

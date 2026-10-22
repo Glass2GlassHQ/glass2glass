@@ -194,6 +194,8 @@ struct DecoderState {
     mappings: BTreeMap<i32, PictureMapping>,
     /// First error raised inside a callback, surfaced after the parse returns.
     error: Option<G2gError>,
+    // cuvidGetDecoderCaps results, one per codec, chroma format and bit depth queried
+    decoder_caps: Vec<ffi::DecodeCaps>,
 }
 
 /// A decoded, mapped surface ready to hand downstream, with the pixel format the
@@ -379,6 +381,7 @@ impl NvDec {
                 vp9_decodes: VecDeque::new(),
                 mappings: BTreeMap::new(),
                 error: None,
+                decoder_caps: Vec::new(),
             }),
             input_stamps: PendingInputStamps::default(),
             emitted: 0,
@@ -495,12 +498,7 @@ impl NvDec {
         let Some(codec_type) = Self::cuvid_codec(codec) else {
             return Ok(None);
         };
-        // SAFETY: plain old data, all-zero is valid before the IN fields are set.
-        let mut decode_caps: ffi::DecodeCaps = unsafe { core::mem::zeroed() };
-        decode_caps.codec_type = codec_type;
-        decode_caps.chroma_format = ffi::CUDA_VIDEO_CHROMA_FORMAT_420;
-        // SAFETY: `decode_caps` is initialized and the caller made a context current.
-        cuchk(unsafe { ffi::cuvid_get_decoder_caps(&mut decode_caps) })?;
+        let decode_caps = query_decoder_caps(codec_type, ffi::CUDA_VIDEO_CHROMA_FORMAT_420, 0)?;
         if decode_caps.is_supported == 0 {
             return Ok(None);
         }
@@ -567,7 +565,7 @@ impl NvDec {
         // SAFETY: standard CUDA driver bring-up; each result is checked and we
         // bail before using a handle on failure.
         let context = unsafe {
-            cuchk(ffi::cu_init(0))?;
+            cuda_check("cuInit", ffi::cu_init(0))?;
             let mut dev = 0i32;
             let rc = ffi::cu_device_get(&mut dev, self.cuda_device_id);
             if rc != 0 {
@@ -575,12 +573,12 @@ impl NvDec {
                     Target::category(short_type_name::<NvDec>()),
                     "no CUDA device {} (cuDeviceGet returned {}): set cuda-device-id to an ordinal this host has",
                     self.cuda_device_id,
-                    rc
+                    cuda_error_name(rc)
                 );
                 return Err(G2gError::Hardware(HardwareError::Cuda(rc)));
             }
             let mut ctx: *mut core::ffi::c_void = core::ptr::null_mut();
-            cuchk(ffi::cu_ctx_create(&mut ctx, 0, dev))?;
+            cuda_check("cuCtxCreate", ffi::cu_ctx_create(&mut ctx, 0, dev))?;
             if ctx.is_null() {
                 return Err(hw());
             }
@@ -592,10 +590,10 @@ impl NvDec {
         // SAFETY: valid context; on success `ctx_lock` receives the lock handle.
         let ctx_lock = unsafe {
             let mut lock: *mut core::ffi::c_void = core::ptr::null_mut();
-            cuchk(ffi::cuvid_ctx_lock_create(
-                &mut lock,
-                context as *mut core::ffi::c_void,
-            ))?;
+            cuda_check(
+                "cuvidCtxLockCreate",
+                ffi::cuvid_ctx_lock_create(&mut lock, context as *mut core::ffi::c_void),
+            )?;
             lock
         };
         self.state.cuda = Some(Arc::new(CuvidContext {
@@ -622,7 +620,9 @@ impl NvDec {
         // SAFETY: `params` is fully initialized; on success `parser` receives a
         // valid handle that retains the `user` pointer (stable: it is the boxed
         // state, which does not move when `self` moves).
-        cuchk(unsafe { ffi::cuvid_create_video_parser(&mut parser, &mut params) })?;
+        cuda_check("cuvidCreateVideoParser", unsafe {
+            ffi::cuvid_create_video_parser(&mut parser, &mut params)
+        })?;
         self.parser = parser;
         Ok(())
     }
@@ -749,7 +749,7 @@ impl NvDec {
         if let Some(e) = self.state.error.take() {
             return Err(e);
         }
-        cuchk(rc)?;
+        cuda_check("cuvidParseVideoData", rc)?;
         Ok(core::mem::take(&mut self.state.ready))
     }
 
@@ -1091,6 +1091,19 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
                 return fail(state, G2gError::CapsMismatch);
             }
         };
+    let caps = match cached_decoder_caps(state, f.chroma_format, f.bit_depth_luma_minus8) {
+        Ok(caps) => caps,
+        Err(e) => return fail(state, e),
+    };
+    if let Some(reason) =
+        decoder_limit_violation(&caps, surface_format, f.coded_width, f.coded_height)
+    {
+        g2g_error!(
+            Target::category(short_type_name::<NvDec>()),
+            "cannot decode this stream: {reason}"
+        );
+        return fail(state, G2gError::CapsMismatch);
+    }
 
     if state.decoder_owner.is_some() {
         let fits = f.coded_width <= state.max_width
@@ -1124,8 +1137,8 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
             // SAFETY: valid decoder; `re` is fully initialized and only read for
             // the duration of the call.
             let rc = unsafe { ffi::cuvid_reconfigure_decoder(state.decoder, &mut re) };
-            if rc != 0 {
-                return fail(state, G2gError::Hardware(HardwareError::Cuda(rc)));
+            if let Err(e) = cuda_check("cuvidReconfigureDecoder", rc) {
+                return fail(state, e);
             }
             state.coded_width = f.coded_width;
             state.coded_height = f.coded_height;
@@ -1185,7 +1198,10 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
     let mut decoder: *mut core::ffi::c_void = core::ptr::null_mut();
     // SAFETY: `info` is fully initialized; on success `decoder` is a valid handle.
     let rc = unsafe { ffi::cuvid_create_decoder(&mut decoder, &mut info) };
-    if rc != 0 || decoder.is_null() {
+    if let Err(e) = cuda_check("cuvidCreateDecoder", rc) {
+        return fail(state, e);
+    }
+    if decoder.is_null() {
         return fail(state, G2gError::Hardware(HardwareError::Cuda(rc)));
     }
     state.decoder = decoder;
@@ -1219,8 +1235,8 @@ extern "C" fn handle_decode(user: *mut core::ffi::c_void, pic: *mut core::ffi::c
     }
     // SAFETY: valid decoder + parser-owned picture params.
     let rc = unsafe { ffi::cuvid_decode_picture(state.decoder, pic) };
-    if rc != 0 {
-        return fail(state, G2gError::Hardware(HardwareError::Cuda(rc)));
+    if let Err(e) = cuda_check("cuvidDecodePicture", rc) {
+        return fail(state, e);
     }
     // SAFETY: `pic` is a `CUVIDPICPARAMS`, which starts with the ints
     // PicWidthInMbs, FrameHeightInMbs and CurrPicIdx.
@@ -1296,6 +1312,7 @@ fn map_picture(
                 NUM_OUTPUT_SURFACES_LIMIT
             );
         }
+        cuda_check("cuvidMapVideoFrame64", rc)?;
         return Err(G2gError::Hardware(HardwareError::Cuda(rc)));
     }
     owner.mapped.fetch_add(1, Ordering::Relaxed);
@@ -1356,6 +1373,130 @@ fn cuchk(code: i32) -> Result<(), G2gError> {
     }
 }
 
+// logs which call failed before returning the code as an error
+fn cuda_check(call: &str, code: i32) -> Result<(), G2gError> {
+    if code != 0 {
+        g2g_error!(
+            Target::category(short_type_name::<NvDec>()),
+            "{call} failed: {}",
+            cuda_error_name(code)
+        );
+    }
+    cuchk(code)
+}
+
+fn cuda_error_name(code: i32) -> alloc::string::String {
+    let mut name: *const core::ffi::c_char = core::ptr::null();
+    // SAFETY: cuGetErrorName only stores a pointer to a static string, or null for an unknown code.
+    let rc = unsafe { crate::cuda_driver_ffi::cu_get_error_name(code, &mut name) };
+    if rc != 0 || name.is_null() {
+        return alloc::format!("CUDA error {code}");
+    }
+    // SAFETY: the driver's error names are static NUL-terminated strings.
+    let name = unsafe { core::ffi::CStr::from_ptr(name) };
+    alloc::format!("{} ({code})", name.to_string_lossy())
+}
+
+// needs a current CUDA context
+fn query_decoder_caps(
+    codec_type: i32,
+    chroma_format: i32,
+    bit_depth_minus8: u32,
+) -> Result<ffi::DecodeCaps, G2gError> {
+    // SAFETY: plain old data, all-zero is valid before the IN fields are set.
+    let mut caps: ffi::DecodeCaps = unsafe { core::mem::zeroed() };
+    caps.codec_type = codec_type;
+    caps.chroma_format = chroma_format;
+    caps.bit_depth_minus8 = bit_depth_minus8;
+    // SAFETY: `caps` is initialized and the caller made a context current.
+    let rc = unsafe { ffi::cuvid_get_decoder_caps(&mut caps) };
+    cuda_check("cuvidGetDecoderCaps", rc)?;
+    Ok(caps)
+}
+
+// runs in the sequence callback, where the parse made the context current
+fn cached_decoder_caps(
+    state: &mut DecoderState,
+    chroma_format: i32,
+    bit_depth_minus8: u8,
+) -> Result<ffi::DecodeCaps, G2gError> {
+    let codec_type = state.codec_cuvid;
+    let bit_depth_minus8 = u32::from(bit_depth_minus8);
+    let cached = state.decoder_caps.iter().find(|caps| {
+        caps.codec_type == codec_type
+            && caps.chroma_format == chroma_format
+            && caps.bit_depth_minus8 == bit_depth_minus8
+    });
+    if let Some(caps) = cached {
+        return Ok(*caps);
+    }
+    let caps = query_decoder_caps(codec_type, chroma_format, bit_depth_minus8)?;
+    state.decoder_caps.push(caps);
+    Ok(caps)
+}
+
+// why this GPU cannot decode a stream of the format `caps` was queried for at this coded size
+fn decoder_limit_violation(
+    caps: &ffi::DecodeCaps,
+    surface_format: i32,
+    coded_width: u32,
+    coded_height: u32,
+) -> Option<alloc::string::String> {
+    let codec = match caps.codec_type {
+        ffi::CUDA_VIDEO_CODEC_H264 => "H.264",
+        ffi::CUDA_VIDEO_CODEC_HEVC => "HEVC",
+        ffi::CUDA_VIDEO_CODEC_VP9 => "VP9",
+        ffi::CUDA_VIDEO_CODEC_AV1 => "AV1",
+        _ => "this codec",
+    };
+    let chroma = match caps.chroma_format {
+        ffi::CUDA_VIDEO_CHROMA_FORMAT_MONOCHROME => "4:0:0",
+        ffi::CUDA_VIDEO_CHROMA_FORMAT_420 => "4:2:0",
+        ffi::CUDA_VIDEO_CHROMA_FORMAT_422 => "4:2:2",
+        ffi::CUDA_VIDEO_CHROMA_FORMAT_444 => "4:4:4",
+        _ => "this chroma format",
+    };
+    let bit_depth = caps.bit_depth_minus8 + 8;
+    let size = alloc::format!("{coded_width}x{coded_height}");
+    if caps.is_supported == 0 {
+        return Some(alloc::format!(
+            "this GPU has no {codec} {chroma} {bit_depth}-bit decoder"
+        ));
+    }
+    if caps.output_format_mask & (1 << surface_format) == 0 {
+        let surface = match surface_format {
+            ffi::CUDA_VIDEO_SURFACE_FORMAT_NV12 => "NV12",
+            ffi::CUDA_VIDEO_SURFACE_FORMAT_P016 => "P016",
+            _ => "this surface format",
+        };
+        return Some(alloc::format!(
+            "this GPU cannot output {codec} {chroma} {bit_depth}-bit as {surface}"
+        ));
+    }
+    let (min_width, min_height) = (u32::from(caps.min_width), u32::from(caps.min_height));
+    if coded_width < min_width || coded_height < min_height {
+        return Some(alloc::format!(
+            "{size} is below this GPU's {codec} minimum of {min_width}x{min_height}"
+        ));
+    }
+    if coded_width > caps.max_width || coded_height > caps.max_height {
+        return Some(alloc::format!(
+            "{size} is above this GPU's {codec} maximum of {}x{}",
+            caps.max_width,
+            caps.max_height
+        ));
+    }
+    const PIXELS_PER_MACROBLOCK: u64 = 16 * 16;
+    let macroblocks = u64::from(coded_width) * u64::from(coded_height) / PIXELS_PER_MACROBLOCK;
+    if macroblocks > u64::from(caps.max_macroblock_count) {
+        return Some(alloc::format!(
+            "{size} is {macroblocks} macroblocks, above this GPU's {codec} limit of {}",
+            caps.max_macroblock_count
+        ));
+    }
+    None
+}
+
 /// Shorthand for the generic hardware error.
 fn hw() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
@@ -1368,11 +1509,8 @@ impl ContextGuard {
     fn push(context: u64) -> Result<Self, G2gError> {
         // SAFETY: `context` is the valid context created in `open`.
         let code = unsafe { ffi::cu_ctx_push_current(context as *mut core::ffi::c_void) };
-        if code == 0 {
-            Ok(ContextGuard)
-        } else {
-            Err(G2gError::Hardware(HardwareError::Cuda(code)))
-        }
+        cuda_check("cuCtxPushCurrent", code)?;
+        Ok(ContextGuard)
     }
 }
 
@@ -1665,7 +1803,10 @@ mod ffi {
     pub const CUDA_VIDEO_CODEC_HEVC: i32 = 8;
     pub const CUDA_VIDEO_CODEC_VP9: i32 = 10;
     pub const CUDA_VIDEO_CODEC_AV1: i32 = 11;
+    pub const CUDA_VIDEO_CHROMA_FORMAT_MONOCHROME: i32 = 0;
     pub const CUDA_VIDEO_CHROMA_FORMAT_420: i32 = 1;
+    pub const CUDA_VIDEO_CHROMA_FORMAT_422: i32 = 2;
+    pub const CUDA_VIDEO_CHROMA_FORMAT_444: i32 = 3;
     pub const CUDA_VIDEO_SURFACE_FORMAT_NV12: i32 = 0;
     /// 16-bit semi-planar YUV, the 9- and 10-bit output surface (g2g `P010`).
     pub const CUDA_VIDEO_SURFACE_FORMAT_P016: i32 = 1;
@@ -1687,6 +1828,7 @@ mod ffi {
 
     // CUVIDDECODECAPS
     #[repr(C)]
+    #[derive(Clone, Copy)]
     pub struct DecodeCaps {
         pub codec_type: i32,
         pub chroma_format: i32,
@@ -2000,6 +2142,137 @@ mod tests {
         );
         assert!(decode_surface(4, 4).is_err(), "12-bit");
         assert!(decode_surface(2, 1).is_err(), "10-bit luma, 9-bit chroma");
+    }
+
+    // what cuvidGetDecoderCaps returns on an RTX 2080 Ti with driver 615.71.09
+    fn rtx_2080_ti_caps(
+        codec_type: i32,
+        chroma_format: i32,
+        bit_depth_minus8: u32,
+    ) -> ffi::DecodeCaps {
+        // SAFETY: plain old data, all-zero is the unsupported answer.
+        let mut caps: ffi::DecodeCaps = unsafe { core::mem::zeroed() };
+        caps.codec_type = codec_type;
+        caps.chroma_format = chroma_format;
+        caps.bit_depth_minus8 = bit_depth_minus8;
+        let (output_format_mask, max_size, max_macroblock_count, min_width, min_height) =
+            match (codec_type, chroma_format, bit_depth_minus8) {
+                (ffi::CUDA_VIDEO_CODEC_H264, ffi::CUDA_VIDEO_CHROMA_FORMAT_420, 0) => {
+                    (0x41, 4096, 65536, 48, 16)
+                }
+                (ffi::CUDA_VIDEO_CODEC_HEVC, ffi::CUDA_VIDEO_CHROMA_FORMAT_420, 0) => {
+                    (0x41, 8192, 262144, 144, 144)
+                }
+                (ffi::CUDA_VIDEO_CODEC_HEVC, ffi::CUDA_VIDEO_CHROMA_FORMAT_420, 2) => {
+                    (0xc3, 8192, 262144, 144, 144)
+                }
+                (ffi::CUDA_VIDEO_CODEC_HEVC, ffi::CUDA_VIDEO_CHROMA_FORMAT_444, 0) => {
+                    (0x104, 8192, 262144, 144, 144)
+                }
+                (ffi::CUDA_VIDEO_CODEC_HEVC, ffi::CUDA_VIDEO_CHROMA_FORMAT_422, 2) => return caps,
+                other => panic!("no recorded caps for {other:?}"),
+            };
+        caps.is_supported = 1;
+        caps.num_nvdecs = 1;
+        caps.output_format_mask = output_format_mask;
+        caps.max_width = max_size;
+        caps.max_height = max_size;
+        caps.max_macroblock_count = max_macroblock_count;
+        caps.min_width = min_width;
+        caps.min_height = min_height;
+        caps
+    }
+
+    #[test]
+    fn decoder_limits_refuse_sizes_outside_the_gpu_range() {
+        let nv12 = ffi::CUDA_VIDEO_SURFACE_FORMAT_NV12;
+        let hevc = rtx_2080_ti_caps(
+            ffi::CUDA_VIDEO_CODEC_HEVC,
+            ffi::CUDA_VIDEO_CHROMA_FORMAT_420,
+            0,
+        );
+        let (min_width, min_height) = (u32::from(hevc.min_width), u32::from(hevc.min_height));
+        assert_eq!(
+            decoder_limit_violation(&hevc, nv12, min_width, min_height),
+            None
+        );
+        assert_eq!(
+            decoder_limit_violation(&hevc, nv12, hevc.max_width, hevc.max_height),
+            None
+        );
+        assert_eq!(
+            decoder_limit_violation(&hevc, nv12, 852, 8).as_deref(),
+            Some("852x8 is below this GPU's HEVC minimum of 144x144")
+        );
+        assert_eq!(
+            decoder_limit_violation(&hevc, nv12, 1056, hevc.max_height + 256).as_deref(),
+            Some("1056x8448 is above this GPU's HEVC maximum of 8192x8192")
+        );
+
+        // the largest H.264 picture is exactly at the macroblock limit
+        let mut h264 = rtx_2080_ti_caps(
+            ffi::CUDA_VIDEO_CODEC_H264,
+            ffi::CUDA_VIDEO_CHROMA_FORMAT_420,
+            0,
+        );
+        assert_eq!(
+            decoder_limit_violation(&h264, nv12, h264.max_width, h264.max_height),
+            None
+        );
+        h264.max_macroblock_count -= 1;
+        assert_eq!(
+            decoder_limit_violation(&h264, nv12, h264.max_width, h264.max_height).as_deref(),
+            Some("4096x4096 is 65536 macroblocks, above this GPU's H.264 limit of 65535")
+        );
+    }
+
+    #[test]
+    fn decoder_limits_refuse_formats_the_gpu_lacks() {
+        let p016 = ffi::CUDA_VIDEO_SURFACE_FORMAT_P016;
+        let hevc_main10 = rtx_2080_ti_caps(
+            ffi::CUDA_VIDEO_CODEC_HEVC,
+            ffi::CUDA_VIDEO_CHROMA_FORMAT_420,
+            2,
+        );
+        assert_eq!(
+            decoder_limit_violation(&hevc_main10, p016, 1920, 1080),
+            None
+        );
+        let hevc_422 = rtx_2080_ti_caps(
+            ffi::CUDA_VIDEO_CODEC_HEVC,
+            ffi::CUDA_VIDEO_CHROMA_FORMAT_422,
+            2,
+        );
+        assert_eq!(
+            decoder_limit_violation(&hevc_422, p016, 1920, 1080).as_deref(),
+            Some("this GPU has no HEVC 4:2:2 10-bit decoder")
+        );
+        // 4:4:4 decodes, but only to 4:4:4 surfaces
+        let hevc_444 = rtx_2080_ti_caps(
+            ffi::CUDA_VIDEO_CODEC_HEVC,
+            ffi::CUDA_VIDEO_CHROMA_FORMAT_444,
+            0,
+        );
+        assert_eq!(
+            decoder_limit_violation(&hevc_444, ffi::CUDA_VIDEO_SURFACE_FORMAT_NV12, 1920, 1080)
+                .as_deref(),
+            Some("this GPU cannot output HEVC 4:4:4 8-bit as NV12")
+        );
+    }
+
+    #[test]
+    fn cuda_errors_are_logged_by_driver_name() {
+        const CUDA_ERROR_NOT_SUPPORTED: i32 = 801;
+        assert_eq!(
+            cuda_error_name(CUDA_ERROR_NOT_SUPPORTED),
+            "CUDA_ERROR_NOT_SUPPORTED (801)"
+        );
+        assert_eq!(
+            cuda_check("cuvidCreateDecoder", CUDA_ERROR_NOT_SUPPORTED),
+            Err(G2gError::Hardware(HardwareError::Cuda(
+                CUDA_ERROR_NOT_SUPPORTED
+            )))
+        );
     }
 
     #[test]

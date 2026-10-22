@@ -338,6 +338,14 @@ loop stays on the GPU and out of libavcodec.
   CUDA NV12 surface encoded by `NvEnc` and decoded by `NvDec` back to CUDA NV12,
   asserting geometry and, via a small device-to-host copy, real luma content. It
   skips with no NVIDIA GPU, and the `nvdec` feature is CI-excluded.
+- Before it creates or reconfigures a decoder, the sequence callback asks
+  `cuvidGetDecoderCaps` about the stream's codec, chroma format and bit depth,
+  caching each answer for the element's lifetime, and refuses the stream with
+  `CapsMismatch` and a logged reason when the GPU has no decoder for it, cannot
+  output it to NV12 or P016, or the coded size is outside the minimum, maximum or
+  macroblock limit. A CUDA or CUVID call that still fails logs the call and the
+  driver's error name from `cuGetErrorName`. The open-caps probe behind autoplug
+  stays silent, so a host without a GPU logs nothing.
 
 ## Decoder cost model
 
