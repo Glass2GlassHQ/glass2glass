@@ -1196,38 +1196,35 @@ pub fn parse_h265_pps(rbsp: &[u8]) -> Result<H265Pps, VulkanVideoError> {
 /// The bit walk of [`parse_h265_pps`]: `None` when the RBSP is truncated, an
 /// inner error when it parses but uses a refused feature.
 fn parse_h265_pps_fields(rbsp: &[u8]) -> Option<Result<H265Pps, VulkanVideoError>> {
-    let mut br = BitReader::new(rbsp);
-    let (poc, pps_seq_parameter_set_id, dependent_slice_segments_enabled_flag) =
-        crate::poc::parse_h265_pps_poc_bits(&mut br)?;
-    let pps_pic_parameter_set_id = poc.pps_pic_parameter_set_id;
-    if pps_seq_parameter_set_id > H265_MAX_SPS_ID {
+    let (head, mut br) = crate::h265parse::parse_h265_pps_head(rbsp)?;
+    let pps_pic_parameter_set_id = head.poc.pps_pic_parameter_set_id;
+    if head.pps_seq_parameter_set_id > H265_MAX_SPS_ID {
         return None;
     }
-    let pps_seq_parameter_set_id = pps_seq_parameter_set_id as u8;
-    let dependent_slice_segments_enabled_flag = dependent_slice_segments_enabled_flag as u8;
-    let output_flag_present_flag = u8::from(poc.output_flag_present_flag);
-    let num_extra_slice_header_bits = poc.num_extra_slice_header_bits;
-    let sign_data_hiding_enabled_flag = br.read_bit()? as u8;
-    let cabac_init_present_flag = br.read_bit()? as u8;
-    let num_ref_idx_l0_default_active_minus1 = br.read_ue()? as u8;
-    let num_ref_idx_l1_default_active_minus1 = br.read_ue()? as u8;
-    let init_qp_minus26 = br.read_se()? as i8;
-    let constrained_intra_pred_flag = br.read_bit()? as u8;
-    let transform_skip_enabled_flag = br.read_bit()? as u8;
-    let cu_qp_delta_enabled_flag = br.read_bit()? as u8;
-    let diff_cu_qp_delta_depth = if cu_qp_delta_enabled_flag == 1 {
-        br.read_ue()? as u8
-    } else {
-        0
-    };
-    let pps_cb_qp_offset = br.read_se()? as i8;
-    let pps_cr_qp_offset = br.read_se()? as i8;
-    let pps_slice_chroma_qp_offsets_present_flag = br.read_bit()? as u8;
-    let weighted_pred_flag = br.read_bit()? as u8;
-    let weighted_bipred_flag = br.read_bit()? as u8;
-    let transquant_bypass_enabled_flag = br.read_bit()? as u8;
-    let tiles_enabled_flag = br.read_bit()? as u8;
-    let entropy_coding_sync_enabled_flag = br.read_bit()? as u8;
+    let pps_seq_parameter_set_id = head.pps_seq_parameter_set_id as u8;
+    let crate::h265parse::H265PpsHead {
+        dependent_slice_segments_enabled_flag,
+        sign_data_hiding_enabled_flag,
+        cabac_init_present_flag,
+        num_ref_idx_l0_default_active_minus1,
+        num_ref_idx_l1_default_active_minus1,
+        init_qp_minus26,
+        constrained_intra_pred_flag,
+        transform_skip_enabled_flag,
+        cu_qp_delta_enabled_flag,
+        diff_cu_qp_delta_depth,
+        pps_cb_qp_offset,
+        pps_cr_qp_offset,
+        pps_slice_chroma_qp_offsets_present_flag,
+        weighted_pred_flag,
+        weighted_bipred_flag,
+        transquant_bypass_enabled_flag,
+        tiles_enabled_flag,
+        entropy_coding_sync_enabled_flag,
+        ..
+    } = head;
+    let output_flag_present_flag = u8::from(head.poc.output_flag_present_flag);
+    let num_extra_slice_header_bits = head.poc.num_extra_slice_header_bits;
     let mut num_tile_columns_minus1 = 0u8;
     let mut num_tile_rows_minus1 = 0u8;
     let mut uniform_spacing_flag = 1u8;

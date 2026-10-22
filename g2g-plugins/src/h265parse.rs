@@ -95,7 +95,7 @@ impl NalCodec for H265Codec {
 const SPS_NUT: u8 = 33;
 /// H.265 NAL unit types for the video and picture parameter sets.
 const VPS_NUT: u8 = 32;
-const PPS_NUT: u8 = 34;
+pub(crate) const PPS_NUT: u8 = 34;
 const RASL_N_NUT: u8 = 8;
 const RASL_R_NUT: u8 = 9;
 const CRA_NUT: u8 = 21;
@@ -256,6 +256,87 @@ pub(crate) fn parse_h265_sps_head(rbsp: &[u8]) -> Option<(H265SpsHead, BitReader
         pic_height_in_luma_samples,
         conformance_window_flag,
         conformance_window,
+    };
+    Some((head, br))
+}
+
+// the H.265 PPS fields up to entropy_coding_sync_enabled_flag (7.3.2.3.1), as coded
+#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+#[derive(Debug, Clone)]
+pub(crate) struct H265PpsHead {
+    pub poc: crate::poc::H265PpsPoc,
+    pub pps_seq_parameter_set_id: u32,
+    pub dependent_slice_segments_enabled_flag: u8,
+    pub sign_data_hiding_enabled_flag: u8,
+    pub cabac_init_present_flag: u8,
+    pub num_ref_idx_l0_default_active_minus1: u8,
+    pub num_ref_idx_l1_default_active_minus1: u8,
+    pub init_qp_minus26: i8,
+    pub constrained_intra_pred_flag: u8,
+    pub transform_skip_enabled_flag: u8,
+    pub cu_qp_delta_enabled_flag: u8,
+    pub diff_cu_qp_delta_depth: u8,
+    pub pps_cb_qp_offset: i8,
+    pub pps_cr_qp_offset: i8,
+    pub pps_slice_chroma_qp_offsets_present_flag: u8,
+    pub weighted_pred_flag: u8,
+    pub weighted_bipred_flag: u8,
+    pub transquant_bypass_enabled_flag: u8,
+    pub tiles_enabled_flag: u8,
+    pub entropy_coding_sync_enabled_flag: u8,
+}
+
+// takes the RBSP after the 2-byte NAL header and returns the reader at the tile layout
+#[cfg_attr(
+    not(any(feature = "vulkan-video", all(target_os = "linux", feature = "nvdec"))),
+    allow(dead_code)
+)]
+pub(crate) fn parse_h265_pps_head(rbsp: &[u8]) -> Option<(H265PpsHead, BitReader<'_>)> {
+    let mut br = BitReader::new(rbsp);
+    let (poc, pps_seq_parameter_set_id, dependent_slice_segments_enabled_flag) =
+        crate::poc::parse_h265_pps_poc_bits(&mut br)?;
+    let sign_data_hiding_enabled_flag = br.read_bit()? as u8;
+    let cabac_init_present_flag = br.read_bit()? as u8;
+    let num_ref_idx_l0_default_active_minus1 = br.read_ue()? as u8;
+    let num_ref_idx_l1_default_active_minus1 = br.read_ue()? as u8;
+    let init_qp_minus26 = br.read_se()? as i8;
+    let constrained_intra_pred_flag = br.read_bit()? as u8;
+    let transform_skip_enabled_flag = br.read_bit()? as u8;
+    let cu_qp_delta_enabled_flag = br.read_bit()? as u8;
+    let diff_cu_qp_delta_depth = if cu_qp_delta_enabled_flag == 1 {
+        br.read_ue()? as u8
+    } else {
+        0
+    };
+    let pps_cb_qp_offset = br.read_se()? as i8;
+    let pps_cr_qp_offset = br.read_se()? as i8;
+    let pps_slice_chroma_qp_offsets_present_flag = br.read_bit()? as u8;
+    let weighted_pred_flag = br.read_bit()? as u8;
+    let weighted_bipred_flag = br.read_bit()? as u8;
+    let transquant_bypass_enabled_flag = br.read_bit()? as u8;
+    let tiles_enabled_flag = br.read_bit()? as u8;
+    let entropy_coding_sync_enabled_flag = br.read_bit()? as u8;
+    let head = H265PpsHead {
+        poc,
+        pps_seq_parameter_set_id,
+        dependent_slice_segments_enabled_flag: dependent_slice_segments_enabled_flag as u8,
+        sign_data_hiding_enabled_flag,
+        cabac_init_present_flag,
+        num_ref_idx_l0_default_active_minus1,
+        num_ref_idx_l1_default_active_minus1,
+        init_qp_minus26,
+        constrained_intra_pred_flag,
+        transform_skip_enabled_flag,
+        cu_qp_delta_enabled_flag,
+        diff_cu_qp_delta_depth,
+        pps_cb_qp_offset,
+        pps_cr_qp_offset,
+        pps_slice_chroma_qp_offsets_present_flag,
+        weighted_pred_flag,
+        weighted_bipred_flag,
+        transquant_bypass_enabled_flag,
+        tiles_enabled_flag,
+        entropy_coding_sync_enabled_flag,
     };
     Some((head, br))
 }

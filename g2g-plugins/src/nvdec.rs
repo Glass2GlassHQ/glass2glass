@@ -43,9 +43,9 @@
 //! picture, a bit-depth change) builds a fresh decoder. Either way the next
 //! emitted frame carries a new `CapsChanged`.
 //!
-//! Bit depth follows the stream: 8-bit decodes to NV12, 10-/12-bit to NVDEC's
+//! Bit depth follows the stream: 8-bit decodes to NV12, 9- and 10-bit to NVDEC's
 //! `P016` surface, announced as [`RawVideoFormat::P010`] (16-bit samples, value in
-//! the top bits).
+//! the top bits). Deeper samples, or luma and chroma at different depths, are refused.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -172,7 +172,7 @@ struct DecoderState {
     /// what `cuvidReconfigureDecoder` can apply in place.
     decoders_created: u32,
     /// The live decoder's `cudaVideoSurfaceFormat` and the caps format it maps to
-    /// (NV12 for 8-bit, P010 for 10-/12-bit).
+    /// (NV12 for 8-bit, P010 for 9- and 10-bit).
     surface_format: i32,
     out_format: RawVideoFormat,
     /// Frames mapped and ready to emit (drained by `process` after each parse).
@@ -728,6 +728,70 @@ fn fail(state: &mut DecoderState, err: G2gError) -> i32 {
     0
 }
 
+// NVDEC returns wrong pictures without an error for these coding tools
+fn check_coding_tools(codec_cuvid: i32, access_unit: &[u8]) -> Result<(), G2gError> {
+    for nal in crate::annexb::nal_units(access_unit) {
+        let unsupported_tool = match codec_cuvid {
+            ffi::CUDA_VIDEO_CODEC_H264 => {
+                h264_switching_slice(nal).then_some("H.264 SP and SI slices")
+            }
+            ffi::CUDA_VIDEO_CODEC_HEVC => h265_tiles_with_wavefront(nal)
+                .then_some("H.265 tiles together with wavefront parallel processing"),
+            _ => None,
+        };
+        if let Some(tool) = unsupported_tool {
+            g2g_error!(
+                Target::category(short_type_name::<NvDec>()),
+                "cannot decode this stream: NVDEC does not support {tool}"
+            );
+            return Err(G2gError::CapsMismatch);
+        }
+    }
+    Ok(())
+}
+
+fn h264_switching_slice(nal: &[u8]) -> bool {
+    const SP_SLICE: u32 = 3;
+    const SI_SLICE: u32 = 4;
+    if !matches!(crate::annexb::h264_nal_type(nal), Some(1 | 5)) {
+        return false;
+    }
+    let mut header = crate::annexb::BitReader::skipping_emulation_prevention(&nal[1..]);
+    let slice_type = header
+        .read_ue()
+        .and_then(|_first_mb_in_slice| header.read_ue());
+    // slice_type 5 to 9 mean the same types as 0 to 4
+    slice_type.is_some_and(|slice_type| matches!(slice_type % 5, SP_SLICE | SI_SLICE))
+}
+
+fn h265_tiles_with_wavefront(nal: &[u8]) -> bool {
+    if crate::annexb::h265_nal_type(nal) != Some(crate::h265parse::PPS_NUT) {
+        return false;
+    }
+    let Some(payload) = nal.get(2..) else {
+        return false;
+    };
+    let rbsp = crate::annexb::strip_emulation_prevention(payload);
+    crate::h265parse::parse_h265_pps_head(&rbsp).is_some_and(|(head, _)| {
+        head.tiles_enabled_flag == 1 && head.entropy_coding_sync_enabled_flag == 1
+    })
+}
+
+// 8-bit decodes to NV12, 9- and 10-bit to the 16-bit semi-planar surface g2g calls P010
+fn decode_surface(
+    luma_bit_depth_minus8: u8,
+    chroma_bit_depth_minus8: u8,
+) -> Result<(i32, RawVideoFormat), &'static str> {
+    if luma_bit_depth_minus8 != chroma_bit_depth_minus8 {
+        return Err("luma and chroma have different bit depths");
+    }
+    match luma_bit_depth_minus8 {
+        0 => Ok((ffi::CUDA_VIDEO_SURFACE_FORMAT_NV12, RawVideoFormat::Nv12)),
+        1 | 2 => Ok((ffi::CUDA_VIDEO_SURFACE_FORMAT_P016, RawVideoFormat::P010)),
+        _ => Err("samples deeper than 10 bits do not fit in P010 output"),
+    }
+}
+
 /// Sequence callback: the parser hands us the decoded stream format. Create the
 /// decoder, or bring the live one to the new format (in place where NVDEC allows
 /// it), and report the surface count back to the parser.
@@ -746,13 +810,17 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
     let target_h = if disp_h != 0 { disp_h } else { f.coded_height };
     let target_w = (target_w + 1) & !1;
     let target_h = (target_h + 1) & !1;
-    // 8-bit decodes to NV12; anything deeper to the 16-bit semi-planar surface,
-    // which g2g calls P010 (samples in the top bits of each 16-bit word).
-    let (surface_format, out_format) = if f.bit_depth_luma_minus8 > 0 {
-        (ffi::CUDA_VIDEO_SURFACE_FORMAT_P016, RawVideoFormat::P010)
-    } else {
-        (ffi::CUDA_VIDEO_SURFACE_FORMAT_NV12, RawVideoFormat::Nv12)
-    };
+    let (surface_format, out_format) =
+        match decode_surface(f.bit_depth_luma_minus8, f.bit_depth_chroma_minus8) {
+            Ok(formats) => formats,
+            Err(reason) => {
+                g2g_error!(
+                    Target::category(short_type_name::<NvDec>()),
+                    "cannot decode this stream: {reason}"
+                );
+                return fail(state, G2gError::CapsMismatch);
+            }
+        };
 
     if state.decoder_owner.is_some() {
         let fits = f.coded_width <= state.max_width
@@ -996,7 +1064,7 @@ impl AsyncElement for NvDec {
     }
 
     /// Native `DerivedOutput`: a supported codec (any geometry) in, NV12 or (for a
-    /// 10-/12-bit stream) P010 at the same dims, framerate and colorimetry out.
+    /// 9- or 10-bit stream) P010 at the same dims, framerate and colorimetry out.
     /// Any other input yields an empty set, rejected at solve. The runtime
     /// `CapsChanged` carries the actual decoded (cropped) dims and the depth the
     /// stream turned out to be.
@@ -1130,6 +1198,7 @@ impl AsyncElement for NvDec {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    check_coding_tools(self.state.codec_cuvid, slice)?;
                     self.input_stamps
                         .insert(frame.timing.pts_ns, InputStamp::of(&frame));
                     let frames = self.parse(slice, frame.timing.pts_ns, false)?;
@@ -1242,7 +1311,7 @@ mod ffi {
     pub const CUDA_VIDEO_CODEC_AV1: i32 = 11;
     pub const CUDA_VIDEO_CHROMA_FORMAT_420: i32 = 1;
     pub const CUDA_VIDEO_SURFACE_FORMAT_NV12: i32 = 0;
-    /// 16-bit semi-planar YUV, the 10-/12-bit output surface (g2g `P010`).
+    /// 16-bit semi-planar YUV, the 9- and 10-bit output surface (g2g `P010`).
     pub const CUDA_VIDEO_SURFACE_FORMAT_P016: i32 = 1;
     pub const CUDA_VIDEO_DEINTERLACE_WEAVE: i32 = 0;
     pub const CUDA_VIDEO_CREATE_PREFER_CUVID: u64 = 0x04;
@@ -1494,6 +1563,49 @@ mod tests {
     // --- Pure-logic coverage (no GPU): caps + struct layout ---
 
     #[test]
+    fn decode_surface_refuses_depths_p010_cannot_hold() {
+        assert_eq!(
+            decode_surface(2, 2),
+            Ok((ffi::CUDA_VIDEO_SURFACE_FORMAT_P016, RawVideoFormat::P010))
+        );
+        assert!(decode_surface(4, 4).is_err(), "12-bit");
+        assert!(decode_surface(2, 1).is_err(), "10-bit luma, 9-bit chroma");
+    }
+
+    #[test]
+    fn check_coding_tools_refuses_what_nvdec_decodes_wrong() {
+        // non-IDR slice header: first_mb_in_slice 0, then slice_type 0 (P) or 3 (SP)
+        let p_slice = [0, 0, 0, 1, 0x01, 0b1100_0000];
+        let sp_slice = [0, 0, 0, 1, 0x01, 0b1001_0010];
+        assert_eq!(
+            check_coding_tools(ffi::CUDA_VIDEO_CODEC_H264, &p_slice),
+            Ok(())
+        );
+        assert_eq!(
+            check_coding_tools(ffi::CUDA_VIDEO_CODEC_H264, &sp_slice),
+            Err(G2gError::CapsMismatch)
+        );
+
+        // PPS with every field zero up to tiles_enabled_flag, entropy_coding_sync_enabled_flag
+        let pps =
+            |tiles_and_wavefront: u8| [0, 0, 0, 1, 0x44, 0x01, 0xC0, 0x71, tiles_and_wavefront];
+        let tiles_only = 0b1000_0101;
+        let tiles_and_wavefront = 0b1000_0111;
+        assert_eq!(
+            check_coding_tools(ffi::CUDA_VIDEO_CODEC_HEVC, &pps(tiles_only)),
+            Ok(())
+        );
+        assert_eq!(
+            check_coding_tools(ffi::CUDA_VIDEO_CODEC_HEVC, &pps(tiles_and_wavefront)),
+            Err(G2gError::CapsMismatch)
+        );
+        assert_eq!(
+            check_coding_tools(ffi::CUDA_VIDEO_CODEC_HEVC, HEVC_MAIN10),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn caps_constraint_covers_the_decodable_codecs_and_depths() {
         let d = NvDec::new();
         let CapsConstraint::DerivedOutput(derive) = d.caps_constraint_as_transform() else {
@@ -1664,6 +1776,7 @@ mod tests {
         include_bytes!("../tests/fixtures/h264_reconfig_640x480_to_320x240.h264");
     /// 640x480 Main 10 (10-bit) HEVC.
     const HEVC_MAIN10: &[u8] = include_bytes!("../tests/fixtures/h265_640x480_main10.hevc");
+    const HEVC_MAIN12: &[u8] = include_bytes!("../tests/fixtures/h265_320x192_main12.hevc");
     /// 640x480 AV1, a raw low-overhead OBU stream.
     const AV1_CLIP: &[u8] = include_bytes!("../tests/fixtures/av1_640x480.obu");
     /// 640x480 H.264, single resolution.
@@ -1978,6 +2091,28 @@ mod tests {
             samples.iter().any(|&s| s != samples[0]),
             "decoded luma is uniform; decode likely failed"
         );
+    }
+
+    #[tokio::test]
+    async fn hevc_main12_is_refused_instead_of_truncated() {
+        let Some(mut dec) = open_dec(VideoCodec::H265, 320, 192, 1) else {
+            return;
+        };
+        let mut sink = RecordSink::default();
+        let mut result = Ok(());
+        for (i, au) in h265_units(HEVC_MAIN12).iter().enumerate() {
+            result = dec
+                .process(
+                    PipelinePacket::DataFrame(au_frame(au, i as u64 * 33_000_000)),
+                    &mut sink,
+                )
+                .await;
+            if result.is_err() {
+                break;
+            }
+        }
+        assert_eq!(result, Err(G2gError::CapsMismatch));
+        assert!(sink.dims.is_empty(), "no 12-bit frame reached the sink");
     }
 
     #[tokio::test]
