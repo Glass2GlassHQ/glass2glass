@@ -12034,7 +12034,8 @@ impl H264DpbDecoder {
         // The active references for this decode are every slot currently holding
         // a reference picture. The driver builds the actual RefPicList from the
         // slice headers; we just supply the candidate set + their FrameNum/POC.
-        // Vulkan rejects a reference slot no decode has set up since the session reset.
+        // Vulkan rejects a reference slot no decode has set up since the session reset,
+        // which a stream that does not start at an IDR can still hit.
         let active: alloc::vec::Vec<(usize, RefPic)> = self
             .references
             .active()
@@ -12043,6 +12044,10 @@ impl H264DpbDecoder {
             .collect();
         let target = self.references.free_slot().ok_or(DPB_FULL)?;
 
+        let gaps_allowed = picture.sps.gaps_in_frame_num_value_allowed_flag != 0;
+        if self.core.first && header.is_idr && gaps_allowed {
+            self.set_up_every_slot(picture, order.field_order_counts, target)?;
+        }
         self.submit_decode(
             picture,
             order.field_order_counts,
@@ -12054,6 +12059,23 @@ impl H264DpbDecoder {
             .mark_current(target, header, max_frame_num, &order)?;
 
         Ok((target, order.meta))
+    }
+
+    // decodes the session's first IDR into every other slot, so a later frame_num
+    // gap can put its frames in slots the driver accepts as references
+    fn set_up_every_slot(
+        &mut self,
+        idr: &H264Picture<'_>,
+        field_order_counts: [i32; 2],
+        target: usize,
+    ) -> Result<(), VulkanVideoError> {
+        // these decodes are not the picture the texture path chains its conversion to
+        let chain_next = core::mem::take(&mut self.core.chain_next);
+        for slot in (0..self.core.slots.len()).filter(|&slot| slot != target) {
+            self.submit_decode(idr, field_order_counts, slot, &[], false)?;
+        }
+        self.core.chain_next = chain_next;
+        Ok(())
     }
 
     /// Decode one picture and convert it, GPU-resident, into an RGBA

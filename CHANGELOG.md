@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1820: `vulkanvideodec` sets up every DPB slot at a gap-allowing H.264 stream's first IDR, so frame_num gap frames reach the driver from the start.
 - M1815: `livesync` numbers its output frames, so a filler no longer repeats the last frame's sequence.
 - M1814: `splitmuxsrc` and `g2g-discover` type a stream selection's properties the way a launch line does.
 - M1813: `nvdec` refuses H.264 slice groups and parses each frame of a VP9 superframe separately.

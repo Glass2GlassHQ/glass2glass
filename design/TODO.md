@@ -121,14 +121,6 @@ Highest leverage first:
   ffmpeg's on a static read, so the difference needs an experiment loop on the
   RADV device. NVIDIA Turing cannot decode it at all (minimum H.265 coded extent
   144x144).
-- **H.264 frame_num gap before every DPB slot is used.** A gap frame whose slot
-  no decode has set up since the session reset is left out of the driver's
-  reference list, so on RADV the lists of the next few pictures miss it (streams
-  that drop temporal layers have gaps from picture 1). Fix by decoding the first
-  IDR into every slot when the SPS allows gaps, which sets them all up.
-
-## CUDA / display
-
 - Run `CudaKmsSink` from a bare VT with DRM master and verify the in-tree
   `// VERIFY:` points.
 

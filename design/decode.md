@@ -936,8 +936,10 @@ starts a new reorder group. A frame_num gap under
 short-term references that hold a DPB slot and go to the driver with
 `is_non_existing`, because a driver whose firmware builds the L0 / L1 lists from
 the reference slots (RADV on VCN) counts them. Vulkan only takes a slot a decode
-has set up since the session reset as a reference, so a gap frame in a slot no
-picture has used yet stays out of the driver's list.
+has set up since the session reset as a reference, so when the SPS allows gaps
+the session's first IDR is also decoded into every other slot, and a gap frame
+can take any of them. A stream that does not start at an IDR leaves a gap frame
+in a slot nothing has set up out of the driver's list.
 
 Parameter sets are kept by id. The decoder parses each slice against its SPS
 and PPS tables and recreates only the `VkVideoSessionParametersKHR` when a
