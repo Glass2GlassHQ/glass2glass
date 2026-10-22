@@ -213,6 +213,37 @@ Highest leverage first:
 - **TS positions with B frames:** `tsdemux` opens its segment at the first DTS, so
   positions read high by the first PTS minus the first DTS until the first seek.
   Needs a signed `Segment` time offset in g2g-core.
+- **Corpus sweep bugs** (calliope TESTING techniques 21-23, paths under
+  `~/.cache/calliope` on hercules):
+  - MP4 seeks land 1-3 frames early because the target ignores the edit list or
+    first composition offset (`fate-suite/mov/mov-3elist.mov --seek 0.5`).
+  - Matroska and FLV seeks count from pts 0 instead of the file start time
+    (`fate-suite/filter/anim.mkv --seek 0.042`), and TS seeks from the video's
+    first pts instead of the earliest stream's
+    (`gst-medias/defaults/bipbop/gear2/fileSequence2.ts`). Recheck both on
+    current master first.
+  - No seek finds a frame in `gst-medias/defaults/webm/opus_vp9-alpha.webm`.
+  - `parsebin` fan-out fails on WAV, VMnc and tagged AVI, and FLV VP6 (no caps
+    overlap), and on IVF, Ogg, `h264_intra_first-small.flv` and tagged-codec
+    AVI (no free output pad `video_0`).
+  - `flvmux` writes an AAC sequence header no decoder accepts
+    (`fate-suite/aac/al04_44.mp4`).
+  - `mpegtsmux` accepts USAC and writes a file nothing decodes
+    (`fate-suite/aac/usac/*`).
+  - LATM AAC loses samples through flvmux and mpegtsmux and fails into mp4mux
+    and matroskamux (`fate-suite/aac/latm_stereo_to_51.ts`, `mpegts/loewe.ts`).
+  - Remux changes samples or frame counts: bipbop TS AAC into mp4mux,
+    `tron_en_ge_aac_h264.ts` AAC, `fragmented_nonseekable_sink.mp4` and
+    `twofields_packet.mp4` into mkv and ts, `test7_cut.mkv` into mp4.
+  - Remux fails mid-run or writes an undecodable file: `opus_vp9-alpha.webm` and
+    `loewe.ts` HEVC into mp4mux and matroskamux, `test-8-7.1.opus-small.ts` into
+    matroskamux and mpegtsmux, `two_first_slice.mp4` into matroskamux,
+    `al04sf_48.mp4` into mpegtsmux.
+  - Stream listing misses the Dolby Vision enhancement layer of
+    `mpegts/dovi-p7.ts`, the PIDs a PMT change adds in `mpegts/pmtchange.ts`, and
+    the second MP2 stream of `sample_mpeg_program_stream_scr.mpg`.
+  - A fan-in muxer that refuses a codec reports a bare `CapsMismatch`: name the
+    muxer and the codec.
 
 ## Codecs
 
