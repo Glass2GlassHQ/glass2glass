@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{SeekController, StreamSelectController};
+use g2g_core::runtime::{ElementSeekRoute, SeekController, StreamSelectController};
 use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
@@ -391,6 +391,8 @@ pub struct TsDemux {
     /// keep their parameter sets in band and their decoders resynchronize on
     /// their own, so they are never dropped. Re-armed on a flush.
     mpeg2_tuned_in: bool,
+    // seek targets count from the first PTS in the file, as ffmpeg's -ss does
+    first_pts_ns: Option<u64>,
 }
 
 impl Default for TsDemux {
@@ -417,6 +419,7 @@ impl TsDemux {
             config_sent: false,
             segment_sent: false,
             mpeg2_tuned_in: false,
+            first_pts_ns: None,
         }
     }
 
@@ -699,13 +702,16 @@ impl TsDemux {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         for u in units {
+            let pts_ns = u
+                .pts_90khz
+                .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64);
+            if self.first_pts_ns.is_none() {
+                self.first_pts_ns = pts_ns;
+            }
             if self.selected_pid()? != Some(u.pid) {
                 continue; // a stream other than the selected one
             }
-            let pts_ns = u
-                .pts_90khz
-                .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64)
-                .unwrap_or(0);
+            let pts_ns = pts_ns.unwrap_or(0);
             // Reordered video carries a separate DTS; fall back to the PTS when the
             // PES had none (the no-DTS convention shared with the fmp4 / mkv demux).
             let dts_ns = u
@@ -740,10 +746,11 @@ impl TsDemux {
                 }
                 self.mpeg2_tuned_in = true;
             }
-            match self.seek.admit(pts_ns, keyframe) {
+            let stream_time_ns = pts_ns.saturating_sub(self.first_pts_ns.unwrap_or(0));
+            match self.seek.admit(stream_time_ns, keyframe) {
                 Admit::Drop => continue,
-                Admit::Resume(start) => {
-                    let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+                Admit::Resume(_) => {
+                    let seg = Segment::for_flush_seek(&Seek::flush_to(pts_ns), None);
                     out.push(PipelinePacket::Segment(seg)).await?;
                     self.segment_sent = true;
                 }
@@ -839,8 +846,8 @@ impl TsDemux {
 }
 
 impl AsyncElement for TsDemux {
-    fn seeks_upstream_bytes(&self) -> bool {
-        true
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::UpstreamBytes)
     }
 
     fn set_seek(&mut self, app: SeekController, upstream: SeekController) {

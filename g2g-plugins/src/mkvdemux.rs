@@ -40,7 +40,7 @@ use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{SeekController, StreamSelectController};
+use g2g_core::runtime::{ElementSeekRoute, SeekController, StreamSelectController};
 use g2g_core::CodecTag;
 use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
@@ -730,8 +730,8 @@ impl MkvDemux {
 }
 
 impl AsyncElement for MkvDemux {
-    fn seeks_upstream_bytes(&self) -> bool {
-        true
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::UpstreamBytes)
     }
 
     fn set_seek(&mut self, app: SeekController, upstream: SeekController) {

@@ -25,6 +25,7 @@ use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::log::short_type_name;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, ProResVariant, PropError,
@@ -37,9 +38,9 @@ use crate::codectag::{
     audio_from_stream_name, audio_stream_name, video_from_stream_name, video_stream_name,
 };
 use crate::fmp4::{
-    clip_stored_pcm, parse_all_tracks, parse_fragments_multi, parse_progressive_multi,
-    prepend_param_sets, starts_with_param_set, track_framerate_q16, vorbis_headers, Sample,
-    TrackHeader, TrackKind,
+    clip_stored_pcm, every_sample_ends_by, keyframe_index_for, parse_all_tracks,
+    parse_fragments_multi, parse_progressive_multi, prepend_param_sets, starts_with_param_set,
+    track_framerate_q16, vorbis_headers, Sample, TrackHeader, TrackKind,
 };
 use crate::mkvdemux::{prores_stream_from_str, prores_stream_str};
 use crate::mp4box::find_box;
@@ -133,6 +134,7 @@ pub struct Mp4Demux {
     sequence: u64,
     configured: bool,
     drained: bool,
+    seek: Option<SeekController>,
 }
 
 impl Default for Mp4Demux {
@@ -152,6 +154,7 @@ impl Mp4Demux {
             sequence: 0,
             configured: false,
             drained: false,
+            seek: None,
         }
     }
 
@@ -218,10 +221,20 @@ impl Mp4Demux {
             return Ok(());
         }
         self.drained = true;
+        // every sample goes out in this one pass, so only a seek queued by now is served
+        let seek_target_ns = self
+            .seek
+            .as_ref()
+            .and_then(SeekController::take_pending)
+            .map(|seek| seek.start);
         match self.select {
-            StreamSelect::Video | StreamSelect::VideoNamed(_) => self.drain_video(out).await,
-            StreamSelect::RawVideo(format) => self.drain_raw_video(format, out).await,
-            StreamSelect::Audio(format) => self.drain_audio(format, out).await,
+            StreamSelect::Video | StreamSelect::VideoNamed(_) => {
+                self.drain_video(seek_target_ns, out).await
+            }
+            StreamSelect::RawVideo(format) => {
+                self.drain_raw_video(format, seek_target_ns, out).await
+            }
+            StreamSelect::Audio(format) => self.drain_audio(format, seek_target_ns, out).await,
         }
     }
 
@@ -234,6 +247,7 @@ impl Mp4Demux {
     async fn drain_audio(
         &mut self,
         selected: AudioFormat,
+        seek_target_ns: Option<u64>,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         let tracks = parse_all_tracks(&self.buffer)?;
@@ -262,7 +276,11 @@ impl Mp4Demux {
             .await?;
             self.caps_sent = true;
         }
-        let segment = audio.presentation_segment();
+        let (samples, segment) = seek_samples(
+            track_samples(&self.buffer, audio)?,
+            audio.presentation_segment(),
+            seek_target_ns,
+        );
         if segment != Segment::new() {
             out.push(PipelinePacket::Segment(segment)).await?;
         }
@@ -289,7 +307,7 @@ impl Mp4Demux {
             .await?;
             self.sequence += 1;
         }
-        for sample in track_samples(&self.buffer, audio)? {
+        for sample in samples {
             // ADTS-frame the raw AAC access unit from the track's ASC, so a decoder
             // starts without the out-of-band config (like the in-band video param
             // sets); raw AAC and every other format go as they are.
@@ -327,7 +345,11 @@ impl Mp4Demux {
     /// the first, matching `fmp4demux`). The track is the first video track, or
     /// the first of the named codec, read from the sample tables or, in a
     /// fragmented file, from the `moof`s. Idempotent; runs once, at `Eos`.
-    async fn drain_video(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+    async fn drain_video(
+        &mut self,
+        seek_target_ns: Option<u64>,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
         let named_codec = match self.select {
             StreamSelect::VideoNamed(codec) => Some(codec),
             StreamSelect::Video | StreamSelect::RawVideo(_) | StreamSelect::Audio(_) => None,
@@ -358,8 +380,12 @@ impl Mp4Demux {
             self.out_codec = codec;
             self.caps_sent = true;
         }
-        // the decoder drops the pictures the edit list cuts
-        let edit = video.presentation_segment();
+        // the decoder drops the pictures the edit list cuts, and those before a seek target
+        let (samples, edit) = seek_samples(
+            track_samples(&self.buffer, video)?,
+            video.presentation_segment(),
+            seek_target_ns,
+        );
         if edit != Segment::new() {
             out.push(PipelinePacket::Segment(edit)).await?;
         }
@@ -375,7 +401,7 @@ impl Mp4Demux {
         }
         let mut need_param_sets = !matches!(codec, VideoCodec::Tagged(_));
         let meta = crate::fmp4::clean_aperture_meta(video.clean_aperture);
-        for mut s in track_samples(&self.buffer, video)? {
+        for mut s in samples {
             let mut annexb = core::mem::take(&mut s.annexb);
             // The moov's config-record parameter sets are out-of-band, so prepend
             // them to the first access unit if it does not already carry them.
@@ -395,6 +421,7 @@ impl Mp4Demux {
     async fn drain_raw_video(
         &mut self,
         selected: RawVideoFormat,
+        seek_target_ns: Option<u64>,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         let tracks = parse_all_tracks(&self.buffer)?;
@@ -418,12 +445,16 @@ impl Mp4Demux {
             out.push(PipelinePacket::CapsChanged(caps)).await?;
             self.caps_sent = true;
         }
-        let edit = video.presentation_segment();
+        let (samples, edit) = seek_samples(
+            track_samples(&self.buffer, video)?,
+            video.presentation_segment(),
+            seek_target_ns,
+        );
         if edit != Segment::new() {
             out.push(PipelinePacket::Segment(edit)).await?;
         }
         let meta = crate::fmp4::clean_aperture_meta(video.clean_aperture);
-        for mut s in track_samples(&self.buffer, video)? {
+        for mut s in samples {
             let mut pixels = core::mem::take(&mut s.annexb);
             let Some(len) = raw_video_frame_bytes(format, width, height, pixels.len()) else {
                 warn_short_raw_video_frame("qtdemux", format, width, height, pixels.len());
@@ -455,6 +486,31 @@ fn video_frame(data: Vec<u8>, sample: &Sample, sequence: u64) -> Frame {
     }
 }
 
+// the samples from the keyframe at or before the target, with the segment moved up to start there
+fn seek_samples(
+    mut samples: Vec<Sample>,
+    edit: Segment,
+    target_ns: Option<u64>,
+) -> (Vec<Sample>, Segment) {
+    let Some(target_ns) = target_ns else {
+        return (samples, edit);
+    };
+    let first = if every_sample_ends_by(&samples, target_ns) {
+        samples.len()
+    } else {
+        keyframe_index_for(&samples, target_ns)
+    };
+    samples.drain(..first);
+    let start = edit.start.max(target_ns);
+    let segment = Segment {
+        start,
+        time: edit.time.saturating_add(start - edit.start),
+        position: start,
+        ..edit
+    };
+    (samples, segment)
+}
+
 // a fragmented file's samples are in its moofs, a progressive file's in the sample tables
 fn track_samples(data: &[u8], track: &TrackHeader) -> Result<Vec<Sample>, G2gError> {
     let selected = core::slice::from_ref(track);
@@ -470,6 +526,14 @@ fn track_samples(data: &[u8], track: &TrackHeader) -> Result<Vec<Sample>, G2gErr
 }
 
 impl AsyncElement for Mp4Demux {
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::Buffered)
+    }
+
+    fn set_buffered_seek(&mut self, app: SeekController) {
+        self.seek = Some(app);
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

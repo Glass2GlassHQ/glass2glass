@@ -34,7 +34,7 @@ use alloc::string::String;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 
-use g2g_core::runtime::SeekController;
+use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain,
@@ -418,8 +418,8 @@ impl FlvDemux {
 }
 
 impl AsyncElement for FlvDemux {
-    fn seeks_upstream_bytes(&self) -> bool {
-        true
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::UpstreamBytes)
     }
 
     fn set_seek(&mut self, app: SeekController, upstream: SeekController) {

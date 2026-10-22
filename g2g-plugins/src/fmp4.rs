@@ -83,6 +83,23 @@ pub(crate) struct Sample {
     pub(crate) keyframe: bool,
 }
 
+/// The index of the keyframe at or before `target_ns` (GStreamer `SNAP_BEFORE`,
+/// so a decoder can resume from a clean reference); 0 when none precedes it.
+pub(crate) fn keyframe_index_for(samples: &[Sample], target_ns: u64) -> usize {
+    samples
+        .iter()
+        .enumerate()
+        .rfind(|(_, s)| s.keyframe && s.pts_ns <= target_ns)
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+pub(crate) fn every_sample_ends_by(samples: &[Sample], target_ns: u64) -> bool {
+    samples
+        .iter()
+        .all(|s| s.pts_ns.saturating_add(s.duration_ns) <= target_ns)
+}
+
 /// Parse the `moov` init box into a [`Header`] (codec, geometry, timescale,
 /// parameter sets). `data` must contain the `moov` (a whole init segment or a
 /// whole file).

@@ -548,13 +548,13 @@ pub trait AsyncElement: ElementBound {
     #[cfg(feature = "runtime")]
     fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
 
-    // whether this element serves a time seek by byte-seeking the source that feeds it
+    // how this element serves a time seek, `None` when it cannot
     #[cfg(feature = "runtime")]
-    fn seeks_upstream_bytes(&self) -> bool {
-        false
+    fn seek_route(&self) -> Option<crate::runtime::ElementSeekRoute> {
+        None
     }
 
-    // called only when `seeks_upstream_bytes` is true
+    // called only when `seek_route` is `UpstreamBytes`
     #[cfg(feature = "runtime")]
     fn set_seek(
         &mut self,
@@ -562,6 +562,10 @@ pub trait AsyncElement: ElementBound {
         _upstream: crate::runtime::SeekController,
     ) {
     }
+
+    // called only when `seek_route` is `Buffered`
+    #[cfg(feature = "runtime")]
+    fn set_buffered_seek(&mut self, _app: crate::runtime::SeekController) {}
 
     /// Override this instance's log category (M845), which is otherwise the
     /// element type name. Default: ignore. An element that logs about itself
@@ -775,8 +779,8 @@ pub trait DynAsyncElement: ElementBound {
     fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
 
     #[cfg(feature = "runtime")]
-    fn seeks_upstream_bytes(&self) -> bool {
-        false
+    fn seek_route(&self) -> Option<crate::runtime::ElementSeekRoute> {
+        None
     }
 
     #[cfg(feature = "runtime")]
@@ -786,6 +790,9 @@ pub trait DynAsyncElement: ElementBound {
         _upstream: crate::runtime::SeekController,
     ) {
     }
+
+    #[cfg(feature = "runtime")]
+    fn set_buffered_seek(&mut self, _app: crate::runtime::SeekController) {}
 
     /// Dyn-safe mirror of [`AsyncElement::set_log_category`].
     fn set_log_category(&mut self, _category: alloc::string::String) {}
@@ -1000,8 +1007,13 @@ impl<T: AsyncElement> DynAsyncElement for T {
     }
 
     #[cfg(feature = "runtime")]
-    fn seeks_upstream_bytes(&self) -> bool {
-        AsyncElement::seeks_upstream_bytes(self)
+    fn seek_route(&self) -> Option<crate::runtime::ElementSeekRoute> {
+        AsyncElement::seek_route(self)
+    }
+
+    #[cfg(feature = "runtime")]
+    fn set_buffered_seek(&mut self, app: crate::runtime::SeekController) {
+        AsyncElement::set_buffered_seek(self, app)
     }
 
     #[cfg(feature = "runtime")]
@@ -1214,8 +1226,13 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
     }
 
     #[cfg(feature = "runtime")]
-    fn seeks_upstream_bytes(&self) -> bool {
-        (**self).seeks_upstream_bytes()
+    fn seek_route(&self) -> Option<crate::runtime::ElementSeekRoute> {
+        (**self).seek_route()
+    }
+
+    #[cfg(feature = "runtime")]
+    fn set_buffered_seek(&mut self, app: crate::runtime::SeekController) {
+        (**self).set_buffered_seek(app)
     }
 
     #[cfg(feature = "runtime")]

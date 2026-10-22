@@ -84,7 +84,7 @@ pub use progress::PipelineProgress;
 pub use runner::{LatencyProfile, LinkCapacity, RunStats, SourceLoop};
 #[cfg(feature = "std")]
 pub use seek::{attach_seek, AttachSeekError};
-pub use seek::{SeekController, SeekFormat, WaitEvent};
+pub use seek::{ElementSeekRoute, SeekController, SeekFormat, WaitEvent};
 pub use solver::{CapsConflict, NegotiationFailure};
 pub use state::{Flow, FlowGate, PrerollGate, StateController};
 pub use stream_select::StreamSelectController;

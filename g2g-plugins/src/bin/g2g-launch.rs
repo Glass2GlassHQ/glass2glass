@@ -154,12 +154,12 @@ g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script (
 
 const SEEK_HELP: &str = "\n\
 --seek <seconds>: one flushing seek to that stream time before the first frame, then run to the end.\n  \
-uridecodebin over an MP4 file restarts at the keyframe at or before the target and the decoder drops\n  \
-the frames before it, so the first decoded frame is the first one at or after the target (ffmpeg -ss).\n  \
+An MP4 file (uridecodebin, or qtdemux after filesrc, also when decodebin plugs it) restarts at the\n  \
+keyframe at or before the target and the decoder drops the frames before it, so the first decoded\n  \
+frame is the first one at or after the target (ffmpeg -ss).\n  \
 A demuxer fed straight by filesrc (tsdemux, matroskademux, flvdemux, oggdemux, fmp4demux, also when\n  \
 decodebin plugs it) restarts at the first keyframe at or after the target (ffmpeg -ss -noaccurate_seek\n  \
-matches only when the target is a keyframe). tsdemux compares the target with the stream's own\n  \
-timestamps, which usually start above zero. A target past the end fails the run.";
+matches only when the target is a keyframe). A target past the end fails the run.";
 
 // Printed on `--help` (not on the terse empty-invocation error): a map of the
 // rest of the dev tooling, so a `gst-launch` reflex finds the ecosystem. Full

@@ -35,9 +35,9 @@ use g2g_core::{
 
 use crate::filesink::path_io_err;
 use crate::fmp4::{
-    clean_aperture_meta, fragment_framerate_q16, parse_all_tracks, parse_chapters, parse_fragments,
-    parse_header, parse_progressive, prepend_param_sets, starts_with_param_set, Header, Sample,
-    TrackKind,
+    clean_aperture_meta, every_sample_ends_by, fragment_framerate_q16, keyframe_index_for,
+    parse_all_tracks, parse_chapters, parse_fragments, parse_header, parse_progressive,
+    prepend_param_sets, starts_with_param_set, Header, Sample, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
@@ -417,23 +417,6 @@ impl SourceLoop for Mp4Src {
             }
         })
     }
-}
-
-/// The index of the keyframe at or before `target_ns` (GStreamer `SNAP_BEFORE`,
-/// so a decoder can resume from a clean reference); 0 when none precedes it.
-fn keyframe_index_for(samples: &[Sample], target_ns: u64) -> usize {
-    samples
-        .iter()
-        .enumerate()
-        .rfind(|(_, s)| s.keyframe && s.pts_ns <= target_ns)
-        .map(|(i, _)| i)
-        .unwrap_or(0)
-}
-
-fn every_sample_ends_by(samples: &[Sample], target_ns: u64) -> bool {
-    samples
-        .iter()
-        .all(|s| s.pts_ns.saturating_add(s.duration_ns) <= target_ns)
 }
 
 /// Exclusive end of the GOP opened by the sync sample at `gop_start`: the next

@@ -59,7 +59,7 @@ use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::SeekController;
+use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_debug, g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding,
@@ -1082,8 +1082,8 @@ fn in_band_headers(codec: OggCodec, stream: &OggLogicalStream) -> Vec<Vec<u8>> {
 }
 
 impl AsyncElement for OggDemux {
-    fn seeks_upstream_bytes(&self) -> bool {
-        true
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        Some(ElementSeekRoute::UpstreamBytes)
     }
 
     fn set_seek(&mut self, app: SeekController, upstream: SeekController) {

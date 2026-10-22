@@ -48,6 +48,8 @@ use alloc::vec::Vec;
 
 use crate::bus::{BusHandle, BusMessage};
 #[cfg(feature = "std")]
+use crate::element::DynAsyncElement;
+#[cfg(feature = "std")]
 use crate::graph::{Graph, NodeId};
 #[cfg(feature = "std")]
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
@@ -243,6 +245,14 @@ pub enum SeekFormat {
     Bytes,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElementSeekRoute {
+    // from the whole stream it holds, so its upstream never repositions
+    Buffered,
+    // by byte-seeking the source that feeds it
+    UpstreamBytes,
+}
+
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachSeekError {
@@ -257,7 +267,7 @@ impl core::fmt::Display for AttachSeekError {
             Self::NothingSeekable => write!(
                 f,
                 "nothing in the pipeline can seek: a seek needs an MP4 file source \
-                 (uridecodebin uri=file://...mp4) or a demuxer fed straight by a filesrc"
+                 (uridecodebin uri=file://...mp4), qtdemux, or a demuxer fed straight by a filesrc"
             ),
             Self::SeveralSeekable(elements) => write!(
                 f,
@@ -273,6 +283,7 @@ impl core::fmt::Display for AttachSeekError {
 #[derive(Debug, Clone, Copy)]
 enum SeekableNode {
     TimeSource(NodeId),
+    BufferedElement(NodeId),
     Demuxer {
         demuxer: NodeId,
         byte_source: NodeId,
@@ -283,7 +294,7 @@ enum SeekableNode {
 impl SeekableNode {
     fn time_node(self) -> NodeId {
         match self {
-            Self::TimeSource(node) => node,
+            Self::TimeSource(node) | Self::BufferedElement(node) => node,
             Self::Demuxer { demuxer, .. } => demuxer,
         }
     }
@@ -295,7 +306,14 @@ fn seekable_node(graph: &Graph<GraphNode>, node: NodeId) -> Option<SeekableNode>
         GraphNodeRef::Source(source) if source.seek_format() == Some(SeekFormat::Time) => {
             Some(SeekableNode::TimeSource(node))
         }
-        GraphNodeRef::Element(element) if element.seeks_upstream_bytes() => {
+        GraphNodeRef::Element(element)
+            if element.seek_route() == Some(ElementSeekRoute::Buffered) =>
+        {
+            Some(SeekableNode::BufferedElement(node))
+        }
+        GraphNodeRef::Element(element)
+            if element.seek_route() == Some(ElementSeekRoute::UpstreamBytes) =>
+        {
             let byte_source = graph
                 .edges()
                 .iter()
@@ -334,6 +352,14 @@ fn source_mut(graph: &mut Graph<GraphNode>, node: NodeId) -> &mut (dyn DynSource
 }
 
 #[cfg(feature = "std")]
+fn element_mut(graph: &mut Graph<GraphNode>, node: NodeId) -> &mut (dyn DynAsyncElement + 'static) {
+    match graph.element_mut(node) {
+        Some(GraphNodeRef::Element(element)) => element.as_mut(),
+        _ => unreachable!("seekable_node found an element here"),
+    }
+}
+
+#[cfg(feature = "std")]
 pub fn attach_seek(
     graph: &mut Graph<GraphNode>,
     first_seek: Seek,
@@ -358,16 +384,16 @@ pub fn attach_seek(
     app.seek(first_seek);
     match target {
         SeekableNode::TimeSource(node) => source_mut(graph, node).set_seek(app.clone()),
+        SeekableNode::BufferedElement(node) => {
+            element_mut(graph, node).set_buffered_seek(app.clone())
+        }
         SeekableNode::Demuxer {
             demuxer,
             byte_source,
         } => {
             let upstream = SeekController::new();
             source_mut(graph, byte_source).set_seek(upstream.clone());
-            match graph.element_mut(demuxer) {
-                Some(GraphNodeRef::Element(element)) => element.set_seek(app.clone(), upstream),
-                _ => unreachable!("seekable_node found an element here"),
-            }
+            element_mut(graph, demuxer).set_seek(app.clone(), upstream);
         }
     }
     Ok(app)
