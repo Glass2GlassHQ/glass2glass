@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{SeekController, SourceLoop};
+use g2g_core::runtime::{SeekController, SeekFormat, SourceLoop};
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind,
@@ -220,6 +220,14 @@ impl SourceLoop for FileSrc {
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn seek_format(&self) -> Option<SeekFormat> {
+        Some(SeekFormat::Bytes)
+    }
+
+    fn set_seek(&mut self, controller: SeekController) {
+        self.seek = Some(controller);
     }
 
     /// Expose the container caps set by `bytestream-format` (M195), so a

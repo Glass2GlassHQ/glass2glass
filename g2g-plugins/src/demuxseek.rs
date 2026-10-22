@@ -78,6 +78,8 @@ impl DemuxSeek {
     pub(crate) fn with(&mut self, app: SeekController, upstream: SeekController) {
         self.app = Some(app);
         self.upstream = Some(upstream);
+        // a seek queued before the run reaches the source before its first chunk
+        self.poll_request();
     }
 
     /// Poll for a pending flushing time seek, re-scanning from the file start

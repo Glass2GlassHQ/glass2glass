@@ -43,7 +43,14 @@ use alloc::sync::Arc;
 
 use spin::Mutex;
 
+#[cfg(feature = "std")]
+use alloc::vec::Vec;
+
 use crate::bus::{BusHandle, BusMessage};
+#[cfg(feature = "std")]
+use crate::graph::{Graph, NodeId};
+#[cfg(feature = "std")]
+use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
 use crate::segment::Seek;
 
 /// Source -> app segment-done state. `count` is monotonic so the app can detect
@@ -227,6 +234,143 @@ impl Future for WaitEvent<'_> {
             Poll::Pending
         }
     }
+}
+
+// gst's `GstFormat` names for the two units a seek position comes in
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeekFormat {
+    Time,
+    Bytes,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachSeekError {
+    NothingSeekable,
+    SeveralSeekable(Vec<&'static str>),
+}
+
+#[cfg(feature = "std")]
+impl core::fmt::Display for AttachSeekError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NothingSeekable => write!(
+                f,
+                "nothing in the pipeline can seek: a seek needs an MP4 file source \
+                 (uridecodebin uri=file://...mp4) or a demuxer fed straight by a filesrc"
+            ),
+            Self::SeveralSeekable(elements) => write!(
+                f,
+                "{} elements can seek ({}), a seek needs exactly one",
+                elements.len(),
+                elements.join(", ")
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy)]
+enum SeekableNode {
+    TimeSource(NodeId),
+    Demuxer {
+        demuxer: NodeId,
+        byte_source: NodeId,
+    },
+}
+
+#[cfg(feature = "std")]
+impl SeekableNode {
+    fn time_node(self) -> NodeId {
+        match self {
+            Self::TimeSource(node) => node,
+            Self::Demuxer { demuxer, .. } => demuxer,
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+fn seekable_node(graph: &Graph<GraphNode>, node: NodeId) -> Option<SeekableNode> {
+    match graph.element(node)? {
+        GraphNodeRef::Source(source) if source.seek_format() == Some(SeekFormat::Time) => {
+            Some(SeekableNode::TimeSource(node))
+        }
+        GraphNodeRef::Element(element) if element.seeks_upstream_bytes() => {
+            let byte_source = graph
+                .edges()
+                .iter()
+                .find(|edge| edge.dst.node == node)?
+                .src
+                .node;
+            match graph.element(byte_source)? {
+                GraphNodeRef::Source(source) if source.seek_format() == Some(SeekFormat::Bytes) => {
+                    Some(SeekableNode::Demuxer {
+                        demuxer: node,
+                        byte_source,
+                    })
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "std")]
+fn log_category(graph: &Graph<GraphNode>, node: NodeId) -> &'static str {
+    match graph.element(node) {
+        Some(GraphNodeRef::Source(source)) => source.log_category(),
+        Some(GraphNodeRef::Element(element)) => element.log_category(),
+        _ => unreachable!("a seekable node is a source or an element"),
+    }
+}
+
+#[cfg(feature = "std")]
+fn source_mut(graph: &mut Graph<GraphNode>, node: NodeId) -> &mut (dyn DynSourceLoop + 'static) {
+    match graph.element_mut(node) {
+        Some(GraphNodeRef::Source(source)) => source.as_mut(),
+        _ => unreachable!("seekable_node found a source here"),
+    }
+}
+
+#[cfg(feature = "std")]
+pub fn attach_seek(
+    graph: &mut Graph<GraphNode>,
+    first_seek: Seek,
+) -> Result<SeekController, AttachSeekError> {
+    let seekable: Vec<SeekableNode> = (0..graph.node_count())
+        .filter_map(|index| seekable_node(graph, NodeId(index as u32)))
+        .collect();
+    let target = match seekable[..] {
+        [target] => target,
+        [] => return Err(AttachSeekError::NothingSeekable),
+        _ => {
+            return Err(AttachSeekError::SeveralSeekable(
+                seekable
+                    .iter()
+                    .map(|node| log_category(graph, node.time_node()))
+                    .collect(),
+            ))
+        }
+    };
+    let app = SeekController::new();
+    // queued before the element gets the controller, so it lands before the first frame
+    app.seek(first_seek);
+    match target {
+        SeekableNode::TimeSource(node) => source_mut(graph, node).set_seek(app.clone()),
+        SeekableNode::Demuxer {
+            demuxer,
+            byte_source,
+        } => {
+            let upstream = SeekController::new();
+            source_mut(graph, byte_source).set_seek(upstream.clone());
+            match graph.element_mut(demuxer) {
+                Some(GraphNodeRef::Element(element)) => element.set_seek(app.clone(), upstream),
+                _ => unreachable!("seekable_node found an element here"),
+            }
+        }
+    }
+    Ok(app)
 }
 
 #[cfg(test)]

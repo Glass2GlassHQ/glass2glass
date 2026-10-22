@@ -213,9 +213,7 @@ impl MkvDemux {
     /// keyframe at/after the target; with a `Cues` index (parsed, or located via a
     /// `SeekHead` and prefetched, M373/M374) it jumps straight to the Cluster.
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
-        self.app = Some(app.clone());
-        self.upstream = Some(upstream.clone());
-        self.seek.with(app, upstream);
+        AsyncElement::set_seek(&mut self, app, upstream);
         self
     }
 
@@ -712,6 +710,16 @@ impl MkvDemux {
 }
 
 impl AsyncElement for MkvDemux {
+    fn seeks_upstream_bytes(&self) -> bool {
+        true
+    }
+
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.app = Some(app.clone());
+        self.upstream = Some(upstream.clone());
+        self.seek.with(app, upstream);
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "Matroska demuxer",

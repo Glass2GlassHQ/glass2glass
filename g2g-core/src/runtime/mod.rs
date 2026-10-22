@@ -82,7 +82,9 @@ pub use instrument::{
 pub use join::{join_all, select2, Either, Join2, JoinAll, Select2};
 pub use progress::PipelineProgress;
 pub use runner::{LatencyProfile, LinkCapacity, RunStats, SourceLoop};
-pub use seek::{SeekController, WaitEvent};
+#[cfg(feature = "std")]
+pub use seek::{attach_seek, AttachSeekError};
+pub use seek::{SeekController, SeekFormat, WaitEvent};
 pub use solver::{CapsConflict, NegotiationFailure};
 pub use state::{Flow, FlowGate, PrerollGate, StateController};
 pub use stream_select::StreamSelectController;

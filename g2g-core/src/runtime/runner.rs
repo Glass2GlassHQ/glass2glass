@@ -25,6 +25,7 @@ use crate::runtime::coordinator::solve_last_link;
 use crate::runtime::instrument::ElementProbe;
 #[cfg(feature = "std")]
 use crate::runtime::join::{select2, Either, Join2};
+use crate::runtime::seek::{SeekController, SeekFormat};
 #[cfg(feature = "std")]
 use crate::runtime::solver::{solve_linear, NegotiationFailure};
 #[cfg(feature = "std")]
@@ -264,6 +265,14 @@ pub trait SourceLoop: ElementBound {
     /// source arm owns its element for the whole run. Every runner built on
     /// the graph runner hands it out when given a bus. Default: ignore.
     fn set_bus(&mut self, _bus: BusHandle) {}
+
+    // the unit of the positions this source repositions to, `None` when it cannot seek
+    fn seek_format(&self) -> Option<SeekFormat> {
+        None
+    }
+
+    // called only on a source whose `seek_format` is `Some`
+    fn set_seek(&mut self, _controller: SeekController) {}
 
     /// Override this instance's log category (M845), mirroring
     /// [`AsyncElement::set_log_category`](crate::AsyncElement::set_log_category).

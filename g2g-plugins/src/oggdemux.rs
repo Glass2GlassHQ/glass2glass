@@ -228,7 +228,7 @@ impl OggDemux {
     /// On a time seek the demuxer repositions the source and re-syncs from the
     /// packet at/after the target (every audio packet is a resync point).
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
-        self.seek.with(app, upstream);
+        AsyncElement::set_seek(&mut self, app, upstream);
         self
     }
 
@@ -1082,6 +1082,14 @@ fn in_band_headers(codec: OggCodec, stream: &OggLogicalStream) -> Vec<Vec<u8>> {
 }
 
 impl AsyncElement for OggDemux {
+    fn seeks_upstream_bytes(&self) -> bool {
+        true
+    }
+
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.seek.with(app, upstream);
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "Ogg demuxer",

@@ -1242,10 +1242,12 @@ impl FfmpegVideoDec {
     }
 
     fn drain_eos(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<u64, G2gError> {
-        if let Some(d) = self.decoder.as_mut() {
-            d.send_eof()
-                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        }
+        // the decoder opens on the first access unit, so a stream without one has nothing to drain
+        let Some(d) = self.decoder.as_mut() else {
+            return Ok(0);
+        };
+        d.send_eof()
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         self.drain_frames(decoded)
     }
 

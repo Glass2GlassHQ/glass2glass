@@ -46,6 +46,7 @@ use crate::runtime::instrument::{EdgeCounters, ElementProbe, Probe};
 use crate::runtime::join::{dynamic_join, join_all, select2, Either};
 use crate::runtime::observe::{link_tapped, register_runner_tap, EdgeTap, TapEdge, TapNode};
 use crate::runtime::runner::{LinkCapacity, NullSink, RunStats, SourceLoop};
+use crate::runtime::seek::{SeekController, SeekFormat};
 use crate::runtime::{NodeRole, Observer};
 use spin::Mutex;
 
@@ -147,6 +148,12 @@ pub trait DynSourceLoop: ElementBound {
 
     /// Dyn-safe mirror of [`SourceLoop::set_bus`].
     fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
+
+    fn seek_format(&self) -> Option<SeekFormat> {
+        None
+    }
+
+    fn set_seek(&mut self, _controller: SeekController) {}
 
     /// Dyn-safe mirror of [`SourceLoop::set_log_category`].
     fn set_log_category(&mut self, _category: alloc::string::String) {}
@@ -257,6 +264,14 @@ impl<T: SourceLoop> DynSourceLoop for T {
         SourceLoop::set_bus(self, bus)
     }
 
+    fn seek_format(&self) -> Option<SeekFormat> {
+        SourceLoop::seek_format(self)
+    }
+
+    fn set_seek(&mut self, controller: SeekController) {
+        SourceLoop::set_seek(self, controller)
+    }
+
     fn set_log_category(&mut self, category: alloc::string::String) {
         SourceLoop::set_log_category(self, category)
     }
@@ -349,6 +364,14 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
 
     fn set_bus(&mut self, bus: crate::bus::BusHandle) {
         (**self).set_bus(bus)
+    }
+
+    fn seek_format(&self) -> Option<SeekFormat> {
+        (**self).seek_format()
+    }
+
+    fn set_seek(&mut self, controller: SeekController) {
+        (**self).set_seek(controller)
     }
 
     fn set_log_category(&mut self, category: alloc::string::String) {

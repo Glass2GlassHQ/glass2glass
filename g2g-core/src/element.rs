@@ -548,6 +548,21 @@ pub trait AsyncElement: ElementBound {
     #[cfg(feature = "runtime")]
     fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
 
+    // whether this element serves a time seek by byte-seeking the source that feeds it
+    #[cfg(feature = "runtime")]
+    fn seeks_upstream_bytes(&self) -> bool {
+        false
+    }
+
+    // called only when `seeks_upstream_bytes` is true
+    #[cfg(feature = "runtime")]
+    fn set_seek(
+        &mut self,
+        _app: crate::runtime::SeekController,
+        _upstream: crate::runtime::SeekController,
+    ) {
+    }
+
     /// Override this instance's log category (M845), which is otherwise the
     /// element type name. Default: ignore. An element that logs about itself
     /// stores it (in a [`LogName`](crate::log::LogName)) and returns it from
@@ -758,6 +773,19 @@ pub trait DynAsyncElement: ElementBound {
     /// Dyn-safe mirror of [`AsyncElement::set_bus`].
     #[cfg(feature = "runtime")]
     fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
+
+    #[cfg(feature = "runtime")]
+    fn seeks_upstream_bytes(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "runtime")]
+    fn set_seek(
+        &mut self,
+        _app: crate::runtime::SeekController,
+        _upstream: crate::runtime::SeekController,
+    ) {
+    }
 
     /// Dyn-safe mirror of [`AsyncElement::set_log_category`].
     fn set_log_category(&mut self, _category: alloc::string::String) {}
@@ -971,6 +999,20 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::set_bus(self, bus)
     }
 
+    #[cfg(feature = "runtime")]
+    fn seeks_upstream_bytes(&self) -> bool {
+        AsyncElement::seeks_upstream_bytes(self)
+    }
+
+    #[cfg(feature = "runtime")]
+    fn set_seek(
+        &mut self,
+        app: crate::runtime::SeekController,
+        upstream: crate::runtime::SeekController,
+    ) {
+        AsyncElement::set_seek(self, app, upstream)
+    }
+
     fn set_log_category(&mut self, category: alloc::string::String) {
         AsyncElement::set_log_category(self, category)
     }
@@ -1169,6 +1211,20 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
     #[cfg(feature = "runtime")]
     fn set_bus(&mut self, bus: crate::bus::BusHandle) {
         (**self).set_bus(bus)
+    }
+
+    #[cfg(feature = "runtime")]
+    fn seeks_upstream_bytes(&self) -> bool {
+        (**self).seeks_upstream_bytes()
+    }
+
+    #[cfg(feature = "runtime")]
+    fn set_seek(
+        &mut self,
+        app: crate::runtime::SeekController,
+        upstream: crate::runtime::SeekController,
+    ) {
+        (**self).set_seek(app, upstream)
     }
 
     fn set_log_category(&mut self, category: alloc::string::String) {

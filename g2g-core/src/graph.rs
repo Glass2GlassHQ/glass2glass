@@ -539,6 +539,12 @@ impl<E> Graph<E> {
             .and_then(|n| n.element.as_ref())
     }
 
+    pub fn element_mut(&mut self, node: NodeId) -> Option<&mut E> {
+        self.nodes
+            .get_mut(node.0 as usize)
+            .and_then(|n| n.element.as_mut())
+    }
+
     /// Append every node and edge of `inner` into this graph, returning the
     /// [`NodeIdOffset`] that maps `inner`'s ids into this graph's id space.
     /// Composition is a pure index shift: nodes are a flat `Vec` and edges carry

@@ -38,6 +38,9 @@
 //!                     keep a bounded ring of recent packets per link while the
 //!                     run goes, and on failure write each link's ring into
 //!                     <dir> as a `replaysrc` recording (M1016)
+//! --seek <seconds>    one flushing seek to that stream time before the first
+//!                     frame, then run to the end (`--help` says where the
+//!                     first frame lands)
 //! --plugin <path>     load a third-party plugin `.so` before parsing
 //!                     (repeatable; needs the `plugin-loader` build feature)
 //! --graph <file>      build the graph from a declarative JSON / YAML document
@@ -80,8 +83,9 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "multi-thread")]
 use g2g_core::element::BoxFuture;
 use g2g_core::runtime::{
-    fallback_factory, has_live_source, parse_launch, parse_launch_avoiding, run_graph_recorded,
-    run_graph_with_progress, FlightRecorder, GraphNode, PipelineProgress, Registry,
+    attach_seek, fallback_factory, has_live_source, parse_launch, parse_launch_avoiding,
+    run_graph_recorded, run_graph_with_progress, FlightRecorder, GraphNode, PipelineProgress,
+    Registry,
 };
 #[cfg(any(feature = "observe", feature = "tui"))]
 use g2g_core::runtime::{run_graph_observed, run_graph_observed_recorded, Observer};
@@ -90,7 +94,7 @@ use g2g_core::runtime::{run_graph_threaded_recorded, run_graph_threaded_with_pro
 #[cfg(feature = "multi-thread")]
 use g2g_core::runtime::{GraphSpawner, LocalArmFuture};
 use g2g_core::Graph;
-use g2g_core::{Bus, BusMessage};
+use g2g_core::{Bus, BusMessage, Seek};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
 #[cfg(feature = "multi-thread")]
@@ -143,10 +147,19 @@ type RunFuture<'r> = core::pin::Pin<
     >,
 >;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads[=pinned]] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--plugin <path>] [-e] [-m] [-h] \
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads[=pinned]] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--seek <seconds>] [--plugin <path>] [-e] [-m] [-h] \
 <element> [key=value ...] ! <element> ! ...\n       \
 g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph (M578)\n       \
 g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script (M579)";
+
+const SEEK_HELP: &str = "\n\
+--seek <seconds>: one flushing seek to that stream time before the first frame, then run to the end.\n  \
+uridecodebin over an MP4 file restarts at the keyframe at or before the target and the decoder drops\n  \
+the frames before it, so the first decoded frame is the first one at or after the target (ffmpeg -ss).\n  \
+A demuxer fed straight by filesrc (tsdemux, matroskademux, flvdemux, oggdemux, fmp4demux, also when\n  \
+decodebin plugs it) restarts at the first keyframe at or after the target (ffmpeg -ss -noaccurate_seek\n  \
+matches only when the target is a keyframe). tsdemux compares the target with the stream's own\n  \
+timestamps, which usually start above zero. A target past the end fails the run.";
 
 // Printed on `--help` (not on the terse empty-invocation error): a map of the
 // rest of the dev tooling, so a `gst-launch` reflex finds the ecosystem. Full
@@ -218,6 +231,7 @@ struct Opts {
     /// recent packets; if the run fails, each ring is written there as a
     /// `replaysrc` recording of the traffic that led to the failure.
     record_on_error: Option<String>,
+    seek_seconds: Option<String>,
 }
 
 /// Parse a `--observe` port, warning and returning `None` on a bad value.
@@ -273,6 +287,10 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             opts.record_on_error = Some(dir.to_string());
             continue;
         }
+        if let Some(seconds) = arg.strip_prefix("--seek=") {
+            opts.seek_seconds = Some(seconds.to_string());
+            continue;
+        }
         match arg.as_str() {
             "-v" | "--verbose" => opts.verbose = true,
             "-q" | "--quiet" => opts.quiet = true,
@@ -307,6 +325,13 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             "--record-on-error" => match args.next() {
                 Some(dir) => opts.record_on_error = Some(dir),
                 None => eprintln!("g2g-launch: --record-on-error needs a directory argument"),
+            },
+            "--seek" => match args.next() {
+                Some(seconds) => opts.seek_seconds = Some(seconds),
+                None => {
+                    eprintln!("g2g-launch: --seek needs a time in seconds");
+                    process::exit(2);
+                }
             },
             // Accepted for compatibility (see the module-level notes): these
             // govern live shutdown / bus output, which g2g does not yet expose
@@ -502,8 +527,29 @@ fn main() {
     let (opts, tokens) = parse_opts(std::env::args().skip(1));
     if opts.help {
         println!("{USAGE}");
+        println!("{SEEK_HELP}");
         println!("{SEE_ALSO}");
         return;
+    }
+    let seek_ns = match opts.seek_seconds.as_deref().map(seek_target_ns).transpose() {
+        Ok(seek_ns) => seek_ns,
+        Err(err) => {
+            eprintln!("g2g-launch: {err}");
+            process::exit(2);
+        }
+    };
+    let skips_the_run = opts.dot
+        || opts.copy_plan
+        || opts.validate_json
+        || opts.run_json
+        || opts.observe.is_some()
+        || opts.tui;
+    if seek_ns.is_some() && skips_the_run {
+        eprintln!(
+            "g2g-launch: --seek takes the plain run, not --dot / --copy-plan / --validate-json / \
+             --run-json / --observe / --tui"
+        );
+        process::exit(2);
     }
     let pipeline = tokens.join(" ");
     let use_file = opts.graph.is_some() || opts.script.is_some();
@@ -744,6 +790,9 @@ fn main() {
     // to choose differently.
     let mut avoided: Vec<&'static str> = Vec::new();
     let mut graph = graph;
+    if let Some(target_ns) = seek_ns {
+        attach_launch_seek(&mut graph, target_ns);
+    }
     loop {
         let clock = WallClock::new();
         let progress = PipelineProgress::new();
@@ -861,6 +910,14 @@ fn main() {
                 if !opts.quiet {
                     print_run_summary(&stats, started.elapsed().as_secs_f64());
                 }
+                // the sink publishes a position for every frame it takes
+                if let (Some(seconds), None) = (&opts.seek_seconds, progress.position()) {
+                    eprintln!(
+                        "pipeline error: no frame followed --seek {seconds}, \
+                         the target is past the end of the stream"
+                    );
+                    process::exit(1);
+                }
                 return;
             }
             Err(err) => {
@@ -880,6 +937,9 @@ fn main() {
                             "{factory} could not decode this stream ({err:?}), retrying without it"
                         );
                         graph = next;
+                        if let Some(target_ns) = seek_ns {
+                            attach_launch_seek(&mut graph, target_ns);
+                        }
                         continue;
                     }
                 }
@@ -890,6 +950,20 @@ fn main() {
                 process::exit(1);
             }
         }
+    }
+}
+
+fn seek_target_ns(seconds: &str) -> Result<u64, String> {
+    let invalid = || format!("--seek needs a time in seconds, got '{seconds}'");
+    let parsed: f64 = seconds.parse().map_err(|_| invalid())?;
+    let target = Duration::try_from_secs_f64(parsed).map_err(|_| invalid())?;
+    u64::try_from(target.as_nanos()).map_err(|_| invalid())
+}
+
+fn attach_launch_seek(graph: &mut Graph<GraphNode>, target_ns: u64) {
+    if let Err(err) = attach_seek(graph, Seek::flush_to(target_ns)) {
+        eprintln!("g2g-launch: --seek: {err}");
+        process::exit(1);
     }
 }
 

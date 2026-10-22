@@ -196,6 +196,7 @@ Highest leverage first:
 
 ## Containers
 
+- **Accurate seek in the byte-stream demuxers.** `tsdemux`, `matroskademux`, `flvdemux`, `oggdemux` and `fmp4demux` restart a seek at the first keyframe at or after the target. Keep the units from the keyframe before the target and send a segment starting at the target, as `Mp4Src` does, in the shared `DemuxSeek`.
 - **FLV:** Speex decode (no Speex encoder exists anywhere to build a validated
   decode vector, and gst's header-in-tag layout is rejected by libavcodec, so
   wiring a decoder would be an unvalidated claim).

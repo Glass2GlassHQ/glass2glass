@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{SeekController, SourceLoop};
+use g2g_core::runtime::{SeekController, SeekFormat, SourceLoop};
 use g2g_core::{
     BusHandle, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming,
     G2gError, MemoryDomain, OutputSink, PipelinePacket, Rate, SeekFlags, Segment, Stream,
@@ -161,6 +161,14 @@ impl SourceLoop for Mp4Src {
     /// publishes it on the progress handle and posts `DurationChanged`.
     fn query_duration(&self) -> Option<u64> {
         self.header.as_ref().and_then(|h| h.duration_ns)
+    }
+
+    fn seek_format(&self) -> Option<SeekFormat> {
+        Some(SeekFormat::Time)
+    }
+
+    fn set_seek(&mut self, controller: SeekController) {
+        self.seek = Some(controller);
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
@@ -315,6 +323,9 @@ impl SourceLoop for Mp4Src {
                         gop_start = keyframe_index_for(&samples, new_seg.stop.unwrap_or(u64::MAX));
                         gop_end = gop_end_after(&samples, gop_start);
                         i = gop_start;
+                    } else if every_sample_ends_by(&samples, seek.start) {
+                        // past the end: emit nothing rather than the last GOP
+                        i = samples.len();
                     } else {
                         i = keyframe_index_for(&samples, seek.start);
                     }
@@ -417,6 +428,12 @@ fn keyframe_index_for(samples: &[Sample], target_ns: u64) -> usize {
         .rfind(|(_, s)| s.keyframe && s.pts_ns <= target_ns)
         .map(|(i, _)| i)
         .unwrap_or(0)
+}
+
+fn every_sample_ends_by(samples: &[Sample], target_ns: u64) -> bool {
+    samples
+        .iter()
+        .all(|s| s.pts_ns.saturating_add(s.duration_ns) <= target_ns)
 }
 
 /// Exclusive end of the GOP opened by the sync sample at `gop_start`: the next

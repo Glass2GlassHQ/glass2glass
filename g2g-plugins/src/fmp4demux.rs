@@ -103,7 +103,7 @@ impl Fmp4Demux {
     /// which a time seek drives to reposition the stream. On the resulting
     /// `Flush` the parser resets and re-syncs from the keyframe at/after target.
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
-        self.seek.with(app, upstream);
+        AsyncElement::set_seek(&mut self, app, upstream);
         self
     }
 
@@ -310,6 +310,14 @@ impl Fmp4Demux {
 }
 
 impl AsyncElement for Fmp4Demux {
+    fn seeks_upstream_bytes(&self) -> bool {
+        true
+    }
+
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.seek.with(app, upstream);
+    }
+
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where

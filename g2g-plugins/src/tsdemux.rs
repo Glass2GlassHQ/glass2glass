@@ -529,7 +529,7 @@ impl TsDemux {
     /// On a time seek the demuxer rewinds the source and re-syncs from the
     /// keyframe at/after the target.
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
-        self.seek.with(app, upstream);
+        AsyncElement::set_seek(&mut self, app, upstream);
         self
     }
 
@@ -815,6 +815,14 @@ impl TsDemux {
 }
 
 impl AsyncElement for TsDemux {
+    fn seeks_upstream_bytes(&self) -> bool {
+        true
+    }
+
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.seek.with(app, upstream);
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "MPEG-TS demuxer",

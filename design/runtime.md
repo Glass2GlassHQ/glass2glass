@@ -565,6 +565,18 @@ keyframe at or before the target so a decoder resumes cleanly, or for `shutdown`
 honours non-flushing repositioning seeks, an accumulating `Segment` with no `Flush`,
 as well as flushing ones.
 
+An application seeks a pipeline built from a launch string through
+`runtime::attach_seek(graph, seek)`. A source reports `seek_format()`, `Time` for
+`Mp4Src` and `Bytes` for `FileSrc`, and a demuxer reports `seeks_upstream_bytes()`
+when it serves a time seek by byte-seeking the source that feeds it. `attach_seek`
+finds the one time-seekable node, a time source or a demuxer fed straight by a
+byte source, gives it a controller with the seek already queued and the byte
+source its own, so the seek lands before the first frame. `g2g-launch --seek` is
+built on it. After a seek `Mp4Src` restarts at the keyframe at or before the
+target with the segment starting at the target, so decoders drop the frames before
+it, while the byte-stream demuxers restart at the first keyframe at or after the
+target. A seek past the end gives no frames, which g2g-launch reports as an error.
+
 ### Re-preroll and byte-source seek
 
 A paused, prerolled pipeline backpressures its source, so a flushing seek issued now
