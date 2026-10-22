@@ -772,6 +772,21 @@ forwarded in-band ahead of the first frame as decoder extradata). An
 the FLV's tags carry, so a VP6 or Sorenson FLV does not plug the default H.264
 port.
 
+`decodebin` takes gst `playbin`'s `current-video` and `current-audio` (-1, the
+default, leaves the choice to it). An index narrows the listed streams to the Nth
+of that kind in the hook's order, which is container order, the order `ffprobe`
+and `ffmpeg -map 0:a:N` count. Setting only one of the two also limits decodebin
+to that kind. An index past the last stream fails `StreamIndexOutOfRange` with the
+count. The expansion refuses to guess, with `StreamIndexUnsupported`, when the
+container has streams the demuxer drops (they still count in the order), when the
+chosen stream's demux selection is the same as an earlier one's (a demux that
+selects only by codec emits the first), when the input is no container a hook
+lists, and on a `decodebin name=d` fan-out. The mp4, Matroska and TS hooks pin
+each selection to the container's track id (`qtdemux track-id`, `matroskademux
+track-number`, `tsdemux pid`, each 0 for the first track of the `stream=` codec),
+so a second track of the same codec is reachable. A pin naming no track of that
+codec fails the run.
+
 A codec with no typed `VideoCodec` / `AudioFormat` still decodes when libavcodec
 has a decoder for it, behind the `ffmpeg-long-tail` feature. `avidemux`, the mp4
 demuxers, `matroskademux` and `wavparse` forward a stream they would otherwise drop as
