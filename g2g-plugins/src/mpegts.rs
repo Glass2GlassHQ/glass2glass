@@ -1275,12 +1275,16 @@ fn drain_complete_sections(
 pub struct TsPacketSplitter {
     buffer: Vec<u8>,
     locked_stride: Option<usize>,
+    // the last stride a following sync byte confirmed, kept across a resync
+    confirmed_stride: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum StrideProbe {
     Locked(usize),
     Tentative(usize),
+    // nothing past this packet is buffered yet, so its sync byte is unconfirmed
+    Unconfirmed,
     FalseSync,
 }
 
@@ -1325,9 +1329,23 @@ impl TsPacketSplitter {
             let stride = match probe {
                 StrideProbe::Locked(stride) => {
                     self.locked_stride = Some(stride);
+                    self.confirmed_stride = Some(stride);
                     stride
                 }
-                StrideProbe::Tentative(stride) => stride,
+                StrideProbe::Tentative(stride) => {
+                    self.confirmed_stride = Some(stride);
+                    stride
+                }
+                // a sync byte inside an M2TS timestamp prefix passes for a packet until the next one shows
+                StrideProbe::Unconfirmed
+                    if !end_of_stream
+                        && self
+                            .confirmed_stride
+                            .is_some_and(|stride| stride != TS_PACKET_LEN) =>
+                {
+                    break
+                }
+                StrideProbe::Unconfirmed => TS_PACKET_LEN,
                 StrideProbe::FalseSync => {
                     start += 1;
                     continue;
@@ -1350,8 +1368,7 @@ fn probe_stride(packet_start: &[u8]) -> StrideProbe {
         };
         return match confirmed {
             STRIDE_LOCK_PACKETS => StrideProbe::Locked(stride),
-            // nothing past this packet is buffered yet, and its first 188 bytes are the packet at any stride
-            0 => StrideProbe::Tentative(TS_PACKET_LEN),
+            0 => StrideProbe::Unconfirmed,
             _ => StrideProbe::Tentative(stride),
         };
     }

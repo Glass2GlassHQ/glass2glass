@@ -35,6 +35,13 @@ const ACCESS_UNIT_ALIGNED_CONFIRMATIONS: u8 = 2;
 pub(crate) type FramedAccessUnit = (Vec<u8>, FrameTiming);
 
 #[derive(Debug)]
+struct BufferedInput {
+    offset: usize,
+    timing: FrameTiming,
+    stamp_taken: bool,
+}
+
+#[derive(Debug)]
 pub(crate) struct AccessUnitFramer {
     /// H.264 / H.265 Annex-B lets a zero byte ahead of `00 00 01` belong to the
     /// start code. The MPEG video streams do not: that zero ends the unit before.
@@ -50,8 +57,8 @@ pub(crate) struct AccessUnitFramer {
     search_from: usize,
     /// Whether the access unit in progress already holds a picture.
     seen_picture: bool,
-    /// Timing captured when the first byte of the head access unit arrived.
-    head_timing: FrameTiming,
+    // each buffered input's offset in `pending` and timing, and whether an access unit has taken its stamp
+    inputs: Vec<BufferedInput>,
     /// Consecutive buffers that began exactly where an access unit begins. At
     /// [`ACCESS_UNIT_ALIGNED_CONFIRMATIONS`] the trailing access unit is emitted
     /// with the buffer it arrived in instead of waiting for the next start
@@ -72,7 +79,7 @@ impl AccessUnitFramer {
             unit_floor: 0,
             search_from: 0,
             seen_picture: false,
-            head_timing: FrameTiming::default(),
+            inputs: Vec::new(),
             aligned_runs: 0,
             input_splits_access_units: false,
         }
@@ -88,7 +95,7 @@ impl AccessUnitFramer {
         classify: impl Fn(&[u8]) -> Option<StartCodeRole>,
     ) -> Vec<FramedAccessUnit> {
         let boundary = self.append(bytes, timing);
-        self.frame_appended(boundary, timing, classify)
+        self.frame_appended(boundary, classify)
     }
 
     // a refused conversion leaves nothing of `bytes` buffered
@@ -104,23 +111,66 @@ impl AccessUnitFramer {
             self.pending.truncate(boundary);
             return None;
         }
-        Some(self.frame_appended(boundary, timing, classify))
+        Some(self.frame_appended(boundary, classify))
     }
 
     // the offset in `pending` where `bytes` begin
     fn append(&mut self, bytes: &[u8], timing: FrameTiming) -> usize {
-        if self.pending.is_empty() {
-            self.head_timing = timing;
-        }
         let boundary = self.pending.len();
+        self.inputs.push(BufferedInput {
+            offset: boundary,
+            timing,
+            stamp_taken: false,
+        });
         self.pending.extend_from_slice(bytes);
         boundary
+    }
+
+    // A stamp names the first access unit that starts in its input, so later ones in that input go unstamped.
+    fn timing_of_unit_at(&mut self, start: usize) -> FrameTiming {
+        let input = self
+            .inputs
+            .iter_mut()
+            .rev()
+            .find(|input| input.offset <= start)
+            .expect("the first buffered input sits at offset 0");
+        if core::mem::replace(&mut input.stamp_taken, true) {
+            FrameTiming {
+                pts_ns: FrameTiming::PTS_NONE,
+                ..input.timing
+            }
+        } else {
+            input.timing
+        }
+    }
+
+    // An input that ends before the scan reached, with no access unit starting in it, names nothing.
+    fn drop_inputs_without_a_unit(&mut self) {
+        let starts = &self.access_unit_starts;
+        let scanned_through = self.search_from;
+        let ends: Vec<usize> = self
+            .inputs
+            .iter()
+            .skip(1)
+            .map(|input| input.offset)
+            .collect();
+        let mut index = 0;
+        self.inputs.retain(|input| {
+            let end = ends.get(index).copied();
+            index += 1;
+            let Some(end) = end.filter(|end| *end <= scanned_through) else {
+                return true;
+            };
+            input.offset == 0
+                || starts
+                    .iter()
+                    .any(|start| (input.offset..end).contains(start))
+        });
     }
 
     fn frame_appended(
         &mut self,
         boundary: usize,
-        timing: FrameTiming,
         classify: impl Fn(&[u8]) -> Option<StartCodeRole>,
     ) -> Vec<FramedAccessUnit> {
         if self.pending.len() > MAX_ACCESS_UNIT_BYTES {
@@ -128,6 +178,7 @@ impl AccessUnitFramer {
         }
 
         self.scan(classify);
+        self.drop_inputs_without_a_unit();
         if self.access_unit_starts.binary_search(&boundary).is_err() {
             self.input_splits_access_units = true;
         } else if boundary > 0 {
@@ -149,16 +200,20 @@ impl AccessUnitFramer {
             // at most one access unit buffered, still open
             return Vec::new();
         };
-        let access_units = self.split_off_complete(complete_through, timing);
-        self.head_timing = timing;
-        access_units
+        self.split_off_complete(complete_through)
     }
 
     /// Everything still buffered, as one access unit (end of stream).
     pub(crate) fn finish(&mut self) -> Option<FramedAccessUnit> {
+        if self.pending.is_empty() {
+            self.reset_scan();
+            return None;
+        }
+        let start = self.access_unit_starts.first().copied().unwrap_or(0);
+        let timing = self.timing_of_unit_at(start);
         let pending = core::mem::take(&mut self.pending);
         self.reset_scan();
-        (!pending.is_empty()).then_some((pending, self.head_timing))
+        Some((pending, timing))
     }
 
     /// Drop everything buffered (a seek discontinuity).
@@ -168,6 +223,7 @@ impl AccessUnitFramer {
     }
 
     fn reset_scan(&mut self) {
+        self.inputs.clear();
         self.access_unit_starts.clear();
         self.unit_floor = 0;
         self.search_from = 0;
@@ -210,15 +266,15 @@ impl AccessUnitFramer {
         }
     }
 
-    fn split_off_complete(
-        &mut self,
-        complete_through: usize,
-        timing: FrameTiming,
-    ) -> Vec<FramedAccessUnit> {
+    fn split_off_complete(&mut self, complete_through: usize) -> Vec<FramedAccessUnit> {
         let retained_from = self
             .access_unit_starts
             .partition_point(|&start| start < complete_through);
         let complete_starts: Vec<usize> = self.access_unit_starts.drain(..retained_from).collect();
+        let timings: Vec<FrameTiming> = complete_starts
+            .iter()
+            .map(|&start| self.timing_of_unit_at(start))
+            .collect();
         let retained = self.pending.split_off(complete_through);
         let mut complete = core::mem::replace(&mut self.pending, retained);
 
@@ -230,23 +286,28 @@ impl AccessUnitFramer {
             }
             self.unit_floor -= complete_through;
             self.search_from -= complete_through;
+            // the input the cut falls in keeps going, from offset 0
+            let continuing = self
+                .inputs
+                .iter()
+                .rposition(|input| input.offset <= complete_through)
+                .expect("the first buffered input sits at offset 0");
+            self.inputs.drain(..continuing);
+            for input in &mut self.inputs {
+                input.offset = input.offset.saturating_sub(complete_through);
+            }
         }
 
         let Some((&first_start, later_starts)) = complete_starts.split_first() else {
             return Vec::new();
         };
         let mut access_units = Vec::with_capacity(complete_starts.len());
-        for &start in later_starts.iter().rev() {
+        for (&start, &timing) in later_starts.iter().zip(&timings[1..]).rev() {
             access_units.push((complete.split_off(start), timing));
         }
         // bytes ahead of the first start code belong to no access unit
         complete.drain(..first_start);
-        let head_timing = if first_start == 0 {
-            self.head_timing
-        } else {
-            timing
-        };
-        access_units.push((complete, head_timing));
+        access_units.push((complete, timings[0]));
         access_units.reverse();
         access_units
     }
@@ -384,6 +445,22 @@ mod tests {
         vec![
             0, 0, 1, 0xB3, payload, 0, 0, 1, 0x00, payload, 0, 0, 1, 0x01, payload,
         ]
+    }
+
+    #[test]
+    fn a_buffer_stamp_names_only_the_first_access_unit_starting_in_it() {
+        const FIRST_PTS_NS: u64 = 5;
+        const SECOND_PTS_NS: u64 = 9;
+        let mut framer = AccessUnitFramer::new(false);
+        let mut emitted = framer.push(
+            &[picture(1), picture(2)].concat(),
+            timing(FIRST_PTS_NS),
+            mpeg_classify,
+        );
+        emitted.extend(framer.push(&picture(3), timing(SECOND_PTS_NS), mpeg_classify));
+        emitted.extend(framer.finish());
+        let stamps: Vec<u64> = emitted.iter().map(|(_, timing)| timing.pts_ns).collect();
+        assert_eq!(stamps, [FIRST_PTS_NS, FrameTiming::PTS_NONE, SECOND_PTS_NS]);
     }
 
     #[test]

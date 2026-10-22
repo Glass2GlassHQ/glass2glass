@@ -461,3 +461,30 @@ fn decodebin_probes_the_pmt_at_every_packet_stride() {
         );
     }
 }
+
+#[tokio::test]
+async fn m2ts_read_in_short_chunks_keeps_every_access_unit() {
+    // every other arrival timestamp holds a sync byte, which a read ending before the next packet takes for one
+    const PLAIN_PREFIX: [u8; M2TS_PREFIX_LEN] = [0x00, 0x00, 0x00, 0x00];
+    const SYNC_LOOKALIKE_PREFIX: [u8; M2TS_PREFIX_LEN] = [0x00, SYNC_BYTE, 0x00, 0x00];
+    let (access_units, ts) = stride_test_stream();
+    let wrapped: Vec<u8> = ts
+        .chunks(TS_PACKET_LEN)
+        .enumerate()
+        .flat_map(|(index, packet)| {
+            let prefix = if index % 2 == 0 {
+                SYNC_LOOKALIKE_PREFIX
+            } else {
+                PLAIN_PREFIX
+            };
+            [prefix.as_slice(), packet].concat()
+        })
+        .collect();
+    let chunks: Vec<&[u8]> = wrapped.chunks(TS_PACKET_LEN).collect();
+    let demuxed: Vec<Vec<u8>> = demux_h264(&chunks)
+        .await
+        .into_iter()
+        .map(|(data, _)| data)
+        .collect();
+    assert_eq!(demuxed, access_units);
+}

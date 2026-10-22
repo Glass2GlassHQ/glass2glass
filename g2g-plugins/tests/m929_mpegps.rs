@@ -356,8 +356,13 @@ async fn an_mpeg1_program_stream_demuxes_video_and_audio() {
         Vec::new(),
         "an audio pad has nothing to refine"
     );
-    let apts: Vec<u64> = aframes.iter().map(|f| f.timing.pts_ns).collect();
-    assert!(apts.windows(2).all(|w| w[1] >= w[0]), "audio pts monotonic");
+    // a unit whose packet carried no stamp goes out at 0, for the parser to count on from the last stamp
+    let apts: Vec<u64> = aframes
+        .iter()
+        .map(|f| f.timing.pts_ns)
+        .filter(|pts| *pts != 0)
+        .collect();
+    assert!(apts.windows(2).all(|w| w[1] > w[0]), "audio pts rise");
     let _ = std::fs::remove_file(path);
 }
 
@@ -1855,5 +1860,110 @@ async fn open_gop_b_frames_before_the_first_i_frame_stay_in_the_segment() {
     assert!(
         frames.iter().all(|f| seg.presents(f.timing.pts_ns)),
         "every picture presents inside {seg:?}"
+    );
+}
+
+const PES_TICKS_PER_SECOND: u64 = 90_000;
+const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+// 1152 samples at 48 kHz
+const MP2_FRAME_TICKS: u64 = 2_160;
+const AC3_FRAME_LEN: usize = 256;
+
+fn ticks_to_ns(ticks: u64) -> u64 {
+    ticks * NANOSECONDS_PER_SECOND / PES_TICKS_PER_SECOND
+}
+
+fn frame_pts(sink: &CollectSink) -> Vec<u64> {
+    sink.frames().iter().map(|f| f.timing.pts_ns).collect()
+}
+
+#[tokio::test]
+async fn an_audio_packet_without_a_stamp_does_not_reuse_the_last_one() {
+    const FIRST_PTS: u64 = 9_000;
+    let mut file = Vec::new();
+    let packets = [
+        (Some(FIRST_PTS), 2),
+        (None, 2),
+        (Some(FIRST_PTS + 4 * MP2_FRAME_TICKS), 1),
+    ];
+    for (pts, frames) in packets {
+        let payload: Vec<u8> = (0..frames).flat_map(|i| mp2_frame(i as u8)).collect();
+        file.extend_from_slice(&PACK);
+        file.extend_from_slice(&pes(0xC0, pts, &payload));
+    }
+    let out = demux(&file, PsStream::Mp2).await;
+    // an unstamped unit goes out at 0, which the audio parsers read as no stamp and count on from the last one
+    assert_eq!(
+        frame_pts(&out),
+        [
+            ticks_to_ns(FIRST_PTS),
+            0,
+            ticks_to_ns(FIRST_PTS + 4 * MP2_FRAME_TICKS)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_stamp_held_behind_a_straddling_frame_names_the_frame_after_it() {
+    const FIRST_PTS: u64 = 9_000;
+    const SECOND_PTS: u64 = 18_000;
+    const HEAD_OF_SECOND_FRAME: usize = 100;
+    let frames: Vec<Vec<u8>> = (0..4)
+        .map(|tag| ac3_syncframe(AC3_FRAME_LEN, tag))
+        .collect();
+    let stream = frames.concat();
+    let cut = AC3_FRAME_LEN + HEAD_OF_SECOND_FRAME;
+    let mut file = Vec::from(PACK);
+    file.extend_from_slice(&pes_ac3(1, Some(FIRST_PTS), &stream[..cut]));
+    file.extend_from_slice(&PACK);
+    // the pointer names the third frame, the first one to start in this packet
+    let third_frame_pointer = (2 * AC3_FRAME_LEN - cut + 1) as u16;
+    file.extend_from_slice(&pes_ac3(
+        third_frame_pointer,
+        Some(SECOND_PTS),
+        &stream[cut..],
+    ));
+    let out = demux(&file, PsStream::Ac3).await;
+    let units: Vec<(Vec<u8>, u64)> = out
+        .frames()
+        .iter()
+        .map(|f| (bytes(f), f.timing.pts_ns))
+        .collect();
+    assert_eq!(
+        units,
+        [
+            (frames[0].clone(), ticks_to_ns(FIRST_PTS)),
+            (frames[1].clone(), 0),
+            (
+                [frames[2].clone(), frames[3].clone()].concat(),
+                ticks_to_ns(SECOND_PTS)
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn the_tail_of_a_picture_ahead_of_the_first_header_is_dropped() {
+    const FRAGMENT_PTS: u64 = 9_000;
+    const SEQUENCE_PTS: u64 = 18_000;
+    const NEXT_PTS: u64 = 27_000;
+    // a slice of a picture whose header came before the stream was cut
+    let mut fragment = Vec::from([0x00u8, 0x00, 0x01, 0x01]);
+    fragment.extend_from_slice(&[0x42u8; 64]);
+    let mut file = Vec::new();
+    for (pts, unit) in [
+        (FRAGMENT_PTS, fragment),
+        (SEQUENCE_PTS, video_unit(720, 480, 1)),
+        (NEXT_PTS, picture_unit(2)),
+    ] {
+        file.extend_from_slice(&PACK);
+        file.extend_from_slice(&pes(0xE0, Some(pts), &unit));
+    }
+    let out = demux(&file, PsStream::Mpeg2).await;
+    let frames = out.frames();
+    assert_eq!(bytes(frames[0]), video_unit(720, 480, 1));
+    assert_eq!(
+        frame_pts(&out),
+        [ticks_to_ns(SEQUENCE_PTS), ticks_to_ns(NEXT_PTS)]
     );
 }

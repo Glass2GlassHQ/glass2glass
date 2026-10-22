@@ -314,6 +314,10 @@ impl AudioAligner {
                     break;
                 }
                 end += len;
+                // the held stamp names the frame after the one that straddled into its packet
+                if self.next_ts.is_some() {
+                    break;
+                }
             }
             if end > 0 {
                 let unit: Vec<u8> = self.carry.drain(..end).collect();
@@ -325,10 +329,9 @@ impl AudioAligner {
                     sequence: None,
                     data: unit,
                 });
-                if let Some((pts, dts)) = self.next_ts.take() {
-                    self.pts_90khz = pts;
-                    self.dts_90khz = dts;
-                }
+                // a unit with no stamp of its own is left unstamped, the stamp just spent is behind it
+                (self.pts_90khz, self.dts_90khz) = self.next_ts.take().unwrap_or((None, None));
+                continue;
             }
             // The front is not a whole frame. Either the rest has yet to arrive,
             // or the stream broke mid-frame and sync has to be re-acquired.
@@ -367,8 +370,10 @@ const MAX_MARKS: usize = 256;
 ///
 /// A unit runs from one picture (with any sequence / GOP header that opens it)
 /// up to the next, and takes the timestamp of the PES packet its first byte fell
-/// in. Everything is bounded: a stream that never shows a second picture is
-/// dropped at [`MAX_UNIT_BYTES`] rather than buffered forever.
+/// in. Bytes ahead of the stream's first header are the tail of a picture whose
+/// start was never read, so they are dropped. Everything is bounded: a stream
+/// that never shows a second picture is dropped at [`MAX_UNIT_BYTES`] rather
+/// than buffered forever.
 #[derive(Debug, Default)]
 struct VideoReframer {
     buf: Vec<u8>,
@@ -382,6 +387,8 @@ struct VideoReframer {
     /// Offset of the first sequence / GOP header seen after that picture: it
     /// opens the next unit, not this one.
     cut: Option<usize>,
+    // whether a picture, sequence or GOP header has been read since the last reset
+    opened: bool,
 }
 
 impl VideoReframer {
@@ -428,6 +435,24 @@ impl VideoReframer {
         self.scanned = 0;
         self.have_picture = false;
         self.cut = None;
+        self.opened = false;
+    }
+
+    // Drop the bytes ahead of `at`. The packet `at` fell in stamps the unit that opens there.
+    fn drop_leading_fragment(&mut self, at: usize) {
+        let stamp = self
+            .marks
+            .iter()
+            .rev()
+            .find(|&&(offset, _, _)| offset <= at)
+            .map_or((0, None, None), |&(_, pts, dts)| (0, pts, dts));
+        self.buf.drain(..at);
+        self.marks.retain(|&(offset, _, _)| offset > at);
+        for mark in self.marks.iter_mut() {
+            mark.0 -= at;
+        }
+        self.marks.insert(0, stamp);
+        self.scanned -= at;
     }
 
     /// Emit whatever is buffered as a final unit (end of stream).
@@ -453,9 +478,14 @@ impl VideoReframer {
             .windows(4)
             .position(|w| w[0] == 0 && w[1] == 0 && w[2] == 1)
         {
-            let at = self.scanned + rel;
+            let mut at = self.scanned + rel;
             let id = self.buf[at + 3];
             self.scanned = at + 4;
+            if !self.opened && matches!(id, 0x00 | 0xB3 | 0xB8) {
+                self.opened = true;
+                self.drop_leading_fragment(at);
+                at = 0;
+            }
             match id {
                 // Picture header: the second one in a unit ends the first.
                 0x00 => {
