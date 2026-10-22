@@ -246,6 +246,7 @@ pub enum SeekFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ElementSeekRoute {
     // from the whole stream it holds, so its upstream never repositions
     Buffered,

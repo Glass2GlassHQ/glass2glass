@@ -577,7 +577,9 @@ restart at the keyframe at or before the target with a segment starting at the
 target, so decoders drop the earlier frames, while the byte-stream demuxers restart
 at the first keyframe at or after the target. `tsdemux` counts the target from the
 file's first PTS, as ffmpeg's `-ss` does (gst counts from the first PCR). A seek
-past the end gives no frames, which g2g-launch reports as an error.
+past the end gives no frames, which g2g-launch reports as an error. `Mp4Demux`
+serves only a seek queued before its EOS drain, and one that arrives once its
+samples have gone out fails the run with `G2gError::SeekRefused`.
 
 ### Re-preroll and byte-source seek
 

@@ -23,13 +23,13 @@ use core::pin::Pin;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::log::short_type_name;
+use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
-    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, ProResVariant, PropError,
-    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment, VideoCodec,
+    g2g_error, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    Dim, ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, ProResVariant,
+    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment, VideoCodec,
 };
 
 use crate::aacparse::{is_raw_aac_config, require_adts};
@@ -229,13 +229,21 @@ impl Mp4Demux {
             .map(|seek| seek.start);
         match self.select {
             StreamSelect::Video | StreamSelect::VideoNamed(_) => {
-                self.drain_video(seek_target_ns, out).await
+                self.drain_video(seek_target_ns, out).await?
             }
             StreamSelect::RawVideo(format) => {
-                self.drain_raw_video(format, seek_target_ns, out).await
+                self.drain_raw_video(format, seek_target_ns, out).await?
             }
-            StreamSelect::Audio(format) => self.drain_audio(format, seek_target_ns, out).await,
+            StreamSelect::Audio(format) => self.drain_audio(format, seek_target_ns, out).await?,
         }
+        if self.seek.as_ref().is_some_and(SeekController::has_pending) {
+            g2g_error!(
+                Target::category(short_type_name::<Self>()),
+                "a seek arrived after every sample went out, it is not served"
+            );
+            return Err(G2gError::SeekRefused);
+        }
+        Ok(())
     }
 
     /// Parse the buffered file's first audio track of the `selected` format and

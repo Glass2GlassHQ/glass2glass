@@ -45,10 +45,17 @@ pub enum G2gError {
     Timeout,
     /// A demux built with `ports` output ports was handed a batch of `streams`
     /// streams (M1233): each stream needs its own port.
-    PortCountMismatch { ports: usize, streams: usize },
+    PortCountMismatch {
+        ports: usize,
+        streams: usize,
+    },
     /// The frame of mux input `index` was already taken out of its batch by an
     /// earlier consumer (M1233).
-    BatchFrameTaken { index: usize },
+    BatchFrameTaken {
+        index: usize,
+    },
+    // the element holding the seek controller can no longer serve the seek it was given
+    SeekRefused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

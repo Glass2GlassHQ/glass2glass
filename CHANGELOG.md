@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1809: `qtdemux` fails with `SeekRefused` on a seek that arrives once its samples have gone out.
 - M1807: `g2g-launch` ends quietly when its stdout closes, as `gst-launch` does.
 - M1806: `tsdemux` counts a seek target from the file's first PTS, and `qtdemux` seeks.
 - M1803: `decodebin current-video=N` / `current-audio=N` decode the Nth video or audio stream of an mp4, mkv or ts file.
