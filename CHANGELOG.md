@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1824: mpegpsdemux stops reusing the previous PES pts for unstamped audio, parsers give a PES stamp only to its first access unit, and tsdemux reads M2TS whole at any read size.
 - M1831: AAC whose SBR output rate is not double its core rate goes raw instead of ADTS, and audioresample stamps its EOS tail after the last frame.
 - M1830: the audio frame parsers keep the frame ahead of a mid-stream ID3v2 tag, and AacParse finds the first ADTS sync past junk longer than one read.
 - M1829: Matroska Vorbis output takes each packet's own pts, and laced Vorbis frames take their lapped block durations.

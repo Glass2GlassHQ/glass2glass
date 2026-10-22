@@ -244,9 +244,16 @@ Highest leverage first:
     the second MP2 stream of `sample_mpeg_program_stream_scr.mpg`.
   - A fan-in muxer that refuses a codec reports a bare `CapsMismatch`: name the
     muxer and the codec.
-  - Reordered H.264 in MP4 comes out with pts going backwards
-    (`h264/late-sei.mp4`, `h264/mixed-nal-coding.mp4`, `mpeg4/packed_bframes.avi`),
-    and `hevc/two_first_slice.mp4` gives 35 frames where gst and ffmpeg give 34.
+  - `mpeg4/packed_bframes.avi` comes out with pts going backwards: two VOPs per
+    chunk need splitting. `h264/mixed-nal-coding.mp4` gives 5 frames where
+    ffprobe gives 10, and `hevc/two_first_slice.mp4` 35 where gst and ffmpeg give
+    34, repeating 2.000 s.
+  - A TS or PS stream whose first PES carries no pts puts its first units at 0
+    where ffmpeg back-fills them from the next stamp (`mpeg2/t.mpg`, 0.06 s): hold
+    the leading units until the PID's first stamp, then back-fill.
+  - `mpegts/loewe.ts` LATM loses two frames mid-stream (14 where ffprobe gives
+    16), and `probe-format/roundup997` decodes a first MP2 frame ffmpeg rejects
+    as "Header missing".
   - qdraw in MOV decodes 2 of 12 frames (`quickdraw/Airplane.mov`).
   - WavParse with a tagged codec cuts payloads at the input chunk: XMA2 packets
     are 2048 bytes but `block_align` is 6 (`xma2/xma2-multistream-tail.xma` gives

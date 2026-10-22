@@ -1111,6 +1111,10 @@ reordering H.264 or H.265 stream, `temporal_reference` for MPEG-2. The first suc
 unit opens the timeline at 0 and an IDR restarts it one period after the latest
 picture. A stream with no declared rate leaves later units unset (`PTS_NONE`),
 as gst's `h264parse` and `h265parse` do, and decoders pass that through.
+A PES or container stamp names the first access unit starting in its packet. The
+shared access-unit framer and the program-stream audio aligner give it to that
+unit only, and later units in the same packet go out unstamped for the parser's
+synthesis to time.
 
 ## AV1 OBU streams
 
