@@ -797,6 +797,10 @@ parsed streams in the framing the demuxers already emit. A remux keeps the AAC
 priming and tail an MP4 edit list cuts whenever the target container has no edit
 list (mkv, ts, flv), as `ffmpeg -c copy` does.
 
+A `NoDecodeChain` or `NoParseChain` error quotes the unplugged input through
+`Caps::to_gst_string`, gst caps syntax with wildcard and range fields left out, so
+the message names the codec and any fixed size, rate or channel count.
+
 A codec with no typed `VideoCodec` / `AudioFormat` still decodes when libavcodec
 has a decoder for it, behind the `ffmpeg-long-tail` feature. `avidemux`, the mp4
 demuxers, `matroskademux` and `wavparse` forward a stream they would otherwise drop as

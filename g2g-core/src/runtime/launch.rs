@@ -248,6 +248,13 @@ pub enum ParseError {
     NoParseChain(String),
 }
 
+impl ParseError {
+    // quotes the caps in gst's caps syntax, which a person reads more easily than the Debug form
+    pub fn no_decode_chain(input: &Caps) -> Self {
+        ParseError::NoDecodeChain(input.to_gst_string())
+    }
+}
+
 impl From<GraphError> for ParseError {
     fn from(e: GraphError) -> Self {
         ParseError::Graph(e)
@@ -893,7 +900,7 @@ fn parsebin_chain(
             MemoryDomainKind::System,
             avoided,
         )
-        .ok_or_else(|| ParseError::NoParseChain(alloc::format!("{input:?}")))?;
+        .ok_or_else(|| ParseError::NoParseChain(input.to_gst_string()))?;
     if chain.is_empty() {
         if let Some(name) = registry.parser_name(input) {
             chain.push(build_element(registry, name, &[])?);
@@ -956,7 +963,7 @@ fn autoplug_for_consumer(
     let names = |target: &dyn Fn(&Caps) -> bool| {
         registry.autoplug_names_avoiding(input, target, DECODEBIN_MAX_DEPTH, preferred, avoided)
     };
-    let no_decode_chain = || ParseError::NoDecodeChain(alloc::format!("{input:?}"));
+    let no_decode_chain = || ParseError::no_decode_chain(input);
     let raw_names = names(&raw).ok_or_else(no_decode_chain)?;
     // the consumer picks only the output caps, so a pinned decoder or a demux's default stream stays
     let use_consumer_chain = names(&consumer_accepts) == Some(raw_names);
@@ -2552,7 +2559,7 @@ fn expand_fallbacksrc(
             let decoders = enable_audio
                 .then(|| plug(source_caps, audio_target))
                 .flatten()
-                .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{source_caps:?}")))?;
+                .ok_or_else(|| ParseError::no_decode_chain(source_caps))?;
             (
                 decoders,
                 audio_target,
@@ -2595,7 +2602,7 @@ fn expand_fallbacksrc(
         Some(origin) => {
             let built = origin.build(registry, restart, FallbackSourceRole::Fallback, unblock)?;
             let decoders = plug(&built.caps, target)
-                .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{:?}", built.caps)))?;
+                .ok_or_else(|| ParseError::no_decode_chain(&built.caps))?;
             fallback.push(Item::Prebuilt {
                 node: PrebuiltNode::Source(built.source),
                 name: Some(alloc::format!(
@@ -2729,7 +2736,7 @@ fn expand_uri_sources(
             let target = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
             let decoders = registry
                 .autoplug_avoiding(&caps, &target, DECODEBIN_MAX_DEPTH, preferred, avoided)
-                .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
+                .ok_or_else(|| ParseError::no_decode_chain(&caps))?;
             new_chain.push(Item::Prebuilt {
                 node: PrebuiltNode::Source(built.source),
                 name: None,
@@ -4159,7 +4166,7 @@ fn build_fallbacksrc_fanout(
                 settings.unblock.clone(),
             )?;
             let port = single_fallback_port(registry, &ports, &built.caps)
-                .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{:?}", built.caps)))?;
+                .ok_or_else(|| ParseError::no_decode_chain(&built.caps))?;
             let src = graph.add_source(GraphNodeRef::Source(built.source));
             name_node(&mut graph, &mut names, src, fallback_name)?;
             Some(FanoutFallback::OnePort {
@@ -4256,7 +4263,7 @@ fn plug_port_decode(
 ) -> Result<(), ParseError> {
     registry
         .decodebin_port(graph, from, to, port, target, DECODEBIN_MAX_DEPTH)
-        .map_err(|_| ParseError::NoDecodeChain(alloc::format!("{:?}", port.caps)))?;
+        .map_err(|_| ParseError::no_decode_chain(&port.caps))?;
     Ok(())
 }
 

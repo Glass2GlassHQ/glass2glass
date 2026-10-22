@@ -1087,9 +1087,9 @@ fn pinned_stream_selection(
 #[cfg(feature = "std")]
 fn map_decode_err(input: &Caps, e: DecodebinError) -> ParseError {
     match e {
-        DecodebinError::NoChain => ParseError::NoDecodeChain(alloc::format!("{input:?}")),
+        DecodebinError::NoChain => ParseError::no_decode_chain(input),
         DecodebinError::Graph(e) => ParseError::Graph(e),
-        _ => ParseError::NoDecodeChain(alloc::format!("{input:?}")),
+        _ => ParseError::no_decode_chain(input),
     }
 }
 
@@ -1126,8 +1126,8 @@ fn wire_subtitle_overlay(
         .position(|port| port.stream_type == StreamType::Video)
         .ok_or_else(|| ParseError::NoDecodeChain("subtitle overlay needs a video track".into()))?;
     if matches!(text_caps, Caps::SubPicture { .. }) {
-        let decoder = subpicture_decoder(text_caps)
-            .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{text_caps:?}")))?;
+        let decoder =
+            subpicture_decoder(text_caps).ok_or_else(|| ParseError::no_decode_chain(text_caps))?;
         let overlay = wire_overlay_av(
             reg,
             sinks,
