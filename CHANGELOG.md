@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1804: `parsebin` demuxes and parses without decoding, so `filesrc ! parsebin name=p p.video_0 ! mux. p.audio_0 ! mux.` remuxes a file.
 - M1811: `nvdec` repeats a VP9 frame that is still held downstream.
 - M1809: `qtdemux` fails with `SeekRefused` on a seek that arrives once its samples have gone out.
 - M1807: `g2g-launch` ends quietly when its stdout closes, as `gst-launch` does.

@@ -244,6 +244,8 @@ pub enum ParseError {
         count: usize,
     },
     StreamIndexUnsupported(String),
+    // a parsebin found no demuxer chain from its input caps to an elementary stream
+    NoParseChain(String),
 }
 
 impl From<GraphError> for ParseError {
@@ -408,11 +410,15 @@ impl core::fmt::Display for ParseError {
                 count,
             } => write!(
                 f,
-                "decodebin: current-{}={index}, but {source} has {count} {} stream(s)",
+                "current-{}={index}, but {source} has {count} {} stream(s)",
                 kind.name(),
                 kind.name()
             ),
-            ParseError::StreamIndexUnsupported(message) => write!(f, "decodebin: {message}"),
+            ParseError::StreamIndexUnsupported(message) => f.write_str(message),
+            ParseError::NoParseChain(caps) => write!(
+                f,
+                "parsebin: no demuxer chain from {caps} to an elementary stream"
+            ),
         }
     }
 }
@@ -854,11 +860,72 @@ fn apply_props<T: PropTarget>(
 /// Build the runnable [`Graph`] from parsed chains: flatten elements, resolve
 /// `t.` references into directed links, derive each element's role (and any tee's
 /// fan-out width) from its link degree, then construct and wire the nodes.
-/// `decodebin`: not an element, but a macro that expands, at parse time, into the
-/// chain of decoders / parsers the auto-plug search finds from its upstream caps
-/// down to raw video or audio (M193).
-fn is_decodebin(name: &str) -> bool {
-    matches!(name, "decodebin")
+/// `decodebin` and `parsebin`: not elements, but macros that expand, at parse
+/// time, into the chain the auto-plug search finds from their upstream caps:
+/// down to raw video or audio through decoders (M193), or for `parsebin` down to
+/// the parsed elementary stream, with no decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoplugBin {
+    Decode,
+    Parse,
+}
+
+fn autoplug_bin(name: &str) -> Option<AutoplugBin> {
+    match name {
+        "decodebin" => Some(AutoplugBin::Decode),
+        "parsebin" => Some(AutoplugBin::Parse),
+        _ => None,
+    }
+}
+
+// a parsebin plugs a demuxer while its input is still a container, then the stream's parser
+fn parsebin_chain(
+    registry: &Registry,
+    input: &Caps,
+    avoided: &[&str],
+) -> Result<Vec<Box<dyn DynAsyncElement>>, ParseError> {
+    let elementary = |caps: &Caps| !matches!(caps, Caps::ByteStream { .. });
+    let mut chain = registry
+        .autoplug_avoiding(
+            input,
+            &elementary,
+            DECODEBIN_MAX_DEPTH,
+            MemoryDomainKind::System,
+            avoided,
+        )
+        .ok_or_else(|| ParseError::NoParseChain(alloc::format!("{input:?}")))?;
+    if chain.is_empty() {
+        if let Some(name) = registry.parser_name(input) {
+            chain.push(build_element(registry, name, &[])?);
+        }
+    }
+    Ok(chain)
+}
+
+// a parsebin port goes through its stream's parser, if one is registered
+fn plug_port_parse(
+    registry: &Registry,
+    graph: &mut Graph<GraphNode>,
+    from: PadId,
+    to: PadId,
+    port: &UriFanoutPort,
+    policy: LinkPolicy,
+    capacity: Option<usize>,
+) -> Result<(), ParseError> {
+    let parser = registry
+        .parser_name(&port.caps)
+        .map(|name| build_element(registry, name, &[]))
+        .transpose()?;
+    let into_branch = match parser {
+        Some(parser) => {
+            let node = graph.add_transform(GraphNodeRef::Element(parser));
+            graph.link(from, node)?;
+            PadId::from(node)
+        }
+        None => from,
+    };
+    graph.link_full(into_branch, to, policy, capacity)?;
+    Ok(())
 }
 
 /// Depth bound for the decodebin auto-plug search: a parse + decode (+ a spare
@@ -946,19 +1013,21 @@ fn raw_for_consumer(caps: &Caps, consumer_constraint: Option<&CapsConstraint<'_>
         && consumer_constraint.is_none_or(|constraint| constraint.accepts(caps))
 }
 
-// the first stream with a decode chain to caps the consumer accepts
+// the first stream with a decode chain to caps the consumer accepts, or for a parsebin the
+// first stream the consumer takes as it is
 fn choose_container_stream(
     registry: &Registry,
     location: &str,
     mut streams: ContainerStreams,
+    bin: AutoplugBin,
     preferred: MemoryDomainKind,
     consumer: Option<&dyn DynAsyncElement>,
     avoided: &[&str],
 ) -> Result<PrimaryStream, ParseError> {
     let consumer_constraint = consumer.map(|element| element.caps_constraint_as_transform());
     let consumer_accepts = |c: &Caps| raw_for_consumer(c, consumer_constraint.as_ref());
-    let reaches_consumer = |stream: &PrimaryStream| {
-        registry
+    let reaches_consumer = |stream: &PrimaryStream| match bin {
+        AutoplugBin::Decode => registry
             .autoplug_names_avoiding(
                 &stream.caps,
                 &consumer_accepts,
@@ -966,7 +1035,10 @@ fn choose_container_stream(
                 preferred,
                 avoided,
             )
-            .is_some()
+            .is_some(),
+        AutoplugBin::Parse => consumer_constraint
+            .as_ref()
+            .is_none_or(|constraint| constraint.accepts(&stream.caps)),
     };
     let chosen = match streams.streams.iter().position(reaches_consumer) {
         Some(index) => index,
@@ -1169,7 +1241,7 @@ fn expand_decodebin(
     // inline `... ! decodebin ! ...` expands to a linear decode chain below.
     let referenced = referenced_names(&chains);
     let is_fanout_decodebin =
-        |spec: &ElementSpec| is_decodebin(&spec.name) && is_referenced(spec, &referenced);
+        |spec: &ElementSpec| autoplug_bin(&spec.name).is_some() && is_referenced(spec, &referenced);
 
     let mut out = Vec::with_capacity(chains.len());
     for chain in chains {
@@ -1186,14 +1258,16 @@ fn expand_decodebin(
                 // decodebin-select path; it is not linearly expandable.
                 Item::Element(spec) if is_fanout_decodebin(&spec) => {
                     if decodebin_stream_indexes(&spec)?.any_set() {
-                        return Err(ParseError::StreamIndexUnsupported(
-                            "a decodebin fan-out decodes every stream on its own branch, so current-video and current-audio apply to an inline decodebin only".to_string(),
-                        ));
+                        return Err(ParseError::StreamIndexUnsupported(alloc::format!(
+                            "a {name} fan-out exposes every stream on its own branch, so current-video and current-audio apply to an inline {name} only",
+                            name = spec.name
+                        )));
                     }
                     upstream = Some((spec.name.clone(), spec.props.clone()));
                     new_chain.push(Item::Element(spec));
                 }
-                Item::Element(spec) if is_decodebin(&spec.name) => {
+                Item::Element(spec) if autoplug_bin(&spec.name).is_some() => {
+                    let bin = autoplug_bin(&spec.name).expect("the arm matched an auto-plug bin");
                     let indexes = decodebin_stream_indexes(&spec)?;
                     let (pred, props) = upstream.as_ref().ok_or(ParseError::DecodebinNoUpstream)?;
                     let caps = resolve_upstream_caps(registry, pred, props)?;
@@ -1240,6 +1314,7 @@ fn expand_decodebin(
                             registry,
                             location,
                             streams_at_indexes(location, streams, indexes)?,
+                            bin,
                             preferred,
                             consumer.as_deref(),
                             avoided,
@@ -1249,9 +1324,11 @@ fn expand_decodebin(
                             None
                         }
                     };
-                    let crops_to_clean_aperture = primary
-                        .as_ref()
-                        .is_some_and(|stream| stream.has_clean_aperture);
+                    // a parsebin hands on coded pictures, which the crop cannot cut
+                    let crops_to_clean_aperture = bin == AutoplugBin::Decode
+                        && primary
+                            .as_ref()
+                            .is_some_and(|stream| stream.has_clean_aperture);
                     let chain_input = match primary {
                         Some(primary) => {
                             new_chain.push(Item::Element(ElementSpec {
@@ -1264,14 +1341,17 @@ fn expand_decodebin(
                         }
                         None => caps,
                     };
-                    let decoders = autoplug_for_consumer(
-                        registry,
-                        source,
-                        &chain_input,
-                        preferred,
-                        consumer.as_deref(),
-                        avoided,
-                    )?;
+                    let decoders = match bin {
+                        AutoplugBin::Decode => autoplug_for_consumer(
+                            registry,
+                            source,
+                            &chain_input,
+                            preferred,
+                            consumer.as_deref(),
+                            avoided,
+                        )?,
+                        AutoplugBin::Parse => parsebin_chain(registry, &chain_input, avoided)?,
+                    };
                     // Built here rather than named, so each element is
                     // constructed for the caps the search chose it to produce (a
                     // multi-format decoder emits the format the consumer takes,
@@ -3003,7 +3083,7 @@ fn build_graph(
     // a decoder onto every port (the decode-per-port that makes it `decodebin`, not a
     // bare demuxer). Behind a network source the URI's fan-out supplies the demuxer
     // and its source replaces the line's.
-    let mut decode_fanout_ports: Vec<Option<Vec<UriFanoutPort>>> =
+    let mut decode_fanout_ports: Vec<Option<(AutoplugBin, Vec<UriFanoutPort>)>> =
         (0..specs.len()).map(|_| None).collect();
     // Which port each link out of a fan-out node reads, filled for every node
     // whose ports are matched to its branches.
@@ -3016,7 +3096,10 @@ fn build_graph(
             .collect()
     };
     for ei in 0..specs.len() {
-        if !is_decodebin(&specs[ei].name) || out_deg[ei] == 0 || prebuilt[ei].is_some() {
+        let Some(bin) = autoplug_bin(&specs[ei].name) else {
+            continue;
+        };
+        if out_deg[ei] == 0 || prebuilt[ei].is_some() {
             continue;
         }
         let upstream = links
@@ -3073,7 +3156,7 @@ fn build_graph(
             ports: kinds.len(),
         });
         demux_select_node[ei] = Some(demux);
-        decode_fanout_ports[ei] = Some(ports);
+        decode_fanout_ports[ei] = Some((bin, ports));
     }
     // `uridecodebin name=d` fan-out: the hook probed every port, so each `d.`
     // reference picks its port here and the wiring below decodes it.
@@ -3093,7 +3176,7 @@ fn build_graph(
             )?,
             ports: kinds.len(),
         });
-        decode_fanout_ports[ei] = Some(fanout.ports.clone());
+        decode_fanout_ports[ei] = Some((AutoplugBin::Decode, fanout.ports.clone()));
     }
     let is_select: Vec<bool> = (0..specs.len())
         .map(|ei| demux_select_node[ei].is_some() || fanout_links[ei].is_some())
@@ -3363,7 +3446,7 @@ fn build_graph(
         // branch consumer instead of a bare link, so each `d.video_0` / `d.audio_0`
         // branch receives DECODED (raw) frames. A text port carries `Text{Utf8}`
         // already, so it links straight through (no codec).
-        if let Some(ports) = &decode_fanout_ports[s] {
+        if let Some((bin, ports)) = &decode_fanout_ports[s] {
             let port = &ports[src.index as usize];
             // the port's own caps say what it carries, a bare `d.` request does not
             let kind = StreamType::of(&port.caps);
@@ -3372,7 +3455,14 @@ fn build_graph(
                     StreamType::Audio => &is_raw_audio,
                     _ => &is_raw_video,
                 };
-                plug_port_decode(registry, &mut graph, src, dst, port, target)?;
+                match bin {
+                    AutoplugBin::Decode => {
+                        plug_port_decode(registry, &mut graph, src, dst, port, target)?
+                    }
+                    AutoplugBin::Parse => {
+                        plug_port_parse(registry, &mut graph, src, dst, port, policy, capacity)?
+                    }
+                }
                 continue;
             }
         }
@@ -3466,6 +3556,7 @@ pub fn parse_launch_avoiding(
                 "queue"
                     | "queue2"
                     | "decodebin"
+                    | "parsebin"
                     | "uridecodebin"
                     | "playbin"
                     | "encodebin"

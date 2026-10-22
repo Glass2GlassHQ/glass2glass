@@ -787,6 +787,16 @@ track-number`, `tsdemux pid`, each 0 for the first track of the `stream=` codec)
 so a second track of the same codec is reachable. A pin naming no track of that
 codec fails the run.
 
+`parsebin` is decodebin's expansion stopped before the decoder. Inline it takes the
+same stream lists, stream choice and `current-video` / `current-audio` indexes,
+then plugs a demuxer while the input is still a container and the stream's parser
+(`Registry::parser_name`, the map decodebin uses) once it is elementary. As a fan-out
+(`parsebin name=p`) it builds the multi-output demuxer a decodebin fan-out builds
+and puts each port through its parser instead of a decode chain. The muxers take the
+parsed streams in the framing the demuxers already emit. A remux keeps the AAC
+priming and tail an MP4 edit list cuts whenever the target container has no edit
+list (mkv, ts, flv), as `ffmpeg -c copy` does.
+
 A codec with no typed `VideoCodec` / `AudioFormat` still decodes when libavcodec
 has a decoder for it, behind the `ffmpeg-long-tail` feature. `avidemux`, the mp4
 demuxers, `matroskademux` and `wavparse` forward a stream they would otherwise drop as

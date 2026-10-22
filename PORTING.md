@@ -47,7 +47,7 @@ and runs it against the standard registry. Supported syntax: linear chains,
 (`filesrc location=movie.mkv ! matroskademux name=d  d.video_0 ! ...  d.audio_0 ! ...`),
 inline caps filters (`! video/x-raw,format=NV12,width=640 !`), `queue`/`queue2`
 (mapped to a per-edge backpressure policy), `decodebin` / `uridecodebin` /
-`playbin` / `fallbacksrc`.
+`playbin` / `fallbacksrc` / `parsebin`.
 
 A **demuxer fan-out** (`matroskademux` / `tsdemux` / `qtdemux` fed by a file
 source) probes the file at parse time and splits it into its elementary streams,
@@ -75,6 +75,12 @@ feeding a multi-stream container, or `hlssrc` on a playlist of muxed streams, th
 g2g form of gst's `souphttpsrc ! hlsdemux ! decodebin name=d`. Behind any other
 source the parse fails and names it, and `uridecodebin uri=X name=d` is the line
 to use.)
+
+**`parsebin`** stops where `decodebin` would plug the decoder: inline or as a
+`parsebin name=p` fan-out it demuxes and parses, so `filesrc location=in.mp4 !
+parsebin name=p  p.video_0 ! queue ! m.  p.audio_0 ! queue ! m.  matroskamux
+name=m ! filesink location=out.mkv` remuxes a file. `decodebin`'s
+`current-video=N` / `current-audio=N` work on it too.
 
 **`uridecodebin uri=X name=d` fans out** the same way for any URI a fan-out probe
 understands: a local file, `rtsp://` (video and audio off one session), and HLS

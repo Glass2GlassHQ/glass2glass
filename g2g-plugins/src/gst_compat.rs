@@ -38,6 +38,7 @@ pub enum GstEquivalent {
 /// Launch keywords the parser handles that are not registry elements.
 static LAUNCH_KEYWORDS: &[&str] = &[
     "decodebin",
+    "parsebin",
     "encodebin",
     "encodebin2",
     "transcodebin",
@@ -199,11 +200,10 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
         "`ristsrc` outputs the MPEG-TS byte stream itself, so link it to `tsdemux` directly",
     )),
     // Launch keywords, not elements: the parser accepts `queue` / `queue2` /
-    // `decodebin` / `uridecodebin` / `playbin` and nothing else, so the gst
+    // `decodebin` / `parsebin` / `uridecodebin` / `playbin` and nothing else, so the gst
     // variants name the keyword they should be spelled as.
     ("multiqueue", GstEquivalent::Renamed("queue")),
     ("decodebin3", GstEquivalent::Renamed("decodebin")),
-    ("parsebin", GstEquivalent::Renamed("decodebin")),
     ("uridecodebin3", GstEquivalent::Renamed("uridecodebin")),
     ("urisourcebin", GstEquivalent::Renamed("uridecodebin")),
     ("playbin3", GstEquivalent::Renamed("playbin")),
