@@ -94,6 +94,15 @@ never answers `Raw`, since every byte sequence matches it, so `filesrc` reaches
 it only by extension or an explicit `bytestream-format=raw`, and no auto-plug
 candidate claims it.
 
+## Audio frame parsers
+
+`aacparse`, `mpegaudioparse` and `ac3parse` share `locate_frame`, which confirms a
+candidate frame by the sync header at its end, or by an ID3v2 tag there, since HLS
+segments of a bare ADTS or MP3 stream each open on one. A buffered tag found while
+scanning is skipped. `aacparse` holds input until the held bytes show LOAS, ADTS or a
+raw AudioSpecificConfig, up to 64 KiB or EOS, before it falls back to forwarding
+them as LATM.
+
 ## Uncompressed video in containers
 
 `avidemux`, `matroskademux` and `qtdemux` emit an uncompressed video stream as

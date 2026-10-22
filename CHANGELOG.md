@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1830: the audio frame parsers keep the frame ahead of a mid-stream ID3v2 tag, and AacParse finds the first ADTS sync past junk longer than one read.
 - M1829: Matroska Vorbis output takes each packet's own pts, and laced Vorbis frames take their lapped block durations.
 - M1823: avidemux counts empty video chunks as frame slots and reads every video chunk as one frame whatever dwSampleSize says.
 - M1835: `filesrc ! matroskademux ! decodebin` and `filesrc ! fmp4demux` on a fragmented file negotiate.
