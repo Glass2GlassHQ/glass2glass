@@ -29,6 +29,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     AsyncElement, AudioFormat, AudioShape, Caps, CapsConstraint, CapsSet, CapsTransform,
     ConfigureOutcome, ElementMetadata, FieldTransform, G2gError, MemoryDomain, OutputSink,
@@ -37,6 +38,15 @@ use g2g_core::{
 };
 
 use crate::audioconvert::{pcm_formats, read_sample, write_sample};
+
+// bytes one interleaved sample of every channel takes
+fn output_frame_bytes(format: AudioFormat, channels: u8) -> Result<usize, G2gError> {
+    format
+        .bytes_per_sample()
+        .map(|bytes| bytes * usize::from(channels))
+        .filter(|&bytes| bytes > 0)
+        .ok_or(G2gError::CapsMismatch)
+}
 
 /// `f64::floor` without `std` / libm: truncation rounds toward zero, so a
 /// negative non-integer needs one subtracted. `rel` lives in a small range
@@ -216,9 +226,8 @@ pub struct AudioResample {
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
-    /// Timing of the last input `DataFrame`, reused to stamp the EOS tail frame
-    /// (its exact timestamp is not critical, the tail is a fraction of a buffer).
-    last_timing: FrameTiming,
+    // where the last output frame's samples end, the pts of the EOS tail frame
+    next_output_pts_ns: u64,
 }
 
 impl AudioResample {
@@ -245,7 +254,7 @@ impl AudioResample {
             configured: false,
             last_caps: None,
             emitted: 0,
-            last_timing: FrameTiming::default(),
+            next_output_pts_ns: 0,
         }
     }
 
@@ -394,7 +403,6 @@ impl AsyncElement for AudioResample {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    self.last_timing = frame.timing;
                     // Effective output rate: property, or caps-resolved (auto).
                     let out_rate = self.out_rate().ok_or(G2gError::NotConfigured)?;
                     let resampled =
@@ -411,6 +419,11 @@ impl AsyncElement for AudioResample {
                             .await?;
                         self.last_caps = Some(new_caps);
                     }
+                    let out_samples = resampled.len() / output_frame_bytes(in_format, in_channels)?;
+                    self.next_output_pts_ns = frame
+                        .timing
+                        .pts_ns
+                        .saturating_add(ticks_to_ns(out_samples as u64, out_rate));
                     let out_frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(resampled)),
                         timing: frame.timing,
@@ -448,9 +461,18 @@ impl AsyncElement for AudioResample {
                 // runner emit Eos (do not re-emit it here).
                 PipelinePacket::Eos => {
                     if let Some(tail) = self.flush_tail()? {
+                        let (format, channels, _) = self.input.ok_or(G2gError::NotConfigured)?;
+                        let out_rate = self.out_rate().ok_or(G2gError::NotConfigured)?;
+                        let tail_samples = tail.len() / output_frame_bytes(format, channels)?;
+                        let pts_ns = self.next_output_pts_ns;
                         let out_frame = Frame {
                             domain: MemoryDomain::System(SystemSlice::from_boxed(tail)),
-                            timing: self.last_timing,
+                            timing: FrameTiming {
+                                pts_ns,
+                                dts_ns: pts_ns,
+                                duration_ns: ticks_to_ns(tail_samples as u64, out_rate),
+                                ..FrameTiming::default()
+                            },
                             sequence: self.emitted,
                             meta: Default::default(),
                         };
@@ -856,6 +878,32 @@ mod tests {
         assert_eq!(body.len() + tail.len(), 8);
         // flush is idempotent: the carry is consumed, a second flush emits nothing.
         assert!(r.flush_tail().unwrap().is_none());
+    }
+
+    #[test]
+    fn eos_tail_starts_where_the_last_frame_ends() {
+        const IN_RATE: u32 = 48_000;
+        const OUT_RATE: u32 = 96_000;
+        let src = interleave_f32(&[&[0.0, 1.0, 2.0, 3.0]]);
+        let sink = crate::testutil::run(
+            &mut linear(OUT_RATE),
+            &audio(AudioFormat::PcmF32Le, 1, IN_RATE),
+            &[&src],
+        );
+        let frames: Vec<&Frame> = sink
+            .packets
+            .iter()
+            .filter_map(|packet| match packet {
+                PipelinePacket::DataFrame(frame) => Some(frame),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames.len(), 2, "the frame, then the tail");
+        let body_samples = f32_samples(frames[0].domain.as_system_slice().unwrap()).len();
+        assert_eq!(
+            frames[1].timing.pts_ns,
+            frames[0].timing.pts_ns + ticks_to_ns(body_samples as u64, OUT_RATE)
+        );
     }
 
     #[test]

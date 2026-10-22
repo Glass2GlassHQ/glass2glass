@@ -177,11 +177,12 @@ pub(crate) fn require_adts(
     })
 }
 
-// ADTS has no profile for ER AAC, ELD or USAC and no field for 960-sample frames, so a demuxer sends their access units raw behind this config as a frame
+// ADTS has no profile for ER AAC, ELD or USAC and no field for 960-sample frames or an SBR output rate, so a demuxer sends their access units raw behind this config as a frame
 pub(crate) fn is_raw_aac_config(config: &[u8]) -> bool {
     read_object_type(&mut BitReader::new(config))
         .is_some_and(|object_type| RAW_AAC_OBJECT_TYPES.contains(&object_type))
         || has_960_sample_frames(config)
+        || has_undoubled_sbr(config)
 }
 
 // the object type of a config a demuxer can neither ADTS-frame nor send raw (ALS, SLS, ...)
@@ -196,6 +197,64 @@ pub(crate) fn unframable_object_type(config: &[u8]) -> Option<u32> {
 fn has_960_sample_frames(config: &[u8]) -> bool {
     let mut r = BitReader::new(config);
     read_adts_core_config(&mut r).is_some() && r.read_bits(1) == Some(1)
+}
+
+// A decoder of ADTS finds SBR data on its own and doubles the core rate, so
+// ADTS cannot carry SBR the config gives any other output rate.
+fn has_undoubled_sbr(config: &[u8]) -> bool {
+    sbr_rates(config).is_some_and(|rates| Some(rates.output) != rates.core.checked_mul(2))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SbrRates {
+    core: u32,
+    output: u32,
+}
+
+// the AudioSpecificConfig's own `syncExtensionType` that announces SBR after the core config
+const SBR_SYNC_EXTENSION_TYPE: u32 = 0x2B7;
+
+// the core and output rates of a config that signals SBR, hierarchically or after the core config
+fn sbr_rates(config: &[u8]) -> Option<SbrRates> {
+    let mut r = BitReader::new(config);
+    let object_type = read_object_type(&mut r)?;
+    let core = read_sample_rate(&mut r)?;
+    let channel_config = r.read_bits(4)?;
+    if object_type == AOT_SBR || object_type == AOT_PS {
+        let output = read_sample_rate(&mut r)?;
+        return Some(SbrRates { core, output });
+    }
+    if !(AOT_AAC_MAIN..=AOT_AAC_LTP).contains(&object_type) {
+        return None;
+    }
+    // GASpecificConfig: frameLengthFlag, dependsOnCoreCoder and its delay, extensionFlag
+    r.read_bits(1)?;
+    if r.read_bits(1)? == 1 {
+        r.read_bits(14)?;
+    }
+    let extension_flag = r.read_bits(1)?;
+    if channel_config == 0 {
+        copy_program_config(&mut r, None)?;
+    }
+    if extension_flag == 1 {
+        r.read_bits(1)?; // extensionFlag3
+    }
+    if r.read_bits(11)? != SBR_SYNC_EXTENSION_TYPE || read_object_type(&mut r)? != AOT_SBR {
+        return None;
+    }
+    if r.read_bits(1)? == 0 {
+        return None; // sbrPresentFlag
+    }
+    let output = read_sample_rate(&mut r)?;
+    Some(SbrRates { core, output })
+}
+
+// a samplingFrequencyIndex, or the explicit 24-bit rate index 15 stands for
+fn read_sample_rate(r: &mut BitReader) -> Option<u32> {
+    match r.read_bits(4)? {
+        EXPLICIT_RATE_INDEX => r.read_bits(24),
+        index => SAMPLE_RATES.get(index as usize).copied(),
+    }
 }
 
 // longest AudioSpecificConfig a muxer takes from the frame leading a raw AAC stream
@@ -1126,6 +1185,44 @@ mod tests {
         assert_eq!(header.profile, PROFILE_AAC_LC);
         assert_eq!(header.freq_index, 6);
         assert_eq!(header.channels, 2);
+    }
+
+    // AAC-LC at `core_index`, stereo, then the sync extension announcing SBR at `output_index`
+    fn backward_compatible_sbr_config(core_index: u32, output_index: u32) -> Vec<u8> {
+        const AOT_AAC_LC: u32 = 2;
+        const STEREO: u32 = 2;
+        let mut asc = BitWriter::default();
+        let fields = [
+            (AOT_AAC_LC, 5),
+            (core_index, 4),
+            (STEREO, 4),
+            (0, 3), // frameLengthFlag, dependsOnCoreCoder, extensionFlag
+            (SBR_SYNC_EXTENSION_TYPE, 11),
+            (AOT_SBR, 5),
+            (1, 1), // sbrPresentFlag
+            (output_index, 4),
+        ];
+        for (value, bits) in fields {
+            asc.write_bits(value, bits);
+        }
+        asc.into_bytes()
+    }
+
+    fn rate_index(rate: u32) -> u32 {
+        SAMPLE_RATES.iter().position(|&r| r == rate).unwrap() as u32
+    }
+
+    #[test]
+    fn sbr_at_the_core_rate_goes_raw() {
+        const RATE: u32 = 48_000;
+        // fate-suite aac/al_sbr_sr_48_2_fsaac48.mp4 signals SBR this way
+        let same_rate = backward_compatible_sbr_config(rate_index(RATE), rate_index(RATE));
+        assert!(is_raw_aac_config(&same_rate));
+        let doubled = backward_compatible_sbr_config(rate_index(RATE / 2), rate_index(RATE));
+        assert!(
+            !is_raw_aac_config(&doubled),
+            "ADTS implies the doubled rate"
+        );
     }
 
     #[test]
