@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1823: avidemux counts empty video chunks as frame slots and reads every video chunk as one frame whatever dwSampleSize says.
 - M1835: `filesrc ! matroskademux ! decodebin` and `filesrc ! fmp4demux` on a fragmented file negotiate.
 - M1828: decoded Opus pts start after the pre-skip, and Matroska Opus lace frames take their own coded duration.
 - M1822: raw H.264, H.265, MPEG-2 and MPEG-4 elementary streams take their frame times from the stream rate, and wavparse stamps each buffer from its data offset.
