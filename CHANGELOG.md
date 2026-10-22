@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1807: `g2g-launch` ends quietly when its stdout closes, as `gst-launch` does.
+- M1806: `tsdemux` counts a seek target from the file's first PTS, and `qtdemux` seeks.
 - M1803: `decodebin current-video=N` / `current-audio=N` decode the Nth video or audio stream of an mp4, mkv or ts file.
 - M1802: `g2g-launch --seek <seconds>` runs a pipeline from one flushing seek made before the first frame.
 - M1805: `vulkanvideodec` passes the frames an H.264 frame_num gap infers to the driver, which RADV needs.

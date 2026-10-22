@@ -36,7 +36,8 @@ linux-full = [
     "declarative-yaml", "script-rhai", "observe", "mcp", "tui", "latency-bench",
     "matroska-compression", "matroska-decrypt",
 ]
-std = ["g2g-core/std", "dep:tokio"]
+# libc lets g2g-launch die on a closed stdout the way gst-launch does
+std = ["g2g-core/std", "dep:tokio", "dep:libc"]
 # bzip2 and lzo `ContentEncoding` decompression in the Matroska demuxer. Both
 # crates are pure Rust and no_std, so the feature does not imply std.
 matroska-compression = ["dep:libbz2-rs-sys", "dep:lzo"]

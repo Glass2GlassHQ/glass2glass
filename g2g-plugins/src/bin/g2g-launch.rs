@@ -520,6 +520,8 @@ fn print_run_json(_reg: &Registry, _pipeline: &str) -> i32 {
 }
 
 fn main() {
+    #[cfg(unix)]
+    end_quietly_on_closed_stdout();
     // Honor G2G_DEBUG (the GST_DEBUG analog): install the stderr log sink and
     // apply the category thresholds before the pipeline runs.
     g2g_core::log::init_from_env();
@@ -950,6 +952,15 @@ fn main() {
                 process::exit(1);
             }
         }
+    }
+}
+
+// Rust ignores SIGPIPE, so a write to a closed stdout (`| head`) panics instead of ending the process
+#[cfg(unix)]
+fn end_quietly_on_closed_stdout() {
+    // SAFETY: runs first in main, before any other thread exists, and SIG_DFL is a valid disposition
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
 
