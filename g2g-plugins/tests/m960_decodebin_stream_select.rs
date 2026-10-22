@@ -143,7 +143,7 @@ fn bare_decodebin_still_selects_an_audio_only_track() {
         Err(e) => {
             let msg = e.to_string();
             assert!(
-                msg.contains("Opus"),
+                msg.contains("audio/x-opus"),
                 "the chain search starts from the selected Opus track: {msg}"
             );
         }

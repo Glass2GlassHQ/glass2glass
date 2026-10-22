@@ -24,12 +24,12 @@ use core::pin::Pin;
 
 use g2g_core::element::DynAsyncElement;
 use g2g_core::runtime::{
-    run_graph_with_progress, DynSourceLoop, GraphNodeRef, PipelineProgress, Registry,
+    apply_props, run_graph_with_progress, DynSourceLoop, GraphNodeRef, PipelineProgress, Registry,
 };
 use g2g_core::stream::StreamType;
 use g2g_core::{
     AsyncElement, Bus, BusMessage, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata,
-    G2gError, Graph, OutputSink, PipelinePacket, PropValue, TagList,
+    G2gError, Graph, OutputSink, PipelinePacket, TagList,
 };
 
 use crate::clock::WallClock;
@@ -256,12 +256,10 @@ pub async fn discover(reg: &Registry, uri: &str) -> Result<Discovery, DiscoverEr
         let name = demux_name.ok_or_else(|| DiscoverError::NoParser(container.clone()))?;
         let mut element = demux_with_bus(name, bus_handle.clone())
             .ok_or_else(|| DiscoverError::NoParser(container.clone()))?;
-        for (key, value) in primary.iter().flat_map(|p| p.props.iter()) {
-            element
-                .set_property(key, PropValue::Str(value.clone()))
-                .map_err(|e| {
-                    DiscoverError::Probe(format!("{name} rejected {key}={value}: {e:?}"))
-                })?;
+        if let Some(primary) = &primary {
+            apply_props(&mut element, name, &primary.props).map_err(|e| {
+                DiscoverError::Probe(format!("{name} rejected its stream selection: {e}"))
+            })?;
         }
         Some(element)
     } else {

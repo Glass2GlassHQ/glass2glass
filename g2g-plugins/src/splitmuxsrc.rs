@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use g2g_core::element::DynAsyncElement;
 use g2g_core::log::{short_type_name, Target};
-use g2g_core::runtime::{PrimaryStreamHook, SourceLoop};
+use g2g_core::runtime::{apply_props, PrimaryStreamHook, SourceLoop};
 use g2g_core::{
     g2g_error, ByteStreamEncoding, Caps, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, PushOutcome,
@@ -147,11 +147,8 @@ impl Part {
             return Err(unsupported_part(path, &container));
         };
         let mut demux = construct();
-        for (name, value) in primary.props {
-            demux
-                .set_property(&name, PropValue::Str(value))
-                .map_err(|_| unsupported_part(path, &container))?;
-        }
+        apply_props(&mut demux, "demuxer", &primary.props)
+            .map_err(|_| unsupported_part(path, &container))?;
         Ok(Self {
             reader: PartReader::Demuxed {
                 path: path.to_path_buf(),

@@ -796,7 +796,7 @@ fn parse_chains_with(
 /// The property surface a launch node exposes, so one applier serves every node
 /// shape (source, transform / sink, muxer, demuxer, fan-out source) instead of a
 /// copy of the parse-and-set loop per shape.
-trait PropTarget {
+pub trait PropTarget {
     fn specs(&self) -> &'static [PropertySpec];
     fn set(&mut self, name: &str, value: PropValue) -> Result<(), PropError>;
 }
@@ -825,7 +825,7 @@ impl_prop_target!(
 /// Apply parsed `key=value` props to a node: look each name up in the element's
 /// declared [`PropertySpec`]s, parse the text for that spec (which validates an
 /// enum nick / flag set against its declared values), then set it.
-fn apply_props<T: PropTarget>(
+pub fn apply_props<T: PropTarget>(
     target: &mut T,
     name: &str,
     props: &[(String, String)],
