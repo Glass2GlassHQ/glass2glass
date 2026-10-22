@@ -253,6 +253,12 @@ Highest leverage first:
     512, 18952 and 30720 bytes of PCM at blocksize 188, 4096 and 65536). AC-3 in
     WAV (`diatonis_invisible_order_anfos_ac3-small.wav`) puts frame 1 at 0.371 s
     where ffmpeg gives 0.035 s.
+  - `flvdemux` ADTS-wraps AAC whose SBR output rate equals the core rate, so it
+    decodes at double rate. It needs the raw-config path the MP4 demuxers use.
+  - `aac/aac-sce-in-stereo.mp4` is 23.2 ms late on every frame,
+    `ac3/mp3ac325-4864-small.ts` gives 4 frames where ffmpeg gives 5,
+    `mp3-conformance/sin1k0db.bit` 317 where it gives 318, and
+    `mov/mov_neg_first_pts_discard_vorbis.mp4` is 2.0 s ahead.
 
 ## Codecs
 
