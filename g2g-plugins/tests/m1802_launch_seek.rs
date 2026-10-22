@@ -30,16 +30,44 @@ const SEEK_MILLISECONDS: u64 = 1_020;
 // the TS fixture needs an output -ss 2.42 (first PTS plus 1.02), ffmpeg's input seek in it lands on the 1.2 s keyframe
 const FRAME_AFTER_SEEK_MD5: &str = "732b16a0536b40e66a6005fa0cca8569";
 
+fn offset_fixture(name: &str) -> String {
+    format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
+}
+
+// The same encode with -bf 3 -output_ts_offset 0.4, the fragmented one also -movflags +frag_keyframe+empty_moov.
+// ffprobe start_time is 0.4 for mkv, flv and mp4 (an edit list) and 0.08 for the fragmented mp4.
+const H264_OFFSET_FIXTURES: [&str; 4] = [
+    "h264_64x48_25fps_gop10_bframes_offset.mkv",
+    "h264_64x48_25fps_gop10_bframes_offset.flv",
+    "h264_64x48_25fps_gop10_bframes_offset.mp4",
+    "h264_64x48_25fps_gop10_bframes_offset_frag.mp4",
+];
+// ffmpeg -ss 1.02 -copyts -i <any H264_OFFSET_FIXTURES> -frames:v 1 -f framemd5 -
+const H264_OFFSET_FRAME_AFTER_SEEK_MD5: &str = "0f522e7ea384962044bb0cb76385ec24";
+// ffmpeg -f lavfi -i testsrc=size=64x48:rate=25:duration=3 -c:v libvpx -g 10 -auto-alt-ref 0 -output_ts_offset 0.4, start_time 0.4
+const VP8_OFFSET_FIXTURE: &str = "vp8_64x48_25fps_gop10_offset.ogg";
+// ffmpeg -ss 1.02 -copyts -i <VP8_OFFSET_FIXTURE> -frames:v 1 -f framemd5 -
+const VP8_OFFSET_FRAME_AFTER_SEEK_MD5: &str = "b125eb8b291a171ef049315747ed794a";
+
 fn seek_seconds(milliseconds: u64) -> String {
     format!("{}", milliseconds as f64 / 1_000.0)
 }
 
-fn launch_with_seek(seconds: &str, pipeline: &str) -> Output {
+fn launch(options: &[&str], pipeline: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_g2g-launch"))
-        .args(["-q", "--seek", seconds])
+        .arg("-q")
+        .args(options)
         .args(pipeline.split_whitespace())
         .output()
         .expect("g2g-launch starts")
+}
+
+fn launch_with_seek(seconds: &str, pipeline: &str) -> Output {
+    launch(&["--seek", seconds], pipeline)
+}
+
+fn first_frame_after_seek() -> u64 {
+    (SEEK_MILLISECONDS * NANOS_PER_MILLISECOND).div_ceil(FRAME_PERIOD_NS)
 }
 
 fn checksum_lines(output: &Output) -> Vec<String> {
@@ -55,7 +83,7 @@ fn checksum_lines(output: &Output) -> Vec<String> {
 }
 
 fn assert_starts_at_the_frame_after_the_seek(lines: &[String], first_pts_ns: u64) {
-    let first_frame = (SEEK_MILLISECONDS * NANOS_PER_MILLISECOND).div_ceil(FRAME_PERIOD_NS);
+    let first_frame = first_frame_after_seek();
     assert_eq!(
         lines[0],
         checksum_line(
@@ -105,6 +133,49 @@ fn mkv_seek_decodes_from_the_first_frame_at_or_after_the_target() {
 fn ts_seek_counts_the_target_from_the_first_pts() {
     let output = launch_with_seek(&seek_seconds(SEEK_MILLISECONDS), &ts_pipeline());
     assert_starts_at_the_frame_after_the_seek(&checksum_lines(&output), TS_FIRST_PTS_NS);
+}
+
+#[test]
+fn seek_counts_the_target_from_the_start_time() {
+    let mut pipelines: Vec<(String, &str)> = Vec::new();
+    for name in H264_OFFSET_FIXTURES {
+        let location = offset_fixture(name);
+        pipelines.push((
+            format!("filesrc location={location} ! decodebin ! checksumsink hash=md5"),
+            H264_OFFSET_FRAME_AFTER_SEEK_MD5,
+        ));
+        if name.ends_with(".mp4") {
+            pipelines.push((
+                format!("uridecodebin uri=file://{location} ! checksumsink hash=md5"),
+                H264_OFFSET_FRAME_AFTER_SEEK_MD5,
+            ));
+        }
+    }
+    pipelines.push((
+        format!(
+            "filesrc location={} ! decodebin ! checksumsink hash=md5",
+            offset_fixture(VP8_OFFSET_FIXTURE)
+        ),
+        VP8_OFFSET_FRAME_AFTER_SEEK_MD5,
+    ));
+    let first_frame = first_frame_after_seek() as usize;
+    for (pipeline, ffmpeg_md5) in pipelines {
+        let unseeked = checksum_lines(&launch(&[], &pipeline));
+        let seeked = checksum_lines(&launch_with_seek(
+            &seek_seconds(SEEK_MILLISECONDS),
+            &pipeline,
+        ));
+        assert_eq!(
+            seeked,
+            unseeked[first_frame..],
+            "{pipeline}: the seek lands on frame {first_frame} of the unseeked run"
+        );
+        assert!(
+            seeked[0].ends_with(ffmpeg_md5),
+            "{pipeline}: {} is not ffmpeg's frame after the seek",
+            seeked[0]
+        );
+    }
 }
 
 #[test]

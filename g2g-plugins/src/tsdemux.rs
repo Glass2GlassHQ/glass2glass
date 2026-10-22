@@ -395,8 +395,6 @@ pub struct TsDemux {
     /// keep their parameter sets in band and their decoders resynchronize on
     /// their own, so they are never dropped. Re-armed on a flush.
     mpeg2_tuned_in: bool,
-    // seek targets count from the first PTS in the file, as ffmpeg's -ss does
-    first_pts_ns: Option<u64>,
 }
 
 impl Default for TsDemux {
@@ -423,7 +421,6 @@ impl TsDemux {
             config_sent: false,
             segment_sent: false,
             mpeg2_tuned_in: false,
-            first_pts_ns: None,
         }
     }
 
@@ -707,8 +704,8 @@ impl TsDemux {
     ) -> Result<(), G2gError> {
         for u in units {
             let pts_ns = u.pts_90khz.map(ticks_90khz_to_ns);
-            if self.first_pts_ns.is_none() {
-                self.first_pts_ns = pts_ns;
+            if let Some(pts_ns) = pts_ns {
+                self.seek.note_stream_start(pts_ns);
             }
             if self.selected_pid()? != Some(u.pid) {
                 continue; // a stream other than the selected one
@@ -743,15 +740,9 @@ impl TsDemux {
                 }
                 self.mpeg2_tuned_in = true;
             }
-            let first_pts_ns = self.first_pts_ns.unwrap_or(0);
-            let admitted = self
-                .seek
-                .admit(pts_ns.saturating_sub(first_pts_ns), keyframe, u);
+            let admitted = self.seek.admit(pts_ns, keyframe, u);
             if let Some(start) = admitted.segment_start_ns {
-                let seg = Segment::for_flush_seek(
-                    &Seek::flush_to(start.saturating_add(first_pts_ns)),
-                    None,
-                );
+                let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
                 out.push(PipelinePacket::Segment(seg)).await?;
                 self.segment_sent = true;
             }

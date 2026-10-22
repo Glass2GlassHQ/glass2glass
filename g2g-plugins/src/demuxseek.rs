@@ -75,10 +75,18 @@ enum Phase {
     #[default]
     Idle,
     /// Upstream byte-seek requested; drop input until the source's `Flush`.
-    AwaitingFlush { target_ns: u64 },
+    AwaitingFlush { target: SeekTarget },
     /// Re-syncing after the flush; keep the units from the last keyframe at or
     /// before the target until a unit at or after it arrives.
-    Discarding { target_ns: u64 },
+    Discarding { target: SeekTarget },
+}
+
+// a seek target counts from the stream's first pts, as ffmpeg -ss counts from the start time
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeekTarget {
+    Pts(u64),
+    // taken before the stream's first unit, so the pts is known only once that unit arrives
+    FromStreamStart(u64),
 }
 
 /// Seek state a demuxer embeds, generic over the demuxer's decoded unit. Inert
@@ -98,6 +106,7 @@ pub(crate) struct DemuxSeek<U> {
     keep_state: bool,
     // empty until the first keyframe after the flush, since nothing before it decodes
     kept: Vec<U>,
+    stream_start_ns: Option<u64>,
 }
 
 impl<U> Default for DemuxSeek<U> {
@@ -108,6 +117,7 @@ impl<U> Default for DemuxSeek<U> {
             phase: Phase::Idle,
             keep_state: false,
             kept: Vec::new(),
+            stream_start_ns: None,
         }
     }
 }
@@ -130,7 +140,7 @@ impl<U> DemuxSeek<U> {
         self.poll_request_indexed(|_| None)
     }
 
-    /// Like [`poll_request`](Self::poll_request), but `resolve(target_ns)` may
+    /// Like [`poll_request`](Self::poll_request), but `resolve(target_pts_ns)` may
     /// return an upstream byte offset from an index (e.g. Matroska `Cues`) to seek
     /// directly to the target region. `Some(offset)` seeks there and marks the
     /// seek state-preserving ([`keeps_state`](Self::keeps_state)) since the landing
@@ -145,16 +155,29 @@ impl<U> DemuxSeek<U> {
         let Some(app) = &self.app else {
             return false;
         };
-        match app.take_pending() {
-            Some(seek) if seek.is_flush() => {
-                match resolve(seek.start) {
-                    Some(offset) => self.begin_seek_at(seek.start, offset, true),
-                    None => self.begin_seek_at(seek.start, 0, false),
-                }
-                true
-            }
-            _ => false,
+        let Some(seek) = app.take_pending().filter(|seek| seek.is_flush()) else {
+            return false;
+        };
+        // an index lookup needs the target as a pts, which the stream's first unit fixes
+        let Some(stream_start_ns) = self.stream_start_ns else {
+            self.await_flush(SeekTarget::FromStreamStart(seek.start), 0, false);
+            return true;
+        };
+        let target_pts_ns = seek.start.saturating_add(stream_start_ns);
+        match resolve(target_pts_ns) {
+            Some(offset) => self.begin_seek_at(target_pts_ns, offset, true),
+            None => self.begin_seek_at(target_pts_ns, 0, false),
         }
+        true
+    }
+
+    // takes the pts of a unit of any track, the first one is where seek targets count from
+    pub(crate) fn note_stream_start(&mut self, pts_ns: u64) {
+        self.stream_start_ns.get_or_insert(pts_ns);
+    }
+
+    pub(crate) fn stream_start_ns(&self) -> Option<u64> {
+        self.stream_start_ns
     }
 
     /// The upstream stream length in bytes, when the source published one, so a
@@ -175,27 +198,31 @@ impl<U> DemuxSeek<U> {
         self.phase != Phase::Idle
     }
 
-    /// Begin an indexed seek to an already-resolved byte `offset` for `target_ns`,
-    /// when the caller consumed the app seek itself (the multi-hop Matroska `Cues`
-    /// prefetch: the `Cues` are fetched first, then this seeks to the target
-    /// Cluster). Issues the upstream byte-seek, marks the seek state-preserving,
-    /// and awaits its flush (so `admit` then re-syncs to the target).
-    pub(crate) fn begin_indexed_seek(&mut self, target_ns: u64, offset: u64) {
-        self.begin_seek_at(target_ns, offset, true);
+    /// Begin an indexed seek to an already-resolved byte `offset` for the pts
+    /// `target_pts_ns`, when the caller consumed the app seek itself (the multi-hop
+    /// Matroska `Cues` prefetch: the `Cues` are fetched first, then this seeks to
+    /// the target Cluster). Issues the upstream byte-seek, marks the seek
+    /// state-preserving, and awaits its flush (so `admit` then re-syncs to the target).
+    pub(crate) fn begin_indexed_seek(&mut self, target_pts_ns: u64, offset: u64) {
+        self.begin_seek_at(target_pts_ns, offset, true);
     }
 
-    /// Begin (or restart) a byte-seek to `offset` for `target_ns` the caller
-    /// resolved itself. `keep_state` marks the landing mid-stream
+    /// Begin (or restart) a byte-seek to `offset` for the pts `target_pts_ns` the
+    /// caller resolved itself. `keep_state` marks the landing mid-stream
     /// ([`keeps_state`](Self::keeps_state)); `false` is a re-scan from the file
     /// start, the fallback when a resolved offset turns out not to serve the
     /// target (the Ogg proportional guess, M862).
-    pub(crate) fn begin_seek_at(&mut self, target_ns: u64, offset: u64, keep_state: bool) {
+    pub(crate) fn begin_seek_at(&mut self, target_pts_ns: u64, offset: u64, keep_state: bool) {
+        self.await_flush(SeekTarget::Pts(target_pts_ns), offset, keep_state);
+    }
+
+    fn await_flush(&mut self, target: SeekTarget, offset: u64, keep_state: bool) {
         if let Some(upstream) = &self.upstream {
             upstream.seek(Seek::flush_to(offset));
         }
         self.keep_state = keep_state;
         self.kept.clear();
-        self.phase = Phase::AwaitingFlush { target_ns };
+        self.phase = Phase::AwaitingFlush { target };
     }
 
     /// Whether the demuxer should ignore input now (awaiting the upstream flush,
@@ -209,22 +236,28 @@ impl<U> DemuxSeek<U> {
     /// while idle also returns `true` (a discontinuity always resets the parser),
     /// without changing phase.
     pub(crate) fn on_flush(&mut self) -> bool {
-        if let Phase::AwaitingFlush { target_ns } = self.phase {
-            self.phase = Phase::Discarding { target_ns };
+        if let Phase::AwaitingFlush { target } = self.phase {
+            self.phase = Phase::Discarding { target };
         }
         self.kept.clear();
         true
     }
 
-    /// Classify a decoded `unit` by its stream-time `pts_ns` and whether it is a
-    /// keyframe. Idle emits it. While discarding, a keyframe at or before the
-    /// target restarts the kept units, and the first unit at or after the target
+    /// Classify a decoded `unit` by its `pts_ns` and whether it is a keyframe.
+    /// Idle emits it. While discarding, a keyframe at or before the target
+    /// restarts the kept units, and the first unit at or after the target
     /// releases them with the segment start, after which the helper is idle.
     pub(crate) fn admit(&mut self, pts_ns: u64, keyframe: bool, unit: U) -> Admitted<U> {
+        let stream_start_ns = *self.stream_start_ns.get_or_insert(pts_ns);
         let target_ns = match self.phase {
             Phase::Idle => return Admitted::emit(unit),
             Phase::AwaitingFlush { .. } => return Admitted::empty(),
-            Phase::Discarding { target_ns } => target_ns,
+            Phase::Discarding {
+                target: SeekTarget::Pts(target_ns),
+            } => target_ns,
+            Phase::Discarding {
+                target: SeekTarget::FromStreamStart(target_ns),
+            } => target_ns.saturating_add(stream_start_ns),
         };
         if keyframe && pts_ns <= target_ns {
             self.kept.clear();
@@ -252,10 +285,11 @@ mod tests {
         (admitted.segment_start_ns, admitted.collect())
     }
 
-    fn discarding_to_target() -> DemuxSeek<u64> {
+    fn discarding_to_target(stream_start_ns: u64) -> DemuxSeek<u64> {
         let app = SeekController::new();
         let mut s = DemuxSeek::default();
         s.with(app.clone(), SeekController::new());
+        s.note_stream_start(stream_start_ns);
         app.seek(Seek::flush_to(TARGET_NS));
         assert!(s.poll_request(), "a pending flushing seek starts the cycle");
         assert!(s.on_flush());
@@ -304,7 +338,7 @@ mod tests {
 
     #[test]
     fn units_before_the_first_keyframe_never_go_out() {
-        let mut s = discarding_to_target();
+        let mut s = discarding_to_target(0);
         assert_eq!(units(s.admit(1_000, false, 1_000)), (None, vec![]));
         assert_eq!(units(s.admit(6_000, false, 6_000)), (None, vec![]));
         assert_eq!(
@@ -316,7 +350,7 @@ mod tests {
 
     #[test]
     fn a_keyframe_on_the_target_starts_there() {
-        let mut s = discarding_to_target();
+        let mut s = discarding_to_target(0);
         assert_eq!(units(s.admit(0, true, 0)), (None, vec![]));
         assert_eq!(
             units(s.admit(TARGET_NS, true, TARGET_NS)),
@@ -326,7 +360,7 @@ mod tests {
 
     #[test]
     fn a_long_run_without_keyframes_releases_early() {
-        let mut s = discarding_to_target();
+        let mut s = discarding_to_target(0);
         assert_eq!(units(s.admit(0, true, 0)), (None, vec![]));
         for unit in 1..KEPT_UNITS_MAX as u64 {
             assert_eq!(units(s.admit(1, false, unit)), (None, vec![]));
@@ -334,6 +368,55 @@ mod tests {
         let (segment_start, released) = units(s.admit(1, false, KEPT_UNITS_MAX as u64));
         assert_eq!(segment_start, Some(TARGET_NS));
         assert_eq!(released, (0..=KEPT_UNITS_MAX as u64).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_target_counts_from_the_first_unit() {
+        const STREAM_START_NS: u64 = 1_000;
+        let mut s = discarding_to_target(STREAM_START_NS);
+        // a later unit does not move the start
+        s.note_stream_start(0);
+        assert_eq!(units(s.admit(STREAM_START_NS, true, 0)), (None, vec![]));
+        assert_eq!(
+            units(s.admit(TARGET_NS, false, 1)),
+            (None, vec![]),
+            "the target pts is the start plus the seek time"
+        );
+        assert_eq!(
+            units(s.admit(TARGET_NS + STREAM_START_NS, false, 2)),
+            (Some(TARGET_NS + STREAM_START_NS), vec![0, 1, 2])
+        );
+    }
+
+    #[test]
+    fn an_index_lookup_waits_for_the_stream_start() {
+        const STREAM_START_NS: u64 = 1_000;
+        const INDEXED_OFFSET: u64 = 4_096;
+        let app = SeekController::new();
+        let upstream = SeekController::new();
+        let mut s: DemuxSeek<u64> = DemuxSeek::default();
+        s.with(app.clone(), upstream.clone());
+
+        app.seek(Seek::flush_to(TARGET_NS));
+        assert!(s.poll_request_indexed(|_| panic!("no pts to look up yet")));
+        assert_eq!(upstream.take_pending().map(|seek| seek.start), Some(0));
+        assert!(!s.keeps_state(), "a re-scan from the file start");
+        s.on_flush();
+        s.admit(STREAM_START_NS, true, 0);
+        s.admit(TARGET_NS + STREAM_START_NS, true, 1);
+
+        let mut looked_up = None;
+        app.seek(Seek::flush_to(TARGET_NS));
+        assert!(s.poll_request_indexed(|target_pts_ns| {
+            looked_up = Some(target_pts_ns);
+            Some(INDEXED_OFFSET)
+        }));
+        assert_eq!(looked_up, Some(TARGET_NS + STREAM_START_NS));
+        assert_eq!(
+            upstream.take_pending().map(|seek| seek.start),
+            Some(INDEXED_OFFSET)
+        );
+        assert!(s.keeps_state());
     }
 
     #[test]

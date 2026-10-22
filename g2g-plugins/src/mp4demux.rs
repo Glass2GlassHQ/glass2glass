@@ -40,7 +40,7 @@ use crate::codectag::{
 use crate::fmp4::{
     clip_stored_pcm, every_sample_ends_by, keyframe_index_for, parse_all_tracks,
     parse_fragments_multi, parse_progressive_multi, prepend_param_sets, starts_with_param_set,
-    track_framerate_q16, vorbis_headers, Sample, TrackHeader, TrackKind,
+    stream_start_ns, track_framerate_q16, vorbis_headers, Sample, TrackHeader, TrackKind,
 };
 use crate::mkvdemux::{prores_stream_from_str, prores_stream_str};
 use crate::mp4box::find_box;
@@ -503,6 +503,8 @@ fn seek_samples(
     let Some(target_ns) = target_ns else {
         return (samples, edit);
     };
+    // an edit list that starts presentation later moves the start time with it
+    let target_ns = target_ns.saturating_add(edit.start.max(stream_start_ns(&samples)));
     let first = if every_sample_ends_by(&samples, target_ns) {
         samples.len()
     } else {

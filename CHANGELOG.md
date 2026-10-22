@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1833: every demuxer counts a seek target from the stream's first timestamp, so `--seek` matches `ffmpeg -ss` on files that do not start at 0.
 - M1819: the m961 tests check the AV1 track the demuxer and the file URI select, not the decoder name, since `ffmpegdec` outranks `rav1ddec` when both are built.
 - M1827: MP3 LAME and M4A iTunSMPB encoder delay and padding are trimmed from the decoded audio.
 - M1818: an HLS MPEG-TS variant's fan-out ports come from its first segment's PMT, so two tracks of one codec each reach their own port.

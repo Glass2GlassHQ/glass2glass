@@ -94,6 +94,11 @@ pub(crate) fn keyframe_index_for(samples: &[Sample], target_ns: u64) -> usize {
         .unwrap_or(0)
 }
 
+// seek targets count from the first sample's pts, as ffmpeg -ss counts from the start time
+pub(crate) fn stream_start_ns(samples: &[Sample]) -> u64 {
+    samples.first().map_or(0, |sample| sample.pts_ns)
+}
+
 pub(crate) fn every_sample_ends_by(samples: &[Sample], target_ns: u64) -> bool {
     samples
         .iter()

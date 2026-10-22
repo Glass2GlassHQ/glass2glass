@@ -130,7 +130,7 @@ enum CuePrefetch {
     /// Byte-seek to the `Cues` element issued; `flushed` flips on the upstream
     /// flush, after which incoming bytes are the `Cues` element to parse.
     Fetching {
-        target_ns: u64,
+        target_pts_ns: u64,
         flushed: bool,
     },
 }
@@ -237,19 +237,22 @@ impl MkvDemux {
             // Index known: seek directly to the target Cluster.
             let demux = &self.demux;
             self.seek.poll_request_indexed(|t| demux.cue_seek_offset(t));
-        } else if let Some(cues_off) = self.demux.cue_index_offset() {
+        } else if let (Some(cues_off), Some(stream_start_ns)) =
+            (self.demux.cue_index_offset(), self.seek.stream_start_ns())
+        {
             // Index located but not parsed: prefetch it before the real seek.
             if let (Some(app), Some(upstream)) = (&self.app, &self.upstream) {
                 if let Some(seek) = app.take_pending() {
                     upstream.seek(Seek::flush_to(cues_off));
                     self.prefetch = CuePrefetch::Fetching {
-                        target_ns: seek.start,
+                        target_pts_ns: seek.start.saturating_add(stream_start_ns),
                         flushed: false,
                     };
                 }
             }
         } else {
-            // No index at all: re-scan from the start (M364).
+            // No index at all, or no first frame yet to count the target from:
+            // re-scan from the start (M364).
             self.seek.poll_request_indexed(|_| None);
         }
     }
@@ -667,6 +670,7 @@ impl MkvDemux {
             }
         }
         for f in self.demux.take_frames() {
+            self.seek.note_stream_start(f.pts_ns);
             if Some(f.track) != selected_track {
                 continue; // a stream other than the selected one
             }
@@ -819,12 +823,12 @@ impl AsyncElement for MkvDemux {
                         // the index is populated, seek to the real target Cluster.
                         CuePrefetch::Fetching {
                             flushed: true,
-                            target_ns,
+                            target_pts_ns,
                         } => {
                             self.demux.push_data(slice);
                             if !self.demux.cues().is_empty() {
-                                let off = self.demux.cue_seek_offset(target_ns).unwrap_or(0);
-                                self.seek.begin_indexed_seek(target_ns, off);
+                                let off = self.demux.cue_seek_offset(target_pts_ns).unwrap_or(0);
+                                self.seek.begin_indexed_seek(target_pts_ns, off);
                                 self.prefetch = CuePrefetch::Idle;
                             }
                             return Ok(());
@@ -847,12 +851,12 @@ impl AsyncElement for MkvDemux {
                 // new bytes may be anything.
                 PipelinePacket::Flush => {
                     if let CuePrefetch::Fetching {
-                        target_ns,
+                        target_pts_ns,
                         flushed: false,
                     } = self.prefetch
                     {
                         self.prefetch = CuePrefetch::Fetching {
-                            target_ns,
+                            target_pts_ns,
                             flushed: true,
                         };
                         self.demux.reset_keeping_tracks();

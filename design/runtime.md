@@ -575,8 +575,13 @@ controller with the seek already queued and a demuxer's byte source a second one
 so the seek lands before the first frame. After a seek every seekable source and
 demuxer restarts at the keyframe at or before the target with a segment starting at
 the target, so decoders drop the earlier frames and the first frame out is the first
-one at or after the target, as `ffmpeg -ss` gives. `tsdemux` counts the target from the
-file's first PTS, as ffmpeg's `-ss` does (gst counts from the first PCR). A seek
+one at or after the target, as `ffmpeg -ss` gives. Every seekable demuxer and source counts
+the target from the stream's first timestamp, as ffmpeg's `-ss` counts from the start
+time (gst counts from the first PCR in TS). `DemuxSeek` records the pts of the first
+unit of any track, a seek taken before that unit becomes a pts once it arrives, and an
+index lookup (Matroska `Cues`, the Ogg guess) waits for it and rescans from the file
+start until then. `Mp4Src` counts from the first sample, `Mp4Demux` from the later of
+the edit-list start and the first sample. A seek
 past the end gives no frames, which g2g-launch reports as an error. `Mp4Demux`
 serves only a seek queued before its EOS drain, and one that arrives once its
 samples have gone out fails the run with `G2gError::SeekRefused`.

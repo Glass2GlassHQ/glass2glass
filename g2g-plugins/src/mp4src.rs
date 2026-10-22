@@ -29,15 +29,15 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, SeekFormat, SourceLoop};
 use g2g_core::{
     BusHandle, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PipelinePacket, Rate, SeekFlags, Segment, Stream,
-    StreamCollection, StreamType,
+    G2gError, MemoryDomain, OutputSink, PipelinePacket, Rate, Seek, SeekFlags, SeekType, Segment,
+    Stream, StreamCollection, StreamType,
 };
 
 use crate::filesink::path_io_err;
 use crate::fmp4::{
     clean_aperture_meta, every_sample_ends_by, fragment_framerate_q16, keyframe_index_for,
     parse_all_tracks, parse_chapters, parse_fragments, parse_header, parse_progressive,
-    prepend_param_sets, starts_with_param_set, Header, Sample, TrackKind,
+    prepend_param_sets, starts_with_param_set, stream_start_ns, Header, Sample, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
@@ -301,6 +301,7 @@ impl SourceLoop for Mp4Src {
                 // running-time base (no flush). Both snap to the keyframe at or
                 // before the target so a decoder resumes from a clean reference.
                 if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
+                    let seek = seek_from_stream_start(seek, stream_start_ns(&samples));
                     let new_seg = if seek.is_flush() {
                         out.push(PipelinePacket::Flush).await?;
                         Segment::for_flush_seek(&seek, None)
@@ -416,6 +417,18 @@ impl SourceLoop for Mp4Src {
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
         })
+    }
+}
+
+fn seek_from_stream_start(seek: Seek, stream_start_ns: u64) -> Seek {
+    let to_pts = |edge_type: SeekType, edge_ns: u64| match edge_type {
+        SeekType::Set => edge_ns.saturating_add(stream_start_ns),
+        SeekType::None | SeekType::End => edge_ns,
+    };
+    Seek {
+        start: to_pts(seek.start_type, seek.start),
+        stop: to_pts(seek.stop_type, seek.stop),
+        ..seek
     }
 }
 
