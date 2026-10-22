@@ -181,6 +181,16 @@ impl Fmp4Demux {
         }
     }
 
+    // filesrc types a fragmented file as the whole-file `Mp4` form, which reads the same
+    fn accepts_input(caps: &Caps) -> bool {
+        matches!(
+            caps,
+            Caps::ByteStream {
+                encoding: ByteStreamEncoding::IsoBmff | ByteStreamEncoding::Mp4
+            }
+        )
+    }
+
     fn output_caps(codec: VideoCodec, width: Dim, height: Dim, framerate: Rate) -> Caps {
         Caps::CompressedVideo {
             codec,
@@ -328,28 +338,27 @@ impl AsyncElement for Fmp4Demux {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        if Self::accepts_input(upstream_caps) {
+            return Ok(upstream_caps.clone());
+        }
         upstream_caps.intersect(&Self::input_caps())
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        // ByteStream{IsoBmff} in -> the video track out. The default codec is
+        // ByteStream{IsoBmff} or a file's Mp4 in -> the video track out. The default codec is
         // refined from the moov via CapsChanged at runtime (like tsdemux).
         let codec = self.out_codec;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::ByteStream {
-                encoding: ByteStreamEncoding::IsoBmff,
-            } => CapsSet::one(crate::typefind::elementary_video_caps(codec)),
-            _ => CapsSet::from_alternatives(Vec::new()),
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            if Self::accepts_input(input) {
+                CapsSet::one(crate::typefind::elementary_video_caps(codec))
+            } else {
+                CapsSet::from_alternatives(Vec::new())
+            }
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if !matches!(
-            absolute_caps,
-            Caps::ByteStream {
-                encoding: ByteStreamEncoding::IsoBmff
-            }
-        ) {
+        if !Self::accepts_input(absolute_caps) {
             return Err(G2gError::CapsMismatch);
         }
         self.configured = true;

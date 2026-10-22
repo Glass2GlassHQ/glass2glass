@@ -1258,6 +1258,8 @@ fn expand_decodebin(
         // another chain). Props matter because they can re-type the output (a
         // `filesrc`'s `bytestream-format` selects the container).
         let mut upstream: Option<(String, Vec<(String, String)>)> = None;
+        // the element before `upstream`, the file an explicit demuxer reads
+        let mut before_upstream: Option<(String, Vec<(String, String)>)> = None;
         let mut items = chain.into_iter().peekable();
         while let Some(item) = items.next() {
             match item {
@@ -1270,6 +1272,7 @@ fn expand_decodebin(
                             name = spec.name
                         )));
                     }
+                    before_upstream = None;
                     upstream = Some((spec.name.clone(), spec.props.clone()));
                     new_chain.push(Item::Element(spec));
                 }
@@ -1311,13 +1314,37 @@ fn expand_decodebin(
                         .find(|(k, _)| k == "location")
                         .map(|(_, v)| v.as_str());
                     let source = location.unwrap_or(pred.as_str());
+                    // `filesrc location=X ! <demux> ! decodebin` reads X through the
+                    // demux the line names, so it forwards the stream
+                    // `filesrc location=X ! decodebin` would
+                    let named_demux_file = match (location, &before_upstream) {
+                        (None, Some((file, file_props))) if props.is_empty() => {
+                            demuxed_file_streams(registry, file, file_props)?
+                        }
+                        _ => None,
+                    };
+                    let named_demux_stream = match named_demux_file {
+                        Some((file_location, streams)) => Some(choose_container_stream(
+                            registry,
+                            &file_location,
+                            streams_at_indexes(&file_location, streams, indexes)?,
+                            bin,
+                            preferred,
+                            consumer.as_deref(),
+                            avoided,
+                        )?),
+                        None => None,
+                    }
+                    .filter(|stream| stream.demux == pred);
+                    let demux_in_line = named_demux_stream.is_some();
                     let listed = location.and_then(|location| {
                         registry
                             .container_streams(location, &caps)
                             .map(|streams| (location, streams))
                     });
-                    let primary = match listed {
-                        Some((location, streams)) => Some(choose_container_stream(
+                    let primary = match (named_demux_stream, listed) {
+                        (Some(stream), _) => Some(stream),
+                        (None, Some((location, streams))) => Some(choose_container_stream(
                             registry,
                             location,
                             streams_at_indexes(location, streams, indexes)?,
@@ -1326,7 +1353,7 @@ fn expand_decodebin(
                             consumer.as_deref(),
                             avoided,
                         )?),
-                        None => {
+                        (None, None) => {
                             check_single_stream_index(source, &caps, indexes)?;
                             None
                         }
@@ -1337,6 +1364,12 @@ fn expand_decodebin(
                             .as_ref()
                             .is_some_and(|stream| stream.has_clean_aperture);
                     let chain_input = match primary {
+                        Some(primary) if demux_in_line => {
+                            if let Some(Item::Element(demux)) = new_chain.last_mut() {
+                                demux.props = primary.props.clone();
+                            }
+                            primary.caps
+                        }
                         Some(primary) => {
                             new_chain.push(Item::Element(ElementSpec {
                                 name: primary.demux.to_string(),
@@ -1375,13 +1408,15 @@ fn expand_decodebin(
                         new_chain.push(clean_aperture_crop_item(registry)?);
                     }
                     upstream = None;
+                    before_upstream = None;
                 }
                 Item::Element(spec) => {
-                    upstream = Some((spec.name.clone(), spec.props.clone()));
+                    before_upstream = upstream.replace((spec.name.clone(), spec.props.clone()));
                     new_chain.push(Item::Element(spec));
                 }
                 Item::Ref { name, pad } => {
                     upstream = None;
+                    before_upstream = None;
                     new_chain.push(Item::Ref { name, pad });
                 }
                 // A pre-built node (from `uridecodebin` / `playbin`) carries no
@@ -1390,6 +1425,7 @@ fn expand_decodebin(
                 // the missing-upstream error.
                 prebuilt @ Item::Prebuilt { .. } => {
                     upstream = None;
+                    before_upstream = None;
                     new_chain.push(prebuilt);
                 }
             }
@@ -1397,6 +1433,21 @@ fn expand_decodebin(
         out.push(new_chain);
     }
     Ok(out)
+}
+
+// the streams of the local file `file` opened, when a container hook can list them
+fn demuxed_file_streams(
+    registry: &Registry,
+    file: &str,
+    file_props: &[(String, String)],
+) -> Result<Option<(String, ContainerStreams)>, ParseError> {
+    let Some((_, location)) = file_props.iter().find(|(key, _)| key == "location") else {
+        return Ok(None);
+    };
+    let container = resolve_upstream_caps(registry, file, file_props)?;
+    Ok(registry
+        .container_streams(location, &container)
+        .map(|streams| (location.clone(), streams)))
 }
 
 /// `encodebin`: not an element either, but a macro that expands, at parse time,
