@@ -41,6 +41,13 @@ pub(crate) fn net_err(e: reqwest::Error) -> G2gError {
     crate::httpsrc::http_err(e)
 }
 
+// a body that breaks off after the response head is past the retries, so it ends the run
+#[cfg(feature = "dash")]
+pub(crate) fn body_read_err(url: &str, e: reqwest::Error) -> G2gError {
+    g2g_core::g2g_error!(&FetchLog, "{url}: {e}");
+    crate::httpsrc::http_err(e)
+}
+
 /// A response body that exceeds its negotiated cap is treated as a (loud) I/O
 /// failure: a remote URL is attacker-controlled, so an over-cap body is a
 /// denial-of-service attempt, not a recoverable condition. Same error surface as
@@ -134,6 +141,7 @@ where
             Err(failure) => failure,
         };
         let Some(reason) = failure.retry_reason() else {
+            g2g_core::g2g_error!(&FetchLog, "{url}: {failure}");
             return Err(failure.into_error());
         };
         let counts = match (retry.live_segment_duration, reason) {
@@ -144,6 +152,10 @@ where
         };
         if counts {
             if counted_retries == MAX_FETCH_RETRIES {
+                g2g_core::g2g_error!(
+                    &FetchLog,
+                    "{url}: {failure}, gave up after {MAX_FETCH_RETRIES} retries"
+                );
                 return Err(failure.into_error());
             }
             counted_retries += 1;

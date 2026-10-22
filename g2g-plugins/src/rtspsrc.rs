@@ -617,7 +617,10 @@ async fn run_session(
 
     let mut demuxed = match played.demuxed() {
         Ok(d) => d,
-        Err(_) => return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other)),
+        Err(e) => {
+            g2g_core::g2g_error!(Target::category(LOG_CATEGORY), "{}: {e}", src.url);
+            return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other));
+        }
     };
 
     if let Some(caps) = &current_caps {
@@ -640,7 +643,8 @@ async fn run_session(
     while *total_emitted < limit {
         let item = match demuxed.next().await {
             Some(Ok(item)) => item,
-            Some(Err(_)) => {
+            Some(Err(e)) => {
+                g2g_core::g2g_error!(Target::category(LOG_CATEGORY), "{}: {e}", src.url);
                 *last_session_max_pts = session_max_pts;
                 return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other));
             }

@@ -70,8 +70,8 @@ use g2g_core::{
 use crate::abr::BandwidthEstimator;
 use crate::dashclock::{local_now_unix, RequestSpan, ServerClock};
 use crate::fetch::{
-    byte_frame, get_bytes_retrying, get_range_bytes_retrying, get_response_retrying, get_text,
-    get_text_retrying, net_err, resolve_url, FetchRetry, MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
+    body_read_err, byte_frame, get_bytes_retrying, get_range_bytes_retrying, get_response_retrying,
+    get_text, get_text_retrying, resolve_url, FetchRetry, MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
 };
 use crate::fmp4::CmafChunker;
 use crate::mpd::{
@@ -162,7 +162,7 @@ async fn stream_segment_chunks(
     let mut resp = get_response_retrying(client, url, MAX_SEGMENT_BYTES, retry).await?;
     let mut chunker = CmafChunker::new(MAX_SEGMENT_BYTES);
     let mut total = 0usize;
-    while let Some(bytes) = resp.chunk().await.map_err(net_err)? {
+    while let Some(bytes) = resp.chunk().await.map_err(|e| body_read_err(url, e))? {
         total = total.saturating_add(bytes.len());
         chunker.feed(&bytes)?;
         while let Some(chunk) = chunker.next_chunk()? {

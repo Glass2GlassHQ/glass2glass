@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1800: a failed HLS or DASH fetch logs its URL and cause, and `rtspsrc` logs the RTSP error that ends a session.
 - M1799: `nvdec` drops the pictures waiting for output at a CRA that follows an end of sequence.
 - M1798: `nvdec` refuses 12-bit, mixed-depth, SP/SI-slice and tiles-with-WPP streams it decoded wrong.
 - M1797: `videocrop` crops RGB, P010 and alpha frames, so a clean aperture no longer fails them.
