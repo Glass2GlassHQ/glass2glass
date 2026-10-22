@@ -1073,6 +1073,18 @@ fn stream_selection(stream: &str) -> Vec<(alloc::string::String, alloc::string::
     alloc::vec![("stream".to_string(), stream.to_string())]
 }
 
+// `stream=` alone picks the first track of a codec, the container id picks the others
+#[cfg(feature = "std")]
+fn pinned_stream_selection(
+    stream: &str,
+    id_property: &str,
+    id: u64,
+) -> Vec<(alloc::string::String, alloc::string::String)> {
+    let mut props = stream_selection(stream);
+    props.push((id_property.to_string(), id.to_string()));
+    props
+}
+
 /// Map a per-branch decode-chain failure to the text-parser error (the
 /// [`decodebin`](Registry::decodebin) form): no chain quotes the unplugged input
 /// caps, a link error wraps the graph error.
@@ -2136,7 +2148,11 @@ pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams
         .into_iter()
         .map(|info| PrimaryStream {
             demux: "tsdemux",
-            props: stream_selection(crate::tsdemux::ts_stream_to_str(info.stream)),
+            props: pinned_stream_selection(
+                crate::tsdemux::ts_stream_to_str(info.stream),
+                "pid",
+                info.pid.into(),
+            ),
             caps: info.caps,
             has_clean_aperture: false,
         })
@@ -2239,7 +2255,7 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
             };
             Some(PrimaryStream {
                 demux: "qtdemux",
-                props: stream_selection(&stream),
+                props: pinned_stream_selection(&stream, "track-id", info.track_id.into()),
                 caps: info.caps,
                 has_clean_aperture,
             })
@@ -2291,7 +2307,11 @@ pub fn mkv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
         .into_iter()
         .map(|info| PrimaryStream {
             demux: "matroskademux",
-            props: stream_selection(&crate::mkvdemux::mkv_stream_str(info.stream)),
+            props: pinned_stream_selection(
+                &crate::mkvdemux::mkv_stream_str(info.stream),
+                "track-number",
+                info.track_number,
+            ),
             caps: info.caps,
             has_clean_aperture: false,
         })

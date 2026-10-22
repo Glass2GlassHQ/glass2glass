@@ -28,14 +28,15 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
+use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, StreamSelectController};
 use g2g_core::{
-    AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, LatencyReport,
-    MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream,
-    StreamCollection, StreamType, SubPictureFormat, Tag, TagList, VideoCodec,
+    g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
+    CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
+    LatencyReport, MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek,
+    Segment, Stream, StreamCollection, StreamType, SubPictureFormat, Tag, TagList, VideoCodec,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -348,6 +349,8 @@ pub struct TsDemux {
     demux: TsDemuxer,
     /// The elementary stream this instance forwards (the single output pad).
     stream: TsStream,
+    // the PID among those carrying `stream`, `None` for the first of them in PMT order
+    pid: Option<u16>,
     /// The PAT program to demux (`None` = the first program in PAT order),
     /// preserved across a parser reset so a seek keeps the selection.
     program_number: Option<u16>,
@@ -401,6 +404,7 @@ impl TsDemux {
         Self {
             demux: TsDemuxer::new(),
             stream: TsStream::H264,
+            pid: None,
             program_number: None,
             packets: TsPacketSplitter::new(),
             configured: false,
@@ -665,6 +669,26 @@ impl TsDemux {
         }
     }
 
+    // called once units arrive, so the PMT has parsed
+    fn selected_pid(&self) -> Result<Option<u16>, G2gError> {
+        let Some(pid) = self.pid else {
+            return Ok(first_pid_carrying(&self.demux, self.stream));
+        };
+        let carries =
+            self.demux.streams().iter().any(|es| {
+                es.pid == pid && pid_carries(&self.demux, self.stream, pid, es.stream_type)
+            });
+        if carries {
+            return Ok(Some(pid));
+        }
+        g2g_error!(
+            Target::category("tsdemux"),
+            "pid={pid} carries no {} stream",
+            ts_stream_to_str(self.stream)
+        );
+        Err(G2gError::CapsMismatch)
+    }
+
     /// Emit each completed access unit of the selected elementary stream as a
     /// frame (Annex-B for H.264 / H.265, ADTS for AAC, raw MPEG-audio frames for
     /// Mp2, and control-header-unwrapped raw Opus packets for Opus), carrying its
@@ -675,7 +699,7 @@ impl TsDemux {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         for u in units {
-            if first_pid_carrying(&self.demux, self.stream) != Some(u.pid) {
+            if self.selected_pid()? != Some(u.pid) {
                 continue; // a stream other than the selected one
             }
             let pts_ns = u
@@ -937,6 +961,14 @@ impl AsyncElement for TsDemux {
                 self.stream = ts_stream_from_str(s).ok_or(PropError::Value)?;
                 Ok(())
             }
+            "pid" => {
+                let pid = value.as_uint().ok_or(PropError::Type)?;
+                self.pid = match pid {
+                    0 => None,
+                    _ => Some(u16::try_from(pid).map_err(|_| PropError::Value)?),
+                };
+                Ok(())
+            }
             "program-number" => {
                 let n = program_number_from_int(value.as_int().ok_or(PropError::Type)?)?;
                 self.program_number = n;
@@ -950,6 +982,7 @@ impl AsyncElement for TsDemux {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "stream" => Some(PropValue::Str(ts_stream_to_str(self.stream).into())),
+            "pid" => Some(PropValue::Uint(self.pid.map_or(0, u64::from))),
             "program-number" => Some(PropValue::Int(program_number_to_int(self.program_number))),
             _ => None,
         }
@@ -967,6 +1000,11 @@ static TSDEMUX_PROPS: &[PropertySpec] = &[
         "program-number",
         PropKind::Int,
         "PAT program to demux (-1 = the first program)",
+    ),
+    PropertySpec::new(
+        "pid",
+        PropKind::Uint,
+        "PID of the elementary stream to emit among those carrying `stream` (0 = the first of them)",
     ),
 ];
 
@@ -1097,6 +1135,7 @@ pub struct TsStreamInfo {
     pub caps: Caps,
     /// `true` for a video stream, `false` for audio (picks the auto sink).
     pub video: bool,
+    pub pid: u16,
 }
 
 /// The forwardable elementary streams a parsed transport stream carries, in PMT
@@ -1132,6 +1171,7 @@ fn stream_info(stream: TsStream, pid: u16, units: &[EsUnit]) -> TsStreamInfo {
         stream,
         caps,
         video,
+        pid,
     }
 }
 

@@ -127,6 +127,8 @@ pub struct Mp4Demux {
     out_codec: VideoCodec,
     /// Which track to emit; set by the `stream` property before negotiation.
     select: StreamSelect,
+    // the `tkhd` track_ID among the tracks `select` matches, `None` for the first of them
+    track_id: Option<u32>,
     caps_sent: bool,
     sequence: u64,
     configured: bool,
@@ -145,6 +147,7 @@ impl Mp4Demux {
             buffer: Vec::new(),
             out_codec: VideoCodec::H264,
             select: StreamSelect::Video,
+            track_id: None,
             caps_sent: false,
             sequence: 0,
             configured: false,
@@ -204,6 +207,10 @@ impl Mp4Demux {
         }
     }
 
+    fn is_pinned_track(&self, track: &TrackHeader) -> bool {
+        self.track_id.is_none_or(|id| track.track_id == id)
+    }
+
     /// Emit the selected track once the whole file is in hand. Idempotent; runs
     /// once, at `Eos`, dispatching to the video or audio drain.
     async fn drain(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
@@ -232,6 +239,7 @@ impl Mp4Demux {
         let tracks = parse_all_tracks(&self.buffer)?;
         let audio = tracks
             .iter()
+            .filter(|t| self.is_pinned_track(t))
             .find(|t| matches!(t.kind, TrackKind::Audio { format, .. } if format == selected))
             .ok_or(G2gError::CapsMismatch)?;
         let TrackKind::Audio {
@@ -327,6 +335,7 @@ impl Mp4Demux {
         let tracks = parse_all_tracks(&self.buffer)?;
         let video = tracks
             .iter()
+            .filter(|t| self.is_pinned_track(t))
             .find(|t| match t.kind {
                 TrackKind::Video { codec, .. } => named_codec.is_none_or(|named| named == codec),
                 _ => false,
@@ -391,6 +400,7 @@ impl Mp4Demux {
         let tracks = parse_all_tracks(&self.buffer)?;
         let video = tracks
             .iter()
+            .filter(|t| self.is_pinned_track(t))
             .find(|t| matches!(t.kind, TrackKind::RawVideo { format, .. } if format == selected))
             .ok_or(G2gError::CapsMismatch)?;
         let TrackKind::RawVideo {
@@ -548,12 +558,21 @@ impl AsyncElement for Mp4Demux {
                 };
                 Ok(())
             }
+            "track-id" => {
+                let id = value.as_uint().ok_or(PropError::Type)?;
+                self.track_id = match id {
+                    0 => None,
+                    _ => Some(u32::try_from(id).map_err(|_| PropError::Value)?),
+                };
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
+            "track-id" => Some(PropValue::Uint(self.track_id.map_or(0, u64::from))),
             "stream" => Some(PropValue::Str(match self.select {
                 StreamSelect::Video => String::from("video"),
                 // constructed from the same table, so the name is always there
@@ -603,11 +622,18 @@ impl AsyncElement for Mp4Demux {
 
 /// `Mp4Demux`'s settable properties (M748). `stream` picks the emitted track, the
 /// single-stream analog of [`TsDemux`](crate::tsdemux::TsDemux)'s `stream`.
-static MP4DEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "stream",
-    PropKind::Str,
-    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | mpeg2 | vp8 | mjpeg | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq (the video track by codec) | raw-i420 | raw-yuy2 | raw-uyvy | raw-v210 (the uncompressed video track by layout) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | pcm-f32le | alaw | mulaw | vorbis (the audio track by format) | video-mov-<fourcc> | audio-mov-<fourcc> (a codec known only by its sample entry, with ffmpeg-long-tail)",
-)];
+static MP4DEMUX_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "stream",
+        PropKind::Str,
+        "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 | mpeg2 | vp8 | mjpeg | dnxhd | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq (the video track by codec) | raw-i420 | raw-yuy2 | raw-uyvy | raw-v210 (the uncompressed video track by layout) | aac | opus | mp3 | pcm-u8 | pcm-s16le | pcm-s24le | pcm-s32le | pcm-f32le | alaw | mulaw | vorbis (the audio track by format) | video-mov-<fourcc> | audio-mov-<fourcc> (a codec known only by its sample entry, with ffmpeg-long-tail)",
+    ),
+    PropertySpec::new(
+        "track-id",
+        PropKind::Uint,
+        "tkhd track_ID of the track to emit among those `stream` matches (0 = the first of them)",
+    ),
+];
 
 impl PadTemplates for Mp4Demux {
     fn pad_templates() -> Vec<PadTemplate> {

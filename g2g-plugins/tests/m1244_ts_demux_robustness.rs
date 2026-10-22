@@ -447,10 +447,16 @@ fn decodebin_probes_the_pmt_at_every_packet_stride() {
         let primary = ts_primary_stream(path.to_str().expect("utf8 path"), &caps)
             .and_then(|streams| streams.streams.into_iter().next());
         std::fs::remove_file(&path).ok();
-        let selection = primary.map(|primary| primary.props);
+        let selected_codec = primary.and_then(|primary| {
+            primary
+                .props
+                .into_iter()
+                .find(|(key, _)| key == "stream")
+                .map(|(_, codec)| codec)
+        });
         assert_eq!(
-            selection,
-            Some(vec![("stream".into(), "h265".into())]),
+            selected_codec.as_deref(),
+            Some("h265"),
             "stride {name} names the PMT's video codec"
         );
     }

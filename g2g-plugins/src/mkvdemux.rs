@@ -148,6 +148,8 @@ enum CuePrefetch {
 pub struct MkvDemux {
     demux: MatroskaDemuxer,
     stream: MkvStream,
+    // the TrackNumber among the tracks of `stream`'s codec, `None` for the first of them
+    track_number: Option<u64>,
     configured: bool,
     emitted: u64,
     last_caps: Option<Caps>,
@@ -191,6 +193,7 @@ impl MkvDemux {
         Self {
             demux: MatroskaDemuxer::new(),
             stream: MkvStream::default(),
+            track_number: None,
             configured: false,
             emitted: 0,
             last_caps: None,
@@ -402,23 +405,28 @@ impl MkvDemux {
     /// The concrete caps for the selected track once Tracks has been parsed,
     /// with real geometry / audio parameters. `None` until the track is known.
     fn concrete_caps(&self) -> Option<Caps> {
-        Self::concrete_caps_of(&self.demux, self.stream)
+        Self::concrete_caps_of(&self.demux, self.stream, self.track_number)
     }
 
-    // the first track of the codec, a second one stays out of the output
-    fn selected_track(demux: &MatroskaDemuxer, stream: MkvStream) -> Option<u64> {
-        selected_track_entry(demux, stream).map(|t| t.number)
+    // the first track of the codec unless `track_number` pins one, the others stay out of the output
+    fn selected_track(
+        demux: &MatroskaDemuxer,
+        stream: MkvStream,
+        track_number: Option<u64>,
+    ) -> Option<u64> {
+        selected_track_entry(demux, stream, track_number).map(|t| t.number)
     }
 
     /// The concrete caps for `stream` in `demux` once Tracks has been parsed, with
     /// real geometry / audio parameters (`None` until that track is known). The
     /// stream-parameterized form [`concrete_caps`](Self::concrete_caps) and the
     /// multi-output [`MkvDemuxN`] share, so a per-port announce reuses it.
-    fn concrete_caps_of(demux: &MatroskaDemuxer, stream: MkvStream) -> Option<Caps> {
-        let track = demux
-            .tracks()
-            .iter()
-            .find(|t| codec_to_stream(t.codec) == Some(stream))?;
+    fn concrete_caps_of(
+        demux: &MatroskaDemuxer,
+        stream: MkvStream,
+        track_number: Option<u64>,
+    ) -> Option<Caps> {
+        let track = selected_track_entry(demux, stream, track_number)?;
         match Self::output_caps(stream) {
             Caps::CompressedVideo { codec, .. } if track.width > 0 && track.height > 0 => {
                 Some(Caps::CompressedVideo {
@@ -459,6 +467,7 @@ impl MkvDemux {
     fn auto_select_video_track(&mut self) {
         let tracks = self.demux.tracks();
         if tracks.is_empty()
+            || self.track_number.is_some()
             || tracks
                 .iter()
                 .any(|t| codec_to_stream(t.codec) == Some(self.stream))
@@ -605,6 +614,7 @@ impl MkvDemux {
             };
             if stream != self.stream {
                 self.stream = stream;
+                self.track_number = None;
                 // Re-emit caps for the newly selected stream on the next frame.
                 self.last_caps = None;
             }
@@ -638,14 +648,24 @@ impl MkvDemux {
         // Fall back to the file's actual video track when the default (Vp9)
         // selection is absent, so autoplug of a VP8 / AV1 / H.264 WebM works.
         self.auto_select_video_track();
-        reject_undecodable_encoding(&self.demux, self.stream)?;
+        let selected_track = Self::selected_track(&self.demux, self.stream, self.track_number);
+        if let (Some(number), None) = (self.track_number, selected_track) {
+            if !self.demux.tracks().is_empty() {
+                g2g_error!(
+                    Target::category("mkvdemux"),
+                    "track-number={number} names no {} track",
+                    mkv_stream_str(self.stream)
+                );
+                return Err(G2gError::CapsMismatch);
+            }
+        }
+        reject_undecodable_encoding(&self.demux, self.stream, self.track_number)?;
         if let Some(caps) = self.concrete_caps() {
             if self.last_caps.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
                 self.last_caps = Some(caps);
             }
         }
-        let selected_track = Self::selected_track(&self.demux, self.stream);
         for f in self.demux.take_frames() {
             if Some(f.track) != selected_track {
                 continue; // a stream other than the selected one
@@ -874,6 +894,11 @@ impl AsyncElement for MkvDemux {
                 self.stream = mkv_stream_from_str(s).ok_or(PropError::Value)?;
                 Ok(())
             }
+            "track-number" => {
+                let number = value.as_uint().ok_or(PropError::Type)?;
+                self.track_number = (number != 0).then_some(number);
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -881,17 +906,25 @@ impl AsyncElement for MkvDemux {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "stream" => Some(PropValue::Str(mkv_stream_str(self.stream))),
+            "track-number" => Some(PropValue::Uint(self.track_number.unwrap_or(0))),
             _ => None,
         }
     }
 }
 
 /// `MkvDemux`'s settable properties (M110).
-static MKVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "stream",
-    PropKind::Str,
-    "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | mjpeg | theora | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy | raw-v210) | video-riff-<fourcc> | video-mov-<fourcc> | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
-)];
+static MKVDEMUX_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "stream",
+        PropKind::Str,
+        "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | mjpeg | theora | prores-proxy | prores-lt | prores-standard | prores-hq | prores-4444 | prores-4444xq | aac | opus | ac3 | flac | vorbis | vobsub | dvbsub | pgs | a raw PCM format (U8 | S16LE | S24LE | S32LE | F32LE) | uncompressed video by layout (raw-i420 | raw-yuy2 | raw-uyvy | raw-v210) | video-riff-<fourcc> | video-mov-<fourcc> | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
+    ),
+    PropertySpec::new(
+        "track-number",
+        PropKind::Uint,
+        "TrackNumber of the track to emit among those of the `stream` codec (0 = the first of them)",
+    ),
+];
 
 /// The [`MkvStream`] a demuxer forwards for a parsed track's codec, or `None` for
 /// an unmappable one. Shared by the single-output and multi-output selection paths.
@@ -1046,12 +1079,18 @@ pub struct MkvStreamInfo {
     /// `true` for a video stream, `false` for audio (picks the auto sink: an
     /// `autovideosink` vs an `autoaudiosink`).
     pub video: bool,
+    pub track_number: u64,
 }
 
-fn selected_track_entry(demux: &MatroskaDemuxer, stream: MkvStream) -> Option<&MkvTrack> {
+fn selected_track_entry(
+    demux: &MatroskaDemuxer,
+    stream: MkvStream,
+    track_number: Option<u64>,
+) -> Option<&MkvTrack> {
     demux
         .tracks()
         .iter()
+        .filter(|t| track_number.is_none_or(|number| t.number == number))
         .find(|t| codec_to_stream(t.codec) == Some(stream))
 }
 
@@ -1060,8 +1099,12 @@ fn selected_track_entry(demux: &MatroskaDemuxer, stream: MkvStream) -> Option<&M
 /// `matroska-compression`, an unknown algorithm): its blocks are the stored
 /// encoded bytes, and forwarding them would hand them downstream as the clear
 /// bitstream. Tracks whose encodings are decoded at demux pass.
-fn reject_undecodable_encoding(demux: &MatroskaDemuxer, stream: MkvStream) -> Result<(), G2gError> {
-    if !selected_track_entry(demux, stream).is_some_and(|t| t.unsupported_encoding) {
+fn reject_undecodable_encoding(
+    demux: &MatroskaDemuxer,
+    stream: MkvStream,
+    track_number: Option<u64>,
+) -> Result<(), G2gError> {
+    if !selected_track_entry(demux, stream, track_number).is_some_and(|t| t.unsupported_encoding) {
         return Ok(());
     }
     g2g_error!(
@@ -1143,6 +1186,7 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
                 stream,
                 caps,
                 video,
+                track_number: t.number,
             })
         })
         .collect()
@@ -1179,6 +1223,7 @@ pub fn subtitle_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
                 stream,
                 caps: MkvDemux::output_caps(stream),
                 video: false,
+                track_number: t.number,
             })
         })
         .collect()
@@ -1746,11 +1791,12 @@ impl MultiOutputElement for MkvDemuxN {
                     // (and its re-armed CapsChanged) takes effect for the frames now.
                     self.apply_stream_selection();
                     for &stream in &self.ports {
-                        reject_undecodable_encoding(&self.demux, stream)?;
+                        reject_undecodable_encoding(&self.demux, stream, None)?;
                     }
                     for f in self.demux.take_frames() {
                         let Some(port) = self.port_for_codec(f.codec).filter(|&port| {
-                            MkvDemux::selected_track(&self.demux, self.ports[port]) == Some(f.track)
+                            MkvDemux::selected_track(&self.demux, self.ports[port], None)
+                                == Some(f.track)
                         }) else {
                             continue; // a track no selected port carries
                         };
@@ -1761,8 +1807,9 @@ impl MultiOutputElement for MkvDemuxN {
                             out.push_to(port, PipelinePacket::Segment(seg)).await?;
                         }
                         if !self.announced[port] {
-                            let caps = MkvDemux::concrete_caps_of(&self.demux, self.ports[port])
-                                .unwrap_or_else(|| MkvDemux::output_caps(self.ports[port]));
+                            let caps =
+                                MkvDemux::concrete_caps_of(&self.demux, self.ports[port], None)
+                                    .unwrap_or_else(|| MkvDemux::output_caps(self.ports[port]));
                             out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
                             self.announced[port] = true;
                         }

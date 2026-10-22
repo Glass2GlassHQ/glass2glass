@@ -102,9 +102,15 @@ pub enum ParseError {
     /// A transform / sink-position element names no registered element.
     UnknownElement(String),
     /// A property token had no `=` (expected `key=value`).
-    MalformedProperty { element: String, token: String },
+    MalformedProperty {
+        element: String,
+        token: String,
+    },
     /// The element has no property of that name.
-    UnknownProperty { element: String, key: String },
+    UnknownProperty {
+        element: String,
+        key: String,
+    },
     /// The value did not parse for the property's kind, or was rejected.
     BadValue {
         element: String,
@@ -139,7 +145,10 @@ pub enum ParseError {
     /// An output-pad reference (`cap.foo`) names a pad this fan-out element does
     /// not have, or one another link already took (M1241). An inline link or a
     /// bare `cap.` reports an empty `pad`.
-    UnknownOutputPad { element: String, pad: String },
+    UnknownOutputPad {
+        element: String,
+        pad: String,
+    },
     /// A `queue` / `queue2` sits anywhere but a 1-in/1-out position. It is not an
     /// element in g2g (it collapses into the edge's backpressure policy), so it
     /// cannot be a source, a sink, or a fan-out / fan-in node.
@@ -179,11 +188,17 @@ pub enum ParseError {
     MissingUnblockHandle(String),
     /// A `togglerecord` request-pad reference has no partner: a stream through it
     /// needs both its `sink_N` and its `src_N`.
-    UnpairedRequestPad { element: String, pad: String },
+    UnpairedRequestPad {
+        element: String,
+        pad: String,
+    },
     /// A `togglerecord` reference named no request pad, or named stream 0. The
     /// pads are paired, so the stream index has to be explicit, and stream 0 is
     /// the inline keyword's own chain.
-    BadRequestPad { element: String, pad: String },
+    BadRequestPad {
+        element: String,
+        pad: String,
+    },
     /// A one-element description held something other than one element: a `!`,
     /// a pad reference, a caps token, or a second element.
     NotOneElement(String),
@@ -192,7 +207,10 @@ pub enum ParseError {
     NotElementChain(String),
     /// A one-element description carried `name=` or `log-category=`, which only
     /// a whole launch line can apply.
-    LaunchKeyword { element: String, key: String },
+    LaunchKeyword {
+        element: String,
+        key: String,
+    },
     /// A `decodebin`'s source read its content and recognized no media type
     /// (`filesrc` with an extension it does not know and no `bytestream-format`).
     UnrecognizedContent(String),
@@ -204,14 +222,28 @@ pub enum ParseError {
         codecs: Vec<String>,
     },
     /// `source` is the decodebin's file location, else its upstream element
-    NoStreamOfKind { source: String, kind: StreamType },
+    NoStreamOfKind {
+        source: String,
+        kind: StreamType,
+    },
     /// A bare `d.` branch of a fan-out found no free stream of a kind its first
     /// element takes.
-    NoFanoutStream { element: String, consumer: String },
+    NoFanoutStream {
+        element: String,
+        consumer: String,
+    },
     /// A `decodebin name=d` fan-out follows an element that is neither a file of a
     /// container g2g demuxes nor a source whose location a URI fan-out probes (the
     /// element and its location are named).
     DecodebinFanoutUpstream(String),
+    // a decodebin's current-video / current-audio names a stream past the last of that kind
+    StreamIndexOutOfRange {
+        source: String,
+        kind: StreamType,
+        index: usize,
+        count: usize,
+    },
+    StreamIndexUnsupported(String),
 }
 
 impl From<GraphError> for ParseError {
@@ -369,6 +401,18 @@ impl core::fmt::Display for ParseError {
                 f,
                 "{n}: unrecognized content, no media type matches its leading bytes (name the demuxer or set bytestream-format)"
             ),
+            ParseError::StreamIndexOutOfRange {
+                source,
+                kind,
+                index,
+                count,
+            } => write!(
+                f,
+                "decodebin: current-{}={index}, but {source} has {count} {} stream(s)",
+                kind.name(),
+                kind.name()
+            ),
+            ParseError::StreamIndexUnsupported(message) => write!(f, "decodebin: {message}"),
         }
     }
 }
@@ -946,6 +990,149 @@ fn choose_container_stream(
     Ok(streams.streams.swap_remove(chosen))
 }
 
+// named after gst playbin's, and checked here since the decodebin keyword is no element
+const DECODEBIN_PROPS: &[&str] = &["current-video", "current-audio"];
+
+// the stream of each kind a decodebin decodes, `None` where gst's -1 leaves the choice to it
+#[derive(Debug, Clone, Copy, Default)]
+struct StreamIndexes {
+    video: Option<usize>,
+    audio: Option<usize>,
+}
+
+impl StreamIndexes {
+    fn of(self, kind: StreamType) -> Option<usize> {
+        match kind {
+            StreamType::Video => self.video,
+            StreamType::Audio => self.audio,
+            StreamType::Text | StreamType::Unknown => None,
+        }
+    }
+
+    fn any_set(self) -> bool {
+        self.video.is_some() || self.audio.is_some()
+    }
+}
+
+fn decodebin_stream_indexes(spec: &ElementSpec) -> Result<StreamIndexes, ParseError> {
+    if let Some((key, _)) = spec
+        .props
+        .iter()
+        .find(|(k, _)| !DECODEBIN_PROPS.contains(&k.as_str()))
+    {
+        return Err(ParseError::UnknownProperty {
+            element: spec.name.clone(),
+            key: key.clone(),
+        });
+    }
+    Ok(StreamIndexes {
+        video: keyword_stream_index(spec, "current-video")?,
+        audio: keyword_stream_index(spec, "current-audio")?,
+    })
+}
+
+// gst types these as gint, -1 to G_MAXINT
+fn keyword_stream_index(spec: &ElementSpec, key: &str) -> Result<Option<usize>, ParseError> {
+    let Some(text) = prop(spec, key) else {
+        return Ok(None);
+    };
+    let bad_value = || ParseError::BadValue {
+        element: spec.name.clone(),
+        key: key.to_string(),
+        value: text.to_string(),
+    };
+    let index: i32 = text.parse().map_err(|_| bad_value())?;
+    if index == -1 {
+        return Ok(None);
+    }
+    usize::try_from(index).map(Some).map_err(|_| bad_value())
+}
+
+// narrows the listed streams to the one of each kind an index names, counted the way ffprobe counts
+fn streams_at_indexes(
+    location: &str,
+    streams: ContainerStreams,
+    indexes: StreamIndexes,
+) -> Result<ContainerStreams, ParseError> {
+    if !indexes.any_set() {
+        return Ok(streams);
+    }
+    // a stream the demux drops still takes a place in the container's order
+    if !streams.unsupported.is_empty() {
+        return Err(ParseError::StreamIndexUnsupported(alloc::format!(
+            "{location} carries streams g2g does not demux ({}), so a stream index cannot be counted",
+            streams.unsupported.join(", ")
+        )));
+    }
+    let mut chosen = Vec::new();
+    for kind in [StreamType::Video, StreamType::Audio] {
+        let Some(index) = indexes.of(kind) else {
+            continue;
+        };
+        let of_kind: Vec<&PrimaryStream> = streams
+            .streams
+            .iter()
+            .filter(|stream| StreamType::of(&stream.caps) == kind)
+            .collect();
+        let stream = *of_kind
+            .get(index)
+            .ok_or_else(|| ParseError::StreamIndexOutOfRange {
+                source: location.to_string(),
+                kind,
+                index,
+                count: of_kind.len(),
+            })?;
+        // the demux emits the first stream its properties match
+        let selects_earlier_stream = of_kind[..index]
+            .iter()
+            .any(|earlier| earlier.demux == stream.demux && earlier.props == stream.props);
+        if selects_earlier_stream {
+            return Err(ParseError::StreamIndexUnsupported(alloc::format!(
+                "{} selects streams by codec, so {location}'s {} stream {index} cannot be told from an earlier one",
+                stream.demux,
+                kind.name()
+            )));
+        }
+        chosen.push(stream.clone());
+    }
+    Ok(ContainerStreams {
+        streams: chosen,
+        unsupported: Vec::new(),
+    })
+}
+
+// an input no container hook lists is the one stream its caps describe
+fn check_single_stream_index(
+    source: &str,
+    caps: &Caps,
+    indexes: StreamIndexes,
+) -> Result<(), ParseError> {
+    if !indexes.any_set() {
+        return Ok(());
+    }
+    let input_kind = StreamType::of(caps);
+    if !matches!(input_kind, StreamType::Video | StreamType::Audio) {
+        return Err(ParseError::StreamIndexUnsupported(alloc::format!(
+            "g2g cannot list the streams of {source}, so it cannot pick one by index"
+        )));
+    }
+    for kind in [StreamType::Video, StreamType::Audio] {
+        let Some(index) = indexes.of(kind) else {
+            continue;
+        };
+        let count = usize::from(kind == input_kind);
+        if index >= count {
+            return Err(ParseError::StreamIndexOutOfRange {
+                source: source.to_string(),
+                kind,
+                index,
+                count,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn referenced_names(chains: &[Chain]) -> alloc::collections::BTreeSet<String> {
     chains
         .iter()
@@ -998,10 +1185,16 @@ fn expand_decodebin(
                 // A fan-out `decodebin name=d` is left for `build_graph`'s
                 // decodebin-select path; it is not linearly expandable.
                 Item::Element(spec) if is_fanout_decodebin(&spec) => {
+                    if decodebin_stream_indexes(&spec)?.any_set() {
+                        return Err(ParseError::StreamIndexUnsupported(
+                            "a decodebin fan-out decodes every stream on its own branch, so current-video and current-audio apply to an inline decodebin only".to_string(),
+                        ));
+                    }
                     upstream = Some((spec.name.clone(), spec.props.clone()));
                     new_chain.push(Item::Element(spec));
                 }
                 Item::Element(spec) if is_decodebin(&spec.name) => {
+                    let indexes = decodebin_stream_indexes(&spec)?;
                     let (pred, props) = upstream.as_ref().ok_or(ParseError::DecodebinNoUpstream)?;
                     let caps = resolve_upstream_caps(registry, pred, props)?;
                     // M1018: the element right after the `decodebin` decides what
@@ -1036,21 +1229,25 @@ fn expand_decodebin(
                         .iter()
                         .find(|(k, _)| k == "location")
                         .map(|(_, v)| v.as_str());
-                    let primary = match location {
-                        Some(location) => registry
+                    let source = location.unwrap_or(pred.as_str());
+                    let listed = location.and_then(|location| {
+                        registry
                             .container_streams(location, &caps)
-                            .map(|streams| {
-                                choose_container_stream(
-                                    registry,
-                                    location,
-                                    streams,
-                                    preferred,
-                                    consumer.as_deref(),
-                                    avoided,
-                                )
-                            })
-                            .transpose()?,
-                        None => None,
+                            .map(|streams| (location, streams))
+                    });
+                    let primary = match listed {
+                        Some((location, streams)) => Some(choose_container_stream(
+                            registry,
+                            location,
+                            streams_at_indexes(location, streams, indexes)?,
+                            preferred,
+                            consumer.as_deref(),
+                            avoided,
+                        )?),
+                        None => {
+                            check_single_stream_index(source, &caps, indexes)?;
+                            None
+                        }
                     };
                     let crops_to_clean_aperture = primary
                         .as_ref()
@@ -1069,7 +1266,7 @@ fn expand_decodebin(
                     };
                     let decoders = autoplug_for_consumer(
                         registry,
-                        location.unwrap_or(pred.as_str()),
+                        source,
                         &chain_input,
                         preferred,
                         consumer.as_deref(),
