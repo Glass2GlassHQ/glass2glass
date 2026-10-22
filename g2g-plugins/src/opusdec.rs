@@ -436,6 +436,10 @@ impl OpusDec {
         Ok((pcm, per_channel))
     }
 
+    fn pre_skip_left(&self) -> u64 {
+        u64::from(self.pre_skip).saturating_sub(self.decoded_samples)
+    }
+
     /// The interleaved-sample window of a decoded frame: drops the pre-skip
     /// lookahead at the stream head and any padding past `keep` (per-channel
     /// valid count from `duration_ns`; `None` keeps the whole frame). Returns
@@ -444,11 +448,7 @@ impl OpusDec {
         let channels = self.channels as usize;
         let n = per_channel as u64;
         // Head drop: pre-skip samples still ahead of this frame's start.
-        let head = self
-            .pre_skip
-            .saturating_sub(self.decoded_samples.min(u32::MAX as u64) as u32)
-            as u64;
-        let head = head.min(n);
+        let head = self.pre_skip_left().min(n);
         // Tail cap: keep at most `keep` per-channel samples from the frame start.
         let end = keep.map_or(n, |k| k.min(n)).max(head);
         self.decoded_samples = self.decoded_samples.saturating_add(n);
@@ -532,6 +532,8 @@ impl OpusDec {
             0
         };
         let concealed = gap - recovered;
+        // the first kept sample comes after what is left of the pre-skip
+        let kept_pts_ns = expected.saturating_add(ticks_to_ns(self.pre_skip_left(), OPUS_RATE_HZ));
 
         let mut pcm = Vec::with_capacity(gap as usize * self.bytes_per_sample());
         let mut done = 0;
@@ -548,7 +550,7 @@ impl OpusDec {
                 true,
             )?);
         }
-        Ok(Some((expected, pcm)))
+        Ok(Some((kept_pts_ns, pcm)))
     }
 
     /// Push the part of `pcm` inside the segment as one output frame, preceded
@@ -568,6 +570,15 @@ impl OpusDec {
         )?
         else {
             return Ok(());
+        };
+        // container timestamps count the pre-skip the decoder drops
+        let pts_ns = timing
+            .pts_ns
+            .saturating_sub(ticks_to_ns(u64::from(self.pre_skip), OPUS_RATE_HZ));
+        let timing = FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            ..timing
         };
         let new_caps = self.output_caps();
         if self.last_out.as_ref() != Some(&new_caps) {
@@ -799,13 +810,24 @@ impl AsyncElement for OpusDec {
                     );
 
                     let keep = duration_to_samples(frame.timing.duration_ns);
+                    let kept_pts_ns = frame
+                        .timing
+                        .pts_ns
+                        .saturating_add(ticks_to_ns(self.pre_skip_left(), OPUS_RATE_HZ));
                     let pcm = self.decode_trimmed(Some(slice), MAX_FRAME_SAMPLES, keep, false)?;
                     // A frame fully inside the pre-skip window trims to nothing;
                     // consume it without emitting an empty PCM frame.
                     if pcm.is_empty() {
                         return Ok(());
                     }
-                    self.emit(pcm, frame.timing, out).await?;
+                    let samples = (pcm.len() / self.bytes_per_sample()) as u64;
+                    let timing = FrameTiming {
+                        pts_ns: kept_pts_ns,
+                        dts_ns: kept_pts_ns,
+                        duration_ns: ticks_to_ns(samples, OPUS_RATE_HZ),
+                        ..frame.timing
+                    };
+                    self.emit(pcm, timing, out).await?;
                 }
                 PipelinePacket::Flush => {
                     // A seek/flush restarts sample accounting; the re-read stream

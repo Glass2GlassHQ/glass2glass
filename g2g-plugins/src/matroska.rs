@@ -21,16 +21,17 @@
 //! declared track or carries no usable size is damage: the parser drops bytes up
 //! to the next Cluster ID and carries on there. SimpleBlock / Block frames,
 //! including all three lacing modes (Xiph / EBML / fixed), are split; laced frames
-//! share the block timestamp. The `Cues` index is parsed into a time -> Cluster
-//! byte-position map ([`MatroskaDemuxer::cue_seek_offset`]) for indexed seeking
-//! (M373). BlockGroup reference tracking and per-frame timestamp interpolation
-//! from DefaultDuration are follow-ups.
+//! are spaced by DefaultDuration, or by an Opus packet's coded duration, and
+//! otherwise share the block timestamp. The `Cues` index is parsed into a time ->
+//! Cluster byte-position map ([`MatroskaDemuxer::cue_seek_offset`]) for indexed
+//! seeking (M373). BlockGroup reference tracking is a follow-up.
 
 use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::log::Target;
+use g2g_core::time::ticks_to_ns;
 #[cfg(feature = "ffmpeg-long-tail")]
 use g2g_core::TagNamespace;
 use g2g_core::{
@@ -723,6 +724,35 @@ struct TrackBlockDecoding {
     dropped_block_logged: bool,
 }
 
+// An Opus decoder presents its output a pre-skip earlier than the packet
+// timestamps, which `CodecDelay` makes true of Matroska blocks only when it
+// equals the pre-skip. A track whose CodecDelay differs, or is missing, gets its
+// blocks moved by the difference.
+#[derive(Debug, Clone, Copy)]
+struct OpusBlockShift {
+    track: u64,
+    pre_skip_ns: u64,
+    codec_delay_ns: u64,
+}
+
+impl OpusBlockShift {
+    fn new(track: u64, codec_private: &[u8], codec_delay_ns: u64) -> Option<OpusBlockShift> {
+        crate::opusparse::parse_opus_head(codec_private)?;
+        let pre_skip_ns = opus_codec_delay_ns(codec_private);
+        (pre_skip_ns != codec_delay_ns).then_some(OpusBlockShift {
+            track,
+            pre_skip_ns,
+            codec_delay_ns,
+        })
+    }
+
+    fn apply(&self, pts_ns: u64) -> u64 {
+        pts_ns
+            .saturating_add(self.pre_skip_ns)
+            .saturating_sub(self.codec_delay_ns)
+    }
+}
+
 /// Undo each frame's track encoding in place, dropping a block whose payload
 /// does not decode (a malformed zlib stream, a malformed encryption signal byte,
 /// IV or partition table), like a malformed lacing.
@@ -831,6 +861,7 @@ pub struct MatroskaDemuxer {
     /// `tracks` for the same reason as `codec_privates`. Only tracks whose blocks
     /// carry one are stored; their blocks are decoded before they are queued.
     block_encodings: Vec<TrackBlockDecoding>,
+    opus_block_shifts: Vec<OpusBlockShift>,
     #[cfg(feature = "matroska-decrypt")]
     content_keys: Vec<([u8; 16], AesKey)>,
     // the `CodecID` of each audio or video track whose codec is `MkvCodec::Other`
@@ -884,6 +915,7 @@ impl MatroskaDemuxer {
             tracks: Vec::new(),
             codec_privates: Vec::new(),
             block_encodings: Vec::new(),
+            opus_block_shifts: Vec::new(),
             #[cfg(feature = "matroska-decrypt")]
             content_keys: Vec::new(),
             unmapped_codec_ids: Vec::new(),
@@ -1151,6 +1183,15 @@ impl MatroskaDemuxer {
                                 &self.tracks,
                             );
                             decode_encodings(&mut frames, &mut self.block_encodings);
+                            for frame in &mut frames {
+                                if let Some(shift) = self
+                                    .opus_block_shifts
+                                    .iter()
+                                    .find(|s| s.track == frame.track)
+                                {
+                                    frame.pts_ns = shift.apply(frame.pts_ns);
+                                }
+                            }
                             self.completed.extend(frames);
                         }
                         self.consume(total);
@@ -1228,6 +1269,7 @@ impl MatroskaDemuxer {
                                     dropped_block_logged: false,
                                 });
                             }
+                            self.opus_block_shifts.extend(parsed.opus_block_shift);
                             if let Some(codec_id) = parsed.unmapped_codec_id {
                                 self.unmapped_codec_ids.push(codec_id);
                             }
@@ -1587,6 +1629,7 @@ struct ParsedTrack {
     /// `MkvTrack` stays `Copy` (the header-stripping settings are owned bytes).
     block_encodings: Vec<ContentDecoding>,
     unmapped_codec_id: Option<String>,
+    opus_block_shift: Option<OpusBlockShift>,
 }
 
 fn parse_tracks(body: &[u8], content_key: ContentKeyLookup<'_>) -> Vec<ParsedTrack> {
@@ -1629,6 +1672,7 @@ fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<P
     let mut sample_rate = 0u32;
     let mut bit_depth = 0u64;
     let mut default_duration_ns = 0u64;
+    let mut codec_delay_ns = 0u64;
     // no ContentEncodings element means nothing to undo
     let mut encodings = Some(ContentEncodingChains::default());
     for (id, data) in children(body) {
@@ -1645,6 +1689,7 @@ fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<P
             // decoder-init bytes (FLAC's fLaC STREAMINFO); kept per track number.
             ID_CODEC_PRIVATE => codec_private = data,
             ID_DEFAULT_DURATION => default_duration_ns = read_uint(data),
+            ID_CODEC_DELAY => codec_delay_ns = read_uint(data),
             ID_VIDEO => {
                 for (vid, vdata) in children(data) {
                     match vid {
@@ -1705,7 +1750,12 @@ fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<P
             .unwrap_or(MkvCodec::Other),
         codec => codec,
     };
+    let opus_block_shift = match codec {
+        MkvCodec::Opus => OpusBlockShift::new(number, &codec_private, codec_delay_ns),
+        _ => None,
+    };
     Some(ParsedTrack {
+        opus_block_shift,
         unmapped_codec_id: unmapped_av_codec_id(codec, codec_id, &codec_private),
         track: MkvTrack {
             number,
@@ -1940,8 +1990,9 @@ fn parse_block_element(
 /// Parse a (Simple)Block, appending its frame(s): a track-number VINT, a 2-byte
 /// signed relative timestamp, a flags byte, then the frame data. A laced block
 /// carries several frames (Xiph / EBML / fixed lacing); they are spaced by the
-/// track's `DefaultDuration` from the block timestamp when it is known, else they
-/// share the block timestamp. A malformed block is dropped.
+/// track's `DefaultDuration` from the block timestamp when it is known, else by
+/// an Opus packet's coded duration, else they share the block timestamp. A
+/// malformed block is dropped.
 fn parse_block(
     block: &[u8],
     cluster_ts: u64,
@@ -1987,11 +2038,17 @@ fn parse_block(
         }
     };
     // A single (unlaced) frame keeps the block timestamp; laced frames advance by
-    // DefaultDuration when known (i == 0 leaves the first at the block timestamp).
-    for (i, data) in frames.into_iter().enumerate() {
-        // default_duration_ns is untrusted; saturate the spacing multiply too,
-        // not just the add.
-        let frame_pts = pts_ns.saturating_add((i as u64).saturating_mul(default_duration_ns));
+    // DefaultDuration when known, else by an Opus packet's own coded duration.
+    let mut frame_pts = pts_ns;
+    for data in frames {
+        let spacing_ns = match codec {
+            MkvCodec::Opus if default_duration_ns == 0 => ticks_to_ns(
+                u64::from(crate::opusparse::packet_samples(data)),
+                crate::opusparse::OPUS_RATE_HZ,
+            ),
+            _ => default_duration_ns,
+        };
+        let next_pts = frame_pts.saturating_add(spacing_ns);
         out.push(MkvFrame {
             track,
             codec,
@@ -2000,6 +2057,7 @@ fn parse_block(
             keyframe,
             data: data.to_vec(),
         });
+        frame_pts = next_pts;
     }
 }
 
@@ -2940,7 +2998,7 @@ fn opus_codec_delay_ns(codec_private: &[u8]) -> u64 {
     let Some((_, pre_skip)) = crate::opusparse::parse_opus_head(codec_private) else {
         return 0;
     };
-    u64::from(pre_skip) * 1_000_000_000 / u64::from(crate::opusparse::OPUS_RATE_HZ)
+    ticks_to_ns(u64::from(pre_skip), crate::opusparse::OPUS_RATE_HZ)
 }
 
 /// The `TrackUID` the muxer writes for the `i`-th track: its track number, so a
@@ -4363,6 +4421,67 @@ mod tests {
         let frames = d.take_frames();
         assert_eq!(frames.len(), 1, "the block still emits");
         assert_eq!(frames[0].pts_ns, 0, "the overflowing timestamp clamps to 0");
+    }
+
+    // An A_OPUS track with a two-packet fixed-laced block at timestamp 0 and no DefaultDuration
+    fn laced_opus_frames(codec_delay: Option<u64>) -> Vec<MkvFrame> {
+        let head = crate::opusparse::synth_opus_head(2, crate::opusparse::OPUS_RATE_HZ);
+        let mut track_body = [
+            elem(&[0xD7], &uint_body(1)),
+            elem(&[0x86], b"A_OPUS"),
+            elem(&[0x63, 0xA2], &head),
+        ]
+        .concat();
+        if let Some(delay) = codec_delay {
+            track_body.extend_from_slice(&elem(&[0x56, 0xAA], &uint_body(delay)));
+        }
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &elem(&[0xAE], &track_body));
+        let mut laced = vint(1);
+        laced.extend_from_slice(&0i16.to_be_bytes());
+        laced.push(0x04); // fixed lacing
+        laced.push(0x01); // two frames
+        laced.extend_from_slice(&[opus_packet(1), opus_packet(2)].concat());
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[elem(&[0xE7], &uint_body(0)), elem(&[0xA3], &laced)].concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
+        let file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat();
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&file);
+        d.take_frames()
+    }
+
+    #[test]
+    fn laced_opus_frames_are_spaced_by_their_coded_duration() {
+        let pre_skip_ns = opus_codec_delay_ns(&crate::opusparse::synth_opus_head(
+            2,
+            crate::opusparse::OPUS_RATE_HZ,
+        ));
+        let frames = laced_opus_frames(Some(pre_skip_ns));
+        let first_duration_ns = ticks_to_ns(
+            u64::from(crate::opusparse::packet_samples(&opus_packet(1))),
+            crate::opusparse::OPUS_RATE_HZ,
+        );
+        assert_eq!(frames.len(), 2);
+        assert_eq!(
+            frames[0].pts_ns, 0,
+            "a CodecDelay equal to the pre-skip moves nothing"
+        );
+        assert_eq!(frames[1].pts_ns, first_duration_ns);
+    }
+
+    #[test]
+    fn opus_blocks_without_codec_delay_move_by_the_pre_skip() {
+        let pre_skip_ns = opus_codec_delay_ns(&crate::opusparse::synth_opus_head(
+            2,
+            crate::opusparse::OPUS_RATE_HZ,
+        ));
+        let frames = laced_opus_frames(None);
+        assert_eq!(
+            frames[0].pts_ns, pre_skip_ns,
+            "the decoder presents the block a pre-skip earlier, at its own timestamp"
+        );
     }
 
     #[test]
