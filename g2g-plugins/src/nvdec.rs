@@ -51,8 +51,8 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -190,6 +190,8 @@ struct DecoderState {
     vp9_slots: [Option<i32>; VP9_REFERENCE_SLOTS],
     // for VP9, the frames of the packet being parsed, in decode order
     vp9_decodes: VecDeque<Vp9Decode>,
+    // the live mapping of each decoded picture, which NVDEC refuses to map twice
+    mappings: BTreeMap<i32, PictureMapping>,
     /// First error raised inside a callback, surfaced after the parse returns.
     error: Option<G2gError>,
 }
@@ -375,6 +377,7 @@ impl NvDec {
                 ready: Vec::new(),
                 vp9_slots: [None; VP9_REFERENCE_SLOTS],
                 vp9_decodes: VecDeque::new(),
+                mappings: BTreeMap::new(),
                 error: None,
             }),
             input_stamps: PendingInputStamps::default(),
@@ -691,7 +694,7 @@ impl NvDec {
         // reserved arrays); all-zero is a valid initial state we then fill.
         let mut proc: ffi::ProcParams = unsafe { core::mem::zeroed() };
         proc.progressive_frame = 1;
-        map_picture(&self.state, picture_index, &mut proc, pts_ns)
+        map_picture(&mut self.state, picture_index, &mut proc, pts_ns)
     }
 
     fn vp9_ordered(&mut self, displayed: Vec<ReadyFrame>) -> Result<Vec<ReadyFrame>, G2gError> {
@@ -1219,10 +1222,11 @@ extern "C" fn handle_decode(user: *mut core::ffi::c_void, pic: *mut core::ffi::c
     if rc != 0 {
         return fail(state, G2gError::Hardware(HardwareError::Cuda(rc)));
     }
+    // SAFETY: `pic` is a `CUVIDPICPARAMS`, which starts with the ints
+    // PicWidthInMbs, FrameHeightInMbs and CurrPicIdx.
+    let picture_index = unsafe { *(pic as *const i32).add(2) };
+    state.mappings.remove(&picture_index);
     if state.codec_cuvid == ffi::CUDA_VIDEO_CODEC_VP9 {
-        // SAFETY: `pic` is a `CUVIDPICPARAMS`, which starts with the ints
-        // PicWidthInMbs, FrameHeightInMbs and CurrPicIdx.
-        let picture_index = unsafe { *(pic as *const i32).add(2) };
         if let Some(decode) = state.vp9_decodes.pop_front() {
             for (slot, picture) in state.vp9_slots.iter_mut().enumerate() {
                 if decode.refresh_slots & (1 << slot) != 0 {
@@ -1259,7 +1263,7 @@ extern "C" fn handle_display(user: *mut core::ffi::c_void, disp: *mut ffi::Parse
 
 // maps a decoded picture for output, it stays mapped until the frame drops
 fn map_picture(
-    state: &DecoderState,
+    state: &mut DecoderState,
     picture_index: i32,
     proc: &mut ffi::ProcParams,
     pts_ns: u64,
@@ -1267,6 +1271,15 @@ fn map_picture(
     let Some(owner) = state.decoder_owner.clone() else {
         return Err(hw());
     };
+    // a VP9 frame shown again while its first output is still downstream
+    let live = state
+        .mappings
+        .get(&picture_index)
+        .and_then(|mapping| Some((mapping, mapping.frame.upgrade()?)))
+        .filter(|(_, frame)| Arc::ptr_eq(&frame.owner, &owner));
+    if let Some((mapping, frame)) = live {
+        return Ok(mapping.ready_frame(frame, pts_ns));
+    }
     let mut dev_ptr: u64 = 0;
     let mut pitch: u32 = 0;
     // SAFETY: valid decoder + a picture index the parser decoded into; on success
@@ -1286,28 +1299,52 @@ fn map_picture(
         return Err(G2gError::Hardware(HardwareError::Cuda(rc)));
     }
     owner.mapped.fetch_add(1, Ordering::Relaxed);
-
-    // Semi-planar: the chroma plane follows luma at pitch * target_height bytes,
-    // at 8 or 16 bits per sample.
-    let chroma_ptr = dev_ptr + (pitch as u64) * (state.target_height as u64);
-    let context = owner.ctx.context;
-    let device_ordinal = owner.ctx.device_ordinal;
-    let buffer = OwnedCudaBuffer::new(
-        dev_ptr,
-        chroma_ptr,
+    let frame = Arc::new(CuvidMappedFrame { owner, dev_ptr });
+    let mapping = PictureMapping {
+        frame: Arc::downgrade(&frame),
         pitch,
-        pitch,
-        state.display_width,
-        state.display_height,
-        context,
-        device_ordinal,
-        Arc::new(CuvidMappedFrame { owner, dev_ptr }),
-    );
-    Ok(ReadyFrame {
-        buffer,
-        pts_ns,
+        width: state.display_width,
+        height: state.display_height,
+        target_height: state.target_height,
         format: state.out_format,
-    })
+    };
+    let ready = mapping.ready_frame(frame, pts_ns);
+    state.mappings.insert(picture_index, mapping);
+    Ok(ready)
+}
+
+#[derive(Debug)]
+struct PictureMapping {
+    frame: Weak<CuvidMappedFrame>,
+    pitch: u32,
+    width: u32,
+    height: u32,
+    target_height: u32,
+    format: RawVideoFormat,
+}
+
+impl PictureMapping {
+    fn ready_frame(&self, frame: Arc<CuvidMappedFrame>, pts_ns: u64) -> ReadyFrame {
+        // Semi-planar: the chroma plane follows luma at pitch * target_height bytes,
+        // at 8 or 16 bits per sample.
+        let chroma_ptr = frame.dev_ptr + (self.pitch as u64) * (self.target_height as u64);
+        let buffer = OwnedCudaBuffer::new(
+            frame.dev_ptr,
+            chroma_ptr,
+            self.pitch,
+            self.pitch,
+            self.width,
+            self.height,
+            frame.owner.ctx.context,
+            frame.owner.ctx.device_ordinal,
+            frame,
+        );
+        ReadyFrame {
+            buffer,
+            pts_ns,
+            format: self.format,
+        }
+    }
 }
 
 /// Map a CUDA / CUVID result to a `Result`, carrying the code on failure.

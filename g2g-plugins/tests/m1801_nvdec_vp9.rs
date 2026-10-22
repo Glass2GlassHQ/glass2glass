@@ -15,6 +15,8 @@ use g2g_plugins::ivfdemux::IvfDemux;
 use g2g_plugins::nvdec::NvDec;
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/vp9_320x240.ivf");
+// libvpx's show_existing_frame vector: one-byte packets repeat frames shown before
+const REPEATS_SHOWN_FRAMES: &[u8] = include_bytes!("fixtures/vp90-2-10-show-existing-frame2.ivf");
 // a 320x180 keyframe, then 640x360 and 1280x720 frames that predict from it
 const SPATIAL_LAYERS: &[u8] = include_bytes!("fixtures/vp90-2-22-svc_1280x720_3_1packet.ivf");
 const FRAME_PERIOD_NS: u64 = 33_333_333;
@@ -99,4 +101,36 @@ async fn nvdec_refuses_a_vp9_frame_that_outgrows_its_references() {
         )
         .await;
     assert_eq!(result, Err(G2gError::CapsMismatch));
+}
+
+#[tokio::test]
+async fn nvdec_repeats_a_vp9_frame_still_held_downstream() {
+    let caps = IvfDemux::stream_caps(REPEATS_SHOWN_FRAMES).expect("an IVF header");
+    let mut decoder = NvDec::new();
+    if decoder.configure_pipeline(&caps).is_err() {
+        eprintln!("skipping: NVDEC unavailable on this host");
+        return;
+    }
+    let frames = ivf_frames(REPEATS_SHOWN_FRAMES);
+    // the sink keeps every decoded frame, so each repeat finds its first output still mapped
+    let mut sink = CollectSink::default();
+    for (index, bytes) in frames.iter().enumerate() {
+        decoder
+            .process(
+                PipelinePacket::DataFrame(coded_frame(bytes, index as u64)),
+                &mut sink,
+            )
+            .await
+            .expect("NVDEC decodes or repeats the VP9 frame");
+    }
+    decoder
+        .process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("flush");
+    let decoded = sink
+        .packets
+        .iter()
+        .filter(|packet| matches!(packet, PipelinePacket::DataFrame(_)))
+        .count();
+    assert_eq!(decoded, frames.len());
 }

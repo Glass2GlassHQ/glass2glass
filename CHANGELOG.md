@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1811: `nvdec` repeats a VP9 frame that is still held downstream.
 - M1809: `qtdemux` fails with `SeekRefused` on a seek that arrives once its samples have gone out.
 - M1807: `g2g-launch` ends quietly when its stdout closes, as `gst-launch` does.
 - M1806: `tsdemux` counts a seek target from the file's first PTS, and `qtdemux` seeks.
