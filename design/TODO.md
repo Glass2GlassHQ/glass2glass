@@ -244,6 +244,15 @@ Highest leverage first:
     the second MP2 stream of `sample_mpeg_program_stream_scr.mpg`.
   - A fan-in muxer that refuses a codec reports a bare `CapsMismatch`: name the
     muxer and the codec.
+  - Reordered H.264 in MP4 comes out with pts going backwards
+    (`h264/late-sei.mp4`, `h264/mixed-nal-coding.mp4`, `mpeg4/packed_bframes.avi`),
+    and `hevc/two_first_slice.mp4` gives 35 frames where gst and ffmpeg give 34.
+  - qdraw in MOV decodes 2 of 12 frames (`quickdraw/Airplane.mov`).
+  - WavParse with a tagged codec cuts payloads at the input chunk: XMA2 packets
+    are 2048 bytes but `block_align` is 6 (`xma2/xma2-multistream-tail.xma` gives
+    512, 18952 and 30720 bytes of PCM at blocksize 188, 4096 and 65536). AC-3 in
+    WAV (`diatonis_invisible_order_anfos_ac3-small.wav`) puts frame 1 at 0.371 s
+    where ffmpeg gives 0.035 s.
 
 ## Codecs
 
