@@ -17,6 +17,10 @@ use g2g_plugins::nvdec::NvDec;
 const FIXTURE: &[u8] = include_bytes!("fixtures/vp9_320x240.ivf");
 // libvpx's show_existing_frame vector: one-byte packets repeat frames shown before
 const REPEATS_SHOWN_FRAMES: &[u8] = include_bytes!("fixtures/vp90-2-10-show-existing-frame2.ivf");
+// the first three packets of libvpx's other show_existing_frame vector: a keyframe, then
+// a superframe of two hidden frames and a repeat, then a one-byte repeat
+const HIDDEN_FRAMES_THEN_A_REPEAT: &[u8] =
+    include_bytes!("fixtures/vp90-2-10-show-existing-frame_3packets.ivf");
 // a 320x180 keyframe, then 640x360 and 1280x720 frames that predict from it
 const SPATIAL_LAYERS: &[u8] = include_bytes!("fixtures/vp90-2-22-svc_1280x720_3_1packet.ivf");
 const FRAME_PERIOD_NS: u64 = 33_333_333;
@@ -103,15 +107,15 @@ async fn nvdec_refuses_a_vp9_frame_that_outgrows_its_references() {
     assert_eq!(result, Err(G2gError::CapsMismatch));
 }
 
-#[tokio::test]
-async fn nvdec_repeats_a_vp9_frame_still_held_downstream() {
-    let caps = IvfDemux::stream_caps(REPEATS_SHOWN_FRAMES).expect("an IVF header");
+// the decoded frame count and the packet count, or None without NVDEC
+async fn decode_every_packet(file: &[u8]) -> Option<(usize, usize)> {
+    let caps = IvfDemux::stream_caps(file).expect("an IVF header");
     let mut decoder = NvDec::new();
     if decoder.configure_pipeline(&caps).is_err() {
         eprintln!("skipping: NVDEC unavailable on this host");
-        return;
+        return None;
     }
-    let frames = ivf_frames(REPEATS_SHOWN_FRAMES);
+    let frames = ivf_frames(file);
     // the sink keeps every decoded frame, so each repeat finds its first output still mapped
     let mut sink = CollectSink::default();
     for (index, bytes) in frames.iter().enumerate() {
@@ -132,5 +136,21 @@ async fn nvdec_repeats_a_vp9_frame_still_held_downstream() {
         .iter()
         .filter(|packet| matches!(packet, PipelinePacket::DataFrame(_)))
         .count();
-    assert_eq!(decoded, frames.len());
+    Some((decoded, frames.len()))
+}
+
+#[tokio::test]
+async fn nvdec_repeats_a_vp9_frame_still_held_downstream() {
+    let Some((decoded, packets)) = decode_every_packet(REPEATS_SHOWN_FRAMES).await else {
+        return;
+    };
+    assert_eq!(decoded, packets);
+}
+
+#[tokio::test]
+async fn nvdec_decodes_a_superframe_of_hidden_frames_then_a_repeat() {
+    let Some((decoded, packets)) = decode_every_packet(HIDDEN_FRAMES_THEN_A_REPEAT).await else {
+        return;
+    };
+    assert_eq!(decoded, packets);
 }

@@ -669,7 +669,14 @@ impl NvDec {
         plan: Vp9PacketPlan,
     ) -> Result<Vec<ReadyFrame>, G2gError> {
         self.state.vp9_decodes = plan.decodes;
-        let displayed = self.parse(packet, pts_ns, false);
+        // NVDEC rejects some superframes parsed whole, such as two hidden frames then a show_existing_frame
+        let displayed =
+            superframe_frames(packet)
+                .into_iter()
+                .try_fold(Vec::new(), |mut displayed, frame| {
+                    displayed.extend(self.parse(frame, pts_ns, false)?);
+                    Ok(displayed)
+                });
         // frames NVDEC skipped, such as those before the first keyframe, refresh no slot
         self.state.vp9_decodes.clear();
         let displayed = displayed?;
@@ -962,9 +969,7 @@ fn fail(state: &mut DecoderState, err: G2gError) -> i32 {
 fn check_coding_tools(codec_cuvid: i32, access_unit: &[u8]) -> Result<(), G2gError> {
     let mut nal_units = crate::annexb::nal_units(access_unit);
     let unsupported_tool = match codec_cuvid {
-        ffi::CUDA_VIDEO_CODEC_H264 => nal_units
-            .any(h264_switching_slice)
-            .then_some("H.264 SP and SI slices"),
+        ffi::CUDA_VIDEO_CODEC_H264 => nal_units.find_map(h264_unsupported_tool),
         ffi::CUDA_VIDEO_CODEC_HEVC => nal_units
             .any(h265_tiles_with_wavefront)
             .then_some("H.265 tiles together with wavefront parallel processing"),
@@ -983,6 +988,23 @@ fn check_coding_tools(codec_cuvid: i32, access_unit: &[u8]) -> Result<(), G2gErr
         return Err(G2gError::CapsMismatch);
     }
     Ok(())
+}
+
+fn h264_unsupported_tool(nal: &[u8]) -> Option<&'static str> {
+    if h264_switching_slice(nal) {
+        return Some("H.264 SP and SI slices");
+    }
+    h264_slice_groups(nal).then_some("H.264 slice groups (FMO)")
+}
+
+fn h264_slice_groups(nal: &[u8]) -> bool {
+    const PPS: u8 = 8;
+    if crate::annexb::h264_nal_type(nal) != Some(PPS) {
+        return false;
+    }
+    let mut pps = crate::annexb::BitReader::skipping_emulation_prevention(&nal[1..]);
+    crate::poc::parse_h264_pps_poc_bits(&mut pps)
+        .is_some_and(|(_, _, _, num_slice_groups_minus1)| num_slice_groups_minus1 > 0)
 }
 
 fn h264_switching_slice(nal: &[u8]) -> bool {
@@ -2286,6 +2308,17 @@ mod tests {
         );
         assert_eq!(
             check_coding_tools(ffi::CUDA_VIDEO_CODEC_H264, &sp_slice),
+            Err(G2gError::CapsMismatch)
+        );
+        // PPS: both ids 0, CAVLC, no bottom field order, then num_slice_groups_minus1 0 or 1
+        let one_slice_group = [0, 0, 0, 1, 0x68, 0b1100_1000];
+        let two_slice_groups = [0, 0, 0, 1, 0x68, 0b1100_0101];
+        assert_eq!(
+            check_coding_tools(ffi::CUDA_VIDEO_CODEC_H264, &one_slice_group),
+            Ok(())
+        );
+        assert_eq!(
+            check_coding_tools(ffi::CUDA_VIDEO_CODEC_H264, &two_slice_groups),
             Err(G2gError::CapsMismatch)
         );
 

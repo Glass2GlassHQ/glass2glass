@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1813: `nvdec` refuses H.264 slice groups and parses each frame of a VP9 superframe separately.
 - M1812: a parse error for a missing decoder names the stream in gst caps syntax (`video/x-vp9,width=352,height=288`).
 - M1808: `matroskademux`, `tsdemux` and decodebin fan-outs carry each of several same-codec tracks on its own port.
 - M1810: `nvdec` refuses a stream outside the GPU's decode limits with the reason, and names the CUDA call and error that fail.

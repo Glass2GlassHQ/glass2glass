@@ -346,6 +346,13 @@ loop stays on the GPU and out of libavcodec.
   macroblock limit. A CUDA or CUVID call that still fails logs the call and the
   driver's error name from `cuGetErrorName`. The open-caps probe behind autoplug
   stays silent, so a host without a GPU logs nothing.
+- nvdec gives NVIDIA's parser one VP9 frame per parse call, splitting each
+  superframe itself: the parser builds picture parameters the decoder rejects for
+  some superframes taken whole (two hidden frames then a show_existing_frame),
+  and the same frames parsed one at a time decode bit-exact. H.264 streams with
+  more than one slice group (FMO) are refused from the PPS: the CUVID picture
+  parameters carry FMO fields, but on an RTX 2080 Ti `cuvidDecodePicture` rejects
+  those pictures and ffmpeg's `h264_cuvid` returns wrong ones.
 
 ## Decoder cost model
 
