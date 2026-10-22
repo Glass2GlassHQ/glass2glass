@@ -581,7 +581,11 @@ time (gst counts from the first PCR in TS). `DemuxSeek` records the pts of the f
 unit of any track, a seek taken before that unit becomes a pts once it arrives, and an
 index lookup (Matroska `Cues`, the Ogg guess) waits for it and rescans from the file
 start until then. `Mp4Src` counts from the first sample, `Mp4Demux` from the later of
-the edit-list start and the first sample. A seek
+the edit-list start and the first sample. Positions use the same origin. Every segment
+a demuxer or `Mp4Src` sends has `time` set to its start minus the stream start, so the
+sink arm's `Segment::to_stream_time` publishes a position that a seek takes back to the
+same frame, as GStreamer's `matroskademux` does. `tsdemux` opens at the first DTS, so a
+stream with B frames reads that much high until its first seek. A seek
 past the end gives no frames, which g2g-launch reports as an error. `Mp4Demux`
 serves only a seek queued before its EOS drain, and one that arrives once its
 samples have gone out fails the run with `G2gError::SeekRefused`.

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1834: reported positions count from the stream's start time, so seeking to a position read back lands on the same frame.
 - M1833: every demuxer counts a seek target from the stream's first timestamp, so `--seek` matches `ffmpeg -ss` on files that do not start at 0.
 - M1819: the m961 tests check the AV1 track the demuxer and the file URI select, not the decoder name, since `ffmpegdec` outranks `rav1ddec` when both are built.
 - M1827: MP3 LAME and M4A iTunSMPB encoder delay and padding are trimmed from the decoded audio.
