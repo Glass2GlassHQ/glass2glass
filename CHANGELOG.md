@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1805: `vulkanvideodec` passes the frames an H.264 frame_num gap infers to the driver, which RADV needs.
 - M1801: `nvdec` decodes VP9.
 - M1800: a failed HLS or DASH fetch logs its URL and cause, and `rtspsrc` logs the RTSP error that ends a session.
 - M1799: `nvdec` drops the pictures waiting for output at a CRA that follows an end of sequence.

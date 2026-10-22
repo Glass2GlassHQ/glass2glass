@@ -918,9 +918,11 @@ operation of 8.2.5.4, long-term ones included: a long-term picture carries
 driver's reference info, and MMCO 5 resets the POC state and frame_num and
 starts a new reorder group. A frame_num gap under
 `gaps_in_frame_num_value_allowed_flag` makes the 8.2.5.2 non-existing frames
-sliding-window entries with no DPB slot, never passed to the driver. Running
-the sliding window regardless diverges from the reference set the driver builds
-its L0 / L1 lists against.
+short-term references that hold a DPB slot and go to the driver with
+`is_non_existing`, because a driver whose firmware builds the L0 / L1 lists from
+the reference slots (RADV on VCN) counts them. Vulkan only takes a slot a decode
+has set up since the session reset as a reference, so a gap frame in a slot no
+picture has used yet stays out of the driver's list.
 
 Parameter sets are kept by id. The decoder parses each slice against its SPS
 and PPS tables and recreates only the `VkVideoSessionParametersKHR` when a

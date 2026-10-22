@@ -8958,6 +8958,7 @@ impl VulkanVideoDevice {
             frame_num: 0,
             field_order_counts: [0, 0],
             long_term_frame_idx: None,
+            non_existing: false,
         });
         let mut dpb_cur = vk::VideoDecodeH264DpbSlotInfoKHR::default().std_reference_info(&std_cur);
         let setup_slot = vk::VideoReferenceSlotInfoKHR::default()
@@ -9817,6 +9818,7 @@ impl VulkanVideoDevice {
             texture_bitstream: None,
             chained_decode_pending: false,
             first: true,
+            set_up_slots: alloc::vec![false; num_slots],
             gpu,
             color,
             bit_depth,
@@ -10195,19 +10197,22 @@ struct RefPic {
     field_order_counts: [i32; 2],
     /// `LongTermFrameIdx` once the picture is marked long-term (8.2.5.4).
     long_term_frame_idx: Option<u32>,
+    // a frame a frame_num gap inferred (8.2.5.2): it holds a slot but was never decoded
+    non_existing: bool,
 }
 
+const DPB_FULL: VulkanVideoError = VulkanVideoError::StreamRefused(
+    "H.264 stream holds more reference frames than its DPB has slots",
+);
+
 /// The H.264 reference picture marking state of a DPB (8.2.5): which slots hold
-/// reference frames, the frames a `frame_num` gap inferred, and the long-term
-/// index bound. Holds no GPU state.
+/// reference frames, including the frames a `frame_num` gap inferred, and the
+/// long-term index bound. Holds no GPU state.
 #[derive(Debug, Clone)]
 struct H264References {
     /// Per-slot reference state: `Some` means the slot holds a reference
     /// picture, `None` means it is free.
     slots: alloc::vec::Vec<Option<RefPic>>,
-    /// `frame_num`s of the frames a gap in `frame_num` inferred (8.2.5.2). They
-    /// count as short-term references for the sliding window but hold no slot.
-    non_existing_frames: alloc::vec::Vec<u32>,
     /// `PrevRefFrameNum` (7.4.3).
     prev_ref_frame_num: u32,
     /// `MaxLongTermFrameIdx` (8.2.5.4), `None` for "no long-term frame indices".
@@ -10219,7 +10224,6 @@ impl H264References {
     fn new(num_slots: usize, max_num_ref_frames: usize) -> Self {
         Self {
             slots: alloc::vec![None; num_slots],
-            non_existing_frames: alloc::vec::Vec::new(),
             prev_ref_frame_num: 0,
             max_long_term_frame_idx: None,
             max_num_ref_frames,
@@ -10229,7 +10233,6 @@ impl H264References {
     /// Mark every picture unused for reference, as an IDR does.
     fn clear(&mut self) {
         self.slots.fill(None);
-        self.non_existing_frames.clear();
         self.prev_ref_frame_num = 0;
         self.max_long_term_frame_idx = None;
     }
@@ -10281,6 +10284,7 @@ impl H264References {
             frame_num,
             field_order_counts: order.stored_field_order_counts,
             long_term_frame_idx,
+            non_existing: false,
         });
         Ok(())
     }
@@ -10335,7 +10339,6 @@ impl H264References {
                 }
                 crate::poc::H264Mmco::AllUnused => {
                     self.slots.fill(None);
-                    self.non_existing_frames.clear();
                     self.max_long_term_frame_idx = None;
                 }
                 crate::poc::H264Mmco::CurrentAsLongTerm {
@@ -10363,10 +10366,7 @@ impl H264References {
     fn unmark_short_term(&mut self, pic_num: i64, frame_num: u32, max_frame_num: u32) {
         if let Some(slot) = self.short_term_slot(pic_num, frame_num, max_frame_num) {
             self.slots[slot] = None;
-            return;
         }
-        self.non_existing_frames
-            .retain(|&gap| h264_frame_num_wrap(gap, frame_num, max_frame_num) != pic_num);
     }
 
     /// Unmark the long-term reference whose `LongTermFrameIdx` is `idx`; for a
@@ -10383,7 +10383,7 @@ impl H264References {
     /// references fill `max_num_ref_frames`, the short-term one with the smallest
     /// `FrameNumWrap` stops being a reference.
     fn slide_window(&mut self, frame_num: u32, max_frame_num: u32) {
-        let held = self.slots.iter().flatten().count() + self.non_existing_frames.len();
+        let held = self.slots.iter().flatten().count();
         if held < self.max_num_ref_frames.max(1) {
             return;
         }
@@ -10397,27 +10397,19 @@ impl H264References {
                     .map(|r| (slot, r))
             })
             .min_by_key(|(_, r)| wrap(r.frame_num));
-        let oldest_gap = self
-            .non_existing_frames
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, &gap)| wrap(gap));
-        match (oldest_slot, oldest_gap) {
-            (Some((slot, r)), Some((_, &gap))) if wrap(r.frame_num) < wrap(gap) => {
-                self.slots[slot] = None
-            }
-            (_, Some((index, _))) => {
-                self.non_existing_frames.remove(index);
-            }
-            (Some((slot, _)), None) => self.slots[slot] = None,
-            (None, None) => {}
+        if let Some((slot, _)) = oldest_slot {
+            self.slots[slot] = None;
         }
     }
 
     /// Infer the frames a gap in `frame_num` skipped (8.2.5.2): each one runs the
-    /// sliding window and then holds a short-term reference place, so the real
+    /// sliding window and then holds a short-term reference slot, so the real
     /// references they push out are the ones the encoder expected to be gone.
-    fn fill_frame_num_gap(&mut self, header: &H264SliceHeader, sps: &H264Sps) {
+    fn fill_frame_num_gap(
+        &mut self,
+        header: &H264SliceHeader,
+        sps: &H264Sps,
+    ) -> Result<(), VulkanVideoError> {
         let max_frame_num = h264_max_frame_num(sps);
         let next = (self.prev_ref_frame_num + 1) % max_frame_num;
         let no_gap = header.is_idr
@@ -10425,15 +10417,22 @@ impl H264References {
             || header.frame_num == self.prev_ref_frame_num
             || header.frame_num == next;
         if no_gap {
-            return;
+            return Ok(());
         }
         let mut unused = next;
         while unused != header.frame_num {
             self.slide_window(unused, max_frame_num);
-            self.non_existing_frames.push(unused);
+            let slot = self.free_slot().ok_or(DPB_FULL)?;
+            self.slots[slot] = Some(RefPic {
+                frame_num: unused,
+                field_order_counts: [0, 0],
+                long_term_frame_idx: None,
+                non_existing: true,
+            });
             unused = (unused + 1) % max_frame_num;
         }
         self.prev_ref_frame_num = (header.frame_num + max_frame_num - 1) % max_frame_num;
+        Ok(())
     }
 }
 
@@ -10751,6 +10750,8 @@ struct DpbCore {
     /// The video session needs a `RESET` control on its first coding operation
     /// (and after a seek [`reset`](H264DpbDecoder::reset)).
     first: bool,
+    // slots a decode has set up since the session's last reset, the only ones a reference may name
+    set_up_slots: alloc::vec::Vec<bool>,
     /// `Some` in GPU-texture mode: the wgpu device + compute queue used to convert
     /// each decoded slot to an RGBA `wgpu::Texture` (DPB slot images are then
     /// created `SAMPLED` + `CONCURRENT` across the decode/compute families).
@@ -11142,10 +11143,16 @@ impl DpbCore {
         target: usize,
         readback_extent: Option<(u32, u32)>,
     ) -> Result<(), VulkanVideoError> {
+        let resets_session = self.first;
         match readback_extent {
             Some(extent) => self.submit_ring(begin_info, decode_info, target, extent),
             None => self.submit_texture(begin_info, decode_info, target),
+        }?;
+        if resets_session {
+            self.set_up_slots.fill(false);
         }
+        self.set_up_slots[target] = true;
+        Ok(())
     }
 
     /// Texture-path submit. When `chain_next` is set (by
@@ -12022,18 +12029,19 @@ impl H264DpbDecoder {
         if header.is_idr {
             self.references.clear();
         }
-        self.references.fill_frame_num_gap(header, &picture.sps);
+        self.references.fill_frame_num_gap(header, &picture.sps)?;
 
         // The active references for this decode are every slot currently holding
         // a reference picture. The driver builds the actual RefPicList from the
         // slice headers; we just supply the candidate set + their FrameNum/POC.
-        let active = self.references.active();
-        let target = self
+        // Vulkan rejects a reference slot no decode has set up since the session reset.
+        let active: alloc::vec::Vec<(usize, RefPic)> = self
             .references
-            .free_slot()
-            .ok_or(VulkanVideoError::StreamRefused(
-                "H.264 stream holds more reference frames than its DPB has slots",
-            ))?;
+            .active()
+            .into_iter()
+            .filter(|(slot, reference)| !reference.non_existing || self.core.set_up_slots[*slot])
+            .collect();
+        let target = self.references.free_slot().ok_or(DPB_FULL)?;
 
         self.submit_decode(
             picture,
@@ -12129,6 +12137,7 @@ impl H264DpbDecoder {
             frame_num: hdr.frame_num,
             field_order_counts,
             long_term_frame_idx: None,
+            non_existing: false,
         });
 
         let mut dpb_infos: alloc::vec::Vec<vk::VideoDecodeH264DpbSlotInfoKHR> =
@@ -14450,7 +14459,7 @@ fn std_ref_info(reference: &RefPic) -> vk::native::StdVideoDecodeH264ReferenceIn
     flags.set_top_field_flag(0);
     flags.set_bottom_field_flag(0);
     flags.set_used_for_long_term_reference(reference.long_term_frame_idx.is_some() as u32);
-    flags.set_is_non_existing(0);
+    flags.set_is_non_existing(reference.non_existing as u32);
     vk::native::StdVideoDecodeH264ReferenceInfo {
         flags,
         FrameNum: reference.long_term_frame_idx.unwrap_or(reference.frame_num) as u16,
@@ -18376,19 +18385,34 @@ mod tests {
         let mut references = H264References::new(3, MAX_NUM_REF_FRAMES as usize);
         mark(&mut references, &idr_slice(&sps), &plain_order());
         let after_gap = reference_slice(&sps, FRAME_NUM_AFTER_GAP, TestMarking::SlidingWindow);
-        references.fill_frame_num_gap(&after_gap, &sps);
+        references
+            .fill_frame_num_gap(&after_gap, &sps)
+            .expect("the DPB has room for the window");
         // frames 1..=3 were inferred, the window keeps the newest two of them
-        assert!(references.active().is_empty(), "the IDR was slid out");
         assert_eq!(
-            references.non_existing_frames,
-            [FRAME_NUM_AFTER_GAP - 2, FRAME_NUM_AFTER_GAP - 1]
+            held_frame_nums(&references),
+            [
+                (FRAME_NUM_AFTER_GAP - 2, None),
+                (FRAME_NUM_AFTER_GAP - 1, None)
+            ],
+            "the IDR was slid out"
         );
+        for (_, inferred) in references.active() {
+            assert!(inferred.non_existing);
+            assert_eq!(std_ref_info(&inferred).flags.is_non_existing(), 1);
+        }
         mark(&mut references, &after_gap, &plain_order());
+        let held: alloc::vec::Vec<(u32, bool)> = references
+            .active()
+            .into_iter()
+            .map(|(_, r)| (r.frame_num, r.non_existing))
+            .collect();
         assert_eq!(
-            references.non_existing_frames,
-            [FRAME_NUM_AFTER_GAP - 1],
+            held.len(),
+            MAX_NUM_REF_FRAMES as usize,
             "the oldest inferred frame makes room for the decoded one"
         );
-        assert_eq!(held_frame_nums(&references), [(FRAME_NUM_AFTER_GAP, None)]);
+        assert!(held.contains(&(FRAME_NUM_AFTER_GAP - 1, true)));
+        assert!(held.contains(&(FRAME_NUM_AFTER_GAP, false)));
     }
 }

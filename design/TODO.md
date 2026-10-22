@@ -114,14 +114,18 @@ Highest leverage first:
 
 - **`VulkanVideoDec` residuals.** Run the `vulkanvideo` GPU tests on Intel ANV.
 - **`VulkanVideoDec` conformance residue on RADV.** `WPP_D_ericsson` (64 wide,
-  wavefront parallel processing with dependent slice segments) decodes wrong
-  through g2g on RADV while ffmpeg's Vulkan decoder decodes it bit-exact there
-  (md5 f710612103f386c415be3e6300693451). The Std SPS, PPS and picture-info
-  fields Mesa's `get_h265_msg` reads and the slice bitstream match ffmpeg's on a
-  static read, so the difference needs an experiment loop on the RADV device.
-  NVIDIA Turing cannot decode it at all (minimum H.265 coded extent 144x144).
-  Also on RADV, `MR4_TANDBERG_C` and `MR5_TANDBERG_C` (H.264) repeat an earlier
-  picture at 22 output positions.
+  wavefront parallel processing with dependent slice segments) is refused,
+  because g2g decodes it wrong on RADV while ffmpeg's Vulkan decoder decodes it
+  bit-exact there (md5 f710612103f386c415be3e6300693451). The Std SPS, PPS and
+  picture-info fields Mesa's `get_h265_msg` reads and the slice bitstream match
+  ffmpeg's on a static read, so the difference needs an experiment loop on the
+  RADV device. NVIDIA Turing cannot decode it at all (minimum H.265 coded extent
+  144x144).
+- **H.264 frame_num gap before every DPB slot is used.** A gap frame whose slot
+  no decode has set up since the session reset is left out of the driver's
+  reference list, so on RADV the lists of the next few pictures miss it (streams
+  that drop temporal layers have gaps from picture 1). Fix by decoding the first
+  IDR into every slot when the SPS allows gaps, which sets them all up.
 
 ## CUDA / display
 
