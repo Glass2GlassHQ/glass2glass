@@ -151,7 +151,7 @@ Highest leverage first:
 
 ## Adaptive streaming (HLS / DASH)
 
-- **Same-codec tracks in one HLS TS variant.** `build_hls_ts_fanout` and `hls_ts_uri_fanout` build `TsDemuxN::new` from `HlsStreamInfo`, which carries no PID, so a second track of the same codec in a muxed variant leaves its port with no frames. Probe the variant's PMT for PIDs and use `TsDemuxN::from_stream_infos`.
+- **HLS init segment byte range.** `HlsPlaylists::init_segment` ignores `#EXT-X-MAP:BYTERANGE`, so a single-file CMAF variant probes the whole file, up to `MAX_SEGMENT_BYTES`. Fetch only the named range.
 - **HLS / CENC:** the multi-key shapes (`senc` v1/v2, multi-key `seig`
   entries) stay declined fail-loud: the 23001-7:2023 syntax is paywalled and
   the two available sources (the MPEG proposal and GPAC) contradict each

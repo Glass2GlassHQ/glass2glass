@@ -1,10 +1,10 @@
 //! M395 - HLS rendition discovery + `playbin uri=hls://...` fan-out core. The
 //! network probe (`hls_playbin`) is validated live, not in CI; this exercises the
-//! network-free assembly (`build_hls_ts_fanout`) that turns a master variant's
-//! discovered streams into `HlsSrc -> TsDemuxN -> {decode -> auto sink}`, plus the
-//! `variant_streams` rendition discovery that feeds it. The M1169 checks at the
-//! bottom cover the open-ported siblings a lone `fallbacksrc uri=hls://...`
-//! builds from the same probe.
+//! network-free assembly (`build_hls_ts_fanout`) that turns the streams of a
+//! variant's first TS segment into `HlsSrc -> TsDemuxN -> {decode -> auto sink}`,
+//! plus the `variant_streams` rendition discovery the separate-audio graph reads.
+//! The M1169 checks at the bottom cover the open-ported siblings a lone
+//! `fallbacksrc uri=hls://...` builds from the same probe.
 #![cfg(feature = "hls")]
 
 use core::future::Future;
@@ -18,11 +18,15 @@ use g2g_core::{
 };
 
 use g2g_plugins::hls::{parse, Playlist};
-use g2g_plugins::hlssrc::{variant_streams, HlsStreamInfo};
+use g2g_plugins::hlssrc::variant_streams;
 use g2g_plugins::uridecodebin::{
     build_hls_fmp4_fanout, build_hls_separate_fanout, build_hls_ts_fanout, hls_fmp4_uri_fanout,
     hls_ts_uri_fanout,
 };
+
+const AV_SEGMENT: &str = "av_h264_aac44100.ts";
+const VIDEO_ONLY_SEGMENT: &str = "h264_64x48_25fps_gop10.ts";
+const TWO_AAC_SEGMENT: &str = "multitrack_h264_aac_hls_segment.ts";
 
 fn h264_any() -> Caps {
     Caps::CompressedVideo {
@@ -117,30 +121,13 @@ fn registry() -> Registry {
     reg
 }
 
-fn muxed(stream_type: StreamType, caps: Caps, video: bool) -> HlsStreamInfo {
-    HlsStreamInfo {
-        stream_type,
-        caps,
-        video,
-        uri: None,
-        name: String::new(),
-        language: None,
-    }
+fn ts_fixture(name: &str) -> Vec<u8> {
+    let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
 #[test]
-fn discovers_renditions_and_fans_out_a_muxed_ts_variant() {
-    // Rendition discovery: a master with a muxed A/V variant yields a video + an
-    // audio stream, both carried in the variant's own TS segments.
-    let master_text = "#EXTM3U\n\
-        #EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720,CODECS=\"avc1.4d401e,mp4a.40.2\"\n\
-        720p.m3u8\n";
-    let Playlist::Master(master) = parse(master_text).unwrap() else {
-        panic!("expected master");
-    };
-    let streams = variant_streams(&master, &master.variants[0]);
-    assert_eq!(streams.len(), 2);
-
+fn fans_out_the_streams_of_a_muxed_ts_segment() {
     // The fan-out assembles HlsSrc -> TsDemuxN(2) -> two decode branches. The audio
     // branch adds audioconvert + audioresample (the M422+ chain) so the sink sees a
     // fixed PCM format: video(decoder+sink) + audio(decoder+convert+resample+sink).
@@ -149,7 +136,7 @@ fn discovers_renditions_and_fans_out_a_muxed_ts_variant() {
         &reg,
         &g2g_core::runtime::PlaybinSinks::AUTO,
         "https://example.com/master.m3u8",
-        &streams,
+        &ts_fixture(AV_SEGMENT),
     )
     .expect("fan-out builds")
     .expect("two muxed streams fan out");
@@ -166,49 +153,18 @@ fn discovers_renditions_and_fans_out_a_muxed_ts_variant() {
 }
 
 #[test]
-fn declines_a_single_stream_variant() {
-    // Only one routable muxed stream: not a fan-out, decline to the single-stream
-    // handler (Ok(None)).
+fn declines_a_single_stream_segment() {
+    // Only one forwardable muxed stream: not a fan-out, decline to the
+    // single-stream handler (Ok(None)).
     let reg = registry();
-    let streams = vec![muxed(StreamType::Video, h264_any(), true)];
     let graph = build_hls_ts_fanout(
         &reg,
         &g2g_core::runtime::PlaybinSinks::AUTO,
         "https://example.com/v.m3u8",
-        &streams,
+        &ts_fixture(VIDEO_ONLY_SEGMENT),
     )
     .unwrap();
     assert!(graph.is_none(), "a lone video stream does not fan out");
-}
-
-#[test]
-fn ignores_separate_audio_renditions_for_the_ts_demuxer() {
-    // A separate-rendition audio (its own playlist URI) is not muxed in the
-    // variant's TS, so it cannot route through the one TsDemuxN: with only the
-    // muxed video left, the builder declines.
-    let reg = registry();
-    let streams = vec![
-        muxed(StreamType::Video, h264_any(), true),
-        HlsStreamInfo {
-            stream_type: StreamType::Audio,
-            caps: aac_any(),
-            video: false,
-            uri: Some("audio/en.m3u8".into()),
-            name: "en".into(),
-            language: Some("en".into()),
-        },
-    ];
-    let graph = build_hls_ts_fanout(
-        &reg,
-        &g2g_core::runtime::PlaybinSinks::AUTO,
-        "https://example.com/v.m3u8",
-        &streams,
-    )
-    .unwrap();
-    assert!(
-        graph.is_none(),
-        "separate-rendition audio is not fanned through TsDemuxN"
-    );
 }
 
 /// A variant with a separate audio rendition fans out as two independent sources
@@ -380,19 +336,12 @@ fn fmp4_variant_fans_out_via_mp4demuxn() {
 // a `fallbackswitch` between each port and its sink. Same probe, same packaging
 // split, so the checks below assert the ports rather than a whole graph.
 
-/// A muxed MPEG-TS variant's streams become one fan-out port each, tagged with
+/// A muxed MPEG-TS segment's streams become one fan-out port each, tagged with
 /// the kind the caller picks that port's switch and sink by.
 #[test]
-fn a_muxed_ts_variant_reports_a_port_per_stream() {
-    let master_text = "#EXTM3U\n\
-        #EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720,CODECS=\"avc1.4d401e,mp4a.40.2\"\n\
-        720p.m3u8\n";
-    let Playlist::Master(master) = parse(master_text).unwrap() else {
-        panic!("expected master");
-    };
-    let streams = variant_streams(&master, &master.variants[0]);
-    let fanout = hls_ts_uri_fanout("https://example.com/master.m3u8", &streams)
-        .expect("a muxed A/V variant fans out");
+fn a_muxed_ts_segment_reports_a_port_per_stream() {
+    let fanout = hls_ts_uri_fanout("https://example.com/master.m3u8", &ts_fixture(AV_SEGMENT))
+        .expect("a muxed A/V segment fans out");
     assert_eq!(
         fanout
             .ports
@@ -402,40 +351,43 @@ fn a_muxed_ts_variant_reports_a_port_per_stream() {
         vec![StreamType::Video, StreamType::Audio],
         "one port per muxed stream, in demux port order"
     );
-    assert_eq!(fanout.ports[0].caps, h264_any());
-    assert_eq!(fanout.ports[1].caps, aac_any());
+    assert!(matches!(
+        fanout.ports[0].caps,
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            ..
+        }
+    ));
+    assert!(matches!(
+        fanout.ports[1].caps,
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            ..
+        }
+    ));
 }
 
-/// A rendition with its own playlist needs a second source, which one fan-out
-/// cannot hold, so only the variant's own muxed streams get ports: a
-/// separate-audio variant reports video alone and the caller falls back to the
-/// single-stream expansion.
+/// CODECS names AAC once for both tracks, the segment's PMT lists each one.
 #[test]
-fn a_separate_audio_rendition_gets_no_port() {
-    let streams = vec![
-        muxed(StreamType::Video, h264_any(), true),
-        HlsStreamInfo {
-            stream_type: StreamType::Audio,
-            caps: aac_any(),
-            video: false,
-            uri: Some("audio/en.m3u8".into()),
-            name: "en".into(),
-            language: Some("en".into()),
-        },
-    ];
-    let fanout = hls_ts_uri_fanout("https://example.com/v.m3u8", &streams)
-        .expect("the muxed video still fans out");
+fn two_aac_tracks_get_a_port_each() {
+    let fanout = hls_ts_uri_fanout(
+        "https://example.com/master.m3u8",
+        &ts_fixture(TWO_AAC_SEGMENT),
+    )
+    .expect("a muxed segment fans out");
     assert_eq!(
         fanout
             .ports
             .iter()
             .map(|p| p.stream_type)
             .collect::<Vec<_>>(),
-        vec![StreamType::Video],
-        "the rendition's audio is not on the variant's own demuxer"
+        vec![StreamType::Video, StreamType::Audio, StreamType::Audio]
     );
+}
 
-    // Nothing muxed at all: no port, so the hook declines outright.
+/// Bytes with no PMT carry no forwardable stream, so the hook declines.
+#[test]
+fn a_segment_without_a_pmt_gets_no_fanout() {
     assert!(hls_ts_uri_fanout("https://example.com/v.m3u8", &[]).is_none());
 }
 

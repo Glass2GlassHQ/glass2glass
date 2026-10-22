@@ -970,8 +970,11 @@ as before.
   discovers the selected variant's renditions (`hls` parses `#EXT-X-MEDIA`
   alternate renditions and the variant's `AUDIO` / `SUBTITLES` / `VIDEO` group
   bindings; `hlssrc::variant_streams` maps the variant's `CODECS` + alternate audio
-  to streams), and for a muxed MPEG-TS variant assembles `HlsSrc → TsDemuxN →
-  {decode → sink}` (the network-free assembly factored into `build_hls_ts_fanout`).
+  to streams), and for a muxed MPEG-TS variant fetches the first segment (AES-128
+  removed), reads its PMT and assembles `HlsSrc → TsDemuxN → {decode → sink}` with
+  one port per forwardable stream, pinned to its PID, since `CODECS` names a codec
+  once however many tracks carry it (the network-free assembly factored into
+  `build_hls_ts_fanout`).
   It declines to a single-stream `hls_handler` for a media-only / fMP4 / single-
   stream variant or a probe failure. The master probe is network-coupled
   (validated live, not CI).

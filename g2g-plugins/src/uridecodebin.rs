@@ -2755,38 +2755,33 @@ fn hls_ts_stream(info: &crate::hlssrc::HlsStreamInfo) -> Option<crate::tsdemux::
     }
 }
 
-/// Assemble the `HlsSrc -> TsDemuxN -> {decode -> auto sink}` fan-out from a
-/// master variant's discovered streams (M395). The network-free core of
-/// [`hls_playbin`], so it is unit-testable: only the *muxed* streams (carried in
-/// the variant's own TS segments, `uri == None`) fan out through one demuxer, one
-/// `TsStream` port per routable codec. Returns `Ok(None)` (decline, the
-/// single-stream handler takes over) when fewer than two routable muxed streams
-/// remain, e.g. a single-rendition or separate-audio variant.
+/// Assemble the `HlsSrc -> TsDemuxN -> {decode -> auto sink}` fan-out from the
+/// streams a variant's first MPEG-TS segment carries (M395). The network-free
+/// core of [`hls_playbin`], so it is unit-testable: the segment's PMT gives one
+/// port per forwardable stream, each pinned to its PID so two tracks of one
+/// codec reach their own ports. Returns `Ok(None)` (decline, the single-stream
+/// handler takes over) when fewer than two forwardable streams are muxed in.
 #[cfg(feature = "hls")]
 pub fn build_hls_ts_fanout(
     reg: &Registry,
     sinks: &PlaybinSinks<'_>,
     source_url: &str,
-    streams: &[crate::hlssrc::HlsStreamInfo],
+    first_segment: &[u8],
 ) -> Result<Option<Graph<GraphNode>>, ParseError> {
-    let mut ts_streams = Vec::new();
-    let mut port_infos = Vec::new();
-    for s in streams.iter().filter(|s| s.uri.is_none()) {
-        if let Some(ts) = hls_ts_stream(s) {
-            ts_streams.push(ts);
-            port_infos.push(uncropped_port(s.caps.clone(), s.video));
-        }
-    }
-    if ts_streams.len() < 2 {
+    let infos = crate::tsdemux::forwardable_streams(&mut ts_demuxer_from_prefix(first_segment));
+    if infos.len() < 2 {
         return Ok(None); // not a multi-stream muxed TS variant
     }
-    let source = crate::hlssrc::HlsSrc::new(source_url);
+    let ports: Vec<UriFanoutPort> = infos
+        .iter()
+        .map(|info| uncropped_port(info.caps.clone(), info.video))
+        .collect();
     build_av_fanout(
         reg,
         sinks,
-        Box::new(source),
-        Box::new(crate::tsdemux::TsDemuxN::new(ts_streams)),
-        &port_infos,
+        Box::new(crate::hlssrc::HlsSrc::new(source_url)),
+        Box::new(crate::tsdemux::TsDemuxN::from_stream_infos(&infos)),
+        &ports,
     )
     .map(Some)
 }
@@ -2886,12 +2881,14 @@ pub fn build_hls_separate_fanout(
 /// per elementary stream, the HLS sibling of [`mkv_playbin`] / [`ts_playbin`] /
 /// [`mp4_playbin`]. The variant's media playlist picks the demuxer: an
 /// `#EXT-X-MAP` init segment is fMP4 (Mp4DemuxN, tracks from the init's moov),
-/// otherwise muxed MPEG-TS (TsDemuxN, ports from CODECS). The `hls` scheme maps to
-/// an `https` origin, and an `http(s)` URL naming an `.m3u8` is fetched as is.
+/// otherwise muxed MPEG-TS (TsDemuxN, ports from the first segment's PMT). The
+/// `hls` scheme maps to an `https` origin, and an `http(s)` URL naming an
+/// `.m3u8` is fetched as is.
 ///
 /// Declines (`Ok(None)`, so the single-stream [`hls_handler`] takes over) for a
 /// URI that names no HLS playlist, a master-probe network failure, a media-only playlist, or a TS
-/// variant without at least two routable muxed streams. Network-coupled: the probe
+/// variant whose first segment does not fetch or carries fewer than two forwardable
+/// streams. Network-coupled: the probe
 /// is validated against a live server, not in CI.
 /// Assemble the HLS subtitle-overlay graph (M419): the video (and any muxed audio)
 /// rides the variant's own MPEG-TS segments through a `TsDemuxN`, the video branch
@@ -3246,7 +3243,7 @@ struct HlsPlaylists {
 /// Fetch and parse the master at `source_url` plus its chosen variant's media
 /// playlist. `None` (so the caller declines to the single-stream handler) on a
 /// failed fetch or parse, a URI naming a media playlist rather than a master, or
-/// a master offering no variant. Three blocking fetches: network-coupled,
+/// a master offering no variant. Two blocking fetches: network-coupled,
 /// validated against a live server rather than in CI.
 #[cfg(feature = "hls")]
 fn hls_playlists(source_url: alloc::string::String) -> Option<HlsPlaylists> {
@@ -3257,7 +3254,8 @@ fn hls_playlists(source_url: alloc::string::String) -> Option<HlsPlaylists> {
     let variant = master.select(None)?.clone();
     // The variant's media playlist tells the container: an `#EXT-X-MAP` init
     // segment means fMP4 / CMAF (fan out via Mp4DemuxN, tracks from the init's
-    // moov), otherwise muxed MPEG-TS (fan out via TsDemuxN, ports from CODECS).
+    // moov), otherwise muxed MPEG-TS (fan out via TsDemuxN, ports from the first
+    // segment's PMT).
     let media_url = crate::fetch::resolve_url(&source_url, &variant.uri);
     let media_text = blocking_get_text(&media_url)?;
     let Ok(crate::hls::Playlist::Media(media)) = crate::hls::parse(&media_text) else {
@@ -3281,49 +3279,54 @@ impl HlsPlaylists {
         blocking_get_bytes(&crate::fetch::resolve_url(&self.media_url, map))
     }
 
+    // CODECS names a codec once however many tracks carry it, so the ports come from the PMT
+    fn first_segment(&self) -> Option<Vec<u8>> {
+        block_on_own_thread(|| async {
+            let client = reqwest::Client::new();
+            crate::hlssrc::first_segment_clear_bytes(&client, &self.media_url, &self.media).await
+        })
+        .ok()?
+        .ok()
+    }
+
     /// One `HlsSrc` on the master, the demuxer for the chosen variant's
     /// packaging, and a port per routable stream (M1169). `None` when the
-    /// variant carries no routable stream, or when its fMP4 init segment does
-    /// not fetch. The two packagings are the network-free
-    /// [`hls_fmp4_uri_fanout`] / [`hls_ts_uri_fanout`]; the fetch is here.
+    /// variant carries no routable stream, or when its fMP4 init segment or
+    /// first MPEG-TS segment does not fetch. The two packagings are the
+    /// network-free [`hls_fmp4_uri_fanout`] / [`hls_ts_uri_fanout`]; the fetch
+    /// is here.
     fn fanout(&self) -> Option<UriFanout> {
         if self.media.map_uri.is_some() {
             return hls_fmp4_uri_fanout(&self.source_url, &self.init_segment()?);
         }
-        let streams = crate::hlssrc::variant_streams(&self.master, &self.variant);
-        hls_ts_uri_fanout(&self.source_url, &streams)
+        hls_ts_uri_fanout(&self.source_url, &self.first_segment()?)
     }
 }
 
 /// The open-ported fan-out of a muxed MPEG-TS HLS variant (M1169), the
 /// `fallbacksrc` sibling of [`build_hls_ts_fanout`]: one `HlsSrc` on the master
-/// into one `TsDemuxN`, a port per routable muxed stream. Only the variant's own
-/// segments (`uri == None`) are carried; a rendition with its own playlist needs
-/// a second source, which one fan-out cannot hold, so a separate-audio variant
-/// yields the video port alone and the caller falls back to single-stream.
-/// `None` when no muxed stream is routable. Network-free assembly.
+/// into one `TsDemuxN`, a port per forwardable stream the variant's first
+/// segment carries, pinned to its PID. A rendition with its own playlist is not
+/// in that segment and needs a second source, which one fan-out cannot hold, so
+/// a separate-audio variant yields the video port alone and the caller falls
+/// back to single-stream. `None` when the segment carries no forwardable
+/// stream. Network-free assembly.
 #[cfg(feature = "hls")]
-pub fn hls_ts_uri_fanout(
-    source_url: &str,
-    streams: &[crate::hlssrc::HlsStreamInfo],
-) -> Option<UriFanout> {
-    let mut ts_streams = Vec::new();
-    let mut av = Vec::new();
-    for stream in streams.iter().filter(|s| s.uri.is_none()) {
-        if let Some(ts) = hls_ts_stream(stream) {
-            ts_streams.push(ts);
-            av.push(uncropped_port(stream.caps.clone(), stream.video));
-        }
-    }
-    if ts_streams.is_empty() {
+pub fn hls_ts_uri_fanout(source_url: &str, first_segment: &[u8]) -> Option<UriFanout> {
+    let infos = crate::tsdemux::forwardable_streams(&mut ts_demuxer_from_prefix(first_segment));
+    if infos.is_empty() {
         return None;
     }
+    let ports: Vec<UriFanoutPort> = infos
+        .iter()
+        .map(|info| uncropped_port(info.caps.clone(), info.video))
+        .collect();
     let url = source_url.to_string();
     Some(byte_fanout(
         move || Box::new(crate::hlssrc::HlsSrc::new(&url)),
         ByteStreamEncoding::MpegTs,
-        Box::new(crate::tsdemux::TsDemuxN::new(ts_streams)),
-        &av,
+        Box::new(crate::tsdemux::TsDemuxN::from_stream_infos(&infos)),
+        &ports,
     ))
 }
 
@@ -3452,7 +3455,10 @@ pub fn hls_playbin(
     if let Some(a) = &audio_url {
         return build_hls_separate_fanout(reg, sinks, source_url, &streams, a);
     }
-    build_hls_ts_fanout(reg, sinks, source_url, &streams)
+    let Some(first_segment) = playlists.first_segment() else {
+        return Ok(None);
+    };
+    build_hls_ts_fanout(reg, sinks, source_url, &first_segment)
 }
 
 /// The lone-`fallbacksrc` URI fan-out hook for HLS (M1169), the open-ported

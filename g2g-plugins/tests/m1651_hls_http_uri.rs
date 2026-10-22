@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use g2g_core::runtime::{parse_launch, ParseError};
+use g2g_core::stream::StreamType;
 use g2g_plugins::registry::default_registry;
 
 #[path = "common/checksum_counts.rs"]
@@ -12,9 +13,17 @@ mod checksum_counts;
 use checksum_counts::count_checksums;
 #[path = "common/hls_vod_playlist.rs"]
 mod hls_vod_playlist;
-use hls_vod_playlist::serve_vod_playlist;
+use hls_vod_playlist::{serve_vod_playlist, serve_vod_playlist_of};
+#[path = "common/multitrack_fixture.rs"]
+mod multitrack_fixture;
+use multitrack_fixture::{assert_decoded_stream, probed_of_kind, run_recording, RECORDING_SINK};
 
 const SINKS: [&str; 2] = ["video", "audio"];
+// ffmpeg's hls muxer over the multi-track TS fixture's first video and both audio tracks, stream copied
+const TWO_AAC_SEGMENT: &str = "multitrack_h264_aac_hls_segment.ts";
+const TWO_AAC_SOURCE_CONTAINER: &str = "ts";
+// Constrained Baseline level 1 video and AAC LC audio
+const TWO_AAC_VARIANT_CODECS: &str = "avc1.42c00a,mp4a.40.2";
 // the fixture is a fraction of a second long, so the run checks that each branch decodes at all
 const FIRST_FRAME: usize = 1;
 const DEADLINE: Duration = Duration::from_secs(20);
@@ -34,6 +43,32 @@ fn an_http_playlist_uri_fans_out_to_video_and_audio() {
         counts.iter().all(|&count| count >= FIRST_FRAME),
         "decoded frames per branch {SINKS:?}: {counts:?}"
     );
+}
+
+#[tokio::test]
+async fn each_aac_track_of_a_muxed_variant_reaches_its_own_port() {
+    let probed = probed_of_kind(TWO_AAC_SOURCE_CONTAINER, StreamType::Audio);
+    assert!(
+        probed.len() > 1,
+        "the source fixture has several AAC tracks"
+    );
+    let labels: Vec<String> = (0..probed.len())
+        .map(|index| format!("hls-audio-{index}"))
+        .collect();
+    let branches: String = labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| format!("  d.audio_{index} ! {RECORDING_SINK} label={label}"))
+        .collect();
+    let line = format!(
+        "uridecodebin uri={} name=d{branches}",
+        serve_vod_playlist_of(TWO_AAC_SEGMENT, TWO_AAC_VARIANT_CODECS)
+    );
+    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let decoded = run_recording(&line, &label_refs).await;
+    for (index, (caps, stream)) in decoded.iter().zip(&probed).enumerate() {
+        assert_decoded_stream(caps, stream, &format!("`{line}` audio port {index}"));
+    }
 }
 
 // canary, MCP and g2g-launch parse lines from inside a tokio runtime

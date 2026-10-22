@@ -503,6 +503,46 @@ async fn fetch_key(
     Ok(key)
 }
 
+// SAMPLE-AES leaves the container clear, so only AES-128 is undone here
+pub(crate) async fn first_segment_clear_bytes(
+    client: &reqwest::Client,
+    media_url: &str,
+    media: &MediaPlaylist,
+) -> Result<Vec<u8>, G2gError> {
+    let (index, segment) = media
+        .segments
+        .iter()
+        .enumerate()
+        .find(|(_, segment)| !segment.gap && !segment.incomplete())
+        .ok_or(G2gError::CapsMismatch)?;
+    let url = resolve_url(media_url, &segment.uri);
+    let bytes = match segment.byte_range {
+        Some(range) => {
+            get_range_bytes_retrying(
+                client,
+                &url,
+                range.offset,
+                range.length,
+                MAX_SEGMENT_BYTES,
+                FetchRetry::BUDGETED,
+            )
+            .await?
+        }
+        None => get_bytes_retrying(client, &url, MAX_SEGMENT_BYTES, FetchRetry::BUDGETED).await?,
+    };
+    let Some(key) = segment
+        .key
+        .as_ref()
+        .filter(|key| matches!(key.method, KeyMethod::Aes128))
+    else {
+        return Ok(bytes);
+    };
+    let key_bytes = fetch_key(client, &mut Vec::new(), &resolve_url(media_url, &key.uri)).await?;
+    let sequence = media.media_sequence + index as u64;
+    let iv = key.iv.unwrap_or_else(|| iv_from_sequence(sequence));
+    decrypt_aes128_cbc(&key_bytes, &iv, bytes)
+}
+
 /// One WebVTT subtitle segment as the text a downstream `SubParse` reads. A raw
 /// `.vtt` segment is its own text, with a blank line appended so the next
 /// segment's `WEBVTT` / `X-TIMESTAMP-MAP` header starts a fresh (non-cue) block.
