@@ -323,6 +323,8 @@ impl LiveSync {
             .domain
             .as_system_slice()
             .map_or(self.last_bytes, |bytes| bytes.len());
+        // a filler repeats the last picture but takes its own place in the output order
+        frame.sequence = self.frames_out;
         self.last_frame = Some(frame.share());
         self.frames_out += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
@@ -591,6 +593,7 @@ mod tests {
     #[derive(Default)]
     struct CollectSink {
         pts: Vec<u64>,
+        sequences: Vec<u64>,
     }
     impl OutputSink for CollectSink {
         fn poll_push(
@@ -602,6 +605,7 @@ mod tests {
                 packet_slot.take().expect("poll_push without a packet")
             {
                 self.pts.push(frame.timing.pts_ns);
+                self.sequences.push(frame.sequence);
             }
             core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }
@@ -642,6 +646,11 @@ mod tests {
             .unwrap();
         let expected: Vec<u64> = (0..4).map(|slot| slot * period_ns()).collect();
         assert_eq!(out.pts, expected);
+        assert!(
+            out.sequences.windows(2).all(|pair| pair[0] < pair[1]),
+            "each filler takes its own sequence: {:?}",
+            out.sequences
+        );
         assert_eq!(sync.frames_duplicated(), 3);
         assert_eq!(sync.frames_out(), 4);
     }

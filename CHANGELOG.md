@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1815: `livesync` numbers its output frames, so a filler no longer repeats the last frame's sequence.
 - M1814: `splitmuxsrc` and `g2g-discover` type a stream selection's properties the way a launch line does.
 - M1813: `nvdec` refuses H.264 slice groups and parses each frame of a VP9 superframe separately.
 - M1812: a parse error for a missing decoder names the stream in gst caps syntax (`video/x-vp9,width=352,height=288`).
