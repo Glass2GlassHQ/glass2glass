@@ -4,6 +4,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use g2g_core::{Chapter, G2gError, Tag, TagList, VideoCodec};
 
@@ -258,14 +259,7 @@ pub(crate) fn find_descriptor(data: &[u8], tag: u8) -> Option<&[u8]> {
 /// becomes a [`Tag::Freeform`] under its `mean` namespace.
 pub(crate) fn parse_ilst_tags(container: &[u8]) -> TagList {
     let mut list = TagList::new();
-    let Some(udta) = find_box(container, b"udta") else {
-        return list;
-    };
-    let Some(meta) = find_box(udta, b"meta") else {
-        return list;
-    };
-    let after_fullbox = meta.get(4..).unwrap_or(meta);
-    let Some(ilst) = find_box(after_fullbox, b"ilst").or_else(|| find_box(meta, b"ilst")) else {
+    let Some(ilst) = find_ilst(container) else {
         return list;
     };
     for (kind, item) in boxes(ilst) {
@@ -286,6 +280,35 @@ pub(crate) fn parse_ilst_tags(container: &[u8]) -> TagList {
         }
     }
     list
+}
+
+fn find_ilst(container: &[u8]) -> Option<&[u8]> {
+    let meta = find_box(find_box(container, b"udta")?, b"meta")?;
+    let after_fullbox = meta.get(4..).unwrap_or(meta);
+    find_box(after_fullbox, b"ilst").or_else(|| find_box(meta, b"ilst"))
+}
+
+const ITUNES_NAMESPACE: &str = "com.apple.iTunes";
+const ITUNES_GAPLESS_KEY: &str = "iTunSMPB";
+
+// The encoder priming and the presented length, in media timescale ticks, from
+// the `iTunSMPB` item of a `moov`: hex fields of which the second is the
+// priming, the third the padding and the fourth the length. `None` when there
+// is none, it is malformed or it presents nothing.
+pub(crate) fn itunes_gapless(moov: &[u8]) -> Option<Range<u64>> {
+    let item = boxes(find_ilst(moov)?)
+        .filter(|(kind, _)| *kind == b"----")
+        .map(|(_, item)| item)
+        .find(|item| freeform_name(item) == Some((ITUNES_NAMESPACE, ITUNES_GAPLESS_KEY)))?;
+    // iTunes marks the value as text, other writers as implicit, and ffmpeg reads either
+    let (_data_type, value) = ilst_data(item)?;
+    let value = core::str::from_utf8(value).ok()?;
+    let mut fields = value.split_whitespace().skip(1);
+    let mut next = || u64::from_str_radix(fields.next()?, 16).ok();
+    let priming = next()?;
+    let _padding = next()?;
+    let length = next()?;
+    (length > 0).then_some(priming..priming.checked_add(length)?)
 }
 
 // the well-known `data` types of a cover-art item that name a still-image codec
@@ -365,14 +388,23 @@ fn be_int(value: &[u8]) -> Option<u64> {
 /// reverse-DNS namespace, e.g. `com.apple.iTunes`), a `name` full box (the key)
 /// and a UTF-8 `data` box. `None` when any part is missing or not UTF-8.
 fn freeform_tag(item: &[u8]) -> Option<Tag> {
-    let text = |b: &[u8]| core::str::from_utf8(b.get(4..)?).ok().map(String::from);
-    let namespace = text(find_box(item, b"mean")?)?;
-    let key = text(find_box(item, b"name")?)?;
+    let (namespace, key) = freeform_name(item)?;
     Some(Tag::Freeform {
-        namespace,
-        key,
+        namespace: String::from(namespace),
+        key: String::from(key),
         value: ilst_text(item)?,
     })
+}
+
+// a freeform item's namespace and key
+fn freeform_name(item: &[u8]) -> Option<(&str, &str)> {
+    fn text(full_box: &[u8]) -> Option<&str> {
+        core::str::from_utf8(full_box.get(4..)?).ok()
+    }
+    Some((
+        text(find_box(item, b"mean")?)?,
+        text(find_box(item, b"name")?)?,
+    ))
 }
 
 /// The index/total integer atoms and the tag keys the two halves carry.
@@ -828,6 +860,31 @@ mod tests {
                 number(Tag::BEATS_PER_MINUTE, 128),
             ]
         );
+    }
+
+    #[test]
+    fn reads_the_itunes_gapless_tag_whatever_its_data_type() {
+        let priming = 0x840;
+        let length = 0x19000;
+        let value = alloc::format!(" 00000000 {priming:08X} 000003C0 {length:016X} 00000000");
+        for data_type in [0u32, 1] {
+            let mut data = data_type.to_be_bytes().to_vec();
+            data.extend_from_slice(&0u32.to_be_bytes());
+            data.extend_from_slice(value.as_bytes());
+            // QuickTime writes the name ahead of the namespace
+            let item = [
+                full_box(b"name", 0, 0, ITUNES_GAPLESS_KEY.as_bytes()),
+                full_box(b"mean", 0, 0, ITUNES_NAMESPACE.as_bytes()),
+                mp4_box(b"data", &data),
+            ]
+            .concat();
+            let moov = moov_with_tags(&[mp4_box(b"----", &item)]);
+            assert_eq!(
+                itunes_gapless(find_box(&moov, b"moov").unwrap()),
+                Some(priming..priming + length),
+                "data type {data_type}"
+            );
+        }
     }
 
     #[test]

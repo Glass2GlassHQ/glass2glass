@@ -19,6 +19,8 @@
 //! since only the end of the stream can tell a trailer from audio), and the
 //! Xing / Info / VBRI header frame, a real MPEG frame whose payload is a VBR
 //! seek table rather than sound. The tags reach the application on the bus.
+//! A LAME tag in that header frame records the encoder delay and padding, which
+//! go downstream as a `Segment` the decoder clips its output to.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -33,14 +35,16 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     g2g_error, g2g_warn, AsyncElement, AudioFormat, BusHandle, BusMessage, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, TagList,
+    PadTemplate, PadTemplates, PipelinePacket, Segment, TagList,
 };
 
 use crate::audioframe::{
-    is_vbr_header_frame, locate_frame, mpa_header, Located, MpaHeader, MpaLayer,
+    is_vbr_header_frame, locate_frame, mp3_gapless, mpa_header, Located, Mp3Gapless, MpaHeader,
+    MpaLayer, MP3_DECODER_DELAY,
 };
 use crate::frame_clock::FrameClock;
 use crate::id3::{id3v2_len, parse_id3v1, parse_id3v2, ID3V1_LEN, ID3V2_HEADER_LEN};
+use crate::pcmclip::within_presentation;
 use g2g_core::time::ticks_to_ns;
 
 /// The largest ID3v2 tag whose text frames are read. A tag is skipped whatever
@@ -72,6 +76,11 @@ pub struct MpegAudioParse {
     /// Whether a frame has been emitted, so the VBR header frame (only ever the
     /// first) is looked for once.
     first_frame_seen: bool,
+    // read from the header frame, applied at the first audio frame
+    pending_gapless: Option<Mp3Gapless>,
+    // the stream time between the encoder delay and padding
+    presented: Option<Segment>,
+    upstream_segment: Segment,
     last_caps: Option<Caps>,
     clock: FrameClock,
     sequence: u64,
@@ -196,6 +205,7 @@ impl MpegAudioParse {
             if !self.first_frame_seen {
                 self.first_frame_seen = true;
                 if is_vbr_header_frame(&data, &header) {
+                    self.pending_gapless = mp3_gapless(&data, &header);
                     continue; // a seek table, not sound
                 }
             }
@@ -227,6 +237,15 @@ impl MpegAudioParse {
             .clock
             .frame_pts(start_offset, frame_samples, header.sample_rate);
         let duration_ns = ticks_to_ns(frame_samples, header.sample_rate);
+        if let Some(gapless) = self.pending_gapless.take() {
+            let presented = presented_segment(gapless, pts_ns, header);
+            out.push(PipelinePacket::Segment(within_presentation(
+                self.upstream_segment,
+                &presented,
+            )))
+            .await?;
+            self.presented = Some(presented);
+        }
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
             FrameTiming {
@@ -242,6 +261,24 @@ impl MpegAudioParse {
         self.sequence += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
+    }
+}
+
+// The stream time the decoder keeps, from the first audio frame's pts: past the
+// encoder delay and before the padding, both late by the decoder's own delay.
+fn presented_segment(gapless: Mp3Gapless, first_pts_ns: u64, header: &MpaHeader) -> Segment {
+    let rate = header.sample_rate;
+    let start_samples = u64::from(gapless.encoder_delay) + MP3_DECODER_DELAY;
+    let start = first_pts_ns + ticks_to_ns(start_samples, rate);
+    let stop = gapless.frames.and_then(|frames| {
+        let total = u64::from(frames) * u64::from(header.samples_per_frame);
+        let stop_samples = (total + MP3_DECODER_DELAY).checked_sub(u64::from(gapless.padding))?;
+        Some(first_pts_ns + ticks_to_ns(stop_samples, rate)).filter(|&stop| stop > start)
+    });
+    Segment {
+        start,
+        stop,
+        ..Segment::new()
     }
 }
 
@@ -345,6 +382,14 @@ impl AsyncElement for MpegAudioParse {
                 // The refined caps this element emits replace the upstream
                 // declaration, so an incoming one is not forwarded.
                 PipelinePacket::CapsChanged(_) => {}
+                PipelinePacket::Segment(segment) => {
+                    self.upstream_segment = segment;
+                    let segment = match &self.presented {
+                        Some(presented) => within_presentation(segment, presented),
+                        None => segment,
+                    };
+                    out.push(PipelinePacket::Segment(segment)).await?;
+                }
                 other => {
                     out.push(other).await?;
                 }

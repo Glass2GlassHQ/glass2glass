@@ -32,3 +32,13 @@ pub(crate) fn clip_pcm_to_segment(
     };
     Ok(Some((clipped, pcm)))
 }
+
+// narrows a segment to the stream time a container or codec header presents
+pub(crate) fn within_presentation(mut segment: Segment, presented: &Segment) -> Segment {
+    segment.start = segment.start.max(presented.start);
+    segment.stop = match (segment.stop, presented.stop) {
+        (Some(upstream), Some(presented)) => Some(upstream.min(presented)),
+        (upstream, presented) => upstream.or(presented),
+    };
+    segment
+}

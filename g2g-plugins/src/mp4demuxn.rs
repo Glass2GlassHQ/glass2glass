@@ -46,6 +46,7 @@ use crate::fmp4::{
     vorbis_headers, Sample, TrackHeader, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
+use crate::pcmclip::within_presentation;
 use crate::uncompressedvideo::{raw_video_frame_bytes, warn_short_raw_video_frame};
 
 /// The id a track carries in the `StreamCollection` and on its `StreamTag`s.
@@ -787,14 +788,7 @@ impl Mp4DemuxN {
     /// presentation, so the priming before it and the frames an edit cuts are
     /// clipped.
     fn port_segment(&self, port: usize) -> Segment {
-        let mut seg = self.upstream_segment;
-        let edit = self.port_edit[port];
-        seg.start = seg.start.max(edit.start);
-        seg.stop = match (seg.stop, edit.stop) {
-            (Some(upstream), Some(edit)) => Some(upstream.min(edit)),
-            (upstream, edit) => upstream.or(edit),
-        };
-        seg
+        within_presentation(self.upstream_segment, &self.port_edit[port])
     }
 
     /// Parse the whole buffered file at `Eos` and emit every sample, for a

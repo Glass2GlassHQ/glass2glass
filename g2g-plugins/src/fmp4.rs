@@ -33,7 +33,7 @@ use crate::cenc::{
 #[cfg(any(test, feature = "dash"))]
 use crate::mp4box::next_box_len;
 use crate::mp4box::{
-    be32, be64, boxes, boxes_at, find_box, find_path, parse_chpl, parse_esds,
+    be32, be64, boxes, boxes_at, find_box, find_path, itunes_gapless, parse_chpl, parse_esds,
     parse_esds_decoder_config, parse_ilst_tags,
 };
 use crate::opusparse::{opus_head_from_dops, parse_opus_head};
@@ -535,6 +535,7 @@ pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError
     let movie_timescale = find_box(moov, b"mvhd")
         .and_then(|mvhd| read_mdhd(mvhd).ok())
         .map(|header| header.timescale);
+    let gapless = itunes_gapless(moov);
     let mut tracks = Vec::new();
     for (kind, trak) in boxes(moov) {
         if kind != b"trak" {
@@ -542,11 +543,18 @@ pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError
         }
         if let Some(mut header) = parse_trak(trak)? {
             header.trex_defaults = trex_defaults(moov, header.track_id);
-            let spans = movie_timescale
-                .and_then(|movie| presented_spans(&edit_list(trak), movie, header.timescale));
+            let edits = edit_list(trak);
+            let spans =
+                movie_timescale.and_then(|movie| presented_spans(&edits, movie, header.timescale));
             if let Some(spans) = spans {
                 header.media_stop = spans.last().map(|span| span.end);
                 header.edit_gaps = edit_gaps(&spans, header.timescale);
+            }
+            // iTunes writes an AAC encoder's priming and padding as metadata instead of an edit list
+            let is_audio = matches!(header.kind, TrackKind::Audio { .. });
+            if let Some(presented) = gapless.clone().filter(|_| is_audio && edits.is_empty()) {
+                header.media_start = presented.start;
+                header.media_stop = Some(presented.end);
             }
             tracks.push(header);
         }

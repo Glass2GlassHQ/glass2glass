@@ -209,6 +209,7 @@ Highest leverage first:
 
 ## Codecs
 
+- **`audioconvert ! audio/x-raw,format=S16LE` with rate and channels open fails the re-solve** with `CapsMismatch`. A capsfilter that fixes only the format should let the rate and channels pass through.
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
 

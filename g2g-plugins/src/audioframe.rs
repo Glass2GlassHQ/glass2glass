@@ -13,6 +13,8 @@
 //! free-format, or otherwise unusable yields `None` rather than a guessed
 //! length, so a caller resynchronizes instead of mis-framing.
 
+use crate::bereader::{be_u24, be_u32};
+
 /// AC-3 syncword, the first two bytes of every syncframe.
 pub(crate) const AC3_SYNC: [u8; 2] = [0x0B, 0x77];
 
@@ -397,6 +399,75 @@ const VBRI_TAG: &[u8; 4] = b"VBRI";
 /// Offset of the VBRI header within its frame, counted from the frame's first
 /// byte (the Fraunhofer encoder writes it at a fixed offset, unlike Xing).
 const VBRI_OFFSET: usize = 36;
+
+/// Xing flag bits, in the 4-byte big-endian word behind the tag: the frame
+/// count, the byte count and the 100-entry seek table are present. Bit 3 marks a
+/// quality indicator, which `xingmux` does not write.
+pub(crate) const XING_FLAG_FRAMES: u32 = 0x0001;
+pub(crate) const XING_FLAG_BYTES: u32 = 0x0002;
+pub(crate) const XING_FLAG_TOC: u32 = 0x0004;
+const XING_FLAG_QUALITY: u32 = 0x0008;
+
+/// Entries in the Xing seek table, one per percent of the stream.
+pub(crate) const XING_TOC_ENTRIES: usize = 100;
+
+// the encoders whose tag behind the Xing fields records the delay and padding, as ffmpeg reads them
+const LAME_TAG_ENCODERS: [&[u8; 4]; 3] = [b"LAME", b"Lavf", b"Lavc"];
+// 9 bytes of encoder version, then revision, lowpass, peak, two gains, flags and bitrate
+const LAME_DELAY_PADDING_AT: usize = 21;
+const LAME_PADDING_BITS: u32 = 12;
+
+// samples an MP3 decoder outputs ahead of the first encoded one
+pub(crate) const MP3_DECODER_DELAY: u64 = 529;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Mp3Gapless {
+    // samples the encoder put ahead of the audio
+    pub(crate) encoder_delay: u32,
+    // samples the encoder put after the audio, to fill the last frame
+    pub(crate) padding: u32,
+    // the audio frames behind the header frame
+    pub(crate) frames: Option<u32>,
+}
+
+// the delay and padding a LAME tag records in a Xing / Info header frame
+pub(crate) fn mp3_gapless(data: &[u8], header: &MpaHeader) -> Option<Mp3Gapless> {
+    if header.layer != MpaLayer::Three {
+        return None;
+    }
+    let tag_at = MPA_HEADER_LEN + side_info_len(header);
+    let tag = data.get(tag_at..tag_at.checked_add(4)?)?;
+    if tag != XING_TAG_VBR && tag != XING_TAG_CBR {
+        return None;
+    }
+    let flags = be_u32(data, tag_at + 4)?;
+    let mut at = tag_at + 8;
+    let frames = match flags & XING_FLAG_FRAMES {
+        0 => None,
+        _ => Some(be_u32(data, at)?),
+    };
+    let skipped = [
+        (XING_FLAG_FRAMES, 4),
+        (XING_FLAG_BYTES, 4),
+        (XING_FLAG_TOC, XING_TOC_ENTRIES),
+        (XING_FLAG_QUALITY, 4),
+    ];
+    for (flag, len) in skipped {
+        if flags & flag != 0 {
+            at += len;
+        }
+    }
+    let encoder = data.get(at..at.checked_add(4)?)?;
+    if !LAME_TAG_ENCODERS.iter().any(|known| encoder == &known[..]) {
+        return None;
+    }
+    let delay_padding = be_u24(data, at + LAME_DELAY_PADDING_AT)?;
+    Some(Mp3Gapless {
+        encoder_delay: delay_padding >> LAME_PADDING_BITS,
+        padding: delay_padding & ((1 << LAME_PADDING_BITS) - 1),
+        frames,
+    })
+}
 
 /// Bytes of side information between the header and the Xing tag. The size
 /// follows from the version and channel mode.

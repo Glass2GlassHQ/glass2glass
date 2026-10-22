@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1827: MP3 LAME and M4A iTunSMPB encoder delay and padding are trimmed from the decoded audio.
 - M1818: an HLS MPEG-TS variant's fan-out ports come from its first segment's PMT, so two tracks of one codec each reach their own port.
 - M1821: `g2g-launch` drains the bus as each message is posted, so `checksumsink` runs at decode speed.
 - M1816: byte-stream demuxers seek to the keyframe before the target and start the segment at it, so `--seek` lands on the frame `ffmpeg -ss` gives.

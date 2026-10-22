@@ -42,19 +42,11 @@ use g2g_core::{
 
 use crate::audioframe::{
     is_vbr_header_frame, locate_frame, mpa_header, side_info_len, Located, MpaHeader,
-    MPA_HEADER_LEN, XING_TAG_CBR, XING_TAG_VBR,
+    MPA_HEADER_LEN, XING_FLAG_BYTES, XING_FLAG_FRAMES, XING_FLAG_TOC, XING_TAG_CBR, XING_TAG_VBR,
+    XING_TOC_ENTRIES,
 };
 use crate::id3::id3v2_len;
 
-/// Xing flag bits, in the 4-byte big-endian word behind the tag: the frame
-/// count, the byte count and the 100-entry seek table are present. Bit 3 marks a
-/// quality indicator, which this does not write.
-const XING_FLAG_FRAMES: u32 = 0x0001;
-const XING_FLAG_BYTES: u32 = 0x0002;
-const XING_FLAG_TOC: u32 = 0x0004;
-
-/// Entries in the Xing seek table, one per percent of the stream.
-const XING_TOC_ENTRIES: usize = 100;
 /// A table entry is the byte offset scaled into a single byte, so the whole
 /// stream spans this many steps.
 const XING_TOC_SCALE: u64 = 256;

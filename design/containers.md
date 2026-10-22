@@ -860,6 +860,13 @@ that straddles the start loses the samples before it and takes the start as
 its pts, a frame that straddles the stop ends there, and a frame wholly
 outside is dropped. `Segment::kept_samples` does that arithmetic for all of
 them.
+An audio track with no edit list takes its segment from the file's iTunSMPB
+tag instead, read in media timescale ticks (the core rate for implicit-SBR
+HE-AAC, where ffmpeg and gst read it at twice that and start 53 ms late on the
+Nero tone vector). `MpegAudioParse` derives the same kind of segment from the
+LAME tag in an MP3's Xing or Info frame, with ffmpeg's rules: the start is the
+first pts plus the encoder delay and libmp3lame's 529-sample decoder delay, and
+the stop trims the padding only when the Xing frame count is present.
 
 Which duration a reader reports depends on the layout, so `Mp4MuxN` writes both,
 selected by the `fragmented` property, default `true`.
