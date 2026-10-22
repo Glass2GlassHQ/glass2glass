@@ -399,6 +399,10 @@ header, and the SDP of an RTSP stream with audio that `uridecodebin` or
 `rtspsrc ! decodebin` has no parse-time DESCRIBE, so those inputs keep the
 shortest chain.
 
+With `ffmpeg` built, `ffmpegdec` decodes AV1 ahead of `rav1ddec` (rank -10) and
+`dav1ddec` (unpriced), so a test that needs the AV1 track selected checks the
+demuxer's `stream` or the source's caps, not the decoder name.
+
 ## End-to-end RTSP pipeline
 
 ```

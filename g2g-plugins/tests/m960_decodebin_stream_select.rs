@@ -11,8 +11,12 @@
 use std::process::Command;
 
 use g2g_core::property::PropValue;
-use g2g_core::runtime::{parse_launch, run_graph, GraphNodeRef};
+use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_plugins::registry::default_registry;
+
+#[path = "common/demux_stream.rs"]
+mod demux_stream;
+use demux_stream::demux_stream;
 
 const MKV_DEMUX_CATEGORY: &str = "MkvDemux";
 
@@ -82,18 +86,6 @@ fn mkv_with_video(codec: &[u8]) -> Vec<u8> {
     [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
 }
 
-fn demux_stream(line: &str) -> Option<PropValue> {
-    let reg = default_registry();
-    let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
-    let vg = graph.finish().expect("valid graph");
-    vg.topo().iter().find_map(|&n| match vg.element(n) {
-        Some(GraphNodeRef::Element(e)) if e.log_category() == MKV_DEMUX_CATEGORY => {
-            e.get_property("stream")
-        }
-        _ => None,
-    })
-}
-
 #[test]
 fn bare_decodebin_selects_the_av1_track() {
     let path = temp_path("av1-header", "mkv");
@@ -101,7 +93,7 @@ fn bare_decodebin_selects_the_av1_track() {
     let line = format!("filesrc location={} ! decodebin ! fakesink", path.display());
     // ffmpegdec outranks rav1ddec for AV1
     assert_eq!(
-        demux_stream(&line),
+        demux_stream(&line, MKV_DEMUX_CATEGORY),
         Some(PropValue::Str("av1".into())),
         "the demuxer selects the AV1 track"
     );

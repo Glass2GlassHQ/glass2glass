@@ -10,8 +10,16 @@
 
 use std::process::Command;
 
+use g2g_core::property::PropValue;
 use g2g_core::runtime::{parse_launch, run_graph};
+use g2g_core::{Caps, VideoCodec};
 use g2g_plugins::registry::default_registry;
+
+#[path = "common/demux_stream.rs"]
+mod demux_stream;
+use demux_stream::demux_stream;
+
+const MP4_DEMUX_CATEGORY: &str = "Mp4Demux";
 
 struct ZeroClock;
 impl g2g_core::PipelineClock for ZeroClock {
@@ -77,25 +85,16 @@ fn mp4_with_av1_video() -> Vec<u8> {
     [mp4_box(b"ftyp", b"isom\x00\x00\x02\x00isomiso2"), moov].concat()
 }
 
-fn chain_names(line: &str) -> Vec<String> {
-    let reg = default_registry();
-    let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
-    let vg = graph.finish().expect("valid graph");
-    vg.topo()
-        .iter()
-        .filter_map(|&n| vg.element(n).map(|e| e.log_category().to_string()))
-        .collect()
-}
-
 #[test]
 fn bare_decodebin_selects_the_av1_track() {
     let path = temp_path("av1-header", "mp4");
     std::fs::write(&path, mp4_with_av1_video()).unwrap();
     let line = format!("filesrc location={} ! decodebin ! fakesink", path.display());
-    let names = chain_names(&line);
-    assert!(
-        names.iter().any(|n| n == "Rav1dDec"),
-        "the AV1 decoder is plugged from the selected track, got {names:?}"
+    // ffmpegdec outranks rav1ddec for AV1
+    assert_eq!(
+        demux_stream(&line, MP4_DEMUX_CATEGORY),
+        Some(PropValue::Str("av1".into())),
+        "the demuxer selects the AV1 track"
     );
     let _ = std::fs::remove_file(&path);
 }
@@ -145,8 +144,9 @@ fn bare_decodebin_still_selects_an_audio_only_track() {
         }
         Err(e) => {
             let msg = e.to_string();
+            // the error quotes the caps in gst syntax, where AAC is `audio/mpeg`
             assert!(
-                msg.contains("Aac"),
+                msg.contains("audio/mpeg"),
                 "the chain search starts from the selected AAC track: {msg}"
             );
         }
@@ -205,15 +205,24 @@ async fn bare_decodebin_decodes_a_real_av1_mp4() {
     let _ = std::fs::remove_file(&clip);
 }
 
+// uridecodebin plugs its decoder from the caps the file URI's source declares
 #[test]
-fn bare_uridecodebin_plugs_the_av1_decoder() {
+fn a_file_uri_declares_the_av1_track() {
     let path = temp_path("av1-uri", "mp4");
     std::fs::write(&path, mp4_with_av1_video()).unwrap();
-    let line = format!("uridecodebin uri=file://{} ! fakesink", path.display());
-    let names = chain_names(&line);
+    let source = default_registry()
+        .build_uri_source(&format!("file://{}", path.display()))
+        .expect("an mp4 file URI builds a source");
     assert!(
-        names.iter().any(|n| n == "Rav1dDec"),
-        "the source declares the AV1 track, got {names:?}"
+        matches!(
+            source.caps,
+            Caps::CompressedVideo {
+                codec: VideoCodec::Av1,
+                ..
+            }
+        ),
+        "the source declares the AV1 track, got {:?}",
+        source.caps
     );
     let _ = std::fs::remove_file(&path);
 }
