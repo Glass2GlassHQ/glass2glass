@@ -51,12 +51,14 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::inputstamp::{InputStamp, PendingInputStamps};
+use crate::vp9parse::{frame_header, superframe_frames, Vp9FrameKind};
 use g2g_core::g2g_error;
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{CudaKeepAlive, DomainSet, MemoryDomainKind, OwnedCudaBuffer};
@@ -109,6 +111,7 @@ pub struct NvDec {
     segment: Segment,
     // the last access unit ended with an H.265 end of sequence NAL unit
     after_end_of_sequence: bool,
+    vp9_outputs: PacketOutputs<ReadyFrame>,
     /// Caps of the last frame emitted; a decoded frame whose format / geometry
     /// differs (a mid-stream resolution or bit-depth change) re-announces.
     last_caps: Option<Caps>,
@@ -161,9 +164,13 @@ struct DecoderState {
     /// reconfigure, unlike the ceiling above).
     coded_width: u32,
     coded_height: u32,
-    /// Display geometry (the cropped output dims). Chroma offset uses `target_height`.
+    /// Surface geometry NVDEC decodes into, the display size rounded up to even.
+    /// Chroma offset uses `target_height`.
     target_width: u32,
     target_height: u32,
+    /// Output frame size: the stream's display size, odd sizes included.
+    display_width: u32,
+    display_height: u32,
     /// Decode-surface count the live decoder was created with; a reconfigure must
     /// stay within it, and the sequence callback keeps reporting it to the parser.
     num_decode_surfaces: u32,
@@ -179,6 +186,10 @@ struct DecoderState {
     out_format: RawVideoFormat,
     /// Frames mapped and ready to emit (drained by `process` after each parse).
     ready: Vec<ReadyFrame>,
+    // for VP9, the picture in each reference slot, which NVDEC's parser never shows again
+    vp9_slots: [Option<i32>; VP9_REFERENCE_SLOTS],
+    // for VP9, the frames of the packet being parsed, in decode order
+    vp9_decodes: VecDeque<Vp9Decode>,
     /// First error raised inside a callback, surfaced after the parse returns.
     error: Option<G2gError>,
 }
@@ -189,6 +200,126 @@ struct ReadyFrame {
     buffer: OwnedCudaBuffer,
     pts_ns: u64,
     format: RawVideoFormat,
+}
+
+const VP9_REFERENCE_SLOTS: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Vp9Decode {
+    refresh_slots: u8,
+    // intra coded and refreshing every slot, so no earlier frame is needed from here on
+    replaces_every_reference: bool,
+}
+
+// what one VP9 packet shows, read from its frame headers before NVDEC parses it
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Vp9PacketPlan {
+    decodes: VecDeque<Vp9Decode>,
+    displays: u32,
+    // the packet's last shown frame repeats the one in this reference slot
+    existing_slot: Option<u8>,
+}
+
+fn vp9_packet_plan(packet: &[u8]) -> Result<Vp9PacketPlan, G2gError> {
+    let mut plan = Vp9PacketPlan::default();
+    for frame in superframe_frames(packet) {
+        let Some(header) = frame_header(frame) else {
+            g2g_error!(
+                Target::category(short_type_name::<NvDec>()),
+                "cannot read a VP9 frame header, so the frame to output is unknown"
+            );
+            return Err(G2gError::CapsMismatch);
+        };
+        match header.kind {
+            Vp9FrameKind::ShowExisting { slot } => plan.existing_slot = Some(slot),
+            Vp9FrameKind::Decoded {
+                shown,
+                intra,
+                refresh_slots,
+            } => {
+                plan.decodes.push_back(Vp9Decode {
+                    refresh_slots,
+                    replaces_every_reference: intra && refresh_slots == u8::MAX,
+                });
+                if shown {
+                    plan.displays += 1;
+                    plan.existing_slot = None;
+                }
+            }
+        }
+    }
+    Ok(plan)
+}
+
+// libvpx outputs one frame per VP9 packet, the last one it shows, at the packet's pts
+#[derive(Debug)]
+struct PacketOutput<T> {
+    pts_ns: u64,
+    displays_left: u32,
+    // false when the packet ends by repeating a reference frame, which replaces its displays
+    keeps_displays: bool,
+    frame: Option<T>,
+}
+
+#[derive(Debug)]
+struct PacketOutputs<T> {
+    pending: VecDeque<PacketOutput<T>>,
+}
+
+impl<T> Default for PacketOutputs<T> {
+    fn default() -> Self {
+        Self {
+            pending: VecDeque::new(),
+        }
+    }
+}
+
+impl<T> PacketOutputs<T> {
+    // `existing` is the repeated reference frame when the packet ends with one
+    fn packet(&mut self, pts_ns: u64, displays: u32, existing: Option<T>) {
+        self.pending.push_back(PacketOutput {
+            pts_ns,
+            displays_left: displays,
+            keeps_displays: existing.is_none(),
+            frame: existing,
+        });
+    }
+
+    // takes the decoder's displayed frames in display order
+    fn displayed(&mut self, frame: T) -> Result<(), G2gError> {
+        let Some(output) = self
+            .pending
+            .iter_mut()
+            .find(|output| output.displays_left > 0)
+        else {
+            g2g_error!(
+                Target::category(short_type_name::<NvDec>()),
+                "NVDEC displayed a VP9 frame that no packet shows"
+            );
+            return Err(hw());
+        };
+        output.displays_left -= 1;
+        if output.keeps_displays {
+            output.frame = Some(frame);
+        }
+        Ok(())
+    }
+
+    // the outputs of the leading packets whose frames have all been displayed
+    fn completed(&mut self) -> Vec<(u64, T)> {
+        let mut done = Vec::new();
+        while self
+            .pending
+            .front()
+            .is_some_and(|output| output.displays_left == 0)
+        {
+            let output = self.pending.pop_front().expect("front checked above");
+            if let Some(frame) = output.frame {
+                done.push((output.pts_ns, frame));
+            }
+        }
+        done
+    }
 }
 
 // SAFETY: `NvDec` holds raw NVCUVID/CUDA handles and a `Box<DecoderState>` with
@@ -234,18 +365,23 @@ impl NvDec {
                 coded_height: 0,
                 target_width: 0,
                 target_height: 0,
+                display_width: 0,
+                display_height: 0,
                 num_decode_surfaces: 0,
                 num_output_surfaces: DEFAULT_NUM_OUTPUT_SURFACES,
                 decoders_created: 0,
                 surface_format: ffi::CUDA_VIDEO_SURFACE_FORMAT_NV12,
                 out_format: RawVideoFormat::Nv12,
                 ready: Vec::new(),
+                vp9_slots: [None; VP9_REFERENCE_SLOTS],
+                vp9_decodes: VecDeque::new(),
                 error: None,
             }),
             input_stamps: PendingInputStamps::default(),
             emitted: 0,
             segment: Segment::new(),
             after_end_of_sequence: false,
+            vp9_outputs: PacketOutputs::default(),
             last_caps: None,
             input_caps: None,
             max_display_delay: DEFAULT_MAX_DISPLAY_DELAY,
@@ -302,8 +438,13 @@ impl NvDec {
 
     /// Accepted input codecs. AV1 needs an Ampere+ NVDEC; an older GPU fails
     /// decoder creation at the first sequence rather than at negotiation.
-    fn input_codecs() -> [VideoCodec; 3] {
-        [VideoCodec::H264, VideoCodec::H265, VideoCodec::Av1]
+    fn input_codecs() -> [VideoCodec; 4] {
+        [
+            VideoCodec::H264,
+            VideoCodec::H265,
+            VideoCodec::Vp9,
+            VideoCodec::Av1,
+        ]
     }
 
     /// Open-geometry input caps, one alternative per accepted codec.
@@ -392,6 +533,7 @@ impl NvDec {
         match codec {
             VideoCodec::H264 => Some(ffi::CUDA_VIDEO_CODEC_H264),
             VideoCodec::H265 => Some(ffi::CUDA_VIDEO_CODEC_HEVC),
+            VideoCodec::Vp9 => Some(ffi::CUDA_VIDEO_CODEC_VP9),
             VideoCodec::Av1 => Some(ffi::CUDA_VIDEO_CODEC_AV1),
             _ => None,
         }
@@ -513,6 +655,55 @@ impl NvDec {
             bytes[nal + 2] |= NO_OUTPUT_OF_PRIOR_PICS_FLAG;
         }
         rewritten
+    }
+
+    // NVDEC's parser shows every shown frame of a superframe, never repeats a
+    // show_existing_frame, and stamps frames after a hidden one with the wrong pts
+    fn vp9_parse(
+        &mut self,
+        packet: &[u8],
+        pts_ns: u64,
+        plan: Vp9PacketPlan,
+    ) -> Result<Vec<ReadyFrame>, G2gError> {
+        self.state.vp9_decodes = plan.decodes;
+        let displayed = self.parse(packet, pts_ns, false);
+        // frames NVDEC skipped, such as those before the first keyframe, refresh no slot
+        self.state.vp9_decodes.clear();
+        let displayed = displayed?;
+        let existing = plan
+            .existing_slot
+            .map(|slot| self.vp9_existing_frame(slot, pts_ns))
+            .transpose()?;
+        self.vp9_outputs.packet(pts_ns, plan.displays, existing);
+        self.vp9_ordered(displayed)
+    }
+
+    fn vp9_existing_frame(&mut self, slot: u8, pts_ns: u64) -> Result<ReadyFrame, G2gError> {
+        let Some(picture_index) = self.state.vp9_slots[usize::from(slot)] else {
+            g2g_error!(
+                Target::category(short_type_name::<NvDec>()),
+                "a VP9 show_existing_frame repeats reference slot {slot}, which holds no frame"
+            );
+            return Err(G2gError::CapsMismatch);
+        };
+        let _ctx = ContextGuard::push(self.context)?;
+        // SAFETY: the NVCUVID param structs are plain old data (ints, pointers,
+        // reserved arrays); all-zero is a valid initial state we then fill.
+        let mut proc: ffi::ProcParams = unsafe { core::mem::zeroed() };
+        proc.progressive_frame = 1;
+        map_picture(&self.state, picture_index, &mut proc, pts_ns)
+    }
+
+    fn vp9_ordered(&mut self, displayed: Vec<ReadyFrame>) -> Result<Vec<ReadyFrame>, G2gError> {
+        for frame in displayed {
+            self.vp9_outputs.displayed(frame)?;
+        }
+        Ok(self
+            .vp9_outputs
+            .completed()
+            .into_iter()
+            .map(|(pts_ns, frame)| ReadyFrame { pts_ns, ..frame })
+            .collect())
     }
 
     fn destroy_parser(&mut self) {
@@ -766,22 +957,27 @@ fn fail(state: &mut DecoderState, err: G2gError) -> i32 {
 
 // NVDEC returns wrong pictures without an error for these coding tools
 fn check_coding_tools(codec_cuvid: i32, access_unit: &[u8]) -> Result<(), G2gError> {
-    for nal in crate::annexb::nal_units(access_unit) {
-        let unsupported_tool = match codec_cuvid {
-            ffi::CUDA_VIDEO_CODEC_H264 => {
-                h264_switching_slice(nal).then_some("H.264 SP and SI slices")
-            }
-            ffi::CUDA_VIDEO_CODEC_HEVC => h265_tiles_with_wavefront(nal)
-                .then_some("H.265 tiles together with wavefront parallel processing"),
-            _ => None,
-        };
-        if let Some(tool) = unsupported_tool {
-            g2g_error!(
-                Target::category(short_type_name::<NvDec>()),
-                "cannot decode this stream: NVDEC does not support {tool}"
-            );
-            return Err(G2gError::CapsMismatch);
-        }
+    let mut nal_units = crate::annexb::nal_units(access_unit);
+    let unsupported_tool = match codec_cuvid {
+        ffi::CUDA_VIDEO_CODEC_H264 => nal_units
+            .any(h264_switching_slice)
+            .then_some("H.264 SP and SI slices"),
+        ffi::CUDA_VIDEO_CODEC_HEVC => nal_units
+            .any(h265_tiles_with_wavefront)
+            .then_some("H.265 tiles together with wavefront parallel processing"),
+        ffi::CUDA_VIDEO_CODEC_VP9 => superframe_frames(access_unit)
+            .into_iter()
+            .filter_map(frame_header)
+            .any(|header| header.profile % 2 == 1)
+            .then_some("VP9 profiles 1 and 3 (4:2:2, 4:4:0 and 4:4:4 chroma)"),
+        _ => None,
+    };
+    if let Some(tool) = unsupported_tool {
+        g2g_error!(
+            Target::category(short_type_name::<NvDec>()),
+            "cannot decode this stream: NVDEC does not support {tool}"
+        );
+        return Err(G2gError::CapsMismatch);
     }
     Ok(())
 }
@@ -828,6 +1024,47 @@ fn decode_surface(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutputGeometry {
+    display_width: u32,
+    display_height: u32,
+    target_width: u32,
+    target_height: u32,
+    area_left: i16,
+    area_top: i16,
+    area_right: i16,
+    area_bottom: i16,
+}
+
+// NVDEC scales the display area to the even target, so an odd picture decodes one
+// column or row wider and the output frame leaves that column or row out
+fn output_geometry(f: &ffi::VideoFormat) -> OutputGeometry {
+    let area = &f.display_area;
+    let cropped = area.right > area.left && area.bottom > area.top;
+    let (left, top, display_width, display_height) = if cropped {
+        (
+            area.left,
+            area.top,
+            (area.right - area.left) as u32,
+            (area.bottom - area.top) as u32,
+        )
+    } else {
+        (0, 0, f.coded_width, f.coded_height)
+    };
+    let target_width = (display_width + 1) & !1;
+    let target_height = (display_height + 1) & !1;
+    OutputGeometry {
+        display_width,
+        display_height,
+        target_width,
+        target_height,
+        area_left: left as i16,
+        area_top: top as i16,
+        area_right: (left + target_width as i32) as i16,
+        area_bottom: (top + target_height as i32) as i16,
+    }
+}
+
 /// Sequence callback: the parser hands us the decoded stream format. Create the
 /// decoder, or bring the live one to the new format (in place where NVDEC allows
 /// it), and report the surface count back to the parser.
@@ -839,13 +1076,7 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
     let f = unsafe { &*fmt };
 
     let num_surfaces = (f.min_num_decode_surfaces as u32).clamp(1, NUM_DECODE_SURFACES);
-    // Display (cropped) geometry, rounded up to even for 4:2:0 chroma.
-    let disp_w = (f.display_area.right - f.display_area.left).max(0) as u32;
-    let disp_h = (f.display_area.bottom - f.display_area.top).max(0) as u32;
-    let target_w = if disp_w != 0 { disp_w } else { f.coded_width };
-    let target_h = if disp_h != 0 { disp_h } else { f.coded_height };
-    let target_w = (target_w + 1) & !1;
-    let target_h = (target_h + 1) & !1;
+    let geometry = output_geometry(f);
     let (surface_format, out_format) =
         match decode_surface(f.bit_depth_luma_minus8, f.bit_depth_chroma_minus8) {
             Ok(formats) => formats,
@@ -866,8 +1097,10 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
         if fits {
             if state.coded_width == f.coded_width
                 && state.coded_height == f.coded_height
-                && state.target_width == target_w
-                && state.target_height == target_h
+                && state.target_width == geometry.target_width
+                && state.target_height == geometry.target_height
+                && state.display_width == geometry.display_width
+                && state.display_height == geometry.display_height
             {
                 // Same geometry and format: nothing to do.
                 return state.num_decode_surfaces as i32;
@@ -877,14 +1110,14 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
             let mut re: ffi::ReconfigureDecoderInfo = unsafe { core::mem::zeroed() };
             re.width = f.coded_width;
             re.height = f.coded_height;
-            re.target_width = target_w;
-            re.target_height = target_h;
+            re.target_width = geometry.target_width;
+            re.target_height = geometry.target_height;
             // Must stay at the count the decoder was created with.
             re.num_decode_surfaces = state.num_decode_surfaces;
-            re.display_area_left = f.display_area.left as i16;
-            re.display_area_top = f.display_area.top as i16;
-            re.display_area_right = f.display_area.right as i16;
-            re.display_area_bottom = f.display_area.bottom as i16;
+            re.display_area_left = geometry.area_left;
+            re.display_area_top = geometry.area_top;
+            re.display_area_right = geometry.area_right;
+            re.display_area_bottom = geometry.area_bottom;
             // SAFETY: valid decoder; `re` is fully initialized and only read for
             // the duration of the call.
             let rc = unsafe { ffi::cuvid_reconfigure_decoder(state.decoder, &mut re) };
@@ -893,13 +1126,30 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
             }
             state.coded_width = f.coded_width;
             state.coded_height = f.coded_height;
-            state.target_width = target_w;
-            state.target_height = target_h;
+            state.target_width = geometry.target_width;
+            state.target_height = geometry.target_height;
+            state.display_width = geometry.display_width;
+            state.display_height = geometry.display_height;
             return state.num_decode_surfaces as i32;
         }
         // Beyond what the live decoder can be reconfigured to (a bigger picture,
         // a deeper bit depth, more surfaces): build a fresh one. The old decoder
         // lives on in any frame still downstream and dies with the last of them.
+        let replaces_every_reference = state
+            .vp9_decodes
+            .front()
+            .is_some_and(|decode| decode.replaces_every_reference);
+        if state.codec_cuvid == ffi::CUDA_VIDEO_CODEC_VP9 && !replaces_every_reference {
+            g2g_error!(
+                Target::category(short_type_name::<NvDec>()),
+                "a {}x{} VP9 frame predicts from earlier frames but needs a bigger decoder than the {}x{} one holding them",
+                f.coded_width,
+                f.coded_height,
+                state.max_width,
+                state.max_height
+            );
+            return fail(state, G2gError::CapsMismatch);
+        }
     }
 
     let Some(cuda) = state.cuda.clone() else {
@@ -918,14 +1168,14 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
     info.bit_depth_minus8 = f.bit_depth_luma_minus8 as u64;
     info.max_width = f.coded_width as u64;
     info.max_height = f.coded_height as u64;
-    info.display_area_left = f.display_area.left as i16;
-    info.display_area_top = f.display_area.top as i16;
-    info.display_area_right = f.display_area.right as i16;
-    info.display_area_bottom = f.display_area.bottom as i16;
+    info.display_area_left = geometry.area_left;
+    info.display_area_top = geometry.area_top;
+    info.display_area_right = geometry.area_right;
+    info.display_area_bottom = geometry.area_bottom;
     info.output_format = surface_format;
     info.deinterlace_mode = ffi::CUDA_VIDEO_DEINTERLACE_WEAVE;
-    info.target_width = target_w as u64;
-    info.target_height = target_h as u64;
+    info.target_width = geometry.target_width as u64;
+    info.target_height = geometry.target_height as u64;
     info.num_output_surfaces = state.num_output_surfaces as u64;
     info.vid_lock = cuda.ctx_lock;
 
@@ -940,8 +1190,10 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
     state.max_height = f.coded_height;
     state.coded_width = f.coded_width;
     state.coded_height = f.coded_height;
-    state.target_width = target_w;
-    state.target_height = target_h;
+    state.target_width = geometry.target_width;
+    state.target_height = geometry.target_height;
+    state.display_width = geometry.display_width;
+    state.display_height = geometry.display_height;
     state.num_decode_surfaces = num_surfaces;
     state.decoders_created += 1;
     state.surface_format = surface_format;
@@ -967,6 +1219,18 @@ extern "C" fn handle_decode(user: *mut core::ffi::c_void, pic: *mut core::ffi::c
     if rc != 0 {
         return fail(state, G2gError::Hardware(HardwareError::Cuda(rc)));
     }
+    if state.codec_cuvid == ffi::CUDA_VIDEO_CODEC_VP9 {
+        // SAFETY: `pic` is a `CUVIDPICPARAMS`, which starts with the ints
+        // PicWidthInMbs, FrameHeightInMbs and CurrPicIdx.
+        let picture_index = unsafe { *(pic as *const i32).add(2) };
+        if let Some(decode) = state.vp9_decodes.pop_front() {
+            for (slot, picture) in state.vp9_slots.iter_mut().enumerate() {
+                if decode.refresh_slots & (1 << slot) != 0 {
+                    *picture = Some(picture_index);
+                }
+            }
+        }
+    }
     1
 }
 
@@ -977,10 +1241,6 @@ extern "C" fn handle_display(user: *mut core::ffi::c_void, disp: *mut ffi::Parse
     let state = unsafe { &mut *(user as *mut DecoderState) };
     // SAFETY: `disp` is the valid display-info struct the parser passes here.
     let d = unsafe { &*disp };
-    let Some(owner) = state.decoder_owner.clone() else {
-        return fail(state, hw());
-    };
-
     // SAFETY: the NVCUVID param structs are plain old data (ints, pointers,
     // reserved arrays); all-zero is a valid initial state we then fill.
     let mut proc: ffi::ProcParams = unsafe { core::mem::zeroed() };
@@ -988,19 +1248,31 @@ extern "C" fn handle_display(user: *mut core::ffi::c_void, disp: *mut ffi::Parse
     proc.top_field_first = d.top_field_first;
     proc.second_field = 0;
     proc.unpaired_field = (d.repeat_first_field < 0) as i32;
+    match map_picture(state, d.picture_index, &mut proc, d.timestamp as u64) {
+        Ok(frame) => {
+            state.ready.push(frame);
+            1
+        }
+        Err(e) => fail(state, e),
+    }
+}
 
+// maps a decoded picture for output, it stays mapped until the frame drops
+fn map_picture(
+    state: &DecoderState,
+    picture_index: i32,
+    proc: &mut ffi::ProcParams,
+    pts_ns: u64,
+) -> Result<ReadyFrame, G2gError> {
+    let Some(owner) = state.decoder_owner.clone() else {
+        return Err(hw());
+    };
     let mut dev_ptr: u64 = 0;
     let mut pitch: u32 = 0;
-    // SAFETY: valid decoder + picture index from the parser; on success `dev_ptr`
-    // / `pitch` describe a mapped NV12 surface valid until unmap.
+    // SAFETY: valid decoder + a picture index the parser decoded into; on success
+    // `dev_ptr` / `pitch` describe a mapped NV12 surface valid until unmap.
     let rc = unsafe {
-        ffi::cuvid_map_video_frame(
-            owner.decoder,
-            d.picture_index,
-            &mut dev_ptr,
-            &mut pitch,
-            &mut proc,
-        )
+        ffi::cuvid_map_video_frame(owner.decoder, picture_index, &mut dev_ptr, &mut pitch, proc)
     };
     if rc != 0 || dev_ptr == 0 {
         if owner.mapped.load(Ordering::Relaxed) >= state.num_output_surfaces {
@@ -1011,7 +1283,7 @@ extern "C" fn handle_display(user: *mut core::ffi::c_void, disp: *mut ffi::Parse
                 NUM_OUTPUT_SURFACES_LIMIT
             );
         }
-        return fail(state, G2gError::Hardware(HardwareError::Cuda(rc)));
+        return Err(G2gError::Hardware(HardwareError::Cuda(rc)));
     }
     owner.mapped.fetch_add(1, Ordering::Relaxed);
 
@@ -1025,18 +1297,17 @@ extern "C" fn handle_display(user: *mut core::ffi::c_void, disp: *mut ffi::Parse
         chroma_ptr,
         pitch,
         pitch,
-        state.target_width,
-        state.target_height,
+        state.display_width,
+        state.display_height,
         context,
         device_ordinal,
         Arc::new(CuvidMappedFrame { owner, dev_ptr }),
     );
-    state.ready.push(ReadyFrame {
+    Ok(ReadyFrame {
         buffer,
-        pts_ns: d.timestamp as u64,
+        pts_ns,
         format: state.out_format,
-    });
-    1
+    })
 }
 
 /// Map a CUDA / CUVID result to a `Result`, carrying the code on failure.
@@ -1173,9 +1444,9 @@ impl AsyncElement for NvDec {
 
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
-            "NVDEC H.264 / HEVC / AV1 decoder",
+            "NVDEC H.264 / HEVC / VP9 / AV1 decoder",
             "Codec/Decoder/Video/Hardware",
-            "Zero-copy H.264 / HEVC / AV1 decode to CUDA NV12 / P010 surfaces via the NVIDIA Video Codec SDK (NVCUVID)",
+            "Zero-copy H.264 / HEVC / VP9 / AV1 decode to CUDA NV12 / P010 surfaces via the NVIDIA Video Codec SDK (NVCUVID)",
             "g2g",
         )
     }
@@ -1235,16 +1506,25 @@ impl AsyncElement for NvDec {
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     check_coding_tools(self.state.codec_cuvid, slice)?;
+                    let vp9_plan = (self.state.codec_cuvid == ffi::CUDA_VIDEO_CODEC_VP9)
+                        .then(|| vp9_packet_plan(slice))
+                        .transpose()?;
                     let cra_as_bla = self.h265_cra_as_bla(slice);
                     let access_unit = cra_as_bla.as_deref().unwrap_or(slice);
-                    self.input_stamps
-                        .insert(frame.timing.pts_ns, InputStamp::of(&frame));
-                    let frames = self.parse(access_unit, frame.timing.pts_ns, false)?;
+                    let pts_ns = frame.timing.pts_ns;
+                    self.input_stamps.insert(pts_ns, InputStamp::of(&frame));
+                    let frames = match vp9_plan {
+                        Some(plan) => self.vp9_parse(access_unit, pts_ns, plan)?,
+                        None => self.parse(access_unit, pts_ns, false)?,
+                    };
                     self.emit(frames, out).await?;
                 }
                 PipelinePacket::Eos => {
                     // Flush the parser's display queue; the runner forwards EOS.
-                    let frames = self.parse(&[], 0, true)?;
+                    let mut frames = self.parse(&[], 0, true)?;
+                    if self.state.codec_cuvid == ffi::CUDA_VIDEO_CODEC_VP9 {
+                        frames = self.vp9_ordered(frames)?;
+                    }
                     self.emit(frames, out).await?;
                 }
                 // The decoder announces its own raw caps from the decoded frames.
@@ -1268,7 +1548,7 @@ impl AsyncElement for NvDec {
 fn derive_output_caps(input: &Caps) -> CapsSet {
     match input {
         Caps::CompressedVideo {
-            codec: VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Av1,
+            codec: VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Vp9 | VideoCodec::Av1,
             width,
             height,
             framerate,
@@ -1346,6 +1626,7 @@ mod ffi {
     // Codec / format enum values (cuviddec.h).
     pub const CUDA_VIDEO_CODEC_H264: i32 = 4;
     pub const CUDA_VIDEO_CODEC_HEVC: i32 = 8;
+    pub const CUDA_VIDEO_CODEC_VP9: i32 = 10;
     pub const CUDA_VIDEO_CODEC_AV1: i32 = 11;
     pub const CUDA_VIDEO_CHROMA_FORMAT_420: i32 = 1;
     pub const CUDA_VIDEO_SURFACE_FORMAT_NV12: i32 = 0;
@@ -1601,6 +1882,80 @@ mod tests {
     // --- Pure-logic coverage (no GPU): caps + struct layout ---
 
     #[test]
+    fn each_vp9_packet_outputs_its_last_shown_frame_at_its_own_pts() {
+        let mut outputs = PacketOutputs::default();
+        // three spatial layers in one superframe: only the top one comes out
+        outputs.packet(0, 3, None);
+        // a hidden frame, shown later by a show_existing_frame packet
+        outputs.packet(33, 0, None);
+        outputs.packet(66, 0, Some(900));
+        // one display, which arrives in a later parse call
+        outputs.packet(100, 1, None);
+        for layer in [1, 2, 3] {
+            outputs.displayed(layer).unwrap();
+        }
+        assert_eq!(outputs.completed(), std::vec![(0, 3), (66, 900)]);
+        outputs.displayed(4).unwrap();
+        assert_eq!(outputs.completed(), std::vec![(100, 4)]);
+        assert_eq!(
+            outputs.displayed(5),
+            Err(hw()),
+            "no packet shows a fifth frame"
+        );
+    }
+
+    #[test]
+    fn vp9_packet_plan_counts_displays_and_finds_a_repeated_frame() {
+        // frame_marker 2, profile 0, then show_existing_frame 1 and slot 6
+        let show_existing = [0b1000_1110, 0];
+        assert_eq!(
+            vp9_packet_plan(&show_existing),
+            Ok(Vp9PacketPlan {
+                decodes: VecDeque::new(),
+                displays: 0,
+                existing_slot: Some(6),
+            })
+        );
+        // frame_marker 2, profile 0, keyframe, shown, then the sync code
+        let keyframe = [0b1000_0010, 0x49, 0x83, 0x42];
+        assert_eq!(
+            vp9_packet_plan(&keyframe),
+            Ok(Vp9PacketPlan {
+                decodes: VecDeque::from([Vp9Decode {
+                    refresh_slots: 0xFF,
+                    replaces_every_reference: true,
+                }]),
+                displays: 1,
+                existing_slot: None,
+            })
+        );
+        assert_eq!(vp9_packet_plan(&[0]), Err(G2gError::CapsMismatch));
+    }
+
+    #[test]
+    fn odd_pictures_decode_into_an_even_area_and_keep_their_size() {
+        // SAFETY: `VideoFormat` is plain old data, all-zero is a valid value.
+        let mut format: ffi::VideoFormat = unsafe { core::mem::zeroed() };
+        format.coded_width = 352;
+        format.coded_height = 288;
+        format.display_area.right = 351;
+        format.display_area.bottom = 287;
+        assert_eq!(
+            output_geometry(&format),
+            OutputGeometry {
+                display_width: 351,
+                display_height: 287,
+                target_width: 352,
+                target_height: 288,
+                area_left: 0,
+                area_top: 0,
+                area_right: 352,
+                area_bottom: 288,
+            }
+        );
+    }
+
+    #[test]
     fn decode_surface_refuses_depths_p010_cannot_hold() {
         assert_eq!(
             decode_surface(2, 2),
@@ -1641,6 +1996,20 @@ mod tests {
             check_coding_tools(ffi::CUDA_VIDEO_CODEC_HEVC, HEVC_MAIN10),
             Ok(())
         );
+
+        // frame_marker 2, then profile_low_bit and profile_high_bit
+        for (profile, first_byte, expected) in [
+            (0, 0b1000_0000, Ok(())),
+            (1, 0b1010_0000, Err(G2gError::CapsMismatch)),
+            (2, 0b1001_0000, Ok(())),
+            (3, 0b1011_0000, Err(G2gError::CapsMismatch)),
+        ] {
+            assert_eq!(
+                check_coding_tools(ffi::CUDA_VIDEO_CODEC_VP9, &[first_byte, 0]),
+                expected,
+                "VP9 profile {profile}"
+            );
+        }
     }
 
     #[test]
@@ -1682,24 +2051,21 @@ mod tests {
                 colorimetry: g2g_core::Colorimetry::UNKNOWN
             }));
         }
-        // AV1 decodes too (Ampere+).
-        let av1 = Caps::CompressedVideo {
-            codec: VideoCodec::Av1,
+        let compressed = |codec| Caps::CompressedVideo {
+            codec,
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
-        assert!(!derive(&av1).alternatives().is_empty());
+        // VP9 and AV1 (Ampere+) decode too.
+        for codec in [VideoCodec::Vp9, VideoCodec::Av1] {
+            assert!(!derive(&compressed(codec)).alternatives().is_empty());
+        }
         // A codec NVDEC has no decoder for yields an empty set, rejected at solve.
-        let vp9 = Caps::CompressedVideo {
-            codec: VideoCodec::Vp9,
-            width: Dim::Fixed(640),
-            height: Dim::Fixed(480),
-            framerate: Rate::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        };
-        assert!(derive(&vp9).alternatives().is_empty());
+        assert!(derive(&compressed(VideoCodec::Png))
+            .alternatives()
+            .is_empty());
     }
 
     #[test]

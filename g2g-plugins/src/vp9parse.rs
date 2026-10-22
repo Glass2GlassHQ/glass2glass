@@ -214,12 +214,26 @@ fn parse_keyframe(packet: &[u8]) -> Option<Vp9KeyFrame> {
     br.read_bit()?; // show_frame
     br.read_bit()?; // error_resilient_mode
 
-    // frame_sync_code: 0x49 0x83 0x42, bit-aligned to the current position.
-    if br.read_bits(8)? != 0x49 || br.read_bits(8)? != 0x83 || br.read_bits(8)? != 0x42 {
-        return None;
-    }
+    read_sync_code(&mut br)?;
+    skip_color_config(&mut br, profile)?;
 
-    // color_config: its length depends on profile and colour space.
+    // frame_size: 16-bit minus-1 fields.
+    let width = br.read_bits(16)? + 1;
+    let height = br.read_bits(16)? + 1;
+    Some(Vp9KeyFrame {
+        width,
+        height,
+        profile,
+    })
+}
+
+// frame_sync_code: 0x49 0x83 0x42, bit-aligned to the current position
+fn read_sync_code(br: &mut BitReader) -> Option<()> {
+    (br.read_bits(8)? == 0x49 && br.read_bits(8)? == 0x83 && br.read_bits(8)? == 0x42).then_some(())
+}
+
+// color_config: its length depends on profile and colour space
+fn skip_color_config(br: &mut BitReader, profile: u8) -> Option<()> {
     if profile >= 2 {
         br.read_bit()?; // ten_or_twelve_bit (bit depth)
     }
@@ -232,15 +246,117 @@ fn parse_keyframe(packet: &[u8]) -> Option<Vp9KeyFrame> {
     } else if profile == 1 || profile == 3 {
         br.read_bit()?; // reserved_zero
     }
+    Some(())
+}
 
-    // frame_size: 16-bit minus-1 fields.
-    let width = br.read_bits(16)? + 1;
-    let height = br.read_bits(16)? + 1;
-    Some(Vp9KeyFrame {
-        width,
-        height,
+#[cfg(all(target_os = "linux", feature = "nvdec"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Vp9FrameKind {
+    // repeats the frame held in reference slot `slot`
+    ShowExisting {
+        slot: u8,
+    },
+    Decoded {
+        shown: bool,
+        intra: bool,
+        refresh_slots: u8,
+    },
+}
+
+#[cfg(all(target_os = "linux", feature = "nvdec"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Vp9FrameHeader {
+    pub(crate) profile: u8,
+    pub(crate) kind: Vp9FrameKind,
+}
+
+// the uncompressed header up to refresh_frame_flags
+#[cfg(all(target_os = "linux", feature = "nvdec"))]
+pub(crate) fn frame_header(frame: &[u8]) -> Option<Vp9FrameHeader> {
+    const KEY_FRAME_REFRESHES_EVERY_SLOT: u8 = 0xFF;
+    let mut br = BitReader::new(frame);
+    if br.read_bits(2)? != 2 {
+        return None;
+    }
+    let profile_low = br.read_bit()?;
+    let profile_high = br.read_bit()?;
+    let profile = ((profile_high << 1) | profile_low) as u8;
+    if profile == 3 {
+        br.read_bit()?; // reserved_zero
+    }
+    if br.read_bit()? == 1 {
+        let slot = br.read_bits(3)? as u8;
+        return Some(Vp9FrameHeader {
+            profile,
+            kind: Vp9FrameKind::ShowExisting { slot },
+        });
+    }
+    let key_frame = br.read_bit()? == 0;
+    let shown = br.read_bit()? == 1;
+    let error_resilient = br.read_bit()? == 1;
+    let intra_only = !key_frame && !shown && br.read_bit()? == 1;
+    let refresh_slots = if key_frame {
+        KEY_FRAME_REFRESHES_EVERY_SLOT
+    } else {
+        if !error_resilient {
+            br.read_bits(2)?; // reset_frame_context
+        }
+        if intra_only {
+            read_sync_code(&mut br)?;
+            if profile > 0 {
+                skip_color_config(&mut br, profile)?;
+            }
+        }
+        br.read_bits(8)? as u8
+    };
+    Some(Vp9FrameHeader {
         profile,
+        kind: Vp9FrameKind::Decoded {
+            shown,
+            intra: key_frame || intra_only,
+            refresh_slots,
+        },
     })
+}
+
+// the frames of a superframe, or the whole packet when it carries no valid index
+#[cfg(all(target_os = "linux", feature = "nvdec"))]
+pub(crate) fn superframe_frames(packet: &[u8]) -> Vec<&[u8]> {
+    const MARKER_BITS: u8 = 0b1110_0000;
+    const MARKER: u8 = 0b1100_0000;
+    let whole = || Vec::from([packet]);
+    let Some(&last) = packet.last() else {
+        return whole();
+    };
+    if last & MARKER_BITS != MARKER {
+        return whole();
+    }
+    let frames = usize::from(last & 0b111) + 1;
+    let size_bytes = usize::from((last >> 3) & 0b11) + 1;
+    let index_len = 2 + size_bytes * frames;
+    let Some(index_start) = packet.len().checked_sub(index_len) else {
+        return whole();
+    };
+    if packet[index_start] != last {
+        return whole();
+    }
+    let mut out = Vec::with_capacity(frames);
+    let mut offset = 0usize;
+    for sizes in packet[index_start + 1..packet.len() - 1].chunks_exact(size_bytes) {
+        let size = sizes
+            .iter()
+            .rev()
+            .fold(0usize, |size, &byte| (size << 8) | usize::from(byte));
+        let Some(frame) = offset
+            .checked_add(size)
+            .and_then(|end| packet[..index_start].get(offset..end))
+        else {
+            return whole();
+        };
+        out.push(frame);
+        offset += size;
+    }
+    out
 }
 
 /// Fuzzing entry: parse a VP9 keyframe's uncompressed header (frame-marker /
@@ -488,5 +604,74 @@ mod tests {
             }
             _ => panic!("expected Identity"),
         }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "nvdec"))]
+    fn inter_frame(shown: bool, intra_only: bool, refresh_slots: u8) -> Vec<u8> {
+        let mut w = BitWriter::default();
+        w.write_bits(2, 2); // frame_marker
+        w.write_bits(0, 2); // profile 0
+        w.write_bit(0); // show_existing_frame
+        w.write_bit(1); // frame_type = NON_KEY_FRAME
+        w.write_bit(shown as u32);
+        w.write_bit(0); // error_resilient_mode
+        if !shown {
+            w.write_bit(intra_only as u32);
+        }
+        w.write_bits(0, 2); // reset_frame_context
+        if intra_only {
+            w.write_bits(0x49, 8); // frame_sync_code
+            w.write_bits(0x83, 8);
+            w.write_bits(0x42, 8);
+        }
+        w.write_bits(u32::from(refresh_slots), 8);
+        w.align_to_byte();
+        w.into_bytes()
+    }
+
+    #[cfg(all(target_os = "linux", feature = "nvdec"))]
+    #[test]
+    fn frame_header_reads_what_each_frame_shows_and_refreshes() {
+        let decoded = |shown, intra, refresh_slots| Vp9FrameKind::Decoded {
+            shown,
+            intra,
+            refresh_slots,
+        };
+        let kind = |frame: &[u8]| frame_header(frame).map(|header| header.kind);
+        assert_eq!(kind(&keyframe(64, 64, 0)), Some(decoded(true, true, 0xFF)));
+        assert_eq!(
+            kind(&inter_frame(true, false, 0b0000_0101)),
+            Some(decoded(true, false, 0b0000_0101))
+        );
+        assert_eq!(
+            kind(&inter_frame(false, true, 0b1000_0000)),
+            Some(decoded(false, true, 0b1000_0000))
+        );
+        // frame_marker 2, profile 0, show_existing_frame 1, frame_to_show_map_idx 5
+        assert_eq!(
+            kind(&[0b1000_1101, 0]),
+            Some(Vp9FrameKind::ShowExisting { slot: 5 })
+        );
+        assert_eq!(
+            frame_header(&keyframe(64, 64, 3)).map(|h| h.profile),
+            Some(3)
+        );
+        assert_eq!(kind(&[0]), None, "no frame marker");
+    }
+
+    #[cfg(all(target_os = "linux", feature = "nvdec"))]
+    #[test]
+    fn superframe_frames_splits_by_the_trailing_index() {
+        // two frames of 3 and 2 bytes, then an index of one-byte sizes
+        let marker = 0b1100_0001;
+        let packet = [1, 2, 3, 4, 5, marker, 3, 2, marker];
+        assert_eq!(
+            superframe_frames(&packet),
+            vec![&[1, 2, 3][..], &[4, 5][..]]
+        );
+        let oversized = [1, 2, 3, 4, 5, marker, 9, 2, marker];
+        assert_eq!(superframe_frames(&oversized), vec![&oversized[..]]);
+        let plain = [0x82, 0x49, 0x83];
+        assert_eq!(superframe_frames(&plain), vec![&plain[..]]);
     }
 }

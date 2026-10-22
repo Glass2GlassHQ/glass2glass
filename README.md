@@ -530,7 +530,7 @@ cargo clippy --workspace --all-targets
 | `D3D11Sink` | `d3d11-sink` | Windows |
 | `MetalVideoSink` (zero-copy from `CVPixelBuffer`) | `metal-sink` | macOS + Metal |
 | `WgpuPresentSink` (`wgpusink`: owns its Wayland window, presents GPU-resident frames with no upload) | `wgpu-present` | Linux + Wayland + wgpu |
-| `NvDec` (native NVDEC H.264 / H.265 / AV1 to CUDA NV12 or 10-bit P010) | `nvdec` | Linux + NVIDIA driver (libnvcuvid) |
+| `NvDec` (native NVDEC H.264 / H.265 / VP9 / AV1 to CUDA NV12 or 10-bit P010) | `nvdec` | Linux + NVIDIA driver (libnvcuvid) |
 | `NvEnc` (native NVENC CUDA NV12 / P010 to H.264 / H.265, incl. HEVC Main 10) | `nvenc` | Linux + NVIDIA driver (libnvidia-encode) |
 | `CudaDownload` (CUDA to System), `CudaUpload` (System to CUDA) | `cuda` | Linux + NVIDIA driver (libcuda) |
 | `WgpuDownload` (`wgpudownload`: wgpu texture or buffer to System), `WgpuUpload` (`wgpuupload`: System to wgpu buffer) | `wgpu-sink` | wgpu adapter |
