@@ -119,8 +119,10 @@ Highest leverage first:
   bit-exact there (md5 f710612103f386c415be3e6300693451). The Std SPS, PPS and
   picture-info fields Mesa's `get_h265_msg` reads and the slice bitstream match
   ffmpeg's on a static read, so the difference needs an experiment loop on the
-  RADV device. NVIDIA Turing cannot decode it at all (minimum H.265 coded extent
-  144x144).
+  RADV device: the Vulkan API dump layer (needs root to install) or an ffmpeg
+  built to print its `StdVideo*` structs, since Mesa 25.3.6's `RADV_DEBUG=dumpibs`
+  prints nothing for video. NVIDIA Turing cannot decode it at all (minimum H.265
+  coded extent 144x144).
 ## CUDA / display
 
 - Run `CudaKmsSink` from a bare VT with DRM master and verify the in-tree
