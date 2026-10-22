@@ -245,6 +245,8 @@ jobs:
         run: cargo test -p g2g-plugins --locked --features ffmpeg,opus --test m753_ts_audio_codecs --test m757_ac3_flac --test m1731_ts_loas_aac
       - name: decodebin picks a stream by index
         run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1803_decodebin_stream_index
+      - name: fan-outs carry each track of a shared codec
+        run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1808_fanout_same_codec_tracks
       - name: parsebin remuxes without decoding
         run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1804_parsebin_remux
       # ffmpeg packetizes the A/V fixture as RTP, the job with its CLI is where these run

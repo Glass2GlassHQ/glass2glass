@@ -886,6 +886,11 @@ as before.
   `MkvDemux`/`MkvDemuxN` and `TsDemux`/`Mp4Src`), the app selects among them
   via a `StreamSelectController`, and the multi-output `MkvDemuxN` (a
   `MultiOutputElement`) routes N elementary streams to N ports in one parse.
+  Built from probed streams (`MkvDemuxN::from_stream_infos`,
+  `TsDemuxN::from_stream_infos`) each port is pinned to its stream's Matroska
+  TrackNumber or TS PID, so two tracks of one codec reach `d.audio_0` and
+  `d.audio_1` separately. A port built from a codec alone carries the first
+  track of that codec, and an app stream selection pins the selected track.
   `Registry::build_playbin_graph` assembles
   `source → demux → {decode chain → sink}` per `PlaybinPort`, with each port's
   branch statically negotiated against its codec via `port_output_caps` /

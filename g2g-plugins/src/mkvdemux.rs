@@ -631,7 +631,7 @@ impl MkvDemux {
     /// demuxer would forward for it, or `None` if the id is unknown / its codec is
     /// not forwardable. Needs `Tracks` parsed (the collection's ids come from it).
     fn resolve_stream_id(&self, id: &str) -> Option<MkvStream> {
-        resolve_stream_id(&self.demux, id)
+        resolve_stream_id(&self.demux, id).map(|(stream, _)| stream)
     }
 
     /// Emit a `CapsChanged` once the selected track's concrete caps are known,
@@ -1232,10 +1232,10 @@ pub fn subtitle_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
 /// Resolve a published stream id (`matroska-track-N`) to the [`MkvStream`] the
 /// demuxer forwards for it, given the parsed tracks (`None` if the id is unknown or
 /// its codec is unforwardable). Needs `Tracks` parsed (the ids come from it).
-fn resolve_stream_id(demux: &MatroskaDemuxer, id: &str) -> Option<MkvStream> {
+fn resolve_stream_id(demux: &MatroskaDemuxer, id: &str) -> Option<(MkvStream, u64)> {
     let num: u64 = id.strip_prefix(STREAM_ID_PREFIX)?.parse().ok()?;
     let track = demux.tracks().iter().find(|t| t.number == num)?;
-    codec_to_stream(track.codec)
+    Some((codec_to_stream(track.codec)?, num))
 }
 
 /// The decoder-init packets to forward in band ahead of a track's first frame,
@@ -1552,8 +1552,9 @@ impl PadTemplates for MkvDemux {
 /// one selected [`MkvStream`] (the "dark slots", design/runtime.md), so one demuxer feeds
 /// several decode branches in one pipeline rather than instantiating a
 /// single-output demuxer per stream. The demuxer parses the container once and
-/// routes each track's access units to its port by codec; a parsed track with no
-/// matching port is dropped. Port `i` emits its concrete [`Caps`]
+/// routes each track's access units to its port by codec, and by track number for
+/// ports built with `from_stream_infos`; a parsed track with no matching port is
+/// dropped. Port `i` emits its concrete [`Caps`]
 /// ([`PipelinePacket::CapsChanged`]) before its first frame, so the branch retypes
 /// from the (byte-stream) input caps to the elementary stream, exactly as the
 /// single-output demuxer announces its output. A port whose stream the container
@@ -1575,6 +1576,8 @@ pub struct MkvDemuxN {
     demux: MatroskaDemuxer,
     /// Port `i` emits this elementary stream (one selected stream per output pad).
     ports: Vec<MkvStream>,
+    // the TrackNumber port `i` carries, `None` for the first track of its stream's codec
+    port_tracks: Vec<Option<u64>>,
     /// Whether port `i` has emitted its opening `CapsChanged` yet.
     announced: Vec<bool>,
     /// Whether port `i` has forwarded its track's `CodecPrivate` in band yet
@@ -1609,9 +1612,11 @@ impl MkvDemuxN {
         let announced = alloc::vec![false; ports.len()];
         let config_sent = alloc::vec![false; ports.len()];
         let segment_sent = alloc::vec![false; ports.len()];
+        let port_tracks = alloc::vec![None; ports.len()];
         Self {
             demux: MatroskaDemuxer::new(),
             ports,
+            port_tracks,
             announced,
             config_sent,
             segment_base: None,
@@ -1622,6 +1627,13 @@ impl MkvDemuxN {
             stream_select: None,
             emitted: 0,
         }
+    }
+
+    // one port per probed track, so two tracks of one codec each reach their own port
+    pub fn from_stream_infos(infos: &[MkvStreamInfo]) -> Self {
+        let mut demux = Self::new(infos.iter().map(|info| info.stream).collect());
+        demux.port_tracks = infos.iter().map(|info| Some(info.track_number)).collect();
+        demux
     }
 
     // the AES key for each ContentEncKeyID of a WebM Encryption track
@@ -1663,11 +1675,12 @@ impl MkvDemuxN {
         };
         let mut active = Vec::new();
         for (port, id) in ids.iter().enumerate().take(self.ports.len()) {
-            let Some(stream) = resolve_stream_id(&self.demux, id) else {
+            let Some((stream, track_number)) = resolve_stream_id(&self.demux, id) else {
                 continue;
             };
-            if self.ports[port] != stream {
+            if self.ports[port] != stream || self.port_tracks[port] != Some(track_number) {
                 self.ports[port] = stream;
+                self.port_tracks[port] = Some(track_number);
                 self.announced[port] = false; // re-emit caps for the new stream
                 self.config_sent[port] = false; // and the new track's config
             }
@@ -1690,12 +1703,13 @@ impl MkvDemuxN {
         self.emitted
     }
 
-    /// The output port that carries the elementary stream of `codec`, or `None`
-    /// when no selected port matches (the track is dropped).
-    fn port_for_codec(&self, codec: MkvCodec) -> Option<usize> {
-        self.ports
-            .iter()
-            .position(|&s| codec_to_stream(codec) == Some(s))
+    // `None` drops the frame: no port carries its track
+    fn port_for_track(&self, codec: MkvCodec, track: u64) -> Option<usize> {
+        (0..self.ports.len()).position(|port| {
+            codec_to_stream(codec) == Some(self.ports[port])
+                && MkvDemux::selected_track(&self.demux, self.ports[port], self.port_tracks[port])
+                    == Some(track)
+        })
     }
 
     /// Announce every container track as a [`BusMessage::StreamCollection`] (M376),
@@ -1790,14 +1804,11 @@ impl MultiOutputElement for MkvDemuxN {
                     // Honor an app selection before routing this batch, so a re-map
                     // (and its re-armed CapsChanged) takes effect for the frames now.
                     self.apply_stream_selection();
-                    for &stream in &self.ports {
-                        reject_undecodable_encoding(&self.demux, stream, None)?;
+                    for (&stream, &track_number) in self.ports.iter().zip(&self.port_tracks) {
+                        reject_undecodable_encoding(&self.demux, stream, track_number)?;
                     }
                     for f in self.demux.take_frames() {
-                        let Some(port) = self.port_for_codec(f.codec).filter(|&port| {
-                            MkvDemux::selected_track(&self.demux, self.ports[port], None)
-                                == Some(f.track)
-                        }) else {
+                        let Some(port) = self.port_for_track(f.codec, f.track) else {
                             continue; // a track no selected port carries
                         };
                         if !self.segment_sent[port] {
@@ -1807,9 +1818,12 @@ impl MultiOutputElement for MkvDemuxN {
                             out.push_to(port, PipelinePacket::Segment(seg)).await?;
                         }
                         if !self.announced[port] {
-                            let caps =
-                                MkvDemux::concrete_caps_of(&self.demux, self.ports[port], None)
-                                    .unwrap_or_else(|| MkvDemux::output_caps(self.ports[port]));
+                            let caps = MkvDemux::concrete_caps_of(
+                                &self.demux,
+                                self.ports[port],
+                                self.port_tracks[port],
+                            )
+                            .unwrap_or_else(|| MkvDemux::output_caps(self.ports[port]));
                             out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
                             self.announced[port] = true;
                         }

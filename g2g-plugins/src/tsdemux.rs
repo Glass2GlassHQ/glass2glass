@@ -1262,7 +1262,8 @@ impl PadTemplates for TsDemux {
 /// A [`MultiOutputElement`] driven by
 /// [`run_source_fanout`](g2g_core::runtime::run_source_fanout): it parses the
 /// transport stream once and routes each PES access unit to the port whose
-/// selected codec matches the unit's PMT `stream_type`, so one demuxer feeds
+/// selected codec matches the unit's PMT `stream_type` (and whose PID matches, for
+/// ports built with `from_stream_infos`), so one demuxer feeds
 /// several decode branches in one pipeline (audio + video together). Port `i`
 /// emits its elementary [`Caps`] ([`PipelinePacket::CapsChanged`]) before its
 /// first frame (the branch retypes from the byte-stream input caps); a parsed
@@ -1359,6 +1360,13 @@ impl TsDemuxN {
         }
     }
 
+    // one port per probed stream, so two streams of one codec each reach their own port
+    pub fn from_stream_infos(infos: &[TsStreamInfo]) -> Self {
+        let mut demux = Self::new(infos.iter().map(|info| info.stream).collect());
+        demux.selected_pids = infos.iter().map(|info| Some(info.pid)).collect();
+        demux
+    }
+
     // a PES stays in the parser until the next one on its PID starts
     fn learn_held_unit(&mut self, port: usize, dts_ns: Option<u64>) {
         let previous = core::mem::replace(&mut self.last_unit_dts_ns[port], dts_ns);
@@ -1440,7 +1448,7 @@ impl TsDemuxN {
         self.emitted
     }
 
-    // a port without an app-selected PID carries the first PMT stream of its codec
+    // a port without a selected PID carries the first PMT stream of its codec
     fn port_for_pid(&self, pid: u16) -> Option<usize> {
         (0..self.ports.len()).position(|port| {
             self.selected_pids[port].or_else(|| first_pid_carrying(&self.demux, self.ports[port]))

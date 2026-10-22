@@ -528,9 +528,7 @@ impl MkvProbe {
     }
 
     fn demux(&self) -> Box<dyn DynMultiOutputElement> {
-        Box::new(crate::mkvdemux::MkvDemuxN::new(
-            self.infos.iter().map(|i| i.stream).collect(),
-        ))
+        Box::new(crate::mkvdemux::MkvDemuxN::from_stream_infos(&self.infos))
     }
 
     fn fanout(&self) -> UriFanout {
@@ -648,9 +646,7 @@ impl TsProbe {
     }
 
     fn demux(&self) -> Box<dyn DynMultiOutputElement> {
-        Box::new(crate::tsdemux::TsDemuxN::new(
-            self.infos.iter().map(|i| i.stream).collect(),
-        ))
+        Box::new(crate::tsdemux::TsDemuxN::from_stream_infos(&self.infos))
     }
 
     fn fanout(&self) -> UriFanout {
@@ -1593,8 +1589,8 @@ fn build_mkv_subtitle_overlay(
 
     // Demux ports (selected streams): every A/V stream (in track order) then the
     // subtitle stream.
-    let mut stream_ports: Vec<_> = av.iter().map(|i| i.stream).collect();
-    stream_ports.push(text.stream);
+    let mut stream_ports = av.to_vec();
+    stream_ports.push(text.clone());
     let text_port = (stream_ports.len() - 1) as u8;
     let outputs = stream_ports.len() as u8;
 
@@ -1606,7 +1602,10 @@ fn build_mkv_subtitle_overlay(
         },
     );
     let src = graph.add_source(GraphNodeRef::source(source));
-    let demux = graph.add_demux(GraphNodeRef::demux(MkvDemuxN::new(stream_ports)), outputs);
+    let demux = graph.add_demux(
+        GraphNodeRef::demux(MkvDemuxN::from_stream_infos(&stream_ports)),
+        outputs,
+    );
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
 
     let av_caps: Vec<UriFanoutPort> = av
@@ -1860,9 +1859,12 @@ fn mkv_select(
         return None;
     }
     let sel = select(&kinds)?;
-    let streams: Vec<_> = sel.iter().map(|&i| infos[i].stream).collect();
-    let caps: Vec<Caps> = sel.iter().map(|&i| infos[i].caps.clone()).collect();
-    Some((Box::new(crate::mkvdemux::MkvDemuxN::new(streams)), caps))
+    let selected: Vec<_> = sel.iter().map(|&i| infos[i].clone()).collect();
+    let caps: Vec<Caps> = selected.iter().map(|info| info.caps.clone()).collect();
+    Some((
+        Box::new(crate::mkvdemux::MkvDemuxN::from_stream_infos(&selected)),
+        caps,
+    ))
 }
 
 /// `matroskademux` explicit fan-out (M476): build the multi-output demuxer,
@@ -2080,9 +2082,12 @@ fn ts_select(
         })
         .collect();
     let sel = select(&kinds)?;
-    let streams: Vec<_> = sel.iter().map(|&i| infos[i].stream).collect();
-    let caps: Vec<Caps> = sel.iter().map(|&i| infos[i].caps.clone()).collect();
-    Some((Box::new(crate::tsdemux::TsDemuxN::new(streams)), caps))
+    let selected: Vec<_> = sel.iter().map(|&i| infos[i].clone()).collect();
+    let caps: Vec<Caps> = selected.iter().map(|info| info.caps.clone()).collect();
+    Some((
+        Box::new(crate::tsdemux::TsDemuxN::from_stream_infos(&selected)),
+        caps,
+    ))
 }
 
 /// `tsdemux` explicit fan-out (M476).
