@@ -121,6 +121,8 @@ Highest leverage first:
   ffmpeg's on a static read, so the difference needs an experiment loop on the
   RADV device. NVIDIA Turing cannot decode it at all (minimum H.265 coded extent
   144x144).
+## CUDA / display
+
 - Run `CudaKmsSink` from a bare VT with DRM master and verify the in-tree
   `// VERIFY:` points.
 
