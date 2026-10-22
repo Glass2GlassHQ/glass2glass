@@ -1,9 +1,9 @@
 //! M365 - FLV demuxer seek (`FlvDemux` over a seekable `FileSrc`). Drives an
-//! upstream byte-seek and re-syncs from the keyframe at or after the target,
+//! upstream byte-seek and re-syncs from the keyframe at or before the target,
 //! using the FLV video tag's frame-type flag.
 //!
 //! The clip has keyframe video tags at 0 ms and 120 ms, with interframes between.
-//! A seek to 80 ms resumes from the 120 ms keyframe.
+//! A seek to 140 ms resumes from the 120 ms keyframe.
 
 #![cfg(feature = "std")]
 
@@ -39,7 +39,7 @@ fn make_flv(tags: &[(u32, bool, Vec<u8>)]) -> Vec<u8> {
 struct Capture {
     frames: Vec<Vec<u8>>,
     flushes: usize,
-    segments: usize,
+    segment_starts: Vec<u64>,
 }
 impl OutputSink for Capture {
     fn poll_push(
@@ -57,7 +57,7 @@ impl OutputSink for Capture {
                     self.frames.push(s.as_slice().to_vec());
                 }
                 PipelinePacket::Flush => self.flushes += 1,
-                PipelinePacket::Segment(_) => self.segments += 1,
+                PipelinePacket::Segment(segment) => self.segment_starts.push(segment.start),
                 _ => {}
             }
             Ok(PushOutcome::Accepted)
@@ -104,8 +104,9 @@ async fn flvdemux_seeks_to_the_target_keyframe_over_filesrc() {
 
     let byte = SeekController::new();
     let time = SeekController::new();
-    // Seek to 80 ms: resume from the next keyframe at 120 ms.
-    time.seek(Seek::flush_to(80_000_000));
+    // Seek to 140 ms: resume from the keyframe before it, at 120 ms.
+    let target_ns = 140_000_000;
+    time.seek(Seek::flush_to(target_ns));
 
     let mut src = FileSrc::new(
         &path,
@@ -143,11 +144,15 @@ async fn flvdemux_seeks_to_the_target_keyframe_over_filesrc() {
         capture.flushes >= 1,
         "the upstream byte-seek flushed downstream"
     );
-    assert!(capture.segments >= 1, "a resume segment was emitted");
+    assert_eq!(
+        capture.segment_starts.last(),
+        Some(&target_ns),
+        "the resume segment starts at the target"
+    );
     assert_eq!(
         capture.frames,
         vec![vec![0, 0, 0, 1, 0x65, 0x04], vec![0, 0, 0, 1, 0x41, 0x05]],
-        "resumed from the 120 ms keyframe to the end, pre-target frames discarded"
+        "resumed from the 120 ms keyframe to the end, earlier frames discarded"
     );
     let _ = std::fs::remove_file(&path);
 }

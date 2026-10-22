@@ -8,10 +8,9 @@
 //! reposition by byte offset, then re-syncs from the returned `Flush`.
 //!
 //! Completeness over speed: the byte-seek target is the file start (offset `0`),
-//! so any container seeks correctly without an index, by re-scanning and
-//! discarding decoded units until the first keyframe at or after the target time.
-//! (An index-derived byte offset is a later performance refinement, not a
-//! correctness gap.)
+//! so any container seeks correctly without an index, by re-scanning decoded
+//! units up to the target time. (An index-derived byte offset is a later
+//! performance refinement, not a correctness gap.)
 //!
 //! Lifecycle, per demuxer `process`:
 //! - [`poll_request`](DemuxSeek::poll_request) at the top: a pending flushing
@@ -21,28 +20,54 @@
 //!   units.
 //! - [`on_flush`](DemuxSeek::on_flush) when the source's `Flush` arrives: the
 //!   demuxer resets its parser and the helper enters `Discarding`.
-//! - [`admit`](DemuxSeek::admit) per decoded unit: drops units until a keyframe
-//!   at/after the target, then returns [`Admit::Resume`] (emit a fresh segment
-//!   and the unit) and goes idle.
+//! - [`admit`](DemuxSeek::admit) per decoded unit: keeps the units from the last
+//!   keyframe at or before the target and, once a unit at or after the target
+//!   arrives, hands them back with a segment start at the target, as `Mp4Src`
+//!   does, so the decoder drops the frames before it. Then it goes idle.
 //!
 //! [`Mp4Src`]: crate::mp4src
 //! [`FileSrc`]: crate::filesrc
 //! [`SeekController`]: g2g_core::runtime::SeekController
 
+use alloc::vec::Vec;
+use core::iter::Chain;
+
 use g2g_core::runtime::SeekController;
 use g2g_core::Seek;
 
-/// What a demuxer should do with a decoded unit (sample / access unit / packet)
-/// during seeking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Admit {
-    /// Not seeking: emit the unit normally.
-    Emit,
-    /// Seeking: discard this unit (pre-flush, or before the target keyframe).
-    Drop,
-    /// Seek complete on this keyframe: emit a fresh segment starting at the
-    /// carried stream-time (ns), then the unit. The helper returns to idle.
-    Resume(u64),
+// a stream without a keyframe for this many units releases them early, the segment still clips them
+const KEPT_UNITS_MAX: usize = 1024;
+
+#[derive(Debug)]
+pub(crate) struct Admitted<U> {
+    // set when a seek completes: the caller sends a segment starting here before the units
+    pub(crate) segment_start_ns: Option<u64>,
+    units: Chain<alloc::vec::IntoIter<U>, core::option::IntoIter<U>>,
+}
+
+impl<U> Admitted<U> {
+    pub(crate) fn emit(unit: U) -> Self {
+        Self::release(None, Vec::new(), Some(unit))
+    }
+
+    fn empty() -> Self {
+        Self::release(None, Vec::new(), None)
+    }
+
+    fn release(segment_start_ns: Option<u64>, kept: Vec<U>, unit: Option<U>) -> Self {
+        Self {
+            segment_start_ns,
+            units: kept.into_iter().chain(unit),
+        }
+    }
+}
+
+impl<U> Iterator for Admitted<U> {
+    type Item = U;
+
+    fn next(&mut self) -> Option<U> {
+        self.units.next()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -51,15 +76,16 @@ enum Phase {
     Idle,
     /// Upstream byte-seek requested; drop input until the source's `Flush`.
     AwaitingFlush { target_ns: u64 },
-    /// Re-syncing after the flush; drop decoded units until a keyframe >= target.
+    /// Re-syncing after the flush; keep the units from the last keyframe at or
+    /// before the target until a unit at or after it arrives.
     Discarding { target_ns: u64 },
 }
 
-/// Seek state a demuxer embeds. Inert (`Idle`, zero controllers) unless
-/// [`with`](DemuxSeek::with) wired it, so a demuxer with no seek controller pays
-/// nothing.
-#[derive(Debug, Default)]
-pub(crate) struct DemuxSeek {
+/// Seek state a demuxer embeds, generic over the demuxer's decoded unit. Inert
+/// (`Idle`, zero controllers) unless [`with`](DemuxSeek::with) wired it, so a
+/// demuxer with no seek controller pays nothing.
+#[derive(Debug)]
+pub(crate) struct DemuxSeek<U> {
     /// App -> demuxer time seeks.
     app: Option<SeekController>,
     /// Demuxer -> upstream byte source (e.g. `FileSrc`) byte-offset seeks.
@@ -70,9 +96,23 @@ pub(crate) struct DemuxSeek {
     /// in its `Flush` handler to decide whether to keep mid-stream parser state
     /// (a mid-segment landing) or fully reset (a from-start re-scan).
     keep_state: bool,
+    // empty until the first keyframe after the flush, since nothing before it decodes
+    kept: Vec<U>,
 }
 
-impl DemuxSeek {
+impl<U> Default for DemuxSeek<U> {
+    fn default() -> Self {
+        Self {
+            app: None,
+            upstream: None,
+            phase: Phase::Idle,
+            keep_state: false,
+            kept: Vec::new(),
+        }
+    }
+}
+
+impl<U> DemuxSeek<U> {
     /// Wire the app-facing time-seek controller and the upstream byte-seek
     /// controller (the source's). Both are needed to seek.
     pub(crate) fn with(&mut self, app: SeekController, upstream: SeekController) {
@@ -99,23 +139,18 @@ impl DemuxSeek {
         &mut self,
         resolve: impl FnOnce(u64) -> Option<u64>,
     ) -> bool {
-        if self.phase != Phase::Idle {
+        if self.phase != Phase::Idle || self.upstream.is_none() {
             return false;
         }
-        let (Some(app), Some(upstream)) = (&self.app, &self.upstream) else {
+        let Some(app) = &self.app else {
             return false;
         };
         match app.take_pending() {
             Some(seek) if seek.is_flush() => {
-                let (offset, keep) = match resolve(seek.start) {
-                    Some(o) => (o, true),
-                    None => (0, false),
-                };
-                upstream.seek(Seek::flush_to(offset));
-                self.keep_state = keep;
-                self.phase = Phase::AwaitingFlush {
-                    target_ns: seek.start,
-                };
+                match resolve(seek.start) {
+                    Some(offset) => self.begin_seek_at(seek.start, offset, true),
+                    None => self.begin_seek_at(seek.start, 0, false),
+                }
                 true
             }
             _ => false,
@@ -144,7 +179,7 @@ impl DemuxSeek {
     /// when the caller consumed the app seek itself (the multi-hop Matroska `Cues`
     /// prefetch: the `Cues` are fetched first, then this seeks to the target
     /// Cluster). Issues the upstream byte-seek, marks the seek state-preserving,
-    /// and awaits its flush (so `admit` then discards to the keyframe >= target).
+    /// and awaits its flush (so `admit` then re-syncs to the target).
     pub(crate) fn begin_indexed_seek(&mut self, target_ns: u64, offset: u64) {
         self.begin_seek_at(target_ns, offset, true);
     }
@@ -159,6 +194,7 @@ impl DemuxSeek {
             upstream.seek(Seek::flush_to(offset));
         }
         self.keep_state = keep_state;
+        self.kept.clear();
         self.phase = Phase::AwaitingFlush { target_ns };
     }
 
@@ -176,78 +212,128 @@ impl DemuxSeek {
         if let Phase::AwaitingFlush { target_ns } = self.phase {
             self.phase = Phase::Discarding { target_ns };
         }
+        self.kept.clear();
         true
     }
 
-    /// Classify a decoded unit by its stream-time `pts_ns` and whether it is a
-    /// keyframe. Idle emits; while discarding, drops until a keyframe at/after the
-    /// target, which resumes (and returns to idle).
-    pub(crate) fn admit(&mut self, pts_ns: u64, keyframe: bool) -> Admit {
-        match self.phase {
-            Phase::Idle => Admit::Emit,
-            Phase::AwaitingFlush { .. } => Admit::Drop,
-            Phase::Discarding { target_ns } => {
-                if keyframe && pts_ns >= target_ns {
-                    self.phase = Phase::Idle;
-                    Admit::Resume(pts_ns)
-                } else {
-                    Admit::Drop
-                }
-            }
+    /// Classify a decoded `unit` by its stream-time `pts_ns` and whether it is a
+    /// keyframe. Idle emits it. While discarding, a keyframe at or before the
+    /// target restarts the kept units, and the first unit at or after the target
+    /// releases them with the segment start, after which the helper is idle.
+    pub(crate) fn admit(&mut self, pts_ns: u64, keyframe: bool, unit: U) -> Admitted<U> {
+        let target_ns = match self.phase {
+            Phase::Idle => return Admitted::emit(unit),
+            Phase::AwaitingFlush { .. } => return Admitted::empty(),
+            Phase::Discarding { target_ns } => target_ns,
+        };
+        if keyframe && pts_ns <= target_ns {
+            self.kept.clear();
+        } else if self.kept.is_empty() && !keyframe {
+            return Admitted::empty();
         }
+        if pts_ns < target_ns && self.kept.len() < KEPT_UNITS_MAX {
+            self.kept.push(unit);
+            return Admitted::empty();
+        }
+        self.phase = Phase::Idle;
+        Admitted::release(Some(target_ns), core::mem::take(&mut self.kept), Some(unit))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use g2g_core::runtime::SeekController;
+
+    const TARGET_NS: u64 = 5_000;
+
+    fn units(admitted: Admitted<u64>) -> (Option<u64>, Vec<u64>) {
+        (admitted.segment_start_ns, admitted.collect())
+    }
+
+    fn discarding_to_target() -> DemuxSeek<u64> {
+        let app = SeekController::new();
+        let mut s = DemuxSeek::default();
+        s.with(app.clone(), SeekController::new());
+        app.seek(Seek::flush_to(TARGET_NS));
+        assert!(s.poll_request(), "a pending flushing seek starts the cycle");
+        assert!(s.on_flush());
+        s
+    }
 
     #[test]
     fn idle_admits_everything() {
         let mut s = DemuxSeek::default();
-        assert_eq!(s.admit(0, false), Admit::Emit);
-        assert_eq!(s.admit(1000, true), Admit::Emit);
+        assert_eq!(units(s.admit(0, false, 1)), (None, vec![1]));
+        assert_eq!(units(s.admit(1000, true, 2)), (None, vec![2]));
         assert!(!s.dropping_input());
     }
 
     #[test]
-    fn full_seek_cycle_drops_until_target_keyframe() {
+    fn full_seek_cycle_releases_from_the_keyframe_before_the_target() {
         let app = SeekController::new();
         let upstream = SeekController::new();
         let upstream_src = upstream.clone();
         let mut s = DemuxSeek::default();
         s.with(app.clone(), upstream);
 
-        // App requests a time seek to 5000 ns.
-        app.seek(Seek::flush_to(5_000));
+        app.seek(Seek::flush_to(TARGET_NS));
         assert!(s.poll_request(), "a pending flushing seek starts the cycle");
         // The upstream source sees a byte-seek to offset 0.
         assert_eq!(upstream_src.take_pending().map(|k| k.start), Some(0));
         // Awaiting the flush: input is dropped and units are not emitted.
         assert!(s.dropping_input());
-        assert_eq!(s.admit(0, true), Admit::Drop);
+        assert_eq!(units(s.admit(0, true, 0)), (None, vec![]));
 
-        // The source's flush arrives: reset, then discard until a keyframe >= 5000.
         assert!(s.on_flush());
         assert!(!s.dropping_input());
+        assert_eq!(units(s.admit(0, true, 0)), (None, vec![]));
+        assert_eq!(units(s.admit(1_000, false, 1_000)), (None, vec![]));
+        // a later keyframe before the target restarts the kept units
+        assert_eq!(units(s.admit(4_000, true, 4_000)), (None, vec![]));
+        assert_eq!(units(s.admit(4_500, false, 4_500)), (None, vec![]));
         assert_eq!(
-            s.admit(0, true),
-            Admit::Drop,
-            "keyframe before target: drop"
+            units(s.admit(6_000, false, 6_000)),
+            (Some(TARGET_NS), vec![4_000, 4_500, 6_000]),
+            "the first unit at or after the target releases the kept ones"
         );
+        // reordered B frames below the target follow in decode order, the segment clips them
+        assert_eq!(units(s.admit(4_800, false, 4_800)), (None, vec![4_800]));
+    }
+
+    #[test]
+    fn units_before_the_first_keyframe_never_go_out() {
+        let mut s = discarding_to_target();
+        assert_eq!(units(s.admit(1_000, false, 1_000)), (None, vec![]));
+        assert_eq!(units(s.admit(6_000, false, 6_000)), (None, vec![]));
         assert_eq!(
-            s.admit(6_000, false),
-            Admit::Drop,
-            "after target but not a keyframe: drop"
+            units(s.admit(7_000, true, 7_000)),
+            (Some(TARGET_NS), vec![7_000]),
+            "a landing past the target resumes on its first keyframe"
         );
+    }
+
+    #[test]
+    fn a_keyframe_on_the_target_starts_there() {
+        let mut s = discarding_to_target();
+        assert_eq!(units(s.admit(0, true, 0)), (None, vec![]));
         assert_eq!(
-            s.admit(8_000, true),
-            Admit::Resume(8_000),
-            "first keyframe >= target resumes"
+            units(s.admit(TARGET_NS, true, TARGET_NS)),
+            (Some(TARGET_NS), vec![TARGET_NS])
         );
-        // Back to idle.
-        assert_eq!(s.admit(9_000, false), Admit::Emit);
+    }
+
+    #[test]
+    fn a_long_run_without_keyframes_releases_early() {
+        let mut s = discarding_to_target();
+        assert_eq!(units(s.admit(0, true, 0)), (None, vec![]));
+        for unit in 1..KEPT_UNITS_MAX as u64 {
+            assert_eq!(units(s.admit(1, false, unit)), (None, vec![]));
+        }
+        let (segment_start, released) = units(s.admit(1, false, KEPT_UNITS_MAX as u64));
+        assert_eq!(segment_start, Some(TARGET_NS));
+        assert_eq!(released, (0..=KEPT_UNITS_MAX as u64).collect::<Vec<_>>());
     }
 
     #[test]
@@ -256,6 +342,6 @@ mod tests {
         // A plain flush (no seek pending) still asks the caller to reset, but
         // stays idle so normal emission continues.
         assert!(s.on_flush());
-        assert_eq!(s.admit(0, false), Admit::Emit);
+        assert_eq!(units(s.admit(0, false, 0)), (None, vec![0]));
     }
 }

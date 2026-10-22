@@ -948,8 +948,8 @@ impl MatroskaDemuxer {
 
     /// The absolute byte offset to seek to for `target_ns` using the `Cues` index:
     /// the Segment data start plus the position of the Cluster with the largest
-    /// `CueTime` at or before the target (the keyframe at/before it; the demuxer's
-    /// re-sync then advances to the first keyframe >= target). `None` if no `Cues`
+    /// `CueTime` at or before the target (the keyframe at/before it, which the
+    /// demuxer's re-sync decodes from). `None` if no `Cues`
     /// have been parsed or the Segment offset is unknown, so the caller falls back
     /// to a re-scan from the start. A target before the first cue clamps to it.
     pub fn cue_seek_offset(&self, target_ns: u64) -> Option<u64> {

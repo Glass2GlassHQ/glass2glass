@@ -55,7 +55,7 @@ use crate::avidemux::pcm_alternatives;
 use crate::codectag::{tagged_stream_name, TaggedStream};
 
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
-use crate::demuxseek::{Admit, DemuxSeek};
+use crate::demuxseek::DemuxSeek;
 use crate::matroska::{MatroskaDemuxer, MkvCodec, MkvTrack};
 use crate::typefind::{framerate_within_placeholder, with_picture_size, PLACEHOLDER_FRAMERATE};
 use crate::uncompressedvideo::{
@@ -165,7 +165,7 @@ pub struct MkvDemux {
     stream_select: Option<StreamSelectController>,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
-    seek: DemuxSeek,
+    seek: DemuxSeek<crate::matroska::MkvFrame>,
     /// Whether the selected track's `CodecPrivate` has been forwarded in-band,
     /// once, before its first frame (see [`config_headers`]). Re-armed on a flush.
     config_sent: bool,
@@ -213,7 +213,7 @@ impl MkvDemux {
     /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
     /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
     /// On a time seek the demuxer rewinds the source and re-syncs from the
-    /// keyframe at/after the target; with a `Cues` index (parsed, or located via a
+    /// keyframe at/before the target; with a `Cues` index (parsed, or located via a
     /// `SeekHead` and prefetched, M373/M374) it jumps straight to the Cluster.
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
         AsyncElement::set_seek(&mut self, app, upstream);
@@ -670,60 +670,61 @@ impl MkvDemux {
             if Some(f.track) != selected_track {
                 continue; // a stream other than the selected one
             }
-            // M362 seek: drop frames until the keyframe at/after the target (the
-            // Matroska block keyframe flag); the resuming frame emits a segment.
-            match self.seek.admit(f.pts_ns, f.keyframe) {
-                Admit::Drop => continue,
-                Admit::Resume(start) => {
-                    let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
-                    out.push(PipelinePacket::Segment(seg)).await?;
-                    self.segment_sent = true;
-                }
-                Admit::Emit => {}
-            }
-            // Stream start: map the first emitted timestamp to running time 0.
-            // Matroska normally starts at 0, so this is usually the identity, but
-            // a file cut from a live recording need not, and every demuxer opens
-            // its stream the same way.
-            if !self.segment_sent {
-                self.segment_sent = true;
-                let seg = Segment::for_flush_seek(&Seek::flush_to(f.pts_ns), None);
+            // M362 seek: hold frames from the keyframe at/before the target (the
+            // Matroska block keyframe flag) until the target, then a segment and them.
+            let admitted = self.seek.admit(f.pts_ns, f.keyframe, f);
+            if let Some(start) = admitted.segment_start_ns {
+                let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
                 out.push(PipelinePacket::Segment(seg)).await?;
+                self.segment_sent = true;
             }
-            // The track's decoder-init bytes go in band once, ahead of its first
-            // frame (FLAC STREAMINFO, Opus `OpusHead`).
-            if !self.config_sent {
-                self.config_sent = true;
-                for header in config_headers(&self.demux, f.codec, f.track) {
-                    let frame = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(header.into_boxed_slice())),
-                        FrameTiming {
-                            pts_ns: f.pts_ns,
-                            dts_ns: f.pts_ns,
-                            ..FrameTiming::default()
-                        },
-                        self.emitted,
-                    );
-                    self.emitted += 1;
-                    out.push(PipelinePacket::DataFrame(frame)).await?;
+            for f in admitted {
+                // Stream start: map the first emitted timestamp to running time 0.
+                // Matroska normally starts at 0, so this is usually the identity, but
+                // a file cut from a live recording need not, and every demuxer opens
+                // its stream the same way.
+                if !self.segment_sent {
+                    self.segment_sent = true;
+                    let seg = Segment::for_flush_seek(&Seek::flush_to(f.pts_ns), None);
+                    out.push(PipelinePacket::Segment(seg)).await?;
                 }
+                // The track's decoder-init bytes go in band once, ahead of its first
+                // frame (FLAC STREAMINFO, Opus `OpusHead`).
+                if !self.config_sent {
+                    self.config_sent = true;
+                    for header in config_headers(&self.demux, f.codec, f.track) {
+                        let frame = Frame::new(
+                            MemoryDomain::System(SystemSlice::from_boxed(
+                                header.into_boxed_slice(),
+                            )),
+                            FrameTiming {
+                                pts_ns: f.pts_ns,
+                                dts_ns: f.pts_ns,
+                                ..FrameTiming::default()
+                            },
+                            self.emitted,
+                        );
+                        self.emitted += 1;
+                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                    }
+                }
+                let timing = FrameTiming {
+                    pts_ns: f.pts_ns,
+                    dts_ns: f.pts_ns,
+                    duration_ns: forwarded_duration_ns(&f),
+                    ..FrameTiming::default()
+                };
+                let Some(payload) = deframe_block(&self.demux, f) else {
+                    continue;
+                };
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+                    timing,
+                    self.emitted,
+                );
+                self.emitted += 1;
+                out.push(PipelinePacket::DataFrame(frame)).await?;
             }
-            let timing = FrameTiming {
-                pts_ns: f.pts_ns,
-                dts_ns: f.pts_ns,
-                duration_ns: forwarded_duration_ns(&f),
-                ..FrameTiming::default()
-            };
-            let Some(payload) = deframe_block(&self.demux, f) else {
-                continue;
-            };
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                timing,
-                self.emitted,
-            );
-            self.emitted += 1;
-            out.push(PipelinePacket::DataFrame(frame)).await?;
         }
         Ok(())
     }

@@ -39,7 +39,7 @@ use g2g_core::{
     Segment, Stream, StreamCollection, StreamType, SubPictureFormat, Tag, TagList, VideoCodec,
 };
 
-use crate::demuxseek::{Admit, DemuxSeek};
+use crate::demuxseek::DemuxSeek;
 use crate::mpegts::{
     unwrap_metadata_au_cells, EitSlot, EsUnit, TsDemuxer, TsPacketSplitter, STREAM_TYPE_AAC,
     STREAM_TYPE_AAC_LATM, STREAM_TYPE_AC3, STREAM_TYPE_H264, STREAM_TYPE_H265,
@@ -264,6 +264,10 @@ fn push_event_timing(
     }
 }
 
+fn ticks_90khz_to_ns(ticks: u64) -> u64 {
+    (ticks as u128 * 1_000_000_000 / 90_000) as u64
+}
+
 /// The bytes to forward for one access unit: a metadata-in-PES (0x15) payload
 /// has its ISO 13818-1 AU cells unwrapped when it carries them (a spec-strict
 /// synchronous KLV writer), and is forwarded unchanged otherwise. Every other
@@ -368,7 +372,7 @@ pub struct TsDemux {
     tags: TagPoster,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
-    seek: DemuxSeek,
+    seek: DemuxSeek<EsUnit>,
     /// Opus only: whether the `CapsChanged` carrying the descriptor's channel
     /// count has been emitted (OpusDec needs a concrete count before it decodes,
     /// and there is no in-band `OpusHead` on this path). Re-armed on a flush.
@@ -534,7 +538,7 @@ impl TsDemux {
     /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
     /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
     /// On a time seek the demuxer rewinds the source and re-syncs from the
-    /// keyframe at/after the target.
+    /// keyframe at/before the target.
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
         AsyncElement::set_seek(&mut self, app, upstream);
         self
@@ -702,9 +706,7 @@ impl TsDemux {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         for u in units {
-            let pts_ns = u
-                .pts_90khz
-                .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64);
+            let pts_ns = u.pts_90khz.map(ticks_90khz_to_ns);
             if self.first_pts_ns.is_none() {
                 self.first_pts_ns = pts_ns;
             }
@@ -712,14 +714,9 @@ impl TsDemux {
                 continue; // a stream other than the selected one
             }
             let pts_ns = pts_ns.unwrap_or(0);
-            // Reordered video carries a separate DTS; fall back to the PTS when the
-            // PES had none (the no-DTS convention shared with the fmp4 / mkv demux).
-            let dts_ns = u
-                .dts_90khz
-                .map(|d| (d as u128 * 1_000_000_000 / 90_000) as u64)
-                .unwrap_or(pts_ns);
             // M362 seek: an audio frame is always a resync point; a video AU is
-            // one only if it carries an IDR/IRAP. Drop until the target keyframe.
+            // one only if it carries an IDR/IRAP. Hold from the keyframe at or
+            // before the target until the target.
             let keyframe = match self.stream {
                 TsStream::H264 => crate::annexb::au_is_keyframe(VideoCodec::H264, &u.data),
                 TsStream::H265 => crate::annexb::au_is_keyframe(VideoCodec::H265, &u.data),
@@ -746,43 +743,51 @@ impl TsDemux {
                 }
                 self.mpeg2_tuned_in = true;
             }
-            let stream_time_ns = pts_ns.saturating_sub(self.first_pts_ns.unwrap_or(0));
-            match self.seek.admit(stream_time_ns, keyframe) {
-                Admit::Drop => continue,
-                Admit::Resume(_) => {
-                    let seg = Segment::for_flush_seek(&Seek::flush_to(pts_ns), None);
-                    out.push(PipelinePacket::Segment(seg)).await?;
-                    self.segment_sent = true;
-                }
-                Admit::Emit => {}
-            }
-            // Stream start: map the first emitted DTS to running time 0, since
-            // open-GOP B frames present before the first I frame. A seek's resume
-            // above already did that for its own case.
-            if !self.segment_sent {
-                self.segment_sent = true;
-                let seg = Segment::for_flush_seek(&Seek::flush_to(dts_ns), None);
+            let first_pts_ns = self.first_pts_ns.unwrap_or(0);
+            let admitted = self
+                .seek
+                .admit(pts_ns.saturating_sub(first_pts_ns), keyframe, u);
+            if let Some(start) = admitted.segment_start_ns {
+                let seg = Segment::for_flush_seek(
+                    &Seek::flush_to(start.saturating_add(first_pts_ns)),
+                    None,
+                );
                 out.push(PipelinePacket::Segment(seg)).await?;
+                self.segment_sent = true;
             }
-            if self.stream == TsStream::Opus {
-                self.emit_opus(u, pts_ns, out).await?;
-                continue;
+            for u in admitted {
+                let pts_ns = u.pts_90khz.map_or(0, ticks_90khz_to_ns);
+                // Reordered video carries a separate DTS; fall back to the PTS when the
+                // PES had none (the no-DTS convention shared with the fmp4 / mkv demux).
+                let dts_ns = u.dts_90khz.map_or(pts_ns, ticks_90khz_to_ns);
+                // Stream start: map the first emitted DTS to running time 0, since
+                // open-GOP B frames present before the first I frame. A seek's resume
+                // above already did that for its own case.
+                if !self.segment_sent {
+                    self.segment_sent = true;
+                    let seg = Segment::for_flush_seek(&Seek::flush_to(dts_ns), None);
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
+                if self.stream == TsStream::Opus {
+                    self.emit_opus(u, pts_ns, out).await?;
+                    continue;
+                }
+                if matches!(self.stream, TsStream::DvbSub | TsStream::Teletext) {
+                    self.emit_stream_config(u.pid, pts_ns, out).await?;
+                }
+                let data = unwrap_sync_klv(u.stream_type, u.data);
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+                    FrameTiming {
+                        pts_ns,
+                        dts_ns,
+                        ..FrameTiming::default()
+                    },
+                    self.emitted,
+                );
+                self.emitted += 1;
+                out.push(PipelinePacket::DataFrame(frame)).await?;
             }
-            if matches!(self.stream, TsStream::DvbSub | TsStream::Teletext) {
-                self.emit_stream_config(u.pid, pts_ns, out).await?;
-            }
-            let data = unwrap_sync_klv(u.stream_type, u.data);
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                FrameTiming {
-                    pts_ns,
-                    dts_ns,
-                    ..FrameTiming::default()
-                },
-                self.emitted,
-            );
-            self.emitted += 1;
-            out.push(PipelinePacket::DataFrame(frame)).await?;
         }
         Ok(())
     }
@@ -1493,16 +1498,10 @@ impl TsDemuxN {
                 }
                 self.mpeg2_tuned_in[port] = true;
             }
-            let pts_ns = u
-                .pts_90khz
-                .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64)
-                .unwrap_or(0);
+            let pts_ns = u.pts_90khz.map_or(0, ticks_90khz_to_ns);
             // Reordered video carries a separate DTS; fall back to the PTS when
             // absent (the no-DTS convention shared with the fmp4 / mkv demux).
-            let dts_ns = u
-                .dts_90khz
-                .map(|d| (d as u128 * 1_000_000_000 / 90_000) as u64)
-                .unwrap_or(pts_ns);
+            let dts_ns = u.dts_90khz.map_or(pts_ns, ticks_90khz_to_ns);
             if !self.segment_sent[port] {
                 self.segment_sent[port] = true;
                 let base = *self.segment_base.get_or_insert(dts_ns);

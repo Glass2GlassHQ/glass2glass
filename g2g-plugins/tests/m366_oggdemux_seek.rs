@@ -1,11 +1,11 @@
 //! M366 - Ogg/Opus demuxer seek (`OggDemux` over a seekable `FileSrc`). Drives an
-//! upstream byte-seek and re-syncs from the packet at or after the target. The
+//! upstream byte-seek and re-syncs from the packet at or before the target. The
 //! Ogg demuxer carries no per-packet PTS, so the element now accumulates one from
 //! each Opus packet's decoded duration (TOC byte, 48 kHz); every audio packet is
 //! a resync point.
 //!
 //! The clip is five 20 ms Opus packets (PTS 0, 20, 40, 60, 80 ms). A seek to
-//! 50 ms resumes from the 60 ms packet.
+//! 50 ms resumes from the 40 ms packet.
 //!
 //! M862 adds the proportional first guess: with enough of the file played to
 //! interpolate through, the seek lands near the target instead of at offset `0`,
@@ -154,7 +154,7 @@ impl Emitted {
 struct Capture {
     frames: Vec<Emitted>,
     flushes: usize,
-    segments: usize,
+    segment_starts: Vec<u64>,
 }
 impl OutputSink for Capture {
     fn poll_push(
@@ -180,7 +180,7 @@ impl OutputSink for Capture {
                     self.flushes += 1;
                     self.frames.clear();
                 }
-                PipelinePacket::Segment(_) => self.segments += 1,
+                PipelinePacket::Segment(segment) => self.segment_starts.push(segment.start),
                 _ => {}
             }
             Ok(PushOutcome::Accepted)
@@ -298,11 +298,17 @@ async fn play_stream(
 }
 
 /// What a seek to `target_ns` must deliver: the codec config, then every packet
-/// at or after the target, exactly as a full scan produced them.
+/// from the last one at or before the target, exactly as a full scan produced them.
 fn expected_after(reference: &[Emitted], target_ns: u64) -> Vec<Emitted> {
+    let first_pts_ns = reference
+        .iter()
+        .filter(|e| !e.is_config() && e.pts_ns <= target_ns)
+        .map(|e| e.pts_ns)
+        .max()
+        .expect("a packet at or before the target");
     reference
         .iter()
-        .filter(|e| e.is_config() || e.pts_ns >= target_ns)
+        .filter(|e| e.is_config() || e.pts_ns >= first_pts_ns)
         .cloned()
         .collect()
 }
@@ -325,8 +331,9 @@ async fn oggdemux_seeks_to_the_target_packet_over_filesrc() {
 
     let byte = SeekController::new();
     let time = SeekController::new();
-    // Seek to 50 ms: resume from the first packet at/after it, the 60 ms one.
-    time.seek(Seek::flush_to(50_000_000));
+    // Seek to 50 ms: resume from the last packet at/before it, the 40 ms one.
+    let target_ns = 50_000_000;
+    time.seek(Seek::flush_to(target_ns));
 
     let mut src = FileSrc::new(
         &path,
@@ -366,15 +373,24 @@ async fn oggdemux_seeks_to_the_target_packet_over_filesrc() {
         capture.flushes >= 1,
         "the upstream byte-seek flushed downstream"
     );
-    assert!(capture.segments >= 1, "a resume segment was emitted");
+    assert_eq!(
+        capture.segment_starts.last(),
+        Some(&target_ns),
+        "the resume segment starts at the target"
+    );
     // The demuxer forwards OpusHead in-band (the decoder's pre-skip source),
-    // then the packets at/after the target: 0, 20, 40 ms dropped, resume from
-    // 60 ms (0xA3) and 80 ms (0xA4).
+    // then the packets from the last one at/before the target: 0 and 20 ms
+    // dropped, resume from 40 ms (0xA2), then 60 ms (0xA3) and 80 ms (0xA4).
     let payloads: Vec<Vec<u8>> = capture.frames.iter().map(|e| e.payload.clone()).collect();
     assert_eq!(
         payloads,
-        vec![opus_head(2), vec![0x08u8, 0xA3], vec![0x08u8, 0xA4]],
-        "resumed from the 60 ms packet, pre-target packets discarded"
+        vec![
+            opus_head(2),
+            vec![0x08u8, 0xA2],
+            vec![0x08u8, 0xA3],
+            vec![0x08u8, 0xA4]
+        ],
+        "resumed from the 40 ms packet, earlier packets discarded"
     );
     let _ = std::fs::remove_file(&path);
 }
@@ -404,7 +420,11 @@ async fn oggdemux_guessed_seek_matches_a_full_scan_without_rereading() {
     let (seeked, bytes, _) = play(&path, Some((target_ns, 96 * 1024)), 8 * 1024).await;
 
     assert_eq!(seeked.flushes, 1, "one byte-seek, no fallback re-scan");
-    assert!(seeked.segments >= 1, "a resume segment was emitted");
+    assert_eq!(
+        seeked.segment_starts.last(),
+        Some(&target_ns),
+        "the resume segment starts at the target"
+    );
     assert_same_frames(
         &seeked.frames,
         &expected_after(&reference.frames, target_ns),

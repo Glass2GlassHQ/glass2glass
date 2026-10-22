@@ -1,11 +1,11 @@
 //! M363 - MPEG-TS demuxer seek (`TsDemux` over a seekable `FileSrc`). Like the
 //! fMP4 case (M362), the demuxer drives an upstream byte-seek and re-syncs from
-//! the keyframe at or after the target. TS units carry no keyframe flag, so the
+//! the keyframe at or before the target. TS units carry no keyframe flag, so the
 //! demuxer detects an IDR/IRAP in the access unit itself (`annexb::au_is_keyframe`).
 //!
 //! The clip has IDR access units at AU 0 and AU 4 (TS repeats SPS/PPS in-band
 //! before each IDR, so the resumed AU is independently decodable). A seek to a
-//! time between them resumes from AU 4.
+//! time after AU 5 resumes from AU 4.
 
 #![cfg(feature = "std")]
 
@@ -78,8 +78,9 @@ impl OutputSink for Bytes {
 #[derive(Default)]
 struct Capture {
     frames: Vec<Vec<u8>>,
+    frame_pts_ns: Vec<u64>,
     flushes: usize,
-    segments: usize,
+    segment_starts: Vec<u64>,
 }
 impl OutputSink for Capture {
     fn poll_push(
@@ -92,12 +93,14 @@ impl OutputSink for Capture {
             match packet {
                 PipelinePacket::DataFrame(Frame {
                     domain: MemoryDomain::System(s),
+                    timing,
                     ..
                 }) => {
                     self.frames.push(s.as_slice().to_vec());
+                    self.frame_pts_ns.push(timing.pts_ns);
                 }
                 PipelinePacket::Flush => self.flushes += 1,
-                PipelinePacket::Segment(_) => self.segments += 1,
+                PipelinePacket::Segment(segment) => self.segment_starts.push(segment.start),
                 _ => {}
             }
             Ok(PushOutcome::Accepted)
@@ -161,8 +164,9 @@ async fn tsdemux_seeks_to_the_target_keyframe_over_filesrc() {
 
     let byte = SeekController::new();
     let time = SeekController::new();
-    // Seek to 100 ms after the first PTS: resume from the next keyframe, AU 4 (133 ms).
-    time.seek(Seek::flush_to(100_000_000));
+    // Seek to 180 ms after the first PTS, between AU 5 (167 ms) and AU 6 (200 ms):
+    // resume from the keyframe before it, AU 4 (133 ms).
+    time.seek(Seek::flush_to(180_000_000));
 
     let mut src = FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })
         .with_chunk_size(188) // one TS packet per chunk: byte-seek observed mid-read
@@ -193,13 +197,17 @@ async fn tsdemux_seeks_to_the_target_keyframe_over_filesrc() {
     assert_eq!(
         capture.frames.len(),
         4,
-        "resumed from the target keyframe (AU 4)"
+        "resumed from the keyframe before the target (AU 4)"
     );
     assert!(
         capture.flushes >= 1,
         "the upstream byte-seek flushed downstream"
     );
-    assert!(capture.segments >= 1, "a resume segment was emitted");
+    let segment_start = *capture.segment_starts.last().expect("a resume segment");
+    assert!(
+        capture.frame_pts_ns[1] < segment_start && segment_start <= capture.frame_pts_ns[2],
+        "the resume segment starts at the target, between AU 5 and AU 6"
+    );
     assert!(
         capture.frames[0].windows(2).any(|w| w == [0x65, 0xA4]),
         "first resumed AU is AU 4's IDR"

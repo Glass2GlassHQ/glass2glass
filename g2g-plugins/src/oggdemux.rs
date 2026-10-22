@@ -69,7 +69,7 @@ use g2g_core::{
     Stream, StreamCollection, StreamType, TagList, VideoCodec,
 };
 
-use crate::demuxseek::{Admit, DemuxSeek};
+use crate::demuxseek::{Admitted, DemuxSeek};
 use crate::ogg::{
     parse_theora_identification, parse_vp8_stream_info, OggCodec, OggDemuxer, OggLogicalStream,
 };
@@ -184,7 +184,7 @@ pub struct OggDemux {
     emitter: StreamEmitter,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
-    seek: DemuxSeek,
+    seek: DemuxSeek<(Vec<u8>, FrameTiming)>,
     /// Byte offset of the next source byte (M862): the seek guess is
     /// proportional in bytes, so the element tracks where in the file it reads.
     read_offset: u64,
@@ -226,7 +226,7 @@ impl OggDemux {
     /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
     /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
     /// On a time seek the demuxer repositions the source and re-syncs from the
-    /// packet at/after the target (every audio packet is a resync point).
+    /// packet at/before the target (every audio packet is a resync point).
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
         AsyncElement::set_seek(&mut self, app, upstream);
         self
@@ -236,7 +236,7 @@ impl OggDemux {
     /// byte offset to land at is guessed proportionally: the granule positions
     /// seen so far give `(byte offset, stream time)` anchors, and the target
     /// interpolates through them. The landing is deliberately early, and the
-    /// scan from it to the first packet at/after the target delivers exactly
+    /// scan from it to the last packet at/before the target delivers exactly
     /// what a re-scan from the file start would. Without usable anchors (too
     /// little played, a chained file, headers not yet in hand) it re-scans from
     /// offset `0`, the M362 path.
@@ -517,28 +517,30 @@ impl OggDemux {
             }
             for (payload, timing, config) in ready.frames {
                 // M362 seek: every audio packet and every VP8 keyframe is a resync
-                // point, so drop until the first one at/after the target, which
-                // emits a fresh segment. The in-band codec config always flows: the decoder
-                // needs it whatever the seek target.
-                if !config {
+                // point, so hold packets from the last one at/before the target
+                // until the target, then a fresh segment and them. The in-band
+                // codec config always flows: the decoder needs it whatever the seek target.
+                let admitted = if config {
+                    Admitted::emit((payload, timing))
+                } else {
                     let resync_point =
                         timing.keyframe || !matches!(self.stream, OggCodec::Vp8 | OggCodec::Theora);
-                    match self.seek.admit(timing.pts_ns, resync_point) {
-                        Admit::Drop => continue,
-                        Admit::Resume(start) => {
-                            let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
-                            out.push(PipelinePacket::Segment(seg)).await?;
-                        }
-                        Admit::Emit => {}
-                    }
+                    self.seek
+                        .admit(timing.pts_ns, resync_point, (payload, timing))
+                };
+                if let Some(start) = admitted.segment_start_ns {
+                    let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+                    out.push(PipelinePacket::Segment(seg)).await?;
                 }
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
-                    timing,
-                    self.emitted,
-                );
-                self.emitted += 1;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
+                for (payload, timing) in admitted {
+                    let frame = Frame::new(
+                        MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+                        timing,
+                        self.emitted,
+                    );
+                    self.emitted += 1;
+                    out.push(PipelinePacket::DataFrame(frame)).await?;
+                }
             }
         }
         self.check_chain_codec()

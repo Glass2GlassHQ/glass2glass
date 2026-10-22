@@ -47,7 +47,7 @@ use crate::annexb::{
     length_prefixed_nal_units, parse_avcc, prepend_param_sets, starts_with_param_set,
 };
 use crate::bereader::{take_be_u16, take_be_u32};
-use crate::demuxseek::{Admit, DemuxSeek};
+use crate::demuxseek::DemuxSeek;
 use crate::flv::{FlvCodec, FlvDemuxer, FlvTrack, FlvUnit};
 
 /// Which elementary stream an [`FlvDemux`] instance forwards. An FLV stream
@@ -111,7 +111,7 @@ pub struct FlvDemux {
     audio_caps_announced: bool,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
-    seek: DemuxSeek,
+    seek: DemuxSeek<FlvUnit>,
 }
 
 impl Default for FlvDemux {
@@ -146,7 +146,7 @@ impl FlvDemux {
     /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
     /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
     /// On a time seek the demuxer rewinds the source and re-syncs from the
-    /// keyframe at/after the target.
+    /// keyframe at/before the target.
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
         AsyncElement::set_seek(&mut self, app, upstream);
         self
@@ -317,101 +317,99 @@ impl FlvDemux {
             if u.codec != want {
                 continue;
             }
-            let pts_ns = u.pts_ms as u64 * 1_000_000;
-            let dts_ns = u.dts_ms as u64 * 1_000_000;
-            // M362 seek: drop units until the keyframe at/after the target (the
-            // FLV frame-type flag); the resuming unit emits a fresh segment.
-            match self.seek.admit(pts_ns, u.keyframe) {
-                Admit::Drop => continue,
-                Admit::Resume(start) => {
-                    let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
-                    out.push(PipelinePacket::Segment(seg)).await?;
-                }
-                Admit::Emit => {}
+            // M362 seek: hold units from the keyframe at/before the target (the
+            // FLV frame-type flag) until the target, then a fresh segment and them.
+            let admitted = self.seek.admit(u.pts_ns(), u.keyframe, u);
+            if let Some(start) = admitted.segment_start_ns {
+                let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+                out.push(PipelinePacket::Segment(seg)).await?;
             }
-            let data = match u.codec {
-                FlvCodec::H264 => {
-                    let annexb = self.video_annexb(u.data);
-                    if annexb.is_empty() {
-                        continue; // malformed AVCC lengths: nothing decodable
-                    }
-                    annexb
-                }
-                // Sorenson frames are already the codec's own bitstream, and VP6
-                // frames keep their leading dimension byte for the decoder.
-                FlvCodec::SorensonH263 | FlvCodec::Vp6 | FlvCodec::Vp6Alpha => u.data,
-                FlvCodec::Aac | FlvCodec::Mp3 | FlvCodec::Speex => {
-                    // Announce the concrete channel layout / sample rate once,
-                    // refining the sentinel negotiation caps, before the first
-                    // audio frame (the MP4-demuxer pattern). AAC's real layout is
-                    // in the ASC, the others' in the audio tag flags.
-                    if !self.audio_caps_announced {
-                        self.audio_caps_announced = true;
-                        let params = if u.codec == FlvCodec::Aac {
-                            self.audio_asc
-                                .as_deref()
-                                .and_then(audio_specific_config_info)
-                                .map(|info| (info.channels, info.sample_rate))
-                        } else {
-                            self.demux.audio_params()
-                        };
-                        if let (Caps::Audio { format, .. }, Some((channels, sample_rate))) =
-                            (Self::output_caps(self.stream), params)
-                        {
-                            let caps = Caps::Audio {
-                                format,
-                                channels,
-                                sample_rate,
-                                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-                            };
-                            out.push(PipelinePacket::CapsChanged(caps)).await?;
+            for u in admitted {
+                let pts_ns = u.pts_ns();
+                let dts_ns = u.dts_ns();
+                let data =
+                    match u.codec {
+                        FlvCodec::H264 => {
+                            let annexb = self.video_annexb(u.data);
+                            if annexb.is_empty() {
+                                continue; // malformed AVCC lengths: nothing decodable
+                            }
+                            annexb
                         }
-                        // ADTS cannot carry ER AAC, ELD or USAC, so their config
-                        // leads the raw units as a frame of its own.
-                        if let Some(config) = self
-                            .audio_asc
-                            .as_ref()
-                            .filter(|asc| u.codec == FlvCodec::Aac && is_raw_aac_config(asc))
-                        {
-                            let frame = Frame::new(
-                                MemoryDomain::System(SystemSlice::from_boxed(
-                                    config.clone().into_boxed_slice(),
-                                )),
-                                FrameTiming::default(),
-                                self.emitted,
-                            );
-                            self.emitted += 1;
-                            out.push(PipelinePacket::DataFrame(frame)).await?;
+                        // Sorenson frames are already the codec's own bitstream, and VP6
+                        // frames keep their leading dimension byte for the decoder.
+                        FlvCodec::SorensonH263 | FlvCodec::Vp6 | FlvCodec::Vp6Alpha => u.data,
+                        FlvCodec::Aac | FlvCodec::Mp3 | FlvCodec::Speex => {
+                            // Announce the concrete channel layout / sample rate once,
+                            // refining the sentinel negotiation caps, before the first
+                            // audio frame (the MP4-demuxer pattern). AAC's real layout is
+                            // in the ASC, the others' in the audio tag flags.
+                            if !self.audio_caps_announced {
+                                self.audio_caps_announced = true;
+                                let params = if u.codec == FlvCodec::Aac {
+                                    self.audio_asc
+                                        .as_deref()
+                                        .and_then(audio_specific_config_info)
+                                        .map(|info| (info.channels, info.sample_rate))
+                                } else {
+                                    self.demux.audio_params()
+                                };
+                                if let (Caps::Audio { format, .. }, Some((channels, sample_rate))) =
+                                    (Self::output_caps(self.stream), params)
+                                {
+                                    let caps = Caps::Audio {
+                                        format,
+                                        channels,
+                                        sample_rate,
+                                        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+                                    };
+                                    out.push(PipelinePacket::CapsChanged(caps)).await?;
+                                }
+                                // ADTS cannot carry ER AAC, ELD or USAC, so their config
+                                // leads the raw units as a frame of its own.
+                                if let Some(config) = self.audio_asc.as_ref().filter(|asc| {
+                                    u.codec == FlvCodec::Aac && is_raw_aac_config(asc)
+                                }) {
+                                    let frame = Frame::new(
+                                        MemoryDomain::System(SystemSlice::from_boxed(
+                                            config.clone().into_boxed_slice(),
+                                        )),
+                                        FrameTiming::default(),
+                                        self.emitted,
+                                    );
+                                    self.emitted += 1;
+                                    out.push(PipelinePacket::DataFrame(frame)).await?;
+                                }
+                            }
+                            if u.codec != FlvCodec::Aac {
+                                u.data
+                            } else {
+                                // ADTS-frame each raw AAC access unit so the elementary
+                                // stream is self-describing; forwarded raw without an ASC.
+                                match self
+                                    .audio_asc
+                                    .as_deref()
+                                    .and_then(|asc| adts_from_asc(asc, &u.data))
+                                {
+                                    Some(framed) => framed,
+                                    None => u.data,
+                                }
+                            }
                         }
-                    }
-                    if u.codec != FlvCodec::Aac {
-                        u.data
-                    } else {
-                        // ADTS-frame each raw AAC access unit so the elementary
-                        // stream is self-describing; forwarded raw without an ASC.
-                        match self
-                            .audio_asc
-                            .as_deref()
-                            .and_then(|asc| adts_from_asc(asc, &u.data))
-                        {
-                            Some(framed) => framed,
-                            None => u.data,
-                        }
-                    }
-                }
-            };
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                FrameTiming {
-                    pts_ns,
-                    dts_ns,
-                    keyframe: u.keyframe,
-                    ..FrameTiming::default()
-                },
-                self.emitted,
-            );
-            self.emitted += 1;
-            out.push(PipelinePacket::DataFrame(frame)).await?;
+                    };
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+                    FrameTiming {
+                        pts_ns,
+                        dts_ns,
+                        keyframe: u.keyframe,
+                        ..FrameTiming::default()
+                    },
+                    self.emitted,
+                );
+                self.emitted += 1;
+                out.push(PipelinePacket::DataFrame(frame)).await?;
+            }
         }
         Ok(())
     }

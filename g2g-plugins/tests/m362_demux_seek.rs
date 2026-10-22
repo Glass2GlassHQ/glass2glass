@@ -2,10 +2,10 @@
 //! transform with no random access; it becomes seek-aware by driving its
 //! upstream byte source. The app seeks the demuxer (time); the demuxer asks
 //! `FileSrc` to reposition (byte offset 0, re-scan), resets its parser on the
-//! returned `Flush`, and re-syncs from the keyframe at or after the target.
+//! returned `Flush`, and re-syncs from the keyframe at or before the target.
 //!
-//! The clip has keyframes at AU 0 and AU 4. A seek to a time between them must
-//! resume from AU 4 (the first keyframe >= target), with the parameter sets
+//! The clip has keyframes at AU 0 and AU 4. A seek to a time after AU 5 must
+//! resume from AU 4 (the last keyframe <= target), with the parameter sets
 //! re-prepended so a decoder can start, and a fresh segment emitted.
 //!
 //! The pipeline is driven as a manual `FileSrc -> Fmp4Demux -> capture` chain so
@@ -88,7 +88,7 @@ impl OutputSink for Bytes {
 struct Capture {
     frames: Vec<Vec<u8>>,
     flushes: usize,
-    segments: usize,
+    segment_starts: Vec<u64>,
     caps: usize,
 }
 impl OutputSink for Capture {
@@ -107,7 +107,7 @@ impl OutputSink for Capture {
                     self.frames.push(s.as_slice().to_vec());
                 }
                 PipelinePacket::Flush => self.flushes += 1,
-                PipelinePacket::Segment(_) => self.segments += 1,
+                PipelinePacket::Segment(segment) => self.segment_starts.push(segment.start),
                 PipelinePacket::CapsChanged(_) => self.caps += 1,
                 _ => {}
             }
@@ -198,11 +198,12 @@ async fn fmp4demux_seeks_to_the_target_keyframe_over_filesrc() {
     std::fs::write(&path, &fmp4).unwrap();
 
     // `byte` drives FileSrc (and is the demuxer's upstream); `time` is the
-    // app-facing time seek. Seek to 100 ms: between AU 3 (100 ms) and the next
-    // keyframe AU 4 (133 ms), so the demuxer must resume from AU 4.
+    // app-facing time seek. Seek to 180 ms: between AU 5 (167 ms) and AU 6
+    // (200 ms), so the demuxer must resume from the keyframe AU 4 (133 ms).
+    let target_ns = 180_000_000;
     let byte = SeekController::new();
     let time = SeekController::new();
-    time.seek(Seek::flush_to(100_000_000));
+    time.seek(Seek::flush_to(target_ns));
 
     let mut src = FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff })
         .with_chunk_size(64) // many chunks: FileSrc observes the byte-seek mid-read
@@ -215,13 +216,17 @@ async fn fmp4demux_seeks_to_the_target_keyframe_over_filesrc() {
     assert_eq!(
         cap.frames.len(),
         4,
-        "resumed from the target keyframe (AU 4) to the end"
+        "resumed from the keyframe before the target (AU 4) to the end"
     );
     assert!(
         cap.flushes >= 1,
         "the upstream byte-seek flushed downstream"
     );
-    assert!(cap.segments >= 1, "a resume segment was emitted");
+    assert_eq!(
+        cap.segment_starts.last(),
+        Some(&target_ns),
+        "the resume segment starts at the target, so a decoder drops AU 4 and AU 5"
+    );
     assert_eq!(
         cap.caps, 1,
         "caps announced exactly once despite the re-scan"

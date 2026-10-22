@@ -572,10 +572,10 @@ when it serves a time seek from the whole stream it holds (`Mp4Demux`),
 `UpstreamBytes` when it byte-seeks the source that feeds it (the byte-stream
 demuxers). `attach_seek` finds the one node that can take the time seek, gives it a
 controller with the seek already queued and a demuxer's byte source a second one,
-so the seek lands before the first frame. After a seek `Mp4Src` and `Mp4Demux`
-restart at the keyframe at or before the target with a segment starting at the
-target, so decoders drop the earlier frames, while the byte-stream demuxers restart
-at the first keyframe at or after the target. `tsdemux` counts the target from the
+so the seek lands before the first frame. After a seek every seekable source and
+demuxer restarts at the keyframe at or before the target with a segment starting at
+the target, so decoders drop the earlier frames and the first frame out is the first
+one at or after the target, as `ffmpeg -ss` gives. `tsdemux` counts the target from the
 file's first PTS, as ffmpeg's `-ss` does (gst counts from the first PCR). A seek
 past the end gives no frames, which g2g-launch reports as an error. `Mp4Demux`
 serves only a seek queued before its EOS drain, and one that arrives once its
@@ -598,8 +598,13 @@ the file read to a byte offset and emits `Flush`.
 A byte-stream demuxer, a transform with no random access, becomes seekable by
 driving that upstream byte source. A shared `DemuxSeek` helper turns an app time
 seek into an upstream byte-seek to offset 0, drops in-flight pre-seek input until
-the returned `Flush`, resets the demuxer's parser, then discards decoded units until
-the keyframe at or after the target and emits a resume `Segment`. That is correct
+the returned `Flush`, resets the demuxer's parser, then keeps the decoded units
+from the last keyframe at or before the target and, when the first unit with pts at
+or after the target arrives, hands them back with a `Segment` starting at the
+target. The keyframe test follows decode order and the release follows pts, so
+reordered B-frames below the target still go out and the decoder's segment check
+drops them. A run of more than 1024 units without a keyframe releases early under
+the same segment. That is correct
 for any container without an index, being a re-scan, with an index-derived offset a
 later optimization.
 

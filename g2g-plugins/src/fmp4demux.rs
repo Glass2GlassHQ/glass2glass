@@ -31,7 +31,7 @@ use g2g_core::{
 use crate::cenc::CencTrack;
 #[cfg(feature = "hls")]
 use crate::cenc::SampleCrypt;
-use crate::demuxseek::{Admit, DemuxSeek};
+use crate::demuxseek::DemuxSeek;
 use crate::fifobuffer::FifoBuffer;
 use crate::fmp4::{
     fragment_framerate_q16, parse_fragments, parse_header, prepend_param_sets,
@@ -71,7 +71,7 @@ pub struct Fmp4Demux {
     configured: bool,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
-    seek: DemuxSeek,
+    seek: DemuxSeek<Sample>,
 }
 
 impl Default for Fmp4Demux {
@@ -101,7 +101,7 @@ impl Fmp4Demux {
     /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
     /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller,
     /// which a time seek drives to reposition the stream. On the resulting
-    /// `Flush` the parser resets and re-syncs from the keyframe at/after target.
+    /// `Flush` the parser resets and re-syncs from the keyframe at/before target.
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
         AsyncElement::set_seek(&mut self, app, upstream);
         self
@@ -267,38 +267,37 @@ impl Fmp4Demux {
                         cenc.as_ref(),
                     )?;
                     for s in samples {
-                        // M362 seek: drop samples until the keyframe at/after the
-                        // target; the resuming keyframe emits a fresh segment.
-                        match self.seek.admit(s.pts_ns, s.keyframe) {
-                            Admit::Drop => continue,
-                            Admit::Resume(start) => {
-                                let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
-                                out.push(PipelinePacket::Segment(seg)).await?;
+                        // M362 seek: hold samples from the keyframe at/before the
+                        // target until the target, then a fresh segment and them.
+                        let admitted = self.seek.admit(s.pts_ns, s.keyframe, s);
+                        if let Some(start) = admitted.segment_start_ns {
+                            let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+                            out.push(PipelinePacket::Segment(seg)).await?;
+                        }
+                        for s in admitted {
+                            let mut annexb = s.annexb;
+                            if self.need_param_sets && !starts_with_param_set(&annexb, codec) {
+                                annexb = prepend_param_sets(&annexb, &param_sets, codec);
                             }
-                            Admit::Emit => {}
+                            self.need_param_sets = false;
+                            let frame = Frame {
+                                domain: MemoryDomain::System(SystemSlice::from_boxed(
+                                    annexb.into_boxed_slice(),
+                                )),
+                                timing: FrameTiming {
+                                    pts_ns: s.pts_ns,
+                                    dts_ns: s.pts_ns,
+                                    duration_ns: s.duration_ns,
+                                    capture_ns: s.pts_ns,
+                                    arrival_ns: g2g_core::metrics::monotonic_ns(),
+                                    keyframe: s.keyframe, // fMP4 trun keyframe flag
+                                },
+                                sequence: self.sequence,
+                                meta: Default::default(),
+                            };
+                            self.sequence += 1;
+                            out.push(PipelinePacket::DataFrame(frame)).await?;
                         }
-                        let mut annexb = s.annexb;
-                        if self.need_param_sets && !starts_with_param_set(&annexb, codec) {
-                            annexb = prepend_param_sets(&annexb, &param_sets, codec);
-                        }
-                        self.need_param_sets = false;
-                        let frame = Frame {
-                            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                                annexb.into_boxed_slice(),
-                            )),
-                            timing: FrameTiming {
-                                pts_ns: s.pts_ns,
-                                dts_ns: s.pts_ns,
-                                duration_ns: s.duration_ns,
-                                capture_ns: s.pts_ns,
-                                arrival_ns: g2g_core::metrics::monotonic_ns(),
-                                keyframe: s.keyframe, // fMP4 trun keyframe flag
-                            },
-                            sequence: self.sequence,
-                            meta: Default::default(),
-                        };
-                        self.sequence += 1;
-                        out.push(PipelinePacket::DataFrame(frame)).await?;
                     }
                 }
                 // ftyp / styp / sidx / free / etc.: not needed for demux

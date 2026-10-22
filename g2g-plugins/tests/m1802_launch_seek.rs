@@ -21,12 +21,14 @@ const TS_FIXTURE: &str = concat!(
 const TS_FIRST_PTS_NS: u64 = 1_400_000_000;
 const FRAME_RATE: u64 = 25;
 const FRAME_COUNT: u64 = 75;
-const GOP_LENGTH: u64 = 10;
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 const NANOS_PER_MILLISECOND: u64 = 1_000_000;
 const FRAME_PERIOD_NS: u64 = NANOS_PER_SECOND / FRAME_RATE;
 // between the keyframes at 0.8 s and 1.2 s, and between two frames
 const SEEK_MILLISECONDS: u64 = 1_020;
+// ffmpeg -ss 1.02 -copyts -i <mp4 or mkv fixture> -frames:v 1 -f framemd5 -, the frame at 1.04
+// the TS fixture needs an output -ss 2.42 (first PTS plus 1.02), ffmpeg's input seek in it lands on the 1.2 s keyframe
+const FRAME_AFTER_SEEK_MD5: &str = "732b16a0536b40e66a6005fa0cca8569";
 
 fn seek_seconds(milliseconds: u64) -> String {
     format!("{}", milliseconds as f64 / 1_000.0)
@@ -52,13 +54,15 @@ fn checksum_lines(output: &Output) -> Vec<String> {
         .collect()
 }
 
-fn assert_starts_at_frame(lines: &[String], first_frame: u64, first_pts_ns: u64) {
-    let first_pts_prefix =
-        checksum_line(first_pts_ns + first_frame * FRAME_PERIOD_NS, String::new());
-    assert!(
-        lines[0].starts_with(&first_pts_prefix),
-        "first frame {} is not at {first_pts_prefix}",
-        lines[0]
+fn assert_starts_at_the_frame_after_the_seek(lines: &[String], first_pts_ns: u64) {
+    let first_frame = (SEEK_MILLISECONDS * NANOS_PER_MILLISECOND).div_ceil(FRAME_PERIOD_NS);
+    assert_eq!(
+        lines[0],
+        checksum_line(
+            first_pts_ns + first_frame * FRAME_PERIOD_NS,
+            FRAME_AFTER_SEEK_MD5.to_string()
+        ),
+        "the first frame out is ffmpeg's first frame after the seek"
     );
     assert_eq!(
         lines.len() as u64,
@@ -68,55 +72,39 @@ fn assert_starts_at_frame(lines: &[String], first_frame: u64, first_pts_ns: u64)
 }
 
 fn mp4_pipeline() -> String {
-    format!("uridecodebin uri=file://{MP4_FIXTURE} ! checksumsink")
+    format!("uridecodebin uri=file://{MP4_FIXTURE} ! checksumsink hash=md5")
 }
 
 fn mkv_pipeline() -> String {
-    format!("filesrc location={MKV_FIXTURE} ! decodebin ! checksumsink")
+    format!("filesrc location={MKV_FIXTURE} ! decodebin ! checksumsink hash=md5")
 }
 
 fn mp4_decodebin_pipeline() -> String {
-    format!("filesrc location={MP4_FIXTURE} ! decodebin ! checksumsink")
+    format!("filesrc location={MP4_FIXTURE} ! decodebin ! checksumsink hash=md5")
 }
 
 fn ts_pipeline() -> String {
-    format!("filesrc location={TS_FIXTURE} ! decodebin ! checksumsink")
-}
-
-fn first_frame_at_or_after_seek() -> u64 {
-    (SEEK_MILLISECONDS * NANOS_PER_MILLISECOND).div_ceil(FRAME_PERIOD_NS)
-}
-
-fn first_keyframe_at_or_after_seek() -> u64 {
-    first_frame_at_or_after_seek().div_ceil(GOP_LENGTH) * GOP_LENGTH
+    format!("filesrc location={TS_FIXTURE} ! decodebin ! checksumsink hash=md5")
 }
 
 #[test]
 fn mp4_seek_decodes_from_the_first_frame_at_or_after_the_target() {
     for pipeline in [mp4_pipeline(), mp4_decodebin_pipeline()] {
         let output = launch_with_seek(&seek_seconds(SEEK_MILLISECONDS), &pipeline);
-        assert_starts_at_frame(&checksum_lines(&output), first_frame_at_or_after_seek(), 0);
+        assert_starts_at_the_frame_after_the_seek(&checksum_lines(&output), 0);
     }
 }
 
 #[test]
-fn mkv_seek_decodes_from_the_first_keyframe_at_or_after_the_target() {
+fn mkv_seek_decodes_from_the_first_frame_at_or_after_the_target() {
     let output = launch_with_seek(&seek_seconds(SEEK_MILLISECONDS), &mkv_pipeline());
-    assert_starts_at_frame(
-        &checksum_lines(&output),
-        first_keyframe_at_or_after_seek(),
-        0,
-    );
+    assert_starts_at_the_frame_after_the_seek(&checksum_lines(&output), 0);
 }
 
 #[test]
 fn ts_seek_counts_the_target_from_the_first_pts() {
     let output = launch_with_seek(&seek_seconds(SEEK_MILLISECONDS), &ts_pipeline());
-    assert_starts_at_frame(
-        &checksum_lines(&output),
-        first_keyframe_at_or_after_seek(),
-        TS_FIRST_PTS_NS,
-    );
+    assert_starts_at_the_frame_after_the_seek(&checksum_lines(&output), TS_FIRST_PTS_NS);
 }
 
 #[test]

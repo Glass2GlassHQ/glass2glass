@@ -263,10 +263,20 @@ pub struct FlvUnit {
     pub keyframe: bool,
 }
 
+const NANOS_PER_MILLISECOND: u64 = 1_000_000;
+
 impl FlvUnit {
     /// Which elementary stream this unit belongs to.
     pub fn track(&self) -> FlvTrack {
         self.codec.track()
+    }
+
+    pub(crate) fn pts_ns(&self) -> u64 {
+        u64::from(self.pts_ms) * NANOS_PER_MILLISECOND
+    }
+
+    pub(crate) fn dts_ns(&self) -> u64 {
+        u64::from(self.dts_ms) * NANOS_PER_MILLISECOND
     }
 }
 
