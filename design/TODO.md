@@ -207,6 +207,12 @@ Highest leverage first:
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
+- **Named demuxer before explicit elements:** `filesrc ! matroskademux ! h264parse ! …`
+  negotiates against the demuxer's default `stream=vp9`, so an H.264 file needs
+  `stream=h264`. The demuxer has to read the file's tracks during negotiation.
+- **TS positions with B frames:** `tsdemux` opens its segment at the first DTS, so
+  positions read high by the first PTS minus the first DTS until the first seek.
+  Needs a signed `Segment` time offset in g2g-core.
 
 ## Codecs
 
