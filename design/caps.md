@@ -866,8 +866,12 @@ as before.
   `d.src_N` by position. A bare `d.` takes the first port no other reference
   took whose kind the branch's first element declares on its sink pad (any kind
   when it declares none), as gst-launch's delayed link tries each new pad against
-  the waiting branches in the order they are written. Named references claim
-  their ports first. A URI no hook claims takes the
+  the waiting branches in the order they are written. A branch that ends in a
+  fan-in muxer answers from the kinds its `MuxerFactory` declares
+  (`with_input_kinds`, none meaning any kind), so `p. ! queue ! m.` into `mp4mux`
+  takes video or audio, a line gst-launch cannot link (its bare request pad behind
+  a queue gets the muxer's first template). Named references claim their ports
+  first. A URI no hook claims takes the
   single-stream expansion, its last node named `d`. The decode target of every
   fan-out port, here and behind `decodebin name=d`, follows the port's caps rather
   than the pad request, so a bare `d.` on an audio port decodes to raw audio.

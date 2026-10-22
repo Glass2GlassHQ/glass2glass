@@ -248,7 +248,7 @@ Highest leverage first:
 
 ## Properties / introspection / DSL
 
-- **Bare fan-out refs into `mp4mux`.** `p. ! queue ! m.  p. ! queue ! m.  mp4mux name=m` fails with no free stream of a kind mp4mux takes, because bare-ref matching reads the single-input `mp4mux` template (video only) and the fan-in muxer factories declare no input caps. Declare the fan-in muxers' input caps.
+- **Bare refs into `textoverlay` fill its inputs in link order.** `TextOverlayN` expects video on input 0, so `d.text ! o.  d.video ! o.` with bare `o.` refs puts text on the video input. Assign a bare muxer-side ref to the input whose kind its stream has.
 - A GUI / tooling introspection surface beyond the text dump.
 - `g2g-discover`: read audio-only MP4 and native FLAC / MP3 files, which it
   cannot probe, so their tags show.

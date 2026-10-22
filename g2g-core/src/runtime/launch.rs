@@ -3095,11 +3095,14 @@ fn build_graph(
     // Which port each link out of a fan-out node reads, filled for every node
     // whose ports are matched to its branches.
     let mut fanout_links: Vec<Option<FanoutLinks>> = (0..specs.len()).map(|_| None).collect();
-    let consumers_of = |ei: usize| -> Vec<&str> {
+    let consumers_of = |ei: usize| -> Vec<Consumer<'_>> {
         links
             .iter()
             .filter(|(s, _, _, _)| *s == ei)
-            .map(|(_, d, _, _)| specs[*d].name.as_str())
+            .map(|(_, d, _, _)| Consumer {
+                name: specs[*d].name.as_str(),
+                is_muxer: is_muxer(*d),
+            })
             .collect()
     };
     for ei in 0..specs.len() {
@@ -3197,7 +3200,7 @@ fn build_graph(
         out_deg[ei] <= 1
             && registry.is_source(&specs[ei].name)
             && consumers_of(ei)
-                .iter()
+                .into_iter()
                 .all(|consumer| made.is_none_or(|kind| consumer_takes(registry, consumer, kind)))
     };
     let is_fanout_src = |ei: usize| {
@@ -3828,10 +3831,26 @@ struct FanoutLinks {
     ports: usize,
 }
 
+#[derive(Clone, Copy)]
+struct Consumer<'a> {
+    name: &'a str,
+    is_muxer: bool,
+}
+
 // an element with no declared sink caps takes any stream, and a stream of unknown kind goes to any element
-fn consumer_takes(registry: &Registry, consumer: &str, kind: StreamType) -> bool {
-    kind == StreamType::Unknown
-        || registry.declared_input_caps(consumer).is_none_or(|set| {
+fn consumer_takes(registry: &Registry, consumer: Consumer<'_>, kind: StreamType) -> bool {
+    if kind == StreamType::Unknown {
+        return true;
+    }
+    // a name registered both ways declares its single-input element's sink caps, not the muxer's
+    if consumer.is_muxer {
+        return registry
+            .muxer_input_kinds(consumer.name)
+            .is_none_or(|kinds| kinds.contains(&kind));
+    }
+    registry
+        .declared_input_caps(consumer.name)
+        .is_none_or(|set| {
             set.alternatives()
                 .iter()
                 .any(|caps| StreamType::of(caps) == kind)
@@ -3846,7 +3865,7 @@ fn fanout_link_ports(
     kinds: &[StreamType],
     requests: &[PadRequest],
     pad_names: &[&str],
-    consumers: &[&str],
+    consumers: &[Consumer<'_>],
 ) -> Result<Vec<u8>, ParseError> {
     let mut taken = alloc::vec![false; kinds.len()];
     let mut named: Vec<Option<usize>> = Vec::with_capacity(requests.len());
@@ -3876,7 +3895,7 @@ fn fanout_link_ports(
     }
     named
         .into_iter()
-        .zip(consumers)
+        .zip(consumers.iter().copied())
         .map(|(port, consumer)| {
             let port = match port {
                 Some(port) => port,
@@ -3887,7 +3906,7 @@ fn fanout_link_ports(
                         })
                         .ok_or_else(|| ParseError::NoFanoutStream {
                             element: element.to_string(),
-                            consumer: consumer.to_string(),
+                            consumer: consumer.name.to_string(),
                         })?;
                     taken[port] = true;
                     port

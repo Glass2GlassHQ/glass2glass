@@ -29,7 +29,7 @@ use g2g_core::runtime::{
     ConverterFactory, ElementFactory, EncoderChoice, GraphMutator, LaunchFactory, MuxerFactory,
     Registry, SourceFactory,
 };
-use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat};
+use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat, StreamType};
 
 use crate::aacparse::AacParse;
 use crate::ac3parse::Ac3Parse;
@@ -1509,27 +1509,36 @@ pub fn default_registry() -> Registry {
     // launch element and here as a fan-in muxer; the parser picks by link degree
     // (M122), the same one-name-two-roles model as `mpegtsmux`. Always 2-input, so
     // link exactly the video and text branches.
-    reg.register_muxer(MuxerFactory::new("textoverlay", |_inputs| {
-        Box::new(crate::textoverlay::TextOverlayN::new())
-    }));
+    reg.register_muxer(
+        MuxerFactory::new("textoverlay", |_inputs| {
+            Box::new(crate::textoverlay::TextOverlayN::new())
+        })
+        .with_input_kinds(&[StreamType::Video, StreamType::Text]),
+    );
     // Bitmap-subtitle overlay fan-in (M1005): the same shape for cues that are
     // pixels rather than text. An RGBA8 video pad (input 0) and the RGBA8
     // canvases a subpicture decoder paints (input 1), merged by PTS:
     // `d.video_0 ! avdec_h264 ! videoconvert ! o.video   d.text_0 ! vobsubdec !
     // o.text   subpictureoverlay name=o ! videoconvert ! autovideosink`. Always
     // 2-input, so link exactly the video and subpicture branches.
-    reg.register_muxer(MuxerFactory::new("subpictureoverlay", |_inputs| {
-        Box::new(crate::subpictureoverlay::SubPictureOverlay::new())
-    }));
+    reg.register_muxer(
+        MuxerFactory::new("subpictureoverlay", |_inputs| {
+            Box::new(crate::subpictureoverlay::SubPictureOverlay::new())
+        })
+        .with_input_kinds(&[StreamType::Video, StreamType::Text]),
+    );
     // Closed-caption fan-in (M1096): a video branch on `c.video` (input 0, whose
     // caps the output follows) and a closed-caption branch on `c.caption` (input
     // 1), merged by PTS so each video frame leaves carrying the caption triples
     // that belong with it, ready for a `ccinsert` in meta-sourced mode. Always
     // 2-input, so link exactly the video and caption branches.
     #[cfg(feature = "metadata")]
-    reg.register_muxer(MuxerFactory::new("cccombiner", |_inputs| {
-        Box::new(crate::cccombiner::CcCombiner::new())
-    }));
+    reg.register_muxer(
+        MuxerFactory::new("cccombiner", |_inputs| {
+            Box::new(crate::cccombiner::CcCombiner::new())
+        })
+        .with_input_kinds(&[StreamType::Video, StreamType::Text]),
+    );
     // Batch fan-in and fan-out (M1233): the demux's `d.src_N` branches are wired in link order.
     #[cfg(feature = "metadata")]
     reg.register_muxer(MuxerFactory::new("streammux", |inputs| {
@@ -1557,43 +1566,55 @@ pub fn default_registry() -> Registry {
     // (`sink_1::xpos`) is flattened to `sinkN-xpos` and friends:
     // `videotestsrc ! c.  videotestsrc ! c.  compositor name=c width=640
     // height=480 sink1-xpos=320 sink1-zorder=1 ! videoconvert ! autovideosink`.
-    reg.register_muxer(MuxerFactory::new("compositor", |inputs| {
-        Box::new(Compositor::new(
-            320,
-            240,
-            (0..inputs).map(|_| CompositorPad::at(0, 0)).collect(),
-        ))
-    }));
+    reg.register_muxer(
+        MuxerFactory::new("compositor", |inputs| {
+            Box::new(Compositor::new(
+                320,
+                240,
+                (0..inputs).map(|_| CompositorPad::at(0, 0)).collect(),
+            ))
+        })
+        .with_input_kinds(&[StreamType::Video]),
+    );
     // The GPU sibling, same property surface (RGBA8 only, no `format`).
     #[cfg(feature = "wgpu-sink")]
-    reg.register_muxer(MuxerFactory::new("wgpucompositor", |inputs| {
-        Box::new(crate::wgpucompositor::WgpuCompositor::new(
-            320,
-            240,
-            (0..inputs).map(|_| CompositorPad::at(0, 0)).collect(),
-        ))
-    }));
+    reg.register_muxer(
+        MuxerFactory::new("wgpucompositor", |inputs| {
+            Box::new(crate::wgpucompositor::WgpuCompositor::new(
+                320,
+                240,
+                (0..inputs).map(|_| CompositorPad::at(0, 0)).collect(),
+            ))
+        })
+        .with_input_kinds(&[StreamType::Video]),
+    );
     // Summing audio fan-in (M130): sums N S16LE inputs on a PTS-aligned timeline
     // (M664). The output caps are a nominal default matching `audiotestsrc`; its
     // channel count / rate drive the PTS-to-sample-frame mapping.
-    reg.register_muxer(MuxerFactory::new("audiomixer", |inputs| {
-        Box::new(AudioMixer::new(
-            inputs,
-            Caps::Audio {
-                format: AudioFormat::PcmS16Le,
-                channels: 2,
-                sample_rate: 48_000,
-                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-            },
-        ))
-    }));
+    reg.register_muxer(
+        MuxerFactory::new("audiomixer", |inputs| {
+            Box::new(AudioMixer::new(
+                inputs,
+                Caps::Audio {
+                    format: AudioFormat::PcmS16Le,
+                    channels: 2,
+                    sample_rate: 48_000,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+                },
+            ))
+        })
+        .with_input_kinds(&[StreamType::Audio]),
+    );
     // Channel interleaver fan-in (M1072): N mono pads in, one N-channel stream
     // out, pad count from the link degree. The output shape is declared before
     // the pads negotiate, so a non-default one is set on the element:
     // `interleave name=i format=F32LE rate=44100`.
-    reg.register_muxer(MuxerFactory::new("interleave", |inputs| {
-        Box::new(crate::interleave::Interleave::new(inputs))
-    }));
+    reg.register_muxer(
+        MuxerFactory::new("interleave", |inputs| {
+            Box::new(crate::interleave::Interleave::new(inputs))
+        })
+        .with_input_kinds(&[StreamType::Audio]),
+    );
     // Multi-stream MPEG-TS fan-in (M208): the A+V container case. `mpegtsmux` is
     // registered both as a single-input launch element (the `tsmux::TsMux` above)
     // and here as a fan-in muxer (`tsmuxn::TsMux`); the parser picks by link
@@ -1601,18 +1622,24 @@ pub fn default_registry() -> Registry {
     // name covers both the `! mpegtsmux !` and `v.! m.  a.! m.  mpegtsmux name=m`
     // shapes the way gst's request sink pads do. Each input's PMT stream type is
     // learned from its negotiated caps; AUs interleave by PTS (M204).
-    reg.register_muxer(MuxerFactory::new("mpegtsmux", |inputs| {
-        Box::new(crate::tsmuxn::TsMux::new(inputs))
-    }));
+    reg.register_muxer(
+        MuxerFactory::new("mpegtsmux", |inputs| {
+            Box::new(crate::tsmuxn::TsMux::new(inputs))
+        })
+        .with_input_kinds(&[StreamType::Video, StreamType::Audio, StreamType::Text]),
+    );
     // Multi-track fragmented-MP4 fan-in (M293): the A/V container case. Like
     // `mpegtsmux`, `mp4mux` is registered both as a single-input launch element
     // (`mp4mux::Mp4Mux` above) and here as a fan-in muxer (`mp4muxn::Mp4MuxN`);
     // the parser picks by link degree, so one name covers `! mp4mux !` and
     // `v.! m.  a.! m.  mp4mux name=m`. Video + AAC audio interleave by PTS.
     #[cfg(feature = "std")]
-    reg.register_muxer(MuxerFactory::new("mp4mux", |inputs| {
-        Box::new(crate::mp4muxn::Mp4MuxN::new(inputs))
-    }));
+    reg.register_muxer(
+        MuxerFactory::new("mp4mux", |inputs| {
+            Box::new(crate::mp4muxn::Mp4MuxN::new(inputs))
+        })
+        .with_input_kinds(&[StreamType::Video, StreamType::Audio, StreamType::Text]),
+    );
     // Multi-track Matroska / WebM fan-in (M294): the A/V container case. Like
     // `mpegtsmux`, `matroskamux` is registered both as a single-input launch
     // element (`mkvmux::MkvMux` above) and here as a fan-in muxer
@@ -1620,9 +1647,12 @@ pub fn default_registry() -> Registry {
     // `! matroskamux !` and `v.! m.  a.! m.  matroskamux name=m`. H.26x video +
     // AAC audio interleave by PTS. std-gated like the `mp4mux` fan-in above.
     #[cfg(feature = "std")]
-    reg.register_muxer(MuxerFactory::new("matroskamux", |inputs| {
-        Box::new(crate::mkvmuxn::MkvMuxN::new(inputs))
-    }));
+    reg.register_muxer(
+        MuxerFactory::new("matroskamux", |inputs| {
+            Box::new(crate::mkvmuxn::MkvMuxN::new(inputs))
+        })
+        .with_input_kinds(&[StreamType::Video, StreamType::Audio, StreamType::Text]),
+    );
     // Multi-stream Ogg fan-in (M790): the grouped-bitstream case. Like
     // `mpegtsmux`, `oggmux` is both a single-input launch element
     // (`oggmux::OggMux` above) and this fan-in muxer (`oggmuxn::OggMuxN`); the
@@ -1634,21 +1664,30 @@ pub fn default_registry() -> Registry {
     // (`avimux::AviMux` above) and this fan-in muxer (`avimux::AviMuxN`); the
     // parser picks by link degree, so one name covers `! avimux !` and
     // `v.! m.video_0  a.! m.audio_0  avimux name=m`.
-    reg.register_muxer(MuxerFactory::new("avimux", |inputs| {
-        Box::new(crate::avimux::AviMuxN::new(inputs))
-    }));
-    reg.register_muxer(MuxerFactory::new("oggmux", |inputs| {
-        Box::new(crate::oggmuxn::OggMuxN::new(inputs))
-    }));
+    reg.register_muxer(
+        MuxerFactory::new("avimux", |inputs| {
+            Box::new(crate::avimux::AviMuxN::new(inputs))
+        })
+        .with_input_kinds(&[StreamType::Video, StreamType::Audio]),
+    );
+    reg.register_muxer(
+        MuxerFactory::new("oggmux", |inputs| {
+            Box::new(crate::oggmuxn::OggMuxN::new(inputs))
+        })
+        .with_input_kinds(&[StreamType::Audio]),
+    );
     // Multi-track FLV fan-in (M296): the A/V container case, FLV's one-video +
     // one-audio model. Like the others, `flvmux` is both a single-input launch
     // element (`flvmux::FlvMux` above) and this fan-in muxer (`flvmuxn::FlvMuxN`);
     // the parser picks by link degree. H.264 video + AAC audio interleave by PTS,
     // with the decoder-config sequence headers written up front. std-gated.
     #[cfg(feature = "std")]
-    reg.register_muxer(MuxerFactory::new("flvmux", |inputs| {
-        Box::new(crate::flvmuxn::FlvMuxN::new(inputs))
-    }));
+    reg.register_muxer(
+        MuxerFactory::new("flvmux", |inputs| {
+            Box::new(crate::flvmuxn::FlvMuxN::new(inputs))
+        })
+        .with_input_kinds(&[StreamType::Video, StreamType::Audio]),
+    );
 
     // Sinks.
     reg.register_launch(LaunchFactory::of::<FakeSink>("fakesink", || {

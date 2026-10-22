@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1817: bare fan-out refs into a fan-in muxer pick a stream of a kind the muxer takes, so `p. ! queue ! m.  p. ! queue ! m.  mp4mux name=m` remuxes.
 - M1820: `vulkanvideodec` sets up every DPB slot at a gap-allowing H.264 stream's first IDR, so frame_num gap frames reach the driver from the start.
 - M1815: `livesync` numbers its output frames, so a filler no longer repeats the last frame's sequence.
 - M1814: `splitmuxsrc` and `g2g-discover` type a stream selection's properties the way a launch line does.

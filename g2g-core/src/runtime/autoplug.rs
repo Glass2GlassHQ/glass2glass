@@ -625,6 +625,7 @@ mod factory {
         ConverterFactory, DynMultiInputElement, DynMultiOutputElement, DynSourceLoop, GraphNode,
         GraphNodeRef, UnblockHandle,
     };
+    use crate::stream::StreamType;
 
     const CONVERTER_MAX_DEPTH: usize = 4;
 
@@ -898,13 +899,24 @@ mod factory {
     pub struct MuxerFactory {
         name: &'static str,
         build: fn(usize) -> Box<dyn DynMultiInputElement>,
+        input_kinds: Option<&'static [StreamType]>,
     }
 
     impl MuxerFactory {
         /// Register a fan-in muxer by name and an input-count constructor
         /// (`|n| Box::new(MyMux::new(n, ...))`).
         pub fn new(name: &'static str, build: fn(usize) -> Box<dyn DynMultiInputElement>) -> Self {
-            Self { name, build }
+            Self {
+                name,
+                build,
+                input_kinds: None,
+            }
+        }
+
+        // a bare fan-out ref into this muxer takes a stream of one of these kinds, any kind when unset
+        pub fn with_input_kinds(mut self, kinds: &'static [StreamType]) -> Self {
+            self.input_kinds = Some(kinds);
+            self
         }
 
         /// This factory's element name.
@@ -2322,6 +2334,15 @@ mod factory {
         pub fn is_muxer(&self, name: &str) -> bool {
             let name = self.resolve_alias(name);
             self.muxers.iter().any(|m| m.name == name)
+        }
+
+        // `None` for an unregistered name or a muxer that takes any kind of stream
+        pub fn muxer_input_kinds(&self, name: &str) -> Option<&'static [StreamType]> {
+            let name = self.resolve_alias(name);
+            self.muxers
+                .iter()
+                .find(|m| m.name == name)
+                .and_then(|m| m.input_kinds)
         }
 
         /// Whether `name` is registered as a transform / sink, the thing

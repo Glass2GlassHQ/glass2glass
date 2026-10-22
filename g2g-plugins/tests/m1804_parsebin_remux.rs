@@ -92,16 +92,40 @@ fn a_parsebin_plugs_parsers_and_no_decoder() {
     );
 }
 
+fn bare_ref_remux_line(source: &Path, muxer: &str, remuxed: &Path) -> String {
+    format!(
+        "filesrc location={} ! parsebin name=p  \
+         p. ! queue ! m.  p. ! queue ! m.  \
+         {muxer} name=m ! filesink location={}",
+        source.display(),
+        remuxed.display()
+    )
+}
+
 #[tokio::test]
 async fn a_parsebin_remux_decodes_like_the_original() {
+    assert_remuxes_decode_like_the_original("named", remux_line).await;
+}
+
+#[tokio::test]
+async fn bare_parsebin_refs_remux_both_streams() {
+    assert_remuxes_decode_like_the_original("bare", bare_ref_remux_line).await;
+}
+
+async fn assert_remuxes_decode_like_the_original(
+    tag: &str,
+    line: fn(&Path, &str, &Path) -> String,
+) {
     let source = fixture(AV_FIXTURE);
-    let video = decoded(&source, "current-video=0", "source-video").await;
-    let audio = decoded(&source, "current-audio=0", "source-audio").await;
+    let video = decoded(&source, "current-video=0", &format!("{tag}-source-video")).await;
+    let audio = decoded(&source, "current-audio=0", &format!("{tag}-source-audio")).await;
     for (muxer, extension) in MUXERS {
-        let remuxed = temp_path(&format!("remux.{extension}"));
-        run(&remux_line(&source, muxer, &remuxed)).await;
-        let remuxed_video = decoded(&remuxed, "current-video=0", "remux-video").await;
-        let remuxed_audio = decoded(&remuxed, "current-audio=0", "remux-audio").await;
+        let remuxed = temp_path(&format!("{tag}-remux.{extension}"));
+        run(&line(&source, muxer, &remuxed)).await;
+        let remuxed_video =
+            decoded(&remuxed, "current-video=0", &format!("{tag}-remux-video")).await;
+        let remuxed_audio =
+            decoded(&remuxed, "current-audio=0", &format!("{tag}-remux-audio")).await;
         std::fs::remove_file(&remuxed).ok();
         assert!(
             remuxed_video == video,
