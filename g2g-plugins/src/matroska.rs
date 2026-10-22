@@ -21,7 +21,7 @@
 //! declared track or carries no usable size is damage: the parser drops bytes up
 //! to the next Cluster ID and carries on there. SimpleBlock / Block frames,
 //! including all three lacing modes (Xiph / EBML / fixed), are split; laced frames
-//! are spaced by DefaultDuration, or by an Opus packet's coded duration, and
+//! are spaced by DefaultDuration, or by an Opus or Vorbis packet's own duration, and
 //! otherwise share the block timestamp. The `Cues` index is parsed into a time ->
 //! Cluster byte-position map ([`MatroskaDemuxer::cue_seek_offset`]) for indexed
 //! seeking (M373). BlockGroup reference tracking is a follow-up.
@@ -753,6 +753,44 @@ impl OpusBlockShift {
     }
 }
 
+// A Vorbis track's block sizes, to space the packets of a laced block, and the
+// size of its last packet, which laps into the next one.
+#[derive(Debug)]
+struct VorbisLacing {
+    track: u64,
+    timing: crate::ogg::VorbisTiming,
+    sample_rate: u32,
+    previous_blocksize: Option<u32>,
+}
+
+impl VorbisLacing {
+    fn new(track: u64, codec_private: &[u8], sample_rate: u32) -> Option<VorbisLacing> {
+        let headers = split_xiph_codec_private(codec_private)?;
+        let [ident, _comment, setup] = headers.as_slice() else {
+            return None;
+        };
+        Some(VorbisLacing {
+            track,
+            timing: crate::ogg::VorbisTiming::parse(ident, setup)?,
+            sample_rate: (sample_rate > 0).then_some(sample_rate)?,
+            previous_blocksize: None,
+        })
+    }
+
+    // the lapped (previous + current) / 4 samples a packet adds, the first counting its own size twice
+    fn packet_duration_ns(&mut self, packet: &[u8]) -> Option<u64> {
+        let blocksize = self.timing.packet_blocksize(packet)?;
+        let previous = self
+            .previous_blocksize
+            .replace(blocksize)
+            .unwrap_or(blocksize);
+        Some(ticks_to_ns(
+            u64::from((previous + blocksize) / 4),
+            self.sample_rate,
+        ))
+    }
+}
+
 /// Undo each frame's track encoding in place, dropping a block whose payload
 /// does not decode (a malformed zlib stream, a malformed encryption signal byte,
 /// IV or partition table), like a malformed lacing.
@@ -862,6 +900,7 @@ pub struct MatroskaDemuxer {
     /// carry one are stored; their blocks are decoded before they are queued.
     block_encodings: Vec<TrackBlockDecoding>,
     opus_block_shifts: Vec<OpusBlockShift>,
+    vorbis_lacing: Vec<VorbisLacing>,
     #[cfg(feature = "matroska-decrypt")]
     content_keys: Vec<([u8; 16], AesKey)>,
     // the `CodecID` of each audio or video track whose codec is `MkvCodec::Other`
@@ -916,6 +955,7 @@ impl MatroskaDemuxer {
             codec_privates: Vec::new(),
             block_encodings: Vec::new(),
             opus_block_shifts: Vec::new(),
+            vorbis_lacing: Vec::new(),
             #[cfg(feature = "matroska-decrypt")]
             content_keys: Vec::new(),
             unmapped_codec_ids: Vec::new(),
@@ -1181,6 +1221,7 @@ impl MatroskaDemuxer {
                                 ts,
                                 self.timestamp_scale,
                                 &self.tracks,
+                                &mut self.vorbis_lacing,
                             );
                             decode_encodings(&mut frames, &mut self.block_encodings);
                             for frame in &mut frames {
@@ -1270,6 +1311,7 @@ impl MatroskaDemuxer {
                                 });
                             }
                             self.opus_block_shifts.extend(parsed.opus_block_shift);
+                            self.vorbis_lacing.extend(parsed.vorbis_lacing);
                             if let Some(codec_id) = parsed.unmapped_codec_id {
                                 self.unmapped_codec_ids.push(codec_id);
                             }
@@ -1630,6 +1672,7 @@ struct ParsedTrack {
     block_encodings: Vec<ContentDecoding>,
     unmapped_codec_id: Option<String>,
     opus_block_shift: Option<OpusBlockShift>,
+    vorbis_lacing: Option<VorbisLacing>,
 }
 
 fn parse_tracks(body: &[u8], content_key: ContentKeyLookup<'_>) -> Vec<ParsedTrack> {
@@ -1754,8 +1797,13 @@ fn parse_track_entry(body: &[u8], content_key: ContentKeyLookup<'_>) -> Option<P
         MkvCodec::Opus => OpusBlockShift::new(number, &codec_private, codec_delay_ns),
         _ => None,
     };
+    let vorbis_lacing = match codec {
+        MkvCodec::Vorbis => VorbisLacing::new(number, &codec_private, sample_rate),
+        _ => None,
+    };
     Some(ParsedTrack {
         opus_block_shift,
+        vorbis_lacing,
         unmapped_codec_id: unmapped_av_codec_id(codec, codec_id, &codec_private),
         track: MkvTrack {
             number,
@@ -1904,6 +1952,7 @@ fn parse_block_group(
     cluster_ts: u64,
     scale: u64,
     tracks: &[MkvTrack],
+    vorbis_lacing: &mut [VorbisLacing],
     out: &mut Vec<MkvFrame>,
 ) {
     let mut block: Option<&[u8]> = None;
@@ -1923,7 +1972,15 @@ fn parse_block_group(
     // BlockDuration is in TimestampScale ticks, like the block timestamp.
     let duration_ns = duration_raw.saturating_mul(scale);
     let first = out.len();
-    parse_block(b, cluster_ts, scale, tracks, duration_ns, out);
+    parse_block(
+        b,
+        cluster_ts,
+        scale,
+        tracks,
+        vorbis_lacing,
+        duration_ns,
+        out,
+    );
     apply_discard_padding(&mut out[first..], discard_ns);
 }
 
@@ -1977,11 +2034,22 @@ fn parse_block_element(
     cluster_ts: u64,
     scale: u64,
     tracks: &[MkvTrack],
+    vorbis_lacing: &mut [VorbisLacing],
 ) -> Vec<MkvFrame> {
     let mut frames = Vec::new();
     match id {
-        ID_SIMPLE_BLOCK => parse_block(body, cluster_ts, scale, tracks, 0, &mut frames),
-        ID_BLOCK_GROUP => parse_block_group(body, cluster_ts, scale, tracks, &mut frames),
+        ID_SIMPLE_BLOCK => parse_block(
+            body,
+            cluster_ts,
+            scale,
+            tracks,
+            vorbis_lacing,
+            0,
+            &mut frames,
+        ),
+        ID_BLOCK_GROUP => {
+            parse_block_group(body, cluster_ts, scale, tracks, vorbis_lacing, &mut frames)
+        }
         _ => {}
     }
     frames
@@ -1991,13 +2059,14 @@ fn parse_block_element(
 /// signed relative timestamp, a flags byte, then the frame data. A laced block
 /// carries several frames (Xiph / EBML / fixed lacing); they are spaced by the
 /// track's `DefaultDuration` from the block timestamp when it is known, else by
-/// an Opus packet's coded duration, else they share the block timestamp. A
+/// an Opus or Vorbis packet's own duration, else they share the block timestamp. A
 /// malformed block is dropped.
 fn parse_block(
     block: &[u8],
     cluster_ts: u64,
     scale: u64,
     tracks: &[MkvTrack],
+    vorbis_lacing: &mut [VorbisLacing],
     duration_ns: u64,
     out: &mut Vec<MkvFrame>,
 ) {
@@ -2039,14 +2108,19 @@ fn parse_block(
     };
     // A single (unlaced) frame keeps the block timestamp; laced frames advance by
     // DefaultDuration when known, else by an Opus packet's own coded duration.
+    let mut vorbis = vorbis_lacing.iter_mut().find(|v| v.track == track);
     let mut frame_pts = pts_ns;
     for data in frames {
+        // every Vorbis packet is measured, since its size laps into the next one's duration
+        let vorbis_ns = vorbis.as_mut().and_then(|v| v.packet_duration_ns(data));
         let spacing_ns = match codec {
-            MkvCodec::Opus if default_duration_ns == 0 => ticks_to_ns(
+            _ if default_duration_ns > 0 => default_duration_ns,
+            MkvCodec::Opus => ticks_to_ns(
                 u64::from(crate::opusparse::packet_samples(data)),
                 crate::opusparse::OPUS_RATE_HZ,
             ),
-            _ => default_duration_ns,
+            MkvCodec::Vorbis => vorbis_ns.unwrap_or(0),
+            _ => 0,
         };
         let next_pts = frame_pts.saturating_add(spacing_ns);
         out.push(MkvFrame {

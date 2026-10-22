@@ -257,8 +257,9 @@ impl AsyncElement for VorbisDec {
                     // Demux-provided timing (M778): the packet's timeline
                     // duration arrives end-granule clamped, so trim the decoded
                     // PCM to it (the final block's encoder padding drops here).
-                    // Untimed input (duration 0) self-stamps from the decoded
-                    // sample count.
+                    // Input with a pts but no duration (a Matroska block) is
+                    // stamped with the packet's pts, as ffmpeg and gst do, and
+                    // untimed input self-stamps from the decoded sample count.
                     let (pts_ns, duration_ns, keep) = if frame.timing.duration_ns > 0 {
                         let k =
                             ns_to_ticks(frame.timing.duration_ns, self.sample_rate.max(1)) as usize;
@@ -267,6 +268,8 @@ impl AsyncElement for VorbisDec {
                             frame.timing.duration_ns,
                             k.min(decoded),
                         )
+                    } else if let Some(pts) = frame.timing.pts() {
+                        (pts, ns(decoded as u64), decoded)
                     } else {
                         let pts = ns(self.samples);
                         let dur = ns(self.samples + decoded as u64).saturating_sub(pts);
