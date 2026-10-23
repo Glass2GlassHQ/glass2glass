@@ -18,6 +18,8 @@ const SCREENPRESSO_CUT_AVI: &str = "tagged_screenpresso_cut.avi";
 const HUFFYUV_422_AVI: &str = "tagged_huffyuv_422.avi";
 // fate-suite's three-channel 48 kHz XMA2 in WAV
 const XMA2_WAV: &str = "xma2_multistream_tail.xma";
+// four mono 8 kHz MS ADPCM streams of 256-byte blocks, interleaved one block per channel
+const ADPCM_MS_4CH_WAV: &str = "tagged_adpcm_ms_4ch.wav";
 // every other fixture carries 8 kHz mono audio
 const AUDIO_CAPS: &str = "audio/x-raw,format=S16LE,rate=8000,channels=1";
 
@@ -126,6 +128,17 @@ async fn a_wav_xma2_stream_decodes_in_whole_packets_from_small_input_chunks() {
     );
     let decoded = decode_from(&source, "audioconvert ! audio/x-raw,format=S16LE", "xma2").await;
     assert_eq!(decoded, expected(&format!("{XMA2_WAV}.s16le")));
+}
+
+#[tokio::test]
+async fn a_wav_ms_adpcm_stream_past_stereo_decodes_one_block_per_channel() {
+    let decoded = decode(
+        &fixture(ADPCM_MS_4CH_WAV),
+        "audioconvert ! audio/x-raw,format=S16LE",
+        "adpcm-ms-4ch",
+    )
+    .await;
+    assert_eq!(decoded, expected(&format!("{ADPCM_MS_4CH_WAV}.s16le")));
 }
 
 #[tokio::test]

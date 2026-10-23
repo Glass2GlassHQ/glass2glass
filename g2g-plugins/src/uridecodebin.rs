@@ -2397,7 +2397,7 @@ pub fn wav_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
         crate::wavparse::WavStream::Readable(caps) => ContainerStreams {
             streams: alloc::vec![PrimaryStream {
                 demux: "wavparse",
-                props: tagged_wav_selection(&caps),
+                props: wav_stream_selection(&caps),
                 caps,
                 has_clean_aperture: false,
             }],
@@ -2410,14 +2410,11 @@ pub fn wav_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     })
 }
 
-// a tagged WAV stream has wavparse negotiate its output as that codec
+// a tagged, MP3 or AC-3 WAV stream has wavparse negotiate its output as that codec
 #[cfg(feature = "std")]
-fn tagged_wav_selection(caps: &Caps) -> Vec<(alloc::string::String, alloc::string::String)> {
+fn wav_stream_selection(caps: &Caps) -> Vec<(alloc::string::String, alloc::string::String)> {
     match caps {
-        Caps::Audio {
-            format: format @ g2g_core::AudioFormat::Tagged(_),
-            ..
-        } => crate::codectag::audio_stream_name(&[], *format)
+        Caps::Audio { format, .. } => crate::wavparse::audio_stream_str(*format)
             .map_or_else(Vec::new, |name| stream_selection(&name)),
         _ => Vec::new(),
     }

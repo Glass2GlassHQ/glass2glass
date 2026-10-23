@@ -2,7 +2,7 @@
 //! it carries out (`Caps::Audio`), so `filesrc location=x.wav ! decodebin`
 //! reaches an audio element. The read side of [`crate::wavenc::WavEnc`]. A
 //! G.711 or IMA ADPCM payload comes out coded, for [`crate::g711`] /
-//! [`crate::adpcm`] to decode.
+//! [`crate::adpcm`] to decode, and MP3 or AC-3 for its parser and decoder.
 //!
 //! RIFF is a chunk list: a 12-byte `RIFF....WAVE` header, then `id` + `size`
 //! chunks. Only `fmt ` (the sample format) and `data` (the samples) matter here;
@@ -74,13 +74,26 @@ struct WaveFormat {
 }
 
 /// The coded payloads this reads beside PCM.
-const CODED_FORMATS: [AudioFormat; 3] =
-    [AudioFormat::Alaw, AudioFormat::Mulaw, AudioFormat::ImaAdpcm];
+const CODED_FORMATS: [AudioFormat; 5] = [
+    AudioFormat::Alaw,
+    AudioFormat::Mulaw,
+    AudioFormat::ImaAdpcm,
+    AudioFormat::Mp3,
+    AudioFormat::Ac3,
+];
 
 /// The coded payloads a WAV file can carry, at the unknown-layout sentinels a
 /// decoder negotiates against before the `fmt ` chunk is read.
-fn coded_alternatives() -> [Caps; 3] {
+fn coded_alternatives() -> [Caps; 5] {
     CODED_FORMATS.map(coded_caps)
+}
+
+// `stream=` names for the payloads the solve cannot tell apart, since their parsers pass any caps
+const CODED_STREAM_NAMES: &[(&str, AudioFormat)] =
+    &[("mp3", AudioFormat::Mp3), ("ac3", AudioFormat::Ac3)];
+
+pub(crate) fn audio_stream_str(format: AudioFormat) -> Option<String> {
+    audio_stream_name(CODED_STREAM_NAMES, format)
 }
 
 fn coded_caps(format: AudioFormat) -> Caps {
@@ -107,10 +120,13 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
     let channels = read_u16(body, 2)?;
     let sample_rate = read_u32(body, 4)?;
     let byte_rate = read_u32(body, 8)?;
+    let declared_block_align = read_u16(body, BLOCK_ALIGN_OFFSET)?;
     // ffmpeg's wav demuxer reads XMA in whole packets, whatever block align the header gives
     let block_align = match tag {
         WAVE_FORMAT_XMA1 | WAVE_FORMAT_XMA2 => XMA_PACKET_LEN,
-        _ => read_u16(body, BLOCK_ALIGN_OFFSET)?,
+        // ffmpeg's wav demuxer reads MS ADPCM past stereo as one declared block per channel
+        WAVE_FORMAT_MS_ADPCM if channels > 2 => declared_block_align.checked_mul(channels)?,
+        _ => declared_block_align,
     };
     let bits = read_u16(body, BITS_OFFSET)?;
     if channels == 0 || channels > u8::MAX as u16 || sample_rate == 0 {
@@ -138,6 +154,7 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
 
 const BLOCK_ALIGN_OFFSET: usize = 12;
 const BITS_OFFSET: usize = 14;
+const WAVE_FORMAT_MS_ADPCM: u16 = 0x0002;
 const WAVE_FORMAT_XMA1: u16 = 0x0165;
 const WAVE_FORMAT_XMA2: u16 = 0x0166;
 const XMA_PACKET_LEN: u16 = 2048;
@@ -218,8 +235,8 @@ pub struct WavParse {
     buf: Vec<u8>,
     riff_seen: bool,
     format: Option<WaveFormat>,
-    // the codec known only by its tag that the output negotiates as, set by the `stream` property
-    tagged: Option<AudioFormat>,
+    // the coded format the output negotiates as, set by the `stream` property
+    stream_format: Option<AudioFormat>,
     // the `fmt ` body a tagged stream sends ahead of its data, for the decoder to open from
     tagged_header: Vec<u8>,
     bus: Option<BusHandle>,
@@ -308,7 +325,10 @@ impl WavParse {
             if &id == b"data" {
                 self.buf.drain(..CHUNK_HEADER_LEN);
                 let format = self.format.ok_or(G2gError::CapsMismatch)?;
-                if self.tagged.is_some_and(|tagged| tagged != format.format) {
+                if self
+                    .stream_format
+                    .is_some_and(|stream_format| stream_format != format.format)
+                {
                     return Err(G2gError::CapsMismatch);
                 }
                 self.post_duration(size, format);
@@ -333,8 +353,12 @@ impl WavParse {
             }
             if &id == b"fmt " {
                 let body = &self.buf[CHUNK_HEADER_LEN..CHUNK_HEADER_LEN + size];
-                self.format = Some(parse_fmt(body).ok_or(G2gError::CapsMismatch)?);
+                let format = parse_fmt(body).ok_or(G2gError::CapsMismatch)?;
+                self.format = Some(format);
+                // the decoder opens from this header, so it carries the block align the data is cut at
                 self.tagged_header = body.to_vec();
+                self.tagged_header[BLOCK_ALIGN_OFFSET..BITS_OFFSET]
+                    .copy_from_slice(&format.block_align.to_le_bytes());
             }
             self.buf.drain(..total);
         }
@@ -413,7 +437,7 @@ fn data_timing(start: u64, end: u64, byte_rate: u32) -> FrameTiming {
 static WAVPARSE_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "the format the output negotiates as: auto (PCM or the coded payloads the parser reads) | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
+    "the format the output negotiates as: auto (PCM or the coded payloads the parser reads) | mp3 | ac3 | audio-riff-0x<tag> (a codec known only by its tag, with ffmpeg-long-tail)",
 )
 .with_default("auto")];
 
@@ -450,12 +474,12 @@ impl AsyncElement for WavParse {
     /// payloads (M1073) come last, so a downstream that takes anything still
     /// gets PCM.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let tagged = self.tagged;
+        let stream_format = self.stream_format;
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::Wav,
-            } if tagged.is_some() => {
-                CapsSet::from_alternatives(tagged.map(coded_caps).into_iter().collect())
+            } if stream_format.is_some() => {
+                CapsSet::from_alternatives(stream_format.map(coded_caps).into_iter().collect())
             }
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::Wav,
@@ -482,9 +506,11 @@ impl AsyncElement for WavParse {
         match name {
             "stream" => {
                 let value = value.as_str().ok_or(PropError::Type)?;
-                self.tagged = match value {
+                self.stream_format = match value {
                     "auto" => None,
-                    name => Some(audio_from_stream_name(&[], name).ok_or(PropError::Value)?),
+                    name => Some(
+                        audio_from_stream_name(CODED_STREAM_NAMES, name).ok_or(PropError::Value)?,
+                    ),
                 };
                 Ok(())
             }
@@ -494,8 +520,8 @@ impl AsyncElement for WavParse {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "stream" => Some(PropValue::Str(match self.tagged {
-                Some(format) => audio_stream_name(&[], format)?,
+            "stream" => Some(PropValue::Str(match self.stream_format {
+                Some(format) => audio_stream_str(format)?,
                 None => String::from("auto"),
             })),
             _ => None,
