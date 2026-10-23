@@ -215,9 +215,18 @@ Highest leverage first:
   Needs a signed `Segment` time offset in g2g-core.
 - **Corpus sweep bugs** (calliope TESTING techniques 21-23, paths under
   `~/.cache/calliope` on hercules):
-  - Seek and position origin is the first unit's pts, where gst uses the lowest
-    pts: an open-GOP stream whose leading frames present before the keyframe
-    (`h264/H264_might_overflow.mkv`, 1.086 against gst's 1.003) counts from too late.
+  - The demuxers latch their segment base and seek origin from the first unit, so
+    units that present earlier are clipped. `MkvDemuxN` takes the IDR's pts, and the
+    open-GOP B frames after it are cut (`h264/twofields_packet.mp4` remuxed into mkv
+    or ts loses 2 of 147 frames). `TsDemuxN` takes the first video unit while audio
+    starts 4.4 ms earlier, so mp4mux trims 98 audio samples (bipbop
+    `fileSequence2.ts`, `fileSequence5.ts`). `mkv/test7_cut.mkv` takes an audio frame
+    at 0.008 and clips the video IDR at 0. `h264/H264_might_overflow.mkv` seeks from
+    1.086 where gst uses 1.003. gst's matroskademux lowers `stream_start_time` for
+    every unit below it and sends a new segment (matroska-demux.c): port that to
+    `DemuxSeek::opening_segment` and the `segment_base` latches in `MkvDemuxN`,
+    `TsDemuxN` and `PsDemuxN`, keeping the seek tests green.
+  - `mpegtsmux` writes a DTS of exactly 0 as unset, so the PES carries no DTS.
   - Demuxers drop streams gst's parsebin exposes: DTS in `filter/242_4.mkv`, TTA,
     pcm_dvd LPCM in `coolitnow-partial.vob`, and the xan_dpcm audio of
     `wc4-xan` AVIs.
