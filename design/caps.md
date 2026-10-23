@@ -820,7 +820,9 @@ A `NoDecodeChain` or `NoParseChain` error quotes the unplugged input through
 the message names the codec and any fixed size, rate or channel count. Parsing
 goes the other way: a raw-audio caps string with no `rate` or `channels` gives
 `ANY_SAMPLE_RATE` / `ANY_CHANNELS`, as gst leaves them open, while compressed
-audio, which has no rate wildcard, defaults to 48000 Hz stereo.
+audio, which has no rate wildcard, defaults to 48000 Hz stereo. A present field whose
+value does not parse (`rate=abc`, `width=abc`, a field with no `=`) fails the parse,
+and a trailing comma is accepted, as gst accepts it.
 
 A codec with no typed `VideoCodec` / `AudioFormat` still decodes when libavcodec
 has a decoder for it, behind the `ffmpeg-long-tail` feature. `avidemux`, the mp4

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1853: a caps string field whose value does not parse fails the parse instead of taking the default.
 - M1845: fMP4 fragments without a tfdt continue their track's timeline instead of restarting at 0.
 - M1851: a Matroska BlockGroup without a ReferenceBlock is a keyframe, so seeks find frames stored in BlockGroups.
 - M1856: mpegtsmux keeps its multiplex and AAC carriage across a mid-stream caps change, so continuity counters no longer restart.

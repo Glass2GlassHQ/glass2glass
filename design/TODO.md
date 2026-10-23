@@ -258,9 +258,10 @@ Highest leverage first:
 
 ## Codecs
 
-- **Caps string parsing.** `expand_u8` and `expand_u32` turn an unparseable value such as
-  `rate=abc` into the default instead of failing the parse. Compressed audio with an
-  unknown rate prints without `rate` and parses back as 48000.
+- **Compressed audio caps round trip.** Compressed audio with an unknown rate prints
+  without `rate` and parses back as 48000, and an absent `channels` parses as 2 where
+  the printer omits 0. A round trip needs compressed rate 0 to intersect as a
+  wildcard, as `ANY_CHANNELS` already does.
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
 
