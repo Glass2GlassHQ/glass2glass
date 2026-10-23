@@ -137,9 +137,11 @@ pub(crate) fn flac_streaminfo() -> Vec<u8> {
 
 // gst-launch-1.0 videotestsrc num-buffers=6 ! video/x-raw,width=64,height=64,framerate=30/1 !
 // x264enc key-int-max=3 ! mp4mux fragment-duration=100 streamable=true: two fragments, each with a tfdt
+#[cfg(feature = "std")]
 const TWO_FRAGMENTS: &[u8] = include_bytes!("../tests/fixtures/h264_two_fragments.mp4");
 
 // the two-fragment fixture as written, and with each tfdt box renamed to `free`, which keeps every offset
+#[cfg(feature = "std")]
 pub(crate) fn two_fragments_with_and_without_tfdt() -> (Vec<u8>, Vec<u8>) {
     let with_tfdt = TWO_FRAGMENTS.to_vec();
     let mut without_tfdt = with_tfdt.clone();
@@ -156,6 +158,7 @@ pub(crate) fn two_fragments_with_and_without_tfdt() -> (Vec<u8>, Vec<u8>) {
     (with_tfdt, without_tfdt)
 }
 
+#[cfg(feature = "std")]
 pub(crate) fn data_pts_ns(packets: &[PipelinePacket]) -> Vec<u64> {
     packets
         .iter()
