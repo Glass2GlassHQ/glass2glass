@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1855: the fan-out upstream error names the bin, and the flvmux, avimux and CMAF mp4mux refusals log what they refuse.
 - M1859: Opus out of MPEG-TS keeps its channel count and an OpusHead through every demuxer and muxer, and mpegtsmux keeps in-band Opus headers out of the multiplex.
 - M1858: ac3parse keeps 44.1 kHz frames whose padding word alternates.
 - M1854: wavparse reads MP3 and AC-3 and cuts MS ADPCM past stereo at one block per channel.
