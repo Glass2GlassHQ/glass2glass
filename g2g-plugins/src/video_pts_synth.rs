@@ -11,13 +11,31 @@ pub(crate) struct ElementaryStreamPts {
     synth: VideoPtsSynth,
     started: bool,
     latest_pts_90khz: Option<u64>,
+    packed_vops: crate::mpeg4videoparse::PackedVops,
+}
+
+// a byte source stamps every chunk 0
+fn source_pts(pts_ns: u64) -> Option<u64> {
+    Some(pts_ns).filter(|pts| *pts != 0 && *pts != FrameTiming::PTS_NONE)
 }
 
 impl ElementaryStreamPts {
+    pub(crate) fn split_packed_input(
+        &mut self,
+        codec: VideoCodec,
+        input: &[u8],
+        pts_ns: u64,
+    ) -> Option<crate::mpeg4videoparse::PackedInputSplit> {
+        if codec != VideoCodec::Mpeg4Part2 {
+            return None;
+        }
+        self.packed_vops.observe_layer_header(input);
+        self.packed_vops.split(input, source_pts(pts_ns)?)
+    }
+
     // An unstamped first unit opens the timeline at 0, as gst's baseparse does.
     pub(crate) fn stamp(&mut self, codec: VideoCodec, au: &[u8], pts_ns: u64) -> u64 {
-        // a byte source stamps every chunk 0
-        let source_pts_ns = Some(pts_ns).filter(|pts| *pts != 0 && *pts != FrameTiming::PTS_NONE);
+        let source_pts_ns = source_pts(pts_ns);
         let mut pts_90khz = source_pts_ns.map(|ns| ns_to_ticks(ns, PES_CLOCK_HZ));
         if !self.started {
             self.started = true;

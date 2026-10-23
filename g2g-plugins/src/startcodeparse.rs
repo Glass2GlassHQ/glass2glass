@@ -333,13 +333,29 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
             out.push(PipelinePacket::DataFrame(frame)).await?;
             return Ok(());
         };
-        #[cfg(feature = "metadata")]
-        self.input_stamps.insert(
-            frame.timing.pts_ns,
-            crate::inputstamp::InputStamp::of(&frame),
-        );
-        for (au, timing) in self.framer.push(bytes, frame.timing, unit_role::<C>) {
-            self.emit_au(au, timing, out).await?;
+        let pieces = match self
+            .stream_pts
+            .split_packed_input(C::CODEC, bytes, frame.timing.pts_ns)
+        {
+            Some(split) => Vec::from([
+                (
+                    &bytes[..split.b_frame_offset],
+                    FrameTiming {
+                        pts_ns: split.reference_pts_ns,
+                        ..frame.timing
+                    },
+                ),
+                (&bytes[split.b_frame_offset..], frame.timing),
+            ]),
+            None => Vec::from([(bytes, frame.timing)]),
+        };
+        for (piece, timing) in pieces {
+            #[cfg(feature = "metadata")]
+            self.input_stamps
+                .insert(timing.pts_ns, crate::inputstamp::InputStamp::of(&frame));
+            for (au, timing) in self.framer.push(piece, timing, unit_role::<C>) {
+                self.emit_au(au, timing, out).await?;
+            }
         }
         Ok(())
     }

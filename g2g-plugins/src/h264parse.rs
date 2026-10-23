@@ -1202,6 +1202,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_trailing_delimiter_leaves_each_sample_stamp_on_its_own_picture() {
+        // fate-suite's mixed-nal-coding.mp4 ends every sample with the delimiter of the next access unit
+        const ACCESS_UNIT_DELIMITER: [u8; 6] = [0, 0, 0, 1, 0x09, 0xF0];
+        const SAMPLE_PERIOD_NS: u64 = 33_366_667;
+        const CODED_SLICE_NAL_TYPE: u8 = 1;
+        let mut parse = H264Parse::reframing();
+        parse.configure_pipeline(&h264_parse_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        let stamps: Vec<u64> = (1..=3).map(|n| n * SAMPLE_PERIOD_NS).collect();
+        for (tag, &pts_ns) in (1u8..).zip(&stamps) {
+            let mut frame = frame_with_bytes(
+                u64::from(tag),
+                [annexb_vcl(true, tag), ACCESS_UNIT_DELIMITER.to_vec()].concat(),
+            );
+            frame.timing.pts_ns = pts_ns;
+            parse
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let picture_stamps: Vec<u64> = sink
+            .packets
+            .iter()
+            .filter_map(|packet| match packet {
+                PipelinePacket::DataFrame(frame) => Some(frame),
+                _ => None,
+            })
+            .filter(|frame| {
+                frame.domain.as_system_slice().is_some_and(|au| {
+                    nal_units(au).any(|nal| nal[0] & 0x1F == CODED_SLICE_NAL_TYPE)
+                })
+            })
+            .map(|frame| frame.timing.pts_ns)
+            .collect();
+        assert_eq!(picture_stamps, stamps);
+    }
+
+    #[tokio::test]
     async fn reframing_reads_a_byte_stream_that_opens_with_junk_as_annex_b() {
         // fate-suite's crew_cif.nal opens with these two bytes before its first
         // start code, which made the parser take the file for length-prefixed NALs.

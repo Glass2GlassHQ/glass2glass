@@ -41,6 +41,20 @@ struct BufferedInput {
     stamp_taken: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AccessUnitStart {
+    offset: usize,
+    // where its first picture start code begins, once scanned
+    picture: Option<usize>,
+}
+
+impl AccessUnitStart {
+    // the offset whose input's stamp names this access unit
+    fn stamp_offset(&self) -> usize {
+        self.picture.unwrap_or(self.offset)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct AccessUnitFramer {
     /// H.264 / H.265 Annex-B lets a zero byte ahead of `00 00 01` belong to the
@@ -48,8 +62,8 @@ pub(crate) struct AccessUnitFramer {
     four_byte_start_codes: bool,
     /// Bytes received but not yet emitted as a complete access unit.
     pending: Vec<u8>,
-    /// Offsets in `pending` where an access unit begins, ascending.
-    access_unit_starts: Vec<usize>,
+    /// Where each access unit begins in `pending`, ascending.
+    access_unit_starts: Vec<AccessUnitStart>,
     /// The lowest offset the next start code may begin at: just past the code
     /// byte of the last unit classified.
     unit_floor: usize,
@@ -126,7 +140,7 @@ impl AccessUnitFramer {
         boundary
     }
 
-    // A stamp names the first access unit that starts in its input, so later ones in that input go unstamped.
+    // A stamp names the first access unit whose picture starts in its input, so later ones in that input go unstamped.
     fn timing_of_unit_at(&mut self, start: usize) -> FrameTiming {
         let input = self
             .inputs
@@ -144,7 +158,7 @@ impl AccessUnitFramer {
         }
     }
 
-    // An input that ends before the scan reached, with no access unit starting in it, names nothing.
+    // An input that ends before the scan reached, with no access unit or picture starting in it, names nothing.
     fn drop_inputs_without_a_unit(&mut self) {
         let starts = &self.access_unit_starts;
         let scanned_through = self.search_from;
@@ -162,9 +176,12 @@ impl AccessUnitFramer {
                 return true;
             };
             input.offset == 0
-                || starts
-                    .iter()
-                    .any(|start| (input.offset..end).contains(start))
+                || starts.iter().any(|start| {
+                    (input.offset..end).contains(&start.offset)
+                        || start
+                            .picture
+                            .is_some_and(|picture| (input.offset..end).contains(&picture))
+                })
         });
     }
 
@@ -179,7 +196,11 @@ impl AccessUnitFramer {
 
         self.scan(classify);
         self.drop_inputs_without_a_unit();
-        if self.access_unit_starts.binary_search(&boundary).is_err() {
+        if self
+            .access_unit_starts
+            .binary_search_by_key(&boundary, |start| start.offset)
+            .is_err()
+        {
             self.input_splits_access_units = true;
         } else if boundary > 0 {
             // The first start code of a buffer would always open an access unit
@@ -195,7 +216,7 @@ impl AccessUnitFramer {
         let complete_through = if release_trailing {
             self.pending.len()
         } else if let [_, .., last] = self.access_unit_starts[..] {
-            last
+            last.offset
         } else {
             // at most one access unit buffered, still open
             return Vec::new();
@@ -209,7 +230,10 @@ impl AccessUnitFramer {
             self.reset_scan();
             return None;
         }
-        let start = self.access_unit_starts.first().copied().unwrap_or(0);
+        let start = self
+            .access_unit_starts
+            .first()
+            .map_or(0, AccessUnitStart::stamp_offset);
         let timing = self.timing_of_unit_at(start);
         let pending = core::mem::take(&mut self.pending);
         self.reset_scan();
@@ -251,13 +275,19 @@ impl AccessUnitFramer {
             };
             let opens_after_picture = matches!(role, StartCodeRole::Leads | StartCodeRole::Picture);
             if self.access_unit_starts.is_empty() || (self.seen_picture && opens_after_picture) {
-                self.access_unit_starts.push(start);
+                self.access_unit_starts.push(AccessUnitStart {
+                    offset: start,
+                    picture: None,
+                });
                 self.seen_picture = false;
             }
             if matches!(
                 role,
                 StartCodeRole::Picture | StartCodeRole::PictureContinuation
             ) {
+                if let Some(unit) = self.access_unit_starts.last_mut() {
+                    unit.picture.get_or_insert(start);
+                }
                 self.seen_picture = true;
             }
             // a picture start code is 0x00, a search resuming on it could re-match its own prefix
@@ -269,12 +299,15 @@ impl AccessUnitFramer {
     fn split_off_complete(&mut self, complete_through: usize) -> Vec<FramedAccessUnit> {
         let retained_from = self
             .access_unit_starts
-            .partition_point(|&start| start < complete_through);
-        let complete_starts: Vec<usize> = self.access_unit_starts.drain(..retained_from).collect();
-        let timings: Vec<FrameTiming> = complete_starts
+            .partition_point(|start| start.offset < complete_through);
+        let completed_units: Vec<AccessUnitStart> =
+            self.access_unit_starts.drain(..retained_from).collect();
+        let timings: Vec<FrameTiming> = completed_units
             .iter()
-            .map(|&start| self.timing_of_unit_at(start))
+            .map(|start| self.timing_of_unit_at(start.stamp_offset()))
             .collect();
+        let complete_starts: Vec<usize> =
+            completed_units.iter().map(|start| start.offset).collect();
         let retained = self.pending.split_off(complete_through);
         let mut complete = core::mem::replace(&mut self.pending, retained);
 
@@ -282,7 +315,10 @@ impl AccessUnitFramer {
             self.reset_scan();
         } else {
             for start in &mut self.access_unit_starts {
-                *start -= complete_through;
+                start.offset -= complete_through;
+                if let Some(picture) = &mut start.picture {
+                    *picture -= complete_through;
+                }
             }
             self.unit_floor -= complete_through;
             self.search_from -= complete_through;
@@ -322,7 +358,11 @@ pub(crate) fn access_unit_starts(
     let mut framer = AccessUnitFramer::new(four_byte_start_codes);
     framer.pending.extend_from_slice(data);
     framer.scan(classify);
-    framer.access_unit_starts
+    framer
+        .access_unit_starts
+        .iter()
+        .map(|start| start.offset)
+        .collect()
 }
 
 /// The gst `config-interval` cadence for re-inserting cached parameter sets or
@@ -461,6 +501,36 @@ mod tests {
         emitted.extend(framer.finish());
         let stamps: Vec<u64> = emitted.iter().map(|(_, timing)| timing.pts_ns).collect();
         assert_eq!(stamps, [FIRST_PTS_NS, FrameTiming::PTS_NONE, SECOND_PTS_NS]);
+    }
+
+    #[test]
+    fn an_access_unit_takes_the_stamp_of_the_buffer_its_picture_starts_in() {
+        const FIRST_PTS_NS: u64 = 5;
+        const SECOND_PTS_NS: u64 = 9;
+        let second = picture(2);
+        let picture_start = second
+            .windows(4)
+            .position(|unit| unit == [0, 0, 1, 0x00])
+            .expect("the picture start code follows the sequence header");
+        let mut framer = AccessUnitFramer::new(false);
+        let mut emitted = framer.push(
+            &[picture(1), second[..picture_start].to_vec()].concat(),
+            timing(FIRST_PTS_NS),
+            mpeg_classify,
+        );
+        emitted.extend(framer.push(
+            &second[picture_start..],
+            timing(SECOND_PTS_NS),
+            mpeg_classify,
+        ));
+        emitted.extend(framer.finish());
+        assert_eq!(
+            emitted,
+            vec![
+                (picture(1), timing(FIRST_PTS_NS)),
+                (second, timing(SECOND_PTS_NS))
+            ]
+        );
     }
 
     #[test]

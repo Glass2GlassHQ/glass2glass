@@ -16,6 +16,7 @@
 use alloc::vec::Vec;
 
 use g2g_core::caps::framerate_q16_from_fraction;
+use g2g_core::time::ticks_to_ns;
 use g2g_core::{PropertySpec, VideoCodec};
 
 use crate::access_unit::StartCodeRole;
@@ -112,11 +113,14 @@ impl StartCodeCodec for Mpeg4VideoCodec {
     }
 }
 
-/// Parse a `video_object_layer` header payload (the bytes after its start code)
-/// for the coded geometry. `None` when the layer is not rectangular, the header
-/// is truncated, or it codes a zero dimension.
-fn parse_video_object_layer(payload: &[u8]) -> Option<VideoGeometry> {
-    let mut bits = BitReader::new(payload);
+// the `video_object_layer` fields ahead of `fixed_vop_rate`
+struct LayerPrefix {
+    pixel_aspect: Option<(u32, u32)>,
+    shape: u32,
+    vop_time_increment_resolution: u32,
+}
+
+fn parse_layer_prefix(bits: &mut BitReader) -> Option<LayerPrefix> {
     bits.skip_bits(1)?; // random_accessible_vol
     bits.skip_bits(8)?; // video_object_type_indication
 
@@ -153,6 +157,23 @@ fn parse_video_object_layer(payload: &[u8]) -> Option<VideoGeometry> {
     bits.skip_bits(1)?; // marker_bit
     let vop_time_increment_resolution = bits.read_bits(16)?;
     bits.skip_bits(1)?; // marker_bit
+    Some(LayerPrefix {
+        pixel_aspect,
+        shape,
+        vop_time_increment_resolution,
+    })
+}
+
+/// Parse a `video_object_layer` header payload (the bytes after its start code)
+/// for the coded geometry. `None` when the layer is not rectangular, the header
+/// is truncated, or it codes a zero dimension.
+fn parse_video_object_layer(payload: &[u8]) -> Option<VideoGeometry> {
+    let mut bits = BitReader::new(payload);
+    let LayerPrefix {
+        pixel_aspect,
+        shape,
+        vop_time_increment_resolution,
+    } = parse_layer_prefix(&mut bits)?;
 
     let framerate = if bits.read_bit()? == 1 {
         // fixed_vop_rate: the increment is coded in as many bits as the
@@ -183,6 +204,89 @@ fn parse_video_object_layer(payload: &[u8]) -> Option<VideoGeometry> {
         framerate,
         pixel_aspect,
     })
+}
+
+const VOP_CODING_TYPE_B: u32 = 2;
+
+// seconds counts the `modulo_time_base` bits
+struct VopTime {
+    coding_type: u32,
+    seconds: u64,
+    increment: u32,
+}
+
+fn parse_vop_time(payload: &[u8], increment_bits: u32) -> Option<VopTime> {
+    let mut bits = BitReader::new(payload);
+    let coding_type = bits.read_bits(2)?;
+    let mut seconds = 0u64;
+    while bits.read_bit()? == 1 {
+        seconds += 1;
+    }
+    bits.skip_bits(1)?; // marker_bit
+    let increment = bits.read_bits(increment_bits)?;
+    Some(VopTime {
+        coding_type,
+        seconds,
+        increment,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PackedInputSplit {
+    pub(crate) b_frame_offset: usize,
+    pub(crate) reference_pts_ns: u64,
+}
+
+// DivX packs a reference VOP and the B-VOP shown before it into one AVI chunk, whose stamp names the B-VOP
+#[derive(Debug, Default)]
+pub(crate) struct PackedVops {
+    vop_time_increment_resolution: Option<u32>,
+}
+
+impl PackedVops {
+    pub(crate) fn observe_layer_header(&mut self, input: &[u8]) {
+        if let Some(resolution) = start_code_units(input)
+            .filter(|(code, _)| VIDEO_OBJECT_LAYER_START_CODES.contains(code))
+            .find_map(|(_, payload)| parse_layer_prefix(&mut BitReader::new(payload)))
+            .map(|layer| layer.vop_time_increment_resolution)
+            .filter(|resolution| *resolution > 0)
+        {
+            self.vop_time_increment_resolution = Some(resolution);
+        }
+    }
+
+    pub(crate) fn split(&self, input: &[u8], pts_ns: u64) -> Option<PackedInputSplit> {
+        let resolution = self.vop_time_increment_resolution?;
+        let starts = crate::access_unit::access_unit_starts(
+            input,
+            false,
+            crate::startcodeparse::unit_role::<Mpeg4VideoCodec>,
+        );
+        let [0, b_frame_offset] = starts[..] else {
+            return None;
+        };
+        let increment_bits = time_increment_bits(resolution);
+        let vop_time = |unit: &[u8]| {
+            start_code_units(unit)
+                .find(|(code, _)| *code == VOP_START_CODE)
+                .and_then(|(_, payload)| parse_vop_time(payload, increment_bits))
+        };
+        let reference = vop_time(&input[..b_frame_offset])?;
+        let b_frame = vop_time(&input[b_frame_offset..])?;
+        if reference.coding_type == VOP_CODING_TYPE_B || b_frame.coding_type != VOP_CODING_TYPE_B {
+            return None;
+        }
+        // ffmpeg counts a B-VOP's seconds from the same base as the reference coded before it
+        let ticks_ahead = (i128::from(reference.seconds) - i128::from(b_frame.seconds))
+            * i128::from(resolution)
+            + i128::from(reference.increment)
+            - i128::from(b_frame.increment);
+        let ticks_ahead = u64::try_from(ticks_ahead).ok().filter(|ticks| *ticks > 0)?;
+        Some(PackedInputSplit {
+            b_frame_offset,
+            reference_pts_ns: pts_ns.checked_add(ticks_to_ns(ticks_ahead, resolution))?,
+        })
+    }
 }
 
 /// Width of `fixed_vop_time_increment` in bits: `ceil(log2(resolution))`, at
@@ -289,6 +393,103 @@ mod tests {
             tag,
             0x11,
         ]
+    }
+
+    // a VOP shown `ticks` VOP time ticks into the stream, at TIME_INCREMENT_RESOLUTION_30
+    fn timed_vop(coding_type: u32, ticks: u32) -> Vec<u8> {
+        let mut w = BitWriter::default();
+        w.write_bits(coding_type, 2);
+        for _ in 0..ticks / TIME_INCREMENT_RESOLUTION_30 {
+            w.write_bit(1); // modulo_time_base
+        }
+        w.write_bit(0);
+        w.write_bit(1); // marker_bit
+        w.write_bits(
+            ticks % TIME_INCREMENT_RESOLUTION_30,
+            time_increment_bits(TIME_INCREMENT_RESOLUTION_30),
+        );
+        w.write_bit(1); // marker_bit
+        w.write_bit(1); // vop_coded
+        w.write_bits(0x2A, 8);
+        w.align_to_byte();
+        let mut unit = vec![0u8, 0, 1, VOP_START_CODE];
+        unit.extend_from_slice(&w.into_bytes());
+        unit
+    }
+
+    const CODING_TYPE_I: u32 = 0;
+    const CODING_TYPE_P: u32 = 1;
+
+    fn pts_of_tick(ticks: u32) -> u64 {
+        ticks_to_ns(u64::from(ticks), TIME_INCREMENT_RESOLUTION_30)
+    }
+
+    #[tokio::test]
+    async fn a_packed_reference_vop_takes_its_own_display_time() {
+        let mut parse = Mpeg4VideoParse::new();
+        parse.configure_pipeline(&mpeg4_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        // one stamp per AVI chunk: I, then P packed with the B shown first, then the second B
+        let chunks = [
+            (
+                0,
+                [configuration(720, 576), timed_vop(CODING_TYPE_I, 0)].concat(),
+            ),
+            (
+                1,
+                [timed_vop(CODING_TYPE_P, 3), timed_vop(VOP_CODING_TYPE_B, 1)].concat(),
+            ),
+            (2, timed_vop(VOP_CODING_TYPE_B, 2)),
+        ];
+        for (sequence, (tick, bytes)) in (0..).zip(chunks) {
+            let mut frame = frame_with_bytes(sequence, bytes);
+            frame.timing.pts_ns = pts_of_tick(tick);
+            parse
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let stamps: Vec<u64> = sink
+            .packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::DataFrame(f) => Some(f.timing.pts_ns),
+                _ => None,
+            })
+            .collect();
+        let packed_chunk_pts = pts_of_tick(1);
+        let expected = vec![
+            0,
+            packed_chunk_pts + pts_of_tick(2),
+            packed_chunk_pts,
+            pts_of_tick(2),
+        ];
+        assert_eq!(stamps, expected);
+    }
+
+    #[test]
+    fn only_a_reference_then_a_b_vop_is_split() {
+        let mut packed = PackedVops::default();
+        let two_references = [timed_vop(CODING_TYPE_P, 3), timed_vop(CODING_TYPE_P, 4)].concat();
+        let reference_then_b =
+            [timed_vop(CODING_TYPE_P, 3), timed_vop(VOP_CODING_TYPE_B, 1)].concat();
+        let pts_ns = pts_of_tick(1);
+        assert_eq!(
+            packed.split(&reference_then_b, pts_ns),
+            None,
+            "no layer header has given the time resolution"
+        );
+        packed.observe_layer_header(&configuration(720, 576));
+        assert_eq!(packed.split(&two_references, pts_ns), None);
+        assert_eq!(
+            packed.split(&reference_then_b, pts_ns),
+            Some(PackedInputSplit {
+                b_frame_offset: timed_vop(CODING_TYPE_P, 3).len(),
+                reference_pts_ns: pts_ns + pts_of_tick(2),
+            })
+        );
     }
 
     #[test]
