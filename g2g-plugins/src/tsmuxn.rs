@@ -480,10 +480,11 @@ impl MultiInputElement for TsMux {
                     if let (Some(aac), Some(s)) =
                         (self.aac[input].as_mut(), frame.domain.as_system_slice())
                     {
-                        if aac.consume_config(s, g2g_core::log::short_type_name::<Self>())? {
-                            if let Some(mux) = self.mux.as_mut() {
-                                mux.set_stream_latm(input);
-                            }
+                        let config = aac.consume_config(s, short_type_name::<Self>())?;
+                        if let Some(mux) = self.mux.as_mut().filter(|_| aac.is_loas()) {
+                            mux.set_stream_latm(input);
+                        }
+                        if config {
                             return Ok(());
                         }
                     }

@@ -282,6 +282,13 @@ pub(crate) fn muxer_audio_specific_config(
         };
         return Ok(Some(with_program_config.unwrap_or_else(|| header.to_vec())));
     }
+    if opens_loas_frame(first_frame) {
+        g2g_error!(
+            g2g_core::log::Target::category(muxer),
+            "cannot carry LOAS/LATM AAC"
+        );
+        return Err(G2gError::CapsMismatch);
+    }
     if !is_raw_aac_config(first_frame) {
         return Ok(None);
     }
@@ -1218,6 +1225,18 @@ mod tests {
             .expect("a config");
         assert_eq!(config, asc);
         assert_eq!(muxer_access_unit(&config, &frame), au);
+    }
+
+    #[test]
+    fn a_muxer_refuses_loas_frames() {
+        const MUXER: &str = "test";
+        // AAC LC, 48 kHz, stereo
+        const LC_CONFIG: [u8; 2] = [0x11, 0x90];
+        let frame = loas_from_asc(&LC_CONFIG, &[0xAA, 0xBB]).expect("a LOAS frame");
+        assert_eq!(
+            muxer_audio_specific_config(&frame, MUXER),
+            Err(G2gError::CapsMismatch)
+        );
     }
 
     #[test]

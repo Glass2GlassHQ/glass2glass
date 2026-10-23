@@ -45,7 +45,7 @@ use g2g_core::{
 
 use crate::aacparse::{
     is_leading_aac_config, is_raw_aac_config, is_usac_config, loas_from_asc,
-    muxer_audio_specific_config,
+    muxer_audio_specific_config, opens_loas_frame,
 };
 use crate::dvbsub::{parse_page_ids, PageIds, DEFAULT_PAGE_ID, DEFAULT_SUBTITLING_TYPE};
 use crate::mpegts::{
@@ -327,6 +327,8 @@ pub(crate) enum AacCarriage {
     Adts,
     // raw access units behind this config, which ADTS cannot signal, multiplexed as LOAS
     Loas(Vec<u8>),
+    // LOAS frames, multiplexed as they arrive
+    SourceLoas,
 }
 
 impl AacCarriage {
@@ -338,7 +340,11 @@ impl AacCarriage {
     ) -> Result<bool, G2gError> {
         match self {
             Self::Loas(config) => Ok(is_leading_aac_config(config.as_slice(), frame)),
-            Self::Adts => Ok(false),
+            Self::Adts | Self::SourceLoas => Ok(false),
+            Self::Undecided if opens_loas_frame(frame) => {
+                *self = Self::SourceLoas;
+                Ok(false)
+            }
             Self::Undecided => {
                 let raw_config =
                     muxer_audio_specific_config(frame, muxer)?.filter(|_| is_raw_aac_config(frame));
@@ -355,7 +361,7 @@ impl AacCarriage {
     }
 
     pub(crate) fn is_loas(&self) -> bool {
-        matches!(self, Self::Loas(_))
+        matches!(self, Self::Loas(_) | Self::SourceLoas)
     }
 
     // the bytes one frame puts on the pad's PID
@@ -797,8 +803,11 @@ impl AsyncElement for TsMux {
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     let access_unit = match self.aac.as_mut() {
                         Some(aac) => {
-                            if aac.consume_config(slice, muxer)? {
+                            let config = aac.consume_config(slice, muxer)?;
+                            if aac.is_loas() {
                                 mux.set_stream_latm(0);
+                            }
+                            if config {
                                 return Ok(());
                             }
                             aac.access_unit(slice, muxer)?
@@ -1056,5 +1065,42 @@ mod tests {
             .process(system_frame(USAC_CONFIG.to_vec(), 0), &mut ts_sink)
             .await;
         assert_eq!(result, Err(G2gError::CapsMismatch));
+    }
+
+    #[tokio::test]
+    async fn loas_frames_go_out_unchanged_under_the_latm_stream_type() {
+        use crate::aacparse::loas_from_asc;
+        use crate::mpegts::{TsDemuxer, STREAM_TYPE_AAC_LATM, TS_PACKET_LEN};
+        // AAC LC, 48 kHz, stereo
+        const LC_CONFIG: [u8; 2] = [0x11, 0x90];
+        let frames: Vec<Vec<u8>> = [[0x21u8, 0x10, 0x04], [0x21, 0x10, 0x05]]
+            .iter()
+            .map(|unit| loas_from_asc(&LC_CONFIG, unit).unwrap())
+            .collect();
+
+        let mut mux = TsMux::new();
+        mux.configure_pipeline(&Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 2,
+            sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        })
+        .unwrap();
+        let mut ts_sink = CaptureSink::default();
+        for (index, frame) in frames.iter().enumerate() {
+            let pts_ns = index as u64 * 10_000_000;
+            mux.process(system_frame(frame.clone(), pts_ns), &mut ts_sink)
+                .await
+                .unwrap();
+        }
+
+        let mut demuxer = TsDemuxer::new();
+        for packet in ts_sink.frames.concat().chunks(TS_PACKET_LEN) {
+            demuxer.push_packet(packet);
+        }
+        demuxer.flush();
+        assert_eq!(demuxer.streams()[0].stream_type, STREAM_TYPE_AAC_LATM);
+        let carried: Vec<Vec<u8>> = demuxer.take_units().into_iter().map(|u| u.data).collect();
+        assert_eq!(carried, frames);
     }
 }
