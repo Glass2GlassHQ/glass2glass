@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1867: hlssrc resolves the multivariant playlist again when a media playlist reload answers 4xx, so it survives an origin restart that drops its session.
 - M1866: rtspsrc fails with `G2gError::Network(NetworkFailure::Connect)` during session setup and `G2gError::RtspStream` once media flows, and logs retina's message.
 - M1860: a one-pad `matroskamux` or `mp4mux` builds the fan-in muxer, and the single-input `MkvMux` and `Mp4Mux` are removed.
 - M1863: muxers take an unknown audio rate or channel count from the AAC or Opus config and fail when the stream states neither.

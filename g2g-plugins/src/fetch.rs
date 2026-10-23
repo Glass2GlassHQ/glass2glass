@@ -326,8 +326,9 @@ pub(crate) async fn get_text_retrying(
     client: &reqwest::Client,
     url: &str,
     max: usize,
+    retry: FetchRetry,
 ) -> Result<String, G2gError> {
-    let bytes = get_bytes_retrying(client, url, max, FetchRetry::BUDGETED).await?;
+    let bytes = get_bytes_retrying(client, url, max, retry).await?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 

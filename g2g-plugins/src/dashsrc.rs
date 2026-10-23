@@ -100,7 +100,7 @@ async fn reload_manifest(
     url: &str,
 ) -> Result<(Mpd, RequestSpan), G2gError> {
     let sent_unix = local_now_unix();
-    let text = get_text_retrying(client, url, MAX_MANIFEST_BYTES).await?;
+    let text = get_text_retrying(client, url, MAX_MANIFEST_BYTES, FetchRetry::BUDGETED).await?;
     parse_manifest(&text, sent_unix)
 }
 

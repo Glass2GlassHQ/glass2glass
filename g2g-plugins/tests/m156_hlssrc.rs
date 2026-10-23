@@ -311,6 +311,96 @@ async fn live_reloads_playlist_and_plays_each_new_segment_once() {
     );
 }
 
+// mediamtx's shape: the master hands out a session in the media playlist URL, and a
+// restarted server answers the old session with 401 and starts its sequence again
+fn serve_restarting_origin(before: Vec<u8>, after: Vec<Vec<u8>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let mut session = 1;
+        let mut first_session_loads = 0;
+        for conn in listener.incoming() {
+            let Ok(mut stream) = conn else { break };
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while stream.read(&mut byte).unwrap_or(0) == 1 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&req);
+            let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+            let body: Vec<u8> = if path == "/master.m3u8" {
+                format!(
+                    "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nmedia.m3u8?session={session}\n"
+                )
+                .into_bytes()
+            } else if path == "/media.m3u8?session=1" && session == 1 {
+                first_session_loads += 1;
+                if first_session_loads > 1 {
+                    session = 2;
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    continue;
+                }
+                "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1.0,\nbefore.ts\n"
+                    .as_bytes()
+                    .to_vec()
+            } else if path == "/media.m3u8?session=2" && session == 2 {
+                let mut playlist =
+                    String::from("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n");
+                for index in 0..after.len() {
+                    playlist.push_str(&format!("#EXTINF:1.0,\nafter{index}.ts\n"));
+                }
+                playlist.push_str("#EXT-X-ENDLIST\n");
+                playlist.into_bytes()
+            } else if path == "/before.ts" {
+                before.clone()
+            } else if let Some(index) = path
+                .strip_prefix("/after")
+                .and_then(|s| s.strip_suffix(".ts"))
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                after[index].clone()
+            } else {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                continue;
+            };
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    format!("http://127.0.0.1:{port}/master.m3u8")
+}
+
+#[tokio::test]
+async fn a_lost_session_resolves_the_master_again_and_flushes() {
+    let segment = |seed: u8| -> Vec<u8> { (0..1000u32).map(|i| (i as u8) ^ seed).collect() };
+    let before = segment(11);
+    let after = vec![segment(23), segment(47)];
+    let url = serve_restarting_origin(before.clone(), after.clone());
+
+    let mut src = HlsSrc::new(url).with_reload_interval_ms(20);
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .unwrap();
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    assert!(sink.eos);
+    assert_eq!(sink.flushes, 1);
+    assert_eq!(sink.body, [before, after.concat()].concat());
+}
+
 /// A live server whose first media-playlist load offers a *wide* window (6
 /// one-second segments, no ENDLIST), then on the next reload appends ENDLIST with
 /// the same segments. Used to prove live-edge start.

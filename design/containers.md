@@ -1272,6 +1272,13 @@ because a live packager pads a freshly started playlist with placeholders whose
 URI it never wrote, and loading one is a 404 that would fail the run before the
 first frame.
 
+A media playlist reload that a multivariant playlist pointed to and that answers
+4xx resolves the multivariant URL again. mediamtx puts a session in the media
+playlist URL and answers it with 401 after a restart, so the source takes the new
+session, waits through the restarted origin's 404s with the not-yet-published
+retry, starts at the new playlist's live edge and sends a `Flush` ahead of the
+new stream. gst's hlsdemux fails on the same restart.
+
 `with_abr()` makes it throughput-adaptive. A shared `abr::BandwidthEstimator`
 keeps an EWMA of measured download throughput, bytes over elapsed
 `monotonic_ns`, and yields an effective bandwidth cap, the estimate scaled by a

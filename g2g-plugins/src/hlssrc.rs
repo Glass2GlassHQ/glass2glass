@@ -60,9 +60,10 @@ use alloc::vec::Vec;
 use g2g_core::log::LogSource;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
-    g2g_debug, AudioFormat, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, Dim, ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, Seek, Segment, StreamType, TextFormat, VideoCodec,
+    g2g_debug, g2g_warn, AudioFormat, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, OutputSink, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, StreamType, TextFormat,
+    VideoCodec,
 };
 
 use crate::abr::BandwidthEstimator;
@@ -431,7 +432,8 @@ impl HlsSrc {
             return Ok(enc);
         }
         let client = reqwest::Client::new();
-        let (media, media_url) = resolve_media(&client, &self.url, self.cap()).await?;
+        let text = get_text(&client, &self.url, MAX_MANIFEST_BYTES).await?;
+        let (media, media_url) = resolve_media(&client, &self.url, &text, self.cap()).await?;
         let enc = if media.map_uri.is_some() {
             ByteStreamEncoding::IsoBmff
         } else {
@@ -443,15 +445,15 @@ impl HlsSrc {
     }
 }
 
-/// Fetch `url` and resolve a master playlist down to a media playlist, returning
+/// Resolve the playlist `text` fetched from `url` down to a media playlist, returning
 /// it with the URL it came from (for segment-URI resolution and live reload).
 async fn resolve_media(
     client: &reqwest::Client,
     url: &str,
+    text: &str,
     cap: Option<u64>,
 ) -> Result<(MediaPlaylist, String), G2gError> {
-    let text = get_text(client, url, MAX_MANIFEST_BYTES).await?;
-    match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
+    match parse(text).map_err(|_| G2gError::CapsMismatch)? {
         Playlist::Media(m) => Ok((m, String::from(url))),
         Playlist::Master(master) => {
             let variant = master.select(cap).ok_or(G2gError::CapsMismatch)?;
@@ -482,6 +484,40 @@ async fn fetch_variant_media(
     match parse(&media_text).map_err(|_| G2gError::CapsMismatch)? {
         Playlist::Media(m) => Ok((m, media_url, variant_uri)),
         Playlist::Master(_) => Err(G2gError::CapsMismatch),
+    }
+}
+
+// the ABR path's playlist: a media playlist, and the master and variant URI it came from when there is one
+struct AbrPlaylist {
+    media: MediaPlaylist,
+    media_url: String,
+    master: Option<(MasterPlaylist, String)>,
+    variant_uri: Option<String>,
+}
+
+async fn resolve_abr(
+    client: &reqwest::Client,
+    url: &str,
+    text: &str,
+    cap: Option<u64>,
+) -> Result<AbrPlaylist, G2gError> {
+    match parse(text).map_err(|_| G2gError::CapsMismatch)? {
+        Playlist::Media(media) => Ok(AbrPlaylist {
+            media,
+            media_url: String::from(url),
+            master: None,
+            variant_uri: None,
+        }),
+        Playlist::Master(master) => {
+            let (media, media_url, variant_uri) =
+                fetch_variant_media(client, &master, url, cap).await?;
+            Ok(AbrPlaylist {
+                media,
+                media_url,
+                master: Some((master, String::from(url))),
+                variant_uri: Some(variant_uri),
+            })
+        }
     }
 }
 
@@ -692,6 +728,16 @@ fn live_edge_start(media: &MediaPlaylist) -> usize {
 /// past the hold-back point to the nearest `INDEPENDENT` part (or the segment
 /// start, which always begins with a keyframe), so the decoder joins on a frame
 /// it can decode. Clamped to the front of the window.
+fn start_position(media: &MediaPlaylist, full_replay: bool, ll: bool) -> (u64, usize) {
+    if full_replay {
+        (media.media_sequence, 0)
+    } else if ll {
+        ll_edge_start(media)
+    } else {
+        (media.media_sequence + live_edge_start(media) as u64, 0)
+    }
+}
+
 fn ll_edge_start(media: &MediaPlaylist) -> (u64, usize) {
     let hold_back_ns = u64::from(media.part_hold_back_ms()).saturating_mul(1_000_000);
     let mut behind_ns = 0u64;
@@ -802,22 +848,19 @@ impl SourceLoop for HlsSrc {
                 // Drop any probed media: ABR resolves fresh, keeping the master.
                 self.probed = None;
                 let text = get_text(&client, &self.url, MAX_MANIFEST_BYTES).await?;
-                match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
-                    Playlist::Media(m) => (m, self.url.clone()),
-                    Playlist::Master(mst) => {
-                        let (m, murl, uri) =
-                            fetch_variant_media(&client, &mst, &self.url, self.cap()).await?;
-                        master = Some((mst, self.url.clone()));
-                        current_variant = Some(uri);
-                        (m, murl)
-                    }
-                }
+                let resolved = resolve_abr(&client, &self.url, &text, self.cap()).await?;
+                master = resolved.master;
+                current_variant = resolved.variant_uri;
+                (resolved.media, resolved.media_url)
             } else {
                 // Reuse the playlist the probe already fetched at negotiation; only
                 // resolve again if run() is entered without a prior probe.
                 match self.probed.take() {
                     Some(probed) => probed,
-                    None => resolve_media(&client, &self.url, self.cap()).await?,
+                    None => {
+                        let text = get_text(&client, &self.url, MAX_MANIFEST_BYTES).await?;
+                        resolve_media(&client, &self.url, &text, self.cap()).await?
+                    }
                 }
             };
 
@@ -852,13 +895,7 @@ impl SourceLoop for HlsSrc {
             // (skipping the stale front of the window) instead of its start, so
             // playback follows what is being published; VOD starts at the front. The
             // `full_replay` opt-in starts a live playlist from the window front too.
-            let (mut next_seq, mut next_part) = if self.full_replay {
-                (media.media_sequence, 0usize)
-            } else if ll {
-                ll_edge_start(&media)
-            } else {
-                (media.media_sequence + live_edge_start(&media) as u64, 0)
-            };
+            let (mut next_seq, mut next_part) = start_position(&media, self.full_replay, ll);
             // fMP4: the EXT-X-MAP init segment (ftyp+moov) is emitted once, before
             // any media fragment, so a downstream fmp4demux sees the moov first.
             let mut init_emitted = false;
@@ -1142,9 +1179,13 @@ impl SourceLoop for HlsSrc {
                                 if current_variant.as_deref() != Some(best.uri.as_str()) {
                                     let new_uri = best.uri.clone();
                                     let new_url = resolve_url(master_url, &new_uri);
-                                    let text =
-                                        get_text_retrying(&client, &new_url, MAX_MANIFEST_BYTES)
-                                            .await?;
+                                    let text = get_text_retrying(
+                                        &client,
+                                        &new_url,
+                                        MAX_MANIFEST_BYTES,
+                                        FetchRetry::BUDGETED,
+                                    )
+                                    .await?;
                                     if let Playlist::Media(m) =
                                         parse(&text).map_err(|_| G2gError::CapsMismatch)?
                                     {
@@ -1246,7 +1287,67 @@ impl SourceLoop for HlsSrc {
                         // A full interval behind: reload now, do not burst.
                         next_reload = Some(scheduled.max(now + interval / 2));
                         g2g_debug!(self, "timed reload after {} ms", interval_ms);
-                        get_text_retrying(&client, &media_url, MAX_MANIFEST_BYTES).await?
+                        let reloaded = get_text_retrying(
+                            &client,
+                            &media_url,
+                            MAX_MANIFEST_BYTES,
+                            FetchRetry::BUDGETED,
+                        )
+                        .await;
+                        match reloaded {
+                            Ok(text) => text,
+                            // a restarted server forgets the session its master put in the media playlist URL
+                            Err(G2gError::Hardware(HardwareError::Http(status)))
+                                if reqwest::StatusCode::from_u16(status)
+                                    .is_ok_and(|code| code.is_client_error())
+                                    && media_url != self.url =>
+                            {
+                                g2g_warn!(
+                                    self,
+                                    "{media_url} answered {status}, resolving {} again",
+                                    self.url
+                                );
+                                // the restarted server serves no playlist until its publisher is back
+                                let restart_retry = FetchRetry {
+                                    live_segment_duration: Some(core::time::Duration::from_millis(
+                                        target_ms,
+                                    )),
+                                };
+                                let text = get_text_retrying(
+                                    &client,
+                                    &self.url,
+                                    MAX_MANIFEST_BYTES,
+                                    restart_retry,
+                                )
+                                .await?;
+                                if self.abr {
+                                    let resolved =
+                                        resolve_abr(&client, &self.url, &text, self.cap()).await?;
+                                    master = resolved.master;
+                                    current_variant = resolved.variant_uri;
+                                    media = resolved.media;
+                                    media_url = resolved.media_url;
+                                } else {
+                                    (media, media_url) =
+                                        resolve_media(&client, &self.url, &text, self.cap())
+                                            .await?;
+                                }
+                                // the new session's stream restarts, like the re-read stream after a seek
+                                emitted_bytes = 0;
+                                if let Some(handle) = &self.sample_aes_key {
+                                    handle.lock().expect("key handle poisoned").reset_timeline();
+                                }
+                                out.push(PipelinePacket::Flush).await?;
+                                ll = self.low_latency && !text_mode && media.low_latency();
+                                blocking_misses = 0;
+                                (next_seq, next_part) =
+                                    start_position(&media, self.full_replay, ll);
+                                init_emitted = false;
+                                next_reload = None;
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        }
                     }
                 };
                 media = match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
