@@ -1052,6 +1052,30 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn sends_a_core_rate_sbr_config_ahead_of_raw_units() {
+        // fate-suite aac/al_sbr_sr_48_2_fsaac48.mp4: AAC-LC at 48 kHz, then SBR announced at 48 kHz
+        let sbr_config = [0x11u8, 0x90, 0x56, 0xE5, 0x98];
+        let units = [[0x21u8, 0x10, 0x04], [0x60, 0x8C, 0x1A]];
+        let mut audio_config_body = alloc::vec![0xAFu8, 0x00];
+        audio_config_body.extend_from_slice(&sbr_config);
+        let stream = flv_stream(&[
+            tag(8, 0, &audio_config_body),
+            tag(8, 0, &aac_raw(&units[0])),
+            tag(8, 10, &aac_raw(&units[1])),
+        ]);
+
+        let mut audio = FlvDemux::new().with_stream(FlvStream::Aac);
+        audio.configure_pipeline(&FlvDemux::input_caps()).unwrap();
+        let mut asink = CaptureSink::default();
+        run_demux(&mut audio, &stream, &mut asink).await;
+        assert_eq!(
+            asink.frames,
+            alloc::vec![sbr_config.to_vec(), units[0].to_vec(), units[1].to_vec()],
+            "ADTS would make a decoder double the core rate"
+        );
+    }
+
     fn amf0_string(s: &str) -> Vec<u8> {
         let mut v = alloc::vec![0x02u8]; // STRING marker
         v.extend_from_slice(&(s.len() as u16).to_be_bytes());

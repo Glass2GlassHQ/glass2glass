@@ -104,10 +104,13 @@ pub(crate) fn strip_adts(au: &[u8]) -> &[u8] {
 /// puts the ASC's program config element in front of the AU, as ffmpeg's ADTS
 /// muxer does. The inverse of the muxers' de-ADTS write, so the demuxed audio is
 /// self-describing. `None` when ADTS cannot carry the configuration (an object
-/// type past AAC LTP, an explicit rate, a 960-sample frame, malformed bits) or
-/// the frame exceeds the 13-bit ADTS length. Shared by the MP4 and FLV
-/// demuxers (M662).
+/// type past AAC LTP, an explicit rate, a 960-sample frame, an SBR output rate
+/// other than double the core rate, malformed bits) or the frame exceeds the
+/// 13-bit ADTS length. Shared by the MP4 and FLV demuxers (M662).
 pub(crate) fn adts_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
+    if has_undoubled_sbr(asc) {
+        return None;
+    }
     let mut r = BitReader::new(asc);
     let core = read_adts_core_config(&mut r)?;
     // GASpecificConfig: frameLengthFlag, dependsOnCoreCoder, extensionFlag
@@ -1283,6 +1286,8 @@ mod tests {
             !is_raw_aac_config(&doubled),
             "ADTS implies the doubled rate"
         );
+        assert!(adts_from_asc(&same_rate, &[0xAA]).is_none());
+        assert!(adts_from_asc(&doubled, &[0xAA]).is_some());
     }
 
     #[test]
