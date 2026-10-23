@@ -436,8 +436,9 @@ pub struct Mp4DemuxN {
     /// list's priming trim, a video edit's start and stop, open when none or not
     /// yet known.
     port_edit: Vec<Segment>,
-    // the earliest presented start among the forwarded tracks, so their positions share one origin
-    stream_start_ns: Option<u64>,
+    // where the earliest forwarded track starts on the presentation timeline, so the ports keep one origin
+    presentation_start_ns: Option<u64>,
+    port_first_presented_ns: Vec<Option<u64>>,
     segment_sent: Vec<Segment>,
     // a seek holds a fragmented file whole too, since it is served from the whole file at Eos
     seek: Option<SeekController>,
@@ -480,6 +481,7 @@ impl Mp4DemuxN {
             })
             .collect();
         let announced = alloc::vec![false; ports.len()];
+        let port_first_presented_ns = alloc::vec![None; ports.len()];
         let need_config = alloc::vec![true; ports.len()];
         let held_fragment_ns = alloc::vec![None; ports.len()];
         let port_edit = alloc::vec![Segment::new(); ports.len()];
@@ -505,7 +507,8 @@ impl Mp4DemuxN {
             upstream_segment: Segment::new(),
             segment_sent: port_edit.clone(),
             port_edit,
-            stream_start_ns: None,
+            presentation_start_ns: None,
+            port_first_presented_ns,
             seek: None,
         }
     }
@@ -831,9 +834,12 @@ impl Mp4DemuxN {
                 }
                 b"mdat" => {
                     let Some(start) = frag_start.take() else {
-                        // A standalone `mdat` (no preceding `moof`) is the progressive
-                        // layout; it is parsed whole at `Eos`, not here.
-                        break;
+                        // ffmpeg's frag_keyframe without empty_moov keeps the first fragment's samples in the moov
+                        g2g_error!(
+                            Target::category(short_type_name::<Self>()),
+                            "a fragmented file with samples outside its fragments is not supported"
+                        );
+                        return Err(G2gError::CapsMismatch);
                     };
                     let end = off + size;
                     let mut fragment_starts = core::mem::take(&mut self.fragment_starts);
@@ -847,7 +853,7 @@ impl Mp4DemuxN {
                     let samples = samples?;
                     self.learn_held_fragment(&samples);
                     let samples = edit_track_samples(&forwarded, samples);
-                    self.learn_stream_start(&forwarded, &samples);
+                    self.learn_presentation_start(&forwarded, &samples);
                     let framerates = forwarded
                         .iter()
                         .map(|track| track_fragment_framerate_q16(&self.buf[start..end], track))
@@ -902,9 +908,12 @@ impl Mp4DemuxN {
     /// clipped, starting no earlier than the stream start its positions count from.
     fn port_segment(&self, port: usize) -> Segment {
         let presented = within_presentation(self.upstream_segment, &self.port_edit[port]);
-        let Some(stream_start_ns) = self.stream_start_ns else {
+        let Some(presentation_start_ns) = self.presentation_start_ns else {
             return presented;
         };
+        let stream_start_ns = self.port_edit[port]
+            .start
+            .saturating_add(presentation_start_ns);
         with_stream_time(
             Segment {
                 start: presented.start.max(stream_start_ns),
@@ -925,22 +934,29 @@ impl Mp4DemuxN {
         Ok(())
     }
 
-    fn learn_stream_start(&mut self, tracks: &[TrackHeader], samples: &[(u32, Sample)]) {
-        if self.stream_start_ns.is_some() {
-            return;
+    fn learn_presentation_start(&mut self, tracks: &[TrackHeader], samples: &[(u32, Sample)]) {
+        for track in tracks {
+            let Some(port) = self.port_of(track.track_id) else {
+                continue;
+            };
+            if self.port_first_presented_ns[port].is_some() {
+                continue;
+            }
+            // a track's first pts past its edit-list start, as ffmpeg's start_time
+            self.port_first_presented_ns[port] = samples
+                .iter()
+                .filter(|(track_id, _)| *track_id == track.track_id)
+                .map(|(_, sample)| sample.pts_ns)
+                .min()
+                .map(|first_pts_ns| {
+                    first_pts_ns.saturating_sub(track.presentation_segment().start)
+                });
         }
-        // as ffmpeg's start_time, the later of a track's edit-list start and its first pts
-        self.stream_start_ns = tracks
-            .iter()
-            .filter_map(|track| {
-                let first_pts_ns = samples
-                    .iter()
-                    .filter(|(track_id, _)| *track_id == track.track_id)
-                    .map(|(_, sample)| sample.pts_ns)
-                    .min()?;
-                Some(track.presentation_segment().start.max(first_pts_ns))
-            })
-            .min();
+        // a fragment can carry one track alone, and a later track can start earlier
+        if self.port_first_presented_ns.iter().all(Option::is_some) {
+            self.presentation_start_ns =
+                self.port_first_presented_ns.iter().flatten().min().copied();
+        }
     }
 
     /// Parse the whole buffered file at `Eos` and emit every sample, for a
@@ -971,7 +987,7 @@ impl Mp4DemuxN {
             parse_progressive_multi(&self.buf, &forwarded)?
         };
         let samples = edit_track_samples(&forwarded, samples);
-        self.learn_stream_start(&forwarded, &samples);
+        self.learn_presentation_start(&forwarded, &samples);
         let framerates = forwarded
             .iter()
             .map(|track| track_framerate_q16(&self.buf, track))
@@ -1306,7 +1322,6 @@ impl MultiOutputElement for Mp4DemuxN {
                     // The byte coordinate restarts with the re-read stream, the
                     // same reset the key publisher does at this flush.
                     self.drained = 0;
-                    self.stream_start_ns = None;
                     for owed in self.need_config.iter_mut() {
                         *owed = true;
                     }

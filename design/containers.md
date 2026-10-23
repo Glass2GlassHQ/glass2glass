@@ -920,10 +920,13 @@ the whole-file `ByteStream{Mp4}`, where an `Mp4DemuxN` with probed ports also
 reads the streaming `IsoBmff`. Either emits a fragmented file fragment by
 fragment and a progressive one at EOS. A one-port `Mp4DemuxN` serves a time seek
 from the whole file (`ElementSeekRoute::Buffered`), so a seek holds a fragmented
-file until EOS too. Every port's segment starts no earlier than the stream start
-and counts stream time from it, the earliest among the forwarded tracks of the
-later of a track's edit-list start and its first pts, so the ports keep one
-origin and a position read back seeks to its frame.
+file until EOS too. The ports share one presentation start, the earliest among
+the forwarded tracks of a track's first pts past its edit-list start, learned
+from the first samples out and kept across a flush. A port's segment starts no
+earlier than its edit-list start plus that presentation start and counts stream
+time from there, so the tracks keep one origin and a position read back seeks to
+its frame. A fragmented file that also keeps samples in its `moov` (ffmpeg's
+`frag_keyframe` without `empty_moov`) fails with `CapsMismatch`.
 
 `Mp4DemuxN` reports a track's frame rate as `timescale / delta` when every `stts`
 entry codes the same sample delta, and `Rate::Any` when the deltas vary, the
