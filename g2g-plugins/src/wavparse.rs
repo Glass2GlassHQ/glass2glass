@@ -107,7 +107,11 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
     let channels = read_u16(body, 2)?;
     let sample_rate = read_u32(body, 4)?;
     let byte_rate = read_u32(body, 8)?;
-    let block_align = read_u16(body, BLOCK_ALIGN_OFFSET)?;
+    // ffmpeg's wav demuxer reads XMA in whole packets, whatever block align the header gives
+    let block_align = match tag {
+        WAVE_FORMAT_XMA1 | WAVE_FORMAT_XMA2 => XMA_PACKET_LEN,
+        _ => read_u16(body, BLOCK_ALIGN_OFFSET)?,
+    };
     let bits = read_u16(body, BITS_OFFSET)?;
     if channels == 0 || channels > u8::MAX as u16 || sample_rate == 0 {
         return None;
@@ -134,6 +138,9 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
 
 const BLOCK_ALIGN_OFFSET: usize = 12;
 const BITS_OFFSET: usize = 14;
+const WAVE_FORMAT_XMA1: u16 = 0x0165;
+const WAVE_FORMAT_XMA2: u16 = 0x0166;
+const XMA_PACKET_LEN: u16 = 2048;
 
 // the chunk's `wFormatTag`, or for WAVE_FORMAT_EXTENSIBLE the tag its GUID extends
 fn format_tag(body: &[u8]) -> Option<u16> {

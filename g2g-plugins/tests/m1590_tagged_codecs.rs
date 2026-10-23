@@ -16,7 +16,9 @@ const GSM_WAV: &str = "tagged_gsm_ms.wav";
 const SCREENPRESSO_CUT_AVI: &str = "tagged_screenpresso_cut.avi";
 // two 32x16 frames of HuffYUV 4:2:2 in AVI, beside ffmpeg's yuv422p decode
 const HUFFYUV_422_AVI: &str = "tagged_huffyuv_422.avi";
-// every fixture carries 8 kHz mono audio
+// fate-suite's three-channel 48 kHz XMA2 in WAV
+const XMA2_WAV: &str = "xma2_multistream_tail.xma";
+// every other fixture carries 8 kHz mono audio
 const AUDIO_CAPS: &str = "audio/x-raw,format=S16LE,rate=8000,channels=1";
 
 struct ZeroClock;
@@ -38,10 +40,13 @@ fn temp_path(tag: &str) -> PathBuf {
 
 // what `filesrc ! decodebin ! <tail> ! filesink` writes for `input`
 async fn decode(input: &Path, tail: &str, tag: &str) -> Vec<u8> {
+    decode_from(&format!("filesrc location={}", input.display()), tail, tag).await
+}
+
+async fn decode_from(source: &str, tail: &str, tag: &str) -> Vec<u8> {
     let out = temp_path(tag);
     let line = format!(
-        "filesrc location={} ! decodebin ! {tail} ! filesink location={}",
-        input.display(),
+        "{source} ! decodebin ! {tail} ! filesink location={}",
         out.display()
     );
     let graph =
@@ -109,6 +114,18 @@ async fn a_wav_codec_known_only_by_its_tag_decodes() {
     let tail = format!("audioconvert ! {AUDIO_CAPS}");
     let decoded = decode(&fixture(GSM_WAV), &tail, "gsm").await;
     assert_eq!(decoded, expected(&format!("{GSM_WAV}.s16le")));
+}
+
+// an input chunk smaller than one 2048-byte XMA packet, whose header gives a block align of 6
+#[tokio::test]
+async fn a_wav_xma2_stream_decodes_in_whole_packets_from_small_input_chunks() {
+    const SMALL_INPUT_CHUNK: usize = 188;
+    let source = format!(
+        "filesrc location={} blocksize={SMALL_INPUT_CHUNK}",
+        fixture(XMA2_WAV).display()
+    );
+    let decoded = decode_from(&source, "audioconvert ! audio/x-raw,format=S16LE", "xma2").await;
+    assert_eq!(decoded, expected(&format!("{XMA2_WAV}.s16le")));
 }
 
 #[tokio::test]
