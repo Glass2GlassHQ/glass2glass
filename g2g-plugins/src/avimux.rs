@@ -29,7 +29,7 @@ use g2g_core::{
 };
 
 use crate::avi::{AviWriteStream, AviWriter};
-use crate::mux::refused_input;
+use crate::mux::{refused_input, refused_input_because};
 use g2g_core::log::short_type_name;
 
 fn output_caps() -> Caps {
@@ -405,7 +405,11 @@ impl MultiInputElement for AviMuxN {
             .enumerate()
             .any(|(i, s)| i != input && matches!(s, Some(AviWriteStream::Video { .. })));
         if video && already_video {
-            return Err(G2gError::CapsMismatch);
+            return Err(refused_input_because(
+                short_type_name::<Self>(),
+                absolute_caps,
+                "AVI holds one video stream",
+            ));
         }
         self.streams[input] = Some(stream);
         Ok(ConfigureOutcome::Accepted)

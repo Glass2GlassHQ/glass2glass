@@ -61,7 +61,7 @@ use crate::mp4box::{
     ftyp, ftyp_cmaf, full_box, mp4_box, prft, put_box_header, styp_cmaf, udta_with_tags,
     BOX_HEADER_LEN, MATRIX,
 };
-use crate::mux::refused_input;
+use crate::mux::{refused_input, refused_input_because};
 use crate::opusparse::{
     dops_from_opus_head, is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP,
 };
@@ -1165,7 +1165,11 @@ impl MultiInputElement for Mp4MuxN {
         // CMAF puts exactly one media stream in a track file, in the fragmented
         // layout. Refuse rather than write a file that claims a brand it breaks.
         if self.cmaf && (self.inputs > 1 || !self.fragmented) {
-            return Err(G2gError::CapsMismatch);
+            return Err(refused_input_because(
+                short_type_name::<Self>(),
+                absolute_caps,
+                "a CMAF track file holds one stream, fragmented",
+            ));
         }
         let kind = Self::pad_kind_for(absolute_caps)
             .ok_or_else(|| refused_input(short_type_name::<Self>(), absolute_caps))?;

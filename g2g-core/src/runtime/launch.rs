@@ -232,10 +232,13 @@ pub enum ParseError {
         element: String,
         consumer: String,
     },
-    /// A `decodebin name=d` fan-out follows an element that is neither a file of a
-    /// container g2g demuxes nor a source whose location a URI fan-out probes (the
-    /// element and its location are named).
-    DecodebinFanoutUpstream(String),
+    /// A `decodebin name=d` or `parsebin name=p` fan-out follows an element that is
+    /// neither a file of a container g2g demuxes nor a source whose location a URI
+    /// fan-out probes (the bin, and the element with its location, are named).
+    DecodebinFanoutUpstream {
+        bin: String,
+        upstream: String,
+    },
     // a decodebin's current-video / current-audio names a stream past the last of that kind
     StreamIndexOutOfRange {
         source: String,
@@ -373,9 +376,9 @@ impl core::fmt::Display for ParseError {
             ParseError::NoFanoutStream { element, consumer } => {
                 write!(f, "{element}: no free stream of a kind {consumer} takes")
             }
-            ParseError::DecodebinFanoutUpstream(upstream) => write!(
+            ParseError::DecodebinFanoutUpstream { bin, upstream } => write!(
                 f,
-                "decodebin name=d fans out behind a file of a container g2g demuxes or an HLS playlist source, not behind {upstream} (for an rtsp:// stream use uridecodebin uri=... name=d or rtspsrc name=s)"
+                "{bin} fans out behind a file of a container g2g demuxes or an HLS playlist source, not behind {upstream} (for an rtsp:// stream use uridecodebin uri=... name=d or rtspsrc name=s)"
             ),
             ParseError::NoDecodeChain(caps) => {
                 write!(f, "decodebin: no decoder chain from {caps} to raw (no decoder feature compiled in, or a container that needs a demuxer)")
@@ -3219,11 +3222,12 @@ fn build_graph(
             .ok_or(ParseError::DecodebinNoUpstream)?;
         let upstream_spec = &specs[upstream];
         let location = prop(upstream_spec, "location");
-        let unsupported = || {
-            ParseError::DecodebinFanoutUpstream(match location {
+        let unsupported = || ParseError::DecodebinFanoutUpstream {
+            bin: specs[ei].name.clone(),
+            upstream: match location {
                 Some(location) => alloc::format!("{} location={location}", upstream_spec.name),
                 None => upstream_spec.name.clone(),
-            })
+            },
         };
         let location = location.ok_or_else(unsupported)?;
         // a network location is a URI, which the file hooks would open as a path

@@ -39,10 +39,17 @@ fn decodebin_fans_out_the_streams_of_an_hls_playlist() {
 #[test]
 fn a_source_with_no_container_to_probe_is_named() {
     let upstream = "videotestsrc";
-    let line = format!("{upstream} ! decodebin name=d  d. ! fakesink  d. ! fakesink");
-    let error = parse_launch(&default_registry(), &line).expect_err("nothing to fan out");
-    assert!(
-        matches!(&error, ParseError::DecodebinFanoutUpstream(name) if name == upstream),
-        "{error}"
-    );
+    for bin in ["decodebin", "parsebin"] {
+        let line = format!("{upstream} ! {bin} name=d  d. ! fakesink  d. ! fakesink");
+        let error = parse_launch(&default_registry(), &line).expect_err("nothing to fan out");
+        assert!(
+            matches!(
+                &error,
+                ParseError::DecodebinFanoutUpstream { bin: named_bin, upstream: named_upstream }
+                    if named_bin == bin && named_upstream == upstream
+            ),
+            "{error}"
+        );
+        assert!(error.to_string().starts_with(bin), "{error}");
+    }
 }

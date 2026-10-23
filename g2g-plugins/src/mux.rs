@@ -35,6 +35,16 @@ pub(crate) fn refused_input(muxer: &'static str, caps: &Caps) -> G2gError {
     G2gError::CapsMismatch
 }
 
+// a muxer that carries the codec but not this stream beside the ones it already has
+pub(crate) fn refused_input_because(muxer: &'static str, caps: &Caps, reason: &str) -> G2gError {
+    g2g_error!(
+        Target::category(muxer),
+        "cannot carry {}: {reason}",
+        caps.to_gst_string()
+    );
+    G2gError::CapsMismatch
+}
+
 /// # Example
 ///
 /// ```no_run
@@ -216,6 +226,11 @@ mod tests {
     #[cfg(feature = "std")]
     fn refusal_lines<M: MultiInputElement>(mut mux: M, caps: &Caps) -> Vec<alloc::string::String> {
         use g2g_core::log::{self, RingSink};
+        // every sink sees every test's records, so two refusals logged at once mix
+        static ONE_REFUSAL_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _serial = ONE_REFUSAL_AT_A_TIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ring = RingSink::new(64);
         let sink = log::add_sink(alloc::boxed::Box::new(ring.clone()));
         let result = mux.configure_pipeline(1, caps);
@@ -254,6 +269,43 @@ mod tests {
         assert_eq!(
             refusal_lines(crate::avimux::AviMuxN::new(2), &raw),
             expected
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_muxer_names_the_stream_it_has_no_room_for() {
+        let h264 = Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H264,
+            width: Dim::Fixed(16),
+            height: Dim::Fixed(16),
+            framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
+        };
+        let expected = |reason: &str| {
+            alloc::vec![alloc::format!(
+                "cannot carry {}: {reason}",
+                h264.to_gst_string()
+            )]
+        };
+        let mut flv = crate::flvmuxn::FlvMuxN::new(2);
+        flv.configure_pipeline(0, &h264)
+            .expect("the first video track");
+        assert_eq!(
+            refusal_lines(flv, &h264),
+            expected("FLV holds one video and one audio track")
+        );
+        let mut avi = crate::avimux::AviMuxN::new(2);
+        avi.configure_pipeline(0, &h264)
+            .expect("the first video stream");
+        assert_eq!(
+            refusal_lines(avi, &h264),
+            expected("AVI holds one video stream")
+        );
+        assert_eq!(
+            refusal_lines(crate::mp4muxn::Mp4MuxN::new(2).with_cmaf(true), &h264),
+            expected("a CMAF track file holds one stream, fragmented")
         );
     }
 }
