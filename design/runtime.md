@@ -580,7 +580,10 @@ the target from the stream's first timestamp, as ffmpeg's `-ss` counts from the 
 time (gst counts from the first PCR in TS). `DemuxSeek` records the pts of the first
 unit of any track, a seek taken before that unit becomes a pts once it arrives, and an
 index lookup (Matroska `Cues`, the Ogg guess) waits for it and rescans from the file
-start until then. `Mp4Src` counts from the first sample, `Mp4Demux` from the later of
+start until then. `tsdemux` holds every PID's units while a seek waits for the stream
+start, until each PMT stream has shown a stamped unit (or EOS, or 5 MB, ffmpeg's
+probesize), and counts from the earliest of those first stamps, so a file whose audio
+starts before its video seeks as ffmpeg does. `Mp4Src` counts from the first sample, `Mp4Demux` from the later of
 the edit-list start and the first sample. Positions use the same origin. Every segment
 a demuxer or `Mp4Src` sends has `time` set to its start minus the stream start, so the
 sink arm's `Segment::to_stream_time` publishes a position that a seek takes back to the

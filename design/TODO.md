@@ -215,9 +215,6 @@ Highest leverage first:
   Needs a signed `Segment` time offset in g2g-core.
 - **Corpus sweep bugs** (calliope TESTING techniques 21-23, paths under
   `~/.cache/calliope` on hercules):
-  - TS seeks count from the video's first pts instead of the earliest stream's
-    (`gst-medias/defaults/bipbop/gear2/fileSequence2.ts`), and
-    `ac3/mp3ac325-4864-small.ts --seek 0.406011` finds no frame.
   - Seek and position origin is the first unit's pts, where gst uses the lowest
     pts: an open-GOP stream whose leading frames present before the keyframe
     (`h264/H264_might_overflow.mkv`, 1.086 against gst's 1.003) counts from too late.
