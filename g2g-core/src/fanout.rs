@@ -322,6 +322,13 @@ pub trait MultiOutputSource: ElementBound {
     fn latency(&self) -> crate::query::LatencyReport {
         crate::query::LatencyReport::ZERO
     }
+
+    // awaited before negotiation reads `output_caps`, for a source that learns them over the network
+    fn resolve_output_caps<'a>(
+        &'a mut self,
+    ) -> impl core::future::Future<Output = Result<(), G2gError>> + 'a {
+        async move { Ok(()) }
+    }
 }
 
 /// Dyn-safe mirror of [`MultiOutputSource`] (boxed-future `run`), so a terminal
@@ -351,6 +358,9 @@ pub trait DynMultiOutputSource: ElementBound {
     fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
     fn latency(&self) -> crate::query::LatencyReport {
         crate::query::LatencyReport::ZERO
+    }
+    fn resolve_output_caps(&mut self) -> BoxFuture<'_, Result<(), G2gError>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -388,6 +398,9 @@ impl<T: MultiOutputSource> DynMultiOutputSource for T {
     fn latency(&self) -> crate::query::LatencyReport {
         MultiOutputSource::latency(self)
     }
+    fn resolve_output_caps(&mut self) -> BoxFuture<'_, Result<(), G2gError>> {
+        Box::pin(MultiOutputSource::resolve_output_caps(self))
+    }
 }
 
 /// Forwarding impl so a borrowed `&mut dyn DynMultiOutputSource` can be boxed
@@ -416,6 +429,9 @@ impl<'b> DynMultiOutputSource for &'b mut (dyn DynMultiOutputSource + 'b) {
     }
     fn latency(&self) -> crate::query::LatencyReport {
         (**self).latency()
+    }
+    fn resolve_output_caps(&mut self) -> BoxFuture<'_, Result<(), G2gError>> {
+        (**self).resolve_output_caps()
     }
 }
 

@@ -860,6 +860,8 @@ pub mod syncsink;
 #[cfg(feature = "std")]
 pub mod wavsink;
 
+// a one-port fan-out element run as its single-output form
+pub mod oneport;
 #[cfg(feature = "rtsp")]
 pub mod rtspsrc;
 // Multi-track RTSP playback: one session, a video pad and (when the SDP offers

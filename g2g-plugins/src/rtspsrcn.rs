@@ -1,13 +1,17 @@
 //! Multi-track RTSP playback (`RtspSrcN`, `rtsp` feature): one retina session,
-//! one output pad per subscribed track. The fan-out sibling of
-//! [`RtspSrc`](crate::rtspsrc::RtspSrc), which plays the video track alone.
+//! one output pad per subscribed track. [`RtspSrc`](crate::rtspsrc::RtspSrc) is
+//! this element with the video pad alone.
 //!
-//! Output 0 is the first H.264 / H.265 video stream in the SDP, emitted
-//! Annex-B framed exactly as `RtspSrc` emits it. Output 1, when the SDP offers
+//! Output 0 is the first H.264 / H.265 video stream in the SDP, Annex-B framed
+//! with SPS/PPS ahead of every key frame. Output 1, when the SDP offers
 //! a supported audio stream, is that audio: AAC arrives ADTS-framed (retina's
 //! [`FrameFormat::SIMPLE`] wraps it, matching what `Mp4DemuxN` synthesizes from
 //! an `AudioSpecificConfig`), G.711 as raw companded samples. Without audio the
-//! element has a single output and behaves like `RtspSrc`.
+//! element has a single output.
+//!
+//! Negotiation connects, DESCRIBEs and SETUPs every subscribed track, so the
+//! video pad advertises the real codec and geometry. `run` then PLAYs that same
+//! session rather than opening a second one.
 //!
 //! Timestamps: the two streams run on different RTP clocks (90 kHz video,
 //! 48 kHz AAC), so each frame's PTS comes from retina's
@@ -32,27 +36,29 @@ use core::time::Duration;
 
 use alloc::boxed::Box;
 use std::string::{String, ToString};
+use std::sync::Arc;
 use std::vec::Vec;
 
 use futures_util::StreamExt;
-use retina::client::{Described, InitialTimestampPolicy, PlayOptions, Session, SetupOptions};
+use retina::client::{
+    Described, InitialTimestampPolicy, PlayOptions, Session, SessionGroup, SessionOptions,
+    SetupOptions,
+};
 use retina::codec::{AudioParameters, CodecItem, FrameFormat, ParametersRef};
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
+use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, Caps, Dim, FrameTiming, G2gError, MemoryDomain, MultiOutputSink,
     MultiOutputSource, NetworkFailure, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, VideoCodec,
+    PropertySpec, Rate, VideoCodec,
 };
 
 use crate::g711::{G711_CLOCK_RATE_HZ, G711_DEFAULT_CHANNELS};
 use crate::rtspclient::{
     transports_from_flags, transports_to_flags, LowerTransport, ReconnectPolicy, ReconnectState,
-};
-use crate::rtspsrc::{
-    connect_describe, placeholder_framerate, rtsp_failure, video_caps_for, video_codec,
-    video_stream_index, with_placeholder_framerate,
 };
 
 /// User-Agent sent on DESCRIBE / SETUP unless `user-agent` overrides it. Also
@@ -88,6 +94,11 @@ const MAX_INFLATED_METADATA_LEN: usize = 4 * 1024 * 1024;
 /// to pick and the real dimensions can arrive later as a `CapsChanged`.
 const MIN_PLACEHOLDER_DIM: u32 = 2;
 const MAX_PLACEHOLDER_DIM: u32 = 8192;
+// highest frame rate the negotiation placeholder accepts
+const MAX_PLACEHOLDER_FPS: u32 = 240;
+
+// log category shared by RtspSrc and RtspSrcN
+const LOG_CATEGORY: &str = "rtspsrc";
 
 /// Gap inserted in the emitted timeline at a reconnect boundary, so downstream
 /// sees the discontinuity as a jump rather than as overlapping timestamps.
@@ -124,18 +135,27 @@ pub struct RtspTracks {
 pub struct RtspSrcN {
     url: String,
     user_agent: String,
+    /// Optional RTSP authentication. ONVIF cameras almost always gate the
+    /// media stream behind the same user/pass as the device service, so
+    /// `OnvifSrc` resolves a URI and threads these through. `None` =
+    /// anonymous DESCRIBE (the historical default).
     creds: Option<retina::client::Credentials>,
+    /// Lower transports to request at SETUP, in the order they are tried
+    /// (the `protocols` flag set). A transport whose SETUP fails falls through
+    /// to the next, as gst's `rtspsrc protocols=` does.
     transports: Vec<LowerTransport>,
     reconnect: ReconnectPolicy,
     /// Access units each output emits before its `Eos`. `u64::MAX` runs until
     /// the server disconnects.
     frame_limit: u64,
     /// Caller-supplied geometry, taking precedence over [`Self::probed_video`]
-    /// the way `RtspSrc::with_expected_dims` takes precedence over its probe.
+    /// and skipping the negotiation-time connect.
     expected_dims: Option<(u32, u32)>,
     /// Video caps a DESCRIBE resolved, so the chain negotiates the real
-    /// geometry instead of the placeholder range.
+    /// codec and geometry instead of the placeholder range.
     probed_video: Option<Caps>,
+    // set up at negotiation and played by the first session of `run`, a reconnect connects afresh
+    prepared: Option<PreparedSession>,
     /// Negotiation caps of the audio pad, or `None` for a video-only element
     /// (one output).
     audio: Option<Caps>,
@@ -158,6 +178,7 @@ impl RtspSrcN {
             frame_limit: u64::MAX,
             expected_dims: None,
             probed_video: None,
+            prepared: None,
             audio: None,
             onvif_metadata: false,
             requested_outputs: None,
@@ -209,8 +230,8 @@ impl RtspSrcN {
         self
     }
 
-    /// Stop each output after this many access units. Without a limit the
-    /// element runs until the server disconnects.
+    /// Stop emitting after this many `DataFrame` packets per output (excludes
+    /// `Eos`). Without a limit, the source runs until the server disconnects.
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
         self
@@ -221,8 +242,10 @@ impl RtspSrcN {
         self
     }
 
-    /// RTSP DESCRIBE / SETUP credentials, as on
-    /// [`RtspSrc::with_credentials`](crate::rtspsrc::RtspSrc::with_credentials).
+    /// Supply RTSP DESCRIBE/SETUP credentials (digest or basic, negotiated
+    /// by retina). Used by [`OnvifSrc`](crate::onvif::OnvifSrc) after it
+    /// resolves a stream URI: ONVIF cameras gate the RTSP media behind the
+    /// same account as the device service.
     pub fn with_credentials<U: Into<String>, P: Into<String>>(mut self, user: U, pass: P) -> Self {
         self.creds = Some(retina::client::Credentials {
             username: user.into(),
@@ -231,17 +254,27 @@ impl RtspSrcN {
         self
     }
 
-    /// Declare the video track's geometry, skipping the placeholder range so a
-    /// downstream sink sizes its surface once.
+    /// Declare the stream's expected pixel geometry. By default negotiation
+    /// connects to the server to read the real codec and geometry; when you
+    /// already know the camera resolution, set it here to skip that connect
+    /// and negotiate fixed H.264 dims at startup. If the actual SDP dims
+    /// differ, the mid-stream `CapsChanged` still corrects them.
     pub fn with_expected_dims(mut self, width: u32, height: u32) -> Self {
         self.expected_dims = Some((width, height));
         self
     }
 
-    /// Retry a failed session up to `max_attempts` times, as
-    /// [`RtspSrc::with_reconnect`](crate::rtspsrc::RtspSrc::with_reconnect) does.
-    /// Both pads see a `Flush` between sessions and the emitted timeline jumps a
-    /// second forward, so the two stay aligned across the discontinuity.
+    /// Enable automatic reconnect on session failure. `max_attempts == 0`
+    /// (the default via [`Self::new`]) disables reconnect entirely;
+    /// pass any positive count to opt in. Backoff starts at 250 ms and
+    /// doubles per attempt, capped at 5 s. Use [`Self::with_reconnect_backoff`]
+    /// to override. The negotiation-time connect retries with the same policy.
+    ///
+    /// Reconnect triggers on network/protocol errors only: a server-side
+    /// graceful end-of-stream (eg a VOD finishing) is treated as final
+    /// and the source emits EOS without retrying. Every pad sees a `Flush`
+    /// between sessions and the emitted timeline jumps a second forward, so
+    /// the pads stay aligned across the discontinuity.
     pub fn with_reconnect(mut self, max_attempts: u32) -> Self {
         self.reconnect.max_attempts = max_attempts;
         self.reconnect.fill_backoff_defaults();
@@ -249,16 +282,24 @@ impl RtspSrcN {
     }
 
     /// Override the exponential-backoff bounds used by [`Self::with_reconnect`].
+    /// `initial_backoff_ms` is the wait before the first retry; each
+    /// subsequent retry doubles up to `max_backoff_ms`.
     pub fn with_reconnect_backoff(mut self, initial_ms: u64, max_ms: u64) -> Self {
         self.reconnect.initial_backoff_ms = initial_ms;
         self.reconnect.max_backoff_ms = max_ms;
         self
     }
 
+    // A half-set property pair (only `width=` in a launch line) is not
+    // geometry, so it leaves the probe to run instead of advertising a 0 dim.
+    fn complete_expected_dims(&self) -> Option<(u32, u32)> {
+        self.expected_dims.filter(|(w, h)| *w > 0 && *h > 0)
+    }
+
     /// The video pad's negotiation caps: caller-supplied geometry first, then a
     /// DESCRIBE's, then a range wide enough for the SPS to refine.
     fn video_caps(&self) -> Caps {
-        if let Some((w, h)) = self.expected_dims.filter(|(w, h)| *w > 0 && *h > 0) {
+        if let Some((w, h)) = self.complete_expected_dims() {
             return Caps::CompressedVideo {
                 codec: VideoCodec::H264,
                 width: Dim::Fixed(w),
@@ -269,20 +310,7 @@ impl RtspSrcN {
             };
         }
         let probed = self.probed_video.clone().map(with_placeholder_framerate);
-        probed.unwrap_or(Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width: Dim::Range {
-                min: MIN_PLACEHOLDER_DIM,
-                max: MAX_PLACEHOLDER_DIM,
-            },
-            height: Dim::Range {
-                min: MIN_PLACEHOLDER_DIM,
-                max: MAX_PLACEHOLDER_DIM,
-            },
-            framerate: placeholder_framerate(),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
-        })
+        probed.unwrap_or_else(|| placeholder_video_caps(VideoCodec::H264))
     }
 
     /// The audio encoding this element subscribes, or `None` when video-only.
@@ -292,6 +320,253 @@ impl RtspSrcN {
             _ => None,
         }
     }
+
+    // DESCRIBE and SETUP every subscribed track, retrying a failed connect per the reconnect policy
+    async fn prepare_session_with_retries(&self) -> Result<PreparedSession, G2gError> {
+        let mut retry = ReconnectState::new(&self.reconnect);
+        loop {
+            match self.prepare_session().await {
+                Ok(prepared) => return Ok(prepared),
+                // a bad URL or a stream without the tracks asked for, which a retry cannot fix
+                Err(G2gError::CapsMismatch) => return Err(G2gError::CapsMismatch),
+                Err(e) => {
+                    let Some(backoff_ms) = retry.next_delay_ms(&self.reconnect) else {
+                        return Err(e);
+                    };
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                }
+            }
+        }
+    }
+
+    /// DESCRIBE and SETUP the video stream plus, when asked for, the audio one and
+    /// the ONVIF metadata one. Every track takes the same lower transport, so a
+    /// server that refuses UDP moves the whole session to interleaved TCP rather
+    /// than splitting it.
+    async fn prepare_session(&self) -> Result<PreparedSession, G2gError> {
+        let mut session =
+            connect_describe(&self.url, &self.user_agent, self.creds.as_ref()).await?;
+        let (video_idx, codec) = video_stream(session.streams()).ok_or(G2gError::CapsMismatch)?;
+        let audio_idx = match self.audio_format() {
+            Some(want) => Some(
+                audio_stream_index(session.streams(), Some(want))
+                    .ok_or(G2gError::CapsMismatch)?
+                    .0,
+            ),
+            None => None,
+        };
+        // A missing metadata track leaves the pad silent through to EOS rather than
+        // failing the session: a camera can be configured to stream analytics on
+        // one profile and not another.
+        let metadata = self
+            .metadata_port()
+            .and_then(|_| onvif_metadata_stream_index(session.streams()));
+
+        let mut setup_err = None;
+        for transport in &self.transports {
+            let options = || {
+                SetupOptions::default()
+                    .frame_format(FrameFormat::SIMPLE)
+                    .transport(transport.retina())
+            };
+            let extra = audio_idx.into_iter().chain(metadata.map(|(idx, _)| idx));
+            match session.setup(video_idx, options()).await {
+                Ok(()) => {}
+                Err(e) => {
+                    setup_err = Some(e);
+                    continue;
+                }
+            }
+            let mut failed = None;
+            for idx in extra {
+                if let Err(e) = session.setup(idx, options()).await {
+                    failed = Some(e);
+                    break;
+                }
+            }
+            match failed {
+                None => {
+                    return Ok(PreparedSession {
+                        session,
+                        video_idx,
+                        codec,
+                        audio_idx,
+                        metadata,
+                    })
+                }
+                Some(e) => setup_err = Some(e),
+            }
+        }
+        Err(match setup_err {
+            Some(e) => rtsp_failure(
+                G2gError::Network(NetworkFailure::Connect),
+                "SETUP",
+                &self.url,
+                &e,
+            ),
+            // An empty transport list cannot happen: `protocols` rejects an empty set.
+            None => G2gError::CapsMismatch,
+        })
+    }
+}
+
+struct PreparedSession {
+    session: Session<Described>,
+    video_idx: usize,
+    codec: VideoCodec,
+    audio_idx: Option<usize>,
+    // the ONVIF metadata track's stream index and whether its payload is gzip-compressed
+    metadata: Option<(usize, bool)>,
+}
+
+impl core::fmt::Debug for PreparedSession {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedSession")
+            .field("video_idx", &self.video_idx)
+            .field("codec", &self.codec)
+            .field("audio_idx", &self.audio_idx)
+            .field("metadata", &self.metadata)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LowerTransport {
+    fn retina(self) -> retina::client::Transport {
+        match self {
+            LowerTransport::Udp => {
+                retina::client::Transport::Udp(retina::client::UdpTransportOptions::default())
+            }
+            LowerTransport::Tcp => {
+                retina::client::Transport::Tcp(retina::client::TcpTransportOptions::default())
+            }
+        }
+    }
+}
+
+/// Connect and DESCRIBE, leaving every stream un-SETUP.
+async fn connect_describe(
+    url: &str,
+    user_agent: &str,
+    creds: Option<&retina::client::Credentials>,
+) -> Result<Session<Described>, G2gError> {
+    let url = url::Url::parse(url).map_err(|_| G2gError::CapsMismatch)?;
+    let session_group = Arc::new(SessionGroup::default());
+    let opts = SessionOptions::default()
+        .session_group(session_group)
+        .creds(creds.cloned())
+        .user_agent(user_agent.to_string());
+    Session::describe(url.clone(), opts).await.map_err(|e| {
+        rtsp_failure(
+            G2gError::Network(NetworkFailure::Connect),
+            "DESCRIBE",
+            &url,
+            &e,
+        )
+    })
+}
+
+// logs retina's message for the RTSP `step` at `url`, which the returned `failure` leaves out
+fn rtsp_failure(
+    failure: G2gError,
+    step: &str,
+    url: &dyn core::fmt::Display,
+    error: &retina::Error,
+) -> G2gError {
+    g2g_core::g2g_error!(
+        Target::category(LOG_CATEGORY),
+        "{step} {url} failed: {error}"
+    );
+    failure
+}
+
+/// The first stream g2g decodes as video, H.264 or H.265, and its codec.
+fn video_stream(streams: &[retina::client::Stream]) -> Option<(usize, VideoCodec)> {
+    streams.iter().enumerate().find_map(|(i, s)| {
+        if s.media() != "video" {
+            return None;
+        }
+        Some((i, video_codec(s)?))
+    })
+}
+
+fn video_codec(stream: &retina::client::Stream) -> Option<VideoCodec> {
+    match stream.encoding_name() {
+        "h264" => Some(VideoCodec::H264),
+        "h265" => Some(VideoCodec::H265),
+        _ => None,
+    }
+}
+
+// `None` until the SDP or the stream has carried the parameter sets
+fn video_caps_for(stream: &retina::client::Stream, codec: VideoCodec) -> Option<Caps> {
+    let Some(ParametersRef::Video(p)) = stream.parameters() else {
+        return None;
+    };
+    let (w, h) = p.pixel_dimensions();
+    Some(Caps::CompressedVideo {
+        codec,
+        width: Dim::Fixed(w),
+        height: Dim::Fixed(h),
+        framerate: rate_from_frame_rate(p.frame_rate()),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
+    })
+}
+
+fn placeholder_video_caps(codec: VideoCodec) -> Caps {
+    Caps::CompressedVideo {
+        codec,
+        width: Dim::Range {
+            min: MIN_PLACEHOLDER_DIM,
+            max: MAX_PLACEHOLDER_DIM,
+        },
+        height: Dim::Range {
+            min: MIN_PLACEHOLDER_DIM,
+            max: MAX_PLACEHOLDER_DIM,
+        },
+        framerate: placeholder_framerate(),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
+    }
+}
+
+fn placeholder_framerate() -> Rate {
+    Rate::Range {
+        min_q16: 1 << 16,
+        max_q16: MAX_PLACEHOLDER_FPS << 16,
+    }
+}
+
+// An SPS without VUI timing leaves the rate `Any`, which negotiation cannot fixate.
+fn with_placeholder_framerate(caps: Caps) -> Caps {
+    match caps {
+        Caps::CompressedVideo {
+            codec,
+            width,
+            height,
+            framerate: Rate::Any,
+            colorimetry,
+            alignment,
+        } => Caps::CompressedVideo {
+            codec,
+            width,
+            height,
+            framerate: placeholder_framerate(),
+            colorimetry,
+            alignment,
+        },
+        other => other,
+    }
+}
+
+/// Convert retina's `(numerator, denominator)` representation of frame
+/// duration into our Q16-fps `Rate`. retina returns frame duration in
+/// seconds (eg `(1, 15)` → 1/15 s per frame → 15 fps), so the fps is
+/// `denominator / numerator`.
+fn rate_from_frame_rate(frame_rate: Option<(u32, u32)>) -> Rate {
+    frame_rate
+        .and_then(|(num, denom)| framerate_q16_from_fraction(denom, num))
+        .map_or(Rate::Any, Rate::Fixed)
 }
 
 /// Compressed-audio caps in the "unknown until parsed" form the demuxers use:
@@ -511,8 +786,8 @@ pub fn blocking_probe_tracks(url: &str, user_agent: &str) -> Option<RtspTracks> 
 pub async fn probe_tracks(url: &str, user_agent: &str) -> Option<RtspTracks> {
     let session = connect_describe(url, user_agent, None).await.ok()?;
     let streams = session.streams();
-    let video_idx = video_stream_index(streams)?;
-    let video = video_caps_for(streams, video_idx)?;
+    let (video_idx, codec) = video_stream(streams)?;
+    let video = video_caps_for(&streams[video_idx], codec)?;
     let audio = audio_stream_index(streams, None)
         .map(|(idx, format)| declared_audio_caps(format, audio_params_for(streams, idx)));
     let onvif_metadata = onvif_metadata_stream_index(streams).is_some();
@@ -523,7 +798,8 @@ pub async fn probe_tracks(url: &str, user_agent: &str) -> Option<RtspTracks> {
     })
 }
 
-static RTSPSRCN_PROPS: &[PropertySpec] = &[
+// the properties that pick the pad set come last, so `RtspSrc` exposes the ones before them
+const RTSPSRCN_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "location",
         PropKind::Str,
@@ -547,28 +823,15 @@ static RTSPSRCN_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "width",
         PropKind::Uint,
-        "expected frame width; with height, negotiates fixed geometry (0 = placeholder range)",
+        "expected frame width; with height, skips the negotiation probe (0 = probe)",
     )
     .with_default("0"),
     PropertySpec::new(
         "height",
         PropKind::Uint,
-        "expected frame height; with width, negotiates fixed geometry (0 = placeholder range)",
+        "expected frame height; with width, skips the negotiation probe (0 = probe)",
     )
     .with_default("0"),
-    PropertySpec::new(
-        "audio-format",
-        PropKind::Str,
-        "audio encoding to subscribe on the second pad",
-    )
-    .with_default(NICK_AAC)
-    .with_enum_values(AUDIO_FORMAT_NICKS),
-    PropertySpec::new(
-        "onvif-metadata",
-        PropKind::Bool,
-        "subscribe the SDP's ONVIF analytics metadata track on a pad of its own",
-    )
-    .with_default("false"),
     PropertySpec::new(
         "reconnect",
         PropKind::Uint,
@@ -594,7 +857,24 @@ static RTSPSRCN_PROPS: &[PropertySpec] = &[
     )
     .with_enum_values("udp | tcp")
     .with_default("tcp"),
+    PropertySpec::new(
+        "audio-format",
+        PropKind::Str,
+        "audio encoding to subscribe on the second pad",
+    )
+    .with_default(NICK_AAC)
+    .with_enum_values(AUDIO_FORMAT_NICKS),
+    PropertySpec::new(
+        "onvif-metadata",
+        PropKind::Bool,
+        "subscribe the SDP's ONVIF analytics metadata track on a pad of its own",
+    )
+    .with_default("false"),
 ];
+const PAD_SET_PROPS: usize = 2;
+pub(crate) const RTSPSRC_PROPS: &[PropertySpec] = RTSPSRCN_PROPS
+    .split_at(RTSPSRCN_PROPS.len() - PAD_SET_PROPS)
+    .0;
 
 impl MultiOutputSource for RtspSrcN {
     type RunFuture<'a>
@@ -615,6 +895,28 @@ impl MultiOutputSource for RtspSrcN {
             AUDIO_PORT => self.audio.clone().ok_or(G2gError::CapsMismatch),
             _ => Err(G2gError::CapsMismatch),
         }
+    }
+
+    // Live: a sink downstream anchors presentation on the pipeline base time,
+    // so a startup stall renders late and drains instead of becoming the
+    // run's standing latency. Min 0: TCP-interleaved delivery adds no
+    // jitterbuffer wait of its own.
+    fn latency(&self) -> g2g_core::query::LatencyReport {
+        g2g_core::query::LatencyReport::live(0, None)
+    }
+
+    async fn resolve_output_caps(&mut self) -> Result<(), G2gError> {
+        if self.complete_expected_dims().is_some() || self.probed_video.is_some() {
+            return Ok(());
+        }
+        let prepared = self.prepare_session_with_retries().await?;
+        let stream = &prepared.session.streams()[prepared.video_idx];
+        // A server that keeps the parameter sets out of the SDP still names the codec.
+        let video = video_caps_for(stream, prepared.codec)
+            .unwrap_or_else(|| placeholder_video_caps(prepared.codec));
+        self.probed_video = Some(video);
+        self.prepared = Some(prepared);
+        Ok(())
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -769,10 +1071,9 @@ impl PortState {
     }
 }
 
-/// Outer reconnect orchestrator, the fan-out twin of `rtspsrc`'s: run a
-/// session, and on a network failure wait per the policy and run another with
-/// the timeline pushed past the gap. Every output gets exactly one `Eos` before
-/// this returns `Ok`.
+/// Outer reconnect orchestrator: run a session, and on a network failure wait
+/// per the policy and run another with the timeline pushed past the gap. Every
+/// output gets exactly one `Eos` before this returns `Ok`.
 async fn run_rtsp_n(src: &mut RtspSrcN, out: &mut dyn MultiOutputSink) -> Result<u64, G2gError> {
     let ports = src.output_count();
     let mut state: Vec<PortState> = (0..ports).map(|_| PortState::new()).collect();
@@ -788,8 +1089,11 @@ async fn run_rtsp_n(src: &mut RtspSrcN, out: &mut dyn MultiOutputSink) -> Result
             SessionOutcome::DownstreamError(e) => return Err(e),
             SessionOutcome::NetworkError(e) => {
                 let emitted_after: u64 = state.iter().map(|port| port.emitted).sum();
+                // A session that emitted nothing leaves the base alone, so a
+                // flapping reconnect does not push PTS a second forward each attempt.
                 if emitted_after > emitted_before {
                     retry.recovered(&src.reconnect);
+                    pts_base_ns = session_max_pts.saturating_add(RECONNECT_PTS_GAP_NS);
                 }
                 let Some(backoff_ms) = retry.next_delay_ms(&src.reconnect) else {
                     return Err(e);
@@ -801,12 +1105,12 @@ async fn run_rtsp_n(src: &mut RtspSrcN, out: &mut dyn MultiOutputSink) -> Result
                     src.reconnect.max_attempts,
                     backoff_ms,
                 );
+                // the flush resets each decoder and each sink's sequence check before the next session
                 for (port, port_state) in state.iter().enumerate() {
                     if !port_state.eos_sent {
                         let _ = out.push_to(port, PipelinePacket::Flush).await;
                     }
                 }
-                pts_base_ns = session_max_pts.saturating_add(RECONNECT_PTS_GAP_NS);
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             }
         }
@@ -823,7 +1127,7 @@ async fn run_rtsp_n(src: &mut RtspSrcN, out: &mut dyn MultiOutputSink) -> Result
     Ok(total)
 }
 
-/// Result of a single connect + play + drain session, as in `rtspsrc`.
+/// Result of a single connect + play + drain session.
 #[derive(Debug)]
 enum SessionOutcome {
     /// Every output reached `num-buffers`.
@@ -836,8 +1140,9 @@ enum SessionOutcome {
     DownstreamError(G2gError),
 }
 
-/// DESCRIBE, SETUP both tracks, PLAY, and drain until every output hits its
-/// limit, the server ends the stream, or the session errors.
+/// PLAY the session negotiation set up, or DESCRIBE and SETUP a new one, and
+/// drain until every output hits its limit, the server ends the stream, or the
+/// session errors.
 async fn run_session(
     src: &mut RtspSrcN,
     out: &mut dyn MultiOutputSink,
@@ -845,21 +1150,21 @@ async fn run_session(
     pts_base_ns: u64,
     session_max_pts: &mut u64,
 ) -> SessionOutcome {
-    let want_audio = src.audio_format();
     let metadata_port = src.metadata_port();
-    let (session, video_idx, audio_idx, metadata) = match connect_describe_setup(
-        &src.url,
-        &src.user_agent,
-        src.creds.as_ref(),
-        &src.transports,
-        want_audio,
-        metadata_port.is_some(),
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => return SessionOutcome::NetworkError(e),
+    let prepared = match src.prepared.take() {
+        Some(prepared) => prepared,
+        None => match src.prepare_session().await {
+            Ok(prepared) => prepared,
+            Err(e) => return SessionOutcome::NetworkError(e),
+        },
     };
+    let PreparedSession {
+        session,
+        video_idx,
+        codec,
+        audio_idx,
+        metadata,
+    } = prepared;
     let (metadata_idx, metadata_gzip) = match metadata {
         Some((idx, gzip)) => (Some(idx), gzip),
         None => (None, false),
@@ -871,10 +1176,7 @@ async fn run_session(
     // The sender report each stream was last pinned to, indexed by retina's
     // stream index, so a frame can carry the sender's wall clock.
     let mut sender_clocks: Vec<Option<SenderClock>> = alloc::vec![None; session.streams().len()];
-    let mut video_caps = video_caps_for(session.streams(), video_idx);
-    let Some(codec) = video_codec(&session.streams()[video_idx]) else {
-        return SessionOutcome::NetworkError(G2gError::CapsMismatch);
-    };
+    let mut video_caps = video_caps_for(&session.streams()[video_idx], codec);
 
     // Both streams are set up, so the server's `RTP-Info` origin is what puts
     // them on one timeline; permissive keeps a server that omits `rtptime`
@@ -928,9 +1230,9 @@ async fn run_session(
         }
     }
 
-    // As in `rtspsrc`: retina prepends SPS/PPS only to key frames, so a mid-GOP
-    // tune-in must drop access units until the first one or the decoder sees
-    // slices with no parameter set.
+    // retina prepends SPS/PPS only to key frames, so a mid-GOP tune-in must drop
+    // access units until the first one or the decoder sees slices with no
+    // parameter set ("non-existing PPS referenced") until the next IDR.
     let mut seen_keyframe = false;
     let mut origin_ns: Option<u64> = None;
     let limit = src.frame_limit;
@@ -958,7 +1260,7 @@ async fn run_session(
                     seen_keyframe = true;
                 }
                 if vf.has_new_parameters() {
-                    let refreshed = video_caps_for(demuxed.streams(), video_idx);
+                    let refreshed = video_caps_for(&demuxed.streams()[video_idx], codec);
                     if refreshed != video_caps {
                         if let Some(caps) = &refreshed {
                             if let Err(e) = out
@@ -1100,86 +1402,48 @@ fn attach_wall_clock(frame: &mut Frame, unix_nanos: i64) {
 #[cfg(not(feature = "metadata"))]
 fn attach_wall_clock(_frame: &mut Frame, _unix_nanos: i64) {}
 
-/// DESCRIBE and SETUP the video stream plus, when asked for, the audio one and
-/// the ONVIF metadata one. Every track takes the same lower transport, so a
-/// server that refuses UDP moves the whole session to interleaved TCP rather
-/// than splitting it. The metadata result is `(stream index, gzip)`.
-async fn connect_describe_setup(
-    url: &str,
-    user_agent: &str,
-    creds: Option<&retina::client::Credentials>,
-    transports: &[LowerTransport],
-    want_audio: Option<AudioFormat>,
-    want_metadata: bool,
-) -> Result<
-    (
-        Session<Described>,
-        usize,
-        Option<usize>,
-        Option<(usize, bool)>,
-    ),
-    G2gError,
-> {
-    let mut session = connect_describe(url, user_agent, creds).await?;
-    let video_idx = video_stream_index(session.streams()).ok_or(G2gError::CapsMismatch)?;
-    let audio_idx = match want_audio {
-        Some(want) => Some(
-            audio_stream_index(session.streams(), Some(want))
-                .ok_or(G2gError::CapsMismatch)?
-                .0,
-        ),
-        None => None,
-    };
-    // A missing metadata track leaves the pad silent through to EOS rather than
-    // failing the session: a camera can be configured to stream analytics on
-    // one profile and not another.
-    let metadata = want_metadata
-        .then(|| onvif_metadata_stream_index(session.streams()))
-        .flatten();
-
-    let mut setup_err = None;
-    for transport in transports {
-        let options = || {
-            SetupOptions::default()
-                .frame_format(FrameFormat::SIMPLE)
-                .transport(transport.retina())
-        };
-        let extra = audio_idx.into_iter().chain(metadata.map(|(idx, _)| idx));
-        match session.setup(video_idx, options()).await {
-            Ok(()) => {}
-            Err(e) => {
-                setup_err = Some(e);
-                continue;
-            }
-        }
-        let mut failed = None;
-        for idx in extra {
-            if let Err(e) = session.setup(idx, options()).await {
-                failed = Some(e);
-                break;
-            }
-        }
-        match failed {
-            None => return Ok((session, video_idx, audio_idx, metadata)),
-            Some(e) => setup_err = Some(e),
-        }
-    }
-    Err(match setup_err {
-        Some(e) => rtsp_failure(
-            G2gError::Network(NetworkFailure::Connect),
-            "SETUP",
-            &url,
-            &e,
-        ),
-        // An empty transport list cannot happen: `protocols` rejects an empty set.
-        None => G2gError::CapsMismatch,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::Rate;
+
+    #[test]
+    fn frame_rate_unset_yields_rate_any() {
+        assert_eq!(rate_from_frame_rate(None), Rate::Any);
+    }
+
+    #[test]
+    fn frame_rate_zero_numerator_yields_rate_any() {
+        // Numerator of 0 would divide-by-zero; treat as unknown.
+        assert_eq!(rate_from_frame_rate(Some((0, 30))), Rate::Any);
+    }
+
+    #[test]
+    fn frame_rate_15fps_round_trips_to_q16() {
+        // 15 fps in retina form: 1/15 s per frame.
+        assert_eq!(rate_from_frame_rate(Some((1, 15))), Rate::Fixed(15 << 16));
+    }
+
+    #[test]
+    fn frame_rate_ntsc_29_97_uses_full_q16_precision() {
+        // 29.97 fps as the canonical (1001, 30000) duration form.
+        // Expected: 30000/1001 ≈ 29.9700; in Q16 that's ~1_963_098.
+        match rate_from_frame_rate(Some((1001, 30000))) {
+            Rate::Fixed(q16) => {
+                // Allow ±1 LSB for integer-division rounding.
+                let expected = ((30000u64 << 16) / 1001) as u32;
+                assert_eq!(q16, expected);
+                // Sanity: q16 / 2^16 ≈ 29.97
+                let int_part = q16 >> 16;
+                assert_eq!(int_part, 29);
+            }
+            other => panic!("expected Rate::Fixed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_live_source_reports_live_latency() {
+        assert!(RtspSrcN::new("rtsp://example/stream").latency().live);
+    }
 
     #[test]
     fn video_only_has_one_output_and_audio_adds_a_second() {

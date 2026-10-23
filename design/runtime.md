@@ -648,7 +648,7 @@ events, so an element notifies the application without a back-reference.
 
 - `StreamStart`, `Eos`, `Error`, `Warning`, `Info(String)`: stream lifecycle,
   faults, and non-fatal status. `StreamStart` is posted by the source arm before a
-  source produces, one per source (`GST_MESSAGE_STREAM_START`), and `Eos` once
+  source produces, one per source or fan-out source (`GST_MESSAGE_STREAM_START`), and `Eos` once
   by the runner when every arm has ended without error (`GST_MESSAGE_EOS`).
   `Info` is the third severity below `Warning`,
   element- or app-posted for status that is not a problem (`GST_MESSAGE_INFO`).

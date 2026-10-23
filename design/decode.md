@@ -417,36 +417,57 @@ RtspSrc ──► H264Parse ──► [decoder] ──► [ML / display / encode
 | Linux + VAAPI | `VaapiH264Dec` / `VaapiH265Dec` | `vaapi` | `System` / NV12 |
 | Windows | `MfDecode` | `mf-decode` | `System` / NV12 |
 
-### RtspSrc
+### RtspSrc and RtspSrcN
 
-`RtspSrc` connects via `retina` using RTSP/RTP over TCP and negotiates H.264 with
-`FrameFormat::SIMPLE` (Annex-B), or accepts AVCC framing detected per buffer. The
-first SPS gives geometry. Framerate comes from the VUI `timing_info`
-(`time_scale / (2 * num_units_in_tick)`) when present, else `Rate::Any`.
-`RtspSrc::with_credentials` supplies the DESCRIBE/SETUP account, threaded into
-retina's `SessionOptions`.
+`RtspSrcN` (`rtspsrcn.rs`, `rtsp` feature) is the one RTSP client. It connects
+via `retina` using RTSP/RTP over TCP (or the `protocols` order) with
+`FrameFormat::SIMPLE`, so H.264 and H.265 arrive Annex-B with SPS/PPS ahead of
+every keyframe, and it drops access units until the first keyframe of each
+session so a mid-GOP tune-in never feeds a decoder slices without parameter
+sets. Output 0 is the video, output 1 the first audio stream the SDP offers,
+AAC via `mpeg4-generic` or G.711 via `pcma` / `pcmu`, as a `MultiOutputSource`.
+Every track takes the same lower transport and one `FrameFormat::SIMPLE` SETUP,
+so AAC arrives ADTS-framed and needs no out-of-band config. `with_credentials`
+supplies the DESCRIBE/SETUP account, threaded into retina's `SessionOptions`.
 
-Both RTSP sources fail DESCRIBE, SETUP, PLAY and depacketizer setup with
+`RtspSrc` (`rtspsrc.rs`) is `OnePortSource<RtspSrcN>`: a video-only `RtspSrcN`
+run as a `SourceLoop`, its port 0 the single output. `OnePortSource`
+(`oneport.rs`) takes the properties the single-output form exposes, here every
+`RtspSrcN` property except `audio-format` and `onvif-metadata`, which pick the
+pad set.
+
+Negotiation connects, DESCRIBEs and SETUPs every subscribed track, retrying a
+failed connect per the reconnect policy, so the video pad advertises the real
+codec and geometry. `RtspSrcN` does this in `resolve_output_caps`, which the
+graph runner awaits for a fan-out source and `OnePortSource` awaits in
+`intercept_caps`. The first session of `run` PLAYs that set-up session instead
+of connecting again. A server that keeps the parameter sets out of the SDP
+leaves the geometry a placeholder range with the real codec, refined by a
+`CapsChanged` once the first SPS arrives. `with_expected_dims` (or `width` and
+`height`) skips the connect and advertises fixed H.264 geometry. Framerate comes
+from the VUI `timing_info` (`time_scale / (2 * num_units_in_tick)`) when
+present, else a fixable placeholder range.
+
+The source reports live latency with a zero minimum. On a network failure with
+`reconnect` set it pushes a `Flush` to every open pad, waits the backoff, and
+connects afresh. The emitted timeline jumps a second past the last session's
+highest PTS, but only after a session that emitted media, so a run of failed
+attempts does not move it.
+
+Both RTSP clients fail DESCRIBE, SETUP, PLAY and depacketizer setup with
 `G2gError::Network(NetworkFailure::Connect)`, and any error after media starts
 with `G2gError::RtspStream`, logging retina's message on the element's category.
 Retina's error kind is private, so a bad NAL and a dropped transport map to the
 same variant.
-
-### RtspSrcN
-
-`RtspSrcN` (`rtspsrcn.rs`, same feature) plays the stream's audio track alongside
-its video: one retina session, output 0 the video and output 1 the first audio
-stream the SDP offers, AAC via `mpeg4-generic` or G.711 via `pcma` / `pcmu`, as a
-`MultiOutputSource` driven by `run_fanout_session`. Both streams take the same
-lower transport and one `FrameFormat::SIMPLE` SETUP, so AAC arrives ADTS-framed
-and needs no out-of-band config.
 
 The pads run on different RTP clocks, so each frame's PTS is
 `Timestamp::elapsed`, normal play time against the server's `RTP-Info` origin
 which spans both streams, converted at that stream's clock rate and rebased on
 the session's first frame: one timeline starting at zero with the stream's A/V
 offset intact. `InitialTimestampPolicy::Permissive` keeps a server that omits
-`rtptime` playable, each stream starting at its own first packet.
+`rtptime` playable, each stream starting at its own first packet. With one
+stream set up retina starts it at its first packet whatever the policy, so the
+video-only form stamps from its first emitted frame.
 
 The audio pad negotiates at the decoder-facing caps, not the SDP's. A compressed
 `sample_rate` is matched for equality (the negotiation lifecycle in

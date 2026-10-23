@@ -76,8 +76,10 @@ rids with independently growing packet counts.
 `NodeKind::FanoutSrc(n)`, added by `Graph::add_fanout_src`, runs a terminal
 `MultiOutputSource` as a graph node with 0 inputs and N outputs it generates
 itself. Its ports are solved from `output_caps`, the demux constraint shape with
-the input half inert, and its arm runs the element into per-edge senders. The
-element owes every port an `Eos`. `FanoutSrcFactory` plus named output pads make
+the input half inert, after negotiation awaits the element's
+`resolve_output_caps` for any I/O those caps depend on. Its arm posts
+`StreamStart`, opens every port with a `Segment` as a single source's arm does,
+and runs the element into per-edge senders. The element owes every port an `Eos`. `FanoutSrcFactory` plus named output pads make
 the node reachable from `parse_launch`
 (`livekitsrc name=s url=...  s. ! ...  s. ! ...`), and `MultiOutputSource`
 carries a properties surface for the launch settings. Validated live with

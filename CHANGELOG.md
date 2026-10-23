@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1873: `RtspSrc` is a one-port `RtspSrcN`, which now probes the camera's real codec, reports live latency and keeps PTS steady across an empty reconnect, and fan-out sources open with `StreamStart` and a `Segment`.
 - M1876: `flvmux`, `mp4mux` and `matroskamux` fail at EOS on an input that sent frames but never its codec config, and write no track for an input that sent no frames, instead of writing an empty file.
 - M1872: the MoQ, WebRTC, LiveKit, remote, RTMP, SRT and RTSP-server elements fail with `G2gError::Network` at connect or mid-stream, and WHIP/WHEP SDP POST and ONVIF failures name the HTTP status.
 - M1871: a one-pad `oggmux` builds the fan-in muxer, and the single-input `OggMux` is removed.

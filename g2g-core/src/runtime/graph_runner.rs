@@ -1690,16 +1690,7 @@ async fn prepare_graph<'a>(
     // releasing the mutable borrow before the constraint phase borrows every
     // node. A source that offers alternatives (a camera's pixel formats) hands
     // over all of them, so the solve picks the one downstream can take.
-    let mut source_caps: Vec<Option<CapsSet>> = (0..n).map(|_| None).collect();
-    for &node in topo {
-        if matches!(vg.kind(node), NodeKind::Source) {
-            let GraphNodeRef::Source(src) = vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
-            else {
-                return Err(G2gError::CapsMismatch);
-            };
-            source_caps[node.0 as usize] = Some(src.produced_caps().await?);
-        }
-    }
+    let mut source_caps = probe_sources(vg, topo).await?;
 
     let mut attempts = 0u32;
     let (solution, feasibility, allocation) = loop {
@@ -2183,6 +2174,7 @@ enum ArmPlan<'a> {
     FanoutSrc {
         source: Box<dyn DynMultiOutputSource + 'a>,
         ports: MultiSenderSink,
+        bus: Option<BusHandle>,
     },
     Muxer {
         muxer: Box<dyn DynMultiInputElement + 'a>,
@@ -2242,7 +2234,9 @@ impl<'a> ArmPlan<'a> {
                 adds,
             } => Box::pin(tee_arm(in_rx, out_txs, branch_drop, adds)),
             ArmPlan::FaninSink { session, io } => session.drive_fanin_sink_arm(io),
-            ArmPlan::FanoutSrc { source, ports } => Box::pin(fanout_src_arm(source, ports)),
+            ArmPlan::FanoutSrc { source, ports, bus } => {
+                Box::pin(fanout_src_arm(source, ports, bus))
+            }
             ArmPlan::Muxer { muxer, parts } => drive_muxer(muxer, parts),
         }
     }
@@ -2450,6 +2444,7 @@ fn plan_arms<'a>(
                             .map(SenderSink::new)
                             .collect(),
                     ),
+                    bus: bus.cloned(),
                 }
             }
             _ => return Err(G2gError::CapsMismatch),
@@ -3384,6 +3379,27 @@ fn build_node_preferences(vg: &ValidatedGraph<GraphNodeRef<'_>>) -> Vec<Option<C
         .collect()
 }
 
+// each source's produce set by node id, once every fan-out source has done the I/O its port caps need
+async fn probe_sources(
+    vg: &mut ValidatedGraph<GraphNodeRef<'_>>,
+    topo: &[NodeId],
+) -> Result<Vec<Option<CapsSet>>, G2gError> {
+    let mut source_caps: Vec<Option<CapsSet>> = (0..vg.node_count()).map(|_| None).collect();
+    for &node in topo {
+        match (vg.kind(node), vg.element_mut(node)) {
+            (NodeKind::Source, Some(GraphNodeRef::Source(src))) => {
+                source_caps[node.0 as usize] = Some(src.produced_caps().await?);
+            }
+            (NodeKind::FanoutSrc(_), Some(GraphNodeRef::FanoutSource(src))) => {
+                src.resolve_output_caps().await?;
+            }
+            (NodeKind::Source | NodeKind::FanoutSrc(_), _) => return Err(G2gError::CapsMismatch),
+            _ => {}
+        }
+    }
+    Ok(source_caps)
+}
+
 /// View a node's payload as a source. `None` for any other node kind.
 fn source_ref<'g, 'a>(
     vg: &'g ValidatedGraph<GraphNodeRef<'a>>,
@@ -3614,19 +3630,9 @@ pub async fn negotiate_graph_explained<'a>(
 
     // Phase 1: probe each source's produce set (async), releasing the mutable
     // borrow before the constraint phase borrows every node immutably.
-    let mut source_caps: Vec<Option<CapsSet>> = (0..n).map(|_| None).collect();
-    for &node in &topo {
-        if matches!(vg.kind(node), NodeKind::Source) {
-            let GraphNodeRef::Source(src) = vg
-                .element_mut(node)
-                .ok_or(NegotiateError::Setup(G2gError::CapsMismatch))?
-            else {
-                return Err(NegotiateError::Setup(G2gError::CapsMismatch));
-            };
-            source_caps[node.0 as usize] =
-                Some(src.produced_caps().await.map_err(NegotiateError::Setup)?);
-        }
-    }
+    let source_caps = probe_sources(&mut vg, &topo)
+        .await
+        .map_err(NegotiateError::Setup)?;
 
     // Phase 2: build constraints and solve. Scope the immutable borrow so `vg`
     // moves out cleanly in the return.
@@ -5254,11 +5260,21 @@ fn out_txs_by_port<'a>(
 /// Drive a terminal fan-out source (a 0-in / N-out [`MultiOutputSource`], e.g.
 /// a WebRTC session receiving several tracks) over the DAG's per-edge channels:
 /// the element pushes to each port itself and owes every port an `Eos`
-/// (its `run` contract), so the arm just runs it to completion.
+/// (its `run` contract), so the arm opens the stream as [`run_source`] does and
+/// then runs it to completion.
 async fn fanout_src_arm<'a>(
     mut source: Box<dyn DynMultiOutputSource + 'a>,
     mut sinks: MultiSenderSink,
+    bus: Option<BusHandle>,
 ) -> Result<u64, G2gError> {
+    if let Some(b) = &bus {
+        b.try_post(BusMessage::StreamStart);
+    }
+    for port in 0..sinks.port_count() {
+        sinks
+            .push_to(port, PipelinePacket::Segment(Segment::new()))
+            .await?;
+    }
     source.run(&mut sinks).await
 }
 
