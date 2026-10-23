@@ -278,23 +278,27 @@ pub(crate) fn track_framerate_q16(data: &[u8], track: &TrackHeader) -> Option<u3
         find_trak_by_id(moov, track.track_id)?,
         &[b"mdia", b"minf", b"stbl"],
     )?;
-    constant_framerate_q16(stbl, track.timescale).or_else(|| {
-        let tfhd_duration = find_box(data, b"moof")
-            .and_then(|moof| {
-                boxes(moof)
-                    .filter(|(kind, _)| *kind == b"traf")
-                    .filter_map(|(_, traf)| find_box(traf, b"tfhd"))
-                    .find(|tfhd| be32(tfhd, TFHD_TRACK_ID_AT).ok() == Some(track.track_id))
-            })
-            .and_then(|tfhd| tfhd_defaults(tfhd).ok())
-            .map_or(0, |defaults| defaults.duration);
-        let duration = if tfhd_duration == 0 {
-            track.trex_defaults.duration
-        } else {
-            tfhd_duration
-        };
-        framerate_q16_from_fraction(track.timescale, duration).filter(|&q16| q16 > 0)
-    })
+    constant_framerate_q16(stbl, track.timescale)
+        .or_else(|| track_fragment_framerate_q16(data, track))
+}
+
+// from the tfhd of the first fragment in `data`, else the moov's trex
+pub(crate) fn track_fragment_framerate_q16(data: &[u8], track: &TrackHeader) -> Option<u32> {
+    let tfhd_duration = find_box(data, b"moof")
+        .and_then(|moof| {
+            boxes(moof)
+                .filter(|(kind, _)| *kind == b"traf")
+                .filter_map(|(_, traf)| find_box(traf, b"tfhd"))
+                .find(|tfhd| be32(tfhd, TFHD_TRACK_ID_AT).ok() == Some(track.track_id))
+        })
+        .and_then(|tfhd| tfhd_defaults(tfhd).ok())
+        .map_or(0, |defaults| defaults.duration);
+    let duration = if tfhd_duration == 0 {
+        track.trex_defaults.duration
+    } else {
+        tfhd_duration
+    };
+    framerate_q16_from_fraction(track.timescale, duration).filter(|&q16| q16 > 0)
 }
 
 /// Pair a track's `tenc` defaults with the movie-level `seig` table its `stbl`

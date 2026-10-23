@@ -1,9 +1,10 @@
 //! Progressive / whole-file MP4 demuxer (Mp4Demux, M479): `ByteStream{Mp4}` in,
-//! the video track's Annex-B access units out. The single-output, whole-file
-//! sibling of [`Fmp4Demux`](crate::fmp4demux) (which streams a live fragmented
+//! one track's access units out, a one-port [`Mp4DemuxN`](crate::mp4demuxn) run
+//! as a single-output element. The whole-file sibling of
+//! [`Fmp4Demux`](crate::fmp4demux) (which streams a live fragmented
 //! `ByteStream{IsoBmff}`): a progressive `.mp4` / `.mov` keeps its `moov` sample
 //! tables (`stbl`) and an `mdat`, and the `moov` may sit at the *end* of the file
-//! with absolute `stco` chunk offsets, so the whole file is buffered before the
+//! with absolute `stco` chunk offsets, so such a file is buffered whole before the
 //! `fmp4::parse_progressive_multi` pass runs at `Eos`.
 //!
 //! This is what a bare `filesrc location=movie.mp4 ! decodebin` auto-plugs: a file
@@ -15,41 +16,25 @@
 //! its codec for truthful startup caps, M961), or the audio track when
 //! `stream=aac` (M748), the one stream a linear `decodebin` chain decodes.
 
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::future::Future;
-use core::pin::Pin;
 
-use g2g_core::element::AsyncElement;
-use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::log::{short_type_name, Target};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::runtime::{ElementSeekRoute, SeekController};
 use g2g_core::{
-    g2g_error, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, ProResVariant,
-    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment, VideoCodec,
+    AudioFormat, ByteStreamEncoding, Caps, CapsSet, Dim, PadTemplate, PadTemplates, ProResVariant,
+    PropKind, PropertySpec, RawVideoFormat, VideoCodec,
 };
 
-use crate::aacparse::{is_raw_aac_config, require_adts};
 use crate::avidemux::{is_pcm, pcm_alternatives};
 use crate::codectag::{
     audio_from_stream_name, audio_stream_name, video_from_stream_name, video_stream_name,
 };
-use crate::demuxseek::segment_from;
-use crate::fmp4::{
-    clip_stored_pcm, every_sample_ends_by, keyframe_index_for, parse_all_tracks,
-    parse_fragments_multi, parse_progressive_multi, prepend_param_sets, starts_with_param_set,
-    stream_start_ns, track_framerate_q16, vorbis_headers, FragmentStarts, Sample, TrackHeader,
-    TrackKind,
-};
+use crate::fmp4::TrackKind;
 use crate::mkvdemux::{prores_stream_from_str, prores_stream_str};
-use crate::mp4box::find_box;
-use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
+use crate::mp4demuxn::Mp4DemuxN;
+use crate::oneport::OnePortElement;
+use crate::typefind::PLACEHOLDER_FRAMERATE;
 use crate::uncompressedvideo::{
-    raw_video_caps, raw_video_formats, raw_video_frame_bytes, raw_video_placeholder_caps,
-    raw_video_stream_from_str, raw_video_stream_str, warn_short_raw_video_frame,
+    raw_video_formats, raw_video_placeholder_caps, raw_video_stream_from_str, raw_video_stream_str,
 };
 
 /// Which track the single-output demux emits (M748): the video track (the
@@ -59,17 +44,73 @@ use crate::uncompressedvideo::{
 /// which a bare `decodebin` on an audio-only file selects via the primary-stream
 /// hook (`stream=aac`, `stream=pcm-s16le`, ...), named by its format.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum StreamSelect {
+pub(crate) enum StreamSelect {
     Video,
     VideoNamed(VideoCodec),
     RawVideo(RawVideoFormat),
     Audio(AudioFormat),
 }
 
+impl StreamSelect {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        if name == "video" {
+            return Some(Self::Video);
+        }
+        audio_from_stream_name(AUDIO_STREAM_NAMES, name)
+            .map(Self::Audio)
+            .or_else(|| mp4_video_stream_from_str(name).map(Self::VideoNamed))
+            .or_else(|| raw_video_stream_from_str(name).map(Self::RawVideo))
+    }
+
+    pub(crate) fn name(self) -> String {
+        match self {
+            Self::Video => String::from("video"),
+            // constructed from the same table, so the name is always there
+            Self::VideoNamed(codec) => {
+                mp4_video_stream_str(codec).unwrap_or_else(|| String::from("video"))
+            }
+            Self::RawVideo(format) => String::from(raw_video_stream_str(format).unwrap_or("video")),
+            Self::Audio(format) => {
+                mp4_audio_stream_str(format).unwrap_or_else(|| String::from("aac"))
+            }
+        }
+    }
+
+    pub(crate) fn matches(self, kind: &TrackKind) -> bool {
+        match (self, kind) {
+            (Self::Video, TrackKind::Video { .. }) => true,
+            (Self::VideoNamed(named), TrackKind::Video { codec, .. }) => named == *codec,
+            (Self::RawVideo(selected), TrackKind::RawVideo { format, .. }) => selected == *format,
+            (Self::Audio(selected), TrackKind::Audio { format, .. }) => selected == *format,
+            _ => false,
+        }
+    }
+
+    // Video defaults to H.264, refined from the moov via CapsChanged, but a
+    // downstream that names another codec (an `h265parse`) can pick it, so the
+    // other codecs follow the default as alternatives. A codec-named selection
+    // (M961) negotiates that codec alone; audio negotiates its selected format
+    // with a wildcard layout, refined the same way.
+    pub(crate) fn nego_caps(self) -> CapsSet {
+        match self {
+            Self::Video => CapsSet::from_alternatives(
+                VIDEO_STREAM_NAMES
+                    .iter()
+                    .map(|(_, codec)| nego_caps(*codec))
+                    .collect(),
+            ),
+            Self::VideoNamed(codec) => CapsSet::one(nego_caps(codec)),
+            Self::RawVideo(format) => CapsSet::one(raw_video_placeholder_caps(format)),
+            Self::Audio(format) => CapsSet::from_alternatives(audio_nego_caps(format)),
+        }
+    }
+}
+
 /// The `stream=` names for a codec-named video selection (M961), the set
 /// [`parse_all_tracks`](crate::fmp4) can read from a `moov` sample entry. Shared
 /// with the bare-`decodebin` primary-stream hook, which names the file's actual
-/// codec through this table.
+/// codec through this table. H.264 leads, as the default video selection's
+/// negotiation caps.
 const VIDEO_STREAM_NAMES: &[(&str, VideoCodec)] = &[
     ("h264", VideoCodec::H264),
     ("h265", VideoCodec::H265),
@@ -113,6 +154,42 @@ fn mp4_video_stream_from_str(name: &str) -> Option<VideoCodec> {
         .or_else(|| prores_stream_from_str(name).map(|variant| VideoCodec::ProRes { variant }))
 }
 
+/// The audio negotiation placeholder: the format with a channels /
+/// sample-rate wildcard (`0`), refined to the concrete `moov` layout via
+/// `CapsChanged`. PCM leads with a concrete layout, as `AviDemux` does, since
+/// a lone wildcard cannot fixate.
+fn audio_nego_caps(format: AudioFormat) -> Vec<Caps> {
+    if is_pcm(format) {
+        return pcm_alternatives(format);
+    }
+    Vec::from([Caps::Audio {
+        format,
+        channels: 0,
+        sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+    }])
+}
+
+/// The negotiation placeholder: a fixatable `Range` (not `Dim::Any`, which
+/// fails Phase-2 fixate, e.g. a downstream `h264parse`), refined to the concrete
+/// moov geometry via `CapsChanged`. Mirrors `tsdemux` / `matroskademux`.
+fn nego_caps(codec: VideoCodec) -> Caps {
+    Caps::CompressedVideo {
+        codec,
+        width: Dim::Range {
+            min: 16,
+            max: 65_535,
+        },
+        height: Dim::Range {
+            min: 16,
+            max: 65_535,
+        },
+        framerate: PLACEHOLDER_FRAMERATE,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: crate::annexb::sample_alignment(codec),
+    }
+}
+
 /// # Example
 ///
 /// ```no_run
@@ -121,23 +198,7 @@ fn mp4_video_stream_from_str(name: &str) -> Option<VideoCodec> {
 /// // gst-launch equivalent: filesrc location=clip.mp4 ! mp4demux ! decodebin
 /// let demux = Mp4Demux::new();
 /// ```
-#[derive(Debug)]
-pub struct Mp4Demux {
-    /// The whole file, accumulated across chunks; parsed once at `Eos` (the `moov`
-    /// may be at the end, so no sample can be emitted before the file is complete).
-    buffer: Vec<u8>,
-    /// Negotiation-time output codec, refined from the `moov` via `CapsChanged`.
-    out_codec: VideoCodec,
-    /// Which track to emit; set by the `stream` property before negotiation.
-    select: StreamSelect,
-    // the `tkhd` track_ID among the tracks `select` matches, `None` for the first of them
-    track_id: Option<u32>,
-    caps_sent: bool,
-    sequence: u64,
-    configured: bool,
-    drained: bool,
-    seek: Option<SeekController>,
-}
+pub type Mp4Demux = OnePortElement<Mp4DemuxN>;
 
 impl Default for Mp4Demux {
     fn default() -> Self {
@@ -147,558 +208,13 @@ impl Default for Mp4Demux {
 
 impl Mp4Demux {
     pub fn new() -> Self {
-        Self {
-            buffer: Vec::new(),
-            out_codec: VideoCodec::H264,
-            select: StreamSelect::Video,
-            track_id: None,
-            caps_sent: false,
-            sequence: 0,
-            configured: false,
-            drained: false,
-            seek: None,
-        }
-    }
-
-    fn input_caps() -> Caps {
-        Caps::ByteStream {
-            encoding: ByteStreamEncoding::Mp4,
-        }
-    }
-
-    fn output_caps(codec: VideoCodec, width: Dim, height: Dim, framerate: Rate) -> Caps {
-        Caps::CompressedVideo {
-            codec,
-            width,
-            height,
-            framerate,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: crate::annexb::sample_alignment(codec),
-        }
-    }
-
-    /// The audio negotiation placeholder: the format with a channels /
-    /// sample-rate wildcard (`0`), refined to the concrete `moov` layout via
-    /// `CapsChanged` at `Eos`. Mirrors [`Mp4DemuxN`](crate::mp4demuxn)'s audio
-    /// port so the same `aacparse -> decoder` chain plugs. PCM leads with a
-    /// concrete layout, as `AviDemux` does, since a lone wildcard cannot fixate.
-    fn audio_nego_caps(format: AudioFormat) -> Vec<Caps> {
-        if is_pcm(format) {
-            return pcm_alternatives(format);
-        }
-        Vec::from([Caps::Audio {
-            format,
-            channels: 0,
-            sample_rate: 0,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        }])
-    }
-
-    /// The negotiation placeholder: a fixatable `Range` (not `Dim::Any`, which
-    /// fails Phase-2 fixate, e.g. a downstream `h264parse`), refined to the concrete
-    /// moov geometry via `CapsChanged` at `Eos`. Mirrors `tsdemux` / `matroskademux`.
-    fn nego_caps(codec: VideoCodec) -> Caps {
-        Caps::CompressedVideo {
-            codec,
-            width: Dim::Range {
-                min: 16,
-                max: 65_535,
-            },
-            height: Dim::Range {
-                min: 16,
-                max: 65_535,
-            },
-            framerate: PLACEHOLDER_FRAMERATE,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: crate::annexb::sample_alignment(codec),
-        }
-    }
-
-    fn is_pinned_track(&self, track: &TrackHeader) -> bool {
-        self.track_id.is_none_or(|id| track.track_id == id)
-    }
-
-    /// Emit the selected track once the whole file is in hand. Idempotent; runs
-    /// once, at `Eos`, dispatching to the video or audio drain.
-    async fn drain(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
-        if self.drained {
-            return Ok(());
-        }
-        self.drained = true;
-        // every sample goes out in this one pass, so only a seek queued by now is served
-        let seek_target_ns = self
-            .seek
-            .as_ref()
-            .and_then(SeekController::take_pending)
-            .map(|seek| seek.start);
-        match self.select {
-            StreamSelect::Video | StreamSelect::VideoNamed(_) => {
-                self.drain_video(seek_target_ns, out).await?
-            }
-            StreamSelect::RawVideo(format) => {
-                self.drain_raw_video(format, seek_target_ns, out).await?
-            }
-            StreamSelect::Audio(format) => self.drain_audio(format, seek_target_ns, out).await?,
-        }
-        if self.seek.as_ref().is_some_and(SeekController::has_pending) {
-            g2g_error!(
-                Target::category(short_type_name::<Self>()),
-                "a seek arrived after every sample went out, it is not served"
-            );
-            return Err(G2gError::SeekRefused);
-        }
-        Ok(())
-    }
-
-    /// Parse the buffered file's first audio track of the `selected` format and
-    /// emit it (M748): the concrete caps (channels / rate from the `moov`) via
-    /// `CapsChanged`, then every access unit, AAC ADTS-framed from the track's
-    /// AudioSpecificConfig so the elementary stream is self-describing (the shape
-    /// [`Mp4DemuxN`](crate::mp4demuxn)'s audio port emits). Runs once, at `Eos`.
-    /// Fails loud if there is no such track.
-    async fn drain_audio(
-        &mut self,
-        selected: AudioFormat,
-        seek_target_ns: Option<u64>,
-        out: &mut dyn OutputSink,
-    ) -> Result<(), G2gError> {
-        let tracks = parse_all_tracks(&self.buffer)?;
-        let audio = tracks
-            .iter()
-            .filter(|t| self.is_pinned_track(t))
-            .find(|t| matches!(t.kind, TrackKind::Audio { format, .. } if format == selected))
-            .ok_or(G2gError::CapsMismatch)?;
-        let TrackKind::Audio {
-            format,
-            channels,
-            sample_rate,
-            config,
-            ..
-        } = &audio.kind
-        else {
-            return Err(G2gError::CapsMismatch);
-        };
-        if !self.caps_sent {
-            out.push(PipelinePacket::CapsChanged(Caps::Audio {
-                format: *format,
-                channels: *channels,
-                sample_rate: *sample_rate,
-                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-            }))
-            .await?;
-            self.caps_sent = true;
-        }
-        let (samples, segment) = seek_samples(
-            track_samples(&self.buffer, audio)?,
-            audio.presentation_segment(),
-            seek_target_ns,
-        );
-        if segment != Segment::new() {
-            out.push(PipelinePacket::Segment(segment)).await?;
-        }
-        // Opus config leads the audio in-band (M791), the `OggDemux` convention,
-        // so the decoder trims the pre-skip; AAC is self-describing once ADTS-framed,
-        // except the object types ADTS cannot carry, which go raw behind their config.
-        // A tagged codec's whole sample entry leads it the same way, and Vorbis
-        // leads with its three headers as `OggDemux` forwards them.
-        let raw_aac = *format == AudioFormat::Aac && is_raw_aac_config(config);
-        let tagged = matches!(format, AudioFormat::Tagged(_));
-        let lead_frames = if *format == AudioFormat::Vorbis {
-            vorbis_headers(config).expect("read with the track")
-        } else if (*format == AudioFormat::Opus && !config.is_empty()) || raw_aac || tagged {
-            Vec::from([config.as_slice()])
-        } else {
-            Vec::new()
-        };
-        for head in lead_frames {
-            out.push(PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(head.into())),
-                FrameTiming::default(),
-                self.sequence,
-            )))
-            .await?;
-            self.sequence += 1;
-        }
-        for sample in samples {
-            // ADTS-frame the raw AAC access unit from the track's ASC, so a decoder
-            // starts without the out-of-band config (like the in-band video param
-            // sets); raw AAC and every other format go as they are.
-            let data = match format {
-                AudioFormat::Aac if !raw_aac => {
-                    require_adts(config, &sample.annexb, short_type_name::<Self>())?
-                }
-                _ => sample.annexb,
-            };
-            let timing = FrameTiming {
-                pts_ns: sample.pts_ns,
-                dts_ns: sample.pts_ns,
-                duration_ns: sample.duration_ns,
-                capture_ns: sample.pts_ns,
-                arrival_ns: g2g_core::metrics::monotonic_ns(),
-                keyframe: sample.keyframe,
-            };
-            let Some((timing, data)) = clip_stored_pcm(&audio.kind, &segment, timing, data)? else {
-                continue;
-            };
-            let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                timing,
-                sequence: self.sequence,
-                meta: Default::default(),
-            };
-            self.sequence += 1;
-            out.push(PipelinePacket::DataFrame(frame)).await?;
-        }
-        Ok(())
-    }
-
-    /// Parse the buffered file and emit the video track: announce the concrete
-    /// caps from the `moov`, then every access unit (parameter sets prepended to
-    /// the first, matching `fmp4demux`). The track is the first video track, or
-    /// the first of the named codec, read from the sample tables or, in a
-    /// fragmented file, from the `moof`s. Idempotent; runs once, at `Eos`.
-    async fn drain_video(
-        &mut self,
-        seek_target_ns: Option<u64>,
-        out: &mut dyn OutputSink,
-    ) -> Result<(), G2gError> {
-        let named_codec = match self.select {
-            StreamSelect::VideoNamed(codec) => Some(codec),
-            StreamSelect::Video | StreamSelect::RawVideo(_) | StreamSelect::Audio(_) => None,
-        };
-        let tracks = parse_all_tracks(&self.buffer)?;
-        let video = tracks
-            .iter()
-            .filter(|t| self.is_pinned_track(t))
-            .find(|t| match t.kind {
-                TrackKind::Video { codec, .. } => named_codec.is_none_or(|named| named == codec),
-                _ => false,
-            })
-            .ok_or(G2gError::CapsMismatch)?;
-        let TrackKind::Video {
-            codec,
-            width,
-            height,
-            param_sets,
-        } = &video.kind
-        else {
-            return Err(G2gError::CapsMismatch);
-        };
-        let codec = *codec;
-        if !self.caps_sent {
-            let framerate = framerate_within_placeholder(track_framerate_q16(&self.buffer, video));
-            let caps = Self::output_caps(codec, Dim::Fixed(*width), Dim::Fixed(*height), framerate);
-            out.push(PipelinePacket::CapsChanged(caps)).await?;
-            self.out_codec = codec;
-            self.caps_sent = true;
-        }
-        // the decoder drops the pictures the edit list cuts, and those before a seek target
-        let (samples, edit) = seek_samples(
-            track_samples(&self.buffer, video)?,
-            video.presentation_segment(),
-            seek_target_ns,
-        );
-        if edit != Segment::new() {
-            out.push(PipelinePacket::Segment(edit)).await?;
-        }
-        // a tagged codec's whole sample entry leads its samples as a frame of its own
-        if let (VideoCodec::Tagged(_), Some(entry)) = (codec, param_sets.first()) {
-            out.push(PipelinePacket::DataFrame(Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(entry.clone().into_boxed_slice())),
-                FrameTiming::default(),
-                self.sequence,
-            )))
-            .await?;
-            self.sequence += 1;
-        }
-        let mut need_param_sets = !matches!(codec, VideoCodec::Tagged(_));
-        let meta = crate::fmp4::clean_aperture_meta(video.clean_aperture);
-        for mut s in samples {
-            let mut annexb = core::mem::take(&mut s.annexb);
-            // The moov's config-record parameter sets are out-of-band, so prepend
-            // them to the first access unit if it does not already carry them.
-            if need_param_sets && !starts_with_param_set(&annexb, codec) {
-                annexb = prepend_param_sets(&annexb, param_sets, codec);
-            }
-            need_param_sets = false;
-            let mut frame = video_frame(annexb, &s, self.sequence);
-            frame.meta = meta.clone();
-            self.sequence += 1;
-            out.push(PipelinePacket::DataFrame(frame)).await?;
-        }
-        Ok(())
-    }
-
-    // the first uncompressed track of the selected layout, each frame cut to its pixels
-    async fn drain_raw_video(
-        &mut self,
-        selected: RawVideoFormat,
-        seek_target_ns: Option<u64>,
-        out: &mut dyn OutputSink,
-    ) -> Result<(), G2gError> {
-        let tracks = parse_all_tracks(&self.buffer)?;
-        let video = tracks
-            .iter()
-            .filter(|t| self.is_pinned_track(t))
-            .find(|t| matches!(t.kind, TrackKind::RawVideo { format, .. } if format == selected))
-            .ok_or(G2gError::CapsMismatch)?;
-        let TrackKind::RawVideo {
-            format,
-            width,
-            height,
-            ..
-        } = video.kind
-        else {
-            return Err(G2gError::CapsMismatch);
-        };
-        if !self.caps_sent {
-            let framerate = framerate_within_placeholder(track_framerate_q16(&self.buffer, video));
-            let caps = raw_video_caps(format, Dim::Fixed(width), Dim::Fixed(height), framerate);
-            out.push(PipelinePacket::CapsChanged(caps)).await?;
-            self.caps_sent = true;
-        }
-        let (samples, edit) = seek_samples(
-            track_samples(&self.buffer, video)?,
-            video.presentation_segment(),
-            seek_target_ns,
-        );
-        if edit != Segment::new() {
-            out.push(PipelinePacket::Segment(edit)).await?;
-        }
-        let meta = crate::fmp4::clean_aperture_meta(video.clean_aperture);
-        for mut s in samples {
-            let mut pixels = core::mem::take(&mut s.annexb);
-            let Some(len) = raw_video_frame_bytes(format, width, height, pixels.len()) else {
-                warn_short_raw_video_frame("qtdemux", format, width, height, pixels.len());
-                continue;
-            };
-            pixels.truncate(len);
-            let mut frame = video_frame(pixels, &s, self.sequence);
-            frame.meta = meta.clone();
-            self.sequence += 1;
-            out.push(PipelinePacket::DataFrame(frame)).await?;
-        }
-        Ok(())
-    }
-}
-
-fn video_frame(data: Vec<u8>, sample: &Sample, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-        timing: FrameTiming {
-            pts_ns: sample.pts_ns,
-            dts_ns: sample.pts_ns,
-            duration_ns: sample.duration_ns,
-            capture_ns: sample.pts_ns,
-            arrival_ns: g2g_core::metrics::monotonic_ns(),
-            keyframe: sample.keyframe,
-        },
-        sequence,
-        meta: Default::default(),
-    }
-}
-
-// the samples from the keyframe at or before the target, with the segment moved up to start there
-fn seek_samples(
-    mut samples: Vec<Sample>,
-    edit: Segment,
-    target_ns: Option<u64>,
-) -> (Vec<Sample>, Segment) {
-    // an edit list that starts presentation later moves the start time with it
-    let stream_start_ns = edit.start.max(stream_start_ns(&samples));
-    let start = match target_ns {
-        None => stream_start_ns,
-        Some(target_ns) => {
-            let target_ns = target_ns.saturating_add(stream_start_ns);
-            let first = if every_sample_ends_by(&samples, target_ns) {
-                samples.len()
-            } else {
-                keyframe_index_for(&samples, target_ns)
-            };
-            samples.drain(..first);
-            target_ns
-        }
-    };
-    let segment = Segment {
-        stop: edit.stop,
-        ..segment_from(start, stream_start_ns)
-    };
-    (samples, segment)
-}
-
-// a fragmented file's samples are in its moofs, a progressive file's in the sample tables
-fn track_samples(data: &[u8], track: &TrackHeader) -> Result<Vec<Sample>, G2gError> {
-    let selected = core::slice::from_ref(track);
-    let samples = if find_box(data, b"moof").is_some() {
-        parse_fragments_multi(data, selected, 0, &mut FragmentStarts::default(), None)?
-    } else {
-        parse_progressive_multi(data, selected)?
-    };
-    Ok(track.edited_samples(samples.into_iter().map(|(_, sample)| sample).collect()))
-}
-
-impl AsyncElement for Mp4Demux {
-    fn seek_route(&self) -> Option<ElementSeekRoute> {
-        Some(ElementSeekRoute::Buffered)
-    }
-
-    fn set_buffered_seek(&mut self, app: SeekController) {
-        self.seek = Some(app);
-    }
-
-    type ProcessFuture<'a>
-        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
-    where
-        Self: 'a;
-
-    /// Reads host memory, so it takes system frames only. The allocation
-    /// cascade turns that into a download demand on a GPU producer.
-    fn input_domains(&self) -> g2g_core::memory::DomainSet {
-        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
-    }
-
-    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&Self::input_caps())
-    }
-
-    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        // ByteStream{Mp4} in -> the selected track out. Video defaults to H.264,
-        // refined from the moov via CapsChanged at Eos (like fmp4demux), but a
-        // downstream that names another codec (an `h265parse`) can pick it, so
-        // the other codecs follow the default as alternatives. A codec-named
-        // selection (M961) negotiates that codec alone; audio negotiates its
-        // selected format with a wildcard layout, refined the same way.
-        let nego = match self.select {
-            StreamSelect::Video => {
-                let mut codecs = Vec::from([self.out_codec]);
-                codecs.extend(
-                    VIDEO_STREAM_NAMES
-                        .iter()
-                        .map(|(_, codec)| *codec)
-                        .filter(|codec| *codec != self.out_codec),
-                );
-                CapsSet::from_alternatives(codecs.into_iter().map(Self::nego_caps).collect())
-            }
-            StreamSelect::VideoNamed(codec) => CapsSet::one(Self::nego_caps(codec)),
-            StreamSelect::RawVideo(format) => CapsSet::one(raw_video_placeholder_caps(format)),
-            StreamSelect::Audio(format) => {
-                CapsSet::from_alternatives(Self::audio_nego_caps(format))
-            }
-        };
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::ByteStream {
-                encoding: ByteStreamEncoding::Mp4,
-            } => nego.clone(),
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
-    }
-
-    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if !matches!(
-            absolute_caps,
-            Caps::ByteStream {
-                encoding: ByteStreamEncoding::Mp4
-            }
-        ) {
-            return Err(G2gError::CapsMismatch);
-        }
-        self.configured = true;
-        Ok(ConfigureOutcome::Accepted)
-    }
-
-    fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new(
-            "Progressive MP4 demuxer",
-            "Codec/Demuxer",
-            "Demuxes a whole-file (progressive) MP4 / QuickTime byte stream to its video (or audio) track",
-            "g2g",
-        )
-    }
-
-    fn properties(&self) -> &'static [PropertySpec] {
-        MP4DEMUX_PROPS
-    }
-
-    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        match name {
-            "stream" => {
-                let name = value.as_str().ok_or(PropError::Type)?;
-                let audio =
-                    audio_from_stream_name(AUDIO_STREAM_NAMES, name).map(StreamSelect::Audio);
-                self.select = match name {
-                    "video" => StreamSelect::Video,
-                    _ => audio
-                        .or_else(|| mp4_video_stream_from_str(name).map(StreamSelect::VideoNamed))
-                        .or_else(|| raw_video_stream_from_str(name).map(StreamSelect::RawVideo))
-                        .ok_or(PropError::Value)?,
-                };
-                Ok(())
-            }
-            "track-id" => {
-                let id = value.as_uint().ok_or(PropError::Type)?;
-                self.track_id = match id {
-                    0 => None,
-                    _ => Some(u32::try_from(id).map_err(|_| PropError::Value)?),
-                };
-                Ok(())
-            }
-            _ => Err(PropError::Unknown),
-        }
-    }
-
-    fn get_property(&self, name: &str) -> Option<PropValue> {
-        match name {
-            "track-id" => Some(PropValue::Uint(self.track_id.map_or(0, u64::from))),
-            "stream" => Some(PropValue::Str(match self.select {
-                StreamSelect::Video => String::from("video"),
-                // constructed from the same table, so the name is always there
-                StreamSelect::VideoNamed(codec) => {
-                    mp4_video_stream_str(codec).unwrap_or_else(|| String::from("video"))
-                }
-                StreamSelect::RawVideo(format) => {
-                    String::from(raw_video_stream_str(format).unwrap_or("video"))
-                }
-                StreamSelect::Audio(format) => {
-                    mp4_audio_stream_str(format).unwrap_or_else(|| String::from("aac"))
-                }
-            })),
-            _ => None,
-        }
-    }
-
-    fn process<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-        out: &'a mut dyn OutputSink,
-    ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            if !self.configured {
-                return Err(G2gError::NotConfigured);
-            }
-            match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    let slice = frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    // Accumulate; the moov may be at the end, so parse only at Eos.
-                    self.buffer.extend_from_slice(slice);
-                }
-                // The whole file is in hand: parse and emit, then the runner's
-                // transform arm forwards the EOS.
-                PipelinePacket::Eos => self.drain(out).await?,
-                PipelinePacket::CapsChanged(_) => {}
-                other => {
-                    out.push(other).await?;
-                }
-            }
-            Ok(())
-        })
+        Self::wrap(Mp4DemuxN::whole_file(StreamSelect::Video), "Mp4Demux")
     }
 }
 
 /// `Mp4Demux`'s settable properties (M748). `stream` picks the emitted track, the
 /// single-stream analog of [`TsDemux`](crate::tsdemux::TsDemux)'s `stream`.
-static MP4DEMUX_PROPS: &[PropertySpec] = &[
+pub(crate) static MP4DEMUX_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
@@ -713,24 +229,25 @@ static MP4DEMUX_PROPS: &[PropertySpec] = &[
 
 impl PadTemplates for Mp4Demux {
     fn pad_templates() -> Vec<PadTemplate> {
-        let video = Self::nego_caps;
         let mut source = Vec::from([
-            video(VideoCodec::H264),
-            video(VideoCodec::H265),
-            video(VideoCodec::Av1),
-            video(VideoCodec::Mpeg4Part2),
-            video(VideoCodec::Mpeg2),
-            video(VideoCodec::Vp8),
-            video(VideoCodec::Mjpeg),
-            video(VideoCodec::DnxHd),
+            nego_caps(VideoCodec::H264),
+            nego_caps(VideoCodec::H265),
+            nego_caps(VideoCodec::Av1),
+            nego_caps(VideoCodec::Mpeg4Part2),
+            nego_caps(VideoCodec::Mpeg2),
+            nego_caps(VideoCodec::Vp8),
+            nego_caps(VideoCodec::Mjpeg),
+            nego_caps(VideoCodec::DnxHd),
         ]);
-        source.extend(ProResVariant::ALL.map(|variant| video(VideoCodec::ProRes { variant })));
+        source.extend(ProResVariant::ALL.map(|variant| nego_caps(VideoCodec::ProRes { variant })));
         source.extend(raw_video_formats().map(raw_video_placeholder_caps));
         for (_, format) in AUDIO_STREAM_NAMES {
-            source.extend(Self::audio_nego_caps(*format));
+            source.extend(audio_nego_caps(*format));
         }
         Vec::from([
-            PadTemplate::sink(CapsSet::one(Self::input_caps())),
+            PadTemplate::sink(CapsSet::one(Caps::ByteStream {
+                encoding: ByteStreamEncoding::Mp4,
+            })),
             PadTemplate::source(CapsSet::from_alternatives(source)),
         ])
     }

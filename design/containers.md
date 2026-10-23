@@ -913,19 +913,32 @@ fourcc in its `CodecPrivate`, standard when it has none, and its blocks lack
 the frame size and `icpf` tag a QuickTime ProRes frame opens with, so
 `matroskademux` puts them back, as ffmpeg's demuxer does.
 
-`mp4demux` reports a track's frame rate as `timescale / delta` when every `stts`
+`Mp4Demux` (`qtdemux` with one output) is `OnePortElement<Mp4DemuxN>`. Its one
+port takes the first track `stream` matches, the first video track by default,
+or the one `track-id` names among them, once the `moov` arrives. It reads only
+the whole-file `ByteStream{Mp4}`, where an `Mp4DemuxN` with probed ports also
+reads the streaming `IsoBmff`. Either emits a fragmented file fragment by
+fragment and a progressive one at EOS. A one-port `Mp4DemuxN` serves a time seek
+from the whole file (`ElementSeekRoute::Buffered`), so a seek holds a fragmented
+file until EOS too. Every port's segment starts no earlier than the stream start
+and counts stream time from it, the earliest among the forwarded tracks of the
+later of a track's edit-list start and its first pts, so the ports keep one
+origin and a position read back seeks to its frame.
+
+`Mp4DemuxN` reports a track's frame rate as `timescale / delta` when every `stts`
 entry codes the same sample delta, and `Rate::Any` when the deltas vary, the
 table is empty (a fragmented init) or the rate falls outside the 1 to 240 fps
 placeholder it negotiated. `mp4src` applies the same rule and announces it in a
 `CapsChanged` before its first sample. A fragmented file has an empty `stts`, so
-`mp4src` and `fmp4demux` read the first fragment's `tfhd`
-`default_sample_duration` instead. `fmp4demux` therefore announces its caps at
+`mp4src`, `fmp4demux` and `Mp4DemuxN` read the first fragment's `tfhd`
+`default_sample_duration` instead, and `Mp4DemuxN` falls back to the `trex`
+default when the `tfhd` has none. `fmp4demux` therefore announces its caps at
 the first `moof` rather than at the `moov`. A fragment with no `tfdt` starts where
 the previous fragment of its track ended: `fmp4demux` and `Mp4DemuxN` keep that
 end across fragments and reset it on a flush.
 
-`Mp4Demux` and `Mp4DemuxN` turn a video track's edit list into the `Segment`
-they send ahead of its samples. It starts at the `media_time` of the first
+`Mp4DemuxN` turns a video track's edit list into the `Segment` it sends ahead
+of its samples. It starts at the `media_time` of the first
 media edit, past any leading empty edits, whose delay is not applied. When
 every edit after them is a media edit with a duration, each starting at or
 after the end of the one before, the segment stops where the last one ends and

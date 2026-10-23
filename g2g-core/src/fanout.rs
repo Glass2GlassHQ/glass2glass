@@ -685,6 +685,9 @@ pub trait MultiOutputElement: ElementBound {
         _upstream: crate::runtime::SeekController,
     ) {
     }
+
+    // called only when `seek_route` is `Buffered`
+    fn set_buffered_seek(&mut self, _app: crate::runtime::SeekController) {}
 }
 
 /// Multi-input element trait variant: an N-input, 1-output element (a

@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::task::{Context, Poll};
 
 use g2g_core::element::BoxFuture;
@@ -100,7 +101,10 @@ pub struct OnePortElement<E> {
 impl<E: MultiOutputElement> OnePortElement<E> {
     pub fn wrap(element: E, log_category: &'static str) -> Self {
         assert!(
-            element.port_output_caps(0).is_some() && element.port_output_caps(1).is_none(),
+            matches!(
+                element.port_caps_constraint(0),
+                Some(CapsConstraint::Produces(_))
+            ) && element.port_output_caps(1).is_none(),
             "a one-port element is a demuxer with caps for port 0 alone"
         );
         Self {
@@ -126,15 +130,15 @@ impl<E: MultiOutputElement> AsyncElement for OnePortElement<E> {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let accepted = self.element.caps_constraint_as_input();
-        let output = self.element.port_output_caps(0);
+        let Some(CapsConstraint::Produces(output)) = self.element.port_caps_constraint(0) else {
+            unreachable!("wrap checked that port 0 produces caps");
+        };
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
-            CapsSet::from_alternatives(
-                output
-                    .iter()
-                    .filter(|_| accepted.accepts(input))
-                    .cloned()
-                    .collect(),
-            )
+            if accepted.accepts(input) {
+                output.clone()
+            } else {
+                CapsSet::from_alternatives(Vec::new())
+            }
         }))
     }
 
@@ -164,6 +168,10 @@ impl<E: MultiOutputElement> AsyncElement for OnePortElement<E> {
 
     fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
         self.element.set_seek(app, upstream);
+    }
+
+    fn set_buffered_seek(&mut self, app: SeekController) {
+        self.element.set_buffered_seek(app);
     }
 
     fn metadata(&self) -> ElementMetadata {

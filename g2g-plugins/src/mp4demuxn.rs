@@ -31,22 +31,28 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
+use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::StreamSelectController;
+use g2g_core::runtime::{ElementSeekRoute, SeekController, StreamSelectController};
 use g2g_core::{
-    AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, Dim, FrameTiming, G2gError, LatencyReport, MemoryDomain, MultiOutputElement,
-    MultiOutputSink, PipelinePacket, Rate, Segment, Stream, StreamCollection, StreamType,
-    VideoCodec,
+    g2g_error, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
+    CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, LatencyReport,
+    MemoryDomain, MultiOutputElement, MultiOutputSink, PipelinePacket, PropError, PropValue,
+    PropertySpec, Rate, Segment, Stream, StreamCollection, StreamType, VideoCodec,
 };
 
+use crate::demuxseek::{segment_from, with_stream_time};
 use crate::fmp4::{
-    clip_stored_pcm, edit_track_samples, parse_all_tracks, parse_chapters, parse_fragments_multi,
-    parse_progressive_multi, prepend_param_sets, starts_with_param_set, unsupported_pcm_layout,
-    vorbis_headers, FragmentStarts, Sample, TrackHeader, TrackKind,
+    clip_stored_pcm, edit_track_samples, every_sample_ends_by, keyframe_index_for,
+    parse_all_tracks, parse_chapters, parse_fragments_multi, parse_progressive_multi,
+    prepend_param_sets, starts_with_param_set, stream_start_ns, track_fragment_framerate_q16,
+    track_framerate_q16, unsupported_pcm_layout, vorbis_headers, FragmentStarts, Sample,
+    TrackHeader, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
+use crate::mp4demux::{StreamSelect, MP4DEMUX_PROPS};
 use crate::pcmclip::within_presentation;
+use crate::typefind::framerate_within_placeholder;
 use crate::uncompressedvideo::{raw_video_frame_bytes, warn_short_raw_video_frame};
 
 /// The id a track carries in the `StreamCollection` and on its `StreamTag`s.
@@ -62,6 +68,17 @@ pub(crate) fn stream_id(track_id: u32) -> alloc::string::String {
 pub struct Mp4Port {
     pub track_id: u32,
     pub caps: Caps,
+}
+
+#[derive(Debug, Clone)]
+enum PortTrack {
+    // probed from the moov when the graph was built, or picked by the app
+    Track(Mp4Port),
+    // the first track `stream` matches, or the one `track_id` names among them
+    Matching {
+        stream: StreamSelect,
+        track_id: Option<u32>,
+    },
 }
 
 /// A forwardable track for the `playbin uri=*.mp4` fan-out (M392): the
@@ -376,8 +393,10 @@ pub struct Mp4DemuxN {
     /// `None` until the `moov` is buffered.
     fragmented: Option<bool>,
     fragment_starts: FragmentStarts,
-    /// Port `i` forwards `ports[i].track_id` with `ports[i].caps`.
-    ports: Vec<Mp4Port>,
+    ports: Vec<PortTrack>,
+    // the track_ID port `i` forwards, `None` until the moov names a matching port's track
+    port_track_ids: Vec<Option<u32>>,
+    encodings: &'static [ByteStreamEncoding],
     /// Whether port `i` has emitted its opening `CapsChanged` yet.
     announced: Vec<bool>,
     /// Whether port `i` still owes the `moov`'s out-of-band codec config: a video
@@ -417,6 +436,11 @@ pub struct Mp4DemuxN {
     /// list's priming trim, a video edit's start and stop, open when none or not
     /// yet known.
     port_edit: Vec<Segment>,
+    // the earliest presented start among the forwarded tracks, so their positions share one origin
+    stream_start_ns: Option<u64>,
+    segment_sent: Vec<Segment>,
+    // a seek holds a fragmented file whole too, since it is served from the whole file at Eos
+    seek: Option<SeekController>,
 }
 
 // no real fragment runs this long
@@ -426,10 +450,35 @@ impl Mp4DemuxN {
     /// A demuxer with one output port per entry of `ports`, in port order. Panics
     /// if `ports` is empty (a fan-out needs a port).
     pub fn new(ports: Vec<Mp4Port>) -> Self {
+        Self::with_ports(
+            ports.into_iter().map(PortTrack::Track).collect(),
+            &[ByteStreamEncoding::IsoBmff, ByteStreamEncoding::Mp4],
+        )
+    }
+
+    // one port reading a whole file, emitting the first track `stream` matches
+    pub(crate) fn whole_file(stream: StreamSelect) -> Self {
+        Self::with_ports(
+            Vec::from([PortTrack::Matching {
+                stream,
+                track_id: None,
+            }]),
+            &[ByteStreamEncoding::Mp4],
+        )
+    }
+
+    fn with_ports(ports: Vec<PortTrack>, encodings: &'static [ByteStreamEncoding]) -> Self {
         assert!(
             !ports.is_empty(),
             "Mp4DemuxN needs at least one output port"
         );
+        let port_track_ids = ports
+            .iter()
+            .map(|port| match port {
+                PortTrack::Track(track) => Some(track.track_id),
+                PortTrack::Matching { .. } => None,
+            })
+            .collect();
         let announced = alloc::vec![false; ports.len()];
         let need_config = alloc::vec![true; ports.len()];
         let held_fragment_ns = alloc::vec![None; ports.len()];
@@ -440,6 +489,8 @@ impl Mp4DemuxN {
             fragmented: None,
             fragment_starts: FragmentStarts::default(),
             ports,
+            port_track_ids,
+            encodings,
             announced,
             need_config,
             bus: None,
@@ -452,7 +503,10 @@ impl Mp4DemuxN {
             emitted: 0,
             held_fragment_ns,
             upstream_segment: Segment::new(),
+            segment_sent: port_edit.clone(),
             port_edit,
+            stream_start_ns: None,
+            seek: None,
         }
     }
 
@@ -503,8 +557,9 @@ impl Mp4DemuxN {
             active.push(id.clone());
         }
         for (port, track_id, caps) in resolved {
-            if self.ports[port].track_id != track_id {
-                self.ports[port] = Mp4Port { track_id, caps };
+            if self.port_track_ids[port] != Some(track_id) {
+                self.ports[port] = PortTrack::Track(Mp4Port { track_id, caps });
+                self.port_track_ids[port] = Some(track_id);
                 self.announced[port] = false; // re-emit caps for the new track
                 self.need_config[port] = true; // the new track owes its codec config
             }
@@ -577,16 +632,50 @@ impl Mp4DemuxN {
     /// The fan-out demuxer reads a whole MP4, so it accepts both the streaming
     /// `IsoBmff` form (HLS / DASH fragments) and the whole-file `Mp4` form (M479,
     /// a `filesrc` progressive `.mp4`); the parse is the same either way.
-    fn accepts(caps: &Caps) -> bool {
-        Self::input_caps().accepts(caps)
+    fn accepts(&self, caps: &Caps) -> bool {
+        self.input_caps().accepts(caps)
     }
 
-    fn input_caps() -> CapsSet {
+    fn input_caps(&self) -> CapsSet {
         CapsSet::from_alternatives(
-            [ByteStreamEncoding::IsoBmff, ByteStreamEncoding::Mp4]
-                .map(|encoding| Caps::ByteStream { encoding })
-                .to_vec(),
+            self.encodings
+                .iter()
+                .map(|&encoding| Caps::ByteStream { encoding })
+                .collect(),
         )
+    }
+
+    fn port_of(&self, track_id: u32) -> Option<usize> {
+        self.port_track_ids
+            .iter()
+            .position(|id| *id == Some(track_id))
+    }
+
+    fn port_caps(&self, port: usize) -> CapsSet {
+        match &self.ports[port] {
+            PortTrack::Track(track) => CapsSet::one(track.caps.clone()),
+            PortTrack::Matching { stream, .. } => stream.nego_caps(),
+        }
+    }
+
+    fn resolve_ports(&mut self, tracks: &[TrackHeader]) -> Result<(), G2gError> {
+        for (port, port_track) in self.ports.iter().enumerate() {
+            let PortTrack::Matching { stream, track_id } = port_track else {
+                continue;
+            };
+            let track = tracks
+                .iter()
+                .filter(|track| track_id.is_none_or(|id| track.track_id == id))
+                .find(|track| stream.matches(&track.kind))
+                .ok_or(G2gError::CapsMismatch)?;
+            self.port_track_ids[port] = Some(track.track_id);
+        }
+        Ok(())
+    }
+
+    // every sample of a whole file goes out at Eos, and a seek holds a fragmented file whole
+    fn emits_at_eos(&self) -> bool {
+        self.fragmented != Some(true) || self.seek.is_some()
     }
 
     /// Announce the file's streams and metadata on the bus, once: the
@@ -710,6 +799,7 @@ impl Mp4DemuxN {
             };
             let fragmented = find_box(moov, b"mvex").is_some();
             let tracks = parse_all_tracks(&self.buf)?;
+            self.resolve_ports(&tracks)?;
             if self.bus.is_some() {
                 self.post_metadata(&tracks);
             }
@@ -717,7 +807,7 @@ impl Mp4DemuxN {
             self.tracks = Some(tracks);
         }
         // Only a fragmented (CMAF) file emits progressively.
-        if self.fragmented != Some(true) {
+        if self.emits_at_eos() {
             return Ok(());
         }
 
@@ -757,7 +847,13 @@ impl Mp4DemuxN {
                     let samples = samples?;
                     self.learn_held_fragment(&samples);
                     let samples = edit_track_samples(&forwarded, samples);
-                    self.emit_samples(&forwarded, samples, out).await?;
+                    self.learn_stream_start(&forwarded, &samples);
+                    let framerates = forwarded
+                        .iter()
+                        .map(|track| track_fragment_framerate_q16(&self.buf[start..end], track))
+                        .collect::<Vec<_>>();
+                    self.emit_samples(&forwarded, &framerates, samples, out)
+                        .await?;
                     off = end;
                     consumed = off;
                 }
@@ -782,7 +878,9 @@ impl Mp4DemuxN {
             if held.is_some() {
                 continue;
             }
-            let track_id = self.ports[port].track_id;
+            let Some(track_id) = self.port_track_ids[port] else {
+                continue;
+            };
             let span = samples
                 .iter()
                 .filter(|(id, _)| *id == track_id)
@@ -801,9 +899,48 @@ impl Mp4DemuxN {
 
     /// The upstream segment as port `port` sees it: within its track's
     /// presentation, so the priming before it and the frames an edit cuts are
-    /// clipped.
+    /// clipped, starting no earlier than the stream start its positions count from.
     fn port_segment(&self, port: usize) -> Segment {
-        within_presentation(self.upstream_segment, &self.port_edit[port])
+        let presented = within_presentation(self.upstream_segment, &self.port_edit[port]);
+        let Some(stream_start_ns) = self.stream_start_ns else {
+            return presented;
+        };
+        with_stream_time(
+            Segment {
+                start: presented.start.max(stream_start_ns),
+                ..presented
+            },
+            stream_start_ns,
+        )
+    }
+
+    async fn send_port_segment(
+        &mut self,
+        port: usize,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        let segment = self.port_segment(port);
+        self.segment_sent[port] = segment;
+        out.push_to(port, PipelinePacket::Segment(segment)).await?;
+        Ok(())
+    }
+
+    fn learn_stream_start(&mut self, tracks: &[TrackHeader], samples: &[(u32, Sample)]) {
+        if self.stream_start_ns.is_some() {
+            return;
+        }
+        // as ffmpeg's start_time, the later of a track's edit-list start and its first pts
+        self.stream_start_ns = tracks
+            .iter()
+            .filter_map(|track| {
+                let first_pts_ns = samples
+                    .iter()
+                    .filter(|(track_id, _)| *track_id == track.track_id)
+                    .map(|(_, sample)| sample.pts_ns)
+                    .min()?;
+                Some(track.presentation_segment().start.max(first_pts_ns))
+            })
+            .min();
     }
 
     /// Parse the whole buffered file at `Eos` and emit every sample, for a
@@ -816,6 +953,7 @@ impl Mp4DemuxN {
         out: &mut dyn MultiOutputSink,
     ) -> Result<(), G2gError> {
         let tracks = parse_all_tracks(&self.buf)?;
+        self.resolve_ports(&tracks)?;
         if self.bus.is_some() {
             self.post_metadata(&tracks);
         }
@@ -833,18 +971,62 @@ impl Mp4DemuxN {
             parse_progressive_multi(&self.buf, &forwarded)?
         };
         let samples = edit_track_samples(&forwarded, samples);
-        self.emit_samples(&forwarded, samples, out).await
+        self.learn_stream_start(&forwarded, &samples);
+        let framerates = forwarded
+            .iter()
+            .map(|track| track_framerate_q16(&self.buf, track))
+            .collect::<Vec<_>>();
+        // every sample goes out in this one pass, so only a seek queued by now is served
+        let seek_target_ns = self
+            .seek
+            .as_ref()
+            .and_then(SeekController::take_pending)
+            .map(|seek| seek.start);
+        let samples = match (seek_target_ns, &forwarded[..]) {
+            (None, _) => samples,
+            (Some(target_ns), [track]) => self.seek_to(track, samples, target_ns, out).await?,
+            (Some(_), _) => unreachable!("only a one-port demuxer seeks"),
+        };
+        self.emit_samples(&forwarded, &framerates, samples, out)
+            .await?;
+        if self.seek.as_ref().is_some_and(SeekController::has_pending) {
+            g2g_error!(
+                Target::category(short_type_name::<Self>()),
+                "a seek arrived after every sample went out, it is not served"
+            );
+            return Err(G2gError::SeekRefused);
+        }
+        Ok(())
+    }
+
+    // the one port opens at the target, from the keyframe at or before it
+    async fn seek_to(
+        &mut self,
+        track: &TrackHeader,
+        samples: Vec<(u32, Sample)>,
+        target_ns: u64,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<Vec<(u32, Sample)>, G2gError> {
+        let edit = track.presentation_segment();
+        let (samples, segment) = seek_samples(
+            samples.into_iter().map(|(_, sample)| sample).collect(),
+            edit,
+            target_ns,
+        );
+        self.upstream_segment = segment;
+        self.port_edit[0] = edit;
+        self.send_port_segment(0, out).await?;
+        Ok(samples
+            .into_iter()
+            .map(|sample| (track.track_id, sample))
+            .collect())
     }
 
     /// The tracks some port forwards, the only ones worth de-framing.
     fn forwarded_tracks(&self, tracks: &[TrackHeader]) -> Vec<TrackHeader> {
         tracks
             .iter()
-            .filter(|track| {
-                self.ports
-                    .iter()
-                    .any(|port| port.track_id == track.track_id)
-            })
+            .filter(|track| self.port_of(track.track_id).is_some())
             .cloned()
             .collect()
     }
@@ -858,28 +1040,33 @@ impl Mp4DemuxN {
     async fn emit_samples(
         &mut self,
         tracks: &[TrackHeader],
+        framerates_q16: &[Option<u32>],
         samples: Vec<(u32, Sample)>,
         out: &mut dyn MultiOutputSink,
     ) -> Result<(), G2gError> {
         for (track_id, sample) in samples {
-            let Some(port) = self.ports.iter().position(|p| p.track_id == track_id) else {
+            let Some(port) = self.port_of(track_id) else {
                 continue; // a track no port forwards
             };
-            let track = tracks.iter().find(|t| t.track_id == track_id);
+            let track_index = tracks.iter().position(|t| t.track_id == track_id);
+            let track = track_index.map(|index| &tracks[index]);
             let kind = track.map(|t| &t.kind);
             // Announce the port's real caps once (refining the looser negotiation
             // caps the branch solved against, e.g. concrete AAC channels/rate).
             if !self.announced[port] {
-                let caps = kind
-                    .map(real_caps)
-                    .unwrap_or_else(|| self.ports[port].caps.clone());
+                let caps = match track_index {
+                    Some(index) => with_framerate(
+                        real_caps(&tracks[index].kind),
+                        framerate_within_placeholder(framerates_q16[index]),
+                    ),
+                    None => self.port_caps(port).alternatives()[0].clone(),
+                };
                 out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
                 self.announced[port] = true;
-                let edit = track.map_or(Segment::new(), TrackHeader::presentation_segment);
-                if edit != self.port_edit[port] {
-                    self.port_edit[port] = edit;
-                    out.push_to(port, PipelinePacket::Segment(self.port_segment(port)))
-                        .await?;
+                self.port_edit[port] =
+                    track.map_or(Segment::new(), TrackHeader::presentation_segment);
+                if self.port_segment(port) != self.segment_sent[port] {
+                    self.send_port_segment(port, out).await?;
                 }
             }
 
@@ -1051,7 +1238,7 @@ impl MultiOutputElement for Mp4DemuxN {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        if Self::accepts(upstream_caps) {
+        if self.accepts(upstream_caps) {
             Ok(upstream_caps.clone())
         } else {
             Err(G2gError::CapsMismatch)
@@ -1059,17 +1246,22 @@ impl MultiOutputElement for Mp4DemuxN {
     }
 
     fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(Self::input_caps())
+        CapsConstraint::Accepts(self.input_caps())
     }
 
     /// Declare each port's elementary caps (M380), so the solver negotiates each
     /// branch against its track at startup. `None` for an out-of-range port.
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
-        self.ports.get(port).map(|p| p.caps.clone())
+        (port < self.ports.len()).then(|| self.port_caps(port).alternatives()[0].clone())
+    }
+
+    // a port matching its track by codec alone offers every codec it could find
+    fn port_caps_constraint(&self, port: usize) -> Option<CapsConstraint<'_>> {
+        (port < self.ports.len()).then(|| CapsConstraint::Produces(self.port_caps(port)))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if Self::accepts(absolute_caps) {
+        if self.accepts(absolute_caps) {
             Ok(ConfigureOutcome::Accepted)
         } else {
             Err(G2gError::CapsMismatch)
@@ -1100,7 +1292,7 @@ impl MultiOutputElement for Mp4DemuxN {
                 // broadcasts the merged Eos to every port after this.
                 PipelinePacket::Eos => {
                     self.advance(out).await?;
-                    if self.fragmented != Some(true) {
+                    if self.emits_at_eos() {
                         self.parse_and_emit_whole(out).await?;
                     }
                 }
@@ -1114,6 +1306,7 @@ impl MultiOutputElement for Mp4DemuxN {
                     // The byte coordinate restarts with the re-read stream, the
                     // same reset the key publisher does at this flush.
                     self.drained = 0;
+                    self.stream_start_ns = None;
                     for owed in self.need_config.iter_mut() {
                         *owed = true;
                     }
@@ -1124,8 +1317,7 @@ impl MultiOutputElement for Mp4DemuxN {
                 PipelinePacket::Segment(seg) => {
                     self.upstream_segment = seg;
                     for port in 0..self.ports.len() {
-                        out.push_to(port, PipelinePacket::Segment(self.port_segment(port)))
-                            .await?;
+                        self.send_port_segment(port, out).await?;
                     }
                 }
                 // The input's (byte-stream) CapsChanged is consumed: each port
@@ -1149,6 +1341,90 @@ impl MultiOutputElement for Mp4DemuxN {
             .unwrap_or(0);
         LatencyReport::buffered(held_ns, Some(held_ns))
     }
+
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        // the seek is served at Eos, where the samples of every port go out together
+        (self.ports.len() == 1).then_some(ElementSeekRoute::Buffered)
+    }
+
+    fn set_buffered_seek(&mut self, app: SeekController) {
+        self.seek = Some(app);
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "MP4 demuxer",
+            "Codec/Demuxer",
+            "Demuxes an MP4 / QuickTime byte stream into the tracks its ports select",
+            "g2g",
+        )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        match self.ports[..] {
+            [PortTrack::Matching { .. }] => MP4DEMUX_PROPS,
+            _ => &[],
+        }
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        let [PortTrack::Matching { stream, track_id }] = &mut self.ports[..] else {
+            return Err(PropError::Unknown);
+        };
+        match name {
+            "stream" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                *stream = StreamSelect::from_name(name).ok_or(PropError::Value)?;
+                Ok(())
+            }
+            "track-id" => {
+                let id = value.as_uint().ok_or(PropError::Type)?;
+                *track_id = match id {
+                    0 => None,
+                    _ => Some(u32::try_from(id).map_err(|_| PropError::Value)?),
+                };
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        let [PortTrack::Matching { stream, track_id }] = &self.ports[..] else {
+            return None;
+        };
+        match name {
+            "stream" => Some(PropValue::Str(stream.name())),
+            "track-id" => Some(PropValue::Uint(track_id.map_or(0, u64::from))),
+            _ => None,
+        }
+    }
+}
+
+// the rate the sample durations give, which the negotiation span stood in for
+fn with_framerate(mut caps: Caps, rate: Rate) -> Caps {
+    if let Caps::CompressedVideo { framerate, .. } | Caps::RawVideo { framerate, .. } = &mut caps {
+        *framerate = rate;
+    }
+    caps
+}
+
+// the samples from the keyframe at or before the target, with the segment moved up to start there
+fn seek_samples(mut samples: Vec<Sample>, edit: Segment, target_ns: u64) -> (Vec<Sample>, Segment) {
+    // an edit list that starts presentation later moves the start time with it
+    let stream_start_ns = edit.start.max(stream_start_ns(&samples));
+    let target_ns = target_ns.saturating_add(stream_start_ns);
+    let first = if every_sample_ends_by(&samples, target_ns) {
+        samples.len()
+    } else {
+        keyframe_index_for(&samples, target_ns)
+    };
+    samples.drain(..first);
+    let segment = Segment {
+        stop: edit.stop,
+        ..segment_from(target_ns, stream_start_ns)
+    };
+    (samples, segment)
 }
 
 #[cfg(test)]
