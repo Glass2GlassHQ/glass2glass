@@ -46,9 +46,9 @@ use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket,
+    g2g_error, g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket,
 };
 
 use crate::audioframe::{locate_frame, Located, SyncFrameHeader};
@@ -169,7 +169,7 @@ pub(crate) fn require_adts(
     demuxer: &'static str,
 ) -> Result<Vec<u8>, G2gError> {
     adts_from_asc(asc, au).ok_or_else(|| {
-        g2g_warn!(
+        g2g_error!(
             g2g_core::log::Target::category(demuxer),
             "AAC config {asc:02x?} cannot be ADTS framed"
         );
@@ -272,7 +272,7 @@ pub(crate) fn muxer_audio_specific_config(
         return Ok(None);
     }
     if first_frame.len() > MAX_RAW_AAC_CONFIG_LEN {
-        g2g_warn!(
+        g2g_error!(
             g2g_core::log::Target::category(muxer),
             "AAC config of {} bytes exceeds {MAX_RAW_AAC_CONFIG_LEN}",
             first_frame.len()
@@ -289,7 +289,7 @@ pub(crate) fn require_muxer_config<'a>(
     muxer: &'static str,
 ) -> Result<&'a [u8], G2gError> {
     config.ok_or_else(|| {
-        g2g_warn!(
+        g2g_error!(
             g2g_core::log::Target::category(muxer),
             "AAC stream has neither ADTS headers nor a leading AudioSpecificConfig"
         );

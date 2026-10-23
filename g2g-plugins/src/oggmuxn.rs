@@ -39,7 +39,9 @@ use g2g_core::{
     PropertySpec,
 };
 
+use crate::mux::refused_input;
 use crate::oggmux::{format_of, ogg_caps, OggStreamMux, DEFAULT_SERIAL};
+use g2g_core::log::short_type_name;
 
 /// Muxes N audio elementary streams into one grouped Ogg byte stream.
 ///
@@ -194,6 +196,9 @@ impl MultiInputElement for OggMuxN {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
+        if format_of(absolute_caps).is_none() {
+            return Err(refused_input(short_type_name::<Self>(), absolute_caps));
+        }
         self.streams[input].configure(absolute_caps)?;
         Ok(ConfigureOutcome::Accepted)
     }

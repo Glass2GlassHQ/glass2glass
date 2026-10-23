@@ -45,10 +45,12 @@ use g2g_core::{
 
 use crate::dvbsub::DEFAULT_PAGE_ID;
 use crate::mpegts::{TsMuxer, PES_CLOCK_HZ, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265};
+use crate::mux::refused_input;
 use crate::tsmux::{
     is_av1, is_dvbsub, language_from_tags, opus_channels, service_from_tags, stream_type_for,
     AacCarriage, DvbSubDecl, TsMuxSettings, MUX_PROPERTIES, UNDETERMINED_LANGUAGE,
 };
+use g2g_core::log::short_type_name;
 
 /// Muxes N elementary streams into one MPEG-TS byte stream, in decode order.
 ///
@@ -377,8 +379,8 @@ impl MultiInputElement for TsMux {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
-        let stream_type =
-            stream_type_for(absolute_caps, self.klv_sync).ok_or(G2gError::CapsMismatch)?;
+        let stream_type = stream_type_for(absolute_caps, self.klv_sync)
+            .ok_or_else(|| refused_input(short_type_name::<Self>(), absolute_caps))?;
         self.stream_types[input] = Some(stream_type);
         if is_dvbsub(absolute_caps) {
             self.dvbsub[input] = Some(DvbSubDecl::on_page(self.dvbsub_page_id));

@@ -29,6 +29,8 @@ use g2g_core::{
 };
 
 use crate::avi::{AviWriteStream, AviWriter};
+use crate::mux::refused_input;
+use g2g_core::log::short_type_name;
 
 fn output_caps() -> Caps {
     Caps::ByteStream {
@@ -390,7 +392,8 @@ impl MultiInputElement for AviMuxN {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
-        let stream = write_stream_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        let stream = write_stream_for(absolute_caps)
+            .ok_or_else(|| refused_input(short_type_name::<Self>(), absolute_caps))?;
         // AVI's main header describes one video stream, and nothing this writes
         // addresses a second one, so refuse rather than write a file whose
         // `avih` contradicts its `strl` list.

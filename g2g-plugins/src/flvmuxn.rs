@@ -44,6 +44,7 @@ use crate::aacparse::{
 use crate::annexb::au_is_keyframe;
 use crate::flv::{FlvCodec, FlvMuxer, FlvTrack};
 use crate::fmp4mux::{avcc_record, avcc_sample, parameter_sets, split_annexb};
+use crate::mux::refused_input;
 use g2g_core::log::short_type_name;
 
 /// A track's init, captured from its first access unit: the parameter sets
@@ -289,7 +290,8 @@ impl MultiInputElement for FlvMuxN {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
-        let kind = Self::pad_kind_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        let kind = Self::pad_kind_for(absolute_caps)
+            .ok_or_else(|| refused_input(short_type_name::<Self>(), absolute_caps))?;
         // FLV carries at most one video and one audio track; reject a duplicate.
         if self
             .kinds

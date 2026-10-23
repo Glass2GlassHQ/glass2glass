@@ -61,6 +61,7 @@ use crate::mp4box::{
     ftyp, ftyp_cmaf, full_box, mp4_box, prft, put_box_header, styp_cmaf, udta_with_tags,
     BOX_HEADER_LEN, MATRIX,
 };
+use crate::mux::refused_input;
 use crate::opusparse::{
     dops_from_opus_head, is_opus_config, parse_opus_head, OPUS_ENCODER_PRE_SKIP,
 };
@@ -1166,7 +1167,8 @@ impl MultiInputElement for Mp4MuxN {
         if self.cmaf && (self.inputs > 1 || !self.fragmented) {
             return Err(G2gError::CapsMismatch);
         }
-        let kind = Self::pad_kind_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        let kind = Self::pad_kind_for(absolute_caps)
+            .ok_or_else(|| refused_input(short_type_name::<Self>(), absolute_caps))?;
         if let Caps::CompressedVideo {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),

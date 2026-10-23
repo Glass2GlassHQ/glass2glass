@@ -62,6 +62,7 @@ use crate::matroska::{
     MkvTrackSpec,
 };
 use crate::mkvmux::{MkvMuxSettings, MKV_MUX_PROPS};
+use crate::mux::refused_input;
 use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head};
 
 /// What an input pad carries, learned from its negotiated caps at configure.
@@ -616,7 +617,8 @@ impl MultiInputElement for MkvMuxN {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
-        let kind = Self::pad_kind_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        let kind = Self::pad_kind_for(absolute_caps)
+            .ok_or_else(|| refused_input(short_type_name::<Self>(), absolute_caps))?;
         if let Caps::CompressedVideo {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),

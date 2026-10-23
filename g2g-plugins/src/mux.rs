@@ -19,10 +19,21 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use g2g_core::log::Target;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, Frame, G2gError,
+    g2g_error, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, Frame, G2gError,
     InputAggregator, MultiInputElement, OutputSink, PipelinePacket,
 };
+
+// the solver lets any caps onto a fan-in muxer pad and reports no refusal itself
+pub(crate) fn refused_input(muxer: &'static str, caps: &Caps) -> G2gError {
+    g2g_error!(
+        Target::category(muxer),
+        "cannot carry {}",
+        caps.to_gst_string()
+    );
+    G2gError::CapsMismatch
+}
 
 /// # Example
 ///
@@ -199,5 +210,50 @@ mod tests {
             }
             other => panic!("expected Produces, got {other:?}"),
         }
+    }
+
+    // the refusal log lines for `caps`, configured onto a fresh two-pad `M`
+    #[cfg(feature = "std")]
+    fn refusal_lines<M: MultiInputElement>(mut mux: M, caps: &Caps) -> Vec<alloc::string::String> {
+        use g2g_core::log::{self, RingSink};
+        let ring = RingSink::new(64);
+        let sink = log::add_sink(alloc::boxed::Box::new(ring.clone()));
+        let result = mux.configure_pipeline(1, caps);
+        log::remove_sink(sink);
+        assert_eq!(result.err(), Some(G2gError::CapsMismatch));
+        let category = g2g_core::log::short_type_name::<M>();
+        ring.drain()
+            .into_iter()
+            .filter(|record| record.category == category)
+            .map(|record| record.message)
+            .collect()
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn every_fan_in_container_muxer_names_the_caps_it_refuses() {
+        let raw = nv12(16, 16);
+        let expected = alloc::vec![alloc::format!("cannot carry {}", raw.to_gst_string())];
+        assert_eq!(
+            refusal_lines(crate::mp4muxn::Mp4MuxN::new(2), &raw),
+            expected
+        );
+        assert_eq!(
+            refusal_lines(crate::mkvmuxn::MkvMuxN::new(2), &raw),
+            expected
+        );
+        assert_eq!(refusal_lines(crate::tsmuxn::TsMux::new(2), &raw), expected);
+        assert_eq!(
+            refusal_lines(crate::flvmuxn::FlvMuxN::new(2), &raw),
+            expected
+        );
+        assert_eq!(
+            refusal_lines(crate::oggmuxn::OggMuxN::new(2), &raw),
+            expected
+        );
+        assert_eq!(
+            refusal_lines(crate::avimux::AviMuxN::new(2), &raw),
+            expected
+        );
     }
 }
