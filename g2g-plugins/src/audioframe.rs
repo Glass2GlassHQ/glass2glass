@@ -119,15 +119,18 @@ pub(crate) struct Ac3Header {
     pub(crate) sample_rate: u32,
     pub(crate) channels: u8,
     pub(crate) frame_len: usize,
+    // `frmsizecod` without its low bit, which pads a 44.1 kHz frame by one word
+    bit_rate_code: u8,
 }
 
 impl Ac3Header {
     /// Whether two headers describe the same stream, the test a resync uses to
-    /// confirm a candidate sync against the frame behind it. Rate and length are
-    /// the `fscod` / `frmsizecod` pair, which a constant-bitrate AC-3 stream
-    /// holds fixed.
+    /// confirm a candidate sync against the frame behind it. Rate and bit rate
+    /// are `fscod` and the upper bits of `frmsizecod`, which a constant-bitrate
+    /// AC-3 stream holds fixed. The length is not: at 44.1 kHz every other frame
+    /// is one word longer.
     pub(crate) fn same_stream(&self, other: &Self) -> bool {
-        self.sample_rate == other.sample_rate && self.frame_len == other.frame_len
+        self.sample_rate == other.sample_rate && self.bit_rate_code == other.bit_rate_code
     }
 }
 
@@ -180,6 +183,7 @@ pub(crate) fn ac3_header(buf: &[u8]) -> Option<Ac3Header> {
         sample_rate: AC3_RATES_HZ[fscod],
         channels: AC3_ACMOD_CHANNELS[acmod] + lfeon,
         frame_len,
+        bit_rate_code: (frmsizecod >> 1) as u8,
     })
 }
 

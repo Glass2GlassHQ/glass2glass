@@ -372,6 +372,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keeps_44100_frames_whose_padding_alternates() {
+        const FSCOD_44100: u8 = 1;
+        const FRMSIZECOD_192K: u8 = 20;
+        let mut bytes = Vec::new();
+        for padding in [0, 1, 0, 1] {
+            let mut frame = ac3_frame(0);
+            frame[4] = (FSCOD_44100 << 6) | (FRMSIZECOD_192K + padding);
+            let len = crate::audioframe::ac3_frame_len(&frame).expect("a valid header");
+            frame.resize(len, 0);
+            bytes.extend(frame);
+        }
+        assert_eq!(parse(bytes).await.frames().len(), 4);
+    }
+
+    #[tokio::test]
     async fn drops_a_truncated_tail() {
         let mut bytes = stream(2);
         bytes.extend_from_slice(&ac3_frame(2)[..AC3_192K_48000_LEN / 2]);
