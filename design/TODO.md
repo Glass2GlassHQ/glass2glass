@@ -245,6 +245,10 @@ Highest leverage first:
     header write when neither has them. Branch `m1861` (a compressed audio rate of 0
     intersects as a wildcard, and a caps string with no `rate` or `channels` parses as
     the wildcards) merges only after this lands.
+  - `tsdemux` (H.264), `matroskademux` (VP9), `flvdemux` (H.264) and `psdemux`
+    (MPEG-2) default to one codec and refuse a file without it, where gst exposes
+    the file's first stream. `oggdemux` behind a consumer that takes any caps
+    fixates Opus, so a video-only Ogg there fails.
   - `aacparse` forwards nothing, with no error, while it cannot refine a LOAS
     stream's caps: fail loud at EOS instead.
   - `mpegts/pmtchange.ts` audio 0 to 2 decode to other lengths and samples than

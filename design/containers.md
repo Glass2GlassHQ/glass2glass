@@ -646,7 +646,10 @@ header. The concurrent stream count is capped, since the serials come from the
 file.
 
 `OggDemux` forwards the first bitstream whose codec matches its `stream`
-selection and drains the rest. `OggDemuxN` is the multi-output form, one port
+selection and drains the rest. With `stream=auto`, the default, it offers every
+mapping it reads at negotiation, audio first, takes its output kind from
+`configure_output`, and emits the first chain's first readable stream of that kind.
+An explicit `stream=` names one codec and fails loud on a file without it. `OggDemuxN` is the multi-output form, one port
 per `OggPort` naming the bitstream it carries. Routing is positional rather than
 codec-keyed because two streams of one codec in a file is ordinary. The
 per-stream caps, in-band codec config and packet timing are one shared

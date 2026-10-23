@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1862: oggdemux with no `stream=` emits the file's first stream of the kind its consumer takes.
 - M1864: LOAS/LATM AAC clears a leading data stream element's byte alignment as ffmpeg does, and aacparse reads a LATM config whose channels are in a program config element.
 - M1855: the fan-out upstream error names the bin, and the flvmux, avimux and CMAF mp4mux refusals log what they refuse.
 - M1859: Opus out of MPEG-TS keeps its channel count and an OpusHead through every demuxer and muxer, and mpegtsmux keeps in-band Opus headers out of the multiplex.
