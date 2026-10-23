@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1851: a Matroska BlockGroup without a ReferenceBlock is a keyframe, so seeks find frames stored in BlockGroups.
 - M1856: mpegtsmux keeps its multiplex and AAC carriage across a mid-stream caps change, so continuity counters no longer restart.
 - M1844: mpegtsmux carries LOAS/LATM AAC as it arrives under stream type 0x11, and the other muxers refuse it.
 - M1850: a TS seek counts its target from the earliest stream's first timestamp, as `ffmpeg -ss` does.

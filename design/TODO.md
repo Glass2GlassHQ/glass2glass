@@ -218,7 +218,6 @@ Highest leverage first:
   - Seek and position origin is the first unit's pts, where gst uses the lowest
     pts: an open-GOP stream whose leading frames present before the keyframe
     (`h264/H264_might_overflow.mkv`, 1.086 against gst's 1.003) counts from too late.
-  - No seek finds a frame in `gst-medias/defaults/webm/opus_vp9-alpha.webm`.
   - Demuxers drop streams gst's parsebin exposes: DTS in `filter/242_4.mkv`, TTA,
     pcm_dvd LPCM in `coolitnow-partial.vob`, and the xan_dpcm audio of
     `wc4-xan` AVIs.

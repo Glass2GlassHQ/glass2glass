@@ -468,7 +468,9 @@ The same parser plus element split keyed on `Caps::ByteStream{Matroska}`.
 `g2g-plugins::matroska::MatroskaDemuxer` is a pure EBML parser: variable-length
 element IDs and sizes, descend into the Segment, read Tracks for the elementary
 streams and `Info` TimestampScale, then parse each Cluster's SimpleBlock and
-Block frames with scaled timestamps. `MkvDemux` wraps it with a per-codec
+Block frames with scaled timestamps. A Block has no keyframe flag, so a BlockGroup's
+frames are keyframes when the group holds no ReferenceBlock, which the seek keyframe
+search reads. `MkvDemux` wraps it with a per-codec
 `MkvStream` selection, H.264 / H.265 / VP8 / VP9 / AV1 / MJPEG video and AAC /
 Opus / AC-3 / FLAC / Vorbis / PCM audio, defaulting to VP9. An `A_PCM/*` track
 takes the PCM format its byte order and `BitDepth` name, the `WAVEFORMATEX`
