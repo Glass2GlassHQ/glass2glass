@@ -426,6 +426,12 @@ first SPS gives geometry. Framerate comes from the VUI `timing_info`
 `RtspSrc::with_credentials` supplies the DESCRIBE/SETUP account, threaded into
 retina's `SessionOptions`.
 
+Both RTSP sources fail DESCRIBE, SETUP, PLAY and depacketizer setup with
+`G2gError::Network(NetworkFailure::Connect)`, and any error after media starts
+with `G2gError::RtspStream`, logging retina's message on the element's category.
+Retina's error kind is private, so a bad NAL and a dropped transport map to the
+same variant.
+
 ### RtspSrcN
 
 `RtspSrcN` (`rtspsrcn.rs`, same feature) plays the stream's audio track alongside

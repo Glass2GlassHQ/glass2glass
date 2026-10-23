@@ -12,7 +12,7 @@
 #![cfg(feature = "rtsp")]
 
 use g2g_core::runtime::run_simple_pipeline;
-use g2g_core::{Caps, Dim, G2gError, PipelineClock, VideoCodec};
+use g2g_core::{Caps, Dim, G2gError, NetworkFailure, PipelineClock, VideoCodec};
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::rtspsrc::RtspSrc;
 
@@ -53,7 +53,7 @@ async fn rtspsrc_intercept_caps_with_expected_dims_skips_probe_and_fixates() {
 #[tokio::test]
 async fn rtspsrc_intercept_caps_probes_and_fails_on_unreachable_url() {
     // Without `with_expected_dims`, intercept_caps attempts DESCRIBE +
-    // SETUP. An unreachable URL must surface a `Hardware` error during
+    // SETUP. An unreachable URL must surface a connect failure during
     // negotiation rather than (as before M18 item 5) silently advertising
     // a placeholder Range and exploding inside `run`.
     use g2g_core::runtime::SourceLoop as _;
@@ -61,14 +61,17 @@ async fn rtspsrc_intercept_caps_probes_and_fails_on_unreachable_url() {
     let res = tokio::time::timeout(std::time::Duration::from_secs(5), src.intercept_caps())
         .await
         .expect("probe must terminate within 5s");
-    assert!(matches!(res, Err(G2gError::Hardware(_))), "got {res:?}");
+    assert!(
+        matches!(res, Err(G2gError::Network(NetworkFailure::Connect))),
+        "got {res:?}"
+    );
 }
 
 #[tokio::test]
 async fn rtspsrc_with_reconnect_retries_then_fails() {
     // Unreachable address + reconnect with a short backoff. The source
     // must try max_attempts+1 times (the first connect plus the retries)
-    // then surface a Hardware error. The whole loop must complete well
+    // then surface a connect failure. The whole loop must complete well
     // under our timeout so a hang regression is visible.
     let url = "rtsp://127.0.0.1:1/never-listens";
     let mut src = RtspSrc::new(url)
@@ -96,7 +99,10 @@ async fn rtspsrc_with_reconnect_retries_then_fails() {
 
     let err = result.expect_err("exhausted retries must surface as error");
     assert!(
-        matches!(err, G2gError::Hardware(_) | G2gError::CapsMismatch),
+        matches!(
+            err,
+            G2gError::Network(NetworkFailure::Connect) | G2gError::CapsMismatch
+        ),
         "unexpected error: {err:?}",
     );
 }
@@ -118,7 +124,10 @@ async fn rtspsrc_bad_url_returns_hardware_error_or_caps_mismatch() {
 
     let err = result.expect_err("connecting to a nonexistent server must fail");
     assert!(
-        matches!(err, G2gError::Hardware(_) | G2gError::CapsMismatch),
+        matches!(
+            err,
+            G2gError::Network(NetworkFailure::Connect) | G2gError::CapsMismatch
+        ),
         "unexpected error: {err:?}"
     );
 }

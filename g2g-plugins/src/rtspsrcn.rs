@@ -41,8 +41,9 @@ use retina::codec::{AudioParameters, CodecItem, FrameFormat, ParametersRef};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AudioFormat, Caps, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink,
-    MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, VideoCodec,
+    AudioFormat, Caps, Dim, FrameTiming, G2gError, MemoryDomain, MultiOutputSink,
+    MultiOutputSource, NetworkFailure, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, VideoCodec,
 };
 
 use crate::g711::{G711_CLOCK_RATE_HZ, G711_DEFAULT_CHANNELS};
@@ -50,8 +51,8 @@ use crate::rtspclient::{
     transports_from_flags, transports_to_flags, LowerTransport, ReconnectPolicy, ReconnectState,
 };
 use crate::rtspsrc::{
-    connect_describe, placeholder_framerate, video_caps_for, video_codec, video_stream_index,
-    with_placeholder_framerate,
+    connect_describe, placeholder_framerate, rtsp_failure, video_caps_for, video_codec,
+    video_stream_index, with_placeholder_framerate,
 };
 
 /// User-Agent sent on DESCRIBE / SETUP unless `user-agent` overrides it. Also
@@ -881,11 +882,25 @@ async fn run_session(
     let play_options = PlayOptions::default().initial_timestamp(InitialTimestampPolicy::Permissive);
     let played = match session.play(play_options).await {
         Ok(p) => p,
-        Err(_) => return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other)),
+        Err(e) => {
+            return SessionOutcome::NetworkError(rtsp_failure(
+                G2gError::Network(NetworkFailure::Connect),
+                "PLAY",
+                &src.url,
+                &e,
+            ))
+        }
     };
     let mut demuxed = match played.demuxed() {
         Ok(d) => d,
-        Err(_) => return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other)),
+        Err(e) => {
+            return SessionOutcome::NetworkError(rtsp_failure(
+                G2gError::Network(NetworkFailure::Connect),
+                "depacketizer setup",
+                &src.url,
+                &e,
+            ))
+        }
     };
 
     if let Some(caps) = &video_caps {
@@ -923,8 +938,13 @@ async fn run_session(
     while state.iter().any(|p| p.emitted < limit) {
         let item = match demuxed.next().await {
             Some(Ok(item)) => item,
-            Some(Err(_)) => {
-                return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other))
+            Some(Err(e)) => {
+                return SessionOutcome::NetworkError(rtsp_failure(
+                    G2gError::RtspStream,
+                    "stream",
+                    &src.url,
+                    &e,
+                ))
             }
             None => return SessionOutcome::GracefulEnd,
         };
@@ -1145,7 +1165,12 @@ async fn connect_describe_setup(
         }
     }
     Err(match setup_err {
-        Some(_) => G2gError::Hardware(HardwareError::Other),
+        Some(e) => rtsp_failure(
+            G2gError::Network(NetworkFailure::Connect),
+            "SETUP",
+            &url,
+            &e,
+        ),
         // An empty transport list cannot happen: `protocols` rejects an empty set.
         None => G2gError::CapsMismatch,
     })

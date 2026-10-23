@@ -56,6 +56,18 @@ pub enum G2gError {
     },
     // the element holding the seek controller can no longer serve the seek it was given
     SeekRefused,
+    // a network session failed at this stage, with the peer's or protocol library's message logged by the element
+    Network(NetworkFailure),
+    // an RTSP session failed after media started flowing, in the transport or the payload, with retina's message logged by the element
+    RtspStream,
+}
+
+// the stage of a network session that failed
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NetworkFailure {
+    // before media flows: connecting, the handshake, or session setup such as RTSP DESCRIBE, SETUP and PLAY
+    Connect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

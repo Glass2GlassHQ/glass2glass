@@ -48,7 +48,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    MemoryDomain, NetworkFailure, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
     PropertySpec, Rate, VideoCodec,
 };
 
@@ -607,20 +607,24 @@ async fn run_session(
     let played = match session.play(PlayOptions::default()).await {
         Ok(p) => p,
         Err(e) => {
-            g2g_core::g2g_error!(
-                Target::category(LOG_CATEGORY),
-                "PLAY {} failed: {e}",
-                src.url
-            );
-            return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other));
+            return SessionOutcome::NetworkError(rtsp_failure(
+                G2gError::Network(NetworkFailure::Connect),
+                "PLAY",
+                &src.url,
+                &e,
+            ));
         }
     };
 
     let mut demuxed = match played.demuxed() {
         Ok(d) => d,
         Err(e) => {
-            g2g_core::g2g_error!(Target::category(LOG_CATEGORY), "{}: {e}", src.url);
-            return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other));
+            return SessionOutcome::NetworkError(rtsp_failure(
+                G2gError::Network(NetworkFailure::Connect),
+                "depacketizer setup",
+                &src.url,
+                &e,
+            ));
         }
     };
 
@@ -645,9 +649,13 @@ async fn run_session(
         let item = match demuxed.next().await {
             Some(Ok(item)) => item,
             Some(Err(e)) => {
-                g2g_core::g2g_error!(Target::category(LOG_CATEGORY), "{}: {e}", src.url);
                 *last_session_max_pts = session_max_pts;
-                return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other));
+                return SessionOutcome::NetworkError(rtsp_failure(
+                    G2gError::RtspStream,
+                    "stream",
+                    &src.url,
+                    &e,
+                ));
             }
             None => {
                 *last_session_max_pts = session_max_pts;
@@ -801,10 +809,12 @@ async fn connect_describe_setup(
         }
     }
     Err(match setup_err {
-        Some(e) => {
-            g2g_core::g2g_error!(Target::category(LOG_CATEGORY), "SETUP {url} failed: {e}");
-            G2gError::Hardware(HardwareError::Other)
-        }
+        Some(e) => rtsp_failure(
+            G2gError::Network(NetworkFailure::Connect),
+            "SETUP",
+            &url,
+            &e,
+        ),
         // An empty transport list cannot happen: `protocols` rejects an empty set.
         None => G2gError::CapsMismatch,
     })
@@ -825,9 +835,27 @@ pub(crate) async fn connect_describe(
         .creds(creds.cloned())
         .user_agent(user_agent.to_string());
     Session::describe(url.clone(), opts).await.map_err(|e| {
-        g2g_core::g2g_error!(Target::category(LOG_CATEGORY), "DESCRIBE {url} failed: {e}");
-        G2gError::Hardware(HardwareError::Other)
+        rtsp_failure(
+            G2gError::Network(NetworkFailure::Connect),
+            "DESCRIBE",
+            &url,
+            &e,
+        )
     })
+}
+
+// logs retina's message for the RTSP `step` at `url`, which the returned `failure` leaves out
+pub(crate) fn rtsp_failure(
+    failure: G2gError,
+    step: &str,
+    url: &dyn core::fmt::Display,
+    error: &retina::Error,
+) -> G2gError {
+    g2g_core::g2g_error!(
+        Target::category(LOG_CATEGORY),
+        "{step} {url} failed: {error}"
+    );
+    failure
 }
 
 /// The first stream g2g decodes as video: H.264 or H.265.
