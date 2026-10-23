@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{Caps, Dim, PropValue};
+use g2g_core::{ByteStreamEncoding, Caps, Dim, PropValue};
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::uridecodebin::ts_decodebin_select;
@@ -87,7 +87,10 @@ fn a_container_file_plans_from_its_video_picture_size() {
 fn a_ts_file_fans_out_with_its_video_picture_size() {
     let (expected_width, expected_height) = UHD_HEVC_CONTAINER_DIMENSIONS;
     for name in [UHD_HEVC_TS, UHD_HEVC_ONE_FRAME_TS] {
-        let (_, ports) = ts_decodebin_select(&fixture_location(name))
+        let ts = Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        };
+        let (_, ports) = ts_decodebin_select(&fixture_location(name), &ts)
             .unwrap_or_else(|| panic!("{name} demuxes"));
         let video = ports
             .first()

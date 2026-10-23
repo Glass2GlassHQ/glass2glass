@@ -77,7 +77,7 @@ use crate::memory::MemoryDomainKind;
 use crate::property::{PropError, PropValue, PropertySpec, ValueError};
 use crate::runtime::autoplug::{
     is_raw_audio, is_raw_video, ContainerStreams, FallbackSourceRole, FallbacksrcSourceFactory,
-    FanoutRebuild, PadKind, PadRequest, PlaybinSinks, PrimaryStream, Registry, RestartPolicy,
+    FanoutRebuild, PadKind, PadRequest, PlaybinSinks, PrimaryStream, Registry, RestartPolicy, Uri,
     UriError, UriFanout, UriFanoutHead, UriFanoutPort, UriRebuild, UriSource,
 };
 use crate::runtime::parse_scope::ParseScope;
@@ -933,6 +933,51 @@ fn plug_port_parse(
     };
     graph.link_full(into_branch, to, policy, capacity)?;
     Ok(())
+}
+
+// how a decodebin or parsebin fan-out splits its file into ports
+enum FanoutSplit {
+    Demux(Box<dyn crate::runtime::DynMultiOutputElement>),
+    Tee(TeeFanout),
+}
+
+// a file no multi-output demuxer parses fans out through a tee, each port reading its own stream
+#[derive(Debug)]
+struct TeeFanout {
+    // `None` for a file that is already the elementary stream
+    port_demuxers: Vec<Option<PrimaryStream>>,
+}
+
+// one port per stream the container hook lists, or the one stream of an elementary file
+fn tee_fanout(
+    registry: &Registry,
+    location: &str,
+    caps: &Caps,
+) -> Option<(TeeFanout, Vec<UriFanoutPort>)> {
+    let port = |caps: &Caps, has_clean_aperture: bool| UriFanoutPort {
+        caps: caps.clone(),
+        stream_type: StreamType::of(caps),
+        has_clean_aperture,
+    };
+    match registry.container_streams(location, caps) {
+        Some(listed) if !listed.streams.is_empty() => {
+            let ports = listed
+                .streams
+                .iter()
+                .map(|stream| port(&stream.caps, stream.has_clean_aperture))
+                .collect();
+            let port_demuxers = listed.streams.into_iter().map(Some).collect();
+            Some((TeeFanout { port_demuxers }, ports))
+        }
+        Some(_) => None,
+        None if matches!(caps, Caps::ByteStream { .. }) => None,
+        None => Some((
+            TeeFanout {
+                port_demuxers: alloc::vec![None],
+            },
+            alloc::vec![port(caps, false)],
+        )),
+    }
 }
 
 /// Depth bound for the decodebin auto-plug search: a parse + decode (+ a spare
@@ -3140,9 +3185,12 @@ fn build_graph(
     // own pads), and records what each port carries so the wiring below splices
     // a decoder onto every port (the decode-per-port that makes it `decodebin`, not a
     // bare demuxer). Behind a network source the URI's fan-out supplies the demuxer
-    // and its source replaces the line's.
+    // and its source replaces the line's. A file no fan-out hook claims splits
+    // through a tee, each port starting with the single-stream demuxer the inline
+    // `decodebin` would plug for that stream.
     let mut decode_fanout_ports: Vec<Option<(AutoplugBin, Vec<UriFanoutPort>)>> =
         (0..specs.len()).map(|_| None).collect();
+    let mut tee_fanouts: Vec<Option<TeeFanout>> = (0..specs.len()).map(|_| None).collect();
     // Which port each link out of a fan-out node reads, filled for every node
     // whose ports are matched to its branches.
     let mut fanout_links: Vec<Option<FanoutLinks>> = (0..specs.len()).map(|_| None).collect();
@@ -3177,13 +3225,28 @@ fn build_graph(
             })
         };
         let location = location.ok_or_else(unsupported)?;
-        let probed_file = registry
-            .decodebin_select_hooks()
-            .iter()
-            .find_map(|hook| hook(location));
-        let (demux, ports) = match probed_file {
-            Some(found) => found,
-            None if in_deg[upstream] == 0 => {
+        // a network location is a URI, which the file hooks would open as a path
+        let file_caps = match Uri::parse(location) {
+            Some(_) => None,
+            None => Some(resolve_upstream_caps(
+                registry,
+                &upstream_spec.name,
+                &upstream_spec.props,
+            )?),
+        };
+        let probed_file = file_caps.as_ref().and_then(|caps| {
+            registry
+                .decodebin_select_hooks()
+                .iter()
+                .find_map(|hook| hook(location, caps))
+        });
+        let (split, ports) = match (probed_file, &file_caps) {
+            (Some((demux, ports)), _) => (FanoutSplit::Demux(demux), ports),
+            (None, Some(caps)) => {
+                let (tee, ports) = tee_fanout(registry, location, caps).ok_or_else(unsupported)?;
+                (FanoutSplit::Tee(tee), ports)
+            }
+            (None, None) if in_deg[upstream] == 0 => {
                 let Some(UriFanout {
                     head:
                         UriFanoutHead::Demux {
@@ -3197,9 +3260,9 @@ fn build_graph(
                 apply_props(&mut source, &upstream_spec.name, &upstream_spec.props)?;
                 prebuilt[upstream] =
                     Some((PrebuiltNode::Source(source), upstream_spec.instance.clone()));
-                (demux, ports)
+                (FanoutSplit::Demux(demux), ports)
             }
-            None => return Err(unsupported()),
+            (None, None) => return Err(unsupported()),
         };
         let kinds: Vec<StreamType> = ports
             .iter()
@@ -3216,7 +3279,10 @@ fn build_graph(
             )?,
             ports: kinds.len(),
         });
-        demux_select_node[ei] = Some(demux);
+        match split {
+            FanoutSplit::Demux(demux) => demux_select_node[ei] = Some(demux),
+            FanoutSplit::Tee(tee) => tee_fanouts[ei] = Some(tee),
+        }
         decode_fanout_ports[ei] = Some((bin, ports));
     }
     // `uridecodebin name=d` fan-out: the hook probed every port, so each `d.`
@@ -3402,6 +3468,8 @@ fn build_graph(
                     .add_muxer(GraphNodeRef::Muxer(mux), in_deg[ei] as u8)
                     .node()
             }
+        } else if let Some(tee) = &tee_fanouts[ei] {
+            graph.add_tee(tee.port_demuxers.len() as u8).node()
         } else if is_select[ei] {
             // M476: a demux-select hook already built the multi-output demuxer
             // (probing the upstream file); splice it in with one port per pad.
@@ -3509,6 +3577,18 @@ fn build_graph(
         // already, so it links straight through (no codec).
         if let Some((bin, ports)) = &decode_fanout_ports[s] {
             let port = &ports[src.index as usize];
+            let port_demuxer = tee_fanouts[s]
+                .as_ref()
+                .and_then(|tee| tee.port_demuxers[src.index as usize].as_ref());
+            let src = match port_demuxer {
+                Some(stream) => {
+                    let demuxer = build_element(registry, stream.demux, &stream.props)?;
+                    let node = graph.add_transform(GraphNodeRef::Element(demuxer));
+                    graph.link(src, node)?;
+                    PadId::from(node)
+                }
+                None => src,
+            };
             // the port's own caps say what it carries, a bare `d.` request does not
             let kind = StreamType::of(&port.caps);
             if kind != StreamType::Text {

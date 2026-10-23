@@ -1629,15 +1629,18 @@ mod factory {
     /// [`DemuxSelectHook`], for `filesrc location=x.mkv ! decodebin name=d
     /// d.video_0 ! ...  d.audio_0 ! ...`. Unlike the demux-select hook it is NOT
     /// keyed by an element name (a `decodebin` names no container): each registered
-    /// hook probes the file and returns `Some` only for the container it parses, so
-    /// the parser tries them in turn. It returns the multi-output demuxer with a
+    /// hook is given the file and the container caps its source sniffed, and returns
+    /// `Some` only for the container it parses, so the parser tries them in turn. It returns the multi-output demuxer with a
     /// port per stream the file carries, plus what each port carries, so the
     /// parser can match the line's branches to ports and auto-plug a decoder chain
     /// onto each (the demuxer emits elementary streams; `decodebin` decodes them to
     /// raw). `None` declines (a different container or an unreadable file).
     /// Registered via [`Registry::register_decodebin_select`].
     pub type DecodebinSelectHook =
-        fn(location: &str) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)>;
+        fn(
+            location: &str,
+            caps: &Caps,
+        ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)>;
 
     /// The single-stream demux + decode chain a bare (non-fan-out) `decodebin`
     /// should build for a file-backed container whose default single-stream demux

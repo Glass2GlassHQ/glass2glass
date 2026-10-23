@@ -429,6 +429,12 @@ fn uncropped_port(caps: Caps, video: bool) -> UriFanoutPort {
     }
 }
 
+// a container's probe can match bytes of another container, so each fan-out hook takes only its own
+#[cfg(feature = "std")]
+fn is_container(caps: &Caps, encodings: &[ByteStreamEncoding]) -> bool {
+    matches!(caps, Caps::ByteStream { encoding } if encodings.contains(encoding))
+}
+
 // each port typed by its caps, as the decodebin fan-out reads them
 #[cfg(feature = "std")]
 fn uncropped_ports(caps: Vec<Caps>) -> Vec<UriFanoutPort> {
@@ -1023,7 +1029,11 @@ pub fn ps_demux_select(
 #[cfg(feature = "std")]
 pub fn ps_decodebin_select(
     location: &str,
+    caps: &Caps,
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
+    if !is_container(caps, &[ByteStreamEncoding::MpegPs]) {
+        return None;
+    }
     ps_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 
@@ -1884,7 +1894,11 @@ pub fn mkv_demux_select(
 #[cfg(feature = "std")]
 pub fn mkv_decodebin_select(
     location: &str,
+    caps: &Caps,
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
+    if !is_container(caps, &[ByteStreamEncoding::Matroska]) {
+        return None;
+    }
     mkv_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 
@@ -2002,7 +2016,11 @@ pub fn ogg_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, P
 #[cfg(feature = "std")]
 pub fn ogg_decodebin_select(
     location: &str,
+    caps: &Caps,
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
+    if !is_container(caps, &[ByteStreamEncoding::Ogg]) {
+        return None;
+    }
     ogg_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 
@@ -2118,7 +2136,11 @@ pub fn ts_demux_caps_select(
 #[cfg(feature = "std")]
 pub fn ts_decodebin_select(
     location: &str,
+    caps: &Caps,
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
+    if !is_container(caps, &[ByteStreamEncoding::MpegTs]) {
+        return None;
+    }
     ts_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 
@@ -2566,7 +2588,14 @@ pub fn mp4_demux_select(
 #[cfg(feature = "std")]
 pub fn mp4_decodebin_select(
     location: &str,
+    caps: &Caps,
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
+    if !is_container(
+        caps,
+        &[ByteStreamEncoding::Mp4, ByteStreamEncoding::IsoBmff],
+    ) {
+        return None;
+    }
     mp4_select(location, every_stream)
 }
 
@@ -2615,7 +2644,11 @@ pub fn avi_demux_select(
 #[cfg(feature = "std")]
 pub fn avi_decodebin_select(
     location: &str,
+    caps: &Caps,
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<UriFanoutPort>)> {
+    if !is_container(caps, &[ByteStreamEncoding::Avi]) {
+        return None;
+    }
     avi_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 

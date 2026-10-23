@@ -249,6 +249,8 @@ jobs:
         run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1808_fanout_same_codec_tracks
       - name: parsebin remuxes without decoding
         run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1804_parsebin_remux
+      - name: fan-outs split every container the inline bins play
+        run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1847_fanout_any_container
       # ffmpeg packetizes the A/V fixture as RTP, the job with its CLI is where these run
       - name: RTSP video and audio pads
         run: cargo test -p g2g-plugins --locked --features ffmpeg,rtsp,rtsp-server,rtsp-client-sink,metadata --test m1650_uridecodebin_fanout --test m1652_rtspsrc_stream_pads --test m1680_rtsp_probe_in_runtime --test m1681_fanout_unlinked_streams --test m1682_fanout_links_by_caps --test m1710_capture_time_paths
