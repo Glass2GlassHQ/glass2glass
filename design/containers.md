@@ -197,6 +197,13 @@ hour of it. A larger jump keeps the raw value. The elements see timestamps that
 keep rising across the wrap, and a flush or seek resets this with the rest of
 the parser.
 
+A `Flush` with no seek behind it is a source restart, such as an HLS origin that
+came back with a new clock. The first unit after it is offset to land one frame
+interval after the last unit before it, the same offset applies to every PID,
+and `TsDemux` sends the segment already in force again, so stream and running
+time both continue as gst's tsdemux keeps them. A seek's own flush, or an
+upstream `Segment` after the `Flush`, takes the new timestamps as they are.
+
 ### Timestamping unstamped access units
 
 A conforming mux need only carry a PES timestamp every 700 ms, so most access

@@ -392,6 +392,9 @@ pub struct TsDemux {
     /// keep their parameter sets in band and their decoders resynchronize on
     /// their own, so they are never dropped. Re-armed on a flush.
     mpeg2_tuned_in: bool,
+    timeline: RestartTimeline,
+    // the segment last sent downstream, which a restarted stream continues in
+    segment: Option<Segment>,
 }
 
 impl Default for TsDemux {
@@ -419,6 +422,8 @@ impl TsDemux {
             opus_caps_emitted: false,
             config_sent: false,
             mpeg2_tuned_in: false,
+            timeline: RestartTimeline::default(),
+            segment: None,
         }
     }
 
@@ -789,6 +794,7 @@ impl TsDemux {
             }
             let admitted = self.seek.admit(pts_ns, keyframe, u);
             if let Some(seg) = admitted.segment {
+                self.segment = Some(seg);
                 out.push(PipelinePacket::Segment(seg)).await?;
             }
             for u in admitted {
@@ -796,10 +802,17 @@ impl TsDemux {
                 // Reordered video carries a separate DTS; fall back to the PTS when the
                 // PES had none (the no-DTS convention shared with the fmp4 / mkv demux).
                 let dts_ns = u.dts_90khz.map_or(pts_ns, ticks_90khz_to_ns);
+                let resuming = self.timeline.resuming();
+                let (pts_ns, dts_ns) = self.timeline.map(pts_ns, dts_ns);
                 // Stream start: map the first emitted DTS to running time 0, since
                 // open-GOP B frames present before the first I frame. A seek's resume
                 // above already did that for its own case.
-                if let Some(seg) = self.seek.opening_segment(dts_ns) {
+                if let Some(opening) = self.seek.opening_segment(dts_ns) {
+                    let seg = match self.segment {
+                        Some(segment) if resuming => segment,
+                        _ => opening,
+                    };
+                    self.segment = Some(seg);
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 if self.stream == TsStream::Opus {
@@ -972,9 +985,19 @@ impl AsyncElement for TsDemux {
                 // The upstream byte-seek's flush: reset the parser, then re-sync
                 // from the re-read stream. Forward it downstream.
                 PipelinePacket::Flush => {
+                    if self.seek.dropping_input() {
+                        self.timeline.seek();
+                    } else {
+                        self.timeline.restart();
+                    }
                     self.seek.on_flush();
                     self.reset_parser();
                     out.push(PipelinePacket::Flush).await?;
+                }
+                PipelinePacket::Segment(seg) => {
+                    self.timeline.seek();
+                    self.segment = Some(seg);
+                    out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 PipelinePacket::Eos => {
                     // Flush the final in-flight PES and emit it; the runner's
@@ -988,8 +1011,7 @@ impl AsyncElement for TsDemux {
                         return Err(self.no_pinned_stream(pid));
                     }
                 }
-                // ByteStream caps don't carry geometry; nothing to forward, and
-                // a Segment passes through.
+                // ByteStream caps don't carry geometry; nothing to forward.
                 PipelinePacket::CapsChanged(_) => {}
                 other => {
                     out.push(other).await?;
@@ -1358,10 +1380,59 @@ pub struct TsDemuxN {
     mpeg2_tuned_in: Vec<bool>,
     last_unit_dts_ns: Vec<Option<u64>>,
     held_unit_ns: Vec<Option<u64>>,
+    timeline: RestartTimeline,
 }
 
 // ISO/IEC 13818-1 caps the gap between coded PTS at 0.7 s, so a longer one is a discontinuity
 const MAX_PTS_INTERVAL_NS: u64 = 700_000_000;
+
+// output timestamps continue across a source restart, a Flush with no seek behind it, as gst's tsdemux does
+#[derive(Debug, Default)]
+struct RestartTimeline {
+    // added to every timestamp the restarted stream carries
+    offset_ns: i128,
+    // the latest output dts, and the last gap between two output dts
+    last_dts_ns: Option<u64>,
+    step_ns: u64,
+    // where the next unit's dts lands after a restart
+    resume_at_ns: Option<u64>,
+}
+
+impl RestartTimeline {
+    fn restart(&mut self) {
+        self.resume_at_ns = self
+            .last_dts_ns
+            .map(|last| last.saturating_add(self.step_ns));
+    }
+
+    // a seek moves the timeline on purpose
+    fn seek(&mut self) {
+        *self = Self::default();
+    }
+
+    fn resuming(&self) -> bool {
+        self.resume_at_ns.is_some()
+    }
+
+    // the output pts and dts of a unit
+    fn map(&mut self, pts_ns: u64, dts_ns: u64) -> (u64, u64) {
+        if let Some(resume_at_ns) = self.resume_at_ns.take() {
+            self.offset_ns = i128::from(resume_at_ns) - i128::from(dts_ns);
+        }
+        let shift =
+            |ns: u64| u64::try_from((i128::from(ns) + self.offset_ns).max(0)).unwrap_or(u64::MAX);
+        let (pts_ns, dts_ns) = (shift(pts_ns), shift(dts_ns));
+        if let Some(step) = self
+            .last_dts_ns
+            .and_then(|last| dts_ns.checked_sub(last))
+            .filter(|&step| step > 0 && step <= MAX_PTS_INTERVAL_NS)
+        {
+            self.step_ns = step;
+        }
+        self.last_dts_ns = Some(self.last_dts_ns.map_or(dts_ns, |last| last.max(dts_ns)));
+        (pts_ns, dts_ns)
+    }
+}
 
 // a sparse stream (subtitles, KLV) holds a unit until the next one arrives, however long that is
 fn holds_timed_units(stream: TsStream) -> bool {
@@ -1393,6 +1464,7 @@ impl TsDemuxN {
             mpeg2_tuned_in,
             last_unit_dts_ns,
             held_unit_ns,
+            timeline: RestartTimeline::default(),
             bus: None,
             collection_posted: false,
             tags: TagPoster::default(),
@@ -1539,6 +1611,7 @@ impl TsDemuxN {
             // Reordered video carries a separate DTS; fall back to the PTS when
             // absent (the no-DTS convention shared with the fmp4 / mkv demux).
             let dts_ns = u.dts_90khz.map_or(pts_ns, ticks_90khz_to_ns);
+            let (pts_ns, dts_ns) = self.timeline.map(pts_ns, dts_ns);
             if !self.segment_sent[port] {
                 self.segment_sent[port] = true;
                 let base = *self.segment_base.get_or_insert(dts_ns);
@@ -1762,11 +1835,13 @@ impl MultiOutputElement for TsDemuxN {
                     self.demux = TsDemuxer::new();
                     self.demux.set_program_number(self.program_number);
                     self.last_unit_dts_ns.fill(None);
+                    self.timeline.restart();
                     for port in 0..self.ports.len() {
                         out.push_to(port, PipelinePacket::Flush).await?;
                     }
                 }
                 PipelinePacket::Segment(seg) => {
+                    self.timeline.seek();
                     for port in 0..self.ports.len() {
                         out.push_to(port, PipelinePacket::Segment(seg)).await?;
                     }
@@ -2135,6 +2210,123 @@ mod tests {
             .await
             .unwrap();
         d.process(PipelinePacket::Eos, sink).await.unwrap();
+    }
+
+    const RESTART_FRAME_TICKS: u64 = 3_000;
+    const FIRST_SESSION_TICKS: u64 = 900_000;
+    // a restarted origin starts its clock again, below where the first session stopped
+    const SECOND_SESSION_TICKS: u64 = 90_000;
+
+    fn h264_session(start_ticks: u64, frames: u64) -> PipelinePacket {
+        let mut muxer = crate::mpegts::TsMuxer::with_streams(&[STREAM_TYPE_H264]);
+        let mut stream = Vec::new();
+        for frame in 0..frames {
+            let pts = start_ticks + frame * RESTART_FRAME_TICKS;
+            stream.extend(muxer.push_au(&[0, 0, 0, 1, 0x65, frame as u8], Some(pts), None, true));
+        }
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        ))
+    }
+
+    // the pts a demuxer reads back from `h264_session`, which adds the muxer's decoder delay
+    fn session_pts_ns(start_ticks: u64, frames: u64) -> Vec<u64> {
+        let delay = crate::mpegts::TsMuxer::with_streams(&[STREAM_TYPE_H264]).decoder_delay_90khz();
+        (0..frames)
+            .map(|frame| ticks_90khz_to_ns(start_ticks + delay + frame * RESTART_FRAME_TICKS))
+            .collect()
+    }
+
+    // the first session's two emitted frames, then the second session one frame gap after them
+    fn continued_pts_ns() -> Vec<u64> {
+        let first = session_pts_ns(FIRST_SESSION_TICKS, 2);
+        let second = session_pts_ns(SECOND_SESSION_TICKS, 3);
+        let resume_ns = first[1] + (first[1] - first[0]);
+        let continued = second.iter().map(|pts| pts - second[0] + resume_ns);
+        first.iter().copied().chain(continued).collect()
+    }
+
+    // the flush drops the first session's last unit, still waiting for the PES after it
+    #[tokio::test]
+    async fn a_restarted_source_continues_the_timeline() {
+        let mut d = TsDemux::new();
+        d.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        for packet in [
+            h264_session(FIRST_SESSION_TICKS, 3),
+            PipelinePacket::Flush,
+            h264_session(SECOND_SESSION_TICKS, 3),
+            PipelinePacket::Eos,
+        ] {
+            d.process(packet, &mut sink).await.unwrap();
+        }
+
+        assert_eq!(sink.pts_ns, continued_pts_ns());
+        let [opening, continued] = sink.segments.as_slice() else {
+            panic!("one segment per session, got {:?}", sink.segments);
+        };
+        assert_eq!(continued, opening);
+    }
+
+    #[tokio::test]
+    async fn an_upstream_seek_keeps_the_new_timestamps() {
+        let mut d = TsDemux::new();
+        d.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        for packet in [
+            h264_session(FIRST_SESSION_TICKS, 3),
+            PipelinePacket::Flush,
+            PipelinePacket::Segment(Segment::new()),
+            h264_session(SECOND_SESSION_TICKS, 3),
+            PipelinePacket::Eos,
+        ] {
+            d.process(packet, &mut sink).await.unwrap();
+        }
+
+        let mut expected = session_pts_ns(FIRST_SESSION_TICKS, 2);
+        expected.extend(session_pts_ns(SECOND_SESSION_TICKS, 3));
+        assert_eq!(sink.pts_ns, expected);
+    }
+
+    #[derive(Default)]
+    struct PortPts(Vec<u64>);
+
+    impl MultiOutputSink for PortPts {
+        fn port_count(&self) -> usize {
+            1
+        }
+
+        fn poll_push_to(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            _port: usize,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            if let Some(PipelinePacket::DataFrame(frame)) = packet_slot.take() {
+                self.0.push(frame.timing.pts_ns);
+            }
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_restarted_source_continues_every_port_timeline() {
+        let mut d = TsDemuxN::new(Vec::from([TsStream::H264]));
+        let mut sink = PortPts::default();
+        for packet in [
+            h264_session(FIRST_SESSION_TICKS, 3),
+            PipelinePacket::Flush,
+            h264_session(SECOND_SESSION_TICKS, 3),
+            PipelinePacket::Eos,
+        ] {
+            MultiOutputElement::process(&mut d, packet, &mut sink)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(sink.0, continued_pts_ns());
     }
 
     #[tokio::test]
