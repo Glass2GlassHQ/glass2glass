@@ -258,11 +258,13 @@ Highest leverage first:
     16), and `probe-format/roundup997` decodes a first MP2 frame ffmpeg rejects
     as "Header missing".
   - qdraw in MOV decodes 2 of 12 frames (`quickdraw/Airplane.mov`).
-  - WavParse with a tagged codec cuts payloads at the input chunk: XMA2 packets
-    are 2048 bytes but `block_align` is 6 (`xma2/xma2-multistream-tail.xma` gives
-    512, 18952 and 30720 bytes of PCM at blocksize 188, 4096 and 65536). AC-3 in
-    WAV (`diatonis_invisible_order_anfos_ac3-small.wav`) puts frame 1 at 0.371 s
-    where ffmpeg gives 0.035 s.
+  - `wavparse` rejects `wFormatTag` 0x2000 (AC-3), 0x55 (MP3) and 0xFF (AAC):
+    `readable_format` takes only PCM, G.711 and IMA ADPCM although
+    `waveformat.rs` maps them. MS ADPCM with more than 2 channels needs
+    `block_align` times the channel count, as ffmpeg's wavdec uses.
+  - `mkvmux::MkvMux` (single audio input) writes AAC with no `CodecPrivate` and
+    the ADTS headers left in the blocks, which ffmpeg cannot decode for 8-channel
+    `aac/al22_chCfg0PCE_44.mp4`.
   - `flvdemux` ADTS-wraps AAC whose SBR output rate equals the core rate, so it
     decodes at double rate. It needs the raw-config path the MP4 demuxers use.
   - `aac/aac-sce-in-stereo.mp4` is 23.2 ms late on every frame,

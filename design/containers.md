@@ -795,7 +795,9 @@ AudioSpecificConfig from its first frame: synthesised from an ADTS header, or
 the leading config frame of a raw stream, which becomes the `esds`,
 `CodecPrivate` or FLV sequence header as is (at most 256 bytes) and is never
 written as a sample. The raw units that follow are stored unchanged. ADTS frames
-are stored without their header. A fan-in muxer whose AAC pad delivers frames
+are stored without their header. A channel-configuration-0 stream carries its
+program config element in each ADTS frame: the muxer moves the first one into
+the config and strips the in-band copies, as ffmpeg's `aac_adtstoasc` does. A fan-in muxer whose AAC pad delivers frames
 without either config fails the stream.
 
 MPEG-TS carries AAC as ADTS (0x0F) unless the stream opens on a raw

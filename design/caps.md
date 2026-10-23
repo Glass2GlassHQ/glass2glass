@@ -832,7 +832,9 @@ Matroska's `V_QUICKTIME`). The container header the decoder needs leads the
 stream in band as a frame of its own, the convention FLAC's `fLaC` and raw AAC's
 AudioSpecificConfig already use: the whole `strf` BITMAPINFOHEADER or
 WAVEFORMATEX, the WAV `fmt ` chunk, the whole sample entry, or the Matroska
-`CodecPrivate`. An AVI `##pc` palette change rides the stream's next frame as a
+`CodecPrivate`. `wavparse` emits a tagged codec in whole blocks of its block
+align, except XMA1 and XMA2, which go out in 2048-byte packets as ffmpeg's wav
+demuxer reads them. An AVI `##pc` palette change rides the stream's next frame as a
 `PaletteChange` frame meta, which `ffmpegdec` writes over its palette and hands
 libavcodec with that packet. A truncated file keeps the cut last chunk or sample
 of a tagged video stream, which libavformat also hands its decoder. The ffmpeg
