@@ -815,7 +815,9 @@ frame, and the PMT entry switches to 0x11 before the tables first go out. On the
 read side, `TsStream::Aac` takes 0x0F and 0x11, LOAS under either, and forwards LOAS frames as the
 PES carries them, and `aacparse` reads both LATM versions. `ffmpegaudiodec` opens
 libavcodec's LATM decoder when the first buffer is a LOAS frame, seeds it with
-the config's rate and channel count, and decodes each LOAS frame whole. ffmpeg
+the config's rate and channel count, and decodes each LOAS frame whole. LOAS
+frames ahead of the first StreamMuxConfig decode too: a throwaway LATM decoder
+reads the first buffer's config, and the real one opens with it as extradata. ffmpeg
 8.1 does not decode ER AAC in LATM from its CLI.
 
 ### Matroska
@@ -1131,7 +1133,11 @@ same packet go out unstamped for the parser's synthesis to time. A DivX packed
 MPEG-4 Part 2 input (a reference VOP then the B-VOP shown before it) is split
 before framing: the input stamp names the B-VOP, and the reference VOP is
 stamped ahead of it by the VOP-time difference at the VOL's
-`vop_time_increment_resolution`.
+`vop_time_increment_resolution`. A TS or PS video stream whose first PES carries
+no pts holds its units, up to 64, until the first stamp: a fresh synthesis
+anchored on the first held unit also places the stamped one, and the gap to its
+real stamp shifts the held units onto the stream's timeline, as ffmpeg does. A
+stream that never shows a stamp keeps its units unstamped at end of stream.
 
 ## AV1 OBU streams
 

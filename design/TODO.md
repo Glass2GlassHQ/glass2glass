@@ -249,12 +249,6 @@ Highest leverage first:
     2.000 s sample holds an IDR and a second picture, and `NalParse` splits them.
     Needs sample-based demuxers to mark one access unit per buffer (gst's
     `alignment=au`) so the parser keeps the sample whole.
-  - A TS or PS stream whose first PES carries no pts puts its first units at 0
-    where ffmpeg back-fills them from the next stamp (`mpeg2/t.mpg`, 0.06 s): hold
-    the leading units until the PID's first stamp, then back-fill.
-  - `mpegts/loewe.ts` LATM loses two frames mid-stream (14 where ffprobe gives
-    16), and `probe-format/roundup997` decodes a first MP2 frame ffmpeg rejects
-    as "Header missing".
   - An MP4 audio track whose edit list replays media plays its samples once:
     replayed edits need sample-accurate clipping, as the video path lays them out.
   - `wavparse` rejects `wFormatTag` 0x2000 (AC-3), 0x55 (MP3) and 0xFF (AAC):
