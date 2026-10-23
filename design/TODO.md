@@ -231,8 +231,10 @@ Highest leverage first:
   - `matroskademux` sets each frame's dts to its pts, so reordered H.264 from
     Matroska reaches mp4mux, flvmux and tsmux with no real DTS and `mp4mux` writes
     no `ctts`. ffmpeg derives the DTS (gst's mp4mux writes the same timing as g2g).
-  - Remux fails mid-run or writes an undecodable file: `opus_vp9-alpha.webm` and
-    `loewe.ts` HEVC into mp4mux and matroskamux, `two_first_slice.mp4` into matroskamux.
+  - Remux fails through the single-input muxers: `mpegts/loewe.ts` HEVC into
+    `mp4mux` and `hevc/two_first_slice.mp4` into `matroskamux` (the one-pad muxer
+    entry below covers both). `webm/opus_vp9-alpha.webm` Opus comes back 8 stereo
+    samples longer through mp4mux and matroskamux.
   - A one-pad `matroskamux` or `mp4mux` builds the single-input `MkvMux` /
     `Mp4Mux`. `MkvMux` writes an empty `CodecPrivate` (AAC with ADTS headers,
     Annex-B H.264/H.265, Opus with no `OpusHead`) and flags every block a keyframe,
