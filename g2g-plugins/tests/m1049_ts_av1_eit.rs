@@ -284,6 +284,7 @@ async fn av1parse_reads_the_geometry_of_the_demuxed_stream() {
             height: Dim::Fixed(HEIGHT),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
         .expect("av1parse accepts the demuxed caps");
     let mut sink = CaptureSink::default();
@@ -363,6 +364,7 @@ async fn a_fan_in_multiplex_carries_av1_on_a_non_zero_pad() {
             height: Dim::Fixed(HEIGHT),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
     )
     .expect("the fan-in muxer accepts AV1 on input 1");

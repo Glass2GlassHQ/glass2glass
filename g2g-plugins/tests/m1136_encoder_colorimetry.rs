@@ -256,6 +256,7 @@ mod av1 {
                 height: Dim::Fixed(HEIGHT),
                 framerate: Rate::Fixed(FPS << 16),
                 colorimetry: Colorimetry::BT709,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }],
             "the encoder announces the input colorimetry on its output caps"
         );
@@ -287,6 +288,7 @@ mod av1 {
                 height: Dim::Fixed(HEIGHT),
                 framerate: Rate::Fixed(FPS << 16),
                 colorimetry: Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }],
             "an untagged input stays untagged on the output caps"
         );
@@ -367,6 +369,7 @@ mod mjpeg {
                     height: Dim::Fixed(HEIGHT),
                     framerate: Rate::Fixed(FPS << 16),
                     colorimetry: Colorimetry::JPEG,
+                    alignment: g2g_core::BitstreamAlignment::Unspecified,
                 }],
                 "a JPEG is JFIF colorimetry whatever fed it ({input:?})"
             );
@@ -417,6 +420,7 @@ mod mjpeg {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     colorimetry: Colorimetry::UNKNOWN,
+                    alignment: g2g_core::BitstreamAlignment::Unspecified,
                 })
                 .expect("configure MjpegDec");
             let mut sink = CaptureSink::default();
@@ -568,6 +572,7 @@ mod nvenc {
                 height: Dim::Fixed(HEIGHT),
                 framerate: Rate::Fixed(FPS << 16),
                 colorimetry: Colorimetry::BT709,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }],
             "the encoder announces the input colorimetry on its output caps"
         );

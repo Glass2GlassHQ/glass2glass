@@ -3385,6 +3385,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            alignment: crate::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -3604,6 +3605,7 @@ mod tests {
             height: Dim::Fixed(height),
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            alignment: crate::BitstreamAlignment::Unspecified,
         }
     }
 

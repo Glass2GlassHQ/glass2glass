@@ -56,6 +56,7 @@ async fn decode_fixture<C: VaapiCodec>(fixture_var: &str) {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let narrowed = dec.intercept_caps(&upstream).expect("intercept the codec");
     assert_eq!(narrowed, upstream);

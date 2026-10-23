@@ -858,6 +858,7 @@ mod tests {
             height: Dim::Fixed(240),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert!(f(&h264).is_empty());
     }

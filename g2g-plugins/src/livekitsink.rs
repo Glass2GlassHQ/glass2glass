@@ -965,6 +965,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let lo = Caps::CompressedVideo {
             codec: VideoCodec::H264,
@@ -972,6 +973,7 @@ mod tests {
             height: Dim::Fixed(240),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert!(s.configure_pipeline(0, &hi).is_ok());
         assert!(s.configure_pipeline(1, &lo).is_ok());

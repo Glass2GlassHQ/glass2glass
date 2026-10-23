@@ -168,6 +168,7 @@ fn configured_decoder() -> Option<VulkanVideoDec> {
         height: Dim::Fixed(HEIGHT),
         framerate: Rate::Fixed(FRAMERATE),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     })
     .expect("configure opens the decode device");
     Some(dec)

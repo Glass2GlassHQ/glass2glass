@@ -76,6 +76,7 @@ fn field_coded_h264_fails_with_a_named_error_and_no_pictures() {
             height: Dim::Fixed(FIELD_PICTURE_HEIGHT),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
         .expect("configure opens the decode device");
     let mut out = CollectSink::default();

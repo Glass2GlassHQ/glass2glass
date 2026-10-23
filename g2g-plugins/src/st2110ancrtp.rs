@@ -57,6 +57,7 @@ fn accepted_caps() -> CapsSet {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     CapsSet::from_alternatives(Vec::from([
         any_geometry(VideoCodec::H264),
@@ -517,6 +518,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 

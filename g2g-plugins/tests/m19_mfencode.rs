@@ -129,6 +129,7 @@ async fn encode_emits_h264_caps_and_annexb_access_units() {
             height: Dim::Fixed(HEIGHT),
             framerate: Rate::Fixed(FPS_Q16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }],
         "one CapsChanged with the encoded geometry"
     );

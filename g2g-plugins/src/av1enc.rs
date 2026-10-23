@@ -182,6 +182,7 @@ impl Av1Enc {
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
             colorimetry: self.colorimetry,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -573,6 +574,7 @@ impl AsyncElement for Av1Enc {
                     height: height.clone(),
                     framerate: framerate.clone(),
                     colorimetry: *colorimetry,
+                    alignment: g2g_core::BitstreamAlignment::Unspecified,
                 })
             }
             _ => CapsSet::from_alternatives(Vec::new()),
@@ -725,6 +727,7 @@ impl PadTemplates for Av1Enc {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let any = |format| Caps::RawVideo {
             format,
@@ -849,7 +852,8 @@ mod tests {
                 width: Dim::Fixed(64),
                 height: Dim::Fixed(64),
                 framerate: Rate::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }]
         );
 

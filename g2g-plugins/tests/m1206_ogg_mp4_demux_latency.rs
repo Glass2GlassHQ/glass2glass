@@ -121,6 +121,7 @@ fn h264_mp4_chunks(mux: Mp4MuxN) -> Vec<Vec<u8>> {
         height: Dim::Fixed(VIDEO_HEIGHT),
         framerate: Rate::Fixed(VIDEO_FRAMERATE_Q16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     mux.configure_pipeline(0, &caps).expect("configure mp4 mux");
     let mut capture = ChunkCapture::default();

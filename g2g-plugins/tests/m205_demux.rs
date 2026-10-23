@@ -47,6 +47,7 @@ fn video_caps() -> Caps {
             max_q16: 240 << 16,
         },
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 fn audio_caps() -> Caps {

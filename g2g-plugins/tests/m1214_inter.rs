@@ -347,6 +347,7 @@ async fn a_consumer_joining_compressed_video_mid_stream_starts_at_a_keyframe() {
         height: Dim::Fixed(HEIGHT as u32),
         framerate: Rate::Any,
         colorimetry: Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let mut sink = named_sink(name);
     sink.configure_pipeline(&caps).expect("claims");

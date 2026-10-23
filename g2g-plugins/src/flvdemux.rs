@@ -244,6 +244,7 @@ impl FlvDemux {
                 max_q16: 240 << 16,
             },
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         // The audio layout is refined at runtime, from the AAC AudioSpecificConfig
         // or the tag flags of the other codecs.

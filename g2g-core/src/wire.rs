@@ -746,6 +746,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             height,
             framerate,
             colorimetry,
+            alignment: _,
         } => {
             w.u8(0);
             put_video_codec(w, *codec);
@@ -831,6 +832,7 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             height: get_dim(r)?,
             framerate: get_rate(r)?,
             colorimetry: get_colorimetry(r)?,
+            alignment: crate::BitstreamAlignment::Unspecified,
         },
         1 => Caps::RawVideo {
             format: raw_format_from_u8(r.u8()?)?,
@@ -1630,6 +1632,7 @@ mod tests {
                 },
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: crate::Colorimetry::BT709,
+                alignment: crate::BitstreamAlignment::Unspecified,
             },
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
@@ -1733,6 +1736,7 @@ mod tests {
             height: Dim::Fixed(576),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: crate::Colorimetry::UNKNOWN,
+            alignment: crate::BitstreamAlignment::Unspecified,
         };
         match roundtrip(&PipelinePacket::CapsChanged(caps.clone())) {
             PipelinePacket::CapsChanged(got) => assert_eq!(got, caps),

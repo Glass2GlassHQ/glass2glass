@@ -1641,6 +1641,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -1746,6 +1747,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(parse.intercept_caps(&h264), Err(G2gError::CapsMismatch));
     }
@@ -1763,7 +1765,8 @@ mod tests {
                         width: Dim::Any,
                         height: Dim::Any,
                         framerate: Rate::Any,
-                        colorimetry: g2g_core::Colorimetry::UNKNOWN
+                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                        alignment: g2g_core::BitstreamAlignment::Unspecified,
                     }]
                 );
             }

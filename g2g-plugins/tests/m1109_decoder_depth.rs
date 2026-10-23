@@ -150,6 +150,7 @@ async fn run_depth_check(mut dec: FfmpegVideoDec, max_depth: Option<usize>) {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let narrowed = dec.intercept_caps(&upstream).expect("intercept H.264");
     let outcome = dec

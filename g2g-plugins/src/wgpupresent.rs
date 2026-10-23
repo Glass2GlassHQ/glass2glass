@@ -749,6 +749,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert!(matches!(
             sink.configure_pipeline(&compressed),

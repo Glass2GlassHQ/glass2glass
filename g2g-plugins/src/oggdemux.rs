@@ -1015,6 +1015,7 @@ pub(crate) fn concrete_caps(stream: &OggLogicalStream) -> Option<Caps> {
                 theora.framerate_denominator,
             )),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         });
     }
     if info.codec == OggCodec::Vp8 {
@@ -1028,6 +1029,7 @@ pub(crate) fn concrete_caps(stream: &OggLogicalStream) -> Option<Caps> {
                 vp8.framerate_denominator,
             )),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         });
     }
     if info.sample_rate == 0 {
@@ -1754,6 +1756,7 @@ mod tests {
                     framerate_q16_from_fraction(FRAMERATE.0, FRAMERATE.1).unwrap()
                 ),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }]
         );
         assert_eq!(
@@ -1846,6 +1849,7 @@ mod tests {
                 height: Dim::Fixed(200),
                 framerate: Rate::Fixed(25 << 16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }]
         );
         assert_eq!(

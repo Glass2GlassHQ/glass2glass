@@ -397,6 +397,7 @@ pub fn caps_from_ffi(caps: &FfiCaps) -> Result<Caps, CapsCodeError> {
                 height: dim_from_ffi(&v.height)?,
                 framerate: rate_from_ffi(&v.framerate)?,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             })
         }
         CAPS_AUDIO => {
@@ -531,6 +532,7 @@ mod tests {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             };
             let ffi = caps_into_ffi(&caps).expect("coded codec crosses");
             assert_eq!(caps_from_ffi(&ffi).expect("and comes back"), caps);

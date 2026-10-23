@@ -99,6 +99,7 @@ pub(crate) fn compressed_video(codec: VideoCodec) -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 

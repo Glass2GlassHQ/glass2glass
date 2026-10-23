@@ -670,6 +670,7 @@ pub fn default_registry() -> Registry {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || Box::new(crate::multifilesrc::MultiFileSrc::new("")),
     ));
@@ -684,6 +685,7 @@ pub fn default_registry() -> Registry {
             height: Dim::Any,
             framerate: Rate::Fixed(IMAGE_SEQUENCE_FPS << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || {
             Box::new(
@@ -2923,6 +2925,7 @@ fn register_feature_gated(reg: &mut Registry) {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || Box::new(RtspSrc::new("")),
     ));
@@ -2956,6 +2959,7 @@ fn register_feature_gated(reg: &mut Registry) {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || Box::new(OnvifSrc::new("")),
     ));
@@ -3019,6 +3023,7 @@ fn register_feature_gated(reg: &mut Registry) {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || Box::new(UdpSrc::new("0.0.0.0:5004".parse().unwrap())),
     ));
@@ -3034,6 +3039,7 @@ fn register_feature_gated(reg: &mut Registry) {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || Box::new(WebRtcWhepSrc::new("")),
     ));
@@ -3111,6 +3117,7 @@ fn register_feature_gated(reg: &mut Registry) {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         || Box::new(RtspServerSrc::new("0.0.0.0:8554".parse().unwrap())),
     ));
@@ -3778,6 +3785,7 @@ mod domain_aware_autoplug_tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 

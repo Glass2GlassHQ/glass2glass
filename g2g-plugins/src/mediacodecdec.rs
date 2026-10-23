@@ -351,6 +351,7 @@ impl MediaCodecDec {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -764,6 +765,7 @@ impl PadTemplates for MediaCodecDec {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let nv12 = Caps::RawVideo {
             format: RawVideoFormat::Nv12,

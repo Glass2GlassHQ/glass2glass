@@ -888,6 +888,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -936,6 +937,7 @@ mod tests {
             height: Dim::Fixed(720),
             framerate,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let sps_without_timing = || frame_with_bytes(0, build_test_annexb_sps(1280, 720));
 
@@ -1100,6 +1102,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(parse.intercept_caps(&vp9), Err(G2gError::CapsMismatch));
     }
@@ -1121,7 +1124,8 @@ mod tests {
                         width: Dim::Any,
                         height: Dim::Any,
                         framerate: Rate::Any,
-                        colorimetry: g2g_core::Colorimetry::UNKNOWN
+                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                        alignment: g2g_core::BitstreamAlignment::Unspecified,
                     }]
                 );
             }
@@ -1199,6 +1203,32 @@ mod tests {
         );
         assert_eq!(payloads[0], au0, "first AU emitted whole");
         assert_eq!(payloads[1], au1, "second AU emitted whole on EOS");
+    }
+
+    #[tokio::test]
+    async fn an_access_unit_aligned_buffer_stays_whole() {
+        let mut parse = H264Parse::reframing();
+        let sample_caps = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::AccessUnit,
+        };
+        parse.configure_pipeline(&sample_caps).unwrap();
+        let mut sink = CollectSink::default();
+        // a container sample holding two first slices, as fate-suite's two_first_slice.mp4 does
+        let sample = [annexb_vcl(true, 1), annexb_vcl(true, 2)].concat();
+        parse
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, sample.clone())),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        assert_eq!(data_payloads(&sink), vec![sample]);
     }
 
     #[tokio::test]

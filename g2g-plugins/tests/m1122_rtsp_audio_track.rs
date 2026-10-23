@@ -70,6 +70,7 @@ mod fanout {
                 height: Dim::Fixed(720),
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             },
             audio,
             onvif_metadata: false,

@@ -83,6 +83,7 @@ fn ingest_caps(codec: VideoCodec) -> Caps {
             max_q16: 240 << 16,
         },
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 

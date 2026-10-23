@@ -240,6 +240,7 @@ impl AsyncElement for SplitMuxSink {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         CapsConstraint::Accepts(CapsSet::from_alternatives(Vec::from([
             video(VideoCodec::H264),
@@ -365,6 +366,7 @@ impl PadTemplates for SplitMuxSink {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
             video(VideoCodec::H264),
@@ -409,6 +411,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 

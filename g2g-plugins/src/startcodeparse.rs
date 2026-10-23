@@ -322,6 +322,7 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
             height: Dim::Fixed(info.height),
             framerate: self.caps.framerate(info.framerate),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         self.caps.refine(new_caps, out).await
     }
@@ -401,6 +402,7 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 }

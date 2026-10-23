@@ -104,6 +104,7 @@ impl WebRtcVideoCodec {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -126,6 +127,7 @@ impl WebRtcVideoCodec {
                 max_q16: PLACEHOLDER_MAX_FPS << 16,
             },
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -389,6 +391,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(Track::from_caps(&caps), None);
     }

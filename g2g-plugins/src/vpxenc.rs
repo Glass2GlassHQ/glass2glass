@@ -132,6 +132,7 @@ impl VpxEnc {
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -443,6 +444,7 @@ impl AsyncElement for VpxEnc {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -565,6 +567,7 @@ impl PadTemplates for VpxEnc {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let source =
             CapsSet::from_alternatives(Vec::from([video(VideoCodec::Vp8), video(VideoCodec::Vp9)]));
@@ -748,6 +751,7 @@ mod tests {
                 },
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             })
             .unwrap();
         let mut psink = CaptureSink::default();

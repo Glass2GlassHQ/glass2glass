@@ -65,6 +65,8 @@ pub enum Caps {
         /// Colour description from the bitstream (VUI / `color_config`),
         /// [`Colorimetry::UNKNOWN`] until a parser reads it.
         colorimetry: Colorimetry,
+        // GStreamer's H.264 / H.265 `alignment`
+        alignment: BitstreamAlignment,
     },
     /// Raw pixel buffer in `format`. Geometry is authoritative.
     RawVideo {
@@ -189,6 +191,7 @@ impl Caps {
                     height: ha,
                     framerate: ra,
                     colorimetry: cla,
+                    alignment: aa,
                 },
                 Caps::CompressedVideo {
                     codec: cb,
@@ -196,6 +199,7 @@ impl Caps {
                     height: hb,
                     framerate: rb,
                     colorimetry: clb,
+                    alignment: ab,
                 },
             ) if ca == cb => Ok(Caps::CompressedVideo {
                 codec: *ca,
@@ -203,6 +207,7 @@ impl Caps {
                 height: ha.intersect(hb).ok_or(G2gError::CapsMismatch)?,
                 framerate: ra.intersect(rb).ok_or(G2gError::CapsMismatch)?,
                 colorimetry: cla.intersect(clb).ok_or(G2gError::CapsMismatch)?,
+                alignment: aa.intersect(ab).ok_or(G2gError::CapsMismatch)?,
             }),
             (
                 Caps::RawVideo {
@@ -351,6 +356,7 @@ impl Caps {
                 height,
                 framerate,
                 colorimetry,
+                alignment,
             } => Ok(Caps::CompressedVideo {
                 codec: *codec,
                 width: width.fixate().ok_or(G2gError::CapsMismatch)?,
@@ -360,6 +366,7 @@ impl Caps {
                 // below: the bitstream refines it later, and collapsing it to a
                 // guess is exactly the wrong-matrix bug this field exists to fix.
                 colorimetry: *colorimetry,
+                alignment: *alignment,
             }),
             Caps::RawVideo {
                 format,
@@ -483,6 +490,7 @@ impl Caps {
                 height,
                 framerate,
                 colorimetry,
+                alignment,
             } => {
                 let mut s = codec_gst_media_type(*codec);
                 if let VideoCodec::ProRes { variant } = codec {
@@ -492,6 +500,9 @@ impl Caps {
                 push_dim(&mut s, "height", height);
                 push_rate(&mut s, framerate);
                 push_colorimetry(&mut s, colorimetry);
+                if let Some(name) = alignment.gst_name() {
+                    s.push_str(&format!(",alignment={name}"));
+                }
                 s
             }
             Caps::Audio {
@@ -970,6 +981,35 @@ impl Interlace {
             (Interlace::Any, x) | (x, Interlace::Any) => Some(*x),
             (a, b) if a == b => Some(*a),
             _ => None,
+        }
+    }
+}
+
+// Unspecified is the wildcard for a producer that does not know, as GStreamer's absent field
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum BitstreamAlignment {
+    Unspecified,
+    // each buffer is exactly one access unit, GStreamer's `au`
+    AccessUnit,
+    // each buffer is one or more whole NAL units, GStreamer's `nal`
+    Nal,
+}
+
+impl BitstreamAlignment {
+    pub fn intersect(&self, other: &BitstreamAlignment) -> Option<BitstreamAlignment> {
+        match (self, other) {
+            (BitstreamAlignment::Unspecified, x) | (x, BitstreamAlignment::Unspecified) => Some(*x),
+            (a, b) if a == b => Some(*a),
+            _ => None,
+        }
+    }
+
+    pub fn gst_name(&self) -> Option<&'static str> {
+        match self {
+            BitstreamAlignment::Unspecified => None,
+            BitstreamAlignment::AccessUnit => Some("au"),
+            BitstreamAlignment::Nal => Some("nal"),
         }
     }
 }
@@ -2945,6 +2985,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            alignment: crate::BitstreamAlignment::Unspecified,
         };
         let b = video(Dim::Any, Dim::Any, Rate::Any); // Rgba8
         assert_eq!(a.intersect(&b), Err(G2gError::CapsMismatch));
@@ -3237,6 +3278,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            alignment: crate::BitstreamAlignment::Unspecified,
         };
         let a = CapsSet::from_alternatives(alloc::vec![rgba(Dim::Any), h264(Dim::Any)]);
         let b =
@@ -3617,8 +3659,30 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: Colorimetry::BT709,
+            alignment: crate::BitstreamAlignment::Unspecified,
         };
         assert!(compressed.to_gst_string().contains(",colorimetry=bt709"));
+    }
+
+    #[test]
+    fn alignment_unspecified_is_a_wildcard_and_au_refuses_nal() {
+        let h264 = |alignment| Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+            colorimetry: Colorimetry::UNKNOWN,
+            alignment,
+        };
+        let access_unit = h264(crate::BitstreamAlignment::AccessUnit);
+        let unspecified = h264(crate::BitstreamAlignment::Unspecified);
+        assert_eq!(unspecified.intersect(&access_unit), Ok(access_unit.clone()));
+        assert_eq!(
+            access_unit.intersect(&h264(crate::BitstreamAlignment::Nal)),
+            Err(G2gError::CapsMismatch)
+        );
+        assert!(access_unit.to_gst_string().ends_with(",alignment=au"));
+        assert!(!unspecified.to_gst_string().contains("alignment"));
     }
 
     #[test]

@@ -600,6 +600,7 @@ mod tests {
             height: Dim::Fixed(32),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(
             r.configure_pipeline(&h264).expect_err("compressed"),

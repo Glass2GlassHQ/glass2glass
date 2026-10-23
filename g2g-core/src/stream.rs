@@ -130,6 +130,7 @@ mod tests {
             height: Dim::Fixed(240),
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            alignment: crate::BitstreamAlignment::Unspecified,
         }
     }
     fn audio() -> Caps {

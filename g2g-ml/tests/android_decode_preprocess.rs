@@ -112,6 +112,7 @@ async fn decode_gpu_to_preprocess_tensor() {
         height: Dim::Fixed(h),
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let narrowed = dec.intercept_caps(&upstream).expect("intercept caps");
     assert!(matches!(

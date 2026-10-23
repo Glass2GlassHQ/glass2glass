@@ -8,9 +8,9 @@ use alloc::vec::Vec;
 
 use crate::caps::{
     batch_alternatives, framerate_q16_from_fraction, is_pcm, pcm_from_gst_format, AudioFormat,
-    ByteStreamEncoding, Caps, CapsSet, CodecTag, Colorimetry, Dim, Interlace, ProResVariant, Rate,
-    RawVideoFormat, SubPictureFormat, TagNamespace, TextFormat, VideoCodec, ANY_CHANNELS,
-    ANY_SAMPLE_RATE, MOV_UNKNOWN_SUBTYPE_PREFIX, PCM_FORMATS, RIFF_AUDIO_TAG_FIELD,
+    BitstreamAlignment, ByteStreamEncoding, Caps, CapsSet, CodecTag, Colorimetry, Dim, Interlace,
+    ProResVariant, Rate, RawVideoFormat, SubPictureFormat, TagNamespace, TextFormat, VideoCodec,
+    ANY_CHANNELS, ANY_SAMPLE_RATE, MOV_UNKNOWN_SUBTYPE_PREFIX, PCM_FORMATS, RIFF_AUDIO_TAG_FIELD,
     RIFF_UNKNOWN_SUBTYPE, RIFF_VIDEO_TAG_FIELD,
 };
 use crate::channels::ChannelLayout;
@@ -176,6 +176,16 @@ fn expand_colorimetry(fv: Option<&FieldVal>) -> Option<Colorimetry> {
     }
 }
 
+// An absent `alignment` is the wildcard, matching `to_gst_string`, and an unknown value rejects the caps
+fn expand_alignment(fv: Option<&FieldVal>) -> Option<BitstreamAlignment> {
+    match fv {
+        None => Some(BitstreamAlignment::Unspecified),
+        Some(FieldVal::One(s)) if *s == "au" => Some(BitstreamAlignment::AccessUnit),
+        Some(FieldVal::One(s)) if *s == "nal" => Some(BitstreamAlignment::Nal),
+        Some(_) => None,
+    }
+}
+
 // An absent `channel-mask` is the wildcard (matching `to_gst_string`, which
 // omits an unspecified layout). A present one is gst's `(bitmask)0x...` in gst
 // bit order; a mask naming a speaker g2g has no position for rejects the whole
@@ -255,6 +265,7 @@ impl CapsSet {
                 expand_rate(fv("framerate"))?,
             );
             let colorimetry = expand_colorimetry(fv("colorimetry"))?;
+            let alignment = expand_alignment(fv("alignment"))?;
             let mut alts = Vec::new();
             for w in &widths {
                 for h in &heights {
@@ -265,6 +276,7 @@ impl CapsSet {
                             h.clone(),
                             r.clone(),
                             colorimetry,
+                            alignment,
                         ));
                     }
                 }
@@ -522,6 +534,7 @@ fn compressed(
     height: Dim,
     framerate: Rate,
     colorimetry: Colorimetry,
+    alignment: BitstreamAlignment,
 ) -> Caps {
     Caps::CompressedVideo {
         codec,
@@ -529,6 +542,7 @@ fn compressed(
         height,
         framerate,
         colorimetry,
+        alignment,
     }
 }
 
@@ -778,6 +792,7 @@ mod tests {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Any,
                 colorimetry: Colorimetry::UNKNOWN,
+                alignment: crate::BitstreamAlignment::Unspecified,
             };
             let printed = caps.to_gst_string();
             assert_eq!(
@@ -828,6 +843,7 @@ mod tests {
                 Dim::Fixed(48),
                 Rate::Any,
                 Colorimetry::UNKNOWN,
+                BitstreamAlignment::Unspecified,
             ),
             compressed(
                 mov_video,
@@ -835,6 +851,7 @@ mod tests {
                 Dim::Any,
                 Rate::Any,
                 Colorimetry::UNKNOWN,
+                BitstreamAlignment::Unspecified,
             ),
             Caps::Audio {
                 format: riff_audio,
@@ -935,6 +952,30 @@ mod tests {
             "multistream/x-analytics-batch,streams=<\"video/x-nonesuch\">"
         )
         .is_none());
+    }
+
+    #[test]
+    fn parse_caps_reads_alignment() {
+        let alignment_of = |desc: &str| {
+            let set = CapsSet::from_gst_string(desc)?;
+            match &set.alternatives()[0] {
+                Caps::CompressedVideo { alignment, .. } => Some(*alignment),
+                _ => None,
+            }
+        };
+        assert_eq!(
+            alignment_of("video/x-h264,alignment=au"),
+            Some(BitstreamAlignment::AccessUnit)
+        );
+        assert_eq!(
+            alignment_of("video/x-h265,alignment=nal"),
+            Some(BitstreamAlignment::Nal)
+        );
+        assert_eq!(
+            alignment_of("video/x-h264"),
+            Some(BitstreamAlignment::Unspecified)
+        );
+        assert_eq!(alignment_of("video/x-h264,alignment=frame"), None);
     }
 
     #[test]

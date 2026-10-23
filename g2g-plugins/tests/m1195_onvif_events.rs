@@ -443,6 +443,7 @@ fn combiner() -> OnvifMetadataCombiner {
         height: g2g_core::Dim::Any,
         framerate: g2g_core::Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let mut combiner = OnvifMetadataCombiner::new();
     combiner

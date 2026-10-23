@@ -1515,6 +1515,7 @@ impl PadTemplates for FfmpegVideoDec {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(
@@ -1576,6 +1577,7 @@ impl AsyncElement for FfmpegVideoDec {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             };
             if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
                 return Ok(narrowed);
@@ -2404,6 +2406,7 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
             height,
             framerate,
             colorimetry,
+            alignment: _,
         } if decodes(*codec) => {
             let mk = |f: RawVideoFormat| Caps::RawVideo {
                 format: f,
@@ -3632,6 +3635,7 @@ mod tests {
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let set = f(&input);
         // I420, I422, I444 are all offered so a flexible downstream links; the
@@ -3682,6 +3686,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let out = f(&h264);
         assert_eq!(
@@ -3703,6 +3708,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(
             f(&vp9).alternatives(),
@@ -3798,6 +3804,7 @@ mod tests {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             };
             assert_eq!(dec.intercept_caps(&caps), Ok(caps));
         }
@@ -3822,6 +3829,7 @@ mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(dec.intercept_caps(&proposal), Ok(proposal));
     }
@@ -3969,6 +3977,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let CapsConstraint::DerivedOutput(f_sw) = sw.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
@@ -4175,6 +4184,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let format_first = FfmpegVideoDec::new()
             .with_output_format(OutputFormat::I420)
@@ -4211,6 +4221,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(
             f(&h264).alternatives(),
@@ -4269,6 +4280,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 

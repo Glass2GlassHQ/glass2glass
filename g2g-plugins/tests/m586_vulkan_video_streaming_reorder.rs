@@ -117,6 +117,7 @@ fn element_streaming_output(codec: VideoCodec, clip: &[u8], aus: Vec<Vec<u8>>) -
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     dec.configure_pipeline(&in_caps)
         .expect("configure opens the decode device");

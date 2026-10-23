@@ -108,6 +108,7 @@ fn twelve_bit_h265_fails_with_a_named_error_and_no_pictures() {
             height: Dim::Fixed(TWELVE_BIT_SIZE),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
         .expect("configure opens the decode device");
     let mut out = CollectSink::default();

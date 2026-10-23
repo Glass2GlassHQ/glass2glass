@@ -370,6 +370,7 @@ fn placeholder_video_caps(codec: VideoCodec, min_dim: u32) -> Caps {
         },
         framerate: PLACEHOLDER_FRAMERATE,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 
@@ -610,6 +611,7 @@ pub(crate) fn with_picture_size(
         height,
         framerate,
         colorimetry,
+        alignment,
     } = placeholder
     else {
         return None;
@@ -620,6 +622,7 @@ pub(crate) fn with_picture_size(
         height: height.intersect(&Dim::Fixed(picture_height))?,
         framerate: framerate.clone(),
         colorimetry: *colorimetry,
+        alignment: *alignment,
     })
 }
 

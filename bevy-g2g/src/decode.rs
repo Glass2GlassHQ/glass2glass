@@ -153,6 +153,7 @@ fn run_decode(ctx: GpuContext, clip: String) {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let mut src = FileSrc::new(&clip, caps);
     let mut parse = H264Parse::reframing();

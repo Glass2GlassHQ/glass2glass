@@ -23,9 +23,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome, Dim,
-    ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropValue, PropertySpec, Rate, VideoCodec,
+    AsyncElement, BitstreamAlignment, Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome,
+    Dim, ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::access_unit::{
@@ -115,6 +115,8 @@ pub struct NalParse<C: NalCodec> {
     /// once: a per-frame guess misclassifies a mid-AU Annex-B continuation buffer
     /// (no leading start code) as length-prefixed and mangles it. Re-framing only.
     input_is_annexb: Option<bool>,
+    // the alignment the upstream caps declare, so an access-unit buffer is not split
+    input_alignment: BitstreamAlignment,
     /// Parameter-set re-insertion cadence, applied on the re-framing
     /// (access-unit-aligned Annex-B) output.
     config_interval: ConfigInterval,
@@ -152,6 +154,7 @@ impl<C: NalCodec> Default for NalParse<C> {
             seq: 0,
             stream_pts: Default::default(),
             input_is_annexb: None,
+            input_alignment: BitstreamAlignment::Unspecified,
             config_interval: ConfigInterval::default(),
             leading_rasl: crate::h265parse::LeadingRaslFilter::default(),
             cached: C::PARAM_SET_TYPES.iter().map(|_| Vec::new()).collect(),
@@ -278,8 +281,24 @@ impl<C: NalCodec> NalParse<C> {
             height: Dim::Fixed(info.height),
             framerate: self.caps.framerate(info.framerate),
             colorimetry: info.colorimetry,
+            alignment: self.output_alignment(),
         };
         self.caps.refine(new_caps, out).await
+    }
+
+    // re-framing emits one access unit per buffer, as gst's h264parse defaults to
+    fn output_alignment(&self) -> BitstreamAlignment {
+        if self.reframe {
+            BitstreamAlignment::AccessUnit
+        } else {
+            self.input_alignment
+        }
+    }
+
+    fn observe_alignment(&mut self, caps: &Caps) {
+        if let Caps::CompressedVideo { alignment, .. } = caps {
+            self.input_alignment = *alignment;
+        }
     }
 
     /// Re-framing path for one input `DataFrame`: normalize to Annex-B, then
@@ -310,6 +329,15 @@ impl<C: NalCodec> NalParse<C> {
         let is_annexb = *self
             .input_is_annexb
             .get_or_insert_with(|| !crate::annexb::is_avcc(bytes));
+        // a container sample is one access unit, so a second first slice in it is not a new picture
+        if self.input_alignment == BitstreamAlignment::AccessUnit {
+            let mut access_unit = bytes.to_vec();
+            if !is_annexb {
+                crate::annexb::avcc_to_annexb_in_place(&mut access_unit)
+                    .ok_or(G2gError::CapsMismatch)?;
+            }
+            return self.emit_au(access_unit, frame.timing, out).await;
+        }
         let access_units = if is_annexb {
             self.framer.push(bytes, frame.timing, C::unit_role)
         } else {
@@ -411,6 +439,7 @@ impl<C: NalCodec> NalParse<C> {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 }
@@ -437,6 +466,7 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
             Caps::CompressedVideo { codec, .. } if *codec == C::CODEC => {
+                self.observe_alignment(absolute_caps);
                 self.configured = true;
                 Ok(ConfigureOutcome::Accepted)
             }
@@ -508,6 +538,7 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                 }
                 PipelinePacket::CapsChanged(c) => {
                     self.caps.observe_upstream(&c);
+                    self.observe_alignment(&c);
                     out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
                 PipelinePacket::Flush => {

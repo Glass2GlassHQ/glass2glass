@@ -85,6 +85,7 @@ mod av1 {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -358,6 +359,7 @@ mod mjpeg {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             })
             .expect("configure MjpegDec");
         let mut sink = CaptureSink::default();

@@ -129,6 +129,7 @@ impl SpsCapsRefiner {
             // source must never hand downstream a wildcard rate.
             framerate: sps.framerate.map_or(framerate, Rate::Fixed),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         if refined == self.current {
             return None;

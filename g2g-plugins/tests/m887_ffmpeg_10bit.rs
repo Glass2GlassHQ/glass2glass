@@ -58,6 +58,7 @@ fn h264_caps() -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 
@@ -241,6 +242,7 @@ async fn autoplug_builds_a_p010_decoder_for_a_p010_sink() {
         height: Dim::Fixed(H as u32),
         framerate: Rate::Fixed(25 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let strict_p010 = |c: &Caps| {
         matches!(

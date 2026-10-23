@@ -253,6 +253,7 @@ impl RtspServerSrc {
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.fps << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -646,6 +647,7 @@ impl PadTemplates for RtspServerSrc {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }))])
     }
 }

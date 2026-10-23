@@ -92,6 +92,7 @@ async fn incompatible_branch_fails_negotiation() {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     });
     let filter = g.add_transform(GraphNode::element(compressed_only));
     let sink = g.add_sink(GraphNode::element(FakeSink::new()));

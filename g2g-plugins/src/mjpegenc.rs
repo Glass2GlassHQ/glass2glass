@@ -134,6 +134,7 @@ impl MjpegEnc {
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
             colorimetry: g2g_core::Colorimetry::JPEG,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -264,6 +265,7 @@ impl AsyncElement for MjpegEnc {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 colorimetry: g2g_core::Colorimetry::JPEG,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -409,6 +411,7 @@ impl PadTemplates for MjpegEnc {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::JPEG,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(Self::input_alternatives())),

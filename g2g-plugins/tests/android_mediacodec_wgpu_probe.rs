@@ -123,6 +123,7 @@ async fn probe_ahb_vulkan_format() {
         height: Dim::Fixed(480),
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let narrowed = dec.intercept_caps(&upstream).expect("intercept caps");
     assert!(matches!(
@@ -274,6 +275,7 @@ async fn mediacodec_gpu_output_emits_wgpu_texture() {
         height: Dim::Fixed(h),
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let narrowed = dec.intercept_caps(&upstream).expect("intercept caps");
     assert!(matches!(

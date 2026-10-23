@@ -91,6 +91,7 @@ impl IvfDemux {
             },
             framerate: crate::typefind::PLACEHOLDER_FRAMERATE,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -103,6 +104,7 @@ impl IvfDemux {
             height: Dim::Fixed(header.height),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         // a header size outside the declared range is not trusted
         Some(declared.intersect(&header_size).unwrap_or(declared))
@@ -149,6 +151,7 @@ impl IvfDemux {
                 height: Dim::Fixed(header.height),
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }))
             .await?;
             self.caps_sent = true;

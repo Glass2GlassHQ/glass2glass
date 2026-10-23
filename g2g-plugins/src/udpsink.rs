@@ -153,6 +153,7 @@ fn h264_any() -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 
@@ -1037,6 +1038,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 

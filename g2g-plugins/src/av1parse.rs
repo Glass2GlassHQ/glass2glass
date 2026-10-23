@@ -106,6 +106,7 @@ impl Av1Parse {
             // the timing_info a sequence header can carry is not read
             framerate: self.caps.framerate(None),
             colorimetry: info.colorimetry,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         self.caps.refine(new_caps, out).await
     }
@@ -154,6 +155,7 @@ impl AsyncElement for Av1Parse {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         upstream_caps.intersect(&supported)
     }
@@ -167,6 +169,7 @@ impl AsyncElement for Av1Parse {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }))
     }
 
@@ -253,6 +256,7 @@ impl PadTemplates for Av1Parse {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(av1.clone())),
@@ -1185,6 +1189,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -1484,6 +1489,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(parse.intercept_caps(&vp9), Err(G2gError::CapsMismatch));
     }
@@ -1501,7 +1507,8 @@ mod tests {
                         width: Dim::Any,
                         height: Dim::Any,
                         framerate: Rate::Any,
-                        colorimetry: g2g_core::Colorimetry::UNKNOWN
+                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                        alignment: g2g_core::BitstreamAlignment::Unspecified,
                     }]
                 );
             }

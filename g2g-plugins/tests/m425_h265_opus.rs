@@ -37,6 +37,7 @@ fn decodebin_inserts_h265_reframer_before_the_decoder() {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let reg = default_registry();
     let decoder_only = reg

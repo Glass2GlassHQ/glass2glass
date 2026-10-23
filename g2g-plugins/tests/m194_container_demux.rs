@@ -109,6 +109,7 @@ fn demuxer_then_decoder_is_a_two_hop_chain() {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let raw = Caps::RawVideo {
         format: RawVideoFormat::Nv12,

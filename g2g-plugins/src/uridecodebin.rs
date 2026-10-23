@@ -37,6 +37,7 @@ fn h264_any() -> Caps {
         height: g2g_core::Dim::Any,
         framerate: g2g_core::Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 
@@ -953,6 +954,7 @@ fn build_ps_subpicture_overlay(
                 height: g2g_core::Dim::Fixed(geometry.height),
                 framerate: g2g_core::Rate::Fixed(geometry.framerate_q16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             };
             // Deinterlace on the decoder's own planar output, before the RGBA
             // convert the compositor needs (M932; `auto` since M935, weaving

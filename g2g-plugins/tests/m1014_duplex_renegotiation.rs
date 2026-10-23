@@ -50,6 +50,7 @@ fn h264_caps() -> Caps {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 

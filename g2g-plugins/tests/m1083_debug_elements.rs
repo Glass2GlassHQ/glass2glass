@@ -500,6 +500,7 @@ fn coded_video_caps() -> Caps {
         height: Dim::Fixed(FAKE_HEIGHT),
         framerate: Rate::Fixed(FAKE_FPS_Q16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 

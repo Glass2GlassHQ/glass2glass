@@ -292,6 +292,7 @@ impl AsyncElement for WebCodecsDecode {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         upstream_caps.intersect(&supported)
     }
@@ -419,6 +420,7 @@ impl PadTemplates for WebCodecsDecode {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             })
             .collect();
         let rgba = Caps::RawVideo {

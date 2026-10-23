@@ -397,6 +397,7 @@ impl MkvDemux {
             },
             framerate: PLACEHOLDER_FRAMERATE,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: crate::annexb::sample_alignment(codec),
         }
     }
 
@@ -433,6 +434,7 @@ impl MkvDemux {
                     height: Dim::Fixed(track.height),
                     framerate: default_duration_framerate(track.default_duration_ns),
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    alignment: crate::annexb::sample_alignment(codec),
                 })
             }
             Caps::RawVideo { format, .. } if track.width > 0 && track.height > 0 => {
@@ -536,6 +538,7 @@ impl MkvDemux {
             height: dim(track.height),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: crate::annexb::sample_alignment(codec),
         };
         let audio = |format| Caps::Audio {
             format,
@@ -2143,7 +2146,8 @@ mod tests {
                 width: Dim::Fixed(320),
                 height: Dim::Fixed(240),
                 framerate: Rate::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }]
         );
         assert_eq!(

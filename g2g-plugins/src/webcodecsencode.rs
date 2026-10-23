@@ -314,6 +314,7 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
             height: height.clone(),
             framerate: framerate.clone(),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
@@ -337,6 +338,7 @@ fn h264_any() -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 
@@ -347,6 +349,7 @@ fn h264_caps(w: u32, h: u32, fps: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(fps << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 

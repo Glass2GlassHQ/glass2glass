@@ -96,6 +96,7 @@ async fn decode_fixture_with(
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let narrowed = dec
         .intercept_caps(&upstream)
@@ -234,6 +235,7 @@ async fn autoplug_builds_nv12_decoder_for_strict_nv12_sink() {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     // A strict-NV12 sink target, mirroring `CudaKmsSink` / `waylandsink`'s
     // `Accepts(NV12)` constraint.

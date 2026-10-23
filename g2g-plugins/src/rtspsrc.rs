@@ -249,6 +249,7 @@ impl SourceLoop for RtspSrc {
                     height: Dim::Fixed(h),
                     framerate: placeholder_framerate(),
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    alignment: g2g_core::BitstreamAlignment::Unspecified,
                 });
             }
             // Memoized probe: a re-fixate retry skips the second DESCRIBE.
@@ -856,6 +857,7 @@ pub(crate) fn video_caps_for(streams: &[retina::client::Stream], idx: usize) -> 
         height: Dim::Fixed(h),
         framerate: rate_from_frame_rate(p.frame_rate()),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     })
 }
 
@@ -875,12 +877,14 @@ pub(crate) fn with_placeholder_framerate(caps: Caps) -> Caps {
             height,
             framerate: Rate::Any,
             colorimetry,
+            alignment,
         } => Caps::CompressedVideo {
             codec,
             width,
             height,
             framerate: placeholder_framerate(),
             colorimetry,
+            alignment,
         },
         other => other,
     }

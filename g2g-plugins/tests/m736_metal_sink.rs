@@ -52,6 +52,7 @@ async fn decode_fixture(cv: bool) -> Vec<Frame> {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let mut parse = g2g_plugins::h264parse::H264Parse::reframing();
     parse.configure_pipeline(&caps).expect("configure parser");
@@ -87,6 +88,7 @@ async fn decode_fixture(cv: bool) -> Vec<Frame> {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let narrowed = dec.intercept_caps(&dec_caps).expect("intercept H.264");
     dec.configure_pipeline(&narrowed).expect("decoder session");

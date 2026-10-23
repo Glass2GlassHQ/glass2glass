@@ -225,6 +225,7 @@ impl Fmp4Demux {
             height,
             framerate,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: crate::annexb::sample_alignment(codec),
         }
     }
 

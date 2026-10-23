@@ -97,6 +97,7 @@ fn registry_with_vp9_stub() -> Registry {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let raw = Caps::RawVideo {
         format: RawVideoFormat::Nv12,

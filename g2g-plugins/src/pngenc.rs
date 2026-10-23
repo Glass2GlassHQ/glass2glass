@@ -98,6 +98,7 @@ impl PngEnc {
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -181,6 +182,7 @@ impl AsyncElement for PngEnc {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -299,6 +301,7 @@ impl PadTemplates for PngEnc {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(Self::input_alternatives())),

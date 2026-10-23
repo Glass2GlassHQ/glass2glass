@@ -466,6 +466,7 @@ impl PadTemplates for VtEncode {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(nv12)),
@@ -484,6 +485,7 @@ fn h264_caps(codec: VideoCodec, w: u32, h: u32, framerate: Rate) -> Caps {
         height: Dim::Fixed(h),
         framerate,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 
@@ -501,6 +503,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             height: height.clone(),
             framerate: framerate.clone(),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }

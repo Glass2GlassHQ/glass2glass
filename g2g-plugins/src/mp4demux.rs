@@ -173,6 +173,7 @@ impl Mp4Demux {
             height,
             framerate,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: crate::annexb::sample_alignment(codec),
         }
     }
 
@@ -209,6 +210,7 @@ impl Mp4Demux {
             },
             framerate: PLACEHOLDER_FRAMERATE,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: crate::annexb::sample_alignment(codec),
         }
     }
 

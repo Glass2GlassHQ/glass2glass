@@ -389,6 +389,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -440,6 +441,7 @@ mod tests {
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let v = packet_preview(&frame(RED16.to_vec()), &caps).unwrap();
         assert_eq!(v["kind"], "video");
@@ -456,6 +458,7 @@ mod tests {
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let v = packet_preview(&frame(vec![0, 1, 2, 3]), &caps).unwrap();
         assert_eq!(v["kind"], "compressed");

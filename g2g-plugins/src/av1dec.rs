@@ -143,6 +143,7 @@ macro_rules! av1_decoder {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    alignment: g2g_core::BitstreamAlignment::Unspecified,
                 }
             }
 
@@ -340,7 +341,7 @@ macro_rules! av1_decoder {
                 CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
                     // Decode does not change how the samples map to colour, so
                     // the bitstream's tag rides through.
-                    Caps::CompressedVideo { codec: VideoCodec::Av1, width, height, framerate, colorimetry } => {
+                    Caps::CompressedVideo { codec: VideoCodec::Av1, width, height, framerate, colorimetry, alignment: _ } => {
                         output_alternatives(width, height, framerate, *colorimetry)
                     }
                     _ => CapsSet::from_alternatives(Vec::new()),

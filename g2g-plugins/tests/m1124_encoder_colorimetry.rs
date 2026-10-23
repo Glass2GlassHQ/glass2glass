@@ -305,6 +305,7 @@ async fn encoded_colorimetry_comes_back_through_h264parse() {
             height: Dim::Fixed(HEIGHT),
             framerate: Rate::Fixed(FPS << 16),
             colorimetry: Colorimetry::BT709,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }],
         "the encoder announces the input colorimetry on its output caps"
     );
@@ -317,6 +318,7 @@ async fn encoded_colorimetry_comes_back_through_h264parse() {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
         .expect("configure h264parse");
     let mut parsed = CaptureSink::default();

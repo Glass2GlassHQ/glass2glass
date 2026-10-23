@@ -65,6 +65,7 @@ fn caps_wh(width: u32, height: u32) -> Caps {
         height: Dim::Fixed(height),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 

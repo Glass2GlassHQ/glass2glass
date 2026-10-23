@@ -324,7 +324,8 @@ async fn an_mpeg1_program_stream_demuxes_video_and_audio() {
             width: Dim::Fixed(352),
             height: Dim::Fixed(288),
             framerate: Rate::Fixed(25 << 16),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }),
         "the sequence header's geometry is announced once, concretely"
     );
@@ -404,7 +405,8 @@ async fn a_vob_demuxes_video_audio_and_subpictures() {
             width: Dim::Fixed(VOB_W),
             height: Dim::Fixed(VOB_H),
             framerate: Rate::Fixed(25 << 16),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
     );
     assert!(video.frames().len() >= 100, "8s of 25fps video");
@@ -693,6 +695,7 @@ async fn a_demuxed_program_stream_decodes_to_frames() {
         height: Dim::Fixed(288),
         framerate: Rate::Fixed(25 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     })
     .expect("libavcodec opens the MPEG-2 decoder");
     let mut sink = CollectSink::default();
@@ -738,6 +741,7 @@ async fn a_vob_decodes_and_playbin_builds_its_graph() {
         height: Dim::Fixed(VOB_H),
         framerate: Rate::Fixed(25 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     })
     .expect("libavcodec opens the MPEG-2 decoder");
     let mut sink = CollectSink::default();
@@ -1165,7 +1169,8 @@ async fn a_mid_gop_tune_in_drops_to_the_first_sequence_header() {
             width: Dim::Fixed(720),
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(25 << 16),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
     );
     let first_caps = out
@@ -1765,6 +1770,7 @@ fn the_source_pad_advertises_every_selection() {
                 max_q16: 240 << 16,
             },
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         },
         Caps::Audio {
             format: AudioFormat::Mp2,

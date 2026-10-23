@@ -30,6 +30,7 @@ fn av1_caps(w: u32, h: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 
@@ -221,7 +222,8 @@ fn assert_av1_track(sink: &FrameSink, expected: &[Vec<u8>], framerate: Rate) {
             width: Dim::Fixed(192),
             height: Dim::Fixed(108),
             framerate,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }),
         "moov-refined AV1 caps"
     );

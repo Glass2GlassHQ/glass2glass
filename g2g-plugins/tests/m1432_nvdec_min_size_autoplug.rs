@@ -50,6 +50,7 @@ async fn undersized_av1_autoplugs_a_software_decoder_with_nvdec_preferred() {
         height: Dim::Any,
         framerate,
         colorimetry,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
 
     let mut registry = default_registry();

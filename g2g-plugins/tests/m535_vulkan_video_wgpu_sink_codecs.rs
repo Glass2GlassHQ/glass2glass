@@ -103,6 +103,7 @@ fn drive_wedge(codec: VideoCodec, clip: &[u8]) {
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     dec.configure_pipeline(&in_caps)
         .expect("configure opens the decode device");

@@ -223,6 +223,7 @@ mod tests {
             height: h,
             framerate: r,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            alignment: crate::BitstreamAlignment::Unspecified,
         }
     }
 

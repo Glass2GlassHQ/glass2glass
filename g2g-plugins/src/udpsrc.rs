@@ -267,6 +267,7 @@ impl UdpSrc {
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.fps << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -642,6 +643,7 @@ impl PadTemplates for UdpSrc {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }]);
         alternatives.extend(crate::bytestream::carried_bytestream_caps());
         alloc::vec::Vec::from([PadTemplate::source(CapsSet::from_alternatives(

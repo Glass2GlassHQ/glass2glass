@@ -107,6 +107,7 @@ async fn mpeg4_part2_mp4_demuxes_and_decodes() {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let narrowed = dec
         .intercept_caps(&upstream)

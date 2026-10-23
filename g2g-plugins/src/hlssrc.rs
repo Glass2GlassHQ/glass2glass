@@ -105,6 +105,7 @@ fn codec_to_stream(codec: &str) -> Option<(StreamType, Caps, bool)> {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             },
             true,
         )

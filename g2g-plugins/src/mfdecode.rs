@@ -360,6 +360,7 @@ impl AsyncElement for MfDecode {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         upstream_caps.intersect(&supported)
     }
@@ -558,6 +559,7 @@ impl PadTemplates for MfDecode {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let nv12 = Caps::RawVideo {
             format: RawVideoFormat::Nv12,
@@ -927,6 +929,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(dec.intercept_caps(&vp9), Err(G2gError::CapsMismatch));
     }
@@ -940,6 +943,7 @@ mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(dec.intercept_caps(&proposal), Ok(proposal));
     }
@@ -981,6 +985,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(dec.intercept_caps(&h265), Ok(h265.clone()));
         let h264 = Caps::CompressedVideo {
@@ -989,6 +994,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(dec.intercept_caps(&h264), Err(G2gError::CapsMismatch));
         // The DerivedOutput closure derives NV12 from H.265 and rejects H.264.
@@ -1081,6 +1087,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let nv12 = Caps::RawVideo {
             format: RawVideoFormat::Nv12,
@@ -1109,6 +1116,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(
             f(&h264).alternatives(),
@@ -1128,6 +1136,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert!(f(&vp9).is_empty());
     }

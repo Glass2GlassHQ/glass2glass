@@ -48,6 +48,7 @@ fn compressed_caps() -> Caps {
         height: Dim::Fixed(2),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 

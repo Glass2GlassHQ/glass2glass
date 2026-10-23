@@ -68,6 +68,7 @@ async fn access_units(codec: VideoCodec, es: &[u8]) -> Vec<Frame> {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let mut sink = CollectSink::default();
     match codec {
@@ -113,6 +114,7 @@ async fn decode_fixture(mut dec: VtDecode, codec: VideoCodec, es: &[u8]) {
         height: Dim::Fixed(480),
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     let narrowed = dec.intercept_caps(&upstream).expect("intercept codec");
     let outcome = dec

@@ -88,6 +88,7 @@ pub(crate) fn couple_passthrough(
                 height: hi,
                 framerate: ri,
                 colorimetry: cli,
+                alignment: ai,
             },
             Caps::CompressedVideo {
                 codec: cp,
@@ -127,6 +128,7 @@ pub(crate) fn couple_passthrough(
                 framerate,
                 // Kept from the input like RawVideo's (see there).
                 colorimetry: *cli,
+                alignment: *ai,
             })
         }
         (
@@ -236,6 +238,7 @@ pub(crate) fn couple_passthrough_derived(
             height,
             framerate,
             colorimetry: *colorimetry,
+            alignment: crate::BitstreamAlignment::Unspecified,
         }),
         _ => None,
     }
@@ -306,6 +309,7 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
                     Rate::Any
                 },
                 colorimetry: Colorimetry::UNKNOWN,
+                alignment: crate::BitstreamAlignment::Unspecified,
             })
         }
         Caps::Audio {
@@ -385,6 +389,7 @@ pub(crate) fn project_passthrough_derived(
             height,
             framerate,
             colorimetry: Colorimetry::UNKNOWN,
+            alignment: crate::BitstreamAlignment::Unspecified,
         }),
         _ => None,
     }
@@ -455,6 +460,7 @@ fn concrete_probe_base(sample: &Caps) -> Caps {
             height: Dim::Fixed(64),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: Colorimetry::UNKNOWN,
+            alignment: crate::BitstreamAlignment::Unspecified,
         },
         Caps::Audio { format, .. } => Caps::Audio {
             format: *format,
@@ -634,6 +640,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            alignment: crate::BitstreamAlignment::Unspecified,
         };
         let pt = discover_passthrough(&dec, &sample);
         assert!(
@@ -662,6 +669,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            alignment: crate::BitstreamAlignment::Unspecified,
         };
         assert_eq!(discover_passthrough(&dec, &sample), PassthroughFields::NONE);
     }
@@ -779,6 +787,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: crate::Colorimetry::UNKNOWN,
+            alignment: crate::BitstreamAlignment::Unspecified,
         };
         let pt = discover_passthrough(&dec, &sample);
         assert!(pt.width && pt.height && pt.framerate);

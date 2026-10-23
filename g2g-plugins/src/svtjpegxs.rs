@@ -262,6 +262,7 @@ fn encoded_caps(input: &Caps) -> Result<Caps, G2gError> {
         height: Dim::Fixed(h),
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     })
 }
 
@@ -522,6 +523,7 @@ impl AsyncElement for SvtJpegXsEnc {
                             height: Dim::Fixed(self.height),
                             framerate: Rate::Any,
                             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                            alignment: g2g_core::BitstreamAlignment::Unspecified,
                         }))
                         .await?;
                         self.caps_sent = true;
@@ -623,6 +625,7 @@ impl PadTemplates for SvtJpegXsEnc {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             })),
         ])
     }
@@ -908,6 +911,7 @@ impl PadTemplates for SvtJpegXsDec {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             })),
             PadTemplate::source(CapsSet::from_alternatives(alts)),
         ])
@@ -1010,7 +1014,8 @@ mod tests {
                 width: Dim::Fixed(w as u32),
                 height: Dim::Fixed(h as u32),
                 framerate: Rate::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }
         );
 

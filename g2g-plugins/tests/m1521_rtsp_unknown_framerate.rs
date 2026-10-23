@@ -53,6 +53,7 @@ async fn rtspsrc_decodes_a_stream_whose_sps_has_no_frame_rate() {
             height: Dim::Fixed(FIXTURE_HEIGHT),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
         .expect("configure the server");
 

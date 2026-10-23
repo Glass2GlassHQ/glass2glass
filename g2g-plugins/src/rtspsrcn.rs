@@ -264,6 +264,7 @@ impl RtspSrcN {
                 height: Dim::Fixed(h),
                 framerate: placeholder_framerate(),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             };
         }
         let probed = self.probed_video.clone().map(with_placeholder_framerate);
@@ -279,6 +280,7 @@ impl RtspSrcN {
             },
             framerate: placeholder_framerate(),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
     }
 
@@ -1203,6 +1205,7 @@ mod tests {
                 height: Dim::Fixed(720),
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             },
             audio: Some(Caps::Audio {
                 format: AudioFormat::Aac,

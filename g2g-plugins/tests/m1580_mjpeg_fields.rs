@@ -63,6 +63,7 @@ fn mjpeg_caps(width: Dim, height: Dim) -> Caps {
         height,
         framerate: FRAMERATE,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 

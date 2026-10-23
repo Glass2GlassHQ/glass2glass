@@ -111,6 +111,7 @@ fn element_reconfigures_on_resolution_change() {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
     dec.configure_pipeline(&in_caps)
         .expect("configure opens the decode device");

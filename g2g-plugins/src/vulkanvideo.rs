@@ -15563,6 +15563,7 @@ fn coded_extent_caps(input: &Caps) -> Caps {
         height: Dim::Fixed(height),
         framerate,
         colorimetry,
+        alignment,
     } = input
     else {
         return input.clone();
@@ -15577,6 +15578,7 @@ fn coded_extent_caps(input: &Caps) -> Caps {
         height: Dim::Fixed(round_up(*height)),
         framerate: framerate.clone(),
         colorimetry: *colorimetry,
+        alignment: *alignment,
     }
 }
 
@@ -15591,6 +15593,7 @@ impl VulkanVideoDec {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    alignment: g2g_core::BitstreamAlignment::Unspecified,
                 })
                 .collect(),
         )
@@ -15620,6 +15623,7 @@ impl VulkanVideoDec {
                 },
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             });
         }
         (!alternatives.is_empty()).then(|| CapsSet::from_alternatives(alternatives))
@@ -16276,6 +16280,7 @@ impl AsyncElement for VulkanVideoDec {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    alignment: g2g_core::BitstreamAlignment::Unspecified,
                 };
                 upstream_caps
                     .intersect(&candidate)
@@ -16689,6 +16694,7 @@ mod tests {
             height: Dim::Fixed(height),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         const MACROBLOCKS_PER_SIDE: u32 = 4;
         const CROPPED_PIXELS: u32 = 4;

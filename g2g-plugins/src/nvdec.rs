@@ -464,6 +464,7 @@ impl NvDec {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    alignment: g2g_core::BitstreamAlignment::Unspecified,
                 })
                 .collect(),
         )
@@ -514,6 +515,7 @@ impl NvDec {
             },
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }))
     }
 
@@ -1750,6 +1752,7 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
             height,
             framerate,
             colorimetry,
+            alignment: _,
         } => CapsSet::from_alternatives(
             [RawVideoFormat::Nv12, RawVideoFormat::P010]
                 .into_iter()
@@ -2077,6 +2080,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -2400,6 +2404,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         // VP9 and AV1 (Ampere+) decode too.
         for codec in [VideoCodec::Vp9, VideoCodec::Av1] {
@@ -2445,6 +2450,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::BT709,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         let raw_colorimetry = |caps: &Caps| match caps {
             Caps::RawVideo { colorimetry, .. } => *colorimetry,
@@ -2725,6 +2731,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         match dec.configure_pipeline(&caps) {
             Ok(_) => Some(dec),
@@ -2747,6 +2754,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(25 << 16),
             colorimetry: g2g_core::Colorimetry::BT709,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         dec.configure_pipeline(&refined).expect("reconfigure");
         assert_eq!(dec.parser, parser);
@@ -3226,6 +3234,7 @@ mod tests {
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         if dec.configure_pipeline(&in_caps).is_err() {
             std::eprintln!("skipping: NVDEC unavailable on this host");

@@ -365,6 +365,7 @@ mod tests {
                 height: Dim::Fixed(64),
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: crate::Colorimetry::UNKNOWN,
+                alignment: crate::BitstreamAlignment::Unspecified,
             },
         }
     }

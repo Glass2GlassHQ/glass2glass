@@ -156,6 +156,7 @@ async fn h264parse_identity_negotiates_in_chain() {
                 height: Dim::Fixed(720),
                 framerate: Rate::Fixed(30 << 16),
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }))
         }
         fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -317,6 +318,7 @@ async fn capsfilter_rejects_incompatible_format() {
         height: Dim::Any,
         framerate: Rate::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     });
     let mut snk = FakeSink::new();
     let clock = ZeroClock;

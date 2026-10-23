@@ -178,7 +178,8 @@ async fn wgpu_rgba_texture_encodes_through_nvenc_no_readback() {
             width: Dim::Fixed(W),
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }],
         "H.264 output caps announced once at the texture geometry"
     );

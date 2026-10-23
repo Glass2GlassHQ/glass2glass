@@ -357,6 +357,7 @@ impl NvEnc {
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
             colorimetry: self.colorimetry,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -1015,6 +1016,7 @@ impl AsyncElement for NvEnc {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 colorimetry: coded_colorimetry(*format, *colorimetry),
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -1169,6 +1171,7 @@ impl PadTemplates for NvEnc {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                    alignment: g2g_core::BitstreamAlignment::Unspecified,
                 })
                 .collect(),
         );
@@ -1771,7 +1774,8 @@ pub(crate) mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }));
         // Non-NV12 (I420) yields an empty set, rejected at solve.
         let i420 = Caps::RawVideo {
@@ -1801,14 +1805,16 @@ pub(crate) mod tests {
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(30 << 16),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }));
         assert!(!out.accepts(&Caps::CompressedVideo {
             codec: VideoCodec::H264,
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(30 << 16),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }));
     }
 
@@ -2201,7 +2207,8 @@ pub(crate) mod tests {
                 width: Dim::Fixed(W),
                 height: Dim::Fixed(H),
                 framerate: Rate::Fixed(30 << 16),
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }],
             "output caps announced once"
         );
@@ -2221,6 +2228,7 @@ pub(crate) mod tests {
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
         .expect("open H.264 decoder");
         let mut dsink = CaptureSink::default();
@@ -2402,6 +2410,7 @@ pub(crate) mod tests {
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         })
         .expect("open NVDEC");
         let mut decoded = 0usize;

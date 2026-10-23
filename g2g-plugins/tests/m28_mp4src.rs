@@ -28,6 +28,7 @@ fn h264_caps(w: u32, h: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 
@@ -152,7 +153,8 @@ async fn round_trip_recovers_access_units_and_timing() {
                 min_q16: 1 << 16,
                 max_q16: 240 << 16
             },
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::AccessUnit,
         }
     );
 

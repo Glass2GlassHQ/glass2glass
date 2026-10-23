@@ -202,6 +202,7 @@ impl Mp4Mux {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         Vec::from([video(VideoCodec::H264), video(VideoCodec::H265)])
     }
@@ -424,6 +425,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 

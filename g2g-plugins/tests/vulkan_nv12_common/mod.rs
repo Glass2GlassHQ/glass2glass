@@ -89,6 +89,7 @@ pub(crate) fn in_caps(codec: VideoCodec) -> Caps {
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(FRAMERATE_Q16),
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }
 }
 

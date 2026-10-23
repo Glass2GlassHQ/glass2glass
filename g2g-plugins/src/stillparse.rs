@@ -175,6 +175,7 @@ impl<F: StillImageFormat> StillImageParse<F> {
             height,
             framerate,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -497,6 +498,7 @@ mod tests {
             height: Dim::Fixed(HEIGHT),
             framerate: Rate::Fixed(FRAMERATE_FPS << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 
@@ -507,6 +509,7 @@ mod tests {
             height: Dim::Fixed(HEIGHT),
             framerate: Rate::Fixed(FRAMERATE_FPS << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         }
     }
 

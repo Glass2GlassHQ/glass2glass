@@ -694,6 +694,7 @@ mod tests {
             height: Dim::Fixed(2),
             framerate: Rate::Fixed(FPS << 16),
             colorimetry: Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(sync.intercept_caps(0, &h264), Err(G2gError::CapsMismatch));
     }

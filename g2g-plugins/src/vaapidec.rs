@@ -424,6 +424,7 @@ impl<C: VaapiCodec> PadTemplates for VaapiDec<C> {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             })),
             PadTemplate::source(CapsSet::one(Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
@@ -452,6 +453,7 @@ impl<C: VaapiCodec> AsyncElement for VaapiDec<C> {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         upstream_caps.intersect(&supported)
     }
@@ -692,6 +694,7 @@ fn geometry_reconfigure<C: VaapiCodec>(
         height: Dim::Fixed(current.height),
         framerate,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
     }))
 }
 
@@ -875,6 +878,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(dec.intercept_caps(&vp9), Err(G2gError::CapsMismatch));
     }
@@ -888,6 +892,7 @@ mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(dec.intercept_caps(&proposal), Ok(proposal));
     }
@@ -910,6 +915,7 @@ mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         // First format: nothing to renegotiate.
         assert_eq!(
@@ -929,7 +935,8 @@ mod tests {
                 width: Dim::Fixed(1920),
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
             }))
         );
     }
@@ -948,6 +955,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(
             f(&h264).alternatives(),
@@ -967,6 +975,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert!(f(&vp9).is_empty());
     }

@@ -774,6 +774,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         assert_eq!(sink.intercept_caps(&h264), Ok(h264));
     }
@@ -823,6 +824,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
         };
         // A native decoder lands NV12 on this link; non-NV12 is a real
         // error (e.g. an undecoded display chain), not a deferred no-op.
