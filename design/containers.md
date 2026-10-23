@@ -870,7 +870,9 @@ placeholder it negotiated. `mp4src` applies the same rule and announces it in a
 `CapsChanged` before its first sample. A fragmented file has an empty `stts`, so
 `mp4src` and `fmp4demux` read the first fragment's `tfhd`
 `default_sample_duration` instead. `fmp4demux` therefore announces its caps at
-the first `moof` rather than at the `moov`.
+the first `moof` rather than at the `moov`. A fragment with no `tfdt` starts where
+the previous fragment of its track ended: `fmp4demux` and `Mp4DemuxN` keep that
+end across fragments and reset it on a flush.
 
 `Mp4Demux` and `Mp4DemuxN` turn a video track's edit list into the `Segment`
 they send ahead of its samples. It starts at the `media_time` of the first
