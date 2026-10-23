@@ -73,8 +73,10 @@ pub(crate) const SAMPLE_RATES: [u32; 13] = [
     7_350,
 ];
 
+const ADTS_AUDIO_SPECIFIC_CONFIG_LEN: usize = 2;
+
 /// Synthesise the 2-byte AAC AudioSpecificConfig from an ADTS header.
-pub(crate) fn asc_from_adts(au: &[u8]) -> Option<[u8; 2]> {
+pub(crate) fn asc_from_adts(au: &[u8]) -> Option<[u8; ADTS_AUDIO_SPECIFIC_CONFIG_LEN]> {
     if au.len() < ADTS_HEADER_LEN || au[0] != 0xFF || (au[1] & 0xF0) != 0xF0 {
         return None;
     }
@@ -265,8 +267,13 @@ pub(crate) fn muxer_audio_specific_config(
     first_frame: &[u8],
     muxer: &'static str,
 ) -> Result<Option<Vec<u8>>, G2gError> {
-    if let Some(asc) = asc_from_adts(first_frame) {
-        return Ok(Some(asc.to_vec()));
+    if let Some(header) = asc_from_adts(first_frame) {
+        // an ADTS stream of channel configuration 0 need not send a program config element
+        let with_program_config = match asc_channel_config(&header) {
+            Some(0) => asc_with_program_config(header, strip_adts(first_frame)),
+            _ => None,
+        };
+        return Ok(Some(with_program_config.unwrap_or_else(|| header.to_vec())));
     }
     if !is_raw_aac_config(first_frame) {
         return Ok(None);
@@ -305,10 +312,44 @@ pub(crate) fn is_leading_aac_config(config: &[u8], frame: &[u8]) -> bool {
 // the access unit a muxer stores for one frame of an AAC stream declared by `config`
 pub(crate) fn muxer_access_unit<'a>(config: &[u8], frame: &'a [u8]) -> &'a [u8] {
     if is_raw_aac_config(config) {
-        frame
-    } else {
-        strip_adts(frame)
+        return frame;
     }
+    let payload = strip_adts(frame);
+    let config_has_program_config =
+        asc_channel_config(config) == Some(0) && config.len() > ADTS_AUDIO_SPECIFIC_CONFIG_LEN;
+    if !config_has_program_config {
+        return payload;
+    }
+    // a copy of the config's program config element in band would be read twice
+    let mut r = BitReader::new(payload);
+    let program_config =
+        r.read_bits(ELEMENT_ID_BITS) == Some(ID_PCE) && copy_program_config(&mut r, None).is_some();
+    if program_config {
+        // a program config element ends byte aligned, on its comment bytes
+        &payload[r.bit_pos() / 8..]
+    } else {
+        payload
+    }
+}
+
+fn asc_channel_config(asc: &[u8]) -> Option<u8> {
+    asc.get(1).map(|byte| (byte >> 3) & 0x0F)
+}
+
+// a channel configuration of 0 leaves the layout to the program config element an ADTS payload opens with
+fn asc_with_program_config(
+    header: [u8; ADTS_AUDIO_SPECIFIC_CONFIG_LEN],
+    payload: &[u8],
+) -> Option<Vec<u8>> {
+    let mut r = BitReader::new(payload);
+    if r.read_bits(ELEMENT_ID_BITS)? != ID_PCE {
+        return None;
+    }
+    let mut w = BitWriter::default();
+    // the header's last three bits are the GASpecificConfig flags, all clear for ADTS
+    w.write_bits(u32::from(u16::from_be_bytes(header)), 16);
+    copy_program_config(&mut r, Some(&mut w))?;
+    Some(w.into_bytes())
 }
 
 fn read_object_type(r: &mut BitReader) -> Option<u32> {
@@ -1121,10 +1162,11 @@ mod tests {
         assert!(parse_adts(&adts_frame(2, 13, 16)).is_none());
     }
 
-    #[test]
-    fn adts_carries_the_program_config_of_a_channel_config_zero_asc() {
-        const AOT_AAC_LC: u32 = 2;
-        const RATE_INDEX_44100: u32 = 4;
+    const AOT_AAC_LC: u32 = 2;
+    const RATE_INDEX_44100: u32 = 4;
+
+    // AAC LC 44.1 kHz whose program config element declares a front channel pair and an LFE
+    fn channel_config_zero_asc() -> Vec<u8> {
         let mut asc = BitWriter::default();
         asc.write_bits(AOT_AAC_LC, 5);
         asc.write_bits(RATE_INDEX_44100, 4);
@@ -1142,13 +1184,31 @@ mod tests {
         asc.write_bits(0, LFE_ELEMENT_BITS);
         asc.align_to_byte();
         asc.write_bits(0, 8); // no comment
+        asc.into_bytes()
+    }
+
+    #[test]
+    fn adts_carries_the_program_config_of_a_channel_config_zero_asc() {
         let au = [0xAA, 0xBB];
-        let frame = adts_from_asc(&asc.into_bytes(), &au).expect("ADTS with a PCE");
+        let frame = adts_from_asc(&channel_config_zero_asc(), &au).expect("ADTS with a PCE");
         let header = adts_header(&frame).expect("the header parses");
         assert_eq!((header.channel_config, header.channels), (0, 3));
         assert_eq!(header.sample_rate, SAMPLE_RATES[RATE_INDEX_44100 as usize]);
         assert_eq!(header.frame_len, frame.len());
         assert!(frame.ends_with(&au));
+    }
+
+    #[test]
+    fn a_muxer_moves_the_in_band_program_config_back_into_the_config() {
+        const MUXER: &str = "test";
+        let asc = channel_config_zero_asc();
+        let au = [0xAA, 0xBB];
+        let frame = adts_from_asc(&asc, &au).expect("ADTS with a PCE");
+        let config = muxer_audio_specific_config(&frame, MUXER)
+            .expect("an ADTS frame")
+            .expect("a config");
+        assert_eq!(config, asc);
+        assert_eq!(muxer_access_unit(&config, &frame), au);
     }
 
     #[test]
