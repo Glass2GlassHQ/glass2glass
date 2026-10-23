@@ -232,8 +232,9 @@ Highest leverage first:
     Matroska reaches mp4mux, flvmux and tsmux with no real DTS and `mp4mux` writes
     no `ctts`. ffmpeg derives the DTS (gst's mp4mux writes the same timing as g2g).
   - Remux fails mid-run or writes an undecodable file: `opus_vp9-alpha.webm` and
-    `loewe.ts` HEVC into mp4mux and matroskamux, `two_first_slice.mp4` into matroskamux,
-    `al04sf_48.mp4` into mpegtsmux.
+    `loewe.ts` HEVC into mp4mux and matroskamux, `two_first_slice.mp4` into matroskamux.
+  - `aacparse` forwards nothing, with no error, while it cannot refine a LOAS
+    stream's caps: fail loud at EOS instead.
   - `mpegts/pmtchange.ts` audio 0 to 2 decode to other lengths and samples than
     ffmpeg's.
   - `flvdemux` and `avidemux` H.264/H.265 output declares no `alignment`, where gst's
