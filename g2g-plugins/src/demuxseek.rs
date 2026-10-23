@@ -194,6 +194,17 @@ impl<U> DemuxSeek<U> {
         self.stream_start_ns.get_or_insert(pts_ns);
     }
 
+    // a seek taken before the first unit waits for the caller to report the stream start
+    pub(crate) fn awaits_stream_start(&self) -> bool {
+        self.stream_start_ns.is_none()
+            && matches!(
+                self.phase,
+                Phase::Discarding {
+                    target: SeekTarget::FromStreamStart(_)
+                }
+            )
+    }
+
     pub(crate) fn stream_start_ns(&self) -> Option<u64> {
         self.stream_start_ns
     }

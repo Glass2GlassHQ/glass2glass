@@ -373,6 +373,9 @@ pub struct TsDemux {
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek<EsUnit>,
+    // units of every PID held while a seek waits for the earliest stream's first pts
+    start_probe: Vec<EsUnit>,
+    start_probe_bytes: usize,
     /// Opus only: whether the `CapsChanged` carrying the descriptor's channel
     /// count has been emitted (OpusDec needs a concrete count before it decodes,
     /// and there is no in-band `OpusHead` on this path). Re-armed on a flush.
@@ -411,6 +414,8 @@ impl TsDemux {
             collection_posted: false,
             tags: TagPoster::default(),
             seek: DemuxSeek::default(),
+            start_probe: Vec::new(),
+            start_probe_bytes: 0,
             opus_caps_emitted: false,
             config_sent: false,
             mpeg2_tuned_in: false,
@@ -541,6 +546,8 @@ impl TsDemux {
         self.packets.clear();
         self.demux = TsDemuxer::new();
         self.demux.set_program_number(self.program_number);
+        self.start_probe.clear();
+        self.start_probe_bytes = 0;
         self.opus_caps_emitted = false;
         self.config_sent = false;
         self.mpeg2_tuned_in = false;
@@ -687,6 +694,48 @@ impl TsDemux {
             ts_stream_to_str(self.stream)
         );
         G2gError::CapsMismatch
+    }
+
+    // ffmpeg -ss counts from the earliest stream's start, and a file can carry that stream last
+    fn past_stream_start_probe(&mut self, units: Vec<EsUnit>, ended: bool) -> Vec<EsUnit> {
+        // ffmpeg's default probesize
+        const STREAM_START_PROBE_BYTES: usize = 5_000_000;
+        if !self.seek.awaits_stream_start() {
+            return units;
+        }
+        self.start_probe_bytes = units.iter().fold(self.start_probe_bytes, |bytes, u| {
+            bytes.saturating_add(u.data.len())
+        });
+        self.start_probe.extend(units);
+        let probe = &self.start_probe;
+        let every_stream_started = self
+            .demux
+            .streams()
+            .iter()
+            .filter(|es| es_to_ts_stream(es).is_some())
+            .all(|es| {
+                probe
+                    .iter()
+                    .any(|u| u.pid == es.pid && u.pts_90khz.is_some())
+            });
+        if !every_stream_started && !ended && self.start_probe_bytes <= STREAM_START_PROBE_BYTES {
+            return Vec::new();
+        }
+        // a stream starts at its first stamped unit in decode order, as ffmpeg's start_time does
+        let mut started_pids: Vec<u16> = Vec::new();
+        let mut start_90khz: Option<u64> = None;
+        for u in probe {
+            let Some(pts) = u.pts_90khz.filter(|_| !started_pids.contains(&u.pid)) else {
+                continue;
+            };
+            started_pids.push(u.pid);
+            start_90khz = Some(start_90khz.map_or(pts, |start| start.min(pts)));
+        }
+        if let Some(start) = start_90khz {
+            self.seek.note_stream_start(ticks_90khz_to_ns(start));
+        }
+        self.start_probe_bytes = 0;
+        core::mem::take(&mut self.start_probe)
     }
 
     /// Emit each completed access unit of the selected elementary stream as a
@@ -917,6 +966,7 @@ impl AsyncElement for TsDemux {
                         self.tags.post(&mut self.demux, self.bus.as_ref());
                     }
                     let units = self.demux.take_units();
+                    let units = self.past_stream_start_probe(units, false);
                     self.emit_units(units, out).await?;
                 }
                 // The upstream byte-seek's flush: reset the parser, then re-sync
@@ -932,6 +982,7 @@ impl AsyncElement for TsDemux {
                     self.packets.finish(&mut self.demux);
                     self.demux.flush();
                     let units = self.demux.take_units();
+                    let units = self.past_stream_start_probe(units, true);
                     self.emit_units(units, out).await?;
                     if let (Some(pid), None) = (self.pid, self.selected_pid()?) {
                         return Err(self.no_pinned_stream(pid));

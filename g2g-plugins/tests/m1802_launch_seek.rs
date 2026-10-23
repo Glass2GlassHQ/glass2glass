@@ -53,6 +53,14 @@ const H264_OFFSET_FRAME_AFTER_SEEK_MD5: &str = "0f522e7ea384962044bb0cb76385ec24
 const VP8_OFFSET_FIXTURE: &str = "vp8_64x48_25fps_gop10_offset.ogg";
 // ffmpeg -ss 1.02 -copyts -i <VP8_OFFSET_FIXTURE> -frames:v 1 -f framemd5 -
 const VP8_OFFSET_FRAME_AFTER_SEEK_MD5: &str = "b125eb8b291a171ef049315747ed794a";
+// ffmpeg -f lavfi -i testsrc=size=64x48:rate=25:duration=1.2 -f lavfi -i sine=frequency=440:sample_rate=48000:duration=1.2
+//   -c:v libx264 -g 10 -keyint_min 10 -sc_threshold 0 -bf 0 -c:a mp2 -ac 1 -b:a 32k -output_ts_offset 10
+// its audio starts 10 ms before its video, where ffprobe's start_time is
+const AUDIO_FIRST_TS_FIXTURE: &str = "h264_mp2_audio_first.ts";
+// lands one frame later when counted from the video's first pts
+const AUDIO_FIRST_SEEK_MILLISECONDS: u64 = 410;
+// ffmpeg -ss 0.41 -copyts -i <AUDIO_FIRST_TS_FIXTURE> -map 0:v -frames:v 1 -f framemd5 -
+const AUDIO_FIRST_FRAME_AFTER_SEEK_MD5: &str = "f8be4f7e5b101f797f1fcecb3159cf25";
 
 fn seek_seconds(milliseconds: u64) -> String {
     format!("{}", milliseconds as f64 / 1_000.0)
@@ -186,6 +194,23 @@ fn seek_counts_the_target_from_the_start_time() {
             seeked[0]
         );
     }
+}
+
+#[test]
+fn ts_seek_counts_the_target_from_the_earliest_stream() {
+    let pipeline = format!(
+        "filesrc location={} ! decodebin ! checksumsink hash=md5",
+        offset_fixture(AUDIO_FIRST_TS_FIXTURE)
+    );
+    let seeked = checksum_lines(&launch_with_seek(
+        &seek_seconds(AUDIO_FIRST_SEEK_MILLISECONDS),
+        &pipeline,
+    ));
+    assert!(
+        seeked[0].ends_with(AUDIO_FIRST_FRAME_AFTER_SEEK_MD5),
+        "{} is not ffmpeg's frame after the seek",
+        seeked[0]
+    );
 }
 
 struct ZeroClock;
