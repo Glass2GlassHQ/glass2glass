@@ -215,13 +215,11 @@ Highest leverage first:
   Needs a signed `Segment` time offset in g2g-core.
 - **Corpus sweep bugs** (calliope TESTING techniques 21-23, paths under
   `~/.cache/calliope` on hercules):
-  - MP4 seeks land 1-3 frames early because the target ignores the edit list or
-    first composition offset (`fate-suite/mov/mov-3elist.mov --seek 0.5`).
-  - Matroska and FLV seeks count from pts 0 instead of the file start time
-    (`fate-suite/filter/anim.mkv --seek 0.042`), and TS seeks from the video's
-    first pts instead of the earliest stream's
-    (`gst-medias/defaults/bipbop/gear2/fileSequence2.ts`). Recheck both on
-    current master first.
+  - TS seeks count from the video's first pts instead of the earliest stream's
+    (`gst-medias/defaults/bipbop/gear2/fileSequence2.ts`), and
+    `ac3/mp3ac325-4864-small.ts --seek 0.406011` finds no frame.
+  - `h264/H264_might_overflow.mkv --seek 1.086` finds no frame, where ffmpeg
+    lands on the keyframe at 1.086 s.
   - No seek finds a frame in `gst-medias/defaults/webm/opus_vp9-alpha.webm`.
   - `parsebin` fan-out fails on WAV, VMnc and tagged AVI, and FLV VP6 (no caps
     overlap), and on IVF, Ogg, `h264_intra_first-small.flv` and tagged-codec
@@ -242,8 +240,8 @@ Highest leverage first:
   - Stream listing misses the Dolby Vision enhancement layer of
     `mpegts/dovi-p7.ts`, the PIDs a PMT change adds in `mpegts/pmtchange.ts`, and
     the second MP2 stream of `sample_mpeg_program_stream_scr.mpg`.
-  - A fan-in muxer that refuses a codec reports a bare `CapsMismatch`: name the
-    muxer and the codec.
+  - The `flvmux` duplicate-track, `avimux` second-video and `mp4mux` CMAF
+    refusals still return a bare `CapsMismatch`: log what they refuse.
   - `mpeg4/packed_bframes.avi` comes out with pts going backwards: two VOPs per
     chunk need splitting. `h264/mixed-nal-coding.mp4` gives 5 frames where
     ffprobe gives 10, and `hevc/two_first_slice.mp4` 35 where gst and ffmpeg give
