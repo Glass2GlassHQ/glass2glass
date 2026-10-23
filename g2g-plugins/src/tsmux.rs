@@ -524,7 +524,8 @@ pub struct TsMux {
     /// Built at configure, once the input codec (and so the PMT stream type) is
     /// known.
     mux: Option<TsMuxer>,
-    configured: bool,
+    // the PMT stream type of the configured input
+    stream_type: Option<u8>,
     emitted: u64,
     /// The cadences, bitrate and identity knobs, applied to the inner `TsMuxer`
     /// when it is built at configure. The PAT and PMT are emitted together, so
@@ -554,7 +555,7 @@ impl TsMux {
     pub fn new() -> Self {
         Self {
             mux: None,
-            configured: false,
+            stream_type: None,
             emitted: 0,
             settings: TsMuxSettings::default(),
             klv_sync: false,
@@ -707,6 +708,10 @@ impl AsyncElement for TsMux {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let stream_type =
             stream_type_for(absolute_caps, self.klv_sync).ok_or(G2gError::CapsMismatch)?;
+        // rebuilding the multiplex mid-stream restarts its continuity counters
+        if self.stream_type == Some(stream_type) {
+            return Ok(ConfigureOutcome::Accepted);
+        }
         let mut mux = TsMuxer::new(stream_type);
         self.settings.apply(&mut mux)?;
         self.aac = (stream_type == STREAM_TYPE_AAC).then(AacCarriage::default);
@@ -731,7 +736,7 @@ impl AsyncElement for TsMux {
             self.dvbsub = Some(DvbSubDecl::on_page(self.dvbsub_page_id));
             self.declare_subtitling();
         }
-        self.configured = true;
+        self.stream_type = Some(stream_type);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -784,7 +789,7 @@ impl AsyncElement for TsMux {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
-            if !self.configured {
+            if self.stream_type.is_none() {
                 return Err(G2gError::NotConfigured);
             }
             match packet {
@@ -1102,5 +1107,40 @@ mod tests {
         assert_eq!(demuxer.streams()[0].stream_type, STREAM_TYPE_AAC_LATM);
         let carried: Vec<Vec<u8>> = demuxer.take_units().into_iter().map(|u| u.data).collect();
         assert_eq!(carried, frames);
+    }
+
+    #[tokio::test]
+    async fn a_caps_change_keeps_the_continuity_counters_running() {
+        use crate::mpegts::{TsDemuxer, TS_PACKET_LEN};
+        // more than one TS packet each, so a unit is in flight when the next one starts
+        const UNIT_LEN: usize = 3 * TS_PACKET_LEN;
+        let caps = |channels| Caps::Audio {
+            format: AudioFormat::Aac,
+            channels,
+            sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        };
+        let units: Vec<Vec<u8>> = (0..3u8).map(|n| alloc::vec![n; UNIT_LEN]).collect();
+
+        let mut mux = TsMux::new();
+        mux.configure_pipeline(&caps(2)).unwrap();
+        let mut ts_sink = CaptureSink::default();
+        for (index, unit) in units.iter().enumerate() {
+            if index == 1 {
+                mux.configure_pipeline(&caps(1)).unwrap();
+            }
+            let pts_ns = index as u64 * 10_000_000;
+            mux.process(system_frame(unit.clone(), pts_ns), &mut ts_sink)
+                .await
+                .unwrap();
+        }
+
+        let mut demuxer = TsDemuxer::new();
+        for packet in ts_sink.frames.concat().chunks(TS_PACKET_LEN) {
+            demuxer.push_packet(packet);
+        }
+        demuxer.flush();
+        let carried: Vec<Vec<u8>> = demuxer.take_units().into_iter().map(|u| u.data).collect();
+        assert_eq!(carried, units);
     }
 }

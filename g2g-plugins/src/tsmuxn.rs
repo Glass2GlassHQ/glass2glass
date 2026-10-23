@@ -381,13 +381,16 @@ impl MultiInputElement for TsMux {
     ) -> Result<ConfigureOutcome, G2gError> {
         let stream_type = stream_type_for(absolute_caps, self.klv_sync)
             .ok_or_else(|| refused_input(short_type_name::<Self>(), absolute_caps))?;
+        // a mid-stream caps change of the same stream keeps how its AAC frames are carried
+        if self.stream_types[input] != Some(stream_type) {
+            self.aac[input] = (stream_type == STREAM_TYPE_AAC).then(AacCarriage::default);
+        }
         self.stream_types[input] = Some(stream_type);
         if is_dvbsub(absolute_caps) {
             self.dvbsub[input] = Some(DvbSubDecl::on_page(self.dvbsub_page_id));
         }
         self.av1[input] = is_av1(absolute_caps);
         self.opus[input] = opus_channels(absolute_caps);
-        self.aac[input] = (stream_type == STREAM_TYPE_AAC).then(AacCarriage::default);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -961,5 +964,46 @@ mod tests {
             audio_units as u64, AUDIO_UNITS,
             "the config frame is not multiplexed"
         );
+    }
+
+    #[tokio::test]
+    async fn a_caps_change_keeps_a_raw_aac_pad_on_loas() {
+        use crate::aacparse::loas_from_asc;
+        use crate::mpegts::{TsDemuxer, TS_PACKET_LEN};
+        // AAC-ELD, 48 kHz, stereo
+        const ELD_CONFIG: [u8; 4] = [0xF8, 0xE6, 0x40, 0x00];
+        const FRAME_NS: u64 = 20_000_000;
+        let units: Vec<Vec<u8>> = (0..2u8).map(|n| alloc::vec![0x7E, 0x89, n]).collect();
+
+        let mut mux = TsMux::new(1);
+        mux.configure_pipeline(0, &aac_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        mux.process(0, au_frame(ELD_CONFIG.to_vec(), 0, false), &mut sink)
+            .await
+            .unwrap();
+        for (index, unit) in units.iter().enumerate() {
+            if index == 1 {
+                mux.configure_pipeline(0, &aac_caps()).unwrap();
+            }
+            let pts_ns = index as u64 * FRAME_NS;
+            mux.process(0, au_frame(unit.clone(), pts_ns, true), &mut sink)
+                .await
+                .unwrap();
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+
+        let mut demuxer = TsDemuxer::new();
+        for packet in sink.bytes.chunks(TS_PACKET_LEN) {
+            demuxer.push_packet(packet);
+        }
+        demuxer.flush();
+        let carried: Vec<Vec<u8>> = demuxer.take_units().into_iter().map(|u| u.data).collect();
+        let expected: Vec<Vec<u8>> = units
+            .iter()
+            .map(|unit| loas_from_asc(&ELD_CONFIG, unit).unwrap())
+            .collect();
+        assert_eq!(carried, expected);
     }
 }
