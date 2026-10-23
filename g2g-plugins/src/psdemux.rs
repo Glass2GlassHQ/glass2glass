@@ -45,6 +45,7 @@ use g2g_core::{
 use crate::mpeg2video::Mpeg2TimestampSynth;
 pub use crate::mpeg2video::{parse_sequence_header, SequenceHeader};
 use crate::mpegts::{decode_timestamp, parse_pes_header};
+use crate::video_pts_synth::{backfill_leading_pts_90khz, LeadingUnits};
 use crate::vobsub::MAX_SPU_BYTES;
 
 /// Pack header start code id: `00 00 01 BA` opens every pack.
@@ -113,6 +114,29 @@ pub struct PsUnit {
     /// per file because a program stream can splice clips of different geometry.
     pub sequence: Option<SequenceHeader>,
     pub data: Vec<u8>,
+}
+
+// the leading units take their pts from a fresh synthesis that also places the first stamped one
+fn backfill_leading_video(leading: &mut [PsUnit], first_stamped: &PsUnit) {
+    let (Some(first_stamp_90khz), Some(period_90)) = (
+        first_stamped.pts_90khz,
+        first_stamped.sequence.and_then(|sequence| {
+            crate::video_pts_synth::frame_period_90khz(sequence.framerate_q16)
+        }),
+    ) else {
+        return;
+    };
+    let mut synth = Mpeg2TimestampSynth::default();
+    let leading_data: Vec<&[u8]> = leading.iter().map(|unit| unit.data.as_slice()).collect();
+    let backfilled = backfill_leading_pts_90khz(
+        &leading_data,
+        &first_stamped.data,
+        first_stamp_90khz,
+        |au, pts| synth.stamp(au, pts, &mut None, period_90),
+    );
+    for (unit, pts) in leading.iter_mut().zip(backfilled) {
+        unit.pts_90khz = pts;
+    }
 }
 
 /// A subpicture unit under reassembly: its first two bytes declare the total
@@ -582,6 +606,10 @@ pub struct PsDemuxer {
     spu: Vec<PendingSpu>,
     /// Video timestamp synthesis state, one per video stream_id.
     video_ts: Vec<(u8, Mpeg2TimestampSynth)>,
+    // each video stream_id's units still waiting for its first stamp
+    video_leading: Vec<(u8, LeadingUnits<PsUnit>)>,
+    // set by `flush`, so `take_units` lets go of units still waiting for a first stamp
+    end_of_stream: bool,
     /// Whether a pack header has parsed. Every program stream carries them, so a
     /// stream without one is some other format.
     pack_seen: bool,
@@ -613,7 +641,37 @@ impl PsDemuxer {
         self.seq_scanned = 0;
         let mut units = core::mem::take(&mut self.completed);
         units.retain(|u| !(0xE0..=0xEF).contains(&u.stream_id) || u.sequence.is_some());
-        units
+        let mut released = Vec::with_capacity(units.len());
+        for unit in units {
+            if !(0xE0..=0xEF).contains(&unit.stream_id) {
+                released.push(unit);
+                continue;
+            }
+            let slot = match self
+                .video_leading
+                .iter()
+                .position(|(id, _)| *id == unit.stream_id)
+            {
+                Some(slot) => slot,
+                None => {
+                    self.video_leading
+                        .push((unit.stream_id, LeadingUnits::default()));
+                    self.video_leading.len() - 1
+                }
+            };
+            let stamped = unit.pts_90khz.is_some();
+            released.extend(
+                self.video_leading[slot]
+                    .1
+                    .pass(unit, stamped, backfill_leading_video),
+            );
+        }
+        if self.end_of_stream {
+            for (_, leading) in &mut self.video_leading {
+                released.extend(leading.release());
+            }
+        }
+        released
     }
 
     /// The elementary streams seen so far, in discovery order.
@@ -648,6 +706,7 @@ impl PsDemuxer {
         self.audio.clear();
         self.spu.clear();
         self.sequence_from_completed();
+        self.end_of_stream = true;
         if !self.pack_seen {
             return Err(G2gError::CapsMismatch);
         }

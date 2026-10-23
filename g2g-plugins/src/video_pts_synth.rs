@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 use g2g_core::frame::FrameTiming;
 use g2g_core::time::{ns_to_ticks, ticks_to_ns};
 use g2g_core::VideoCodec;
@@ -59,6 +61,90 @@ impl ElementaryStreamPts {
             .or(pts_90khz.map(|ticks| ticks_to_ns(ticks, PES_CLOCK_HZ)))
             .unwrap_or(FrameTiming::PTS_NONE)
     }
+}
+
+// A muxer stamps video at least every 700 ms (13818-1 2.7.4), far fewer units than this at any frame rate.
+const MAX_UNITS_BEFORE_FIRST_STAMP: usize = 64;
+
+// The units ahead of a stream's first stamp wait for it, so they are back-filled from it as ffmpeg does instead of opening the timeline at 0.
+#[derive(Debug)]
+pub(crate) struct LeadingUnits<U> {
+    held: Vec<U>,
+    stamp_seen: bool,
+}
+
+impl<U> Default for LeadingUnits<U> {
+    fn default() -> Self {
+        Self {
+            held: Vec::new(),
+            stamp_seen: false,
+        }
+    }
+}
+
+impl<U> LeadingUnits<U> {
+    // `backfill` gets the held units and the first stamped one after them
+    pub(crate) fn pass(
+        &mut self,
+        unit: U,
+        stamped: bool,
+        backfill: impl FnOnce(&mut [U], &U),
+    ) -> Vec<U> {
+        if self.stamp_seen {
+            return Vec::from([unit]);
+        }
+        if !stamped {
+            self.held.push(unit);
+            if self.held.len() < MAX_UNITS_BEFORE_FIRST_STAMP {
+                return Vec::new();
+            }
+            self.stamp_seen = true;
+            return core::mem::take(&mut self.held);
+        }
+        self.stamp_seen = true;
+        backfill(&mut self.held, &unit);
+        let mut released = core::mem::take(&mut self.held);
+        released.push(unit);
+        released
+    }
+
+    // end of stream: a stream that never showed a stamp keeps its units unstamped
+    pub(crate) fn release(&mut self) -> Vec<U> {
+        core::mem::take(&mut self.held)
+    }
+}
+
+// Far from both ends of the range, so a provisional run neither saturates nor overflows.
+const PROVISIONAL_ANCHOR_90KHZ: u64 = 1 << 62;
+
+// The pts of the `leading` units ahead of a stream's first stamped unit. A fresh
+// synthesis anchored provisionally on the first leading unit also places the
+// stamped one, and its distance from the real stamp moves the others onto the
+// stream's timeline. `stamp` runs that fresh synthesis on one unit.
+pub(crate) fn backfill_leading_pts_90khz(
+    leading: &[&[u8]],
+    first_stamped: &[u8],
+    first_stamp_90khz: u64,
+    mut stamp: impl FnMut(&[u8], &mut Option<u64>),
+) -> Vec<Option<u64>> {
+    let provisional: Vec<Option<u64>> = leading
+        .iter()
+        .enumerate()
+        .map(|(index, au)| {
+            let mut pts = (index == 0).then_some(PROVISIONAL_ANCHOR_90KHZ);
+            stamp(au, &mut pts);
+            pts
+        })
+        .collect();
+    let mut placed = None;
+    stamp(first_stamped, &mut placed);
+    let Some(placed) = placed else {
+        return alloc::vec![None; leading.len()];
+    };
+    provisional
+        .into_iter()
+        .map(|pts| pts?.checked_add(first_stamp_90khz)?.checked_sub(placed))
+        .collect()
 }
 
 fn resets_picture_order_count(codec: VideoCodec, au: &[u8]) -> bool {

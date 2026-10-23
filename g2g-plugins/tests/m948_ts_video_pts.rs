@@ -225,6 +225,19 @@ fn unstamped_h264_units_get_the_vui_frame_period() {
     );
 }
 
+/// A stream whose first PES carries no stamp: the units ahead of the first one
+/// take their slots back from it instead of opening the timeline at 0.
+#[test]
+fn units_ahead_of_the_first_stamp_are_backfilled_from_it() {
+    let base = 90_000u64;
+    let stamps = [None, None, Some(base + 2 * PERIOD), None];
+    let pts = demux_pts(STREAM_TYPE_H264, &h264_sps(2, true), &stamps);
+    assert_eq!(
+        pts,
+        (0..4).map(|i| Some(base + i * PERIOD)).collect::<Vec<_>>()
+    );
+}
+
 /// A later real stamp re-anchors the run, so synthesis follows the real
 /// timeline (mux drift) rather than the arithmetic one.
 #[test]

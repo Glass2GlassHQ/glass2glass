@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 
 use g2g_core::{G2gError, VideoCodec};
 
-use crate::video_pts_synth::VideoPtsSynth;
+use crate::video_pts_synth::{backfill_leading_pts_90khz, LeadingUnits, VideoPtsSynth};
 
 /// MPEG-TS packet size in bytes (the standard 188). [`TsPacketSplitter`] also
 /// reads the 192-byte M2TS and 204-byte DVB-ASI strides around it.
@@ -429,6 +429,40 @@ pub struct EsUnit {
 /// from growing the table without bound. Past it, later PIDs go unsynthesized.
 const MAX_VIDEO_PTS_STREAMS: usize = 16;
 
+#[derive(Debug)]
+struct VideoStreamTiming {
+    pid: u16,
+    synth: VideoPtsSynth,
+    leading: LeadingUnits<EsUnit>,
+}
+
+fn video_codec(stream_type: u8) -> Option<VideoCodec> {
+    match stream_type {
+        STREAM_TYPE_H264 => Some(VideoCodec::H264),
+        STREAM_TYPE_H265 => Some(VideoCodec::H265),
+        STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => Some(VideoCodec::Mpeg2),
+        _ => None,
+    }
+}
+
+// the leading units take their pts from a fresh synthesis that also places the first stamped one
+fn backfill_leading_video(codec: VideoCodec, leading: &mut [EsUnit], first_stamped: &EsUnit) {
+    let Some(first_stamp_90khz) = first_stamped.pts_90khz else {
+        return;
+    };
+    let mut synth = VideoPtsSynth::default();
+    let leading_data: Vec<&[u8]> = leading.iter().map(|unit| unit.data.as_slice()).collect();
+    let backfilled = backfill_leading_pts_90khz(
+        &leading_data,
+        &first_stamped.data,
+        first_stamp_90khz,
+        |au, pts| synth.stamp(codec, au, pts, &mut None),
+    );
+    for (unit, pts) in leading.iter_mut().zip(backfilled) {
+        unit.pts_90khz = pts;
+    }
+}
+
 /// A PES packet being reassembled across TS packets for one PID.
 #[derive(Debug)]
 struct PendingPes {
@@ -510,7 +544,9 @@ pub struct TsDemuxer {
     pending: Vec<PendingPes>,
     completed: Vec<EsUnit>,
     /// Video PTS synthesis state, one entry per video PID (M948).
-    video_pts: Vec<(u16, VideoPtsSynth)>,
+    video_pts: Vec<VideoStreamTiming>,
+    // set by `flush`, so `take_units` lets go of units still waiting for a first stamp
+    end_of_stream: bool,
     last_extended_timestamps: Vec<(u16, u64)>,
     continuity: Vec<PidContinuity>,
     // replayed once the active program's PMT parses
@@ -818,33 +854,56 @@ impl TsDemuxer {
     /// Drain the access units completed so far, synthesizing a PTS for each
     /// unstamped video unit that qualifies (see `VideoPtsSynth`).
     pub fn take_units(&mut self) -> Vec<EsUnit> {
-        let mut units = core::mem::take(&mut self.completed);
-        for unit in units.iter_mut() {
-            self.synthesize_video_pts(unit);
+        let units = core::mem::take(&mut self.completed);
+        let mut released = Vec::with_capacity(units.len());
+        for mut unit in units {
+            let Some((slot, codec)) = self.synthesize_video_pts(&mut unit) else {
+                released.push(unit);
+                continue;
+            };
+            let stamped = unit.pts_90khz.is_some();
+            released.extend(self.video_pts[slot].leading.pass(
+                unit,
+                stamped,
+                |leading, first_stamped| backfill_leading_video(codec, leading, first_stamped),
+            ));
         }
-        units
+        if self.end_of_stream {
+            for stream in &mut self.video_pts {
+                released.extend(stream.leading.release());
+            }
+        }
+        released
     }
 
-    /// Run one unit through its stream's [`VideoPtsSynth`]. A non-video unit,
-    /// and any video PID past [`MAX_VIDEO_PTS_STREAMS`], passes through.
-    fn synthesize_video_pts(&mut self, unit: &mut EsUnit) {
-        let codec = match unit.stream_type {
-            STREAM_TYPE_H264 => VideoCodec::H264,
-            STREAM_TYPE_H265 => VideoCodec::H265,
-            STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => VideoCodec::Mpeg2,
-            _ => return,
-        };
-        let slot = match self.video_pts.iter().position(|(pid, _)| *pid == unit.pid) {
+    /// Run one unit through its stream's [`VideoPtsSynth`], returning the
+    /// stream's slot. A non-video unit, and any video PID past
+    /// [`MAX_VIDEO_PTS_STREAMS`], passes through.
+    fn synthesize_video_pts(&mut self, unit: &mut EsUnit) -> Option<(usize, VideoCodec)> {
+        let codec = video_codec(unit.stream_type)?;
+        let slot = match self
+            .video_pts
+            .iter()
+            .position(|stream| stream.pid == unit.pid)
+        {
             Some(slot) => slot,
             None if self.video_pts.len() < MAX_VIDEO_PTS_STREAMS => {
-                self.video_pts.push((unit.pid, VideoPtsSynth::default()));
+                self.video_pts.push(VideoStreamTiming {
+                    pid: unit.pid,
+                    synth: VideoPtsSynth::default(),
+                    leading: LeadingUnits::default(),
+                });
                 self.video_pts.len() - 1
             }
-            None => return,
+            None => return None,
         };
-        self.video_pts[slot]
-            .1
-            .stamp(codec, &unit.data, &mut unit.pts_90khz, &mut unit.dts_90khz);
+        self.video_pts[slot].synth.stamp(
+            codec,
+            &unit.data,
+            &mut unit.pts_90khz,
+            &mut unit.dts_90khz,
+        );
+        Some((slot, codec))
     }
 
     /// Finalize any PES still being reassembled (call at end of stream). The
@@ -853,6 +912,7 @@ impl TsDemuxer {
         for p in core::mem::take(&mut self.pending) {
             Self::finish(&mut self.completed, p);
         }
+        self.end_of_stream = true;
     }
 
     fn stream_type_of(&self, pid: u16) -> Option<u8> {

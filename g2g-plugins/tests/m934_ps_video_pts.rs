@@ -116,6 +116,28 @@ fn unstamped_pictures_get_display_order_pts() {
     );
 }
 
+/// A stream whose first PES carries no stamp: the pictures ahead of the first
+/// stamped one take their display slots back from it, as ffmpeg does.
+#[test]
+fn pictures_ahead_of_the_first_stamp_are_backfilled_from_it() {
+    let mut demux = PsDemuxer::new();
+    let base = 90_000u64;
+    let mut gop = seq_and_gop();
+    gop.extend_from_slice(&pic(0, 1));
+    demux.push_data(&pes(None, &gop));
+    demux.push_data(&pes(Some(base + 3 * PERIOD), &pic(3, 2)));
+    for (tref, ct) in [(1u16, 3u8), (2, 3)] {
+        demux.push_data(&pes(None, &pic(tref, ct)));
+    }
+    assert_eq!(
+        video_pts(&mut demux),
+        [0, 3, 1, 2]
+            .iter()
+            .map(|k| Some(base + k * PERIOD))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// A stream that stamps every packet keeps its own timestamps untouched.
 #[test]
 fn real_stamps_pass_through_unchanged() {
