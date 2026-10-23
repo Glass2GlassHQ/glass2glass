@@ -1,5 +1,5 @@
-// the multi-track fixtures (two H.264 and two AAC tracks, interleaved, that differ in size or
-// in rate and channels), their checked-in ffprobe streams, and a sink that records decoded caps
+// the multi-track fixtures (two video and two audio tracks of one codec each, interleaved, that
+// differ in size or in rate and channels), their checked-in ffprobe streams, and a sink that records decoded caps
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -101,9 +101,14 @@ impl AsyncElement for CapsRecordingSink {
 }
 
 pub(crate) fn multitrack_fixture(container: &str) -> PathBuf {
+    // a program stream carries MPEG-2 video and MP2 audio, not H.264 and AAC
+    let name = match container {
+        "mpg" => String::from("multitrack_mpeg2_mp2.mpg"),
+        _ => format!("multitrack_h264_aac.{container}"),
+    };
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
-        .join(format!("multitrack_h264_aac.{container}"))
+        .join(name)
 }
 
 // the checked-in `ffprobe -show_entries stream=codec_type,width,height,sample_rate,channels

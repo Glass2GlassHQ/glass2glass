@@ -13,7 +13,7 @@ use multitrack_fixture::{
     RECORDING_SINK,
 };
 
-const CONTAINERS: [&str; 3] = ["mp4", "mkv", "ts"];
+const CONTAINERS: [&str; 4] = ["mp4", "mkv", "ts", "mpg"];
 
 fn launch_line(container: &str, kind: StreamType, index: usize, label: &str) -> String {
     format!(

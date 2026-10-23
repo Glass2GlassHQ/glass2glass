@@ -31,14 +31,15 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
+use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::StreamSelectController;
 use g2g_core::{
-    AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, LatencyReport,
-    MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream,
-    StreamCollection, StreamType, SubPictureFormat, VideoCodec,
+    g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
+    CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
+    LatencyReport, MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek,
+    Segment, Stream, StreamCollection, StreamType, SubPictureFormat, VideoCodec,
 };
 
 use crate::mpeg2video::Mpeg2TimestampSynth;
@@ -88,6 +89,11 @@ impl PsElementaryStream {
             (PS_PRIVATE_1, Some(0x20..=0x3F)) => Some(PsStream::SubPicture),
             _ => None,
         }
+    }
+
+    // what tells two streams of one kind apart, the `stream-id` property value
+    pub fn selection_id(&self) -> u8 {
+        self.substream_id.unwrap_or(self.stream_id)
     }
 }
 
@@ -1002,6 +1008,8 @@ pub struct PsDemux {
     demux: PsDemuxer,
     /// The elementary stream this instance forwards (the single output pad).
     stream: PsStream,
+    // the `selection_id` among the streams carrying `stream`, `None` for the first of them
+    stream_id: Option<u8>,
     configured: bool,
     emitted: u64,
     /// Pipeline bus, for announcing the file's `StreamCollection`. Inert unless
@@ -1033,6 +1041,7 @@ impl PsDemux {
         Self {
             demux: PsDemuxer::new(),
             stream: PsStream::Mpeg2,
+            stream_id: None,
             configured: false,
             emitted: 0,
             bus: None,
@@ -1167,6 +1176,17 @@ impl PsDemux {
         ))
     }
 
+    fn selected_stream(&self) -> Option<PsElementaryStream> {
+        let Some(id) = self.stream_id else {
+            return first_stream_of_kind(&self.demux, self.stream);
+        };
+        self.demux
+            .streams()
+            .iter()
+            .copied()
+            .find(|es| es.kind() == Some(self.stream) && es.selection_id() == id)
+    }
+
     /// Emit each completed access unit of the selected stream as a frame.
     async fn emit_units(
         &mut self,
@@ -1178,7 +1198,7 @@ impl PsDemux {
                 stream_id: u.stream_id,
                 substream_id: u.substream_id,
             };
-            if first_stream_of_kind(&self.demux, self.stream) != Some(es) {
+            if self.selected_stream() != Some(es) {
                 continue; // a stream other than the selected one
             }
             let pts_ns = ns_from_90khz(u.pts_90khz).unwrap_or(0);
@@ -1381,6 +1401,14 @@ impl AsyncElement for PsDemux {
                     self.demux.flush()?;
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
+                    if let (Some(id), None) = (self.stream_id, self.selected_stream()) {
+                        g2g_error!(
+                            Target::category("mpegpsdemux"),
+                            "stream-id={id} carries no {} stream",
+                            ps_stream_to_str(self.stream)
+                        );
+                        return Err(G2gError::CapsMismatch);
+                    }
                 }
                 // ByteStream caps don't carry geometry; nothing to forward, and
                 // a Segment passes through.
@@ -1414,6 +1442,14 @@ impl AsyncElement for PsDemux {
                 self.stream = ps_stream_from_str(s).ok_or(PropError::Value)?;
                 Ok(())
             }
+            "stream-id" => {
+                let id = value.as_uint().ok_or(PropError::Type)?;
+                self.stream_id = match id {
+                    0 => None,
+                    _ => Some(u8::try_from(id).map_err(|_| PropError::Value)?),
+                };
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -1421,17 +1457,25 @@ impl AsyncElement for PsDemux {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "stream" => Some(PropValue::Str(ps_stream_to_str(self.stream).into())),
+            "stream-id" => Some(PropValue::Uint(self.stream_id.map_or(0, u64::from))),
             _ => None,
         }
     }
 }
 
 /// `PsDemux`'s settable properties (M929).
-static PSDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "stream",
-    PropKind::Str,
-    "elementary stream to emit: mpeg2 | mp2 | ac3 | subpicture",
-)];
+static PSDEMUX_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "stream",
+        PropKind::Str,
+        "elementary stream to emit: mpeg2 | mp2 | ac3 | subpicture",
+    ),
+    PropertySpec::new(
+        "stream-id",
+        PropKind::Uint,
+        "PES stream_id (the substream id for ac3 and subpicture) of the stream to emit among those carrying `stream` (0 = the first of them)",
+    ),
+];
 
 /// Parse a `stream` property string to a [`PsStream`].
 fn ps_stream_from_str(s: &str) -> Option<PsStream> {
@@ -1478,10 +1522,11 @@ pub struct PsStreamInfo {
     pub stream: PsStream,
     pub caps: Caps,
     pub video: bool,
+    pub elementary: PsElementaryStream,
 }
 
 /// The forwardable elementary streams a probed program stream carries, in
-/// discovery order: one entry per distinct selection seen. Subpictures stay out,
+/// discovery order: one entry per elementary stream seen. Subpictures stay out,
 /// as DVB subtitles do on the MPEG-TS side: this feeds the `playbin` fan-out,
 /// which builds A/V decode branches only (a subtitle port is selected explicitly
 /// on `PsDemux` / `PsDemuxN`). Returns empty for a non-program-stream or a prefix
@@ -1492,13 +1537,14 @@ pub fn forwardable_streams(demux: &PsDemuxer) -> Vec<PsStreamInfo> {
         let Some(stream) = es.kind().filter(|_| unsupported_codec(demux, es).is_none()) else {
             continue;
         };
-        if stream == PsStream::SubPicture || out.iter().any(|i| i.stream == stream) {
+        if stream == PsStream::SubPicture {
             continue;
         }
         out.push(PsStreamInfo {
             stream,
             caps: PsDemux::output_caps(stream),
             video: stream == PsStream::Mpeg2,
+            elementary: *es,
         });
     }
     out
@@ -1622,6 +1668,17 @@ impl PsDemuxN {
             seed_geometry: None,
             held_picture_ns: 0,
         }
+    }
+
+    // port `i` carries `selected[i]`, a `None` port the first stream of its kind
+    pub fn with_selected_streams(mut self, selected: Vec<Option<PsElementaryStream>>) -> Self {
+        assert_eq!(
+            selected.len(),
+            self.ports.len(),
+            "one selection per PsDemuxN port"
+        );
+        self.selected_streams = selected;
+        self
     }
 
     /// Declare the video geometry a probe already read, so the video port

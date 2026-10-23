@@ -11,15 +11,18 @@ use multitrack_fixture::{
     assert_decoded_stream, multitrack_fixture, probed_of_kind, run_recording, RECORDING_SINK,
 };
 
-const DEMUXERS: [(&str, &str); 3] = [
+const DEMUXERS: [(&str, &str); 4] = [
     ("mkv", "matroskademux"),
     ("ts", "tsdemux"),
     ("mp4", "qtdemux"),
+    ("mpg", "mpegpsdemux"),
 ];
 
-fn decoder(kind: StreamType) -> &'static str {
-    match kind {
-        StreamType::Video => "h264parse ! avdec_h264 !",
+fn decoder(container: &str, kind: StreamType) -> &'static str {
+    match (container, kind) {
+        ("mpg", StreamType::Video) => "mpegvideoparse ! avdec_mpeg2video !",
+        ("mpg", _) => "mpegaudioparse ! mpg123audiodec !",
+        (_, StreamType::Video) => "h264parse ! avdec_h264 !",
         _ => "aacparse ! avdec_aac !",
     }
 }
@@ -65,7 +68,8 @@ async fn each_port_carries_its_own_track(
 async fn a_demux_fanout_carries_each_same_codec_track() {
     for (container, demuxer) in DEMUXERS {
         for kind in [StreamType::Video, StreamType::Audio] {
-            each_port_carries_its_own_track(container, demuxer, kind, decoder(kind)).await;
+            each_port_carries_its_own_track(container, demuxer, kind, decoder(container, kind))
+                .await;
         }
     }
 }

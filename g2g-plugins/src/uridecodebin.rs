@@ -759,9 +759,10 @@ impl PsProbe {
     }
 
     fn demux(&self) -> Box<dyn DynMultiOutputElement> {
-        Box::new(crate::psdemux::PsDemuxN::new(
-            self.infos.iter().map(|i| i.stream).collect(),
-        ))
+        Box::new(
+            crate::psdemux::PsDemuxN::new(self.infos.iter().map(|i| i.stream).collect())
+                .with_selected_streams(self.infos.iter().map(|i| Some(i.elementary)).collect()),
+        )
     }
 
     fn fanout(&self) -> UriFanout {
@@ -864,6 +865,8 @@ fn build_ps_subpicture_overlay(
     // Demux ports: every A/V stream in discovery order, then the subpicture one.
     let mut ports: Vec<PsStream> = infos.iter().map(|i| i.stream).collect();
     ports.push(PsStream::SubPicture);
+    let mut selected: Vec<_> = infos.iter().map(|i| Some(i.elementary)).collect();
+    selected.push(None);
     let text_port = (ports.len() - 1) as u8;
     let port_count = ports.len() as u8;
 
@@ -876,7 +879,11 @@ fn build_ps_subpicture_overlay(
     );
     let src = graph.add_source(GraphNodeRef::Source(Box::new(source)));
     let demux = graph.add_demux(
-        GraphNodeRef::demux(PsDemuxN::new(ports).with_video_geometry(geometry)),
+        GraphNodeRef::demux(
+            PsDemuxN::new(ports)
+                .with_selected_streams(selected)
+                .with_video_geometry(geometry),
+        ),
         port_count,
     );
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
@@ -996,20 +1003,26 @@ fn ps_select(
         })
         .collect();
     let mut streams: Vec<crate::psdemux::PsStream> = infos.iter().map(|i| i.stream).collect();
+    let mut selected: Vec<_> = infos.iter().map(|i| Some(i.elementary)).collect();
     let mut caps: Vec<Caps> = infos.iter().map(|i| i.caps.clone()).collect();
     // One port serves every subpicture substream (they share a selection), so a
     // single Text kind follows the A/V ones.
     if !crate::psdemux::subpicture_streams(&demux).is_empty() {
         kinds.push(PadKind::Text);
         streams.push(crate::psdemux::PsStream::SubPicture);
+        selected.push(None);
         caps.push(Caps::SubPicture {
             format: g2g_core::SubPictureFormat::VobSub,
         });
     }
     let sel = select(&kinds)?;
     let ports: Vec<_> = sel.iter().map(|&i| streams[i]).collect();
+    let selected: Vec<_> = sel.iter().map(|&i| selected[i]).collect();
     let caps: Vec<Caps> = sel.iter().map(|&i| caps[i].clone()).collect();
-    Some((Box::new(crate::psdemux::PsDemuxN::new(ports)), caps))
+    Some((
+        Box::new(crate::psdemux::PsDemuxN::new(ports).with_selected_streams(selected)),
+        caps,
+    ))
 }
 
 /// `mpegpsdemux` explicit fan-out (M929).
@@ -1063,7 +1076,11 @@ pub fn ps_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStreams
         .into_iter()
         .map(|info| PrimaryStream {
             demux: "mpegpsdemux",
-            props: stream_selection(crate::psdemux::ps_stream_to_str(info.stream)),
+            props: pinned_stream_selection(
+                crate::psdemux::ps_stream_to_str(info.stream),
+                "stream-id",
+                info.elementary.selection_id().into(),
+            ),
             caps: info.caps,
             has_clean_aperture: false,
         })
