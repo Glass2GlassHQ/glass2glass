@@ -37,9 +37,9 @@ use alloc::vec;
 use g2g_core::memory::{CudaKeepAlive, MemoryDomainKind, OwnedCudaBuffer};
 use g2g_core::runtime::{auto_plug_domain_converters, GraphNode};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, Frame, G2gError, Graph,
-    HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropValue, PropertySpec,
-    Rate, RawVideoFormat, SystemSlice,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, Frame,
+    G2gError, Graph, HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropValue,
+    PropertySpec, Rate, RawVideoFormat, SystemSlice,
 };
 
 use crate::cuda_driver_ffi as ffi;
@@ -102,6 +102,15 @@ impl AsyncElement for CudaDownload {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "CUDA download",
+            "Filter/Converter/Video/GPU",
+            "Copies a CUDA device frame back to system memory",
+            "g2g",
+        )
+    }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // The download keeps the caps unchanged (only the domain changes), so
@@ -310,6 +319,15 @@ impl AsyncElement for CudaUpload {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "CUDA upload",
+            "Filter/Converter/Video/GPU",
+            "Copies a system frame into CUDA device memory",
+            "g2g",
+        )
+    }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         for alt in nv12_any().alternatives() {
