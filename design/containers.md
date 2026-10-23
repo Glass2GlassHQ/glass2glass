@@ -178,7 +178,10 @@ for the first three and 4096 for the EIT.
 A PMT that lists one PID twice keeps the PID at its first position with the
 last entry's stream type and descriptors, as ffmpeg does. One broadcast mux
 lists each AC-3 PID as MPEG audio and then again as a private PES with an AC-3
-descriptor.
+descriptor. A PMT version change that passes its CRC adds the PIDs it lists to
+the program's streams and keeps the ones it drops, so the stream list matches
+ffprobe's after a mid-file PMT change. A `pid` pin waits for a later PMT version
+and fails at EOS if its PID never appears.
 
 Packets on PIDs no table names yet are held until the active program's PMT
 parses, then replayed in order, so a capture that starts between two PMT
@@ -803,17 +806,17 @@ the config and strips the in-band copies, as ffmpeg's `aac_adtstoasc` does. A fa
 without either config fails the stream.
 
 MPEG-TS carries AAC as ADTS (0x0F) unless the stream opens on a raw
-AudioSpecificConfig (ER AAC, ELD, USAC, 960-sample frames). That pad goes out as
+AudioSpecificConfig (ER AAC, ELD, 960-sample frames). That pad goes out as
 LOAS/LATM (0x11) with audioMuxVersion 1. The StreamMuxConfig repeats in every
 frame, and the config sits verbatim behind its bit length, so the muxer never
-parses ELDSpecificConfig or UsacConfig. The carriage is fixed by each pad's first
+parses ELDSpecificConfig. USAC is refused, since neither ADTS nor ffmpeg's LATM
+decoder carries it (gst's mpegtsmux writes it as ADTS that nothing decodes). The carriage is fixed by each pad's first
 frame, and the PMT entry switches to 0x11 before the tables first go out. On the
 read side, `TsStream::Aac` takes 0x0F and 0x11, LOAS under either, and forwards LOAS frames as the
 PES carries them, and `aacparse` reads both LATM versions. `ffmpegaudiodec` opens
 libavcodec's LATM decoder when the first buffer is a LOAS frame, seeds it with
 the config's rate and channel count, and decodes each LOAS frame whole. ffmpeg
-8.1 decodes neither USAC in LATM nor, from its CLI, ER AAC in LATM, so the USAC
-leg is checked only by readback and GStreamer's `aacparse`.
+8.1 does not decode ER AAC in LATM from its CLI.
 
 ### Matroska
 

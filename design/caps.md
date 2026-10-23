@@ -794,7 +794,8 @@ chosen stream's demux selection is the same as an earlier one's (a demux that
 selects only by codec emits the first), when the input is no container a hook
 lists, and on a `decodebin name=d` fan-out. The mp4, Matroska and TS hooks pin
 each selection to the container's track id (`qtdemux track-id`, `matroskademux
-track-number`, `tsdemux pid`, each 0 for the first track of the `stream=` codec),
+track-number`, `tsdemux pid`, `mpegpsdemux stream-id`, each 0 for the first track of
+the `stream=` codec),
 so a second track of the same codec is reachable. A pin naming no track of that
 codec fails the run.
 

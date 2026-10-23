@@ -231,8 +231,6 @@ Highest leverage first:
     `flvmux` and `mpegtsmux` VP8 (calliope TESTING technique 23 lists the rest).
   - `flvmux` writes an AAC sequence header no decoder accepts
     (`fate-suite/aac/al04_44.mp4`).
-  - `mpegtsmux` accepts USAC and writes a file nothing decodes
-    (`fate-suite/aac/usac/*`).
   - LATM AAC loses samples through flvmux and mpegtsmux and fails into mp4mux
     and matroskamux (`fate-suite/aac/latm_stereo_to_51.ts`, `mpegts/loewe.ts`).
   - Remux changes samples or frame counts: bipbop TS AAC into mp4mux,
@@ -242,9 +240,8 @@ Highest leverage first:
     `loewe.ts` HEVC into mp4mux and matroskamux, `test-8-7.1.opus-small.ts` into
     matroskamux and mpegtsmux, `two_first_slice.mp4` into matroskamux,
     `al04sf_48.mp4` into mpegtsmux.
-  - Stream listing misses the Dolby Vision enhancement layer of
-    `mpegts/dovi-p7.ts`, the PIDs a PMT change adds in `mpegts/pmtchange.ts`, and
-    the second MP2 stream of `sample_mpeg_program_stream_scr.mpg`.
+  - `mpegts/pmtchange.ts` audio 0 to 2 decode to other lengths and samples than
+    ffmpeg's.
   - The `flvmux` duplicate-track, `avimux` second-video and `mp4mux` CMAF
     refusals still return a bare `CapsMismatch`: log what they refuse.
   - `hevc/two_first_slice.mp4` gives 35 frames where gst and ffmpeg give 34: its
@@ -269,10 +266,6 @@ Highest leverage first:
   - Raw AAC whose SBR runs at the core rate (`aac/al_sbr_sr_48_2_fsaac48.mp4`):
     `mp4mux` refuses it and `matroskamux` writes a file ffmpeg decodes to other
     samples.
-  - `aac/aac-sce-in-stereo.mp4` is 23.2 ms late on every frame,
-    `ac3/mp3ac325-4864-small.ts` gives 4 frames where ffmpeg gives 5,
-    `mp3-conformance/sin1k0db.bit` 317 where it gives 318, and
-    `mov/mov_neg_first_pts_discard_vorbis.mp4` is 2.0 s ahead.
 
 ## Codecs
 

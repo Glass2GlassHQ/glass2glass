@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1843: mpegtsmux refuses USAC, which neither ADTS nor ffmpeg's LATM decoder carries.
+- M1848b: a PMT version change adds the PIDs it lists to the TS stream list.
+- M1848: `mpegpsdemux` lists every audio track and pins one with `stream-id`, so `current-audio` reaches a second MP2 track.
 - M1839: the FLV, AVI and Matroska demuxers send AAC whose SBR runs at the core rate raw behind its config instead of ADTS-framing it.
 - M1826: MP4/MOV video edit lists that replay or reorder media play each edit in turn.
 - M1842: muxers keep the program config element of channel-configuration-0 AAC in the codec config.
