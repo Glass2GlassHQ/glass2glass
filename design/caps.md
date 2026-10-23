@@ -339,7 +339,10 @@ keeps the "`c` is the output" contract below intact for the common
 `... ! avdec ! videoconvert ! textoverlay ! ...` shape: the decoder's
 mid-stream `CapsChanged` (its 16x16 `Range` placeholders settling to the real
 geometry) would otherwise make the converter forward its *input* (I420) to the
-strict overlay, which rejects it.
+strict overlay, which rejects it. The kept shape applies only through
+alternatives that pin its scalars: an alternative that leaves channels or rate
+open would take the startup placeholder, so `audioconvert` with "any channels"
+would upmix a mono stream to the placeholder's stereo.
 
 The **runner**, not `process(CapsChanged)`, owns the forwarded output. A
 format-changing element moves its derivation into the declared constraint
@@ -807,7 +810,10 @@ list (mkv, ts, flv), as `ffmpeg -c copy` does.
 
 A `NoDecodeChain` or `NoParseChain` error quotes the unplugged input through
 `Caps::to_gst_string`, gst caps syntax with wildcard and range fields left out, so
-the message names the codec and any fixed size, rate or channel count.
+the message names the codec and any fixed size, rate or channel count. Parsing
+goes the other way: a raw-audio caps string with no `rate` or `channels` gives
+`ANY_SAMPLE_RATE` / `ANY_CHANNELS`, as gst leaves them open, while compressed
+audio, which has no rate wildcard, defaults to 48000 Hz stereo.
 
 A codec with no typed `VideoCodec` / `AudioFormat` still decodes when libavcodec
 has a decoder for it, behind the `ffmpeg-long-tail` feature. `avidemux`, the mp4

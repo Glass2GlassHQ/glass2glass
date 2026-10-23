@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1838: a raw-audio caps filter that names only the format leaves rate and channels open, as in gst.
 - M1841: a fan-in muxer that refuses a pad's caps names them in an error log.
 - M1824: mpegpsdemux stops reusing the previous PES pts for unstamped audio, parsers give a PES stamp only to its first access unit, and tsdemux reads M2TS whole at any read size.
 - M1831: AAC whose SBR output rate is not double its core rate goes raw instead of ADTS, and audioresample stamps its EOS tail after the last frame.

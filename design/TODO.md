@@ -267,7 +267,9 @@ Highest leverage first:
 
 ## Codecs
 
-- **`audioconvert ! audio/x-raw,format=S16LE` with rate and channels open fails the re-solve** with `CapsMismatch`. A capsfilter that fixes only the format should let the rate and channels pass through.
+- **Caps string parsing.** `expand_u8` and `expand_u32` turn an unparseable value such as
+  `rate=abc` into the default instead of failing the parse. Compressed audio with an
+  unknown rate prints without `rate` and parses back as 48000.
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
 
