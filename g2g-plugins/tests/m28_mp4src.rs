@@ -1,4 +1,4 @@
-//! M28: `Mp4Src` reads back what `Mp4Mux` muxes. Round trip is
+//! M28: `Mp4Src` reads back what `Mp4MuxN` muxes. Round trip is
 //! byte-exact (Annex-B in, fMP4, Annex-B out), the caps probe recovers the
 //! recorded geometry during negotiation, and on Windows the full circle
 //! runs encode -> container -> demux -> decode through both real MFTs.
@@ -7,12 +7,12 @@
 mod collect_sink;
 use collect_sink::CollectSink;
 
-use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
+use g2g_core::element::{OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{Caps, Dim, G2gError, Rate, TagList, VideoCodec};
-use g2g_plugins::mp4mux::Mp4Mux;
+use g2g_core::{Caps, Dim, G2gError, MultiInputElement, Rate, TagList, VideoCodec};
+use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::mp4src::Mp4Src;
 
 use std::path::PathBuf;
@@ -65,7 +65,7 @@ fn au_frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
     }
 }
 
-/// A sink that concatenates the ISO-BMFF byte-stream frames `Mp4Mux` forwards.
+/// A sink that concatenates the ISO-BMFF byte-stream frames `Mp4MuxN` forwards.
 #[derive(Default)]
 struct Capture {
     bytes: Vec<u8>,
@@ -89,31 +89,32 @@ impl OutputSink for Capture {
     }
 }
 
-/// Mux `aus` through `Mp4Mux`, returning the forwarded fMP4 byte stream. Tags,
+/// Mux `aus` through `Mp4MuxN`, returning the forwarded fMP4 byte stream. Tags,
 /// when present, go in the init segment's moov.
 async fn mux_to_bytes(aus: &[Vec<u8>], w: u32, h: u32, tags: Option<TagList>) -> Vec<u8> {
     let mut mux = match tags {
-        Some(t) => Mp4Mux::new().with_tags(t),
-        None => Mp4Mux::new(),
+        Some(t) => Mp4MuxN::new(1).with_tags(t),
+        None => Mp4MuxN::new(1),
     };
-    mux.configure_pipeline(&h264_caps(w, h))
+    mux.configure_pipeline(0, &h264_caps(w, h))
         .expect("configure mux");
     let mut cap = Capture::default();
     for (i, au) in aus.iter().enumerate() {
         mux.process(
+            0,
             PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)),
             &mut cap,
         )
         .await
         .expect("mux AU");
     }
-    mux.process(PipelinePacket::Eos, &mut cap)
+    mux.process(0, PipelinePacket::Eos, &mut cap)
         .await
         .expect("eos");
     cap.bytes
 }
 
-/// Record `aus` to an fMP4 file at `path` (muxed via `Mp4Mux`, then written).
+/// Record `aus` to an fMP4 file at `path` (muxed via `Mp4MuxN`, then written).
 async fn record(path: &PathBuf, aus: &[Vec<u8>], w: u32, h: u32) {
     let bytes = mux_to_bytes(aus, w, h, None).await;
     std::fs::write(path, &bytes).unwrap();
@@ -656,6 +657,7 @@ async fn missing_or_invalid_file_fails_loud() {
 #[cfg(all(target_os = "windows", feature = "mf-encode", feature = "mf-decode"))]
 #[tokio::test(flavor = "current_thread")]
 async fn encode_mux_demux_decode_full_circle() {
+    use g2g_core::element::AsyncElement;
     use g2g_plugins::mfdecode::MfDecode;
     use g2g_plugins::mfencode::MfEncode;
 
@@ -693,12 +695,13 @@ async fn encode_mux_demux_decode_full_circle() {
 
     // mux to fMP4.
     let path = temp_path("full_circle");
-    let mut mux = Mp4Mux::new();
-    mux.configure_pipeline(&h264_caps(W, H))
+    let mut mux = Mp4MuxN::new(1);
+    mux.configure_pipeline(0, &h264_caps(W, H))
         .expect("configure mux");
     let mut cap = Capture::default();
     for f in encoded.frames() {
         mux.process(
+            0,
             PipelinePacket::DataFrame(au_frame(
                 frame_bytes(f).to_vec(),
                 f.timing.pts_ns,
@@ -709,7 +712,7 @@ async fn encode_mux_demux_decode_full_circle() {
         .await
         .expect("mux");
     }
-    mux.process(PipelinePacket::Eos, &mut cap)
+    mux.process(0, PipelinePacket::Eos, &mut cap)
         .await
         .expect("eos");
     std::fs::write(&path, &cap.bytes).unwrap();

@@ -554,37 +554,77 @@ fn mpegts_contains_a_dropped_packet() -> bool {
 
 /// Conformance of the fragmented-MP4 writer and reader (`mp4mux`, `fmp4demux`).
 ///
-/// Muxes two H.264 access units into an `ftyp` + `moov` + `moof`/`mdat` stream and
-/// reads the geometry, the sync-sample flag, and both access units back byte-exact
-/// (`RoundTrip`). Video only: the A/V interleave lives in the `Mp4MuxN` element,
-/// which has no sans-IO core to drive here.
+/// Muxes two H.264 access units through the `mp4mux` element into an `ftyp` +
+/// `moov` + `moof`/`mdat` stream and reads the geometry, the sync-sample flag, and
+/// both access units back byte-exact (`RoundTrip`).
 #[cfg(feature = "std")]
 pub fn mp4() -> [MaturityRecord; 2] {
     use crate::fmp4::{parse_fragments, parse_header, FragmentStarts};
-    use crate::fmp4mux::Fmp4Muxer;
-    use g2g_core::{TagList, VideoCodec};
+    use crate::mp4muxn::Mp4MuxN;
+    use g2g_core::memory::SystemSlice;
+    use g2g_core::{
+        BitstreamAlignment, Caps, Colorimetry, Dim, Frame, FrameTiming, G2gError, MemoryDomain,
+        MultiInputElement, OutputSink, PipelinePacket, PushOutcome, Rate, VideoCodec,
+    };
 
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 240;
     const FRAME_DURATION_NS: u64 = 33_000_000;
 
-    let [idr, inter] = h264_access_units();
-    let mut mux = Fmp4Muxer::new(VideoCodec::H264, WIDTH, HEIGHT, TagList::new());
-    let mut bytes = mux
-        .push_au(&idr, 0, 0, FRAME_DURATION_NS)
-        .unwrap_or_default();
-    if let Ok(more) = mux.push_au(
-        &inter,
-        FRAME_DURATION_NS,
-        FRAME_DURATION_NS,
-        FRAME_DURATION_NS,
-    ) {
-        bytes.extend(more);
+    #[derive(Default)]
+    struct ByteSink(Vec<u8>);
+    impl OutputSink for ByteSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            if let Some(PipelinePacket::DataFrame(frame)) = packet.take() {
+                if let Some(bytes) = frame.domain.as_system_slice() {
+                    self.0.extend_from_slice(bytes);
+                }
+            }
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+        }
     }
-    bytes.extend(mux.flush());
+
+    let [idr, inter] = h264_access_units();
+    let caps = Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Fixed(WIDTH),
+        height: Dim::Fixed(HEIGHT),
+        framerate: Rate::Any,
+        colorimetry: Colorimetry::UNKNOWN,
+        alignment: BitstreamAlignment::Unspecified,
+    };
+    let mut mux = Mp4MuxN::new(1);
+    let mut sink = ByteSink::default();
+    let muxed = mux.configure_pipeline(0, &caps).and_then(|_| {
+        g2g_core::runtime::block_on(async {
+            for (index, access_unit) in [&idr, &inter].into_iter().enumerate() {
+                let pts_ns = index as u64 * FRAME_DURATION_NS;
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(
+                        access_unit.clone().into_boxed_slice(),
+                    )),
+                    FrameTiming {
+                        pts_ns,
+                        dts_ns: pts_ns,
+                        duration_ns: FRAME_DURATION_NS,
+                        ..FrameTiming::default()
+                    },
+                    index as u64,
+                );
+                mux.process(0, PipelinePacket::DataFrame(frame), &mut sink)
+                    .await?;
+            }
+            mux.process(0, PipelinePacket::Eos, &mut sink).await
+        })
+    });
+    let bytes = sink.0;
 
     let mut earned = Vec::new();
-    if let Ok(header) = parse_header(&bytes) {
+    if let (Ok(()), Ok(header)) = (muxed, parse_header(&bytes)) {
         let samples = parse_fragments(
             &bytes,
             header.timescale,

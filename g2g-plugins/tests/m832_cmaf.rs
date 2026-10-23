@@ -34,7 +34,6 @@ use g2g_core::{
 };
 use g2g_plugins::conformance::persist;
 use g2g_plugins::mp4demuxn::{forwardable_streams, Mp4DemuxN, Mp4Port};
-use g2g_plugins::mp4mux::Mp4Mux;
 use g2g_plugins::mp4muxn::Mp4MuxN;
 
 const WIDTH: usize = 320;
@@ -244,21 +243,21 @@ fn synthetic_aus() -> Vec<Vec<u8>> {
     ]
 }
 
-/// Push `aus` through a single-track `Mp4Mux` and return the whole byte stream.
+/// Push `aus` through a single-track `Mp4MuxN` and return the whole byte stream.
 async fn mux_single(aus: &[Vec<u8>], cmaf: bool) -> Vec<u8> {
-    let mut m = Mp4Mux::new().with_cmaf(cmaf);
-    m.configure_pipeline(&h264_caps()).expect("configure");
+    let mut m = Mp4MuxN::new(1).with_cmaf(cmaf);
+    m.configure_pipeline(0, &h264_caps()).expect("configure");
     let mut sink = CaptureSink::default();
     for (i, au) in aus.iter().enumerate() {
         let timing = FrameTiming {
             pts_ns: i as u64 * 33_333_333,
             ..FrameTiming::default()
         };
-        m.process(frame(au.clone(), timing), &mut sink)
+        m.process(0, frame(au.clone(), timing), &mut sink)
             .await
             .expect("mux");
     }
-    m.process(PipelinePacket::Eos, &mut sink)
+    m.process(0, PipelinePacket::Eos, &mut sink)
         .await
         .expect("mux eos");
     sink.bytes
@@ -383,12 +382,12 @@ fn field<'a>(probed: &'a [(String, String)], key: &str) -> &'a str {
 
 // --- tests ----------------------------------------------------------------
 
-/// The `cmaf` property round-trips on both muxers, and the multi-track muxer
+/// The `cmaf` property round-trips, and the multi-track muxer
 /// refuses the mode: a CMAF track file carries exactly one media stream, and the
 /// mode has no meaning in the progressive (unfragmented) layout.
 #[test]
 fn cmaf_property_round_trips_and_multi_track_is_refused() {
-    let mut single = Mp4Mux::new();
+    let mut single = Mp4MuxN::new(1);
     assert_eq!(single.get_property("cmaf"), Some(PropValue::Bool(false)));
     single
         .set_property("cmaf", PropValue::Bool(true))

@@ -546,13 +546,12 @@ end marker behind, and both directions run through `segment_span`, which finds t
 segment run by walking its headers rather than trimming bytes.
 
 Subtitle blocks, bitmap as well as text, are written as a `BlockGroup` so a cue's
-display window rides its `BlockDuration`. Both Matroska muxers take these pads,
-the fan-in `MkvMuxN` beside its A/V tracks and the single-track `MkvMux` on its
-one sink pad, so a sidecar subtitle file muxes over one link
-(`vobsubsrc location=movie.idx ! matroskamux ! filesink`) rather than the `name=m`
-shape. The mapping they share, the codec each format writes, the config-blob
-recognition, the block framing and the `S_TEXT/ASS` script header, lives in
-`matroska.rs` beside `MkvTrackSpec`, so the two cannot drift.
+display window rides its `BlockDuration`. `MkvMuxN` takes these pads beside its
+A/V tracks, and a one-pad `matroskamux` builds it too, so a sidecar subtitle file
+muxes over one link (`vobsubsrc location=movie.idx ! matroskamux ! filesink`)
+rather than the `name=m` shape. The mapping, the codec each format writes, the
+config-blob recognition, the block framing and the `S_TEXT/ASS` script header,
+lives in `matroska.rs` beside `MkvTrackSpec`.
 
 ## EBU teletext
 

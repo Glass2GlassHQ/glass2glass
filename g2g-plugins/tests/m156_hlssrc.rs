@@ -16,12 +16,12 @@ use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, Dim, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PushOutcome, Rate, Seek, VideoCodec,
+    ByteStreamEncoding, Caps, CapsConstraint, Dim, G2gError, MemoryDomain, MultiInputElement,
+    OutputSink, PipelinePacket, PushOutcome, Rate, Seek, VideoCodec,
 };
 use g2g_plugins::fmp4demux::Fmp4Demux;
 use g2g_plugins::hlssrc::HlsSrc;
-use g2g_plugins::mp4mux::Mp4Mux;
+use g2g_plugins::mp4muxn::Mp4MuxN;
 
 #[derive(Default)]
 struct CaptureSink {
@@ -671,29 +671,33 @@ fn access_units() -> Vec<Vec<u8>> {
     vec![idr, p(1), p(2)]
 }
 
-/// Mux the access units to an fMP4 buffer via the `Mp4Mux` element, returning
+/// Mux the access units to an fMP4 buffer via the `Mp4MuxN` element, returning
 /// the byte stream it forwards downstream.
 async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
-    let mut mux = Mp4Mux::new();
-    mux.configure_pipeline(&Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width: Dim::Fixed(64),
-        height: Dim::Fixed(48),
-        framerate: Rate::Fixed(30 << 16),
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        alignment: g2g_core::BitstreamAlignment::Unspecified,
-    })
+    let mut mux = Mp4MuxN::new(1);
+    mux.configure_pipeline(
+        0,
+        &Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(64),
+            height: Dim::Fixed(48),
+            framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
+        },
+    )
     .unwrap();
     let mut out = CaptureSink::default();
     for (i, au) in aus.iter().enumerate() {
         mux.process(
+            0,
             PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)),
             &mut out,
         )
         .await
         .unwrap();
     }
-    mux.process(PipelinePacket::Eos, &mut out).await.unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut out).await.unwrap();
     out.body
 }
 

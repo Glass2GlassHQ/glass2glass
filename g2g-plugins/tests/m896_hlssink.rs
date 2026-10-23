@@ -37,7 +37,6 @@ use g2g_plugins::conformance::persist;
 use g2g_plugins::hls::{parse, Playlist};
 use g2g_plugins::hlssink::HlsSink;
 use g2g_plugins::mp4demuxn::{forwardable_streams, Mp4DemuxN, Mp4Port};
-use g2g_plugins::mp4mux::Mp4Mux;
 use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::tsmux::TsMux;
@@ -237,17 +236,17 @@ async fn mux_fmp4_av(
     sink.frames
 }
 
-/// Access units through `Mp4Mux` batched into `fragment_ms` fragments.
+/// Access units through `Mp4MuxN` batched into `fragment_ms` fragments.
 async fn mux_fmp4(aus: &[(Vec<u8>, FrameTiming)], fragment_ms: u64) -> Vec<(Vec<u8>, FrameTiming)> {
-    let mut mux = Mp4Mux::new().with_fragment_duration_ms(fragment_ms);
-    mux.configure_pipeline(&h264_caps()).expect("configure");
+    let mut mux = Mp4MuxN::new(1).with_fragment_duration_ms(fragment_ms);
+    mux.configure_pipeline(0, &h264_caps()).expect("configure");
     let mut sink = CaptureSink::default();
     for (au, timing) in aus {
-        mux.process(frame(au.clone(), *timing), &mut sink)
+        mux.process(0, frame(au.clone(), *timing), &mut sink)
             .await
             .expect("mux");
     }
-    mux.process(PipelinePacket::Eos, &mut sink)
+    mux.process(0, PipelinePacket::Eos, &mut sink)
         .await
         .expect("mux eos");
     sink.frames

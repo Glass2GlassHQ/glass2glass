@@ -1,5 +1,5 @@
 //! M375 - the Matroska muxer writes a `Cues` index, closing the seek round-trip:
-//! `MkvMux` output is seekable by `MkvDemux` through the very index the muxer
+//! `MkvMuxN` output is seekable by `MkvDemux` through the very index the muxer
 //! wrote (the write side of M373's read). The muxer flushes the `Cues` at EOS
 //! (after the last Cluster); a streaming muxer cannot place a front `SeekHead`, so
 //! seeking relies on the demuxer having read past the Clusters to the `Cues`
@@ -11,9 +11,11 @@ use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SeekController;
-use g2g_core::{ByteStreamEncoding, Caps, Dim, G2gError, Rate, Seek, VideoCodec};
+use g2g_core::{
+    ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, Rate, Seek, VideoCodec,
+};
 use g2g_plugins::mkvdemux::{MkvDemux, MkvStream};
-use g2g_plugins::mkvmux::MkvMux;
+use g2g_plugins::mkvmuxn::MkvMuxN;
 
 const CLUSTER_ID: [u8; 4] = [0x1F, 0x43, 0xB6, 0x75];
 
@@ -58,6 +60,11 @@ fn vp9_caps() -> Caps {
     }
 }
 
+// a VP9 uncompressed header byte marking a key frame, then a tag that tells the frames apart
+fn vp9_key(tag: u8) -> Vec<u8> {
+    vec![0x80, tag]
+}
+
 fn data_frame(bytes: &[u8], pts_ns: u64) -> PipelinePacket {
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
@@ -72,22 +79,24 @@ fn data_frame(bytes: &[u8], pts_ns: u64) -> PipelinePacket {
 /// Mux four VP9 keyframes into two Clusters (default 1 s span): two at 0/40 ms,
 /// two at 1200/1240 ms. Returns the whole Matroska stream the element produced.
 async fn mux_two_clusters() -> Vec<u8> {
-    let mut mux = MkvMux::new();
-    mux.configure_pipeline(&vp9_caps()).unwrap();
+    let mut mux = MkvMuxN::new(1);
+    mux.configure_pipeline(0, &vp9_caps()).unwrap();
     let mut sink = Capture::default();
-    mux.process(data_frame(&[0x01], 0), &mut sink)
+    mux.process(0, data_frame(&vp9_key(1), 0), &mut sink)
         .await
         .unwrap();
-    mux.process(data_frame(&[0x02], 40_000_000), &mut sink)
+    mux.process(0, data_frame(&vp9_key(2), 40_000_000), &mut sink)
         .await
         .unwrap();
-    mux.process(data_frame(&[0x04], 1_200_000_000), &mut sink)
+    mux.process(0, data_frame(&vp9_key(4), 1_200_000_000), &mut sink)
         .await
         .unwrap();
-    mux.process(data_frame(&[0x05], 1_240_000_000), &mut sink)
+    mux.process(0, data_frame(&vp9_key(5), 1_240_000_000), &mut sink)
         .await
         .unwrap();
-    mux.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
     sink.frames.concat()
 }
 
@@ -129,7 +138,7 @@ async fn mkvmux_cues_make_its_own_output_seekable() {
     demux.process(data_frame(&file, 0), &mut pre).await.unwrap();
     assert_eq!(
         pre.frames,
-        vec![vec![0x01u8], vec![0x02], vec![0x04], vec![0x05]]
+        vec![vp9_key(1), vp9_key(2), vp9_key(4), vp9_key(5)]
     );
 
     // 2. Seek to 1200 ms. With the muxer's Cues parsed, the demuxer byte-seeks
@@ -168,7 +177,7 @@ async fn mkvmux_cues_make_its_own_output_seekable() {
     );
     assert_eq!(
         post.frames,
-        vec![vec![0x04u8], vec![0x05]],
+        vec![vp9_key(4), vp9_key(5)],
         "re-synced from Cluster 2 via the Cues"
     );
 }

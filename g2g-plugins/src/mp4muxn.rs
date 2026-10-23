@@ -1,7 +1,6 @@
-//! Multi-track fragmented-MP4 multiplexer element (M293): N elementary streams
-//! in (H.264 / H.265 video + AAC audio), one ISO-BMFF byte stream out. The A/V
-//! analog of the single-track [`crate::mp4mux::Mp4Mux`], so a muxed recording
-//! carries video and audio together:
+//! Fragmented-MP4 multiplexer element (M293): N elementary streams in
+//! (H.264 / H.265 video + AAC audio), one ISO-BMFF byte stream out, so a muxed
+//! recording carries video and audio together:
 //!
 //! ```text
 //! videotestsrc ! x264enc ! mp4mux name=m
@@ -21,9 +20,8 @@
 //! referencing its track with a per-track `tfdt` in that track's timescale.
 //!
 //! Reachable from the `gst-launch` fan-in syntax: registered as the `mp4mux`
-//! muxer in `default_registry`, so >1 input link builds this element (a single
-//! input builds the single-track [`crate::mp4mux::Mp4Mux`]), the way gst's
-//! request sink pads do. Video is H.264/H.265 (avc1/hvc1), VP8/VP9
+//! muxer in `default_registry`, so any number of input links builds this element,
+//! the way gst's request sink pads do. Video is H.264/H.265 (avc1/hvc1), VP8/VP9
 //! (vp08/vp09 + vpcC) or AV1 (av01 + av1C from the sequence header, M773);
 //! audio is AAC (mp4a/esds) or Opus (Opus/dOps), sync-sample audio. A
 //! `Caps::Text{Utf8}` pad adds a `tx3g` timed-text track (M898, ffmpeg's
@@ -41,9 +39,9 @@ use g2g_core::log::short_type_name;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter,
-    ClosedCaptionFormat, ConfigureOutcome, Dim, FrameTiming, G2gError, InputAggregator,
-    MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, TagList, TextFormat, VideoCodec,
+    ClosedCaptionFormat, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
+    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, TagList, TextFormat, VideoCodec,
 };
 
 use g2g_core::caps::framerate_q16_period_ns;
@@ -181,7 +179,7 @@ pub struct Mp4MuxN {
     /// Target fragment duration in milliseconds (`0` = one `moof`+`mdat` fragment
     /// per access unit, the default). Batches a track's access units into a
     /// multi-sample fragment closed at the next sync sample once the target is
-    /// reached, matching the single-track [`crate::mp4mux::Mp4Mux`].
+    /// reached.
     fragment_duration_ms: u64,
     /// Per-track fragment being accumulated in batched mode (empty in per-AU mode).
     pending: Vec<PendingFragment>,
@@ -330,8 +328,7 @@ impl Mp4MuxN {
     }
 
     /// Attach whole-file metadata, written as the `moov`'s own
-    /// `udta/meta/ilst` (the [`crate::mp4mux::Mp4Mux`] builder for the
-    /// multi-track muxer).
+    /// `udta/meta/ilst`.
     pub fn with_tags(mut self, tags: TagList) -> Self {
         self.tags = tags;
         self
@@ -1204,6 +1201,15 @@ impl MultiInputElement for Mp4MuxN {
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
         Ok(Self::output_caps_value())
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "MP4 muxer",
+            "Codec/Muxer",
+            "Muxes video, audio and text tracks into an MP4 / ISO base media file",
+            "g2g",
+        )
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -2169,7 +2175,7 @@ mod tests {
     }
 
     /// The `fragment-duration` knob is honored on the fan-in muxer (the `name=m`
-    /// shape), the same as the single-track `Mp4Mux`: access units batch into
+    /// shape): access units batch into
     /// keyframe-aligned multi-sample fragments, versus one fragment per AU by
     /// default. Set via `set_property`, the path `parse_launch` uses.
     #[tokio::test]

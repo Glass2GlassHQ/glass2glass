@@ -1,7 +1,9 @@
 //! M115 Matroska / WebM mux, end to end through the DAG runner: a VP9 source
-//! feeds `MkvMux`, whose `Caps::ByteStream{Matroska}` output feeds `MkvDemux`,
+//! feeds `MkvMuxN`, whose `Caps::ByteStream{Matroska}` output feeds `MkvDemux`,
 //! which recovers the frames to a sink. Proves the mux/demux pair composes and
-//! that `ByteStream{Matroska}` negotiates as an interior link between transforms.
+//! that `ByteStream{Matroska}` negotiates as an interior link.
+
+#![cfg(feature = "std")]
 
 use core::future::Future;
 use core::pin::Pin;
@@ -15,7 +17,7 @@ use g2g_core::{
 };
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::mkvdemux::MkvDemux;
-use g2g_plugins::mkvmux::MkvMux;
+use g2g_plugins::mkvmuxn::MkvMuxN;
 
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -83,11 +85,11 @@ impl SourceLoop for Vp9Source {
 async fn mkvmux_then_mkvdemux_round_trips_in_runner() {
     let mut graph: Graph<GraphNode> = Graph::new();
     let src = graph.add_source(GraphNodeRef::Source(Box::new(Vp9Source { remaining: 3 })));
-    let mux = graph.add_transform(GraphNodeRef::element(MkvMux::new()));
+    let mux = graph.add_muxer(GraphNodeRef::muxer(MkvMuxN::new(1)), 1);
     let demux = graph.add_transform(GraphNodeRef::element(MkvDemux::new()));
     let sink = graph.add_sink(GraphNodeRef::element(FakeSink::new()));
-    graph.link(src, mux).unwrap();
-    graph.link(mux, demux).unwrap();
+    graph.link(src, mux.input(0)).unwrap();
+    graph.link(mux.output(), demux).unwrap();
     graph.link(demux, sink).unwrap();
 
     let stats = run_graph(graph, &ZeroClock, 4)

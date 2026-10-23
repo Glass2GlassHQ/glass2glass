@@ -551,13 +551,13 @@ which the parser tracks.
 
 ### matroskamux
 
-`matroskamux` is `MatroskaMuxer` plus the `MkvMux` element, the inverse path,
-writing the EBML header, an unknown-size Segment, Tracks, and one Cluster per
-frame, with the `webm` DocType for the WebM codec subset. Scope is one Segment
-and one track with definite-size Clusters. Multi-track A/V muxing is the sibling
-`mkvmuxn`.
+`matroskamux` is `MatroskaMuxer` plus the `MkvMuxN` element, the inverse path,
+writing the EBML header, an unknown-size Segment, Tracks, and time-windowed
+Clusters, with the `webm` DocType for the WebM codec subset. It takes one track
+per input pad. `matroskamux` and `mp4mux` are registered only as fan-in muxers,
+so the parser builds `MkvMuxN` and `Mp4MuxN` for a single input link too.
 
-Both muxers also have a `seekable` two-pass mode: the element buffers the file
+The muxer also has a `seekable` two-pass mode: the element buffers the file
 and finalizes it at EOS with a front `SeekHead`, fixed-layout entries indexing
 Info / Tracks / Chapters / Tags / Cues with the Cues position patched in place
 once known, so the file seeks from byte 0 without reading past the Clusters. It

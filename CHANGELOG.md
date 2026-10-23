@@ -7,6 +7,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M1866: rtspsrc fails with `G2gError::Network(NetworkFailure::Connect)` during session setup and `G2gError::RtspStream` once media flows, and logs retina's message.
+- M1860: a one-pad `matroskamux` or `mp4mux` builds the fan-in muxer, and the single-input `MkvMux` and `Mp4Mux` are removed.
 - M1863: muxers take an unknown audio rate or channel count from the AAC or Opus config and fail when the stream states neither.
 - M1861: a compressed audio rate of 0 intersects as a wildcard, and a caps string with no `rate` or `channels` leaves both open.
 - M1865: a fan-in muxer takes a mid-stream input caps with an unknown framerate or geometry instead of failing with CapsMismatch.

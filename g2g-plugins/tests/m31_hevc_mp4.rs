@@ -1,15 +1,15 @@
-//! M31: HEVC through the fMP4 container. `Mp4Mux` muxes an `hvc1`/`hvcC`
+//! M31: HEVC through the fMP4 container. `Mp4MuxN` muxes an `hvc1`/`hvcC`
 //! track from synthetic H.265 access units, and `Mp4Src` reads them back
 //! byte-exactly with the codec/geometry recovered during the caps probe. No
 //! encoder needed: the elements only frame the bitstream, so hand-built NALUs
 //! exercise the full container path on any platform.
 
-use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
+use g2g_core::element::{OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{Caps, Dim, G2gError, Rate, VideoCodec};
-use g2g_plugins::mp4mux::Mp4Mux;
+use g2g_core::{Caps, Dim, G2gError, MultiInputElement, Rate, VideoCodec};
+use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::mp4src::Mp4Src;
 
 use std::path::PathBuf;
@@ -120,8 +120,10 @@ async fn hevc_round_trips_through_the_fmp4_container() {
         .map(|i| if i == 0 { keyframe_au() } else { delta_au(i) })
         .collect();
 
-    let mut mux = Mp4Mux::new();
-    let narrowed = mux.intercept_caps(&hevc_caps()).expect("intercept H.265");
+    let mut mux = Mp4MuxN::new(1);
+    let narrowed = mux
+        .intercept_caps(0, &hevc_caps())
+        .expect("intercept H.265");
     assert!(matches!(
         narrowed,
         Caps::CompressedVideo {
@@ -129,14 +131,14 @@ async fn hevc_round_trips_through_the_fmp4_container() {
             ..
         }
     ));
-    mux.configure_pipeline(&narrowed).expect("configure mux");
+    mux.configure_pipeline(0, &narrowed).expect("configure mux");
     let mut cap = Capture::default();
     for (i, au) in access_units.iter().enumerate() {
-        mux.process(PipelinePacket::DataFrame(frame(au.clone(), i)), &mut cap)
+        mux.process(0, PipelinePacket::DataFrame(frame(au.clone(), i)), &mut cap)
             .await
             .expect("mux frame");
     }
-    mux.process(PipelinePacket::Eos, &mut cap)
+    mux.process(0, PipelinePacket::Eos, &mut cap)
         .await
         .expect("mux eos");
     assert_eq!(mux.emitted(), FRAMES as u64);
@@ -190,16 +192,18 @@ async fn flush_seek_snaps_to_a_cra() {
     let cra_au = annexb(&[hevc_nal(CRA_NUT, &[0x55, 0x66])]);
     let access_units = [keyframe_au(), delta_au(1), cra_au.clone(), delta_au(3)];
 
-    let mut mux = Mp4Mux::new();
-    let narrowed = mux.intercept_caps(&hevc_caps()).expect("intercept H.265");
-    mux.configure_pipeline(&narrowed).expect("configure mux");
+    let mut mux = Mp4MuxN::new(1);
+    let narrowed = mux
+        .intercept_caps(0, &hevc_caps())
+        .expect("intercept H.265");
+    mux.configure_pipeline(0, &narrowed).expect("configure mux");
     let mut cap = Capture::default();
     for (i, au) in access_units.iter().enumerate() {
-        mux.process(PipelinePacket::DataFrame(frame(au.clone(), i)), &mut cap)
+        mux.process(0, PipelinePacket::DataFrame(frame(au.clone(), i)), &mut cap)
             .await
             .expect("mux frame");
     }
-    mux.process(PipelinePacket::Eos, &mut cap)
+    mux.process(0, PipelinePacket::Eos, &mut cap)
         .await
         .expect("mux eos");
     std::fs::write(&path, &cap.bytes).expect("write fmp4 file");
@@ -222,7 +226,7 @@ async fn flush_seek_snaps_to_a_cra() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Concatenates the ISO-BMFF byte-stream frames `Mp4Mux` forwards downstream.
+/// Concatenates the ISO-BMFF byte-stream frames `Mp4MuxN` forwards downstream.
 #[derive(Default)]
 struct Capture {
     bytes: Vec<u8>,

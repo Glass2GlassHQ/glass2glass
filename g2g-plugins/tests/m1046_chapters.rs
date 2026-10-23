@@ -31,14 +31,13 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AsyncElement, AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, Chapter, Dim, G2gError,
+    AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, Chapter, Dim, G2gError,
     MultiInputElement, MultiOutputElement, OutputSink, PushOutcome, Rate, Tag, TagList, VideoCodec,
 };
 use g2g_plugins::matroska::MatroskaDemuxer;
 use g2g_plugins::mkvdemux::{MkvDemuxN, MkvStream};
 use g2g_plugins::mkvmuxn::MkvMuxN;
 use g2g_plugins::mp4demuxn::{forwardable_streams, Mp4DemuxN, Mp4Port};
-use g2g_plugins::mp4mux::Mp4Mux;
 use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::mp4src::Mp4Src;
 
@@ -553,21 +552,21 @@ async fn reads_the_chapters_of_an_ffmpeg_authored_mp4() {
     );
 }
 
-/// The fragmented single-track path, which builds its `moov` separately from the
-/// progressive one: `Mp4Mux` puts the `chpl` in the init segment, and `Mp4Src`
-/// posts it when it opens the file.
+/// The fragmented single-track path: `Mp4MuxN` puts the `chpl` in the init
+/// segment, and `Mp4Src` posts it when it opens the file.
 #[tokio::test]
 async fn fragmented_mp4_carries_chapters_to_the_source_bus() {
-    let mut mux = Mp4Mux::new().with_chapters(reference_chapters());
-    mux.configure_pipeline(&h264_caps()).expect("configure mux");
+    let mut mux = Mp4MuxN::new(1).with_chapters(reference_chapters());
+    mux.configure_pipeline(0, &h264_caps())
+        .expect("configure mux");
     let mut written = Collect::default();
     let sps = [0x67u8, 0x42, 0x00, 0x1e, 0x88];
     let pps = [0x68u8, 0xce, 0x3c, 0x80];
     let idr = [0x65u8, 0x88, 0x84, 0x00];
-    mux.process(frame(annexb(&[&sps, &pps, &idr]), 0), &mut written)
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut written)
         .await
         .unwrap();
-    mux.process(PipelinePacket::Eos, &mut written)
+    mux.process(0, PipelinePacket::Eos, &mut written)
         .await
         .unwrap();
 

@@ -236,19 +236,12 @@ Highest leverage first:
   - `flvmux` writes an AAC sequence header no decoder accepts
     (`fate-suite/aac/al04_44.mp4`).
   - Remux changes samples or frame counts: bipbop TS AAC into mp4mux,
-    `twofields_packet.mp4` into mkv and ts, `test7_cut.mkv` into mp4.
+    `twofields_packet.mp4` into mkv and ts, `test7_cut.mkv` into mp4, and
+    `webm/opus_vp9-alpha.webm` Opus comes back 8 stereo samples longer through
+    mp4mux and matroskamux.
   - `matroskademux` sets each frame's dts to its pts, so reordered H.264 from
     Matroska reaches mp4mux, flvmux and tsmux with no real DTS and `mp4mux` writes
     no `ctts`. ffmpeg derives the DTS (gst's mp4mux writes the same timing as g2g).
-  - Remux fails through the single-input muxers: `mpegts/loewe.ts` HEVC into
-    `mp4mux` and `hevc/two_first_slice.mp4` into `matroskamux` (the one-pad muxer
-    entry below covers both). `webm/opus_vp9-alpha.webm` Opus comes back 8 stereo
-    samples longer through mp4mux and matroskamux.
-  - A one-pad `matroskamux` or `mp4mux` builds the single-input `MkvMux` /
-    `Mp4Mux`. `MkvMux` writes an empty `CodecPrivate` (AAC with ADTS headers,
-    Annex-B H.264/H.265, Opus with no `OpusHead`) and flags every block a keyframe,
-    and `Mp4Mux` takes no audio. Build the fan-in `MkvMuxN` / `Mp4MuxN` for any pad
-    count and delete the single-input muxers.
   - `tsdemux` (H.264), `matroskademux` (VP9), `flvdemux` (H.264) and `psdemux`
     (MPEG-2) default to one codec and refuse a file without it, where gst exposes
     the file's first stream. `oggdemux` behind a consumer that takes any caps
@@ -263,12 +256,6 @@ Highest leverage first:
     replayed edits need sample-accurate clipping, as the video path lays them out.
   - An explicit `wavparse ! ac3parse ! …` line picks `stream=mp3` unless it sets
     `stream=ac3`: only decodebin pins the stream from the `fmt ` chunk.
-  - `mkvmux::MkvMux` (single audio input) writes AAC with no `CodecPrivate` and
-    the ADTS headers left in the blocks, which ffmpeg cannot decode for 8-channel
-    `aac/al22_chCfg0PCE_44.mp4`.
-  - Raw AAC whose SBR runs at the core rate (`aac/al_sbr_sr_48_2_fsaac48.mp4`):
-    `mp4mux` refuses it and `matroskamux` writes a file ffmpeg decodes to other
-    samples.
 
 ## Codecs
 

@@ -68,9 +68,6 @@ use crate::identity::IdentityTransform;
 use crate::iv8demux::Iv8Demux;
 use crate::ivfdemux::IvfDemux;
 use crate::mkvdemux::MkvDemux;
-use crate::mkvmux::MkvMux;
-#[cfg(feature = "std")]
-use crate::mp4mux::Mp4Mux;
 use crate::mpeg4videoparse::Mpeg4VideoParse;
 use crate::mpegaudioparse::MpegAudioParse;
 use crate::mpegvideoparse::MpegVideoParse;
@@ -1234,16 +1231,6 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<TsMux>("mpegtsmux", || {
         Box::new(TsMux::new())
     }));
-    reg.register_launch(LaunchFactory::of::<MkvMux>("matroskamux", || {
-        Box::new(MkvMux::new())
-    }));
-    // Fragmented-MP4 / ISO-BMFF muxer (M291), the gst `mp4mux`/`qtmux` analog:
-    // `... ! x264enc ! mp4mux ! filesink location=out.mp4`. std-gated like its
-    // module (it shares the `fmp4mux` box writer).
-    #[cfg(feature = "std")]
-    reg.register_launch(LaunchFactory::of::<Mp4Mux>("mp4mux", || {
-        Box::new(Mp4Mux::new())
-    }));
     reg.register_launch(LaunchFactory::of::<OggDemux>("oggdemux", || {
         Box::new(OggDemux::new())
     }));
@@ -1630,11 +1617,9 @@ pub fn default_registry() -> Registry {
         })
         .with_input_kinds(&[StreamType::Video, StreamType::Audio, StreamType::Text]),
     );
-    // Multi-track fragmented-MP4 fan-in (M293): the A/V container case. Like
-    // `mpegtsmux`, `mp4mux` is registered both as a single-input launch element
-    // (`mp4mux::Mp4Mux` above) and here as a fan-in muxer (`mp4muxn::Mp4MuxN`);
-    // the parser picks by link degree, so one name covers `! mp4mux !` and
-    // `v.! m.  a.! m.  mp4mux name=m`. Video + AAC audio interleave by PTS.
+    // Multi-track MP4 fan-in (M293), registered only as a muxer, so the parser
+    // builds it at any link degree: `! mp4mux !` and `v.! m.  a.! m.  mp4mux name=m`.
+    // Video + AAC audio interleave by PTS.
     #[cfg(feature = "std")]
     reg.register_muxer(
         MuxerFactory::new("mp4mux", |inputs| {
@@ -1642,12 +1627,10 @@ pub fn default_registry() -> Registry {
         })
         .with_input_kinds(&[StreamType::Video, StreamType::Audio, StreamType::Text]),
     );
-    // Multi-track Matroska / WebM fan-in (M294): the A/V container case. Like
-    // `mpegtsmux`, `matroskamux` is registered both as a single-input launch
-    // element (`mkvmux::MkvMux` above) and here as a fan-in muxer
-    // (`mkvmuxn::MkvMuxN`); the parser picks by link degree, so one name covers
-    // `! matroskamux !` and `v.! m.  a.! m.  matroskamux name=m`. H.26x video +
-    // AAC audio interleave by PTS. std-gated like the `mp4mux` fan-in above.
+    // Multi-track Matroska / WebM fan-in (M294), registered only as a muxer, so
+    // the parser builds it at any link degree: `! matroskamux !` and
+    // `v.! m.  a.! m.  matroskamux name=m`. H.26x video + AAC audio interleave by
+    // PTS. std-gated like the `mp4mux` fan-in above.
     #[cfg(feature = "std")]
     reg.register_muxer(
         MuxerFactory::new("matroskamux", |inputs| {

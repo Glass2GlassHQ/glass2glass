@@ -44,13 +44,13 @@ use bevy::{
 };
 use crossbeam_channel::{Receiver, Sender};
 use g2g_core::element::DynAsyncElement;
-use g2g_core::runtime::{run_linear_chain, SourceLoop};
-use g2g_core::{G2gError, HardwareError, PipelineClock, PropValue, RawVideoFormat};
+use g2g_core::runtime::{run_graph, run_linear_chain, GraphNodeRef, SourceLoop};
+use g2g_core::{G2gError, Graph, HardwareError, PipelineClock, PropValue, RawVideoFormat};
 use g2g_plugins::appsrc::{register_appsrc, AppSrc, AppSrcFeed};
 use g2g_plugins::ffmpegenc::{Backend, FfmpegH264Enc};
 use g2g_plugins::filesink::FileSink;
 use g2g_plugins::moqtsink::MoqtSink;
-use g2g_plugins::mp4mux::Mp4Mux;
+use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::videoconvert::VideoConvert;
 use g2g_plugins::webrtcsink::WebRtcSink;
 
@@ -718,9 +718,7 @@ fn sink_pipeline(settings: StreamSettings, encoded: bool) -> Result<u64, G2gErro
     let mut enc = FfmpegH264Enc::new()
         .with_backend(Backend::Software)
         .with_bitrate(settings.bitrate as usize);
-    // MoQT egress only (see the arm below for the fragment shape).
-    let mut mux = Mp4Mux::new().with_prft(true);
-    let mut transforms: Vec<&mut dyn DynAsyncElement> = if encoded {
+    let transforms: Vec<&mut dyn DynAsyncElement> = if encoded {
         vec![]
     } else {
         vec![&mut convert, &mut enc]
@@ -743,15 +741,29 @@ fn sink_pipeline(settings: StreamSettings, encoded: bool) -> Result<u64, G2gErro
             cert_hashes,
         } => {
             info!("publishing to MoQT relay {url} under namespace {namespace}");
-            // The sink takes fragmented MP4, so the muxer is the last transform.
-            // Its default is one fragment per access unit: one MOQT object per
-            // frame, the low-latency shape this stream wants, with a producer
-            // reference time box per fragment so the viewer can measure its own
-            // end-to-end latency.
-            transforms.push(&mut mux);
+            // The sink takes fragmented MP4. The muxer's default is one fragment
+            // per access unit: one MOQT object per frame, the low-latency shape
+            // this stream wants, with a producer reference time box per fragment
+            // so the viewer can measure its own end-to-end latency.
+            let mut mux = Mp4MuxN::new(1).with_prft(true);
             let mut sink =
                 MoqtSink::new(url, namespace).with_server_certificate_hashes(cert_hashes);
-            rt.block_on(run_linear_chain(&mut src, transforms, &mut sink, &clock, 4))?
+            let mut graph: Graph<GraphNodeRef> = Graph::new();
+            let mut upstream = graph.add_source(GraphNodeRef::source_ref(&mut src));
+            for transform in transforms {
+                let node = graph.add_transform(GraphNodeRef::element_ref(transform));
+                graph.link(upstream, node).expect("link transform");
+                upstream = node;
+            }
+            let mux_node = graph.add_muxer(GraphNodeRef::muxer_ref(&mut mux), 1);
+            let sink_node = graph.add_sink(GraphNodeRef::element_ref(&mut sink));
+            graph
+                .link(upstream, mux_node.input(0))
+                .expect("link mp4mux");
+            graph
+                .link(mux_node.output(), sink_node)
+                .expect("link moqtsink");
+            rt.block_on(run_graph(graph, &clock, 4))?
         }
         StreamOutput::File(path) => {
             info!("writing H.264 to {path}");

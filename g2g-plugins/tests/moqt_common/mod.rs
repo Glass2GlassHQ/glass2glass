@@ -173,7 +173,7 @@ pub(crate) async fn publish_av_fragments(sink: &mut MoqtSink, count: u64) -> Vec
 /// access unit at a time so a broadcast can stay live while a subscriber
 /// attaches.
 pub(crate) struct VideoMuxer {
-    mux: g2g_plugins::mp4mux::Mp4Mux,
+    mux: g2g_plugins::mp4muxn::Mp4MuxN,
     index: u64,
     pad: usize,
 }
@@ -188,20 +188,25 @@ impl VideoMuxer {
     /// `pad` bytes are added to every access unit, for a test that wants
     /// objects large enough to fill a peer's flow-control window.
     pub(crate) fn new(pad: usize) -> Self {
-        let mut mux = g2g_plugins::mp4mux::Mp4Mux::new();
-        mux.configure_pipeline(&h264_caps(64, 48))
+        use g2g_core::MultiInputElement;
+
+        let mut mux = g2g_plugins::mp4muxn::Mp4MuxN::new(1);
+        mux.configure_pipeline(0, &h264_caps(64, 48))
             .expect("mp4mux caps");
         Self { mux, index: 0, pad }
     }
 
     /// Mux the next access unit and publish the fragments it produced.
     pub(crate) async fn step(&mut self, sink: &mut MoqtSink) -> Vec<u8> {
+        use g2g_core::MultiInputElement;
+
         let index = self.index;
         self.index += 1;
         let pts = index * 33_333_333;
         let mut captured = CaptureSink::default();
         self.mux
             .process(
+                0,
                 PipelinePacket::DataFrame(frame(padded_access_unit(index, self.pad), pts, index)),
                 &mut captured,
             )

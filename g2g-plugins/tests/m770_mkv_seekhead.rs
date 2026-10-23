@@ -8,11 +8,8 @@
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{
-    AsyncElement, Caps, Dim, G2gError, MultiInputElement, OutputSink, PushOutcome, Rate, VideoCodec,
-};
+use g2g_core::{Caps, Dim, G2gError, MultiInputElement, OutputSink, PushOutcome, Rate, VideoCodec};
 use g2g_plugins::matroska::MatroskaDemuxer;
-use g2g_plugins::mkvmux::MkvMux;
 use g2g_plugins::mkvmuxn::MkvMuxN;
 
 const ID_SEEK_HEAD: [u8; 4] = [0x11, 0x4D, 0x9B, 0x74];
@@ -134,28 +131,16 @@ async fn mkvmuxn_seekable_finalize_writes_front_seekhead() {
 }
 
 #[tokio::test]
-async fn mkvmux_seekable_finalize_writes_front_seekhead() {
-    let mut mux = MkvMux::new().with_seekable(true);
-    mux.configure_pipeline(&h264_caps()).unwrap();
-    let mut sink = CaptureSink::default();
-    for i in 0..3u64 {
-        mux.process(frame(h264_idr(), i * 33_000_000), &mut sink)
-            .await
-            .unwrap();
-    }
-    assert!(sink.frames.is_empty(), "two-pass: nothing emits before EOS");
-    mux.process(PipelinePacket::Eos, &mut sink).await.unwrap();
-    assert_eq!(sink.frames.len(), 1, "the whole file emits once at EOS");
-    assert_seekable_file(&sink.frames[0]);
-}
-
-#[tokio::test]
 async fn default_streaming_output_has_no_front_seekhead() {
-    let mut mux = MkvMux::new();
-    mux.configure_pipeline(&h264_caps()).unwrap();
+    let mut mux = MkvMuxN::new(1);
+    mux.configure_pipeline(0, &h264_caps()).unwrap();
     let mut sink = CaptureSink::default();
-    mux.process(frame(h264_idr(), 0), &mut sink).await.unwrap();
-    mux.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, frame(h264_idr(), 0), &mut sink)
+        .await
+        .unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
     let stream: Vec<u8> = sink.frames.concat();
     assert!(
         find(&stream, &ID_SEEK_HEAD).is_none(),

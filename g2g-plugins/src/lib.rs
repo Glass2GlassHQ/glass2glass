@@ -753,13 +753,9 @@ pub mod ivfdemux;
 // IV8 demuxer element (no_std): Caps::ByteStream{Iv8} -> the MPEG-4 Part 2 video
 // elementary stream of an IndigoVision 8000 file.
 pub mod iv8demux;
-// Matroska / WebM muxer element (no_std): one elementary stream ->
-// Caps::ByteStream{Matroska}, the inverse of mkvdemux.
-pub mod mkvmux;
-// Multi-track Matroska / WebM muxer element: N elementary streams (A/V) ->
-// Caps::ByteStream{Matroska}, the fan-in analog of mkvmux. std-gated: reuses the
-// MP4 family's NAL / ADTS / avcC helpers, and the A/V case is only reachable with
-// the std+ffmpeg encoders.
+// Matroska / WebM muxer element: N elementary streams ->
+// Caps::ByteStream{Matroska}, the inverse of mkvdemux. std-gated: reuses the
+// MP4 family's NAL / ADTS / avcC helpers.
 #[cfg(feature = "std")]
 pub mod mkvmuxn;
 // Ogg demuxer parsing core (no_std): OggS pages -> elementary-stream packets.
@@ -862,8 +858,6 @@ pub mod mp4audiosrc;
 mod mp4box;
 #[cfg(feature = "std")]
 pub mod mp4demuxn;
-#[cfg(feature = "std")]
-pub mod mp4mux;
 #[cfg(feature = "std")]
 pub mod mp4muxn;
 #[cfg(feature = "std")]

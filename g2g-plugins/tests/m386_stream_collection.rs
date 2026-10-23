@@ -16,11 +16,11 @@ use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, Dim, G2gError, OutputSink,
-    PipelinePacket, PushOutcome, Rate, StreamType, VideoCodec,
+    AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement,
+    OutputSink, PipelinePacket, PushOutcome, Rate, StreamType, VideoCodec,
 };
 
-use g2g_plugins::mp4mux::Mp4Mux;
+use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::mp4src::Mp4Src;
 use g2g_plugins::mpegts::{STREAM_TYPE_AAC, STREAM_TYPE_H264};
 use g2g_plugins::tsdemux::TsDemux;
@@ -216,7 +216,7 @@ async fn tsdemux_announces_a_stream_collection_from_the_pmt() {
     ));
 }
 
-// --- MP4 fixture: mux a tiny H.264 track with Mp4Mux, read it back with Mp4Src ---
+// --- MP4 fixture: mux a tiny H.264 track with Mp4MuxN, read it back with Mp4Src ---
 fn h264_caps() -> Caps {
     Caps::CompressedVideo {
         codec: VideoCodec::H264,
@@ -256,17 +256,19 @@ async fn mp4src_announces_its_single_video_track() {
     let sps = [0x67u8, 0x42, 0x00, 0x1e, 0x88];
     let pps = [0x68u8, 0xce, 0x3c, 0x80];
     let idr = [0x65u8, 0x88, 0x84, 0x00];
-    let mut mux = Mp4Mux::new();
-    let narrowed = mux.intercept_caps(&h264_caps()).expect("intercept H.264");
-    mux.configure_pipeline(&narrowed).expect("configure mux");
+    let mut mux = Mp4MuxN::new(1);
+    let narrowed = mux
+        .intercept_caps(0, &h264_caps())
+        .expect("intercept H.264");
+    mux.configure_pipeline(0, &narrowed).expect("configure mux");
     let mut cap = Drain::default();
-    mux.process(frame(annexb(&[&sps, &pps, &idr]), 0), &mut cap)
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut cap)
         .await
         .unwrap();
-    mux.process(frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 1), &mut cap)
+    mux.process(0, frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 1), &mut cap)
         .await
         .unwrap();
-    mux.process(PipelinePacket::Eos, &mut cap).await.unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut cap).await.unwrap();
     std::fs::write(&path, &cap.bytes).expect("write mp4");
 
     // Read it back with a bus attached; Mp4Src announces the one video track.

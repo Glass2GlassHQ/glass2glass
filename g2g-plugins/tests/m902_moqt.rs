@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::PipelinePacket;
-use g2g_core::{ByteStreamEncoding, Caps, PropValue};
+use g2g_core::{ByteStreamEncoding, Caps, MultiInputElement, PropValue};
 
 use g2g_core::runtime::parse_launch;
 use g2g_plugins::moqt::coding::{
@@ -39,7 +39,7 @@ use g2g_plugins::moqt::message::{
 };
 use g2g_plugins::moqt::session::{MOQT_PROTOCOL, MOQT_VERSION};
 use g2g_plugins::moqtsink::MoqtSink;
-use g2g_plugins::mp4mux::Mp4Mux;
+use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::registry::default_registry;
 
 mod moqt_common;
@@ -560,8 +560,8 @@ async fn moqtsink_publishes_through_the_reference_relay_to_moq_sub() {
     // it a moment rather than racing the handshake.
     tokio::time::sleep(Duration::from_millis(750)).await;
 
-    let mut mux = Mp4Mux::new();
-    mux.configure_pipeline(&h264_caps(64, 48))
+    let mut mux = Mp4MuxN::new(1);
+    mux.configure_pipeline(0, &h264_caps(64, 48))
         .expect("mp4mux caps");
     let mut sink = MoqtSink::new(&url, namespace).with_server_certificate_hashes(&tls.hash_hex);
     sink.configure_pipeline(&Caps::ByteStream {
@@ -580,6 +580,7 @@ async fn moqtsink_publishes_through_the_reference_relay_to_moq_sub() {
     while Instant::now() < deadline {
         let mut captured = CaptureSink::default();
         mux.process(
+            0,
             PipelinePacket::DataFrame(frame(access_unit(index, 0), index * 33_333_333, index)),
             &mut captured,
         )

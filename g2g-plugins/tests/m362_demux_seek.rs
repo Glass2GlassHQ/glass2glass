@@ -23,10 +23,12 @@ use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{SeekController, SourceLoop};
-use g2g_core::{ByteStreamEncoding, Caps, Dim, G2gError, Rate, Seek, VideoCodec};
+use g2g_core::{
+    ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, Rate, Seek, VideoCodec,
+};
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::fmp4demux::Fmp4Demux;
-use g2g_plugins::mp4mux::Mp4Mux;
+use g2g_plugins::mp4muxn::Mp4MuxN;
 
 use std::path::PathBuf;
 
@@ -59,7 +61,7 @@ fn au_frame(bytes: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
     }
 }
 
-/// Concatenate the ISO-BMFF byte stream `Mp4Mux` forwards.
+/// Concatenate the ISO-BMFF byte stream `Mp4MuxN` forwards.
 #[derive(Default)]
 struct Bytes {
     out: Vec<u8>,
@@ -143,20 +145,23 @@ impl OutputSink for Chain<'_> {
     }
 }
 
-/// Mux the access units to an fMP4 byte buffer via `Mp4Mux`.
+/// Mux the access units to an fMP4 byte buffer via `Mp4MuxN`.
 async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
-    let mut mux = Mp4Mux::new();
-    mux.configure_pipeline(&h264_caps()).unwrap();
+    let mut mux = Mp4MuxN::new(1);
+    mux.configure_pipeline(0, &h264_caps()).unwrap();
     let mut bytes = Bytes::default();
     for (i, au) in aus.iter().enumerate() {
         mux.process(
+            0,
             PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)),
             &mut bytes,
         )
         .await
         .unwrap();
     }
-    mux.process(PipelinePacket::Eos, &mut bytes).await.unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut bytes)
+        .await
+        .unwrap();
     bytes.out
 }
 

@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! RtspSrc -> tee -+-> FfmpegH264Dec -> WaylandSink
-//!                 `-> Mp4Mux -> FileSink
+//!                 `-> Mp4MuxN -> FileSink
 //! ```
 //!
 //! Until now the tee only had fake-element coverage. This drives one live RTSP
@@ -44,7 +44,7 @@ use g2g_core::{
 use g2g_plugins::ffmpegdec::{FfmpegH264Dec, OutputFormat};
 use g2g_plugins::filesink::FileSink;
 use g2g_plugins::fmp4demux::Fmp4Demux;
-use g2g_plugins::mp4mux::Mp4Mux;
+use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::rtspsrc::RtspSrc;
 use g2g_plugins::waylandsink::WaylandSink;
 
@@ -103,7 +103,7 @@ impl OutputSink for CaptureSink {
     }
 }
 
-/// Reads the recording back through `Fmp4Demux`, the in-repo inverse of `Mp4Mux`.
+/// Reads the recording back through `Fmp4Demux`, the in-repo inverse of `Mp4MuxN`.
 async fn demux_recording(bytes: Vec<u8>) -> CaptureSink {
     let mut demux = Fmp4Demux::new();
     demux
@@ -161,7 +161,7 @@ async fn tee_feeds_a_wayland_display_and_an_mp4_recording() {
     let mut source = RtspSrc::new(url).with_frame_limit(target);
     let mut decoder = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
     let mut display = WaylandSink::new().with_title(WINDOW_TITLE);
-    let mut muxer = Mp4Mux::new();
+    let mut muxer = Mp4MuxN::new(1);
     let mut file = FileSink::new(recording.0.clone());
 
     let stats = {
@@ -170,13 +170,13 @@ async fn tee_feeds_a_wayland_display_and_an_mp4_recording() {
         let tee = graph.add_tee(2);
         let decoder_node = graph.add_transform(GraphNodeRef::element_ref(&mut decoder));
         let display_node = graph.add_sink(GraphNodeRef::element_ref(&mut display));
-        let muxer_node = graph.add_transform(GraphNodeRef::element_ref(&mut muxer));
+        let muxer_node = graph.add_muxer(GraphNodeRef::muxer_ref(&mut muxer), 1);
         let file_node = graph.add_sink(GraphNodeRef::element_ref(&mut file));
         graph.link(source_node, tee.input()).unwrap();
         graph.link(tee.out(0), decoder_node).unwrap();
         graph.link(decoder_node, display_node).unwrap();
-        graph.link(tee.out(1), muxer_node).unwrap();
-        graph.link(muxer_node, file_node).unwrap();
+        graph.link(tee.out(1), muxer_node.input(0)).unwrap();
+        graph.link(muxer_node.output(), file_node).unwrap();
 
         let budget = std::time::Duration::from_secs(SETUP_BUDGET_S + target / 10);
         tokio::time::timeout(budget, run_graph(graph, &ZeroClock, link_cap))

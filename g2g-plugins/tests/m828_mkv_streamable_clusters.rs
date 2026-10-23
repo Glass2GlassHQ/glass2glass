@@ -1,5 +1,4 @@
-//! M828: the two shapes the single-track `matroskamux` writes, and what each one
-//! buys.
+//! M828: the two shapes a one-pad `matroskamux` writes, and what each one buys.
 //!
 //! Streaming (the default, and `streamable`): an unknown-size `Segment` (the
 //! 8-byte all-ones EBML size) and unknown-size `Cluster`s (the one-byte `0xFF`
@@ -36,13 +35,13 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::parse_launch;
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, Dim, G2gError, OutputSink, PropValue, PushOutcome,
-    Rate, VideoCodec,
+    AsyncElement, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, OutputSink,
+    PropValue, PushOutcome, Rate, VideoCodec,
 };
 use g2g_plugins::conformance::persist;
 use g2g_plugins::matroska::MatroskaDemuxer;
 use g2g_plugins::mkvdemux::{MkvDemux, MkvStream};
-use g2g_plugins::mkvmux::MkvMux;
+use g2g_plugins::mkvmuxn::MkvMuxN;
 use g2g_plugins::registry::default_registry;
 
 const ID_SEGMENT: [u8; 4] = [0x18, 0x53, 0x80, 0x67];
@@ -111,7 +110,9 @@ fn script() -> Vec<(Vec<u8>, u64)> {
     (0..40u64)
         .map(|i| {
             let len = 40 + (i as usize % 7) * 130;
-            let payload = (0..len).map(|b| (b as u8) ^ (i as u8)).collect();
+            let mut payload: Vec<u8> = (0..len).map(|b| (b as u8) ^ (i as u8)).collect();
+            // a VP9 uncompressed header byte marking a key frame
+            payload[0] = 0x80;
             (payload, i * 80_000_000)
         })
         .collect()
@@ -119,17 +120,17 @@ fn script() -> Vec<(Vec<u8>, u64)> {
 
 /// Mux a script through the element, in whichever mode the flags select.
 async fn mux(streamable: bool, seekable: bool, aus: &[(Vec<u8>, u64)]) -> Vec<u8> {
-    let mut mux = MkvMux::new()
+    let mut mux = MkvMuxN::new(1)
         .with_streamable(streamable)
         .with_seekable(seekable);
-    mux.configure_pipeline(&vp9_caps()).expect("configure");
+    mux.configure_pipeline(0, &vp9_caps()).expect("configure");
     let mut sink = CaptureSink::default();
     for (data, pts) in aus {
-        mux.process(frame(data.clone(), *pts), &mut sink)
+        mux.process(0, frame(data.clone(), *pts), &mut sink)
             .await
             .expect("mux frame");
     }
-    mux.process(PipelinePacket::Eos, &mut sink)
+    mux.process(0, PipelinePacket::Eos, &mut sink)
         .await
         .expect("mux eos");
     sink.bytes()
@@ -243,10 +244,10 @@ fn simple_block_ends(file: &[u8]) -> Vec<usize> {
 /// two-pass `seekable` mode, whose backpatches a live stream cannot carry.
 #[test]
 fn streamable_property_round_trips() {
-    let mux = MkvMux::new().with_streamable(true);
+    let mux = MkvMuxN::new(1).with_streamable(true);
     assert_eq!(mux.get_property("streamable"), Some(PropValue::Bool(true)));
 
-    let mut mux = MkvMux::new();
+    let mut mux = MkvMuxN::new(1);
     assert_eq!(mux.get_property("streamable"), Some(PropValue::Bool(false)));
     assert!(mux
         .properties()
@@ -260,7 +261,7 @@ fn streamable_property_round_trips() {
         "a live stream has nowhere to put the two-pass backpatches"
     );
 
-    // The same name through the launch text, on the single-input matroskamux.
+    // The same name through the launch text, on matroskamux.
     let reg = default_registry();
     parse_launch(
         &reg,

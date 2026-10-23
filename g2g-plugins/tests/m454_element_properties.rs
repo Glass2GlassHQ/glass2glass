@@ -1470,10 +1470,12 @@ fn tsmux_broadcast_knobs() {
         .expect("cadences stay live");
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn mkvmux_streamable() {
-    use g2g_plugins::mkvmux::MkvMux;
-    let mut e = MkvMux::new();
+    use g2g_core::MultiInputElement;
+    use g2g_plugins::mkvmuxn::MkvMuxN;
+    let mut e = MkvMuxN::new(1);
     assert!(declares(e.properties(), "streamable"));
     e.set_property("streamable", PropValue::Bool(true)).unwrap();
     assert_eq!(e.get_property("streamable"), Some(PropValue::Bool(true)));
@@ -1482,8 +1484,9 @@ fn mkvmux_streamable() {
 #[cfg(feature = "std")]
 #[test]
 fn mp4mux_fragment_duration() {
-    use g2g_plugins::mp4mux::Mp4Mux;
-    let mut e = Mp4Mux::new();
+    use g2g_core::MultiInputElement;
+    use g2g_plugins::mp4muxn::Mp4MuxN;
+    let mut e = Mp4MuxN::new(1);
     assert!(declares(e.properties(), "fragment-duration"));
     e.set_property("fragment-duration", PropValue::Uint(2000))
         .unwrap();

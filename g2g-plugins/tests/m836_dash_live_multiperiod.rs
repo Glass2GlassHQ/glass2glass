@@ -20,12 +20,12 @@ use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropValue,
-    PushOutcome, Rate, Segment, VideoCodec,
+    ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain, MultiInputElement, OutputSink,
+    PipelinePacket, PropValue, PushOutcome, Rate, Segment, VideoCodec,
 };
 use g2g_plugins::dashsrc::DashSrc;
 use g2g_plugins::fmp4demux::Fmp4Demux;
-use g2g_plugins::mp4mux::Mp4Mux;
+use g2g_plugins::mp4muxn::Mp4MuxN;
 
 #[path = "common/dash_live_server.rs"]
 mod dash_live_server;
@@ -368,26 +368,30 @@ fn access_units(mark: u8) -> Vec<Vec<u8>> {
 }
 
 async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
-    let mut mux = Mp4Mux::new();
-    mux.configure_pipeline(&Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width: Dim::Fixed(64),
-        height: Dim::Fixed(48),
-        framerate: Rate::Fixed(30 << 16),
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        alignment: g2g_core::BitstreamAlignment::Unspecified,
-    })
+    let mut mux = Mp4MuxN::new(1);
+    mux.configure_pipeline(
+        0,
+        &Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(64),
+            height: Dim::Fixed(48),
+            framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
+        },
+    )
     .unwrap();
     let mut out = CaptureSink::default();
     for (i, au) in aus.iter().enumerate() {
         mux.process(
+            0,
             PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)),
             &mut out,
         )
         .await
         .unwrap();
     }
-    mux.process(PipelinePacket::Eos, &mut out).await.unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut out).await.unwrap();
     out.body
 }
 

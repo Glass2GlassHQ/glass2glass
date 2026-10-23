@@ -11,7 +11,7 @@
 //! `CapsChanged` at the first `moof`, whose `tfhd` can declare the frame rate;
 //! each `moof`+`mdat` pair yields samples. The out-of-band
 //! parameter sets are prepended to the first emitted access unit so a decoder can
-//! start. Single video track; the profile `Mp4Mux` writes (see `fmp4`).
+//! start. Single video track; the profile `mp4mux` writes (see `fmp4`).
 
 use core::future::Future;
 use core::pin::Pin;

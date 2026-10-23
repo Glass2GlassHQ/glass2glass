@@ -43,7 +43,7 @@ use web_transport_quinn::{RecvStream, SendStream, Server, Session};
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::PipelinePacket;
 use g2g_core::runtime::{parse_launch, SourceLoop};
-use g2g_core::{ByteStreamEncoding, Caps, PropValue};
+use g2g_core::{ByteStreamEncoding, Caps, MultiInputElement, PropValue};
 
 use g2g_plugins::moqt::coding::{setup_param, MoqtError, Params, Reader};
 use g2g_plugins::moqt::data::{ObjectStatus, SubgroupHeader};
@@ -52,7 +52,7 @@ use g2g_plugins::moqt::message::ControlMessage;
 use g2g_plugins::moqt::reassembly::Reassembler;
 use g2g_plugins::moqtsink::MoqtSink;
 use g2g_plugins::moqtsrc::MoqtSrc;
-use g2g_plugins::mp4mux::Mp4Mux;
+use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::registry::default_registry;
 
 mod moqt_common;
@@ -400,8 +400,8 @@ async fn round_trip(
     big_every: u64,
     subscribe_after: Duration,
 ) -> RoundTrip {
-    let mut mux = Mp4Mux::new();
-    mux.configure_pipeline(&h264_caps(64, 48))
+    let mut mux = Mp4MuxN::new(1);
+    mux.configure_pipeline(0, &h264_caps(64, 48))
         .expect("mp4mux caps");
     sink.configure_pipeline(&Caps::ByteStream {
         encoding: ByteStreamEncoding::IsoBmff,
@@ -420,6 +420,7 @@ async fn round_trip(
         while !done.get() && Instant::now() < deadline {
             let mut captured = CaptureSink::default();
             mux.process(
+                0,
                 PipelinePacket::DataFrame(frame(
                     access_unit(index, big_every),
                     index * 33_333_333,

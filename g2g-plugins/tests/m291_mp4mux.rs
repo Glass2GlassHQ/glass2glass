@@ -1,7 +1,7 @@
-//! M291 fragmented-MP4 muxer element: `Mp4Mux` wraps an H.264 elementary stream
+//! M291 fragmented-MP4 muxer element: `Mp4MuxN` wraps an H.264 elementary stream
 //! into an ISO-BMFF byte stream forwarded downstream (the gst `mp4mux`/`qtmux`
 //! analog: `... ! x264enc ! mp4mux ! filesink`). The strong test is a real
-//! round-trip: mux access units through `Mp4Mux`, demux them back through
+//! round-trip: mux access units through `Mp4MuxN`, demux them back through
 //! `Fmp4Demux`, and compare byte-exact (the same round-trip proof `m158` runs).
 //! Also checks the launch registry resolves `mp4mux` / `qtmux` to ISO-BMFF, and
 //! that a non-H.264/H.265 caps is rejected at configure.
@@ -13,10 +13,11 @@ use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    ByteStreamEncoding, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, VideoCodec,
+    ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, OutputSink, PushOutcome, Rate,
+    VideoCodec,
 };
 use g2g_plugins::fmp4demux::Fmp4Demux;
-use g2g_plugins::mp4mux::Mp4Mux;
+use g2g_plugins::mp4muxn::Mp4MuxN;
 
 fn h264_caps(w: u32, h: u32) -> Caps {
     Caps::CompressedVideo {
@@ -88,21 +89,24 @@ fn source_access_units() -> Vec<Vec<u8>> {
     vec![idr, p(1), p(2), p(3)]
 }
 
-/// Mux the access units to an fMP4 byte buffer via the `Mp4Mux` element,
+/// Mux the access units to an fMP4 byte buffer via the `Mp4MuxN` element,
 /// concatenating the byte-stream frames it forwards downstream.
 async fn mux_via_element(aus: &[Vec<u8>]) -> Vec<u8> {
-    let mut mux = Mp4Mux::new();
-    mux.configure_pipeline(&h264_caps(64, 48)).unwrap();
+    let mut mux = Mp4MuxN::new(1);
+    mux.configure_pipeline(0, &h264_caps(64, 48)).unwrap();
     let mut sink = CaptureSink::default();
     for (i, au) in aus.iter().enumerate() {
         mux.process(
+            0,
             PipelinePacket::DataFrame(frame(au.clone(), i as u64 * 33_333_333, i as u64)),
             &mut sink,
         )
         .await
         .unwrap();
     }
-    mux.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
     assert_eq!(
         mux.emitted(),
         aus.len() as u64,
@@ -150,7 +154,7 @@ async fn mp4mux_roundtrips_through_fmp4demux() {
 
 #[test]
 fn rejects_non_h26x_caps() {
-    // The muxer carries H.264 / H.265 only; raw video is refused at configure
+    // The muxer carries compressed streams only; raw video is refused at configure
     // (the coverage the removed Mp4Sink test held).
     let raw = Caps::RawVideo {
         format: g2g_core::RawVideoFormat::Rgba8,
@@ -161,11 +165,13 @@ fn rejects_non_h26x_caps() {
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     assert!(
-        Mp4Mux::new().configure_pipeline(&raw).is_err(),
+        Mp4MuxN::new(1).configure_pipeline(0, &raw).is_err(),
         "raw video is not a muxable codec"
     );
     assert!(
-        Mp4Mux::new().configure_pipeline(&h264_caps(64, 48)).is_ok(),
+        Mp4MuxN::new(1)
+            .configure_pipeline(0, &h264_caps(64, 48))
+            .is_ok(),
         "H.264 is accepted"
     );
 }

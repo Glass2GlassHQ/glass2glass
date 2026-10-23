@@ -16,8 +16,14 @@ fn muxer_takes_system_frames() {
         g2g_plugins::tsmux::TsMux::new().input_domains(),
         SYSTEM_ONLY
     );
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn matroska_muxer_takes_system_frames() {
+    use g2g_core::MultiInputElement;
     assert_eq!(
-        g2g_plugins::mkvmux::MkvMux::new().input_domains(),
+        g2g_plugins::mkvmuxn::MkvMuxN::new(1).input_domains(),
         SYSTEM_ONLY
     );
 }

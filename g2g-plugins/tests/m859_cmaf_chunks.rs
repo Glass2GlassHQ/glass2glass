@@ -32,13 +32,11 @@ use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement,
-    MultiOutputElement, MultiOutputSink, OutputSink, PropError, PropValue, PushOutcome, Rate,
-    VideoCodec,
+    AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, MultiOutputElement,
+    MultiOutputSink, OutputSink, PropError, PropValue, PushOutcome, Rate, VideoCodec,
 };
 use g2g_plugins::conformance::persist;
 use g2g_plugins::mp4demuxn::{forwardable_streams, Mp4DemuxN, Mp4Port};
-use g2g_plugins::mp4mux::Mp4Mux;
 use g2g_plugins::mp4muxn::Mp4MuxN;
 
 const WIDTH: usize = 320;
@@ -338,11 +336,11 @@ fn timed_aus(aus: &[Vec<u8>]) -> Vec<(Vec<u8>, FrameTiming)> {
         .collect()
 }
 
-/// Push `aus`, `step_ns` apart, through a single-track `Mp4Mux` and return the
+/// Push `aus`, `step_ns` apart, through a single-track `Mp4MuxN` and return the
 /// byte stream plus the number of downstream frames it was pushed in.
-async fn mux_single(aus: &[Vec<u8>], step_ns: u64, m: Mp4Mux) -> (Vec<u8>, usize) {
+async fn mux_single(aus: &[Vec<u8>], step_ns: u64, m: Mp4MuxN) -> (Vec<u8>, usize) {
     let mut m = m;
-    m.configure_pipeline(&h264_caps()).expect("configure");
+    m.configure_pipeline(0, &h264_caps()).expect("configure");
     let mut sink = CaptureSink::default();
     for (i, au) in aus.iter().enumerate() {
         let timing = FrameTiming {
@@ -350,11 +348,11 @@ async fn mux_single(aus: &[Vec<u8>], step_ns: u64, m: Mp4Mux) -> (Vec<u8>, usize
             duration_ns: step_ns,
             ..FrameTiming::default()
         };
-        m.process(frame(au.clone(), timing), &mut sink)
+        m.process(0, frame(au.clone(), timing), &mut sink)
             .await
             .expect("mux");
     }
-    m.process(PipelinePacket::Eos, &mut sink)
+    m.process(0, PipelinePacket::Eos, &mut sink)
         .await
         .expect("mux eos");
     (sink.bytes, sink.frames)
@@ -555,11 +553,11 @@ fn field<'a>(probed: &'a [(String, String)], key: &str) -> &'a str {
 
 // --- tests ----------------------------------------------------------------
 
-/// Both new properties round-trip on both muxers, are typed, and default to the
+/// Both new properties round-trip, are typed, and default to the
 /// pre-M859 behaviour.
 #[test]
 fn chunk_duration_and_prft_properties_round_trip() {
-    let mut single = Mp4Mux::new();
+    let mut single = Mp4MuxN::new(1);
     assert_eq!(
         single.get_property("chunk-duration"),
         Some(PropValue::Uint(0)),
@@ -634,7 +632,7 @@ async fn chunks_subdivide_a_fragment_with_continuous_decode_times() {
     let (file, frames) = mux_single(
         &aus,
         FRAME_25FPS_NS,
-        Mp4Mux::new().with_cmaf(true).with_chunk_duration_ms(120),
+        Mp4MuxN::new(1).with_cmaf(true).with_chunk_duration_ms(120),
     )
     .await;
 
@@ -663,8 +661,8 @@ async fn chunks_subdivide_a_fragment_with_continuous_decode_times() {
     );
     assert_eq!(kinds.len(), 20, "2 + 2 * (1 styp + 4 * 2 boxes): {kinds:?}");
     assert_eq!(
-        frames, 9,
-        "the init segment, then one byte-stream frame per chunk"
+        frames, 8,
+        "one byte-stream frame per chunk, the first carrying the init segment"
     );
 
     // The `cmfl` chunk brand appears once chunking is on, alongside the segment
@@ -712,16 +710,16 @@ async fn chunks_subdivide_a_fragment_with_continuous_decode_times() {
 async fn unchunked_output_is_unchanged() {
     let aus = synthetic_aus(2, 6);
     for (name, mux, reference) in [
-        ("per-AU", Mp4Mux::new(), Mp4Mux::new()),
+        ("per-AU", Mp4MuxN::new(1), Mp4MuxN::new(1)),
         (
             "batched",
-            Mp4Mux::new().with_fragment_duration_ms(100),
-            Mp4Mux::new().with_fragment_duration_ms(100),
+            Mp4MuxN::new(1).with_fragment_duration_ms(100),
+            Mp4MuxN::new(1).with_fragment_duration_ms(100),
         ),
         (
             "cmaf",
-            Mp4Mux::new().with_cmaf(true),
-            Mp4Mux::new().with_cmaf(true).with_chunk_duration_ms(0),
+            Mp4MuxN::new(1).with_cmaf(true),
+            Mp4MuxN::new(1).with_cmaf(true).with_chunk_duration_ms(0),
         ),
     ] {
         let (a, _) = mux_single(&aus, FRAME_25FPS_NS, mux).await;
@@ -760,7 +758,7 @@ async fn prft_anchors_each_fragment_to_the_producer_wall_clock() {
     let (file, _) = mux_single(
         &aus,
         FRAME_25FPS_NS,
-        Mp4Mux::new()
+        Mp4MuxN::new(1)
             .with_cmaf(true)
             .with_chunk_duration_ms(120)
             .with_prft(true),
@@ -972,7 +970,7 @@ async fn chunk_layout_matches_ffmpegs_low_latency_dash_segments() {
     let (file, _) = mux_single(
         &aus,
         FRAME_25FPS_NS,
-        Mp4Mux::new().with_cmaf(true).with_chunk_duration_ms(120),
+        Mp4MuxN::new(1).with_cmaf(true).with_chunk_duration_ms(120),
     )
     .await;
     let g2g_kinds = layout(&file);

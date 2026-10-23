@@ -26,14 +26,14 @@ use g2g_core::frame::{Frame, PipelinePacket};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph, SourceLoop};
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, FrameTiming, MemoryDomain, PipelineClock, PropValue,
-    PropertySpec, SubPictureFormat, TextFormat,
+    AsyncElement, ByteStreamEncoding, Caps, FrameTiming, MemoryDomain, MultiInputElement,
+    PipelineClock, PropValue, PropertySpec, SubPictureFormat, TextFormat,
 };
 
 use g2g_plugins::dvbsub::{page_id_blob, parse_page_ids, PageIds};
 use g2g_plugins::matroska::{MatroskaDemuxer, MkvCodec};
 use g2g_plugins::mkvdemux::{MkvDemux, MkvStream};
-use g2g_plugins::mkvmux::MkvMux;
+use g2g_plugins::mkvmuxn::MkvMuxN;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::subparse::ASS_SCRIPT_HEADER;
 use g2g_plugins::vobsubsrc::VobSubSrc;
@@ -100,16 +100,16 @@ fn matroska_caps() -> Caps {
 
 /// Mux one subtitle stream through the single-track muxer, the `! matroskamux !`
 /// shape this milestone is about.
-async fn mux(mut el: MkvMux, caps: &Caps, stream: &[(Vec<u8>, FrameTiming)]) -> Vec<u8> {
-    el.configure_pipeline(caps)
+async fn mux(mut el: MkvMuxN, caps: &Caps, stream: &[(Vec<u8>, FrameTiming)]) -> Vec<u8> {
+    el.configure_pipeline(0, caps)
         .expect("matroskamux accepts the subtitle pad");
     let mut sink = CollectSink::default();
     for (data, timing) in stream {
-        el.process(frame(data.clone(), *timing), &mut sink)
+        el.process(0, frame(data.clone(), *timing), &mut sink)
             .await
             .expect("mux a cue");
     }
-    el.process(PipelinePacket::Eos, &mut sink)
+    el.process(0, PipelinePacket::Eos, &mut sink)
         .await
         .expect("mux EOS");
     sink.bytes()
@@ -200,7 +200,7 @@ async fn a_text_pad_writes_an_s_text_track_with_cue_durations() {
         ),
     ];
 
-    let muxed = mux(MkvMux::new(), &caps, &stream).await;
+    let muxed = mux(MkvMuxN::new(1), &caps, &stream).await;
     assert!(
         muxed.windows(11).any(|w| w == b"S_TEXT/UTF8"),
         "the track declares the S_TEXT/UTF8 CodecID"
@@ -240,7 +240,7 @@ async fn the_ass_storage_syntax_writes_the_script_header_as_codec_private() {
     ];
 
     let muxed = mux(
-        MkvMux::new().with_subtitle_format(TextFormat::Ssa),
+        MkvMuxN::new(1).with_subtitle_format(TextFormat::Ssa),
         &caps,
         &stream,
     )
@@ -286,7 +286,7 @@ async fn a_vobsub_pad_writes_an_s_vobsub_track_with_the_idx_as_codec_private() {
     let caps = Caps::SubPicture {
         format: SubPictureFormat::VobSub,
     };
-    let muxed = mux(MkvMux::new(), &caps, &stream).await;
+    let muxed = mux(MkvMuxN::new(1), &caps, &stream).await;
     assert!(
         muxed.windows(8).any(|w| w == b"S_VOBSUB"),
         "the track declares the S_VOBSUB CodecID"
@@ -345,7 +345,7 @@ async fn a_dvbsub_pad_writes_the_page_ids_and_drops_the_data_field_header() {
     let caps = Caps::SubPicture {
         format: SubPictureFormat::DvbSub,
     };
-    let muxed = mux(MkvMux::new(), &caps, &stream).await;
+    let muxed = mux(MkvMuxN::new(1), &caps, &stream).await;
     assert!(
         muxed.windows(8).any(|w| w == b"S_DVBSUB"),
         "the track declares the S_DVBSUB CodecID"
@@ -374,7 +374,7 @@ async fn a_dvbsub_pad_writes_the_page_ids_and_drops_the_data_field_header() {
 /// Both subtitle knobs are settable at runtime, the path `parse_launch` takes.
 #[test]
 fn the_subtitle_properties_round_trip_on_the_single_track_muxer() {
-    let mux = MkvMux::new();
+    let mux = MkvMuxN::new(1);
     let props: &[PropertySpec] = mux.properties();
     for name in ["subtitle-format", "dvbsub-page-id"] {
         assert!(
@@ -383,7 +383,7 @@ fn the_subtitle_properties_round_trip_on_the_single_track_muxer() {
         );
     }
 
-    let mut mux = MkvMux::new();
+    let mut mux = MkvMuxN::new(1);
     assert_eq!(
         mux.get_property("subtitle-format"),
         Some(PropValue::Str("utf8".into()))
@@ -414,27 +414,36 @@ fn the_subtitle_properties_round_trip_on_the_single_track_muxer() {
 
     // A document-format text pad carries whole-file bytes, not cues: refused.
     assert!(mux
-        .intercept_caps(&Caps::Text {
-            format: TextFormat::Srt
-        })
+        .intercept_caps(
+            0,
+            &Caps::Text {
+                format: TextFormat::Srt
+            }
+        )
         .is_err());
     assert!(mux
-        .intercept_caps(&Caps::Text {
-            format: TextFormat::Utf8
-        })
+        .intercept_caps(
+            0,
+            &Caps::Text {
+                format: TextFormat::Utf8
+            }
+        )
         .is_ok());
     // PGS has no Matroska carriage here, so its pad is refused too.
     assert!(mux
-        .intercept_caps(&Caps::SubPicture {
-            format: SubPictureFormat::Pgs
-        })
+        .intercept_caps(
+            0,
+            &Caps::SubPicture {
+                format: SubPictureFormat::Pgs
+            }
+        )
         .is_err());
 }
 
 /// The property is what a stream carrying no page-id config is declared on.
 #[tokio::test]
 async fn the_page_id_property_declares_a_stream_that_sends_no_config() {
-    let mut el = MkvMux::new();
+    let mut el = MkvMuxN::new(1);
     el.set_property("dvbsub-page-id", PropValue::Uint(5))
         .unwrap();
     let muxed = mux(
@@ -559,7 +568,7 @@ async fn ffprobe_reads_the_tracks_the_single_track_muxer_wrote() {
     std::fs::write(
         &text,
         mux(
-            MkvMux::new(),
+            MkvMuxN::new(1),
             &Caps::Text {
                 format: TextFormat::Utf8,
             },
@@ -581,7 +590,7 @@ async fn ffprobe_reads_the_tracks_the_single_track_muxer_wrote() {
     std::fs::write(
         &bitmap,
         mux(
-            MkvMux::new(),
+            MkvMuxN::new(1),
             &Caps::SubPicture {
                 format: SubPictureFormat::VobSub,
             },

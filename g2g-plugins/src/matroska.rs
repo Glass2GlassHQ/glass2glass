@@ -2342,9 +2342,7 @@ impl MkvTrackSpec {
     }
 }
 
-// --- Subtitle track mapping, shared by both muxer elements (M898 / M927 / M928).
-// The single-track `crate::mkvmux::MkvMux` and the fan-in `crate::mkvmuxn::MkvMuxN`
-// write subtitle pads identically, so the mapping lives here rather than in either.
+// --- Subtitle track mapping for `crate::mkvmuxn::MkvMuxN` (M898 / M927 / M928).
 
 /// The Matroska codec a bitmap subtitle format is written as, or `None` for one
 /// these muxers do not write (a `S_HDMV/PGS` block needs the `.sup` framing
@@ -2447,7 +2445,7 @@ pub struct SizePatch {
 
 /// Matroska / WebM multiplexer for a single track (M115): writes the EBML header,
 /// the Segment, Info + Tracks, then time-windowed Clusters of frames. The inverse
-/// of [`MatroskaDemuxer`]; the [`crate::mkvmux::MkvMux`] element wraps it.
+/// of [`MatroskaDemuxer`]; the `MkvMuxN` element wraps it.
 ///
 /// Frames batch into one Cluster until one is more than the span cap past its
 /// base timestamp (or time runs backward), amortizing the per-Cluster overhead.

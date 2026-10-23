@@ -26,14 +26,12 @@ use g2g_core::{
     PropertySpec, PushOutcome, Rate, VideoCodec,
 };
 
+use g2g_core::runtime::DynMultiInputElement;
+
 use crate::filesink::{io_err, path_io_err};
 use g2g_core::log::short_type_name;
 
-// A type alias (not a `use` of the trait) so the trait's methods do not land in
-// scope: `SplitMuxSink` implements `AsyncElement`, and the blanket
-// `DynAsyncElement` impl would otherwise make `self.process` / `configure_pipeline`
-// ambiguous. Method calls on the boxed muxer use the fully-qualified path.
-type BoxedMuxer = Box<dyn g2g_core::element::DynAsyncElement>;
+type BoxedMuxer = Box<dyn DynMultiInputElement>;
 
 /// The container the child muxer writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,9 +62,9 @@ impl MuxerKind {
     /// A fresh child muxer instance for this container.
     fn make(self) -> BoxedMuxer {
         match self {
-            Self::Mp4 => Box::new(crate::mp4mux::Mp4Mux::new()),
-            Self::Matroska => Box::new(crate::mkvmux::MkvMux::new()),
-            Self::MpegTs => Box::new(crate::tsmux::TsMux::new()),
+            Self::Mp4 => Box::new(crate::mp4muxn::Mp4MuxN::new(1)),
+            Self::Matroska => Box::new(crate::mkvmuxn::MkvMuxN::new(1)),
+            Self::MpegTs => Box::new(crate::tsmuxn::TsMux::new(1)),
         }
     }
 }
@@ -135,7 +133,7 @@ pub struct SplitMuxSink {
     files_written: u64,
 }
 
-// `dyn DynAsyncElement` is not Debug, so implement it by hand (like StreamDemux).
+// `dyn DynMultiInputElement` is not Debug, so implement it by hand (like StreamDemux).
 impl core::fmt::Debug for SplitMuxSink {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SplitMuxSink")
@@ -192,7 +190,7 @@ impl SplitMuxSink {
         let caps = self.caps.clone().ok_or(G2gError::NotConfigured)?;
         let path = crate::multifilesink::expand(&self.location, self.index);
         let mut mux = self.muxer.make();
-        g2g_core::element::DynAsyncElement::configure_pipeline(mux.as_mut(), &caps)?;
+        DynMultiInputElement::configure_pipeline(mux.as_mut(), 0, &caps)?;
         self.mux = Some(mux);
         self.seg = Some(SegmentSink::create(&path)?);
         self.index += 1;
@@ -204,8 +202,7 @@ impl SplitMuxSink {
     /// flush the file.
     async fn finalize_current(&mut self) -> Result<(), G2gError> {
         if let (Some(mux), Some(seg)) = (self.mux.as_mut(), self.seg.as_mut()) {
-            g2g_core::element::DynAsyncElement::process(mux.as_mut(), PipelinePacket::Eos, seg)
-                .await?;
+            DynMultiInputElement::process(mux.as_mut(), 0, PipelinePacket::Eos, seg).await?;
             seg.flush()?;
         }
         self.mux = None;
@@ -277,8 +274,9 @@ impl AsyncElement for SplitMuxSink {
                     }
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     let seg = self.seg.as_mut().ok_or(G2gError::NotConfigured)?;
-                    g2g_core::element::DynAsyncElement::process(
+                    DynMultiInputElement::process(
                         mux.as_mut(),
+                        0,
                         PipelinePacket::DataFrame(frame),
                         seg,
                     )
@@ -394,7 +392,7 @@ mod tests {
     }
 
     /// A minimal Annex-B access unit: SPS + PPS + IDR (keyframe) or a single P
-    /// slice, enough for `Mp4Mux` to build its moov and accept subsequent AUs.
+    /// slice, enough for `mp4mux` to build its moov and accept subsequent AUs.
     fn au(nals: &[&[u8]]) -> Vec<u8> {
         let mut v = Vec::new();
         for n in nals {

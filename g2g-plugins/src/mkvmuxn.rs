@@ -1,7 +1,6 @@
-//! Multi-track Matroska / WebM multiplexer element (M294): N elementary streams
-//! in (H.264 / H.265 video + AAC audio), one Matroska byte stream out. The A/V
-//! analog of the single-track [`crate::mkvmux::MkvMux`], so a muxed recording
-//! carries video and audio together:
+//! Matroska / WebM multiplexer element (M294): N elementary streams in
+//! (H.264 / H.265 video + AAC audio), one Matroska byte stream out, so a muxed
+//! recording carries video and audio together:
 //!
 //! ```text
 //! videotestsrc ! x264enc ! matroskamux name=m
@@ -20,9 +19,8 @@
 //! framing the Matroska codec mappings expect).
 //!
 //! Reachable from the `gst-launch` fan-in syntax: registered as the `matroskamux`
-//! muxer in `default_registry`, so >1 input link builds this element (a single
-//! input builds the single-track [`crate::mkvmux::MkvMux`]), the way gst's request
-//! sink pads do. Video is H.264/H.265 (avcC/hvcC + AVCC samples), VP8/VP9 (raw
+//! muxer in `default_registry`, so any number of input links builds this element,
+//! the way gst's request sink pads do. Video is H.264/H.265 (avcC/hvcC + AVCC samples), VP8/VP9 (raw
 //! frames, no CodecPrivate) or AV1 (`V_AV1`, av1C `CodecPrivate` from the
 //! sequence header, temporal delimiters stripped, M773); audio is AAC (ASC) or
 //! Opus (an in-band `OpusHead` verbatim, else a synthesised one, plus the
@@ -47,23 +45,156 @@ use g2g_core::log::short_type_name;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter,
-    ConfigureOutcome, Dim, FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement,
-    OutputSink, PipelinePacket, PropError, PropValue, PropertySpec, SubPictureFormat, TagList,
-    TextFormat, VideoCodec,
+    ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, InputAggregator, MemoryDomain,
+    MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    SubPictureFormat, TagList, TextFormat, VideoCodec,
 };
 
 use crate::aacparse::{
     is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config, require_muxer_config,
 };
+use crate::dvbsub::DEFAULT_PAGE_ID;
 use crate::fmp4mux::{avcc_record, hvcc_record, parameter_sets, split_annexb, video_sample};
 use crate::matroska::{
     default_page_blob, finalize_seekable, subpicture_block, subpicture_config,
-    subpicture_mkv_codec, text_codec_private, MatroskaMuxer, MkvCodec, MkvTrackConfig,
-    MkvTrackSpec,
+    subpicture_mkv_codec, subtitle_format_from_str, subtitle_format_str, text_codec_private,
+    MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec,
 };
-use crate::mkvmux::{MkvMuxSettings, MKV_MUX_PROPS};
 use crate::mux::{audio_track_params, refused_input};
 use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP};
+use crate::subparse::frame_subtitle_block;
+
+/// The properties the Matroska muxer exposes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MkvMuxSettings {
+    /// Live / streamable mode (the gst `streamable` property): suppress the `Cues`
+    /// seek index normally appended at EOS. The Cues let a read-to-end file seek,
+    /// but a live consumer (a pipe, an HTTP push) cannot seek and the muxer would
+    /// have to hold the cluster positions to the end; `streamable` drops it (and
+    /// the positions it would have collected) so the output is a pure forward
+    /// stream: an unknown-size Segment and unknown-size Clusters, nothing patched
+    /// at EOS. Off by default (a recording stays seekable).
+    pub(crate) streamable: bool,
+    /// Two-pass / seekable-finalize mode (M770): buffer the whole file and emit
+    /// it once at EOS with a front `SeekHead` indexing Info / Tracks / Cues, so
+    /// the file seeks from byte 0 without reading past the Clusters, and with a
+    /// real `Info` `Duration` (M794), which only a caller holding the whole file
+    /// can fill in. Costs one file-sized buffer; mutually exclusive with
+    /// `streamable`, whose live stream has no length to declare.
+    pub(crate) seekable: bool,
+    /// The on-disk syntax a `Caps::Text` pad's cues are written in (M928): the
+    /// `S_TEXT/*` CodecID and the block framing that goes with it. The pad always
+    /// carries plain cue text; this only picks how it is stored.
+    pub(crate) subtitle_format: TextFormat,
+    /// The `dvbsub-page-id` property: the composition and ancillary page an
+    /// `S_DVBSUB` track's `CodecPrivate` names when the stream carries no page-id
+    /// config blob of its own.
+    pub(crate) dvbsub_page_id: u16,
+}
+
+impl Default for MkvMuxSettings {
+    fn default() -> Self {
+        Self {
+            streamable: false,
+            seekable: false,
+            subtitle_format: TextFormat::Utf8,
+            dvbsub_page_id: DEFAULT_PAGE_ID,
+        }
+    }
+}
+
+pub(crate) const MKV_MUX_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "streamable",
+        PropKind::Bool,
+        "live mode: omit the seekable Cues index written at EOS",
+    )
+    .with_default("false"),
+    PropertySpec::new(
+        "seekable",
+        PropKind::Bool,
+        "two-pass mode: buffer the file and finalize with a front SeekHead",
+    )
+    .with_default("false"),
+    PropertySpec::new(
+        "subtitle-format",
+        PropKind::Str,
+        "storage syntax for a text input: utf8 (S_TEXT/UTF8) | ass (S_TEXT/ASS)",
+    )
+    .with_default("utf8"),
+    PropertySpec::new(
+        "dvbsub-page-id",
+        PropKind::Uint,
+        "composition and ancillary page an S_DVBSUB track declares when the stream carries no page-id config",
+    )
+    .with_default("1"),
+];
+
+impl MkvMuxSettings {
+    pub(crate) fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            // streamable (pure forward stream) and seekable (whole-file buffer)
+            // are opposites; setting both is a configuration error.
+            "streamable" => {
+                let v = value.as_bool().ok_or(PropError::Type)?;
+                if v && self.seekable {
+                    return Err(PropError::Type);
+                }
+                self.streamable = v;
+            }
+            "seekable" => {
+                let v = value.as_bool().ok_or(PropError::Type)?;
+                if v && self.streamable {
+                    return Err(PropError::Type);
+                }
+                self.seekable = v;
+            }
+            "subtitle-format" => {
+                let v = value.as_str().ok_or(PropError::Type)?;
+                self.subtitle_format = subtitle_format_from_str(v).ok_or(PropError::Value)?;
+            }
+            "dvbsub-page-id" => {
+                self.dvbsub_page_id = u16::try_from(value.as_uint().ok_or(PropError::Type)?)
+                    .map_err(|_| PropError::Value)?;
+            }
+            _ => return Err(PropError::Unknown),
+        }
+        Ok(())
+    }
+
+    pub(crate) fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "streamable" => Some(PropValue::Bool(self.streamable)),
+            "seekable" => Some(PropValue::Bool(self.seekable)),
+            "subtitle-format" => Some(PropValue::Str(
+                subtitle_format_str(self.subtitle_format)
+                    .unwrap_or("utf8")
+                    .into(),
+            )),
+            "dvbsub-page-id" => Some(PropValue::Uint(self.dvbsub_page_id as u64)),
+            _ => None,
+        }
+    }
+
+    /// The `S_TEXT/*` syntax a text pad's cues are written in: [`TextFormat::Utf8`]
+    /// (the default, `S_TEXT/UTF8`, which ffmpeg reports as `subrip`) or
+    /// [`TextFormat::Ssa`] (`S_TEXT/ASS`, cues framed as `Dialogue` fields behind
+    /// an ASS script header `CodecPrivate`). Any other value leaves the default.
+    pub(crate) fn set_subtitle_format(&mut self, format: TextFormat) {
+        if subtitle_format_str(format).is_some() {
+            self.subtitle_format = format;
+        }
+    }
+
+    /// One text cue as a block in the track's `S_TEXT/*` syntax. `read_order` is
+    /// the pad's ASS event counter, advanced here.
+    pub(crate) fn text_block(&self, cue: &[u8], read_order: &mut u64) -> Vec<u8> {
+        let seq = *read_order;
+        *read_order = seq.saturating_add(1);
+        let text = alloc::string::String::from_utf8_lossy(cue);
+        frame_subtitle_block(&text, self.subtitle_format, seq).into_bytes()
+    }
+}
 
 /// What an input pad carries, learned from its negotiated caps at configure.
 #[derive(Debug, Clone, Copy)]
@@ -177,8 +308,7 @@ impl MkvMuxN {
         }
     }
 
-    /// Attach whole-file metadata, written as a `Tags` element in the header (the
-    /// [`crate::mkvmux::MkvMux`] builder for the multi-track muxer).
+    /// Attach whole-file metadata, written as a `Tags` element in the header.
     pub fn with_tags(mut self, tags: TagList) -> Self {
         self.tags = tags;
         self
@@ -670,6 +800,15 @@ impl MultiInputElement for MkvMuxN {
         Ok(Self::output_caps_value())
     }
 
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Matroska muxer",
+            "Codec/Muxer",
+            "Muxes video, audio and subtitle tracks into a Matroska / WebM file",
+            "g2g",
+        )
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         MKV_MUX_PROPS
     }
@@ -962,7 +1101,7 @@ mod tests {
     }
 
     /// The `streamable` knob is honored on the fan-in muxer (the `name=m` shape),
-    /// the same as the single-track `MkvMux`: no `Cues` seek index is appended at
+    /// so no `Cues` seek index is appended at
     /// EOS. Set via `set_property`, the path `parse_launch` uses.
     #[tokio::test]
     async fn streamable_property_omits_cues_on_the_fan_in_muxer() {
