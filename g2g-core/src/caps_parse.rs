@@ -91,14 +91,13 @@ fn parse_field_val(v: &str) -> FieldVal<'_> {
     FieldVal::One(v)
 }
 
-// Expand a dimension field into its constraint(s): a fixed value or `Any`, a
-// `Range`, or (for a list) one `Fixed` per alternative. A present-but-unparseable
-// fixed value stays lenient (`Any`), as before; a range / list must parse or the
-// whole caps is rejected (`None`).
+// Expand a dimension field into its constraint(s): `Any` when absent, a fixed
+// value, a `Range`, or (for a list) one `Fixed` per alternative. A present value
+// must parse or the whole caps is rejected (`None`).
 fn expand_dim(fv: Option<&FieldVal>) -> Option<Vec<Dim>> {
     Some(match fv {
         None => alloc::vec![Dim::Any],
-        Some(FieldVal::One(s)) => alloc::vec![s.parse::<u32>().map_or(Dim::Any, Dim::Fixed)],
+        Some(FieldVal::One(s)) => alloc::vec![Dim::Fixed(s.parse().ok()?)],
         Some(FieldVal::Range(a, b)) => {
             alloc::vec![Dim::Range {
                 min: a.parse().ok()?,
@@ -115,7 +114,7 @@ fn expand_dim(fv: Option<&FieldVal>) -> Option<Vec<Dim>> {
 fn expand_rate(fv: Option<&FieldVal>) -> Option<Vec<Rate>> {
     Some(match fv {
         None => alloc::vec![Rate::Any],
-        Some(FieldVal::One(s)) => alloc::vec![parse_rate(s).unwrap_or(Rate::Any)],
+        Some(FieldVal::One(s)) => alloc::vec![parse_rate(s)?],
         Some(FieldVal::Range(a, b)) => {
             alloc::vec![Rate::Range {
                 min_q16: rate_q16(a)?,
@@ -203,7 +202,7 @@ fn expand_channel_mask(fv: Option<&FieldVal>) -> Option<ChannelLayout> {
 fn expand_u8(fv: Option<&FieldVal>, default: u8) -> Option<Vec<u8>> {
     Some(match fv {
         None => alloc::vec![default],
-        Some(FieldVal::One(s)) => alloc::vec![s.parse().unwrap_or(default)],
+        Some(FieldVal::One(s)) => alloc::vec![s.parse().ok()?],
         Some(FieldVal::List(xs)) => xs
             .iter()
             .map(|x| x.parse::<u8>().ok())
@@ -215,7 +214,7 @@ fn expand_u8(fv: Option<&FieldVal>, default: u8) -> Option<Vec<u8>> {
 fn expand_u32(fv: Option<&FieldVal>, default: u32) -> Option<Vec<u32>> {
     Some(match fv {
         None => alloc::vec![default],
-        Some(FieldVal::One(s)) => alloc::vec![s.parse().unwrap_or(default)],
+        Some(FieldVal::One(s)) => alloc::vec![s.parse().ok()?],
         Some(FieldVal::List(xs)) => xs
             .iter()
             .map(|x| x.parse::<u32>().ok())
@@ -231,14 +230,18 @@ impl CapsSet {
     /// `Dim::Range` / `Rate::Range`), or a `{a,b,...}` list (`format={I420,NV12}`,
     /// expanded to alternatives). A `video/x-raw` / `audio/x-raw` with no `format`
     /// expands to all supported raw formats at the given geometry (the
-    /// gst-idiomatic format-less caps). `None` on an unknown media type or an
-    /// unparseable range / list. Format values are case-insensitive (GStreamer's
+    /// gst-idiomatic format-less caps). `None` on an unknown media type, a field
+    /// with no `=`, or a field value that does not parse. Format values are case-insensitive (GStreamer's
     /// uppercase or the historical lowercase, M182).
     pub fn from_gst_string(desc: &str) -> Option<CapsSet> {
         let mut parts = split_top_commas(desc).into_iter();
         let media = parts.next()?.trim();
+        // a trailing comma leaves an empty part, gst accepts it
         let fields: Vec<(&str, FieldVal)> = parts
-            .filter_map(|p| p.split_once('='))
+            .filter(|p| !p.trim().is_empty())
+            .map(|p| p.split_once('='))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
             .map(|(k, v)| (k.trim(), parse_field_val(v)))
             .collect();
         let fv = |key: &str| fields.iter().find(|(k, _)| *k == key).map(|(_, v)| v);
@@ -622,6 +625,27 @@ mod tests {
                 .unwrap()
                 .alternatives(),
             [open]
+        );
+    }
+
+    #[test]
+    fn a_present_field_that_does_not_parse_fails_the_caps() {
+        for desc in [
+            "audio/x-raw,rate=abc",
+            "audio/x-raw,channels=two",
+            "audio/x-opus,rate=abc",
+            "audio/x-raw,rate",
+            "video/x-raw,format=NV12,width=abc",
+            "video/x-h264,height=-1",
+            "video/x-h264,framerate=thirty",
+        ] {
+            assert!(CapsSet::from_gst_string(desc).is_none(), "{desc} parsed");
+        }
+        let plain =
+            CapsSet::from_gst_string("audio/x-raw,format=S16LE,rate=44100").expect("parses");
+        assert_eq!(
+            CapsSet::from_gst_string("audio/x-raw,format=S16LE,rate=44100,"),
+            Some(plain)
         );
     }
 

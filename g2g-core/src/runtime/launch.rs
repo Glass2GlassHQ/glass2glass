@@ -1577,12 +1577,15 @@ fn parse_encoding_profile(text: &str) -> Result<EncodingProfile, ParseError> {
 /// and a sample rate whether or not the part named them, and `bitrate` is not a
 /// caps field at all.
 fn parse_profile_stream(part: &str) -> Result<ProfileStream, ParseError> {
-    let caps = single_caps(part)
-        .ok_or_else(|| ParseError::EncodingProfile(alloc::format!("unknown stream `{part}`")))?;
-    let video = matches!(caps, Caps::CompressedVideo { .. } | Caps::RawVideo { .. });
-    let audio = matches!(caps, Caps::Audio { .. });
+    let unknown_stream = || ParseError::EncodingProfile(alloc::format!("unknown stream `{part}`"));
+    let mut fields = crate::caps_parse::split_top_commas(part).into_iter();
+    let media_type = fields.next().ok_or_else(unknown_stream)?;
+    // the media type alone, so a bad field value reaches the field check below
+    let kind = single_caps(media_type).ok_or_else(unknown_stream)?;
+    let video = matches!(kind, Caps::CompressedVideo { .. } | Caps::RawVideo { .. });
+    let audio = matches!(kind, Caps::Audio { .. });
     let mut stream = ProfileStream {
-        caps,
+        caps: kind,
         width: None,
         height: None,
         framerate: None,
@@ -1590,10 +1593,7 @@ fn parse_profile_stream(part: &str) -> Result<ProfileStream, ParseError> {
         channels: None,
         bitrate: None,
     };
-    for field in crate::caps_parse::split_top_commas(part)
-        .into_iter()
-        .skip(1)
-    {
+    for field in fields {
         let (key, value) = field.split_once('=').ok_or_else(|| {
             ParseError::EncodingProfile(alloc::format!(
                 "`{part}` has a field `{}` that is not key=value",
@@ -1632,6 +1632,7 @@ fn parse_profile_stream(part: &str) -> Result<ProfileStream, ParseError> {
             "`{part}` pins one of width / height: a scale needs both, so pin both or neither"
         )));
     }
+    stream.caps = single_caps(part).ok_or_else(unknown_stream)?;
     Ok(stream)
 }
 
