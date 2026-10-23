@@ -702,7 +702,9 @@ page order, which is why the per-stream header writing is split in two. Every
 stream's beginning-of-stream page is written first, in pad order, then each
 stream's remaining header pages, then the data pages. That block goes out when
 the merge first releases a packet, the first moment every pad's in-band codec
-config is known to have arrived. `oggmux` is registered only as a fan-in muxer,
+config is known to have arrived. A Vorbis or FLAC pad whose headers are still
+missing then fails with `CapsMismatch`, logging the input and the headers it
+lacked. `oggmux` is registered only as a fan-in muxer,
 so the parser builds `OggMuxN` for one input link too.
 
 With one input pad, a changed `Segment` after audio has flowed closes the
@@ -827,8 +829,12 @@ the leading config frame of a raw stream, which becomes the `esds`,
 written as a sample. The raw units that follow are stored unchanged. ADTS frames
 are stored without their header. A channel-configuration-0 stream carries its
 program config element in each ADTS frame: the muxer moves the first one into
-the config and strips the in-band copies, as ffmpeg's `aac_adtstoasc` does. A fan-in muxer whose AAC pad delivers frames
-without either config fails the stream.
+the config and strips the in-band copies, as ffmpeg's `aac_adtstoasc` does.
+`FlvMuxN`, `Mp4MuxN` and `MkvMuxN` hold an input's frames until its config
+arrives (the H.264 or H.265 parameter sets, the AV1 sequence header, or the AAC
+config). An input that reaches EOS with frames held and no config fails with
+`CapsMismatch`, logging the input and the config it lacked, and an input that
+ends with no frames writes no track.
 
 An audio track header takes its channel count and sample rate from the pad caps,
 which a `CapsChanged` refines until the header is written. A field the caps leave

@@ -22,8 +22,8 @@ use alloc::vec::Vec;
 use g2g_core::log::Target;
 use g2g_core::{
     g2g_error, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    Frame, G2gError, InputAggregator, MultiInputElement, OutputSink, PipelinePacket, ANY_CHANNELS,
-    ANY_SAMPLE_RATE,
+    Frame, G2gError, InputAggregator, MultiInputElement, OutputSink, PipelinePacket, VideoCodec,
+    ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::aacparse::audio_specific_config_info;
@@ -47,6 +47,61 @@ pub(crate) fn refused_input_because(muxer: &'static str, caps: &Caps, reason: &s
         caps.to_gst_string()
     );
     G2gError::CapsMismatch
+}
+
+pub(crate) const CODEC_CONFIG: &str = "codec config";
+
+// what a fan-in muxer reads from a video stream's leading frames to write its track header
+pub(crate) fn video_header_config(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::H264 => "SPS and PPS",
+        VideoCodec::H265 => "VPS, SPS and PPS",
+        VideoCodec::Av1 => "AV1 sequence header",
+        _ => CODEC_CONFIG,
+    }
+}
+
+// what a fan-in muxer reads from an audio stream's leading frames to write its track header
+pub(crate) fn audio_header_config(format: AudioFormat) -> &'static str {
+    match format {
+        AudioFormat::Aac => "ADTS header or leading AudioSpecificConfig",
+        AudioFormat::Vorbis => "Vorbis identification and setup headers",
+        AudioFormat::Flac => "fLaC stream header",
+        _ => CODEC_CONFIG,
+    }
+}
+
+pub(crate) fn missing_header_config(muxer: &'static str, input: usize, awaited: &str) -> G2gError {
+    g2g_error!(
+        Target::category(muxer),
+        "input {input} has no {awaited} for its track header"
+    );
+    G2gError::CapsMismatch
+}
+
+// fails when `input` ends with frames still queued behind a track header that never got `awaited`
+pub(crate) fn require_header_config_at_end<I, T>(
+    muxer: &'static str,
+    input: usize,
+    inits: &[Option<I>],
+    aggregator: &InputAggregator<T>,
+    awaited: &str,
+) -> Result<(), G2gError> {
+    if inits[input].is_some() || aggregator.queued(input) == 0 {
+        return Ok(());
+    }
+    Err(missing_header_config(muxer, input, awaited))
+}
+
+// an input that ended with no init sent no frames, so the file carries no track for it
+pub(crate) fn every_track_header_ready<I, T>(
+    inits: &[Option<I>],
+    aggregator: &InputAggregator<T>,
+) -> bool {
+    inits
+        .iter()
+        .enumerate()
+        .all(|(input, init)| init.is_some() || aggregator.is_ended(input))
 }
 
 // the channel count and sample rate an audio track header declares
@@ -272,26 +327,108 @@ mod tests {
         }
     }
 
-    // the refusal log lines for `caps`, configured onto a fresh two-pad `M`
+    // the error `run` returns and the lines it logs on the category of `M`
     #[cfg(feature = "std")]
-    fn refusal_lines<M: MultiInputElement>(mut mux: M, caps: &Caps) -> Vec<alloc::string::String> {
+    fn logged_failure<M, T>(
+        run: impl FnOnce() -> Result<T, G2gError>,
+    ) -> (Option<G2gError>, Vec<alloc::string::String>) {
         use g2g_core::log::{self, RingSink};
-        // every sink sees every test's records, so two refusals logged at once mix
-        static ONE_REFUSAL_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _serial = ONE_REFUSAL_AT_A_TIME
+        // every sink sees every test's records, so two failures logged at once mix
+        static ONE_FAILURE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _serial = ONE_FAILURE_AT_A_TIME
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ring = RingSink::new(64);
         let sink = log::add_sink(alloc::boxed::Box::new(ring.clone()));
-        let result = mux.configure_pipeline(1, caps);
+        let result = run();
         log::remove_sink(sink);
-        assert_eq!(result.err(), Some(G2gError::CapsMismatch));
         let category = g2g_core::log::short_type_name::<M>();
-        ring.drain()
+        let lines = ring
+            .drain()
             .into_iter()
             .filter(|record| record.category == category)
             .map(|record| record.message)
-            .collect()
+            .collect();
+        (result.err(), lines)
+    }
+
+    // the refusal log lines for `caps`, configured onto a fresh two-pad `M`
+    #[cfg(feature = "std")]
+    fn refusal_lines<M: MultiInputElement>(mut mux: M, caps: &Caps) -> Vec<alloc::string::String> {
+        let (error, lines) = logged_failure::<M, _>(|| mux.configure_pipeline(1, caps));
+        assert_eq!(error, Some(G2gError::CapsMismatch));
+        lines
+    }
+
+    #[cfg(feature = "std")]
+    #[derive(Default)]
+    struct CollectSink(Vec<u8>);
+
+    #[cfg(feature = "std")]
+    impl OutputSink for CollectSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            if let Some(PipelinePacket::DataFrame(frame)) = packet_slot.take() {
+                if let Some(bytes) = frame.domain.as_system_slice() {
+                    self.0.extend_from_slice(bytes);
+                }
+            }
+            core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn system_frame(bytes: &[u8]) -> PipelinePacket {
+        use g2g_core::memory::SystemSlice;
+        use g2g_core::{FrameTiming, MemoryDomain};
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(bytes.into())),
+            FrameTiming::default(),
+            0,
+        ))
+    }
+
+    #[cfg(feature = "std")]
+    fn compressed_video(codec: g2g_core::VideoCodec) -> Caps {
+        Caps::CompressedVideo {
+            codec,
+            width: Dim::Fixed(16),
+            height: Dim::Fixed(16),
+            framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            alignment: g2g_core::BitstreamAlignment::Unspecified,
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn stereo(format: AudioFormat) -> Caps {
+        Caps::Audio {
+            format,
+            channels: 2,
+            sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        }
+    }
+
+    // the error and log lines of a one-pad `M` fed `access_unit` on caps `caps`, then Eos
+    #[cfg(feature = "std")]
+    fn end_of_stream_failure<M: MultiInputElement>(
+        mut mux: M,
+        caps: &Caps,
+        access_unit: &[u8],
+    ) -> (Option<G2gError>, Vec<alloc::string::String>) {
+        mux.configure_pipeline(0, caps)
+            .expect("the pad takes its caps");
+        let mut sink = CollectSink::default();
+        logged_failure::<M, _>(|| {
+            g2g_core::runtime::block_on(async {
+                mux.process(0, system_frame(access_unit), &mut sink).await?;
+                mux.process(0, PipelinePacket::Eos, &mut sink).await
+            })
+        })
     }
 
     #[cfg(feature = "std")]
@@ -320,6 +457,115 @@ mod tests {
             refusal_lines(crate::avimux::AviMuxN::new(2), &raw),
             expected
         );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_fan_in_muxer_fails_at_eos_on_a_stream_that_never_sent_its_config() {
+        use crate::flvmuxn::FlvMuxN;
+        use crate::mkvmuxn::MkvMuxN;
+        use crate::mp4muxn::Mp4MuxN;
+        let video = compressed_video;
+        let aac = stereo(AudioFormat::Aac);
+        // a non-IDR slice, with no parameter sets ahead of it
+        let h264_slice: &[u8] = &[0, 0, 0, 1, 0x41, 0x9A, 0x02];
+        // a TRAIL_R slice, with no parameter sets ahead of it
+        let h265_slice: &[u8] = &[0, 0, 0, 1, 0x02, 0x01, 0xD0];
+        // a temporal delimiter and a frame OBU, with no sequence header
+        let av1_frame: &[u8] = &[0x12, 0x00, 0x32, 0x01, 0x00];
+        // a raw channel pair element, neither ADTS framed nor a config
+        let raw_aac: &[u8] = &[0x21, 0x10, 0x04, 0x60];
+        let expected = |config: &str| {
+            (
+                Some(G2gError::CapsMismatch),
+                alloc::vec![alloc::format!(
+                    "input 0 has no {config} for its track header"
+                )],
+            )
+        };
+        assert_eq!(
+            end_of_stream_failure(
+                FlvMuxN::new(1),
+                &video(g2g_core::VideoCodec::H264),
+                h264_slice
+            ),
+            expected("SPS and PPS")
+        );
+        assert_eq!(
+            end_of_stream_failure(FlvMuxN::new(1), &aac, raw_aac),
+            expected("ADTS header or leading AudioSpecificConfig")
+        );
+        assert_eq!(
+            end_of_stream_failure(
+                Mp4MuxN::new(1),
+                &video(g2g_core::VideoCodec::H265),
+                h265_slice
+            ),
+            expected("VPS, SPS and PPS")
+        );
+        assert_eq!(
+            end_of_stream_failure(Mp4MuxN::new(1), &aac, raw_aac),
+            expected("ADTS header or leading AudioSpecificConfig")
+        );
+        assert_eq!(
+            end_of_stream_failure(
+                MkvMuxN::new(1),
+                &video(g2g_core::VideoCodec::Av1),
+                av1_frame
+            ),
+            expected("AV1 sequence header")
+        );
+        assert_eq!(
+            end_of_stream_failure(MkvMuxN::new(1), &aac, raw_aac),
+            expected("ADTS header or leading AudioSpecificConfig")
+        );
+        // an audio packet, its even packet type marking it as no Vorbis header
+        let vorbis_audio: &[u8] = &[0x00, 0x12, 0x34];
+        assert_eq!(
+            end_of_stream_failure(
+                crate::oggmuxn::OggMuxN::new(1),
+                &stereo(AudioFormat::Vorbis),
+                vorbis_audio
+            ),
+            expected("Vorbis identification and setup headers")
+        );
+    }
+
+    // the bytes a two-pad `M` writes from one H.264 IDR while its AAC pad ends with no frames
+    #[cfg(feature = "std")]
+    fn bytes_beside_an_empty_audio_pad<M: MultiInputElement>(mut mux: M) -> Vec<u8> {
+        let idr: &[u8] = &[
+            0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1E, 0, 0, 0, 1, 0x68, 0xCE, 0x3C, 0x80, 0, 0, 0, 1,
+            0x65, 0x88, 0x84,
+        ];
+        mux.configure_pipeline(0, &compressed_video(g2g_core::VideoCodec::H264))
+            .expect("the video pad takes its caps");
+        mux.configure_pipeline(1, &stereo(AudioFormat::Aac))
+            .expect("the audio pad takes its caps");
+        let mut sink = CollectSink::default();
+        g2g_core::runtime::block_on(async {
+            mux.process(1, PipelinePacket::Eos, &mut sink).await?;
+            mux.process(0, system_frame(idr), &mut sink).await?;
+            mux.process(0, PipelinePacket::Eos, &mut sink).await
+        })
+        .expect("the empty pad has no track to fail");
+        sink.0
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_fan_in_muxer_writes_no_track_for_an_input_that_ended_with_no_frames() {
+        // the byte after the `FLV` signature and version
+        const FLV_HEADER_FLAGS_AT: usize = 4;
+        let flv = bytes_beside_an_empty_audio_pad(crate::flvmuxn::FlvMuxN::new(2));
+        assert_eq!(
+            flv.get(FLV_HEADER_FLAGS_AT),
+            Some(&crate::flv::FLV_FLAG_VIDEO)
+        );
+        let mkv = bytes_beside_an_empty_audio_pad(crate::mkvmuxn::MkvMuxN::new(2));
+        let mut demuxer = crate::matroska::MatroskaDemuxer::new();
+        demuxer.push_data(&mkv);
+        assert_eq!(demuxer.tracks().len(), 1);
     }
 
     #[cfg(feature = "std")]

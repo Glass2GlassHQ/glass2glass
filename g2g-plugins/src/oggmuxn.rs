@@ -64,7 +64,9 @@ use g2g_core::{
     OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Segment,
 };
 
-use crate::mux::{audio_track_params, refused_input};
+use crate::mux::{
+    audio_header_config, audio_track_params, missing_header_config, refused_input, CODEC_CONFIG,
+};
 use crate::ogg::{OggPageWriter, VorbisTiming};
 use crate::opusparse::{
     is_opus_config, packet_samples as opus_packet_samples, synth_opus_head, OPUS_ENCODER_PRE_SKIP,
@@ -200,8 +202,7 @@ impl OggStreamMux {
     /// Write this stream's beginning-of-stream page (the mapping's first packet
     /// alone, granule 0), stashing the remaining header packets for
     /// [`write_rest`](Self::write_rest).
-    fn write_bos(&mut self) -> Result<Vec<u8>, G2gError> {
-        let (bos, rest) = self.header_packets()?.ok_or(G2gError::NotConfigured)?;
+    fn write_bos(&mut self, (bos, rest): HeaderPackets) -> Vec<u8> {
         // Vorbis timing needs the mode tables from ident + setup.
         if self.format == Some(AudioFormat::Vorbis) {
             self.vorbis = match (self.vorbis_header(1), self.vorbis_header(5)) {
@@ -211,7 +212,7 @@ impl OggStreamMux {
         }
         self.pending_rest = rest;
         self.writer.push_packet(bos, 0);
-        Ok(self.writer.flush(false))
+        self.writer.flush(false)
     }
 
     /// Write the header packets after the beginning-of-stream one, on their own
@@ -582,8 +583,16 @@ impl OggMuxN {
     /// pad order, then each stream's remaining header pages (RFC 3533 §4).
     fn write_headers(&mut self) -> Result<Vec<u8>, G2gError> {
         let mut out = Vec::new();
-        for stream in &mut self.streams {
-            out.extend_from_slice(&stream.write_bos()?);
+        for (input, stream) in self.streams.iter_mut().enumerate() {
+            let Some(packets) = stream.header_packets()? else {
+                let awaited = stream.format.map_or(CODEC_CONFIG, audio_header_config);
+                return Err(missing_header_config(
+                    short_type_name::<Self>(),
+                    input,
+                    awaited,
+                ));
+            };
+            out.extend_from_slice(&stream.write_bos(packets));
         }
         for stream in &mut self.streams {
             out.extend_from_slice(&stream.write_rest());

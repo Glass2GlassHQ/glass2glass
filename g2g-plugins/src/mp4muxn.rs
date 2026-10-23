@@ -47,9 +47,7 @@ use g2g_core::{
 use g2g_core::caps::framerate_q16_period_ns;
 use g2g_core::time::ns_to_ticks;
 
-use crate::aacparse::{
-    is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config, require_muxer_config,
-};
+use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
 use crate::cea::{build_cdp, parse_cc_data, CcTriple};
 use crate::fmp4mux::{
     av1c_record, parameter_sets, split_annexb, video_sample, visual_sample_entry,
@@ -59,7 +57,10 @@ use crate::mp4box::{
     ftyp, ftyp_cmaf, full_box, mp4_box, prft, put_box_header, styp_cmaf, udta_with_tags,
     BOX_HEADER_LEN, MATRIX,
 };
-use crate::mux::{audio_track_params, refused_input, refused_input_because};
+use crate::mux::{
+    audio_header_config, audio_track_params, every_track_header_ready, refused_input,
+    refused_input_because, require_header_config_at_end, video_header_config, CODEC_CONFIG,
+};
 use crate::opusparse::{
     dops_from_opus_head, is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP,
 };
@@ -575,10 +576,13 @@ impl Mp4MuxN {
         }
     }
 
-    /// True once every pad that will produce data has its init captured. A pad
-    /// that ended without an AU is excluded (its track is simply absent).
-    fn all_inits_ready(&self) -> bool {
-        (0..self.inputs).all(|i| self.inits[i].is_some() || self.agg.is_ended(i))
+    // what the pad's track header waits for from its stream
+    fn header_config(&self, input: usize) -> &'static str {
+        match self.kinds[input] {
+            Some(PadKind::Video { codec, .. }) => video_header_config(codec),
+            Some(PadKind::Audio { format, .. }) => audio_header_config(format),
+            _ => CODEC_CONFIG,
+        }
     }
 
     /// Capture a pad's track init from its first access unit, if not already set.
@@ -697,19 +701,14 @@ impl Mp4MuxN {
     /// the raw AAC for audio, and the caption atoms (`cdat` / `cdt2` for
     /// 608, `ccdp` for 708) for a raw-caption track. Also returns whether it is a
     /// sync sample.
-    fn sample_for(&mut self, input: usize, au: &[u8]) -> Result<(Vec<u8>, bool), G2gError> {
-        Ok(match self.kinds[input] {
+    fn sample_for(&mut self, input: usize, au: &[u8]) -> (Vec<u8>, bool) {
+        // Audio access units are always sync samples. AAC strips its ADTS
+        // header; Opus packets are stored raw.
+        if let Some(config) = self.aac_config(input) {
+            return (muxer_access_unit(config, au).to_vec(), true);
+        }
+        match self.kinds[input] {
             Some(PadKind::Video { codec, .. }) => video_sample(codec, au),
-            // Audio access units are always sync samples. AAC strips its ADTS
-            // header; Opus packets are stored raw.
-            Some(PadKind::Audio {
-                format: AudioFormat::Aac,
-                ..
-            }) => {
-                let config =
-                    require_muxer_config(self.aac_config(input), short_type_name::<Self>())?;
-                (muxer_access_unit(config, au).to_vec(), true)
-            }
             // A caption frame is a cc_data triple stream; re-frame it into the
             // sample atoms the QuickTime caption entry defines.
             Some(PadKind::ClosedCaption(format)) => {
@@ -719,7 +718,7 @@ impl Mp4MuxN {
             }
             Some(PadKind::Text) => (tx3g_sample(au), true),
             _ => (au.to_vec(), true),
-        })
+        }
     }
 
     /// Buffer one access unit for its track. In per-AU mode (`fragment-duration`
@@ -736,7 +735,7 @@ impl Mp4MuxN {
             .domain
             .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
         let pts_ns = frame.timing.pts_ns;
-        let (sample, is_sync) = self.sample_for(input, au)?;
+        let (sample, is_sync) = self.sample_for(input, au);
 
         let track = &self.inits[input];
         let timescale = track
@@ -1332,7 +1331,16 @@ impl MultiInputElement for Mp4MuxN {
                     self.first_pts_ns[input].get_or_insert(frame.timing.pts_ns);
                     self.agg.push(input, frame);
                 }
-                PipelinePacket::Eos => self.agg.mark_ended(input),
+                PipelinePacket::Eos => {
+                    require_header_config_at_end(
+                        short_type_name::<Self>(),
+                        input,
+                        &self.inits,
+                        &self.agg,
+                        self.header_config(input),
+                    )?;
+                    self.agg.mark_ended(input)
+                }
                 // A demuxer negotiates compressed audio with the `0/0` "unknown
                 // until parsed" caps and refines them at runtime, so the real
                 // channel count / rate arrive here. Take them while the `moov`
@@ -1357,7 +1365,7 @@ impl MultiInputElement for Mp4MuxN {
             }
 
             // Hold every AU until all tracks have their init (the moov needs them).
-            if !self.all_inits_ready() {
+            if !every_track_header_ready(&self.inits, &self.agg) {
                 return Ok(());
             }
             // Release AUs now safe to emit, in global PTS order.

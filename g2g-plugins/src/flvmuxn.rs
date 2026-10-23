@@ -41,12 +41,13 @@ use g2g_core::{
     OutputSink, PipelinePacket, TagList, VideoCodec,
 };
 
-use crate::aacparse::{
-    is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config, require_muxer_config,
-};
+use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
 use crate::annexb::{au_is_keyframe, avcc_record, avcc_sample, parameter_sets, split_annexb};
 use crate::flv::{FlvCodec, FlvMuxer, FlvTrack};
-use crate::mux::{audio_track_params, refused_input, refused_input_because};
+use crate::mux::{
+    audio_header_config, audio_track_params, every_track_header_ready, refused_input,
+    refused_input_because, require_header_config_at_end, video_header_config, CODEC_CONFIG,
+};
 use g2g_core::log::short_type_name;
 
 /// A track's init, captured from its first access unit: the parameter sets
@@ -152,9 +153,13 @@ impl FlvMuxN {
         }
     }
 
-    /// True once every pad has its init captured (the sequence headers need them).
-    fn all_inits_ready(&self) -> bool {
-        self.inits.iter().all(|i| i.is_some())
+    // what the pad's sequence header waits for from its stream
+    fn header_config(&self, input: usize) -> &'static str {
+        match self.kinds[input] {
+            Some(FlvCodec::H264) => video_header_config(VideoCodec::H264),
+            Some(FlvCodec::Aac) => audio_header_config(AudioFormat::Aac),
+            _ => CODEC_CONFIG,
+        }
     }
 
     /// Capture a pad's track init from its first access unit, if not already set.
@@ -196,11 +201,13 @@ impl FlvMuxN {
                 TrackInit::None => {}
             }
         }
+        // a pad that ended with no frames has no init and writes no track
         let of_track = |t| {
             self.kinds
                 .iter()
-                .flatten()
-                .copied()
+                .zip(&self.inits)
+                .filter(|(_, init)| init.is_some())
+                .filter_map(|(kind, _)| *kind)
                 .find(|c| c.track() == t)
         };
         let audio_codec = of_track(FlvTrack::Audio);
@@ -254,12 +261,10 @@ impl FlvMuxN {
             }
             // AAC access units are raw frames once any ADTS header is stripped;
             // MP3 and Speex frames need no unwrapping.
-            Some(FlvCodec::Aac) => {
-                let config = self.inits[input].as_ref().and_then(TrackInit::asc);
-                let config = require_muxer_config(config, short_type_name::<Self>())?;
-                mux.push_audio(muxer_access_unit(config, slice), pts_ms)
-            }
-            _ => mux.push_audio(slice, pts_ms),
+            _ => match self.inits[input].as_ref().and_then(TrackInit::asc) {
+                Some(config) => mux.push_audio(muxer_access_unit(config, slice), pts_ms),
+                None => mux.push_audio(slice, pts_ms),
+            },
         };
 
         let out_frame = Frame::new(
@@ -389,7 +394,16 @@ impl MultiInputElement for FlvMuxN {
                     }
                     self.agg.push(input, frame);
                 }
-                PipelinePacket::Eos => self.agg.mark_ended(input),
+                PipelinePacket::Eos => {
+                    require_header_config_at_end(
+                        short_type_name::<Self>(),
+                        input,
+                        &self.inits,
+                        &self.agg,
+                        self.header_config(input),
+                    )?;
+                    self.agg.mark_ended(input)
+                }
                 // CapsChanged is consumed by the runner's muxer arm; the sequence
                 // headers are fixed from the first AU's in-band init.
                 PipelinePacket::CapsChanged(_) => return Ok(()),
@@ -405,7 +419,7 @@ impl MultiInputElement for FlvMuxN {
 
             // Hold every AU until all tracks have their init (the sequence headers
             // are written before any media frame).
-            if !self.all_inits_ready() {
+            if !every_track_header_ready(&self.inits, &self.agg) {
                 return Ok(());
             }
             if self.mux.is_none() {

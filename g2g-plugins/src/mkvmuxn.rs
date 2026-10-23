@@ -50,9 +50,7 @@ use g2g_core::{
     SubPictureFormat, TagList, TextFormat, VideoCodec,
 };
 
-use crate::aacparse::{
-    is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config, require_muxer_config,
-};
+use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
 use crate::dvbsub::DEFAULT_PAGE_ID;
 use crate::fmp4mux::{avcc_record, hvcc_record, parameter_sets, split_annexb, video_sample};
 use crate::matroska::{
@@ -60,7 +58,10 @@ use crate::matroska::{
     subpicture_mkv_codec, subtitle_format_from_str, subtitle_format_str, text_codec_private,
     MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec,
 };
-use crate::mux::{audio_track_params, refused_input};
+use crate::mux::{
+    audio_header_config, audio_track_params, every_track_header_ready, refused_input,
+    require_header_config_at_end, video_header_config, CODEC_CONFIG,
+};
 use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP};
 use crate::subparse::frame_subtitle_block;
 
@@ -438,10 +439,18 @@ impl MkvMuxN {
         }
     }
 
-    /// True once every pad has its init captured (the Tracks element, and so the
-    /// track numbering, needs every track present).
-    fn all_inits_ready(&self) -> bool {
-        self.inits.iter().all(|i| i.is_some())
+    // what the pad's track header waits for from its stream
+    fn header_config(&self, input: usize) -> &'static str {
+        match self.kinds[input] {
+            Some(PadKind::Video(codec)) => video_header_config(codec),
+            Some(PadKind::Audio { format, .. }) => audio_header_config(format),
+            _ => CODEC_CONFIG,
+        }
+    }
+
+    // the Matroska track a pad writes, counting only the pads that carry a track
+    fn track_index(&self, input: usize) -> usize {
+        self.inits[..input].iter().flatten().count()
     }
 
     /// Capture a pad's track init from its first access unit, if not already set.
@@ -563,24 +572,19 @@ impl MkvMuxN {
     /// header or is stored raw behind its config; Opus packets are stored raw.
     /// Audio frames are always sync samples. A text cue is framed in the track's
     /// `S_TEXT/*` syntax (M898).
-    fn sample_for(&mut self, input: usize, au: &[u8]) -> Result<(Vec<u8>, bool), G2gError> {
-        Ok(match self.kinds[input] {
+    fn sample_for(&mut self, input: usize, au: &[u8]) -> (Vec<u8>, bool) {
+        if let Some(config) = self.aac_config(input) {
+            return (muxer_access_unit(config, au).to_vec(), true);
+        }
+        match self.kinds[input] {
             Some(PadKind::Video(codec)) => video_sample(codec, au),
-            Some(PadKind::Audio {
-                format: AudioFormat::Aac,
-                ..
-            }) => {
-                let config =
-                    require_muxer_config(self.aac_config(input), short_type_name::<Self>())?;
-                (muxer_access_unit(config, au).to_vec(), true)
-            }
             Some(PadKind::Text) => (
                 self.settings.text_block(au, &mut self.text_seq[input]),
                 true,
             ),
             Some(PadKind::SubPicture(format)) => (subpicture_block(format, au), true),
             _ => (au.to_vec(), true),
-        })
+        }
     }
 
     /// Take an in-band config blob as the pad's `CodecPrivate`. `true` when the
@@ -615,9 +619,10 @@ impl MkvMuxN {
             .domain
             .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
         let pts_ns = frame.timing.pts_ns;
-        let (sample, is_key) = self.sample_for(input, slice)?;
+        let (sample, is_key) = self.sample_for(input, slice);
+        let track = self.track_index(input);
         let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
-        let bytes = mux.push_frame_on(input, &sample, pts_ns, is_key, frame.timing.duration_ns);
+        let bytes = mux.push_frame_on(track, &sample, pts_ns, is_key, frame.timing.duration_ns);
 
         // Seekable (two-pass) mode: hold the whole file until every input drains.
         if self.settings.seekable {
@@ -871,7 +876,16 @@ impl MultiInputElement for MkvMuxN {
                     }
                     self.agg.push(input, frame);
                 }
-                PipelinePacket::Eos => self.agg.mark_ended(input),
+                PipelinePacket::Eos => {
+                    require_header_config_at_end(
+                        short_type_name::<Self>(),
+                        input,
+                        &self.inits,
+                        &self.agg,
+                        self.header_config(input),
+                    )?;
+                    self.agg.mark_ended(input)
+                }
                 // CapsChanged is consumed by the runner's muxer arm; the Tracks
                 // element is fixed from the first AU's in-band init.
                 PipelinePacket::CapsChanged(_) => return Ok(()),
@@ -887,23 +901,24 @@ impl MultiInputElement for MkvMuxN {
 
             // Hold every AU until all tracks have their init (the Tracks element,
             // and the track numbering it pins, needs them all).
-            if !self.all_inits_ready() {
+            if !every_track_header_ready(&self.inits, &self.agg) {
                 return Ok(());
             }
-            if self.mux.is_none() {
+            if self.mux.is_none() && self.inits.iter().any(Option::is_some) {
                 let subtitle_format = self.settings.subtitle_format;
                 let configs: Vec<MkvTrackConfig> = self
                     .inits
                     .iter()
-                    .map(|i| track_config(i.as_ref().expect("ready"), subtitle_format))
+                    .flatten()
+                    .map(|init| track_config(init, subtitle_format))
                     .collect();
                 let (global, per_track) = split_tags(&self.tags, &self.track_tags);
                 let mut mux = MatroskaMuxer::new_multi(configs)
                     .with_tags(global)
                     .with_chapters(self.chapters.clone());
                 for (input, tags) in per_track.into_iter().enumerate() {
-                    if !tags.is_empty() {
-                        mux = mux.with_track_tags(input, tags);
+                    if !tags.is_empty() && self.inits[input].is_some() {
+                        mux = mux.with_track_tags(self.track_index(input), tags);
                     }
                 }
                 if self.settings.seekable {

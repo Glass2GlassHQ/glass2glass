@@ -303,20 +303,6 @@ pub(crate) fn muxer_audio_specific_config(
     Ok(Some(first_frame.to_vec()))
 }
 
-// the config a muxer captured for an AAC pad, failing loud when its stream carried neither ADTS headers nor a leading config
-pub(crate) fn require_muxer_config<'a>(
-    config: Option<&'a [u8]>,
-    muxer: &'static str,
-) -> Result<&'a [u8], G2gError> {
-    config.ok_or_else(|| {
-        g2g_error!(
-            g2g_core::log::Target::category(muxer),
-            "AAC stream has neither ADTS headers nor a leading AudioSpecificConfig"
-        );
-        G2gError::CapsMismatch
-    })
-}
-
 // whether `frame` is the config frame leading the raw access units of an AAC stream declared by `config`
 pub(crate) fn is_leading_aac_config(config: &[u8], frame: &[u8]) -> bool {
     is_raw_aac_config(config) && frame == config
