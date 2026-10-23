@@ -257,7 +257,8 @@ Highest leverage first:
   - `mpegts/loewe.ts` LATM loses two frames mid-stream (14 where ffprobe gives
     16), and `probe-format/roundup997` decodes a first MP2 frame ffmpeg rejects
     as "Header missing".
-  - qdraw in MOV decodes 2 of 12 frames (`quickdraw/Airplane.mov`).
+  - An MP4 audio track whose edit list replays media plays its samples once:
+    replayed edits need sample-accurate clipping, as the video path lays them out.
   - `wavparse` rejects `wFormatTag` 0x2000 (AC-3), 0x55 (MP3) and 0xFF (AAC):
     `readable_format` takes only PCM, G.711 and IMA ADPCM although
     `waveformat.rs` maps them. MS ADPCM with more than 2 channels needs

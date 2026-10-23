@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1826: MP4/MOV video edit lists that replay or reorder media play each edit in turn.
 - M1842: muxers keep the program config element of channel-configuration-0 AAC in the codec config.
 - M1832: wavparse reads XMA in whole 2048-byte packets, so its decode no longer depends on the read size.
 - M1847: `decodebin` and `parsebin` fan-outs split every container the inline bins play, WAV, FLV, IVF and elementary audio included.

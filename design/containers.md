@@ -870,8 +870,13 @@ after the end of the one before, the segment stops where the last one ends and
 the demuxers cut the media between edits out of the timeline, as ffmpeg's mov
 demuxer does: a sample after a gap moves back by the length of the gaps before
 it, a decode time inside a gap moves to its start, and a sample whose pts is
-inside a gap moves past the segment's stop. A list of any other shape keeps
-only the first media edit's start. Every sample still goes downstream, because
+inside a gap moves past the segment's stop. A video edit list whose edits go
+back in the media (a QuickTime edit list used as a playlist) is laid out edit
+after edit: each edit decodes from the keyframe at or before its first
+presented sample and presents its media span at the edit's place on the movie
+timeline, samples decoded only as references take pts past the segment stop,
+and the tracks are interleaved by decode time. An audio track with such a list,
+or a list of any other shape, keeps only the first media edit's start. Every sample still goes downstream, because
 the cut pictures can be references, and every video decoder drops each decoded
 picture whose pts `Segment::presents` rejects:
 before the start, or at or past the stop, the frames ffmpeg drops for the same
