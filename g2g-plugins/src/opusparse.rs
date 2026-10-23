@@ -79,18 +79,43 @@ pub(crate) const OPUS_ENCODER_PRE_SKIP: u16 = 312;
 /// pre-skip, input sample rate, output gain, channel mapping family.
 pub(crate) const OPUS_HEAD_FIXED: usize = 19;
 
+pub(crate) const MAPPING_FAMILY_RTP: u8 = 0;
+pub(crate) const MAPPING_FAMILY_VORBIS: u8 = 1;
+
+// RFC 7845 section 5.1.1.2: streams, coupled streams, table per channel count
+pub(crate) const VORBIS_MAPPINGS: [(u8, u8, &[u8]); 8] = [
+    (1, 0, &[0]),
+    (1, 1, &[0, 1]),
+    (2, 1, &[0, 2, 1]),
+    (2, 2, &[0, 1, 2, 3]),
+    (3, 2, &[0, 4, 1, 2, 3]),
+    (4, 2, &[0, 4, 1, 2, 3, 5]),
+    (4, 3, &[0, 4, 1, 2, 3, 5, 6]),
+    (5, 3, &[0, 6, 1, 2, 3, 4, 5, 7]),
+];
+
 /// A synthesized `OpusHead` (RFC 7845 §5.1) for a stream that carried none: a
-/// freshly encoded one, where the pre-skip is the encoder's lookahead. Channel
-/// mapping family 0, which is defined for mono and stereo only, so the count is
-/// clamped to that. Used by every muxer that has to invent a header.
-pub(crate) fn synth_opus_head(channels: u8, sample_rate: u32) -> Vec<u8> {
+/// freshly encoded one, whose pre-skip is the encoder's lookahead, or one out of
+/// a transport stream, whose packets start with no pre-skip to state. Mono and
+/// stereo take channel mapping family 0, three to eight channels family 1 in
+/// the Vorbis order, and the count is clamped to that range.
+pub(crate) fn synth_opus_head(channels: u8, sample_rate: u32, pre_skip: u16) -> Vec<u8> {
+    let channels = channels.clamp(1, VORBIS_MAPPINGS.len() as u8);
     let mut h = Vec::from(*b"OpusHead");
     h.push(1); // version
-    h.push(channels.clamp(1, 2));
-    h.extend_from_slice(&OPUS_ENCODER_PRE_SKIP.to_le_bytes());
+    h.push(channels);
+    h.extend_from_slice(&pre_skip.to_le_bytes());
     h.extend_from_slice(&sample_rate.max(1).to_le_bytes()); // original input rate
     h.extend_from_slice(&0i16.to_le_bytes()); // output gain
-    h.push(0); // channel mapping family
+    if channels <= 2 {
+        h.push(MAPPING_FAMILY_RTP);
+        return h;
+    }
+    let (streams, coupled_streams, table) = VORBIS_MAPPINGS[usize::from(channels) - 1];
+    h.push(MAPPING_FAMILY_VORBIS);
+    h.push(streams);
+    h.push(coupled_streams);
+    h.extend_from_slice(table);
     h
 }
 
@@ -210,11 +235,12 @@ pub struct OpusParse {
     configured: bool,
     last_emitted_caps: Option<Caps>,
     headers_emitted: u64,
-    /// Authoritative channel count from an in-band `OpusHead` (RFC 7845), once
-    /// seen. It overrides the per-packet TOC's mono/stereo guess, so a
-    /// multichannel (mapping family 1) stream keeps its real channel count
-    /// instead of collapsing to the TOC's internal-stream stereo bit.
-    header_channels: Option<u8>,
+    /// Authoritative channel count from an in-band `OpusHead` (RFC 7845) or an
+    /// upstream caps change (a transport stream's descriptor), once seen. It
+    /// overrides the per-packet TOC's mono/stereo guess, so a multichannel
+    /// (mapping family 1) stream keeps its real channel count instead of
+    /// collapsing to the TOC's internal-stream stereo bit.
+    stream_channels: Option<u8>,
 }
 
 impl OpusParse {
@@ -309,7 +335,7 @@ impl AsyncElement for OpusParse {
                         // authoritative channel count from it, emit caps, and
                         // consume it (do not forward as a DataFrame).
                         if let Some((ch, _)) = parse_opus_head(bytes) {
-                            self.header_channels = Some(ch);
+                            self.stream_channels = Some(ch);
                             if let Some(caps) = self.caps_update(ch) {
                                 out.push(PipelinePacket::CapsChanged(caps)).await?;
                             }
@@ -318,7 +344,7 @@ impl AsyncElement for OpusParse {
                         // Prefer the OpusHead count when known; else the TOC's
                         // mono/stereo bit (mapping family 0).
                         let channels = self
-                            .header_channels
+                            .stream_channels
                             .or_else(|| parse_toc(bytes).map(|t| t.channels));
                         if let Some(ch) = channels {
                             if let Some(caps) = self.caps_update(ch) {
@@ -329,6 +355,14 @@ impl AsyncElement for OpusParse {
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
+                    if let Caps::Audio {
+                        format: AudioFormat::Opus,
+                        channels,
+                        ..
+                    } = &c
+                    {
+                        self.stream_channels = (*channels > 0).then_some(*channels);
+                    }
                     out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
                 PipelinePacket::Flush => {
@@ -672,6 +706,41 @@ mod tests {
             sink.packets.last().unwrap(),
             PipelinePacket::DataFrame(_)
         ));
+    }
+
+    // a transport stream's Opus descriptor states the count, and its packets carry no OpusHead
+    #[tokio::test]
+    async fn an_upstream_channel_count_outranks_the_toc() {
+        const CHANNELS: u8 = 8;
+        let mut parse = OpusParse::new();
+        parse.configure_pipeline(&opus_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        let upstream = Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: CHANNELS,
+            sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        };
+        parse
+            .process(PipelinePacket::CapsChanged(upstream), &mut sink)
+            .await
+            .unwrap();
+        parse
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(1, opus_packet(31, true, 12))),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        let channels: Vec<u8> = sink
+            .packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::CapsChanged(Caps::Audio { channels, .. }) => Some(*channels),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(channels, vec![CHANNELS, CHANNELS]);
     }
 
     #[tokio::test]

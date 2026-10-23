@@ -826,8 +826,8 @@ impl TsDemux {
         Ok(())
     }
 
-    /// Forward the page selection the PMT descriptor carries in band once, ahead
-    /// of the first display set / teletext line.
+    /// Forward the config the PMT descriptor carries in band once, ahead of the
+    /// first display set, teletext line or Opus packet.
     async fn emit_stream_config(
         &mut self,
         pid: u16,
@@ -838,7 +838,7 @@ impl TsDemux {
             return Ok(());
         }
         self.config_sent = true;
-        let Some(blob) = page_config_blob(&self.demux, pid, self.stream) else {
+        let Some(blob) = in_band_config(&self.demux, pid, self.stream) else {
             return Ok(());
         };
         let frame = config_frame(blob, pts_ns, self.emitted);
@@ -849,7 +849,7 @@ impl TsDemux {
 
     /// Unwrap one Opus PES into raw Opus packets and forward each as a frame,
     /// preceded once by a `CapsChanged` carrying the descriptor's channel count
-    /// (OpusDec needs a concrete count, and this path has no in-band `OpusHead`).
+    /// and the `OpusHead` the descriptor implies.
     async fn emit_opus(
         &mut self,
         u: EsUnit,
@@ -857,16 +857,14 @@ impl TsDemux {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         if !self.opus_caps_emitted {
-            let channels = self.demux.opus_channels(u.pid).unwrap_or(2);
-            out.push(PipelinePacket::CapsChanged(Caps::Audio {
-                format: AudioFormat::Opus,
-                channels,
-                sample_rate: 0,
-                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-            }))
+            out.push(PipelinePacket::CapsChanged(opus_stream_caps(
+                &self.demux,
+                u.pid,
+            )))
             .await?;
             self.opus_caps_emitted = true;
         }
+        self.emit_stream_config(u.pid, pts_ns, out).await?;
         for pkt in crate::mpegts::opus_ts_packets(&u.data) {
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(pkt.to_vec().into_boxed_slice())),
@@ -1548,15 +1546,15 @@ impl TsDemuxN {
                 out.push_to(port, PipelinePacket::Segment(seg)).await?;
             }
             if !self.announced[port] {
-                out.push_to(
-                    port,
-                    PipelinePacket::CapsChanged(TsDemux::output_caps(self.ports[port])),
-                )
-                .await?;
+                let caps = match self.ports[port] {
+                    TsStream::Opus => opus_stream_caps(&self.demux, u.pid),
+                    stream => TsDemux::output_caps(stream),
+                };
+                out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
                 self.announced[port] = true;
                 // The page ids the display sets compose under go out in band
                 // ahead of the first one, as on the single-output demuxer.
-                if let Some(blob) = page_config_blob(&self.demux, u.pid, self.ports[port]) {
+                if let Some(blob) = in_band_config(&self.demux, u.pid, self.ports[port]) {
                     let frame = config_frame(blob, pts_ns, self.emitted);
                     self.emitted += 1;
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
@@ -1566,19 +1564,38 @@ impl TsDemuxN {
                 self.learn_held_unit(port, u.pts_90khz.map(|_| dts_ns));
             }
             let data = unwrap_sync_klv(u.stream_type, u.data);
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                FrameTiming {
-                    pts_ns,
-                    dts_ns,
-                    ..FrameTiming::default()
-                },
-                self.emitted,
-            );
-            self.emitted += 1;
-            out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
+            let units = match self.ports[port] {
+                TsStream::Opus => crate::mpegts::opus_ts_packets(&data)
+                    .into_iter()
+                    .map(<[u8]>::to_vec)
+                    .collect(),
+                _ => alloc::vec![data],
+            };
+            for unit in units {
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(unit.into_boxed_slice())),
+                    FrameTiming {
+                        pts_ns,
+                        dts_ns,
+                        ..FrameTiming::default()
+                    },
+                    self.emitted,
+                );
+                self.emitted += 1;
+                out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
+            }
         }
         Ok(())
+    }
+}
+
+// an Opus stream's caps carry its descriptor's channel count, since no OpusHead rides a transport stream
+fn opus_stream_caps(demux: &TsDemuxer, pid: u16) -> Caps {
+    Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: demux.opus_channels(pid).unwrap_or(2),
+        sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -1589,14 +1606,20 @@ fn mpeg2_can_open_here(au: &[u8]) -> bool {
     crate::psdemux::parse_sequence_header(au).is_some()
 }
 
-/// The in-band page-selection blob a subtitle stream's PMT descriptor implies:
-/// the DVB `subtitling_descriptor`'s page ids (the same bytes a Matroska
-/// `S_DVBSUB` `CodecPrivate` carries), or the `teletext_descriptor`'s page and
-/// language. The PMT is the only place a transport stream states which page a
-/// subtitle decoder follows, so it has to reach the decoder some way, and this
-/// is the one a Matroska source already uses.
-fn page_config_blob(demux: &TsDemuxer, pid: u16, stream: TsStream) -> Option<Vec<u8>> {
+/// The in-band config a stream's PMT descriptor implies: the DVB
+/// `subtitling_descriptor`'s page ids (the same bytes a Matroska `S_DVBSUB`
+/// `CodecPrivate` carries), the `teletext_descriptor`'s page and language, or
+/// an `OpusHead` for the Opus descriptor's channel count. The PMT is the only
+/// place a transport stream states these, so they have to reach the decoder
+/// some way, and this is the one a Matroska source already uses.
+fn in_band_config(demux: &TsDemuxer, pid: u16, stream: TsStream) -> Option<Vec<u8>> {
     match stream {
+        // a transport stream states no pre-skip, which is what ffmpeg's demuxer assumes too
+        TsStream::Opus => Some(crate::opusparse::synth_opus_head(
+            demux.opus_channels(pid)?,
+            crate::opusparse::OPUS_RATE_HZ,
+            0,
+        )),
         TsStream::DvbSub => {
             let (subtitling_type, composition, ancillary) = demux.subtitling(pid)?;
             Some(

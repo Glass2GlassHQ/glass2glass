@@ -66,8 +66,8 @@ use g2g_core::{
 use audiopus::ffi;
 
 use crate::opusparse::{
-    mapping_len, packet_frame_samples, packet_samples, parse_opus_head, OPUS_HEAD_FIXED,
-    OPUS_RATE_HZ,
+    mapping_len, packet_frame_samples, packet_samples, parse_opus_head, MAPPING_FAMILY_RTP,
+    MAPPING_FAMILY_VORBIS, OPUS_HEAD_FIXED, OPUS_RATE_HZ, VORBIS_MAPPINGS,
 };
 use crate::pcmclip::clip_pcm_to_segment;
 use crate::vorbischannels::vorbis_layout;
@@ -92,21 +92,7 @@ const MAX_PLC_SAMPLES: u64 = (OPUS_RATE_HZ as u64 * 200) / 1000;
 /// opusdec's assumption for an unknown duration).
 const DEFAULT_PLC_CHUNK_SAMPLES: u64 = (OPUS_RATE_HZ as u64 * 20) / 1000;
 
-const MAPPING_FAMILY_RTP: u8 = 0;
-const MAPPING_FAMILY_VORBIS: u8 = 1;
 const MAPPING_FAMILY_OFFSET: usize = OPUS_HEAD_FIXED - 1;
-
-// RFC 7845 section 5.1.1.2: streams, coupled streams, table per channel count
-const VORBIS_MAPPINGS: [(u8, u8, &[u8]); 8] = [
-    (1, 0, &[0]),
-    (1, 1, &[0, 1]),
-    (2, 1, &[0, 2, 1]),
-    (2, 2, &[0, 1, 2, 3]),
-    (3, 2, &[0, 4, 1, 2, 3]),
-    (4, 2, &[0, 4, 1, 2, 3, 5]),
-    (4, 3, &[0, 4, 1, 2, 3, 5, 6]),
-    (5, 3, &[0, 6, 1, 2, 3, 4, 5, 7]),
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChannelMapping {
@@ -895,5 +881,23 @@ impl PadTemplates for OpusDec {
                 out(AudioFormat::PcmF32Le),
             ]))),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::opusparse::synth_opus_head;
+
+    #[test]
+    fn a_synthesized_head_decodes_with_the_default_mapping_of_its_channel_count() {
+        for channels in 1..=VORBIS_MAPPINGS.len() as u8 {
+            let head = synth_opus_head(channels, OPUS_RATE_HZ, 0);
+            assert_eq!(
+                ChannelMapping::from_opus_head(&head),
+                ChannelMapping::default_for(channels),
+                "{channels} channels"
+            );
+        }
     }
 }

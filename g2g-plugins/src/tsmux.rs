@@ -54,6 +54,7 @@ use crate::mpegts::{
     PES_CLOCK_HZ, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES,
     STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_NAME, TAG_KEY_SERVICE_PROVIDER,
 };
+use crate::opusparse::{is_opus_config, parse_opus_head};
 
 /// The language a `subtitling_descriptor` declares when the stream's tags name
 /// none, the ISO 639 code for "undetermined" (what ffmpeg writes).
@@ -543,6 +544,8 @@ pub struct TsMux {
     dvbsub_page_id: u16,
     // how the input pad's AAC frames are multiplexed, `None` for any other pad
     aac: Option<AacCarriage>,
+    // an Opus pad's in-band `OpusHead` / `OpusTags` are codec config, which a transport stream carries in the PMT
+    opus: bool,
 }
 
 impl Default for TsMux {
@@ -563,6 +566,7 @@ impl TsMux {
             dvbsub: None,
             dvbsub_page_id: DEFAULT_PAGE_ID,
             aac: None,
+            opus: false,
         }
     }
 
@@ -711,6 +715,10 @@ impl AsyncElement for TsMux {
             stream_type_for(absolute_caps, self.klv_sync).ok_or(G2gError::CapsMismatch)?;
         // rebuilding the multiplex mid-stream restarts its continuity counters
         if self.stream_type == Some(stream_type) {
+            // a demuxer states the Opus channel count after negotiation, before the PMT goes out
+            if let (Some(mux), Some(channels)) = (self.mux.as_mut(), opus_channels(absolute_caps)) {
+                mux.set_stream_opus(0, channels);
+            }
             return Ok(ConfigureOutcome::Accepted);
         }
         let mut mux = TsMuxer::new(stream_type);
@@ -732,6 +740,7 @@ impl AsyncElement for TsMux {
         if let Some(channels) = opus_channels(absolute_caps) {
             mux.set_stream_opus(0, channels);
         }
+        self.opus = opus_channels(absolute_caps).is_some();
         self.mux = Some(mux);
         if is_dvbsub(absolute_caps) {
             self.dvbsub = Some(DvbSubDecl::on_page(self.dvbsub_page_id));
@@ -807,6 +816,12 @@ impl AsyncElement for TsMux {
                     }
                     let muxer = g2g_core::log::short_type_name::<Self>();
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
+                    if self.opus && is_opus_config(slice) {
+                        if let Some((channels, _)) = parse_opus_head(slice) {
+                            mux.set_stream_opus(0, channels);
+                        }
+                        return Ok(());
+                    }
                     let access_unit = match self.aac.as_mut() {
                         Some(aac) => {
                             let config = aac.consume_config(slice, muxer)?;
@@ -1072,6 +1087,52 @@ mod tests {
             .process(system_frame(USAC_CONFIG.to_vec(), 0), &mut ts_sink)
             .await;
         assert_eq!(result, Err(G2gError::CapsMismatch));
+    }
+
+    #[tokio::test]
+    async fn an_in_band_opus_head_sets_the_descriptor_and_stays_out_of_the_multiplex() {
+        use crate::mpegts::{TsDemuxer, TS_PACKET_LEN};
+        use crate::opusparse::{synth_opus_head, OPUS_RATE_HZ};
+        const CHANNELS: u8 = 6;
+        let packets: Vec<Vec<u8>> = (0..2u8).map(|n| alloc::vec![0xFC, n, n]).collect();
+        let mut mux = TsMux::new();
+        mux.configure_pipeline(&Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 0,
+            sample_rate: OPUS_RATE_HZ,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        })
+        .unwrap();
+        let mut ts_sink = CaptureSink::default();
+        let head = synth_opus_head(CHANNELS, OPUS_RATE_HZ, 0);
+        mux.process(system_frame(head, 0), &mut ts_sink)
+            .await
+            .unwrap();
+        for (index, packet) in packets.iter().enumerate() {
+            let pts_ns = index as u64 * 20_000_000;
+            mux.process(system_frame(packet.clone(), pts_ns), &mut ts_sink)
+                .await
+                .unwrap();
+        }
+
+        let mut demuxer = TsDemuxer::new();
+        for packet in ts_sink.frames.concat().chunks(TS_PACKET_LEN) {
+            demuxer.push_packet(packet);
+        }
+        demuxer.flush();
+        let pid = demuxer.streams()[0].pid;
+        assert_eq!(demuxer.opus_channels(pid), Some(CHANNELS));
+        let carried: Vec<Vec<u8>> = demuxer
+            .take_units()
+            .into_iter()
+            .flat_map(|u| {
+                crate::mpegts::opus_ts_packets(&u.data)
+                    .into_iter()
+                    .map(<[u8]>::to_vec)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(carried, packets);
     }
 
     #[tokio::test]

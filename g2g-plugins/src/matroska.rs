@@ -4532,7 +4532,11 @@ mod tests {
 
     // An A_OPUS track with a two-packet fixed-laced block at timestamp 0 and no DefaultDuration
     fn laced_opus_frames(codec_delay: Option<u64>) -> Vec<MkvFrame> {
-        let head = crate::opusparse::synth_opus_head(2, crate::opusparse::OPUS_RATE_HZ);
+        let head = crate::opusparse::synth_opus_head(
+            2,
+            crate::opusparse::OPUS_RATE_HZ,
+            crate::opusparse::OPUS_ENCODER_PRE_SKIP,
+        );
         let mut track_body = [
             elem(&[0xD7], &uint_body(1)),
             elem(&[0x86], b"A_OPUS"),
@@ -4564,6 +4568,7 @@ mod tests {
         let pre_skip_ns = opus_codec_delay_ns(&crate::opusparse::synth_opus_head(
             2,
             crate::opusparse::OPUS_RATE_HZ,
+            crate::opusparse::OPUS_ENCODER_PRE_SKIP,
         ));
         let frames = laced_opus_frames(Some(pre_skip_ns));
         let first_duration_ns = ticks_to_ns(
@@ -4583,6 +4588,7 @@ mod tests {
         let pre_skip_ns = opus_codec_delay_ns(&crate::opusparse::synth_opus_head(
             2,
             crate::opusparse::OPUS_RATE_HZ,
+            crate::opusparse::OPUS_ENCODER_PRE_SKIP,
         ));
         let frames = laced_opus_frames(None);
         assert_eq!(
@@ -5196,7 +5202,11 @@ mod tests {
                 channels: 2,
                 sample_rate: 48_000,
             },
-            codec_private: crate::opusparse::synth_opus_head(2, 48_000),
+            codec_private: crate::opusparse::synth_opus_head(
+                2,
+                48_000,
+                crate::opusparse::OPUS_ENCODER_PRE_SKIP,
+            ),
         }
     }
 

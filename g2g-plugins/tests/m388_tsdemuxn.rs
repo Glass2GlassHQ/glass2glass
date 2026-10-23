@@ -271,3 +271,73 @@ async fn tsdemuxn_leaves_an_absent_streams_port_dark() {
     );
     assert!(tap.caps[1].is_empty(), "a dark port announces nothing");
 }
+
+#[derive(Default)]
+struct ByteTap(Vec<u8>);
+impl g2g_core::OutputSink for ByteTap {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        if let Some(PipelinePacket::DataFrame(f)) = packet_slot.take() {
+            self.0
+                .extend_from_slice(f.domain.as_system_slice().expect("system memory"));
+        }
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+    }
+}
+
+#[tokio::test]
+async fn tsdemuxn_opens_an_opus_port_on_the_descriptor_channel_count() {
+    use g2g_core::AsyncElement;
+    const CHANNELS: u8 = 8;
+    let packets: Vec<Vec<u8>> = (0..3u8).map(|n| vec![0xFC, n, n, n]).collect();
+    let mut mux = g2g_plugins::tsmux::TsMux::new();
+    mux.configure_pipeline(&Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: CHANNELS,
+        sample_rate: 48_000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+    })
+    .unwrap();
+    let mut ts = ByteTap::default();
+    for (index, packet) in packets.iter().enumerate() {
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(packet.clone().into_boxed_slice())),
+            FrameTiming {
+                pts_ns: index as u64 * 20_000_000,
+                ..FrameTiming::default()
+            },
+            index as u64,
+        );
+        mux.process(PipelinePacket::DataFrame(frame), &mut ts)
+            .await
+            .unwrap();
+    }
+
+    let mut demux = TsDemuxN::new(vec![TsStream::Opus]);
+    demux
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        })
+        .unwrap();
+    let mut tap = PortTap::new(1);
+    demux.process(data_frame(ts.0), &mut tap).await.unwrap();
+    demux.process(PipelinePacket::Eos, &mut tap).await.unwrap();
+
+    assert!(matches!(
+        tap.caps[0][..],
+        [Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: CHANNELS,
+            ..
+        }]
+    ));
+    // RFC 7845: the magic, then the version byte, then the channel count
+    const OPUS_HEAD_CHANNELS_AT: usize = 9;
+    let (head, units) = tap.frames[0].split_first().expect("an OpusHead leads");
+    assert!(head.starts_with(b"OpusHead"));
+    assert_eq!(head[OPUS_HEAD_CHANNELS_AT], CHANNELS);
+    assert_eq!(units, &packets[..], "the control headers are stripped");
+}

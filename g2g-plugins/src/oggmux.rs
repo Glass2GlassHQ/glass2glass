@@ -59,7 +59,8 @@ use g2g_core::{
 
 use crate::ogg::{OggPageWriter, VorbisTiming};
 use crate::opusparse::{
-    is_opus_config, packet_samples as opus_packet_samples, synth_opus_head, OPUS_RATE_HZ,
+    is_opus_config, packet_samples as opus_packet_samples, synth_opus_head, OPUS_ENCODER_PRE_SKIP,
+    OPUS_RATE_HZ,
 };
 
 /// Default logical-bitstream serial number, overridable via the `serial`
@@ -297,7 +298,9 @@ impl OggStreamMux {
                     .iter()
                     .find(|h| h.starts_with(b"OpusHead"))
                     .cloned()
-                    .unwrap_or_else(|| synth_opus_head(self.channels, self.sample_rate));
+                    .unwrap_or_else(|| {
+                        synth_opus_head(self.channels, self.sample_rate, OPUS_ENCODER_PRE_SKIP)
+                    });
                 let tags = self
                     .headers
                     .iter()

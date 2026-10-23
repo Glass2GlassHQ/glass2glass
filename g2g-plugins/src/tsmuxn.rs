@@ -46,6 +46,7 @@ use g2g_core::{
 use crate::dvbsub::DEFAULT_PAGE_ID;
 use crate::mpegts::{TsMuxer, PES_CLOCK_HZ, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265};
 use crate::mux::refused_input;
+use crate::opusparse::{is_opus_config, parse_opus_head};
 use crate::tsmux::{
     is_av1, is_dvbsub, language_from_tags, opus_channels, service_from_tags, stream_type_for,
     AacCarriage, DvbSubDecl, TsMuxSettings, MUX_PROPERTIES, UNDETERMINED_LANGUAGE,
@@ -477,6 +478,20 @@ impl MultiInputElement for TsMux {
                         .is_some_and(|s| self.dvbsub[input].as_mut().is_some_and(|d| d.adopt(s)));
                     if config {
                         self.declare_subtitling(input);
+                        return Ok(());
+                    }
+                    // an Opus pad's in-band headers are config, the PMT descriptor states the count
+                    if let Some(s) = frame
+                        .domain
+                        .as_system_slice()
+                        .filter(|s| self.opus[input].is_some() && is_opus_config(s))
+                    {
+                        if let Some((channels, _)) = parse_opus_head(s) {
+                            self.opus[input] = Some(channels);
+                            if let Some(mux) = self.mux.as_mut() {
+                                mux.set_stream_opus(input, channels);
+                            }
+                        }
                         return Ok(());
                     }
                     // a raw AAC pad opens on its config, which rides every LOAS frame instead

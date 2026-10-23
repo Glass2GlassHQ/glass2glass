@@ -63,7 +63,7 @@ use crate::matroska::{
 };
 use crate::mkvmux::{MkvMuxSettings, MKV_MUX_PROPS};
 use crate::mux::refused_input;
-use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head};
+use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP};
 
 /// What an input pad carries, learned from its negotiated caps at configure.
 #[derive(Debug, Clone, Copy)]
@@ -392,7 +392,7 @@ impl MkvMuxN {
                         // An `OpusTags` before the identification header is not
                         // the config: wait for it rather than fix a synthesized one.
                         None if is_opus_config(au) => return Ok(()),
-                        None => synth_opus_head(channels, rate),
+                        None => synth_opus_head(channels, rate, OPUS_ENCODER_PRE_SKIP),
                     };
                     self.inits[input] = Some(TrackInit::Audio {
                         format,

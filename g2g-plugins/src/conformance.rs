@@ -797,7 +797,7 @@ fn opus_packets() -> Vec<Vec<u8>> {
 /// dropped whole.
 fn ogg_pages() -> Vec<Vec<u8>> {
     use crate::ogg::OggPageWriter;
-    use crate::opusparse::{packet_samples, synth_opus_head, OPUS_RATE_HZ};
+    use crate::opusparse::{packet_samples, synth_opus_head, OPUS_ENCODER_PRE_SKIP, OPUS_RATE_HZ};
 
     const SERIAL: u32 = 0xC0FFEE;
     const CHANNELS: u8 = 2;
@@ -806,7 +806,10 @@ fn ogg_pages() -> Vec<Vec<u8>> {
 
     let mut writer = OggPageWriter::new(SERIAL);
     let mut pages = Vec::new();
-    writer.push_packet(synth_opus_head(CHANNELS, OPUS_RATE_HZ), 0);
+    writer.push_packet(
+        synth_opus_head(CHANNELS, OPUS_RATE_HZ, OPUS_ENCODER_PRE_SKIP),
+        0,
+    );
     pages.push(writer.flush(false));
     writer.push_packet(Vec::from(OPUS_TAGS), 0);
     pages.push(writer.flush(false));
@@ -1127,7 +1130,7 @@ pub fn opus_parse() -> MaturityRecord {
         rec.add(Evidence::new(D::Instantiate));
     }
 
-    let head = synth_opus_head(CHANNELS, OPUS_RATE_HZ);
+    let head = synth_opus_head(CHANNELS, OPUS_RATE_HZ, OPUS_ENCODER_PRE_SKIP);
     let packets = opus_packets();
     let expected_samples = OPUS_RATE_HZ * FRAME_DURATION_MS / 1000;
     let parsed = parse_opus_head(&head) == Some((CHANNELS, OPUS_ENCODER_PRE_SKIP))

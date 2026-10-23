@@ -63,7 +63,7 @@ use crate::mp4box::{
 };
 use crate::mux::refused_input;
 use crate::opusparse::{
-    dops_from_opus_head, is_opus_config, parse_opus_head, OPUS_ENCODER_PRE_SKIP,
+    dops_from_opus_head, is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP,
 };
 use crate::rtcp;
 
@@ -1865,18 +1865,11 @@ fn audio_sample_entry(fourcc: &[u8; 4], channels: u8, rate: u32, config: &[u8]) 
 /// sample entry. Fields are big-endian (unlike the little-endian Ogg/WebM
 /// `OpusHead`). Built from the stream's own `OpusHead` when one arrived in band,
 /// so a remux keeps the source's pre-skip, output gain and channel mapping;
-/// otherwise the caps plus libopus' encoder lookahead, mapping family 0.
+/// otherwise the header `synth_opus_head` writes for the caps.
 fn dops(channels: u8, rate: u32, head: &[u8]) -> Vec<u8> {
-    let body = dops_from_opus_head(head).unwrap_or_else(|| {
-        let mut b = Vec::new();
-        b.push(0); // Version
-        b.push(channels.max(1)); // OutputChannelCount
-        b.extend_from_slice(&OPUS_ENCODER_PRE_SKIP.to_be_bytes()); // PreSkip
-        b.extend_from_slice(&rate.to_be_bytes()); // InputSampleRate
-        b.extend_from_slice(&0i16.to_be_bytes()); // OutputGain
-        b.push(0); // ChannelMappingFamily
-        b
-    });
+    let body = dops_from_opus_head(head)
+        .or_else(|| dops_from_opus_head(&synth_opus_head(channels, rate, OPUS_ENCODER_PRE_SKIP)))
+        .expect("a synthesized OpusHead converts to a dOps body");
     mp4_box(b"dOps", &body)
 }
 
