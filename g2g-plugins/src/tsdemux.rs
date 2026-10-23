@@ -1,25 +1,25 @@
-//! MPEG-TS demuxer element (M108): `Caps::ByteStream{MpegTs}` in, one selected
-//! elementary stream out. H.264 / H.265 video leave as `Caps::CompressedVideo`
+//! MPEG-TS demuxers (M108, M388): `Caps::ByteStream{MpegTs}` in, selected
+//! elementary streams out. H.264 / H.265 video leave as `Caps::CompressedVideo`
 //! (Annex-B); AAC audio leaves as `Caps::Audio` (ADTS).
 //!
 //! Wraps the pure [`crate::mpegts::TsDemuxer`] parser. Incoming byte frames are
 //! resynchronized to 188-byte TS packets and fed to the demuxer; the reassembled
-//! PES access units of the selected stream ([`TsStream`], default H.264) are
-//! forwarded with their PTS, ready for the matching parser. CPU, `no_std`
-//! baseline.
+//! PES access units of the selected streams ([`TsStream`]) are forwarded with
+//! their PTS, ready for the matching parser. CPU, `no_std` baseline.
 //!
 //! ```text
 //! filesrc(location=x.ts, caps=ByteStream{MpegTs}) ! tsdemux ! h264parse ! <decoder> ! <sink>
 //! tsdemux stream=aac ! aacparse ! <audio>
 //! ```
 //!
-//! One output pad carries one elementary stream: the parser reassembles every
-//! stream the PMT names, and the [`TsStream`] selection picks which to emit, so a
-//! second `tsdemux` selecting another stream demuxes the rest of the multiplex.
-//! The choice is by codec, not a runtime-discovered "first video", because the
-//! output caps are fixed at negotiation before any packet is parsed (M109).
-//! Scope: the first stream of the selected codec within the active PAT program
-//! (`program-number`, default the first program; M781).
+//! [`TsDemuxN`] routes one selected stream to each of its output ports, and
+//! [`TsDemux`] is a one-port `TsDemuxN` run as a single-output element. The
+//! parser reassembles every stream the PMT names, and the [`TsStream`] selection
+//! picks which to emit, so a second `tsdemux` selecting another stream demuxes
+//! the rest of the multiplex. The choice is by codec, not a runtime-discovered
+//! "first video", because the output caps are fixed at negotiation before any
+//! packet is parsed (M109). Scope: the first stream of the selected codec within
+//! the active PAT program (`program-number`, default the first program; M781).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -34,9 +34,9 @@ use g2g_core::runtime::{ElementSeekRoute, SeekController, StreamSelectController
 use g2g_core::{
     g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
     CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    LatencyReport, MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek,
-    Segment, Stream, StreamCollection, StreamType, SubPictureFormat, Tag, TagList, VideoCodec,
+    LatencyReport, MemoryDomain, MultiOutputElement, MultiOutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Segment, Stream,
+    StreamCollection, StreamType, SubPictureFormat, Tag, TagList, VideoCodec,
 };
 
 use crate::demuxseek::DemuxSeek;
@@ -51,6 +51,7 @@ use crate::mpegts::{
     TAG_KEY_SCHEDULE_EVENT_NAME, TAG_KEY_SCHEDULE_EVENT_START, TAG_KEY_SCHEDULE_EVENT_TEXT,
     TAG_KEY_SERVICE_PROVIDER,
 };
+use crate::oneport::OnePortElement;
 use crate::typefind::sized_by_sps;
 
 /// The published stream id of an elementary stream: the id it takes in the
@@ -63,8 +64,8 @@ fn stream_id(pid: u16) -> alloc::string::String {
 /// text as a [`BusMessage::Tag`] scoped to its program (the service name as
 /// [`Tag::Title`], the provider as a [`Tag::Other`] under ffprobe's
 /// `service_provider` key), and each PMT stream's ISO 639 language as a
-/// [`BusMessage::StreamTag`] on that stream's collection id. Shared by the single-
-/// and multi-output demuxers, the MPEG-TS sibling of the Matroska `MetadataPoster`.
+/// [`BusMessage::StreamTag`] on that stream's collection id. The MPEG-TS sibling of
+/// the Matroska `MetadataPoster`.
 ///
 /// The SDT describes the whole multiplex, so every service it names posts under its
 /// own `program_number` (M878), not only the one this element routes: an
@@ -279,11 +280,11 @@ fn unwrap_sync_klv(stream_type: u8, data: Vec<u8>) -> Vec<u8> {
     unwrap_metadata_au_cells(&data).unwrap_or(data)
 }
 
-/// Which elementary stream a [`TsDemux`] instance forwards. A TS multiplex
-/// carries several (video + audio); this element has one output pad, so it emits
-/// exactly one, chosen here. The choice is by codec because the output caps are
-/// fixed at negotiation, before any packet is parsed: H.264 and H.265 are
-/// distinct downstream decoders, not a geometry refinement of one another.
+/// Which elementary stream a [`TsDemuxN`] port forwards. A TS multiplex
+/// carries several (video + audio); a port emits exactly one, chosen here. The
+/// choice is by codec because the output caps are fixed at negotiation, before
+/// any packet is parsed: H.264 and H.265 are distinct downstream decoders, not a
+/// geometry refinement of one another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TsStream {
     /// The first H.264 (AVC) video elementary stream. The default.
@@ -348,54 +349,7 @@ pub enum TsStream {
 ///     .with_stream(TsStream::Aac)
 ///     .with_program_number(Some(1));
 /// ```
-#[derive(Debug)]
-pub struct TsDemux {
-    demux: TsDemuxer,
-    /// The elementary stream this instance forwards (the single output pad).
-    stream: TsStream,
-    // the PID among those carrying `stream`, `None` for the first of them in PMT order
-    pid: Option<u16>,
-    /// The PAT program to demux (`None` = the first program in PAT order),
-    /// preserved across a parser reset so a seek keeps the selection.
-    program_number: Option<u16>,
-    /// Bytes not yet consumed as whole TS packets (packet realignment and
-    /// stride detection across input frames).
-    packets: TsPacketSplitter,
-    configured: bool,
-    emitted: u64,
-    /// Pipeline bus, for announcing the program's `StreamCollection` (M386).
-    /// Inert unless `with_bus` wired it.
-    bus: Option<BusHandle>,
-    /// Set once the `StreamCollection` has been announced, so it posts once.
-    collection_posted: bool,
-    /// Posts the SDT service text and per-stream languages as tags (M872).
-    tags: TagPoster,
-    /// Seek support (M362): app time seeks drive an upstream byte-seek and a
-    /// re-sync. Inert unless `with_seek` wired the controllers.
-    seek: DemuxSeek<EsUnit>,
-    // units of every PID held while a seek waits for the earliest stream's first pts
-    start_probe: Vec<EsUnit>,
-    start_probe_bytes: usize,
-    /// Opus only: whether the `CapsChanged` carrying the descriptor's channel
-    /// count has been emitted (OpusDec needs a concrete count before it decodes,
-    /// and there is no in-band `OpusHead` on this path). Re-armed on a flush.
-    opus_caps_emitted: bool,
-    /// DVB subtitles / teletext only: whether the PMT descriptor's page selection
-    /// has gone out in band ahead of the first display set or teletext line.
-    /// Re-armed on a flush.
-    config_sent: bool,
-    /// MPEG-1/2 video only: whether a sequence header has been seen. Those
-    /// pictures carry no geometry of their own, so a mid-GOP join hands
-    /// libavcodec a stream it cannot size and it fails the lot ("invalid frame
-    /// dimensions"). Dropping to the first sequence header is the tune-in
-    /// convention `RtspSrc` follows for the same reason. The other video codecs
-    /// keep their parameter sets in band and their decoders resynchronize on
-    /// their own, so they are never dropped. Re-armed on a flush.
-    mpeg2_tuned_in: bool,
-    timeline: RestartTimeline,
-    // the segment last sent downstream, which a restarted stream continues in
-    segment: Option<Segment>,
-}
+pub type TsDemux = OnePortElement<TsDemuxN>;
 
 impl Default for TsDemux {
     fn default() -> Self {
@@ -405,135 +359,30 @@ impl Default for TsDemux {
 
 impl TsDemux {
     pub fn new() -> Self {
-        Self {
-            demux: TsDemuxer::new(),
-            stream: TsStream::H264,
-            pid: None,
-            program_number: None,
-            packets: TsPacketSplitter::new(),
-            configured: false,
-            emitted: 0,
-            bus: None,
-            collection_posted: false,
-            tags: TagPoster::default(),
-            seek: DemuxSeek::default(),
-            start_probe: Vec::new(),
-            start_probe_bytes: 0,
-            opus_caps_emitted: false,
-            config_sent: false,
-            mpeg2_tuned_in: false,
-            timeline: RestartTimeline::default(),
-            segment: None,
-        }
+        Self::wrap(TsDemuxN::new(Vec::from([TsStream::H264])), "TsDemux")
     }
 
     /// Select which elementary stream to forward (default [`TsStream::H264`]).
-    pub fn with_stream(mut self, stream: TsStream) -> Self {
-        self.stream = stream;
-        self
+    pub fn with_stream(self, stream: TsStream) -> Self {
+        self.map(|mut demux| {
+            demux.ports[0] = stream;
+            demux
+        })
     }
 
     /// Select which PAT program to demux by `program_number` (`None` = the first
     /// program in PAT order, the default). Matches GStreamer `tsdemux`'s
     /// `program-number` (its `-1` is this `None`).
-    pub fn with_program_number(mut self, n: Option<u16>) -> Self {
-        self.program_number = n;
-        self.demux.set_program_number(n);
-        self
+    pub fn with_program_number(self, n: Option<u16>) -> Self {
+        self.map(|demux| demux.with_program_number(n))
     }
 
     /// Attach the pipeline bus so the program's `StreamCollection` (M386) is
     /// announced once the PMT is parsed, and its SDT service text / per-stream
     /// languages post as tags (M872), the MPEG-TS sibling of
     /// [`MkvDemux::with_bus`](crate::mkvdemux::MkvDemux::with_bus).
-    pub fn with_bus(mut self, bus: BusHandle) -> Self {
-        self.bus = Some(bus);
-        self
-    }
-
-    /// Announce the active program's elementary streams as a
-    /// [`BusMessage::StreamCollection`] (M386), once, when that program's PMT has
-    /// parsed. The collection is the selected program's streams (GStreamer's
-    /// collection is per-program too). A no-op without a bus, before the PMT, or
-    /// once already posted.
-    fn post_stream_collection(&mut self) {
-        if self.collection_posted {
-            return;
-        }
-        let streams: alloc::vec::Vec<Stream> = self
-            .demux
-            .streams()
-            .iter()
-            .filter_map(Self::es_to_stream)
-            .collect();
-        if streams.is_empty() {
-            return;
-        }
-        self.collection_posted = true;
-        if let Some(bus) = &self.bus {
-            bus.try_post(BusMessage::StreamCollection(StreamCollection::new(
-                "mpegts-0", streams,
-            )));
-        }
-    }
-
-    /// Map one PMT elementary stream to a [`Stream`] for the collection: its kind
-    /// (video / audio) and the media-type [`Caps`] it carries (geometry is
-    /// unknown from the PMT, so `Any`, refined later by `CapsChanged`). `None` for
-    /// a `stream_type` g2g does not forward.
-    fn es_to_stream(es: &crate::mpegts::ElementaryStream) -> Option<Stream> {
-        let id = stream_id(es.pid);
-        let video = |codec| Caps::CompressedVideo {
-            codec,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
-        };
-        let audio = |format| {
-            (
-                StreamType::Audio,
-                Caps::Audio {
-                    format,
-                    channels: 0,
-                    sample_rate: 0,
-                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-                },
-            )
-        };
-        let (stream_type, caps) = match es.stream_type {
-            STREAM_TYPE_H264 => (StreamType::Video, video(VideoCodec::H264)),
-            STREAM_TYPE_H265 => (StreamType::Video, video(VideoCodec::H265)),
-            STREAM_TYPE_MPEG4P2 => (StreamType::Video, video(VideoCodec::Mpeg4Part2)),
-            STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => {
-                (StreamType::Video, video(VideoCodec::Mpeg2))
-            }
-            STREAM_TYPE_AAC | STREAM_TYPE_AAC_LATM => audio(AudioFormat::Aac),
-            STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => audio(AudioFormat::Mp2),
-            // 0x06 is a generic private PES; only an 'Opus' registration marks it
-            // as Opus (else g2g does not forward it).
-            STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => audio(AudioFormat::Opus),
-            STREAM_TYPE_PRIVATE_PES if es.av1 => (StreamType::Video, video(VideoCodec::Av1)),
-            STREAM_TYPE_AC3 => audio(AudioFormat::Ac3),
-            STREAM_TYPE_PRIVATE_PES if es.ac3 => audio(AudioFormat::Ac3),
-            STREAM_TYPE_PRIVATE_PES if es.subtitling.is_some() => (
-                StreamType::Text,
-                Caps::SubPicture {
-                    format: SubPictureFormat::DvbSub,
-                },
-            ),
-            STREAM_TYPE_PRIVATE_PES if es.teletext.is_some() => (
-                StreamType::Text,
-                Caps::Text {
-                    format: g2g_core::TextFormat::Teletext,
-                },
-            ),
-            // KLV metadata: no dedicated StreamType kind, the caps classify it.
-            _ if es.klv => (StreamType::Unknown, Caps::Klv),
-            _ => return None,
-        };
-        Some(Stream::new(id, stream_type, caps))
+    pub fn with_bus(self, bus: BusHandle) -> Self {
+        self.map(|demux| demux.with_bus(bus))
     }
 
     /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
@@ -544,540 +393,227 @@ impl TsDemux {
         AsyncElement::set_seek(&mut self, app, upstream);
         self
     }
+}
 
-    /// Reset the parser for a discontinuity (a `Flush` / seek): drop buffered
-    /// bytes and the demuxer's PAT/PMT/PES state, which the re-read stream
-    /// re-establishes from its start.
-    fn reset_parser(&mut self) {
-        self.packets.clear();
-        self.demux = TsDemuxer::new();
-        self.demux.set_program_number(self.program_number);
-        self.start_probe.clear();
-        self.start_probe_bytes = 0;
-        self.opus_caps_emitted = false;
-        self.config_sent = false;
-        self.mpeg2_tuned_in = false;
+/// The input a TS demuxer accepts: an MPEG-TS byte stream.
+fn input_caps() -> Caps {
+    Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
     }
+}
 
-    /// The elementary stream this instance forwards.
-    pub fn stream(&self) -> TsStream {
-        self.stream
+/// The output caps for the selected elementary stream. Video geometry is
+/// unknown until the bitstream parser reads the SPS, so H.264 / H.265
+/// advertise a fixatable placeholder `Range` (`Dim::Any` would fail Phase-2
+/// fixate) refined downstream via `CapsChanged`, the pattern `RtspSrc` uses
+/// for async-discovered dims. AAC has no open `Caps` field, so it advertises
+/// the sentinel channels/rate 0 that `aacparse` accepts pre-header and
+/// refines from the ADTS header.
+fn output_caps(stream: TsStream) -> Caps {
+    match stream {
+        TsStream::H264 => compressed_video(VideoCodec::H264),
+        TsStream::H265 => compressed_video(VideoCodec::H265),
+        TsStream::Mpeg4Part2 => compressed_video(VideoCodec::Mpeg4Part2),
+        TsStream::Av1 => compressed_video(VideoCodec::Av1),
+        TsStream::Mpeg2 => compressed_video(VideoCodec::Mpeg2),
+        TsStream::Aac => compressed_audio(AudioFormat::Aac),
+        TsStream::Mp2 => compressed_audio(AudioFormat::Mp2),
+        TsStream::Opus => compressed_audio(AudioFormat::Opus),
+        TsStream::Ac3 => compressed_audio(AudioFormat::Ac3),
+        TsStream::Klv => Caps::Klv,
+        TsStream::Teletext => Caps::Text {
+            format: g2g_core::TextFormat::Teletext,
+        },
+        TsStream::DvbSub => Caps::SubPicture {
+            format: SubPictureFormat::DvbSub,
+        },
     }
+}
 
-    /// Count of frames forwarded.
-    pub fn emitted(&self) -> u64 {
-        self.emitted
+fn compressed_audio(format: AudioFormat) -> Caps {
+    Caps::Audio {
+        format,
+        channels: 0,
+        sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
+}
 
-    /// The input this element accepts: an MPEG-TS byte stream.
-    fn input_caps() -> Caps {
-        Caps::ByteStream {
-            encoding: ByteStreamEncoding::MpegTs,
+fn compressed_video(codec: VideoCodec) -> Caps {
+    Caps::CompressedVideo {
+        codec,
+        width: Dim::Range {
+            min: 16,
+            max: 65_535,
+        },
+        height: Dim::Range {
+            min: 16,
+            max: 65_535,
+        },
+        framerate: Rate::Range {
+            min_q16: 1 << 16,
+            max_q16: 240 << 16,
+        },
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
+    }
+}
+
+/// The canonical PMT `stream_type` for a selection (the first, for Mp2 which
+/// spans 0x03 / 0x04). Prefer [`accepts_stream_type`]
+/// for routing; this is the representative value the PMT round-trip test uses.
+fn selected_stream_type(stream: TsStream) -> u8 {
+    match stream {
+        TsStream::H264 => STREAM_TYPE_H264,
+        TsStream::H265 => STREAM_TYPE_H265,
+        TsStream::Mpeg4Part2 => STREAM_TYPE_MPEG4P2,
+        TsStream::Av1 => STREAM_TYPE_PRIVATE_PES,
+        TsStream::Mpeg2 => STREAM_TYPE_MPEG2_VIDEO,
+        TsStream::Aac => STREAM_TYPE_AAC,
+        TsStream::Mp2 => STREAM_TYPE_MPEG1_AUDIO,
+        TsStream::Opus => STREAM_TYPE_PRIVATE_PES,
+        TsStream::Ac3 => STREAM_TYPE_AC3,
+        TsStream::Klv => STREAM_TYPE_PRIVATE_PES,
+        TsStream::DvbSub => STREAM_TYPE_PRIVATE_PES,
+        TsStream::Teletext => STREAM_TYPE_PRIVATE_PES,
+    }
+}
+
+/// Whether a selection carries a PMT `stream_type`. Mp2 accepts both MPEG-1
+/// (0x03) and MPEG-2 (0x04) audio; Opus accepts the private PES 0x06 (the
+/// 'Opus' registration is checked separately, at PMT parse); Klv accepts the
+/// private PES 0x06 (the 'KLVA' registration likewise) and metadata-in-PES
+/// 0x15; Av1 accepts the private PES 0x06 (its registration likewise); Ac3
+/// accepts ATSC 0x81 and the DVB private PES 0x06 (its AC-3 descriptor likewise);
+/// Aac accepts ADTS 0x0F and LOAS/LATM 0x11.
+fn accepts_stream_type(stream: TsStream, stream_type: u8) -> bool {
+    match stream {
+        TsStream::Aac => stream_type == STREAM_TYPE_AAC || stream_type == STREAM_TYPE_AAC_LATM,
+        TsStream::Mp2 => {
+            stream_type == STREAM_TYPE_MPEG1_AUDIO || stream_type == STREAM_TYPE_MPEG2_AUDIO
         }
+        TsStream::Ac3 => stream_type == STREAM_TYPE_AC3 || stream_type == STREAM_TYPE_PRIVATE_PES,
+        TsStream::Klv => {
+            stream_type == STREAM_TYPE_PRIVATE_PES || stream_type == STREAM_TYPE_METADATA_PES
+        }
+        TsStream::Mpeg2 => {
+            stream_type == STREAM_TYPE_MPEG1_VIDEO || stream_type == STREAM_TYPE_MPEG2_VIDEO
+        }
+        other => selected_stream_type(other) == stream_type,
     }
+}
 
-    /// The output caps for the selected elementary stream. Video geometry is
-    /// unknown until the bitstream parser reads the SPS, so H.264 / H.265
-    /// advertise a fixatable placeholder `Range` (`Dim::Any` would fail Phase-2
-    /// fixate) refined downstream via `CapsChanged`, the pattern `RtspSrc` uses
-    /// for async-discovered dims. AAC has no open `Caps` field, so it advertises
-    /// the sentinel channels/rate 0 that `aacparse` accepts pre-header and
-    /// refines from the ADTS header.
-    fn output_caps(stream: TsStream) -> Caps {
-        match stream {
-            TsStream::H264 => Self::compressed_video(VideoCodec::H264),
-            TsStream::H265 => Self::compressed_video(VideoCodec::H265),
-            TsStream::Mpeg4Part2 => Self::compressed_video(VideoCodec::Mpeg4Part2),
-            TsStream::Av1 => Self::compressed_video(VideoCodec::Av1),
-            TsStream::Mpeg2 => Self::compressed_video(VideoCodec::Mpeg2),
-            TsStream::Aac => Self::compressed_audio(AudioFormat::Aac),
-            TsStream::Mp2 => Self::compressed_audio(AudioFormat::Mp2),
-            TsStream::Opus => Self::compressed_audio(AudioFormat::Opus),
-            TsStream::Ac3 => Self::compressed_audio(AudioFormat::Ac3),
-            TsStream::Klv => Caps::Klv,
-            TsStream::Teletext => Caps::Text {
-                format: g2g_core::TextFormat::Teletext,
+/// Map one PMT elementary stream to a [`Stream`] for the collection: its kind
+/// (video / audio) and the media-type [`Caps`] it carries (geometry is
+/// unknown from the PMT, so `Any`, refined later by `CapsChanged`). `None` for
+/// a `stream_type` g2g does not forward.
+fn es_to_stream(es: &crate::mpegts::ElementaryStream) -> Option<Stream> {
+    let id = stream_id(es.pid);
+    let video = |codec| Caps::CompressedVideo {
+        codec,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        alignment: g2g_core::BitstreamAlignment::Unspecified,
+    };
+    let audio = |format| {
+        (
+            StreamType::Audio,
+            Caps::Audio {
+                format,
+                channels: 0,
+                sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
-            TsStream::DvbSub => Caps::SubPicture {
+        )
+    };
+    let (stream_type, caps) = match es.stream_type {
+        STREAM_TYPE_H264 => (StreamType::Video, video(VideoCodec::H264)),
+        STREAM_TYPE_H265 => (StreamType::Video, video(VideoCodec::H265)),
+        STREAM_TYPE_MPEG4P2 => (StreamType::Video, video(VideoCodec::Mpeg4Part2)),
+        STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => {
+            (StreamType::Video, video(VideoCodec::Mpeg2))
+        }
+        STREAM_TYPE_AAC | STREAM_TYPE_AAC_LATM => audio(AudioFormat::Aac),
+        STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => audio(AudioFormat::Mp2),
+        // 0x06 is a generic private PES; only an 'Opus' registration marks it
+        // as Opus (else g2g does not forward it).
+        STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => audio(AudioFormat::Opus),
+        STREAM_TYPE_PRIVATE_PES if es.av1 => (StreamType::Video, video(VideoCodec::Av1)),
+        STREAM_TYPE_AC3 => audio(AudioFormat::Ac3),
+        STREAM_TYPE_PRIVATE_PES if es.ac3 => audio(AudioFormat::Ac3),
+        STREAM_TYPE_PRIVATE_PES if es.subtitling.is_some() => (
+            StreamType::Text,
+            Caps::SubPicture {
                 format: SubPictureFormat::DvbSub,
             },
-        }
-    }
-
-    fn compressed_audio(format: AudioFormat) -> Caps {
-        Caps::Audio {
-            format,
-            channels: 0,
-            sample_rate: 0,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-        }
-    }
-
-    fn compressed_video(codec: VideoCodec) -> Caps {
-        Caps::CompressedVideo {
-            codec,
-            width: Dim::Range {
-                min: 16,
-                max: 65_535,
+        ),
+        STREAM_TYPE_PRIVATE_PES if es.teletext.is_some() => (
+            StreamType::Text,
+            Caps::Text {
+                format: g2g_core::TextFormat::Teletext,
             },
-            height: Dim::Range {
-                min: 16,
-                max: 65_535,
-            },
-            framerate: Rate::Range {
-                min_q16: 1 << 16,
-                max_q16: 240 << 16,
-            },
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
-        }
-    }
+        ),
+        // KLV metadata: no dedicated StreamType kind, the caps classify it.
+        _ if es.klv => (StreamType::Unknown, Caps::Klv),
+        _ => return None,
+    };
+    Some(Stream::new(id, stream_type, caps))
+}
 
-    /// The canonical PMT `stream_type` for a selection (the first, for Mp2 which
-    /// spans 0x03 / 0x04). Prefer [`accepts_stream_type`](Self::accepts_stream_type)
-    /// for routing; this is the representative value the PMT round-trip test uses.
-    fn selected_stream_type(stream: TsStream) -> u8 {
-        match stream {
-            TsStream::H264 => STREAM_TYPE_H264,
-            TsStream::H265 => STREAM_TYPE_H265,
-            TsStream::Mpeg4Part2 => STREAM_TYPE_MPEG4P2,
-            TsStream::Av1 => STREAM_TYPE_PRIVATE_PES,
-            TsStream::Mpeg2 => STREAM_TYPE_MPEG2_VIDEO,
-            TsStream::Aac => STREAM_TYPE_AAC,
-            TsStream::Mp2 => STREAM_TYPE_MPEG1_AUDIO,
-            TsStream::Opus => STREAM_TYPE_PRIVATE_PES,
-            TsStream::Ac3 => STREAM_TYPE_AC3,
-            TsStream::Klv => STREAM_TYPE_PRIVATE_PES,
-            TsStream::DvbSub => STREAM_TYPE_PRIVATE_PES,
-            TsStream::Teletext => STREAM_TYPE_PRIVATE_PES,
-        }
-    }
-
-    /// Whether a selection carries a PMT `stream_type`. Mp2 accepts both MPEG-1
-    /// (0x03) and MPEG-2 (0x04) audio; Opus accepts the private PES 0x06 (the
-    /// 'Opus' registration is checked separately, at PMT parse); Klv accepts the
-    /// private PES 0x06 (the 'KLVA' registration likewise) and metadata-in-PES
-    /// 0x15; Av1 accepts the private PES 0x06 (its registration likewise); Ac3
-    /// accepts ATSC 0x81 and the DVB private PES 0x06 (its AC-3 descriptor likewise);
-    /// Aac accepts ADTS 0x0F and LOAS/LATM 0x11.
-    fn accepts_stream_type(stream: TsStream, stream_type: u8) -> bool {
-        match stream {
-            TsStream::Aac => stream_type == STREAM_TYPE_AAC || stream_type == STREAM_TYPE_AAC_LATM,
-            TsStream::Mp2 => {
-                stream_type == STREAM_TYPE_MPEG1_AUDIO || stream_type == STREAM_TYPE_MPEG2_AUDIO
-            }
-            TsStream::Ac3 => {
-                stream_type == STREAM_TYPE_AC3 || stream_type == STREAM_TYPE_PRIVATE_PES
-            }
-            TsStream::Klv => {
-                stream_type == STREAM_TYPE_PRIVATE_PES || stream_type == STREAM_TYPE_METADATA_PES
-            }
-            TsStream::Mpeg2 => {
-                stream_type == STREAM_TYPE_MPEG1_VIDEO || stream_type == STREAM_TYPE_MPEG2_VIDEO
-            }
-            other => Self::selected_stream_type(other) == stream_type,
-        }
-    }
-
-    // called once units arrive, so the first PMT has parsed
-    fn selected_pid(&self) -> Result<Option<u16>, G2gError> {
-        let Some(pid) = self.pid else {
-            return Ok(first_pid_carrying(&self.demux, self.stream));
-        };
-        let Some(listed) = self.demux.streams().iter().find(|es| es.pid == pid) else {
-            // a later PMT version can still add the PID
-            return Ok(None);
-        };
-        if pid_carries(&self.demux, self.stream, pid, listed.stream_type) {
-            return Ok(Some(pid));
-        }
-        Err(self.no_pinned_stream(pid))
-    }
-
-    fn no_pinned_stream(&self, pid: u16) -> G2gError {
-        g2g_error!(
-            Target::category("tsdemux"),
-            "pid={pid} carries no {} stream",
-            ts_stream_to_str(self.stream)
-        );
-        G2gError::CapsMismatch
-    }
-
-    // ffmpeg -ss counts from the earliest stream's start, and a file can carry that stream last
-    fn past_stream_start_probe(&mut self, units: Vec<EsUnit>, ended: bool) -> Vec<EsUnit> {
-        // ffmpeg's default probesize
-        const STREAM_START_PROBE_BYTES: usize = 5_000_000;
-        if !self.seek.awaits_stream_start() {
-            return units;
-        }
-        self.start_probe_bytes = units.iter().fold(self.start_probe_bytes, |bytes, u| {
-            bytes.saturating_add(u.data.len())
-        });
-        self.start_probe.extend(units);
-        let probe = &self.start_probe;
-        let every_stream_started = self
-            .demux
-            .streams()
-            .iter()
-            .filter(|es| es_to_ts_stream(es).is_some())
-            .all(|es| {
-                probe
-                    .iter()
-                    .any(|u| u.pid == es.pid && u.pts_90khz.is_some())
-            });
-        if !every_stream_started && !ended && self.start_probe_bytes <= STREAM_START_PROBE_BYTES {
-            return Vec::new();
-        }
-        // a stream starts at its first stamped unit in decode order, as ffmpeg's start_time does
-        let mut started_pids: Vec<u16> = Vec::new();
-        let mut start_90khz: Option<u64> = None;
-        for u in probe {
-            let Some(pts) = u.pts_90khz.filter(|_| !started_pids.contains(&u.pid)) else {
-                continue;
-            };
-            started_pids.push(u.pid);
-            start_90khz = Some(start_90khz.map_or(pts, |start| start.min(pts)));
-        }
-        if let Some(start) = start_90khz {
-            self.seek.note_stream_start(ticks_90khz_to_ns(start));
-        }
-        self.start_probe_bytes = 0;
-        core::mem::take(&mut self.start_probe)
-    }
-
-    /// Emit each completed access unit of the selected elementary stream as a
-    /// frame (Annex-B for H.264 / H.265, ADTS for AAC, raw MPEG-audio frames for
-    /// Mp2, and control-header-unwrapped raw Opus packets for Opus), carrying its
-    /// PTS.
-    async fn emit_units(
-        &mut self,
-        units: Vec<EsUnit>,
-        out: &mut dyn OutputSink,
-    ) -> Result<(), G2gError> {
-        for u in units {
-            let pts_ns = u.pts_90khz.map(ticks_90khz_to_ns);
-            if let Some(pts_ns) = pts_ns {
-                self.seek.note_stream_start(pts_ns);
-            }
-            if self.selected_pid()? != Some(u.pid) {
-                continue; // a stream other than the selected one
-            }
-            let pts_ns = pts_ns.unwrap_or(0);
-            // M362 seek: an audio frame is always a resync point; a video AU is
-            // one only if it carries an IDR/IRAP. Hold from the keyframe at or
-            // before the target until the target.
-            let keyframe = match self.stream {
-                TsStream::H264 => crate::annexb::au_is_keyframe(VideoCodec::H264, &u.data),
-                TsStream::H265 => crate::annexb::au_is_keyframe(VideoCodec::H265, &u.data),
-                TsStream::Mpeg4Part2 => {
-                    crate::annexb::au_is_keyframe(VideoCodec::Mpeg4Part2, &u.data)
-                }
-                TsStream::Mpeg2 => crate::annexb::au_is_keyframe(VideoCodec::Mpeg2, &u.data),
-                // AV1 is OBU-framed, not Annex-B: its resume points read from the
-                // frame header instead.
-                TsStream::Av1 => crate::av1parse::av1_keyframe(&u.data),
-                TsStream::Aac
-                | TsStream::Mp2
-                | TsStream::Opus
-                | TsStream::Ac3
-                | TsStream::Klv
-                | TsStream::DvbSub
-                | TsStream::Teletext => true,
-            };
-            // MPEG-2 tune-in: nothing before the first sequence header can be
-            // sized, let alone decoded.
-            if self.stream == TsStream::Mpeg2 && !self.mpeg2_tuned_in {
-                if !mpeg2_can_open_here(&u.data) {
-                    continue;
-                }
-                self.mpeg2_tuned_in = true;
-            }
-            let admitted = self.seek.admit(pts_ns, keyframe, u);
-            if let Some(seg) = admitted.segment {
-                self.segment = Some(seg);
-                out.push(PipelinePacket::Segment(seg)).await?;
-            }
-            for u in admitted {
-                let pts_ns = u.pts_90khz.map_or(0, ticks_90khz_to_ns);
-                // Reordered video carries a separate DTS; fall back to the PTS when the
-                // PES had none (the no-DTS convention shared with the fmp4 / mkv demux).
-                let dts_ns = u.dts_90khz.map_or(pts_ns, ticks_90khz_to_ns);
-                let resuming = self.timeline.resuming();
-                let (pts_ns, dts_ns) = self.timeline.map(pts_ns, dts_ns);
-                // Stream start: map the first emitted DTS to running time 0, since
-                // open-GOP B frames present before the first I frame. A seek's resume
-                // above already did that for its own case.
-                if let Some(opening) = self.seek.opening_segment(dts_ns) {
-                    let seg = match self.segment {
-                        Some(segment) if resuming => segment,
-                        _ => opening,
-                    };
-                    self.segment = Some(seg);
-                    out.push(PipelinePacket::Segment(seg)).await?;
-                }
-                if self.stream == TsStream::Opus {
-                    self.emit_opus(u, pts_ns, out).await?;
-                    continue;
-                }
-                if matches!(self.stream, TsStream::DvbSub | TsStream::Teletext) {
-                    self.emit_stream_config(u.pid, pts_ns, out).await?;
-                }
-                let data = unwrap_sync_klv(u.stream_type, u.data);
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                    FrameTiming {
-                        pts_ns,
-                        dts_ns,
-                        ..FrameTiming::default()
-                    },
-                    self.emitted,
-                );
-                self.emitted += 1;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Forward the config the PMT descriptor carries in band once, ahead of the
-    /// first display set, teletext line or Opus packet.
-    async fn emit_stream_config(
-        &mut self,
-        pid: u16,
-        pts_ns: u64,
-        out: &mut dyn OutputSink,
-    ) -> Result<(), G2gError> {
-        if self.config_sent {
-            return Ok(());
-        }
-        self.config_sent = true;
-        let Some(blob) = in_band_config(&self.demux, pid, self.stream) else {
-            return Ok(());
-        };
-        let frame = config_frame(blob, pts_ns, self.emitted);
-        self.emitted += 1;
-        out.push(PipelinePacket::DataFrame(frame)).await?;
-        Ok(())
-    }
-
-    /// Unwrap one Opus PES into raw Opus packets and forward each as a frame,
-    /// preceded once by a `CapsChanged` carrying the descriptor's channel count
-    /// and the `OpusHead` the descriptor implies.
-    async fn emit_opus(
-        &mut self,
-        u: EsUnit,
-        pts_ns: u64,
-        out: &mut dyn OutputSink,
-    ) -> Result<(), G2gError> {
-        if !self.opus_caps_emitted {
-            out.push(PipelinePacket::CapsChanged(opus_stream_caps(
-                &self.demux,
-                u.pid,
-            )))
-            .await?;
-            self.opus_caps_emitted = true;
-        }
-        self.emit_stream_config(u.pid, pts_ns, out).await?;
-        for pkt in crate::mpegts::opus_ts_packets(&u.data) {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(pkt.to_vec().into_boxed_slice())),
-                FrameTiming {
-                    pts_ns,
-                    dts_ns: pts_ns,
-                    ..FrameTiming::default()
-                },
-                self.emitted,
-            );
-            self.emitted += 1;
-            out.push(PipelinePacket::DataFrame(frame)).await?;
-        }
-        Ok(())
+// an audio frame is always a seek resync point, a video AU only when it carries an IDR or IRAP
+fn is_keyframe(stream: TsStream, au: &[u8]) -> bool {
+    match stream {
+        TsStream::H264 => crate::annexb::au_is_keyframe(VideoCodec::H264, au),
+        TsStream::H265 => crate::annexb::au_is_keyframe(VideoCodec::H265, au),
+        TsStream::Mpeg4Part2 => crate::annexb::au_is_keyframe(VideoCodec::Mpeg4Part2, au),
+        TsStream::Mpeg2 => crate::annexb::au_is_keyframe(VideoCodec::Mpeg2, au),
+        // AV1 is OBU-framed, not Annex-B: its resume points read from the
+        // frame header instead.
+        TsStream::Av1 => crate::av1parse::av1_keyframe(au),
+        TsStream::Aac
+        | TsStream::Mp2
+        | TsStream::Opus
+        | TsStream::Ac3
+        | TsStream::Klv
+        | TsStream::DvbSub
+        | TsStream::Teletext => true,
     }
 }
 
-impl AsyncElement for TsDemux {
-    fn seek_route(&self) -> Option<ElementSeekRoute> {
-        Some(ElementSeekRoute::UpstreamBytes)
-    }
-
-    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
-        self.seek.with(app, upstream);
-    }
-
-    fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new(
-            "MPEG-TS demuxer",
-            "Codec/Demuxer",
-            "Demuxes an MPEG transport stream into one selected elementary stream",
-            "g2g",
-        )
-    }
-    type ProcessFuture<'a>
-        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
-    where
-        Self: 'a;
-
-    /// Reads host memory, so it takes system frames only. The allocation
-    /// cascade turns that into a download demand on a GPU producer.
-    fn input_domains(&self) -> g2g_core::memory::DomainSet {
-        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
-    }
-
-    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&Self::input_caps())
-    }
-
-    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        // ByteStream{MpegTs} in -> the selected elementary stream out. The solver
-        // hands downstream the chosen caps; the bitstream parser refines video
-        // geometry / audio params from the stream via CapsChanged.
-        let stream = self.stream;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::ByteStream {
-                encoding: ByteStreamEncoding::MpegTs,
-            } => CapsSet::one(Self::output_caps(stream)),
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
-    }
-
-    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if !matches!(
-            absolute_caps,
-            Caps::ByteStream {
-                encoding: ByteStreamEncoding::MpegTs
-            }
-        ) {
-            return Err(G2gError::CapsMismatch);
-        }
-        self.configured = true;
-        Ok(ConfigureOutcome::Accepted)
-    }
-
-    fn process<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-        out: &'a mut dyn OutputSink,
-    ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            if !self.configured {
-                return Err(G2gError::NotConfigured);
-            }
-            // M362: a pending app seek triggers an upstream byte-seek; until its
-            // `Flush` returns, drop input so no stale pre-seek units are emitted.
-            self.seek.poll_request();
-            match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    if self.seek.dropping_input() {
-                        return Ok(());
-                    }
-                    let slice = frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    self.packets.push(slice, &mut self.demux);
-                    if self.bus.is_some() {
-                        self.post_stream_collection();
-                        self.tags.post(&mut self.demux, self.bus.as_ref());
-                    }
-                    let units = self.demux.take_units();
-                    let units = self.past_stream_start_probe(units, false);
-                    self.emit_units(units, out).await?;
-                }
-                // The upstream byte-seek's flush: reset the parser, then re-sync
-                // from the re-read stream. Forward it downstream.
-                PipelinePacket::Flush => {
-                    if self.seek.dropping_input() {
-                        self.timeline.seek();
-                    } else {
-                        self.timeline.restart();
-                    }
-                    self.seek.on_flush();
-                    self.reset_parser();
-                    out.push(PipelinePacket::Flush).await?;
-                }
-                PipelinePacket::Segment(seg) => {
-                    self.timeline.seek();
-                    self.segment = Some(seg);
-                    out.push(PipelinePacket::Segment(seg)).await?;
-                }
-                PipelinePacket::Eos => {
-                    // Flush the final in-flight PES and emit it; the runner's
-                    // transform arm forwards the EOS itself.
-                    self.packets.finish(&mut self.demux);
-                    self.demux.flush();
-                    let units = self.demux.take_units();
-                    let units = self.past_stream_start_probe(units, true);
-                    self.emit_units(units, out).await?;
-                    if let (Some(pid), None) = (self.pid, self.selected_pid()?) {
-                        return Err(self.no_pinned_stream(pid));
-                    }
-                }
-                // ByteStream caps don't carry geometry; nothing to forward.
-                PipelinePacket::CapsChanged(_) => {}
-                other => {
-                    out.push(other).await?;
-                }
-            }
-            Ok(())
-        })
-    }
-
-    fn properties(&self) -> &'static [PropertySpec] {
-        TSDEMUX_PROPS
-    }
-
-    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        match name {
-            "stream" => {
-                let s = value.as_str().ok_or(PropError::Type)?;
-                self.stream = ts_stream_from_str(s).ok_or(PropError::Value)?;
-                Ok(())
-            }
-            "pid" => {
-                let pid = value.as_uint().ok_or(PropError::Type)?;
-                self.pid = match pid {
-                    0 => None,
-                    _ => Some(u16::try_from(pid).map_err(|_| PropError::Value)?),
-                };
-                Ok(())
-            }
-            "program-number" => {
-                let n = program_number_from_int(value.as_int().ok_or(PropError::Type)?)?;
-                self.program_number = n;
-                self.demux.set_program_number(n);
-                Ok(())
-            }
-            _ => Err(PropError::Unknown),
-        }
-    }
-
-    fn get_property(&self, name: &str) -> Option<PropValue> {
-        match name {
-            "stream" => Some(PropValue::Str(ts_stream_to_str(self.stream).into())),
-            "pid" => Some(PropValue::Uint(self.pid.map_or(0, u64::from))),
-            "program-number" => Some(PropValue::Int(program_number_to_int(self.program_number))),
-            _ => None,
-        }
-    }
+fn no_pinned_stream(pid: u16, stream: TsStream) -> G2gError {
+    g2g_error!(
+        Target::category("tsdemux"),
+        "pid={pid} carries no {} stream",
+        ts_stream_to_str(stream)
+    );
+    G2gError::CapsMismatch
 }
 
-/// `TsDemux`'s settable properties (M109, M781).
-static TSDEMUX_PROPS: &[PropertySpec] = &[
+const PROGRAM_NUMBER_PROP: PropertySpec = PropertySpec::new(
+    "program-number",
+    PropKind::Int,
+    "PAT program to demux (-1 = the first program)",
+);
+
+/// A one-port `TsDemuxN`'s settable properties (M109, M781).
+static ONE_PORT_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
         "elementary stream to emit: h264 | h265 | av1 | mpeg2 | mpeg4part2 | aac | mp2 | opus | ac3 | klv | dvbsub | teletext",
     ),
-    PropertySpec::new(
-        "program-number",
-        PropKind::Int,
-        "PAT program to demux (-1 = the first program)",
-    ),
+    PROGRAM_NUMBER_PROP,
     PropertySpec::new(
         "pid",
         PropKind::Uint,
         "PID of the elementary stream to emit among those carrying `stream` (0 = the first of them)",
     ),
 ];
+
+/// `TsDemuxN`'s settable properties with several ports (M781).
+static MULTI_PORT_PROPS: &[PropertySpec] = &[PROGRAM_NUMBER_PROP];
 
 /// Map the `program-number` property (`-1` = first program) to the demuxer's
 /// selection.
@@ -1136,7 +672,7 @@ const TS_STREAMS: [TsStream; 12] = [
 #[cfg(feature = "std")]
 pub(crate) fn stream_carrying(accepted: &CapsSet) -> Option<TsStream> {
     TS_STREAMS.into_iter().find(|&stream| {
-        let carried = TsDemux::output_caps(stream);
+        let carried = output_caps(stream);
         accepted
             .alternatives()
             .iter()
@@ -1188,7 +724,7 @@ fn es_to_ts_stream(es: &crate::mpegts::ElementaryStream) -> Option<TsStream> {
         STREAM_TYPE_PRIVATE_PES if es.ac3 => Some(TsStream::Ac3),
         // KLV and DVB subtitles stay out: this feeds the playbin fan-out, which
         // builds A/V decode branches only (their ports are selected explicitly
-        // on TsDemux / TsDemuxN).
+        // on a TsDemuxN port).
         _ => None,
     }
 }
@@ -1232,7 +768,7 @@ fn stream_info(stream: TsStream, pid: u16, units: &[EsUnit]) -> TsStreamInfo {
         stream,
         TsStream::H264 | TsStream::H265 | TsStream::Mpeg2 | TsStream::Mpeg4Part2 | TsStream::Av1
     );
-    let placeholder = TsDemux::output_caps(stream);
+    let placeholder = output_caps(stream);
     let caps = units
         .iter()
         .filter(|unit| unit.pid == pid)
@@ -1299,20 +835,20 @@ impl PadTemplates for TsDemux {
         // One sink (the TS byte stream); the source pad can carry any of the
         // selectable elementary streams (an instance pins one via with_stream).
         let source = CapsSet::from_alternatives(Vec::from([
-            Self::output_caps(TsStream::H264),
-            Self::output_caps(TsStream::H265),
-            Self::output_caps(TsStream::Av1),
-            Self::output_caps(TsStream::Mpeg2),
-            Self::output_caps(TsStream::Aac),
-            Self::output_caps(TsStream::Mp2),
-            Self::output_caps(TsStream::Opus),
-            Self::output_caps(TsStream::Ac3),
-            Self::output_caps(TsStream::Klv),
-            Self::output_caps(TsStream::DvbSub),
-            Self::output_caps(TsStream::Teletext),
+            output_caps(TsStream::H264),
+            output_caps(TsStream::H265),
+            output_caps(TsStream::Av1),
+            output_caps(TsStream::Mpeg2),
+            output_caps(TsStream::Aac),
+            output_caps(TsStream::Mp2),
+            output_caps(TsStream::Opus),
+            output_caps(TsStream::Ac3),
+            output_caps(TsStream::Klv),
+            output_caps(TsStream::DvbSub),
+            output_caps(TsStream::Teletext),
         ]));
         Vec::from([
-            PadTemplate::sink(CapsSet::one(Self::input_caps())),
+            PadTemplate::sink(CapsSet::one(input_caps())),
             PadTemplate::source(source),
         ])
     }
@@ -1320,8 +856,8 @@ impl PadTemplates for TsDemux {
 
 /// Multi-output MPEG-TS demuxer (M388): one TS byte stream in, N elementary
 /// streams out, one selected [`TsStream`] per output port. The MPEG-TS sibling of
-/// [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN), and the multi-output counterpart of
-/// [`TsDemux`] (which forwards a single selected stream).
+/// [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN). [`TsDemux`] is this element with
+/// one port.
 ///
 /// A [`MultiOutputElement`] driven by
 /// [`run_source_fanout`](g2g_core::runtime::run_source_fanout): it parses the
@@ -1332,8 +868,8 @@ impl PadTemplates for TsDemux {
 /// emits its elementary [`Caps`] ([`PipelinePacket::CapsChanged`]) before its
 /// first frame (the branch retypes from the byte-stream input caps); a parsed
 /// stream no port carries is dropped, and a port whose stream the multiplex lacks
-/// stays dark. With a bus, announces the same `StreamCollection` (M386) as
-/// [`TsDemux`]. The `playbin uri=*.ts` fan-out (M389) builds this.
+/// stays dark. With a bus, announces the program's `StreamCollection` (M386).
+/// The `playbin uri=*.ts` fan-out (M389) builds this.
 ///
 /// # Example
 ///
@@ -1351,9 +887,10 @@ pub struct TsDemuxN {
     packets: TsPacketSplitter,
     /// Port `i` emits this elementary stream (one selected stream per output pad).
     ports: Vec<TsStream>,
-    /// Whether port `i` has emitted its opening `CapsChanged` yet.
+    /// Whether port `i` has emitted its opening `CapsChanged` and the in-band
+    /// config its PMT descriptor implies. Re-armed on a flush.
     announced: Vec<bool>,
-    selected_pids: Vec<Option<u16>>,
+    port_pids: Vec<PortPid>,
     bus: Option<BusHandle>,
     /// Set once the `StreamCollection` has been announced (M386), so it posts once.
     collection_posted: bool,
@@ -1368,19 +905,37 @@ pub struct TsDemuxN {
     /// preserved across a parser reset so a seek keeps the selection.
     program_number: Option<u16>,
     emitted: u64,
-    /// Stream-start DTS (ns) latched from the first routed unit; every port's
-    /// opening `Segment` maps it to running time 0, so the ports share one
-    /// running-time origin and a capture's arbitrary PTS base does not stall a
-    /// paced sink.
-    segment_base: Option<u64>,
-    /// Whether port `i` has emitted its opening `Segment` yet.
+    /// Seek support (M362): app time seeks drive an upstream byte-seek and a
+    /// re-sync. Inert unless `set_seek` wired the controllers.
+    seek: DemuxSeek<EsUnit>,
+    // units of every PID held while a seek waits for the earliest stream's first pts
+    start_probe: Vec<EsUnit>,
+    start_probe_bytes: usize,
+    // every port opens with this segment, so the ports share one running-time origin
+    segment: Option<Segment>,
+    /// Whether port `i` has emitted its opening `Segment` yet. Re-armed on a flush.
     segment_sent: Vec<bool>,
-    /// Whether port `i` has seen a sequence header (MPEG-2 ports only, see
-    /// [`TsDemux`]'s `mpeg2_tuned_in`).
+    /// MPEG-1/2 video only: whether port `i` has seen a sequence header. Those
+    /// pictures carry no geometry of their own, so a mid-GOP join hands
+    /// libavcodec a stream it cannot size and it fails the lot ("invalid frame
+    /// dimensions"). Dropping to the first sequence header is the tune-in
+    /// convention `RtspSrc` follows for the same reason. The other video codecs
+    /// keep their parameter sets in band and their decoders resynchronize on
+    /// their own, so they are never dropped. Re-armed on a flush.
     mpeg2_tuned_in: Vec<bool>,
     last_unit_dts_ns: Vec<Option<u64>>,
     held_unit_ns: Vec<Option<u64>>,
     timeline: RestartTimeline,
+}
+
+// the PID a port carries among those carrying its stream
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortPid {
+    FirstInPmtOrder,
+    // a probed or app-selected track, routed whatever a later PMT lists it as
+    Track(u16),
+    // set through the `pid` property, which fails the run on a PID that carries another codec or never appears
+    Required(u16),
 }
 
 // ISO/IEC 13818-1 caps the gap between coded PTS at 0.7 s, so a longer one is a discontinuity
@@ -1437,7 +992,7 @@ impl RestartTimeline {
 // a sparse stream (subtitles, KLV) holds a unit until the next one arrives, however long that is
 fn holds_timed_units(stream: TsStream) -> bool {
     matches!(
-        TsDemux::output_caps(stream),
+        output_caps(stream),
         Caps::CompressedVideo { .. } | Caps::Audio { .. }
     )
 }
@@ -1448,7 +1003,7 @@ impl TsDemuxN {
     pub fn new(ports: Vec<TsStream>) -> Self {
         assert!(!ports.is_empty(), "TsDemuxN needs at least one output port");
         let announced = alloc::vec![false; ports.len()];
-        let selected_pids = alloc::vec![None; ports.len()];
+        let port_pids = alloc::vec![PortPid::FirstInPmtOrder; ports.len()];
         let segment_sent = alloc::vec![false; ports.len()];
         let mpeg2_tuned_in = alloc::vec![false; ports.len()];
         let last_unit_dts_ns = alloc::vec![None; ports.len()];
@@ -1458,8 +1013,11 @@ impl TsDemuxN {
             packets: TsPacketSplitter::new(),
             ports,
             announced,
-            selected_pids,
-            segment_base: None,
+            port_pids,
+            seek: DemuxSeek::default(),
+            start_probe: Vec::new(),
+            start_probe_bytes: 0,
+            segment: None,
             segment_sent,
             mpeg2_tuned_in,
             last_unit_dts_ns,
@@ -1477,7 +1035,7 @@ impl TsDemuxN {
     // one port per probed stream, so two streams of one codec each reach their own port
     pub fn from_stream_infos(infos: &[TsStreamInfo]) -> Self {
         let mut demux = Self::new(infos.iter().map(|info| info.stream).collect());
-        demux.selected_pids = infos.iter().map(|info| Some(info.pid)).collect();
+        demux.port_pids = infos.iter().map(|info| PortPid::Track(info.pid)).collect();
         demux
     }
 
@@ -1494,15 +1052,15 @@ impl TsDemuxN {
     }
 
     /// Attach the pipeline bus so the program's `StreamCollection` (M386) posts
-    /// once the PMT is parsed, the way [`TsDemux::with_bus`] does.
+    /// once the PMT is parsed, and its SDT service text / per-stream languages
+    /// post as tags (M872).
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.bus = Some(bus);
         self
     }
 
     /// Select which PAT program to demux by `program_number` (`None` = the first
-    /// program in PAT order, the default), the multi-output sibling of
-    /// [`TsDemux::with_program_number`].
+    /// program in PAT order, the default).
     pub fn with_program_number(mut self, n: Option<u16>) -> Self {
         self.program_number = n;
         self.demux.set_program_number(n);
@@ -1538,9 +1096,9 @@ impl TsDemuxN {
             let Some((pid, stream)) = resolve_ts_stream_id(&self.demux, id) else {
                 continue;
             };
-            if self.ports[port] != stream || self.selected_pids[port] != Some(pid) {
+            if self.ports[port] != stream || self.port_pids[port] != PortPid::Track(pid) {
                 self.ports[port] = stream;
-                self.selected_pids[port] = Some(pid);
+                self.port_pids[port] = PortPid::Track(pid);
                 self.announced[port] = false; // re-emit caps for the new stream
             }
             active.push(id.clone());
@@ -1562,17 +1120,38 @@ impl TsDemuxN {
         self.emitted
     }
 
-    // a port without a selected PID carries the first PMT stream of its codec
-    fn port_for_pid(&self, pid: u16) -> Option<usize> {
-        (0..self.ports.len()).position(|port| {
-            self.selected_pids[port].or_else(|| first_pid_carrying(&self.demux, self.ports[port]))
-                == Some(pid)
-        })
+    // called once units arrive, so the first PMT has parsed
+    fn port_pid(&self, port: usize) -> Result<Option<u16>, G2gError> {
+        let stream = self.ports[port];
+        let pid = match self.port_pids[port] {
+            PortPid::FirstInPmtOrder => return Ok(first_pid_carrying(&self.demux, stream)),
+            PortPid::Track(pid) => return Ok(Some(pid)),
+            PortPid::Required(pid) => pid,
+        };
+        let Some(listed) = self.demux.streams().iter().find(|es| es.pid == pid) else {
+            // a later PMT version can still add the PID
+            return Ok(None);
+        };
+        if pid_carries(&self.demux, stream, pid, listed.stream_type) {
+            return Ok(Some(pid));
+        }
+        Err(no_pinned_stream(pid, stream))
     }
 
-    /// Announce the active program's PMT elementary streams as a
-    /// `StreamCollection` (M386), once. Reuses [`TsDemux::es_to_stream`]. A no-op
-    /// without a bus, before the PMT, or once posted.
+    fn port_for_pid(&self, pid: u16) -> Result<Option<usize>, G2gError> {
+        for port in 0..self.ports.len() {
+            if self.port_pid(port)? == Some(pid) {
+                return Ok(Some(port));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Announce the active program's elementary streams as a
+    /// [`BusMessage::StreamCollection`] (M386), once, when that program's PMT has
+    /// parsed. The collection is the selected program's streams (GStreamer's
+    /// collection is per-program too). A no-op without a bus, before the PMT, or
+    /// once already posted.
     fn post_stream_collection(&mut self) {
         if self.collection_posted {
             return;
@@ -1581,7 +1160,7 @@ impl TsDemuxN {
             .demux
             .streams()
             .iter()
-            .filter_map(TsDemux::es_to_stream)
+            .filter_map(es_to_stream)
             .collect();
         if streams.is_empty() {
             return;
@@ -1594,69 +1173,168 @@ impl TsDemuxN {
         }
     }
 
-    /// Route each completed access unit to the port carrying its `stream_type`,
-    /// emitting that port's opening `CapsChanged` before its first frame.
-    async fn route_units(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
-        for u in self.demux.take_units() {
-            let Some(port) = self.port_for_pid(u.pid) else {
+    /// Reset the parser for a discontinuity (a `Flush` / seek): drop buffered
+    /// bytes and the demuxer's PAT/PMT/PES state, which the re-read stream
+    /// re-establishes from its start, and re-arm what each port sends ahead of
+    /// its first unit.
+    fn reset_parser(&mut self) {
+        self.packets.clear();
+        self.demux = TsDemuxer::new();
+        self.demux.set_program_number(self.program_number);
+        self.start_probe.clear();
+        self.start_probe_bytes = 0;
+        self.announced.fill(false);
+        self.segment_sent.fill(false);
+        self.mpeg2_tuned_in.fill(false);
+        self.last_unit_dts_ns.fill(None);
+    }
+
+    // ffmpeg -ss counts from the earliest stream's start, and a file can carry that stream last
+    fn past_stream_start_probe(&mut self, units: Vec<EsUnit>, ended: bool) -> Vec<EsUnit> {
+        // ffmpeg's default probesize
+        const STREAM_START_PROBE_BYTES: usize = 5_000_000;
+        if !self.seek.awaits_stream_start() {
+            return units;
+        }
+        self.start_probe_bytes = units.iter().fold(self.start_probe_bytes, |bytes, u| {
+            bytes.saturating_add(u.data.len())
+        });
+        self.start_probe.extend(units);
+        let probe = &self.start_probe;
+        let every_stream_started = self
+            .demux
+            .streams()
+            .iter()
+            .filter(|es| es_to_ts_stream(es).is_some())
+            .all(|es| {
+                probe
+                    .iter()
+                    .any(|u| u.pid == es.pid && u.pts_90khz.is_some())
+            });
+        if !every_stream_started && !ended && self.start_probe_bytes <= STREAM_START_PROBE_BYTES {
+            return Vec::new();
+        }
+        // a stream starts at its first stamped unit in decode order, as ffmpeg's start_time does
+        let mut started_pids: Vec<u16> = Vec::new();
+        let mut start_90khz: Option<u64> = None;
+        for u in probe {
+            let Some(pts) = u.pts_90khz.filter(|_| !started_pids.contains(&u.pid)) else {
+                continue;
+            };
+            started_pids.push(u.pid);
+            start_90khz = Some(start_90khz.map_or(pts, |start| start.min(pts)));
+        }
+        if let Some(start) = start_90khz {
+            self.seek.note_stream_start(ticks_90khz_to_ns(start));
+        }
+        self.start_probe_bytes = 0;
+        core::mem::take(&mut self.start_probe)
+    }
+
+    /// Route each completed access unit to the port carrying its PID. While a
+    /// seek re-syncs, hold from the keyframe at or before the target until the
+    /// target.
+    async fn route_units(
+        &mut self,
+        units: Vec<EsUnit>,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        for u in units {
+            let pts_ns = u.pts_90khz.map(ticks_90khz_to_ns);
+            if let Some(pts_ns) = pts_ns {
+                self.seek.note_stream_start(pts_ns);
+            }
+            let Some(port) = self.port_for_pid(u.pid)? else {
                 continue; // a stream no selected port carries
             };
-            if self.ports[port] == TsStream::Mpeg2 && !self.mpeg2_tuned_in[port] {
+            let stream = self.ports[port];
+            // MPEG-2 tune-in: nothing before the first sequence header can be
+            // sized, let alone decoded.
+            if stream == TsStream::Mpeg2 && !self.mpeg2_tuned_in[port] {
                 if !mpeg2_can_open_here(&u.data) {
                     continue;
                 }
                 self.mpeg2_tuned_in[port] = true;
             }
-            let pts_ns = u.pts_90khz.map_or(0, ticks_90khz_to_ns);
-            // Reordered video carries a separate DTS; fall back to the PTS when
-            // absent (the no-DTS convention shared with the fmp4 / mkv demux).
-            let dts_ns = u.dts_90khz.map_or(pts_ns, ticks_90khz_to_ns);
-            let (pts_ns, dts_ns) = self.timeline.map(pts_ns, dts_ns);
-            if !self.segment_sent[port] {
-                self.segment_sent[port] = true;
-                let base = *self.segment_base.get_or_insert(dts_ns);
-                let seg = Segment::for_flush_seek(&Seek::flush_to(base), None);
-                out.push_to(port, PipelinePacket::Segment(seg)).await?;
+            let keyframe = is_keyframe(stream, &u.data);
+            let admitted = self.seek.admit(pts_ns.unwrap_or(0), keyframe, u);
+            if admitted.segment.is_some() {
+                self.segment = admitted.segment;
             }
-            if !self.announced[port] {
-                let caps = match self.ports[port] {
-                    TsStream::Opus => opus_stream_caps(&self.demux, u.pid),
-                    stream => TsDemux::output_caps(stream),
-                };
-                out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
-                self.announced[port] = true;
-                // The page ids the display sets compose under go out in band
-                // ahead of the first one, as on the single-output demuxer.
-                if let Some(blob) = in_band_config(&self.demux, u.pid, self.ports[port]) {
-                    let frame = config_frame(blob, pts_ns, self.emitted);
-                    self.emitted += 1;
-                    out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
-                }
+            for u in admitted {
+                self.emit_unit(port, u, out).await?;
             }
-            if holds_timed_units(self.ports[port]) {
-                self.learn_held_unit(port, u.pts_90khz.map(|_| dts_ns));
+        }
+        Ok(())
+    }
+
+    /// Emit one access unit on `port` as frames (Annex-B for H.264 / H.265, ADTS
+    /// for AAC, raw MPEG-audio frames for Mp2, and control-header-unwrapped raw
+    /// Opus packets for Opus), preceded by the port's opening `Segment`,
+    /// `CapsChanged` and in-band config when it has not sent them yet.
+    async fn emit_unit(
+        &mut self,
+        port: usize,
+        u: EsUnit,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        let stream = self.ports[port];
+        let pts_ns = u.pts_90khz.map_or(0, ticks_90khz_to_ns);
+        // Reordered video carries a separate DTS; fall back to the PTS when
+        // absent (the no-DTS convention shared with the fmp4 / mkv demux).
+        let dts_ns = u.dts_90khz.map_or(pts_ns, ticks_90khz_to_ns);
+        let resuming = self.timeline.resuming();
+        let (pts_ns, dts_ns) = self.timeline.map(pts_ns, dts_ns);
+        // Stream start: map the first emitted DTS to running time 0, since
+        // open-GOP B frames present before the first I frame. A seek's resume
+        // already did that for its own case.
+        if let Some(opening) = self.seek.opening_segment(dts_ns) {
+            match self.segment {
+                Some(_) if resuming => {}
+                _ => self.segment = Some(opening),
             }
-            let data = unwrap_sync_klv(u.stream_type, u.data);
-            let units = match self.ports[port] {
-                TsStream::Opus => crate::mpegts::opus_ts_packets(&data)
-                    .into_iter()
-                    .map(<[u8]>::to_vec)
-                    .collect(),
-                _ => alloc::vec![data],
+        }
+        if !self.segment_sent[port] {
+            self.segment_sent[port] = true;
+            let segment = self.segment.expect("the stream opened with a segment");
+            out.push_to(port, PipelinePacket::Segment(segment)).await?;
+        }
+        if !self.announced[port] {
+            let caps = match stream {
+                TsStream::Opus => opus_stream_caps(&self.demux, u.pid),
+                stream => output_caps(stream),
             };
-            for unit in units {
-                let frame = Frame::new(
-                    MemoryDomain::System(SystemSlice::from_boxed(unit.into_boxed_slice())),
-                    FrameTiming {
-                        pts_ns,
-                        dts_ns,
-                        ..FrameTiming::default()
-                    },
-                    self.emitted,
-                );
+            out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
+            self.announced[port] = true;
+            if let Some(blob) = in_band_config(&self.demux, u.pid, stream) {
+                let frame = config_frame(blob, pts_ns, self.emitted);
                 self.emitted += 1;
                 out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
             }
+        }
+        if holds_timed_units(stream) {
+            self.learn_held_unit(port, u.pts_90khz.map(|_| dts_ns));
+        }
+        let data = unwrap_sync_klv(u.stream_type, u.data);
+        let units = match stream {
+            TsStream::Opus => crate::mpegts::opus_ts_packets(&data)
+                .into_iter()
+                .map(<[u8]>::to_vec)
+                .collect(),
+            _ => alloc::vec![data],
+        };
+        for unit in units {
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(unit.into_boxed_slice())),
+                FrameTiming {
+                    pts_ns,
+                    dts_ns,
+                    ..FrameTiming::default()
+                },
+                self.emitted,
+            );
+            self.emitted += 1;
+            out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
         }
         Ok(())
     }
@@ -1749,7 +1427,7 @@ fn resolve_ts_stream_id(demux: &TsDemuxer, id: &str) -> Option<(u16, TsStream)> 
 
 // a private PES (0x06) carries a codec only when its PMT descriptors name it
 fn pid_carries(demux: &TsDemuxer, stream: TsStream, pid: u16, stream_type: u8) -> bool {
-    if !TsDemux::accepts_stream_type(stream, stream_type) {
+    if !accepts_stream_type(stream, stream_type) {
         return false;
     }
     let private = stream_type == STREAM_TYPE_PRIVATE_PES;
@@ -1786,24 +1464,22 @@ impl MultiOutputElement for TsDemuxN {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&TsDemux::input_caps())
+        upstream_caps.intersect(&input_caps())
     }
 
     fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::one(TsDemux::input_caps()))
+        CapsConstraint::Accepts(CapsSet::one(input_caps()))
     }
 
     /// Declare each port's elementary-stream caps (M380), so the solver negotiates
     /// each branch against its codec at startup. `None` for an out-of-range port.
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
-        self.ports
-            .get(port)
-            .map(|&stream| TsDemux::output_caps(stream))
+        self.ports.get(port).map(|&stream| output_caps(stream))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         absolute_caps
-            .intersect(&TsDemux::input_caps())
+            .intersect(&input_caps())
             .map(|_| ConfigureOutcome::Accepted)
     }
 
@@ -1813,8 +1489,14 @@ impl MultiOutputElement for TsDemuxN {
         out: &'a mut dyn MultiOutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            // M362: a pending app seek triggers an upstream byte-seek; until its
+            // `Flush` returns, drop input so no stale pre-seek units are emitted.
+            self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
@@ -1826,22 +1508,28 @@ impl MultiOutputElement for TsDemuxN {
                     // Honor an app selection before routing this batch, so a re-map
                     // (and its re-armed CapsChanged) takes effect for the frames now.
                     self.apply_stream_selection();
-                    self.route_units(out).await?;
+                    let units = self.demux.take_units();
+                    let units = self.past_stream_start_probe(units, false);
+                    self.route_units(units, out).await?;
                 }
-                // A flush resets the parser; the re-read stream re-establishes
-                // PAT/PMT/PES. Broadcast it to every branch.
+                // The upstream byte-seek's flush or a source restart: reset the
+                // parser, then re-sync from the re-read stream. Broadcast it to
+                // every branch.
                 PipelinePacket::Flush => {
-                    self.packets.clear();
-                    self.demux = TsDemuxer::new();
-                    self.demux.set_program_number(self.program_number);
-                    self.last_unit_dts_ns.fill(None);
-                    self.timeline.restart();
+                    if self.seek.dropping_input() {
+                        self.timeline.seek();
+                    } else {
+                        self.timeline.restart();
+                    }
+                    self.seek.on_flush();
+                    self.reset_parser();
                     for port in 0..self.ports.len() {
                         out.push_to(port, PipelinePacket::Flush).await?;
                     }
                 }
                 PipelinePacket::Segment(seg) => {
                     self.timeline.seek();
+                    self.segment = Some(seg);
                     for port in 0..self.ports.len() {
                         out.push_to(port, PipelinePacket::Segment(seg)).await?;
                     }
@@ -1851,7 +1539,16 @@ impl MultiOutputElement for TsDemuxN {
                     // broadcasts the merged Eos to every port.
                     self.packets.finish(&mut self.demux);
                     self.demux.flush();
-                    self.route_units(out).await?;
+                    let units = self.demux.take_units();
+                    let units = self.past_stream_start_probe(units, true);
+                    self.route_units(units, out).await?;
+                    for port in 0..self.ports.len() {
+                        if let (PortPid::Required(pid), None) =
+                            (self.port_pids[port], self.port_pid(port)?)
+                        {
+                            return Err(no_pinned_stream(pid, self.ports[port]));
+                        }
+                    }
                 }
                 // The input's (byte-stream) CapsChanged is consumed: each port
                 // defines its own caps, announced per port above.
@@ -1863,11 +1560,34 @@ impl MultiOutputElement for TsDemuxN {
         })
     }
 
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        // a seek re-syncs on one stream's keyframes
+        (self.ports.len() == 1).then_some(ElementSeekRoute::UpstreamBytes)
+    }
+
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.seek.with(app, upstream);
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "MPEG-TS demuxer",
+            "Codec/Demuxer",
+            "Demuxes an MPEG transport stream into the elementary streams its ports select",
+            "g2g",
+        )
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
-        TSDEMUXN_PROPS
+        if self.ports.len() == 1 {
+            ONE_PORT_PROPS
+        } else {
+            MULTI_PORT_PROPS
+        }
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        let one_port = self.ports.len() == 1;
         match name {
             "program-number" => {
                 let n = program_number_from_int(value.as_int().ok_or(PropError::Type)?)?;
@@ -1875,13 +1595,32 @@ impl MultiOutputElement for TsDemuxN {
                 self.demux.set_program_number(n);
                 Ok(())
             }
+            "stream" if one_port => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.ports[0] = ts_stream_from_str(s).ok_or(PropError::Value)?;
+                Ok(())
+            }
+            "pid" if one_port => {
+                let pid = value.as_uint().ok_or(PropError::Type)?;
+                self.port_pids[0] = match pid {
+                    0 => PortPid::FirstInPmtOrder,
+                    _ => PortPid::Required(u16::try_from(pid).map_err(|_| PropError::Value)?),
+                };
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        let one_port = self.ports.len() == 1;
         match name {
             "program-number" => Some(PropValue::Int(program_number_to_int(self.program_number))),
+            "stream" if one_port => Some(PropValue::Str(ts_stream_to_str(self.ports[0]).into())),
+            "pid" if one_port => Some(PropValue::Uint(match self.port_pids[0] {
+                PortPid::FirstInPmtOrder => 0,
+                PortPid::Track(pid) | PortPid::Required(pid) => pid.into(),
+            })),
             _ => None,
         }
     }
@@ -1898,18 +1637,11 @@ impl MultiOutputElement for TsDemuxN {
     }
 }
 
-/// `TsDemuxN`'s settable properties (M781).
-static TSDEMUXN_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "program-number",
-    PropKind::Int,
-    "PAT program to demux (-1 = the first program)",
-)];
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mpegts::{SYNC_BYTE, TS_PACKET_LEN};
-    use g2g_core::{PushOutcome, RawVideoFormat};
+    use g2g_core::{OutputSink, PushOutcome, RawVideoFormat};
 
     /// PMT stream_type 0x10 maps to an MPEG-4 Part 2 video stream, and the
     /// selection round-trips through the `stream` property string and the
@@ -1927,7 +1659,7 @@ mod tests {
             teletext: None,
             language: None,
         };
-        let stream = TsDemux::es_to_stream(&es).expect("0x10 is forwarded");
+        let stream = es_to_stream(&es).expect("0x10 is forwarded");
         assert_eq!(stream.stream_type, StreamType::Video);
         assert!(
             matches!(
@@ -1955,7 +1687,7 @@ mod tests {
             Some(TsStream::Mpeg4Part2)
         );
         assert_eq!(
-            TsDemux::selected_stream_type(TsStream::Mpeg4Part2),
+            selected_stream_type(TsStream::Mpeg4Part2),
             STREAM_TYPE_MPEG4P2
         );
         assert_eq!(ts_stream_from_str("mpeg4part2"), Some(TsStream::Mpeg4Part2));
@@ -2144,7 +1876,7 @@ mod tests {
     #[test]
     fn caps_byte_stream_in_h264_out() {
         let d = TsDemux::new();
-        assert!(d.intercept_caps(&TsDemux::input_caps()).is_ok());
+        assert!(d.intercept_caps(&input_caps()).is_ok());
         // A non-TS byte stream / other caps is rejected.
         let raw = Caps::RawVideo {
             format: RawVideoFormat::Rgba8,
@@ -2161,7 +1893,7 @@ mod tests {
     async fn demuxes_h264_frames_from_ts_bytes() {
         let es_pid = 0x0100;
         let mut d = TsDemux::new();
-        d.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        d.configure_pipeline(&input_caps()).unwrap();
 
         // Build a TS byte stream: PAT, PMT, then two H.264 access units, each its
         // own PES (PUSI). The first flushes when the second's PES starts; the
@@ -2196,7 +1928,6 @@ mod tests {
             !sink.eos,
             "EOS is forwarded by the runner's arm, not the element"
         );
-        assert_eq!(d.emitted(), 2);
     }
 
     /// Feed the whole stream as one frame, then EOS, capturing the output.
@@ -2217,18 +1948,33 @@ mod tests {
     // a restarted origin starts its clock again, below where the first session stopped
     const SECOND_SESSION_TICKS: u64 = 90_000;
 
-    fn h264_session(start_ticks: u64, frames: u64) -> PipelinePacket {
-        let mut muxer = crate::mpegts::TsMuxer::with_streams(&[STREAM_TYPE_H264]);
+    // one access unit per frame period from `start_ticks`
+    fn session(
+        mut muxer: crate::mpegts::TsMuxer,
+        start_ticks: u64,
+        aus: &[Vec<u8>],
+    ) -> PipelinePacket {
         let mut stream = Vec::new();
-        for frame in 0..frames {
+        for (frame, au) in (0..).zip(aus) {
             let pts = start_ticks + frame * RESTART_FRAME_TICKS;
-            stream.extend(muxer.push_au(&[0, 0, 0, 1, 0x65, frame as u8], Some(pts), None, true));
+            stream.extend(muxer.push_au(au, Some(pts), None, true));
         }
         PipelinePacket::DataFrame(Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
             FrameTiming::default(),
             0,
         ))
+    }
+
+    fn h264_session(start_ticks: u64, frames: u64) -> PipelinePacket {
+        let aus: Vec<Vec<u8>> = (0..frames)
+            .map(|frame| alloc::vec![0, 0, 0, 1, 0x65, frame as u8])
+            .collect();
+        session(
+            crate::mpegts::TsMuxer::with_streams(&[STREAM_TYPE_H264]),
+            start_ticks,
+            &aus,
+        )
     }
 
     // the pts a demuxer reads back from `h264_session`, which adds the muxer's decoder delay
@@ -2252,7 +1998,7 @@ mod tests {
     #[tokio::test]
     async fn a_restarted_source_continues_the_timeline() {
         let mut d = TsDemux::new();
-        d.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        d.configure_pipeline(&input_caps()).unwrap();
         let mut sink = CaptureSink::default();
         for packet in [
             h264_session(FIRST_SESSION_TICKS, 3),
@@ -2273,7 +2019,7 @@ mod tests {
     #[tokio::test]
     async fn an_upstream_seek_keeps_the_new_timestamps() {
         let mut d = TsDemux::new();
-        d.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        d.configure_pipeline(&input_caps()).unwrap();
         let mut sink = CaptureSink::default();
         for packet in [
             h264_session(FIRST_SESSION_TICKS, 3),
@@ -2291,9 +2037,12 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct PortPts(Vec<u64>);
+    struct PortCapture {
+        frames: Vec<Vec<u8>>,
+        pts_ns: Vec<u64>,
+    }
 
-    impl MultiOutputSink for PortPts {
+    impl MultiOutputSink for PortCapture {
         fn port_count(&self) -> usize {
             1
         }
@@ -2305,28 +2054,242 @@ mod tests {
             packet_slot: &mut Option<PipelinePacket>,
         ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
             if let Some(PipelinePacket::DataFrame(frame)) = packet_slot.take() {
-                self.0.push(frame.timing.pts_ns);
+                if let Some(bytes) = frame.domain.as_system_slice() {
+                    self.frames.push(bytes.to_vec());
+                }
+                self.pts_ns.push(frame.timing.pts_ns);
             }
             core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }
     }
 
+    async fn run_ports(
+        demux: &mut TsDemuxN,
+        packets: impl IntoIterator<Item = PipelinePacket>,
+    ) -> Result<PortCapture, G2gError> {
+        let mut sink = PortCapture::default();
+        for packet in packets {
+            MultiOutputElement::process(demux, packet, &mut sink).await?;
+        }
+        Ok(sink)
+    }
+
     #[tokio::test]
     async fn a_restarted_source_continues_every_port_timeline() {
         let mut d = TsDemuxN::new(Vec::from([TsStream::H264]));
-        let mut sink = PortPts::default();
-        for packet in [
-            h264_session(FIRST_SESSION_TICKS, 3),
-            PipelinePacket::Flush,
-            h264_session(SECOND_SESSION_TICKS, 3),
-            PipelinePacket::Eos,
-        ] {
-            MultiOutputElement::process(&mut d, packet, &mut sink)
-                .await
-                .unwrap();
-        }
+        let sink = run_ports(
+            &mut d,
+            [
+                h264_session(FIRST_SESSION_TICKS, 3),
+                PipelinePacket::Flush,
+                h264_session(SECOND_SESSION_TICKS, 3),
+                PipelinePacket::Eos,
+            ],
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(sink.0, continued_pts_ns());
+        assert_eq!(sink.pts_ns, continued_pts_ns());
+    }
+
+    // a 16x16, 25 fps sequence header, then a picture start code
+    const MPEG2_SEQUENCE: [u8; 13] = [0, 0, 1, 0xB3, 0x01, 0x00, 0x10, 0x13, 0, 0, 1, 0x00, 0xAA];
+    const MPEG2_PICTURE: [u8; 5] = [0, 0, 1, 0x00, 0xBB];
+
+    // the flush drops each session's last unit, still waiting for the PES after it
+    #[tokio::test]
+    async fn a_restarted_mpeg2_port_tunes_in_again() {
+        let mpeg2 = || crate::mpegts::TsMuxer::with_streams(&[STREAM_TYPE_MPEG2_VIDEO]);
+        let (sequence, picture) = (MPEG2_SEQUENCE.to_vec(), MPEG2_PICTURE.to_vec());
+        let mut d = TsDemuxN::new(Vec::from([TsStream::Mpeg2]));
+        let sink = run_ports(
+            &mut d,
+            [
+                session(
+                    mpeg2(),
+                    FIRST_SESSION_TICKS,
+                    &[sequence.clone(), picture.clone(), picture.clone()],
+                ),
+                PipelinePacket::Flush,
+                session(
+                    mpeg2(),
+                    SECOND_SESSION_TICKS,
+                    &[picture.clone(), sequence.clone(), picture.clone()],
+                ),
+                PipelinePacket::Eos,
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            sink.frames,
+            [sequence.clone(), picture.clone(), sequence, picture]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restarted_dvb_subtitle_port_sends_its_page_ids_again() {
+        const SUBTITLING_TYPE: u8 = 0x10;
+        let ids = crate::dvbsub::PageIds {
+            composition: 1,
+            ancillary: 2,
+        };
+        let dvbsub = || {
+            let mut muxer = crate::mpegts::TsMuxer::with_streams(&[STREAM_TYPE_PRIVATE_PES]);
+            muxer.set_stream_subtitling(0, "eng", SUBTITLING_TYPE, ids);
+            muxer
+        };
+        let display_sets = [
+            alloc::vec![0x0F, 0x10, 0x00, 0x01],
+            alloc::vec![0x0F, 0x10, 0x00, 0x02],
+        ];
+        let mut d = TsDemuxN::new(Vec::from([TsStream::DvbSub]));
+        let sink = run_ports(
+            &mut d,
+            [
+                session(dvbsub(), FIRST_SESSION_TICKS, &display_sets),
+                PipelinePacket::Flush,
+                session(dvbsub(), SECOND_SESSION_TICKS, &display_sets),
+                PipelinePacket::Eos,
+            ],
+        )
+        .await
+        .unwrap();
+
+        let page_ids = crate::dvbsub::page_id_blob(ids, SUBTITLING_TYPE).to_vec();
+        assert_eq!(
+            sink.frames.len(),
+            5,
+            "page ids and one set, page ids and two sets"
+        );
+        assert_eq!(sink.frames[0], page_ids);
+        assert_eq!(sink.frames[2], page_ids);
+    }
+
+    #[tokio::test]
+    async fn a_pid_carrying_another_codec_fails_the_run() {
+        const VIDEO_PID: u16 = 0x0100;
+        const AUDIO_PID: u16 = 0x0101;
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&pat(0x1000));
+        stream.extend_from_slice(&pmt2(
+            VIDEO_PID,
+            STREAM_TYPE_H264,
+            AUDIO_PID,
+            STREAM_TYPE_AAC,
+        ));
+        stream.extend_from_slice(&ts_packet(
+            VIDEO_PID,
+            true,
+            &pes_id(0xE0, &[0, 0, 0, 1, 0x65]),
+        ));
+
+        let mut d = TsDemuxN::new(Vec::from([TsStream::Aac]));
+        d.set_property("pid", PropValue::Uint(VIDEO_PID.into()))
+            .unwrap();
+        let ran = run_ports(
+            &mut d,
+            [
+                PipelinePacket::DataFrame(Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
+                    FrameTiming::default(),
+                    0,
+                )),
+                PipelinePacket::Eos,
+            ],
+        )
+        .await;
+        assert!(matches!(ran, Err(G2gError::CapsMismatch)));
+    }
+
+    // the PID `h264_session` muxes its track on
+    const TRACK_PID: u16 = crate::mpegts::MUX_ES_PID;
+    const MOVED_TRACK_PID: u16 = TRACK_PID + 1;
+
+    // the port a playbin fan-out builds for a probed H.264 track
+    fn probed_track_port() -> TsDemuxN {
+        TsDemuxN::from_stream_infos(&[TsStreamInfo {
+            stream: TsStream::H264,
+            caps: output_caps(TsStream::H264),
+            video: true,
+            pid: TRACK_PID,
+        }])
+    }
+
+    fn two_units(pmt: Vec<u8>, pid: u16, stream_id: u8, units: [&[u8]; 2]) -> PipelinePacket {
+        let mut stream = pat(0x1000);
+        stream.extend_from_slice(&pmt);
+        for unit in units {
+            stream.extend_from_slice(&ts_packet(pid, true, &pes_id(stream_id, unit)));
+        }
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        ))
+    }
+
+    const H264_AU: [u8; 5] = [0, 0, 0, 1, 0x65];
+
+    #[tokio::test]
+    async fn a_probed_track_port_ends_cleanly_without_data() {
+        let ran = run_ports(&mut probed_track_port(), [PipelinePacket::Eos]).await;
+        assert!(ran.is_ok(), "{:?}", ran.err());
+    }
+
+    // the flush drops the first session's last unit, still waiting for the PES after it
+    #[tokio::test]
+    async fn a_probed_track_port_stays_dark_when_a_restart_moves_its_pid() {
+        let sink = run_ports(
+            &mut probed_track_port(),
+            [
+                h264_session(FIRST_SESSION_TICKS, 3),
+                PipelinePacket::Flush,
+                two_units(
+                    pmt(MOVED_TRACK_PID),
+                    MOVED_TRACK_PID,
+                    0xE0,
+                    [&H264_AU, &H264_AU],
+                ),
+                PipelinePacket::Eos,
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(sink.pts_ns, session_pts_ns(FIRST_SESSION_TICKS, 2));
+    }
+
+    #[tokio::test]
+    async fn a_probed_track_port_survives_a_restart_that_lists_its_pid_as_another_codec() {
+        const ADTS: [u8; 4] = [0xFF, 0xF1, 0x50, 0x80];
+        let ran = run_ports(
+            &mut probed_track_port(),
+            [
+                h264_session(FIRST_SESSION_TICKS, 3),
+                PipelinePacket::Flush,
+                two_units(
+                    pmt2(
+                        MOVED_TRACK_PID,
+                        STREAM_TYPE_H264,
+                        TRACK_PID,
+                        STREAM_TYPE_AAC,
+                    ),
+                    TRACK_PID,
+                    0xC0,
+                    [&ADTS, &ADTS],
+                ),
+                PipelinePacket::Eos,
+            ],
+        )
+        .await;
+        assert!(ran.is_ok(), "{:?}", ran.err());
+    }
+
+    #[test]
+    #[should_panic(expected = "a one-port element is a demuxer with caps for port 0 alone")]
+    fn a_one_port_demuxer_rejects_a_second_port() {
+        let _ = TsDemux::new().map(|_| TsDemuxN::new(Vec::from([TsStream::H264, TsStream::Aac])));
     }
 
     #[tokio::test]
@@ -2346,7 +2309,7 @@ mod tests {
         }
 
         let mut d = TsDemux::new();
-        d.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        d.configure_pipeline(&input_caps()).unwrap();
         let mut sink = CaptureSink::default();
         run_demux(&mut d, &stream, &mut sink).await;
         let [seg] = sink.segments.as_slice() else {
@@ -2360,29 +2323,49 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn forwards_only_the_first_pmt_stream_of_the_selected_codec() {
-        const FIRST_PID: u16 = 0x0101;
-        const SECOND_PID: u16 = 0x0102;
-        let first = [0xFFu8, 0xF1, 0x50, 0x80, 0x01, 0x23];
-        let second = [0xFFu8, 0xF1, 0x50, 0x80, 0x02, 0x45];
+    const FIRST_AAC_PID: u16 = 0x0101;
+    const SECOND_AAC_PID: u16 = 0x0102;
+    const FIRST_AAC: [u8; 6] = [0xFF, 0xF1, 0x50, 0x80, 0x01, 0x23];
+    const SECOND_AAC: [u8; 6] = [0xFF, 0xF1, 0x50, 0x80, 0x02, 0x45];
+
+    // two AAC tracks, the second PID's units around the first's
+    fn two_aac_tracks() -> Vec<u8> {
         let mut stream = Vec::new();
         stream.extend_from_slice(&pat(0x1000));
         stream.extend_from_slice(&pmt2(
-            FIRST_PID,
+            FIRST_AAC_PID,
             STREAM_TYPE_AAC,
-            SECOND_PID,
+            SECOND_AAC_PID,
             STREAM_TYPE_AAC,
         ));
-        stream.extend_from_slice(&ts_packet(SECOND_PID, true, &pes_id(0xC0, &second)));
-        stream.extend_from_slice(&ts_packet(FIRST_PID, true, &pes_id(0xC0, &first)));
-        stream.extend_from_slice(&ts_packet(SECOND_PID, true, &pes_id(0xC0, &second)));
+        for (pid, unit) in [
+            (SECOND_AAC_PID, SECOND_AAC),
+            (FIRST_AAC_PID, FIRST_AAC),
+            (SECOND_AAC_PID, SECOND_AAC),
+        ] {
+            stream.extend_from_slice(&ts_packet(pid, true, &pes_id(0xC0, &unit)));
+        }
+        stream
+    }
 
+    #[tokio::test]
+    async fn forwards_only_the_first_pmt_stream_of_the_selected_codec() {
         let mut d = TsDemux::new().with_stream(TsStream::Aac);
-        d.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        d.configure_pipeline(&input_caps()).unwrap();
         let mut sink = CaptureSink::default();
-        run_demux(&mut d, &stream, &mut sink).await;
-        assert_eq!(sink.frames, alloc::vec![first.to_vec()]);
+        run_demux(&mut d, &two_aac_tracks(), &mut sink).await;
+        assert_eq!(sink.frames, alloc::vec![FIRST_AAC.to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn pid_picks_a_track_among_those_of_the_selected_codec() {
+        let mut d = TsDemux::new().with_stream(TsStream::Aac);
+        d.set_property("pid", PropValue::Uint(SECOND_AAC_PID.into()))
+            .unwrap();
+        d.configure_pipeline(&input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        run_demux(&mut d, &two_aac_tracks(), &mut sink).await;
+        assert_eq!(sink.frames, alloc::vec![SECOND_AAC.to_vec(); 2]);
     }
 
     // a PMT naming each (stream_type, pid, descriptors) entry in order, PCR on the first
@@ -2441,13 +2424,13 @@ mod tests {
         assert_eq!(streams, alloc::vec![TsStream::Ac3]);
 
         let mut d = TsDemux::new().with_stream(TsStream::Ac3);
-        d.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        d.configure_pipeline(&input_caps()).unwrap();
         let mut sink = CaptureSink::default();
         run_demux(&mut d, &stream, &mut sink).await;
         assert_eq!(sink.frames, alloc::vec![syncframe.to_vec()]);
     }
 
-    /// The single-output demuxer posts the tags a transport stream carries (M872):
+    /// The one-port demuxer posts the tags a transport stream carries (M872):
     /// the SDT service text once as a `Tag`, each PMT language as a `StreamTag` on
     /// its stream's collection id. Re-feeding the same stream posts nothing more.
     #[tokio::test]
@@ -2461,7 +2444,7 @@ mod tests {
 
         let (bus, handle) = Bus::new(16);
         let mut d = TsDemux::new().with_bus(handle);
-        d.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        d.configure_pipeline(&input_caps()).unwrap();
         let mut sink = CaptureSink::default();
         run_demux(&mut d, &stream, &mut sink).await;
         run_demux(&mut d, &stream, &mut sink).await; // the tables repeat, the tags do not
@@ -2513,7 +2496,7 @@ mod tests {
 
         // Default selects H.264: only the two video AUs come out.
         let mut video = TsDemux::new();
-        video.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        video.configure_pipeline(&input_caps()).unwrap();
         let mut vsink = CaptureSink::default();
         run_demux(&mut video, &stream, &mut vsink).await;
         assert_eq!(
@@ -2524,7 +2507,7 @@ mod tests {
 
         // stream=aac selects AAC: only the two audio AUs come out (ADTS payload).
         let mut audio = TsDemux::new().with_stream(TsStream::Aac);
-        audio.configure_pipeline(&TsDemux::input_caps()).unwrap();
+        audio.configure_pipeline(&input_caps()).unwrap();
         let mut asink = CaptureSink::default();
         run_demux(&mut audio, &stream, &mut asink).await;
         assert_eq!(
@@ -2559,21 +2542,21 @@ mod tests {
     #[test]
     fn output_caps_track_the_selection() {
         assert!(matches!(
-            TsDemux::output_caps(TsStream::H264),
+            output_caps(TsStream::H264),
             Caps::CompressedVideo {
                 codec: VideoCodec::H264,
                 ..
             }
         ));
         assert!(matches!(
-            TsDemux::output_caps(TsStream::H265),
+            output_caps(TsStream::H265),
             Caps::CompressedVideo {
                 codec: VideoCodec::H265,
                 ..
             }
         ));
         assert!(matches!(
-            TsDemux::output_caps(TsStream::Aac),
+            output_caps(TsStream::Aac),
             Caps::Audio {
                 format: AudioFormat::Aac,
                 ..
@@ -2591,7 +2574,6 @@ mod tests {
 
         d.set_property("stream", PropValue::Str("aac".into()))
             .unwrap();
-        assert_eq!(d.stream(), TsStream::Aac);
         assert_eq!(d.get_property("stream"), Some(PropValue::Str("aac".into())));
 
         // An unsupported codec name is rejected (leaving the selection unchanged).
@@ -2599,13 +2581,13 @@ mod tests {
             d.set_property("stream", PropValue::Str("vp9".into())),
             Err(PropError::Value)
         );
-        assert_eq!(d.stream(), TsStream::Aac);
+        assert_eq!(d.get_property("stream"), Some(PropValue::Str("aac".into())));
 
         // DerivedOutput now maps the TS byte stream to AAC audio.
         let CapsConstraint::DerivedOutput(f) = d.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
-        let out = f(&TsDemux::input_caps());
+        let out = f(&input_caps());
         assert!(matches!(
             out.alternatives(),
             [Caps::Audio {
@@ -2654,9 +2636,6 @@ mod tests {
         let mut muxer = crate::mpegts::TsMuxer::with_streams(&[STREAM_TYPE_H264]);
         let mut stream = muxer.push_au(&[0, 0, 0, 1, 0x65, 0x11], None, None, true);
         stream.extend(muxer.push_au(&[0, 0, 0, 1, 0x01, 0x22], None, None, false));
-        assert_eq!(
-            probed_video_caps(&stream),
-            TsDemux::output_caps(TsStream::H264)
-        );
+        assert_eq!(probed_video_caps(&stream), output_caps(TsStream::H264));
     }
 }

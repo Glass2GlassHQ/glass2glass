@@ -672,6 +672,19 @@ pub trait MultiOutputElement: ElementBound {
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::default()
     }
+
+    // the graph runner seeks no demux node, only an element wrapping a one-output demux
+    fn seek_route(&self) -> Option<crate::runtime::ElementSeekRoute> {
+        None
+    }
+
+    // called only when `seek_route` is `UpstreamBytes`
+    fn set_seek(
+        &mut self,
+        _app: crate::runtime::SeekController,
+        _upstream: crate::runtime::SeekController,
+    ) {
+    }
 }
 
 /// Multi-input element trait variant: an N-input, 1-output element (a

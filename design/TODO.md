@@ -224,8 +224,8 @@ Highest leverage first:
     at 0.008 and clips the video IDR at 0. `h264/H264_might_overflow.mkv` seeks from
     1.086 where gst uses 1.003. gst's matroskademux lowers `stream_start_time` for
     every unit below it and sends a new segment (matroska-demux.c): port that to
-    `DemuxSeek::opening_segment` and the `segment_base` latches in `MkvDemuxN`,
-    `TsDemuxN` and `PsDemuxN`, keeping the seek tests green.
+    `DemuxSeek::opening_segment` and the `segment_base` latches in `MkvDemuxN` and
+    `PsDemuxN`, keeping the seek tests green.
   - `mpegtsmux` writes a DTS of exactly 0 as unset, so the PES carries no DTS.
   - Demuxers drop streams gst's parsebin exposes: DTS in `filter/242_4.mkv`, TTA,
     pcm_dvd LPCM in `coolitnow-partial.vob`, and the xan_dpcm audio of

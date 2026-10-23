@@ -1,11 +1,15 @@
 use alloc::boxed::Box;
+use alloc::string::String;
 use core::task::{Context, Poll};
 
 use g2g_core::element::BoxFuture;
-use g2g_core::runtime::SourceLoop;
+use g2g_core::memory::DomainSet;
+use g2g_core::query::LatencyReport;
+use g2g_core::runtime::{ElementSeekRoute, SeekController, SourceLoop};
 use g2g_core::{
-    Caps, ConfigureOutcome, ElementMetadata, G2gError, MultiOutputSink, MultiOutputSource,
-    OutputSink, PipelinePacket, PropError, PropValue, PropertySpec, PushOutcome,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
+    MultiOutputElement, MultiOutputSink, MultiOutputSource, OutputSink, PipelinePacket, PropError,
+    PropValue, PropertySpec, PushOutcome,
 };
 
 #[derive(Debug)]
@@ -84,6 +88,110 @@ impl<S: MultiOutputSource> SourceLoop for OnePortSource<S> {
         self.exposes(name)
             .then(|| self.source.get_property(name))
             .flatten()
+    }
+}
+
+#[derive(Debug)]
+pub struct OnePortElement<E> {
+    element: E,
+    log_category: &'static str,
+}
+
+impl<E: MultiOutputElement> OnePortElement<E> {
+    pub fn wrap(element: E, log_category: &'static str) -> Self {
+        assert!(
+            element.port_output_caps(0).is_some() && element.port_output_caps(1).is_none(),
+            "a one-port element is a demuxer with caps for port 0 alone"
+        );
+        Self {
+            element,
+            log_category,
+        }
+    }
+
+    pub fn map(self, build: impl FnOnce(E) -> E) -> Self {
+        Self::wrap(build(self.element), self.log_category)
+    }
+}
+
+impl<E: MultiOutputElement> AsyncElement for OnePortElement<E> {
+    type ProcessFuture<'a>
+        = BoxFuture<'a, Result<(), G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        self.element.intercept_caps(upstream_caps)
+    }
+
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        let accepted = self.element.caps_constraint_as_input();
+        let output = self.element.port_output_caps(0);
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            CapsSet::from_alternatives(
+                output
+                    .iter()
+                    .filter(|_| accepted.accepts(input))
+                    .cloned()
+                    .collect(),
+            )
+        }))
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.element.configure_pipeline(absolute_caps)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move { self.element.process(packet, &mut OnePortSink(out)).await })
+    }
+
+    fn input_domains(&self) -> DomainSet {
+        self.element.input_domains()
+    }
+
+    fn latency(&self) -> LatencyReport {
+        self.element.latency()
+    }
+
+    fn seek_route(&self) -> Option<ElementSeekRoute> {
+        self.element.seek_route()
+    }
+
+    fn set_seek(&mut self, app: SeekController, upstream: SeekController) {
+        self.element.set_seek(app, upstream);
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        self.element.metadata()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        self.element.properties()
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.element.set_property(name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.element.get_property(name)
+    }
+
+    fn set_instance_name(&mut self, name: String) {
+        self.element.set_instance_name(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.element.set_log_category(category);
+    }
+
+    fn log_category(&self) -> &'static str {
+        self.log_category
     }
 }
 

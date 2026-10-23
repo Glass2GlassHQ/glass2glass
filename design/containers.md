@@ -141,11 +141,19 @@ back. `typefind` and `filesrc` type them by magic or extension: `aiff`, `aif`,
 
 `g2g-plugins::mpegts::TsDemuxer` is a pure `no_std + alloc` parser: it takes
 188-byte packets, reads the PAT and then the PMT it names, and reassembles PES
-per PID into access units with PTS. The `TsDemux` element wraps it. The parser
-reassembles every elementary stream the PMT names. The element has one output
-pad, so a `TsStream` selection picks which to emit, `H264` or `H265` video as
-`CompressedVideo` and `Aac` audio as `Audio`, defaulting to H.264, and a second
-`tsdemux` selecting another stream demuxes the rest of the multiplex.
+per PID into access units with PTS. The parser reassembles every elementary
+stream the PMT names. `TsDemuxN` wraps it, and each of its output ports emits
+one `TsStream` selection, `H264` or `H265` video as `CompressedVideo` and `Aac`
+audio as `Audio`, optionally pinned to one PID among the streams of that codec.
+
+`TsDemux` (`tsdemux`) is `OnePortElement<TsDemuxN>`: a one-port `TsDemuxN` run
+as an `AsyncElement`, its port 0 the single output, defaulting to H.264.
+`OnePortElement` (`oneport.rs`) negotiates as a transform from the input caps
+the demuxer accepts to its port's caps, and forwards the demuxer's properties,
+latency and seek. A one-port `TsDemuxN` exposes `stream` and `pid` for its port,
+and a second `tsdemux` selecting another stream demuxes the rest of the
+multiplex. Only a one-port `TsDemuxN` seeks, since the seek re-syncs on one
+stream's keyframes, and the graph runner reaches it through `TsDemux`.
 
 Selection is by codec, not by a runtime-discovered "first video", because the
 output pad's media type is fixed at negotiation before any packet is parsed.
@@ -181,7 +189,8 @@ lists each AC-3 PID as MPEG audio and then again as a private PES with an AC-3
 descriptor. A PMT version change that passes its CRC adds the PIDs it lists to
 the program's streams and keeps the ones it drops, so the stream list matches
 ffprobe's after a mid-file PMT change. A `pid` pin waits for a later PMT version
-and fails at EOS if its PID never appears.
+and fails at EOS if its PID never appears, and fails the run as soon as the PMT
+lists its PID with another codec.
 
 Packets on PIDs no table names yet are held until the active program's PMT
 parses, then replayed in order, so a capture that starts between two PMT
@@ -200,9 +209,11 @@ the parser.
 A `Flush` with no seek behind it is a source restart, such as an HLS origin that
 came back with a new clock. The first unit after it is offset to land one frame
 interval after the last unit before it, the same offset applies to every PID,
-and `TsDemux` sends the segment already in force again, so stream and running
+and every port sends the segment already in force again, so stream and running
 time both continue as gst's tsdemux keeps them. A seek's own flush, or an
 upstream `Segment` after the `Flush`, takes the new timestamps as they are.
+Any flush also re-arms each port's `CapsChanged`, its in-band config and the
+MPEG-2 tune-in, so the restarted stream carries them again.
 
 ### Timestamping unstamped access units
 

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1874: `TsDemux` is a one-port `TsDemuxN`, which now takes `stream`, `pid` and seeks, and re-sends its segment, caps, in-band config and MPEG-2 tune-in after a flush.
 - M1877: a lone `fallbacksrc` over an RTSP session advertises the codec the camera reports instead of the H.264 placeholder.
 - M1873: `RtspSrc` is a one-port `RtspSrcN`, which now probes the camera's real codec, reports live latency and keeps PTS steady across an empty reconnect, and fan-out sources open with `StreamStart` and a `Segment`.
 - M1876: `flvmux`, `mp4mux`, `matroskamux` and `oggmux` fail at EOS on an input that sent frames but never its codec config, and write no track for an input that sent no frames, instead of writing an empty file.

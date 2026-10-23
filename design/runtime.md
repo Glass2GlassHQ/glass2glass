@@ -570,7 +570,9 @@ An application seeks a pipeline built from a launch string through
 `Mp4Src` and `Bytes` for `FileSrc`. A transform reports `seek_route()`: `Buffered`
 when it serves a time seek from the whole stream it holds (`Mp4Demux`),
 `UpstreamBytes` when it byte-seeks the source that feeds it (the byte-stream
-demuxers). `attach_seek` finds the one node that can take the time seek, gives it a
+demuxers). A `MultiOutputElement` reports the same, but the runner seeks no demux
+node, so only `OnePortElement` reads it, for a demuxer run as its one-output
+form. `attach_seek` finds the one node that can take the time seek, gives it a
 controller with the seek already queued and a demuxer's byte source a second one,
 so the seek lands before the first frame. After a seek every seekable source and
 demuxer restarts at the keyframe at or before the target with a segment starting at
