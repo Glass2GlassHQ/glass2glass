@@ -33,7 +33,7 @@ async fn rtspsrcn_negotiates_an_h265_track_and_plays_the_session_it_set_up() {
         eprintln!("ffmpeg not present; skipping the RTSP H.265 fan-out negotiation");
         return;
     }
-    let relay = rtsp_h265_relay::serve_h265_fixture(0);
+    let relay = rtsp_h265_relay::serve_h265_fixture(&[], None);
     let line = format!(
         "rtspsrcn name=s location={} num-buffers={DECODED_FRAMES} \
          s. ! h265parse ! avdec_h265 ! fakesink",
@@ -57,7 +57,8 @@ async fn a_session_that_dies_before_any_frame_leaves_the_timeline_at_zero() {
         eprintln!("ffmpeg not present; skipping the RTSP reconnect timeline");
         return;
     }
-    let relay = rtsp_h265_relay::serve_h265_fixture(1);
+    let relay =
+        rtsp_h265_relay::serve_h265_fixture(&[rtsp_h265_relay::EarlyEnd::CorruptPacket], None);
     let mut src = RtspSrc::new(relay.url.clone())
         .with_frame_limit(DECODED_FRAMES)
         .with_reconnect(1)

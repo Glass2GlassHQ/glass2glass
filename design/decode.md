@@ -454,6 +454,12 @@ connects afresh. The emitted timeline jumps a second past the last session's
 highest PTS, but only after a session that emitted media, so a run of failed
 attempts does not move it.
 
+A server that closes the connection mid-stream ends a recording, an SDP whose
+`a=range` has an end such as `npt=0-30`, with `Eos`. On a live feed the close
+is a lost session when `reconnect` is set, failing with
+`G2gError::Network(NetworkFailure::Stream)` once the attempts run out, and an
+`Eos` without it, as GStreamer's `rtspsrc` ends on a server EOF.
+
 Both RTSP clients fail DESCRIBE, SETUP, PLAY and depacketizer setup with
 `G2gError::Network(NetworkFailure::Connect)`, and any error after media starts
 with `G2gError::RtspStream`, logging retina's message on the element's category.

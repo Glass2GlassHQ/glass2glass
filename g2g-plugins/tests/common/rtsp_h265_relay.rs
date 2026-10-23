@@ -1,5 +1,6 @@
-// ffmpeg packetizes an H.265 fixture as RTP, this answers RTSP and relays each datagram
-// interleaved, one client session at a time
+#![allow(dead_code)] // no one test file uses every helper here
+                     // ffmpeg packetizes an H.265 fixture as RTP, this answers RTSP and relays each datagram
+                     // interleaved, one client session at a time
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -36,8 +37,17 @@ impl Drop for H265Relay {
     }
 }
 
-// the first `broken_sessions` sessions get a corrupt RTP packet right after PLAY instead of media
-pub(crate) fn serve_h265_fixture(broken_sessions: usize) -> H265Relay {
+// how the relay ends a session before it streams the fixture until the client leaves
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum EarlyEnd {
+    // a corrupt RTP packet right after PLAY instead of media
+    CorruptPacket,
+    // the connection closes after this many datagrams, as a restarting server does
+    CloseAfter(usize),
+}
+
+// session `n` ends as `early_ends[n]` says, and a `range` goes into the SDP as `a=range`
+pub(crate) fn serve_h265_fixture(early_ends: &[EarlyEnd], range: Option<&str>) -> H265Relay {
     let rtp = UdpSocket::bind("127.0.0.1:0").expect("bind rtp");
     let rtp_port = rtp.local_addr().unwrap().port();
     let sdp_path = std::env::temp_dir().join(format!("h265-relay-{rtp_port}.sdp"));
@@ -65,6 +75,11 @@ pub(crate) fn serve_h265_fixture(broken_sessions: usize) -> H265Relay {
         }
     };
     let _ = std::fs::remove_file(&sdp_path);
+    let sdp = match range {
+        Some(range) => format!("{sdp}a=range:{range}\r\n"),
+        None => sdp,
+    };
+    let early_ends = early_ends.to_vec();
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind rtsp");
     let port = listener.local_addr().unwrap().port();
@@ -74,7 +89,7 @@ pub(crate) fn serve_h265_fixture(broken_sessions: usize) -> H265Relay {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { return };
             let index = accepted.fetch_add(1, Ordering::SeqCst);
-            serve_client(stream, &sdp, &rtp, index < broken_sessions);
+            serve_client(stream, &sdp, &rtp, early_ends.get(index).copied());
         }
     });
     H265Relay {
@@ -84,7 +99,7 @@ pub(crate) fn serve_h265_fixture(broken_sessions: usize) -> H265Relay {
     }
 }
 
-fn serve_client(stream: TcpStream, sdp: &str, rtp: &UdpSocket, broken: bool) {
+fn serve_client(stream: TcpStream, sdp: &str, rtp: &UdpSocket, early_end: Option<EarlyEnd>) {
     let mut write_half = stream.try_clone().expect("clone the control connection");
     let mut reader = BufReader::new(stream);
     loop {
@@ -110,12 +125,16 @@ fn serve_client(stream: TcpStream, sdp: &str, rtp: &UdpSocket, broken: bool) {
             break;
         }
     }
-    if broken {
-        let _ = write_half.write_all(&interleaved(&CORRUPT_RTP));
-        return;
-    }
+    let datagrams = match early_end {
+        Some(EarlyEnd::CorruptPacket) => {
+            let _ = write_half.write_all(&interleaved(&CORRUPT_RTP));
+            return;
+        }
+        Some(EarlyEnd::CloseAfter(datagrams)) => datagrams,
+        None => usize::MAX,
+    };
     let mut datagram = vec![0u8; MAX_DATAGRAM];
-    loop {
+    for _ in 0..datagrams {
         let len = rtp.recv(&mut datagram).expect("receive ffmpeg's rtp");
         if write_half
             .write_all(&interleaved(&datagram[..len]))

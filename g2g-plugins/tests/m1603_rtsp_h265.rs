@@ -23,7 +23,7 @@ async fn rtspsrc_decodes_an_h265_track_packetized_by_ffmpeg() {
         eprintln!("ffmpeg not present; skipping the reference-peer RTSP H.265 decode");
         return;
     }
-    let relay = rtsp_h265_relay::serve_h265_fixture(0);
+    let relay = rtsp_h265_relay::serve_h265_fixture(&[], None);
 
     let line = format!(
         "rtspsrc location={} num-buffers={DECODED_FRAMES} \

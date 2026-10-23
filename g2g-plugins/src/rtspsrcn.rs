@@ -1127,12 +1127,24 @@ async fn run_rtsp_n(src: &mut RtspSrcN, out: &mut dyn MultiOutputSink) -> Result
     Ok(total)
 }
 
+// an SDP `a=range` with an end, such as `npt=0-30`, describes a recording rather than a live feed
+fn sdp_range_has_end(sdp: &[u8]) -> bool {
+    sdp.split(|&byte| byte == b'\n')
+        .filter_map(|line| line.strip_prefix(b"a=range:"))
+        .any(|range| {
+            range
+                .iter()
+                .position(|&byte| byte == b'-')
+                .is_some_and(|dash| !range[dash + 1..].trim_ascii().is_empty())
+        })
+}
+
 /// Result of a single connect + play + drain session.
 #[derive(Debug)]
 enum SessionOutcome {
     /// Every output reached `num-buffers`.
     LimitReached,
-    /// The server closed the stream without error.
+    /// The server ended a recording, or closed a session that has no reconnect.
     GracefulEnd,
     /// retina or the network errored. Eligible for reconnect.
     NetworkError(G2gError),
@@ -1165,6 +1177,7 @@ async fn run_session(
         audio_idx,
         metadata,
     } = prepared;
+    let recording = sdp_range_has_end(session.sdp());
     let (metadata_idx, metadata_gzip) = match metadata {
         Some((idx, gzip)) => (Some(idx), gzip),
         None => (None, false),
@@ -1248,7 +1261,11 @@ async fn run_session(
                     &e,
                 ))
             }
-            None => return SessionOutcome::GracefulEnd,
+            None if recording || src.reconnect.max_attempts == 0 => {
+                return SessionOutcome::GracefulEnd
+            }
+            // a live server that drops the connection, as on a restart, lost the session
+            None => return SessionOutcome::NetworkError(G2gError::Network(NetworkFailure::Stream)),
         };
 
         let (port, timestamp, duration_ns, bytes, keyframe) = match item {
@@ -1553,6 +1570,15 @@ mod tests {
             src.set_property("audio-format", PropValue::Str("vorbis".to_string())),
             Err(PropError::Value)
         );
+    }
+
+    #[test]
+    fn an_sdp_range_with_an_end_marks_a_recording() {
+        let sdp = |range: &str| std::format!("v=0\r\ns=Stream\r\n{range}m=video 0 RTP/AVP 96\r\n");
+        assert!(sdp_range_has_end(sdp("a=range:npt=0-30.5\r\n").as_bytes()));
+        assert!(!sdp_range_has_end(sdp("a=range:npt=0-\r\n").as_bytes()));
+        assert!(!sdp_range_has_end(sdp("a=range:npt=now-\r\n").as_bytes()));
+        assert!(!sdp_range_has_end(sdp("").as_bytes()));
     }
 
     #[test]

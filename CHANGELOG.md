@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1879: `rtspsrc` with `reconnect` set reconnects when a live server closes the connection, where it ended the stream.
 - M1878: the fMP4 readers read every track of a `moof` that holds several, as ffmpeg and mediamtx write, where they read only the first.
 - M1875: `Mp4Demux` is a one-port `Mp4DemuxN`, which now takes `stream`, `track-id` and a seek, and announces a video track's frame rate.
 - M1874: `TsDemux` is a one-port `TsDemuxN`, which now takes `stream`, `pid` and seeks, and re-sends its segment, caps, in-band config and MPEG-2 tune-in after a flush.
