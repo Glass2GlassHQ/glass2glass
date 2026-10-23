@@ -97,7 +97,9 @@ fn null_ts_packet() -> Vec<u8> {
 fn ts_with_null_packets(rtp_packets: usize) -> Vec<u8> {
     let mut stream = synthetic_ts(rtp_packets);
     for packet in stream
-        .chunks_exact_mut(TS_PACKET_SIZE)
+        .as_chunks_mut::<TS_PACKET_SIZE>()
+        .0
+        .iter_mut()
         .step_by(NULL_PACKET_SPACING)
     {
         packet.copy_from_slice(&null_ts_packet());
@@ -123,9 +125,11 @@ fn deletion_bits(positions: &[usize]) -> u8 {
 
 fn null_positions(payload: &[u8]) -> Vec<usize> {
     payload
-        .chunks_exact(TS_PACKET_SIZE)
+        .as_chunks::<TS_PACKET_SIZE>()
+        .0
+        .iter()
         .enumerate()
-        .filter(|(_, packet)| *packet == null_ts_packet().as_slice())
+        .filter(|(_, packet)| packet.as_slice() == null_ts_packet().as_slice())
         .map(|(index, _)| index)
         .collect()
 }
@@ -172,7 +176,9 @@ fn the_extension_has_the_ristrtpext_layout() {
     assert_eq!(&extension[6..8], &sequence_high_bits.to_be_bytes());
 
     let kept: Vec<u8> = payload
-        .chunks_exact(TS_PACKET_SIZE)
+        .as_chunks::<TS_PACKET_SIZE>()
+        .0
+        .iter()
         .enumerate()
         .filter(|(index, _)| !deleted.contains(index))
         .flat_map(|(_, packet)| packet.iter().copied())
