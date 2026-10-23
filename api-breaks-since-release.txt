@@ -11,6 +11,7 @@ constructible_struct_adds_field: field ElementDesc.accepts_input
 constructible_struct_adds_field: field PrimaryStream.has_clean_aperture
 constructible_struct_adds_field: field QosMessage.taken_ns
 enum_discriminants_undefined_non_unit_variant: enum AudioFormat
+enum_struct_variant_field_added: field alignment of variant Caps::CompressedVideo
 enum_unit_variant_changed_kind: variant Reconfigure::AbsorbOrientation
 enum_variant_added: variant NodeConstraint:BatchDemux
 enum_variant_added: variant NodeConstraint:BatchMuxer

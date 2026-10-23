@@ -241,10 +241,8 @@ Highest leverage first:
     ffmpeg's.
   - The `flvmux` duplicate-track, `avimux` second-video and `mp4mux` CMAF
     refusals still return a bare `CapsMismatch`: log what they refuse.
-  - `hevc/two_first_slice.mp4` gives 35 frames where gst and ffmpeg give 34: its
-    2.000 s sample holds an IDR and a second picture, and `NalParse` splits them.
-    Needs sample-based demuxers to mark one access unit per buffer (gst's
-    `alignment=au`) so the parser keeps the sample whole.
+  - `flvdemux` and `avidemux` H.264/H.265 output declares no `alignment`, where gst's
+    flvdemux declares `au`.
   - An MP4 audio track whose edit list replays media plays its samples once:
     replayed edits need sample-accurate clipping, as the video path lays them out.
   - `wavparse` rejects `wFormatTag` 0x2000 (AC-3), 0x55 (MP3) and 0xFF (AAC):

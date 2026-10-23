@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1852: H.264/H.265 caps carry gst's `alignment`, MP4 and Matroska samples are `au`, and h264parse/h265parse keep them whole.
 - M1846: oggdemux fails loud when the file has no stream of its selected codec instead of ending with no output.
 - M1853: a caps string field whose value does not parse fails the parse instead of taking the default.
 - M1845: fMP4 fragments without a tfdt continue their track's timeline instead of restarting at 0.

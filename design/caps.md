@@ -824,6 +824,14 @@ audio, which has no rate wildcard, defaults to 48000 Hz stereo. A present field 
 value does not parse (`rate=abc`, `width=abc`, a field with no `=`) fails the parse,
 and a trailing comma is accepted, as gst accepts it.
 
+`Caps::CompressedVideo` carries gst's `alignment` (`BitstreamAlignment`:
+Unspecified, AccessUnit, Nal). Unspecified is the wildcard, and AccessUnit against
+Nal does not intersect. The MP4 and Matroska demuxers declare AccessUnit for
+H.264/H.265, since a sample is one access unit, and `NalParse` passes such a buffer
+on whole instead of splitting it on first-slice flags. A re-framing h264parse or
+h265parse refines its output to AccessUnit, as gst's parsers default to. The remote
+wire format does not carry the field, so received caps read Unspecified.
+
 A codec with no typed `VideoCodec` / `AudioFormat` still decodes when libavcodec
 has a decoder for it, behind the `ffmpeg-long-tail` feature. `avidemux`, the mp4
 demuxers, `matroskademux` and `wavparse` forward a stream they would otherwise drop as
