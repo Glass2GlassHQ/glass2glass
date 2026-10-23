@@ -35,7 +35,7 @@ use crate::demuxseek::DemuxSeek;
 use crate::fifobuffer::FifoBuffer;
 use crate::fmp4::{
     fragment_framerate_q16, parse_fragments, parse_header, prepend_param_sets,
-    starts_with_param_set, Header, Sample,
+    starts_with_param_set, FragmentStarts, Header, Sample,
 };
 use crate::mp4box::{find_box, next_box_len};
 
@@ -53,6 +53,7 @@ pub struct Fmp4Demux {
     /// A `moof` box awaiting its following `mdat` to form a complete fragment,
     /// with its byte offset in the stream (which keys the content key in force).
     pending_moof: Option<(u64, Vec<u8>)>,
+    fragment_starts: FragmentStarts,
     /// Negotiation-time output codec (refined from the `moov` at runtime).
     out_codec: VideoCodec,
     /// Prepend the config-record parameter sets to the first access unit.
@@ -86,6 +87,7 @@ impl Fmp4Demux {
             buffer: FifoBuffer::default(),
             header: None,
             pending_moof: None,
+            fragment_starts: FragmentStarts::default(),
             out_codec: VideoCodec::H264,
             need_param_sets: true,
             #[cfg(feature = "hls")]
@@ -117,6 +119,7 @@ impl Fmp4Demux {
         self.stream_pos = 0;
         self.buffer.clear();
         self.pending_moof = None;
+        self.fragment_starts = FragmentStarts::default();
         self.need_param_sets = true;
     }
 
@@ -140,7 +143,7 @@ impl Fmp4Demux {
     /// fragment's aux info and `seig` groups).
     #[cfg(feature = "hls")]
     fn parse_fragment_samples(
-        &self,
+        &mut self,
         frag: &[u8],
         frag_at: u64,
         timescale: u32,
@@ -148,7 +151,15 @@ impl Fmp4Demux {
         cenc: Option<&CencTrack>,
     ) -> Result<Vec<Sample>, G2gError> {
         let Some(c) = cenc else {
-            return parse_fragments(frag, timescale, codec, None, frag_at, None);
+            return parse_fragments(
+                frag,
+                timescale,
+                codec,
+                None,
+                frag_at,
+                &mut self.fragment_starts,
+                None,
+            );
         };
         let keys = self.cbcs_key.as_ref().ok_or(G2gError::CapsMismatch)?;
         let mut decrypt = move |sc: &SampleCrypt, at: u64, buf: &mut [u8]| {
@@ -159,20 +170,36 @@ impl Fmp4Demux {
                 .ok_or(G2gError::CapsMismatch)?;
             crate::cenc::decrypt_sample(buf, sc, &key)
         };
-        parse_fragments(frag, timescale, codec, Some(c), frag_at, Some(&mut decrypt))
+        parse_fragments(
+            frag,
+            timescale,
+            codec,
+            Some(c),
+            frag_at,
+            &mut self.fragment_starts,
+            Some(&mut decrypt),
+        )
     }
 
     /// Without the `hls` feature there is no AES: an encrypted track fails loud.
     #[cfg(not(feature = "hls"))]
     fn parse_fragment_samples(
-        &self,
+        &mut self,
         frag: &[u8],
         frag_at: u64,
         timescale: u32,
         codec: VideoCodec,
         cenc: Option<&CencTrack>,
     ) -> Result<Vec<Sample>, G2gError> {
-        parse_fragments(frag, timescale, codec, cenc, frag_at, None)
+        parse_fragments(
+            frag,
+            timescale,
+            codec,
+            cenc,
+            frag_at,
+            &mut self.fragment_starts,
+            None,
+        )
     }
 
     fn input_caps() -> Caps {
@@ -477,5 +504,16 @@ mod tests {
             next_box_len(&[0, 0, 0, 7, b'f', b'r', b'e', b'e']),
             Err(G2gError::CapsMismatch)
         );
+    }
+
+    #[test]
+    fn a_fragment_without_tfdt_starts_where_the_previous_one_ended() {
+        use crate::testutil::{data_pts_ns, run, two_fragments_with_and_without_tfdt};
+        let (with_tfdt, without_tfdt) = two_fragments_with_and_without_tfdt();
+        let demux = |file: &[u8]| {
+            let sink = run(&mut Fmp4Demux::new(), &Fmp4Demux::input_caps(), &[file]);
+            data_pts_ns(&sink.packets)
+        };
+        assert_eq!(demux(&without_tfdt), demux(&with_tfdt));
     }
 }

@@ -41,7 +41,8 @@ use crate::demuxseek::segment_from;
 use crate::fmp4::{
     clip_stored_pcm, every_sample_ends_by, keyframe_index_for, parse_all_tracks,
     parse_fragments_multi, parse_progressive_multi, prepend_param_sets, starts_with_param_set,
-    stream_start_ns, track_framerate_q16, vorbis_headers, Sample, TrackHeader, TrackKind,
+    stream_start_ns, track_framerate_q16, vorbis_headers, FragmentStarts, Sample, TrackHeader,
+    TrackKind,
 };
 use crate::mkvdemux::{prores_stream_from_str, prores_stream_str};
 use crate::mp4box::find_box;
@@ -527,7 +528,7 @@ fn seek_samples(
 fn track_samples(data: &[u8], track: &TrackHeader) -> Result<Vec<Sample>, G2gError> {
     let selected = core::slice::from_ref(track);
     let samples = if find_box(data, b"moof").is_some() {
-        parse_fragments_multi(data, selected, 0, None)?
+        parse_fragments_multi(data, selected, 0, &mut FragmentStarts::default(), None)?
     } else {
         parse_progressive_multi(data, selected)?
     };

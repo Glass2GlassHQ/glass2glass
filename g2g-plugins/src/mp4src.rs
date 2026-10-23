@@ -38,7 +38,8 @@ use crate::filesink::path_io_err;
 use crate::fmp4::{
     clean_aperture_meta, every_sample_ends_by, fragment_framerate_q16, keyframe_index_for,
     parse_all_tracks, parse_chapters, parse_fragments, parse_header, parse_progressive,
-    prepend_param_sets, starts_with_param_set, stream_start_ns, Header, Sample, TrackKind,
+    prepend_param_sets, starts_with_param_set, stream_start_ns, FragmentStarts, Header, Sample,
+    TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 use crate::typefind::{framerate_within_placeholder, PLACEHOLDER_FRAMERATE};
@@ -256,6 +257,7 @@ impl SourceLoop for Mp4Src {
                     header.codec,
                     header.cenc.as_ref(),
                     0,
+                    &mut FragmentStarts::default(),
                     None,
                 )?
             } else {

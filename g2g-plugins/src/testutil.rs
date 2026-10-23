@@ -134,3 +134,34 @@ pub(crate) fn flac_streaminfo() -> Vec<u8> {
     body[12] = (((SAMPLE_RATE & 0x0F) as u8) << 4) | ((CHANNELS - 1) << 1);
     body
 }
+
+// gst-launch-1.0 videotestsrc num-buffers=6 ! video/x-raw,width=64,height=64,framerate=30/1 !
+// x264enc key-int-max=3 ! mp4mux fragment-duration=100 streamable=true: two fragments, each with a tfdt
+const TWO_FRAGMENTS: &[u8] = include_bytes!("../tests/fixtures/h264_two_fragments.mp4");
+
+// the two-fragment fixture as written, and with each tfdt box renamed to `free`, which keeps every offset
+pub(crate) fn two_fragments_with_and_without_tfdt() -> (Vec<u8>, Vec<u8>) {
+    let with_tfdt = TWO_FRAGMENTS.to_vec();
+    let mut without_tfdt = with_tfdt.clone();
+    let tfdt_types: Vec<usize> = with_tfdt
+        .windows(4)
+        .enumerate()
+        .filter(|(_, window)| *window == b"tfdt")
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(tfdt_types.len(), 2, "one tfdt per fragment");
+    for at in tfdt_types {
+        without_tfdt[at..at + 4].copy_from_slice(b"free");
+    }
+    (with_tfdt, without_tfdt)
+}
+
+pub(crate) fn data_pts_ns(packets: &[PipelinePacket]) -> Vec<u64> {
+    packets
+        .iter()
+        .filter_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(f.timing.pts_ns),
+            _ => None,
+        })
+        .collect()
+}

@@ -582,7 +582,13 @@ fn webvtt_segment(bytes: Vec<u8>, tracks: Option<&[TrackHeader]>) -> Vec<u8> {
 /// fragment that does not parse yields nothing rather than leaking binary into
 /// the text stream.
 fn webvtt_from_fmp4(data: &[u8], tracks: &[TrackHeader]) -> Vec<u8> {
-    let Ok(samples) = crate::fmp4::parse_fragments_multi(data, tracks, 0, None) else {
+    let Ok(samples) = crate::fmp4::parse_fragments_multi(
+        data,
+        tracks,
+        0,
+        &mut crate::fmp4::FragmentStarts::default(),
+        None,
+    ) else {
         return Vec::new();
     };
     let mut out = alloc::format!("{}\n\n", crate::subparse::WEBVTT_HEADER);

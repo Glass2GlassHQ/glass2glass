@@ -43,7 +43,7 @@ use g2g_core::{
 use crate::fmp4::{
     clip_stored_pcm, edit_track_samples, parse_all_tracks, parse_chapters, parse_fragments_multi,
     parse_progressive_multi, prepend_param_sets, starts_with_param_set, unsupported_pcm_layout,
-    vorbis_headers, Sample, TrackHeader, TrackKind,
+    vorbis_headers, FragmentStarts, Sample, TrackHeader, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 use crate::pcmclip::within_presentation;
@@ -374,6 +374,7 @@ pub struct Mp4DemuxN {
     /// emit per fragment), `Some(false)` progressive (parse whole at `Eos`),
     /// `None` until the `moov` is buffered.
     fragmented: Option<bool>,
+    fragment_starts: FragmentStarts,
     /// Port `i` forwards `ports[i].track_id` with `ports[i].caps`.
     ports: Vec<Mp4Port>,
     /// Whether port `i` has emitted its opening `CapsChanged` yet.
@@ -436,6 +437,7 @@ impl Mp4DemuxN {
             buf: Vec::new(),
             tracks: None,
             fragmented: None,
+            fragment_starts: FragmentStarts::default(),
             ports,
             announced,
             need_config,
@@ -669,6 +671,7 @@ impl Mp4DemuxN {
         data: &[u8],
         tracks: &[TrackHeader],
         base_offset: u64,
+        fragment_starts: &mut FragmentStarts,
     ) -> Result<Vec<(u32, Sample)>, G2gError> {
         #[cfg(feature = "mp4-cenc")]
         if let Some(keys) = self.cenc_keys.clone() {
@@ -680,9 +683,15 @@ impl Mp4DemuxN {
                     .ok_or(G2gError::CapsMismatch)?;
                 crate::cenc::decrypt_sample(buf, sc, &key)
             };
-            return parse_fragments_multi(data, tracks, base_offset, Some(&mut decrypt));
+            return parse_fragments_multi(
+                data,
+                tracks,
+                base_offset,
+                fragment_starts,
+                Some(&mut decrypt),
+            );
         }
-        parse_fragments_multi(data, tracks, base_offset, None)
+        parse_fragments_multi(data, tracks, base_offset, fragment_starts, None)
     }
 
     /// Make progress on the buffered bytes (M437): learn the layout from the `moov`,
@@ -736,11 +745,15 @@ impl Mp4DemuxN {
                         break;
                     };
                     let end = off + size;
+                    let mut fragment_starts = core::mem::take(&mut self.fragment_starts);
                     let samples = self.parse_fragments_in(
                         &self.buf[start..end],
                         &forwarded,
                         self.drained.saturating_add(start as u64),
-                    )?;
+                        &mut fragment_starts,
+                    );
+                    self.fragment_starts = fragment_starts;
+                    let samples = samples?;
                     self.learn_held_fragment(&samples);
                     let samples = edit_track_samples(&forwarded, samples);
                     self.emit_samples(&forwarded, samples, out).await?;
@@ -809,7 +822,12 @@ impl Mp4DemuxN {
         // progressive `moov`+`mdat` layout, walked from the sample tables instead.
         let forwarded = self.forwarded_tracks(&tracks);
         let samples = if find_box(&self.buf, b"moof").is_some() {
-            self.parse_fragments_in(&self.buf, &forwarded, self.drained)?
+            self.parse_fragments_in(
+                &self.buf,
+                &forwarded,
+                self.drained,
+                &mut FragmentStarts::default(),
+            )?
         } else {
             parse_progressive_multi(&self.buf, &forwarded)?
         };
@@ -1091,6 +1109,7 @@ impl MultiOutputElement for Mp4DemuxN {
                     self.buf.clear();
                     self.tracks = None;
                     self.fragmented = None;
+                    self.fragment_starts = FragmentStarts::default();
                     // The byte coordinate restarts with the re-read stream, the
                     // same reset the key publisher does at this flush.
                     self.drained = 0;
@@ -1425,6 +1444,32 @@ mod tests {
     /// emit each fragment as it completes, *before* any `Eos` (the old demuxer
     /// emitted nothing until `Eos`). Feeding one byte at a time also exercises the
     /// partial-box buffering, and the result must match the all-at-once decode.
+    #[test]
+    fn a_fragment_without_tfdt_starts_where_the_previous_one_ended() {
+        use crate::testutil::two_fragments_with_and_without_tfdt;
+        let (with_tfdt, without_tfdt) = two_fragments_with_and_without_tfdt();
+        let demux = |file: &[u8]| {
+            let ports: Vec<Mp4Port> = forwardable_streams(file)
+                .iter()
+                .map(|s| Mp4Port {
+                    track_id: s.track_id,
+                    caps: s.caps.clone(),
+                })
+                .collect();
+            let mut demux = Mp4DemuxN::new(ports);
+            let mut out = PortCapture::new(1);
+            block_on(async {
+                demux
+                    .process(vframe(file.to_vec(), 0), &mut out)
+                    .await
+                    .unwrap();
+                demux.process(PipelinePacket::Eos, &mut out).await.unwrap();
+            });
+            out.ptss.remove(0)
+        };
+        assert_eq!(demux(&without_tfdt), demux(&with_tfdt));
+    }
+
     #[test]
     fn emits_fragments_progressively_before_eos() {
         let bytes = mux_av();

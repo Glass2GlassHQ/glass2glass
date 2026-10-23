@@ -1862,16 +1862,20 @@ struct OpenFragment {
 /// following `mdat` payload; the `trun` `data_offset` is not honored. This holds
 /// for ffmpeg / CMAF output. A non-conforming fragment that positions its sample
 /// data elsewhere in the `mdat` is mis-split, not rejected.
+// per track, where the next fragment starts when it carries no tfdt, kept across the fragments of one stream
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FragmentStarts(Vec<(Option<u32>, u64)>);
+
 pub(crate) fn moof_samples<'a, 't>(
     data: &'a [u8],
     base_offset: u64,
+    fragment_starts: &mut FragmentStarts,
     track: impl Fn(Option<u32>) -> Option<(u32, Option<&'t CencTrack>, SampleDefaults)>,
 ) -> Result<Vec<MoofSample<'a>>, G2gError> {
     let mut out = Vec::new();
     // `Some(None)` is an open fragment of a skipped track.
     let mut open: Option<Option<OpenFragment>> = None;
-    // per track, where the next fragment starts when it has no tfdt
-    let mut fragment_end_ticks: Vec<(Option<u32>, u64)> = Vec::new();
+    let fragment_end_ticks = &mut fragment_starts.0;
     for (kind, payload, box_at) in boxes_at(data) {
         match kind {
             b"moof" => {
@@ -1993,10 +1997,11 @@ pub(crate) fn parse_fragments_multi(
     data: &[u8],
     tracks: &[TrackHeader],
     base_offset: u64,
+    fragment_starts: &mut FragmentStarts,
     mut decrypt: Option<SampleDecrypt<'_>>,
 ) -> Result<Vec<(u32, Sample)>, G2gError> {
     let track_of = |track_id: Option<u32>| tracks.iter().find(|t| Some(t.track_id) == track_id);
-    let stored = moof_samples(data, base_offset, |track_id| {
+    let stored = moof_samples(data, base_offset, fragment_starts, |track_id| {
         track_of(track_id).map(|t| (t.timescale, t.cenc.as_ref(), t.trex_defaults))
     })?;
     let mut out = Vec::with_capacity(stored.len());
@@ -2091,9 +2096,10 @@ pub(crate) fn parse_fragments(
     codec: VideoCodec,
     cenc: Option<&CencTrack>,
     base_offset: u64,
+    fragment_starts: &mut FragmentStarts,
     mut decrypt: Option<SampleDecrypt<'_>>,
 ) -> Result<Vec<Sample>, G2gError> {
-    let stored = moof_samples(data, base_offset, |_| {
+    let stored = moof_samples(data, base_offset, fragment_starts, |_| {
         Some((timescale, cenc, SampleDefaults::default()))
     })?;
     let mut samples = Vec::with_capacity(stored.len());
@@ -3602,6 +3608,7 @@ mod tests {
             header.codec,
             None,
             0,
+            &mut FragmentStarts::default(),
             None,
         )
         .unwrap();
@@ -3612,7 +3619,14 @@ mod tests {
     #[test]
     fn parse_fragments_multi_applies_composition_offsets() {
         let tracks = parse_all_tracks(BFRAME_FRAGMENTED).unwrap();
-        let samples = parse_fragments_multi(BFRAME_FRAGMENTED, &tracks, 0, None).unwrap();
+        let samples = parse_fragments_multi(
+            BFRAME_FRAGMENTED,
+            &tracks,
+            0,
+            &mut FragmentStarts::default(),
+            None,
+        )
+        .unwrap();
         let pts_dts: Vec<(u64, u64)> = samples.iter().map(|(_, s)| (s.pts_ns, s.dts_ns)).collect();
         assert_eq!(pts_dts, probed_pts_dts_ns(tracks[0].timescale));
     }
@@ -4143,7 +4157,9 @@ mod tests {
         }
 
         // --- assert: fragments route to their track and de-frame correctly -
-        let samples = parse_fragments_multi(&file, &tracks, 0, None).expect("fragment routing");
+        let samples =
+            parse_fragments_multi(&file, &tracks, 0, &mut FragmentStarts::default(), None)
+                .expect("fragment routing");
         assert_eq!(samples.len(), 2);
         let (vid_id, vid) = &samples[0];
         assert_eq!(*vid_id, 1);
@@ -4566,7 +4582,9 @@ mod tests {
             tracks[0].kind,
             TrackKind::Video { width: w, height: h, .. } if (w, h) == (width, height)
         ));
-        let samples = parse_fragments_multi(&file, &tracks, 0, None).expect("fragments parse");
+        let samples =
+            parse_fragments_multi(&file, &tracks, 0, &mut FragmentStarts::default(), None)
+                .expect("fragments parse");
         let decode_times: Vec<u64> = samples.iter().map(|(_, s)| s.dts_ns).collect();
         let sample_ns = ticks_to_ns(u64::from(SAMPLE_TICKS), TIMESCALE);
         assert_eq!(decode_times, alloc::vec![0, sample_ns]);

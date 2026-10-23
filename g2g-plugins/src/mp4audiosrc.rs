@@ -154,7 +154,7 @@ struct Sample {
 }
 
 // box read primitives are shared across the MP4 elements.
-use crate::fmp4::moof_samples;
+use crate::fmp4::{moof_samples, FragmentStarts};
 use crate::mp4box::{be32, find_box, find_path, parse_esds};
 
 fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
@@ -199,7 +199,7 @@ fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
 /// Walk `moof`+`mdat` pairs and split every raw AAC access unit out of its
 /// `mdat`.
 fn parse_fragments(data: &[u8], timescale: u32) -> Result<Vec<Sample>, G2gError> {
-    Ok(moof_samples(data, 0, |_| {
+    Ok(moof_samples(data, 0, &mut FragmentStarts::default(), |_| {
         Some((timescale, None, crate::fmp4::SampleDefaults::default()))
     })?
     .into_iter()

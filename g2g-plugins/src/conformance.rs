@@ -560,7 +560,7 @@ fn mpegts_contains_a_dropped_packet() -> bool {
 /// which has no sans-IO core to drive here.
 #[cfg(feature = "std")]
 pub fn mp4() -> [MaturityRecord; 2] {
-    use crate::fmp4::{parse_fragments, parse_header};
+    use crate::fmp4::{parse_fragments, parse_header, FragmentStarts};
     use crate::fmp4mux::Fmp4Muxer;
     use g2g_core::{TagList, VideoCodec};
 
@@ -585,7 +585,15 @@ pub fn mp4() -> [MaturityRecord; 2] {
 
     let mut earned = Vec::new();
     if let Ok(header) = parse_header(&bytes) {
-        let samples = parse_fragments(&bytes, header.timescale, VideoCodec::H264, None, 0, None);
+        let samples = parse_fragments(
+            &bytes,
+            header.timescale,
+            VideoCodec::H264,
+            None,
+            0,
+            &mut FragmentStarts::default(),
+            None,
+        );
         if let Ok(samples) = samples {
             let framed: Vec<&[u8]> = samples.iter().map(|s| s.annexb.as_slice()).collect();
             let geometry = header.width == WIDTH && header.height == HEIGHT;
