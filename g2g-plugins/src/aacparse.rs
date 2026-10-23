@@ -382,10 +382,15 @@ const AOT_ESCAPE: u32 = 31;
 const AOT_USAC: u32 = 42;
 // ER AAC LC, ER AAC LTP, ER AAC LD, ER AAC ELD, USAC
 const RAW_AAC_OBJECT_TYPES: [u32; 5] = [17, 19, 23, 39, AOT_USAC];
+// AAC Main, LC, SSR, LTP, ER AAC LC, ER AAC LTP, ER AAC LD: a GASpecificConfig with no layer number ahead of its program config
+const GA_SPECIFIC_CONFIG_OBJECT_TYPES: [u32; 7] = [1, 2, 3, 4, 17, 19, 23];
 const EXPLICIT_RATE_INDEX: u32 = 15;
 // raw_data_block element id of a program_config_element
 const ID_PCE: u32 = 5;
+const ID_DSE: u32 = 4;
 const ELEMENT_ID_BITS: u32 = 3;
+// a data_stream_element's first byte: the element id, a four-bit tag, then data_byte_align_flag
+const DSE_BYTE_ALIGN_FLAG: u8 = 0x01;
 
 // a front / side / back element: is_cpe, then the tag
 const CHANNEL_ELEMENT_BITS: u32 = 5;
@@ -507,7 +512,17 @@ pub(crate) fn loas_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
         w.write_bits(LATM_LENGTH_STEP as u32, 8);
     }
     w.write_bits((au.len() % LATM_LENGTH_STEP) as u32, 8);
-    for &byte in au {
+    // decoders byte-align a leading data_stream_element against the stream, and a LATM payload sits off byte boundaries
+    let clears_dse_alignment = au.first().is_some_and(|&byte| {
+        u32::from(byte >> (8 - ELEMENT_ID_BITS)) == ID_DSE && byte & DSE_BYTE_ALIGN_FLAG != 0
+    }) && read_object_type(&mut BitReader::new(asc))
+        .is_some_and(|object_type| !RAW_AAC_OBJECT_TYPES.contains(&object_type));
+    for (index, &byte) in au.iter().enumerate() {
+        let byte = if index == 0 && clears_dse_alignment {
+            byte & !DSE_BYTE_ALIGN_FLAG
+        } else {
+            byte
+        };
         w.write_bits(u32::from(byte), 8);
     }
     w.align_to_byte();
@@ -1062,7 +1077,12 @@ fn parse_audio_mux_element(data: &[u8]) -> Option<AacInfo> {
     if audio_mux_version == 1 {
         read_latm_value(&mut r)?; // ascLen
     }
-    parse_audio_specific_config(&mut r)
+    // a program config element aligns against the config's start, which the element puts off a byte boundary
+    let mut config = BitWriter::default();
+    while let Some(bit) = r.read_bit() {
+        config.write_bit(bit);
+    }
+    parse_audio_specific_config(&mut BitReader::new(&config.into_bytes()))
 }
 
 pub(crate) fn audio_specific_config_info(config: &[u8]) -> Option<AacInfo> {
@@ -1073,19 +1093,30 @@ pub(crate) fn audio_specific_config_info(config: &[u8]) -> Option<AacInfo> {
 /// audio object type, sampling frequency (index or explicit), and channel
 /// configuration, enough to pin the channel count and sample rate.
 fn parse_audio_specific_config(r: &mut BitReader) -> Option<AacInfo> {
-    // the object type does not affect the channel count / rate
-    read_object_type(r)?;
-    let sr_index = r.read_bits(4)? as usize;
-    let sample_rate = if sr_index == 0x0F {
-        r.read_bits(24)? // explicit 24-bit sampling frequency
-    } else {
-        *SAMPLE_RATES.get(sr_index)?
-    };
+    let mut object_type = read_object_type(r)?;
+    let sample_rate = read_sample_rate(r)?;
     let channel_config = r.read_bits(4)?;
     let channels = match channel_config {
         1..=6 => channel_config as u8,
         7 => 8,
-        _ => return None, // 0 = further config; reserved otherwise
+        0 => {
+            // explicit SBR signalling puts the SBR rate and the core type ahead of the GASpecificConfig
+            if object_type == AOT_SBR || object_type == AOT_PS {
+                read_sample_rate(r)?;
+                object_type = read_object_type(r)?;
+            }
+            if !GA_SPECIFIC_CONFIG_OBJECT_TYPES.contains(&object_type) {
+                return None;
+            }
+            // GASpecificConfig: frameLengthFlag, dependsOnCoreCoder and its delay, extensionFlag
+            r.read_bits(1)?;
+            if r.read_bits(1)? == 1 {
+                r.read_bits(14)?;
+            }
+            r.read_bits(1)?;
+            copy_program_config(r, None)?
+        }
+        _ => return None, // reserved
     };
     Some(AacInfo {
         channels,
@@ -1410,6 +1441,34 @@ mod tests {
         assert_eq!(mux_len, frame.len() - LOAS_HEADER_LEN);
         let info = parse_aac(&frame).expect("the version 1 config parses");
         assert_eq!((info.channels, info.sample_rate), (2, 48_000));
+    }
+
+    #[test]
+    fn a_channel_config_zero_loas_frame_counts_its_program_config_channels() {
+        let frame = loas_from_asc(&channel_config_zero_asc(), &[0xAA, 0xBB]).expect("a LOAS frame");
+        let info = parse_loas(&frame).expect("the config parses");
+        assert_eq!(
+            (info.channels, info.sample_rate),
+            (3, SAMPLE_RATES[RATE_INDEX_44100 as usize])
+        );
+    }
+
+    #[test]
+    fn loas_from_asc_clears_a_leading_dse_byte_alignment_in_a_ga_payload_only() {
+        // AAC LC, 48 kHz, stereo
+        const LC_ASC: [u8; 2] = [0x11, 0x90];
+        // a data_stream_element, tag 15, data_byte_align_flag set, then its count
+        const ALIGNED_DSE: [u8; 2] = [0x9F, 0x02];
+        let unaligned_dse = [ALIGNED_DSE[0] & !DSE_BYTE_ALIGN_FLAG, ALIGNED_DSE[1]];
+        assert_eq!(
+            loas_from_asc(&LC_ASC, &ALIGNED_DSE),
+            loas_from_asc(&LC_ASC, &unaligned_dse)
+        );
+        // an ER payload has no element ids, so its first byte is data
+        assert_ne!(
+            loas_from_asc(&ELD_ASC, &ALIGNED_DSE),
+            loas_from_asc(&ELD_ASC, &unaligned_dse)
+        );
     }
 
     #[test]
