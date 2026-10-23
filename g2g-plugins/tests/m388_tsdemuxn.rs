@@ -290,16 +290,19 @@ impl g2g_core::OutputSink for ByteTap {
 
 #[tokio::test]
 async fn tsdemuxn_opens_an_opus_port_on_the_descriptor_channel_count() {
-    use g2g_core::AsyncElement;
+    use g2g_core::MultiInputElement;
     const CHANNELS: u8 = 8;
     let packets: Vec<Vec<u8>> = (0..3u8).map(|n| vec![0xFC, n, n, n]).collect();
-    let mut mux = g2g_plugins::tsmux::TsMux::new();
-    mux.configure_pipeline(&Caps::Audio {
-        format: AudioFormat::Opus,
-        channels: CHANNELS,
-        sample_rate: 48_000,
-        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-    })
+    let mut mux = g2g_plugins::tsmuxn::TsMux::new(1);
+    mux.configure_pipeline(
+        0,
+        &Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: CHANNELS,
+            sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        },
+    )
     .unwrap();
     let mut ts = ByteTap::default();
     for (index, packet) in packets.iter().enumerate() {
@@ -311,7 +314,7 @@ async fn tsdemuxn_opens_an_opus_port_on_the_descriptor_channel_count() {
             },
             index as u64,
         );
-        mux.process(PipelinePacket::DataFrame(frame), &mut ts)
+        mux.process(0, PipelinePacket::DataFrame(frame), &mut ts)
             .await
             .unwrap();
     }

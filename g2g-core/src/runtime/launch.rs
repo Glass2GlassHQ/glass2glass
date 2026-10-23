@@ -3105,9 +3105,9 @@ fn build_graph(
     // registry with that input count); a tee has a single input pad. A single
     // inbound link builds a fan-in too when the name is only registered as a
     // muxer (M1155: `livesync` needs the fan-in arm's deadline tick and has one
-    // input). A name registered both ways (`mpegtsmux`, `textoverlay`) falls
-    // back to its single-input element, unless that element does not take what
-    // the one producer puts out and the fan-in does.
+    // input). A name registered both ways (`avimux`, `textoverlay`) falls back
+    // to its single-input element, unless that element does not take what the
+    // one producer puts out and the fan-in does.
     let is_muxer = |ei: usize| {
         !is_tee(ei)
             && match in_deg[ei] {

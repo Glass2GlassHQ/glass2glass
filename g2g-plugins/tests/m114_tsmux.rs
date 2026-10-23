@@ -1,8 +1,8 @@
-//! M114 MPEG-TS mux, end to end through the DAG runner: an H.264 source feeds
-//! `TsMux`, whose `Caps::ByteStream{MpegTs}` output feeds `TsDemux`, which
+//! M114 MPEG-TS mux, end to end through the DAG runner: an H.264 source feeds a
+//! one-pad `TsMux`, whose `Caps::ByteStream{MpegTs}` output feeds `TsDemux`, which
 //! recovers the access units to a sink. Proves the mux/demux pair composes and
-//! that the `ByteStream` caps negotiates as an *interior* link between two
-//! transforms (not just a source link, as in m108 / m110).
+//! that the `ByteStream` caps negotiates as an *interior* link (not just a source
+//! link, as in m108 / m110).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -16,7 +16,7 @@ use g2g_core::{
 };
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::tsdemux::TsDemux;
-use g2g_plugins::tsmux::TsMux;
+use g2g_plugins::tsmuxn::TsMux;
 
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -84,11 +84,11 @@ impl SourceLoop for H264Source {
 async fn tsmux_then_tsdemux_round_trips_in_runner() {
     let mut graph: Graph<GraphNode> = Graph::new();
     let src = graph.add_source(GraphNodeRef::Source(Box::new(H264Source { remaining: 3 })));
-    let mux = graph.add_transform(GraphNodeRef::element(TsMux::new()));
+    let mux = graph.add_muxer(GraphNodeRef::muxer(TsMux::new(1)), 1);
     let demux = graph.add_transform(GraphNodeRef::element(TsDemux::new()));
     let sink = graph.add_sink(GraphNodeRef::element(FakeSink::new()));
-    graph.link(src, mux).unwrap();
-    graph.link(mux, demux).unwrap();
+    graph.link(src, mux.input(0)).unwrap();
+    graph.link(mux.output(), demux).unwrap();
     graph.link(demux, sink).unwrap();
 
     let stats = run_graph(graph, &ZeroClock, 4)

@@ -420,12 +420,11 @@ pub(crate) fn write_u24(out: &mut Vec<u8>, v: u32) {
 ///
 /// Single-track ([`new`](Self::new)) writes the one track's decoder config once
 /// set ([`set_video_config`](Self::set_video_config) /
-/// [`set_audio_config`](Self::set_audio_config), M662). The A/V case
-/// ([`new_av`](Self::new_av), driven by [`crate::flvmuxn::FlvMuxN`]) carries a
-/// video + audio track and writes each track's decoder config (the `avcC`
-/// record / AAC `AudioSpecificConfig`) as an FLV sequence-header tag up front,
-/// so a player can decode; video and audio media tags then interleave by
-/// timestamp.
+/// [`set_audio_config`](Self::set_audio_config), M662). [`new_av`](Self::new_av),
+/// driven by [`crate::flvmuxn::FlvMuxN`], carries a video track, an audio track
+/// or both and writes each track's decoder config (the `avcC` record / AAC
+/// `AudioSpecificConfig`) as an FLV sequence-header tag up front, so a player can
+/// decode; video and audio media tags then interleave by timestamp.
 #[derive(Debug)]
 pub struct FlvMuxer {
     tags: TagList,
@@ -452,35 +451,26 @@ impl FlvMuxer {
     pub fn new(codec: FlvCodec) -> Self {
         let video = (codec.track() == FlvTrack::Video).then_some(codec);
         let audio = (codec.track() == FlvTrack::Audio).then_some(codec);
-        Self {
-            tags: TagList::new(),
-            video,
-            audio,
-            video_config: Vec::new(),
-            audio_config: Vec::new(),
-            audio_flags: audio_tag_flags(codec, 2, 44_100),
-            header_written: false,
-            prev_tag_size: 0,
-        }
+        Self::new_av(video, Vec::new(), audio, Vec::new())
     }
 
-    /// An A/V muxer carrying a video + audio track, each with its decoder config
-    /// (the H.264 `avcC` record and AAC `AudioSpecificConfig`) written as an FLV
-    /// sequence-header tag ahead of the media frames. A codec with no sequence
-    /// header (Sorenson, VP6, MP3, Speex) passes an empty config.
+    /// A muxer carrying the video and audio tracks that are `Some`, each with its
+    /// decoder config (the H.264 `avcC` record and AAC `AudioSpecificConfig`)
+    /// written as an FLV sequence-header tag ahead of the media frames. A codec
+    /// with no sequence header (Sorenson, VP6, MP3, Speex) passes an empty config.
     pub fn new_av(
-        video: FlvCodec,
+        video: Option<FlvCodec>,
         video_config: Vec<u8>,
-        audio: FlvCodec,
+        audio: Option<FlvCodec>,
         audio_config: Vec<u8>,
     ) -> Self {
         Self {
             tags: TagList::new(),
-            video: Some(video),
-            audio: Some(audio),
+            video,
+            audio,
             video_config,
             audio_config,
-            audio_flags: audio_tag_flags(audio, 2, 44_100),
+            audio_flags: audio.map_or(0, |codec| audio_tag_flags(codec, 2, 44_100)),
             header_written: false,
             prev_tag_size: 0,
         }
@@ -513,10 +503,6 @@ impl FlvMuxer {
     /// the audio sequence-header tag; effective before the first tag (M662).
     pub fn set_audio_config(&mut self, asc: Vec<u8>) {
         self.audio_config = asc;
-    }
-
-    pub(crate) fn audio_config(&self) -> &[u8] {
-        &self.audio_config
     }
 
     /// Wrap one access unit into FLV bytes, routed to the muxer's single track:

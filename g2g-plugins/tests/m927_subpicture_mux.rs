@@ -40,8 +40,7 @@ use g2g_plugins::mkvmuxn::MkvMuxN;
 use g2g_plugins::mpegts::{TsMuxer, STREAM_TYPE_PRIVATE_PES};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::tsdemux::{TsDemux, TsStream};
-use g2g_plugins::tsmux::TsMux;
-use g2g_plugins::tsmuxn::TsMux as TsMuxN;
+use g2g_plugins::tsmuxn::TsMux;
 use g2g_plugins::vobsub::{idx_config_text, parse_idx};
 use g2g_plugins::vobsubsrc::VobSubSrc;
 
@@ -122,12 +121,12 @@ async fn mux_mkv(format: SubPictureFormat, stream: &[(Vec<u8>, FrameTiming)]) ->
 
 /// Mux one DVB subtitle stream into an MPEG-TS byte stream.
 async fn mux_ts(stream: &[(Vec<u8>, FrameTiming)]) -> Vec<u8> {
-    let mut mux = TsMux::new();
-    mux.configure_pipeline(&caps(SubPictureFormat::DvbSub))
+    let mut mux = TsMux::new(1);
+    mux.configure_pipeline(0, &caps(SubPictureFormat::DvbSub))
         .expect("mpegtsmux accepts a DVB subtitle pad");
     let mut sink = CollectSink::default();
     for (data, timing) in stream {
-        mux.process(frame(data.clone(), *timing), &mut sink)
+        mux.process(0, frame(data.clone(), *timing), &mut sink)
             .await
             .expect("mux a display set");
     }
@@ -408,7 +407,7 @@ async fn the_fan_in_ts_muxer_declares_a_subtitle_pad_in_its_language() {
 
     let mut tags = TagList::new();
     tags.push(Tag::Language("deu".into()));
-    let mut mux = TsMuxN::new(2).with_track_tags(1, tags);
+    let mut mux = TsMux::new(2).with_track_tags(1, tags);
     mux.configure_pipeline(
         0,
         &Caps::CompressedVideo {
@@ -471,37 +470,30 @@ fn the_page_id_property_round_trips_on_every_muxer() {
         Some(PropValue::Uint(42))
     );
 
-    let mut ts = TsMux::new();
-    assert!(declares(AsyncElement::properties(&ts)));
-    AsyncElement::set_property(&mut ts, "dvbsub-page-id", PropValue::Uint(42)).unwrap();
+    let mut ts = TsMux::new(1);
+    assert!(declares(MultiInputElement::properties(&ts)));
+    MultiInputElement::set_property(&mut ts, "dvbsub-page-id", PropValue::Uint(42)).unwrap();
     assert_eq!(
-        AsyncElement::get_property(&ts, "dvbsub-page-id"),
-        Some(PropValue::Uint(42))
-    );
-
-    let mut tsn = TsMuxN::new(1);
-    assert!(declares(MultiInputElement::properties(&tsn)));
-    MultiInputElement::set_property(&mut tsn, "dvbsub-page-id", PropValue::Uint(42)).unwrap();
-    assert_eq!(
-        MultiInputElement::get_property(&tsn, "dvbsub-page-id"),
+        MultiInputElement::get_property(&ts, "dvbsub-page-id"),
         Some(PropValue::Uint(42))
     );
 
     // A page id past the 16-bit field is refused rather than truncated.
     assert!(
-        AsyncElement::set_property(&mut ts, "dvbsub-page-id", PropValue::Uint(70_000)).is_err()
+        MultiInputElement::set_property(&mut ts, "dvbsub-page-id", PropValue::Uint(70_000))
+            .is_err()
     );
 }
 
 /// The property is what a stream carrying no page-id config is declared on.
 #[tokio::test]
 async fn the_page_id_property_declares_a_stream_that_sends_no_config() {
-    let mut mux = TsMux::new();
-    AsyncElement::set_property(&mut mux, "dvbsub-page-id", PropValue::Uint(5)).unwrap();
-    mux.configure_pipeline(&caps(SubPictureFormat::DvbSub))
+    let mut mux = TsMux::new(1);
+    MultiInputElement::set_property(&mut mux, "dvbsub-page-id", PropValue::Uint(5)).unwrap();
+    mux.configure_pipeline(0, &caps(SubPictureFormat::DvbSub))
         .unwrap();
     let mut sink = CollectSink::default();
-    mux.process(frame(dvb_display_set(5), at(0, 0)), &mut sink)
+    mux.process(0, frame(dvb_display_set(5), at(0, 0)), &mut sink)
         .await
         .unwrap();
     assert_eq!(

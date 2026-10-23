@@ -7,9 +7,9 @@ use collect_sink::CollectSink;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{AsyncElement, ByteStreamEncoding, Caps, Dim, Rate, VideoCodec};
+use g2g_core::{AsyncElement, ByteStreamEncoding, Caps, Dim, MultiInputElement, Rate, VideoCodec};
 use g2g_plugins::flvdemux::{FlvDemux, FlvStream};
-use g2g_plugins::flvmux::FlvMux;
+use g2g_plugins::flvmuxn::FlvMuxN;
 
 const TAG_VIDEO: u8 = 9;
 const KEYFRAME: u8 = 1 << 4;
@@ -85,19 +85,23 @@ async fn vp6_dimension_byte_survives_demux_and_remux() {
             "{stream:?} unit starts with the dimension byte"
         );
 
-        let mut mux = FlvMux::new();
-        mux.configure_pipeline(&Caps::CompressedVideo {
-            codec: VideoCodec::Vp6 { alpha },
-            width: Dim::Fixed(300),
-            height: Dim::Fixed(180),
-            framerate: Rate::Fixed(25 << 16),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
-        })
+        let mut mux = FlvMuxN::new(1);
+        mux.configure_pipeline(
+            0,
+            &Caps::CompressedVideo {
+                codec: VideoCodec::Vp6 { alpha },
+                width: Dim::Fixed(300),
+                height: Dim::Fixed(180),
+                framerate: Rate::Fixed(25 << 16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
+            },
+        )
         .unwrap();
         let mut muxed = CollectSink::default();
         let demuxed_unit = units[0].domain.as_system_slice().unwrap().to_vec();
         mux.process(
+            0,
             PipelinePacket::DataFrame(system_frame(demuxed_unit, units[0].timing)),
             &mut muxed,
         )

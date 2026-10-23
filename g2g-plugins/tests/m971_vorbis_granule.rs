@@ -25,12 +25,12 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, G2gError, OutputSink, PipelineClock,
-    PropValue, PushOutcome,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, G2gError, MultiInputElement, OutputSink,
+    PipelineClock, PropValue, PushOutcome,
 };
 use g2g_plugins::ogg::OggDemuxer;
 use g2g_plugins::oggdemux::OggDemux;
-use g2g_plugins::oggmux::OggMux;
+use g2g_plugins::oggmuxn::OggMuxN;
 use g2g_plugins::registry::default_registry;
 
 struct ZeroClock;
@@ -204,21 +204,24 @@ async fn oggdemux_frames(ogg: &[u8]) -> CaptureSink {
 
 /// Mux demuxed frames back into an Ogg byte stream.
 async fn oggmux_bytes(frames: &CaptureSink, fixture: &Fixture) -> Vec<u8> {
-    let mut mux = OggMux::new();
-    mux.configure_pipeline(&Caps::Audio {
-        format: AudioFormat::Vorbis,
-        channels: fixture.channels,
-        sample_rate: fixture.sample_rate,
-        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-    })
+    let mut mux = OggMuxN::new(1);
+    mux.configure_pipeline(
+        0,
+        &Caps::Audio {
+            format: AudioFormat::Vorbis,
+            channels: fixture.channels,
+            sample_rate: fixture.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        },
+    )
     .expect("configure");
     let mut sink = CaptureSink::default();
     for (data, timing) in &frames.frames {
-        mux.process(frame(data.clone(), *timing), &mut sink)
+        mux.process(0, frame(data.clone(), *timing), &mut sink)
             .await
             .expect("mux");
     }
-    mux.process(PipelinePacket::Eos, &mut sink)
+    mux.process(0, PipelinePacket::Eos, &mut sink)
         .await
         .expect("mux eos");
     sink.frames.iter().flat_map(|(b, _)| b.clone()).collect()

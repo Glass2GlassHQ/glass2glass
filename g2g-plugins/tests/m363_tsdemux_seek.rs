@@ -16,10 +16,12 @@ use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{SeekController, SourceLoop};
-use g2g_core::{ByteStreamEncoding, Caps, Dim, G2gError, Rate, Seek, VideoCodec};
+use g2g_core::{
+    ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement, Rate, Seek, VideoCodec,
+};
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::tsdemux::TsDemux;
-use g2g_plugins::tsmux::TsMux;
+use g2g_plugins::tsmuxn::TsMux;
 
 use std::path::PathBuf;
 
@@ -134,18 +136,21 @@ impl OutputSink for Chain<'_> {
 }
 
 async fn make_ts(aus: &[Vec<u8>]) -> Vec<u8> {
-    let mut mux = TsMux::new();
-    mux.configure_pipeline(&h264_caps()).unwrap();
+    let mut mux = TsMux::new(1);
+    mux.configure_pipeline(0, &h264_caps()).unwrap();
     let mut bytes = Bytes::default();
     for (i, au) in aus.iter().enumerate() {
         mux.process(
+            0,
             PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)),
             &mut bytes,
         )
         .await
         .unwrap();
     }
-    mux.process(PipelinePacket::Eos, &mut bytes).await.unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut bytes)
+        .await
+        .unwrap();
     bytes.out
 }
 

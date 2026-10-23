@@ -16,7 +16,7 @@ use g2g_core::{
 };
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::flvdemux::FlvDemux;
-use g2g_plugins::flvmux::FlvMux;
+use g2g_plugins::flvmuxn::FlvMuxN;
 
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -82,18 +82,22 @@ impl SourceLoop for H264Source {
 async fn flvmux_round_trips_through_flvdemux_in_runner() {
     // Annex-B access units, as an encoder/parser emits (M662: the muxer
     // re-frames them AVCC into the FLV tags, the demuxer re-frames them back).
+    // The first carries the parameter sets the sequence header is built from.
     let aus = vec![
-        vec![0, 0, 0, 1, 0x65u8, 0xAA, 0xBB],
+        vec![
+            0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1E, 0, 0, 0, 1, 0x68, 0xCE, 0x3C, 0x80, 0, 0, 0, 1,
+            0x65, 0xAA, 0xBB,
+        ],
         vec![0, 0, 0, 1, 0x41u8, 0xCC],
     ];
 
     let mut graph: Graph<GraphNode> = Graph::new();
     let src = graph.add_source(GraphNodeRef::Source(Box::new(H264Source { aus, next: 0 })));
-    let mux = graph.add_transform(GraphNodeRef::element(FlvMux::new()));
+    let mux = graph.add_muxer(GraphNodeRef::muxer(FlvMuxN::new(1)), 1);
     let demux = graph.add_transform(GraphNodeRef::element(FlvDemux::new()));
     let sink = graph.add_sink(GraphNodeRef::element(FakeSink::new()));
-    graph.link(src, mux).unwrap();
-    graph.link(mux, demux).unwrap();
+    graph.link(src, mux.input(0)).unwrap();
+    graph.link(mux.output(), demux).unwrap();
     graph.link(demux, sink).unwrap();
 
     let stats = run_graph(graph, &ZeroClock, 4)

@@ -1,11 +1,11 @@
-//! Multi-stream MPEG-TS multiplexer element (M207): N elementary streams in
-//! (e.g. H.264 video + AAC audio), one MPEG-TS byte stream out. The A+V analog
-//! of the single-input [`crate::tsmux::TsMux`], the everyday live-streaming
-//! container case.
+//! MPEG-TS multiplexer element (M114, M207): N elementary streams in (e.g. H.264
+//! video + AAC audio, or one of them alone), one MPEG-TS byte stream out, the
+//! everyday live-streaming container case. Wraps the pure [`crate::mpegts::TsMuxer`],
+//! the inverse of [`crate::tsdemux::TsDemux`].
 //!
 //! A [`MultiInputElement`]: each input pad accepts one elementary stream
-//! (`Caps::CompressedVideo{H264|H265}`, `Caps::Audio{Aac}`, or the
-//! `Caps::SubPicture{DvbSub}` subtitle pad of M927), and the access
+//! (`Caps::CompressedVideo{H264|H265|Av1}`, `Caps::Audio{Aac|Opus}`, `Caps::Klv`,
+//! or the `Caps::SubPicture{DvbSub}` subtitle pad of M927), and the access
 //! units are interleaved into one multiplex by decode time (the DTS when the
 //! frame carries one, else the PTS) before being written to their per-stream
 //! PIDs. Time-ordering reuses the M204
@@ -15,15 +15,20 @@
 //! expects, and no stream's data trails a PCR taken from another. The PMT (built once all inputs are configured) names every stream of
 //! its program.
 //!
+//! An AAC stream that opens on a raw AudioSpecificConfig (ER AAC, ELD, USAC,
+//! which ADTS cannot signal) goes out as LOAS/LATM under stream type 0x11, with
+//! that config in every frame. A DVB subtitle pad is a private PES whose PMT
+//! entry gets the `subtitling_descriptor`, declaring the pages from the page-id
+//! config blob the stream leads with, else from the `dvbsub-page-id` property.
+//!
 //! Scope: one program by default, several via `prog-map` (M783), which assigns a
 //! program number per input pad; each program gets its own PMT and its own PCR on
 //! its first stream's PID, on the `pcr-interval` cadence (see
 //! [`crate::mpegts::TsMuxer`]). Reachable from
-//! the `gst-launch` fan-in syntax (M208): registered as the `mpegtsmux` muxer in
-//! [`default_registry`](crate::registry::default_registry), so
-//! `v.! m.  a.! m.  mpegtsmux name=m ! sink` builds this element when more than
-//! one input links (a single input still builds the single-stream
-//! [`crate::tsmux::TsMux`]). Also runs programmatically through `run_muxer_sink`
+//! the `gst-launch` fan-in syntax (M208): registered only as the `mpegtsmux` muxer
+//! in [`default_registry`](crate::registry::default_registry), so
+//! `... ! h264parse ! mpegtsmux ! filesink` and `v.! m.  a.! m.  mpegtsmux name=m ! sink`
+//! both build this element. Also runs programmatically through `run_muxer_sink`
 //! / a `run_graph` muxer node.
 
 use core::future::Future;
@@ -38,20 +43,478 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::time::ns_to_ticks;
 use g2g_core::{
-    resolve_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, TagList,
+    g2g_error, resolve_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, InputAggregator, MemoryDomain,
+    MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    SubPictureFormat, Tag, TagList, VideoCodec,
 };
 
-use crate::dvbsub::DEFAULT_PAGE_ID;
-use crate::mpegts::{TsMuxer, PES_CLOCK_HZ, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265};
+use crate::aacparse::{
+    is_leading_aac_config, is_raw_aac_config, is_usac_config, loas_from_asc,
+    muxer_audio_specific_config, opens_loas_frame,
+};
+use crate::dvbsub::{parse_page_ids, PageIds, DEFAULT_PAGE_ID, DEFAULT_SUBTITLING_TYPE};
+use crate::mpegts::{
+    TsMuxer, DEFAULT_ORIGINAL_NETWORK_ID, DEFAULT_PCR_INTERVAL_90KHZ, DEFAULT_TABLE_INTERVAL_90KHZ,
+    DEFAULT_TRANSPORT_STREAM_ID, MAX_TABLES_VERSION, MUX_ES_PID, MUX_PID_RANGE, MUX_PMT_PID,
+    PES_CLOCK_HZ, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES,
+    STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_NAME, TAG_KEY_SERVICE_PROVIDER,
+};
 use crate::mux::{audio_track_params, refused_input};
 use crate::opusparse::{is_opus_config, parse_opus_head, OPUS_RATE_HZ};
-use crate::tsmux::{
-    is_av1, is_dvbsub, language_from_tags, opus_channels, service_from_tags, stream_type_for,
-    AacCarriage, DvbSubDecl, TsMuxSettings, MUX_PROPERTIES, UNDETERMINED_LANGUAGE,
-};
-use g2g_core::log::short_type_name;
+use g2g_core::log::{short_type_name, Target};
+
+/// The language a `subtitling_descriptor` declares when the stream's tags name
+/// none, the ISO 639 code for "undetermined" (what ffmpeg writes).
+const UNDETERMINED_LANGUAGE: &str = "und";
+
+/// What a DVB subtitle pad's PMT `subtitling_descriptor` declares (M927): the
+/// page ids and subtitling type from the config blob the stream carries in band
+/// ahead of its first display set, falling back to the `dvbsub-page-id` property
+/// for a stream that sends none.
+#[derive(Debug, Clone, Copy)]
+struct DvbSubDecl {
+    /// The `dvbsub-page-id` property: the composition and ancillary page a
+    /// stream with no config blob is declared on.
+    page_id: u16,
+    /// The ids and `subtitling_type` a config blob named, once one has arrived.
+    from_stream: Option<(PageIds, u8)>,
+}
+
+impl DvbSubDecl {
+    /// A pad declared on `page_id` until its stream says otherwise.
+    fn on_page(page_id: u16) -> Self {
+        Self {
+            page_id,
+            from_stream: None,
+        }
+    }
+
+    /// Adopt a page-id config blob. `false` when the bytes are not one, so they
+    /// are a display set and belong in the multiplex.
+    fn adopt(&mut self, data: &[u8]) -> bool {
+        let Some(ids) = parse_page_ids(data) else {
+            return false;
+        };
+        let subtitling_type = data.get(4).copied().unwrap_or(DEFAULT_SUBTITLING_TYPE);
+        self.from_stream = Some((ids, subtitling_type));
+        true
+    }
+
+    fn ids(&self) -> PageIds {
+        self.from_stream.map(|(ids, _)| ids).unwrap_or(PageIds {
+            composition: self.page_id,
+            ancillary: self.page_id,
+        })
+    }
+
+    fn subtitling_type(&self) -> u8 {
+        self.from_stream
+            .map(|(_, t)| t)
+            .unwrap_or(DEFAULT_SUBTITLING_TYPE)
+    }
+}
+
+const PROPERTIES: [PropertySpec; 13] = [
+    PropertySpec::new(
+        "pat-interval",
+        PropKind::Uint,
+        "PAT/PMT re-emission interval, ticks of the 90kHz clock (0 = once)",
+    )
+    .with_default("9000"),
+    // The PAT and PMT are emitted as a pair, so this shares the cadence.
+    PropertySpec::new(
+        "pmt-interval",
+        PropKind::Uint,
+        "alias of pat-interval (the tables are emitted together)",
+    )
+    .with_default("9000"),
+    PropertySpec::new(
+        "si-interval",
+        PropKind::Uint,
+        "SDT re-emission interval, ticks of the 90kHz clock (0 = once)",
+    )
+    .with_default("9000"),
+    PropertySpec::new(
+        "pcr-interval",
+        PropKind::Uint,
+        "PCR insertion interval, ticks of the 90kHz clock",
+    )
+    .with_default("3600"),
+    PropertySpec::new(
+        "bitrate",
+        PropKind::Uint,
+        "constant output bitrate in bits per second, padded with null packets (0 = variable bitrate)",
+    )
+    .with_default("0"),
+    PropertySpec::new(
+        "transport-stream-id",
+        PropKind::Uint,
+        "transport_stream_id written in the PAT and SDT",
+    )
+    .with_default("1")
+    .with_range("0", "65535"),
+    PropertySpec::new(
+        "original-network-id",
+        PropKind::Uint,
+        "original_network_id written in the SDT",
+    )
+    .with_default("1")
+    .with_range("0", "65535"),
+    PropertySpec::new(
+        "start-pid",
+        PropKind::Uint,
+        "PID of the first elementary stream, the rest follow in order",
+    )
+    .with_default("256")
+    .with_range("16", "8190"),
+    PropertySpec::new(
+        "pmt-start-pid",
+        PropKind::Uint,
+        "PID of the first program's PMT, the rest follow in order",
+    )
+    .with_default("4096")
+    .with_range("16", "8190"),
+    PropertySpec::new(
+        "tables-version",
+        PropKind::Uint,
+        "version_number written in the PAT, PMT and SDT",
+    )
+    .with_default("0")
+    .with_range("0", "31"),
+    PropertySpec::new(
+        "klv-sync",
+        PropKind::Bool,
+        "carry KLV metadata as synchronous metadata-in-PES (stream_type 0x15) instead of asynchronous private PES",
+    )
+    .with_default("false"),
+    PropertySpec::new(
+        "dvbsub-page-id",
+        PropKind::Uint,
+        "composition and ancillary page a DVB subtitle input is declared on when the stream carries no page-id config",
+    )
+    .with_default("1"),
+    // GStreamer mpegtsmux takes a pad-name -> program structure for prog-map, g2g properties are scalar
+    PropertySpec::new(
+        "prog-map",
+        PropKind::Str,
+        "program number per input, comma separated in pad order (e.g. 1,1,2; default all in program 1)",
+    )
+    .with_default("1"),
+];
+
+#[derive(Debug, Clone, Copy)]
+struct TsMuxSettings {
+    table_interval_90khz: u64,
+    si_interval_90khz: u64,
+    pcr_interval_90khz: u64,
+    bitrate: u64,
+    transport_stream_id: u16,
+    original_network_id: u16,
+    start_pid: u16,
+    pmt_start_pid: u16,
+    tables_version: u8,
+}
+
+impl Default for TsMuxSettings {
+    fn default() -> Self {
+        Self {
+            table_interval_90khz: DEFAULT_TABLE_INTERVAL_90KHZ,
+            si_interval_90khz: DEFAULT_TABLE_INTERVAL_90KHZ,
+            pcr_interval_90khz: DEFAULT_PCR_INTERVAL_90KHZ,
+            bitrate: 0,
+            transport_stream_id: DEFAULT_TRANSPORT_STREAM_ID,
+            original_network_id: DEFAULT_ORIGINAL_NETWORK_ID,
+            start_pid: MUX_ES_PID,
+            pmt_start_pid: MUX_PMT_PID,
+            tables_version: 0,
+        }
+    }
+}
+
+impl TsMuxSettings {
+    // None when the name is not one of these
+    fn set_property(
+        &mut self,
+        name: &str,
+        value: &PropValue,
+        mux: Option<&mut TsMuxer>,
+    ) -> Option<Result<(), PropError>> {
+        let result = match name {
+            "pat-interval" | "pmt-interval" | "si-interval" | "pcr-interval" => {
+                self.set_cadence(name, value, mux)
+            }
+            "bitrate"
+            | "transport-stream-id"
+            | "original-network-id"
+            | "start-pid"
+            | "pmt-start-pid"
+            | "tables-version" => {
+                // baked into the stream when the muxer is built
+                if mux.is_some() {
+                    return Some(Err(PropError::ReadOnly));
+                }
+                self.set_identity(name, value)
+            }
+            _ => return None,
+        };
+        Some(result)
+    }
+
+    fn set_cadence(
+        &mut self,
+        name: &str,
+        value: &PropValue,
+        mux: Option<&mut TsMuxer>,
+    ) -> Result<(), PropError> {
+        let ticks = value.as_uint().ok_or(PropError::Type)?;
+        match name {
+            "si-interval" => self.si_interval_90khz = ticks,
+            "pcr-interval" => self.pcr_interval_90khz = ticks,
+            _ => self.table_interval_90khz = ticks,
+        }
+        if let Some(mux) = mux {
+            self.apply_cadences(mux);
+        }
+        Ok(())
+    }
+
+    fn set_identity(&mut self, name: &str, value: &PropValue) -> Result<(), PropError> {
+        let number = value.as_uint().ok_or(PropError::Type)?;
+        if name == "bitrate" {
+            self.bitrate = number;
+            return Ok(());
+        }
+        let field = u16::try_from(number).map_err(|_| PropError::Value)?;
+        let pid_ok = MUX_PID_RANGE.contains(&field);
+        match name {
+            "transport-stream-id" => self.transport_stream_id = field,
+            "original-network-id" => self.original_network_id = field,
+            "start-pid" if pid_ok => self.start_pid = field,
+            "pmt-start-pid" if pid_ok => self.pmt_start_pid = field,
+            "tables-version" if number <= u64::from(MAX_TABLES_VERSION) => {
+                self.tables_version = field as u8
+            }
+            _ => return Err(PropError::Value),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        let value = match name {
+            "pat-interval" | "pmt-interval" => self.table_interval_90khz,
+            "si-interval" => self.si_interval_90khz,
+            "pcr-interval" => self.pcr_interval_90khz,
+            "bitrate" => self.bitrate,
+            "transport-stream-id" => u64::from(self.transport_stream_id),
+            "original-network-id" => u64::from(self.original_network_id),
+            "start-pid" => u64::from(self.start_pid),
+            "pmt-start-pid" => u64::from(self.pmt_start_pid),
+            "tables-version" => u64::from(self.tables_version),
+            _ => return None,
+        };
+        Some(PropValue::Uint(value))
+    }
+
+    fn apply_cadences(&self, mux: &mut TsMuxer) {
+        mux.set_table_interval_90khz(self.table_interval_90khz);
+        mux.set_si_interval_90khz(self.si_interval_90khz);
+        mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
+    }
+
+    fn apply(&self, mux: &mut TsMuxer) -> Result<(), G2gError> {
+        self.apply_cadences(mux);
+        mux.set_bitrate(self.bitrate);
+        mux.set_transport_stream_id(self.transport_stream_id);
+        mux.set_original_network_id(self.original_network_id);
+        mux.set_tables_version(self.tables_version)?;
+        mux.set_pid_bases(self.start_pid, self.pmt_start_pid)
+    }
+}
+
+// how an AAC pad's frames enter the multiplex, fixed by the pad's first frame
+#[derive(Debug, Clone, Default)]
+enum AacCarriage {
+    #[default]
+    Undecided,
+    // ADTS frames, multiplexed as they arrive
+    Adts,
+    // raw access units behind this config, which ADTS cannot signal, multiplexed as LOAS
+    Loas(Vec<u8>),
+    // LOAS frames, multiplexed as they arrive
+    SourceLoas,
+}
+
+impl AacCarriage {
+    // true for a raw stream's config frame, which rides every LOAS frame instead of the multiplex
+    fn consume_config(&mut self, frame: &[u8], muxer: &'static str) -> Result<bool, G2gError> {
+        match self {
+            Self::Loas(config) => Ok(is_leading_aac_config(config.as_slice(), frame)),
+            Self::Adts | Self::SourceLoas => Ok(false),
+            Self::Undecided if opens_loas_frame(frame) => {
+                *self = Self::SourceLoas;
+                Ok(false)
+            }
+            Self::Undecided => {
+                let raw_config =
+                    muxer_audio_specific_config(frame, muxer)?.filter(|_| is_raw_aac_config(frame));
+                // ADTS has no profile for USAC, and LATM decoders (ffmpeg's included) do not read it
+                if raw_config.as_deref().is_some_and(is_usac_config) {
+                    g2g_error!(Target::category(muxer), "cannot carry USAC");
+                    return Err(G2gError::CapsMismatch);
+                }
+                let leads_raw_stream = raw_config.is_some();
+                *self = raw_config.map_or(Self::Adts, Self::Loas);
+                Ok(leads_raw_stream)
+            }
+        }
+    }
+
+    fn is_loas(&self) -> bool {
+        matches!(self, Self::Loas(_) | Self::SourceLoas)
+    }
+
+    // the bytes one frame puts on the pad's PID
+    fn access_unit<'a>(
+        &self,
+        frame: &'a [u8],
+        muxer: &'static str,
+    ) -> Result<Cow<'a, [u8]>, G2gError> {
+        let Self::Loas(config) = self else {
+            return Ok(Cow::Borrowed(frame));
+        };
+        loas_from_asc(config, frame).map(Cow::Owned).ok_or_else(|| {
+            g2g_error!(
+                Target::category(muxer),
+                "AAC access unit of {} bytes exceeds the LOAS frame length",
+                frame.len()
+            );
+            G2gError::CapsMismatch
+        })
+    }
+}
+
+/// The PMT `stream_type` for an input caps, or `None` if unsupported. KLV metadata
+/// rides a private PES (0x06) with the 'KLVA' registration descriptor
+/// (asynchronous KLV, MISB ST 1402 / STANAG 4609), or, with `klv_sync`,
+/// metadata-in-PES (0x15) with a metadata descriptor (synchronous KLV).
+fn stream_type_for(caps: &Caps, klv_sync: bool) -> Option<u8> {
+    match caps {
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            ..
+        } => Some(STREAM_TYPE_H264),
+        Caps::CompressedVideo {
+            codec: VideoCodec::H265,
+            ..
+        } => Some(STREAM_TYPE_H265),
+        // AV1 has no stream_type of its own: it rides a private PES told apart by
+        // the AV1 registration descriptor the muxer writes for it (M1049).
+        Caps::CompressedVideo {
+            codec: VideoCodec::Av1,
+            ..
+        } => Some(STREAM_TYPE_PRIVATE_PES),
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            ..
+        } => Some(STREAM_TYPE_AAC),
+        // Opus has no stream_type of its own: it rides a private PES told apart
+        // by the 'Opus' registration + extension descriptors the muxer writes.
+        Caps::Audio {
+            format: AudioFormat::Opus,
+            ..
+        } => Some(STREAM_TYPE_PRIVATE_PES),
+        Caps::Klv => Some(if klv_sync {
+            STREAM_TYPE_METADATA_PES
+        } else {
+            STREAM_TYPE_PRIVATE_PES
+        }),
+        // DVB subtitles ride a private PES too, told apart by the
+        // `subtitling_descriptor` the muxer writes for them. VobSub has no TS
+        // carriage (it is a DVD program-stream codec), so only DVB is muxable.
+        Caps::SubPicture {
+            format: SubPictureFormat::DvbSub,
+        } => Some(STREAM_TYPE_PRIVATE_PES),
+        _ => None,
+    }
+}
+
+/// Whether an input caps is the AV1 pad, whose PMT entry needs the AV1
+/// registration descriptor to be anything other than an unidentified private PES.
+fn is_av1(caps: &Caps) -> bool {
+    matches!(
+        caps,
+        Caps::CompressedVideo {
+            codec: VideoCodec::Av1,
+            ..
+        }
+    )
+}
+
+/// The channel count of an Opus input pad, whose PMT entry needs the Opus
+/// descriptors and whose access units need the control header. `None` for
+/// any other caps.
+fn opus_channels(caps: &Caps) -> Option<u8> {
+    match caps {
+        Caps::Audio {
+            format: AudioFormat::Opus,
+            channels,
+            ..
+        } => Some(*channels),
+        _ => None,
+    }
+}
+
+/// Whether an input caps is the DVB subtitle pad, whose PMT entry needs the
+/// `subtitling_descriptor` and whose access units are display sets.
+fn is_dvbsub(caps: &Caps) -> bool {
+    matches!(
+        caps,
+        Caps::SubPicture {
+            format: SubPictureFormat::DvbSub
+        }
+    )
+}
+
+/// The SDT service text a tag list names (M872): the service name from
+/// [`Tag::Title`] or a `service_name` key, the provider from a `service_provider`
+/// key (ffprobe's names for the two `service_descriptor` fields). `None` when the
+/// list names neither, in which case no SDT is written.
+///
+/// TS standardizes only these two whole-service strings and a per-stream language,
+/// with no free-form tag carrier, so every other tag is dropped rather than
+/// smuggled into a private descriptor.
+fn service_from_tags(tags: &TagList) -> Option<(String, String)> {
+    let mut name: Option<&str> = None;
+    let mut provider: Option<&str> = None;
+    for tag in tags.tags() {
+        match tag {
+            Tag::Title(v) => name = Some(v),
+            Tag::Other { key, value } if key.eq_ignore_ascii_case(TAG_KEY_SERVICE_NAME) => {
+                name = Some(value)
+            }
+            Tag::Other { key, value } if key.eq_ignore_ascii_case(TAG_KEY_SERVICE_PROVIDER) => {
+                provider = Some(value)
+            }
+            _ => {}
+        }
+    }
+    (name.is_some() || provider.is_some()).then(|| {
+        (
+            String::from(name.unwrap_or_default()),
+            String::from(provider.unwrap_or_default()),
+        )
+    })
+}
+
+/// The language a tag list declares, for a stream's
+/// `ISO_639_language_descriptor`. The only per-stream tag TS carries.
+fn language_from_tags(tags: &TagList) -> Option<&str> {
+    tags.tags().iter().find_map(|tag| match tag {
+        Tag::Language(v) => Some(v.as_str()),
+        _ => None,
+    })
+}
 
 /// Muxes N elementary streams into one MPEG-TS byte stream, in decode order.
 ///
@@ -78,7 +541,8 @@ pub struct TsMux {
     agg: InputAggregator<Frame>,
     emitted: u64,
     /// The cadences, bitrate and identity knobs, applied to the inner `TsMuxer`
-    /// when it is built, matching the single-input [`crate::tsmux::TsMux`].
+    /// when it is built. The PAT and PMT are emitted together, so `pat-interval`
+    /// and `pmt-interval` share one cadence.
     settings: TsMuxSettings,
     /// Program number per input pad, in pad order (default: every input in
     /// program 1). Zipped with the learned stream types to build the muxer.
@@ -265,6 +729,14 @@ impl TsMux {
         }
     }
 
+    fn is_video(&self, input: usize) -> bool {
+        self.av1[input]
+            || matches!(
+                self.stream_types[input],
+                Some(STREAM_TYPE_H264) | Some(STREAM_TYPE_H265)
+            )
+    }
+
     /// The metadata that applies to input `i`: its own tags over its program's
     /// over the muxer's.
     fn effective_tags(&self, i: usize) -> TagList {
@@ -290,24 +762,6 @@ impl TsMux {
         }
     }
 }
-
-const PROG_MAP_PROPERTY: PropertySpec = PropertySpec::new(
-    "prog-map",
-    PropKind::Str,
-    "program number per input, comma separated in pad order (e.g. 1,1,2; default all in program 1)",
-)
-.with_default("1");
-
-// GStreamer mpegtsmux takes a pad-name -> program structure for prog-map, g2g properties are scalar
-const FAN_IN_PROPERTIES: [PropertySpec; MUX_PROPERTIES.len() + 1] = {
-    let mut all = [PROG_MAP_PROPERTY; MUX_PROPERTIES.len() + 1];
-    let mut i = 0;
-    while i < MUX_PROPERTIES.len() {
-        all[i] = MUX_PROPERTIES[i];
-        i += 1;
-    }
-    all
-};
 
 // 0 is the unset DTS sentinel
 fn decode_time_ns(frame: &Frame) -> u64 {
@@ -399,8 +853,17 @@ impl MultiInputElement for TsMux {
         Ok(Self::output_caps_value())
     }
 
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "MPEG-TS muxer",
+            "Codec/Muxer",
+            "Muxes elementary streams into an MPEG transport stream",
+            "g2g",
+        )
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
-        &FAN_IN_PROPERTIES
+        &PROPERTIES
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -592,6 +1055,7 @@ impl MultiInputElement for TsMux {
                 self.mux = Some(mux);
             }
 
+            let carries_video = (0..self.inputs).any(|i| self.is_video(i));
             // Drain every AU now safe to emit, in global decode order, writing each
             // to its stream's PID.
             while let Some((stream, frame)) = self.agg.take_earliest_by(decode_time_ns) {
@@ -620,13 +1084,11 @@ impl MultiInputElement for TsMux {
                         pts_ns: frame.timing.pts_ns,
                         // one output frame is one access unit's packets, so the
                         // AU's sync flag still describes it and a downstream
-                        // segmenter cuts on it. Only the video pads count: every
-                        // audio AU is a sync sample, which would cut everywhere.
+                        // segmenter cuts on it. Beside a video pad only the video
+                        // counts: every audio AU is a sync sample, which would cut
+                        // everywhere.
                         keyframe: frame.timing.keyframe
-                            && matches!(
-                                self.stream_types[stream],
-                                Some(STREAM_TYPE_H264) | Some(STREAM_TYPE_H265)
-                            ),
+                            && (self.is_video(stream) || !carries_video),
                         ..FrameTiming::default()
                     },
                     self.emitted,
@@ -649,6 +1111,7 @@ mod tests {
         bytes: Vec<u8>,
         /// Per output frame, its PTS and sync flag.
         timings: Vec<(u64, bool)>,
+        eos: bool,
     }
     impl OutputSink for CaptureSink {
         fn poll_push(
@@ -658,15 +1121,37 @@ mod tests {
         ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
             let packet = packet_slot.take().expect("poll_push without a packet");
             core::task::Poll::Ready({
-                if let PipelinePacket::DataFrame(f) = packet {
-                    self.timings.push((f.timing.pts_ns, f.timing.keyframe));
-                    if let Some(s) = f.domain.as_system_slice() {
-                        self.bytes.extend_from_slice(s);
+                match packet {
+                    PipelinePacket::DataFrame(f) => {
+                        self.timings.push((f.timing.pts_ns, f.timing.keyframe));
+                        if let Some(s) = f.domain.as_system_slice() {
+                            self.bytes.extend_from_slice(s);
+                        }
                     }
+                    PipelinePacket::Eos => self.eos = true,
+                    _ => {}
                 }
                 Ok(PushOutcome::Accepted)
             })
         }
+    }
+
+    // the access units a `TsDemuxer` recovers from `ts`
+    fn demuxed_units(ts: &[u8]) -> Vec<Vec<u8>> {
+        demuxer_of(ts)
+            .take_units()
+            .into_iter()
+            .map(|u| u.data)
+            .collect()
+    }
+
+    fn demuxer_of(ts: &[u8]) -> crate::mpegts::TsDemuxer {
+        let mut demuxer = crate::mpegts::TsDemuxer::new();
+        for packet in ts.chunks(crate::mpegts::TS_PACKET_LEN) {
+            demuxer.push_packet(packet);
+        }
+        demuxer.flush();
+        demuxer
     }
 
     fn h264_caps() -> Caps {
@@ -716,10 +1201,9 @@ mod tests {
             .count()
     }
 
-    /// The `pat-interval` knob is honored on the fan-in muxer (the `name=m` shape),
-    /// the same as the single-input `TsMux`: the PAT/PMT are re-emitted at the
-    /// cadence instead of only once. Set via `set_property`, the path
-    /// `parse_launch` uses; `pmt-interval` shares the cadence.
+    /// The `pat-interval` knob re-emits the PAT/PMT at the cadence instead of only
+    /// once. Set via `set_property`, the path `parse_launch` uses; `pmt-interval`
+    /// shares the cadence.
     #[tokio::test]
     async fn pat_interval_property_re_emits_tables_on_the_fan_in_muxer() {
         let au = |b: u8| alloc::vec![0u8, 0, 0, 1, b, 0xAA, 0xBB];
@@ -1031,5 +1515,283 @@ mod tests {
             .map(|unit| loas_from_asc(&ELD_CONFIG, unit).unwrap())
             .collect();
         assert_eq!(carried, expected);
+    }
+
+    #[test]
+    fn caps_codec_in_byte_stream_out() {
+        let m = TsMux::new(1);
+        assert!(m.intercept_caps(0, &h264_caps()).is_ok());
+        // Raw video / an existing byte stream have nothing to mux.
+        let raw = Caps::RawVideo {
+            format: g2g_core::RawVideoFormat::Rgba8,
+            width: Dim::Fixed(2),
+            height: Dim::Fixed(2),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        assert!(m.intercept_caps(0, &raw).is_err());
+
+        let Ok(CapsConstraint::Produces(set)) = m.caps_constraint_for_output() else {
+            panic!("expected Produces");
+        };
+        assert!(matches!(
+            set.alternatives(),
+            [Caps::ByteStream {
+                encoding: ByteStreamEncoding::MpegTs
+            }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn one_pad_round_trips_through_tsdemux() {
+        use crate::tsdemux::TsDemux;
+        use g2g_core::AsyncElement;
+
+        let au0 = alloc::vec![0u8, 0, 0, 1, 0x65, 0xAA];
+        let au1 = alloc::vec![0u8, 0, 0, 1, 0x41, 0xBB, 0xCC];
+
+        let mut mux = TsMux::new(1);
+        mux.configure_pipeline(0, &h264_caps()).unwrap();
+        let mut ts_sink = CaptureSink::default();
+        mux.process(0, h264_frame(au0.clone(), 10_000_000), &mut ts_sink)
+            .await
+            .unwrap();
+        mux.process(0, h264_frame(au1.clone(), 20_000_000), &mut ts_sink)
+            .await
+            .unwrap();
+        mux.process(0, PipelinePacket::Eos, &mut ts_sink)
+            .await
+            .unwrap();
+        assert!(
+            !ts_sink.eos,
+            "EOS is forwarded by the runner's arm, not the element"
+        );
+
+        // Feed the muxed TS bytes back through the demuxer.
+        let mut demux = TsDemux::new();
+        demux
+            .configure_pipeline(&TsMux::output_caps_value())
+            .unwrap();
+        let mut au_sink = AuSink::default();
+        let ts_frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(ts_sink.bytes.into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        demux
+            .process(PipelinePacket::DataFrame(ts_frame), &mut au_sink)
+            .await
+            .unwrap();
+        demux
+            .process(PipelinePacket::Eos, &mut au_sink)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            au_sink.frames,
+            alloc::vec![au0, au1],
+            "AUs recovered through mux + demux"
+        );
+        assert_eq!(mux.emitted(), 2);
+    }
+
+    #[derive(Default)]
+    struct AuSink {
+        frames: Vec<Vec<u8>>,
+    }
+    impl OutputSink for AuSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            if let PipelinePacket::DataFrame(f) = packet {
+                if let Some(s) = f.domain.as_system_slice() {
+                    self.frames.push(s.to_vec());
+                }
+            }
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+        }
+    }
+
+    // an audio-only multiplex has no video sync point to cut on, so every sync sample is one
+    #[tokio::test]
+    async fn an_audio_only_mux_keeps_every_sync_flag() {
+        const FRAME_NS: u64 = 20_000_000;
+        let adts = alloc::vec![0xFFu8, 0xF1, 0x4C, 0x80, 0x01, 0x00, 0xFC, 0x00];
+        let mut mux = TsMux::new(1);
+        mux.configure_pipeline(0, &aac_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        for i in 0..3u64 {
+            mux.process(0, au_frame(adts.clone(), i * FRAME_NS, true), &mut sink)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            sink.timings,
+            alloc::vec![(0, true), (FRAME_NS, true), (2 * FRAME_NS, true)]
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_aac_goes_out_as_loas_under_the_latm_stream_type() {
+        use crate::aacparse::loas_from_asc;
+        use crate::mpegts::STREAM_TYPE_AAC_LATM;
+        // AAC-ELD, 48 kHz, stereo
+        const ELD_CONFIG: [u8; 4] = [0xF8, 0xE6, 0x40, 0x00];
+        let units = alloc::vec![
+            alloc::vec![0x7Eu8, 0x89, 0xB4],
+            alloc::vec![0x56, 0x78, 0x9A]
+        ];
+
+        let mut mux = TsMux::new(1);
+        mux.configure_pipeline(0, &aac_caps()).unwrap();
+        let mut ts_sink = CaptureSink::default();
+        mux.process(0, au_frame(ELD_CONFIG.to_vec(), 0, false), &mut ts_sink)
+            .await
+            .unwrap();
+        for (index, unit) in units.iter().enumerate() {
+            let pts_ns = (index as u64 + 1) * 10_000_000;
+            mux.process(0, au_frame(unit.clone(), pts_ns, false), &mut ts_sink)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            mux.emitted(),
+            units.len() as u64,
+            "the config is not multiplexed"
+        );
+
+        let mut demuxer = demuxer_of(&ts_sink.bytes);
+        assert_eq!(demuxer.streams()[0].stream_type, STREAM_TYPE_AAC_LATM);
+        let carried: Vec<Vec<u8>> = demuxer.take_units().into_iter().map(|u| u.data).collect();
+        let expected: Vec<Vec<u8>> = units
+            .iter()
+            .map(|unit| loas_from_asc(&ELD_CONFIG, unit).unwrap())
+            .collect();
+        assert_eq!(carried, expected, "each unit rides its own LOAS frame");
+    }
+
+    #[tokio::test]
+    async fn refuses_usac() {
+        // the AudioSpecificConfig of fate-suite aac/usac/Fd_1_c1_0x03.mp4, USAC 48 kHz mono
+        const USAC_CONFIG: [u8; 7] = [0xF9, 0x46, 0x23, 0x21, 0x10, 0xC0, 0x00];
+        let mut mux = TsMux::new(1);
+        mux.configure_pipeline(
+            0,
+            &Caps::Audio {
+                format: AudioFormat::Aac,
+                channels: 1,
+                sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            },
+        )
+        .unwrap();
+        let mut ts_sink = CaptureSink::default();
+        let result = mux
+            .process(0, au_frame(USAC_CONFIG.to_vec(), 0, false), &mut ts_sink)
+            .await;
+        assert_eq!(result, Err(G2gError::CapsMismatch));
+    }
+
+    #[tokio::test]
+    async fn an_in_band_opus_head_sets_the_descriptor_and_stays_out_of_the_multiplex() {
+        use crate::opusparse::synth_opus_head;
+        const CHANNELS: u8 = 6;
+        let packets: Vec<Vec<u8>> = (0..2u8).map(|n| alloc::vec![0xFC, n, n]).collect();
+        let mut mux = TsMux::new(1);
+        mux.configure_pipeline(
+            0,
+            &Caps::Audio {
+                format: AudioFormat::Opus,
+                channels: 0,
+                sample_rate: OPUS_RATE_HZ,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+            },
+        )
+        .unwrap();
+        let mut ts_sink = CaptureSink::default();
+        let head = synth_opus_head(CHANNELS, OPUS_RATE_HZ, 0);
+        mux.process(0, au_frame(head, 0, false), &mut ts_sink)
+            .await
+            .unwrap();
+        for (index, packet) in packets.iter().enumerate() {
+            let pts_ns = index as u64 * 20_000_000;
+            mux.process(0, au_frame(packet.clone(), pts_ns, false), &mut ts_sink)
+                .await
+                .unwrap();
+        }
+
+        let mut demuxer = demuxer_of(&ts_sink.bytes);
+        let pid = demuxer.streams()[0].pid;
+        assert_eq!(demuxer.opus_channels(pid), Some(CHANNELS));
+        let carried: Vec<Vec<u8>> = demuxer
+            .take_units()
+            .into_iter()
+            .flat_map(|u| {
+                crate::mpegts::opus_ts_packets(&u.data)
+                    .into_iter()
+                    .map(<[u8]>::to_vec)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(carried, packets);
+    }
+
+    #[tokio::test]
+    async fn loas_frames_go_out_unchanged_under_the_latm_stream_type() {
+        use crate::aacparse::loas_from_asc;
+        use crate::mpegts::STREAM_TYPE_AAC_LATM;
+        // AAC LC, 48 kHz, stereo
+        const LC_CONFIG: [u8; 2] = [0x11, 0x90];
+        let frames: Vec<Vec<u8>> = [[0x21u8, 0x10, 0x04], [0x21, 0x10, 0x05]]
+            .iter()
+            .map(|unit| loas_from_asc(&LC_CONFIG, unit).unwrap())
+            .collect();
+
+        let mut mux = TsMux::new(1);
+        mux.configure_pipeline(0, &aac_caps()).unwrap();
+        let mut ts_sink = CaptureSink::default();
+        for (index, frame) in frames.iter().enumerate() {
+            let pts_ns = index as u64 * 10_000_000;
+            mux.process(0, au_frame(frame.clone(), pts_ns, false), &mut ts_sink)
+                .await
+                .unwrap();
+        }
+
+        let demuxer = demuxer_of(&ts_sink.bytes);
+        assert_eq!(demuxer.streams()[0].stream_type, STREAM_TYPE_AAC_LATM);
+        assert_eq!(demuxed_units(&ts_sink.bytes), frames);
+    }
+
+    #[tokio::test]
+    async fn a_caps_change_keeps_the_continuity_counters_running() {
+        use crate::mpegts::TS_PACKET_LEN;
+        // more than one TS packet each, so a unit is in flight when the next one starts
+        const UNIT_LEN: usize = 3 * TS_PACKET_LEN;
+        let caps = |channels| Caps::Audio {
+            format: AudioFormat::Aac,
+            channels,
+            sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        };
+        let units: Vec<Vec<u8>> = (0..3u8).map(|n| alloc::vec![n; UNIT_LEN]).collect();
+
+        let mut mux = TsMux::new(1);
+        mux.configure_pipeline(0, &caps(2)).unwrap();
+        let mut ts_sink = CaptureSink::default();
+        for (index, unit) in units.iter().enumerate() {
+            if index == 1 {
+                mux.configure_pipeline(0, &caps(1)).unwrap();
+            }
+            let pts_ns = index as u64 * 10_000_000;
+            mux.process(0, au_frame(unit.clone(), pts_ns, false), &mut ts_sink)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(demuxed_units(&ts_sink.bytes), units);
     }
 }

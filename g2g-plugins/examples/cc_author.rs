@@ -32,7 +32,7 @@ fn main() {
     use g2g_plugins::mp4src::Mp4Src;
     use g2g_plugins::subparse::SubParse;
     use g2g_plugins::subtitlesrc::SubtitleSrc;
-    use g2g_plugins::tsmux::TsMux;
+    use g2g_plugins::tsmuxn::TsMux;
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 4 {
@@ -54,7 +54,7 @@ fn main() {
     let vsrc = g.add_source(GraphNode::source(Mp4Src::new(video)));
     let parse = g.add_transform(GraphNode::element(H264Parse::reframing()));
     let cc = g.add_muxer(GraphNode::muxer(CcInsert::new()), 2);
-    let tsmux = g.add_transform(GraphNode::element(TsMux::new()));
+    let tsmux = g.add_muxer(GraphNode::muxer(TsMux::new(1)), 1);
     let sink = g.add_sink(GraphNode::element(FileSink::new(out)));
     // Caption branch: subtitle file -> timed cues -> CcInsert cue pad.
     let ssrc = g.add_source(GraphNode::source(SubtitleSrc::from_location(subs)));
@@ -66,8 +66,10 @@ fn main() {
     g.link(ssrc, sp).expect("link subtitlesrc -> subparse");
     g.link(sp, cc.input(1))
         .expect("link subparse -> ccinsert.cue");
-    g.link(cc.output(), tsmux).expect("link ccinsert -> tsmux");
-    g.link(tsmux, sink).expect("link tsmux -> filesink");
+    g.link(cc.output(), tsmux.input(0))
+        .expect("link ccinsert -> tsmux");
+    g.link(tsmux.output(), sink)
+        .expect("link tsmux -> filesink");
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

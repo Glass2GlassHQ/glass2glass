@@ -6,7 +6,7 @@
 //!   payloads byte-identical to what libavcodec's own FLV demuxer emits (the proof
 //!   that each codec's payload offset is right), and ffmpeg must decode the
 //!   extracted MP3 elementary stream standalone.
-//! - **Mux:** `FlvMux` writes each codec back into an FLV; ffprobe must read the
+//! - **Mux:** `FlvMuxN` writes each codec back into an FLV; ffprobe must read the
 //!   codec back and ffmpeg decode the result (the M615 oracle discipline).
 //!
 //! VP6 has no encoder in any ffmpeg build, so its carriage is proven the other
@@ -29,7 +29,6 @@ use g2g_core::{
 };
 use g2g_plugins::conformance::persist;
 use g2g_plugins::flvdemux::{FlvDemux, FlvStream};
-use g2g_plugins::flvmux::FlvMux;
 use g2g_plugins::flvmuxn::FlvMuxN;
 
 fn have(bin: &str) -> bool {
@@ -180,12 +179,12 @@ fn frame_at(au: &[u8], pts_ns: u64, keyframe: bool) -> Frame {
 
 /// Mux access units into an FLV byte stream, one tag per unit at 25 fps.
 async fn mux(caps: &Caps, aus: &[Vec<u8>], keyframe_every: usize) -> Vec<u8> {
-    let mut m = FlvMux::new();
-    m.configure_pipeline(caps).unwrap();
+    let mut m = FlvMuxN::new(1);
+    m.configure_pipeline(0, caps).unwrap();
     let mut sink = CaptureSink::default();
     for (i, au) in aus.iter().enumerate() {
         let frame = frame_at(au, i as u64 * 40_000_000, i % keyframe_every == 0);
-        m.process(PipelinePacket::DataFrame(frame), &mut sink)
+        m.process(0, PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .unwrap();
     }

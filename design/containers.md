@@ -238,15 +238,15 @@ on its first stream's PID.
 The fan-in element exposes that layout as `prog-map`, one program number per
 input pad in pad order, `prog-map=1,1,2`. GStreamer's `mpegtsmux` takes a
 pad-name structure there and g2g takes a comma list because its properties are
-scalar. The single-input `tsmux::TsMux` element wraps a one-stream muxer,
-`! mpegtsmux !`. The multi-input `tsmuxn::TsMux` is a `MultiInputElement` that
-muxes A+V, interleaving access units across inputs by decode time (the DTS when
-a frame carries one, else the PTS) via the `take_earliest_by` merge, so the
-multiplex is in decode order and no PES trails a PCR taken from another stream.
-The `mpegtsmux` name is registered both as the single-input launch element and
-as a fan-in muxer, so the text parser picks `tsmux::TsMux` for one input and
-`tsmuxn::TsMux` for several by link degree, as in
-`v.! m.  a.! m.  mpegtsmux name=m`.
+scalar. The `tsmuxn::TsMux` element is a `MultiInputElement` that muxes one
+stream or several, interleaving access units across inputs by decode time (the
+DTS when a frame carries one, else the PTS) via the `take_earliest_by` merge, so
+the multiplex is in decode order and no PES trails a PCR taken from another
+stream. The `mpegtsmux` name is registered only as a fan-in muxer, so the text
+parser builds `tsmuxn::TsMux` for `! mpegtsmux !` and for
+`v.! m.  a.! m.  mpegtsmux name=m` alike. An output frame carries the sync flag
+of the access unit it packetizes, from the video pads only when there is one, so
+an audio-only multiplex keeps every sync sample for a segmenter to cut on.
 
 Tables repeat. The PAT and every PMT go out together every `pat-interval`
 (`pmt-interval` is the same cadence), and the SDT every `si-interval`, both in
@@ -674,7 +674,7 @@ through `TagList::text_tags`.
 
 ### oggmux
 
-`oggmux` is `g2g-plugins::ogg::OggPageWriter` plus the `OggMux` element, the
+`oggmux` is `g2g-plugins::ogg::OggPageWriter` plus the `OggMuxN` element, the
 inverse path on the same three mappings. The writer laces packets into pages,
 255-byte segments with continuation pages past the 255-segment limit and the RFC
 3533 CRC-32 with polynomial `0x04c11db7` and no reflection, holding the last
@@ -695,15 +695,21 @@ tables, the inverse of the demux-side durations. They are held to the total
 carries a source's end-of-stream trim through a remux, so ffmpeg decodes a
 remuxed Opus, Vorbis or FLAC stream to the source's samples bit for bit.
 
-`oggmuxn` is the fan-in form: one `OggStreamMux` per input pad, each its own
-logical bitstream with its own serial, packets interleaved by PTS through the
-same `InputAggregator` merge the other multi-track muxers use. Grouping forces
-the page order, which is why the per-stream header writing is split in two.
-Every stream's beginning-of-stream page is written first, in pad order, then
-each stream's remaining header pages, then the data pages. That block goes out
-when the merge first releases a packet, the first moment every pad's in-band
-codec config is known to have arrived. Like `mpegtsmux`, the one name `oggmux`
-covers both shapes, the parser picking by link degree.
+`OggMuxN` holds one `OggStreamMux` per input pad, each its own logical
+bitstream with its own serial, packets interleaved by PTS through the same
+`InputAggregator` merge the other multi-track muxers use. Grouping forces the
+page order, which is why the per-stream header writing is split in two. Every
+stream's beginning-of-stream page is written first, in pad order, then each
+stream's remaining header pages, then the data pages. That block goes out when
+the merge first releases a packet, the first moment every pad's in-band codec
+config is known to have arrived. `oggmux` is registered only as a fan-in muxer,
+so the parser builds `OggMuxN` for one input link too.
+
+With one input pad, a changed `Segment` after audio has flowed closes the
+logical bitstream on an end-of-stream page and opens the next link of a chained
+file on a fresh serial, the write side of the chains `oggdemux` announces with
+that `Segment`. A grouped file does not chain: a link closes as a whole, and the
+other pads' packets still queued in the merge belong to it.
 
 ## Opus pre-skip and end trim
 
@@ -1017,12 +1023,14 @@ standalone, validated against the ffmpeg oracle in both directions in the CI
 conformance job. The `onMetaData` script tag posts as bus tags. The container is
 auto-detectable through `typefind` "FLV" and `filesrc bytestream-format=auto`.
 
-The FLV muxer is `flvmux`, `g2g-plugins::flv::FlvMuxer` plus the `FlvMux`
-element. Like `FlvMuxN` it captures the decoder config in-band from the first
-access unit, parameter sets from the IDR and the first ADTS header, and writes
-it as the track's sequence-header tag, re-framing video Annex-B to AVCC with
-keyframes flagged from the IDR NAL and audio de-ADTS'd, so a single-track
-`flvmux` output is a playable FLV, which is what `RtmpSink` publishes.
+The FLV muxer is `flvmux`, `g2g-plugins::flv::FlvMuxer` plus the `FlvMuxN`
+element, registered only as a fan-in muxer, so one input link builds it too. It
+captures the decoder config in-band from the first access unit, parameter sets
+from the IDR and the first ADTS header, and writes it as the track's
+sequence-header tag, re-framing video Annex-B to AVCC with keyframes flagged from
+the IDR NAL and audio de-ADTS'd. The header flags name only the tracks the pads
+carry, so a single-track `flvmux` output is a playable FLV, which is what
+`RtmpSink` publishes.
 
 With MP4 through `Mp4Src` and `Mp4Sink`, MPEG-TS, Matroska/WebM, Ogg and FLV,
 the demux and mux coverage spans the major containers.

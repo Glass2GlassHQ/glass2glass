@@ -213,6 +213,8 @@ pub mod streamdemux;
 pub mod taginject;
 // The `tags=` property, gst taglist syntax, shared by taginject and the tag writers.
 pub mod tagproperty;
+// MPEG-TS muxer element (no_std): N elementary streams -> Caps::ByteStream{MpegTs},
+// the inverse of tsdemux.
 pub mod tsmuxn;
 // Closable pass-through: drops data while `drop=true`, for muting one tee branch.
 pub mod valve;
@@ -678,9 +680,6 @@ pub mod mpegcrc;
 // MPEG-TS demuxer element (no_std): Caps::ByteStream{MpegTs} -> H.264, wrapping
 // the mpegts parser.
 pub mod tsdemux;
-// MPEG-TS muxer element (no_std): one elementary stream -> Caps::ByteStream{MpegTs},
-// the inverse of tsdemux.
-pub mod tsmux;
 // MPEG program stream demuxer (no_std): Caps::ByteStream{MpegPs} -> one
 // elementary stream, the `.mpg` / `.vob` sibling of tsdemux.
 pub mod mpeg2video;
@@ -763,24 +762,16 @@ pub mod ogg;
 // Ogg demuxer element (no_std): Caps::ByteStream{Ogg} -> Opus, wrapping the
 // ogg parser.
 pub mod oggdemux;
-// Ogg muxer element (no_std): one Opus / Vorbis / FLAC stream ->
+// Ogg muxer element (no_std): N Opus / Vorbis / FLAC streams ->
 // Caps::ByteStream{Ogg}, the inverse of oggdemux.
-pub mod oggmux;
-// Multi-stream Ogg muxer element (no_std): N audio streams -> one grouped
-// Caps::ByteStream{Ogg}, the fan-in analog of oggmux.
 pub mod oggmuxn;
 // FLV demuxer parsing core (no_std): FLV tags -> elementary access units.
 pub mod flv;
 // FLV demuxer element (no_std): Caps::ByteStream{Flv} -> H.264 / AAC, wrapping
 // the flv parser.
 pub mod flvdemux;
-// FLV muxer element (no_std): one elementary stream -> Caps::ByteStream{Flv}, the
-// inverse of flvdemux.
-pub mod flvmux;
-// Multi-track FLV muxer element: a video + audio elementary stream (A/V) ->
-// Caps::ByteStream{Flv}, the fan-in analog of flvmux. std-gated: reuses the MP4
-// family's NAL / ADTS / avcC helpers, like mkvmuxn.
-#[cfg(feature = "std")]
+// FLV muxer element (no_std): a video and an audio elementary stream ->
+// Caps::ByteStream{Flv}, the inverse of flvdemux.
 pub mod flvmuxn;
 // Container content sniffing (no_std): guess a ByteStreamEncoding from a header.
 pub mod typefind;

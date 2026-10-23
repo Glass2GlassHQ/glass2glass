@@ -15,7 +15,7 @@ use g2g_core::{AsyncElement, AudioFormat, ByteStreamEncoding, Caps, MultiInputEl
 use g2g_plugins::mp4demux::Mp4Demux;
 use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::mpegts::{TsDemuxer, TsPacketSplitter, STREAM_TYPE_AAC_LATM};
-use g2g_plugins::tsmux::TsMux;
+use g2g_plugins::tsmuxn::TsMux;
 
 use audio_mp4::{access_units, progressive_eld_mp4, ELD_CONFIG};
 use collect_sink::CollectSink;
@@ -186,11 +186,11 @@ fn opens_loas_frame(data: &[u8]) -> bool {
 
 #[tokio::test]
 async fn tsmux_writes_the_raw_eld_stream_as_loas() {
-    let mut mux = TsMux::new();
-    mux.configure_pipeline(&aac_caps()).expect("configure");
+    let mut mux = TsMux::new(1);
+    mux.configure_pipeline(0, &aac_caps()).expect("configure");
     let mut sink = CollectSink::default();
     for packet in demux_eld().await {
-        mux.process(packet, &mut sink).await.expect("mux");
+        mux.process(0, packet, &mut sink).await.expect("mux");
     }
     let ts: Vec<u8> = sink
         .packets

@@ -4,6 +4,9 @@
 //! `get_property` onto the real field the element acts on. These assert both,
 //! per element, gated on the feature that builds it.
 
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+
 use g2g_core::{AsyncElement, PropValue, PropertySpec};
 
 /// True when a spec table declares a property of this name (the half
@@ -1336,8 +1339,9 @@ fn h265parse_config_interval() {
 
 #[test]
 fn tsmux_pat_pmt_interval() {
-    use g2g_plugins::tsmux::TsMux;
-    let mut e = TsMux::new();
+    use g2g_core::MultiInputElement;
+    use g2g_plugins::tsmuxn::TsMux;
+    let mut e = TsMux::new(1);
     assert!(declares(e.properties(), "pat-interval"));
     assert!(declares(e.properties(), "pmt-interval"));
     e.set_property("pat-interval", PropValue::Uint(9000))
@@ -1351,22 +1355,8 @@ fn tsmux_pat_pmt_interval() {
 
 #[test]
 fn tsmux_pcr_interval() {
-    // pcr-interval on both the single-input and fan-in muxers: declared, default
-    // 3600 (matching GStreamer mpegtsmux), and round-trips through set/get.
-    let mut single = g2g_plugins::tsmux::TsMux::new();
-    assert!(declares(single.properties(), "pcr-interval"));
-    assert_eq!(
-        single.get_property("pcr-interval"),
-        Some(PropValue::Uint(3600))
-    );
-    single
-        .set_property("pcr-interval", PropValue::Uint(1800))
-        .unwrap();
-    assert_eq!(
-        single.get_property("pcr-interval"),
-        Some(PropValue::Uint(1800))
-    );
-
+    // pcr-interval: declared, default 3600 (matching GStreamer mpegtsmux), and
+    // round-trips through set/get.
     use g2g_core::MultiInputElement;
     let mut fanin = g2g_plugins::tsmuxn::TsMux::new(2);
     assert!(declares(fanin.properties(), "pcr-interval"));
@@ -1383,8 +1373,8 @@ fn tsmux_pcr_interval() {
     );
 }
 
-// both mpegtsmux elements declare these, a fresh element reports the declared
-// default, and a value set reads back
+// mpegtsmux declares these, a fresh element reports the declared default, and a
+// value set reads back
 macro_rules! assert_ts_broadcast_knobs {
     ($element:expr) => {{
         let e = &mut $element;
@@ -1431,25 +1421,40 @@ macro_rules! assert_ts_broadcast_knobs {
     }};
 }
 
-#[test]
-fn tsmux_broadcast_knobs() {
-    assert_ts_broadcast_knobs!(g2g_plugins::tsmux::TsMux::new());
-    {
-        use g2g_core::MultiInputElement;
-        assert_ts_broadcast_knobs!(g2g_plugins::tsmuxn::TsMux::new(2));
-    }
+#[tokio::test]
+async fn tsmux_broadcast_knobs() {
+    use g2g_core::memory::{MemoryDomain, SystemSlice};
+    use g2g_core::{Frame, FrameTiming, MultiInputElement, PipelinePacket};
+    assert_ts_broadcast_knobs!(g2g_plugins::tsmuxn::TsMux::new(2));
 
-    // Built at configure: the knobs baked into the stream are fixed from then on.
-    let mut built = g2g_plugins::tsmux::TsMux::new();
+    // Built at the first frame: the knobs baked into the stream are fixed from then on.
+    let mut built = g2g_plugins::tsmuxn::TsMux::new(1);
     built
-        .configure_pipeline(&g2g_core::Caps::CompressedVideo {
-            codec: g2g_core::VideoCodec::H264,
-            width: g2g_core::Dim::Any,
-            height: g2g_core::Dim::Any,
-            framerate: g2g_core::Rate::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
-        })
+        .configure_pipeline(
+            0,
+            &g2g_core::Caps::CompressedVideo {
+                codec: g2g_core::VideoCodec::H264,
+                width: g2g_core::Dim::Any,
+                height: g2g_core::Dim::Any,
+                framerate: g2g_core::Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
+            },
+        )
+        .unwrap();
+    let idr = vec![0u8, 0, 0, 1, 0x65, 0xAA];
+    let frame = Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(idr.into_boxed_slice())),
+        FrameTiming::default(),
+        0,
+    );
+    built
+        .process(
+            0,
+            PipelinePacket::DataFrame(frame),
+            &mut collect_sink::CollectSink::default(),
+        )
+        .await
         .unwrap();
     for name in [
         "bitrate",
@@ -1525,8 +1530,9 @@ fn parse_launch_sets_encoder_property() {
 
 #[test]
 fn oggmux_serial() {
-    use g2g_plugins::oggmux::OggMux;
-    let mut e = OggMux::new();
+    use g2g_core::MultiInputElement;
+    use g2g_plugins::oggmuxn::OggMuxN;
+    let mut e = OggMuxN::new(1);
     assert!(declares(e.properties(), "serial"));
     e.set_property("serial", PropValue::Uint(0xDEAD_BEEF))
         .unwrap();
@@ -1539,7 +1545,7 @@ fn oggmux_serial() {
 
 #[cfg(feature = "std")]
 #[test]
-fn oggmux_is_a_launch_element() {
+fn oggmux_builds_on_one_link() {
     use g2g_core::runtime::parse_launch;
     use g2g_plugins::registry::default_registry;
     let reg = default_registry();
@@ -1549,7 +1555,7 @@ fn oggmux_is_a_launch_element() {
             "filesrc location=in.ogg ! oggdemux ! oggmux serial=7 ! fakesink"
         )
         .is_ok(),
-        "oggmux is registered as a launch element"
+        "oggmux builds on one input link"
     );
 }
 

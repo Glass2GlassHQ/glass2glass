@@ -2001,7 +2001,7 @@ struct MuxProgram {
 /// MPEG-TS multiplexer (M114, multi-stream since M207, multi-program since M783):
 /// wraps access units in PES packets and 188-byte TS packets, repeating the PAT
 /// and PMTs on one cadence and the SDT on another. The inverse of [`TsDemuxer`];
-/// the [`crate::tsmux::TsMux`] element wraps it. Each elementary stream (e.g.
+/// the [`crate::tsmuxn::TsMux`] element wraps it. Each elementary stream (e.g.
 /// H.264 video + AAC audio) rides its own PID, named by the PMT of the program it
 /// belongs to.
 ///
@@ -2015,7 +2015,7 @@ struct MuxProgram {
 /// (the default) the PCR is the input clock. With [`set_bitrate`](Self::set_bitrate)
 /// the multiplex is constant-bitrate: the PCR comes from the byte position, and
 /// null packets pad the gaps. The caller is expected to interleave access units in
-/// timestamp order, which [`crate::tsmux::TsMux`] does. The PSI carries a real
+/// timestamp order, which [`crate::tsmuxn::TsMux`] does. The PSI carries a real
 /// MPEG-2 CRC-32, so the output is a valid TS.
 ///
 /// [`pcr_interval_90khz`]: Self::set_pcr_interval_90khz

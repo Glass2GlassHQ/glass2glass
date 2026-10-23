@@ -6,14 +6,14 @@
 //! download through every pass-through in the graph.
 
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
-use g2g_core::AsyncElement;
+use g2g_core::{AsyncElement, MultiInputElement};
 
 const SYSTEM_ONLY: DomainSet = DomainSet::only(MemoryDomainKind::System);
 
 #[test]
 fn muxer_takes_system_frames() {
     assert_eq!(
-        g2g_plugins::tsmux::TsMux::new().input_domains(),
+        g2g_plugins::tsmuxn::TsMux::new(1).input_domains(),
         SYSTEM_ONLY
     );
 }
@@ -21,7 +21,6 @@ fn muxer_takes_system_frames() {
 #[cfg(feature = "std")]
 #[test]
 fn matroska_muxer_takes_system_frames() {
-    use g2g_core::MultiInputElement;
     assert_eq!(
         g2g_plugins::mkvmuxn::MkvMuxN::new(1).input_domains(),
         SYSTEM_ONLY

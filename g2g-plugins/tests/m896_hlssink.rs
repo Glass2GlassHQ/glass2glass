@@ -39,8 +39,7 @@ use g2g_plugins::hlssink::HlsSink;
 use g2g_plugins::mp4demuxn::{forwardable_streams, Mp4DemuxN, Mp4Port};
 use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::registry::default_registry;
-use g2g_plugins::tsmux::TsMux;
-use g2g_plugins::tsmuxn::TsMux as TsMuxN;
+use g2g_plugins::tsmuxn::TsMux;
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 240;
@@ -153,28 +152,28 @@ fn bytestream(encoding: ByteStreamEncoding) -> Caps {
     Caps::ByteStream { encoding }
 }
 
-/// Access units through `TsMux`, as the frames it pushes downstream.
+/// Access units through a one-pad `TsMux`, as the frames it pushes downstream.
 async fn mux_ts(aus: &[(Vec<u8>, FrameTiming)]) -> Vec<(Vec<u8>, FrameTiming)> {
-    let mut mux = TsMux::new();
-    mux.configure_pipeline(&h264_caps()).expect("configure");
+    let mut mux = TsMux::new(1);
+    mux.configure_pipeline(0, &h264_caps()).expect("configure");
     let mut sink = CaptureSink::default();
     for (au, timing) in aus {
-        mux.process(frame(au.clone(), *timing), &mut sink)
+        mux.process(0, frame(au.clone(), *timing), &mut sink)
             .await
             .expect("mux");
     }
-    mux.process(PipelinePacket::Eos, &mut sink)
+    mux.process(0, PipelinePacket::Eos, &mut sink)
         .await
         .expect("mux eos");
     sink.frames
 }
 
-/// The same access units through the multi-track `tsmuxn`, with an AAC AU
+/// The same access units through a two-pad `TsMux`, with an AAC AU
 /// interleaved mid-frame on a second pad (flagged a sync sample, as every AAC AU
 /// is).
 async fn mux_ts_av(aus: &[(Vec<u8>, FrameTiming)]) -> Vec<(Vec<u8>, FrameTiming)> {
     let adts: Vec<u8> = vec![0xFF, 0xF1, 0x4C, 0x80, 0x01, 0x00, 0xFC, 0x00];
-    let mut mux = TsMuxN::new(2);
+    let mut mux = TsMux::new(2);
     mux.configure_pipeline(0, &h264_caps())
         .expect("configure v");
     mux.configure_pipeline(1, &aac_caps()).expect("configure a");

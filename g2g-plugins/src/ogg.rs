@@ -24,7 +24,7 @@
 //! stream of unbounded chains stays bounded.
 //!
 //! The [`OggPageWriter`] is the inverse framing side, wrapped by the
-//! [`crate::oggmux::OggMux`] and [`crate::oggmuxn::OggMuxN`] elements.
+//! [`crate::oggmuxn::OggMuxN`] element.
 
 use alloc::vec::Vec;
 

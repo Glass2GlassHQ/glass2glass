@@ -22,8 +22,7 @@ use g2g_plugins::mp4demux::Mp4Demux;
 use g2g_plugins::mpegts::{TsDemuxer, TsPacketSplitter, STREAM_TYPE_AAC_LATM};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::tsdemux::{TsDemux, TsStream};
-use g2g_plugins::tsmux::TsMux;
-use g2g_plugins::tsmuxn::TsMux as TsMuxN;
+use g2g_plugins::tsmuxn::TsMux;
 
 use collect_sink::CollectSink;
 use ffmpeg_tool::have_ffmpeg;
@@ -69,7 +68,7 @@ async fn aac_eld_goes_into_mpeg_ts_as_loas() {
 }
 
 #[tokio::test]
-async fn usac_is_refused_by_both_mpeg_ts_muxers() {
+async fn usac_is_refused_by_the_mpeg_ts_muxer() {
     let source = fixture_path(USAC_FIXTURE);
     let Ok(file) = std::fs::read(&source) else {
         eprintln!(
@@ -87,19 +86,7 @@ async fn usac_is_refused_by_both_mpeg_ts_muxers() {
         })
         .expect("the demuxer announces the track caps");
 
-    let mut single = TsMux::new();
-    single.configure_pipeline(&caps).expect("configure");
-    let mut sink = CollectSink::default();
-    let mut single_result = Ok(());
-    for packet in demux(&file).await {
-        single_result = single.process(packet, &mut sink).await;
-        if single_result.is_err() {
-            break;
-        }
-    }
-    assert_eq!(single_result, Err(G2gError::CapsMismatch), "tsmux");
-
-    let mut fan_in = TsMuxN::new(1);
+    let mut fan_in = TsMux::new(1);
     fan_in.configure_pipeline(0, &caps).expect("configure");
     let mut sink = CollectSink::default();
     let mut fan_in_result = Ok(());
@@ -211,47 +198,43 @@ async fn check(object_type: ObjectType) {
         .split_first()
         .expect("a config frame leads the track");
 
-    let muxed = [
-        ("tsmux", mux_single(demux(&file).await, &caps).await),
-        ("tsmuxn", mux_fan_in(demux(&file).await, &caps).await),
-    ];
-    for (muxer, ts) in muxed {
-        let carried = read_back(&ts, muxer);
-        let loas: Vec<LoasFrame> = carried.iter().map(|frame| parse_loas(frame)).collect();
-        assert!(
-            loas.iter().all(|frame| frame.config == *config),
-            "{muxer}: every LOAS frame carries the source config"
-        );
-        assert_eq!(
-            loas.into_iter()
-                .map(|frame| frame.payload)
-                .collect::<Vec<_>>(),
-            units,
-            "{muxer}: the source access units, in order and unchanged"
-        );
+    let muxer = "mpegtsmux";
+    let ts = mux_ts(demux(&file).await, &caps).await;
+    let carried = read_back(&ts, muxer);
+    let loas: Vec<LoasFrame> = carried.iter().map(|frame| parse_loas(frame)).collect();
+    assert!(
+        loas.iter().all(|frame| frame.config == *config),
+        "{muxer}: every LOAS frame carries the source config"
+    );
+    assert_eq!(
+        loas.into_iter()
+            .map(|frame| frame.payload)
+            .collect::<Vec<_>>(),
+        units,
+        "{muxer}: the source access units, in order and unchanged"
+    );
 
-        let demuxed = tsdemux_frames(ts.clone()).await;
-        assert_eq!(
-            demuxed, carried,
-            "{muxer}: TsDemux forwards each LOAS frame as its PES carries it"
-        );
-        let parsed = aacparse(&demuxed).await;
-        assert_eq!(
-            parsed.caps,
-            std::slice::from_ref(&caps),
-            "{muxer}: AacParse reads the source caps back from the LOAS frames"
-        );
-        assert_eq!(
-            parsed.frames, demuxed,
-            "{muxer}: AacParse forwards the LOAS frames unchanged"
-        );
+    let demuxed = tsdemux_frames(ts.clone()).await;
+    assert_eq!(
+        demuxed, carried,
+        "{muxer}: TsDemux forwards each LOAS frame as its PES carries it"
+    );
+    let parsed = aacparse(&demuxed).await;
+    assert_eq!(
+        parsed.caps,
+        std::slice::from_ref(&caps),
+        "{muxer}: AacParse reads the source caps back from the LOAS frames"
+    );
+    assert_eq!(
+        parsed.frames, demuxed,
+        "{muxer}: AacParse forwards the LOAS frames unchanged"
+    );
 
-        let ts_path = scratch_path(object_type, muxer, "ts");
-        std::fs::write(&ts_path, &ts).expect("write the transport stream");
-        check_ffprobe(&source, &ts_path, muxer);
-        check_gstreamer_parse(&ts_path, &caps, muxer);
-        check_decoded_pcm(object_type, &source, &ts_path, &caps, muxer).await;
-    }
+    let ts_path = scratch_path(object_type, muxer, "ts");
+    std::fs::write(&ts_path, &ts).expect("write the transport stream");
+    check_ffprobe(&source, &ts_path, muxer);
+    check_gstreamer_parse(&ts_path, &caps, muxer);
+    check_decoded_pcm(object_type, &source, &ts_path, &caps, muxer).await;
 }
 
 async fn demux(file: &[u8]) -> Vec<PipelinePacket> {
@@ -296,18 +279,8 @@ fn data_frames(packets: &[PipelinePacket]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-async fn mux_single(packets: Vec<PipelinePacket>, caps: &Caps) -> Vec<u8> {
-    let mut mux = TsMux::new();
-    mux.configure_pipeline(caps).expect("configure");
-    let mut sink = CollectSink::default();
-    for packet in packets {
-        mux.process(packet, &mut sink).await.expect("mux");
-    }
-    data_frames(&sink.packets).concat()
-}
-
-async fn mux_fan_in(packets: Vec<PipelinePacket>, caps: &Caps) -> Vec<u8> {
-    let mut mux = TsMuxN::new(1);
+async fn mux_ts(packets: Vec<PipelinePacket>, caps: &Caps) -> Vec<u8> {
+    let mut mux = TsMux::new(1);
     mux.configure_pipeline(0, caps).expect("configure");
     let mut sink = CollectSink::default();
     for packet in packets {

@@ -1,7 +1,6 @@
 //! M208 `gst-launch` multi-stream MPEG-TS fan-in: a text pipeline that joins an
 //! H.264 video stream and an AAC audio stream at `mpegtsmux name=m` builds the
-//! multi-input `tsmuxn::TsMux` (the muxer is picked over the single-input
-//! `tsmux::TsMux` by link degree), and runs end to end through `run_graph`. The
+//! multi-input `tsmuxn::TsMux`, and runs end to end through `run_graph`. The
 //! byte-level correctness of the multiplex is covered by `m207_ts_av_mux`; this
 //! test proves the launch text path reaches the multi-input muxer and that the
 //! one `mpegtsmux` name covers both the single- and multi-input shapes.
@@ -204,8 +203,7 @@ async fn multi_input_mpegtsmux_builds_a_two_input_muxer_node() {
         .map(|&n| vg.kind(n))
         .filter(|k| matches!(k, NodeKind::Muxer(_)))
         .collect();
-    // Two inbound links select the multi-input `tsmuxn::TsMux` over the
-    // single-input launch element registered under the same name.
+    // Two inbound links build the muxer with two input pads.
     assert_eq!(
         muxers,
         [NodeKind::Muxer(2)],
@@ -214,27 +212,29 @@ async fn multi_input_mpegtsmux_builds_a_two_input_muxer_node() {
 }
 
 #[tokio::test]
-async fn single_input_mpegtsmux_stays_a_transform() {
+async fn single_input_mpegtsmux_builds_a_one_input_muxer_node() {
     let reg = registry_with_av_sources();
-    // One input: `mpegtsmux` resolves to the single-stream launch element (a
-    // transform node), not the fan-in muxer. It must not appear as a Muxer node.
+    // `mpegtsmux` is registered only as a muxer, so one input builds it too.
     let graph = parse_launch(&reg, "h264src ! mpegtsmux ! anysink").expect("parses");
     let vg = graph.finish().expect("valid graph");
-    let has_muxer = vg
+    let muxers: Vec<NodeKind> = vg
         .topo()
         .iter()
-        .any(|&n| matches!(vg.kind(n), NodeKind::Muxer(_)));
-    assert!(
-        !has_muxer,
-        "single-input mpegtsmux is a transform, not a muxer node"
+        .map(|&n| vg.kind(n))
+        .filter(|k| matches!(k, NodeKind::Muxer(_)))
+        .collect();
+    assert_eq!(
+        muxers,
+        [NodeKind::Muxer(1)],
+        "one muxer node with one input pad"
     );
 }
 
-// M470: the fan-in muxer shape (`name=m`) now accepts the same properties as its
-// single-input sibling. Before, the N-input variants had an empty `properties()`,
-// so `apply_muxer_props` rejected the knob with `UnknownProperty`; these assert the
-// parse path applies it (the behavior each knob drives is unit-tested in the
-// tsmuxn / mp4muxn / mkvmuxn modules).
+// M470: the fan-in muxer shape (`name=m`) accepts the muxer's properties. Before,
+// the N-input variants had an empty `properties()`, so `apply_muxer_props`
+// rejected the knob with `UnknownProperty`; these assert the parse path applies it
+// (the behavior each knob drives is unit-tested in the tsmuxn / mp4muxn / mkvmuxn
+// modules).
 
 #[tokio::test]
 async fn mpegtsmux_fan_in_accepts_pat_interval() {

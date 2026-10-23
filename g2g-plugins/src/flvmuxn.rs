@@ -1,9 +1,10 @@
-//! Multi-track FLV multiplexer element (M296): a video + audio elementary stream
-//! in (`Caps::CompressedVideo{H264}` + `Caps::Audio{Aac}`), one FLV byte stream
-//! out. The A/V analog of the single-track [`crate::flvmux::FlvMux`], so a muxed
-//! recording carries video and audio together:
+//! FLV multiplexer element (M120, M296): a video and an audio elementary stream
+//! in, either one optional (`Caps::CompressedVideo{H264}` Annex-B, `Caps::Audio{Aac}`
+//! ADTS, or one of the legacy Flash codecs: Sorenson, VP6, VP6-alpha, MP3, Speex),
+//! one FLV byte stream out:
 //!
 //! ```text
+//! ... ! h264parse ! flvmux ! filesink location=out.flv
 //! videotestsrc ! x264enc ! flvmux name=m
 //! audiotestsrc ! avenc_aac ! m.
 //! m. ! filesink location=av.flv
@@ -12,18 +13,19 @@
 //! A [`MultiInputElement`]: each pad takes one elementary stream (FLV implies the
 //! track by tag type, so the muxer routes by pad codec, not pad index), and access
 //! units interleave by presentation timestamp via the M204 [`InputAggregator`]
-//! merge before being written as FLV tags. Unlike the single-track muxer, the
-//! sequence-header tags a player needs are written up front, captured in-band from
-//! the first access unit: the video track's `avcC` record from the parameter sets
-//! in the first IDR, the audio track's `AudioSpecificConfig` from the first ADTS
-//! header (the AAC bytes are written de-ADTS'd, video NALUs AVCC length-prefixed).
+//! merge before being written as FLV tags. The sequence-header tags a player needs
+//! are written up front, captured in-band from the first access unit: the video
+//! track's `avcC` record from the parameter sets in the first IDR, the audio
+//! track's `AudioSpecificConfig` from the first ADTS header (the AAC bytes are
+//! written de-ADTS'd, video NALUs AVCC length-prefixed). The header flags name only
+//! the tracks the pads carry, and an `onMetaData` script tag is written when
+//! metadata is attached via [`FlvMuxN::with_tags`].
 //!
-//! Reachable from the `gst-launch` fan-in syntax: registered as the `flvmux` muxer
-//! in `default_registry`, so >1 input link builds this element (a single input
-//! builds the single-track [`crate::flvmux::FlvMux`]). Scope: FLV's one-video +
-//! one-audio model over the codecs [`crate::flvmux::FlvMux`] accepts; a second pad
-//! of either kind is rejected. The legacy Flash codecs have no sequence header, so
-//! their tracks are ready to write from the first access unit.
+//! Reachable from the `gst-launch` fan-in syntax: registered only as the `flvmux`
+//! muxer in `default_registry`, so any number of input links builds this element.
+//! Scope: FLV's one-video + one-audio model; a second pad of either kind is
+//! rejected. The legacy Flash codecs have no sequence header, so their tracks are
+//! ready to write from the first access unit.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -34,17 +36,16 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
-    G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket,
-    VideoCodec,
+    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    ElementMetadata, FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement,
+    OutputSink, PipelinePacket, TagList, VideoCodec,
 };
 
 use crate::aacparse::{
     is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config, require_muxer_config,
 };
-use crate::annexb::au_is_keyframe;
+use crate::annexb::{au_is_keyframe, avcc_record, avcc_sample, parameter_sets, split_annexb};
 use crate::flv::{FlvCodec, FlvMuxer, FlvTrack};
-use crate::fmp4mux::{avcc_record, avcc_sample, parameter_sets, split_annexb};
 use crate::mux::{audio_track_params, refused_input, refused_input_because};
 use g2g_core::log::short_type_name;
 
@@ -73,7 +74,8 @@ impl TrackInit {
     }
 }
 
-/// Muxes a video + audio stream into one FLV byte stream, PTS-ordered.
+/// Muxes a video and an audio stream, either one optional, into one FLV byte
+/// stream, PTS-ordered.
 ///
 /// # Example
 ///
@@ -95,6 +97,7 @@ pub struct FlvMuxN {
     agg: InputAggregator<Frame>,
     /// Built lazily once every track has its init (the sequence headers need it).
     mux: Option<FlvMuxer>,
+    tags: TagList,
     emitted: u64,
 }
 
@@ -108,8 +111,15 @@ impl FlvMuxN {
             inits: alloc::vec![None; inputs],
             agg: InputAggregator::new(inputs),
             mux: None,
+            tags: TagList::new(),
             emitted: 0,
         }
+    }
+
+    /// Attach stream metadata, written as an `onMetaData` script tag in the header.
+    pub fn with_tags(mut self, tags: TagList) -> Self {
+        self.tags = tags;
+        self
     }
 
     pub fn emitted(&self) -> u64 {
@@ -122,10 +132,24 @@ impl FlvMuxN {
         }
     }
 
-    /// The FLV codec an input pad's caps carries, or `None` if FLV cannot carry
-    /// it (the same set the single-track muxer accepts).
+    /// The FLV codec an input pad's caps carries, or `None` if FLV cannot carry it.
     fn pad_kind_for(caps: &Caps) -> Option<FlvCodec> {
-        crate::flvmux::FlvMux::codec_for(caps)
+        match caps {
+            Caps::CompressedVideo { codec, .. } => match codec {
+                VideoCodec::H264 => Some(FlvCodec::H264),
+                VideoCodec::SorensonH263 => Some(FlvCodec::SorensonH263),
+                VideoCodec::Vp6 { alpha: false } => Some(FlvCodec::Vp6),
+                VideoCodec::Vp6 { alpha: true } => Some(FlvCodec::Vp6Alpha),
+                _ => None,
+            },
+            Caps::Audio { format, .. } => match format {
+                AudioFormat::Aac => Some(FlvCodec::Aac),
+                AudioFormat::Mp3 => Some(FlvCodec::Mp3),
+                AudioFormat::Speex => Some(FlvCodec::Speex),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// True once every pad has its init captured (the sequence headers need them).
@@ -179,16 +203,17 @@ impl FlvMuxN {
                 .copied()
                 .find(|c| c.track() == t)
         };
-        let audio_codec = of_track(FlvTrack::Audio).unwrap_or(FlvCodec::Aac);
+        let audio_codec = of_track(FlvTrack::Audio);
         let mut mux = FlvMuxer::new_av(
-            of_track(FlvTrack::Video).unwrap_or(FlvCodec::H264),
+            of_track(FlvTrack::Video),
             video_config,
             audio_codec,
             audio_config,
-        );
+        )
+        .with_tags(self.tags.clone());
         if let Some((channels, sample_rate)) = self.audio_params {
             // an MP3 tag's flags declare the rate and channel count
-            if audio_codec == FlvCodec::Mp3 {
+            if audio_codec == Some(FlvCodec::Mp3) {
                 audio_track_params(
                     short_type_name::<Self>(),
                     AudioFormat::Mp3,
@@ -333,6 +358,15 @@ impl MultiInputElement for FlvMuxN {
         Ok(Self::output_caps_value())
     }
 
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "FLV muxer",
+            "Codec/Muxer",
+            "Muxes a video and an audio stream into a Flash Video stream",
+            "g2g",
+        )
+    }
+
     fn process<'a>(
         &'a mut self,
         input: usize,
@@ -388,20 +422,27 @@ impl MultiInputElement for FlvMuxN {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flv::{FlvDemuxer, FlvTrack as DemuxTrack};
-    use g2g_core::{AudioFormat, Dim};
+    use crate::flv::{FlvDemuxer, FlvTrack as DemuxTrack, FLV_FLAG_AUDIO, FLV_FLAG_VIDEO};
+    use crate::flvdemux::{FlvDemux, FlvStream};
+    use g2g_core::{AsyncElement, AudioFormat, Dim};
 
-    fn h264_idr() -> Vec<u8> {
+    const SPS: &[u8] = &[0x67, 0x42, 0x00, 0x1E];
+    const PPS: &[u8] = &[0x68, 0xCE, 0x3C, 0x80];
+    // the byte after the `FLV` signature and version
+    const HEADER_FLAGS_AT: usize = 4;
+
+    // an Annex-B access unit from raw NAL payloads, with 4-byte start codes
+    fn annexb(nals: &[&[u8]]) -> Vec<u8> {
         let mut au = Vec::new();
-        for nal in [
-            alloc::vec![0x67u8, 0x42, 0x00, 0x1E],
-            alloc::vec![0x68u8, 0xCE, 0x3C, 0x80],
-            alloc::vec![0x65u8, 0x88, 0x84],
-        ] {
+        for nal in nals {
             au.extend_from_slice(&[0, 0, 0, 1]);
-            au.extend_from_slice(&nal);
+            au.extend_from_slice(nal);
         }
         au
+    }
+
+    fn h264_idr() -> Vec<u8> {
+        annexb(&[SPS, PPS, &[0x65, 0x88, 0x84]])
     }
 
     fn aac_adts() -> Vec<u8> {
@@ -442,6 +483,7 @@ mod tests {
     #[derive(Default)]
     struct CaptureSink {
         bytes: Vec<u8>,
+        frames: Vec<Vec<u8>>,
     }
     impl OutputSink for CaptureSink {
         fn poll_push(
@@ -454,11 +496,57 @@ mod tests {
                 if let PipelinePacket::DataFrame(f) = packet {
                     if let Some(s) = f.domain.as_system_slice() {
                         self.bytes.extend_from_slice(s);
+                        self.frames.push(s.to_vec());
                     }
                 }
                 Ok(g2g_core::PushOutcome::Accepted)
             })
         }
+    }
+
+    // mux `aus` through a one-pad muxer configured with `caps`
+    async fn mux_one_pad(mux: FlvMuxN, caps: &Caps, aus: &[Vec<u8>]) -> (FlvMuxN, Vec<u8>) {
+        let mut mux = mux;
+        mux.configure_pipeline(0, caps).unwrap();
+        let mut sink = CaptureSink::default();
+        for (index, au) in aus.iter().enumerate() {
+            mux.process(0, frame(au.clone(), index as u64 * 33_000_000), &mut sink)
+                .await
+                .unwrap();
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        (mux, sink.bytes)
+    }
+
+    // the access units `FlvDemux` recovers from `flv`, with what it posted on the bus
+    async fn flvdemux_units(flv: Vec<u8>) -> (Vec<Vec<u8>>, Option<TagList>) {
+        use g2g_core::{Bus, BusMessage};
+        let (bus, handle) = Bus::new(8);
+        let mut demux = FlvDemux::new()
+            .with_stream(FlvStream::H264)
+            .with_bus(handle);
+        demux
+            .configure_pipeline(&FlvMuxN::output_caps_value())
+            .unwrap();
+        let mut sink = CaptureSink::default();
+        let flv_frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(flv.into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        demux
+            .process(PipelinePacket::DataFrame(flv_frame), &mut sink)
+            .await
+            .unwrap();
+        let mut posted = None;
+        while let Some(message) = bus.try_recv() {
+            if let BusMessage::Tag { tags, .. } = message {
+                posted = Some(tags);
+            }
+        }
+        (sink.frames, posted)
     }
 
     #[tokio::test]
@@ -542,5 +630,95 @@ mod tests {
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(mux.intercept_caps(0, &raw).is_err());
+    }
+
+    #[test]
+    fn produces_an_flv_byte_stream() {
+        let mux = FlvMuxN::new(1);
+        assert!(mux.intercept_caps(0, &video_caps()).is_ok());
+        let Ok(CapsConstraint::Produces(set)) = mux.caps_constraint_for_output() else {
+            panic!("expected Produces");
+        };
+        assert!(matches!(
+            set.alternatives(),
+            [Caps::ByteStream {
+                encoding: ByteStreamEncoding::Flv
+            }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn one_pad_round_trips_through_flvdemux() {
+        let au0 = annexb(&[SPS, PPS, &[0x65, 0xAA, 0xBB]]);
+        let au1 = annexb(&[&[0x41, 0xCC]]);
+        let (mux, flv) =
+            mux_one_pad(FlvMuxN::new(1), &video_caps(), &[au0.clone(), au1.clone()]).await;
+        assert_eq!(mux.emitted(), 2);
+        assert_eq!(
+            flv[HEADER_FLAGS_AT], FLV_FLAG_VIDEO,
+            "a video-only file declares no audio track"
+        );
+        let (units, _) = flvdemux_units(flv).await;
+        assert_eq!(
+            units,
+            alloc::vec![au0, au1],
+            "AUs recovered through mux + demux"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_pad_round_trips_tags_through_flvdemux() {
+        use g2g_core::Tag;
+        let tags: TagList = [Tag::Title("My Clip".into()), Tag::Encoder("g2g".into())]
+            .into_iter()
+            .collect();
+        let au = annexb(&[SPS, PPS, &[0x65, 0xAA]]);
+        let (_, flv) = mux_one_pad(
+            FlvMuxN::new(1).with_tags(tags.clone()),
+            &video_caps(),
+            core::slice::from_ref(&au),
+        )
+        .await;
+        let (units, posted) = flvdemux_units(flv).await;
+        assert_eq!(posted.expect("a Tag message").tags(), tags.tags());
+        assert_eq!(units, alloc::vec![au], "the AU still demuxes");
+    }
+
+    #[tokio::test]
+    async fn one_pad_writes_the_sequence_header_from_the_first_idr() {
+        let (_, flv) = mux_one_pad(FlvMuxN::new(1), &video_caps(), &[h264_idr()]).await;
+        let mut d = FlvDemuxer::new();
+        d.push_data(&flv);
+        assert_eq!(
+            d.video_config(),
+            Some(&avcc_record(&[SPS, PPS])[..]),
+            "the avcC sequence header rides ahead of the media tag"
+        );
+        let units = d.take_units();
+        assert_eq!(units.len(), 1);
+        assert!(units[0].keyframe, "the IDR NAL flags the FLV keyframe type");
+    }
+
+    #[tokio::test]
+    async fn one_pad_writes_the_audio_sequence_header_from_adts() {
+        // 48 kHz (index 3) stereo AAC-LC ADTS frame; the muxer derives the ASC.
+        let (_, flv) = mux_one_pad(FlvMuxN::new(1), &audio_caps(), &[aac_adts()]).await;
+        assert_eq!(
+            flv[HEADER_FLAGS_AT], FLV_FLAG_AUDIO,
+            "an audio-only file declares no video track"
+        );
+        let mut d = FlvDemuxer::new();
+        d.push_data(&flv);
+        assert_eq!(
+            d.audio_config(),
+            Some(&[0x11u8, 0x90][..]),
+            "ASC from the ADTS header"
+        );
+        let units = d.take_units();
+        assert_eq!(
+            units[0].data,
+            alloc::vec![0xAB, 0xCD],
+            "media tag carries the raw AAC frame"
+        );
     }
 }

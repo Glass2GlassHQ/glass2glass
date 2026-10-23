@@ -14,9 +14,9 @@ use std::process::Command;
 use g2g_core::conformance::{ConformanceDimension, Evidence, MaturityLevel};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, VideoCodec};
+use g2g_core::{Caps, Dim, G2gError, MultiInputElement, OutputSink, PushOutcome, Rate, VideoCodec};
 use g2g_plugins::conformance::persist;
-use g2g_plugins::tsmux::TsMux;
+use g2g_plugins::tsmuxn::TsMux;
 
 #[derive(Default)]
 struct CaptureSink {
@@ -73,25 +73,29 @@ async fn mux_ts() -> Vec<u8> {
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
-    let mut mux = TsMux::new();
-    mux.configure_pipeline(&caps).unwrap();
+    let mut mux = TsMux::new(1);
+    mux.configure_pipeline(0, &caps).unwrap();
     let mut sink = CaptureSink::default();
-    mux.process(frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
+    mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink)
         .await
         .unwrap();
     mux.process(
+        0,
         frame(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000),
         &mut sink,
     )
     .await
     .unwrap();
     mux.process(
+        0,
         frame(annexb(&[&[0x41u8, 0x9a, 0x01]]), 66_000_000),
         &mut sink,
     )
     .await
     .unwrap();
-    mux.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+    mux.process(0, PipelinePacket::Eos, &mut sink)
+        .await
+        .unwrap();
     sink.bytes
 }
 

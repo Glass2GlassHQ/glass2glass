@@ -20,13 +20,12 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::parse_launch;
 use g2g_core::{
-    AsyncElement, AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, G2gError,
-    MultiInputElement, MultiOutputElement, MultiOutputSink, OutputSink, PushOutcome, StreamType,
+    AudioFormat, Bus, BusMessage, ByteStreamEncoding, Caps, G2gError, MultiInputElement,
+    MultiOutputElement, MultiOutputSink, OutputSink, PushOutcome, StreamType,
 };
 use g2g_plugins::conformance::persist;
 use g2g_plugins::ogg::OggCodec;
 use g2g_plugins::oggdemux::{OggDemuxN, OggPort};
-use g2g_plugins::oggmux::OggMux;
 use g2g_plugins::oggmuxn::OggMuxN;
 use g2g_plugins::registry::default_registry;
 
@@ -260,15 +259,15 @@ async fn demux_n(ogg: &[u8], ports: Vec<OggPort>) -> (PortTap, Bus) {
 
 /// Mux one port's frames back into a single-stream Ogg file.
 async fn remux_one(tap: &PortTap, port: usize, caps: &Caps) -> Vec<u8> {
-    let mut m = OggMux::new();
-    m.configure_pipeline(caps).expect("configure oggmux");
+    let mut m = OggMuxN::new(1);
+    m.configure_pipeline(0, caps).expect("configure oggmux");
     let mut sink = ByteSink::default();
     for (data, timing) in &tap.frames[port] {
-        m.process(frame(data.clone(), *timing), &mut sink)
+        m.process(0, frame(data.clone(), *timing), &mut sink)
             .await
             .expect("mux");
     }
-    m.process(PipelinePacket::Eos, &mut sink)
+    m.process(0, PipelinePacket::Eos, &mut sink)
         .await
         .expect("mux eos");
     sink.bytes

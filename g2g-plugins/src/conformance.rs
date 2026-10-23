@@ -744,9 +744,9 @@ pub fn flv() -> [MaturityRecord; 2] {
     let audio_config = Vec::from(aac_config());
 
     let mut mux = FlvMuxer::new_av(
-        FlvCodec::H264,
+        Some(FlvCodec::H264),
         video_config.clone(),
-        FlvCodec::Aac,
+        Some(FlvCodec::Aac),
         audio_config.clone(),
     );
     let mut bytes = mux.push_video(&video_sample, VIDEO_DTS_MS, NO_COMPOSITION_OFFSET, true);

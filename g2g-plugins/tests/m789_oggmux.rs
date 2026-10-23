@@ -20,13 +20,13 @@ use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, G2gError, OutputSink, PropValue,
-    PushOutcome,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, G2gError, MultiInputElement, OutputSink,
+    PropValue, PushOutcome,
 };
 use g2g_plugins::conformance::persist;
 use g2g_plugins::flacparse::FlacParse;
 use g2g_plugins::oggdemux::OggDemux;
-use g2g_plugins::oggmux::OggMux;
+use g2g_plugins::oggmuxn::OggMuxN;
 
 /// Captures the frames an element pushes, keeping their timing (the muxer reads
 /// `duration_ns` to reproduce a source's end-of-stream trim).
@@ -190,15 +190,15 @@ async fn oggdemux_frames(ogg: &[u8], stream: &str) -> CaptureSink {
 /// Mux `frames` (headers then audio, as an upstream demuxer / parser emits them)
 /// into an Ogg byte stream.
 async fn oggmux_bytes(frames: &CaptureSink, caps: &Caps) -> Vec<u8> {
-    let mut m = OggMux::new();
-    m.configure_pipeline(caps).expect("configure");
+    let mut m = OggMuxN::new(1);
+    m.configure_pipeline(0, caps).expect("configure");
     let mut sink = CaptureSink::default();
     for (data, timing) in &frames.frames {
-        m.process(frame(data.clone(), *timing), &mut sink)
+        m.process(0, frame(data.clone(), *timing), &mut sink)
             .await
             .expect("mux");
     }
-    m.process(PipelinePacket::Eos, &mut sink)
+    m.process(0, PipelinePacket::Eos, &mut sink)
         .await
         .expect("mux eos");
     sink.bytes()

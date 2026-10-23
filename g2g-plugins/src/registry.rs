@@ -57,7 +57,6 @@ use crate::filesink::FileSink;
 use crate::filesrc::FileSrc;
 use crate::flacparse::FlacParse;
 use crate::flvdemux::FlvDemux;
-use crate::flvmux::FlvMux;
 use crate::g711::{AlawDec, AlawEnc, MulawDec, MulawEnc};
 use crate::gaudieffects::{Burn, Chromium, Dilate, Dodge, Exclusion, Solarize};
 use crate::h264parse::H264Parse;
@@ -73,7 +72,6 @@ use crate::mpegaudioparse::MpegAudioParse;
 use crate::mpegvideoparse::MpegVideoParse;
 use crate::mux::InterleaveMux;
 use crate::oggdemux::OggDemux;
-use crate::oggmux::OggMux;
 use crate::opusparse::OpusParse;
 use crate::pnm::{PnmDec, PnmEnc};
 use crate::rawaudioparse::RawAudioParse;
@@ -86,7 +84,6 @@ use crate::tensorconvert::TensorConvert;
 use crate::textoverlay::TextOverlay;
 use crate::tonegeneratesrc::ToneGenerateSrc;
 use crate::tsdemux::TsDemux;
-use crate::tsmux::TsMux;
 use crate::valve::Valve;
 use crate::vc1parse::Vc1Parse;
 use crate::videoanalyse::VideoAnalyse;
@@ -1228,14 +1225,8 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<crate::avimux::AviMux>("avimux", || {
         Box::new(crate::avimux::AviMux::new())
     }));
-    reg.register_launch(LaunchFactory::of::<TsMux>("mpegtsmux", || {
-        Box::new(TsMux::new())
-    }));
     reg.register_launch(LaunchFactory::of::<OggDemux>("oggdemux", || {
         Box::new(OggDemux::new())
-    }));
-    reg.register_launch(LaunchFactory::of::<OggMux>("oggmux", || {
-        Box::new(OggMux::new())
     }));
     reg.register_launch(LaunchFactory::of::<Fmp4Demux>("fmp4demux", || {
         Box::new(Fmp4Demux::new())
@@ -1250,9 +1241,6 @@ pub fn default_registry() -> Registry {
     }));
     reg.register_launch(LaunchFactory::of::<FlvDemux>("flvdemux", || {
         Box::new(FlvDemux::new())
-    }));
-    reg.register_launch(LaunchFactory::of::<FlvMux>("flvmux", || {
-        Box::new(FlvMux::new())
     }));
     // Re-framing mode (M421): a `gst-launch` `h264parse` access-unit-aligns its
     // output (one coded picture per buffer), matching GStreamer's `h264parse`, so
@@ -1496,7 +1484,7 @@ pub fn default_registry() -> Registry {
     // `d.video_0 ! ffmpegdec ! videoconvert ! o.   d.text_0 ! o.   textoverlay
     // name=o ! videoconvert ! autovideosink`. Registered both as a single-input
     // launch element and here as a fan-in muxer; the parser picks by link degree
-    // (M122), the same one-name-two-roles model as `mpegtsmux`. Always 2-input, so
+    // (M122), the same one-name-two-roles model as `avimux`. Always 2-input, so
     // link exactly the video and text branches.
     reg.register_muxer(
         MuxerFactory::new("textoverlay", |_inputs| {
@@ -1604,13 +1592,10 @@ pub fn default_registry() -> Registry {
         })
         .with_input_kinds(&[StreamType::Audio]),
     );
-    // Multi-stream MPEG-TS fan-in (M208): the A+V container case. `mpegtsmux` is
-    // registered both as a single-input launch element (the `tsmux::TsMux` above)
-    // and here as a fan-in muxer (`tsmuxn::TsMux`); the parser picks by link
-    // degree (`make_element` for one input, `make_muxer` for several), so the one
-    // name covers both the `! mpegtsmux !` and `v.! m.  a.! m.  mpegtsmux name=m`
-    // shapes the way gst's request sink pads do. Each input's PMT stream type is
-    // learned from its negotiated caps; AUs interleave by PTS (M204).
+    // MPEG-TS fan-in (M208), registered only as a muxer, so the parser builds it
+    // at any link degree: `! mpegtsmux !` and `v.! m.  a.! m.  mpegtsmux name=m`,
+    // the way gst's request sink pads do. Each input's PMT stream type is learned
+    // from its negotiated caps; AUs interleave by decode time (M204).
     reg.register_muxer(
         MuxerFactory::new("mpegtsmux", |inputs| {
             Box::new(crate::tsmuxn::TsMux::new(inputs))
@@ -1638,14 +1623,8 @@ pub fn default_registry() -> Registry {
         })
         .with_input_kinds(&[StreamType::Video, StreamType::Audio, StreamType::Text]),
     );
-    // Multi-stream Ogg fan-in (M790): the grouped-bitstream case. Like
-    // `mpegtsmux`, `oggmux` is both a single-input launch element
-    // (`oggmux::OggMux` above) and this fan-in muxer (`oggmuxn::OggMuxN`); the
-    // parser picks by link degree, so one name covers `! oggmux !` and
-    // `a.! m.  b.! m.  oggmux name=m`. Each pad becomes its own logical
-    // bitstream; packets interleave by PTS (M204).
     // AVI fan-in (M1071): one video stream plus an optional audio one. Like
-    // `mpegtsmux`, `avimux` is both a single-input launch element
+    // `textoverlay`, `avimux` is both a single-input launch element
     // (`avimux::AviMux` above) and this fan-in muxer (`avimux::AviMuxN`); the
     // parser picks by link degree, so one name covers `! avimux !` and
     // `v.! m.video_0  a.! m.audio_0  avimux name=m`.
@@ -1655,18 +1634,19 @@ pub fn default_registry() -> Registry {
         })
         .with_input_kinds(&[StreamType::Video, StreamType::Audio]),
     );
+    // Ogg fan-in (M790), registered only as a muxer, so the parser builds it at
+    // any link degree: `! oggmux !` and `a.! m.  b.! m.  oggmux name=m`. Each pad
+    // becomes its own logical bitstream; packets interleave by PTS (M204).
     reg.register_muxer(
         MuxerFactory::new("oggmux", |inputs| {
             Box::new(crate::oggmuxn::OggMuxN::new(inputs))
         })
         .with_input_kinds(&[StreamType::Audio]),
     );
-    // Multi-track FLV fan-in (M296): the A/V container case, FLV's one-video +
-    // one-audio model. Like the others, `flvmux` is both a single-input launch
-    // element (`flvmux::FlvMux` above) and this fan-in muxer (`flvmuxn::FlvMuxN`);
-    // the parser picks by link degree. H.264 video + AAC audio interleave by PTS,
-    // with the decoder-config sequence headers written up front. std-gated.
-    #[cfg(feature = "std")]
+    // FLV fan-in (M296), FLV's one-video + one-audio model, registered only as a
+    // muxer, so the parser builds it at any link degree: `! flvmux !` and
+    // `v.! m.  a.! m.  flvmux name=m`. H.264 video + AAC audio interleave by PTS,
+    // with the decoder-config sequence headers written up front.
     reg.register_muxer(
         MuxerFactory::new("flvmux", |inputs| {
             Box::new(crate::flvmuxn::FlvMuxN::new(inputs))

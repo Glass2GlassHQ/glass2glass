@@ -6,7 +6,7 @@
 //!   parameter sets prepended in-band, the audio as self-describing ADTS, so
 //!   ffmpeg itself can decode both extracted streams standalone (the proof the
 //!   side channel makes them decodable without the container).
-//! - **Mux:** `FlvMux` muxes an ffmpeg-encoded H.264 elementary stream into an
+//! - **Mux:** `FlvMuxN` muxes an ffmpeg-encoded H.264 elementary stream into an
 //!   FLV, capturing the sequence header from the first IDR; ffprobe must read
 //!   the result back as a playable h264 FLV (the M615 oracle discipline).
 //!
@@ -20,12 +20,12 @@ use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, OutputSink, PushOutcome,
-    Rate, VideoCodec,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, Dim, G2gError, MultiInputElement,
+    OutputSink, PushOutcome, Rate, VideoCodec,
 };
 use g2g_plugins::conformance::persist;
 use g2g_plugins::flvdemux::{FlvDemux, FlvStream};
-use g2g_plugins::flvmux::FlvMux;
+use g2g_plugins::flvmuxn::FlvMuxN;
 
 fn have(bin: &str) -> bool {
     Command::new(bin).arg("-version").output().is_ok()
@@ -257,15 +257,15 @@ async fn flvmux_output_probes_as_playable_h264_flv() {
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
         alignment: g2g_core::BitstreamAlignment::Unspecified,
     };
-    let mut mux = FlvMux::new();
-    mux.configure_pipeline(&caps).unwrap();
+    let mut mux = FlvMuxN::new(1);
+    mux.configure_pipeline(0, &caps).unwrap();
     let mut sink = CaptureSink::default();
     let frame = Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(es.into_boxed_slice())),
         FrameTiming::default(),
         0,
     );
-    mux.process(PipelinePacket::DataFrame(frame), &mut sink)
+    mux.process(0, PipelinePacket::DataFrame(frame), &mut sink)
         .await
         .unwrap();
 

@@ -24,12 +24,12 @@ use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, G2gError, OutputSink, PropValue,
-    PushOutcome, Segment,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, G2gError, MultiInputElement, OutputSink,
+    PropValue, PushOutcome, Segment,
 };
 use g2g_plugins::conformance::persist;
 use g2g_plugins::oggdemux::OggDemux;
-use g2g_plugins::oggmux::OggMux;
+use g2g_plugins::oggmuxn::OggMuxN;
 
 /// One thing an element pushed, in order: the segments matter as much as the
 /// frames here, since a segment is what opens a chain link.
@@ -219,17 +219,17 @@ async fn oggdemux_events(ogg: &[u8], stream: &str) -> CaptureSink {
 /// travel with the packets, so the muxer sees the boundary where the source had
 /// one.
 async fn oggmux_bytes(events: &CaptureSink, caps: &Caps) -> Vec<u8> {
-    let mut m = OggMux::new();
-    m.configure_pipeline(caps).expect("configure");
+    let mut m = OggMuxN::new(1);
+    m.configure_pipeline(0, caps).expect("configure");
     let mut sink = CaptureSink::default();
     for event in &events.events {
         let packet = match event {
             Event::Frame(data, timing) => frame(data.clone(), *timing),
             Event::Segment(seg) => PipelinePacket::Segment(*seg),
         };
-        m.process(packet, &mut sink).await.expect("mux");
+        m.process(0, packet, &mut sink).await.expect("mux");
     }
-    m.process(PipelinePacket::Eos, &mut sink)
+    m.process(0, PipelinePacket::Eos, &mut sink)
         .await
         .expect("mux eos");
     sink.bytes()

@@ -946,7 +946,7 @@ to swap either one during a run. The generated names collide with a line's own
 no packet arriving, and a stalled input is exactly that case. So `parse_launch`
 builds a name registered only as a muxer into a fan-in at link degree one
 (`is_muxer` in `g2g-core/src/runtime/launch.rs`), while a name registered both
-ways, `mpegtsmux` and `textoverlay`, keeps its single-input element there.
+ways, `avimux` and `textoverlay`, keeps its single-input element there.
 
 The tick period is one output buffer, the frame period of the negotiated
 `Caps::RawVideo` framerate or the last audio buffer's duration, and

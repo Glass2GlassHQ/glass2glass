@@ -304,7 +304,6 @@ pub(crate) fn muxer_audio_specific_config(
 }
 
 // the config a muxer captured for an AAC pad, failing loud when its stream carried neither ADTS headers nor a leading config
-#[cfg(feature = "std")]
 pub(crate) fn require_muxer_config<'a>(
     config: Option<&'a [u8]>,
     muxer: &'static str,
