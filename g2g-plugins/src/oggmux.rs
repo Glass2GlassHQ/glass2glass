@@ -57,6 +57,7 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Segment,
 };
 
+use crate::mux::audio_track_params;
 use crate::ogg::{OggPageWriter, VorbisTiming};
 use crate::opusparse::{
     is_opus_config, packet_samples as opus_packet_samples, synth_opus_head, OPUS_ENCODER_PRE_SKIP,
@@ -97,6 +98,9 @@ pub(crate) fn format_of(caps: &Caps) -> Option<AudioFormat> {
         _ => None,
     }
 }
+
+// a stream's beginning-of-stream packet and the header packets after it
+type HeaderPackets = (Vec<u8>, Vec<Vec<u8>>);
 
 /// One logical bitstream being written: its page writer, codec mapping, in-band
 /// headers and granule accounting. The single-input [`OggMux`] owns one; the
@@ -206,7 +210,7 @@ impl OggStreamMux {
     /// alone, granule 0), stashing the remaining header packets for
     /// [`write_rest`](Self::write_rest).
     pub(crate) fn write_bos(&mut self) -> Result<Vec<u8>, G2gError> {
-        let (bos, rest) = self.header_packets().ok_or(G2gError::NotConfigured)?;
+        let (bos, rest) = self.header_packets()?.ok_or(G2gError::NotConfigured)?;
         // Vorbis timing needs the mode tables from ident + setup.
         if self.format == Some(AudioFormat::Vorbis) {
             self.vorbis = match (self.vorbis_header(1), self.vorbis_header(5)) {
@@ -290,38 +294,48 @@ impl OggStreamMux {
     /// The header packets that go before the audio: the beginning-of-stream
     /// packet, then the rest (which share the following page). `None` when the
     /// codec's mandatory in-band config has not arrived.
-    fn header_packets(&self) -> Option<(Vec<u8>, Vec<Vec<u8>>)> {
-        match self.format? {
+    fn header_packets(&self) -> Result<Option<HeaderPackets>, G2gError> {
+        let Some(format) = self.format else {
+            return Ok(None);
+        };
+        match format {
             AudioFormat::Opus => {
-                let head = self
-                    .headers
-                    .iter()
-                    .find(|h| h.starts_with(b"OpusHead"))
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        synth_opus_head(self.channels, self.sample_rate, OPUS_ENCODER_PRE_SKIP)
-                    });
+                let head = match self.headers.iter().find(|h| h.starts_with(b"OpusHead")) {
+                    Some(head) => head.clone(),
+                    None => {
+                        let params = audio_track_params(
+                            g2g_core::log::short_type_name::<Self>(),
+                            format,
+                            self.channels,
+                            self.sample_rate,
+                            &[],
+                        )?;
+                        synth_opus_head(params.channels, params.sample_rate, OPUS_ENCODER_PRE_SKIP)
+                    }
+                };
                 let tags = self
                     .headers
                     .iter()
                     .find(|h| h.starts_with(b"OpusTags"))
                     .cloned()
                     .unwrap_or_else(|| vorbis_comment(b"OpusTags"));
-                Some((head, Vec::from([tags])))
+                Ok(Some((head, Vec::from([tags]))))
             }
             AudioFormat::Vorbis => {
                 // Remux only: without the codebooks there is no decodable stream
                 // to write, so the ident and setup headers must arrive in-band.
-                let ident = self.vorbis_header(1)?.to_vec();
-                let setup = self.vorbis_header(5)?.to_vec();
+                let (Some(ident), Some(setup)) = (self.vorbis_header(1), self.vorbis_header(5))
+                else {
+                    return Ok(None);
+                };
                 let comment = self
                     .vorbis_header(3)
                     .map(|c| c.to_vec())
                     .unwrap_or_else(|| vorbis_comment(b"\x03vorbis"));
-                Some((ident, Vec::from([comment, setup])))
+                Ok(Some((ident.to_vec(), Vec::from([comment, setup.to_vec()]))))
             }
-            AudioFormat::Flac => flac_headers(self.headers.first()?),
-            _ => None,
+            AudioFormat::Flac => Ok(self.headers.first().and_then(|first| flac_headers(first))),
+            _ => Ok(None),
         }
     }
 
@@ -536,7 +550,7 @@ fn vorbis_comment(magic: &[u8]) -> Vec<u8> {
 /// VORBIS_COMMENT, so one is synthesized when the source carried none. `None`
 /// when `native` is too short to hold the mandatory STREAMINFO (a 4-byte block
 /// header then 34 bytes), which is not a FLAC header at all.
-fn flac_headers(native: &[u8]) -> Option<(Vec<u8>, Vec<Vec<u8>>)> {
+fn flac_headers(native: &[u8]) -> Option<HeaderPackets> {
     let streaminfo = native.get(4..42)?;
     let comment = comment_block(native).unwrap_or_else(|| {
         let body = vorbis_comment(b"");

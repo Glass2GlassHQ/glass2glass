@@ -21,9 +21,13 @@ use alloc::vec::Vec;
 
 use g2g_core::log::Target;
 use g2g_core::{
-    g2g_error, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, Frame, G2gError,
-    InputAggregator, MultiInputElement, OutputSink, PipelinePacket,
+    g2g_error, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    Frame, G2gError, InputAggregator, MultiInputElement, OutputSink, PipelinePacket, ANY_CHANNELS,
+    ANY_SAMPLE_RATE,
 };
+
+use crate::aacparse::audio_specific_config_info;
+use crate::opusparse::{parse_opus_head, OPUS_RATE_HZ};
 
 // the solver lets any caps onto a fan-in muxer pad and reports no refusal itself
 pub(crate) fn refused_input(muxer: &'static str, caps: &Caps) -> G2gError {
@@ -43,6 +47,52 @@ pub(crate) fn refused_input_because(muxer: &'static str, caps: &Caps, reason: &s
         caps.to_gst_string()
     );
     G2gError::CapsMismatch
+}
+
+// the channel count and sample rate an audio track header declares
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AudioTrackParams {
+    pub(crate) channels: u8,
+    pub(crate) sample_rate: u32,
+}
+
+// the caps' channels and rate where known, else the ones the AAC or Opus config states
+pub(crate) fn audio_track_params(
+    muxer: &'static str,
+    format: AudioFormat,
+    channels: u8,
+    sample_rate: u32,
+    config: &[u8],
+) -> Result<AudioTrackParams, G2gError> {
+    let (config_channels, config_rate) = match format {
+        AudioFormat::Aac => match audio_specific_config_info(config) {
+            Some(info) => (Some(info.channels), Some(info.sample_rate)),
+            None => (None, None),
+        },
+        // Opus decodes at 48 kHz whatever rate the encoder took in
+        AudioFormat::Opus => (
+            parse_opus_head(config).map(|(channels, _)| channels),
+            Some(OPUS_RATE_HZ),
+        ),
+        _ => (None, None),
+    };
+    let channels = (channels != ANY_CHANNELS)
+        .then_some(channels)
+        .or(config_channels);
+    let sample_rate = (sample_rate != ANY_SAMPLE_RATE)
+        .then_some(sample_rate)
+        .or(config_rate);
+    let (Some(channels), Some(sample_rate)) = (channels, sample_rate) else {
+        g2g_error!(
+            Target::category(muxer),
+            "{format:?} stream states no channel count or sample rate"
+        );
+        return Err(G2gError::CapsMismatch);
+    };
+    Ok(AudioTrackParams {
+        channels,
+        sample_rate,
+    })
 }
 
 /// # Example
@@ -306,6 +356,48 @@ mod tests {
         assert_eq!(
             refusal_lines(crate::mp4muxn::Mp4MuxN::new(2).with_cmaf(true), &h264),
             expected("a CMAF track file holds one stream, fragmented")
+        );
+    }
+
+    #[test]
+    fn an_unknown_opus_channel_count_and_rate_come_from_the_opus_head() {
+        let channels = 6;
+        let head = crate::opusparse::synth_opus_head(channels, OPUS_RATE_HZ, 0);
+        assert_eq!(
+            audio_track_params(
+                "test",
+                AudioFormat::Opus,
+                ANY_CHANNELS,
+                ANY_SAMPLE_RATE,
+                &head
+            ),
+            Ok(AudioTrackParams {
+                channels,
+                sample_rate: OPUS_RATE_HZ
+            })
+        );
+    }
+
+    #[test]
+    fn stated_caps_win_over_the_config_and_a_stream_stating_neither_fails() {
+        let head = crate::opusparse::synth_opus_head(6, OPUS_RATE_HZ, 0);
+        let stated = AudioTrackParams {
+            channels: 2,
+            sample_rate: 24_000,
+        };
+        assert_eq!(
+            audio_track_params(
+                "test",
+                AudioFormat::Opus,
+                stated.channels,
+                stated.sample_rate,
+                &head
+            ),
+            Ok(stated)
+        );
+        assert_eq!(
+            audio_track_params("test", AudioFormat::Mp3, 2, ANY_SAMPLE_RATE, &[]),
+            Err(G2gError::CapsMismatch)
         );
     }
 }

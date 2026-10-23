@@ -39,6 +39,7 @@ use g2g_core::{
 use crate::aacparse::{is_leading_aac_config, muxer_access_unit, muxer_audio_specific_config};
 use crate::annexb::{au_is_keyframe, avcc_record, avcc_sample, parameter_sets, split_annexb};
 use crate::flv::{FlvCodec, FlvMuxer};
+use crate::mux::audio_track_params;
 
 /// Muxes one elementary stream into an FLV byte stream.
 ///
@@ -58,6 +59,8 @@ pub struct FlvMux {
     codec: Option<FlvCodec>,
     /// Whether the sequence-header config was captured from an access unit.
     init_captured: bool,
+    // the negotiated audio channel count and sample rate
+    audio_params: Option<(u8, u32)>,
     tags: TagList,
     configured: bool,
     emitted: u64,
@@ -75,6 +78,7 @@ impl FlvMux {
             mux: None,
             codec: None,
             init_captured: false,
+            audio_params: None,
             tags: TagList::new(),
             configured: false,
             emitted: 0,
@@ -197,6 +201,7 @@ impl AsyncElement for FlvMux {
         } = absolute_caps
         {
             mux.set_audio_params(*channels, *sample_rate);
+            self.audio_params = Some((*channels, *sample_rate));
         }
         self.mux = Some(mux);
         self.codec = Some(codec);
@@ -258,7 +263,20 @@ impl AsyncElement for FlvMux {
                             }
                             mux.push_audio(muxer_access_unit(mux.audio_config(), au), pts_ms)
                         }
-                        FlvCodec::Mp3 | FlvCodec::Speex => mux.push_audio(au, pts_ms),
+                        // an MP3 tag's flags declare the rate and channel count
+                        FlvCodec::Mp3 => {
+                            let (channels, sample_rate) =
+                                self.audio_params.ok_or(G2gError::NotConfigured)?;
+                            audio_track_params(
+                                g2g_core::log::short_type_name::<Self>(),
+                                AudioFormat::Mp3,
+                                channels,
+                                sample_rate,
+                                &[],
+                            )?;
+                            mux.push_audio(au, pts_ms)
+                        }
+                        FlvCodec::Speex => mux.push_audio(au, pts_ms),
                     };
                     let out_frame = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(flv.into_boxed_slice())),

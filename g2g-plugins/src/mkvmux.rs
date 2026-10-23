@@ -51,6 +51,7 @@ use crate::matroska::{
     subpicture_mkv_codec, subtitle_format_from_str, subtitle_format_str, text_codec_private,
     MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec,
 };
+use crate::mux::audio_track_params;
 use crate::subparse::frame_subtitle_block;
 
 /// The properties both Matroska muxers expose.
@@ -501,8 +502,19 @@ impl AsyncElement for MkvMux {
                     let sample = self.sample_for(slice);
                     if self.mux.is_none() {
                         let caps = self.caps.as_ref().ok_or(G2gError::NotConfigured)?;
-                        let spec = Self::track_spec(caps, self.settings.subtitle_format)
+                        let mut spec = Self::track_spec(caps, self.settings.subtitle_format)
                             .ok_or(G2gError::CapsMismatch)?;
+                        if let Caps::Audio { format, .. } = caps {
+                            let params = audio_track_params(
+                                g2g_core::log::short_type_name::<Self>(),
+                                *format,
+                                spec.channels,
+                                spec.sample_rate,
+                                &[],
+                            )?;
+                            spec.channels = params.channels;
+                            spec.sample_rate = params.sample_rate;
+                        }
                         let mut mux = MatroskaMuxer::new_multi(alloc::vec![MkvTrackConfig {
                             spec,
                             codec_private: self.codec_private(),

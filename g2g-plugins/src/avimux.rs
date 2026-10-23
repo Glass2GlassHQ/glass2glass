@@ -29,7 +29,7 @@ use g2g_core::{
 };
 
 use crate::avi::{AviWriteStream, AviWriter};
-use crate::mux::{refused_input, refused_input_because};
+use crate::mux::{audio_track_params, refused_input, refused_input_because};
 use g2g_core::log::short_type_name;
 
 fn output_caps() -> Caps {
@@ -61,6 +61,27 @@ fn geometry_known(streams: &[AviWriteStream]) -> bool {
             *width != GEOMETRY_UNKNOWN && *height != GEOMETRY_UNKNOWN
         }
         AviWriteStream::Audio { .. } => true,
+    })
+}
+
+// an audio stream with the channel count and rate its `WAVEFORMATEX` declares
+fn with_audio_params(
+    muxer: &'static str,
+    stream: AviWriteStream,
+) -> Result<AviWriteStream, G2gError> {
+    let AviWriteStream::Audio {
+        format,
+        channels,
+        sample_rate,
+    } = stream
+    else {
+        return Ok(stream);
+    };
+    let params = audio_track_params(muxer, format, channels, sample_rate, &[])?;
+    Ok(AviWriteStream::Audio {
+        format,
+        channels: params.channels,
+        sample_rate: params.sample_rate,
     })
 }
 
@@ -181,7 +202,7 @@ impl AviMux {
     fn writer(&mut self) -> Result<&mut AviWriter, G2gError> {
         if self.writer.is_none() {
             let stream = self.stream.clone().ok_or(G2gError::NotConfigured)?;
-            let streams = Vec::from([stream]);
+            let streams = Vec::from([with_audio_params(short_type_name::<Self>(), stream)?]);
             if !geometry_known(&streams) {
                 return Err(G2gError::CapsMismatch);
             }
@@ -325,15 +346,20 @@ impl AviMuxN {
     /// Build the writer once every pad has declared its stream, so the `strl`
     /// list is in pad order.
     /// Built on first use, so a runtime `CapsChanged` on any pad has had its
-    /// chance to fill in what negotiation left open. `None` while a pad has no
+    /// chance to fill in what negotiation left open. Fails while a pad has no
     /// stream yet, or while a video stream's size is still unknown.
-    fn writer(&mut self) -> Option<&mut AviWriter> {
+    fn writer(&mut self) -> Result<&mut AviWriter, G2gError> {
         if self.writer.is_none() {
             let streams: Option<Vec<AviWriteStream>> = self.streams.iter().cloned().collect();
-            let streams = streams.filter(|streams| geometry_known(streams))?;
+            let streams = streams
+                .filter(|streams| geometry_known(streams))
+                .ok_or(G2gError::NotConfigured)?
+                .into_iter()
+                .map(|stream| with_audio_params(short_type_name::<Self>(), stream))
+                .collect::<Result<Vec<_>, _>>()?;
             self.writer = Some(AviWriter::new(streams));
         }
-        self.writer.as_mut()
+        self.writer.as_mut().ok_or(G2gError::NotConfigured)
     }
 }
 
@@ -459,13 +485,11 @@ impl MultiInputElement for AviMuxN {
                 let data = Vec::from(slice);
                 let keyframe = is_keyframe(&stream, &frame.timing);
                 let pts_ns = frame.timing.pts_ns;
-                self.writer()
-                    .ok_or(G2gError::NotConfigured)?
-                    .push(pad, data, pts_ns, keyframe)?;
+                self.writer()?.push(pad, data, pts_ns, keyframe)?;
             }
             if self.aggregator.is_drained() && !self.finished {
                 self.finished = true;
-                let bytes = self.writer().ok_or(G2gError::NotConfigured)?.finish()?;
+                let bytes = self.writer()?.finish()?;
                 out.push(PipelinePacket::DataFrame(file_frame(bytes)))
                     .await?;
             }

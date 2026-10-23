@@ -54,7 +54,8 @@ use crate::mpegts::{
     PES_CLOCK_HZ, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES,
     STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_NAME, TAG_KEY_SERVICE_PROVIDER,
 };
-use crate::opusparse::{is_opus_config, parse_opus_head};
+use crate::mux::audio_track_params;
+use crate::opusparse::{is_opus_config, parse_opus_head, OPUS_RATE_HZ};
 
 /// The language a `subtitling_descriptor` declares when the stream's tags name
 /// none, the ISO 639 code for "undetermined" (what ffmpeg writes).
@@ -544,8 +545,8 @@ pub struct TsMux {
     dvbsub_page_id: u16,
     // how the input pad's AAC frames are multiplexed, `None` for any other pad
     aac: Option<AacCarriage>,
-    // an Opus pad's in-band `OpusHead` / `OpusTags` are codec config, which a transport stream carries in the PMT
-    opus: bool,
+    // an Opus pad's channel count, `None` for any other pad: its in-band `OpusHead` / `OpusTags` are codec config, which a transport stream carries in the PMT
+    opus: Option<u8>,
 }
 
 impl Default for TsMux {
@@ -566,7 +567,7 @@ impl TsMux {
             dvbsub: None,
             dvbsub_page_id: DEFAULT_PAGE_ID,
             aac: None,
-            opus: false,
+            opus: None,
         }
     }
 
@@ -716,8 +717,11 @@ impl AsyncElement for TsMux {
         // rebuilding the multiplex mid-stream restarts its continuity counters
         if self.stream_type == Some(stream_type) {
             // a demuxer states the Opus channel count after negotiation, before the PMT goes out
-            if let (Some(mux), Some(channels)) = (self.mux.as_mut(), opus_channels(absolute_caps)) {
-                mux.set_stream_opus(0, channels);
+            if let Some(channels) = opus_channels(absolute_caps) {
+                self.opus = Some(channels);
+                if let Some(mux) = self.mux.as_mut() {
+                    mux.set_stream_opus(0, channels);
+                }
             }
             return Ok(ConfigureOutcome::Accepted);
         }
@@ -740,7 +744,7 @@ impl AsyncElement for TsMux {
         if let Some(channels) = opus_channels(absolute_caps) {
             mux.set_stream_opus(0, channels);
         }
-        self.opus = opus_channels(absolute_caps).is_some();
+        self.opus = opus_channels(absolute_caps);
         self.mux = Some(mux);
         if is_dvbsub(absolute_caps) {
             self.dvbsub = Some(DvbSubDecl::on_page(self.dvbsub_page_id));
@@ -816,11 +820,16 @@ impl AsyncElement for TsMux {
                     }
                     let muxer = g2g_core::log::short_type_name::<Self>();
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
-                    if self.opus && is_opus_config(slice) {
+                    if self.opus.is_some() && is_opus_config(slice) {
                         if let Some((channels, _)) = parse_opus_head(slice) {
+                            self.opus = Some(channels);
                             mux.set_stream_opus(0, channels);
                         }
                         return Ok(());
+                    }
+                    // the PMT's Opus descriptor states the channel count
+                    if let Some(channels) = self.opus {
+                        audio_track_params(muxer, AudioFormat::Opus, channels, OPUS_RATE_HZ, &[])?;
                     }
                     let access_unit = match self.aac.as_mut() {
                         Some(aac) => {

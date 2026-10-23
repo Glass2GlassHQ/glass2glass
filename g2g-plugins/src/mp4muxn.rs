@@ -61,7 +61,7 @@ use crate::mp4box::{
     ftyp, ftyp_cmaf, full_box, mp4_box, prft, put_box_header, styp_cmaf, udta_with_tags,
     BOX_HEADER_LEN, MATRIX,
 };
-use crate::mux::{refused_input, refused_input_because};
+use crate::mux::{audio_track_params, refused_input, refused_input_because};
 use crate::opusparse::{
     dops_from_opus_head, is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP,
 };
@@ -532,9 +532,6 @@ impl Mp4MuxN {
         if let Some(PadKind::Audio { channels, rate, .. }) = &mut self.kinds[input] {
             fill(channels, rate);
         }
-        if let Some(TrackInit::Audio { channels, rate, .. }) = &mut self.inits[input] {
-            fill(channels, rate);
-        }
     }
 
     /// Whether the pad carries Opus, whose in-band headers are dropped rather
@@ -646,10 +643,17 @@ impl Mp4MuxN {
                     if let Some(config) =
                         muxer_audio_specific_config(au, short_type_name::<Self>())?
                     {
-                        self.inits[input] = Some(TrackInit::Audio {
+                        let params = audio_track_params(
+                            short_type_name::<Self>(),
                             format,
                             channels,
                             rate,
+                            &config,
+                        )?;
+                        self.inits[input] = Some(TrackInit::Audio {
+                            format,
+                            channels: params.channels,
+                            rate: params.sample_rate,
                             config,
                         });
                     }
@@ -666,10 +670,17 @@ impl Mp4MuxN {
                         None if is_opus_config(au) => return Ok(()),
                         None => Vec::new(),
                     };
-                    self.inits[input] = Some(TrackInit::Audio {
+                    let params = audio_track_params(
+                        short_type_name::<Self>(),
                         format,
                         channels,
                         rate,
+                        &config,
+                    )?;
+                    self.inits[input] = Some(TrackInit::Audio {
+                        format,
+                        channels: params.channels,
+                        rate: params.sample_rate,
                         config,
                     });
                 }

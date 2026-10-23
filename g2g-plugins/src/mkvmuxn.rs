@@ -62,7 +62,7 @@ use crate::matroska::{
     MkvTrackSpec,
 };
 use crate::mkvmux::{MkvMuxSettings, MKV_MUX_PROPS};
-use crate::mux::refused_input;
+use crate::mux::{audio_track_params, refused_input};
 use crate::opusparse::{is_opus_config, parse_opus_head, synth_opus_head, OPUS_ENCODER_PRE_SKIP};
 
 /// What an input pad carries, learned from its negotiated caps at configure.
@@ -373,10 +373,17 @@ impl MkvMuxN {
                     if let Some(config) =
                         muxer_audio_specific_config(au, short_type_name::<Self>())?
                     {
-                        self.inits[input] = Some(TrackInit::Audio {
+                        let params = audio_track_params(
+                            short_type_name::<Self>(),
                             format,
                             channels,
                             rate,
+                            &config,
+                        )?;
+                        self.inits[input] = Some(TrackInit::Audio {
+                            format,
+                            channels: params.channels,
+                            rate: params.sample_rate,
                             config,
                         });
                     }
@@ -387,17 +394,27 @@ impl MkvMuxN {
                 // encoded one has none, so the header is synthesized with
                 // libopus' lookahead (M792).
                 _ => {
-                    let config = match parse_opus_head(au) {
-                        Some(_) => au.to_vec(),
+                    let head = match parse_opus_head(au) {
+                        Some(_) => Some(au.to_vec()),
                         // An `OpusTags` before the identification header is not
                         // the config: wait for it rather than fix a synthesized one.
                         None if is_opus_config(au) => return Ok(()),
-                        None => synth_opus_head(channels, rate, OPUS_ENCODER_PRE_SKIP),
+                        None => None,
                     };
-                    self.inits[input] = Some(TrackInit::Audio {
+                    let params = audio_track_params(
+                        short_type_name::<Self>(),
                         format,
                         channels,
                         rate,
+                        head.as_deref().unwrap_or_default(),
+                    )?;
+                    let config = head.unwrap_or_else(|| {
+                        synth_opus_head(params.channels, params.sample_rate, OPUS_ENCODER_PRE_SKIP)
+                    });
+                    self.inits[input] = Some(TrackInit::Audio {
+                        format,
+                        channels: params.channels,
+                        rate: params.sample_rate,
                         config,
                     });
                 }
@@ -1135,5 +1152,50 @@ mod tests {
         assert!(video[0].keyframe, "the key frame is flagged");
         assert_eq!(audio.len(), 2, "two Opus packets");
         assert_eq!(audio[0].data, opus0, "Opus packet stored raw");
+    }
+
+    #[tokio::test]
+    async fn an_aac_pad_without_rate_or_channels_takes_them_from_its_adts_header() {
+        let open_caps = Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: g2g_core::ANY_CHANNELS,
+            sample_rate: g2g_core::ANY_SAMPLE_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        };
+        let mut mux = MkvMuxN::new(1);
+        mux.configure_pipeline(0, &open_caps).unwrap();
+        let mut sink = CaptureSink::default();
+        mux.process(0, frame(aac_adts(), 0), &mut sink)
+            .await
+            .unwrap();
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+
+        let asc = crate::aacparse::asc_from_adts(&aac_adts()).expect("an ADTS header");
+        let stated = crate::aacparse::audio_specific_config_info(&asc).expect("a valid config");
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&sink.bytes);
+        let tracks = d.tracks();
+        assert_eq!(tracks[0].channels, stated.channels);
+        assert_eq!(tracks[0].sample_rate, stated.sample_rate);
+    }
+
+    #[tokio::test]
+    async fn an_opus_pad_with_no_channel_count_and_no_opus_head_fails() {
+        let open_caps = Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: g2g_core::ANY_CHANNELS,
+            sample_rate: g2g_core::ANY_SAMPLE_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        };
+        let mut mux = MkvMuxN::new(1);
+        mux.configure_pipeline(0, &open_caps).unwrap();
+        let mut sink = CaptureSink::default();
+        let result = mux
+            .process(0, frame(alloc::vec![0xFC, 0xDE, 0xAD], 0), &mut sink)
+            .await;
+        assert_eq!(result, Err(G2gError::CapsMismatch));
+        assert!(sink.bytes.is_empty(), "no header is written");
     }
 }

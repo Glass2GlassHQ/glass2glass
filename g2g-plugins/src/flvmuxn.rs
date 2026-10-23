@@ -34,8 +34,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
-    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, VideoCodec,
+    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
+    G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket,
+    VideoCodec,
 };
 
 use crate::aacparse::{
@@ -44,7 +45,7 @@ use crate::aacparse::{
 use crate::annexb::au_is_keyframe;
 use crate::flv::{FlvCodec, FlvMuxer, FlvTrack};
 use crate::fmp4mux::{avcc_record, avcc_sample, parameter_sets, split_annexb};
-use crate::mux::{refused_input, refused_input_because};
+use crate::mux::{audio_track_params, refused_input, refused_input_because};
 use g2g_core::log::short_type_name;
 
 /// A track's init, captured from its first access unit: the parameter sets
@@ -158,7 +159,7 @@ impl FlvMuxN {
     }
 
     /// Build the A/V muxer from the captured inits (video `avcC` record + AAC ASC).
-    fn build_mux(&self) -> FlvMuxer {
+    fn build_mux(&self) -> Result<FlvMuxer, G2gError> {
         let mut video_config = Vec::new();
         let mut audio_config = Vec::new();
         for init in self.inits.iter().flatten() {
@@ -178,16 +179,27 @@ impl FlvMuxN {
                 .copied()
                 .find(|c| c.track() == t)
         };
+        let audio_codec = of_track(FlvTrack::Audio).unwrap_or(FlvCodec::Aac);
         let mut mux = FlvMuxer::new_av(
             of_track(FlvTrack::Video).unwrap_or(FlvCodec::H264),
             video_config,
-            of_track(FlvTrack::Audio).unwrap_or(FlvCodec::Aac),
+            audio_codec,
             audio_config,
         );
         if let Some((channels, sample_rate)) = self.audio_params {
+            // an MP3 tag's flags declare the rate and channel count
+            if audio_codec == FlvCodec::Mp3 {
+                audio_track_params(
+                    short_type_name::<Self>(),
+                    AudioFormat::Mp3,
+                    channels,
+                    sample_rate,
+                    &[],
+                )?;
+            }
             mux.set_audio_params(channels, sample_rate);
         }
-        mux
+        Ok(mux)
     }
 
     /// Emit one access unit as its track's FLV tag.
@@ -363,7 +375,7 @@ impl MultiInputElement for FlvMuxN {
                 return Ok(());
             }
             if self.mux.is_none() {
-                self.mux = Some(self.build_mux());
+                self.mux = Some(self.build_mux()?);
             }
             while let Some((track, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
                 self.emit_au(track, frame, out).await?;

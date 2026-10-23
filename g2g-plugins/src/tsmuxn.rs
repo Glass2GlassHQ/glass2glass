@@ -38,15 +38,15 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::time::ns_to_ticks;
 use g2g_core::{
-    resolve_tags, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
-    G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, TagList,
+    resolve_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, TagList,
 };
 
 use crate::dvbsub::DEFAULT_PAGE_ID;
 use crate::mpegts::{TsMuxer, PES_CLOCK_HZ, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265};
-use crate::mux::refused_input;
-use crate::opusparse::{is_opus_config, parse_opus_head};
+use crate::mux::{audio_track_params, refused_input};
+use crate::opusparse::{is_opus_config, parse_opus_head, OPUS_RATE_HZ};
 use crate::tsmux::{
     is_av1, is_dvbsub, language_from_tags, opus_channels, service_from_tags, stream_type_for,
     AacCarriage, DvbSubDecl, TsMuxSettings, MUX_PROPERTIES, UNDETERMINED_LANGUAGE,
@@ -505,6 +505,16 @@ impl MultiInputElement for TsMux {
                         if config {
                             return Ok(());
                         }
+                    }
+                    // the PMT's Opus descriptor states the channel count
+                    if let Some(channels) = self.opus[input] {
+                        audio_track_params(
+                            short_type_name::<Self>(),
+                            AudioFormat::Opus,
+                            channels,
+                            OPUS_RATE_HZ,
+                            &[],
+                        )?;
                     }
                     self.agg.push(input, frame);
                 }
