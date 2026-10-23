@@ -8,8 +8,9 @@
 //! element wraps it; the split keeps the bit-twiddling testable without a runner.
 //!
 //! Scope: every program the PAT names (select one via
-//! [`TsDemuxer::set_program_number`], default the first in PAT order); first PAT
-//! and first PMT per program win (no version / update handling). PSI sections and
+//! [`TsDemuxer::set_program_number`], default the first in PAT order); the first
+//! PAT wins, and a PMT version change adds the PIDs it lists to the program's
+//! streams, keeping the ones it drops. PSI sections and
 //! PES payloads both reassemble across packets. The carried elementary
 //! stream for H.264 / H.265 is already Annex-B, so a unit feeds `h264parse`
 //! directly.
@@ -470,6 +471,8 @@ struct TsProgram {
     number: u16,
     pmt_pid: u16,
     streams: Vec<ElementaryStream>,
+    // `None` until the first PMT parses
+    pmt_version: Option<u8>,
 }
 
 /// Incremental MPEG-TS demuxer: feed 188-byte packets, drain [`EsUnit`]s.
@@ -910,6 +913,7 @@ impl TsDemuxer {
                     number: program_number,
                     pmt_pid: pid,
                     streams: Vec::new(),
+                    pmt_version: None,
                 });
             }
             i += 4;
@@ -919,7 +923,7 @@ impl TsDemuxer {
     /// Parse an SDT section (PID 0x11, `table_id` 0x42) into the per-service
     /// name / provider text (M872): the service loop follows the 8-byte PSI header,
     /// `original_network_id` and a reserved byte, and each entry's descriptor loop
-    /// carries the DVB `service_descriptor`. First SDT wins, the PAT / PMT
+    /// carries the DVB `service_descriptor`. First SDT wins, the PAT
     /// discipline (no version handling). The CRC is verified
     /// ([`checked_section_body`](Self::checked_section_body)) and every length is
     /// bounds-checked, so a malformed or unrelated section on this PID is ignored
@@ -1092,18 +1096,30 @@ impl TsDemuxer {
     }
 
     fn parse_pmt(&mut self, prog_idx: usize, section: &[u8]) {
-        if !self.programs[prog_idx].streams.is_empty() {
-            return; // first PMT per program wins
-        }
         if section.first() != Some(&0x02) {
             return; // table_id 0x02 = PMT
         }
-        let Some(body) = Self::section_body(section) else {
+        let known_version = self.programs[prog_idx].pmt_version;
+        // a repeat of the PMT in force carries nothing new, and a changed one must pass its CRC
+        let body = match known_version {
+            None => Self::section_body(section),
+            Some(_) => Self::checked_section_body(section),
+        };
+        let Some(body) = body else {
             return;
         };
         if body.len() < 12 {
             return;
         }
+        // current_next_indicator 0 marks a version not yet in force
+        if known_version.is_some() && body[5] & 0x01 == 0 {
+            return;
+        }
+        let version = (body[5] >> 1) & 0x1F;
+        if known_version == Some(version) {
+            return;
+        }
+        self.programs[prog_idx].pmt_version = Some(version);
         let program_info_length = (((body[10] & 0x0F) as usize) << 8) | body[11] as usize;
         let mut i = 12usize.saturating_add(program_info_length);
         while i + 5 <= body.len() {
@@ -3216,6 +3232,51 @@ pub(crate) mod tests {
         assert_eq!(units[0].pid, es_pid);
         assert_eq!(units[0].pts_90khz, Some(900_000));
         assert_eq!(units[0].data, au, "PES header stripped, ES bytes intact");
+    }
+
+    // the PMT of `pmt_body` at another version, with the CRC the muxer writes
+    fn pmt_version_packet(pmt_pid: u16, es_pid: u16, version: u8, crc: bool) -> Vec<u8> {
+        let mut body = pmt_body(es_pid, STREAM_TYPE_H264);
+        body[2] = 0xC1 | (version << 1);
+        let mut packet = Vec::new();
+        super::psi_packet(pmt_pid, 0x02, &body, 1, &mut packet);
+        if !crc {
+            let last = packet.iter().rposition(|&b| b != 0xFF).expect("a section");
+            packet[last] ^= 0xFF;
+        }
+        packet
+    }
+
+    #[test]
+    fn a_pmt_version_change_adds_its_pids() {
+        let pmt_pid = 0x1000;
+        let (first_pid, added_pid) = (0x0100, 0x0200);
+        let mut d = TsDemuxer::new();
+        d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, pmt_pid)));
+        d.push_packet(&psi_packet(
+            pmt_pid,
+            0x02,
+            &pmt_body(first_pid, STREAM_TYPE_H264),
+        ));
+        d.push_packet(&pmt_version_packet(pmt_pid, added_pid, 1, true));
+        let pids: Vec<u16> = d.streams().iter().map(|es| es.pid).collect();
+        assert_eq!(pids, [first_pid, added_pid]);
+    }
+
+    #[test]
+    fn a_pmt_version_change_with_a_bad_crc_adds_nothing() {
+        let pmt_pid = 0x1000;
+        let first_pid = 0x0100;
+        let mut d = TsDemuxer::new();
+        d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, pmt_pid)));
+        d.push_packet(&psi_packet(
+            pmt_pid,
+            0x02,
+            &pmt_body(first_pid, STREAM_TYPE_H264),
+        ));
+        d.push_packet(&pmt_version_packet(pmt_pid, 0x0200, 1, false));
+        let pids: Vec<u16> = d.streams().iter().map(|es| es.pid).collect();
+        assert_eq!(pids, [first_pid]);
     }
 
     #[test]

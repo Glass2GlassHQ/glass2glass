@@ -665,24 +665,28 @@ impl TsDemux {
         }
     }
 
-    // called once units arrive, so the PMT has parsed
+    // called once units arrive, so the first PMT has parsed
     fn selected_pid(&self) -> Result<Option<u16>, G2gError> {
         let Some(pid) = self.pid else {
             return Ok(first_pid_carrying(&self.demux, self.stream));
         };
-        let carries =
-            self.demux.streams().iter().any(|es| {
-                es.pid == pid && pid_carries(&self.demux, self.stream, pid, es.stream_type)
-            });
-        if carries {
+        let Some(listed) = self.demux.streams().iter().find(|es| es.pid == pid) else {
+            // a later PMT version can still add the PID
+            return Ok(None);
+        };
+        if pid_carries(&self.demux, self.stream, pid, listed.stream_type) {
             return Ok(Some(pid));
         }
+        Err(self.no_pinned_stream(pid))
+    }
+
+    fn no_pinned_stream(&self, pid: u16) -> G2gError {
         g2g_error!(
             Target::category("tsdemux"),
             "pid={pid} carries no {} stream",
             ts_stream_to_str(self.stream)
         );
-        Err(G2gError::CapsMismatch)
+        G2gError::CapsMismatch
     }
 
     /// Emit each completed access unit of the selected elementary stream as a
@@ -929,6 +933,9 @@ impl AsyncElement for TsDemux {
                     self.demux.flush();
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
+                    if let (Some(pid), None) = (self.pid, self.selected_pid()?) {
+                        return Err(self.no_pinned_stream(pid));
+                    }
                 }
                 // ByteStream caps don't carry geometry; nothing to forward, and
                 // a Segment passes through.

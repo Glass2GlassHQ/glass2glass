@@ -113,8 +113,8 @@ pub(crate) fn multitrack_fixture(container: &str) -> PathBuf {
 
 // the checked-in `ffprobe -show_entries stream=codec_type,width,height,sample_rate,channels
 // -of flat` of a fixture, one field map per stream in ffprobe's order
-fn probed_streams(container: &str) -> Vec<BTreeMap<String, String>> {
-    let mut path = multitrack_fixture(container).into_os_string();
+fn probed_streams(fixture: &Path) -> Vec<BTreeMap<String, String>> {
+    let mut path = fixture.to_path_buf().into_os_string();
     path.push(".probe");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{} is checked in: {e}", path.to_string_lossy()));
@@ -136,7 +136,11 @@ fn probed_streams(container: &str) -> Vec<BTreeMap<String, String>> {
 }
 
 pub(crate) fn probed_of_kind(container: &str, kind: StreamType) -> Vec<BTreeMap<String, String>> {
-    probed_streams(container)
+    probed_of_kind_at(&multitrack_fixture(container), kind)
+}
+
+pub(crate) fn probed_of_kind_at(fixture: &Path, kind: StreamType) -> Vec<BTreeMap<String, String>> {
+    probed_streams(fixture)
         .into_iter()
         .filter(|stream| stream["codec_type"] == kind.name())
         .collect()
