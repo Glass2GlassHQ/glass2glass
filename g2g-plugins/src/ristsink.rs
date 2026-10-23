@@ -560,6 +560,8 @@ impl AsyncElement for RistSink {
         packet: PipelinePacket,
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
+        // librist reads its sockets every 5 ms, so two periods put the report in an earlier pass
+        const FIRST_REPORT_LEAD: Duration = Duration::from_millis(10);
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
@@ -570,6 +572,7 @@ impl AsyncElement for RistSink {
                     // librist's `ristreceiver` drops media that comes before the first sender report
                     if self.packets_sent == 0 {
                         self.send_reports_if_due().await?;
+                        tokio::time::sleep(FIRST_REPORT_LEAD).await;
                     }
                     for payload in bytes.chunks(TS_DATAGRAM_PAYLOAD) {
                         self.send_media(payload, timestamp).await?;

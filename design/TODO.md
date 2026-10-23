@@ -149,6 +149,9 @@ Highest leverage first:
   - A data channel signalled through a WHIP / WHEP session.
   - Move the bevy-g2g input backchannel from its WebSocket side channel to
     `livekitdatasink` / `livekitdatasrc`.
+- **RIST bonding test flake:** `ristsender_broadcast_bonding_feeds_ristsrc`
+  failed once in 50 runs on hercules, after 2.4 s. Capture its failure output
+  and fix the cause.
 
 ## Adaptive streaming (HLS / DASH)
 
@@ -191,6 +194,9 @@ Highest leverage first:
 - Run `decklinkvideosink` and `decklinkaudiosink` on a board: scheduled
   playback, the board clock and audio against video have only run against a
   mock device.
+- `pipewiresink_disciplines_its_clock_from_the_stream` fails about half the
+  time on hercules with a playout-rate estimate near 0.78. Find whether the
+  sink or the test's half-second window is wrong.
 
 ## Containers
 
