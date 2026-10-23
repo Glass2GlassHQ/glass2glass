@@ -411,10 +411,19 @@ pub(crate) struct TrackHeader {
     pub(crate) media_stop: Option<u64>,
     // the media between consecutive edits that neither presents, in order
     pub(crate) edit_gaps: Vec<EditGap>,
+    // a video edit list that replays or reorders media, laid out one edit after another
+    pub(crate) replayed_edits: Vec<ReplayedEdit>,
     /// The `mvex/trex` default sample duration, size and flags, which a
     /// fragment falls back to when its `tfhd` does not declare them.
     pub(crate) trex_defaults: SampleDefaults,
     pub(crate) clean_aperture: Option<CropRectangle>,
+}
+
+// media ticks: where the edit starts presenting, counted from the first edit's start, and the media it presents
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReplayedEdit {
+    presented_from: u64,
+    media: Range<u64>,
 }
 
 // media time between two edits, in ns
@@ -488,6 +497,57 @@ impl TrackHeader {
         }
     }
 
+    // An edit presents the samples its media span holds, decoded from the
+    // keyframe before them. The ones decoded only as references go past the
+    // segment's stop, where the decoder drops them.
+    pub(crate) fn edited_samples(&self, samples: Vec<Sample>) -> Vec<Sample> {
+        let Some(stop_ns) = self.presentation_segment().stop else {
+            return samples;
+        };
+        if self.replayed_edits.is_empty() {
+            return samples
+                .into_iter()
+                .map(|sample| self.edited_sample(sample))
+                .collect();
+        }
+        let mut edited = Vec::new();
+        for edit in &self.replayed_edits {
+            let media_ns = ticks_to_ns(edit.media.start, self.timescale)
+                ..ticks_to_ns(edit.media.end, self.timescale);
+            let presented_ns = ticks_to_ns(
+                self.media_start.saturating_add(edit.presented_from),
+                self.timescale,
+            );
+            let presented = |sample: &Sample| media_ns.contains(&sample.pts_ns);
+            let (Some(first), Some(last)) = (
+                samples.iter().position(presented),
+                samples.iter().rposition(presented),
+            ) else {
+                continue;
+            };
+            let from = samples[..=first]
+                .iter()
+                .rposition(|sample| sample.keyframe)
+                .unwrap_or(0);
+            for sample in &samples[from..=last] {
+                let pts_ns = if presented(sample) {
+                    presented_ns.saturating_add(sample.pts_ns - media_ns.start)
+                } else {
+                    stop_ns.saturating_add(sample.pts_ns)
+                };
+                edited.push(Sample {
+                    annexb: sample.annexb.clone(),
+                    pts_ns,
+                    dts_ns: presented_ns
+                        .saturating_add(sample.dts_ns)
+                        .saturating_sub(media_ns.start),
+                    ..*sample
+                });
+            }
+        }
+        edited
+    }
+
     // An audio edit list trims the encoder's priming and padding off the
     // presentation: the segment starts past the one and stops before the other,
     // so the decoder clips them and a remux writes the start back as an edit
@@ -500,6 +560,42 @@ impl TrackHeader {
             _ => Segment::new(),
         }
     }
+}
+
+// A track that replays media takes its samples out of file order, so the tracks then interleave by decode time.
+pub(crate) fn edit_track_samples(
+    tracks: &[TrackHeader],
+    samples: Vec<(u32, Sample)>,
+) -> Vec<(u32, Sample)> {
+    let track_of = |track_id: u32| tracks.iter().find(|track| track.track_id == track_id);
+    if tracks.iter().all(|track| track.replayed_edits.is_empty()) {
+        return samples
+            .into_iter()
+            .map(|(track_id, sample)| match track_of(track_id) {
+                Some(track) => (track_id, track.edited_sample(sample)),
+                None => (track_id, sample),
+            })
+            .collect();
+    }
+    let mut by_track: Vec<(u32, Vec<Sample>)> = Vec::new();
+    for (track_id, sample) in samples {
+        match by_track.iter_mut().find(|(id, _)| *id == track_id) {
+            Some((_, own)) => own.push(sample),
+            None => by_track.push((track_id, Vec::from([sample]))),
+        }
+    }
+    let mut edited: Vec<(u32, Sample)> = by_track
+        .into_iter()
+        .flat_map(|(track_id, own)| {
+            let own = match track_of(track_id) {
+                Some(track) => track.edited_samples(own),
+                None => own,
+            };
+            own.into_iter().map(move |sample| (track_id, sample))
+        })
+        .collect();
+    edited.sort_by_key(|(_, sample)| sample.dts_ns);
+    edited
 }
 
 // PCM reaches no decoder, so the demuxers drop the samples outside the segment themselves
@@ -555,9 +651,19 @@ pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError
             let edits = edit_list(trak);
             let spans =
                 movie_timescale.and_then(|movie| presented_spans(&edits, movie, header.timescale));
+            let is_video = matches!(header.kind, TrackKind::Video { .. });
+            let replayed = movie_timescale
+                .filter(|_| spans.is_none() && is_video)
+                .and_then(|movie| replayed_edits(&edits, movie, header.timescale));
             if let Some(spans) = spans {
                 header.media_stop = spans.last().map(|span| span.end);
                 header.edit_gaps = edit_gaps(&spans, header.timescale);
+            } else if let Some((replayed, stop)) = replayed.and_then(|replayed| {
+                let stop = replayed_media_stop(header.media_start, &replayed)?;
+                Some((replayed, stop))
+            }) {
+                header.media_stop = Some(stop);
+                header.replayed_edits = replayed;
             }
             // iTunes writes an AAC encoder's priming and padding as metadata instead of an edit list
             let is_audio = matches!(header.kind, TrackKind::Audio { .. });
@@ -634,6 +740,7 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         media_start: edit_media_start(&edit_list(trak)),
         media_stop: None,
         edit_gaps: Vec::new(),
+        replayed_edits: Vec::new(),
         trex_defaults: SampleDefaults::default(),
         clean_aperture,
     }))
@@ -690,17 +797,51 @@ fn presented_spans(
         if edit.segment_duration == 0 {
             return None;
         }
-        // segment_duration counts movie ticks, rounded to the nearest media tick
-        let duration = (u128::from(edit.segment_duration) * u128::from(media_timescale)
-            + u128::from(movie_timescale / 2))
-        .checked_div(u128::from(movie_timescale))?;
-        let end = media_time.checked_add(u64::try_from(duration).ok()?)?;
+        let duration = segment_media_ticks(edit, movie_timescale, media_timescale)?;
+        let end = media_time.checked_add(duration)?;
         if spans.last().is_some_and(|last| media_time < last.end) {
             return None;
         }
         spans.push(media_time..end);
     }
     (!spans.is_empty()).then_some(spans)
+}
+
+// segment_duration counts movie ticks, rounded to the nearest media tick
+fn segment_media_ticks(edit: &Edit, movie_timescale: u32, media_timescale: u32) -> Option<u64> {
+    let duration = (u128::from(edit.segment_duration) * u128::from(media_timescale)
+        + u128::from(movie_timescale / 2))
+    .checked_div(u128::from(movie_timescale))?;
+    u64::try_from(duration).ok()
+}
+
+// The media edits after the leading empty ones, laid out one after another,
+// for a list presented_spans cannot read because an edit goes back in the media.
+fn replayed_edits(
+    edits: &[Edit],
+    movie_timescale: u32,
+    media_timescale: u32,
+) -> Option<Vec<ReplayedEdit>> {
+    let mut replayed: Vec<ReplayedEdit> = Vec::new();
+    let mut presented_from = 0u64;
+    for edit in edits.iter().skip_while(|edit| edit.media_time < 0) {
+        let media_time = u64::try_from(edit.media_time).ok()?;
+        let duration = segment_media_ticks(edit, movie_timescale, media_timescale)
+            .filter(|duration| *duration > 0)?;
+        replayed.push(ReplayedEdit {
+            presented_from,
+            media: media_time..media_time.checked_add(duration)?,
+        });
+        presented_from = presented_from.checked_add(duration)?;
+    }
+    (!replayed.is_empty()).then_some(replayed)
+}
+
+fn replayed_media_stop(media_start: u64, replayed: &[ReplayedEdit]) -> Option<u64> {
+    let last = replayed.last()?;
+    media_start
+        .checked_add(last.presented_from)?
+        .checked_add(last.media.end - last.media.start)
 }
 
 fn edit_gaps(spans: &[Range<u64>], timescale: u32) -> Vec<EditGap> {
@@ -3112,6 +3253,7 @@ mod tests {
             media_start: edit_media_start(&edits),
             media_stop: Some(second_end),
             edit_gaps: edit_gaps(&spans, MEDIA_TIMESCALE),
+            replayed_edits: Vec::new(),
             trex_defaults: SampleDefaults::default(),
             clean_aperture: None,
         };
@@ -3147,6 +3289,78 @@ mod tests {
         assert!(!segment.presents(in_gap.pts_ns), "the gap is cut");
         assert_eq!(in_gap.dts_ns, ns(first_end));
     }
+    #[test]
+    fn a_replayed_edit_list_presents_its_media_again() {
+        // Airplane.mov's timescale and frame spacing
+        const TIMESCALE: u32 = 600;
+        const FRAME_TICKS: u32 = 40;
+        let edit = |duration: u32, media_time: u32| {
+            [
+                duration.to_be_bytes(),
+                media_time.to_be_bytes(),
+                0x0001_0000u32.to_be_bytes(),
+            ]
+            .concat()
+        };
+        // both frames, the second again, then the third
+        let elst = [
+            edit(2 * FRAME_TICKS, 0),
+            edit(FRAME_TICKS, FRAME_TICKS),
+            edit(FRAME_TICKS, 2 * FRAME_TICKS),
+        ]
+        .concat();
+        let edits = edit_list(&trak_with_elst(0, 3, &elst));
+        assert_eq!(presented_spans(&edits, TIMESCALE, TIMESCALE), None);
+        let replayed = replayed_edits(&edits, TIMESCALE, TIMESCALE).expect("three media edits");
+        let track = TrackHeader {
+            track_id: 1,
+            timescale: TIMESCALE,
+            kind: TrackKind::Video {
+                codec: VideoCodec::H264,
+                width: 64,
+                height: 48,
+                param_sets: Vec::new(),
+            },
+            cenc: None,
+            tags: TagList::default(),
+            media_start: edit_media_start(&edits),
+            media_stop: replayed_media_stop(edit_media_start(&edits), &replayed),
+            edit_gaps: Vec::new(),
+            replayed_edits: replayed,
+            trex_defaults: SampleDefaults::default(),
+            clean_aperture: None,
+        };
+        let ns = |ticks: u32| ticks_to_ns(u64::from(ticks), TIMESCALE);
+        let sample = |index: u32, keyframe: bool| Sample {
+            annexb: Vec::from([index as u8]),
+            pts_ns: ns(index * FRAME_TICKS),
+            dts_ns: ns(index * FRAME_TICKS),
+            duration_ns: ns(FRAME_TICKS),
+            keyframe,
+        };
+        let samples = Vec::from([sample(0, true), sample(1, false), sample(2, true)]);
+        let segment = track.presentation_segment();
+        assert_eq!(segment.stop, Some(ns(4 * FRAME_TICKS)));
+
+        let edited = track.edited_samples(samples);
+        let order: Vec<u8> = edited.iter().map(|sample| sample.annexb[0]).collect();
+        assert_eq!(
+            order,
+            [0, 1, 0, 1, 2],
+            "the second edit decodes from the keyframe"
+        );
+        let presented: Vec<u64> = edited
+            .iter()
+            .map(|sample| sample.pts_ns)
+            .filter(|pts| segment.presents(*pts))
+            .collect();
+        assert_eq!(
+            presented,
+            [0, 1, 2, 3].map(|frame| ns(frame * FRAME_TICKS)),
+            "the reference decoded again for the replay is not shown"
+        );
+    }
+
     const CLAP_PICTURE: (u16, u16) = (64, 48);
 
     fn clap_payload(fields: [i32; 8]) -> Vec<u8> {

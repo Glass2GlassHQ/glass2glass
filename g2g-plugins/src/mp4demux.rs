@@ -531,10 +531,7 @@ fn track_samples(data: &[u8], track: &TrackHeader) -> Result<Vec<Sample>, G2gErr
     } else {
         parse_progressive_multi(data, selected)?
     };
-    Ok(samples
-        .into_iter()
-        .map(|(_, sample)| track.edited_sample(sample))
-        .collect())
+    Ok(track.edited_samples(samples.into_iter().map(|(_, sample)| sample).collect()))
 }
 
 impl AsyncElement for Mp4Demux {

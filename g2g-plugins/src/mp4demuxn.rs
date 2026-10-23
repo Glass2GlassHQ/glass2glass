@@ -41,7 +41,7 @@ use g2g_core::{
 };
 
 use crate::fmp4::{
-    clip_stored_pcm, parse_all_tracks, parse_chapters, parse_fragments_multi,
+    clip_stored_pcm, edit_track_samples, parse_all_tracks, parse_chapters, parse_fragments_multi,
     parse_progressive_multi, prepend_param_sets, starts_with_param_set, unsupported_pcm_layout,
     vorbis_headers, Sample, TrackHeader, TrackKind,
 };
@@ -742,6 +742,7 @@ impl Mp4DemuxN {
                         self.drained.saturating_add(start as u64),
                     )?;
                     self.learn_held_fragment(&samples);
+                    let samples = edit_track_samples(&forwarded, samples);
                     self.emit_samples(&forwarded, samples, out).await?;
                     off = end;
                     consumed = off;
@@ -812,6 +813,7 @@ impl Mp4DemuxN {
         } else {
             parse_progressive_multi(&self.buf, &forwarded)?
         };
+        let samples = edit_track_samples(&forwarded, samples);
         self.emit_samples(&forwarded, samples, out).await
     }
 
@@ -846,10 +848,6 @@ impl Mp4DemuxN {
             };
             let track = tracks.iter().find(|t| t.track_id == track_id);
             let kind = track.map(|t| &t.kind);
-            let sample = match track {
-                Some(track) => track.edited_sample(sample),
-                None => sample,
-            };
             // Announce the port's real caps once (refining the looser negotiation
             // caps the branch solved against, e.g. concrete AAC channels/rate).
             if !self.announced[port] {
