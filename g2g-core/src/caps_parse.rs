@@ -7,11 +7,11 @@
 use alloc::vec::Vec;
 
 use crate::caps::{
-    batch_alternatives, framerate_q16_from_fraction, pcm_from_gst_format, AudioFormat,
+    batch_alternatives, framerate_q16_from_fraction, is_pcm, pcm_from_gst_format, AudioFormat,
     ByteStreamEncoding, Caps, CapsSet, CodecTag, Colorimetry, Dim, Interlace, ProResVariant, Rate,
-    RawVideoFormat, SubPictureFormat, TagNamespace, TextFormat, VideoCodec,
-    MOV_UNKNOWN_SUBTYPE_PREFIX, PCM_FORMATS, RIFF_AUDIO_TAG_FIELD, RIFF_UNKNOWN_SUBTYPE,
-    RIFF_VIDEO_TAG_FIELD,
+    RawVideoFormat, SubPictureFormat, TagNamespace, TextFormat, VideoCodec, ANY_CHANNELS,
+    ANY_SAMPLE_RATE, MOV_UNKNOWN_SUBTYPE_PREFIX, PCM_FORMATS, RIFF_AUDIO_TAG_FIELD,
+    RIFF_UNKNOWN_SUBTYPE, RIFF_VIDEO_TAG_FIELD,
 };
 use crate::channels::ChannelLayout;
 
@@ -272,13 +272,17 @@ impl CapsSet {
             Some(CapsSet::one(Caps::ByteStream { encoding }))
         };
         let audio_set = |formats: &[AudioFormat]| -> Option<CapsSet> {
-            let (channels, rates) = (
-                expand_u8(fv("channels"), 2)?,
-                expand_u32(fv("rate"), 48_000)?,
-            );
             let channel_layout = expand_channel_mask(fv("channel-mask"))?;
             let mut alts = Vec::new();
             for &format in formats {
+                // raw PCM leaves an absent field open as gst does, compressed audio has no rate wildcard
+                let (absent_channels, absent_rate) = if is_pcm(format) {
+                    (ANY_CHANNELS, ANY_SAMPLE_RATE)
+                } else {
+                    (2, 48_000)
+                };
+                let channels = expand_u8(fv("channels"), absent_channels)?;
+                let rates = expand_u32(fv("rate"), absent_rate)?;
                 for &ch in &channels {
                     for &sr in &rates {
                         alts.push(Caps::Audio {
@@ -603,6 +607,22 @@ mod tests {
                 .unwrap_or_else(|| panic!("{printed} does not parse back"));
             assert_eq!(parsed.alternatives(), [caps].as_slice(), "{printed}");
         }
+    }
+
+    #[test]
+    fn raw_audio_without_rate_or_channels_leaves_both_open() {
+        let open = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: ANY_CHANNELS,
+            sample_rate: ANY_SAMPLE_RATE,
+            channel_layout: ChannelLayout::UNSPECIFIED,
+        };
+        assert_eq!(
+            CapsSet::from_gst_string(&open.to_gst_string())
+                .unwrap()
+                .alternatives(),
+            [open]
+        );
     }
 
     #[test]

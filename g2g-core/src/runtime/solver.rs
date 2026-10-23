@@ -591,11 +591,12 @@ pub(crate) fn resolve_forward_output(
             },
         }
     }
+    // an alternative leaving a kept scalar open would take the startup placeholder, not a value this input derives
     let fixate_kept_shape = |set: &CapsSet| -> Option<Caps> {
         let shape = keep_shape.as_ref()?;
-        set.intersect(&CapsSet::one(shape.clone()))
-            .alternatives()
+        set.alternatives()
             .iter()
+            .filter(|alternative| alternative.intersect(shape).as_ref() == Ok(*alternative))
             .find(|c| tracks_input(c, input, copied_fields))
             .cloned()
     };

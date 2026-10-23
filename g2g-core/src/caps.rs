@@ -1524,7 +1524,7 @@ pub fn pcm_from_gst_format(name: &str) -> Option<AudioFormat> {
 
 /// Raw (uncompressed) PCM formats, the only ones the "any rate" wildcard (M187)
 /// and the resampler apply to.
-fn is_pcm(f: AudioFormat) -> bool {
+pub(crate) fn is_pcm(f: AudioFormat) -> bool {
     // comparing discriminants keeps the format names out of heap-free builds
     PCM_FORMATS
         .iter()
