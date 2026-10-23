@@ -1602,9 +1602,15 @@ impl MultiOutputElement for TsDemuxN {
             }
             "pid" if one_port => {
                 let pid = value.as_uint().ok_or(PropError::Type)?;
-                self.port_pids[0] = match pid {
-                    0 => PortPid::FirstInPmtOrder,
-                    _ => PortPid::Required(u16::try_from(pid).map_err(|_| PropError::Value)?),
+                self.port_pids[0] = match (pid, self.port_pids[0]) {
+                    (0, _) => PortPid::FirstInPmtOrder,
+                    // the PID a probed port reads back, so setting it again changes nothing
+                    (pid, PortPid::Track(track)) if pid == u64::from(track) => {
+                        PortPid::Track(track)
+                    }
+                    (pid, _) => {
+                        PortPid::Required(u16::try_from(pid).map_err(|_| PropError::Value)?)
+                    }
                 };
                 Ok(())
             }
@@ -2260,11 +2266,12 @@ mod tests {
         assert_eq!(sink.pts_ns, session_pts_ns(FIRST_SESSION_TICKS, 2));
     }
 
-    #[tokio::test]
-    async fn a_probed_track_port_survives_a_restart_that_lists_its_pid_as_another_codec() {
+    async fn run_a_restart_that_lists_the_track_pid_as_aac(
+        demux: &mut TsDemuxN,
+    ) -> Result<PortCapture, G2gError> {
         const ADTS: [u8; 4] = [0xFF, 0xF1, 0x50, 0x80];
-        let ran = run_ports(
-            &mut probed_track_port(),
+        run_ports(
+            demux,
             [
                 h264_session(FIRST_SESSION_TICKS, 3),
                 PipelinePacket::Flush,
@@ -2282,7 +2289,23 @@ mod tests {
                 PipelinePacket::Eos,
             ],
         )
-        .await;
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_probed_track_port_survives_a_restart_that_lists_its_pid_as_another_codec() {
+        let ran = run_a_restart_that_lists_the_track_pid_as_aac(&mut probed_track_port()).await;
+        assert!(ran.is_ok(), "{:?}", ran.err());
+    }
+
+    #[tokio::test]
+    async fn setting_a_probed_port_the_pid_it_reads_back_keeps_it_routing() {
+        let mut demux = probed_track_port();
+        let pid = demux
+            .get_property("pid")
+            .expect("a one-port demuxer has a pid");
+        demux.set_property("pid", pid).unwrap();
+        let ran = run_a_restart_that_lists_the_track_pid_as_aac(&mut demux).await;
         assert!(ran.is_ok(), "{:?}", ran.err());
     }
 
