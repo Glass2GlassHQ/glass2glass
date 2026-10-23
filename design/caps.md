@@ -843,7 +843,13 @@ Matroska's `V_QUICKTIME`). The container header the decoder needs leads the
 stream in band as a frame of its own, the convention FLAC's `fLaC` and raw AAC's
 AudioSpecificConfig already use: the whole `strf` BITMAPINFOHEADER or
 WAVEFORMATEX, the WAV `fmt ` chunk, the whole sample entry, or the Matroska
-`CodecPrivate`. `wavparse` emits a tagged codec in whole blocks of its block
+`CodecPrivate`. `wavparse` emits MP3 (0x55) and AC-3 (0x2000) as coded caps for
+`mpegaudioparse` and `ac3parse`, and decodebin pins its `stream=mp3|ac3` from the
+probed `fmt ` chunk, since both parsers pass any caps. AAC (0xFF) stays refused: WAV
+gives its raw access units no boundaries. MS ADPCM past stereo is read as one
+declared block per channel, as ffmpeg's wav demuxer reads it, and the `fmt ` header
+a tagged decoder opens from carries the block align the data is cut at. `wavparse`
+emits a tagged codec in whole blocks of its block
 align, except XMA1 and XMA2, which go out in 2048-byte packets as ffmpeg's wav
 demuxer reads them. An AVI `##pc` palette change rides the stream's next frame as a
 `PaletteChange` frame meta, which `ffmpegdec` writes over its palette and hands

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1858: ac3parse keeps 44.1 kHz frames whose padding word alternates.
+- M1854: wavparse reads MP3 and AC-3 and cuts MS ADPCM past stereo at one block per channel.
 - M1852: H.264/H.265 caps carry gst's `alignment`, MP4 and Matroska samples are `au`, and h264parse/h265parse keep them whole.
 - M1846: oggdemux fails loud when the file has no stream of its selected codec instead of ending with no output.
 - M1853: a caps string field whose value does not parse fails the parse instead of taking the default.

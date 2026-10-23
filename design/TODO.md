@@ -245,10 +245,8 @@ Highest leverage first:
     flvdemux declares `au`.
   - An MP4 audio track whose edit list replays media plays its samples once:
     replayed edits need sample-accurate clipping, as the video path lays them out.
-  - `wavparse` rejects `wFormatTag` 0x2000 (AC-3), 0x55 (MP3) and 0xFF (AAC):
-    `readable_format` takes only PCM, G.711 and IMA ADPCM although
-    `waveformat.rs` maps them. MS ADPCM with more than 2 channels needs
-    `block_align` times the channel count, as ffmpeg's wavdec uses.
+  - An explicit `wavparse ! ac3parse ! …` line picks `stream=mp3` unless it sets
+    `stream=ac3`: only decodebin pins the stream from the `fmt ` chunk.
   - `mkvmux::MkvMux` (single audio input) writes AAC with no `CodecPrivate` and
     the ADTS headers left in the blocks, which ffmpeg cannot decode for 8-channel
     `aac/al22_chCfg0PCE_44.mp4`.
