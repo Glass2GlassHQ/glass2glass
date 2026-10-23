@@ -1849,7 +1849,15 @@ pub(crate) struct MoofSample<'a> {
     pub(crate) fragment_at: u64,
 }
 
-/// A `moof` waiting for its `mdat`.
+// a traf waiting for its mdat
+struct OpenTraf {
+    // None for a track the caller skips
+    fragment: Option<OpenFragment>,
+    // where its trun data offsets count from, None when that is the end of the previous traf's data
+    base: Option<usize>,
+    runs: Vec<DataRun>,
+}
+
 struct OpenFragment {
     track_id: Option<u32>,
     timings: Vec<FragmentSampleTiming>,
@@ -1857,15 +1865,24 @@ struct OpenFragment {
     fragment_at: u64,
 }
 
+struct DataRun {
+    data_offset: Option<i32>,
+    sample_count: usize,
+    // None when a skipped track's trun leaves its sample sizes to the trex
+    byte_len: Option<usize>,
+}
+
+const BASE_DATA_OFFSET_PRESENT: u32 = 0x01;
+const DEFAULT_BASE_IS_MOOF: u32 = 0x02_0000;
+
 /// Walk the `moof`+`mdat` pairs in `data` and split every sample out of its
 /// `mdat`, timed in its track's timescale. `track` maps a fragment's `track_ID`
 /// to that track's timescale, encryption and `trex` defaults, and a fragment it returns `None`
 /// for is skipped. `base_offset` is where `data` sits in the source byte stream.
 ///
-/// Assumes each `trun`'s samples are stored contiguously from the start of the
-/// following `mdat` payload; the `trun` `data_offset` is not honored. This holds
-/// for ffmpeg / CMAF output. A non-conforming fragment that positions its sample
-/// data elsewhere in the `mdat` is mis-split, not rejected.
+/// A `trun` with a `data_offset` starts there, counted from its `traf`'s base
+/// data offset. One without starts where the previous `trun` ended, the first
+/// at the start of the following `mdat` payload.
 // per track, where the next fragment starts when it carries no tfdt, kept across the fragments of one stream
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FragmentStarts(Vec<(Option<u32>, u64)>);
@@ -1874,86 +1891,166 @@ pub(crate) fn moof_samples<'a, 't>(
     data: &'a [u8],
     base_offset: u64,
     fragment_starts: &mut FragmentStarts,
-    track: impl Fn(Option<u32>) -> Option<(u32, Option<&'t CencTrack>, SampleDefaults)>,
+    mut track: impl FnMut(Option<u32>) -> Option<(u32, Option<&'t CencTrack>, SampleDefaults)>,
 ) -> Result<Vec<MoofSample<'a>>, G2gError> {
     let mut out = Vec::new();
-    // `Some(None)` is an open fragment of a skipped track.
-    let mut open: Option<Option<OpenFragment>> = None;
+    let mut open: Option<Vec<OpenTraf>> = None;
     let fragment_end_ticks = &mut fragment_starts.0;
     for (kind, payload, box_at) in boxes_at(data) {
         match kind {
             b"moof" => {
-                let traf = find_box(payload, b"traf").ok_or(G2gError::CapsMismatch)?;
-                let tfhd = find_box(traf, b"tfhd");
-                // tfhd: track_ID at payload offset 4 (after version/flags).
-                let track_id = tfhd.map(|tfhd| be32(tfhd, 4)).transpose()?;
-                let Some((timescale, cenc, trex)) = track(track_id) else {
-                    open = Some(None);
-                    continue;
-                };
-                let previous_end = fragment_end_ticks
-                    .iter()
-                    .position(|(id, _)| *id == track_id);
-                let base_time = match find_box(traf, b"tfdt").map(|tfdt| (tfdt.first(), tfdt)) {
-                    Some((Some(1), tfdt)) => be64(tfdt, 4)?,
-                    Some((Some(0), tfdt)) => be32(tfdt, 4)? as u64,
-                    Some(_) => return Err(G2gError::CapsMismatch),
-                    None => previous_end.map_or(0, |at| fragment_end_ticks[at].1),
-                };
-                let trun = find_box(traf, b"trun").ok_or(G2gError::CapsMismatch)?;
-                // The `tfhd` is where a CMAF fragment declares the sample duration
-                // its `trun` then omits.
-                let defaults = tfhd
-                    .map(tfhd_defaults)
-                    .transpose()?
-                    .unwrap_or_default()
-                    .or_trex(trex);
-                let trun_samples = parse_trun(trun, defaults, data.len())?;
-                let end = trun_samples.iter().fold(base_time, |end, sample| {
-                    end.saturating_add(u64::from(sample.duration))
-                });
-                match previous_end {
-                    Some(at) => fragment_end_ticks[at].1 = end,
-                    None => fragment_end_ticks.push((track_id, end)),
-                }
-                // An encrypted track's per-sample IVs / subsample maps live in the
-                // fragment's aux info, addressed from the start of this `moof`.
-                let crypt = match cenc {
-                    Some(c) => {
-                        let from_moof = data.get(box_at..).ok_or(G2gError::CapsMismatch)?;
-                        fragment_sample_crypt(traf, from_moof, c, trun_samples.len())?
+                let mut trafs = Vec::new();
+                for (index, (_, traf)) in boxes(payload)
+                    .filter(|(kind, _)| *kind == b"traf")
+                    .enumerate()
+                {
+                    let tfhd = find_box(traf, b"tfhd");
+                    let tfhd_flags = tfhd.map(|tfhd| be32(tfhd, 0)).transpose()?.unwrap_or(0);
+                    let base = match tfhd.filter(|_| tfhd_flags & BASE_DATA_OFFSET_PRESENT != 0) {
+                        Some(tfhd) => Some(
+                            be64(tfhd, 8)?
+                                .checked_sub(base_offset)
+                                .and_then(|at| usize::try_from(at).ok())
+                                .ok_or(G2gError::CapsMismatch)?,
+                        ),
+                        None if index == 0 || tfhd_flags & DEFAULT_BASE_IS_MOOF != 0 => {
+                            Some(box_at)
+                        }
+                        None => None,
+                    };
+                    // tfhd: track_ID at payload offset 4 (after version/flags).
+                    let track_id = tfhd.map(|tfhd| be32(tfhd, 4)).transpose()?;
+                    let truns = boxes(traf)
+                        .filter(|(kind, _)| *kind == b"trun")
+                        .map(|(_, trun)| trun);
+                    let Some((timescale, cenc, trex)) = track(track_id) else {
+                        // a skipped track's sizes still place the traf after it
+                        let defaults = tfhd
+                            .and_then(|tfhd| tfhd_defaults(tfhd).ok())
+                            .unwrap_or_default();
+                        let runs = truns
+                            .map(|trun| DataRun {
+                                data_offset: trun_data_offset(trun).ok().flatten(),
+                                sample_count: 0,
+                                byte_len: parse_trun(trun, defaults, data.len())
+                                    .ok()
+                                    .and_then(|samples| run_byte_len(&samples)),
+                            })
+                            .collect();
+                        trafs.push(OpenTraf {
+                            fragment: None,
+                            base,
+                            runs,
+                        });
+                        continue;
+                    };
+                    let previous_end = fragment_end_ticks
+                        .iter()
+                        .position(|(id, _)| *id == track_id);
+                    let base_time = match find_box(traf, b"tfdt").map(|tfdt| (tfdt.first(), tfdt)) {
+                        Some((Some(1), tfdt)) => be64(tfdt, 4)?,
+                        Some((Some(0), tfdt)) => be32(tfdt, 4)? as u64,
+                        Some(_) => return Err(G2gError::CapsMismatch),
+                        None => previous_end.map_or(0, |at| fragment_end_ticks[at].1),
+                    };
+                    // The `tfhd` is where a CMAF fragment declares the sample duration
+                    // its `trun` then omits.
+                    let defaults = tfhd
+                        .map(tfhd_defaults)
+                        .transpose()?
+                        .unwrap_or_default()
+                        .or_trex(trex);
+                    let mut trun_samples = Vec::new();
+                    let mut runs = Vec::new();
+                    for trun in truns {
+                        let samples = parse_trun(trun, defaults, data.len())?;
+                        runs.push(DataRun {
+                            data_offset: trun_data_offset(trun)?,
+                            sample_count: samples.len(),
+                            byte_len: run_byte_len(&samples),
+                        });
+                        trun_samples.extend(samples);
                     }
-                    None => Vec::new(),
-                };
-                open = Some(Some(OpenFragment {
-                    track_id,
-                    timings: fragment_sample_timings(base_time, &trun_samples, timescale),
-                    crypt,
-                    fragment_at: base_offset.saturating_add(box_at as u64),
-                }));
+                    if runs.is_empty() {
+                        return Err(G2gError::CapsMismatch);
+                    }
+                    let end = trun_samples.iter().fold(base_time, |end, sample| {
+                        end.saturating_add(u64::from(sample.duration))
+                    });
+                    match previous_end {
+                        Some(at) => fragment_end_ticks[at].1 = end,
+                        None => fragment_end_ticks.push((track_id, end)),
+                    }
+                    // An encrypted track's per-sample IVs / subsample maps live in the
+                    // fragment's aux info, addressed from the start of this `moof`.
+                    let crypt = match cenc {
+                        Some(c) => {
+                            let from_moof = data.get(box_at..).ok_or(G2gError::CapsMismatch)?;
+                            fragment_sample_crypt(traf, from_moof, c, trun_samples.len())?
+                        }
+                        None => Vec::new(),
+                    };
+                    trafs.push(OpenTraf {
+                        fragment: Some(OpenFragment {
+                            track_id,
+                            timings: fragment_sample_timings(base_time, &trun_samples, timescale),
+                            crypt,
+                            fragment_at: base_offset.saturating_add(box_at as u64),
+                        }),
+                        base,
+                        runs,
+                    });
+                }
+                if trafs.is_empty() {
+                    return Err(G2gError::CapsMismatch);
+                }
+                open = Some(trafs);
             }
             b"mdat" => {
-                let Some(fragment) = open.take() else {
+                let Some(trafs) = open.take() else {
                     return Err(G2gError::CapsMismatch); // mdat without moof
                 };
-                let Some(fragment) = fragment else {
-                    continue;
-                };
-                let mut crypt = fragment.crypt.into_iter();
-                let mut at = 0usize;
-                for timing in fragment.timings {
-                    let end = at
-                        .checked_add(timing.size as usize)
-                        .ok_or(G2gError::CapsMismatch)?;
-                    let bytes = payload.get(at..end).ok_or(G2gError::CapsMismatch)?;
-                    at = end;
-                    out.push(MoofSample {
-                        track_id: fragment.track_id,
-                        bytes,
-                        timing,
-                        crypt: crypt.next(),
-                        fragment_at: fragment.fragment_at,
-                    });
+                let payload_at = payload.as_ptr() as usize - data.as_ptr() as usize;
+                let mut cursor = Some(payload_at);
+                for traf in trafs {
+                    let base = traf.base.or(cursor);
+                    let mut run_starts = Vec::with_capacity(traf.runs.len());
+                    for run in &traf.runs {
+                        let start = match run.data_offset {
+                            Some(offset) => {
+                                base.and_then(|base| base.checked_add_signed(offset as isize))
+                            }
+                            None => cursor,
+                        };
+                        run_starts.push(start);
+                        cursor = start
+                            .zip(run.byte_len)
+                            .and_then(|(start, len)| start.checked_add(len));
+                    }
+                    let Some(fragment) = traf.fragment else {
+                        continue;
+                    };
+                    let mut timings = fragment.timings.into_iter();
+                    let mut crypt = fragment.crypt.into_iter();
+                    for (run, start) in traf.runs.iter().zip(run_starts) {
+                        let mut at = start
+                            .and_then(|start| start.checked_sub(payload_at))
+                            .ok_or(G2gError::CapsMismatch)?;
+                        for timing in timings.by_ref().take(run.sample_count) {
+                            let end = at
+                                .checked_add(timing.size as usize)
+                                .ok_or(G2gError::CapsMismatch)?;
+                            let bytes = payload.get(at..end).ok_or(G2gError::CapsMismatch)?;
+                            at = end;
+                            out.push(MoofSample {
+                                track_id: fragment.track_id,
+                                bytes,
+                                timing,
+                                crypt: crypt.next(),
+                                fragment_at: fragment.fragment_at,
+                            });
+                        }
+                    }
                 }
             }
             _ => {}
@@ -1963,6 +2060,12 @@ pub(crate) fn moof_samples<'a, 't>(
         return Err(G2gError::CapsMismatch); // trailing moof without mdat
     }
     Ok(out)
+}
+
+fn run_byte_len(samples: &[TrunSample]) -> Option<usize> {
+    samples
+        .iter()
+        .try_fold(0usize, |len, sample| len.checked_add(sample.size as usize))
 }
 
 /// A stored sample's clear bytes. A protected sample of an `encrypted` track is
@@ -2092,8 +2195,8 @@ pub(crate) use crate::annexb::{parse_avcc, prepend_param_sets, starts_with_param
 
 /// Split every sample of a single-track fMP4 out of its `mdat`, converting AVCC
 /// framing back to Annex-B. `codec` selects the IDR NAL type used to flag
-/// keyframes (the seek snap points). Every fragment is taken as this track's,
-/// whatever its `track_ID`.
+/// keyframes (the seek snap points). The first `traf`'s track is taken as this
+/// one, whatever its `track_ID`.
 pub(crate) fn parse_fragments(
     data: &[u8],
     timescale: u32,
@@ -2103,8 +2206,13 @@ pub(crate) fn parse_fragments(
     fragment_starts: &mut FragmentStarts,
     mut decrypt: Option<SampleDecrypt<'_>>,
 ) -> Result<Vec<Sample>, G2gError> {
-    let stored = moof_samples(data, base_offset, fragment_starts, |_| {
-        Some((timescale, cenc, SampleDefaults::default()))
+    let mut own_track = None;
+    let stored = moof_samples(data, base_offset, fragment_starts, |track_id| {
+        (*own_track.get_or_insert(track_id) == track_id).then_some((
+            timescale,
+            cenc,
+            SampleDefaults::default(),
+        ))
     })?;
     let mut samples = Vec::with_capacity(stored.len());
     for sample in &stored {
@@ -2849,6 +2957,14 @@ fn sample_flags_sync(flags: u32) -> bool {
 /// states no flags at all (neither the first-sample override nor per-sample
 /// flags) is taken to open at one, which is what a fragment without sample
 /// dependency information implies.
+fn trun_data_offset(trun: &[u8]) -> Result<Option<i32>, G2gError> {
+    let flags = be32(trun, 0)? & 0x00FF_FFFF;
+    if flags & 0x001 == 0 {
+        return Ok(None);
+    }
+    Ok(Some(be32(trun, 8)? as i32))
+}
+
 pub(crate) fn trun_first_sample_is_sync(trun: &[u8]) -> Result<bool, G2gError> {
     let flags = be32(trun, 0)? & 0x00FF_FFFF;
     // version/flags + sample_count, then the optional fields in declaration order.
@@ -2901,7 +3017,7 @@ pub(crate) fn parse_trun(
     let count = be32(trun, 4)? as usize;
     let mut at = 8usize;
     if flags & 0x1 != 0 {
-        at += 4; // data offset (sequential mdat split makes it redundant)
+        at += 4; // data offset, read by `trun_data_offset`
     }
     let mut first_sample_flags = defaults.flags;
     if flags & 0x4 != 0 {
@@ -4102,10 +4218,9 @@ mod tests {
         let tfdt = |base: u64| full_box(b"tfdt", 1, 0, &base.to_be_bytes());
         let trun = |dur: u32, size: u32| {
             let mut p = 1u32.to_be_bytes().to_vec(); // sample count
-            p.extend_from_slice(&0u32.to_be_bytes()); // data offset
             p.extend_from_slice(&dur.to_be_bytes());
             p.extend_from_slice(&size.to_be_bytes());
-            full_box(b"trun", 0, 0x000301, &p) // data-offset | duration | size
+            full_box(b"trun", 0, 0x000300, &p) // duration | size
         };
         let moof = |track_id: u32, dur: u32, size: u32| {
             let traf = mp4_box(

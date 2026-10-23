@@ -199,16 +199,23 @@ fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
 /// Walk `moof`+`mdat` pairs and split every raw AAC access unit out of its
 /// `mdat`.
 fn parse_fragments(data: &[u8], timescale: u32) -> Result<Vec<Sample>, G2gError> {
-    Ok(moof_samples(data, 0, &mut FragmentStarts::default(), |_| {
-        Some((timescale, None, crate::fmp4::SampleDefaults::default()))
-    })?
-    .into_iter()
-    .map(|sample| Sample {
-        au: sample.bytes.to_vec(),
-        pts_ns: sample.timing.pts_ns,
-        duration_ns: sample.timing.duration_ns,
-    })
-    .collect())
+    // the first traf's track is the one this reader takes
+    let mut own_track = None;
+    let samples = moof_samples(data, 0, &mut FragmentStarts::default(), |track_id| {
+        (*own_track.get_or_insert(track_id) == track_id).then_some((
+            timescale,
+            None,
+            crate::fmp4::SampleDefaults::default(),
+        ))
+    })?;
+    Ok(samples
+        .into_iter()
+        .map(|sample| Sample {
+            au: sample.bytes.to_vec(),
+            pts_ns: sample.timing.pts_ns,
+            duration_ns: sample.timing.duration_ns,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -223,7 +230,6 @@ mod tests {
         const BASE_TIME: u64 = u64::MAX - 1;
         let mut trun = Vec::new();
         trun.extend_from_slice(&2u32.to_be_bytes()); // sample count
-        trun.extend_from_slice(&0u32.to_be_bytes()); // data offset
         for _ in 0..2 {
             trun.extend_from_slice(&FRAME_TICKS.to_be_bytes());
             trun.extend_from_slice(&1u32.to_be_bytes()); // sample size
@@ -231,8 +237,8 @@ mod tests {
         let traf = [
             full_box(b"tfhd", 0, 0, &1u32.to_be_bytes()),
             full_box(b"tfdt", 1, 0, &BASE_TIME.to_be_bytes()),
-            // data offset + sample duration + sample size
-            full_box(b"trun", 0, 0x301, &trun),
+            // sample duration + sample size
+            full_box(b"trun", 0, 0x300, &trun),
         ]
         .concat();
         let file = [

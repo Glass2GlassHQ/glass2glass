@@ -928,6 +928,15 @@ time from there, so the tracks keep one origin and a position read back seeks to
 its frame. A fragmented file that also keeps samples in its `moov` (ffmpeg's
 `frag_keyframe` without `empty_moov`) fails with `CapsMismatch`.
 
+A `moof` can hold one `traf` per track, as ffmpeg and mediamtx write by
+default. A `trun` with a `data_offset` reads its samples at that offset from its
+`traf`'s base: the `tfhd` base-data-offset, else the `moof` for the first `traf`
+or one flagged default-base-is-moof, else the end of the previous `traf`'s data.
+A `trun` without one continues where the previous `trun` ended, the first at the
+start of the `mdat` payload. Every sample has to lie inside the `mdat` that
+follows. The single-track readers (`fmp4demux`, `mp4src`, `mp4audiosrc`) take
+the first `traf`'s track as theirs.
+
 `Mp4DemuxN` reports a track's frame rate as `timescale / delta` when every `stts`
 entry codes the same sample delta, and `Rate::Any` when the deltas vary, the
 table is empty (a fragmented init) or the rate falls outside the 1 to 240 fps
