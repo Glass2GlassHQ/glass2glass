@@ -242,10 +242,10 @@ Highest leverage first:
     the second MP2 stream of `sample_mpeg_program_stream_scr.mpg`.
   - The `flvmux` duplicate-track, `avimux` second-video and `mp4mux` CMAF
     refusals still return a bare `CapsMismatch`: log what they refuse.
-  - `mpeg4/packed_bframes.avi` comes out with pts going backwards: two VOPs per
-    chunk need splitting. `h264/mixed-nal-coding.mp4` gives 5 frames where
-    ffprobe gives 10, and `hevc/two_first_slice.mp4` 35 where gst and ffmpeg give
-    34, repeating 2.000 s.
+  - `hevc/two_first_slice.mp4` gives 35 frames where gst and ffmpeg give 34: its
+    2.000 s sample holds an IDR and a second picture, and `NalParse` splits them.
+    Needs sample-based demuxers to mark one access unit per buffer (gst's
+    `alignment=au`) so the parser keeps the sample whole.
   - A TS or PS stream whose first PES carries no pts puts its first units at 0
     where ffmpeg back-fills them from the next stamp (`mpeg2/t.mpg`, 0.06 s): hold
     the leading units until the PID's first stamp, then back-fill.
