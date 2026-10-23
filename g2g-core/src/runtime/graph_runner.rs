@@ -4157,8 +4157,12 @@ fn solve_mux_input_dyn(
     mux: &dyn DynMultiInputElement,
     pad: usize,
 ) -> Result<Caps, G2gError> {
-    let src_c = CapsConstraint::Produces(CapsSet::one(new_caps.clone()));
     let mux_c = mux.caps_constraint_as_input(pad);
+    // a demuxer states an unknown framerate or geometry as a wildcard, which fixation refuses
+    if matches!(mux_c, CapsConstraint::AcceptsAny) {
+        return Ok(new_caps.clone());
+    }
+    let src_c = CapsConstraint::Produces(CapsSet::one(new_caps.clone()));
     let links = solve_linear(&[&src_c, &mux_c]).map_err(|_| G2gError::CapsMismatch)?;
     links.last().cloned().ok_or(G2gError::CapsMismatch)
 }

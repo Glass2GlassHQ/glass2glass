@@ -287,6 +287,37 @@ async fn mx1_per_input_capschanged_reconfigures_pad_and_is_not_leaked() {
     );
 }
 
+// a demuxer of a container with no frame rate states it as a wildcard
+#[tokio::test]
+async fn mx1_takes_a_new_input_caps_with_an_unknown_framerate() {
+    let unknown_rate = Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Fixed(1920),
+        height: Dim::Fixed(1080),
+        framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+    };
+    let mut src = ReconfigSrc {
+        initial: rgba(640, 480),
+        switch_to: unknown_rate.clone(),
+        before: 2,
+        after: 2,
+        configured: false,
+    };
+    let mut mux = InterleaveMux::new(1, rgba(640, 480));
+    let mut snk = ProbeSink {
+        log: Arc::new(Mutex::new(RecordingSink::default())),
+    };
+    {
+        let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut src];
+        run_muxer_sink(sources, &mut mux, &mut snk, &ZeroClock, 4)
+            .await
+            .expect("muxer pipeline completes");
+    }
+    assert_eq!(mux.input_caps(0), Some(&unknown_rate));
+}
+
 /// MX-2: when the per-input change shifts the derived merged output, the
 /// muxer eagerly emits exactly one downstream `CapsChanged` carrying the
 /// new output caps.
