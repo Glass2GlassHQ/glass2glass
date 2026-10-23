@@ -178,7 +178,7 @@ pub struct OggDemux {
     tags_posted: Option<u32>,
     /// The logical stream to emit (`stream` property): Opus by default, Flac
     /// for the Ogg-FLAC mapping, or Vorbis. A file with no stream of that codec
-    /// forwards nothing.
+    /// fails loud.
     stream: OggCodec,
     /// Caps, in-band config and packet timing for the selected bitstream.
     emitter: StreamEmitter,
@@ -426,14 +426,14 @@ impl OggDemux {
         out
     }
 
-    /// A chained physical stream carries the selected codec, or this pad cannot
-    /// present it: the output caps name one codec, so a chain that switches
-    /// codecs (or carries only mappings g2g does not read) fails loud instead of
-    /// silently going quiet for the rest of the file. Waits while the chain's
-    /// opening group is still arriving.
+    /// Every physical stream, the first included, carries the selected codec, or
+    /// this pad cannot present it: the output caps name one codec, so a file or
+    /// chain without it (or with only mappings g2g does not read) fails loud
+    /// instead of silently going quiet. Waits while the chain's opening group is
+    /// still arriving.
     fn check_chain_codec(&self) -> Result<(), G2gError> {
         let chain = self.demux.chain();
-        if chain == 0 || !self.demux.grouping_done() {
+        if !self.demux.grouping_done() {
             return Ok(());
         }
         let group = || self.demux.streams().iter().filter(|s| s.chain() == chain);
@@ -444,17 +444,18 @@ impl OggDemux {
         if group().any(|s| s.info().map(|i| i.codec) == Some(self.stream)) {
             return Ok(());
         }
+        let carried: Vec<OggCodec> = group().filter_map(|s| s.info().map(|i| i.codec)).collect();
         g2g_error!(
             self,
-            "chained physical stream {chain} carries no {:?} bitstream: a chain that changes codec cannot ride one output pad",
+            "physical stream {chain} carries no {:?} bitstream, only {carried:?}: one output pad presents one codec",
             self.stream
         );
         Err(G2gError::CapsMismatch)
     }
 
     /// Emit a `CapsChanged` once the stream parameters are known, then forward
-    /// each audio packet. A file with no stream of the selected codec is drained
-    /// and dropped (the output pad is typed by the selection).
+    /// each audio packet. A file with no stream of the selected codec fails loud
+    /// (the output pad is typed by the selection).
     async fn emit_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         // Surface the stream's metadata once per chain, as soon as its comment
         // header lands (a chained file's next physical stream has its own).

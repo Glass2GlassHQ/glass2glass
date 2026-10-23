@@ -582,6 +582,24 @@ async fn a_chain_that_changes_codec_fails_loud() {
     );
 }
 
+// a file of Vorbis only, against the default Opus selection
+#[tokio::test]
+async fn a_file_without_the_selected_codec_fails_loud() {
+    let vorbis = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vorbis_stereo_48k.ogg"),
+    )
+    .expect("the Vorbis fixture");
+    let mut d = OggDemux::new();
+    d.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::Ogg,
+    })
+    .expect("configure");
+    let mut sink = CaptureSink::default();
+    let result = AsyncElement::process(&mut d, chunk(&vorbis), &mut sink).await;
+    assert_eq!(result, Err(G2gError::CapsMismatch));
+    assert!(sink.audio().is_empty());
+}
+
 /// The multi-output demuxer routes by slot, so a chained file continues on the
 /// same port with a segment of its own.
 #[tokio::test]
