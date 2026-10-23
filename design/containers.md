@@ -746,13 +746,15 @@ with no header, so its RTP consumers are unaffected. The Opus `trak` also
 carries the `edts`/`elst` the Opus-in-ISOBMFF binding requires, with
 `media_time` = pre-skip.
 
-AAC leaves the MP4 demuxers ADTS-framed from the track's AudioSpecificConfig.
+AAC leaves the MP4, FLV, AVI and Matroska demuxers ADTS-framed from the track's
+AudioSpecificConfig.
 ADTS has no profile for ER AAC, ELD or USAC and no field for 960-sample
 frames, and it signals SBR only implicitly, so a decoder doubles the core rate.
 Those access units, and those of a config whose SBR output rate is anything but
 double the core rate (AOT 5 or 29, or a syncExtensionType 0x2B7 after the
 GASpecificConfig), go out raw with the AudioSpecificConfig ahead of them as a
-frame of its own. `aacparse`
+frame of its own: `adts_from_asc` refuses every config `is_raw_aac_config`
+sends raw, so no demuxer ADTS-frames the units after that config frame. `aacparse`
 forwards that stream unchanged. `ffmpegaudiodec` reopens the AAC decoder with the
 config as extradata and presets the channel count and rate it declares, which
 libavcodec needs to output an ER AAC frame. USAC decodes only on libavcodec 62

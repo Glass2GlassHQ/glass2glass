@@ -266,8 +266,9 @@ Highest leverage first:
   - `mkvmux::MkvMux` (single audio input) writes AAC with no `CodecPrivate` and
     the ADTS headers left in the blocks, which ffmpeg cannot decode for 8-channel
     `aac/al22_chCfg0PCE_44.mp4`.
-  - `flvdemux` ADTS-wraps AAC whose SBR output rate equals the core rate, so it
-    decodes at double rate. It needs the raw-config path the MP4 demuxers use.
+  - Raw AAC whose SBR runs at the core rate (`aac/al_sbr_sr_48_2_fsaac48.mp4`):
+    `mp4mux` refuses it and `matroskamux` writes a file ffmpeg decodes to other
+    samples.
   - `aac/aac-sce-in-stereo.mp4` is 23.2 ms late on every frame,
     `ac3/mp3ac325-4864-small.ts` gives 4 frames where ffmpeg gives 5,
     `mp3-conformance/sin1k0db.bit` 317 where it gives 318, and
