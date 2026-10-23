@@ -65,7 +65,8 @@ use g2g_core::{
 };
 
 use crate::mux::{
-    audio_header_config, audio_track_params, missing_header_config, refused_input, CODEC_CONFIG,
+    audio_header_config, audio_track_params, every_track_header_ready, refused_input,
+    require_header_config_at_end, CODEC_CONFIG,
 };
 use crate::ogg::{OggPageWriter, VorbisTiming};
 use crate::opusparse::{
@@ -119,6 +120,8 @@ struct OggStreamMux {
     headers_written: bool,
     /// Header packets `write_bos` held back for `write_rest`.
     pending_rest: Vec<Vec<u8>>,
+    // built from `headers` and the caps, cleared when either changes
+    built_headers: Option<HeaderPackets>,
     /// Cumulative samples the audio packets decode to, per the codec mapping.
     natural_samples: u64,
     /// Cumulative `duration_ns` the input frames declared.
@@ -143,6 +146,7 @@ impl OggStreamMux {
             headers: Vec::new(),
             headers_written: false,
             pending_rest: Vec::new(),
+            built_headers: None,
             natural_samples: 0,
             declared_ns: 0,
             untimed: false,
@@ -183,6 +187,7 @@ impl OggStreamMux {
         if self.headers_written {
             return;
         }
+        self.built_headers = None;
         if let Caps::Audio {
             channels,
             sample_rate,
@@ -197,6 +202,19 @@ impl OggStreamMux {
     /// Collect an in-band codec-config packet, to be written as a header page.
     fn push_header(&mut self, packet: &[u8]) {
         self.headers.push(packet.to_vec());
+        self.built_headers = None;
+    }
+
+    // packets this stream sent that are not written yet
+    fn held_packets(&self, queued_audio: usize) -> usize {
+        self.headers.len() + queued_audio
+    }
+
+    fn build_headers(&mut self) -> Result<Option<&HeaderPackets>, G2gError> {
+        if self.built_headers.is_none() {
+            self.built_headers = self.header_packets()?;
+        }
+        Ok(self.built_headers.as_ref())
     }
 
     /// Write this stream's beginning-of-stream page (the mapping's first packet
@@ -581,24 +599,22 @@ impl OggMuxN {
 
     /// Write the grouped header block: every stream's beginning-of-stream page in
     /// pad order, then each stream's remaining header pages (RFC 3533 §4).
-    fn write_headers(&mut self) -> Result<Vec<u8>, G2gError> {
+    fn write_headers(&mut self) -> Vec<u8> {
         let mut out = Vec::new();
-        for (input, stream) in self.streams.iter_mut().enumerate() {
-            let Some(packets) = stream.header_packets()? else {
-                let awaited = stream.format.map_or(CODEC_CONFIG, audio_header_config);
-                return Err(missing_header_config(
-                    short_type_name::<Self>(),
-                    input,
-                    awaited,
-                ));
+        let mut written = Vec::new();
+        // a stream that ended without its header packets gets no logical stream
+        for stream in &mut self.streams {
+            let Some(packets) = stream.built_headers.take() else {
+                continue;
             };
             out.extend_from_slice(&stream.write_bos(packets));
+            written.push(stream);
         }
-        for stream in &mut self.streams {
+        for stream in written {
             out.extend_from_slice(&stream.write_rest());
         }
         self.headers_written = true;
-        Ok(out)
+        out
     }
 
     /// Wrap muxed bytes as an output frame, or `None` when nothing was produced.
@@ -614,6 +630,23 @@ impl OggMuxN {
         self.emitted += 1;
         Some(PipelinePacket::DataFrame(frame))
     }
+}
+
+// each stream's header packets, `None` until it has sent a packet and its full config
+fn stream_headers<'a>(
+    streams: &'a mut [OggStreamMux],
+    agg: &InputAggregator<Frame>,
+) -> Result<Vec<Option<&'a HeaderPackets>>, G2gError> {
+    streams
+        .iter_mut()
+        .enumerate()
+        .map(|(input, stream)| {
+            if stream.held_packets(agg.queued(input)) == 0 {
+                return Ok(None);
+            }
+            stream.build_headers()
+        })
+        .collect()
 }
 
 /// The serial of pad `index` given the base. Wrapping, so a base near the top of
@@ -746,7 +779,22 @@ impl MultiInputElement for OggMuxN {
                 }
                 // A per-input Eos lets the merge release packets held waiting on
                 // this input; the runner emits the merged Eos.
-                PipelinePacket::Eos => self.agg.mark_ended(input),
+                PipelinePacket::Eos => {
+                    if !self.headers_written {
+                        let awaited = self.streams[input]
+                            .format
+                            .map_or(CODEC_CONFIG, audio_header_config);
+                        let held = self.streams[input].held_packets(self.agg.queued(input));
+                        require_header_config_at_end(
+                            short_type_name::<Self>(),
+                            input,
+                            &stream_headers(&mut self.streams, &self.agg)?,
+                            held,
+                            awaited,
+                        )?;
+                    }
+                    self.agg.mark_ended(input)
+                }
                 // Channels / rate only feed a synthesized header, written before
                 // any audio flows.
                 PipelinePacket::CapsChanged(caps) => {
@@ -779,13 +827,21 @@ impl MultiInputElement for OggMuxN {
                 }
             }
 
+            // Hold every packet until each stream that has not ended has its
+            // in-band config, so the header block can go out ahead of the audio.
+            if !self.headers_written
+                && !every_track_header_ready(
+                    &stream_headers(&mut self.streams, &self.agg)?,
+                    &self.agg,
+                )
+            {
+                return Ok(());
+            }
             let mut bytes = Vec::new();
-            // Drain every packet now safe to emit, in global PTS order. The first
-            // release means every contributing pad has delivered audio, so every
-            // stream's in-band config has landed and the header block can go out.
+            // Drain every packet now safe to emit, in global PTS order.
             while let Some((stream, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
                 if !self.headers_written {
-                    bytes.extend_from_slice(&self.write_headers()?);
+                    bytes.extend_from_slice(&self.write_headers());
                 }
                 let slice = frame
                     .domain
@@ -800,7 +856,7 @@ impl MultiInputElement for OggMuxN {
                 && (0..self.inputs).all(|i| self.agg.is_ended(i))
             {
                 self.closed = true;
-                for stream in &mut self.streams {
+                for stream in self.streams.iter_mut().filter(|s| s.headers_written) {
                     bytes.extend_from_slice(&stream.flush(true));
                 }
             }

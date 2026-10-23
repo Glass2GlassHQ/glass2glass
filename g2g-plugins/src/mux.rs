@@ -79,15 +79,15 @@ pub(crate) fn missing_header_config(muxer: &'static str, input: usize, awaited: 
     G2gError::CapsMismatch
 }
 
-// fails when `input` ends with frames still queued behind a track header that never got `awaited`
-pub(crate) fn require_header_config_at_end<I, T>(
+// fails when `input` ends with `held` frames behind a track header that never got `awaited`
+pub(crate) fn require_header_config_at_end<I>(
     muxer: &'static str,
     input: usize,
     inits: &[Option<I>],
-    aggregator: &InputAggregator<T>,
+    held: usize,
     awaited: &str,
 ) -> Result<(), G2gError> {
-    if inits[input].is_some() || aggregator.queued(input) == 0 {
+    if inits[input].is_some() || held == 0 {
         return Ok(());
     }
     Err(missing_header_config(muxer, input, awaited))
@@ -529,6 +529,16 @@ mod tests {
             ),
             expected("Vorbis identification and setup headers")
         );
+        // a Vorbis identification header with no setup header after it
+        let vorbis_ident_only: &[u8] = b"\x01vorbis\x00\x00\x00\x00";
+        assert_eq!(
+            end_of_stream_failure(
+                crate::oggmuxn::OggMuxN::new(1),
+                &stereo(AudioFormat::Vorbis),
+                vorbis_ident_only
+            ),
+            expected("Vorbis identification and setup headers")
+        );
     }
 
     // the bytes a two-pad `M` writes from one H.264 IDR while its AAC pad ends with no frames
@@ -566,6 +576,30 @@ mod tests {
         let mut demuxer = crate::matroska::MatroskaDemuxer::new();
         demuxer.push_data(&mkv);
         assert_eq!(demuxer.tracks().len(), 1);
+        assert_eq!(ogg_streams_beside_an_empty_pad(AudioFormat::Vorbis), 1);
+        assert_eq!(ogg_streams_beside_an_empty_pad(AudioFormat::Opus), 1);
+    }
+
+    // the logical streams a two-pad OggMuxN writes from one Opus packet while its `empty` pad ends with none
+    #[cfg(feature = "std")]
+    fn ogg_streams_beside_an_empty_pad(empty: AudioFormat) -> usize {
+        // a 20 ms CELT stereo Opus packet
+        let opus_packet: &[u8] = &[(31 << 3) | 0x04, 0, 0];
+        let mut mux = crate::oggmuxn::OggMuxN::new(2);
+        mux.configure_pipeline(0, &stereo(AudioFormat::Opus))
+            .expect("the Opus pad takes its caps");
+        mux.configure_pipeline(1, &stereo(empty))
+            .expect("the empty pad takes its caps");
+        let mut sink = CollectSink::default();
+        g2g_core::runtime::block_on(async {
+            mux.process(1, PipelinePacket::Eos, &mut sink).await?;
+            mux.process(0, system_frame(opus_packet), &mut sink).await?;
+            mux.process(0, PipelinePacket::Eos, &mut sink).await
+        })
+        .expect("the empty pad has no logical stream to fail");
+        let mut demuxer = crate::ogg::OggDemuxer::new();
+        demuxer.push_data(&sink.0);
+        demuxer.streams().len()
     }
 
     #[cfg(feature = "std")]

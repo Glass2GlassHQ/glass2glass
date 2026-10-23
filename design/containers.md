@@ -700,12 +700,13 @@ bitstream with its own serial, packets interleaved by PTS through the same
 `InputAggregator` merge the other multi-track muxers use. Grouping forces the
 page order, which is why the per-stream header writing is split in two. Every
 stream's beginning-of-stream page is written first, in pad order, then each
-stream's remaining header pages, then the data pages. That block goes out when
-the merge first releases a packet, the first moment every pad's in-band codec
-config is known to have arrived. A Vorbis or FLAC pad whose headers are still
-missing then fails with `CapsMismatch`, logging the input and the headers it
-lacked. `oggmux` is registered only as a fan-in muxer,
-so the parser builds `OggMuxN` for one input link too.
+stream's remaining header pages, then the data pages. Packets are held until
+every pad that has not ended has its in-band codec config, as in `FlvMuxN`,
+`Mp4MuxN` and `MkvMuxN`, and the block goes out with the first released packet.
+A Vorbis or FLAC pad that sent packets and reaches EOS without its full headers
+fails with `CapsMismatch`, logging the input and the headers it lacked, and a
+pad that ends with no packets gets no logical stream. `oggmux` is registered
+only as a fan-in muxer, so the parser builds `OggMuxN` for one input link too.
 
 With one input pad, a changed `Segment` after audio has flowed closes the
 logical bitstream on an end-of-stream page and opens the next link of a chained

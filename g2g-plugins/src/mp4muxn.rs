@@ -1336,7 +1336,7 @@ impl MultiInputElement for Mp4MuxN {
                         short_type_name::<Self>(),
                         input,
                         &self.inits,
-                        &self.agg,
+                        self.agg.queued(input),
                         self.header_config(input),
                     )?;
                     self.agg.mark_ended(input)
