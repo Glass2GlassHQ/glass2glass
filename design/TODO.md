@@ -233,6 +233,18 @@ Highest leverage first:
     no `ctts`. ffmpeg derives the DTS (gst's mp4mux writes the same timing as g2g).
   - Remux fails mid-run or writes an undecodable file: `opus_vp9-alpha.webm` and
     `loewe.ts` HEVC into mp4mux and matroskamux, `two_first_slice.mp4` into matroskamux.
+  - A one-pad `matroskamux` or `mp4mux` builds the single-input `MkvMux` /
+    `Mp4Mux`. `MkvMux` writes an empty `CodecPrivate` (AAC with ADTS headers,
+    Annex-B H.264/H.265, Opus with no `OpusHead`) and flags every block a keyframe,
+    and `Mp4Mux` takes no audio. Build the fan-in `MkvMuxN` / `Mp4MuxN` for any pad
+    count and delete the single-input muxers.
+  - Muxers write whatever audio rate and channel count reach them: `synth_opus_head`
+    clamps 0 channels to 1, Matroska writes `SamplingFrequency` 0, `mp4mux` takes its
+    `mdhd` timescale from the rate, and the TS Opus descriptor gets 0 channels. Refine
+    both from `CapsChanged` or the codec config (ASC, `OpusHead`) and fail loud at
+    header write when neither has them. Branch `m1861` (a compressed audio rate of 0
+    intersects as a wildcard, and a caps string with no `rate` or `channels` parses as
+    the wildcards) merges only after this lands.
   - `aacparse` forwards nothing, with no error, while it cannot refine a LOAS
     stream's caps: fail loud at EOS instead.
   - `mpegts/pmtchange.ts` audio 0 to 2 decode to other lengths and samples than
