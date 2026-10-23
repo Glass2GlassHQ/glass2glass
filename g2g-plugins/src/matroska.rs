@@ -460,10 +460,10 @@ fn encrypted_sections(
 ) -> Option<impl Iterator<Item = (usize, usize)> + '_> {
     let bounds = move || {
         let offsets = partition_table
-            .chunks_exact(PARTITION_OFFSET_LEN)
-            .map(|offset| {
-                u32::from_be_bytes([offset[0], offset[1], offset[2], offset[3]]) as usize
-            });
+            .as_chunks::<PARTITION_OFFSET_LEN>()
+            .0
+            .iter()
+            .map(|offset| u32::from_be_bytes(*offset) as usize);
         core::iter::once(0)
             .chain(offsets)
             .chain(core::iter::once(frame_len))
