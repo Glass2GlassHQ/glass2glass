@@ -44,7 +44,8 @@ use g2g_core::{
 };
 
 use crate::aacparse::{
-    is_leading_aac_config, is_raw_aac_config, loas_from_asc, muxer_audio_specific_config,
+    is_leading_aac_config, is_raw_aac_config, is_usac_config, loas_from_asc,
+    muxer_audio_specific_config,
 };
 use crate::dvbsub::{parse_page_ids, PageIds, DEFAULT_PAGE_ID, DEFAULT_SUBTITLING_TYPE};
 use crate::mpegts::{
@@ -341,6 +342,11 @@ impl AacCarriage {
             Self::Undecided => {
                 let raw_config =
                     muxer_audio_specific_config(frame, muxer)?.filter(|_| is_raw_aac_config(frame));
+                // ADTS has no profile for USAC, and LATM decoders (ffmpeg's included) do not read it
+                if raw_config.as_deref().is_some_and(is_usac_config) {
+                    g2g_error!(Target::category(muxer), "cannot carry USAC");
+                    return Err(G2gError::CapsMismatch);
+                }
                 let leads_raw_stream = raw_config.is_some();
                 *self = raw_config.map_or(Self::Adts, Self::Loas);
                 Ok(leads_raw_stream)
@@ -1031,5 +1037,24 @@ mod tests {
             .map(|unit| loas_from_asc(&ELD_CONFIG, unit).unwrap())
             .collect();
         assert_eq!(carried, expected, "each unit rides its own LOAS frame");
+    }
+
+    #[tokio::test]
+    async fn refuses_usac() {
+        // the AudioSpecificConfig of fate-suite aac/usac/Fd_1_c1_0x03.mp4, USAC 48 kHz mono
+        const USAC_CONFIG: [u8; 7] = [0xF9, 0x46, 0x23, 0x21, 0x10, 0xC0, 0x00];
+        let mut mux = TsMux::new();
+        mux.configure_pipeline(&Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: 1,
+            sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        })
+        .unwrap();
+        let mut ts_sink = CaptureSink::default();
+        let result = mux
+            .process(system_frame(USAC_CONFIG.to_vec(), 0), &mut ts_sink)
+            .await;
+        assert_eq!(result, Err(G2gError::CapsMismatch));
     }
 }

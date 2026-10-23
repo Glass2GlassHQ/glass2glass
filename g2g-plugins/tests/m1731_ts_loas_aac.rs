@@ -14,8 +14,8 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, MultiInputElement, PipelineClock,
-    PropValue,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, G2gError, MultiInputElement,
+    PipelineClock, PropValue,
 };
 use g2g_plugins::aacparse::AacParse;
 use g2g_plugins::mp4demux::Mp4Demux;
@@ -41,22 +41,16 @@ const LC_LOAS_TS: &str = "aac_lc_stereo_48000_latm.ts";
 #[derive(Debug, Clone, Copy)]
 struct ObjectType {
     fixture: &'static str,
-    // libavcodec 62 (ffmpeg 8.1) fails on a USAC config inside LATM, so it neither decodes nor profiles one
-    libavcodec_decodes_loas: bool,
 }
 
 const AAC_LD: ObjectType = ObjectType {
     fixture: "aac_ld_stereo_48000.m4a",
-    libavcodec_decodes_loas: true,
 };
 const AAC_ELD: ObjectType = ObjectType {
     fixture: "aac_eld_stereo_48000.m4a",
-    libavcodec_decodes_loas: true,
 };
-const USAC: ObjectType = ObjectType {
-    fixture: "aac_usac_stereo_48000.m4a",
-    libavcodec_decodes_loas: false,
-};
+// libavcodec 62 (ffmpeg 8.1) fails on a USAC config inside LATM and ADTS has no profile for it
+const USAC_FIXTURE: &str = "aac_usac_stereo_48000.m4a";
 
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -75,8 +69,47 @@ async fn aac_eld_goes_into_mpeg_ts_as_loas() {
 }
 
 #[tokio::test]
-async fn usac_goes_into_mpeg_ts_as_loas() {
-    check(USAC).await;
+async fn usac_is_refused_by_both_mpeg_ts_muxers() {
+    let source = fixture_path(USAC_FIXTURE);
+    let Ok(file) = std::fs::read(&source) else {
+        eprintln!(
+            "{} is absent (tools/aac-loas-fixtures.sh makes it); skipping",
+            source.display()
+        );
+        return;
+    };
+    let packets = demux(&file).await;
+    let caps = packets
+        .iter()
+        .find_map(|packet| match packet {
+            PipelinePacket::CapsChanged(caps) => Some(caps.clone()),
+            _ => None,
+        })
+        .expect("the demuxer announces the track caps");
+
+    let mut single = TsMux::new();
+    single.configure_pipeline(&caps).expect("configure");
+    let mut sink = CollectSink::default();
+    let mut single_result = Ok(());
+    for packet in demux(&file).await {
+        single_result = single.process(packet, &mut sink).await;
+        if single_result.is_err() {
+            break;
+        }
+    }
+    assert_eq!(single_result, Err(G2gError::CapsMismatch), "tsmux");
+
+    let mut fan_in = TsMuxN::new(1);
+    fan_in.configure_pipeline(0, &caps).expect("configure");
+    let mut sink = CollectSink::default();
+    let mut fan_in_result = Ok(());
+    for packet in packets {
+        fan_in_result = fan_in.process(0, packet, &mut sink).await;
+        if fan_in_result.is_err() {
+            break;
+        }
+    }
+    assert_eq!(fan_in_result, Err(G2gError::CapsMismatch), "tsmuxn");
 }
 
 #[tokio::test]
@@ -156,11 +189,9 @@ async fn check(object_type: ObjectType) {
 
         let ts_path = scratch_path(object_type, muxer, "ts");
         std::fs::write(&ts_path, &ts).expect("write the transport stream");
-        check_ffprobe(object_type, &source, &ts_path, muxer);
+        check_ffprobe(&source, &ts_path, muxer);
         check_gstreamer_parse(&ts_path, &caps, muxer);
-        if object_type.libavcodec_decodes_loas {
-            check_decoded_pcm(object_type, &source, &ts_path, &caps, muxer).await;
-        }
+        check_decoded_pcm(object_type, &source, &ts_path, &caps, muxer).await;
     }
 }
 
@@ -437,7 +468,7 @@ fn ffprobe_stream(path: &Path) -> Vec<String> {
         .collect()
 }
 
-fn check_ffprobe(object_type: ObjectType, source: &Path, ts: &Path, muxer: &str) {
+fn check_ffprobe(source: &Path, ts: &Path, muxer: &str) {
     if !have_ffprobe() {
         eprintln!("ffprobe not present; skipping the ffprobe leg");
         return;
@@ -446,13 +477,11 @@ fn check_ffprobe(object_type: ObjectType, source: &Path, ts: &Path, muxer: &str)
         String::from("codec_name=aac_latm"),
         format!("codec_tag={STREAM_TYPE_AAC_LATM:#06x}"),
     ]);
-    if object_type.libavcodec_decodes_loas {
-        expected.extend(
-            ffprobe_stream(source)
-                .into_iter()
-                .find(|line| line.starts_with("profile=")),
-        );
-    }
+    expected.extend(
+        ffprobe_stream(source)
+            .into_iter()
+            .find(|line| line.starts_with("profile=")),
+    );
     let ts_stream = ffprobe_stream(ts);
     for expected in expected {
         assert!(

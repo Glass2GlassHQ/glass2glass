@@ -190,6 +190,10 @@ pub(crate) fn is_raw_aac_config(config: &[u8]) -> bool {
         || has_undoubled_sbr(config)
 }
 
+pub(crate) fn is_usac_config(config: &[u8]) -> bool {
+    read_object_type(&mut BitReader::new(config)) == Some(AOT_USAC)
+}
+
 // the object type of a config a demuxer can neither ADTS-frame nor send raw (ALS, SLS, ...)
 #[cfg(feature = "std")]
 pub(crate) fn unframable_object_type(config: &[u8]) -> Option<u32> {
@@ -368,8 +372,9 @@ const AOT_AAC_LTP: u32 = 4;
 const AOT_SBR: u32 = 5;
 const AOT_PS: u32 = 29;
 const AOT_ESCAPE: u32 = 31;
+const AOT_USAC: u32 = 42;
 // ER AAC LC, ER AAC LTP, ER AAC LD, ER AAC ELD, USAC
-const RAW_AAC_OBJECT_TYPES: [u32; 5] = [17, 19, 23, 39, 42];
+const RAW_AAC_OBJECT_TYPES: [u32; 5] = [17, 19, 23, 39, AOT_USAC];
 const EXPLICIT_RATE_INDEX: u32 = 15;
 // raw_data_block element id of a program_config_element
 const ID_PCE: u32 = 5;
