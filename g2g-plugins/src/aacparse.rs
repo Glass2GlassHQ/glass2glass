@@ -862,6 +862,7 @@ impl PadTemplates for AacParse {
 
 /// Channel count and sample rate recovered from an AAC bitstream header (ADTS or
 /// LOAS/LATM).
+#[derive(Clone, Copy)]
 pub(crate) struct AacInfo {
     pub(crate) channels: u8,
     pub(crate) sample_rate: u32,

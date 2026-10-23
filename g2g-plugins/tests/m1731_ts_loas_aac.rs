@@ -130,6 +130,65 @@ async fn ffmpeg_written_lc_loas_plays_through_decodebin() {
     );
 }
 
+// ffmpeg's stream probe hands the decoder the config, so it decodes the frames ahead of it too
+#[cfg(feature = "ffmpeg")]
+#[tokio::test]
+async fn loas_frames_ahead_of_the_first_config_decode() {
+    use g2g_plugins::ffmpegaudiodec::FfmpegAudioDec;
+    // AAC-LC LOAS opening on frames that reuse a StreamMuxConfig a later frame carries, made by tools/aac-loas-fixtures.sh
+    const LATE_CONFIG_LOAS: &str = "aac_lc_stereo_48000_late_config.latm";
+    // AAC-LC codes 1024 samples per frame
+    const AAC_LC_FRAME_SAMPLES: usize = 1024;
+    const CHANNELS: u8 = 2;
+    const SAMPLE_RATE: u32 = 48_000;
+    let path = fixture_path(LATE_CONFIG_LOAS);
+    let loas = std::fs::read(&path).expect("read the fixture");
+    let mut frames = 0;
+    let mut at = 0;
+    while at < loas.len() {
+        let mut header = BitCursor {
+            data: &loas[at..],
+            position: 0,
+        };
+        assert_eq!(header.read(11), LOAS_SYNC_WORD, "a LOAS frame at {at}");
+        at += LOAS_HEADER_LEN + header.read(13) as usize;
+        frames += 1;
+    }
+    assert_eq!(at, loas.len(), "the fixture ends on a whole frame");
+    let mut decoder = FfmpegAudioDec::new();
+    decoder
+        .configure_pipeline(&Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: CHANNELS,
+            sample_rate: SAMPLE_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+        })
+        .expect("configures");
+    let mut sink = CollectSink::default();
+    let input = Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(loas.clone().into_boxed_slice())),
+        FrameTiming::default(),
+        0,
+    );
+    decoder
+        .process(PipelinePacket::DataFrame(input), &mut sink)
+        .await
+        .expect("decodes");
+    decoder
+        .process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("drains");
+    let pcm: Vec<u8> = data_frames(&sink.packets).concat();
+    let bytes_per_frame = AAC_LC_FRAME_SAMPLES * usize::from(CHANNELS) * size_of::<i16>();
+    assert_eq!(pcm.len(), frames * bytes_per_frame, "every frame decodes");
+    if have_ffmpeg() {
+        assert!(
+            pcm == ffmpeg_pcm(&["-f", "loas"], &path, "s16le"),
+            "the PCM is ffmpeg's"
+        );
+    }
+}
+
 async fn check(object_type: ObjectType) {
     let source = fixture_path(object_type.fixture);
     let Ok(file) = std::fs::read(&source) else {

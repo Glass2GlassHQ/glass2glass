@@ -200,8 +200,41 @@ impl FfmpegAudioDec {
         })?;
         self.decoder = None;
         self.open_codec(Id::AAC_LATM, None, Some(info))?;
+        // libavcodec drops the frames ahead of the first StreamMuxConfig unless it
+        // has the config as extradata, which ffmpeg's stream probe hands it
+        let config = self.latm_config_from(first_frame)?;
+        self.decoder = None;
+        self.open_codec(Id::AAC_LATM, config.as_deref(), Some(info))?;
         self.loas = true;
         Ok(())
+    }
+
+    // the AudioSpecificConfig libavcodec stores as extradata once it reads a StreamMuxConfig in `buf`
+    fn latm_config_from(&mut self, buf: &[u8]) -> Result<Option<Vec<u8>>, G2gError> {
+        let mut discarded = Vec::new();
+        for frame in loas_frames(buf) {
+            self.send_unit(frame)?;
+            self.drain(&mut discarded)?;
+            let decoder = self.decoder.as_ref().ok_or(G2gError::NotConfigured)?;
+            // SAFETY: the context outlives this read, and libavcodec keeps
+            // `extradata` allocated to at least `extradata_size` bytes.
+            let config = unsafe {
+                let context = decoder.as_ptr();
+                let size = usize::try_from((*context).extradata_size)
+                    .ok()
+                    .filter(|size| *size > 0);
+                match size {
+                    Some(size) if !(*context).extradata.is_null() => {
+                        Some(core::slice::from_raw_parts((*context).extradata, size).to_vec())
+                    }
+                    _ => None,
+                }
+            };
+            if config.is_some() {
+                return Ok(config);
+            }
+        }
+        Ok(None)
     }
 
     fn open_codec(
