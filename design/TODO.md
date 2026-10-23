@@ -249,13 +249,6 @@ Highest leverage first:
     Annex-B H.264/H.265, Opus with no `OpusHead`) and flags every block a keyframe,
     and `Mp4Mux` takes no audio. Build the fan-in `MkvMuxN` / `Mp4MuxN` for any pad
     count and delete the single-input muxers.
-  - Muxers write whatever audio rate and channel count reach them: `synth_opus_head`
-    clamps 0 channels to 1, Matroska writes `SamplingFrequency` 0, `mp4mux` takes its
-    `mdhd` timescale from the rate, and the TS Opus descriptor gets 0 channels. Refine
-    both from `CapsChanged` or the codec config (ASC, `OpusHead`) and fail loud at
-    header write when neither has them. Branch `m1861` (a compressed audio rate of 0
-    intersects as a wildcard, and a caps string with no `rate` or `channels` parses as
-    the wildcards) merges only after this lands.
   - `tsdemux` (H.264), `matroskademux` (VP9), `flvdemux` (H.264) and `psdemux`
     (MPEG-2) default to one codec and refuse a file without it, where gst exposes
     the file's first stream. `oggdemux` behind a consumer that takes any caps
@@ -279,10 +272,6 @@ Highest leverage first:
 
 ## Codecs
 
-- **Compressed audio caps round trip.** Compressed audio with an unknown rate prints
-  without `rate` and parses back as 48000, and an absent `channels` parses as 2 where
-  the printer omits 0. A round trip needs compressed rate 0 to intersect as a
-  wildcard, as `ANY_CHANNELS` already does.
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
 

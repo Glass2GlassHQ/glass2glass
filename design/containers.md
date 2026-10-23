@@ -817,6 +817,13 @@ program config element in each ADTS frame: the muxer moves the first one into
 the config and strips the in-band copies, as ffmpeg's `aac_adtstoasc` does. A fan-in muxer whose AAC pad delivers frames
 without either config fails the stream.
 
+An audio track header takes its channel count and sample rate from the pad caps,
+which a `CapsChanged` refines until the header is written. A field the caps leave
+at the `0` wildcard comes from the AAC AudioSpecificConfig or the Opus `OpusHead`,
+and an Opus rate is 48 kHz. A stream that states neither fails with
+`CapsMismatch` before the header goes out, in Matroska, MP4, Ogg Opus, the
+MPEG-TS Opus descriptor, FLV MP3 tags and AVI.
+
 MPEG-TS carries AAC as ADTS (0x0F) unless the stream opens on a raw
 AudioSpecificConfig (ER AAC, ELD, 960-sample frames). That pad goes out as
 LOAS/LATM (0x11) with audioMuxVersion 1. A pad whose first frame is already a LOAS

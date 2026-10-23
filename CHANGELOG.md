@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1863: muxers take an unknown audio rate or channel count from the AAC or Opus config and fail when the stream states neither.
+- M1861: a compressed audio rate of 0 intersects as a wildcard, and a caps string with no `rate` or `channels` leaves both open.
 - M1865: a fan-in muxer takes a mid-stream input caps with an unknown framerate or geometry instead of failing with CapsMismatch.
 - M1862: oggdemux with no `stream=` emits the file's first stream of the kind its consumer takes.
 - M1864: LOAS/LATM AAC clears a leading data stream element's byte alignment as ffmpeg does, and aacparse reads a LATM config whose channels are in a program config element.

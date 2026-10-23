@@ -819,8 +819,8 @@ A `NoDecodeChain` or `NoParseChain` error quotes the unplugged input through
 `Caps::to_gst_string`, gst caps syntax with wildcard and range fields left out, so
 the message names the codec and any fixed size, rate or channel count. Parsing
 goes the other way: a raw-audio caps string with no `rate` or `channels` gives
-`ANY_SAMPLE_RATE` / `ANY_CHANNELS`, as gst leaves them open, while compressed
-audio, which has no rate wildcard, defaults to 48000 Hz stereo. A present field whose
+`ANY_SAMPLE_RATE` / `ANY_CHANNELS`, as gst leaves them open, and so does a
+compressed-audio one. A present field whose
 value does not parse (`rate=abc`, `width=abc`, a field with no `=`) fails the parse,
 and a trailing comma is accepted, as gst accepts it.
 
@@ -974,10 +974,10 @@ as before.
   accumulated whole and parsed at EOS. The per-sample emit (caps announce,
   parameter-set prepend, ADTS re-framing) is shared, with the per-port "caps
   announced" / "parameter sets owed" flags persisting across the incremental
-  fragments. Compressed-audio port caps negotiate as `0/0` (AAC caps
-  intersect by strict equality, so the concrete channel layout / sample rate is
-  refined per port at runtime via `CapsChanged`, not advertised for the static
-  branch solve). Demuxed AAC is re-framed to ADTS from the track's `esds`
+  fragments. Compressed-audio port caps negotiate as `0/0`, the rate and
+  channel wildcards, and the concrete sample rate and channel count are refined
+  per port at runtime via `CapsChanged`, not advertised for the static branch
+  solve. Demuxed AAC is re-framed to ADTS from the track's `esds`
   AudioSpecificConfig, so the audio elementary stream is self-describing and
   decodes without out-of-band config, symmetric with the in-band video parameter
   sets. Encrypted (cbcs / MPEG-CENC) multi-track files are supported under the
