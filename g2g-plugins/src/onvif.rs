@@ -37,12 +37,14 @@ use alloc::boxed::Box;
 use base64::Engine as _;
 use sha1::{Digest, Sha1};
 
+use g2g_core::log::io_err;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
-    LatencyReport, OutputSink, PropError, PropKind, PropValue, PropertySpec,
+    Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, LatencyReport, OutputSink,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
+use crate::httperror::http_err;
 use crate::rtspsrc::RtspSrc;
 use crate::xmlutil::{iso8601_utc, xml_escape};
 
@@ -71,11 +73,11 @@ pub struct OnvifDevice {
 pub async fn discover(timeout: Duration) -> Result<Vec<OnvifDevice>, G2gError> {
     let sock = tokio::net::UdpSocket::bind("0.0.0.0:0")
         .await
-        .map_err(|_| hw())?;
+        .map_err(io_err)?;
     let probe = probe_message(&random_uuid());
     sock.send_to(probe.as_bytes(), WS_DISCOVERY_ADDR)
         .await
-        .map_err(|_| hw())?;
+        .map_err(io_err)?;
 
     let mut devices: Vec<OnvifDevice> = Vec::new();
     let deadline = tokio::time::Instant::now() + timeout;
@@ -299,10 +301,6 @@ static ONVIF_PROPS: &[PropertySpec] = &[
 // SOAP transport
 // ---------------------------------------------------------------------------
 
-fn hw() -> G2gError {
-    G2gError::Hardware(HardwareError::Other)
-}
-
 /// POST a SOAP 1.2 body to an ONVIF service and return the response text.
 /// Wraps `body` in an envelope with a WS-Security header when `user` is set.
 async fn soap_call(
@@ -324,8 +322,9 @@ async fn soap_call(
         .body(envelope)
         .send()
         .await
-        .map_err(|_| hw())?;
-    resp.text().await.map_err(|_| hw())
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(http_err)?;
+    resp.text().await.map_err(http_err)
 }
 
 /// Wrap a header fragment + body fragment in a SOAP 1.2 envelope. The ONVIF

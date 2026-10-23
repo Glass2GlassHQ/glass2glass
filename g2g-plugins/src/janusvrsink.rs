@@ -27,16 +27,15 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
 use str0m::bwe::{Bitrate, BweKind};
-use str0m::change::SdpAnswer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, Mid, Pt};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
-    g2g_debug, g2g_info, g2g_warn, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, G2gError, HardwareError, OutputSink, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Reconfigure,
+    g2g_debug, g2g_info, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Reconfigure,
 };
 
 pub use crate::janus_signal::DEFAULT_ENDPOINT;
@@ -52,7 +51,8 @@ use crate::webrtc_codec::{
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
-    add_ice_candidates, drain_pacer, feed_datagram, select_host_ip, send_transmit, STUN_SERVER_PROP,
+    accept_answer_sdp, add_ice_candidates, connect_failed, drain_pacer, feed_datagram,
+    select_host_ip, send_transmit, STUN_SERVER_PROP,
 };
 use crate::webrtcsink::{MediaUnit, DEFAULT_QUEUE_DEPTH, INITIAL_BITRATE_BPS};
 
@@ -172,10 +172,7 @@ impl JanusVrSink {
     async fn start_session(&mut self) -> Result<(), G2gError> {
         match self.signal_and_publish().await {
             Ok(()) => Ok(()),
-            Err(reason) => {
-                g2g_warn!(self, "{reason}");
-                Err(G2gError::Hardware(HardwareError::Other))
-            }
+            Err(reason) => Err(connect_failed(self, &reason)),
         }
     }
 
@@ -247,11 +244,7 @@ impl JanusVrSink {
                 .flatten()
         })
         .await?;
-        let answer = SdpAnswer::from_sdp_string(&answer_sdp)
-            .map_err(|e| format!("answer sdp: {e:?}\n{answer_sdp}"))?;
-        rtc.sdp_api()
-            .accept_answer(pending, answer)
-            .map_err(|e| format!("answer rejected: {e:?}\n{answer_sdp}"))?;
+        accept_answer_sdp(&mut rtc, pending, &answer_sdp)?;
         // a room whose codec list excludes ours answers the m-line disabled
         let direction = rtc.media(mid).map(|m| m.direction());
         if direction != Some(Direction::SendOnly) {

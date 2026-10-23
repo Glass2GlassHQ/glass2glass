@@ -39,8 +39,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, VideoCodec,
+    HardwareError, NetworkFailure, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -442,7 +442,7 @@ impl RtspServerSink {
         'handshake: loop {
             let n = control.read(&mut buf).await.map_err(io_err)?;
             if n == 0 {
-                return Err(G2gError::Hardware(HardwareError::Other)); // closed before PLAY
+                return Err(G2gError::Network(NetworkFailure::Connect)); // closed before PLAY
             }
             pending.extend_from_slice(&buf[..n]);
             while let Some((req, consumed)) = RtspRequest::parse(&pending) {

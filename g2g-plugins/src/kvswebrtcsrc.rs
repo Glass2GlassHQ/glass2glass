@@ -13,15 +13,14 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::UdpSocket;
 
-use str0m::change::SdpAnswer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
-    g2g_debug, g2g_info, g2g_warn, Caps, G2gError, HardwareError, MultiOutputSink,
-    MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    g2g_debug, g2g_info, g2g_warn, Caps, G2gError, MultiOutputSink, MultiOutputSource,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::kvs_signal::{
@@ -37,8 +36,8 @@ use crate::webrtc_codec::{
 };
 use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_util::{
-    drain_pacer, feed_datagram, random_hex_id, select_host_ip, send_transmit, IceTransportPolicy,
-    ICE_TRANSPORT_POLICY_PROP,
+    accept_answer_sdp, connect_failed, drain_pacer, feed_datagram, random_hex_id, select_host_ip,
+    send_transmit, IceTransportPolicy, ICE_TRANSPORT_POLICY_PROP,
 };
 
 const VIDEO_PORT: usize = 0;
@@ -238,11 +237,7 @@ impl KvsWebRtcSrc {
                 Received::Closed(reason) => return Err(reason),
             }
         };
-        let answer = SdpAnswer::from_sdp_string(&answer_sdp)
-            .map_err(|e| format!("answer sdp: {e:?}\n{answer_sdp}"))?;
-        rtc.sdp_api()
-            .accept_answer(pending, answer)
-            .map_err(|e| format!("answer rejected: {e:?}\n{answer_sdp}"))?;
+        accept_answer_sdp(&mut rtc, pending, &answer_sdp)?;
         for candidate in early_candidates {
             rtc.add_remote_candidate(candidate);
         }
@@ -363,10 +358,7 @@ impl MultiOutputSource for KvsWebRtcSrc {
             }
             let mut s = match self.offer_to_the_master().await {
                 Ok(session) => session,
-                Err(reason) => {
-                    g2g_warn!(self, "{reason}");
-                    return Err(G2gError::Hardware(HardwareError::Other));
-                }
+                Err(reason) => return Err(connect_failed(self, &reason)),
             };
 
             let video_codec = self.video_codec;

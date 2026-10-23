@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
-    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    NetworkFailure, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
     PropValue, PropertySpec,
 };
 
@@ -236,7 +236,7 @@ impl SrtSink {
         while !hs.is_established() {
             let n = match tokio::time::timeout_at(deadline, socket.recv(&mut buf)).await {
                 Ok(r) => r.map_err(io_err)?,
-                Err(_) => return Err(G2gError::Hardware(HardwareError::Other)),
+                Err(_) => return Err(G2gError::Network(NetworkFailure::Connect)),
             };
             let step = hs.on_packet(&buf[..n]);
             if let Some(reply) = step.reply {

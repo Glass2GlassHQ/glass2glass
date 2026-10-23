@@ -166,7 +166,10 @@ impl<T: PacketDuplex> AsyncElement for RemoteTransform<T> {
             }
             // Open the connection once, on first use.
             if !self.transport.is_connected() {
-                self.transport.connect().await?;
+                self.transport
+                    .connect()
+                    .await
+                    .map_err(G2gError::during_connect)?;
             }
             // The peer's subgraph must see the caps before the first frame.
             self.send_caps_if_new().await?;

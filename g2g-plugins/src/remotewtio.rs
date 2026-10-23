@@ -29,16 +29,15 @@ use web_transport_quinn::{ClientBuilder, CongestionControl, RecvStream, SendStre
 
 use g2g_core::wire::{decode_packet, encode_packet};
 use g2g_core::{
-    G2gError, HardwareError, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    G2gError, NetworkFailure, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::remotewire::{map_wire, send_framed, FramedRead};
 use crate::textencoding::hex_decode;
 
-/// Any WebTransport / QUIC / TLS failure maps to an internal hardware error (the
-/// network boundary), matching how the other transports treat a transport fault.
+/// Any WebTransport / QUIC / TLS failure ends the session.
 pub(crate) fn wt_err<E>(_: E) -> G2gError {
-    G2gError::Hardware(HardwareError::Other)
+    G2gError::Network(NetworkFailure::Stream)
 }
 
 /// How long a half-close waits for the peer to acknowledge what was already

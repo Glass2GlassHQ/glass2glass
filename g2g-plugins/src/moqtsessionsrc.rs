@@ -33,8 +33,8 @@ use g2g_core::{
     PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::moqt::parse_versions;
-use crate::moqt::subscriber::{byte_frame, connect, session_err, Pumped, SubscriberConfig};
+use crate::moqt::subscriber::{byte_frame, connect, Pumped, SubscriberConfig};
+use crate::moqt::{parse_versions, session_err};
 
 /// Subscribes to several tracks of one MoQ Transport broadcast and emits each
 /// on its own output pad.

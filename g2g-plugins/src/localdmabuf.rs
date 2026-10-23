@@ -41,6 +41,7 @@ use std::os::unix::net::UnixListener as StdUnixListener;
 use tokio::io::Interest;
 use tokio::net::UnixStream;
 
+use g2g_core::log::io_err;
 use g2g_core::memory::{MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SyncFd};
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
 use g2g_core::runtime::SourceLoop;
@@ -167,10 +168,6 @@ impl Record {
             sync_value: u64_at(67),
         }
     }
-}
-
-fn io_err(_: std::io::Error) -> G2gError {
-    G2gError::Hardware(HardwareError::Other)
 }
 
 /// Send one record, attaching `fd` (a FRAME's dma-buf) as `SCM_RIGHTS`. The fd

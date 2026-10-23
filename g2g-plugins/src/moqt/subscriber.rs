@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::log::LogSource;
 use g2g_core::memory::SystemSlice;
-use g2g_core::{g2g_debug, FrameTiming, G2gError, HardwareError, MemoryDomain};
+use g2g_core::{g2g_debug, FrameTiming, G2gError, MemoryDomain};
 
 use web_transport_quinn::SendStream;
 
@@ -31,7 +31,7 @@ use super::message::{request_error_code, ControlMessage, FetchType, JoiningFetch
 use super::reassembly::Reassembler;
 use super::session::{implementation_name, DataEvent, MoqtSession};
 use super::v18;
-use super::{negotiated_version, parse_versions, MoqtVersion};
+use super::{negotiated_version, parse_versions, session_err, MoqtVersion};
 
 /// What a subscribing element hands the session driver: everything both
 /// elements expose as properties and the driver needs to dial and subscribe.
@@ -79,6 +79,10 @@ impl Default for SubscriberConfig {
 /// Dial the relay and complete the handshake of whichever draft the server
 /// selected, leaving a driver ready to subscribe.
 pub async fn connect(cfg: &SubscriberConfig) -> Result<AnyDriver, G2gError> {
+    handshake(cfg).await.map_err(G2gError::during_connect)
+}
+
+async fn handshake(cfg: &SubscriberConfig) -> Result<AnyDriver, G2gError> {
     let offered = parse_versions(&cfg.versions)?;
     let protocols: Vec<&str> = offered.iter().map(|v| v.protocol()).collect();
     let session =
@@ -138,12 +142,6 @@ pub async fn connect(cfg: &SubscriberConfig) -> Result<AnyDriver, G2gError> {
 /// Tracks a publisher may establish here with PUBLISH. A publisher cannot make
 /// the subscriber hold state for more tracks than this.
 const MAX_PUBLISHED_TRACKS: usize = 16;
-
-/// A relay we cannot talk to, or one that violates the protocol, is the same
-/// thing to the pipeline: no stream.
-pub fn session_err() -> G2gError {
-    G2gError::Hardware(HardwareError::Other)
-}
 
 /// One track we asked the relay for.
 #[derive(Debug)]

@@ -34,7 +34,6 @@ use std::time::Instant;
 
 use tokio::net::UdpSocket;
 
-use str0m::change::SdpAnswer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::Direction;
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
@@ -54,9 +53,9 @@ use crate::webrtc_codec::{
 use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
-    add_host_candidate, delete_resource, feed_datagram, ice_restart, post_sdp, select_host_ip,
-    send_transmit, trickle_candidates, TricklePatch, TurnConfig, ICE_RESTART_TIMEOUT,
-    STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
+    add_host_candidate, delete_resource, feed_datagram, ice_restart, negotiate_over_http,
+    select_host_ip, send_transmit, trickle_candidates, TricklePatch, TurnConfig,
+    ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
 };
 
 /// Which media this source subscribes to. WHEP offers one recv-only m-line, and
@@ -331,7 +330,6 @@ impl SourceLoop for WebRtcWhepSrc {
             if crate::numbuffers::finished_at_zero_limit(self.frame_limit, out).await? {
                 return Ok(0);
             }
-            let hw = || G2gError::Hardware(HardwareError::Other);
 
             // ICE host candidate + UDP socket (see WebRtcSink for the rationale).
             let host_ip = select_host_ip();
@@ -353,15 +351,19 @@ impl SourceLoop for WebRtcWhepSrc {
             let (offer_sdp, pending, mid) = {
                 let mut api = rtc.sdp_api();
                 let mid = api.add_media(track.media_kind(), Direction::RecvOnly, None, None, None);
-                let (offer, pending) = api.apply().ok_or_else(hw)?;
+                let (offer, pending) = api
+                    .apply()
+                    .ok_or(G2gError::Hardware(HardwareError::Other))?;
                 (offer.to_sdp_string(), pending, mid)
             };
-            let session =
-                post_sdp(&self.whep_url, self.bearer.as_deref(), offer_sdp.clone()).await?;
-            let answer = SdpAnswer::from_sdp_string(&session.answer).map_err(|_| hw())?;
-            rtc.sdp_api()
-                .accept_answer(pending, answer)
-                .map_err(|_| hw())?;
+            let session = negotiate_over_http(
+                &mut rtc,
+                pending,
+                &self.whep_url,
+                self.bearer.as_deref(),
+                &offer_sdp,
+            )
+            .await?;
 
             // Gather reflexive / relay candidates and trickle them to the
             // resource; allocation failure degrades to host/srflx.

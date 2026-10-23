@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 use tokio::sync::mpsc;
 use web_transport_quinn::{RecvStream, SendStream, Session};
 
-use g2g_core::{G2gError, HardwareError};
+use g2g_core::{G2gError, NetworkFailure};
 
 use crate::remotewtio::{dial, wt_err};
 
@@ -36,7 +36,7 @@ use super::datagram::DatagramObject;
 use super::fetch::{FetchItem, FetchStreamDecoder, FetchWriter, FETCH_HEADER_TYPE};
 use super::message::ControlMessage;
 use super::reassembly::{ReceivedObject, StreamItem, SubgroupStreamDecoder, DATA_READ_CHUNK};
-use super::{read_stream_type, MoqtVersion};
+use super::{coding_err, read_stream_type, MoqtVersion};
 
 /// The WebTransport subprotocol that names draft-16
 /// (`moq-transport/src/setup/mod.rs`).
@@ -48,12 +48,6 @@ pub const MOQT_VERSION: u32 = 0xff00_0010;
 /// Read size for the control stream. Control messages are 16-bit-length
 /// bounded, so this only affects how often the reader syscalls.
 const CONTROL_READ_CHUNK: usize = 8192;
-
-/// A peer that violates the control-stream framing, or a transport fault, is
-/// the same thing to the pipeline: the session is gone.
-fn protocol_err(_: MoqtError) -> G2gError {
-    G2gError::Hardware(HardwareError::Other)
-}
 
 /// One event off the data plane. A stream's events arrive in order (`Opened`,
 /// its objects, `Closed`); events from different streams interleave freely,
@@ -152,7 +146,7 @@ impl MoqtSession {
         let server_params = match inbound.recv().await {
             Some(ControlMessage::ServerSetup { params }) => params,
             // Anything before SERVER_SETUP, or a closed stream, fails the dial.
-            _ => return Err(G2gError::Hardware(HardwareError::Other)),
+            _ => return Err(G2gError::Network(NetworkFailure::Connect)),
         };
         let peer_max_request_id = server_params
             .get_int(setup_param::MAX_REQUEST_ID)
@@ -278,7 +272,7 @@ impl MoqtSession {
     /// caller has to carry the object on a stream instead.
     pub fn send_datagram(&self, object: &DatagramObject) -> Result<(), G2gError> {
         let mut bytes = Vec::new();
-        object.encode(&mut bytes).map_err(protocol_err)?;
+        object.encode(&mut bytes).map_err(coding_err)?;
         self.session
             .send_datagram(bytes.into())
             .map_err(wt_err)
@@ -302,7 +296,7 @@ impl MoqtSession {
     /// caller then writes object headers and payloads.
     pub async fn open_subgroup(&mut self, header: &SubgroupHeader) -> Result<SendStream, G2gError> {
         let mut bytes = Vec::new();
-        header.encode(&mut bytes).map_err(protocol_err)?;
+        header.encode(&mut bytes).map_err(coding_err)?;
         let mut stream = self.session.open_uni().await.map_err(wt_err)?;
         // Smaller publisher priority is sent first, and QUIC send priority runs
         // the other way, so the stream priority is the negated byte.
@@ -331,7 +325,7 @@ impl MoqtSession {
 
 async fn write_message(stream: &mut SendStream, msg: &ControlMessage) -> Result<(), G2gError> {
     let mut bytes = Vec::new();
-    msg.encode(&mut bytes).map_err(protocol_err)?;
+    msg.encode(&mut bytes).map_err(coding_err)?;
     stream.write_all(&bytes).await.map_err(wt_err)
 }
 

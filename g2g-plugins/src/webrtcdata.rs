@@ -52,24 +52,27 @@ use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use str0m::change::{SdpAnswer, SdpOffer};
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 use str0m::crypto::from_feature_flags;
 use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::frame::Frame;
+use g2g_core::log::{short_type_name, LogSource, Target};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
-    G2gError, HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec,
+    G2gError, HardwareError, MemoryDomain, NetworkFailure, OutputSink, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
 use crate::turn::TurnSet;
-use crate::webrtc_util::{add_ice_candidates, select_host_ip, send_transmit};
+use crate::webrtc_util::{
+    accept_answer_sdp, accept_offer_sdp, add_ice_candidates, connect_failed, select_host_ip,
+    send_transmit,
+};
 use crate::webrtcduplex::{SdpChannel, SignalRole};
 
 /// Bounded depth of the element->session channel in the sink: backpressures the
@@ -216,9 +219,8 @@ async fn connect(
     role: SignalRole,
     mut sig: SdpChannel,
     settings: &ChannelSettings,
+    log: &dyn LogSource,
 ) -> Result<(Rtc, UdpSocket, SocketAddr), G2gError> {
-    let hw = || G2gError::Hardware(HardwareError::Other);
-
     let host_ip = select_host_ip();
     let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
     let local = socket.local_addr().map_err(io_err)?;
@@ -234,24 +236,30 @@ async fn connect(
             let (offer_sdp, pending) = {
                 let mut api = rtc.sdp_api();
                 api.add_channel_with_config(settings.to_config());
-                let (offer, pending) = api.apply().ok_or_else(hw)?;
+                let (offer, pending) = api
+                    .apply()
+                    .ok_or(G2gError::Hardware(HardwareError::Other))?;
                 (offer.to_sdp_string(), pending)
             };
             if !sig.send_sdp(offer_sdp).await {
-                return Err(hw());
+                return Err(G2gError::Network(NetworkFailure::Connect));
             }
-            let answer_sdp = sig.recv_sdp().await.ok_or_else(hw)?;
-            let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|_| hw())?;
-            rtc.sdp_api()
-                .accept_answer(pending, answer)
-                .map_err(|_| hw())?;
+            let answer_sdp = sig
+                .recv_sdp()
+                .await
+                .ok_or(G2gError::Network(NetworkFailure::Connect))?;
+            accept_answer_sdp(&mut rtc, pending, &answer_sdp)
+                .map_err(|reason| connect_failed(log, &reason))?;
         }
         SignalRole::Answerer => {
-            let offer_sdp = sig.recv_sdp().await.ok_or_else(hw)?;
-            let offer = SdpOffer::from_sdp_string(&offer_sdp).map_err(|_| hw())?;
-            let answer = rtc.sdp_api().accept_offer(offer).map_err(|_| hw())?;
+            let offer_sdp = sig
+                .recv_sdp()
+                .await
+                .ok_or(G2gError::Network(NetworkFailure::Connect))?;
+            let answer = accept_offer_sdp(&mut rtc, &offer_sdp)
+                .map_err(|reason| connect_failed(log, &reason))?;
             if !sig.send_sdp(answer.to_sdp_string()).await {
-                return Err(hw());
+                return Err(G2gError::Network(NetworkFailure::Connect));
             }
         }
     }
@@ -379,9 +387,9 @@ impl SourceLoop for WebRtcDataSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let hw = || G2gError::Hardware(HardwareError::Other);
-            let sig = sig.ok_or_else(hw)?;
-            let (mut rtc, socket, local) = connect(role, sig, &settings).await?;
+            let sig = sig.ok_or(G2gError::Hardware(HardwareError::Other))?;
+            let log = Target::category(short_type_name::<Self>());
+            let (mut rtc, socket, local) = connect(role, sig, &settings, &log).await?;
 
             out.push(PipelinePacket::CapsChanged(caps)).await?;
 
@@ -564,7 +572,8 @@ impl WebRtcDataSink {
             .sig
             .take()
             .ok_or(G2gError::Hardware(HardwareError::Other))?;
-        let (rtc, socket, local) = connect(self.role, sig, &self.settings).await?;
+        let log = Target::category(short_type_name::<Self>());
+        let (rtc, socket, local) = connect(self.role, sig, &self.settings, &log).await?;
         let (tx, rx) = mpsc::channel::<Vec<u8>>(self.queue_depth);
         tokio::spawn(run_egress(rtc, socket, local, rx, self.linger));
         self.tx = Some(tx);

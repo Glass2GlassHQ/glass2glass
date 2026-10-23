@@ -226,8 +226,9 @@ impl SourceLoop for LiveKitDataSrc {
                 return Ok(0);
             }
             let grant = VideoGrant::data_receiver(self.room_settings.room.clone());
-            let mut session =
-                DataSession::open(&self.room_settings, &self.ice, &grant, &*self).await?;
+            let mut session = DataSession::open(&self.room_settings, &self.ice, &grant, &*self)
+                .await
+                .map_err(G2gError::during_connect)?;
             out.push(PipelinePacket::CapsChanged(OUTPUT_CAPS)).await?;
             let received = self.receive(&mut session, out).await;
             session.leave().await;

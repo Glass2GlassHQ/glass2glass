@@ -15,14 +15,13 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::WebSocketStream;
 
 use g2g_core::wire::{decode_packet, encode_packet};
-use g2g_core::{G2gError, HardwareError, PipelinePacket};
+use g2g_core::{G2gError, HardwareError, NetworkFailure, PipelinePacket};
 
 use crate::remotewire::map_wire;
 
-/// Any WebSocket / transport failure maps to an internal hardware error (the
-/// network boundary), matching how the CPU sinks treat a transport failure.
+/// Any WebSocket / transport failure ends the session.
 pub(crate) fn ws_err(_: WsError) -> G2gError {
-    G2gError::Hardware(HardwareError::Other)
+    G2gError::Network(NetworkFailure::Stream)
 }
 
 /// The address inside a `ws://host:port` URL, for the sink that listens instead

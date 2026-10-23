@@ -6,6 +6,24 @@ boundary, MoQ Transport, SMPTE ST 2110 media transport, in-process links
 between graphs, zero-copy local IPC for GPU memory, and RIST.
 Part of the design in [README.md](README.md).
 
+## Network errors
+
+A network element fails with `G2gError::Network(NetworkFailure::Connect)`
+when connecting, a handshake, signalling or SDP negotiation fails. It fails with
+`G2gError::Network(NetworkFailure::Stream)` when the peer closes or resets the
+session, or breaks the protocol, after media starts. The transport mappers
+(`wt_err`, `ws_err`, `map_wire`, `moqt::session_err`) assume the second case.
+Each element's setup call site applies `G2gError::during_connect`, which turns
+any network error raised inside setup into `Connect`. HTTP exchanges such as the
+WHIP and WHEP SDP POST and ONVIF SOAP go through `httperror::http_err`, so a
+refused request reports `HardwareError::Http(status)`. Socket calls keep
+`HardwareError::Io(errno)`. The message only goes to the element's log.
+`G2gError` cannot carry it.
+
+The WebRTC elements share the SDP steps in `webrtc_util`. These are
+`accept_offer_sdp`, `accept_answer_sdp`, `negotiate_over_http` (POST the offer,
+apply the answer) and `connect_failed` (log the reason, return `Connect`).
+
 ## WebRTC
 
 The WebRTC elements are built on [str0m](https://github.com/algesten/str0m), a

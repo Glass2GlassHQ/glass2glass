@@ -22,7 +22,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    MemoryDomain, NetworkFailure, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
     PropertySpec,
 };
 
@@ -271,9 +271,9 @@ impl SourceLoop for SrtSrc {
             if let Some(pass) = &self.passphrase {
                 let km = hs
                     .peer_km()
-                    .ok_or(G2gError::Hardware(HardwareError::Other))?;
-                let crypto =
-                    SrtCrypto::from_km(km, pass).ok_or(G2gError::Hardware(HardwareError::Other))?;
+                    .ok_or(G2gError::Network(NetworkFailure::Connect))?;
+                let crypto = SrtCrypto::from_km(km, pass)
+                    .ok_or(G2gError::Network(NetworkFailure::Connect))?;
                 receiver.set_crypto(crypto);
             }
             let limit = self.frame_limit;

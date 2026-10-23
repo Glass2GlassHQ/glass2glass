@@ -77,7 +77,7 @@ use g2g_core::log::LogSource;
 use crate::bereader::{be_u16, be_u32};
 use crate::fmp4::trun_first_sample_is_sync;
 use crate::moqt::catalog;
-use crate::moqt::coding::{MoqtError, Params, TrackName, TrackNamespace};
+use crate::moqt::coding::{Params, TrackName, TrackNamespace};
 use crate::moqt::data::{StreamHeaderType, SubgroupHeader, SubgroupObjectHeader};
 use crate::moqt::datagram::DatagramObject;
 use crate::moqt::fetch::FetchWriter;
@@ -87,7 +87,7 @@ use crate::moqt::message::{
 };
 use crate::moqt::session::{implementation_name, MoqtSession};
 use crate::moqt::v18;
-use crate::moqt::{negotiated_version, parse_versions, MoqtVersion};
+use crate::moqt::{coding_err, negotiated_version, parse_versions, session_err, MoqtVersion};
 use crate::mp4box::{be32, boxes, find_box, find_path};
 use crate::remotewtio::wt_err;
 
@@ -103,12 +103,6 @@ const MAX_PENDING_SUBSCRIBES: usize = 64;
 /// FETCH responses written at once. A peer cannot make the publisher hold more
 /// response streams (and the objects queued on them) than this.
 const MAX_ACTIVE_FETCHES: usize = 16;
-
-/// A malformed message we built, or a peer message we could not decode: either
-/// way the session is unusable.
-fn proto_err(_: MoqtError) -> G2gError {
-    G2gError::Hardware(HardwareError::Other)
-}
 
 /// What an accepted subscription is serving.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -541,7 +535,8 @@ impl MoqtSink {
                 )
                 .await
             }
-        };
+        }
+        .map_err(G2gError::during_connect);
         if outcome.is_ok() {
             self.connect = Connect::Connected;
         }
@@ -582,9 +577,7 @@ async fn connect_session(
             let mut session =
                 MoqtSession::connect_over(session, dial.max_request_id, &implementation_name())
                     .await?;
-            let id = session
-                .allocate_request_id()
-                .ok_or(G2gError::Hardware(HardwareError::Other))?;
+            let id = session.allocate_request_id().ok_or_else(session_err)?;
             session
                 .send(&ControlMessage::PublishNamespace {
                     id,
@@ -744,7 +737,7 @@ impl Core {
     /// since the pipeline only learns of it when it next has a frame.
     fn alive(&self) -> Result<(), G2gError> {
         if self.dead || self.session.as_ref().is_some_and(Wire::is_closed) {
-            return Err(G2gError::Hardware(HardwareError::Other));
+            return Err(session_err());
         }
         Ok(())
     }
@@ -771,7 +764,7 @@ impl Core {
                 // Our namespace publish being refused leaves nothing to serve.
                 if Some(id) == self.namespace_request {
                     g2g_debug!(self, "PUBLISH_NAMESPACE rejected, code {error_code}");
-                    return Err(G2gError::Hardware(HardwareError::Other));
+                    return Err(session_err());
                 }
                 // A refused PUBLISH costs that track, not the session.
                 self.reject_publish(id);
@@ -782,7 +775,7 @@ impl Core {
                 }
             }
             ControlMessage::PublishNamespaceCancel { .. } | ControlMessage::GoAway { .. } => {
-                return Err(G2gError::Hardware(HardwareError::Other));
+                return Err(session_err());
             }
             ControlMessage::Fetch {
                 id,
@@ -1009,9 +1002,7 @@ impl Core {
         let track_name = TrackName::new(name);
         let (id, reply, watch) = match self.session.as_mut().ok_or(G2gError::NotConfigured)? {
             Wire::V16(session) => {
-                let id = session
-                    .allocate_request_id()
-                    .ok_or(G2gError::Hardware(HardwareError::Other))?;
+                let id = session.allocate_request_id().ok_or_else(session_err)?;
                 session
                     .send(&ControlMessage::Publish {
                         id,
@@ -2015,10 +2006,10 @@ async fn write_object(
     match version {
         MoqtVersion::V16 => SubgroupObjectHeader::normal(object_id_delta, payload.len())
             .encode(HEADER_TYPE, &mut header)
-            .map_err(proto_err)?,
+            .map_err(coding_err)?,
         MoqtVersion::V18 => v18::data::SubgroupObjectHeader::normal(object_id_delta, payload.len())
             .encode(v18::data::SubgroupHeaderType::explicit(), &mut header)
-            .map_err(proto_err)?,
+            .map_err(coding_err)?,
     }
     stream.write_all(&header).await.map_err(wt_err)?;
     stream.write_all(payload).await.map_err(wt_err)

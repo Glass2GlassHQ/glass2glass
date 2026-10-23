@@ -18,15 +18,17 @@ use std::time::Instant;
 
 use tokio::net::UdpSocket;
 
+use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::media::MediaTime;
 use str0m::net::{Protocol, Receive, Transmit};
 use str0m::{Candidate, IceCreds, Input, Rtc};
 
+use crate::httperror::http_err;
 use crate::turn::TurnSet;
-use g2g_core::log::LogSource;
+use g2g_core::log::{io_err, LogSource};
 use g2g_core::{
-    g2g_debug, g2g_info, g2g_warn, G2gError, HardwareError, PropError, PropKind, PropValue,
-    PropertySpec,
+    g2g_debug, g2g_info, g2g_warn, G2gError, HardwareError, NetworkFailure, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 /// `G2G_DEBUG=webrtc-http:...` names the shared WHIP/WHEP HTTP signalling path.
@@ -216,7 +218,7 @@ pub(crate) fn select_host_ip() -> IpAddr {
 /// answer SDP plus the created resource (`Location` header, resolved absolute)
 /// and its `ETag`, for later trickle / DELETE. Keeps the localhost-IPv4 retry
 /// fallback.
-pub(crate) async fn post_sdp(
+async fn post_sdp(
     url: &str,
     bearer: Option<&str>,
     offer_sdp: String,
@@ -232,10 +234,10 @@ pub(crate) async fn post_sdp(
                     .await
                     .map_err(|e| {
                         log_sdp_post_error(&fallback_url, &e);
-                        G2gError::Hardware(HardwareError::Other)
+                        http_err(e)
                     })?
             } else {
-                return Err(G2gError::Hardware(HardwareError::Other));
+                return Err(http_err(e));
             }
         }
     };
@@ -246,7 +248,7 @@ pub(crate) async fn post_sdp(
             &WebRtcHttpLog,
             "sdp POST failed for {url}: HTTP {status}: {body}"
         );
-        return Err(G2gError::Hardware(HardwareError::Other));
+        return Err(G2gError::Hardware(HardwareError::Http(status.as_u16())));
     }
     // Resolve the resource URL before consuming the response for its body:
     // `Location` may be relative and is resolved against the request URL.
@@ -263,13 +265,59 @@ pub(crate) async fn post_sdp(
         .map(String::from);
     let answer = resp.text().await.map_err(|e| {
         g2g_warn!(&WebRtcHttpLog, "sdp response read failed for {url}: {e}");
-        G2gError::Hardware(HardwareError::Other)
+        http_err(e)
     })?;
     Ok(WhipSession {
         answer,
         resource,
         etag,
     })
+}
+
+// POSTs our offer and applies the answer the endpoint returns
+pub(crate) async fn negotiate_over_http(
+    rtc: &mut Rtc,
+    pending: SdpPendingOffer,
+    url: &str,
+    bearer: Option<&str>,
+    offer_sdp: &str,
+) -> Result<WhipSession, G2gError> {
+    let session = post_sdp(url, bearer, offer_sdp.to_string()).await?;
+    accept_answer_sdp(rtc, pending, &session.answer).map_err(|reason| {
+        connect_failed(
+            &WebRtcHttpLog,
+            &format!("{reason}\nlocal offer:\n{offer_sdp}"),
+        )
+    })?;
+    Ok(session)
+}
+
+// applies the peer's answer to our pending offer, or says what was wrong with it
+pub(crate) fn accept_answer_sdp(
+    rtc: &mut Rtc,
+    pending: SdpPendingOffer,
+    answer_sdp: &str,
+) -> Result<(), String> {
+    let answer = SdpAnswer::from_sdp_string(answer_sdp)
+        .map_err(|e| format!("answer sdp: {e:?}\n{answer_sdp}"))?;
+    rtc.sdp_api()
+        .accept_answer(pending, answer)
+        .map_err(|e| format!("answer rejected: {e:?}\n{answer_sdp}"))
+}
+
+// our answer to the peer's offer, or what was wrong with the offer
+pub(crate) fn accept_offer_sdp(rtc: &mut Rtc, offer_sdp: &str) -> Result<SdpAnswer, String> {
+    let offer = SdpOffer::from_sdp_string(offer_sdp)
+        .map_err(|e| format!("offer sdp: {e:?}\n{offer_sdp}"))?;
+    rtc.sdp_api()
+        .accept_offer(offer)
+        .map_err(|e| format!("offer rejected: {e:?}\n{offer_sdp}"))
+}
+
+// logs why session setup failed, which the returned error leaves out
+pub(crate) fn connect_failed(log: &dyn LogSource, reason: &str) -> G2gError {
+    g2g_warn!(log, "{reason}");
+    G2gError::Network(NetworkFailure::Connect)
 }
 
 async fn send_sdp(
@@ -462,9 +510,7 @@ impl ResourceHandle {
 /// initial offer already carries a directly reachable candidate (trickle sends
 /// the reflexive / relay ones after the POST).
 pub(crate) fn add_host_candidate(rtc: &mut Rtc, socket: &UdpSocket) -> Result<(), G2gError> {
-    let local = socket
-        .local_addr()
-        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    let local = socket.local_addr().map_err(io_err)?;
     if let Ok(host) = Candidate::host(local, "udp") {
         rtc.add_local_candidate(host);
     }
@@ -658,9 +704,7 @@ pub(crate) async fn add_ice_candidates(
     socket: &UdpSocket,
     stun_server: Option<&str>,
 ) -> Result<(), G2gError> {
-    let local = socket
-        .local_addr()
-        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    let local = socket.local_addr().map_err(io_err)?;
     if let Ok(host) = Candidate::host(local, "udp") {
         rtc.add_local_candidate(host);
     }
@@ -1001,11 +1045,8 @@ mod tests {
         assert!(frag.contains("a=mid:0\r\n"));
     }
 
-    /// The SDP POST must capture the resource URL (relative `Location` resolved
-    /// against the request URL) and the `ETag`. A hand-rolled one-shot TCP
-    /// responder stands in for the WHIP server (no new HTTP-server dependency).
-    #[tokio::test]
-    async fn post_sdp_captures_location_and_etag() {
+    // a hand-rolled one-shot TCP responder that stands in for the WHIP server
+    async fn answer_one_request(response: String) -> (u16, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -1017,20 +1058,28 @@ mod tests {
             // completes; a single read is sufficient for the small offer.
             let mut buf = [0u8; 4096];
             let _ = stream.read(&mut buf).await.unwrap();
-            let body = "v=0\r\no=- 2 2 IN IP4 0.0.0.0\r\n";
-            let resp = alloc::format!(
-                "HTTP/1.1 201 Created\r\n\
-                 Content-Type: application/sdp\r\n\
-                 Location: /whip/resource/abc123\r\n\
-                 ETag: \"etag-xyz\"\r\n\
-                 Content-Length: {}\r\n\
-                 \r\n{}",
-                body.len(),
-                body
-            );
-            stream.write_all(resp.as_bytes()).await.unwrap();
+            stream.write_all(response.as_bytes()).await.unwrap();
             stream.flush().await.unwrap();
         });
+        (port, server)
+    }
+
+    /// The SDP POST must capture the resource URL (relative `Location` resolved
+    /// against the request URL) and the `ETag`.
+    #[tokio::test]
+    async fn post_sdp_captures_location_and_etag() {
+        let body = "v=0\r\no=- 2 2 IN IP4 0.0.0.0\r\n";
+        let (port, server) = answer_one_request(alloc::format!(
+            "HTTP/1.1 201 Created\r\n\
+             Content-Type: application/sdp\r\n\
+             Location: /whip/resource/abc123\r\n\
+             ETag: \"etag-xyz\"\r\n\
+             Content-Length: {}\r\n\
+             \r\n{}",
+            body.len(),
+            body
+        ))
+        .await;
 
         let url = alloc::format!("http://127.0.0.1:{port}/whip");
         let session = post_sdp(&url, None, "v=0\r\n".to_string())
@@ -1043,7 +1092,25 @@ mod tests {
             Some(alloc::format!("http://127.0.0.1:{port}/whip/resource/abc123").as_str())
         );
         assert_eq!(session.etag.as_deref(), Some("\"etag-xyz\""));
-        assert_eq!(session.answer, "v=0\r\no=- 2 2 IN IP4 0.0.0.0\r\n");
+        assert_eq!(session.answer, body);
+    }
+
+    #[tokio::test]
+    async fn a_refused_sdp_post_fails_with_the_http_status() {
+        let status = 401;
+        let (port, server) = answer_one_request(alloc::format!(
+            "HTTP/1.1 {status} Unauthorized\r\nContent-Length: 0\r\n\r\n"
+        ))
+        .await;
+
+        let url = alloc::format!("http://127.0.0.1:{port}/whip");
+        let refused = post_sdp(&url, None, "v=0\r\n".to_string()).await;
+        server.await.unwrap();
+
+        assert_eq!(
+            refused.err(),
+            Some(G2gError::Hardware(HardwareError::Http(status)))
+        );
     }
 
     /// The element and its session task both hold the resource handle and both

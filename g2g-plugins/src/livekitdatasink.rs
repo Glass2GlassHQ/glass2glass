@@ -136,7 +136,9 @@ impl LiveKitDataSink {
 
     async fn start_session(&mut self) -> Result<mpsc::Sender<Vec<u8>>, G2gError> {
         let grant = VideoGrant::data_sender(self.room_settings.room.clone());
-        let session = DataSession::open(&self.room_settings, &self.ice, &grant, self).await?;
+        let session = DataSession::open(&self.room_settings, &self.ice, &grant, self)
+            .await
+            .map_err(G2gError::during_connect)?;
         let (tx, rx) = mpsc::channel(QUEUE_DEPTH);
         self.session = Some(tokio::spawn(run_session(session, self.kind(), rx)));
         self.tx = Some(tx.clone());

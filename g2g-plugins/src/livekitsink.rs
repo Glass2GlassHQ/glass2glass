@@ -48,7 +48,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 use str0m::bwe::{Bitrate, BweKind};
-use str0m::change::{SdpAnswer, SdpPendingOffer};
+use str0m::change::SdpPendingOffer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind, Mid, Pt, Rid};
 use str0m::rtp::AbsCaptureTime;
@@ -57,8 +57,8 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig}
 use g2g_core::log::{short_type_name, LogName, LogSource, Target};
 use g2g_core::{
     g2g_debug, g2g_warn, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, HardwareError, MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, ReverseChannel,
+    G2gError, HardwareError, MultiInputElement, NetworkFailure, OutputSink, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, ReverseChannel,
 };
 
 use crate::filesink::io_err;
@@ -78,7 +78,9 @@ use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_simulcast::{
     rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
-use crate::webrtc_util::{feed_datagram, select_host_ip, send_transmit};
+use crate::webrtc_util::{
+    accept_answer_sdp, connect_failed, feed_datagram, select_host_ip, send_transmit,
+};
 
 /// Default bounded depth of the element->session media channel (per direction).
 const DEFAULT_QUEUE_DEPTH: usize = 256;
@@ -276,7 +278,6 @@ impl LiveKitSink {
     /// Run the LiveKit join + publish handshake and spawn the session task.
     /// Runs on the first frame, once every track kind is known.
     async fn start_session(&mut self) -> Result<(), G2gError> {
-        let hw = || G2gError::Hardware(HardwareError::Other);
         // Phase A: the server's first envelope is the JoinResponse.
         let (mut ws, join) = self
             .room_settings
@@ -345,7 +346,9 @@ impl LiveKitSink {
                     None,
                 )
             });
-            let (offer, pending) = api.apply().ok_or_else(hw)?;
+            let (offer, pending) = api
+                .apply()
+                .ok_or(G2gError::Hardware(HardwareError::Other))?;
             (offer.to_sdp_string(), pending, video_mid, audio_mid)
         };
 
@@ -410,7 +413,9 @@ impl LiveKitSink {
                     want_cids.retain(|c| *c != tp.cid);
                 }
                 Some(SignalResponse::Trickle(t)) => stash_candidate(&mut remote_cands, t),
-                Some(SignalResponse::Leave) | None => return Err(hw()),
+                Some(SignalResponse::Leave) | None => {
+                    return Err(G2gError::Network(NetworkFailure::Connect))
+                }
                 Some(_) => {}
             }
         }
@@ -430,19 +435,13 @@ impl LiveKitSink {
                 Some(SignalResponse::Trickle(t)) => stash_candidate(&mut remote_cands, t),
                 Some(SignalResponse::Leave) | None => {
                     g2g_warn!(self, "closed before publisher answer");
-                    return Err(hw());
+                    return Err(G2gError::Network(NetworkFailure::Connect));
                 }
                 Some(_) => {}
             }
         };
-        let answer = SdpAnswer::from_sdp_string(&answer.sdp).map_err(|e| {
-            g2g_warn!(self, "publisher answer parse failed: {e:?}");
-            hw()
-        })?;
-        rtc.sdp_api().accept_answer(pending, answer).map_err(|e| {
-            g2g_warn!(self, "publisher answer rejected: {e:?}");
-            hw()
-        })?;
+        accept_answer_sdp(&mut rtc, pending, &answer.sdp)
+            .map_err(|reason| connect_failed(self, &format!("publisher {reason}")))?;
 
         // Apply any buffered remote candidates now the remote description is set.
         for cand in remote_cands.drain(..) {
@@ -650,7 +649,9 @@ impl MultiInputElement for LiveKitSink {
                         if !self.all_configured() {
                             return Err(G2gError::NotConfigured);
                         }
-                        self.start_session().await?;
+                        self.start_session()
+                            .await
+                            .map_err(G2gError::during_connect)?;
                     }
                     let sink = self
                         .sinks

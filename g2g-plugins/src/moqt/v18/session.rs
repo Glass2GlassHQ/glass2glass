@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 use tokio::sync::{mpsc, oneshot};
 use web_transport_quinn::{RecvStream, SendStream, Session};
 
-use g2g_core::{G2gError, HardwareError};
+use g2g_core::G2gError;
 
 use crate::remotewtio::wt_err;
 
@@ -39,7 +39,7 @@ use super::super::reassembly::DATA_READ_CHUNK;
 // only in its integer flavour.
 pub use super::super::session::DataEvent;
 use super::super::session::{open_fetch_stream, read_fetch};
-use super::super::{read_stream_type, MoqtVersion};
+use super::super::{coding_err, read_stream_type, session_err, MoqtVersion};
 use super::coding::{setup_option, MoqtError, Params};
 use super::data::{
     SubgroupHeader, SubgroupStreamDecoder, UniStreamType, PADDING_DATAGRAM_TYPE,
@@ -62,14 +62,6 @@ const MAX_CONTROL_BUFFER: usize = u16::MAX as usize + 64;
 /// Most a padding stream may deliver before we stop reading it. Padding carries
 /// no application data, so this only keeps a peer from spending our time.
 const MAX_PADDING_BYTES: u64 = 16 * 1024 * 1024;
-
-fn protocol_err() -> G2gError {
-    G2gError::Hardware(HardwareError::Other)
-}
-
-fn coding_err(_: MoqtError) -> G2gError {
-    protocol_err()
-}
 
 /// A request stream the peer opened, with its first message and both halves. The
 /// response goes on `tx`; `rx` carries any REQUEST_UPDATE and, by ending, the
@@ -137,7 +129,7 @@ impl Session18 {
 
         // Our SETUP is already written, so waiting here cannot deadlock against
         // a peer that also waits to send first.
-        let peer_options = setup_rx.await.map_err(|_| protocol_err())??;
+        let peer_options = setup_rx.await.map_err(|_| session_err())??;
 
         Ok(Self {
             session,
@@ -176,7 +168,7 @@ impl Session18 {
         if !msg.opens_request_stream() {
             // §3.3 lists the seven messages that may open a request stream;
             // anything else would be a violation at the peer.
-            return Err(protocol_err());
+            return Err(session_err());
         }
         let (mut tx, rx) = self.session.open_bi().await.map_err(wt_err)?;
         write_message(&mut tx, msg).await?;
@@ -278,10 +270,10 @@ impl MessageReader {
                 Err(MoqtError::Incomplete) => {}
                 // A malformed control message is a PROTOCOL_VIOLATION: stop
                 // rather than resynchronize on framing we no longer trust.
-                Err(MoqtError::Malformed) => return Err(protocol_err()),
+                Err(MoqtError::Malformed) => return Err(session_err()),
             }
             if self.buf.len() > MAX_CONTROL_BUFFER {
-                return Err(protocol_err());
+                return Err(session_err());
             }
             match rx.read(&mut chunk).await {
                 Ok(Some(n)) if n > 0 => self.buf.extend_from_slice(&chunk[..n]),
@@ -292,7 +284,7 @@ impl MessageReader {
                     return if self.buf.is_empty() {
                         Ok(None)
                     } else {
-                        Err(protocol_err())
+                        Err(session_err())
                     }
                 }
                 Err(_) => return Ok(None),
@@ -392,7 +384,7 @@ async fn accept_uni(
         }
     }
     if let Some(slot) = setup.take() {
-        let _ = slot.send(Err(protocol_err()));
+        let _ = slot.send(Err(session_err()));
     }
     session.close(session_error_code::PROTOCOL_VIOLATION, b"stream type");
     closed.store(true, Ordering::Relaxed);
@@ -417,7 +409,7 @@ async fn read_control(
         // Anything but SETUP first, or a stream that ends there, fails the
         // handshake (§3.3).
         _ => {
-            let _ = setup.send(Err(protocol_err()));
+            let _ = setup.send(Err(session_err()));
             closed.store(true, Ordering::Relaxed);
             return;
         }

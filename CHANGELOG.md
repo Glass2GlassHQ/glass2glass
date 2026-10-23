@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1872: the MoQ, WebRTC, LiveKit, remote, RTMP, SRT and RTSP-server elements fail with `G2gError::Network` at connect or mid-stream, and WHIP/WHEP SDP POST and ONVIF failures name the HTTP status.
 - M1868: tsdemux keeps its output timestamps continuous across a source restart, a flush with no seek behind it.
 - M1867: hlssrc resolves the multivariant playlist again when a media playlist reload answers 4xx, so it survives an origin restart that drops its session.
 - M1866: rtspsrc fails with `G2gError::Network(NetworkFailure::Connect)` during session setup and `G2gError::RtspStream` once media flows, and logs retina's message.

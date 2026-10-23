@@ -55,7 +55,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use str0m::bwe::{Bitrate, BweKind};
-use str0m::change::{SdpAnswer, SdpOffer};
+use str0m::change::SdpAnswer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind, Mid, Pt};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
@@ -65,8 +65,8 @@ use g2g_core::g2g_warn;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     Caps, CapsConstraint, ConfigureOutcome, DuplexInbound, G2gError, HardwareError, MemoryDomain,
-    MultiDuplexSession, MultiOutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, ReverseChannel,
+    MultiDuplexSession, MultiOutputSink, NetworkFailure, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, ReverseChannel,
 };
 
 use crate::filesink::io_err;
@@ -77,9 +77,10 @@ use crate::webrtc_codec::{
 };
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_util::{
-    add_ice_candidates, feed_datagram, get_linger_ms_property, media_time_ns, non_empty,
-    select_host_ip, send_transmit, set_linger_ms_property, DEFAULT_LINGER_MS, LINGER_MS_PROP,
-    STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
+    accept_answer_sdp, accept_offer_sdp, add_ice_candidates, connect_failed, feed_datagram,
+    get_linger_ms_property, media_time_ns, non_empty, select_host_ip, send_transmit,
+    set_linger_ms_property, DEFAULT_LINGER_MS, LINGER_MS_PROP, STUN_SERVER_PROP, TURN_PASS_PROP,
+    TURN_SERVER_PROP, TURN_USER_PROP,
 };
 
 /// The tracks a duplex session offers at the handshake, in pad order: video on
@@ -583,6 +584,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
         let nacks_seen = self.nacks_seen.clone();
         Box::pin(async move {
             let hw = || G2gError::Hardware(HardwareError::Other);
+            let log = g2g_core::log::Target::category(DUPLEX_CATEGORY);
             let mut sig = sig.ok_or_else(hw)?;
 
             let host_ip = select_host_ip();
@@ -646,21 +648,30 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                         let (offer, pending) = api.apply().ok_or_else(hw)?;
                         (offer.to_sdp_string(), pending)
                     };
-                    sig.tx.send(offer_sdp).await.map_err(|_| hw())?;
-                    let answer_sdp = sig.rx.recv().await.ok_or_else(hw)?;
-                    let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|_| hw())?;
-                    rtc.sdp_api()
-                        .accept_answer(pending, answer)
-                        .map_err(|_| hw())?;
+                    sig.tx
+                        .send(offer_sdp)
+                        .await
+                        .map_err(|_| G2gError::Network(NetworkFailure::Connect))?;
+                    let answer_sdp = sig
+                        .rx
+                        .recv()
+                        .await
+                        .ok_or(G2gError::Network(NetworkFailure::Connect))?;
+                    accept_answer_sdp(&mut rtc, pending, &answer_sdp)
+                        .map_err(|reason| connect_failed(&log, &reason))?;
                 }
                 SignalRole::Answerer => {
-                    let offer_sdp = sig.rx.recv().await.ok_or_else(hw)?;
-                    let offer = SdpOffer::from_sdp_string(&offer_sdp).map_err(|_| hw())?;
-                    let answer = rtc.sdp_api().accept_offer(offer).map_err(|_| hw())?;
+                    let offer_sdp = sig
+                        .rx
+                        .recv()
+                        .await
+                        .ok_or(G2gError::Network(NetworkFailure::Connect))?;
+                    let answer = accept_offer_sdp(&mut rtc, &offer_sdp)
+                        .map_err(|reason| connect_failed(&log, &reason))?;
                     sig.tx
                         .send(answer.to_sdp_string())
                         .await
-                        .map_err(|_| hw())?;
+                        .map_err(|_| G2gError::Network(NetworkFailure::Connect))?;
                 }
             }
 
@@ -932,19 +943,15 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                         prune_bindings!();
                                     }
                                     if renego_pending.is_none() {
-                                        if let Ok(offer) =
-                                            str0m::change::SdpOffer::from_sdp_string(sdp)
-                                        {
-                                            if let Ok(answer) = rtc.sdp_api().accept_offer(offer) {
-                                                let msg = alloc::format!(
-                                                    "{RENEGO_ANSWER}{}",
-                                                    answer.to_sdp_string()
-                                                );
-                                                let _ = sig.tx.send(msg).await;
-                                                // The peer may have stopped an
-                                                // m-line: free its pads (M785).
-                                                prune_bindings!();
-                                            }
+                                        if let Ok(answer) = accept_offer_sdp(&mut rtc, sdp) {
+                                            let msg = alloc::format!(
+                                                "{RENEGO_ANSWER}{}",
+                                                answer.to_sdp_string()
+                                            );
+                                            let _ = sig.tx.send(msg).await;
+                                            // The peer may have stopped an
+                                            // m-line: free its pads (M785).
+                                            prune_bindings!();
                                         }
                                     }
                                 }

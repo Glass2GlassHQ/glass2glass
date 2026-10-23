@@ -46,7 +46,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use str0m::bwe::{Bitrate, BweKind};
-use str0m::change::{SdpAnswer, SdpPendingOffer};
+use str0m::change::SdpPendingOffer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, Mid, Pt};
 use str0m::rtp::AbsCaptureTime;
@@ -68,8 +68,8 @@ use crate::webrtc_codec::{
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
-    add_host_candidate, drain_pacer, feed_datagram, ice_restart, post_sdp, select_host_ip,
-    send_transmit, trickle_candidates, ResourceHandle, TricklePatch, TurnConfig,
+    add_host_candidate, drain_pacer, feed_datagram, ice_restart, negotiate_over_http,
+    select_host_ip, send_transmit, trickle_candidates, ResourceHandle, TricklePatch, TurnConfig,
     ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
 };
 
@@ -283,23 +283,14 @@ impl WebRtcSink {
         };
 
         // WHIP: POST the offer, receive the answer SDP + resource URL, apply it.
-        let session = post_sdp(&self.whip_url, self.bearer.as_deref(), offer_sdp.clone()).await?;
-        let answer = SdpAnswer::from_sdp_string(&session.answer).map_err(|e| {
-            g2g_warn!(
-                self,
-                "answer SDP parse failed: {e:?}\nlocal offer:\n{offer_sdp}\nremote answer:\n{}",
-                session.answer
-            );
-            G2gError::Hardware(HardwareError::Other)
-        })?;
-        rtc.sdp_api().accept_answer(pending, answer).map_err(|e| {
-            g2g_warn!(
-                self,
-                "answer SDP rejected: {e:?}\nlocal offer:\n{offer_sdp}\nremote answer:\n{}",
-                session.answer
-            );
-            G2gError::Hardware(HardwareError::Other)
-        })?;
+        let session = negotiate_over_http(
+            &mut rtc,
+            pending,
+            &self.whip_url,
+            self.bearer.as_deref(),
+            &offer_sdp,
+        )
+        .await?;
 
         // Gather reflexive / relay candidates and trickle them to the resource.
         let turn: TurnSet = trickle_candidates(

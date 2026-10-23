@@ -45,6 +45,7 @@ use std::os::unix::net::UnixListener as StdUnixListener;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 
+use g2g_core::log::io_err;
 use g2g_core::memory::{CudaKeepAlive, OwnedCudaBuffer};
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
 use g2g_core::runtime::SourceLoop;
@@ -152,10 +153,6 @@ fn decode_desc(b: &[u8]) -> Option<FrameDesc> {
         },
         handle,
     })
-}
-
-fn io_err(_: std::io::Error) -> G2gError {
-    G2gError::Hardware(HardwareError::Other)
 }
 
 /// Write one tagged, length-framed message: `[tag][u32 len][payload]`.

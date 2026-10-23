@@ -30,7 +30,8 @@ use core::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use g2g_core::log::LogSource;
 use g2g_core::{
-    g2g_info, g2g_warn, G2gError, HardwareError, PropError, PropKind, PropValue, PropertySpec,
+    g2g_info, g2g_warn, G2gError, HardwareError, NetworkFailure, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 use str0m::Rtc;
 use tokio::net::{TcpStream, UdpSocket};
@@ -275,19 +276,21 @@ impl RoomSettings {
         auto_subscribe: bool,
         log: &dyn LogSource,
     ) -> Result<(SignalSocket, JoinResponse), G2gError> {
-        let hw = || G2gError::Hardware(HardwareError::Other);
         let token = self.access_token(grant, ttl_secs)?;
         let ws_url = signal_ws_url(&self.url, &token, auto_subscribe);
         let (mut ws, _response) = connect_async(&ws_url).await.map_err(|e| {
             g2g_warn!(log, "WebSocket connect to {} failed: {e}", self.url);
-            hw()
+            G2gError::Network(NetworkFailure::Connect)
         })?;
         loop {
-            match recv_signal(&mut ws).await? {
+            match recv_signal(&mut ws)
+                .await
+                .map_err(G2gError::during_connect)?
+            {
                 Some(SignalResponse::Join(join)) => return Ok((ws, join)),
                 Some(SignalResponse::Leave) | None => {
                     g2g_warn!(log, "closed before JoinResponse");
-                    return Err(hw());
+                    return Err(G2gError::Network(NetworkFailure::Connect));
                 }
                 Some(_) => {}
             }
@@ -342,7 +345,7 @@ pub(crate) async fn recv_signal(ws: &mut SignalSocket) -> Result<Option<SignalRe
             Some(Ok(_)) => continue,
             Some(Err(e)) => {
                 g2g_warn!(&LiveKitSignalLog, "signal recv failed: {e}");
-                return Err(G2gError::Hardware(HardwareError::Other));
+                return Err(G2gError::Network(NetworkFailure::Stream));
             }
         }
     }
@@ -354,7 +357,7 @@ pub(crate) async fn send_signal(
 ) -> Result<(), G2gError> {
     ws.send(Message::Binary(req.encode())).await.map_err(|e| {
         g2g_warn!(&LiveKitSignalLog, "signal send failed: {e}");
-        G2gError::Hardware(HardwareError::Other)
+        G2gError::Network(NetworkFailure::Stream)
     })
 }
 
@@ -797,7 +800,7 @@ impl IceSettings {
         );
         if self.transport_policy == IceTransportPolicy::Relay && turn.is_empty() {
             g2g_warn!(log, "relay policy but no TURN allocation succeeded");
-            return Err(G2gError::Hardware(HardwareError::Other));
+            return Err(G2gError::Network(NetworkFailure::Connect));
         }
         Ok(turn)
     }

@@ -16,7 +16,6 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
 use str0m::bwe::{Bitrate, BweKind};
-use str0m::change::SdpOffer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{MediaKind, Mid, Pt};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
@@ -24,8 +23,8 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig}
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
     g2g_debug, g2g_info, g2g_warn, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, G2gError, HardwareError, OutputSink, PipelinePacket, PropError, PropValue,
-    PropertySpec, Reconfigure,
+    ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropValue, PropertySpec,
+    Reconfigure,
 };
 
 use crate::kvs_signal::{
@@ -42,8 +41,8 @@ use crate::webrtc_codec::{
 use crate::webrtc_receive::UDP_RECV_BYTES;
 use crate::webrtc_stats::{WebRtcStatsHandle, STATS_INTERVAL};
 use crate::webrtc_util::{
-    drain_pacer, feed_datagram, select_host_ip, send_transmit, IceTransportPolicy,
-    ICE_TRANSPORT_POLICY_PROP,
+    accept_offer_sdp, connect_failed, drain_pacer, feed_datagram, select_host_ip, send_transmit,
+    IceTransportPolicy, ICE_TRANSPORT_POLICY_PROP,
 };
 use crate::webrtcsink::{MediaUnit, DEFAULT_QUEUE_DEPTH, INITIAL_BITRATE_BPS};
 
@@ -160,10 +159,7 @@ impl KvsWebRtcSink {
     async fn start_session(&mut self) -> Result<(), G2gError> {
         match self.connect_as_master().await {
             Ok(()) => Ok(()),
-            Err(reason) => {
-                g2g_warn!(self, "{reason}");
-                Err(G2gError::Hardware(HardwareError::Other))
-            }
+            Err(reason) => Err(connect_failed(self, &reason)),
         }
     }
 
@@ -439,13 +435,7 @@ async fn answer(
         turn.relay_addrs().len(),
         turn.relay_addrs()
     );
-    let offer = SdpOffer::from_sdp_string(offer_sdp)
-        .map_err(|e| format!("offer sdp: {e:?}\n{offer_sdp}"))?;
-    let answer_sdp = rtc
-        .sdp_api()
-        .accept_offer(offer)
-        .map_err(|e| format!("offer rejected: {e:?}\n{offer_sdp}"))?
-        .to_sdp_string();
+    let answer_sdp = accept_offer_sdp(&mut rtc, offer_sdp)?.to_sdp_string();
     let mid = sending_mid(&answer_sdp, m.track.media_kind()).ok_or_else(|| {
         format!(
             "offered no {:?} m-line we can send on",

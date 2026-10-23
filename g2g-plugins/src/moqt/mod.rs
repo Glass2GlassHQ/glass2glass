@@ -47,7 +47,7 @@ pub mod v18;
 
 use alloc::vec::Vec;
 
-use g2g_core::{G2gError, HardwareError};
+use g2g_core::{G2gError, NetworkFailure};
 use web_transport_quinn::RecvStream;
 
 use coding::{MoqtError, Reader};
@@ -94,6 +94,17 @@ impl MoqtVersion {
     }
 }
 
+/// A relay we cannot talk to, or one that violates the protocol, is the same
+/// thing to the pipeline: no stream.
+pub fn session_err() -> G2gError {
+    G2gError::Network(NetworkFailure::Stream)
+}
+
+// a message that does not encode or decode leaves the session unusable
+pub(crate) fn coding_err(_: MoqtError) -> G2gError {
+    session_err()
+}
+
 /// Read just enough of a unidirectional stream to decode the type varint that
 /// opens it, returning it and every byte read (the type included, since the
 /// decoder that follows needs it).
@@ -111,11 +122,11 @@ pub async fn read_stream_type(
         match version.reader(&buf).varint() {
             Ok(code) => return Ok((code, buf)),
             Err(MoqtError::Incomplete) if buf.len() < 9 => {}
-            Err(_) => return Err(G2gError::Hardware(HardwareError::Other)),
+            Err(_) => return Err(session_err()),
         }
         match stream.read(&mut chunk[..9 - buf.len()]).await {
             Ok(Some(n)) if n > 0 => buf.extend_from_slice(&chunk[..n]),
-            _ => return Err(G2gError::Hardware(HardwareError::Other)),
+            _ => return Err(session_err()),
         }
     }
 }
@@ -155,7 +166,7 @@ pub fn negotiated_version(
         .and_then(|response| response.protocol.as_deref())
     {
         Some(protocol) => {
-            MoqtVersion::from_protocol(protocol).ok_or(G2gError::Hardware(HardwareError::Other))
+            MoqtVersion::from_protocol(protocol).ok_or(G2gError::Network(NetworkFailure::Connect))
         }
         None if offered.contains(&MoqtVersion::V16) => Ok(MoqtVersion::V16),
         None => Ok(offered[0]),

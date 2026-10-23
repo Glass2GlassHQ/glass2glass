@@ -32,7 +32,7 @@ use futures_util::StreamExt;
 use tokio::net::UdpSocket;
 use tokio_tungstenite::tungstenite::Message;
 
-use str0m::change::{SdpAnswer, SdpPendingOffer};
+use str0m::change::SdpPendingOffer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind, Mid, Pt};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
@@ -47,9 +47,9 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::livekit_signal::{
     candidate_from_init_json, ping_timestamp, room_property_table, send_signal, AddTrackRequest,
-    IceSettings, IceTransportPolicy, RoomSettings, SessionDescription, SignalRequest,
-    SignalResponse, SignalTarget, TrackSource, TrackType, VideoGrant, ICE_TRANSPORT_POLICY_PROP,
-    LIVEKIT_TURN_SERVER_PROP, TURN_PASS_PROP, TURN_USER_PROP,
+    IceSettings, IceTransportPolicy, LiveKitSignalLog, RoomSettings, SessionDescription,
+    SignalRequest, SignalResponse, SignalTarget, TrackSource, TrackType, VideoGrant,
+    ICE_TRANSPORT_POLICY_PROP, LIVEKIT_TURN_SERVER_PROP, TURN_PASS_PROP, TURN_USER_PROP,
 };
 use crate::livekitsrc::answer_offer;
 use crate::webrtc_codec::{
@@ -59,8 +59,8 @@ use crate::webrtc_codec::{
 };
 use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_util::{
-    feed_datagram, get_linger_ms_property, send_transmit, set_linger_ms_property,
-    DEFAULT_LINGER_MS, LINGER_MS_PROP,
+    accept_answer_sdp, connect_failed, feed_datagram, get_linger_ms_property, send_transmit,
+    set_linger_ms_property, DEFAULT_LINGER_MS, LINGER_MS_PROP,
 };
 
 /// Send input / recv output pad layout: 0 = video, 1 = audio.
@@ -313,7 +313,6 @@ impl MultiDuplexSession for LiveKitDuplex {
             {
                 return Ok(0);
             }
-            let hw = || G2gError::Hardware(HardwareError::Other);
             let (mut ws, join) = self
                 .room_settings
                 .join(&self.grant(), TOKEN_TTL_SECS, true, &*self)
@@ -368,7 +367,9 @@ impl MultiDuplexSession for LiveKitDuplex {
                     Some(audio_cid.clone()),
                     None,
                 );
-                let (offer, pending) = api.apply().ok_or_else(hw)?;
+                let (offer, pending) = api
+                    .apply()
+                    .ok_or(G2gError::Hardware(HardwareError::Other))?;
                 (offer.to_sdp_string(), pending, v, a)
             };
             for (cid, ty, source, name) in [
@@ -534,12 +535,10 @@ impl MultiDuplexSession for LiveKitDuplex {
                                 // Publisher answer: completes our offer.
                                 Some(SignalResponse::Answer(sd)) => {
                                     if let Some(pending) = pub_pending.take() {
-                                        let answer = SdpAnswer::from_sdp_string(&sd.sdp)
-                                            .map_err(|_| hw())?;
-                                        pub_rtc
-                                            .sdp_api()
-                                            .accept_answer(pending, answer)
-                                            .map_err(|_| hw())?;
+                                        accept_answer_sdp(&mut pub_rtc, pending, &sd.sdp)
+                                            .map_err(|reason| {
+                                                connect_failed(&LiveKitSignalLog, &format!("publisher {reason}"))
+                                            })?;
                                     }
                                 }
                                 // Subscriber (re-)offer: answer on the sub PC.

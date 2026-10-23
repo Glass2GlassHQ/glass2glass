@@ -131,7 +131,10 @@ impl<T: PacketClient> RemoteClient<T> {
         loop {
             let attempt = async {
                 if !self.transport.is_connected() {
-                    self.transport.connect().await?;
+                    self.transport
+                        .connect()
+                        .await
+                        .map_err(G2gError::during_connect)?;
                     // A new connection needs the caps re-sent as its first packet.
                     self.caps.forget_sent();
                 }

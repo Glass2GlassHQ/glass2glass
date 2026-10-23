@@ -210,7 +210,9 @@ impl<T: PacketTransport> RemoteSource<T> {
         // Keep the listener after the accept so a dropped client can be replaced
         // (keep_listening).
         let listener = self.listener.as_mut().ok_or(G2gError::NotConfigured)?;
-        let (conn, caps) = T::accept(listener).await?;
+        let (conn, caps) = T::accept(listener)
+            .await
+            .map_err(G2gError::during_connect)?;
         self.conn = Some(conn);
         self.discovered = Some(caps.clone());
         Ok(caps)
@@ -316,7 +318,9 @@ impl<T: PacketTransport> SourceLoop for RemoteSource<T> {
                             // re-sends its leading caps, which we forward so a
                             // downstream re-negotiates if they changed.
                             let listener = self.listener.as_mut().ok_or(G2gError::NotConfigured)?;
-                            let (conn, caps) = T::accept(listener).await?;
+                            let (conn, caps) = T::accept(listener)
+                                .await
+                                .map_err(G2gError::during_connect)?;
                             self.conn = Some(conn);
                             out.push(PipelinePacket::CapsChanged(caps)).await?;
                             continue;

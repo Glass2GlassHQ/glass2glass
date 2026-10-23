@@ -28,8 +28,8 @@ use tokio::net::TcpStream;
 
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ElementMetadata, G2gError, HardwareError, NetworkFailure, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
@@ -168,7 +168,7 @@ async fn drive_publish(
     while !publisher.is_publishing() {
         let n = stream.read(&mut buf).await.map_err(io_err)?;
         if n == 0 {
-            return Err(G2gError::Hardware(HardwareError::Other)); // server closed before publish
+            return Err(G2gError::Network(NetworkFailure::Connect)); // server closed before publish
         }
         publisher.push(&buf[..n]);
         flush_out(stream, publisher).await?;
@@ -204,7 +204,7 @@ async fn await_ack_window(
     let mut buf = [0u8; READ_BUF];
     while publisher.throttled() {
         match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
-            Ok(Ok(0)) => return Err(G2gError::Hardware(HardwareError::Other)), // server closed
+            Ok(Ok(0)) => return Err(G2gError::Network(NetworkFailure::Stream)), // server closed
             Ok(Ok(n)) => publisher.push(&buf[..n]),
             Ok(Err(e)) => return Err(io_err(e)),
             Err(_) => break, // timed out waiting for an ack: proceed best-effort

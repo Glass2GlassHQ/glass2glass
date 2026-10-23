@@ -12,13 +12,12 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-use str0m::change::SdpAnswer;
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 use str0m::crypto::from_feature_flags;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::log::LogSource;
-use g2g_core::{g2g_warn, G2gError, HardwareError};
+use g2g_core::{g2g_warn, G2gError, HardwareError, NetworkFailure};
 
 use crate::filesink::io_err;
 use crate::livekit_signal::{
@@ -28,7 +27,9 @@ use crate::livekit_signal::{
 };
 use crate::turn::TurnSet;
 use crate::webrtc_receive::UDP_RECV_BYTES;
-use crate::webrtc_util::{feed_datagram, select_host_ip, send_transmit};
+use crate::webrtc_util::{
+    accept_answer_sdp, connect_failed, feed_datagram, select_host_ip, send_transmit,
+};
 
 const RELIABLE_LABEL: &str = "_reliable";
 const LOSSY_LABEL: &str = "_lossy";
@@ -88,7 +89,6 @@ impl DataSession {
         grant: &VideoGrant,
         log: &dyn LogSource,
     ) -> Result<Self, G2gError> {
-        let hw = || G2gError::Hardware(HardwareError::Other);
         let (mut ws, join) = room.join(grant, TOKEN_TTL_SECS, false, log).await?;
 
         let socket = UdpSocket::bind((select_host_ip(), 0))
@@ -115,7 +115,9 @@ impl DataSession {
                 reliability: Reliability::MaxRetransmits { retransmits: 0 },
                 ..Default::default()
             });
-            let (offer, pending) = api.apply().ok_or_else(hw)?;
+            let (offer, pending) = api
+                .apply()
+                .ok_or(G2gError::Hardware(HardwareError::Other))?;
             (offer, pending, reliable, lossy)
         };
         send_signal(
@@ -138,19 +140,13 @@ impl DataSession {
                 }
                 Some(SignalResponse::Leave) | None => {
                     g2g_warn!(log, "closed before publisher answer");
-                    return Err(hw());
+                    return Err(G2gError::Network(NetworkFailure::Connect));
                 }
                 Some(_) => {}
             }
         };
-        let answer = SdpAnswer::from_sdp_string(&answer.sdp).map_err(|e| {
-            g2g_warn!(log, "publisher answer parse failed: {e:?}");
-            hw()
-        })?;
-        rtc.sdp_api().accept_answer(pending, answer).map_err(|e| {
-            g2g_warn!(log, "publisher answer rejected: {e:?}");
-            hw()
-        })?;
+        accept_answer_sdp(&mut rtc, pending, &answer.sdp)
+            .map_err(|reason| connect_failed(log, &alloc::format!("publisher {reason}")))?;
         for candidate_init in &early_candidates {
             add_remote_candidate(&mut rtc, candidate_init);
         }
@@ -294,7 +290,7 @@ impl DataSession {
         };
         channel
             .write(true, bytes)
-            .map_err(|_| G2gError::Hardware(HardwareError::Other))
+            .map_err(|_| G2gError::Network(NetworkFailure::Stream))
     }
 
     // bytes written that the server has not acknowledged yet

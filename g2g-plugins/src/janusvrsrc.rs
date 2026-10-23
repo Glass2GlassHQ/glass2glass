@@ -15,7 +15,6 @@ use serde_json::{json, Value};
 use tokio::net::UdpSocket;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
-use str0m::change::SdpOffer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::MediaKind;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
@@ -38,7 +37,8 @@ use crate::webrtc_codec::{
 };
 use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
 use crate::webrtc_util::{
-    add_ice_candidates, feed_datagram, select_host_ip, send_transmit, STUN_SERVER_PROP,
+    accept_offer_sdp, add_ice_candidates, feed_datagram, select_host_ip, send_transmit,
+    STUN_SERVER_PROP,
 };
 
 const VIDEO_PORT: usize = 0;
@@ -262,12 +262,7 @@ async fn answer_offer<S>(
 where
     S: Sink<Message, Error = WsError> + Unpin,
 {
-    let offer = SdpOffer::from_sdp_string(offer_sdp)
-        .map_err(|e| format!("offer sdp: {e:?}\n{offer_sdp}"))?;
-    let answer = rtc
-        .sdp_api()
-        .accept_offer(offer)
-        .map_err(|e| format!("offer rejected: {e:?}\n{offer_sdp}"))?;
+    let answer = accept_offer_sdp(rtc, offer_sdp)?;
     let jsep = json!({ "type": "answer", "sdp": answer.to_sdp_string(), "trickle": false });
     send_json(
         ws,

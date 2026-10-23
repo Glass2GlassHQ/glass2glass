@@ -25,7 +25,7 @@ use tokio::time::timeout;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::PipelinePacket;
-use g2g_core::{ByteStreamEncoding, Caps, G2gError};
+use g2g_core::{ByteStreamEncoding, Caps, G2gError, NetworkFailure};
 
 use g2g_plugins::moqt::coding::{Params, TrackNamespace};
 use g2g_plugins::moqt::message::{request_error_code, ControlMessage};
@@ -201,5 +201,5 @@ async fn a_failed_dial_surfaces_on_the_first_frame() {
     .await
     .expect("the frame was not left hanging on the dial");
     let err = outcome.expect_err("a dial that cannot succeed fails the frame");
-    assert!(matches!(err, G2gError::Hardware(_)), "{err:?}");
+    assert_eq!(err, G2gError::Network(NetworkFailure::Connect));
 }

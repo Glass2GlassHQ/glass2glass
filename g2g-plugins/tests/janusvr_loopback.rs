@@ -36,7 +36,7 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, FrameTiming, G2gError, MemoryDomain, MultiOutputSource,
-    OutputSink, PipelinePacket, PushOutcome, VideoCodec,
+    NetworkFailure, OutputSink, PipelinePacket, PushOutcome, VideoCodec,
 };
 use g2g_plugins::janusvrsink::JanusVrSink;
 use g2g_plugins::janusvrsrc::JanusVrSrc;
@@ -615,7 +615,7 @@ async fn a_room_error_fails_the_first_frame() {
             &mut Discard,
         )
         .await;
-    assert!(matches!(result, Err(G2gError::Hardware(_))), "{result:?}");
+    assert_eq!(result, Err(G2gError::Network(NetworkFailure::Connect)));
     assert_eq!(sink.frames_sent(), 0);
     server.abort();
     assert_eq!(state.lock().unwrap().requests, ["create", "attach", "join"]);

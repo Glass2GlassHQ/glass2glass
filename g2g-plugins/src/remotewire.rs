@@ -6,15 +6,15 @@
 //! only the byte transport under it differs.
 
 use g2g_core::wire::WireError;
-use g2g_core::{Caps, G2gError, HardwareError};
+use g2g_core::{Caps, G2gError, NetworkFailure};
 
 /// Map a [`WireError`] to the pipeline error type. A device / foreign memory
 /// domain surfaces as `UnsupportedDomain` (the same error a CPU sink raises);
-/// anything else is an internal encode / decode fault.
+/// anything else is a truncated or unknown message, which breaks the session.
 pub(crate) fn map_wire(e: WireError) -> G2gError {
     match e {
         WireError::UnsupportedDomain => G2gError::UnsupportedDomain,
-        _ => G2gError::Hardware(HardwareError::Other),
+        _ => G2gError::Network(NetworkFailure::Stream),
     }
 }
 

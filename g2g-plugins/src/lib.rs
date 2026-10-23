@@ -1379,6 +1379,8 @@ mod vorbischannels;
 pub mod webrtcdsp;
 
 // HTTP(S) byte-stream source via reqwest (the fetch layer under HLS/DASH).
+#[cfg(any(feature = "http-src", feature = "webrtc", feature = "onvif"))]
+mod httperror;
 #[cfg(feature = "http-src")]
 pub mod httpsrc;
 

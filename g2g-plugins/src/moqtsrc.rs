@@ -52,10 +52,10 @@ use g2g_core::{
 
 use crate::moqt::catalog::CatalogTrack;
 use crate::moqt::hang::{self, HangVideoTrack};
-use crate::moqt::parse_versions;
 use crate::moqt::subscriber::{
-    byte_frame, connect, select_track, session_err, AnyDriver, Pumped, SubscriberConfig,
+    byte_frame, connect, select_track, AnyDriver, Pumped, SubscriberConfig,
 };
+use crate::moqt::{parse_versions, session_err};
 
 /// Subscribes to a MoQ Transport broadcast and emits its fMP4 byte stream.
 ///

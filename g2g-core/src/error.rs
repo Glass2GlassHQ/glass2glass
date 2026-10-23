@@ -68,6 +68,18 @@ pub enum G2gError {
 pub enum NetworkFailure {
     // before media flows: connecting, the handshake, or session setup such as RTSP DESCRIBE, SETUP and PLAY
     Connect,
+    // after media flows: the peer closed or reset the session, or sent something the protocol forbids
+    Stream,
+}
+
+impl G2gError {
+    // a transport fault inside session setup is a connect failure, whatever stage the transport mapper assumed
+    pub fn during_connect(self) -> Self {
+        match self {
+            G2gError::Network(_) => G2gError::Network(NetworkFailure::Connect),
+            other => other,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

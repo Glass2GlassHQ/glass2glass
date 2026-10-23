@@ -37,14 +37,13 @@ use futures_util::StreamExt;
 use tokio::net::UdpSocket;
 use tokio_tungstenite::tungstenite::Message;
 
-use str0m::change::SdpOffer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::MediaKind;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
-    g2g_warn, Caps, G2gError, HardwareError, MultiOutputSink, MultiOutputSource, PipelinePacket,
+    g2g_warn, Caps, G2gError, MultiOutputSink, MultiOutputSource, NetworkFailure, PipelinePacket,
     PropError, PropKind, PropValue, PropertySpec,
 };
 
@@ -60,7 +59,7 @@ use crate::webrtc_codec::{
     WebRtcVideoCodec, VIDEO_CODEC_PROP,
 };
 use crate::webrtc_receive::{MediaReceiver, ReceivedUnit, UDP_RECV_BYTES};
-use crate::webrtc_util::send_transmit;
+use crate::webrtc_util::{accept_offer_sdp, send_transmit};
 
 /// Output port for the video track.
 const VIDEO_PORT: usize = 0;
@@ -191,14 +190,9 @@ pub(crate) async fn answer_offer(
     ws: &mut SignalSocket,
     sd: &SessionDescription,
 ) -> Result<(), G2gError> {
-    let hw = || G2gError::Hardware(HardwareError::Other);
-    let offer = SdpOffer::from_sdp_string(&sd.sdp).map_err(|e| {
-        g2g_warn!(&LiveKitSignalLog, "subscriber offer parse failed: {e:?}");
-        hw()
-    })?;
-    let answer = rtc.sdp_api().accept_offer(offer).map_err(|e| {
-        g2g_warn!(&LiveKitSignalLog, "subscriber offer rejected: {e:?}");
-        hw()
+    let answer = accept_offer_sdp(rtc, &sd.sdp).map_err(|reason| {
+        g2g_warn!(&LiveKitSignalLog, "subscriber {reason}");
+        G2gError::Network(NetworkFailure::Stream)
     })?;
     send_signal(
         ws,

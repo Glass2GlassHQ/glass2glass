@@ -35,7 +35,7 @@ use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use str0m::change::{SdpAnswer, SdpPendingOffer};
+use str0m::change::SdpPendingOffer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind, Mid, Pt, Rid};
 use str0m::rtp::AbsCaptureTime;
@@ -61,8 +61,8 @@ use crate::webrtc_simulcast::{
     rids_high_to_low, send_simulcast, KeyframeRoutes, LayerAllocator, SimulcastPads,
 };
 use crate::webrtc_util::{
-    add_host_candidate, drain_pacer, feed_datagram, ice_restart, post_sdp, select_host_ip,
-    send_transmit, trickle_candidates, ResourceHandle, TricklePatch, TurnConfig,
+    add_host_candidate, drain_pacer, feed_datagram, ice_restart, negotiate_over_http,
+    select_host_ip, send_transmit, trickle_candidates, ResourceHandle, TricklePatch, TurnConfig,
     ICE_RESTART_TIMEOUT, STUN_SERVER_PROP, TURN_PASS_PROP, TURN_SERVER_PROP, TURN_USER_PROP,
 };
 
@@ -220,7 +220,6 @@ impl WebRtcSessionSink {
     /// Build the `Rtc` with one m-line per configured track, do the WHIP
     /// offer/answer, and spawn the session task. Runs on the first frame.
     async fn start_session(&mut self) -> Result<(), G2gError> {
-        let hw = || G2gError::Hardware(HardwareError::Other);
         let host_ip = select_host_ip();
         let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
         let local = socket.local_addr().map_err(io_err)?;
@@ -273,15 +272,20 @@ impl WebRtcSessionSink {
             });
             let audio_mid = has_audio
                 .then(|| api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None));
-            let (offer, pending) = api.apply().ok_or_else(hw)?;
+            let (offer, pending) = api
+                .apply()
+                .ok_or(G2gError::Hardware(HardwareError::Other))?;
             (offer.to_sdp_string(), pending, video_mid, audio_mid)
         };
 
-        let session = post_sdp(&self.whip_url, self.bearer.as_deref(), offer_sdp.clone()).await?;
-        let answer = SdpAnswer::from_sdp_string(&session.answer).map_err(|_| hw())?;
-        rtc.sdp_api()
-            .accept_answer(pending, answer)
-            .map_err(|_| hw())?;
+        let session = negotiate_over_http(
+            &mut rtc,
+            pending,
+            &self.whip_url,
+            self.bearer.as_deref(),
+            &offer_sdp,
+        )
+        .await?;
 
         // Gather reflexive / relay candidates and trickle them to the resource.
         let turn: TurnSet = trickle_candidates(
