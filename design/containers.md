@@ -721,6 +721,13 @@ underflowing granule drops it. A stream with no `OpusHead` and no per-frame
 duration, which is the RTP path, decodes untrimmed, matching gstreamer's
 SDP-less default.
 
+MPEG-TS Opus has no `OpusHead`. Both TS demuxers send one in band from the PMT
+descriptor ahead of the first packet, with pre-skip 0 and a 48 kHz input rate as
+ffmpeg's extradata has, and split the 0x7FE0 control headers. A synthesized
+`OpusHead` uses mapping family 1 with the Vorbis order for 3 to 8 channels. The TS
+muxers keep in-band `OpusHead`/`OpusTags` out of the multiplex and take the channel
+count from them for the descriptor.
+
 ### Vorbis in Ogg
 
 Vorbis carries the same two facts without a header field. Its playable length is
