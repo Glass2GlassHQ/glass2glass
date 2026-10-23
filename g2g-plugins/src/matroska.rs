@@ -24,7 +24,8 @@
 //! are spaced by DefaultDuration, or by an Opus or Vorbis packet's own duration, and
 //! otherwise share the block timestamp. The `Cues` index is parsed into a time ->
 //! Cluster byte-position map ([`MatroskaDemuxer::cue_seek_offset`]) for indexed
-//! seeking (M373). BlockGroup reference tracking is a follow-up.
+//! seeking (M373). A BlockGroup frame is a keyframe when the group holds no
+//! ReferenceBlock.
 
 use alloc::borrow::Cow;
 use alloc::string::String;
@@ -105,6 +106,7 @@ const ID_SIMPLE_BLOCK: u32 = 0x00A3;
 const ID_BLOCK_GROUP: u32 = 0x00A0;
 const ID_BLOCK: u32 = 0x00A1;
 const ID_BLOCK_DURATION: u32 = 0x009B;
+const ID_REFERENCE_BLOCK: u32 = 0x00FB;
 const ID_DISCARD_PADDING: u32 = 0x75A2;
 const ID_SEEK_HEAD: u32 = 0x114D_9B74;
 const ID_SEEK: u32 = 0x4DBB;
@@ -1945,8 +1947,10 @@ const VIDEO_CODEC_ID_PREFIX: &str = "V_";
 
 /// Parse a `BlockGroup`'s frames, carrying its `BlockDuration` (the cue display
 /// window, essential for a subtitle track) onto them. Scans the children for the
-/// `Block`, the optional `BlockDuration` and the optional `DiscardPadding` (any
-/// order), then de-frames the block with the resulting duration.
+/// `Block`, the optional `BlockDuration`, the optional `DiscardPadding` and any
+/// `ReferenceBlock` (any order), then de-frames the block with the resulting
+/// duration. A `Block` has no keyframe flag, so a group is a keyframe when it
+/// references no other block.
 fn parse_block_group(
     group: &[u8],
     cluster_ts: u64,
@@ -1958,11 +1962,13 @@ fn parse_block_group(
     let mut block: Option<&[u8]> = None;
     let mut duration_raw = 0u64;
     let mut discard_ns = 0i64;
+    let mut references_a_block = false;
     for (bid, bdata) in children(group) {
         match bid {
             ID_BLOCK => block = Some(bdata),
             ID_BLOCK_DURATION => duration_raw = read_uint(bdata),
             ID_DISCARD_PADDING => discard_ns = read_int(bdata),
+            ID_REFERENCE_BLOCK => references_a_block = true,
             _ => {}
         }
     }
@@ -1981,6 +1987,9 @@ fn parse_block_group(
         duration_ns,
         out,
     );
+    for frame in &mut out[first..] {
+        frame.keyframe = !references_a_block;
+    }
     apply_discard_padding(&mut out[first..], discard_ns);
 }
 
@@ -3587,6 +3596,30 @@ mod tests {
             "cluster+block timestamp, scaled"
         );
         assert_eq!(f.duration_ns, 2000 * 1_000_000, "BlockDuration, scaled");
+    }
+
+    #[test]
+    fn a_block_group_is_a_keyframe_unless_it_references_a_block() {
+        let tracks = elem(
+            &[0x16, 0x54, 0xAE, 0x6B],
+            &track_entry(1, b"V_VP9", None, None),
+        );
+        // a Block's flags byte has no keyframe bit, so neither group sets one
+        let independent = elem(&[0xA0], &elem(&[0xA1], &block_body(1, 0, false, b"key")));
+        let reference = elem(&[0xFB], &uint_body(1));
+        let dependent = elem(
+            &[0xA0],
+            &[elem(&[0xA1], &block_body(1, 1, false, b"delta")), reference].concat(),
+        );
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[elem(&[0xE7], &uint_body(0)), independent, dependent].concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&[elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat());
+        let keyframes: Vec<bool> = d.take_frames().iter().map(|f| f.keyframe).collect();
+        assert_eq!(keyframes, [true, false]);
     }
 
     /// A `ContentEncodings` element declaring one block-scoped compression with
