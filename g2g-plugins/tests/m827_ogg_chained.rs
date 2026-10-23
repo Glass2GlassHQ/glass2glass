@@ -582,14 +582,106 @@ async fn a_chain_that_changes_codec_fails_loud() {
     );
 }
 
-// a file of Vorbis only, against the default Opus selection
+fn fixture_bytes(name: &str) -> Vec<u8> {
+    std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name),
+    )
+    .expect("the fixture")
+}
+
+// a demuxer with no `stream` selection, told its output kind as the runner tells it
+fn unselected_demux(output: Option<&str>) -> OggDemux {
+    let mut d = OggDemux::new();
+    d.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::Ogg,
+    })
+    .expect("configure");
+    if let Some(output) = output {
+        let caps = g2g_core::CapsSet::from_gst_string(output).expect("output caps parse");
+        AsyncElement::configure_output(&mut d, &caps.alternatives()[0]).expect("output caps");
+    }
+    d
+}
+
+#[tokio::test]
+async fn with_no_selection_the_first_stream_of_the_output_kind_comes_out() {
+    let mut vorbis = unselected_demux(None);
+    let mut sink = CaptureSink::default();
+    AsyncElement::process(
+        &mut vorbis,
+        chunk(&fixture_bytes("vorbis_stereo_48k.ogg")),
+        &mut sink,
+    )
+    .await
+    .expect("a Vorbis-only file plays");
+    assert!(matches!(
+        sink.caps.first(),
+        Some(Caps::Audio {
+            format: AudioFormat::Vorbis,
+            ..
+        })
+    ));
+    assert!(!sink.audio().is_empty());
+
+    let vp8 = fixture_bytes("vp8_64x48_25fps_gop10_offset.ogg");
+    let mut as_video = unselected_demux(Some("video/x-vp8"));
+    let mut sink = CaptureSink::default();
+    AsyncElement::process(&mut as_video, chunk(&vp8), &mut sink)
+        .await
+        .expect("a VP8 file fills a video output");
+    assert!(matches!(
+        sink.caps.first(),
+        Some(Caps::CompressedVideo { .. })
+    ));
+    let mut as_audio = unselected_demux(Some("audio/x-opus"));
+    let result =
+        AsyncElement::process(&mut as_audio, chunk(&vp8), &mut CaptureSink::default()).await;
+    assert_eq!(
+        result,
+        Err(G2gError::CapsMismatch),
+        "a VP8 file has no audio"
+    );
+}
+
+// the consumer's kind reaches the demuxer through a launch line's negotiation
+#[cfg(feature = "vorbis")]
+#[tokio::test]
+async fn a_bare_oggdemux_feeds_vorbisdec_the_vorbis_stream() {
+    let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vorbis_stereo_48k.ogg");
+    let decode = |selection: &str, tag: &str| {
+        let out = temp_path(tag, "raw");
+        let line = format!(
+            "filesrc location={} ! oggdemux{selection} ! vorbisdec ! audioconvert ! \
+             audio/x-raw,format=S16LE ! filesink location={}",
+            input.display(),
+            out.display()
+        );
+        (line, out)
+    };
+    let (bare, bare_out) = decode("", "bare-oggdemux");
+    let (named, named_out) = decode(" stream=vorbis", "vorbis-oggdemux");
+    assert!(run_line(&bare).await > 0, "{bare}");
+    assert!(run_line(&named).await > 0, "{named}");
+    let bare_pcm = std::fs::read(&bare_out).expect("pcm written");
+    let named_pcm = std::fs::read(&named_out).expect("pcm written");
+    let _ = std::fs::remove_file(&bare_out);
+    let _ = std::fs::remove_file(&named_out);
+    assert!(!bare_pcm.is_empty());
+    assert!(
+        bare_pcm == named_pcm,
+        "the bare demuxer emits the Vorbis stream"
+    );
+}
+
+// a file of Vorbis only, against an explicit Opus selection
 #[tokio::test]
 async fn a_file_without_the_selected_codec_fails_loud() {
-    let vorbis = std::fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vorbis_stereo_48k.ogg"),
-    )
-    .expect("the Vorbis fixture");
+    let vorbis = fixture_bytes("vorbis_stereo_48k.ogg");
     let mut d = OggDemux::new();
+    d.set_property("stream", PropValue::Str("opus".into()))
+        .expect("stream=opus");
     d.configure_pipeline(&Caps::ByteStream {
         encoding: ByteStreamEncoding::Ogg,
     })

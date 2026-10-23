@@ -1,7 +1,7 @@
 //! Ogg demuxer element (M116): `Caps::ByteStream{Ogg}` in, the selected
-//! elementary stream out (`Caps::Audio{Opus}` default, `stream=flac` for the
-//! Ogg-FLAC mapping (M775), `stream=vorbis` for Vorbis (M777), `stream=vp8` for
-//! the VP8 video mapping).
+//! elementary stream out (by default the file's first stream of the kind the
+//! consumer takes, `stream=flac` for the Ogg-FLAC mapping (M775), `stream=vorbis`
+//! for Vorbis (M777), `stream=vp8` for the VP8 video mapping).
 //!
 //! Wraps the pure [`crate::ogg::OggDemuxer`], the Ogg sibling of
 //! [`crate::mkvdemux::MkvDemux`]: it reassembles the logical bitstream's packets,
@@ -59,7 +59,7 @@ use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{ElementSeekRoute, SeekController};
+use g2g_core::runtime::{ElementSeekRoute, PadKind, SeekController};
 use g2g_core::time::ticks_to_ns;
 use g2g_core::{
     g2g_debug, g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding,
@@ -158,7 +158,7 @@ struct GuessedSeek {
     chain: u32,
 }
 
-/// Demuxes an Ogg byte stream into its Opus audio elementary stream.
+/// Demuxes an Ogg byte stream into one of its elementary streams.
 ///
 /// # Example
 ///
@@ -176,10 +176,12 @@ pub struct OggDemux {
     /// The chain whose VorbisComment tags have been posted, so each physical
     /// stream's metadata posts once.
     tags_posted: Option<u32>,
-    /// The logical stream to emit (`stream` property): Opus by default, Flac
-    /// for the Ogg-FLAC mapping, or Vorbis. A file with no stream of that codec
-    /// fails loud.
-    stream: OggCodec,
+    /// The logical stream to emit (`stream` property): Opus, Flac for the
+    /// Ogg-FLAC mapping, Vorbis, VP8 or Theora. A file with no stream of that
+    /// codec fails loud. `None` emits the file's first stream of the output's kind.
+    selection: Option<OggCodec>,
+    // audio or video from the negotiated output caps, `Any` until `configure_output`
+    output_kind: PadKind,
     /// Caps, in-band config and packet timing for the selected bitstream.
     emitter: StreamEmitter,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
@@ -212,7 +214,8 @@ impl OggDemux {
             emitted: 0,
             bus: None,
             tags_posted: None,
-            stream: OggCodec::Opus,
+            selection: None,
+            output_kind: PadKind::Any,
             emitter: StreamEmitter::default(),
             seek: DemuxSeek::default(),
             read_offset: 0,
@@ -400,25 +403,47 @@ impl OggDemux {
         }
     }
 
+    // `None` while a stream ahead of the first one of the output's kind is unparsed, or the file has none
+    fn stream(&self) -> Option<OggCodec> {
+        if let Some(selection) = self.selection {
+            return Some(selection);
+        }
+        for stream in self.demux.streams().iter().filter(|s| s.chain() == 0) {
+            let codec = stream.info()?.codec;
+            let kind_matches = match self.output_kind {
+                PadKind::Video => is_video_codec(codec),
+                PadKind::Audio => !is_video_codec(codec),
+                PadKind::Text | PadKind::Any => true,
+            };
+            if codec != OggCodec::Other && kind_matches {
+                return Some(codec);
+            }
+        }
+        None
+    }
+
     /// The logical bitstream this element forwards out of the chain being
     /// parsed: the first one whose codec is the `stream` selection. A grouped
     /// file (M790) carries several, so the selection picks among them; a
     /// single-stream file has only one candidate.
     fn selected(&self) -> Option<usize> {
-        self.demux.stream_of(self.stream)
+        self.demux.stream_of(self.stream()?)
     }
 
     /// The selected bitstream of every retained chain, in play order (M827): a
     /// chained file continues on this pad with the next physical stream's
     /// stream of the same codec.
     fn selected_streams(&self) -> Vec<usize> {
+        let Some(codec) = self.stream() else {
+            return Vec::new();
+        };
         let mut picked: Option<u32> = None;
         let mut out = Vec::new();
         for (index, stream) in self.demux.streams().iter().enumerate() {
             if picked == Some(stream.chain()) {
                 continue;
             }
-            if stream.info().map(|i| i.codec) == Some(self.stream) {
+            if stream.info().map(|i| i.codec) == Some(codec) {
                 picked = Some(stream.chain());
                 out.push(index);
             }
@@ -441,15 +466,22 @@ impl OggDemux {
         if group().next().is_none() || group().any(|s| s.info().is_none()) {
             return Ok(());
         }
-        if group().any(|s| s.info().map(|i| i.codec) == Some(self.stream)) {
+        let stream = self.stream();
+        if stream.is_some_and(|codec| group().any(|s| s.info().map(|i| i.codec) == Some(codec))) {
             return Ok(());
         }
         let carried: Vec<OggCodec> = group().filter_map(|s| s.info().map(|i| i.codec)).collect();
-        g2g_error!(
-            self,
-            "physical stream {chain} carries no {:?} bitstream, only {carried:?}: one output pad presents one codec",
-            self.stream
-        );
+        match stream {
+            Some(codec) => g2g_error!(
+                self,
+                "physical stream {chain} carries no {codec:?} bitstream, only {carried:?}: one output pad presents one codec"
+            ),
+            None => g2g_error!(
+                self,
+                "physical stream {chain} carries no readable {:?} bitstream, only {carried:?}",
+                self.output_kind
+            ),
+        }
         Err(G2gError::CapsMismatch)
     }
 
@@ -525,7 +557,7 @@ impl OggDemux {
                     Admitted::emit((payload, timing))
                 } else {
                     let resync_point =
-                        timing.keyframe || !matches!(self.stream, OggCodec::Vp8 | OggCodec::Theora);
+                        timing.keyframe || !self.stream().is_some_and(is_video_codec);
                     self.seek
                         .admit(timing.pts_ns, resync_point, (payload, timing))
                 };
@@ -1117,14 +1149,28 @@ impl AsyncElement for OggDemux {
         upstream_caps.intersect(&Self::input_caps())
     }
 
+    // with no selection the consumer picks the kind, and the file's first stream of it fills the pad
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let stream = self.stream;
+        let selection = self.selection;
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::Ogg,
-            } => CapsSet::one(Self::output_caps(stream)),
+            } => match selection {
+                Some(codec) => CapsSet::one(Self::output_caps(codec)),
+                None => CapsSet::from_alternatives(
+                    READABLE_CODECS.into_iter().map(Self::output_caps).collect(),
+                ),
+            },
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
+    }
+
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        self.output_kind = match output_caps {
+            Caps::CompressedVideo { .. } => PadKind::Video,
+            _ => PadKind::Audio,
+        };
+        Ok(())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -1221,12 +1267,13 @@ impl AsyncElement for OggDemux {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "stream" => {
-                self.stream = match value.as_str().ok_or(PropError::Type)? {
-                    "opus" => OggCodec::Opus,
-                    "flac" => OggCodec::Flac,
-                    "vorbis" => OggCodec::Vorbis,
-                    "vp8" => OggCodec::Vp8,
-                    "theora" => OggCodec::Theora,
+                self.selection = match value.as_str().ok_or(PropError::Type)? {
+                    "auto" => None,
+                    "opus" => Some(OggCodec::Opus),
+                    "flac" => Some(OggCodec::Flac),
+                    "vorbis" => Some(OggCodec::Vorbis),
+                    "vp8" => Some(OggCodec::Vp8),
+                    "theora" => Some(OggCodec::Theora),
                     _ => return Err(PropError::Value),
                 };
                 Ok(())
@@ -1238,12 +1285,13 @@ impl AsyncElement for OggDemux {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "stream" => Some(PropValue::Str(
-                match self.stream {
-                    OggCodec::Flac => "flac",
-                    OggCodec::Vorbis => "vorbis",
-                    OggCodec::Vp8 => "vp8",
-                    OggCodec::Theora => "theora",
-                    _ => "opus",
+                match self.selection {
+                    None => "auto",
+                    Some(OggCodec::Flac) => "flac",
+                    Some(OggCodec::Vorbis) => "vorbis",
+                    Some(OggCodec::Vp8) => "vp8",
+                    Some(OggCodec::Theora) => "theora",
+                    Some(OggCodec::Opus | OggCodec::Other) => "opus",
                 }
                 .into(),
             )),
@@ -1270,8 +1318,22 @@ impl LogSource for OggDemux {
 static OGGDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "logical stream to emit: opus | flac | vorbis | vp8 | theora",
-)];
+    "logical stream to emit: auto (the file's first stream of the consumer's kind) | opus | flac | vorbis | vp8 | theora",
+)
+.with_default("auto")];
+
+// every mapping the single-output demuxer emits, the audio ones first
+const READABLE_CODECS: [OggCodec; 5] = [
+    OggCodec::Opus,
+    OggCodec::Vorbis,
+    OggCodec::Flac,
+    OggCodec::Vp8,
+    OggCodec::Theora,
+];
+
+fn is_video_codec(codec: OggCodec) -> bool {
+    matches!(codec, OggCodec::Vp8 | OggCodec::Theora)
+}
 
 /// The published stream id of the bitstream in slot `slot`. Positional,
 /// matching the output-port order of [`OggDemuxN`].
