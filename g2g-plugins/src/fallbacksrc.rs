@@ -478,9 +478,9 @@ pub fn restart_fanout_source(
 ///
 /// There is no per-port configure to repeat, unlike [`RestartSrc`]: a
 /// multi-output source answers `output_caps` itself, so a rebuild is only a
-/// build. The port count and each port's caps are read once at construction and
-/// answered from there, because between a death and the next life there is no
-/// inner session to ask.
+/// build. The port count and each port's caps are read from the first session,
+/// at construction and again after it resolves them, and answered from there,
+/// because between a death and the next life there is no inner session to ask.
 pub struct RestartFanoutSrc {
     /// The session about to run. Taken by `run`, which then rebuilds successors.
     current: Option<Box<dyn DynMultiOutputSource>>,
@@ -515,9 +515,7 @@ impl RestartFanoutSrc {
         policy: RestartPolicy,
         role: Option<FallbackSourceRole>,
     ) -> Self {
-        let ports = (0..source.output_count())
-            .map(|i| source.output_caps(i))
-            .collect();
+        let ports = session_ports(&*source);
         Self {
             current: Some(source),
             rebuild,
@@ -557,6 +555,12 @@ impl RestartFanoutSrc {
             reason,
         });
     }
+}
+
+fn session_ports(source: &dyn DynMultiOutputSource) -> Vec<Result<Caps, G2gError>> {
+    (0..source.output_count())
+        .map(|i| source.output_caps(i))
+        .collect()
 }
 
 /// The [`MultiOutputSink`] adapter wrapping the real output for one life of a
@@ -647,6 +651,13 @@ impl MultiOutputSource for RestartFanoutSrc {
 
     fn set_bus(&mut self, bus: BusHandle) {
         self.bus = Some(bus);
+    }
+
+    async fn resolve_output_caps(&mut self) -> Result<(), G2gError> {
+        let source = self.current.as_mut().ok_or(G2gError::NotConfigured)?;
+        source.resolve_output_caps().await?;
+        self.ports = session_ports(&**source);
+        Ok(())
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a> {

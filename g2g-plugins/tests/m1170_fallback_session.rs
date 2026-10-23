@@ -60,8 +60,12 @@ const SHORT_STALL: Duration = Duration::from_millis(200);
 const SETTLE: Duration = Duration::from_millis(500);
 
 fn h264_any() -> Caps {
+    video_any(VideoCodec::H264)
+}
+
+fn video_any(codec: VideoCodec) -> Caps {
     Caps::CompressedVideo {
-        codec: VideoCodec::H264,
+        codec,
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
@@ -227,6 +231,54 @@ fn the_wrapper_answers_the_sessions_ports() {
     assert_eq!(wrapper.output_caps(VIDEO).unwrap(), h264_any());
     assert_eq!(wrapper.output_caps(AUDIO).unwrap(), aac_any());
     assert!(wrapper.output_caps(PORTS).is_err(), "no third port");
+}
+
+/// A one-port session that advertises an H.264 placeholder until it has asked the
+/// server, which answers H.265, the way `RtspSrcN` learns its codec from the SDP.
+#[derive(Debug)]
+struct ProbingSession {
+    resolved: bool,
+}
+
+impl MultiOutputSource for ProbingSession {
+    type RunFuture<'a>
+        = Pin<Box<dyn core::future::Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn output_count(&self) -> usize {
+        1
+    }
+
+    fn output_caps(&self, _output: usize) -> Result<Caps, G2gError> {
+        Ok(video_any(if self.resolved {
+            VideoCodec::H265
+        } else {
+            VideoCodec::H264
+        }))
+    }
+
+    async fn resolve_output_caps(&mut self) -> Result<(), G2gError> {
+        self.resolved = true;
+        Ok(())
+    }
+
+    fn run<'a>(&'a mut self, _out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a> {
+        Box::pin(core::future::pending())
+    }
+}
+
+/// The wrapper forwards the session's caps resolution and answers what it found,
+/// so an H.265 stream under a lone `fallbacksrc` is not negotiated as H.264.
+#[tokio::test]
+async fn the_wrapper_answers_the_sessions_resolved_caps() {
+    let probing = || -> DynSession { Box::new(ProbingSession { resolved: false }) };
+    let (rebuild, _) = counting_rebuild(probing);
+    let mut wrapper = RestartFanoutSrc::new(probing(), rebuild, policy(false, 0, 0), None);
+    MultiOutputSource::resolve_output_caps(&mut wrapper)
+        .await
+        .unwrap();
+    assert_eq!(wrapper.output_caps(0).unwrap(), video_any(VideoCodec::H265));
 }
 
 /// Every life restarts at PTS 0, and one shared offset moves both ports onto the
