@@ -12,9 +12,10 @@ use crate::tensor::MAX_TENSOR_RANK;
 /// Sentinel sample rate meaning "any / unspecified" in [`Caps::Audio`] (M187).
 /// `Caps::Audio.sample_rate` is a bare `u32` (not a ranged [`Dim`]); 0 Hz is
 /// never a real rate, so it serves as the wildcard a caps-driven element
-/// (`audioresample`) advertises so a downstream capsfilter can pin the rate.
-/// `intersect` treats it as a wildcard and `fixate` rejects it (like
-/// [`Dim::Any`]).
+/// (`audioresample`) advertises so a downstream capsfilter can pin the rate, and
+/// the unknown rate of a compressed stream not yet parsed. `intersect` treats it
+/// as a wildcard for both. `fixate` rejects it on PCM (like [`Dim::Any`]) and
+/// leaves a compressed `0` nominal, since the decoder replaces it.
 pub const ANY_SAMPLE_RATE: u32 = 0;
 
 /// Sentinel channel count meaning "any / unknown" in [`Caps::Audio`]. Like
@@ -248,19 +249,13 @@ impl Caps {
                     channel_layout: lb,
                 },
             ) if fa == fb => {
-                // Channels use the `ANY_CHANNELS` (0) wildcard in *both* the
-                // compressed and PCM cases: a decoder's concrete output channels
+                // `ANY_CHANNELS` and `ANY_SAMPLE_RATE` (both 0) are wildcards in
+                // *both* the compressed and PCM cases: a decoder's concrete output
                 // coupling back onto a demuxer's unknown `0` input must not be an
-                // empty link. The "any rate" wildcard (M187) is a raw-PCM concept
-                // only: a caps-driven resampler leaves its output rate open, while
-                // compressed audio (AAC/Opus) uses `sample_rate: 0` as "unknown
-                // until parsed" and keeps strict equality, unchanged.
+                // empty link, and a filter that names no rate, as in gst, takes
+                // whatever rate the stream carries.
                 let channels = intersect_channels(*ca, *cb);
-                let rate = if is_pcm(*fa) {
-                    intersect_sample_rate(*sa, *sb)
-                } else {
-                    (sa == sb).then_some(*sa)
-                };
+                let rate = intersect_sample_rate(*sa, *sb);
                 // An unspecified layout is the wildcard, so a producer that knows
                 // its speakers pins them onto a peer that does not, and two
                 // different declared layouts refuse the link.
@@ -327,9 +322,9 @@ impl Caps {
             ..
         } = self
         {
-            // Only raw PCM uses the "any rate" / "any channels" wildcards;
-            // compressed audio keeps `0` as a fixed (if nominal) value, since the
-            // decoder replaces it before anything reads it.
+            // Only raw PCM has to fixate the "any rate" / "any channels"
+            // wildcards; compressed audio keeps `0` as a fixed (if nominal)
+            // value, since the decoder replaces it before anything reads it.
             return !(is_pcm(*format)
                 && (*sample_rate == ANY_SAMPLE_RATE || *channels == ANY_CHANNELS));
         }
@@ -1562,8 +1557,8 @@ pub fn pcm_from_gst_format(name: &str) -> Option<AudioFormat> {
         .find_map(|(format, gst)| gst.eq_ignore_ascii_case(name).then_some(*format))
 }
 
-/// Raw (uncompressed) PCM formats, the only ones the "any rate" wildcard (M187)
-/// and the resampler apply to.
+/// Raw (uncompressed) PCM formats, the only ones the resampler applies to and
+/// `fixate` refuses an "any rate" (M187) on.
 pub(crate) fn is_pcm(f: AudioFormat) -> bool {
     // comparing discriminants keeps the format names out of heap-free builds
     PCM_FORMATS
@@ -1572,8 +1567,8 @@ pub(crate) fn is_pcm(f: AudioFormat) -> bool {
 }
 
 /// Intersect two [`Caps::Audio`] sample rates, where [`ANY_SAMPLE_RATE`] (0) is
-/// a wildcard (M187): `any ∩ x = x`, equal rates agree, distinct concrete rates
-/// are disjoint (`None`).
+/// a wildcard (M187) for PCM and compressed audio alike: `any ∩ x = x`, equal
+/// rates agree, distinct concrete rates are disjoint (`None`).
 pub(crate) fn intersect_sample_rate(a: u32, b: u32) -> Option<u32> {
     match (a, b) {
         (ANY_SAMPLE_RATE, x) | (x, ANY_SAMPLE_RATE) => Some(x),
@@ -1584,7 +1579,7 @@ pub(crate) fn intersect_sample_rate(a: u32, b: u32) -> Option<u32> {
 
 /// Intersect two [`Caps::Audio`] channel counts, where [`ANY_CHANNELS`] (0) is a
 /// wildcard: `any ∩ x = x`, equal counts agree, distinct concrete counts are
-/// disjoint (`None`). Unlike [`intersect_sample_rate`] this applies to compressed
+/// disjoint (`None`). Like [`intersect_sample_rate`] this applies to compressed
 /// audio too, so a decoder's concrete output channels coupling back onto a
 /// demuxer's unknown `0` input intersects rather than emptying the link.
 pub(crate) fn intersect_channels(a: u8, b: u8) -> Option<u8> {
@@ -3082,6 +3077,21 @@ mod tests {
         assert_eq!(
             aac(2, 48_000).intersect(&aac(6, 48_000)),
             Err(G2gError::CapsMismatch)
+        );
+        // A compressed unknown rate takes the concrete one, and two concrete rates stay disjoint.
+        assert_eq!(
+            aac(2, ANY_SAMPLE_RATE).intersect(&aac(2, 44_100)),
+            Ok(aac(2, 44_100))
+        );
+        assert_eq!(
+            aac(2, 44_100).intersect(&aac(2, 48_000)),
+            Err(G2gError::CapsMismatch)
+        );
+        // An unknown compressed rate stays nominal: fixed, and fixate keeps it.
+        assert!(aac(2, ANY_SAMPLE_RATE).is_fixed());
+        assert_eq!(
+            aac(2, ANY_SAMPLE_RATE).fixate(),
+            Ok(aac(2, ANY_SAMPLE_RATE))
         );
     }
 

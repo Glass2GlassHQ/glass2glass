@@ -7,7 +7,7 @@
 use alloc::vec::Vec;
 
 use crate::caps::{
-    batch_alternatives, framerate_q16_from_fraction, is_pcm, pcm_from_gst_format, AudioFormat,
+    batch_alternatives, framerate_q16_from_fraction, pcm_from_gst_format, AudioFormat,
     BitstreamAlignment, ByteStreamEncoding, Caps, CapsSet, CodecTag, Colorimetry, Dim, Interlace,
     ProResVariant, Rate, RawVideoFormat, SubPictureFormat, TagNamespace, TextFormat, VideoCodec,
     ANY_CHANNELS, ANY_SAMPLE_RATE, MOV_UNKNOWN_SUBTYPE_PREFIX, PCM_FORMATS, RIFF_AUDIO_TAG_FIELD,
@@ -288,16 +288,11 @@ impl CapsSet {
         };
         let audio_set = |formats: &[AudioFormat]| -> Option<CapsSet> {
             let channel_layout = expand_channel_mask(fv("channel-mask"))?;
+            // an absent field is left open, as gst leaves it
+            let channels = expand_u8(fv("channels"), ANY_CHANNELS)?;
+            let rates = expand_u32(fv("rate"), ANY_SAMPLE_RATE)?;
             let mut alts = Vec::new();
             for &format in formats {
-                // raw PCM leaves an absent field open as gst does, compressed audio has no rate wildcard
-                let (absent_channels, absent_rate) = if is_pcm(format) {
-                    (ANY_CHANNELS, ANY_SAMPLE_RATE)
-                } else {
-                    (2, 48_000)
-                };
-                let channels = expand_u8(fv("channels"), absent_channels)?;
-                let rates = expand_u32(fv("rate"), absent_rate)?;
                 for &ch in &channels {
                     for &sr in &rates {
                         alts.push(Caps::Audio {
@@ -640,6 +635,26 @@ mod tests {
                 .alternatives(),
             [open]
         );
+    }
+
+    #[test]
+    fn compressed_audio_without_rate_or_channels_leaves_both_open() {
+        let open = Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: ANY_CHANNELS,
+            sample_rate: ANY_SAMPLE_RATE,
+            channel_layout: ChannelLayout::UNSPECIFIED,
+        };
+        let printed = open.to_gst_string();
+        let parsed = CapsSet::from_gst_string(&printed).expect("parses back");
+        assert_eq!(parsed.alternatives(), [open], "{printed}");
+        let stream = Caps::Audio {
+            format: AudioFormat::Opus,
+            channels: 6,
+            sample_rate: 48_000,
+            channel_layout: ChannelLayout::UNSPECIFIED,
+        };
+        assert_eq!(parsed.alternatives()[0].intersect(&stream), Ok(stream));
     }
 
     #[test]
