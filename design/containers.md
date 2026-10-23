@@ -807,7 +807,8 @@ without either config fails the stream.
 
 MPEG-TS carries AAC as ADTS (0x0F) unless the stream opens on a raw
 AudioSpecificConfig (ER AAC, ELD, 960-sample frames). That pad goes out as
-LOAS/LATM (0x11) with audioMuxVersion 1. The StreamMuxConfig repeats in every
+LOAS/LATM (0x11) with audioMuxVersion 1. A pad whose first frame is already a LOAS
+frame goes out unchanged under 0x11, and every other muxer refuses LOAS, as gst's do. The StreamMuxConfig repeats in every
 frame, and the config sits verbatim behind its bit length, so the muxer never
 parses ELDSpecificConfig. USAC is refused, since neither ADTS nor ffmpeg's LATM
 decoder carries it (gst's mpegtsmux writes it as ADTS that nothing decodes). The carriage is fixed by each pad's first

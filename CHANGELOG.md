@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1856: mpegtsmux keeps its multiplex and AAC carriage across a mid-stream caps change, so continuity counters no longer restart.
+- M1844: mpegtsmux carries LOAS/LATM AAC as it arrives under stream type 0x11, and the other muxers refuse it.
 - M1850: a TS seek counts its target from the earliest stream's first timestamp, as `ffmpeg -ss` does.
 - M1837: LATM frames ahead of the stream's first StreamMuxConfig decode, as ffmpeg's do.
 - M1836: TS and PS video ahead of a stream's first PES stamp is back-filled from it instead of starting at 0.

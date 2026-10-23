@@ -229,8 +229,6 @@ Highest leverage first:
     `flvmux` and `mpegtsmux` VP8 (calliope TESTING technique 23 lists the rest).
   - `flvmux` writes an AAC sequence header no decoder accepts
     (`fate-suite/aac/al04_44.mp4`).
-  - LATM AAC loses samples through flvmux and mpegtsmux and fails into mp4mux
-    and matroskamux (`fate-suite/aac/latm_stereo_to_51.ts`, `mpegts/loewe.ts`).
   - Remux changes samples or frame counts: bipbop TS AAC into mp4mux,
     `tron_en_ge_aac_h264.ts` AAC, `fragmented_nonseekable_sink.mp4` and
     `twofields_packet.mp4` into mkv and ts, `test7_cut.mkv` into mp4.
