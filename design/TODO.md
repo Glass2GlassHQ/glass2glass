@@ -229,8 +229,10 @@ Highest leverage first:
   - `flvmux` writes an AAC sequence header no decoder accepts
     (`fate-suite/aac/al04_44.mp4`).
   - Remux changes samples or frame counts: bipbop TS AAC into mp4mux,
-    `tron_en_ge_aac_h264.ts` AAC, `twofields_packet.mp4` into mkv and ts,
-    `test7_cut.mkv` into mp4.
+    `twofields_packet.mp4` into mkv and ts, `test7_cut.mkv` into mp4.
+  - `matroskademux` sets each frame's dts to its pts, so reordered H.264 from
+    Matroska reaches mp4mux, flvmux and tsmux with no real DTS and `mp4mux` writes
+    no `ctts`. ffmpeg derives the DTS (gst's mp4mux writes the same timing as g2g).
   - Remux fails mid-run or writes an undecodable file: `opus_vp9-alpha.webm` and
     `loewe.ts` HEVC into mp4mux and matroskamux, `test-8-7.1.opus-small.ts` into
     matroskamux and mpegtsmux, `two_first_slice.mp4` into matroskamux,
