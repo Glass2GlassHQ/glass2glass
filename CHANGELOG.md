@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1847: `decodebin` and `parsebin` fan-outs split every container the inline bins play, WAV, FLV, IVF and elementary audio included.
 - M1825: DivX packed B-frames get their own display times, and a PES or container stamp names the access unit whose picture starts in that buffer.
 - M1838: a raw-audio caps filter that names only the format leaves rate and channels open, as in gst.
 - M1841: a fan-in muxer that refuses a pad's caps names them in an error log.

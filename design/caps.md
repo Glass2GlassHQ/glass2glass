@@ -808,6 +808,12 @@ parsed streams in the framing the demuxers already emit. A remux keeps the AAC
 priming and tail an MP4 edit list cuts whenever the target container has no edit
 list (mkv, ts, flv), as `ffmpeg -c copy` does.
 
+A decodebin or parsebin fan-out tries the container fan-out hooks with the
+container caps its source sniffed, so a hook only takes its own container. A file
+no hook claims splits through a tee: each port starts with the single-stream
+demuxer and stream selection the inline decodebin plugs for that stream
+(`Registry::container_streams`), and an elementary file has one port.
+
 A `NoDecodeChain` or `NoParseChain` error quotes the unplugged input through
 `Caps::to_gst_string`, gst caps syntax with wildcard and range fields left out, so
 the message names the codec and any fixed size, rate or channel count. Parsing

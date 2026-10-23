@@ -221,9 +221,14 @@ Highest leverage first:
   - `h264/H264_might_overflow.mkv --seek 1.086` finds no frame, where ffmpeg
     lands on the keyframe at 1.086 s.
   - No seek finds a frame in `gst-medias/defaults/webm/opus_vp9-alpha.webm`.
-  - `parsebin` fan-out fails on WAV, VMnc and tagged AVI, and FLV VP6 (no caps
-    overlap), and on IVF, Ogg, `h264_intra_first-small.flv` and tagged-codec
-    AVI (no free output pad `video_0`).
+  - Demuxers drop streams gst's parsebin exposes: DTS in `filter/242_4.mkv`, TTA,
+    pcm_dvd LPCM in `coolitnow-partial.vob`, and the xan_dpcm audio of
+    `wc4-xan` AVIs.
+  - A parsebin fan-out error (`ParseError::DecodebinFanoutUpstream`) says
+    `decodebin name=d` for a parsebin too.
+  - The fan-in muxers refuse codecs the gst muxer of the same name takes:
+    `matroskamux` PCM, Vorbis, Theora and VP6, `mp4mux` ADTS AAC and VP8,
+    `flvmux` and `mpegtsmux` VP8 (calliope TESTING technique 23 lists the rest).
   - `flvmux` writes an AAC sequence header no decoder accepts
     (`fate-suite/aac/al04_44.mp4`).
   - `mpegtsmux` accepts USAC and writes a file nothing decodes
