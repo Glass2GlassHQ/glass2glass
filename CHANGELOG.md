@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+## 0.10.0
+
 Breaking: `LaunchFactory::with_usable` / `usable` return `Result<(), String>`, `ElementProbe::new` / `with_journeys` take an `ElementLogName`, `NegotiationFailure::NoOutputForInput` and `ParseError::BadValue` gain a field, g2g-plugins' `required_feature` is now `feature_gated_element`, `FeatureGatedElement` gains two fields, and `GstEquivalent` gains `BuildsOnlyOn`.
 
 - M1893: the runner logs each packet an element receives or a source pushes at `log` / `debug` under its instance name, and silent drop paths log at `debug`.

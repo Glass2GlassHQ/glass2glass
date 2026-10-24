@@ -54,8 +54,8 @@ A complete program:
 # Cargo.toml
 [dependencies]
 tokio       = { version = "1", features = ["macros", "rt-multi-thread"] }
-g2g-core    = "0.9"
-g2g-plugins = { version = "0.9", features = ["std", "wayland-sink"] }
+g2g-core    = "0.10"
+g2g-plugins = { version = "0.10", features = ["std", "wayland-sink"] }
 ```
 
 `wayland-sink` links the Wayland and xkbcommon system libraries. Install the
