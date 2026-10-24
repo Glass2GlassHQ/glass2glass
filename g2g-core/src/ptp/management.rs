@@ -1,5 +1,5 @@
 //! PTP management messages (IEEE 1588-2008 clause 15), the GET half plus the
-//! data sets a client needs to read another clock's sync state (M998).
+//! data sets a client needs to read another clock's sync state.
 //!
 //! This is what `pmc` speaks to `ptp4l`: a management message carries a
 //! targetPortIdentity and one management TLV naming a managementId, and the

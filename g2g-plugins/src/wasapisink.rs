@@ -1,5 +1,5 @@
-//! Windows WASAPI render sink (M29): the audible output end of the audio path
-//! `AudioTestSrc` / `WavSink` started in M25. Consumes interleaved PCM
+//! Windows WASAPI render sink: the audible output end of the audio path
+//! that starts at `AudioTestSrc`. Consumes interleaved PCM
 //! (`PcmS16Le` or `PcmF32Le`) `DataFrame`s and plays them on the default
 //! render endpoint via WASAPI shared mode, so an audio pipeline actually makes
 //! sound instead of only writing a file.

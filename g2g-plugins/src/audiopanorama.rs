@@ -188,7 +188,7 @@ impl AsyncElement for AudioPanorama {
     }
 }
 
-/// `AudioPanorama`'s settable properties (M104).
+/// `AudioPanorama`'s settable properties.
 static AUDIOPANORAMA_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "panorama",
     PropKind::Double,

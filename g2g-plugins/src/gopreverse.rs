@@ -1,4 +1,4 @@
-//! Decoded-GOP reverser (M897): the presentation half of reverse playback.
+//! Decoded-GOP reverser: the presentation half of reverse playback.
 //!
 //! A decoder only runs forward, so a reverse-rate segment (`rate < 0`) is played
 //! by feeding it whole GOPs in decode order, newest GOP first

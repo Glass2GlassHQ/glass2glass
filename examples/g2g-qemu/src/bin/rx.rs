@@ -1,4 +1,4 @@
-//! Receive-direction proof (M653): the RX chain on the emulated Cortex-M4. A
+//! Receive-direction proof: the RX chain on the emulated Cortex-M4. A
 //! mock network receiver hands the pipeline a *reordered* stream of RTP/PCMU
 //! datagrams; `RtpSrc -> JitterBuffer -> G.711 decode -> hash` must reconstruct
 //! the ordered PCM. Correctness is proved by equivalence to an independent

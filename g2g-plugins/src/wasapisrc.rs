@@ -1,4 +1,4 @@
-//! Windows WASAPI capture source (M32): the input mirror of [`WasapiSink`].
+//! Windows WASAPI capture source: the input mirror of [`WasapiSink`].
 //! Captures interleaved PCM from the default audio capture endpoint (shared
 //! mode) and emits `DataFrame`s, so a live microphone / line-in feeds a g2g
 //! pipeline the same way `AudioTestSrc` feeds a synthetic tone.

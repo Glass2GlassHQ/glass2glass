@@ -1,4 +1,4 @@
-//! Embedded-CPython host for [`PyTransform`] (M198, `python` feature).
+//! Embedded-CPython host for [`PyTransform`] (`python` feature).
 //!
 //! Bootstraps a single in-process CPython interpreter (pyo3 `auto-initialize`),
 //! registers the native `g2g` module that a gst-python-ml `backend/g2g` package
@@ -62,7 +62,7 @@
 //! it on arrival. `output="text_src"` sends the bytes as a text frame on the
 //! `text_src` pad instead, for a `pyelement` whose launch line links it.
 //!
-//! GPU-resident frames take their own entry points (M984, M986). A
+//! GPU-resident frames take their own entry points. A
 //! [`MemoryDomain::Cuda`] frame has no CPU bytes to wrap, so its two semi-planar
 //! planes are handed over as [`CudaPlane`]s instead, one hook per shape:
 //!
@@ -102,7 +102,7 @@
 //! one-thread-per-element shape is deliberately the free-threaded (PEP 703,
 //! `python3.14t`) unit: on a free-threaded interpreter the workers run truly in
 //! parallel with no code change (the `Python::attach` API is the no-GIL model, not
-//! "acquire the GIL"). Measured on both (M988, `tests/m988_gil_offload.rs`): four
+//! "acquire the GIL"). Measured on both (`tests/m988_gil_offload.rs`): four
 //! hosted elements running one compute-bound Python callback each recover 3.6x of
 //! the ideal 4x on free-threaded 3.14, and 0.9x on stock 3.14.
 //! Per-interpreter-GIL sub-interpreters were rejected: numpy / torch / cv2 are not
@@ -138,7 +138,7 @@ use crate::cuda_plane::{nv12_planes, produced_cuda_buffer, CudaPlane};
 use crate::hosted_input::HostedOutput;
 use crate::text_output::{SRC_PAD, TEXT_SRC_PAD};
 
-/// The Python entry points for GPU-resident frames (M984, M986). An element that
+/// The Python entry points for GPU-resident frames. An element that
 /// works on device memory defines the one matching its shape.
 const CUDA_HOOK: &str = "g2g_process_cuda";
 const CUDA_BATCH_HOOK: &str = "g2g_process_cuda_batch";

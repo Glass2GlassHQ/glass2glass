@@ -747,7 +747,7 @@ mod tests {
         }
     }
 
-    /// A fan-in arm is tappable like any other edge (M849): subscribing to an
+    /// A fan-in arm is tappable like any other edge: subscribing to an
     /// edge whose destination is the muxer streams previews of the frames that
     /// input contributes, even when the muxer forwards a different input.
     #[tokio::test]

@@ -1,4 +1,4 @@
-//! Windowed wgpu display sink (M1017): the launch-line `wgpusink`.
+//! Windowed wgpu display sink: the launch-line `wgpusink`.
 //!
 //! [`WgpuSink`] renders and presents, but only to a target the application built.
 //! This element is that application: it opens its own `xdg_toplevel` on the
@@ -17,7 +17,7 @@
 //! A `MemoryDomain::WgpuTexture` frame is blitted where it lies (the point of the
 //! zero-copy decode paths); a system-memory NV12 or RGBA frame costs one
 //! `write_texture` before the same blit. A frame in another domain gets a
-//! converter spliced ahead of the sink by the M354 auto-plug, which is how an
+//! converter spliced ahead of the sink by the domain auto-plug, which is how an
 //! NVDEC CUDA frame reaches the screen without the PCIe download `waylandsink`
 //! would have cost.
 //!
@@ -381,7 +381,7 @@ impl AsyncElement for WgpuPresentSink {
     }
 
     /// A GPU texture is presented where it lies; system memory is uploaded.
-    /// Declaring this is what makes the M354 auto-plug splice a bridge (rather
+    /// Declaring this is what makes the auto-plug splice a bridge (rather
     /// than a download) ahead of a decoder that emits into another GPU domain.
     fn input_domains(&self) -> DomainSet {
         DomainSet::only(MemoryDomainKind::WgpuTexture).with(MemoryDomainKind::System)

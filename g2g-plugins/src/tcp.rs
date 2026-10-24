@@ -1,4 +1,4 @@
-//! Plain TCP byte-stream elements (M1068, `tcp` feature): the four elements of
+//! Plain TCP byte-stream elements (`tcp` feature): the four elements of
 //! GStreamer's `tcp` plugin. `TcpServerSrc` / `TcpClientSrc` read a socket and
 //! emit its bytes as `DataFrame` chunks exactly the way [`FileSrc`](crate::filesrc)
 //! reads a file, so `tcpclientsrc ! typefind ! decodebin` types a stream the same

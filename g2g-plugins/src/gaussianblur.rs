@@ -367,7 +367,7 @@ impl AsyncElement for GaussianBlur {
     }
 }
 
-/// `GaussianBlur`'s settable properties, named as GStreamer's (M1084).
+/// `GaussianBlur`'s settable properties, named as GStreamer's.
 static GAUSSIANBLUR_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "sigma",
     PropKind::Double,

@@ -1,4 +1,4 @@
-//! Pipeline queries (M12).
+//! Pipeline queries.
 //!
 //! GStreamer answers a `LATENCY` query by walking the pipeline from sink to
 //! source: each element folds its own latency contribution into the upstream
@@ -11,7 +11,7 @@
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::meta::MetaRequests;
 
-/// Downstream-proposed buffer allocation parameters (M12 ALLOCATION query).
+/// Downstream-proposed buffer allocation parameters (the ALLOCATION query).
 ///
 /// A consumer answers its producer's allocation query with the buffer size,
 /// count, alignment, and memory domain it needs, so the producer can allocate
@@ -39,8 +39,8 @@ pub struct AllocationParams {
     /// the frame copy-free when it is able to. The producer reconciles this
     /// against what it can emit ([`resolve_for_producer`](Self::resolve_for_producer)).
     pub accepts: DomainSet,
-    /// Per-frame metadata every consumer downstream of this link asked for
-    /// (M976). Rides the same cascade as the buffer parameters, unioned at each
+    /// Per-frame metadata every consumer downstream of this link asked for.
+    /// Rides the same cascade as the buffer parameters, unioned at each
     /// hop, so a producer several elements upstream can ask
     /// `MetaRequests::wants` before it decides whether to attach optional
     /// metadata. Empty unless some element declared a request.
@@ -75,7 +75,7 @@ impl AllocationParams {
     }
 
     /// A proposal that constrains nothing about the buffers and carries only
-    /// downstream metadata demand (M976), for a consumer that wants a meta but
+    /// downstream metadata demand, for a consumer that wants a meta but
     /// has no pool requirement. It accepts every memory domain, so folding it
     /// into the cascade cannot turn a producer's own domain choice into a
     /// conflict.
@@ -211,7 +211,7 @@ impl AllocationParams {
 }
 
 /// The proposal an element hands its upstream peer once metadata demand is
-/// folded in (M976). `proposal` is what the element asked for itself, `requests`
+/// folded in. `proposal` is what the element asked for itself, `requests`
 /// what its hop passes on ([`MetaRequests::carry_upstream`]).
 ///
 /// An element with no pool requirement of its own still passes the demand on, as

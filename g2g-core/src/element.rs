@@ -112,7 +112,7 @@ pub enum PushOutcome {
     /// upstream should retarget its bitrate. Lowest priority of the reverse
     /// signals (Reconfigure > Qos > Bitrate); a held estimate surfaces on a
     /// later push, and BWE updates far slower than the frame rate. A target of
-    /// `0` is the shed-layer idle hint (M722): the consumer downstream is
+    /// `0` is the shed-layer idle hint: the consumer downstream is
     /// discarding this stream (a starved simulcast layer), so the encoder
     /// should mostly stop encoding until a non-zero target resumes it.
     Bitrate(u32),
@@ -220,7 +220,7 @@ pub trait AsyncElement: ElementBound {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
 
     /// Receive this element's negotiated OUTPUT (source-pad) caps after the
-    /// solve, alongside the input caps from [`AsyncElement::configure_pipeline`] (M185). A
+    /// solve, alongside the input caps from [`AsyncElement::configure_pipeline`]. A
     /// geometry / format / rate-changing transform (videoscale, videoconvert,
     /// audioresample) uses this to take its target from a downstream capsfilter
     /// instead of its own properties, the gst caps-driven idiom. Default: no-op,
@@ -237,7 +237,7 @@ pub trait AsyncElement: ElementBound {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a>;
 
-    /// This element's contribution to the pipeline latency query (M12).
+    /// This element's contribution to the pipeline latency query.
     /// Default: zero, non-live. Transforms that buffer (jitter buffers,
     /// reorder queues) and live sources override this; the linear runners
     /// fold the chain into `RunStats::latency`.
@@ -245,7 +245,7 @@ pub trait AsyncElement: ElementBound {
         LatencyReport::ZERO
     }
 
-    /// The path's aggregated liveness (M1123): the inbound half of the latency
+    /// The path's aggregated liveness: the inbound half of the latency
     /// query, where [`latency`](Self::latency) is the outbound one. True when
     /// any element on the path is a live source. The runner calls this once on
     /// every element after it folds the chain and before the first `process`,
@@ -264,7 +264,7 @@ pub trait AsyncElement: ElementBound {
     }
 
     /// The full set of memory domains this element *can* emit on its output pad,
-    /// not just its preferred one. The producer-capability half of the M351
+    /// not just its preferred one. The producer-capability half of the
     /// two-sided allocation-domain negotiation: the runner intersects it with the
     /// downstream consumers' acceptance set and settles on a single domain, so a
     /// decoder that can deliver to System *or* stay resident on the GPU lets the
@@ -275,7 +275,7 @@ pub trait AsyncElement: ElementBound {
         DomainSet::only(self.output_memory())
     }
 
-    /// The memory domains this element can accept on its *input* pad (M354), for
+    /// The memory domains this element can accept on its *input* pad, for
     /// the domain-converter auto-plug. Default [`DomainSet::ALL`] (no requirement,
     /// so no converter is forced); a domain-strict element (a CUDA encoder/sink
     /// that needs device-resident input) narrows it, and the auto-plug splices a
@@ -291,7 +291,7 @@ pub trait AsyncElement: ElementBound {
         false
     }
 
-    /// Answer the upstream peer's allocation query (M12): the buffer size,
+    /// Answer the upstream peer's allocation query: the buffer size,
     /// count, alignment, and memory domain this element needs allocated so a
     /// pool can be handed over without a copy. Default: no preference
     /// (`None`). A transform that has already received its own downstream
@@ -301,12 +301,12 @@ pub trait AsyncElement: ElementBound {
         None
     }
 
-    /// Receive the downstream peer's allocation proposal (M12) so this element
+    /// Receive the downstream peer's allocation proposal so this element
     /// can allocate its output buffers from a compatible pool. Default:
     /// ignore and allocate however the element sees fit.
     fn configure_allocation(&mut self, _params: &AllocationParams) {}
 
-    /// Offer a clock to the pipeline's clock election (M12). Default: none.
+    /// Offer a clock to the pipeline's clock election. Default: none.
     /// Elements that pace to real hardware (an audio sink to its DAC) override
     /// this; the runner elects the highest-priority offered clock.
     fn provide_clock(&self) -> Option<ClockCandidate> {
@@ -362,7 +362,7 @@ pub trait AsyncElement: ElementBound {
     /// Whether this element consumes a downstream keyframe request
     /// (`PushOutcome::Reconfigure(ForceKeyframe)`) itself, i.e. it is an
     /// encoder that forces an IDR. Default `false`: the runner then relays the
-    /// request onto the element's input link (M720), so a PLI crosses any
+    /// request onto the element's input link, so a PLI crosses any
     /// number of pass-through transforms (a parser between the encoder and a
     /// WebRTC sink) to reach the encoder.
     fn handles_keyframe_requests(&self) -> bool {
@@ -411,7 +411,7 @@ pub trait AsyncElement: ElementBound {
     }
 
     /// Whether the runner relays a downstream QoS report onto this element's
-    /// input link (M175), as well as surfacing it to this element when
+    /// input link, as well as surfacing it to this element when
     /// [`AsyncElement::handles_qos`] is `true`. Default `!handles_qos()`: a
     /// decoder that sheds non-reference frames keeps the report to itself. An
     /// element that drops whole frames on a report (a hosted Python element)
@@ -475,7 +475,7 @@ pub trait AsyncElement: ElementBound {
     }
 
     /// The per-frame metadata this element wants attached to the frames it
-    /// receives (M976), the pull half of `meta_transform`'s push half. The
+    /// receives, the pull half of `meta_transform`'s push half. The
     /// runner unions the declaration into the allocation cascade travelling
     /// upstream, so a producer any number of hops away can ask
     /// `MetaRequests::wants` in
@@ -492,14 +492,14 @@ pub trait AsyncElement: ElementBound {
         crate::meta::MetaRequests::new()
     }
 
-    /// M16 step 5b: declare this element's negotiation-time constraint
+    /// Declare this element's negotiation-time constraint
     /// when used as the **sink** of a chain. The default accepts anything.
     /// A sink that narrows what it takes overrides with `Accepts(CapsSet)`.
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
         CapsConstraint::AcceptsAny
     }
 
-    /// M16 step 5b: same as `caps_constraint_as_sink` but for the
+    /// Same as `caps_constraint_as_sink` but for the
     /// **transform** role. The default passes caps through unchanged. A
     /// transform that narrows or changes caps overrides with `Identity` /
     /// `Mapping` / `DerivedOutput` / `DerivedFields`.
@@ -517,7 +517,7 @@ pub trait AsyncElement: ElementBound {
         None
     }
 
-    /// The runtime properties this element type exposes (M104), the GObject
+    /// The runtime properties this element type exposes, the GObject
     /// property-spec analog. Default: none. An element overrides this (and
     /// [`set_property`](Self::set_property) / [`get_property`](Self::get_property))
     /// to be settable by name from a `gst-launch` pipeline or inspectable by a
@@ -527,7 +527,7 @@ pub trait AsyncElement: ElementBound {
         &[]
     }
 
-    /// Static introspection metadata for this element type (M178): the
+    /// Static introspection metadata for this element type: the
     /// `gst-inspect` "Factory Details" (long-name / classification / description
     /// / author). Default: empty, like [`properties`](Self::properties). An
     /// element overrides it with a `const ElementMetadata` to document itself.
@@ -535,7 +535,7 @@ pub trait AsyncElement: ElementBound {
         ElementMetadata::default()
     }
 
-    /// Receive this instance's log name (M179), assigned by the runner as
+    /// Receive this instance's log name, assigned by the runner as
     /// `<category>N`. Default: ignore. An element that logs about itself stores
     /// it and returns it from its [`LogSource`](crate::log::LogSource) so its log
     /// lines carry the instance name.
@@ -567,14 +567,14 @@ pub trait AsyncElement: ElementBound {
     #[cfg(feature = "runtime")]
     fn set_buffered_seek(&mut self, _app: crate::runtime::SeekController) {}
 
-    /// Override this instance's log category (M845), which is otherwise the
+    /// Override this instance's log category, which is otherwise the
     /// element type name. Default: ignore. An element that logs about itself
     /// stores it (in a [`LogName`](crate::log::LogName)) and returns it from
     /// `LogSource::log_category_override`, so `G2G_DEBUG` filtering keys off the
     /// override for this instance while its siblings keep the type category.
     fn set_log_category(&mut self, _category: alloc::string::String) {}
 
-    /// Set a property by name (M104). Default: every name is
+    /// Set a property by name. Default: every name is
     /// [`PropError::Unknown`] (no properties). An overriding element validates
     /// the value kind against its [`properties`](Self::properties) spec and
     /// applies it.
@@ -582,13 +582,13 @@ pub trait AsyncElement: ElementBound {
         Err(PropError::Unknown)
     }
 
-    /// Read a property back by name (M104). Default: `None`. Overriding elements
+    /// Read a property back by name. Default: `None`. Overriding elements
     /// return the current value for a known property.
     fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
     }
 
-    /// The log category for this element (M179): its short type name by
+    /// The log category for this element: its short type name by
     /// default, the `G2G_DEBUG` filtering key. A wrapper that erases another
     /// element forwards the inner one's category instead.
     fn log_category(&self) -> &'static str {
@@ -604,7 +604,7 @@ pub trait DynAsyncElement: ElementBound {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
 
-    /// Dyn-safe mirror of [`AsyncElement::configure_output`] (M185). Defaults to
+    /// Dyn-safe mirror of [`AsyncElement::configure_output`]. Defaults to
     /// no-op so unaffected erased elements need not implement it.
     fn configure_output(&mut self, _output_caps: &Caps) -> Result<(), G2gError> {
         Ok(())
@@ -721,27 +721,27 @@ pub trait DynAsyncElement: ElementBound {
         None
     }
 
-    /// Dyn-safe mirror of [`AsyncElement::handles_keyframe_requests`] (M720).
+    /// Dyn-safe mirror of [`AsyncElement::handles_keyframe_requests`].
     fn handles_keyframe_requests(&self) -> bool {
         false
     }
 
-    /// Dyn-safe mirror of [`AsyncElement::handles_bitrate_requests`] (M720).
+    /// Dyn-safe mirror of [`AsyncElement::handles_bitrate_requests`].
     fn handles_bitrate_requests(&self) -> bool {
         false
     }
 
-    /// Dyn-safe mirror of [`AsyncElement::absorbed_orientations`] (M1058).
+    /// Dyn-safe mirror of [`AsyncElement::absorbed_orientations`].
     fn absorbed_orientations(&self) -> OrientationSet {
         OrientationSet::EMPTY
     }
 
-    /// Dyn-safe mirror of [`AsyncElement::handles_orientation`] (M1058).
+    /// Dyn-safe mirror of [`AsyncElement::handles_orientation`].
     fn handles_orientation(&self) -> bool {
         false
     }
 
-    /// Dyn-safe mirror of [`AsyncElement::handles_qos`] (M997).
+    /// Dyn-safe mirror of [`AsyncElement::handles_qos`].
     fn handles_qos(&self) -> bool {
         false
     }
@@ -763,7 +763,7 @@ pub trait DynAsyncElement: ElementBound {
         ElementMetadata::default()
     }
 
-    /// The log category for this erased element (M179): its short type name by
+    /// The log category for this erased element: its short type name by
     /// default (the blanket impl fills it from `core::any::type_name`), so the
     /// runner can name (`<category>N`) and log about any element. Filtering key.
     fn log_category(&self) -> &'static str {
@@ -810,7 +810,7 @@ pub trait DynAsyncElement: ElementBound {
         None
     }
 
-    /// Consume this element into its graph-runner transform arm (M1000). The
+    /// Consume this element into its graph-runner transform arm. The
     /// blanket impl monomorphizes the arm loop over the concrete element type,
     /// so the per-frame `process` future is unboxed: the one box is this
     /// method's returned arm future, once per run. Implementations outside the

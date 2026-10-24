@@ -1,4 +1,4 @@
-//! Peripheral-breadth proof (M654): an I2C sensor -> UART telemetry pipeline on
+//! Peripheral-breadth proof: an I2C sensor -> UART telemetry pipeline on
 //! the emulated Cortex-M4. A mock SHT3x on the I2C bus returns a datasheet
 //! response (raw words + CRC-8); the `Sht3xSrc` driver validates the CRCs and
 //! converts to milli-units per the datasheet transfer functions; a `UartSink`

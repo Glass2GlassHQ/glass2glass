@@ -1,4 +1,4 @@
-//! Trim (M1176, `no_std`): keeps the frames in a presentation-time range and
+//! Trim (`no_std`): keeps the frames in a presentation-time range and
 //! rebases them onto it, so `filesrc ! decodebin ! trim start=… stop=… ! …` cuts
 //! a clip out of a decoded file without a seek.
 //!

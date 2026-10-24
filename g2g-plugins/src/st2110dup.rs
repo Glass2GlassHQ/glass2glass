@@ -1,4 +1,4 @@
-//! ST 2110-7 seamless protection (M608): the receive-side reconstruction that
+//! ST 2110-7 seamless protection: the receive-side reconstruction that
 //! merges two (or more) identical redundant RTP streams into one lossless stream.
 //!
 //! A -7 sender emits the *same* RTP packets (same SSRC, sequence numbers, and

@@ -365,7 +365,7 @@ impl AsyncElement for AudioRate {
     }
 }
 
-/// `AudioRate`'s properties (M1066): gst `audiorate`'s two settings plus its
+/// `AudioRate`'s properties: gst `audiorate`'s two settings plus its
 /// four sample counters.
 static AUDIORATE_PROPS: &[PropertySpec] = &[
     PropertySpec::new(

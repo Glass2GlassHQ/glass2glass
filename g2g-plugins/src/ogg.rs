@@ -1,4 +1,4 @@
-//! Ogg demuxer (M116) + page writer (M789): parse an Ogg byte stream into the
+//! Ogg demuxer + page writer: parse an Ogg byte stream into the
 //! packets of its logical bitstream (RFC 3533), the Opus / Vorbis carrier, and
 //! frame packets back into pages.
 //!
@@ -8,14 +8,14 @@
 //! 0..254), reassemble packets that span pages, and skip the codec setup headers.
 //! The [`crate::oggdemux::OggDemux`] element wraps it.
 //!
-//! Grouped multi-stream Ogg (M790) is handled: a file opens with one BOS page
+//! Grouped multi-stream Ogg is handled: a file opens with one BOS page
 //! per logical bitstream before any other page (RFC 3533 §4), and each serial's
 //! codec mapping, headers, packets and granule timing are tracked independently
 //! ([`OggLogicalStream`]). Codec support per stream: Opus fully (codec + channel
 //! count from `OpusHead`, the two setup headers skipped), Vorbis and Ogg-FLAC
 //! likewise, other codecs best-effort (tagged, all packets emitted).
 //!
-//! **Chained** Ogg (M827) is handled too: a fresh BOS page after the current
+//! **Chained** Ogg is handled too: a fresh BOS page after the current
 //! group's end opens the next physical stream (a *chain*), sequential rather
 //! than concurrent. Each chain gets its own group of [`OggLogicalStream`]s,
 //! tagged with the chain index and their slot within it; a chain's k-th stream
@@ -190,14 +190,14 @@ pub struct OggLogicalStream {
     end_granulepos: Option<u64>,
     /// The first audio-bearing page's granule position, the count of audio
     /// packets completed through it, and whether that page is also the EOS
-    /// page (M778). Anchors the Vorbis timeline: the granule names the
+    /// page. Anchors the Vorbis timeline: the granule names the
     /// position after the page's last packet, so any excess of the natural
     /// packet durations over it is initial priming.
     first_data: Option<(u64, u32, bool)>,
     /// Running count of audio (non-header) packets finalized.
     audio_finalized: u32,
     completed: Vec<Vec<u8>>,
-    /// Mid-file landing in progress (M862): set by `resume_mid_stream`, cleared
+    /// Mid-file landing in progress: set by `resume_mid_stream`, cleared
     /// by the first page carrying a granule position. While set, completed
     /// packets are dropped: a byte-seek can land inside a packet, and a page's
     /// granule names the decode position at its *end*, so the packets after
@@ -230,7 +230,7 @@ impl OggLogicalStream {
         }
     }
 
-    /// Restart this bitstream at a mid-file byte-seek landing (M862): the
+    /// Restart this bitstream at a mid-file byte-seek landing: the
     /// position state goes (it is re-established from the landing's first page
     /// granule) while the codec, headers and header-packet count stay, since the
     /// landing has no beginning-of-stream page to re-read them from.
@@ -248,7 +248,7 @@ impl OggLogicalStream {
         self.serial
     }
 
-    /// The physical stream (chain) this bitstream belongs to (M827): `0` for the
+    /// The physical stream (chain) this bitstream belongs to: `0` for the
     /// file's first, one more per chained beginning-of-stream block.
     pub fn chain(&self) -> u32 {
         self.chain
@@ -295,12 +295,12 @@ impl OggLogicalStream {
     }
 
     /// The first audio-bearing page's `(granulepos, audio packets completed
-    /// through it, is-EOS-page)`, once parsed (M778). See `first_data`.
+    /// through it, is-EOS-page)`, once parsed. See `first_data`.
     pub fn first_data_granule(&self) -> Option<(u64, u32, bool)> {
         self.first_data
     }
 
-    /// The mid-file landing anchor (M862): the granule position the packets
+    /// The mid-file landing anchor: the granule position the packets
     /// drained since the landing start from, and the packet completing the
     /// anchor page. `None` until the landing's first granule-bearing page is
     /// parsed, and outside a landing.
@@ -324,7 +324,7 @@ pub struct OggDemuxer {
     chain: u32,
     /// A page of a serial this chain never opened, or a chained
     /// beginning-of-stream block, has been parsed since the last reset. After a
-    /// mid-file landing (M862) that means the landing left the physical stream
+    /// mid-file landing that means the landing left the physical stream
     /// the caller resumed, so its byte-offset guess cannot serve the seek.
     foreign_page: bool,
 }
@@ -350,7 +350,7 @@ impl OggDemuxer {
         self.grouping_done
     }
 
-    /// The physical stream (chain) being parsed (M827): `0` until a chained
+    /// The physical stream (chain) being parsed: `0` until a chained
     /// second stream's beginning-of-stream page arrives.
     pub fn chain(&self) -> u32 {
         self.chain
@@ -408,7 +408,7 @@ impl OggDemuxer {
         self.streams.first()?.end_granule()
     }
 
-    /// The first stream's first audio-bearing page granule (M778). See
+    /// The first stream's first audio-bearing page granule. See
     /// [`OggLogicalStream::first_data_granule`].
     pub fn first_data_granule(&self) -> Option<(u64, u32, bool)> {
         self.streams.first()?.first_data_granule()
@@ -421,7 +421,7 @@ impl OggDemuxer {
         self.buf.len()
     }
 
-    /// Restart parsing at a mid-file byte-seek landing (M862), keeping the
+    /// Restart parsing at a mid-file byte-seek landing, keeping the
     /// current chain's bitstreams (codec, headers) while dropping all position
     /// state. Without them the packets after the landing would be typed by
     /// `detect` from a random audio packet, and the decoder would never get
@@ -670,7 +670,7 @@ impl OggLogicalStream {
     }
 }
 
-/// Vorbis per-packet timing tables (M778), recovered from the identification
+/// Vorbis per-packet timing tables, recovered from the identification
 /// and setup headers without a codebook parse: the two block sizes (ident
 /// byte 28) and each mode's blockflag, located by a validated backward scan
 /// of the setup header's mode section (the ffmpeg `vorbis_parser` technique).

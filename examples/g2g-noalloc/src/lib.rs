@@ -1,4 +1,4 @@
-//! Link-time no-heap proof (M625) + panic-free proof (M626): a real g2g
+//! Link-time no-heap proof + panic-free proof: a real g2g
 //! pipeline that links for a bare Cortex-M target with NO global allocator, NO
 //! `alloc` crate dependency, and NO reachable panic path.
 //!
@@ -42,7 +42,7 @@ pub extern "C" fn g2g_noalloc_expected() -> u64 {
     noalloc_pipeline::EXPECTED_CHECKSUM
 }
 
-/// Run the flagship audio graph (M644: capture -> convert -> resample ->
+/// Run the flagship audio graph (capture -> convert -> resample ->
 /// mix -> encode -> RTP) and return its wire checksum, extending every
 /// symbol proof over the whole audio element set.
 #[no_mangle]

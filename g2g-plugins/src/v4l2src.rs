@@ -5,7 +5,7 @@
 //! used: the probe enumerates the device's pixel formats, advertises every one
 //! [`CapturePixelFormat`] covers, and the capture thread runs whichever the
 //! solver fixed. Packed YUYV comes first in that set, so a chain that accepts
-//! anything (`V4l2Src -> VideoConvert -> sink`, M89) still gets the raw UVC
+//! anything (`V4l2Src -> VideoConvert -> sink`) still gets the raw UVC
 //! output it always did. Pinning the link to `image/jpeg` instead selects the
 //! camera's MJPEG mode, which fits resolutions and frame rates over USB that
 //! uncompressed YUYV cannot; `MjpegDec` decodes it downstream.
@@ -1058,7 +1058,7 @@ pub struct V4l2Src {
     /// The mode negotiation settled on, filled by `configure_pipeline` from the
     /// caps the solver fixed. The capture thread runs exactly this.
     chosen: Option<Mode>,
-    /// Whether a consumer asked where the rows are (M1059), so a driver that
+    /// Whether a consumer asked where the rows are, so a driver that
     /// pads them can hand its buffer over as it is instead of packing it tight.
     keep_row_padding: bool,
     configured: bool,
@@ -1380,7 +1380,7 @@ impl SourceLoop for V4l2Src {
         }
     }
 
-    /// M1059: a driver that pads its rows normally has them packed tight before
+    /// A driver that pads its rows normally has them packed tight before
     /// the frame goes downstream. A consumer that asked for a `PlaneLayout`
     /// reads rows where they lie, so that copy can go and the driver's own
     /// buffer travels with its pitch declared.
@@ -2126,7 +2126,7 @@ mod tests {
         );
     }
 
-    /// The whole M944 path against a real camera: an id the provider minted
+    /// The whole device-discovery path against a real camera: an id the provider minted
     /// selects the node, and a control set through a property reaches the
     /// driver. Self-skips where no camera (CI) or none with a switch control.
     #[test]

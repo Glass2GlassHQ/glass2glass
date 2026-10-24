@@ -1,4 +1,4 @@
-//! ST 2110-20 uncompressed video network elements (M599): a sink and source that
+//! ST 2110-20 uncompressed video network elements: a sink and source that
 //! put the sans-IO `st2110video` core (RFC 4175) on the wire over UDP, with RTP
 //! timestamps from the PTP media clock.
 //!

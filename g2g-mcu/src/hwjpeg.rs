@@ -1,4 +1,4 @@
-//! Hardware JPEG codec seam (M640): the [`JpegDecoder`] contract, shaped
+//! Hardware JPEG codec seam: the [`JpegDecoder`] contract, shaped
 //! like the STM32H7 JPEG codec peripheral (feed one complete JFIF bitstream,
 //! the silicon parses the header itself and reports the image parameters,
 //! then emits decoded YCbCr in its native MCU-block order), plus

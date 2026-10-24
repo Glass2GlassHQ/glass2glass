@@ -163,7 +163,7 @@ impl AsyncElement for Alpha {
     }
 }
 
-/// `Alpha`'s settable properties (M104).
+/// `Alpha`'s settable properties.
 static ALPHA_PROPS: &[PropertySpec] = &[
     PropertySpec::new("method", PropKind::Str, "alpha op: set | green | blue")
         .with_enum_values("set | green | blue"),

@@ -187,7 +187,7 @@ impl AsyncElement for CapsFilter {
     }
 }
 
-/// `CapsFilter`'s settable properties (M117).
+/// `CapsFilter`'s settable properties.
 static CAPSFILTER_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "caps",
     PropKind::Str,

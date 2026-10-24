@@ -1,4 +1,4 @@
-//! M307: Android audio via the NDK AAudio API (`AAudioStream`).
+//! Android audio via the NDK AAudio API (`AAudioStream`).
 //!
 //! Two elements, the Android analog of the WASAPI / ALSA / PulseAudio audio
 //! elements:

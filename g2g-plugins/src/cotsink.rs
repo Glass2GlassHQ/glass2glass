@@ -1,4 +1,4 @@
-//! Cursor-on-Target (CoT) bridge (M811): a drone's decoded MISB ST 0601
+//! Cursor-on-Target (CoT) bridge: a drone's decoded MISB ST 0601
 //! telemetry becomes a track on a TAK / ATAK situational-awareness network.
 //!
 //! The event builder ([`cot_event`]) is pure `no_std + alloc`: a

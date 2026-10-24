@@ -1,5 +1,5 @@
 //! Application sink (`appsink`): the application receives buffers out of a
-//! running pipeline (M233 callback, M235 pull), the `gst-appsink` analog.
+//! running pipeline (by callback or by pull), the `gst-appsink` analog.
 //!
 //! Two delivery modes, selected by what the application registers under the
 //! sink's `channel` name *before* launch (the parameterless `fn` factory means

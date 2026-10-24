@@ -1,5 +1,5 @@
 //! File source. Reads a file and emits its bytes as `DataFrame` chunks, the
-//! playback half of M20 (`FileSink` records, `FileSrc` replays). Feed an
+//! playback half of recording (`FileSink` records, `FileSrc` replays). Feed an
 //! Annex-B `.h264` recording through `H264Parse` to recover access units for
 //! a decoder.
 //!
@@ -10,7 +10,7 @@
 //! matching how a raw recording loses per-frame boundaries.
 //!
 //! For a text pipeline / registry build the caps come from the
-//! `bytestream-format` property instead (M112): `mpegts` / `matroska` name the
+//! `bytestream-format` property instead: `mpegts` / `matroska` name the
 //! container directly, and `auto` sniffs the file header at negotiation (the one
 //! case `FileSrc` does I/O before `run`) so `filesrc location=x.webm
 //! bytestream-format=auto ! matroskademux` works without naming the container.
@@ -68,14 +68,14 @@ pub struct FileSrc {
     verify_extension: bool,
     /// `true` once the media type is pinned explicitly (the `new` caps argument or
     /// a `bytestream-format` property). While `false` (a bare launch `filesrc`),
-    /// setting `location` derives the type from the file extension (M478), so
+    /// setting `location` derives the type from the file extension, so
     /// `filesrc location=movie.mp4` / `subs.vtt` types without an explicit format.
     format_explicit: bool,
     chunk_size: usize,
     /// Chunks to emit before EOS; `u64::MAX` is unlimited.
     target_chunks: u64,
     configured: bool,
-    /// Optional byte-offset seek channel (M361). A `FileSrc` is a byte source, so
+    /// Optional byte-offset seek channel. A `FileSrc` is a byte source, so
     /// a [`Seek`](g2g_core::Seek) it observes is in **BYTES** format: `start` is a
     /// file byte offset, not a timestamp. A downstream demuxer drives this to
     /// reposition the read for a time seek it resolved to a byte offset.
@@ -102,7 +102,7 @@ impl FileSrc {
         }
     }
 
-    /// A launch-registry `filesrc` with no pinned type (M478): the media type is
+    /// A launch-registry `filesrc` with no pinned type: the media type is
     /// derived from the `location` extension unless a `bytestream-format` property
     /// overrides it, so `filesrc location=X.mp4 ! decodebin` and
     /// `filesrc location=X.vtt ! subparse` type without an explicit format. Falls
@@ -123,7 +123,7 @@ impl FileSrc {
         }
     }
 
-    /// Make the source byte-seekable (M361): `run` polls `controller` between
+    /// Make the source byte-seekable: `run` polls `controller` between
     /// chunks and, on a flushing seek, emits `Flush`, repositions the file read
     /// to `seek.start` (a **byte** offset, since `FileSrc` is a byte source), and
     /// resumes. A downstream demuxer that resolved a time seek to a byte offset
@@ -230,7 +230,7 @@ impl SourceLoop for FileSrc {
         self.seek = Some(controller);
     }
 
-    /// Expose the container caps set by `bytestream-format` (M195), so a
+    /// Expose the container caps set by `bytestream-format`, so a
     /// downstream `decodebin` auto-plugs the right demuxer. `None` in
     /// `bytestream-format=auto` mode, where the container is only known after
     /// sniffing the file header at run time.
@@ -238,7 +238,7 @@ impl SourceLoop for FileSrc {
         (!self.auto_detect).then(|| self.caps.clone())
     }
 
-    /// Parse-time caps for `decodebin` (M480): sniff a `bytestream-format=auto`
+    /// Parse-time caps for `decodebin`: sniff a `bytestream-format=auto`
     /// header now (reading the file), so the demuxer is picked from the real
     /// content rather than a possibly-wrong extension. Content the sniff does not
     /// recognize is an error, an unreadable file returns `None`.
@@ -431,7 +431,7 @@ const PLAIN_TEXT_CAPS: Caps = Caps::Text {
     format: g2g_core::TextFormat::Utf8,
 };
 
-/// `FileSrc`'s settable properties (M107, M112): the input file path, and the
+/// `FileSrc`'s settable properties: the input file path, and the
 /// container of a raw byte stream (so a text pipeline can feed a demuxer).
 static FILESRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("location", PropKind::Str, "input file path"),
@@ -504,12 +504,12 @@ fn file_caps_from_header(header: &[u8]) -> Option<Caps> {
     Some(caps)
 }
 
-/// Derive the media type from a file extension (M478), so a bare launch
+/// Derive the media type from a file extension, so a bare launch
 /// `filesrc location=X` types without an explicit `bytestream-format`. Containers
 /// map to `Caps::ByteStream`, subtitle documents and plain text to `Caps::Text`,
 /// raw Annex-B elementary streams to `Caps::CompressedVideo` at a fixable `Range`
 /// placeholder geometry (never `Any`, which cannot fixate; the parser refines
-/// via SPS, M676); an unknown extension returns `None`, and the caller then
+/// via SPS); an unknown extension returns `None`, and the caller then
 /// content-sniffs the header. String-only, so it costs no filesystem read at
 /// parse time.
 pub(crate) fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {

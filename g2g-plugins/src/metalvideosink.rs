@@ -1,11 +1,11 @@
-//! M736: macOS Metal present sink (`CAMetalLayer`).
+//! macOS Metal present sink (`CAMetalLayer`).
 //!
 //! `MetalVideoSink` is the macOS analog of `WaylandSink` / `D3D11Sink`: it
 //! consumes NV12 `DataFrame`s and presents them to a `CAMetalLayer` drawable
 //! through a fullscreen-triangle render pass (BT.601 video-range YUV -> RGB in
 //! the fragment shader). Two input domains:
 //!
-//! - `MemoryDomain::CvPixelBuffer` (the M735 zero-copy domain): the decoder's
+//! - `MemoryDomain::CvPixelBuffer` (the zero-copy domain): the decoder's
 //!   IOSurface-backed buffer is imported plane-by-plane as `MTLTexture`s
 //!   (`newTextureWithDescriptor:iosurface:plane:`), so `vtdec cv-output !
 //!   metalvideosink` never copies pixels on the CPU.
@@ -503,7 +503,7 @@ impl AsyncElement for MetalVideoSink {
         CapsConstraint::Accepts(CapsSet::one(nv12_any()))
     }
 
-    /// Accepts packed System NV12 or the M735 zero-copy CvPixelBuffer domain.
+    /// Accepts packed System NV12 or the zero-copy CvPixelBuffer domain.
     fn input_domains(&self) -> DomainSet {
         DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::CvPixelBuffer)
     }
@@ -514,7 +514,7 @@ impl AsyncElement for MetalVideoSink {
         self.pacer.set_clock_sync(sync);
     }
 
-    /// Relay a late drop upstream (M174): the runner forwards it onto the
+    /// Relay a late drop upstream: the runner forwards it onto the
     /// incoming link, where the producer can shed load.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()

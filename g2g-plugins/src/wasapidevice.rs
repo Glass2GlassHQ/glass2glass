@@ -1,4 +1,4 @@
-//! WASAPI endpoint discovery (M943): the Windows audio half of the
+//! WASAPI endpoint discovery: the Windows audio half of the
 //! [`DeviceMonitor`](g2g_core::runtime::DeviceMonitor), the counterpart of
 //! [`alsadevice`](crate::alsadevice) on Linux. `IMMDeviceEnumerator` lists the
 //! active render and capture endpoints; a render endpoint drives

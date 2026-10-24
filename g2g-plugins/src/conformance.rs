@@ -1,4 +1,4 @@
-//! Conformance batteries (M614): the cases that produce the [`MaturityRecord`]s the
+//! Conformance batteries: the cases that produce the [`MaturityRecord`]s the
 //! maturity report is derived from.
 //!
 //! Each battery here exercises a *real* element (never a mock) with cheap,
@@ -1390,7 +1390,7 @@ pub fn report() -> ConformanceReport {
     report
 }
 
-/// Persisted conformance evidence (M615): the `Oracle` (reference-implementation) and
+/// Persisted conformance evidence: the `Oracle` (reference-implementation) and
 /// `Hardware` (device) checks that cannot run in-process are produced by the
 /// integration tests that own those resources (ffmpeg, a GPU), which append their
 /// evidence to a shared log. [`full_report`](persist::full_report) folds that

@@ -1,4 +1,4 @@
-//! IMA ADPCM fixed-point audio codec (M639): 4 bits per sample (4:1 vs
+//! IMA ADPCM fixed-point audio codec: 4 bits per sample (4:1 vs
 //! S16LE), the WAV / DVI block layout, mono. Pure integer step-adaptive
 //! delta modulation: an 89-entry step table and shift/multiply arithmetic,
 //! MCU-fit like [`g711`](crate::g711).

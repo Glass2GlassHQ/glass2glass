@@ -18,7 +18,7 @@
 //! binary, in order, so no jitter buffer is needed), chosen by what the publisher
 //! negotiates in SETUP. What `ffmpeg -rtsp_transport tcp` uses.
 //!
-//! Multi-client (M834): the element has one output pad, so one publisher records
+//! Multi-client: the element has one output pad, so one publisher records
 //! at a time and sessions are *sequential*. When a publisher disconnects, tears
 //! down, or falls silent past `timeout`, its session state (control connection,
 //! RTP port, interleaved channel, depayloader) is dropped and the element goes

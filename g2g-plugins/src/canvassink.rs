@@ -1,7 +1,7 @@
 //! HTML canvas presentation sink (browser/wasm). Consumes decoded RGBA
 //! `System` frames and draws them to a `<canvas>` via the 2D context
 //! (`ImageData` + `putImageData`), completing the in-browser glass-to-glass
-//! path `WebSocketSrc -> WebCodecsDecode -> CanvasSink` (M41).
+//! path `WebSocketSrc -> WebCodecsDecode -> CanvasSink`.
 //!
 //! 2D presentation is the robust, dependency-free path;
 //! [`WebGpuCanvasSink`](crate::webgpucanvassink::WebGpuCanvasSink) is the
@@ -9,7 +9,7 @@
 //! with no readback into wasm memory.
 //!
 //! [`CanvasSink::from_offscreen_canvas`] takes an `OffscreenCanvas` instead of
-//! a canvas id, which is how the sink presents from inside a worker (M1054):
+//! a canvas id, which is how the sink presents from inside a worker:
 //! a worker has no `document` to look an id up in.
 
 use core::future::Future;
@@ -161,7 +161,7 @@ impl AsyncElement for CanvasSink {
         self.pacer.set_clock_sync(sync);
     }
 
-    /// Relay a late drop upstream (M174): the runner forwards it onto the
+    /// Relay a late drop upstream: the runner forwards it onto the
     /// incoming link, where the producer can shed load.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()

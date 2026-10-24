@@ -1,4 +1,4 @@
-//! AVI demuxer elements (M1071): `ByteStream{Avi}` in, the elementary streams
+//! AVI demuxer elements: `ByteStream{Avi}` in, the elementary streams
 //! the `movi` chunks carry out. [`AviDemux`] emits one stream (the `stream=`
 //! selection, `filesrc location=x.avi ! avidemux ! ...`), [`AviDemuxN`] emits
 //! one per output port (`avidemux name=d  d.video_0 ! ...  d.audio_0 ! ...`),
@@ -163,7 +163,7 @@ fn audio_caps(format: AudioFormat, channels: u8, sample_rate: u32) -> Caps {
 
 /// The layout a PCM selection negotiates on before the `strf` is read: a
 /// concrete default first so the link can fixate, the wildcard second so a
-/// downstream `rate=` pin intersects to it (a lone wildcard cannot fixate, M754).
+/// downstream `rate=` pin intersects to it (a lone wildcard cannot fixate).
 /// The real layout arrives with the `CapsChanged` the parsed header emits, the
 /// way [`WavParse`](crate::wavparse::WavParse) does it.
 const DEFAULT_PCM_SAMPLE_RATE: u32 = 48_000;

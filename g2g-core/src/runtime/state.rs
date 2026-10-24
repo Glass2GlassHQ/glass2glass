@@ -1,4 +1,4 @@
-//! Shared pipeline state controller (M76 / M77 / M78).
+//! Shared pipeline state controller.
 //!
 //! A cloneable handle over an atomic [`PipelineState`] plus a `Waker`
 //! registry, so an application can drive `set_state(Playing)` from one task
@@ -7,14 +7,14 @@
 //! the bounded link fills, and backpressure stalls the whole chain upstream
 //! with no per-element cooperation. `Playing` opens the gate.
 //!
-//! **Preroll (M77).** A non-live pipeline in `Paused` admits exactly one
+//! **Preroll.** A non-live pipeline in `Paused` admits exactly one
 //! buffer per sink (its preroll frame) and then holds; `set_state(Paused)`
 //! reports `Async` and completes once the sinks preroll
 //! ([`BusMessage::AsyncDone`], [`StateController::await_prerolled`]). A live
 //! pipeline produces no preroll buffer: `Paused` reports `NoPreroll` and the
 //! gate full-holds. Mark a pipeline live with [`StateController::set_live`].
 //!
-//! **DAG (M78).** `run_graph_stateful` gates every `Sink` arm, so an arbitrary
+//! **DAG.** `run_graph_stateful` gates every `Sink` arm, so an arbitrary
 //! topology honors the ladder. Preroll aggregates across sinks: the runner
 //! calls [`StateController::expect_prerolls`] with the sink count, each sink's
 //! [`StateController::notify_prerolled`] decrements it, and the async `Paused`
@@ -70,7 +70,7 @@ struct Inner {
     /// replay. Without this, the down-transition clears `prerolled` but leaves
     /// `pending_preroll` at `0`, so the next `Paused` never re-completes preroll.
     preroll_target: AtomicUsize,
-    /// Preroll generation (M360). Bumped by [`StateController::request_repreroll`]
+    /// Preroll generation. Bumped by [`StateController::request_repreroll`]
     /// (a flushing seek while paused). A sink arm holding a stale generation
     /// re-prerolls: the `flow_gate` reopens even though the arm already took a
     /// preroll buffer this generation, so the post-flush target frame becomes the
@@ -85,7 +85,7 @@ struct Inner {
     /// Optional bus; `set_state` posts a [`BusMessage::StateChanged`] and
     /// `notify_prerolled` posts a [`BusMessage::AsyncDone`] when set.
     bus: Option<BusHandle>,
-    /// Elected clock + presentation base-time anchor (M176). Armed by the runner
+    /// Elected clock + presentation base-time anchor. Armed by the runner
     /// after clock election; `set_state(Playing)` stamps the anchor with
     /// `clock.now_ns()` (and a transition down to `Ready`/`Null` clears it), so a
     /// sink anchors presentation to the play edge rather than to runner startup
@@ -152,7 +152,7 @@ impl StateController {
         }
     }
 
-    /// Arm the `Playing`-transition presentation anchor (M176): the runner passes
+    /// Arm the `Playing`-transition presentation anchor: the runner passes
     /// the elected clock after clock election, and the returned [`PlayAnchor`] is
     /// stamped with `clock.now_ns()` on the next `set_state(Playing)` (cleared on
     /// a transition down to `Ready`/`Null`). The runner hands the same anchor to
@@ -279,7 +279,7 @@ impl StateController {
         }
     }
 
-    /// Re-arm preroll for a flushing seek issued while paused (M360). The app
+    /// Re-arm preroll for a flushing seek issued while paused. The app
     /// calls this alongside a flushing [`Seek`](crate::segment::Seek) on a paused
     /// pipeline: the sinks have already prerolled and are holding (so they are not
     /// draining the links and the source is backpressured, unable to observe the
@@ -306,7 +306,7 @@ impl StateController {
         }
     }
 
-    /// The current preroll generation (M360). A sink arm remembers the value it
+    /// The current preroll generation. A sink arm remembers the value it
     /// last prerolled at and re-prerolls when it observes a newer one.
     pub fn preroll_generation(&self) -> u64 {
         self.inner.preroll_gen.load(Ordering::Acquire)
@@ -364,7 +364,7 @@ impl StateController {
     ///   preroll frame), then `Pending` until `Playing`.
     /// - live `Paused` / `Ready` → `Pending` (no flow).
     ///
-    /// `self_gen` is the preroll generation the arm last prerolled at (M360):
+    /// `self_gen` is the preroll generation the arm last prerolled at:
     /// when [`request_repreroll`](StateController::request_repreroll) bumps the
     /// controller's generation past it, the gate reopens (`Go`) even with
     /// `self_prerolled` set, so the arm re-prerolls the post-flush frame. Pass

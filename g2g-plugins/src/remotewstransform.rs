@@ -1,8 +1,8 @@
-//! Remote WebSocket transform (M555, `remote-ws` feature): a media-agnostic
-//! *remote stage* over a WebSocket. Where the M554 `RemoteWsSink` / `RemoteWsSrc`
+//! Remote WebSocket transform (`remote-ws` feature): a media-agnostic
+//! *remote stage* over a WebSocket. Where the `RemoteWsSink` / `RemoteWsSrc`
 //! pair cuts an edge one-way, `RemoteWsTransform` keeps the graph shape and
 //! offloads a single middle stage, the bidirectional generalization of the bespoke
-//! M549 `WebRemoteDetect` shim (which hand-rolled an RGBA-up / boxes-down protocol
+//! `WebRemoteDetect` shim (which hand-rolled an RGBA-up / boxes-down protocol
 //! that knew about detection).
 //!
 //! The shared machinery (the FIFO round-trip protocol, caps dedup, the

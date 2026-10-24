@@ -1,4 +1,4 @@
-//! MoQ Transport subscriber source (`moqtsrc`, M903, `moqt` feature): subscribes
+//! MoQ Transport subscriber source (`moqtsrc`, `moqt` feature): subscribes
 //! to a broadcast on an IETF MoQT relay over WebTransport and emits the
 //! fragmented-MP4 byte stream it carries.
 //!

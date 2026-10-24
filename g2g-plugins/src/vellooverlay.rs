@@ -1,4 +1,4 @@
-//! Vello GPU analytics overlay (M102, masks M994): the GPU companion to the CPU
+//! Vello GPU analytics overlay: the GPU companion to the CPU
 //! [`AnalyticsOverlay`](crate::analyticsoverlay), rendering the `AnalyticsMeta`
 //! with the Vello GPU 2D renderer (wgpu) instead of the CPU blend loop. The HD /
 //! many-box path: stroking dozens of antialiased boxes per frame is a GPU job, and

@@ -1,4 +1,4 @@
-//! Copy / allocation plan (M613): a static, pre-run analysis of the memory-domain
+//! Copy / allocation plan: a static, pre-run analysis of the memory-domain
 //! path a frame takes through a negotiated graph.
 //!
 //! g2g's whole-graph negotiation already resolves, per edge, the memory domain the

@@ -1,4 +1,4 @@
-//! Saturating Q15-gain audio mixer (M642): the first fan-in element on the
+//! Saturating Q15-gain audio mixer: the first fan-in element on the
 //! heap-free subset, and the `mix` stage of the reference audio chain
 //! (capture -> convert -> resample -> mix -> encode -> RTP). Two interleaved
 //! S16LE streams in, one out: `out = sat(a * gain_a + b * gain_b)` per
@@ -13,7 +13,7 @@
 //! The Q15 result is rounded (round-half-up) then saturated to i16.
 //!
 //! [`Mixer`] wraps the math as a heap-free [`StaticFanIn2`], the two-input
-//! stage driven by `run_sources_fanin_sink` (M642's const-arity fan-in
+//! stage driven by `run_sources_fanin_sink` (the const-arity fan-in
 //! runner). Both inputs must carry the same byte count (the lockstep runner
 //! plus a deterministic upstream makes equal chunking the invariant, and a
 //! silent shorter-input policy would hide a real rate bug); input `a` is the

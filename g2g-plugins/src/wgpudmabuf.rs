@@ -5,9 +5,9 @@
 //! `WgpuToDmaBuf` consumes a GPU-resident [`MemoryDomain::WgpuBuffer`] frame and
 //! emits a [`MemoryDomain::DmaBuf`] one referencing the *same* pixels, so a
 //! rendered / decoded GPU frame can leave the process with no CPU copy: feed the
-//! emitted dma-buf to a [`DmaBufSink`](crate::localdmabuf::DmaBufSink) (M557) and
+//! emitted dma-buf to a [`DmaBufSink`](crate::localdmabuf::DmaBufSink) and
 //! the peer re-imports it with `DmaBufToWgpu`. This is the export mirror of the
-//! import side of design/README.md and the GPU producer named as the M557 follow-up.
+//! import side of design/README.md.
 //!
 //! # How the export works
 //!
@@ -49,7 +49,7 @@
 //! shared semaphore.
 //!
 //! [`with_external_semaphore`](WgpuToDmaBuf::with_external_semaphore)`(true)` drops
-//! that stall (M562): the element exports a persistent `VK_KHR_external_semaphore_fd`
+//! that stall: the element exports a persistent `VK_KHR_external_semaphore_fd`
 //! *timeline* semaphore once, signals the next value on each frame's copy submit
 //! (via `wgpu_hal::vulkan::Queue::add_signal_semaphore`, no `poll(Wait)`), and
 //! attaches the semaphore fd + value to the emitted dma-buf ([`OwnedDmaBuf::with_sync`]).

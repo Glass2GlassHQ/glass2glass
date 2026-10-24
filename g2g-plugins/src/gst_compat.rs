@@ -1,4 +1,4 @@
-//! GStreamer-to-g2g porting helpers (M200): a `gst`-element-name map and a
+//! GStreamer-to-g2g porting helpers: a `gst`-element-name map and a
 //! launch-line linter that turns parse failures into porting guidance.
 //!
 //! These back `g2g-inspect --gst <name>` and `g2g-launch`'s explain-on-error,

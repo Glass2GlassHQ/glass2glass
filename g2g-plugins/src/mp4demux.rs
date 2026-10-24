@@ -1,4 +1,4 @@
-//! Progressive / whole-file MP4 demuxer (Mp4Demux, M479): `ByteStream{Mp4}` in,
+//! Progressive / whole-file MP4 demuxer (Mp4Demux): `ByteStream{Mp4}` in,
 //! one track's access units out, a one-port [`Mp4DemuxN`](crate::mp4demuxn) run
 //! as a single-output element. The whole-file sibling of
 //! [`Fmp4Demux`](crate::fmp4demux) (which streams a live fragmented
@@ -8,13 +8,13 @@
 //! `fmp4::parse_progressive_multi` pass runs at `Eos`.
 //!
 //! This is what a bare `filesrc location=movie.mp4 ! decodebin` auto-plugs: a file
-//! source types itself `ByteStream{Mp4}` (M478), the auto-plugger picks this
+//! source types itself `ByteStream{Mp4}`, the auto-plugger picks this
 //! whole-file demuxer for it, and the fragmented `fmp4demux` still serves the
 //! streaming `IsoBmff` that HLS / DASH produce. Multi-track fan-out (video, audio,
 //! text) stays on [`Mp4DemuxN`](crate::mp4demuxn) via `qtdemux name=d ...`; this
 //! element emits one stream, the video track by default (`stream=av1` etc. names
-//! its codec for truthful startup caps, M961), or the audio track when
-//! `stream=aac` (M748), the one stream a linear `decodebin` chain decodes.
+//! its codec for truthful startup caps), or the audio track when
+//! `stream=aac`, the one stream a linear `decodebin` chain decodes.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -37,9 +37,9 @@ use crate::uncompressedvideo::{
     raw_video_formats, raw_video_placeholder_caps, raw_video_stream_from_str, raw_video_stream_str,
 };
 
-/// Which track the single-output demux emits (M748): the video track (the
+/// Which track the single-output demux emits: the video track (the
 /// default, so `filesrc ! qtdemux ! ...` is unchanged), the video track with its
-/// codec named (M961, `stream=av1` etc., so a codec-specific decoder negotiates
+/// codec named (`stream=av1` etc., so a codec-specific decoder negotiates
 /// truthful startup caps instead of the nominal H.264), or the audio track,
 /// which a bare `decodebin` on an audio-only file selects via the primary-stream
 /// hook (`stream=aac`, `stream=pcm-s16le`, ...), named by its format.
@@ -106,7 +106,7 @@ impl StreamSelect {
     }
 }
 
-/// The `stream=` names for a codec-named video selection (M961), the set
+/// The `stream=` names for a codec-named video selection, the set
 /// [`parse_all_tracks`](crate::fmp4) can read from a `moov` sample entry. Shared
 /// with the bare-`decodebin` primary-stream hook, which names the file's actual
 /// codec through this table. H.264 leads, as the default video selection's
@@ -212,7 +212,7 @@ impl Mp4Demux {
     }
 }
 
-/// `Mp4Demux`'s settable properties (M748). `stream` picks the emitted track, the
+/// `Mp4Demux`'s settable properties. `stream` picks the emitted track, the
 /// single-stream analog of [`TsDemux`](crate::tsdemux::TsDemux)'s `stream`.
 pub(crate) static MP4DEMUX_PROPS: &[PropertySpec] = &[
     PropertySpec::new(

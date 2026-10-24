@@ -1,4 +1,4 @@
-//! Bitmap-subtitle overlay (M1005): a video pad and a decoded-subpicture pad in,
+//! Bitmap-subtitle overlay: a video pad and a decoded-subpicture pad in,
 //! the video with the cue on screen blended over it out.
 //!
 //! The subpicture decoders ([`vobsubdec`](crate::vobsubdec),

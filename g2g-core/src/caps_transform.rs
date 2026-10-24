@@ -1,4 +1,4 @@
-//! M837: declarative forward derivation for caps transforms
+//! Declarative forward derivation for caps transforms
 //! (design/caps.md).
 //!
 //! A caps-driven transform (videoscale / videoconvert / videorate /

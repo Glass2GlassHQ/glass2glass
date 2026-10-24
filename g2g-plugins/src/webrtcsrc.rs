@@ -1,7 +1,7 @@
 //! WebRTC data-channel ingest source (browser/wasm). Consumes binary messages
 //! from a provided, already-open `RtcDataChannel` and emits each as a
 //! system-memory `DataFrame` chunk: the second browser ingest path alongside
-//! `WebSocketSrc` (M42). Signaling (offer/answer/ICE) is the application's job;
+//! `WebSocketSrc`. Signaling (offer/answer/ICE) is the application's job;
 //! this element wraps the negotiated channel.
 //!
 //! Same callback-to-async bridge as `WebSocketSrc`: the channel's `onmessage`

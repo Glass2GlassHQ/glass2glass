@@ -41,7 +41,7 @@ pub(crate) const MAX_FIXATION_ATTEMPTS: u32 = 3;
 /// Pick the most informative error from a pipeline's arm results. A closed-link
 /// `Shutdown` is usually the *consequence* of another arm erroring first (it
 /// dropped its channel end), so prefer any non-`Shutdown` error over it; fall
-/// back to the first error otherwise (M81). `None` if every arm succeeded.
+/// back to the first error otherwise. `None` if every arm succeeded.
 ///
 /// Each result is paired with its arm's instance name, and the one that wins is
 /// logged naming that element, since `G2gError` carries no element identity.
@@ -133,7 +133,7 @@ pub trait SourceLoop: ElementBound {
         Err(G2gError::FixationFailed)
     }
 
-    /// This source's latency contribution to the pipeline latency query (M12).
+    /// This source's latency contribution to the pipeline latency query.
     /// Live capture sources (cameras, RTSP) override this to report `live`
     /// with their capture interval as `min_ns`; the default is zero, non-live
     /// (eg a file or test-pattern source that can produce data on demand).
@@ -149,7 +149,7 @@ pub trait SourceLoop: ElementBound {
         MemoryDomainKind::System
     }
 
-    /// The full set of memory domains this source can emit (M351). The
+    /// The full set of memory domains this source can emit. The
     /// producer-capability half of the two-sided allocation-domain negotiation;
     /// see [`AsyncElement::output_domains`](crate::element::AsyncElement::output_domains).
     /// Default: just [`output_memory`](Self::output_memory). A GPU capture source
@@ -159,7 +159,7 @@ pub trait SourceLoop: ElementBound {
     }
 
     /// The total stream duration in nanoseconds, the source's answer to the
-    /// application `DURATION` query (M203). A source that knows the total length
+    /// application `DURATION` query. A source that knows the total length
     /// (a file / container source after reading its header, e.g. `Mp4Src`)
     /// overrides this; the runner publishes it on the
     /// [`PipelineProgress`](crate::runtime::PipelineProgress) handle and posts a
@@ -170,14 +170,14 @@ pub trait SourceLoop: ElementBound {
         None
     }
 
-    /// Receive the downstream peer's allocation proposal (M12) so the source
+    /// Receive the downstream peer's allocation proposal so the source
     /// can allocate its output `BufferPool` from compatible parameters
     /// (size, count, alignment, domain). Default: ignore and allocate the
     /// source's own way. The proposal is advisory; a source that cannot honor
     /// it (eg cannot produce the requested domain) falls back silently.
     fn configure_allocation(&mut self, _params: &AllocationParams) {}
 
-    /// Offer a clock to the pipeline's clock election (M12). Default: none.
+    /// Offer a clock to the pipeline's clock election. Default: none.
     /// Live capture sources override this to provide their hardware capture
     /// clock at [`ClockPriority::LiveSource`](crate::ClockPriority::LiveSource)
     /// so the pipeline paces to capture cadence.
@@ -192,7 +192,7 @@ pub trait SourceLoop: ElementBound {
     /// stamps from the source's own zero.
     fn set_clock_sync(&mut self, _sync: ClockSync) {}
 
-    /// M16 step 5f: declare this source's negotiation-time constraint.
+    /// Declare this source's negotiation-time constraint.
     /// Default: eagerly await `intercept_caps()` and produce that one caps.
     /// A source offering alternatives (a camera's pixel formats) overrides
     /// this to return the whole `Produces(CapsSet)`.
@@ -218,7 +218,7 @@ pub trait SourceLoop: ElementBound {
     }
 
     /// The fixed output caps this source already knows from its properties,
-    /// readable synchronously without negotiation or I/O (M195). The auto-plug
+    /// readable synchronously without negotiation or I/O. The auto-plug
     /// `decodebin` parser consults it to learn its upstream caps, so a property
     /// that re-types the output (a `filesrc`'s `bytestream-format`) is reflected
     /// into the chain search. The default `None` means "fall back to the
@@ -230,7 +230,7 @@ pub trait SourceLoop: ElementBound {
     }
 
     /// Like [`configured_output_caps`](Self::configured_output_caps) but permitted
-    /// to do I/O to determine the type (M480): the auto-plug `decodebin` parser
+    /// to do I/O to determine the type: the auto-plug `decodebin` parser
     /// calls this once, at parse time, to pick the demuxer. A `bytestream-format=
     /// auto` source overrides it to sniff the file header now (so a mislabeled
     /// `.ts` that is really an MP4 still auto-plugs the right demuxer, the way
@@ -241,7 +241,7 @@ pub trait SourceLoop: ElementBound {
         Ok(self.configured_output_caps())
     }
 
-    /// The runtime properties this source type exposes (M104), the GObject
+    /// The runtime properties this source type exposes, the GObject
     /// property-spec analog. Default: none. A source overrides this (and
     /// [`set_property`](Self::set_property) / [`get_property`](Self::get_property))
     /// to be settable by name from a `gst-launch` pipeline (eg `filesrc
@@ -250,17 +250,17 @@ pub trait SourceLoop: ElementBound {
         &[]
     }
 
-    /// Static introspection metadata for this source type (M178), the
+    /// Static introspection metadata for this source type, the
     /// `gst-inspect` "Factory Details". Default: empty.
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::default()
     }
 
-    /// Receive this source instance's log name (M179), assigned by the runner.
+    /// Receive this source instance's log name, assigned by the runner.
     /// Default: ignore.
     fn set_instance_name(&mut self, _name: alloc::string::String) {}
 
-    /// Receive the run's message bus (M1164), so a source can report out of band
+    /// Receive the run's message bus, so a source can report out of band
     /// what a property read cannot answer for it (its restart status, say): a
     /// source arm owns its element for the whole run. Every runner built on
     /// the graph runner hands it out when given a bus. Default: ignore.
@@ -274,19 +274,19 @@ pub trait SourceLoop: ElementBound {
     // called only on a source whose `seek_format` is `Some`
     fn set_seek(&mut self, _controller: SeekController) {}
 
-    /// Override this instance's log category (M845), mirroring
+    /// Override this instance's log category, mirroring
     /// [`AsyncElement::set_log_category`](crate::AsyncElement::set_log_category).
     /// Default: ignore. A source that logs about itself stores it in a
     /// [`LogName`](crate::log::LogName) and returns it from
     /// `LogSource::log_category_override`.
     fn set_log_category(&mut self, _category: alloc::string::String) {}
 
-    /// Set a property by name (M104). Default: [`PropError::Unknown`].
+    /// Set a property by name. Default: [`PropError::Unknown`].
     fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
         Err(PropError::Unknown)
     }
 
-    /// Read a property back by name (M104). Default: `None`.
+    /// Read a property back by name. Default: `None`.
     fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
     }
@@ -373,28 +373,28 @@ pub struct RunStats {
     /// under downstream stall. `0` for all-`Block` pipelines and for runners
     /// that don't expose per-edge policy (only `run_graph` does today).
     pub frames_dropped: u64,
-    /// Aggregated source-to-sink latency (M12), computed once after
+    /// Aggregated source-to-sink latency, computed once after
     /// negotiation from every element's `latency()`. The hand-built fan-in and
     /// dynamic runners leave this at `ZERO`.
     pub latency: LatencyReport,
-    /// The allocation proposal (M12) handed to the head producer (the source),
+    /// The allocation proposal handed to the head producer (the source),
     /// negotiated from downstream. `None` when no downstream element proposed
     /// one; always `None` for the hand-built fan-in and dynamic runners.
     pub allocation: Option<AllocationParams>,
-    /// Priority of the clock the pipeline elected (M12). `SystemFallback` when
+    /// Priority of the clock the pipeline elected. `SystemFallback` when
     /// no element provided one (the supplied clock stands); always
     /// `SystemFallback` for the hand-built fan-in and dynamic runners.
     pub clock_priority: ClockPriority,
     /// `now_ns()` of the elected clock, read once after election — the
     /// pipeline's base-time origin.
     pub base_time_ns: u64,
-    /// M18 β scaffolding: number of `CoordinatorEvent`s the coordinator
+    /// Scaffolding: number of `CoordinatorEvent`s the coordinator
     /// task observed over this run's control channel. Today the only
     /// event is a boundary forwarding a mid-stream `CapsChanged` the next
     /// element accepted; β will turn each into a `Recascade`. `0` for
     /// runners that don't spawn a coordinator (simple / fan-in / dynamic).
     pub coordinator_events: u64,
-    /// Measured per-element telemetry (M399): each interior element's `process()`
+    /// Measured per-element telemetry: each interior element's `process()`
     /// latency distribution (p50/p99) and input-link fill, in topological order.
     /// Populated by `run_graph` and the two linear runners
     /// (`run_simple_pipeline` / `run_source_transform_sink`); empty for the
@@ -405,7 +405,7 @@ pub struct RunStats {
 }
 
 impl RunStats {
-    /// A human-readable end-of-run summary of the pipeline telemetry (M287):
+    /// A human-readable end-of-run summary of the pipeline telemetry:
     /// frame counts + drop rate, the aggregated declared latency window, the
     /// elected clock, and the negotiated head allocation. `g2g-launch` prints
     /// this at end (and a host can log it). The latency is the chain's
@@ -527,7 +527,7 @@ impl RunStats {
 }
 
 /// Re-solve a mid-stream `CapsChanged` against a sink's declared constraint
-/// before the sink is configured with it (M16 Phase B, per branch for fan-out
+/// before the sink is configured with it (per branch for fan-out
 /// FO-2). An `Unfixable` result (a ranged field like `Rate::Any` left open) is
 /// not a failure: the sink accepted the shape, so `new_caps` passes through.
 #[cfg(feature = "std")]
@@ -566,7 +566,7 @@ where
     run_simple_pipeline_inner(source, sink, clock, link_capacity, None, None).await
 }
 
-/// As [`run_simple_pipeline`], but driven by a [`StateController`] (M76).
+/// As [`run_simple_pipeline`], but driven by a [`StateController`].
 ///
 /// The sink arm gates on the controller: while the state is below
 /// `Playing` the sink stops pulling, the bounded link fills, and backpressure
@@ -601,7 +601,7 @@ where
 
 /// As [`run_simple_pipeline`], but posts a structured
 /// [`BusMessage::NegotiationFailed`](crate::BusMessage::NegotiationFailed) to
-/// `bus` on a startup or mid-stream negotiation failure (M18 item 7).
+/// `bus` on a startup or mid-stream negotiation failure.
 #[cfg(feature = "std")]
 pub async fn run_simple_pipeline_with_bus<Src, Snk, Clk>(
     source: &mut Src,
@@ -788,8 +788,8 @@ where
 ///
 /// Heterogeneous branches arrive as `Box`-erased `&mut dyn DynAsyncElement`
 /// (std only). Negotiation fixates the source proposal once and configures
-/// every element with it (design/README.md); per-branch caps negotiation is
-/// M10, so a sink returning `ReFixate` here fails with `FixationFailed`.
+/// every element with it (design/README.md). This runner has no per-branch
+/// caps negotiation, so a sink returning `ReFixate` here fails with `FixationFailed`.
 #[cfg(feature = "std")]
 pub async fn run_source_fanout<Src, Tx, Clk>(
     source: &mut Src,
@@ -806,7 +806,7 @@ where
     run_source_fanout_inner(source, fanout, sinks, clock, link_capacity, None, None).await
 }
 
-/// As [`run_source_fanout`], but taps live telemetry into `observer` (M846), the
+/// As [`run_source_fanout`], but taps live telemetry into `observer`, the
 /// hand-built analog of
 /// [`run_graph_observed`](crate::runtime::run_graph_observed): the topology is
 /// the source, the fan-out element, and the N branch sinks, each with its
@@ -923,7 +923,7 @@ enum DynArmOut {
     Branch(u64),
 }
 
-/// A handle to add output branches to a *running* dynamic fan-out (M310): the
+/// A handle to add output branches to a *running* dynamic fan-out: the
 /// runtime equivalent of GStreamer's tee request pads. Each
 /// [`add_branch`](Self::add_branch) attaches a new sink the router routes frames
 /// to; the new branch configures from the fan-out's sticky caps on attach, then
@@ -963,7 +963,7 @@ enum FanOutMode {
     /// model). Used when a frame must not be duplicated (load spreading).
     Route,
     /// Each `DataFrame` is shared to *every* branch (the `tee` model). The
-    /// frame's memory is made shareable once (M250), so the per-branch copies
+    /// frame's memory is made shareable once, so the per-branch copies
     /// are zero-copy refcount bumps, not byte copies.
     Broadcast,
 }
@@ -987,7 +987,7 @@ const DYN_FANOUT_NODE: usize = 1;
 
 /// Telemetry bookkeeping the router arm of a dynamic fan-out carries, so a branch
 /// attached mid-run gets named, probed, and put in the observer's topology before
-/// its first packet (M869). `probes` is shared with the run future, which
+/// its first packet. `probes` is shared with the run future, which
 /// snapshots it into [`RunStats::per_element`] once the arms have joined.
 #[cfg(feature = "std")]
 #[derive(Debug)]
@@ -998,7 +998,7 @@ struct FanoutTap {
 }
 
 /// Drives `source -> dynamic router -> N branches`, where branches can be added
-/// at runtime through the returned [`DynamicFanoutHandle`] (M310 request pads).
+/// at runtime through the returned [`DynamicFanoutHandle`] (request pads).
 ///
 /// The router distributes `DataFrame`s round-robin across the currently-attached
 /// branches (frames are not `Clone`, so this routes rather than broadcasts, the
@@ -1025,8 +1025,8 @@ where
     run_source_fanout_dynamic(source, link_capacity, FanOutMode::Route, None)
 }
 
-/// As [`run_source_router_dynamic`], but taps live telemetry into `observer`
-/// (M869). The topology starts as the source plus the runner's routing stage;
+/// As [`run_source_router_dynamic`], but taps live telemetry into `observer`.
+/// The topology starts as the source plus the runner's routing stage;
 /// each branch attached through the handle appends its own node and link before
 /// it sees a packet, so a dashboard polling [`Observer::snapshot`] sees runtime
 /// branches appear with their measured `process()` latency and link counters.
@@ -1050,9 +1050,9 @@ where
     )
 }
 
-/// Drives `source -> dynamic tee -> N branches` (M319): the broadcast counterpart
+/// Drives `source -> dynamic tee -> N branches`: the broadcast counterpart
 /// of [`run_source_router_dynamic`]. Each `DataFrame` is shared to *every*
-/// currently-attached branch via the M250 zero-copy frame-sharing path
+/// currently-attached branch via the zero-copy frame-sharing path
 /// ([`MemoryDomain::make_shareable`](crate::MemoryDomain::make_shareable) once,
 /// then a refcount handle per branch), so a CPU or GPU frame fans out to N
 /// consumers with no byte copies. This is the runtime equivalent of GStreamer's
@@ -1377,7 +1377,7 @@ where
     run_fanout_session_inner(session, sinks, clock, link_capacity, None).await
 }
 
-/// As [`run_fanout_session`], but taps live telemetry into `observer` (M846):
+/// As [`run_fanout_session`], but taps live telemetry into `observer`:
 /// the session plus its N recv sinks, each sink's measured `process()` latency
 /// and every branch link's packet / byte / drop counters readable mid-run via
 /// [`Observer::snapshot`].
@@ -1446,7 +1446,7 @@ where
 /// Drives an arbitrary-length linear pipeline:
 /// `source -> transforms[0] -> ... -> transforms[N-1] -> sink`.
 ///
-/// M18 item 4. Generalizes [`run_source_transform_sink`] (one transform) and
+/// Generalizes [`run_source_transform_sink`] (one transform) and
 /// [`run_simple_pipeline`] (zero) past their fixed arity, lifting the
 /// "runner caps at 3 elements" limit so chains like
 /// `decoder -> capsfilter -> converter -> sink` are expressible. Interior
@@ -1486,7 +1486,7 @@ where
 
 /// As [`run_linear_chain`], but posts a structured
 /// [`BusMessage::NegotiationFailed`](crate::BusMessage::NegotiationFailed) to
-/// `bus` on a startup or mid-stream negotiation failure (M18 item 7).
+/// `bus` on a startup or mid-stream negotiation failure.
 #[cfg(feature = "std")]
 pub async fn run_linear_chain_with_bus<Src, Snk, Clk>(
     source: &mut Src,
@@ -1582,7 +1582,7 @@ impl OutputSink for NullSink {
 /// Transform contract: `process(Eos)` may flush buffered state as
 /// `DataFrame` packets; the runner forwards the EOS sentinel downstream after
 /// `process(Eos)` returns, and skips its own push when the element already
-/// forwarded one (M909), so exactly one `Eos` reaches the sink either way.
+/// forwarded one, so exactly one `Eos` reaches the sink either way.
 ///
 /// `link_capacity` is the primary glass-to-glass latency knob. Under
 /// steady-state backpressure each link sits full, so the latency floor is
@@ -1618,7 +1618,7 @@ where
 /// As [`run_source_transform_sink`], but posts a structured
 /// [`BusMessage::NegotiationFailed`](crate::BusMessage::NegotiationFailed)
 /// to `bus` so the application learns *which* link conflicted (the returned
-/// error stays the opaque `CapsMismatch`). M18 item 7. Covers both startup
+/// error stays the opaque `CapsMismatch`). Covers both startup
 /// negotiation and the mid-stream re-solve sites (the sink's Phase-B re-solve
 /// and the transform's Caps-α `Infeasible`). The bus is opt-in to keep the
 /// common call site unchanged.

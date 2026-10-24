@@ -1,5 +1,5 @@
 //! Strided tensor *view* over a byte buffer: the zero-copy substrate for raw
-//! numeric media (M180). A [`TensorView`] describes how to read a flat `[u8]`
+//! numeric media. A [`TensorView`] describes how to read a flat `[u8]`
 //! backing as an n-dimensional array, by NumPy-style byte strides plus a byte
 //! offset, so a layout-preserving transform (flip, transpose, crop, channel
 //! reorder) is expressed as a *new view over the same bytes* rather than a

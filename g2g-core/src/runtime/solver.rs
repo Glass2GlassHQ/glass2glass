@@ -1,4 +1,4 @@
-//! M16 step 3 (design/caps.md): linear-pipeline caps solver.
+//! Linear-pipeline caps solver (design/caps.md).
 //!
 //! Takes the ordered constraint list for a source → transform* → sink
 //! chain and returns one fixated `Caps` per link, or a structured
@@ -849,7 +849,7 @@ pub enum NodeConstraint<'a> {
         output: CapsConstraint<'a>,
         follows: Option<usize>,
     },
-    /// Fan-out demux (M380): `input` is the byte-stream input constraint (the
+    /// Fan-out demux: `input` is the byte-stream input constraint (the
     /// container the demux consumes), and `ports[i]` is output port `i`'s
     /// `Produces` constraint (its distinct elementary stream), or a transform
     /// constraint for a port whose caps follow the input. Unlike a broadcast
@@ -862,11 +862,11 @@ pub enum NodeConstraint<'a> {
         input: CapsConstraint<'a>,
         ports: Vec<CapsConstraint<'a>>,
     },
-    /// Batching mux (M1233): `inputs[i]` is input pad `i`'s constraint as in
+    /// Batching mux: `inputs[i]` is input pad `i`'s constraint as in
     /// [`Muxer`](Self::Muxer), and the output edge carries a [`Caps::Batch`]
     /// whose streams are the input edges' caps in pad order.
     BatchMuxer { inputs: Vec<CapsConstraint<'a>> },
-    /// Unbatching demux (M1233): `input` is the input edge's constraint as in
+    /// Unbatching demux: `input` is the input edge's constraint as in
     /// [`Demux`](Self::Demux), and output port `i` carries stream `i` of the
     /// input's [`Caps::Batch`].
     BatchDemux { input: CapsConstraint<'a> },
@@ -1878,7 +1878,7 @@ fn apply_transform_node<E>(
 }
 
 /// Forward image of a `DerivedOutput` transform over its (possibly ambiguous)
-/// input set: the union of `f` over the input alternatives (M188). For a single
+/// input set: the union of `f` over the input alternatives. For a single
 /// fixated input this is just `f(input)`; for a multi-alternative input it lets a
 /// downstream auto transform still receive an output to narrow, instead of
 /// stalling until the input fixates (which it can't, with no downstream pin).
@@ -1891,7 +1891,7 @@ fn forward_derived_union(f: &dyn Fn(&Caps) -> CapsSet, in_set: &CapsSet) -> Caps
         })
 }
 
-/// M188 backward narrowing for a `DerivedOutput` transform: given the (already
+/// Backward narrowing for a `DerivedOutput` transform: given the (already
 /// constrained) output set, drop input alternatives whose forward image `f(a)`
 /// can no longer satisfy it. `f` is not analytically invertible, but it is
 /// evaluable per candidate, so a downstream pin propagates back through a
@@ -1899,8 +1899,8 @@ fn forward_derived_union(f: &dyn Fn(&Caps) -> CapsSet, in_set: &CapsSet) -> Caps
 /// (`videoconvert ! videoscale ! caps`) resolve.
 ///
 /// Only narrows when the input is still ambiguous (more than one alternative),
-/// so single-input transforms (decoders, the single-transform pipelines of
-/// M185/M186) are untouched. Returns `Some(narrowed)` when it removed
+/// so single-input transforms (decoders, single-transform pipelines) are
+/// untouched. Returns `Some(narrowed)` when it removed
 /// alternatives, `None` when unchanged, `Err(())` when nothing survives.
 fn backward_filter_derived(
     f: &dyn Fn(&Caps) -> CapsSet,
@@ -2039,7 +2039,7 @@ fn apply_tee_node<E>(
     Ok(())
 }
 
-/// Apply a fan-out **demux** node (M380): its ports are decoupled, so the input
+/// Apply a fan-out **demux** node: its ports are decoupled, so the input
 /// edge narrows by the demux's `input` accept (the container it consumes) and each
 /// output edge narrows by its port's `Produces` caps (its elementary stream),
 /// independent of one another. A port with a transform constraint instead

@@ -1,4 +1,4 @@
-//! DVB subtitle decoder element (M900): `Caps::SubPicture{DvbSub}` in,
+//! DVB subtitle decoder element: `Caps::SubPicture{DvbSub}` in,
 //! `Caps::RawVideo{Rgba8}` canvases out.
 //!
 //! Each display set becomes a full-frame transparent canvas the size of the DVB

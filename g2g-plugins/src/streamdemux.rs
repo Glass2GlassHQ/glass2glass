@@ -1,4 +1,4 @@
-//! Content-based demultiplexer (M205): one input, N typed output ports.
+//! Content-based demultiplexer: one input, N typed output ports.
 //!
 //! The `pad-added` / dynamic-pad analog for the bounded-N case (design/README.md
 //! the "dark slots" in design/runtime.md). A container or multiplexed stream carries several

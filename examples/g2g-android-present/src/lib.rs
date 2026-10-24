@@ -1,4 +1,4 @@
-//! M742: true on-screen Android present. The APK harness the bare-binary
+//! True on-screen Android present. The APK harness the bare-binary
 //! probes cannot be: a `NativeActivity` owns a real on-screen window (the
 //! `SurfaceView` case), `MediaCodec` decodes the bundled H.264 clip zero-copy
 //! onto the GPU (`mediacodec-wgpu`), and `WgpuSink` presents each frame to a

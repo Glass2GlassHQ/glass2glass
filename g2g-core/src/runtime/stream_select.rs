@@ -1,9 +1,9 @@
-//! Stream-selection request channel (M377), the GStreamer `GST_EVENT_SELECT_STREAMS`
+//! Stream-selection request channel, the GStreamer `GST_EVENT_SELECT_STREAMS`
 //! analog and the sibling of [`SeekController`](crate::runtime::SeekController).
 //!
 //! A cloneable handle carrying a pending stream selection from the application to
 //! a selection-aware demuxer. After the demuxer announces what streams exist (a
-//! [`StreamCollection`](crate::stream::StreamCollection) on the bus, M376), the app
+//! [`StreamCollection`](crate::stream::StreamCollection) on the bus), the app
 //! names the stream id(s) it wants via [`StreamSelectController::select`]; the
 //! demuxer's `process` calls [`take_pending`](StreamSelectController::take_pending)
 //! and switches which stream it forwards (re-negotiating caps if the kind

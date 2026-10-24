@@ -1,4 +1,4 @@
-//! M737: macOS audio via the AudioToolbox `AudioQueue` C API.
+//! macOS audio via the AudioToolbox `AudioQueue` C API.
 //!
 //! Two elements, the macOS analog of the WASAPI / ALSA / AAudio audio elements:
 //! - [`CoreAudioSink`]: an `AsyncElement` sink that renders interleaved PCM

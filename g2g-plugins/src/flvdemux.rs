@@ -1,7 +1,7 @@
-//! FLV demuxer element (M119): `Caps::ByteStream{Flv}` in, one selected
+//! FLV demuxer element: `Caps::ByteStream{Flv}` in, one selected
 //! elementary stream out. H.264 video leaves as `Caps::CompressedVideo` in
 //! Annex-B framing with the `avcC` parameter sets prepended in-band to the first
-//! access unit (M662); AAC audio leaves as `Caps::Audio` in self-describing ADTS
+//! access unit; AAC audio leaves as `Caps::Audio` in self-describing ADTS
 //! frames built from the `AudioSpecificConfig`, with the concrete channel
 //! layout / sample rate announced via `CapsChanged`, matching the MP4 demuxers.
 //!
@@ -72,7 +72,7 @@ pub enum FlvStream {
     Speex,
 }
 
-/// The video track's decoder config, parsed from the `avcC` side channel (M662).
+/// The video track's decoder config, parsed from the `avcC` side channel.
 #[derive(Debug)]
 struct VideoInit {
     /// SPS + PPS, prepended in-band ahead of the first access unit.
@@ -99,9 +99,9 @@ pub struct FlvDemux {
     emitted: u64,
     bus: Option<BusHandle>,
     tags_posted: bool,
-    /// Video decoder config from the AVC sequence-header tag, once seen (M662).
+    /// Video decoder config from the AVC sequence-header tag, once seen.
     video_init: Option<VideoInit>,
-    /// AAC `AudioSpecificConfig` from the audio sequence-header tag (M662).
+    /// AAC `AudioSpecificConfig` from the audio sequence-header tag.
     audio_asc: Option<Vec<u8>>,
     /// Prepend the parameter sets to the next video access unit (the first, and
     /// the resume point after a flush, so a decoder can (re-)initialize).
@@ -109,7 +109,7 @@ pub struct FlvDemux {
     /// The concrete audio caps (from the ASC) are announced once, before the
     /// first audio frame.
     audio_caps_announced: bool,
-    /// Seek support (M362): app time seeks drive an upstream byte-seek and a
+    /// Seek support: app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek<FlvUnit>,
 }
@@ -143,7 +143,7 @@ impl FlvDemux {
         self
     }
 
-    /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
+    /// Make the demuxer seekable: `app` carries app time seeks; `upstream`
     /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
     /// On a time seek the demuxer rewinds the source and re-syncs from the
     /// keyframe at/before the target.
@@ -161,7 +161,7 @@ impl FlvDemux {
         self.need_param_sets = true;
     }
 
-    /// Adopt newly-parsed sequence-header configs from the tag parser (M662).
+    /// Adopt newly-parsed sequence-header configs from the tag parser.
     fn sync_configs(&mut self) {
         if self.video_init.is_none() {
             if let Some(avcc) = self.demux.video_config() {
@@ -226,8 +226,7 @@ impl FlvDemux {
     /// unknown until the bitstream parser reads the SPS, so H.264 advertises a
     /// fixatable placeholder `Range` refined downstream via `CapsChanged`. AAC
     /// advertises the sentinel channels/rate 0 that `aacparse` accepts
-    /// pre-header; the concrete layout is announced at runtime from the ASC
-    /// (M662).
+    /// pre-header; the concrete layout is announced at runtime from the ASC.
     fn output_caps(stream: FlvStream) -> Caps {
         let video = |codec| Caps::CompressedVideo {
             codec,
@@ -281,7 +280,7 @@ impl FlvDemux {
     /// Convert one AVCC video access unit to Annex-B (honouring the `avcC`'s NAL
     /// length-prefix width) and prepend the parameter sets at the (re-)start, so
     /// the elementary stream is what the g2g pipeline assumes: start-coded, with
-    /// in-band SPS/PPS a decoder can initialize from (M662). An empty result
+    /// in-band SPS/PPS a decoder can initialize from. An empty result
     /// means malformed AVCC lengths.
     fn video_annexb(&mut self, data: Vec<u8>) -> Vec<u8> {
         // FLV AVC packets are always length-prefixed: a 4-byte length of 256 to

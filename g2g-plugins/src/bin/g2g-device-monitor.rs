@@ -10,7 +10,7 @@
 //! g2g-device-monitor --json [class]     # machine-readable one-shot dump
 //! ```
 //!
-//! Backed by [`g2g_plugins::devicemon::default_device_monitor`] (M939). Which
+//! Backed by [`g2g_plugins::devicemon::default_device_monitor`]. Which
 //! providers exist depends on the build features, so run it with a broad set:
 //! `--features v4l2,alsa-src,pipewire,wgpu-sink` on Linux,
 //! `--features mf-video-src,wasapi-src,wasapi-sink,wgpu-sink` on Windows,

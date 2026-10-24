@@ -88,7 +88,7 @@ impl SimulcastPads {
         self.rebuild();
     }
 
-    /// Shape by bare pad count (the launch-registry path, M725): the track
+    /// Shape by bare pad count (the launch-registry path): the track
     /// kinds are read from each pad's caps at configure time, so `n` linked
     /// pads simply become `n` slots (an audio-caps pad is the audio track, the
     /// video-caps pads are the layers in pad order).
@@ -341,7 +341,7 @@ impl LayerAllocator {
         self.layers[..self.active].iter().any(|(r, _)| *r == rid)
     }
 
-    /// Per-layer bitrate targets for one aggregate estimate (M722): each
+    /// Per-layer bitrate targets for one aggregate estimate: each
     /// active layer gets its nominal share scaled by the estimate over the
     /// active set's total (clamped to 0.25x..2x nominal so a transient
     /// estimate cannot starve or balloon an encoder), and a shed layer gets

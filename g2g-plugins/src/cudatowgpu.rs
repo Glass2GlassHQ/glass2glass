@@ -1,16 +1,16 @@
-//! `CudaToWgpu`: the CUDA->wgpu zero-copy bridge element (M220).
+//! `CudaToWgpu`: the CUDA->wgpu zero-copy bridge element.
 //!
 //! Consumes a decoded NV12 frame in CUDA device memory
 //! ([`MemoryDomain::Cuda`], from `FfmpegVideoDec` in `NvdecCuda` mode) and emits
 //! it as a wgpu external-memory texture ([`MemoryDomain::WgpuTexture`]) that
-//! `WgpuPreprocess`'s M217 surface-import path samples directly. The pixels
+//! `WgpuPreprocess`'s surface-import path samples directly. The pixels
 //! never leave the GPU: NVDEC's planes are copied device->device into a Vulkan
 //! image shared with CUDA (no PCIe download, unlike `CudaDownload`).
 //!
 //! The transport primitives live in [`crate::cudawgpu`] (raw Vulkan + the CUDA
 //! external-memory FFI); this element wires them into the pipeline and produces a
 //! [`WgpuNv12Texture`](crate::gpu::WgpuNv12Texture)-owned frame on the shared
-//! interop device, which `WgpuPreprocess` then adopts (the M217 device-identity
+//! interop device, which `WgpuPreprocess` then adopts (the device-identity
 //! pattern) and a windowed `WgpuSink` blits.
 //!
 //! Caps are `Identity(NV12)`: only the memory domain changes, Cuda -> WgpuTexture
@@ -18,7 +18,7 @@
 //! `NvdecCuda -> WgpuPreprocess` chain without changing negotiation.
 //!
 //! Linux + NVIDIA only (`cuda-wgpu` feature). Frames reuse shared images from a
-//! [`CudaWgpuPool`] (M254): the Vulkan image, its CUDA import, and the
+//! [`CudaWgpuPool`]: the Vulkan image, its CUDA import, and the
 //! `wgpu::Texture` are allocated once and recycled when the downstream frame is
 //! released (via a drop guard on the emitted keep-alive), so per frame only the
 //! two device->device plane copies and a sync run. A recycled entry may still be
@@ -175,7 +175,7 @@ impl AsyncElement for CudaToWgpu {
     }
 
     /// The whole point of the element: CUDA device memory in, a wgpu texture out.
-    /// Declaring both ends lets the M354 auto-plug pick this as the converter for
+    /// Declaring both ends lets the auto-plug pick this as the converter for
     /// a `Cuda -> WgpuTexture` edge, and stops it splicing another one after.
     fn input_domains(&self) -> DomainSet {
         DomainSet::only(MemoryDomainKind::Cuda)

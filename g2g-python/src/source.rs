@@ -7,7 +7,7 @@
 //! (`intercept_caps` returns them with no I/O). The same GIL-owning worker
 //! thread as the other hosts runs the calls.
 //!
-//! Under `cuda-frames` the source produces GPU-resident frames instead (M986):
+//! Under `cuda-frames` the source produces GPU-resident frames instead:
 //! `g2g_produce_cuda(width, height, meta)` returns the two semi-planar planes as
 //! `__cuda_array_interface__` objects (a cupy / torch allocation), since this
 //! crate links no CUDA and cannot allocate device memory itself. The frame carries
@@ -254,7 +254,7 @@ impl SourceLoop for PySource {
     }
 
     /// A GPU source emits into the Cuda domain, so a downstream GPU consumer takes
-    /// the frames with no upload and a CPU consumer gets a download spliced (M985).
+    /// the frames with no upload and a CPU consumer gets a download spliced.
     fn output_memory(&self) -> g2g_core::memory::MemoryDomainKind {
         if self.cuda_frames {
             g2g_core::memory::MemoryDomainKind::Cuda

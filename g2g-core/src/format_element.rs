@@ -1,5 +1,4 @@
-//! M16 step 2 (design/caps.md): negotiation-time element
-//! surface.
+//! Negotiation-time element surface (design/caps.md).
 //!
 //! `FormatElement` is the trait the solver consumes; `CapsConstraint` is
 //! the per-element data it walks.
@@ -52,7 +51,7 @@ pub enum CapsConstraint<'a> {
     /// but before the output link is solved.
     DerivedOutput(Box<dyn Fn(&Caps) -> CapsSet + Send + Sync + 'a>),
 
-    /// Declarative form of [`DerivedOutput`](Self::DerivedOutput) (M837): the
+    /// Declarative form of [`DerivedOutput`](Self::DerivedOutput): the
     /// forward derivation stated field by field as data the solver can inspect.
     /// Because it knows which fields are passed through unchanged, it can
     /// couple those *bidirectionally and per field*, so a downstream pin on a

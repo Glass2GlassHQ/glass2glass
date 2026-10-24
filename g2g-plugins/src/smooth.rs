@@ -225,7 +225,7 @@ impl AsyncElement for Smooth {
     }
 }
 
-/// `Smooth`'s settable properties, named as GStreamer's (M1084).
+/// `Smooth`'s settable properties, named as GStreamer's.
 static SMOOTH_PROPS: &[PropertySpec] = &[
     PropertySpec::new("active", PropKind::Bool, "process video").with_default("true"),
     PropertySpec::new(

@@ -1,7 +1,7 @@
 //! WebCodecs hardware video decode element (browser/wasm). Wraps the browser
 //! `VideoDecoder`, consuming Annex-B H.264 access units and producing decoded
 //! RGBA frames in the system-memory domain: the browser analog of `MfDecode`
-//! (Windows) and `FfmpegH264Dec` (Linux). M40.
+//! (Windows) and `FfmpegH264Dec` (Linux).
 //!
 //! Output is RGBA, not the decoder's native YUV: `VideoFrame.copyTo` is asked
 //! to convert via `VideoFrameCopyToOptions::format`, so negotiation fixates one

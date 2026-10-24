@@ -1,4 +1,4 @@
-//! Metadata sink (M1176): writes one JSON line per frame holding the frame's
+//! Metadata sink: writes one JSON line per frame holding the frame's
 //! presentation time and whatever analytics it carries, the gst-python-ml
 //! `pyml_metasink` analog. The line goes to a file (appended) or to stdout, and
 //! onto the bus as [`BusMessage::MetadataRecord`] so a tool watching the run

@@ -1,4 +1,4 @@
-//! Seek request channel (M82) and segment-done back-channel (M358).
+//! Seek request channel and segment-done back-channel.
 //!
 //! A cloneable handle carrying a pending [`Seek`] from the application to a
 //! seek-aware source. The app calls [`SeekController::seek`]; the source's run
@@ -14,7 +14,7 @@
 //! between frames; a parked source isn't producing, so there is nothing to
 //! reposition until it resumes.
 //!
-//! ## Segment seeks (M358)
+//! ## Segment seeks
 //!
 //! A [`SeekFlags::SEGMENT`](crate::segment::SeekFlags::SEGMENT) seek asks the
 //! source to play `[start, stop]` and, on reaching `stop`, report

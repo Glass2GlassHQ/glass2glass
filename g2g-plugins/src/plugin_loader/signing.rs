@@ -1,5 +1,4 @@
-//! Detached Ed25519 signatures over a plugin file, checked before `dlopen`
-//! (M1061).
+//! Detached Ed25519 signatures over a plugin file, checked before `dlopen`.
 //!
 //! # The `.sig` file
 //!

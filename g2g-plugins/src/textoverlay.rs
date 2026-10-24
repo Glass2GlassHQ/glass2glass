@@ -1,4 +1,4 @@
-//! Subtitle text overlay (M171): renders timed [`Cue`] text onto an RGBA8 frame
+//! Subtitle text overlay: renders timed [`Cue`] text onto an RGBA8 frame
 //! at the bottom centre, selecting the active cue by the frame's PTS. The
 //! `textoverlay` / `subtitleoverlay` analog and the visible end of an
 //! SRT / WebVTT subtitle path.
@@ -13,7 +13,7 @@
 //! to the frame height, over a translucent backing box for legibility; the
 //! all-caps ASCII bitmap font is the `no_std` baseline.
 //!
-//! With the `truetype-overlay` feature (M409) the overlay instead rasterizes
+//! With the `truetype-overlay` feature the overlay instead rasterizes
 //! glyphs from a loaded `.ttf` / `.otf` / `.ttc` (`TextOverlay::with_font` /
 //! `font=`), so CJK, accented Latin, and mixed-case text render, horizontal and
 //! vertical (`vertical:rl` / `lr`). `ab_glyph` does the parsing / rasterization on
@@ -21,7 +21,7 @@
 //! a chosen axis position (`TextOverlay::with_font_axis` /
 //! `font-variations=wght=700`) instead of its default instance.
 //!
-//! The `text-shaping` feature (M892) adds real shaping to that: horizontal cues
+//! The `text-shaping` feature adds real shaping to that: horizontal cues
 //! are laid out by cosmic-text, so runs are shaped (Arabic joining, kerning,
 //! ligatures), reordered by the Unicode bidi algorithm, and filled in from the
 //! system fonts fontdb discovers, which means text renders with no `font=` set at
@@ -30,7 +30,7 @@
 //! set, else the system face the shaper resolved). `font-variations=` axes other
 //! than `wght` reach only that column path.
 //!
-//! A cue's `font-weight` / `font-style` / `font-stretch` (M1055, from a `::cue`
+//! A cue's `font-weight` / `font-style` / `font-stretch` (from a `::cue`
 //! rule or a `<b>` / `<i>` tag) selects a face on the shaped path only, so a
 //! vertical cue renders at whatever weight the element's own
 //! `font-variations=` asks for. cosmic-text has no synthetic oblique, so an
@@ -2268,7 +2268,7 @@ impl AsyncElement for TextOverlay {
     }
 }
 
-/// Two-input text overlay (M403): a video pad (`RawVideo{Rgba8}`) and a *text
+/// Two-input text overlay: a video pad (`RawVideo{Rgba8}`) and a *text
 /// stream* pad (`Caps::Text{Utf8}`), painting cues that arrive as a stream onto
 /// the video, the `N`-pad sibling of [`TextOverlay`] (which loads cues from a
 /// file). The `subtitleoverlay` analog: pair it with [`SubParse`](crate::subparse)
@@ -2279,12 +2279,12 @@ impl AsyncElement for TextOverlay {
 /// `input_pts_ordered`, so the runner merges the two pads by PTS: every cue
 /// (PTS = its start time) is delivered before the video frame it first covers,
 /// giving correct A/V-text alignment. `SubParse` streams each cue as soon as it
-/// is fully parsed (M405), so the merge only buffers video up to the next cue's
+/// is fully parsed, so the merge only buffers video up to the next cue's
 /// start, not to the end of the subtitle stream. The
 /// rendering is reused wholesale from [`TextOverlay`] (composition); the text pad
 /// only feeds it cues. Cue positioning (WebVTT / SSA `position` / `line` / `align`)
-/// rides the stream as `TextCueMeta` frame-meta under the `metadata` feature
-/// (M406), so a placed cue renders where it asks; on
+/// rides the stream as `TextCueMeta` frame-meta under the `metadata` feature,
+/// so a placed cue renders where it asks; on
 /// the ZST baseline (no meta) every cue draws at the renderer default (bottom-centre).
 ///
 /// # Example
@@ -2359,7 +2359,7 @@ impl MultiInputElement for TextOverlayN {
         Some(Self::VIDEO)
     }
 
-    /// Named request pads (M481): `video`/`video_0` -> the video pad (0),
+    /// Named request pads: `video`/`video_0` -> the video pad (0),
     /// `text`/`subtitle`/`text_0` -> the text pad (1), so a launch line can wire
     /// `d.video_0 ! ... ! o.video   d.text_0 ! o.text` in either order and the
     /// video still lands on pad 0 (keeping `output_follows_input`/PTS-merge valid).
@@ -2495,7 +2495,7 @@ impl MultiInputElement for TextOverlayN {
     }
 }
 
-/// `TextOverlay`'s settable properties (M171).
+/// `TextOverlay`'s settable properties.
 pub(crate) static TEXTOVERLAY_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "location",

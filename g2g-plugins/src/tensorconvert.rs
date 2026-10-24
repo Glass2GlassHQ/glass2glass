@@ -1,4 +1,4 @@
-//! Tensor dtype / layout converter (M441, M445): the tensor-domain sibling of
+//! Tensor dtype / layout converter: the tensor-domain sibling of
 //! [`VideoConvert`](crate::videoconvert::VideoConvert). Where `VideoConvert`
 //! converts between raw-video pixel formats, `TensorConvert` converts between
 //! [`TensorDType`]s and [`TensorLayout`]s:
@@ -17,8 +17,7 @@
 //! frame arrives interleaved (NHWC). One element does `f32 NCHW ->
 //! quantize+transpose -> uint8 NHWC`, moving both the quantize and the layout
 //! shuffle out of the model so the whole graph stays accelerator-eligible (the
-//! float boundary `QuantizeLinear` / `Transpose` no longer pin work on the CPU,
-//! cf. M440 / M442).
+//! float boundary `QuantizeLinear` / `Transpose` no longer pin work on the CPU).
 //!
 //! Scope: F32 <-> U8 / I8 affine quantization, F32 <-> F16 float narrowing, and
 //! 4D NCHW <-> NHWC transposition. A direct int8 <-> uint8 or int <-> f16

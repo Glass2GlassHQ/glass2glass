@@ -1,4 +1,4 @@
-//! Remote WebSocket transport sink (M554, `remote-ws` feature): the WebSocket
+//! Remote WebSocket transport sink (`remote-ws` feature): the WebSocket
 //! send half of the distributed-graph primitive, the sibling of the TCP
 //! [`RemoteSink`](crate::remotesink).
 //!
@@ -13,7 +13,7 @@
 //! The point of the WebSocket variant is reach: a browser peer can speak only
 //! WebSocket (not a raw TCP socket), so this is the transport that lets a
 //! `g2g-web` graph ship an edge to a native subgraph over the same wire codec,
-//! turning the bespoke M549 browser->detect-server shim into an instance of the
+//! turning the bespoke browser->detect-server shim into an instance of the
 //! media-agnostic primitive.
 //!
 //! `RemoteWsSink` is the WebSocket *client* (it dials the [`RemoteWsSrc`]

@@ -210,7 +210,7 @@ pub struct PipeWireVideoSrc {
     portal_restore_token: String,
     #[cfg(feature = "portal")]
     portal_timeout_secs: u64,
-    /// Whether a consumer asked where the rows are (M1059), so a padded mapped
+    /// Whether a consumer asked where the rows are, so a padded mapped
     /// buffer travels as it is instead of being packed tight.
     keep_row_padding: bool,
     configured: bool,
@@ -614,7 +614,7 @@ impl SourceLoop for PipeWireVideoSrc {
         }
     }
 
-    /// M1059: a producer whose rows are padded normally has them packed tight
+    /// A producer whose rows are padded normally has them packed tight
     /// on the way out of a mapped buffer. A consumer that asked for a
     /// `PlaneLayout` reads rows where they lie, so that copy can go.
     fn configure_allocation(&mut self, params: &g2g_core::AllocationParams) {
@@ -1395,7 +1395,7 @@ mod tests {
         }
     }
 
-    /// M1059: a mapped chunk is packed tight on the way out, unless a consumer
+    /// A mapped chunk is packed tight on the way out, unless a consumer
     /// asked to read the rows where the daemon left them.
     #[test]
     fn a_mapped_chunk_is_packed_unless_a_consumer_asked_for_its_pitch() {

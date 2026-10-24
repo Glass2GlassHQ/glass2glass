@@ -481,7 +481,7 @@ mod tests {
     const SPS: &[u8] = &[0x67, 0x64, 0x00, 0x28, 0xAC, 0xD9];
     const PPS: &[u8] = &[0x68, 0xEB, 0xEC, 0xB2];
 
-    /// M1117: without the fmtp line a client that will not decode before it has
+    /// Without the fmtp line a client that will not decode before it has
     /// parameter sets (retina) cannot set up from the DESCRIBE at all. The
     /// expected base64 is hand-computed from the bytes above, not re-encoded
     /// here, so a broken encoder fails the test.

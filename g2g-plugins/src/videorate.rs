@@ -57,7 +57,7 @@ pub struct VideoRate {
     /// fails loud at negotiation / configure.
     rate_q16: u32,
     dt_ns: u64,
-    /// Caps-driven (M290): take the target framerate from the negotiated output
+    /// Caps-driven: take the target framerate from the negotiated output
     /// caps (a downstream capsfilter), the gst `videorate ! caps,framerate=N`
     /// idiom, instead of the `framerate` property. With no downstream pin it
     /// defaults to passthrough (the input rate, no retiming).
@@ -96,7 +96,7 @@ impl VideoRate {
         }
     }
 
-    /// Caps-driven (M290): take the target framerate from the negotiated output
+    /// Caps-driven: take the target framerate from the negotiated output
     /// caps (a downstream capsfilter). With no downstream pin it passes the
     /// input rate through unchanged.
     pub fn auto() -> Self {
@@ -275,7 +275,7 @@ impl AsyncElement for VideoRate {
         Ok(ConfigureOutcome::Accepted)
     }
 
-    /// M290: in auto mode, take the target framerate from the negotiated output
+    /// In auto mode, take the target framerate from the negotiated output
     /// caps (a downstream capsfilter). The framerate is fixated by the solver, so
     /// it is concrete here. No-op for the property-driven instance.
     fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
@@ -433,7 +433,7 @@ impl AsyncElement for VideoRate {
     }
 }
 
-/// `VideoRate`'s settable properties (M104).
+/// `VideoRate`'s settable properties.
 static VIDEORATE_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "framerate",
     PropKind::Fraction,

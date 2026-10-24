@@ -46,7 +46,7 @@ pub struct ModelGeometry {
     pub width: u32,
     pub height: u32,
     /// The model's input element type: `F32` (the RGBA / f32-tensor path) or `U8`
-    /// / `I8` (a quantized model, fed an integer tensor straight through, M442 the
+    /// / `I8` (a quantized model, fed an integer tensor straight through, the
     /// `TensorConvert::quantize` output). RGBA mode requires `F32`.
     pub input_dtype: TensorDType,
     /// Static output shape (a dynamic leading batch dim coerced to 1).
@@ -687,7 +687,7 @@ mod tests {
         lists_every_base_property::<crate::executorchinfer::ExecutorchBackend>();
     }
 
-    /// M1178: `only-on` forwards a frame that does not carry the named blob, with
+    /// `only-on` forwards a frame that does not carry the named blob, with
     /// no session run, which is also why this needs no model file: without the
     /// gate the same frame fails with `NotConfigured` (the last case below). It
     /// is refused outright unless `attach-tensor` keeps the picture on the wire,

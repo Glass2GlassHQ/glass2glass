@@ -1,4 +1,4 @@
-//! MISB ST 0903 VMTI (Video Moving Target Indicator) Local Set (M808): the
+//! MISB ST 0903 VMTI (Video Moving Target Indicator) Local Set: the
 //! moving-target reports a detector puts alongside the video, either nested in
 //! ST 0601 tag 74 (the usual STANAG 4609 case, where the enclosing set supplies
 //! the platform telemetry and frame center) or as a KLV packet of its own.
@@ -898,7 +898,7 @@ fn last_pixel_before(v: f32, span: u32) -> u32 {
     }
 }
 
-/// Turn a frame's detections into a VMTI local set (M808): the bridge from
+/// Turn a frame's detections into a VMTI local set: the bridge from
 /// g2g's in-pipeline analytics to the standard a ground station reads.
 ///
 /// Every `AnalyticsNode::Detection` becomes a [`VTarget`] with its centroid and

@@ -1,14 +1,14 @@
-//! MPEG-TS multiplexer element (M114, M207): N elementary streams in (e.g. H.264
+//! MPEG-TS multiplexer element: N elementary streams in (e.g. H.264
 //! video + AAC audio, or one of them alone), one MPEG-TS byte stream out, the
 //! everyday live-streaming container case. Wraps the pure [`crate::mpegts::TsMuxer`],
 //! the inverse of [`crate::tsdemux::TsDemux`].
 //!
 //! A [`MultiInputElement`]: each input pad accepts one elementary stream
 //! (`Caps::CompressedVideo{H264|H265|Av1}`, `Caps::Audio{Aac|Opus}`, `Caps::Klv`,
-//! or the `Caps::SubPicture{DvbSub}` subtitle pad of M927), and the access
+//! or the `Caps::SubPicture{DvbSub}` subtitle pad), and the access
 //! units are interleaved into one multiplex by decode time (the DTS when the
 //! frame carries one, else the PTS) before being written to their per-stream
-//! PIDs. Time-ordering reuses the M204
+//! PIDs. Time-ordering reuses the
 //! [`InputAggregator::take_earliest_by`](g2g_core::InputAggregator::take_earliest_by)
 //! merge (release the globally earliest AU once every contributing input has one
 //! queued), so the muxed TS is in decode order across streams the way a decoder
@@ -21,11 +21,11 @@
 //! entry gets the `subtitling_descriptor`, declaring the pages from the page-id
 //! config blob the stream leads with, else from the `dvbsub-page-id` property.
 //!
-//! Scope: one program by default, several via `prog-map` (M783), which assigns a
+//! Scope: one program by default, several via `prog-map`, which assigns a
 //! program number per input pad; each program gets its own PMT and its own PCR on
 //! its first stream's PID, on the `pcr-interval` cadence (see
 //! [`crate::mpegts::TsMuxer`]). Reachable from
-//! the `gst-launch` fan-in syntax (M208): registered only as the `mpegtsmux` muxer
+//! the `gst-launch` fan-in syntax: registered only as the `mpegtsmux` muxer
 //! in [`default_registry`](crate::registry::default_registry), so
 //! `... ! h264parse ! mpegtsmux ! filesink` and `v.! m.  a.! m.  mpegtsmux name=m ! sink`
 //! both build this element. Also runs programmatically through `run_muxer_sink`
@@ -68,7 +68,7 @@ use g2g_core::log::{short_type_name, Target};
 /// none, the ISO 639 code for "undetermined" (what ffmpeg writes).
 const UNDETERMINED_LANGUAGE: &str = "und";
 
-/// What a DVB subtitle pad's PMT `subtitling_descriptor` declares (M927): the
+/// What a DVB subtitle pad's PMT `subtitling_descriptor` declares: the
 /// page ids and subtitling type from the config blob the stream carries in band
 /// ahead of its first display set, falling back to the `dvbsub-page-id` property
 /// for a stream that sends none.
@@ -476,7 +476,7 @@ fn is_dvbsub(caps: &Caps) -> bool {
     )
 }
 
-/// The SDT service text a tag list names (M872): the service name from
+/// The SDT service text a tag list names: the service name from
 /// [`Tag::Title`] or a `service_name` key, the provider from a `service_provider`
 /// key (ffprobe's names for the two `service_descriptor` fields). `None` when the
 /// list names neither, in which case no SDT is written.
@@ -537,7 +537,7 @@ pub struct TsMux {
     stream_types: Vec<Option<u8>>,
     /// Built lazily once every input is configured (the PMT needs all streams).
     mux: Option<TsMuxer>,
-    /// Per-input AU buffer; releases the globally earliest-decode-time AU (M204).
+    /// Per-input AU buffer; releases the globally earliest-decode-time AU.
     agg: InputAggregator<Frame>,
     emitted: u64,
     /// The cadences, bitrate and identity knobs, applied to the inner `TsMuxer`
@@ -550,22 +550,22 @@ pub struct TsMux {
     /// Carry a `Caps::Klv` input as synchronous KLV (metadata-in-PES 0x15)
     /// instead of the default asynchronous private PES (0x06 + 'KLVA').
     klv_sync: bool,
-    /// Whole-service metadata (M872), written to the SDT: the service every
+    /// Whole-service metadata, written to the SDT: the service every
     /// program without its own is named with.
     tags: TagList,
-    /// Per-program service metadata (M878), keyed by program number: that
+    /// Per-program service metadata, keyed by program number: that
     /// program's own SDT entry text.
     program_tags: Vec<(u16, TagList)>,
     /// Per-input metadata: its `Tag::Language` becomes that stream's
     /// `ISO_639_language_descriptor`. One (possibly empty) list per input pad.
     track_tags: Vec<TagList>,
-    /// Per-pad DVB subtitle declaration (M927), `None` for a pad that carries
+    /// Per-pad DVB subtitle declaration, `None` for a pad that carries
     /// something else. Its page ids become that stream's `subtitling_descriptor`.
     dvbsub: Vec<Option<DvbSubDecl>>,
     /// The `dvbsub-page-id` property, the page every DVB subtitle pad that
     /// carries no page-id config blob is declared on.
     dvbsub_page_id: u16,
-    /// Which pads carry AV1 (M1049), so their PMT entries get the AV1
+    /// Which pads carry AV1, so their PMT entries get the AV1
     /// registration descriptor rather than the private PES default of KLV.
     av1: Vec<bool>,
     /// Per input: the channel count of an Opus pad, which declares the Opus
@@ -601,7 +601,7 @@ impl TsMux {
         }
     }
 
-    /// Attach whole-service metadata (M872): the service name ([`g2g_core::Tag::Title`]
+    /// Attach whole-service metadata: the service name ([`g2g_core::Tag::Title`]
     /// or a `service_name` key) and provider (a `service_provider` key) written to
     /// the SDT, naming every program that has no service of its own
     /// ([`with_program_tags`](Self::with_program_tags)). TS defines no free-form tag
@@ -611,7 +611,7 @@ impl TsMux {
         self
     }
 
-    /// Attach metadata scoped to one program of a multi-program mux (M878): its
+    /// Attach metadata scoped to one program of a multi-program mux: its
     /// service name / provider become that program's own SDT entry, so each program
     /// carries distinct service text instead of repeating the
     /// [`with_tags`](Self::with_tags) default. The program is named by its number in
@@ -650,7 +650,7 @@ impl TsMux {
         self
     }
 
-    /// Assign a program number to each input pad, in pad order (M783): inputs
+    /// Assign a program number to each input pad, in pad order: inputs
     /// sharing a number land in one program, and each program gets its own PMT and
     /// PCR. `numbers` must have one entry per input.
     pub fn with_program_numbers(mut self, numbers: &[u16]) -> Self {
@@ -795,7 +795,7 @@ impl MultiInputElement for TsMux {
         self.inputs
     }
 
-    /// Named request pads (M481): a container mux's inputs are caps-typed slots, so
+    /// Named request pads: a container mux's inputs are caps-typed slots, so
     /// `video_%u` / `audio_%u` / `sink_%u` each claim the next positional slot (the
     /// track type is read from the input's caps, not its index), so a launch line
     /// can name the pads (`m.video_0` / `m.audio_0`) in any order.
@@ -1370,7 +1370,7 @@ mod tests {
             .is_err());
     }
 
-    /// M908: an output frame carries the sync flag of the video AU it packetizes,
+    /// An output frame carries the sync flag of the video AU it packetizes,
     /// so a downstream segmenter (`tsmuxn ! hlssink`) cuts on it. Audio never sets
     /// it: every AAC AU is a sync sample, which would cut everywhere.
     #[tokio::test]

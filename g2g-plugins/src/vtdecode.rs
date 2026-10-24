@@ -1,11 +1,11 @@
-//! M218: macOS hardware H.264 / H.265 decode via VideoToolbox
+//! macOS hardware H.264 / H.265 decode via VideoToolbox
 //! (`VTDecompressionSession`).
 //!
 //! `VtDecode` is the macOS counterpart of `MfDecode` (Windows Media Foundation):
 //! it consumes Annex-B H.264 *or* H.265 (HEVC) `DataFrame`s (`MemoryDomain::
 //! System`, what `RtspSrc` / `H264Parse` / `H265Parse` emit) and produces decoded
 //! NV12 frames, also `MemoryDomain::System` (a CPU copy out of the decoder's
-//! `CVPixelBuffer`). In `cv-output` mode (M735) the copy is skipped: frames are
+//! `CVPixelBuffer`). In `cv-output` mode the copy is skipped: frames are
 //! emitted as retained IOSurface-backed `CVPixelBuffer`s
 //! (`MemoryDomain::CvPixelBuffer`), so a VideoToolbox encoder or Metal consumer
 //! reads the decoder's buffer directly. A Metal present sink is the follow-up.
@@ -80,7 +80,7 @@ use crate::inputstamp::{InputStamp, PendingInputStamps};
 
 /// One decoded frame the output callback captured: packed to tight NV12 bytes
 /// (the default), or the decoder's retained `CVPixelBuffer` unread (`cv-output`
-/// mode, the M735 zero-copy domain).
+/// mode, the zero-copy domain).
 enum DecodedFrame {
     Nv12 {
         nv12: Box<[u8]>,
@@ -179,7 +179,7 @@ pub struct VtDecode {
     /// our emitted output caps: a downstream transform cannot `fixate()` an
     /// `Any` rate, so we never emit one (mirrors `FfmpegVideoDec`).
     input_framerate: Rate,
-    /// M735 zero-copy output: emit decoded frames as retained (IOSurface-backed)
+    /// Zero-copy output: emit decoded frames as retained (IOSurface-backed)
     /// `CVPixelBuffer`s (`MemoryDomain::CvPixelBuffer`) instead of packing NV12
     /// bytes to system memory.
     cv_output: bool,

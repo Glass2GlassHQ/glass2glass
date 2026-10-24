@@ -29,7 +29,7 @@
 //!
 //! ## Verification status
 //!
-//! `cuda-gl` + Linux + NVIDIA-gated. Validated on the RTX 3060 host (M252):
+//! `cuda-gl` + Linux + NVIDIA-gated. Validated on the RTX 3060 host:
 //! compiles + lints clean, and the `cudagl_smoke` on-display e2e presents real
 //! `NvdecCuda` frames through the CUDA-GL path (60 frames, glass-to-glass
 //! p50 ~8 ms on a GNOME Wayland session). The off-host draft needed only two
@@ -40,7 +40,7 @@
 //! cast) all held. On a hybrid iGPU+NVIDIA host the GL context must be forced
 //! onto the NVIDIA GPU (`__NV_PRIME_RENDER_OFFLOAD` / `__EGL_VENDOR_LIBRARY_FILENAMES`)
 //! or `cuGraphicsGLRegisterImage` fails. The `cudagl_vs_wayland` A/B benchmark
-//! (M253) measured this device-resident path at **10.7x lower present latency**
+//! measured this device-resident path at **10.7x lower present latency**
 //! than the `NvdecCuvid -> WaylandSink` baseline at 1080p (p50 ~8 ms vs ~90 ms):
 //! the GPU NV12->RGB convert replaces the baseline's per-frame CPU convert +
 //! `wl_shm` upload.
@@ -274,7 +274,7 @@ impl AsyncElement for CudaGlSink {
         self.pacer.set_clock_sync(sync);
     }
 
-    /// Relay a late drop upstream (M174): the runner forwards it onto the
+    /// Relay a late drop upstream: the runner forwards it onto the
     /// incoming link, where the producer can shed load.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()
@@ -294,14 +294,14 @@ impl AsyncElement for CudaGlSink {
         self.pacer.get_property(name)
     }
 
-    /// Presents from CUDA device memory only; declaring it lets the M354 converter
+    /// Presents from CUDA device memory only; declaring it lets the converter
     /// auto-plug splice a `CudaDownload`-free GPU path (or, behind a tee, a
     /// `CudaDownload` only on a sibling System branch).
     fn input_domains(&self) -> g2g_core::memory::DomainSet {
         g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::Cuda)
     }
 
-    /// M12 / C3 step 3: ask the producer to keep buffers in CUDA device memory
+    /// Ask the producer to keep buffers in CUDA device memory
     /// so the `NvdecCuda` -> sink handoff stays on the GPU. The runner conveys
     /// this `MemoryDomainKind::Cuda` proposal to the decoder's
     /// `configure_allocation`. Returns `None` until the geometry is known (no

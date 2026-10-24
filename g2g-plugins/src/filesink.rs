@@ -1,6 +1,6 @@
 //! File sink. Writes every `DataFrame`'s system-memory bytes to a file in
 //! arrival order, producing a raw byte stream (e.g. an Annex-B `.h264`
-//! elementary stream when fed from `H264Parse` or `MfEncode`). M20: with
+//! elementary stream when fed from `H264Parse` or `MfEncode`). With
 //! `FileSrc` this completes the record / playback path.
 //!
 //! Caps are not encoded in the output (a raw byte stream has no container),
@@ -171,7 +171,7 @@ impl AsyncElement for FileSink {
     }
 }
 
-/// `FileSink`'s settable properties (M107): the output file path.
+/// `FileSink`'s settable properties: the output file path.
 static FILESINK_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "location",
     PropKind::Str,

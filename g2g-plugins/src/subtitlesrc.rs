@@ -1,4 +1,4 @@
-//! Subtitle / text file source (M433): reads a `.srt` / `.vtt` / `.ssa` / `.ttml`
+//! Subtitle / text file source: reads a `.srt` / `.vtt` / `.ssa` / `.ttml`
 //! file and emits its contents as a [`Caps::Text`] stream, the streaming
 //! counterpart of the out-of-band file `TextOverlay` loads with `location=`. It is
 //! the head of a text pipeline: `subtitlesrc location=subs.srt ! subparse ! ...`

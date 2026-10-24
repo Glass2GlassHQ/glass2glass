@@ -1,4 +1,4 @@
-//! Analytics overlay (M101, masks M994): draws the [`AnalyticsMeta`] carried on a
+//! Analytics overlay: draws the [`AnalyticsMeta`] carried on a
 //! frame onto its raw RGBA8 pixels, the visible end of a detector -> overlay
 //! pipeline. The `cairooverlay` / `ovrenderhud` analog for ML analytics.
 //!
@@ -17,7 +17,7 @@
 //! It is the one thing here that remembers anything between frames, so a trail
 //! outlives a few missed detections and is dropped once its track stops coming.
 //!
-//! Pairs with the M100 metadata-through-fan-out path: a `decode -> tee ->
+//! Pairs with the metadata-through-fan-out path: a `decode -> tee ->
 //! {detect, video} -> overlay -> display` diamond runs the detector on one branch
 //! and carries its `AnalyticsMeta` (shared by Arc) onto the video branch, where
 //! this element renders them onto the picture that actually reaches the sink.
@@ -28,7 +28,7 @@
 //! the shapes it paints. Boxes are normalized `[0,1]` in the metadata and a mask
 //! spans exactly its instance's box, so this works at any frame size without an
 //! upstream coordinate rewrite. A frame with no `AnalyticsMeta` passes through
-//! untouched. The Vello GPU backend is the separate `vello-overlay` feature (M102).
+//! untouched. The Vello GPU backend is the separate `vello-overlay` feature.
 
 use core::future::Future;
 use core::pin::Pin;

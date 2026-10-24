@@ -1,5 +1,5 @@
 //! Cross-process validation of the vendor-neutral DMABUF transport elements
-//! (M557, `local-dmabuf`). Two *separate processes* move a frame with no copy:
+//! (`local-dmabuf`). Two *separate processes* move a frame with no copy:
 //! the producer's dma-buf file descriptor is passed to the consumer as
 //! `SCM_RIGHTS` ancillary data over a Unix socket, so both processes reference
 //! the same underlying buffer (kernel-refcounted) and only the fd + a small

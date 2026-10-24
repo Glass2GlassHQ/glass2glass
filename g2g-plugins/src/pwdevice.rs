@@ -1,4 +1,4 @@
-//! PipeWire device discovery (M939): the [`DeviceProvider`] over the PipeWire
+//! PipeWire device discovery: the [`DeviceProvider`] over the PipeWire
 //! graph. Nodes carrying a capture / render `media.class` become devices whose
 //! element is the matching g2g PipeWire element, selected with `target-object`.
 //!

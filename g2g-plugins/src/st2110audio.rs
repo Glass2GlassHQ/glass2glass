@@ -1,4 +1,4 @@
-//! ST 2110-30 PCM audio over RTP (M595): the packetizer and depacketizer for
+//! ST 2110-30 PCM audio over RTP: the packetizer and depacketizer for
 //! uncompressed linear PCM, AES67-compatible (RFC 3190 L16 / L24).
 //!
 //! ST 2110-30 carries interleaved big-endian PCM straight in the RTP payload (no

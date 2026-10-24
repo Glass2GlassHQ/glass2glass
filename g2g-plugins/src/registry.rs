@@ -1,11 +1,11 @@
-//! A pre-populated element [`Registry`] (M107), so a `gst-launch` text pipeline
+//! A pre-populated element [`Registry`], so a `gst-launch` text pipeline
 //! and `gst-inspect` work out of the box without the caller hand-registering
 //! every element.
 //!
 //! [`default_registry`] registers the standard `no_std`-baseline elements under
 //! their conventional names: the test sources, the video and audio transform
 //! chains, and the `fakesink` / `filesink` sinks. Each is default-constructed and
-//! then configured by the parser from its `key=value` properties (M104/M106).
+//! then configured by the parser from its `key=value` properties.
 //!
 //! `std`-only (the `Registry` is). Feature- and platform-gated elements (the
 //! opus / av1 / vpx / mjpeg codecs, `fmp4demux`, the rtsp / udp / http / hls /
@@ -13,7 +13,7 @@
 //! wayland / kms / alsa / pulse elements) are registered by
 //! `register_feature_gated`, each block `#[cfg]`-gated like its module, so they
 //! appear in `gst-inspect` / `parse_launch` when their feature is enabled.
-//! `filesrc` is registered (M112): its `bytestream-format` property supplies the
+//! `filesrc` is registered: its `bytestream-format` property supplies the
 //! container type a raw byte stream lacks, so `filesrc location=x.ts
 //! bytestream-format=mpegts ! tsdemux` works as text.
 
@@ -256,20 +256,20 @@ use crate::{opusdec::OpusDec, opusenc::OpusEnc};
 /// videotestsrc num-buffers=10 ! videoconvert format=nv12 ! videoscale width=320 height=240 ! fakesink
 /// audiotestsrc num-buffers=5 freq=440 ! audioconvert channels=1 ! audioresample samplerate=16000 ! fakesink
 /// ```
-/// The decode-chain parser injector (M421): an auto-plugged decoder is fed one
+/// The decode-chain parser injector: an auto-plugged decoder is fed one
 /// access unit per packet by splicing an access-unit-re-framing `h264parse` ahead
 /// of it, the way GStreamer's `decodebin` always inserts a parser. Names the
-/// registered launch element (M676: the name-based `decodebin` expansion in
+/// registered launch element (the name-based `decodebin` expansion in
 /// `parse_launch` shares this mapping; both launch registrations construct the
 /// re-framing form). Returns `None` for codecs without a re-framing parser (the
-/// input decodes directly). H.264 (M421) and H.265 (M425) re-frame to one access
+/// input decodes directly). H.264 and H.265 re-frame to one access
 /// unit per packet, AV1 to one temporal unit (a raw `.obu` byte stream), MPEG-1 / MPEG-2
 /// video to one picture (a transport stream's PES packets need not align to
-/// pictures); FLAC frame-aligns via `flacparse` (M775, a bare `.flac` byte
+/// pictures); FLAC frame-aligns via `flacparse` (a bare `.flac` byte
 /// stream carries no frame lengths), and MPEG audio, AAC and AC-3 frame-align via
-/// `mpegaudioparse` / `aacparse` / `ac3parse` (M1065, M1074: one self-syncing
+/// `mpegaudioparse` / `aacparse` / `ac3parse` (one self-syncing
 /// frame per packet); other audio decodes directly. JPEG and PNG frame into
-/// whole images via `jpegparse` / `pngparse` (M1087), which the still-image
+/// whole images via `jpegparse` / `pngparse`, which the still-image
 /// decoders need: they take one complete image per buffer.
 fn decode_parser_provider(input: &Caps) -> Option<&'static str> {
     match input {
@@ -1743,7 +1743,7 @@ pub fn default_registry() -> Registry {
 
 const PLUGIN_FEATURE_RANK_VARIABLE: &str = "G2G_PLUGIN_FEATURE_RANK";
 
-/// Register the `uri=` scheme handlers (M196) so `uridecodebin` / `playbin` in a
+/// Register the `uri=` scheme handlers so `uridecodebin` / `playbin` in a
 /// text pipeline can build their source from a URI. Each handler is gated to its
 /// source's feature (the same gate as in [`uridecodebin`](crate::uridecodebin)),
 /// so a scheme is available only when its source is compiled in.
@@ -1835,8 +1835,8 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_uri(crate::uridecodebin::v4l2_handler());
 }
 
-/// Register the parsers and decoders as auto-plug [`ElementFactory`] candidates
-/// (M193), so the decode-chain search (`Registry::autoplug` / the `decodebin`
+/// Register the parsers and decoders as auto-plug [`ElementFactory`] candidates,
+/// so the decode-chain search (`Registry::autoplug` / the `decodebin`
 /// parser node / `build_playbin`) has elements to compose. These are the same
 /// element types already registered for the text parser via `register_launch`;
 /// here they additionally carry their pad templates into the search. Parsers
@@ -1854,7 +1854,7 @@ fn ffmpegdec_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
 }
 
 /// The decoder output layout a *pinned* raw-video target demands: a downstream
-/// that fixes NV12, a non-4:2:0 chroma, or a 10-/12-bit format (M887) must get a
+/// that fixes NV12, a non-4:2:0 chroma, or a 10-/12-bit format must get a
 /// decoder built for exactly that, or its `CapsChanged` is rejected at startup.
 /// `None` for an I420 / non-raw target, which gets `Auto`.
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
@@ -2384,7 +2384,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     );
 }
 
-/// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using
+/// Register gst-canonical-name aliases so pasted `gst-launch` lines using
 /// GStreamer's element names resolve to the g2g equivalents. Each alias resolves
 /// at construction time to the first of its targets that is actually registered,
 /// so the decoder / display aliases work only when their feature is on, and the
@@ -3707,7 +3707,7 @@ fn register_feature_gated(reg: &mut Registry) {
 mod nv_registry_tests {
     use super::*;
 
-    /// The native NVENC / NVDEC elements (M269 / M270) and their gst-canonical
+    /// The native NVENC / NVDEC elements and their gst-canonical
     /// aliases resolve to constructible elements. `new()` touches no CUDA (the
     /// session / context open lazily at configure), so this runs without a GPU.
     #[test]
@@ -3745,7 +3745,7 @@ mod domain_aware_autoplug_tests {
         }
     }
 
-    /// M276: the memory feature gates auto-plug by domain. A default (System)
+    /// The memory feature gates auto-plug by domain. A default (System)
     /// decode of H.264 stays on the CPU decoder; requesting `Cuda` prefers the
     /// native NVDEC. Needs no GPU (the search reads pad-template + feature
     /// metadata; nothing is constructed or run).
@@ -3778,7 +3778,7 @@ mod domain_aware_autoplug_tests {
 mod ffmpeg_enc_registry_tests {
     use super::*;
 
-    /// The ffmpeg H.264 encoder (M266 / M274) resolves under its native name, the
+    /// The ffmpeg H.264 encoder resolves under its native name, the
     /// software `x264enc` name, and the gst `avenc_h264` alias. `new()` opens no
     /// libavcodec context (that happens at configure), so this needs no GPU.
     #[test]

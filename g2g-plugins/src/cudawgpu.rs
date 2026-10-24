@@ -1,8 +1,8 @@
-//! CUDA<->wgpu zero-copy interop (M220, the GPU keep-on-GPU pillar).
+//! CUDA<->wgpu zero-copy interop (the GPU keep-on-GPU pillar).
 //!
 //! Joins the NVDEC decode side ([`MemoryDomain::Cuda`](g2g_core::MemoryDomain),
 //! NV12 in CUDA device memory) to the wgpu preprocess / inference side
-//! ([`MemoryDomain::WgpuTexture`], consumed by `WgpuPreprocess`'s M217
+//! ([`MemoryDomain::WgpuTexture`], consumed by `WgpuPreprocess`'s
 //! surface-import path), so decode -> preprocess -> infer stay on the GPU with
 //! no PCIe round-trip.
 //!
@@ -17,7 +17,7 @@
 //!    drop to wgpu-hal's `open_with_callback` and append the extension in the
 //!    callback (wgpu-hal still builds the full feature / queue chain).
 //! 2. Allocate an exportable `VkImage` + `VkDeviceMemory` ourselves via ash
-//!    (R8Uint, `width x (height + height/2)`, the packed-NV12 layout M217
+//!    (R8Uint, `width x (height + height/2)`, the packed-NV12 layout the importer
 //!    samples), export the memory as an opaque FD, and wrap the image as a
 //!    `wgpu::Texture` via `texture_from_raw` with `TextureMemory::External` (we
 //!    own the memory, shared with CUDA).
@@ -26,10 +26,10 @@
 //!    the same copy `CudaGlSink` does into a GL texture).
 //!
 //! The wgpu device created here is carried on the output frame's keep-alive, so
-//! `WgpuPreprocess` adopts it (the M217 device-identity pattern) and samples the
+//! `WgpuPreprocess` adopts it (the device-identity pattern) and samples the
 //! shared image directly.
 //!
-//! Linux + NVIDIA only (`cuda-wgpu` feature). Validated on an RTX 3060 (M251):
+//! Linux + NVIDIA only (`cuda-wgpu` feature). Validated on an RTX 3060:
 //! the `cudawgpu_spike` tests prove the Vulkan<->CUDA external-memory round-trip
 //! in both directions (CUDA writes / wgpu reads back, and the reverse, 0 byte
 //! mismatches), and the cross-crate `cuda_wgpu_e2e` test runs the full
@@ -132,7 +132,7 @@ pub async fn create_interop_device_for_surface(
 /// Like [`create_interop_device`], but opens the device with the adapter's full
 /// feature set and limits instead of the minimal default. Use this when the
 /// interop device is also driving a full renderer (e.g. handed to a Bevy app via
-/// `RenderCreation::Manual` for the M278 zero-copy render -> NVENC path): a render
+/// `RenderCreation::Manual` for the zero-copy render -> NVENC path): a render
 /// engine needs more than the bridge's bare NV12 / RGBA copy path, and a device
 /// opened with `Features::empty()` would fail its pipeline setup. The CUDA interop
 /// itself is unaffected (more features never hurt the copy).
@@ -396,7 +396,7 @@ impl SharedNv12Image {
 /// interop device the image was allocated on). wgpu does not own the backing
 /// memory (`TextureMemory::External`); the image and its memory are freed by the
 /// texture's drop callback when wgpu drops the texture. The result is a normal
-/// R8Uint sampled texture that `WgpuPreprocess`'s M217 path consumes.
+/// R8Uint sampled texture that `WgpuPreprocess`'s surface-import path consumes.
 ///
 /// # Safety
 /// `device` must be the Vulkan wgpu device `shared` was created on. Consumes
@@ -1626,12 +1626,12 @@ fn rgba_any() -> CapsSet {
 static WGPU_TO_CUDA_PROPS: &[PropertySpec] =
     &[crate::cudadeviceid::CUDA_DEVICE_ID_PROP.read_only()];
 
-/// `WgpuToCuda` as a pipeline transform (M275): a `MemoryDomain::WgpuTexture`
+/// `WgpuToCuda` as a pipeline transform: a `MemoryDomain::WgpuTexture`
 /// RGBA frame (rendered on this bridge's interop [`device`](WgpuToCuda::device))
 /// in, a `MemoryDomain::Cuda` RGBA frame `NvEnc` can encode out, with no
 /// device->host read-back. Caps are `Identity(RGBA)`; only the domain changes.
 ///
-/// Unlike the M220 CUDA -> wgpu (`CudaToWgpu`) bridge, whose interop device is
+/// Unlike the CUDA -> wgpu (`CudaToWgpu`) bridge, whose interop device is
 /// built lazily on the first frame, this element owns its device up
 /// front (in [`WgpuToCuda::new`]) and exposes it: the upstream renderer must draw
 /// onto it (clone [`device`](WgpuToCuda::device) / [`queue`](WgpuToCuda::queue)

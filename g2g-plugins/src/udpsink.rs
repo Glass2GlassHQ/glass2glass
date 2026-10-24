@@ -1,5 +1,5 @@
-//! UDP egress sink for H.264 over RTP (M47). The I/O half of the live-egress
-//! path whose Sans-IO half is `rtppay::RtpH264Packetizer` (M46): this sink
+//! UDP egress sink for H.264 over RTP. The I/O half of the live-egress
+//! path whose Sans-IO half is `rtppay::RtpH264Packetizer`: this sink
 //! drives the packetizer over each Annex-B access unit and sends the resulting
 //! RTP packets to a destination on a UDP socket, the send-side inverse of
 //! `RtspSrc`'s receive path.
@@ -11,7 +11,7 @@
 //! handshake for Wowza-style ingest is the remaining live-egress follow-up (it
 //! needs the network port the sandbox blocks).
 //!
-//! An incoming `Caps::ByteStream` selects raw mode instead (M1079), the
+//! An incoming `Caps::ByteStream` selects raw mode instead, the
 //! broadcast `mpegtsmux ! udpsink host=... port=...` case: the bytes go out as
 //! plain datagrams of at most `max-payload`, an MPEG-TS stream cut on whole
 //! 188-byte packets. `clients` (gst `multiudpsink` syntax) replaces the single
@@ -403,7 +403,7 @@ impl UdpSink {
         self
     }
 
-    /// Two-dimensional FlexFEC (M758): row repairs every `group` packets plus
+    /// Two-dimensional FlexFEC: row repairs every `group` packets plus
     /// column repairs at stride `group` over a `group` x `rows` block, so a burst
     /// of up to `group` consecutive losses is recoverable (the multi-level burst
     /// counterpart of [`with_flexfec`](Self::with_flexfec)).

@@ -14,7 +14,7 @@
 //! task that owns the `Rtc` + `UdpSocket` and routes each access unit to the
 //! matching track writer. STUN / TURN NAT traversal mirror `WebRtcSink`.
 //!
-//! Status: on-network validated (M248) against a local mediamtx, behind the
+//! Status: on-network validated against a local mediamtx, behind the
 //! `webrtc` feature: A/V published over one PeerConnection and read back via
 //! `WebRtcWhepSessionSrc` (`webrtc_av_session_loopback`), mediamtx logging the
 //! path as `2 tracks (Opus, H264)`. Reverse signals (keyframe-request / BWE) are
@@ -156,8 +156,8 @@ impl WebRtcSessionSink {
 
     /// Publish the video as `layers` simulcast layers on one m-line (each an
     /// input pad, pad 0 = highest resolution), alongside the audio pad. Two or
-    /// more layers offer `a=rid`/`a=simulcast`, exactly as on `LiveKitSink`
-    /// (M723). NOTE: the receiving WHIP server must support simulcast ingest
+    /// more layers offer `a=rid`/`a=simulcast`, exactly as on `LiveKitSink`.
+    /// NOTE: the receiving WHIP server must support simulcast ingest
     /// (mediamtx does not).
     pub fn with_simulcast(mut self, layers: usize) -> Self {
         self.pads.set_video_layers(layers);

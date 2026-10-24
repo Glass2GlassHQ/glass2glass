@@ -1,4 +1,4 @@
-//! EBU teletext subtitle decoder element (M924): `Caps::Text{Teletext}` in,
+//! EBU teletext subtitle decoder element: `Caps::Text{Teletext}` in,
 //! timed `Caps::Text{Utf8}` cues out.
 //!
 //! The bitmap-subtitle decoders turn their cues into RGBA canvases because their

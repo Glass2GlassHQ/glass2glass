@@ -205,7 +205,7 @@ impl AsyncElement for Volume {
     }
 }
 
-/// `Volume`'s settable properties (M104).
+/// `Volume`'s settable properties.
 static VOLUME_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "volume",

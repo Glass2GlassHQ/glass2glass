@@ -28,7 +28,7 @@ use g2g_core::time::ticks_to_ns;
 /// Release policy. A packet missing a predecessor is held at most `max_hold_ns`
 /// (then the gap is declared lost), and the buffer never grows past `max_depth`
 /// packets (a flood forces release). `max_depth == 0` disables buffering:
-/// packets pass straight through in arrival order (the pre-M94 behaviour).
+/// packets pass straight through in arrival order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JitterConfig {
     pub max_hold_ns: u64,

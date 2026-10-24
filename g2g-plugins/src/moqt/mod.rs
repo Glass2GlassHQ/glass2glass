@@ -1,4 +1,4 @@
-//! IETF MoQ Transport (MOQT) draft-16, implemented in-tree over the M901
+//! IETF MoQ Transport (MOQT) draft-16, implemented in-tree over the
 //! WebTransport carrier.
 //!
 //! The dialect is the IETF draft, version `0xff000010` (draft-16), which is

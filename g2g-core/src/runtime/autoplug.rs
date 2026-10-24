@@ -1,6 +1,6 @@
 //! Auto-plug: a runtime element registry plus a decode-chain search over the
 //! static pad-template metadata (design/caps.md, design/TODO.md "Auto-plug /
-//! element registry / `decodebin`-equivalent"). M83.
+//! element registry / `decodebin`-equivalent").
 //!
 //! GStreamer's `decodebin` takes the caps coming off a source and walks the
 //! registry for a chain of element factories whose pad templates compose from
@@ -531,8 +531,8 @@ impl PricedChain {
     }
 }
 
-/// The media kind a demux output-pad / muxer input-pad reference names (M476,
-/// input side M481): `video_0` -> [`Video`](PadKind::Video), `audio_1` ->
+/// The media kind a demux output-pad / muxer input-pad reference names:
+/// `video_0` -> [`Video`](PadKind::Video), `audio_1` ->
 /// [`Audio`](PadKind::Audio), a bare `d.` / `m.` or `src_2` / `sink_2` ->
 /// [`Any`](PadKind::Any). Defined outside the std-gated `factory` module because
 /// the `no_std` fan-in trait ([`MultiInputElement::input_pad_index`](crate::fanout::MultiInputElement::input_pad_index)) uses it.
@@ -544,7 +544,7 @@ pub enum PadKind {
     Any,
 }
 
-/// A parsed pad reference from a `gst-launch` line (M476 output / M481 input),
+/// A parsed pad reference from a `gst-launch` line (output or input pad),
 /// e.g. `d.video_0` -> `{ Video, 0 }`, `m.audio_1` -> `{ Audio, 1 }`, a bare `d.`
 /// -> `{ Any, n }`. Handed to a [`DemuxSelectHook`] (output) or
 /// [`MultiInputElement::input_pad_index`] (input) to map each request to a stream
@@ -823,7 +823,7 @@ mod factory {
     }
 
     /// A named element factory for the `gst-launch` text parser and the
-    /// `gst-inspect` dump (M105): a *parameterless* constructor plus the element's
+    /// `gst-inspect` dump: a *parameterless* constructor plus the element's
     /// pad templates. Unlike [`ElementFactory`] (the autoplug factory, built from
     /// the chosen output caps), this default-constructs the element so the parser
     /// can then apply `key=value` properties to it, the
@@ -913,7 +913,7 @@ mod factory {
         }
     }
 
-    /// A named fan-in muxer factory for the `gst-launch` parser (M122): an
+    /// A named fan-in muxer factory for the `gst-launch` parser: an
     /// N-to-1 element built per use with the input count the parser derives from
     /// link degree. Unlike [`LaunchFactory`] (a single-in / single-out transform
     /// or sink), the constructor takes the input count, because a
@@ -956,7 +956,7 @@ mod factory {
         }
     }
 
-    /// A named fan-out demuxer factory for the `gst-launch` parser (M210): the
+    /// A named fan-out demuxer factory for the `gst-launch` parser: the
     /// transpose of [`MuxerFactory`]. A 1-to-N element built per use with the
     /// output count the parser derives from link degree (the `d.` references),
     /// because a [`MultiOutputElement`](crate::fanout::MultiOutputElement)'s
@@ -966,7 +966,7 @@ mod factory {
         build: fn(usize) -> Box<dyn DynMultiOutputElement>,
     }
 
-    /// Factory for a terminal fan-out *source* (M727): a 0-in / N-out
+    /// Factory for a terminal fan-out *source*: a 0-in / N-out
     /// [`MultiOutputSource`](crate::fanout::MultiOutputSource) generating every
     /// output itself (a WebRTC session receiving its tracks). The build takes
     /// the linked output count so the parser can validate it against the
@@ -1261,7 +1261,7 @@ mod factory {
         }
     }
 
-    /// One output branch of a `playbin` graph (M379): the elementary stream a
+    /// One output branch of a `playbin` graph: the elementary stream a
     /// demux port carries, the raw target to decode it to, and the sink it ends in.
     /// The caller derives these from the demux's announced
     /// [`StreamCollection`](crate::stream::StreamCollection) and its selection: one
@@ -1421,7 +1421,7 @@ mod factory {
         }
     }
 
-    /// A `playbin uri=X` auto-fan-out hook (M382): given the registry and the
+    /// A `playbin uri=X` auto-fan-out hook: given the registry and the
     /// URI, probe the container and assemble a complete multi-stream
     /// `source -> demux -> per-stream decode -> sink` graph, the auto
     /// counterpart of [`Registry::build_playbin_graph`]. `Ok(Some(graph))`
@@ -1461,8 +1461,8 @@ mod factory {
     }
 
     /// What produces a [`UriFanout`]'s ports. A file container splits one byte
-    /// stream with a demuxer; a session protocol delivers every track itself
-    /// (M1170). Each carries the rebuild its restart wrapper calls.
+    /// stream with a demuxer; a session protocol delivers every track itself.
+    /// Each carries the rebuild its restart wrapper calls.
     pub enum UriFanoutHead {
         /// A byte source feeding a multi-output demuxer, one port per demux
         /// output. `rebuild` builds another byte source for the same URI, the
@@ -1490,7 +1490,7 @@ mod factory {
         }
     }
 
-    /// A URI probed into an open-ported fan-out (M1168): what produces the ports,
+    /// A URI probed into an open-ported fan-out: what produces the ports,
     /// and one entry per port. The open-ported sibling of [`PlaybinHook`], whose
     /// graph is already closed on its own sinks: a lone `fallbacksrc` needs the
     /// ports themselves, because a `fallbackswitch` sits between each port and
@@ -1509,14 +1509,14 @@ mod factory {
         }
     }
 
-    /// A URI fan-out hook (M1168): probe the URI's container and return the byte
+    /// A URI fan-out hook: probe the URI's container and return the byte
     /// source, the demuxer, and its ports, or `Ok(None)` to decline a container
     /// the hook does not parse. `Err` aborts the parse. A plain `fn` pointer for
     /// the same reason as [`PlaybinHook`]; registered via
     /// [`Registry::register_uri_fanout`].
     pub type UriFanoutHook = fn(&Registry, &str) -> Result<Option<UriFanout>, ParseError>;
 
-    /// When a `fallbacksrc` rebuilds the source behind a URI (M1163). The
+    /// When a `fallbacksrc` rebuilds the source behind a URI. The
     /// timeouts are nanoseconds, as gst's `fallbacksrc` takes them.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct RestartPolicy {
@@ -1538,8 +1538,8 @@ mod factory {
     pub type UriRebuild = Box<dyn Fn() -> Result<(Box<dyn DynSourceLoop>, Caps), UriError> + Send>;
 
     /// The application's own source for one side of a `fallbacksrc`: the main
-    /// side when the line has no `uri=` (M1198, gst's `source`), the fallback
-    /// side when it has no `fallback-uri=` (M1203, gst's `fallback-source`). A
+    /// side when the line has no `uri=` (gst's `source`), the fallback
+    /// side when it has no `fallback-uri=` (gst's `fallback-source`). A
     /// factory because a source runs once: it is called at parse and again for
     /// every restart, each call returning a fresh source and the caps it produces.
     #[derive(Clone)]
@@ -1575,10 +1575,10 @@ mod factory {
     }
 
     /// Wraps a URI source in one that rebuilds it with `rebuild` under `policy`
-    /// when it fails, stalls, or (under `restart_on_eos`) ends (M1163). Registered
+    /// when it fails, stalls, or (under `restart_on_eos`) ends. Registered
     /// via [`Registry::register_restart_source`]; when none is registered a
     /// `fallbacksrc` runs its sources unwrapped, as before. `unblock`, when set,
-    /// is the handle each life waits on before it delivers (M1166). A plain `fn`
+    /// is the handle each life waits on before it delivers. A plain `fn`
     /// pointer for the same reason as [`PlaybinHook`]; cross-crate because the
     /// restart delay needs a timer core does not have.
     pub type RestartSourceHook = fn(
@@ -1590,14 +1590,14 @@ mod factory {
     ) -> Box<dyn DynSourceLoop>;
 
     /// Builds a fresh multi-output source for one URI each time it is called, the
-    /// rebuild half of [`RestartFanoutSourceHook`] (M1170). Owns its URI so it
+    /// rebuild half of [`RestartFanoutSourceHook`]. Owns its URI so it
     /// stays `'static`. There are no declared caps alongside it, unlike
     /// [`UriRebuild`]: a multi-output source answers `output_caps` per port
     /// itself.
     pub type FanoutRebuild =
         Box<dyn Fn() -> Result<Box<dyn DynMultiOutputSource>, UriError> + Send>;
 
-    /// [`RestartSourceHook`] for a multi-output source (M1170): the same policy
+    /// [`RestartSourceHook`] for a multi-output source: the same policy
     /// over a session that delivers several tracks, so a dead RTSP session is
     /// rebuilt with every track back on one timeline. Registered via
     /// [`Registry::register_restart_fanout_source`]; when none is registered a
@@ -1611,7 +1611,7 @@ mod factory {
         unblock: Option<UnblockHandle>,
     ) -> Box<dyn DynMultiOutputSource>;
 
-    /// An explicit-demux fan-out hook (M476), the sibling of [`PlaybinHook`] for a
+    /// An explicit-demux fan-out hook, the sibling of [`PlaybinHook`] for a
     /// named demux element inside a user-authored line
     /// (`filesrc location=x.mkv ! matroskademux name=d  d.video_0 ! ...  d.audio_0 ! ...`).
     /// Given the demux element name, its upstream file location, and the ordered
@@ -1632,7 +1632,7 @@ mod factory {
     pub type DemuxCapsSelectHook =
         fn(name: &str, wanted: &[CapsSet]) -> Option<Box<dyn DynMultiOutputElement>>;
 
-    /// A `decodebin` fan-out hook (M482): the decode-per-port sibling of
+    /// A `decodebin` fan-out hook: the decode-per-port sibling of
     /// [`DemuxSelectHook`], for `filesrc location=x.mkv ! decodebin name=d
     /// d.video_0 ! ...  d.audio_0 ! ...`. Unlike the demux-select hook it is NOT
     /// keyed by an element name (a `decodebin` names no container): each registered
@@ -1651,7 +1651,7 @@ mod factory {
 
     /// The single-stream demux + decode chain a bare (non-fan-out) `decodebin`
     /// should build for a file-backed container whose default single-stream demux
-    /// guesses the wrong port (M746). A single-stream demuxer fixes its output pad
+    /// guesses the wrong port. A single-stream demuxer fixes its output pad
     /// at negotiation before parsing any byte, so it defaults to a video port; an
     /// audio-only MPEG-TS then auto-plugs a video decoder and fails "no caps
     /// overlap". `expand_decodebin` consults a hook so the demux instead selects the
@@ -1679,12 +1679,12 @@ mod factory {
         pub unsupported: Vec<String>,
     }
 
-    /// A bare-`decodebin` primary-stream hook (M746): given the upstream file
+    /// A bare-`decodebin` primary-stream hook: given the upstream file
     /// location and the container caps, sniff the container and return the
     /// single-stream demux + stream selection for each stream it can forward, or
     /// `None` when the file is unreadable or the hook does not parse the
     /// container. A demux whose port caps are fixed before parsing (TsDemux,
-    /// M936) must name the stream even when a video track is present. Registered
+    /// TsDemux) must name the stream even when a video track is present. Registered
     /// via [`Registry::register_primary_stream`].
     pub type PrimaryStreamHook = fn(location: &str, caps: &Caps) -> Option<ContainerStreams>;
 
@@ -1744,66 +1744,66 @@ mod factory {
         muxers: Vec<MuxerFactory>,
         demuxes: Vec<DemuxFactory>,
         fanout_srcs: Vec<FanoutSrcFactory>,
-        /// gst-canonical-name aliases (M192): each maps a name to an ordered list
+        /// gst-canonical-name aliases: each maps a name to an ordered list
         /// of registered targets, the first that is actually registered wins. A
         /// plain rename is a one-entry list; `autovideosink` is a fallback chain
         /// (`waylandsink`, `kmssink`, ..., `fakesink`). Resolved at `make_*` time,
         /// so an alias whose targets are all feature-gated-out simply misses.
         aliases: Vec<(&'static str, &'static [&'static str])>,
-        /// The `playbin uri=X` auto-fan-out hooks (M382, multi-hook M389). A lone
+        /// The `playbin uri=X` auto-fan-out hooks. A lone
         /// `playbin` in a text pipeline tries each in registration order until one
         /// handles the URI (`Ok(Some)`); each declines (`Ok(None)`) a container it
         /// does not parse, so one hook per container type coexists (MKV, TS, ...).
-        /// Empty (the default) leaves `playbin` as the M196 single-stream pipeline.
+        /// Empty (the default) leaves `playbin` as the single-stream pipeline.
         playbin: Vec<PlaybinHook>,
-        /// URI fan-out hooks (M1168), the open-ported siblings of `playbin`. A
+        /// URI fan-out hooks, the open-ported siblings of `playbin`. A
         /// lone `fallbacksrc uri=X` tries each in registration order until one
         /// claims the container, then puts a `fallbackswitch` between every port
         /// and its sink. Empty (the default) leaves `fallbacksrc` single-stream.
         uri_fanout: Vec<UriFanoutHook>,
-        /// Explicit-demux fan-out hooks (M476): a named demux element with several
+        /// Explicit-demux fan-out hooks: a named demux element with several
         /// output-pad references and a file source upstream tries each in order
         /// until one builds the multi-output demuxer (`Some`); each declines
         /// (`None`) a container it does not parse. Empty (the default) leaves a
-        /// demux element single-stream (its M114/M180 launch registration).
+        /// demux element single-stream (its default launch registration).
         demux_select: Vec<DemuxSelectHook>,
         demux_caps_select: Vec<DemuxCapsSelectHook>,
-        /// `decodebin` fan-out hooks (M482): the decode-per-port sibling of
+        /// `decodebin` fan-out hooks: the decode-per-port sibling of
         /// `demux_select`. A `decodebin name=d` with several `d.` refs and a file
         /// upstream tries each until one parses the container, returning the
         /// demuxer + per-port caps so the parser splices a decoder onto each port.
         decodebin_select: Vec<DecodebinSelectHook>,
-        /// The `fallbacksrc` source-restart hook (M1163). `None` (the default)
+        /// The `fallbacksrc` source-restart hook. `None` (the default)
         /// leaves a `fallbacksrc`'s sources unwrapped: a dead main source stays
         /// dead and the switch holds the fallback.
         restart_source: Option<RestartSourceHook>,
-        /// The `fallbacksrc` restart hook for a fanned-out session (M1170), the
+        /// The `fallbacksrc` restart hook for a fanned-out session, the
         /// multi-output sibling of `restart_source`. `None` (the default) leaves a
         /// fanned-out session unwrapped.
         restart_fanout_source: Option<RestartFanoutSourceHook>,
-        /// The `fallbacksrc` manual-unblock handle (M1166), the release control
+        /// The `fallbacksrc` manual-unblock handle, the release control
         /// each life of a `manual-unblock=true` source waits on. `None` (the
         /// default) makes `manual-unblock=true` a parse error, since nothing
         /// could release the source.
         unblock: Option<UnblockHandle>,
-        /// The application's source for a `fallbacksrc` with no `uri=` (M1198).
+        /// The application's source for a `fallbacksrc` with no `uri=`.
         /// `None` (the default) makes such a line a parse error.
         fallbacksrc_main_source: Option<FallbacksrcSourceFactory>,
         // None leaves a line with no `fallback-uri=` the dummy generators
         fallbacksrc_fallback_source: Option<FallbacksrcSourceFactory>,
-        /// Bare-`decodebin` primary-stream hooks (M746): a `filesrc location=X !
+        /// Bare-`decodebin` primary-stream hooks: a `filesrc location=X !
         /// decodebin` on a container tries each until one sniffs the file and names
         /// the single-stream demux + stream selection for its primary decodable
         /// stream. Empty (the default) keeps the demux's declared default port, so
         /// an audio-only container plugs the wrong (video) decoder.
         primary_stream: Vec<PrimaryStreamHook>,
-        /// Optional parser injector (M421): given a decode-chain input caps,
+        /// Optional parser injector: given a decode-chain input caps,
         /// returns a parser element to splice in just before the decoder (e.g. an
         /// access-unit-re-framing `h264parse` for `CompressedVideo { H264, .. }`),
         /// or `None` to decode the input directly. A decoder fed un-aligned units
         /// (one MPEG-TS PES that is not one access unit) mis-parses; this is how
         /// the registry mirrors GStreamer's `decodebin` always inserting a parser.
-        /// Maps input caps to the LAUNCH NAME of the parser (M676: a name, not a
+        /// Maps input caps to the LAUNCH NAME of the parser (a name, not a
         /// boxed element, so the name-based `decodebin` expansion in `parse_launch`
         /// shares the one mapping); the element is built via
         /// [`make_element`](Self::make_element). A bare function pointer so the
@@ -1816,8 +1816,8 @@ mod factory {
         encoder_provider: Option<EncoderProvider>,
         /// Muxer candidates for a container caps, in preference order.
         muxer_provider: Option<MuxerProvider>,
-        /// The memory-domain converter factory `parse_launch` splices with (M354,
-        /// M1017). The converter elements live outside this crate, so the registry
+        /// The memory-domain converter factory `parse_launch` splices with.
+        /// The converter elements live outside this crate, so the registry
         /// carries the factory; `None` (the default) leaves a domain mismatch to
         /// fail loud at negotiation, as it did before.
         domain_converter: Option<fn(MemoryDomainKind, MemoryDomainKind) -> Option<GraphNode>>,
@@ -1854,20 +1854,20 @@ mod factory {
         }
 
         /// Register a named transform / sink for the `gst-launch` parser and
-        /// `gst-inspect` (M105), returning `&mut self` to chain calls.
+        /// `gst-inspect`, returning `&mut self` to chain calls.
         pub fn register_launch(&mut self, factory: LaunchFactory) -> &mut Self {
             self.launch.push(factory);
             self
         }
 
-        /// Register a named fan-in muxer for the `gst-launch` parser (M122),
+        /// Register a named fan-in muxer for the `gst-launch` parser,
         /// returning `&mut self` to chain calls.
         pub fn register_muxer(&mut self, factory: MuxerFactory) -> &mut Self {
             self.muxers.push(factory);
             self
         }
 
-        /// Register a named fan-out demuxer for the `gst-launch` parser (M210),
+        /// Register a named fan-out demuxer for the `gst-launch` parser,
         /// returning `&mut self` to chain calls.
         pub fn register_fanout_src(&mut self, factory: FanoutSrcFactory) -> &mut Self {
             self.fanout_srcs.push(factory);
@@ -1901,7 +1901,7 @@ mod factory {
             self
         }
 
-        /// Register a `playbin uri=X` auto-fan-out hook (M382): a lone `playbin`
+        /// Register a `playbin uri=X` auto-fan-out hook: a lone `playbin`
         /// in a [`parse_launch`](crate::runtime::parse_launch) pipeline tries the
         /// registered hooks in order until one handles the URI. Register one per
         /// container type (MKV, TS, ...); each declines a container it does not
@@ -1911,14 +1911,14 @@ mod factory {
             self
         }
 
-        /// The registered URI fan-out hooks (M1168), tried in order by a lone
+        /// The registered URI fan-out hooks, tried in order by a lone
         /// `fallbacksrc uri=X` in a [`parse_launch`](crate::runtime::parse_launch)
         /// pipeline.
         pub fn uri_fanout_hooks(&self) -> &[UriFanoutHook] {
             &self.uri_fanout
         }
 
-        /// Register a URI fan-out hook (M1168): a lone `fallbacksrc uri=X` tries
+        /// Register a URI fan-out hook: a lone `fallbacksrc uri=X` tries
         /// the registered hooks in order until one claims the container, then
         /// carries every port it reports at once. Register one per container
         /// type; each declines a container it does not parse. Returns `&mut self`
@@ -1928,14 +1928,14 @@ mod factory {
             self
         }
 
-        /// The registered explicit-demux fan-out hooks (M476), tried in order by
+        /// The registered explicit-demux fan-out hooks, tried in order by
         /// [`parse_launch`](crate::runtime::parse_launch) for a named demux element
         /// with several output-pad references and a file source upstream.
         pub fn demux_select_hooks(&self) -> &[DemuxSelectHook] {
             &self.demux_select
         }
 
-        /// Register an explicit-demux fan-out hook (M476): a named demux element
+        /// Register an explicit-demux fan-out hook: a named demux element
         /// (`matroskademux name=d  d.video_0 ! ...  d.audio_0 ! ...`) fed by a file
         /// source tries the registered hooks in order until one probes the file and
         /// builds the multi-output demuxer. Register one per container type; each
@@ -1954,14 +1954,14 @@ mod factory {
             self
         }
 
-        /// The `decodebin` fan-out hooks (M482), tried in order by
+        /// The `decodebin` fan-out hooks, tried in order by
         /// [`parse_launch`](crate::runtime::parse_launch) for a `decodebin name=d`
         /// with several `d.` references and a file source upstream.
         pub fn decodebin_select_hooks(&self) -> &[DecodebinSelectHook] {
             &self.decodebin_select
         }
 
-        /// Register a `decodebin` fan-out hook (M482): a `decodebin name=d` fed by a
+        /// Register a `decodebin` fan-out hook: a `decodebin name=d` fed by a
         /// file source tries the registered hooks until one parses the container,
         /// returning the multi-output demuxer + per-port caps so the parser splices
         /// a decoder onto each port. One per container type. Returns `&mut self`.
@@ -1970,12 +1970,12 @@ mod factory {
             self
         }
 
-        /// The `fallbacksrc` source-restart hook (M1163), if one is registered.
+        /// The `fallbacksrc` source-restart hook, if one is registered.
         pub fn restart_source_hook(&self) -> Option<RestartSourceHook> {
             self.restart_source
         }
 
-        /// Register the `fallbacksrc` source-restart hook (M1163): the wrapper
+        /// Register the `fallbacksrc` source-restart hook: the wrapper
         /// that rebuilds a URI source when it fails, stalls, or ends. One per
         /// registry; a second call replaces the first. Returns `&mut self`.
         pub fn register_restart_source(&mut self, hook: RestartSourceHook) -> &mut Self {
@@ -1983,14 +1983,14 @@ mod factory {
             self
         }
 
-        /// The `fallbacksrc` restart hook for a fanned-out session (M1170), if one
+        /// The `fallbacksrc` restart hook for a fanned-out session, if one
         /// is registered.
         pub fn restart_fanout_source_hook(&self) -> Option<RestartFanoutSourceHook> {
             self.restart_fanout_source
         }
 
-        /// Register the `fallbacksrc` restart hook for a fanned-out session
-        /// (M1170), the multi-output sibling of
+        /// Register the `fallbacksrc` restart hook for a fanned-out session,
+        /// the multi-output sibling of
         /// [`register_restart_source`](Self::register_restart_source). One per
         /// registry; a second call replaces the first. Returns `&mut self`.
         pub fn register_restart_fanout_source(
@@ -2001,12 +2001,12 @@ mod factory {
             self
         }
 
-        /// The `fallbacksrc` manual-unblock handle (M1166), if one is registered.
+        /// The `fallbacksrc` manual-unblock handle, if one is registered.
         pub fn unblock_handle(&self) -> Option<UnblockHandle> {
             self.unblock.clone()
         }
 
-        /// Register the `fallbacksrc` manual-unblock handle (M1166): the release
+        /// Register the `fallbacksrc` manual-unblock handle: the release
         /// control every life of a `manual-unblock=true` source waits on, stored
         /// as a clone so the application keeps its own. One per registry; a
         /// second call replaces the first. Returns `&mut self`.
@@ -2015,14 +2015,14 @@ mod factory {
             self
         }
 
-        /// The application's source for a `fallbacksrc` with no `uri=` (M1198), if
+        /// The application's source for a `fallbacksrc` with no `uri=`, if
         /// one is registered.
         pub fn fallbacksrc_main_source(&self) -> Option<FallbacksrcSourceFactory> {
             self.fallbacksrc_main_source.clone()
         }
 
         /// Register the source a `fallbacksrc` with no `uri=` runs as its main
-        /// source (M1198). A `uri=` on the line still wins, as in gst. One per
+        /// source. A `uri=` on the line still wins, as in gst. One per
         /// registry, a second call replaces the first. Returns `&mut self`.
         pub fn register_fallbacksrc_main_source(
             &mut self,
@@ -2036,7 +2036,7 @@ mod factory {
             self.fallbacksrc_fallback_source.clone()
         }
 
-        /// The fallback source of a `fallbacksrc` with no `fallback-uri=` (M1203),
+        /// The fallback source of a `fallbacksrc` with no `fallback-uri=`,
         /// in place of the dummy generators. A second call replaces the first.
         pub fn register_fallbacksrc_fallback_source(
             &mut self,
@@ -2046,7 +2046,7 @@ mod factory {
             self
         }
 
-        /// Register a bare-`decodebin` primary-stream hook (M746): a `filesrc
+        /// Register a bare-`decodebin` primary-stream hook: a `filesrc
         /// location=X ! decodebin` on a container tries each until one sniffs the
         /// file and names the single-stream demux + stream selection for its primary
         /// decodable stream. One per container type. Returns `&mut self`.
@@ -2056,8 +2056,8 @@ mod factory {
         }
 
         /// The single-stream demux selections for a bare `decodebin` on the
-        /// container at `location` with `caps`, from the first hook that parses it
-        /// (M746); `None` when none applies (an unreadable file, or no hook
+        /// container at `location` with `caps`, from the first hook that parses it;
+        /// `None` when none applies (an unreadable file, or no hook
         /// registered for the container).
         pub fn container_streams(&self, location: &str, caps: &Caps) -> Option<ContainerStreams> {
             // a network source's location is a URI, which the hooks would open as a file path
@@ -2070,12 +2070,12 @@ mod factory {
         }
 
         /// Set the parser injector consulted by [`decodebin`](Self::decodebin) and
-        /// [`decodebin_preferring`](Self::decodebin_preferring) (M421): before a
+        /// [`decodebin_preferring`](Self::decodebin_preferring): before a
         /// decode chain is spliced, `provider(input)` may name a registered parser
         /// (e.g. an access-unit-re-framing `h264parse`) to prepend ahead of the
         /// decoder, so the decoder is fed one access unit per packet. The
         /// name-based `decodebin` expansion in `parse_launch` consults the same
-        /// mapping via [`parser_name`](Self::parser_name) (M676). Returns
+        /// mapping via [`parser_name`](Self::parser_name). Returns
         /// `&mut self` to chain calls.
         pub fn set_parser_provider(
             &mut self,
@@ -2137,7 +2137,7 @@ mod factory {
         }
 
         /// Set the memory-domain converter factory a parsed pipeline is spliced
-        /// with (M1017): after the graph is built, an edge whose producer and
+        /// with: after the graph is built, an edge whose producer and
         /// consumer share no memory domain gets `factory(from, to)` inserted, so a
         /// text pipeline reaches a GPU sink from a GPU decoder without naming the
         /// bridge element. Returns `&mut self` to chain calls.
@@ -2164,7 +2164,7 @@ mod factory {
         }
 
         /// The launch name of the re-framing parser `decodebin` prepends ahead of
-        /// a decoder for `input` caps, if the provider names one (M676).
+        /// a decoder for `input` caps, if the provider names one.
         pub fn parser_name(&self, input: &Caps) -> Option<&'static str> {
             self.parser_provider.and_then(|provider| provider(input))
         }
@@ -2189,13 +2189,13 @@ mod factory {
         }
 
         /// The registered [`PlaybinHook`]s, in registration order (empty if none,
-        /// so `playbin` stays the M196 single-stream pipeline). The parser tries
+        /// so `playbin` stays the single-stream pipeline). The parser tries
         /// them in turn for a lone `playbin uri=`.
         pub fn playbin_hooks(&self) -> &[PlaybinHook] {
             &self.playbin
         }
 
-        /// Register a gst-canonical-name alias (M192): `name` resolves, at
+        /// Register a gst-canonical-name alias: `name` resolves, at
         /// `make_source` / `make_element` time, to the first of `targets` that is
         /// actually registered. Use a one-entry list for a plain rename
         /// (`avdec_h264` -> `ffmpegdec`) and a fallback chain for an auto element
@@ -2881,7 +2881,7 @@ mod factory {
         /// empty chain (input already satisfies `target`) links `from` straight
         /// to `to`.
         ///
-        /// The memory-domain preference comes from the graph itself (M989): the
+        /// The memory-domain preference comes from the graph itself: the
         /// element behind `to` declares what memory it accepts
         /// ([`input_domains`](crate::AsyncElement::input_domains)), so a
         /// Cuda-only consumer gets the `Cuda`-producing decoder without the
@@ -2960,7 +2960,7 @@ mod factory {
         /// The memory domain the element registered under `name` wants its frames
         /// in, the same rule as
         /// [`derived_memory_preference`](Self::derived_memory_preference) but
-        /// reached by launch name rather than through a built graph (M1018): the
+        /// reached by launch name rather than through a built graph: the
         /// text parser expands a `decodebin` before any element exists, so its
         /// consumer is still just a name. An unregistered name derives `System`.
         ///
@@ -3301,7 +3301,7 @@ mod factory {
             Ok(graph)
         }
 
-        /// `playbin`-equivalent (M379): assemble a complete runnable graph that
+        /// `playbin`-equivalent: assemble a complete runnable graph that
         /// splits a container into its selected streams and decodes each to its own
         /// sink. Builds the source from `uri`, adds `demux` (a
         /// [`MultiOutputElement`], e.g. `MkvDemuxN`) as a fan-out node, and for each
@@ -3312,12 +3312,12 @@ mod factory {
         /// [`build_uridecodebin`](Self::build_uridecodebin).
         ///
         /// The app derives `ports` from the demux's announced
-        /// [`StreamCollection`](crate::stream::StreamCollection) (M376) and its
-        /// selection (M377); `demux`'s port count must equal `ports.len()`. Each
+        /// [`StreamCollection`](crate::stream::StreamCollection) and its
+        /// selection; `demux`'s port count must equal `ports.len()`. Each
         /// branch retypes from the demux's (byte-stream) input caps to its
         /// elementary stream via the per-port `CapsChanged` the demux emits, so a
         /// branch element must tolerate the startup broadcast and re-solve then (the
-        /// M210 demux-node contract); per-branch static negotiation against the port
+        /// demux-node contract); per-branch static negotiation against the port
         /// caps is a follow-up.
         pub fn build_playbin_graph<D: MultiOutputElement + 'static>(
             &self,
@@ -3371,7 +3371,7 @@ mod factory {
 
         /// Like [`build_playbin_graph`](Self::build_playbin_graph) but with a
         /// pre-built byte source instead of one derived from the URI's scheme
-        /// handler. The `playbin uri=` auto-fan-out hook (M382) uses this: having
+        /// handler. The `playbin uri=` auto-fan-out hook uses this: having
         /// probed the file to choose the demuxer, it already knows the container,
         /// so it supplies the matching raw-byte source directly rather than the
         /// URI handler's source (which, for `file://`, may self-demux a *different*
@@ -3865,7 +3865,7 @@ mod tests {
         }
     }
 
-    /// M421: a configured `parser_provider` prepends its parser to every auto-plugged
+    /// A configured `parser_provider` prepends its parser to every auto-plugged
     /// decode chain (so a decoder is fed access-unit-aligned input), and only then.
     #[cfg(feature = "std")]
     #[test]

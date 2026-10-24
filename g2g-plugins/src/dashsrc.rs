@@ -5,19 +5,19 @@
 //! the fetching (via `reqwest`, shared with [`HlsSrc`](crate::hlssrc)) and the
 //! `SegmentTemplate` `$Number$` / `$Time$` addressing.
 //!
-//! `SegmentList` is also supported (M369): an explicit ordered list of
+//! `SegmentList` is also supported: an explicit ordered list of
 //! `<SegmentURL>` entries, each a `@media` URL and/or a `mediaRange` byte range
 //! of the `BaseURL` resource, with an `<Initialization>` (`sourceURL` / `range`).
 //! A range-only entry fetches just its sub-range with an HTTP `Range` request,
 //! the DASH analog of HLS `#EXT-X-BYTERANGE`, so a single-file CMAF DASH stream
 //! plays.
 //!
-//! Live (`type="dynamic"`, M836): the MPD is reloaded on its refresh period, and
+//! Live (`type="dynamic"`): the MPD is reloaded on its refresh period, and
 //! every addressing mode but `SegmentBase` gets its available segment window
 //! from the wall clock against `availabilityStartTime` + `Period@start`, bounded
 //! by `timeShiftBufferDepth`: a `SegmentTimeline` or `SegmentList` entry listed
-//! ahead of its availability time is held back like a `@duration` segment
-//! (M1732). Playback starts `suggestedPresentationDelay` behind the live edge
+//! ahead of its availability time is held back like a `@duration` segment.
+//! Playback starts `suggestedPresentationDelay` behind the live edge
 //! (see [`presentation_delay_secs`]) rather than replaying the whole window. An
 //! `@availabilityTimeOffset` moves each segment's availability that many seconds
 //! ahead of its nominal completion, so a chunked low-latency packager's newest
@@ -35,13 +35,13 @@
 //! value), so seek targets and the boundary `Segment` are on the same timeline
 //! whatever media timestamps the Period uses.
 //!
-//! Multi-period (M836): the Periods play through back to back, each with its own
+//! Multi-period: the Periods play through back to back, each with its own
 //! `BaseURL` / template / Representation choice. Crossing a boundary emits a
 //! [`PipelinePacket::Segment`] whose `base` is the media played before it and
 //! whose `time` is 0: running time continues across the boundary while stream
 //! time restarts with the new Period's own timeline.
 //!
-//! CMAF chunked consumption (`low-latency`, M888): a segment response is read as
+//! CMAF chunked consumption (`low-latency`): a segment response is read as
 //! a stream and each complete chunk (`styp` / `moof`+`mdat`) is pushed downstream
 //! as it arrives, so the media of a segment the packager is still writing flows at
 //! chunk latency instead of segment latency. `@availabilityTimeOffset` decides
@@ -146,7 +146,7 @@ async fn fetch_segment(
     }
 }
 
-/// Consume a segment response chunk by chunk (M888), pushing each complete CMAF
+/// Consume a segment response chunk by chunk, pushing each complete CMAF
 /// chunk (`styp` / `moof`+`mdat`) downstream as it arrives instead of waiting for
 /// the whole body, which is what a low-latency packager writing an open segment
 /// serves. Returns the total body length (what the ABR estimator measures). The
@@ -285,12 +285,12 @@ pub struct DashSrc {
     /// How far behind the live edge a dynamic manifest starts, in ms
     /// (0 = derive; see [`presentation_delay_secs`]).
     presentation_delay_ms: u64,
-    /// Optional time-seek channel (M367): resolves a TIME seek to the media
+    /// Optional time-seek channel: resolves a TIME seek to the media
     /// segment whose start time precedes the target (the `SegmentRef.time` is
     /// already a stream-time in `timescale` units), flushes, re-emits the init
     /// segment, and resumes there. The CMAF/DASH segment-transition case.
     seek: Option<SeekController>,
-    /// Throughput-driven ABR (M372): when set, the run loop measures each segment
+    /// Throughput-driven ABR: when set, the run loop measures each segment
     /// download and re-selects the Representation whose bandwidth fits the
     /// estimate (under `max_bandwidth`), switching mid-stream (new init re-emitted,
     /// aligned index kept). Off by default (a fixed up-front Representation).
@@ -298,7 +298,7 @@ pub struct DashSrc {
     /// Duration-keyed prebuffer target in ms (0 = off): fetch this much media
     /// ahead before emitting, posting `Buffering` on the attached bus.
     prebuffer_ms: u64,
-    /// Consume a segment chunk by chunk as the packager writes it (M888) instead
+    /// Consume a segment chunk by chunk as the packager writes it instead
     /// of once its whole response has arrived. Off by default.
     low_latency: bool,
     bus: Option<BusHandle>,
@@ -321,7 +321,7 @@ impl DashSrc {
         }
     }
 
-    /// Consume each segment chunk by chunk as it arrives (M888): the response
+    /// Consume each segment chunk by chunk as it arrives: the response
     /// body is read as a stream and every complete CMAF chunk
     /// (`styp` / `moof`+`mdat`) is pushed downstream immediately, so a segment a
     /// low-latency packager is still writing plays from its first chunk instead of
@@ -351,7 +351,7 @@ impl DashSrc {
         self
     }
 
-    /// Enable throughput-driven ABR (M372): measure each segment's download and
+    /// Enable throughput-driven ABR: measure each segment's download and
     /// re-select the Representation whose declared bandwidth fits the smoothed
     /// estimate (under any `max_bandwidth` cap), switching mid-stream and
     /// re-emitting the init segment on a change. Off by default. Shares the
@@ -361,7 +361,7 @@ impl DashSrc {
         self
     }
 
-    /// Make the source time-seekable (M367): `run` polls `controller` before each
+    /// Make the source time-seekable: `run` polls `controller` before each
     /// segment fetch and, on a flushing seek, selects the segment containing the
     /// target (the last whose `$Time$` start precedes it), emits `Flush`, re-emits
     /// the init segment for a reset downstream demuxer, emits the post-flush

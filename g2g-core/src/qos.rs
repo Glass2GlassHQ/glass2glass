@@ -124,7 +124,7 @@ impl QosTracker {
     ///
     /// `Some` means the frame is too late and must be dropped: the drop is
     /// counted and reported on the bus, and the returned [`QosMessage`] is the
-    /// sink's upstream report (M174), for a sink that relays it. `None` means
+    /// sink's upstream report, for a sink that relays it. `None` means
     /// present it, and posts the periodic running-stats report if the interval
     /// has elapsed.
     pub fn judge_frame(

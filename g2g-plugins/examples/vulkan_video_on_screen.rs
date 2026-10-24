@@ -1,4 +1,4 @@
-//! On-screen live demo of the Vulkan Video wedge (M497): H.264 decoded on the
+//! On-screen live demo of the Vulkan Video wedge: H.264 decoded on the
 //! GPU via `VK_KHR_video_*`, presented in a real window by [`WgpuSink`].
 //!
 //! Two present paths, chosen at runtime by what the hardware allows:

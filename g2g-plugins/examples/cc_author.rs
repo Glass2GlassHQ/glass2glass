@@ -2,7 +2,7 @@
 //!
 //!   cargo run -p g2g-plugins --example cc_author -- in.mp4 subs.srt out.ts
 //!
-//! Builds the turnkey authoring pipeline (M431-M433):
+//! Builds the turnkey authoring pipeline:
 //!
 //!   mp4src(in.mp4) -> h264parse -> ccinsert -> tsmux -> filesink(out.ts)
 //!   subtitlesrc(subs.srt) -> subparse ----^ (cue pad)
@@ -10,7 +10,7 @@
 //! `SubtitleSrc` reads the `.srt` / `.vtt`, `SubParse` turns it into timed cues,
 //! `CcInsert` encodes them to CEA-608 and writes a `GA94` SEI into each access
 //! unit, and `TsMux` muxes the result. Play it back (captions render via the
-//! M430 `playbin` caption path) with:
+//! `playbin` caption path) with:
 //!
 //!   g2g-launch 'playbin uri=file:///abs/out.ts#closed-captions=cc1'
 //!

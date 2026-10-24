@@ -22,17 +22,17 @@
 //! and dodge `process` / run-loop aliasing), the duplex runner gives this element
 //! a single `run` that owns the connection outright: it selects over the inbound
 //! send packets and the network, so the send and recv halves share state with no
-//! task hop. Status: on-network validated (M249) by in-process P2P loopbacks
+//! task hop. Status: on-network validated by in-process P2P loopbacks
 //! (`webrtc_duplex_p2p_loopback` video, `webrtc_duplex_p2p_av_loopback` A/V),
-//! behind the `webrtc` feature. Mid-session tracks (M784) ride on spare pads
+//! behind the `webrtc` feature. Mid-session tracks ride on spare pads
 //! declared up front by [`WebRtcDuplexSession::with_spare_tracks`]: a spare
 //! carries no m-line at the handshake and binds later, when its send pad gets a
 //! frame (which re-offers a new m-line) or when the peer adds one.
-//! [`DuplexControl::remove_track`] is the inverse (M785): it stops the m-line,
+//! [`DuplexControl::remove_track`] is the inverse: it stops the m-line,
 //! freeing both of its pads on both peers. A freed pad is claimable again by the
 //! same two paths, and its next track always negotiates a NEW m-line, since a
 //! stopped one cannot be reactivated. Under the dynamic runner
-//! (`run_duplex_session_dynamic`, M1014) no reserve is needed at all: a send
+//! (`run_duplex_session_dynamic`) no reserve is needed at all: a send
 //! track added through the runner's handle announces itself on a fresh input
 //! index and the session grows to take it, and a peer track with no free pad
 //! grows a recv port through `MultiOutputSink::add_port` instead of being
@@ -176,10 +176,10 @@ impl SdpChannel {
 }
 
 /// Bidirectional sendrecv WebRTC session. See the module docs.
-/// Cloneable mid-session control for a [`WebRtcDuplexSession`] (M729): toggle
+/// Cloneable mid-session control for a [`WebRtcDuplexSession`]: toggle
 /// a track on/off, which renegotiates that m-line's direction with the peer
 /// (SendRecv <-> Inactive) over the session's `SdpChannel`, or remove it
-/// outright (M785). The handle can be used from any task; the session applies
+/// outright. The handle can be used from any task; the session applies
 /// pending toggles and removes in its loop.
 #[derive(Debug, Clone, Default)]
 pub struct DuplexControl {
@@ -193,7 +193,7 @@ impl DuplexControl {
         self.toggles.lock().unwrap().push((input, enabled));
     }
 
-    /// Remove track `input` (M785): its m-line is stopped (port 0, out of the
+    /// Remove track `input`: its m-line is stopped (port 0, out of the
     /// BUNDLE group) in the next re-offer, which frees both of its pads for a
     /// later track. Unlike a disable this cannot be undone, since a stopped
     /// m-line never reactivates: reusing the pad negotiates a NEW m-line. The
@@ -306,12 +306,12 @@ impl WebRtcDuplexSession {
         }
     }
 
-    /// Reserve `video` + `audio` extra pads beyond the active tracks (M784).
+    /// Reserve `video` + `audio` extra pads beyond the active tracks.
     /// A spare pad carries no m-line at the handshake: it binds mid-session,
     /// either when its send pad gets its first frame (the session offers the
     /// peer a new m-line) or when the peer adds an m-line of that kind. Under
     /// the fixed-arity runner, tracks beyond the reserve are rejected; the
-    /// dynamic runner (`run_duplex_session_dynamic`, M1014) grows the pad count
+    /// dynamic runner (`run_duplex_session_dynamic`) grows the pad count
     /// instead, so it needs no reserve.
     pub fn with_spare_tracks(mut self, video: usize, audio: usize) -> Self {
         self.set_spare_tracks(video, audio);
@@ -350,7 +350,7 @@ impl WebRtcDuplexSession {
         self.reverse.resize_with(pads, ReverseChannel::new);
     }
 
-    /// A cloneable mid-session control handle (M729): toggling a track
+    /// A cloneable mid-session control handle: toggling a track
     /// renegotiates its m-line direction with the peer.
     pub fn control(&self) -> DuplexControl {
         self.control.clone()
@@ -405,8 +405,8 @@ fn caps_for(kind: Track) -> Caps {
 /// The log category this session reports its pad decisions on.
 const DUPLEX_CATEGORY: &str = "webrtcduplex";
 
-/// Ask the runner for one more recv pad of `kind` when no declared pad is free
-/// (M1014), and take it into the pad tables so the new port announces its caps
+/// Ask the runner for one more recv pad of `kind` when no declared pad is free,
+/// and take it into the pad tables so the new port announces its caps
 /// before its first frame like any other. `None` when the runner cannot grow (the
 /// fixed-arity duplex runner), which leaves the caller with today's behavior.
 fn grow_out_pad(

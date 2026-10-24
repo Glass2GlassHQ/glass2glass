@@ -5,7 +5,7 @@
 //! way `V4l2Src` does on Linux.
 //!
 //! Pipeline shape: `MfVideoSrc -> VideoConvert -> sink` (NV12 is already a
-//! downstream-friendly format; YUY2 needs the M89 unpack like `V4l2Src`).
+//! downstream-friendly format; YUY2 needs an unpack step like `V4l2Src`'s).
 //!
 //! ## Threading
 //!

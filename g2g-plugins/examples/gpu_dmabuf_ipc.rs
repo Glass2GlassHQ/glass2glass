@@ -1,12 +1,12 @@
-//! End-to-end zero-copy GPU frame egress across a process boundary (M559):
+//! End-to-end zero-copy GPU frame egress across a process boundary:
 //! `WgpuToDmaBuf -> DmaBufSink` in one process, `DmaBufSrc -> DmaBufToWgpu` in
 //! another, with only a dma-buf fd crossing (over a Unix socket via SCM_RIGHTS).
 //! A GPU-resident frame leaves the producer process and lands GPU-resident in the
 //! consumer process with no CPU copy and no PCIe round trip.
 //!
 //! This wires together the whole stack proven in pieces:
-//! `WgpuToDmaBuf` (M559) exports a wgpu buffer as a dma-buf fd, `DmaBufSink`
-//! (M557) passes that fd to the peer via SCM_RIGHTS, `DmaBufSrc` receives it, and
+//! `WgpuToDmaBuf` exports a wgpu buffer as a dma-buf fd, `DmaBufSink`
+//! passes that fd to the peer via SCM_RIGHTS, `DmaBufSrc` receives it, and
 //! `DmaBufToWgpu` re-imports it on the peer's GPU.
 //!
 //! The lifetime story also composes: the export frees its own Vulkan handles at

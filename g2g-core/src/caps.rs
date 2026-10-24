@@ -9,7 +9,7 @@ use crate::channels::ChannelLayout;
 use crate::error::G2gError;
 use crate::tensor::MAX_TENSOR_RANK;
 
-/// Sentinel sample rate meaning "any / unspecified" in [`Caps::Audio`] (M187).
+/// Sentinel sample rate meaning "any / unspecified" in [`Caps::Audio`].
 /// `Caps::Audio.sample_rate` is a bare `u32` (not a ranged [`Dim`]); 0 Hz is
 /// never a real rate, so it serves as the wildcard a caps-driven element
 /// (`audioresample`) advertises so a downstream capsfilter can pin the rate, and
@@ -45,7 +45,7 @@ const FIXATE_CHANNELS_PLACEHOLDER: u8 = 2;
 /// sink (waylandsink, kmssink) intercepting a `CompressedVideo` caps is
 /// a category error; the type system now expresses that as a variant
 /// mismatch rather than a runtime enum compare. (Mirrors GStreamer's
-/// `video/x-h264` vs `video/x-raw` distinction; M17 split.)
+/// `video/x-h264` vs `video/x-raw` distinction.)
 ///
 /// Both video variants carry geometry today. That's pragmatic, not
 /// honest: GStreamer's `video/x-h264` doesn't have width/height because
@@ -92,7 +92,7 @@ pub enum Caps {
         channel_layout: ChannelLayout,
     },
     /// A tensor stream (ML). Its `shape` ([`TensorShape`]) is a fixed-rank
-    /// inline array (M636), so the variant is part of the no-alloc MCU subset
+    /// inline array, so the variant is part of the no-alloc MCU subset
     /// like every other caps kind.
     Tensor {
         dtype: TensorDType,
@@ -979,13 +979,13 @@ pub fn greatest_common_divisor(mut a: u64, mut b: u64) -> u64 {
     a
 }
 
-/// Scan structure of raw video (M935). `Any` is the unconstrained default
+/// Scan structure of raw video. `Any` is the unconstrained default
 /// nearly every caps site uses, and it reads as "progressive unless declared"
 /// (GStreamer's meaning for an absent `interlace-mode`): a decoder that sees
 /// interlaced pictures refines it to `Interleaved` via `CapsChanged`, which is
 /// what `deinterlace mode=auto` acts on. Unlike `Dim::Any` / `Rate::Any` the
 /// wildcard survives `fixate` and counts as fixed, so the field never blocks a
-/// solve and pre-M935 negotiations are unchanged.
+/// solve and negotiations that never set it are unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Interlace {
     Any,
@@ -1585,7 +1585,7 @@ pub fn pcm_from_gst_format(name: &str) -> Option<AudioFormat> {
 }
 
 /// Raw (uncompressed) PCM formats, the only ones the resampler applies to and
-/// `fixate` refuses an "any rate" (M187) on.
+/// `fixate` refuses an "any rate" on.
 pub(crate) fn is_pcm(f: AudioFormat) -> bool {
     // comparing discriminants keeps the format names out of heap-free builds
     PCM_FORMATS
@@ -1594,7 +1594,7 @@ pub(crate) fn is_pcm(f: AudioFormat) -> bool {
 }
 
 /// Intersect two [`Caps::Audio`] sample rates, where [`ANY_SAMPLE_RATE`] (0) is
-/// a wildcard (M187) for PCM and compressed audio alike: `any ∩ x = x`, equal
+/// a wildcard for PCM and compressed audio alike: `any ∩ x = x`, equal
 /// rates agree, distinct concrete rates are disjoint (`None`).
 pub(crate) fn intersect_sample_rate(a: u32, b: u32) -> Option<u32> {
     match (a, b) {
@@ -1934,7 +1934,7 @@ impl CapsSet {
 /// Compressed video codec carried in a [`Caps::CompressedVideo`] link.
 /// Split out of the old `VideoFormat` enum so a decoder's "I accept
 /// codec, I emit raw" boundary is type-level rather than a runtime
-/// format compare. M17 split.
+/// format compare.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum VideoCodec {
@@ -2109,7 +2109,7 @@ pub enum ByteStreamEncoding {
     /// `moof`+`mdat` fragments. The modern HLS/DASH segment container, demuxed by
     /// `fmp4demux` incrementally (a live stream, no end).
     IsoBmff,
-    /// Progressive / whole-file MP4 / QuickTime (M479): `ftyp` + `moov` (sample
+    /// Progressive / whole-file MP4 / QuickTime: `ftyp` + `moov` (sample
     /// tables) + `mdat`, in either order. A seekable file rather than a live
     /// stream, so it is demuxed by `mp4demux` after the whole file is buffered (the
     /// `moov` may sit at the end, and `stco` chunk offsets are absolute). The local
@@ -2271,7 +2271,6 @@ pub enum SubPictureFormat {
 /// Raw pixel layout carried in a [`Caps::RawVideo`] link. Split out of
 /// the old `VideoFormat` enum so a raw sink (waylandsink/kmssink)
 /// rejects compressed input structurally rather than via runtime check.
-/// M17 split.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RawVideoFormat {
@@ -2691,14 +2690,14 @@ pub enum AudioFormat {
     /// G.711 mu-law companded audio, one byte per sample (GStreamer
     /// `audio/x-mulaw`, RTP payload type 0 / PCMU). Encoded, not raw PCM: like
     /// `Aac` / `Opus` it keeps a nominal rate/channels rather than the PCM
-    /// wildcards. Codec in `g2g-mcu::g711` (M638).
+    /// wildcards. Codec in `g2g-mcu::g711`.
     Mulaw,
     /// G.711 A-law companded audio, one byte per sample (GStreamer
     /// `audio/x-alaw`, RTP payload type 8 / PCMA). See [`AudioFormat::Mulaw`].
     Alaw,
     /// IMA ADPCM, 4 bits per sample in the WAV / DVI4 block layout
     /// (GStreamer `audio/x-adpcm` layout=dvi). Encoded like the G.711 pair;
-    /// codec in `g2g-mcu::adpcm` (M639).
+    /// codec in `g2g-mcu::adpcm`.
     ImaAdpcm,
     // a codec no variant above names, known only by its container's tag
     Tagged(CodecTag),
@@ -2751,8 +2750,7 @@ impl TensorDType {
 
 /// Logical shape of a tensor stream: up to [`MAX_TENSOR_RANK`] dimensions
 /// stored inline, so the type is `Copy`, heap-free, and part of the no-alloc
-/// MCU subset (M636; it was a `Vec` before, which is why `Caps::Tensor` used
-/// to be gated behind `alloc`). Unused trailing slots are always zero, so the
+/// MCU subset. Unused trailing slots are always zero, so the
 /// derived equality over the whole array agrees with slice equality on
 /// [`dims`](TensorShape::dims).
 #[derive(Clone, Copy, PartialEq, Eq)]

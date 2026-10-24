@@ -1,4 +1,4 @@
-//! Fragmented-MP4 multiplexer element (M293): N elementary streams in
+//! Fragmented-MP4 multiplexer element: N elementary streams in
 //! (H.264 / H.265 video + AAC audio), one ISO-BMFF byte stream out, so a muxed
 //! recording carries video and audio together:
 //!
@@ -10,7 +10,7 @@
 //!
 //! A [`MultiInputElement`] (input pad order = track order = `track_ID`): each pad
 //! takes one elementary stream, and access units interleave by presentation
-//! timestamp via the M204 [`InputAggregator`] merge before being written to their
+//! timestamp via the [`InputAggregator`] merge before being written to their
 //! track. The `moov` (one `trak` per stream) is built once every track has its
 //! init data, which arrives in-band: a video track's parameter sets ride the
 //! first IDR, an AAC track's AudioSpecificConfig is synthesised from the first
@@ -22,9 +22,9 @@
 //! Reachable from the `gst-launch` fan-in syntax: registered as the `mp4mux`
 //! muxer in `default_registry`, so any number of input links builds this element,
 //! the way gst's request sink pads do. Video is H.264/H.265 (avc1/hvc1), VP8/VP9
-//! (vp08/vp09 + vpcC) or AV1 (av01 + av1C from the sequence header, M773);
+//! (vp08/vp09 + vpcC) or AV1 (av01 + av1C from the sequence header);
 //! audio is AAC (mp4a/esds) or Opus (Opus/dOps), sync-sample audio. A
-//! `Caps::Text{Utf8}` pad adds a `tx3g` timed-text track (M898, ffmpeg's
+//! `Caps::Text{Utf8}` pad adds a `tx3g` timed-text track (ffmpeg's
 //! `mov_text`): one cue per sample, with the runs between cues filled by empty
 //! samples, since a text sample presents where the durations before it end.
 
@@ -91,10 +91,10 @@ enum PadKind {
         channels: u8,
         rate: u32,
     },
-    /// A raw closed-caption track (M883): the pad carries `cc_data` triples, which
+    /// A raw closed-caption track: the pad carries `cc_data` triples, which
     /// go into `c608` / `c708` samples.
     ClosedCaption(ClosedCaptionFormat),
-    /// A timed-text subtitle track (M898): the pad carries one plain-UTF-8 cue per
+    /// A timed-text subtitle track: the pad carries one plain-UTF-8 cue per
     /// frame, which goes into a `tx3g` (3GPP timed text, ffmpeg's `mov_text`)
     /// sample.
     Text,
@@ -115,7 +115,7 @@ pub(crate) enum TrackInit {
         rate: u32,
         /// The elementary stream's out-of-band config: the AAC
         /// AudioSpecificConfig synthesised from the first ADTS header, or an
-        /// in-band Opus `OpusHead` (M791). Empty when the stream carried none,
+        /// in-band Opus `OpusHead`. Empty when the stream carried none,
         /// in which case the sample entry falls back to the caps.
         config: Vec<u8>,
     },
@@ -188,10 +188,10 @@ pub struct Mp4MuxN {
     /// default and the only streamable one). `false` selects the progressive
     /// layout: see [`with_fragmented`](Self::with_fragmented).
     fragmented: bool,
-    /// Whether the progressive layout puts its `moov` ahead of the `mdat`
-    /// (M824); see [`with_faststart`](Self::with_faststart).
+    /// Whether the progressive layout puts its `moov` ahead of the `mdat`;
+    /// see [`with_faststart`](Self::with_faststart).
     faststart: bool,
-    /// CMAF conformance mode (M832); see [`with_cmaf`](Self::with_cmaf).
+    /// CMAF conformance mode; see [`with_cmaf`](Self::with_cmaf).
     cmaf: bool,
     /// Target CMAF chunk duration in milliseconds (`0` = no chunking); see
     /// [`with_chunk_duration_ms`](Self::with_chunk_duration_ms).
@@ -205,10 +205,10 @@ pub struct Mp4MuxN {
     samples: Vec<ProgSample>,
     /// Whole-file metadata, written as the `moov`'s `udta/meta/ilst`.
     tags: TagList,
-    /// Per-input metadata, written as that `trak`'s own `udta/meta/ilst` (M838).
+    /// Per-input metadata, written as that `trak`'s own `udta/meta/ilst`.
     /// One (possibly empty) list per input pad.
     track_tags: Vec<TagList>,
-    /// The table of contents, written as the `moov`'s `udta/chpl` (M1046).
+    /// The table of contents, written as the `moov`'s `udta/chpl`.
     chapters: Vec<Chapter>,
 }
 
@@ -277,7 +277,7 @@ struct TimedSample {
 /// A track's in-progress `moof`+`mdat` fragment: the samples buffered so far, the
 /// decode time at the fragment's first sample (its `tfdt`), and the accumulated
 /// media duration (track timescale) used to decide when the target is reached.
-/// With chunking on (M859) the buffered samples and the `tfdt` are the open
+/// With chunking on the buffered samples and the `tfdt` are the open
 /// chunk's, while `accum_ticks` still measures the whole fragment.
 #[derive(Debug, Clone, Default)]
 struct PendingFragment {
@@ -351,7 +351,7 @@ impl Mp4MuxN {
     }
 
     /// Attach the table of contents, written as the `moov`'s
-    /// `udta/chpl` Nero chapter list (M1046). Chapter times are stream-time
+    /// `udta/chpl` Nero chapter list. Chapter times are stream-time
     /// nanoseconds. Builder only: a launch line has no syntax for a chapter
     /// list.
     pub fn with_chapters(mut self, chapters: Vec<Chapter>) -> Self {
@@ -377,7 +377,7 @@ impl Mp4MuxN {
         self
     }
 
-    /// Split each fragment into CMAF chunks of at least `ms` milliseconds (M859),
+    /// Split each fragment into CMAF chunks of at least `ms` milliseconds,
     /// each its own `moof`+`mdat` emitted the moment it fills, so a low-latency
     /// player receives part of a fragment before the fragment is complete. `0`
     /// (the default) writes one `moof`+`mdat` per fragment. Inert unless the
@@ -388,7 +388,7 @@ impl Mp4MuxN {
         self
     }
 
-    /// Write a `prft` ahead of each fragment (M859) mapping the fragment's first
+    /// Write a `prft` ahead of each fragment mapping the fragment's first
     /// decode time to the producer's wall clock (NTP), which is what lets a
     /// player measure its end-to-end latency against a chunked live stream. The
     /// box names the fragment's own track.
@@ -397,7 +397,7 @@ impl Mp4MuxN {
         self
     }
 
-    /// Choose the output layout (M793). `true` (the default) is the fragmented
+    /// Choose the output layout. `true` (the default) is the fragmented
     /// one: `ftyp`+`moov` up front, then a `moof`+`mdat` per fragment, which
     /// streams and survives truncation. `false` is the progressive one: `ftyp`,
     /// one `mdat` holding every sample, then a `moov` with real sample tables
@@ -415,7 +415,7 @@ impl Mp4MuxN {
         self
     }
 
-    /// Put the `moov` ahead of the media data (M824), the `qtmux faststart`
+    /// Put the `moov` ahead of the media data, the `qtmux faststart`
     /// layout: a reader has the whole index before it has read a byte of `mdat`,
     /// so playback over a network starts without seeking to the end of the file.
     ///
@@ -429,7 +429,7 @@ impl Mp4MuxN {
         self
     }
 
-    /// Write a CMAF (ISO/IEC 23000-19) track file (M832): the `ftyp` carries the
+    /// Write a CMAF (ISO/IEC 23000-19) track file: the `ftyp` carries the
     /// `cmfc` structural brand, each fragment opens a CMAF segment with its own
     /// `styp`, its `tfhd` states the sample description rather than inheriting it,
     /// and a fragment starts only at a sync sample, so `fragment-duration = 0`
@@ -1006,9 +1006,9 @@ impl Mp4MuxN {
         Ok(())
     }
 
-    /// Progressive mode's finalize (M793): write `ftyp` + one `mdat` holding
+    /// Progressive mode's finalize: write `ftyp` + one `mdat` holding
     /// every buffered sample + a `moov` whose sample tables index them, and emit
-    /// the whole file as one frame. With `faststart` (M824) the `moov` goes
+    /// the whole file as one frame. With `faststart` the `moov` goes
     /// between the `ftyp` and the `mdat` instead. A no-op when nothing was
     /// buffered.
     async fn finish_progressive(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
@@ -1134,7 +1134,7 @@ impl MultiInputElement for Mp4MuxN {
         self.inputs
     }
 
-    /// Named request pads (M481): a container mux's inputs are caps-typed slots, so
+    /// Named request pads: a container mux's inputs are caps-typed slots, so
     /// `video_%u` / `audio_%u` / `sink_%u` each claim the next positional slot (the
     /// track type is read from the input's caps, not its index), so a launch line
     /// can name the pads (`m.video_0` / `m.audio_0`) in any order.
@@ -1389,8 +1389,8 @@ impl MultiInputElement for Mp4MuxN {
 }
 
 /// The metadata a `moov` carries: the file's own tags and one list per pad slot,
-/// already split by the global / per-stream merge policy (M838), plus the
-/// file's table of contents (M1046, which has no per-track scope).
+/// already split by the global / per-stream merge policy, plus the
+/// file's table of contents (which has no per-track scope).
 #[derive(Debug, Default)]
 pub(crate) struct MoovMetadata {
     pub(crate) global: TagList,
@@ -2568,7 +2568,7 @@ mod tests {
         );
     }
 
-    /// M824 faststart: the same progressive file with its `moov` ahead of the
+    /// Faststart: the same progressive file with its `moov` ahead of the
     /// `mdat`, every chunk offset shifted by the `moov`'s own size so the sample
     /// bytes are still where `stco` points.
     #[tokio::test]

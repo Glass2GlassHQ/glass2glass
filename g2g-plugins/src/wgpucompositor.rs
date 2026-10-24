@@ -1,4 +1,4 @@
-//! wgpu compute compositor (M853): the GPU sibling of the CPU
+//! wgpu compute compositor: the GPU sibling of the CPU
 //! [`Compositor`](crate::compositor) for HD / many-input scale. Same
 //! N-in-1-out [`MultiInputElement`] surface, same [`CompositorPad`] semantics
 //! (position, z-order, per-pad alpha, optional bilinear resize), the same
@@ -9,7 +9,7 @@
 //! RGBA8 only (the planar YUV mixing stays on the CPU element). A system-memory
 //! frame is uploaded into one packed storage buffer, and re-uploaded only when a
 //! new frame lands, so a slow overlay costs nothing per output frame. A
-//! [`MemoryDomain::WgpuTexture`] frame (M874) is instead bound as a sampled
+//! [`MemoryDomain::WgpuTexture`] frame is instead bound as a sampled
 //! texture and composited where it already is: no download, no upload, no copy.
 //! Pads mix freely, and texture inputs with
 //! [`with_gpu_output`](WgpuCompositor::with_gpu_output) keep the whole composite
@@ -418,7 +418,7 @@ pub struct WgpuCompositor {
     ctx: Option<GpuContext>,
     gpu: Option<Gpu>,
     gpu_output: bool,
-    /// M977: a downstream consumer asked for a `PlaneLayout`, so the canvas
+    /// A downstream consumer asked for a `PlaneLayout`, so the canvas
     /// readback hands over the GPU's own padded rows and declares their pitch
     /// instead of repacking them tight.
     #[cfg(feature = "metadata")]
@@ -779,7 +779,7 @@ impl WgpuCompositor {
         Ok(())
     }
 
-    /// Whether the readback keeps the GPU's row padding (M977). Always false
+    /// Whether the readback keeps the GPU's row padding. Always false
     /// without the `metadata` feature, since nothing can then declare the layout.
     fn keeps_row_padding(&self) -> bool {
         #[cfg(feature = "metadata")]
@@ -1059,7 +1059,7 @@ impl MultiInputElement for WgpuCompositor {
         Ok(self.output())
     }
 
-    /// M977: the readback repacks the GPU's 256-byte-aligned rows into tight ones
+    /// The readback repacks the GPU's 256-byte-aligned rows into tight ones
     /// for every frame. When a consumer downstream has asked for a `PlaneLayout`,
     /// that pass is pure waste: hand over the padded buffer and say where the
     /// rows are.

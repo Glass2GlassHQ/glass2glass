@@ -6132,7 +6132,7 @@ unsafe fn nv12_to_wgpu_texture(
 enum HdrOutput {
     /// Store the ycbcr result unchanged: an SDR stream is display-ready, and an
     /// HDR stream keeps its PQ / HLG-encoded R'G'B' in the float target (ready for
-    /// an HDR swapchain that expects that encoding). The default (M573 behaviour).
+    /// an HDR swapchain that expects that encoding). The default.
     Passthrough,
     /// Tone-map an HDR (PQ / HLG, BT.2020) stream down to display-ready SDR
     /// (BT.709 + gamma) via the shader's EOTF -> BT.2390 EETF -> gamut -> OETF
@@ -8313,8 +8313,8 @@ impl VulkanVideoDevice {
     /// a stream of up to `max_w` x `max_h`, output at the SPS conformance window.
     /// The HEVC sibling of
     /// [`create_h264_session`](Self::create_h264_session): building the session
-    /// parameters makes the driver validate the M501 `Std*` mapping (a wrong
-    /// mapping fails here), the H.265 analog of M488's H.264 validation.
+    /// parameters makes the driver validate the H.265 `Std*` mapping (a wrong
+    /// mapping fails here), the analog of the H.264 session validation.
     pub fn create_h265_session(
         &self,
         std: &StdH265Params,
@@ -8433,7 +8433,7 @@ impl VulkanVideoDevice {
     /// [`create_h265_session`](Self::create_h265_session). The session parameters
     /// carry the single Std AV1 sequence header (AV1 has no per-picture parameter
     /// set analog; the frame headers arrive at decode time), so creating them
-    /// makes the driver validate the M504 `Std*` mapping.
+    /// makes the driver validate the AV1 `Std*` mapping.
     pub fn create_av1_session(
         &self,
         std: &StdAv1Params,
@@ -8849,7 +8849,7 @@ impl VulkanVideoDevice {
     /// Decode a single IDR frame and upload it to an RGBA `wgpu::Texture` on this
     /// device's wgpu queue, the output type a wgpu consumer (game engine /
     /// visualization viewer) samples directly. NV12 -> RGBA is converted on the
-    /// CPU here (M490); the zero-copy GPU-resident `VkSamplerYcbcrConversion`
+    /// CPU here; the zero-copy GPU-resident `VkSamplerYcbcrConversion`
     /// path that keeps the frame on the GPU is the next increment.
     pub fn decode_idr_to_rgba_texture(
         &self,
@@ -16330,7 +16330,7 @@ impl AsyncElement for VulkanVideoDec {
     }
 
     /// Both domains the decoder can emit: GPU-resident `WgpuTexture` or system
-    /// NV12 (M351 multi-domain negotiation, mirrors `NvDec`).
+    /// NV12 (multi-domain negotiation, mirrors `NvDec`).
     fn output_domains(&self) -> DomainSet {
         Self::OUTPUT_DOMAINS
     }

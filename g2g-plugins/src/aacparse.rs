@@ -106,7 +106,7 @@ pub(crate) fn strip_adts(au: &[u8]) -> &[u8] {
 /// self-describing. `None` when ADTS cannot carry the configuration (an object
 /// type past AAC LTP, an explicit rate, a 960-sample frame, an SBR output rate
 /// other than double the core rate, malformed bits) or the frame exceeds the
-/// 13-bit ADTS length. Shared by the MP4 and FLV demuxers (M662).
+/// 13-bit ADTS length. Shared by the MP4 and FLV demuxers.
 pub(crate) fn adts_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
     if has_undoubled_sbr(asc) {
         return None;

@@ -1,4 +1,4 @@
-//! Browser remote transform for the distributed-graph primitive (M555, `web`):
+//! Browser remote transform for the distributed-graph primitive (`web`):
 //! the wasm twin of the native [`RemoteWsTransform`](crate::remotewstransform),
 //! and the generic replacement for the bespoke `WebRemoteDetect` shim.
 //!

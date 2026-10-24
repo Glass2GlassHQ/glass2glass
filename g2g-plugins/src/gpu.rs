@@ -1,4 +1,4 @@
-//! Shared wgpu device context for the GPU elements (M103): the Vello overlay
+//! Shared wgpu device context for the GPU elements: the Vello overlay
 //! producer (`vellooverlay`) and the [`WgpuSink`](crate::wgpusink)
 //! consumer.
 //!
@@ -125,7 +125,7 @@ impl GpuContext {
     }
 
     /// Wrap an application's *existing* wgpu device as the shared context, rather
-    /// than opening one (M263). For an embedder that already owns a `wgpu::Device`
+    /// than opening one. For an embedder that already owns a `wgpu::Device`
     /// (a game engine, a Bevy / Tauri app, an editor's renderer): hand its
     /// device / queue / adapter / instance here and every GPU element produces
     /// textures *on that device*, so a decoded frame's
@@ -271,7 +271,7 @@ impl WgpuKeepAlive for WgpuTextureKeepAlive {
 ///
 /// Three in-tree producers wrap their texture differently: the overlay / blit
 /// path uses [`WgpuTextureKeepAlive`], the CUDA and GPU-decode NV12 bridges use
-/// [`WgpuNv12Texture`], and the Android MediaCodec GPU decode (M304/M305) uses
+/// [`WgpuNv12Texture`], and the Android MediaCodec GPU decode uses
 /// `mediacodec_wgpu::WgpuRgbaTexture`.
 /// Recognising all three lets the one [`WgpuSink`](crate::wgpusink) present any
 /// of them; [`texture_layout`] says how the pixels are stored.
@@ -586,8 +586,8 @@ pub(crate) unsafe fn import_vk_image_as_wgpu_texture(
     }
 }
 
-/// Owns a GPU-resident NV12 frame for surface-import into `WgpuPreprocess`
-/// (M217), in either NV12 texture layout: an R8Uint `wgpu::Texture` of
+/// Owns a GPU-resident NV12 frame for surface-import into `WgpuPreprocess`,
+/// in either NV12 texture layout: an R8Uint `wgpu::Texture` of
 /// [`packed_nv12_extent`] holding the NV12 rows (Y plane, then interleaved
 /// Cb,Cr), or a two-plane `TextureFormat::NV12` /
 /// `TextureFormat::P010` texture of `width x height`. [`texture_layout`] of
@@ -834,7 +834,7 @@ mod tests {
         data
     }
 
-    /// M263 keystone for the game-engine / lightweight-app wedge: a frame produced
+    /// Keystone for the game-engine / lightweight-app wedge: a frame produced
     /// on an *embedder-supplied* device (via `GpuContext::from_wgpu`) carries a
     /// `WgpuTexture` the embedder can use on its *own* device with no copy. If g2g
     /// had opened its own device (the `headless` path), the texture would be bound

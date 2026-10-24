@@ -1,4 +1,4 @@
-//! Media Foundation device discovery (M943): the Windows camera half of the
+//! Media Foundation device discovery: the Windows camera half of the
 //! [`DeviceMonitor`](g2g_core::runtime::DeviceMonitor), the counterpart of
 //! [`v4l2device`](crate::v4l2device) on Linux. `MFEnumDeviceSources` lists the
 //! video capture devices, each becoming a [`Device`] that

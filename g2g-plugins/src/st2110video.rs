@@ -1,4 +1,4 @@
-//! ST 2110-20 uncompressed video over RTP (M599): the packetizer and
+//! ST 2110-20 uncompressed video over RTP: the packetizer and
 //! depacketizer for uncompressed active video, RFC 4175.
 //!
 //! Unlike -30 audio (raw PCM straight in the payload), -20 video carries a small

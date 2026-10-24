@@ -1,22 +1,22 @@
-//! The visual end of the one-graph detector (M452): a real YOLO's structured
+//! The visual end of the one-graph detector: a real YOLO's structured
 //! detections drawn back onto the picture, the screenshot-able payoff of the
 //! `inference -> AnalyticsMeta -> overlay -> display` story.
 //!
 //! The detector runs once on the fixture's preprocessed tensor (`OrtInference ->
-//! DetectionPostprocess`, the exact M452 chain), producing an [`AnalyticsMeta`]
+//! DetectionPostprocess`, the exact detection chain), producing an [`AnalyticsMeta`]
 //! of normalized boxes. The frame the model saw is reconstructed straight from
 //! that tensor (CHW f32 -> HWC RGBA8) so the boxes land pixel-exact, and a single
 //! graph paints them on and presents:
 //!
 //!   ImageSource(RGBA8 + AnalyticsMeta) -> AnalyticsOverlay -> <display>
 //!
-//! Two display backends, like `textoverlay_demo`. This is the M214 fan-out
+//! Two display backends, like `textoverlay_demo`. This is the fan-out
 //! pattern (meta carried on the frame, the overlay draws it) but with a real
 //! detector and a desktop sink instead of a hard-coded box and a fake sink.
 //!
 //! A leading `segment` argument swaps the detector for `OrtSegmentation` on the
 //! segmentation fixture, so the same overlay draws real instance masks and their
-//! ROIs instead of boxes (M994).
+//! ROIs instead of boxes.
 //!
 //!   # Still: write the annotated frame as a PPM (no display, headless-safe)
 //!   tools/detect-fixture.sh   # fetch the gitignored YOLO model + sample tensor

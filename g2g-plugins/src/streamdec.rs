@@ -37,7 +37,7 @@
 //! [`VulkanStreamDecoder::submit_chunk_texture`] returns the decoded frame as a
 //! GPU-resident RGBA
 //! [`wgpu::Texture`] (YUV->RGB already applied on the GPU by g2g's
-//! `VkSamplerYcbcrConversion` compute pass, M494), so the frame never leaves the
+//! `VkSamplerYcbcrConversion` compute pass), so the frame never leaves the
 //! decode device. A consumer hands the texture
 //! straight to its renderer, skipping both the CPU readback and the renderer's
 //! upload + YUV->RGB.

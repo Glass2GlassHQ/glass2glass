@@ -1,4 +1,4 @@
-//! Per-node property requests a running graph's arms answer (M1175): a
+//! Per-node property requests a running graph's arms answer: a
 //! [`GraphMutator`](crate::runtime::GraphMutator) set or get is queued here and
 //! the arm that owns the element performs it at its next packet boundary, so the
 //! element is only ever touched from the task driving it.

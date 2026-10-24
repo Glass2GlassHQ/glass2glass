@@ -1,4 +1,4 @@
-//! Emulated Cortex-M execution proof (M628): run the heap-free proof pipeline
+//! Emulated Cortex-M execution proof: run the heap-free proof pipeline
 //! (the shared `noalloc-pipeline` crate, the same definition the `g2g-noalloc`
 //! no-heap / panic-free symbol proofs wrap) on QEMU's MPS2-AN386 Cortex-M4,
 //! and report the result over semihosting. The pipeline blits 64 frames

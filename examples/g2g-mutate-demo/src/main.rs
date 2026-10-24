@@ -1,4 +1,4 @@
-//! Splicing a transform onto a live pipeline, on screen (M1120, M1133).
+//! Splicing a transform onto a live pipeline, on screen.
 //!
 //! `rtspsrc -> ffmpegdec -> waylandsink` plays an RTSP feed in a window. Every
 //! few seconds a `videoflip` is spliced onto the decoded-video edge, held, and
@@ -9,7 +9,7 @@
 //! cd examples/g2g-mutate-demo && cargo run --release
 //! ```
 //!
-//! `cargo run --release -- tee` runs the structural variant (M1133): the
+//! `cargo run --release -- tee` runs the structural variant: the
 //! decoder feeds a tee with a window on each branch, and the flip is spliced
 //! onto one branch by `insert_before` on that branch's sink, so one window
 //! turns over while its sibling plays on untouched.

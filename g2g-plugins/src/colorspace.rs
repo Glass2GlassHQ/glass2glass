@@ -1,4 +1,4 @@
-//! Colorimetry converter (M1127): changes what a raw frame's samples *mean*
+//! Colorimetry converter: changes what a raw frame's samples *mean*
 //! while leaving the pixel format alone, the complement of
 //! [`videoconvert`](crate::videoconvert), which changes the format and carries
 //! the colorimetry through.
@@ -12,7 +12,7 @@
 //!   transfer, apply the source-primaries-to-target-primaries matrix (both
 //!   D65, so no chromatic adaptation), re-encode with the output transfer.
 //!
-//! PQ and HLG (M1153) go through the same linear step: light relative to the
+//! PQ and HLG go through the same linear step: light relative to the
 //! 203 cd/m2 HDR reference white of BT.2408, which is what the SDR curves
 //! already produce at code 255. An HDR source headed for an SDR transfer is
 //! tone mapped on the way, with the BT.2390 EETF from `hdr-peak-nits` down to

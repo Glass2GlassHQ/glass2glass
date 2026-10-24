@@ -1,4 +1,4 @@
-//! Linux H.264 video *encode* element using ffmpeg / libavcodec (M266): the
+//! Linux H.264 video *encode* element using ffmpeg / libavcodec: the
 //! encode-side mirror of [`crate::ffmpegdec::FfmpegVideoDec`]. `RawVideo` (see
 //! the input formats below) in, `CompressedVideo{H264}` Annex-B out, so the
 //! Linux production path finally
@@ -31,7 +31,7 @@
 //! sound on the ownership-transfer grounds documented on `FfmpegVideoDec` /
 //! `MfDecode`.
 //!
-//! Runtime bitrate retarget (M722): a libavcodec encoder fixes its rate at
+//! Runtime bitrate retarget: a libavcodec encoder fixes its rate at
 //! open, so a downstream BWE target reopens the encoder (hysteresis-gated 20%,
 //! old encoder flushed first so nothing in flight is lost, fresh encoder starts
 //! on an IDR). Setting the `bitrate` property mid-stream reopens the same way,
@@ -39,14 +39,14 @@
 //! shed-layer idle hint: frames are skipped unencoded except a sparse 1-in-32
 //! keep-alive that keeps the reverse-signal path alive for the resume.
 //!
-//! Input formats (M823): `I420`, `NV12` (so an NV12-emitting decoder or capture
+//! Input formats: `I420`, `NV12` (so an NV12-emitting decoder or capture
 //! source feeds the encoder without a `videoconvert`), and 10-bit `I420_10LE`
 //! (High 10 profile). The pixel format is checked against the encoder's
 //! advertised list at configure, so a 10-bit input on an 8-bit-only libx264 or
 //! on NVENC (whose H.264 encoder is 8-bit only, whatever the shared pixel-format
 //! list claims) fails negotiation loud rather than encoding garbage.
 //!
-//! Colorimetry (M1124): the negotiated input's colour description goes onto the
+//! Colorimetry: the negotiated input's colour description goes onto the
 //! encoder context before open, so libx264 and NVENC write it into the SPS VUI,
 //! and onto the H.264 output caps. An untagged input stays untagged.
 //!
@@ -215,7 +215,7 @@ pub struct FfmpegH264Enc {
     caps_sent: bool,
     /// A downstream PLI latched a keyframe request; the next encode forces an IDR.
     force_keyframe: bool,
-    /// Shed-layer idle (M722, `Bitrate(0)`): most frames are skipped unencoded;
+    /// Shed-layer idle (`Bitrate(0)`): most frames are skipped unencoded;
     /// a sparse 1-in-32 keep-alive encode keeps the push cadence (and thus the
     /// reverse-signal path that will deliver the resume target) alive.
     idle: bool,
@@ -978,7 +978,7 @@ mod tests {
         v
     }
 
-    /// M722 runtime retarget: a downstream BWE target far below the configured
+    /// Runtime retarget: a downstream BWE target far below the configured
     /// rate reopens the encoder, and the later access units come out smaller.
     #[tokio::test]
     async fn bitrate_feedback_retargets_via_reopen() {
@@ -1027,7 +1027,7 @@ mod tests {
         );
     }
 
-    /// M722 shed-layer idle: `Bitrate(0)` mostly stops the encoder (sparse
+    /// Shed-layer idle: `Bitrate(0)` mostly stops the encoder (sparse
     /// 1-in-32 keep-alives only), and a non-zero target resumes it on an IDR.
     #[tokio::test]
     async fn bitrate_zero_idles_and_resume_restarts_on_idr() {
@@ -1238,7 +1238,7 @@ mod tests {
         samples.iter().map(|&s| s as f64).sum::<f64>() / samples.len().max(1) as f64
     }
 
-    /// M823: NV12 input encodes without a `videoconvert` in front, and the
+    /// NV12 input encodes without a `videoconvert` in front, and the
     /// decoded round trip puts luma and both chroma components back where they
     /// belong (a mis-read interleave would grey the chroma out).
     #[tokio::test]
@@ -1276,7 +1276,7 @@ mod tests {
         );
     }
 
-    /// M823: 10-bit input encodes as High 10 and decodes back to 10-bit planar.
+    /// 10-bit input encodes as High 10 and decodes back to 10-bit planar.
     /// Skips (with the reason) on a libx264 built 8-bit only.
     #[tokio::test]
     async fn ten_bit_input_encodes_high10_and_round_trips() {
@@ -1314,7 +1314,7 @@ mod tests {
         );
     }
 
-    /// M823 fail-loud: NVENC's H.264 encoder is 8-bit only, so 10-bit input must
+    /// Fail loud: NVENC's H.264 encoder is 8-bit only, so 10-bit input must
     /// fail negotiation rather than open and emit garbage.
     #[tokio::test]
     async fn ten_bit_on_nvenc_fails_negotiation() {
@@ -1349,7 +1349,7 @@ mod tests {
         }
     }
 
-    /// M823: setting the `bitrate` property mid-stream retargets a running
+    /// Setting the `bitrate` property mid-stream retargets a running
     /// encoder (libavcodec fixes its rate at open, so this reopens it): output
     /// continues, restarts on an IDR, and the access units get smaller.
     #[tokio::test]

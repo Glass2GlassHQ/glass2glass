@@ -1,4 +1,4 @@
-//! Runtime element properties (M104): a name/value bag layered over the
+//! Runtime element properties: a name/value bag layered over the
 //! compile-time `with_*` builders, the GObject-property analog.
 //!
 //! The builders (`VideoTestSrc::new().with_pattern(..)`) stay the zero-cost,
@@ -7,7 +7,7 @@
 //! property by string name and value, read it back, and enumerate an element's
 //! properties without instantiating tooling-specific code. That runtime face is
 //! what a `gst-launch` text pipeline parser and a `gst-inspect` introspection
-//! dump build on (M105 / M106).
+//! dump build on.
 //!
 //! It costs the baseline nothing: the [`properties`](crate::AsyncElement::properties)
 //! / [`set_property`](crate::AsyncElement::set_property) /
@@ -414,7 +414,7 @@ impl core::fmt::Display for ValueError {
 }
 
 /// Static, type-level description of an element for `gst-inspect`-style
-/// introspection (M178), the GStreamer element-class-metadata analog
+/// introspection, the GStreamer element-class-metadata analog
 /// (`gst_element_class_set_static_metadata`). All `&'static str` so it is
 /// `const`-declarable next to the element and costs a live instance nothing.
 /// An element opts in by overriding `metadata()` (default: empty), exactly like
@@ -490,8 +490,7 @@ fn kind_label(kind: PropKind) -> &'static str {
 
 /// Format a property spec table the way `gst-inspect` details it: a header line
 /// per property (name + blurb), then indented `flags`, type, range/enum, and
-/// default lines. Used by the registry's introspection dump (M105, enriched
-/// M178).
+/// default lines. Used by the registry's introspection dump.
 pub fn format_specs(specs: &[PropertySpec]) -> String {
     use core::fmt::Write;
     let mut out = String::new();

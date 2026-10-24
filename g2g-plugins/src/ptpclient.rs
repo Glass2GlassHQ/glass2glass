@@ -1,4 +1,4 @@
-//! In-process software PTP ordinary clock, SLAVE mode (M594): the UDP transport
+//! In-process software PTP ordinary clock, SLAVE mode: the UDP transport
 //! around the `g2g-core` PTP servo + wire + slave state machine.
 //!
 //! This is the portable "own the primitive" path (no dependency on an OS PTP

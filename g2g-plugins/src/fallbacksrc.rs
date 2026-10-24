@@ -1,4 +1,4 @@
-//! The source half of `fallbacksrc` (M1163): a wrapper that rebuilds the
+//! The source half of `fallbacksrc`: a wrapper that rebuilds the
 //! source behind it when that source fails, delivers nothing for
 //! `restart-timeout`, or (under `restart-on-eos`) ends. Each life of the inner
 //! source is stitched onto one timeline through the
@@ -11,7 +11,7 @@
 //! `fallbacksrc uri=X` launch keyword wraps both its main and its `fallback-uri`
 //! source with it.
 //!
-//! With an [`UnblockHandle`] set (M1166, gst's
+//! With an [`UnblockHandle`] set (gst's
 //! `manual-unblock`), each life waits for the application to release it before
 //! it delivers anything, and the wait re-arms on every restart.
 //!
@@ -87,7 +87,7 @@ pub struct RestartSrc {
     /// Which `fallbacksrc` source this is, for the bus report. `None` when it was
     /// built directly rather than by the launch keyword.
     role: Option<FallbackSourceRole>,
-    /// The application's release control (M1166): with one set, every life waits
+    /// The application's release control: with one set, every life waits
     /// for an `unblock` before it delivers.
     unblock: Option<UnblockHandle>,
     bus: Option<BusHandle>,
@@ -126,7 +126,7 @@ impl RestartSrc {
     }
 
     /// Hold every life until the application releases it through `handle`
-    /// (M1166, gst's `manual-unblock`). The handle re-arms, so a restarted
+    /// (gst's `manual-unblock`). The handle re-arms, so a restarted
     /// source waits again.
     pub fn with_unblock_handle(mut self, handle: UnblockHandle) -> Self {
         self.unblock = Some(handle);
@@ -454,7 +454,7 @@ impl SourceLoop for RestartSrc {
     }
 }
 
-/// [`restart_source`] for a session that produces every port itself (M1170),
+/// [`restart_source`] for a session that produces every port itself,
 /// registered as the registry's
 /// [`RestartFanoutSourceHook`](g2g_core::runtime::RestartFanoutSourceHook).
 pub fn restart_fanout_source(
@@ -472,7 +472,7 @@ pub fn restart_fanout_source(
 }
 
 /// A multi-output source that rebuilds the session it wraps when that session
-/// dies, the fan-out sibling of [`RestartSrc`] (M1170): an RTSP stream under a
+/// dies, the fan-out sibling of [`RestartSrc`]: an RTSP stream under a
 /// lone `fallbacksrc` restarts with every track back on one timeline, instead of
 /// handing its switches to their fallbacks for good.
 ///

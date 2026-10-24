@@ -1,5 +1,5 @@
 //! URI-scheme handlers for [`Registry::build_uridecodebin`], the `uridecodebin`
-//! front door (M92). Each maps a URI scheme to one of the concrete g2g sources
+//! front door. Each maps a URI scheme to one of the concrete g2g sources
 //! and is gated to that source's feature, so an app registers only the schemes
 //! its build supports:
 //!
@@ -68,7 +68,7 @@ pub fn rtsp_handler() -> UriSourceFactory {
     })
 }
 
-/// Assemble the A/V fan-out for an RTSP stream that carries both tracks (M1122):
+/// Assemble the A/V fan-out for an RTSP stream that carries both tracks:
 /// one [`RtspSrcN`](crate::rtspsrcn::RtspSrcN) session with a video pad and an
 /// audio pad, each decoding to its own auto sink. `Ok(None)` (decline, so the
 /// single-stream [`rtsp_handler`] takes over) when the SDP offered no audio.
@@ -99,7 +99,7 @@ pub fn build_rtsp_av_fanout(
     Ok(Some(graph))
 }
 
-/// The `playbin uri=rtsp://...` fan-out hook (M1122): DESCRIBE the stream and,
+/// The `playbin uri=rtsp://...` fan-out hook: DESCRIBE the stream and,
 /// when it carries audio as well as video, build the two-pad graph over one
 /// session. Declines (`Ok(None)`) for a non-`rtsp` URI, an unreachable server,
 /// or a video-only stream, leaving the single-stream [`rtsp_handler`] to plug
@@ -125,7 +125,7 @@ pub fn rtsp_playbin(
     build_rtsp_av_fanout(reg, sinks, parsed.raw, &tracks)
 }
 
-/// The lone-`fallbacksrc` URI fan-out hook for RTSP (M1170), the open-ported
+/// The lone-`fallbacksrc` URI fan-out hook for RTSP, the open-ported
 /// sibling of [`rtsp_playbin`]: `DESCRIBE` the stream and, when it carries audio
 /// as well as video, carry both tracks off one session as fan-out ports, so each
 /// gets its own `fallbackswitch` and sink.
@@ -152,7 +152,7 @@ pub fn rtsp_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, 
     Ok(rtsp_track_fanout(parsed.raw, &tracks))
 }
 
-/// The fan-out of an RTSP stream that carries both tracks (M1170), the
+/// The fan-out of an RTSP stream that carries both tracks, the
 /// network-free half of [`rtsp_uri_fanout`]: `tracks` comes from a `DESCRIBE`
 /// the caller already did. `None` when the SDP offered no audio, so the port
 /// order matches [`VIDEO_PORT`](crate::rtspsrcn::VIDEO_PORT) /
@@ -397,7 +397,7 @@ fn byte_source(path: &str, encoding: ByteStreamEncoding) -> Box<dyn DynSourceLoo
     ))
 }
 
-/// The open-ported fan-out of a probed container (M1168): a source of its bytes,
+/// The open-ported fan-out of a probed container: a source of its bytes,
 /// a rebuild of that source (what `RestartSrc` calls when it dies), the demuxer,
 /// and one port entry per forwardable stream in port order. `make` is called once
 /// for the running source and again for every rebuild, so it carries its own URI.
@@ -543,7 +543,7 @@ impl MkvProbe {
     }
 }
 
-/// The `playbin uri=X` auto-fan-out hook for Matroska / WebM (M382): probe a
+/// The `playbin uri=X` auto-fan-out hook for Matroska / WebM: probe a
 /// `file://` MKV container, then assemble `FileSrc -> MkvDemuxN -> {decode -> auto
 /// sink}` with one branch per forwardable stream, the multi-stream form of
 /// `playbin`. Register it with [`Registry::register_playbin`] (done by
@@ -599,7 +599,7 @@ pub fn mkv_playbin(
     .map(Some)
 }
 
-/// The lone-`fallbacksrc` URI fan-out hook for Matroska (M1168), the open-ported
+/// The lone-`fallbacksrc` URI fan-out hook for Matroska, the open-ported
 /// sibling of [`mkv_playbin`]: the caller puts a `fallbackswitch` between each
 /// port and its sink, so the hook stops at the demuxer. Declines the same URIs
 /// [`mkv_playbin`] declines. A `#closed-captions=` fragment is stripped and
@@ -661,7 +661,7 @@ impl TsProbe {
     }
 }
 
-/// The `playbin uri=X` auto-fan-out hook for MPEG-TS (M389): probe a `file://`
+/// The `playbin uri=X` auto-fan-out hook for MPEG-TS: probe a `file://`
 /// transport stream's PMT, then assemble `FileSrc -> TsDemuxN -> {decode -> auto
 /// sink}` with one branch per forwardable stream, the MPEG-TS sibling of
 /// [`mkv_playbin`]. Declines (`Ok(None)`) for a non-`file://` URI, an unreadable
@@ -701,7 +701,7 @@ pub fn ts_playbin(
     .map(Some)
 }
 
-/// The lone-`fallbacksrc` URI fan-out hook for MPEG-TS (M1168), the open-ported
+/// The lone-`fallbacksrc` URI fan-out hook for MPEG-TS, the open-ported
 /// sibling of [`ts_playbin`]. See [`mkv_uri_fanout`].
 #[cfg(feature = "std")]
 pub fn ts_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, ParseError> {
@@ -771,7 +771,7 @@ impl PsProbe {
     }
 }
 
-/// The `playbin uri=X` auto-fan-out hook for MPEG program streams (M929): probe a
+/// The `playbin uri=X` auto-fan-out hook for MPEG program streams: probe a
 /// `file://` `.mpg` / `.vob`, then assemble `FileSrc -> PsDemuxN -> {decode -> auto
 /// sink}` with one branch per forwardable stream, the program stream sibling of
 /// [`ts_playbin`]. Declines (`Ok(None)`) for a non-`file://` URI, an unreadable
@@ -826,7 +826,7 @@ pub fn ps_playbin(
     .map(Some)
 }
 
-/// The lone-`fallbacksrc` URI fan-out hook for MPEG program streams (M1169), the
+/// The lone-`fallbacksrc` URI fan-out hook for MPEG program streams, the
 /// open-ported sibling of [`ps_playbin`]. See [`mkv_uri_fanout`]. Subpicture
 /// tracks are left out: there is no overlay on this path.
 #[cfg(feature = "std")]
@@ -835,7 +835,7 @@ pub fn ps_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, Pa
     Ok(ps_probe(&uri).map(|probe| probe.fanout()))
 }
 
-/// Build the DVD subpicture overlay graph (M931): `FileSrc -> PsDemuxN ->
+/// Build the DVD subpicture overlay graph: `FileSrc -> PsDemuxN ->
 /// {video decode -> RGBA8 -> compositor.0, subpicture -> vobsubdec ->
 /// compositor.1} -> NV12 -> auto video sink`, with the audio tracks fanning out
 /// to their own sinks.
@@ -977,7 +977,7 @@ fn build_ps_subpicture_overlay(
 }
 
 /// Probe a program stream file and build a [`PsDemuxN`](crate::psdemux::PsDemuxN)
-/// with the requested streams + their caps (M929). Shared by `mpegpsdemux`
+/// with the requested streams + their caps. Shared by `mpegpsdemux`
 /// demux-select and `decodebin` fan-out. Declines a non-program-stream file.
 ///
 /// Unlike MPEG-TS, a program stream's subpicture tracks are selectable here: they
@@ -1027,7 +1027,7 @@ fn ps_select(
     ))
 }
 
-/// `mpegpsdemux` explicit fan-out (M929).
+/// `mpegpsdemux` explicit fan-out.
 #[cfg(feature = "std")]
 pub fn ps_demux_select(
     name: &str,
@@ -1039,7 +1039,7 @@ pub fn ps_demux_select(
         .flatten()
 }
 
-/// `decodebin` fan-out over a program stream file (M929): the demuxer + per-port
+/// `decodebin` fan-out over a program stream file: the demuxer + per-port
 /// caps.
 #[cfg(feature = "std")]
 pub fn ps_decodebin_select(
@@ -1052,7 +1052,7 @@ pub fn ps_decodebin_select(
     ps_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 
-/// Bare-`decodebin` primary-stream hook for MPEG program streams (M929): the
+/// Bare-`decodebin` primary-stream hook for MPEG program streams: the
 /// program stream sibling of [`ts_primary_stream`]. An audio-only `.mpg` through
 /// `filesrc ! decodebin` selects the demux's audio stream instead of failing on
 /// the default video port.
@@ -1123,7 +1123,7 @@ fn map_decode_err(input: &Caps, e: DecodebinError) -> ParseError {
 }
 
 /// Splice the subtitle-overlay subgraph onto a built demux, shared by every
-/// container's `playbin` hook (MP4 M412, MKV / TS M415). Given a `demux` whose
+/// container's `playbin` hook (MP4, MKV, TS). Given a `demux` whose
 /// leading ports are the A/V tracks `av` (in port order, the first video one is
 /// overlaid) and whose trailing `text_port` carries the chosen
 /// subtitle track (caps `text_caps`): the video track decodes, converts to RGBA8,
@@ -1139,7 +1139,7 @@ fn map_decode_err(input: &Caps, e: DecodebinError) -> ParseError {
 /// A *bitmap*-subtitle track (DVD / DVB / PGS) takes the other overlay: its cues
 /// are palette-indexed pixels with no text to render, so the port decodes to RGBA
 /// cue canvases and a [`SubPictureOverlay`](crate::subpictureoverlay::SubPictureOverlay)
-/// blends them onto the video (M1005).
+/// blends them onto the video.
 #[cfg(feature = "std")]
 fn wire_subtitle_overlay(
     reg: &Registry,
@@ -1215,7 +1215,7 @@ fn subpicture_decoder(caps: &Caps) -> Option<GraphNode> {
 /// outside the auto-plug pool, RGBA8 in/out vs the display sink's NV12). Shared by
 /// the single-container [`wire_subtitle_overlay`] and the multi-source HLS builder,
 /// which differ only in where the text pad is fed from.
-/// Decode a compressed-audio demux port to an auto audio sink (M422): the audio
+/// Decode a compressed-audio demux port to an auto audio sink: the audio
 /// analog of the video overlay's explicit `VideoConvert`s. The decoded PCM's
 /// channel count and sample rate are only known once a frame decodes, but the
 /// sink needs a fixed format at configure, so the branch is
@@ -1323,7 +1323,7 @@ fn wire_av_ports(
 
 /// Add a `deinterlace mode=auto` feeding `to` and return it, so the decode chain
 /// plugs into the deinterlacer instead of directly into what follows. Every
-/// playbin video branch gets one (M935, gst parity with playbin's `deinterlace`
+/// playbin video branch gets one (gst parity with playbin's `deinterlace`
 /// flag): under `auto` it weaves only when the decoder's caps declare
 /// `Interlace::Interleaved` and forwards progressive frames untouched.
 #[cfg(feature = "std")]
@@ -1391,7 +1391,7 @@ fn wire_overlay_av(
     Ok(overlay)
 }
 
-/// Build a closed-caption overlay graph (M430): `source -> demux -> {video tee}`,
+/// Build a closed-caption overlay graph: `source -> demux -> {video tee}`,
 /// where the compressed video is teed so one copy decodes for display and the
 /// other feeds a [`CcExtract`](crate::ccextract::CcExtract). The CcExtract output
 /// (timed `Text{Utf8}` cues) drives the same `TextOverlayN` text pad a subtitle
@@ -1547,7 +1547,7 @@ fn link_text_into_overlay(
     Ok(())
 }
 
-/// Assemble the subtitle-overlay MP4 graph (M412): `FileSrc -> Mp4DemuxN -> {video:
+/// Assemble the subtitle-overlay MP4 graph: `FileSrc -> Mp4DemuxN -> {video:
 /// decode -> overlay; text: -> overlay} -> sink`. `av` carries the A/V tracks (in
 /// `moov` order, the demux's leading ports) and `text` the chosen subtitle track
 /// (the trailing port); `av` must contain a video track. The overlay wiring is the
@@ -1602,7 +1602,7 @@ fn build_mp4_subtitle_overlay(
     Ok(graph)
 }
 
-/// Assemble the subtitle-overlay Matroska graph (M415): the MKV sibling of
+/// Assemble the subtitle-overlay Matroska graph: the MKV sibling of
 /// [`build_mp4_subtitle_overlay`]. `FileSrc -> MkvDemuxN -> {video: decode ->
 /// overlay; text: -> overlay} -> sink`, with one trailing demux port for the chosen
 /// subtitle track. `av` must contain a video track. Shares [`wire_subtitle_overlay`].
@@ -1699,12 +1699,12 @@ impl Mp4Probe {
     }
 }
 
-/// The `playbin uri=X` auto-fan-out hook for fragmented MP4 / CMAF (M392): probe
+/// The `playbin uri=X` auto-fan-out hook for fragmented MP4 / CMAF: probe
 /// a `file://` ISO-BMFF container's `moov`, then assemble `FileSrc -> Mp4DemuxN ->
 /// {decode -> auto sink}` with one branch per forwardable track, the MP4 sibling
 /// of [`mkv_playbin`] / [`ts_playbin`]. When the file also carries a subtitle
 /// track and a video track, the video branch routes through a `TextOverlayN` fed
-/// by the subtitle track (M412, `build_mp4_subtitle_overlay`) so the subtitles
+/// by the subtitle track (`build_mp4_subtitle_overlay`) so the subtitles
 /// render on screen. Declines (`Ok(None)`) for a non-`file://` URI, an unreadable
 /// file, or a container with no readable `moov` (a non-MP4).
 #[cfg(feature = "std")]
@@ -1748,7 +1748,7 @@ pub fn mp4_playbin(
     .map(Some)
 }
 
-/// The lone-`fallbacksrc` URI fan-out hook for ISO-BMFF (M1168), the open-ported
+/// The lone-`fallbacksrc` URI fan-out hook for ISO-BMFF, the open-ported
 /// sibling of [`mp4_playbin`]. See [`mkv_uri_fanout`].
 #[cfg(feature = "std")]
 pub fn mp4_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, ParseError> {
@@ -1827,7 +1827,7 @@ fn read_mp4_top_level_box(path: &str, wanted: &[u8; 4]) -> Option<Vec<u8>> {
     None
 }
 
-/// Resolve each output-pad request to a selectable-stream index (M476, text M477),
+/// Resolve each output-pad request to a selectable-stream index,
 /// given the per-stream kind in selection order (A/V streams first, then subtitle
 /// streams). `video_k` picks the k-th video stream, `audio_k` the k-th audio,
 /// `text_k` / `subtitle_k` the k-th subtitle, `src_k` / a bare `d.` the k-th stream
@@ -1855,8 +1855,8 @@ fn every_stream(kinds: &[PadKind]) -> Option<Vec<usize>> {
 
 /// Probe a Matroska file and build a [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN) with
 /// one port per pad request, returning the demuxer plus each selected port's
-/// elementary caps (M482). Shared by `matroskademux` demux-select (M476, drops the
-/// caps) and `decodebin` fan-out (M482, keeps them to auto-plug a decoder per port).
+/// elementary caps. Shared by `matroskademux` demux-select (drops the
+/// caps) and `decodebin` fan-out (keeps them to auto-plug a decoder per port).
 /// Declines a non-Matroska file or an unsatisfiable request.
 #[cfg(feature = "std")]
 fn mkv_select(
@@ -1896,7 +1896,7 @@ fn mkv_select(
     ))
 }
 
-/// `matroskademux` explicit fan-out (M476): build the multi-output demuxer,
+/// `matroskademux` explicit fan-out: build the multi-output demuxer,
 /// dropping the per-port caps (each branch names its own decode chain).
 #[cfg(feature = "std")]
 pub fn mkv_demux_select(
@@ -1909,7 +1909,7 @@ pub fn mkv_demux_select(
         .flatten()
 }
 
-/// `decodebin` fan-out over a Matroska file (M482): the demuxer + per-port caps.
+/// `decodebin` fan-out over a Matroska file: the demuxer + per-port caps.
 #[cfg(feature = "std")]
 pub fn mkv_decodebin_select(
     location: &str,
@@ -2017,7 +2017,7 @@ impl OggProbe {
     }
 }
 
-/// The lone-`fallbacksrc` URI fan-out hook for Ogg (M1171): a grouped Ogg file's
+/// The lone-`fallbacksrc` URI fan-out hook for Ogg: a grouped Ogg file's
 /// logical bitstreams each get their own decode chain, `fallbackswitch` and
 /// sink. Several audio streams in one Ogg file are ordinary, so this is the hook
 /// that needs the fan-out's several-ports-of-one-kind support; a single-stream Ogg
@@ -2031,7 +2031,7 @@ pub fn ogg_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, P
     Ok(ogg_probe(uri).map(|probe| probe.fanout()))
 }
 
-/// `decodebin` fan-out over an Ogg file (M1596): the demuxer + per-port caps.
+/// `decodebin` fan-out over an Ogg file: the demuxer + per-port caps.
 #[cfg(feature = "std")]
 pub fn ogg_decodebin_select(
     location: &str,
@@ -2044,8 +2044,8 @@ pub fn ogg_decodebin_select(
 }
 
 /// Probe an Ogg file and build an [`OggDemuxN`](crate::oggdemux::OggDemuxN) with
-/// one port per selected stream (M790), plus the per-port caps the `decodebin`
-/// fan-out plugs a decoder from (M1596). `audio_k` / `video_k` (or a bare `d.`)
+/// one port per selected stream, plus the per-port caps the `decodebin`
+/// fan-out plugs a decoder from. `audio_k` / `video_k` (or a bare `d.`)
 /// picks the k-th logical bitstream of that kind in the grouped file. Declines
 /// a non-Ogg file or an unsatisfiable request.
 #[cfg(feature = "std")]
@@ -2080,7 +2080,7 @@ fn ogg_select(
     Some((Box::new(crate::oggdemux::OggDemuxN::new(ports)), caps))
 }
 
-/// `oggdemux` explicit fan-out (M790): build the multi-output demuxer, dropping
+/// `oggdemux` explicit fan-out: build the multi-output demuxer, dropping
 /// the per-port caps (each branch names its own decode chain).
 #[cfg(feature = "std")]
 pub fn ogg_demux_select(
@@ -2094,7 +2094,7 @@ pub fn ogg_demux_select(
 }
 
 /// Probe an MPEG-TS file and build a [`TsDemuxN`](crate::tsdemux::TsDemuxN) with
-/// the requested streams + their caps (M482). Shared by `tsdemux` demux-select and
+/// the requested streams + their caps. Shared by `tsdemux` demux-select and
 /// `decodebin` fan-out. Declines a non-MPEG-TS file.
 #[cfg(feature = "std")]
 fn ts_select(
@@ -2127,7 +2127,7 @@ fn ts_select(
     ))
 }
 
-/// `tsdemux` explicit fan-out (M476).
+/// `tsdemux` explicit fan-out.
 #[cfg(feature = "std")]
 pub fn ts_demux_select(
     name: &str,
@@ -2151,7 +2151,7 @@ pub fn ts_demux_caps_select(
     Some(Box::new(crate::tsdemux::TsDemuxN::new(streams?)))
 }
 
-/// `decodebin` fan-out over an MPEG-TS file (M482): the demuxer + per-port caps.
+/// `decodebin` fan-out over an MPEG-TS file: the demuxer + per-port caps.
 #[cfg(feature = "std")]
 pub fn ts_decodebin_select(
     location: &str,
@@ -2163,7 +2163,7 @@ pub fn ts_decodebin_select(
     ts_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 
-/// Bare-`decodebin` primary-stream hook for MPEG-TS (M746): a `filesrc
+/// Bare-`decodebin` primary-stream hook for MPEG-TS: a `filesrc
 /// location=X.ts ! decodebin` needs the single-stream
 /// [`TsDemux`](crate::tsdemux::TsDemux) to select the stream the PMT actually
 /// carries. Unlike the container demuxers, `TsDemux` cannot derive its output
@@ -2245,10 +2245,10 @@ pub fn flv_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     })
 }
 
-/// Bare-`decodebin` primary-stream hook for MP4 (M748): the MP4 sibling of
+/// Bare-`decodebin` primary-stream hook for MP4: the MP4 sibling of
 /// [`ts_primary_stream`]. Lists the file's streams as selections on the
 /// single-stream [`Mp4Demux`](crate::mp4demux::Mp4Demux): each video track with
-/// its codec named (M961: the demux port's nominal default is H.264, so a
+/// its codec named (the demux port's nominal default is H.264, so a
 /// codec-specific decoder like `rav1ddec` against an AV1 mp4 would otherwise
 /// fail startup negotiation), then each audio track by format (`stream=aac`,
 /// which an audio-only `.m4a` needs because the default video port would plug
@@ -2315,9 +2315,9 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     })
 }
 
-/// Bare-`decodebin` primary-stream hook for Matroska (M757): the mkv sibling of
+/// Bare-`decodebin` primary-stream hook for Matroska: the mkv sibling of
 /// [`ts_primary_stream`]. Lists the file's streams as selections by name
-/// (`matroskademux stream=<codec>`), video tracks first (M960: the demux port's
+/// (`matroskademux stream=<codec>`), video tracks first (the demux port's
 /// parameterless default is VP9, so a codec-specific decoder like `rav1ddec`
 /// against an AV1 webm would otherwise fail startup negotiation on the nominal
 /// caps, and an audio-only `.mka` would fail on the default video port).
@@ -2442,7 +2442,7 @@ pub fn ivf_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
     })
 }
 
-/// The `playbin uri=X` hook for a lone-audio-stream file (M775): an elementary
+/// The `playbin uri=X` hook for a lone-audio-stream file: an elementary
 /// audio file (`.flac`) or an Ogg logical stream, which the container hooks
 /// decline and the single-stream `file://` fallback (a self-demuxing MP4 video
 /// source) cannot play. Probes the content: an Ogg stream builds `FileSrc ->
@@ -2499,7 +2499,7 @@ pub fn audio_playbin(
     Ok(Some(graph))
 }
 
-/// Bare-`decodebin` primary-stream hook for Ogg (M775): the Ogg sibling of
+/// Bare-`decodebin` primary-stream hook for Ogg: the Ogg sibling of
 /// [`ts_primary_stream`]. [`OggDemux`](crate::oggdemux::OggDemux) defaults to its
 /// Opus port, so `filesrc location=X.oga ! decodebin` on an Ogg-FLAC / Vorbis
 /// file would plug an Opus decoder. Lists an `oggdemux stream=` selection for
@@ -2543,7 +2543,7 @@ pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<ContainerStream
 }
 
 /// Probe an MP4 file and build an [`Mp4DemuxN`](crate::mp4demuxn::Mp4DemuxN) with
-/// the requested tracks + their caps (M482). Shared by `qtdemux` demux-select and
+/// the requested tracks + their caps. Shared by `qtdemux` demux-select and
 /// `decodebin` fan-out. Declines a non-MP4 file.
 #[cfg(feature = "std")]
 fn mp4_select(
@@ -2588,7 +2588,7 @@ fn mp4_select(
     ))
 }
 
-/// `qtdemux` explicit fan-out (M476).
+/// `qtdemux` explicit fan-out.
 #[cfg(feature = "std")]
 pub fn mp4_demux_select(
     name: &str,
@@ -2600,7 +2600,7 @@ pub fn mp4_demux_select(
         .flatten()
 }
 
-/// `decodebin` fan-out over an MP4 file (M482): the demuxer + per-port caps.
+/// `decodebin` fan-out over an MP4 file: the demuxer + per-port caps.
 #[cfg(feature = "std")]
 pub fn mp4_decodebin_select(
     location: &str,
@@ -2616,7 +2616,7 @@ pub fn mp4_decodebin_select(
 }
 
 /// Probe an AVI file and build an [`AviDemuxN`](crate::avidemux::AviDemuxN) with
-/// one port per pad request (M1071). Shared by `avidemux` demux-select and
+/// one port per pad request. Shared by `avidemux` demux-select and
 /// `decodebin` fan-out. Declines a non-AVI file or an unsatisfiable request.
 #[cfg(feature = "std")]
 fn avi_select(
@@ -2644,7 +2644,7 @@ fn avi_select(
     Some((Box::new(crate::avidemux::AviDemuxN::new(ports)), caps))
 }
 
-/// `avidemux` explicit fan-out (M1071).
+/// `avidemux` explicit fan-out.
 #[cfg(feature = "std")]
 pub fn avi_demux_select(
     name: &str,
@@ -2656,7 +2656,7 @@ pub fn avi_demux_select(
         .flatten()
 }
 
-/// `decodebin` fan-out over an AVI file (M1071): the demuxer + per-port caps.
+/// `decodebin` fan-out over an AVI file: the demuxer + per-port caps.
 #[cfg(feature = "std")]
 pub fn avi_decodebin_select(
     location: &str,
@@ -2668,7 +2668,7 @@ pub fn avi_decodebin_select(
     avi_select(location, every_stream).map(|(demux, caps)| (demux, uncropped_ports(caps)))
 }
 
-/// Bare-`decodebin` primary-stream hook for AVI (M1071):
+/// Bare-`decodebin` primary-stream hook for AVI:
 /// [`AviDemux`](crate::avidemux::AviDemux) defaults to the file's video stream,
 /// so an audio-only AVI, or one whose codec is not the nominal H.264, needs the
 /// `stream=` selection naming what the file actually carries. Lists each
@@ -2736,7 +2736,7 @@ fn name_undecodable_tagged(
 }
 
 /// Fetch a text resource synchronously on a throwaway current-thread runtime, for
-/// the `playbin uri=hls://...` probe (M395). Returns `None` on any failure, so the
+/// the `playbin uri=hls://...` probe. Returns `None` on any failure, so the
 /// hook declines to the single-stream `hls` handler. Network-coupled: validated
 /// against a live server, not in CI (like the RTSP / WHIP paths).
 #[cfg(feature = "hls")]
@@ -2793,7 +2793,7 @@ fn hls_ts_stream(info: &crate::hlssrc::HlsStreamInfo) -> Option<crate::tsdemux::
 }
 
 /// Assemble the `HlsSrc -> TsDemuxN -> {decode -> auto sink}` fan-out from the
-/// streams a variant's first MPEG-TS segment carries (M395). The network-free
+/// streams a variant's first MPEG-TS segment carries. The network-free
 /// core of [`hls_playbin`], so it is unit-testable: the segment's PMT gives one
 /// port per forwardable stream, each pinned to its PID so two tracks of one
 /// codec reach their own ports. Returns `Ok(None)` (decline, the single-stream
@@ -2824,7 +2824,7 @@ pub fn build_hls_ts_fanout(
 }
 
 /// Assemble the `HlsSrc -> Mp4DemuxN -> {decode -> auto sink}` fan-out for an
-/// fMP4 / CMAF HLS variant (M396), discovering its tracks from the `#EXT-X-MAP`
+/// fMP4 / CMAF HLS variant, discovering its tracks from the `#EXT-X-MAP`
 /// init segment's `moov` ([`crate::mp4demuxn::forwardable_streams`]). The network-free
 /// core of the fMP4 branch of [`hls_playbin`], unit-testable on an init segment.
 /// `Ok(None)` (decline) when the init carries no forwardable track.
@@ -2863,7 +2863,7 @@ pub fn build_hls_fmp4_fanout(
 }
 
 /// Assemble a *multi-source* HLS fan-out for a variant with a separate audio
-/// rendition (M397): the video rides the variant's own (video-only) TS segments
+/// rendition: the video rides the variant's own (video-only) TS segments
 /// while the audio is a distinct `#EXT-X-MEDIA` rendition playlist, so two
 /// independent `HlsSrc -> TsDemuxN -> decode -> sink` chains are built and merged
 /// into one graph (each rendition is its own source, unlike the single-demuxer
@@ -2912,7 +2912,7 @@ pub fn build_hls_separate_fanout(
     Ok(Some(graph))
 }
 
-/// The `playbin uri=X` auto-fan-out hook for HLS (M395 TS, M396 fMP4): probe a
+/// The `playbin uri=X` auto-fan-out hook for HLS (TS and fMP4): probe a
 /// `hls://` master playlist, discover its selected variant's renditions, and
 /// assemble `HlsSrc -> {TsDemuxN | Mp4DemuxN} -> {decode -> auto sink}`, one branch
 /// per elementary stream, the HLS sibling of [`mkv_playbin`] / [`ts_playbin`] /
@@ -2927,7 +2927,7 @@ pub fn build_hls_separate_fanout(
 /// variant whose first segment does not fetch or carries fewer than two forwardable
 /// streams. Network-coupled: the probe
 /// is validated against a live server, not in CI.
-/// Assemble the HLS subtitle-overlay graph (M419): the video (and any muxed audio)
+/// Assemble the HLS subtitle-overlay graph: the video (and any muxed audio)
 /// rides the variant's own MPEG-TS segments through a `TsDemuxN`, the video branch
 /// feeding a [`TextOverlayN`](crate::textoverlay::TextOverlayN); the subtitle is a
 /// *separate* `#EXT-X-MEDIA:TYPE=SUBTITLES` WebVTT rendition, its own
@@ -2993,7 +2993,7 @@ pub fn build_hls_subtitle_overlay(
     Ok(Some(graph))
 }
 
-/// Assemble the *three-source* HLS subtitle-overlay graph (M420): a variant that
+/// Assemble the *three-source* HLS subtitle-overlay graph: a variant that
 /// carries video in its own TS segments but pairs it with BOTH a separate audio
 /// rendition and a SUBTITLES rendition. The video rides the variant's (video-only)
 /// MPEG-TS segments through a `TsDemuxN` into a
@@ -3085,7 +3085,7 @@ pub fn build_hls_separate_subtitle_overlay(
     Ok(Some(graph))
 }
 
-/// Assemble the muxed-TS HLS closed-caption overlay (M436): the CEA-608 / 708
+/// Assemble the muxed-TS HLS closed-caption overlay: the CEA-608 / 708
 /// sibling of [`build_hls_ts_fanout`]. The variant's muxed MPEG-TS streams fan out
 /// through a `TsDemuxN`, the video port teed so one copy decodes for display and the
 /// other feeds a [`CcExtract`](crate::ccextract::CcExtract) into a `TextOverlayN`, so
@@ -3124,7 +3124,7 @@ pub fn build_hls_ts_cc_overlay(
     .map(Some)
 }
 
-/// Assemble the fMP4 / CMAF HLS closed-caption overlay (M436): the CEA-608 / 708
+/// Assemble the fMP4 / CMAF HLS closed-caption overlay: the CEA-608 / 708
 /// sibling of [`build_hls_fmp4_fanout`], tracks discovered from the `#EXT-X-MAP`
 /// init segment's `moov`. The video track is teed for a display decode and a
 /// `CcExtract` caption branch into a `TextOverlayN`; any audio track fans out to its
@@ -3162,7 +3162,7 @@ pub fn build_hls_fmp4_cc_overlay(
     .map(Some)
 }
 
-/// Assemble the *multi-source* HLS closed-caption overlay (M436) for a variant whose
+/// Assemble the *multi-source* HLS closed-caption overlay for a variant whose
 /// video rides its own TS segments while the audio is a separate `#EXT-X-MEDIA`
 /// rendition: the video-only TS feeds the caption overlay (tee -> {decode for
 /// display, `CcExtract` for the text pad} -> `TextOverlayN`) and the audio rendition
@@ -3214,7 +3214,7 @@ pub fn build_hls_separate_cc_overlay(
 }
 
 /// Resolve the playlist URL of the chosen `#EXT-X-MEDIA` rendition in `group`
-/// (M418 language pick: `language` -> DEFAULT -> first), absolute against
+/// (language pick: `language` -> DEFAULT -> first), absolute against
 /// `base_url`. `None` when there is no group, no matching rendition, or the chosen
 /// rendition has no `URI` (a track muxed into the variant rather than its own
 /// playlist).
@@ -3230,8 +3230,8 @@ fn resolve_rendition(
     Some(crate::fetch::resolve_url(base_url, r.uri.as_ref()?))
 }
 
-/// Parse the `playbin uri=hls://...` rendition-language hints from the URI fragment
-/// (M418): `#audio-lang=fr&subtitle-lang=en`. Returns the playlist `rest` with the
+/// Parse the `playbin uri=hls://...` rendition-language hints from the URI fragment:
+/// `#audio-lang=fr&subtitle-lang=en`. Returns the playlist `rest` with the
 /// fragment stripped, plus the requested audio and subtitle languages (`None` when
 /// absent). `subtitle-lang` / `text-lang` are accepted aliases. An HLS URL has no
 /// other place to carry a preference, so the fragment (never sent to the server)
@@ -3331,7 +3331,7 @@ impl HlsPlaylists {
     }
 
     /// One `HlsSrc` on the master, the demuxer for the chosen variant's
-    /// packaging, and a port per routable stream (M1169). `None` when the
+    /// packaging, and a port per routable stream. `None` when the
     /// variant carries no routable stream, or when its fMP4 init segment or
     /// first MPEG-TS segment does not fetch. The two packagings are the
     /// network-free [`hls_fmp4_uri_fanout`] / [`hls_ts_uri_fanout`]; the fetch
@@ -3344,7 +3344,7 @@ impl HlsPlaylists {
     }
 }
 
-/// The open-ported fan-out of a muxed MPEG-TS HLS variant (M1169), the
+/// The open-ported fan-out of a muxed MPEG-TS HLS variant, the
 /// `fallbacksrc` sibling of [`build_hls_ts_fanout`]: one `HlsSrc` on the master
 /// into one `TsDemuxN`, a port per forwardable stream the variant's first
 /// segment carries, pinned to its PID. A rendition with its own playlist is not
@@ -3371,7 +3371,7 @@ pub fn hls_ts_uri_fanout(source_url: &str, first_segment: &[u8]) -> Option<UriFa
     ))
 }
 
-/// The open-ported fan-out of an fMP4 / CMAF HLS variant (M1169), the
+/// The open-ported fan-out of an fMP4 / CMAF HLS variant, the
 /// `fallbacksrc` sibling of [`build_hls_fmp4_fanout`]: the tracks come from the
 /// `#EXT-X-MAP` init segment's `moov`. `None` when the init carries no
 /// forwardable track. Network-free assembly, unit-testable on an init segment.
@@ -3502,7 +3502,7 @@ pub fn hls_playbin(
     build_hls_ts_fanout(reg, sinks, source_url, &first_segment)
 }
 
-/// The lone-`fallbacksrc` URI fan-out hook for HLS (M1169), the open-ported
+/// The lone-`fallbacksrc` URI fan-out hook for HLS, the open-ported
 /// sibling of [`hls_playbin`]: probe the master and carry the chosen variant's
 /// muxed MPEG-TS or fMP4 streams as demux ports, so each gets its own
 /// `fallbackswitch` and sink. Declines (`Ok(None)`) a URI that names no HLS

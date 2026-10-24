@@ -8,7 +8,7 @@
 //! (shared with it in [`crate::remotewire`]), not the WebSocket pair's
 //! one-message-per-packet.
 //!
-//! The M911 datagram carrier rides the same session: with `datagrams` set, a
+//! The datagram carrier rides the same session: with `datagrams` set, a
 //! sender puts each data frame in one QUIC datagram (unreliable, unordered,
 //! MTU-bounded) and keeps the control packets (caps, segment, flush, `Eos`) on
 //! the stream, since losing one of those loses the stream itself. One datagram is

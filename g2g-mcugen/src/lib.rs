@@ -1,4 +1,4 @@
-//! Host graph compiler (M646, generalized M648): turn a declarative MCU graph
+//! Host graph compiler: turn a declarative MCU graph
 //! document into a monomorphized static pipeline, the codegen resolution of the
 //! "develop-and-test on Linux, ship a bounded static build to the MCU" tension.
 //! The same elements the hand-written flagship pipelines wire by hand, this

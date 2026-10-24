@@ -1,4 +1,4 @@
-//! Blu-ray PGS subtitle decoder element (M925): `Caps::SubPicture{Pgs}` in,
+//! Blu-ray PGS subtitle decoder element: `Caps::SubPicture{Pgs}` in,
 //! `Caps::RawVideo{Rgba8}` canvases out.
 //!
 //! Each display set becomes a full-frame transparent canvas at the video

@@ -1,4 +1,4 @@
-//! Tensor post-processing element (M27): the classification head that turns
+//! Tensor post-processing element: the classification head that turns
 //! a model's raw logits into something a consumer can act on, in-graph.
 //! Composes after `OrtInference`: `... -> OrtInference -> TensorPostprocess`.
 //!

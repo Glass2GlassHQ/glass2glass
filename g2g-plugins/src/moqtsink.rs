@@ -1,4 +1,4 @@
-//! MoQ Transport publisher sink (`moqtsink`, M902, `moqt` feature): publishes a
+//! MoQ Transport publisher sink (`moqtsink`, `moqt` feature): publishes a
 //! fragmented-MP4 byte stream to an IETF MoQT relay over WebTransport.
 //!
 //! ```text
@@ -427,7 +427,7 @@ impl MoqtSink {
     }
 
     /// Accept only relay certificates whose SHA-256 digest is listed (hex,
-    /// comma-separated) instead of requiring a system root, as the M901 carrier
+    /// comma-separated) instead of requiring a system root, as the WebTransport carrier
     /// does.
     pub fn with_server_certificate_hashes(mut self, hashes: impl Into<String>) -> Self {
         self.cert_hashes = hashes.into();

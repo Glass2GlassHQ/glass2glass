@@ -1,9 +1,9 @@
 //! The heap-free proof pipeline (shared by `g2g-noalloc` and `g2g-qemu`): a
-//! real [`GrabberSrc`] capture source (M630, the camera seam from `g2g-mcu`,
+//! real [`GrabberSrc`] capture source (the camera seam from `g2g-mcu`,
 //! fed by a stub pattern grabber over a `StaticLendRing`) -> pass-through
-//! transform -> a real [`SpiDisplaySink`] (M629, the ST7789-family element)
+//! transform -> a real [`SpiDisplaySink`] (the ST7789-family element)
 //! driving a stub SPI bus, wired with the static element model. The transform
-//! link carries negotiated `Caps::Tensor` (M636: `TensorShape` is fixed-rank
+//! link carries negotiated `Caps::Tensor` (`TensorShape` is fixed-rank
 //! inline, so tensor caps are heap-free): the caps intersect at build and
 //! every frame is validated against the negotiated tensor's byte size, so the
 //! ML caps kind is covered by the same no-alloc / panic-free / footprint /
@@ -105,7 +105,7 @@ impl FrameGrabber for PatternGrabber {
 }
 
 /// The tensor description of one RGBA frame on the transform link: an NHWC u8
-/// tensor `[1, HEIGHT, WIDTH, 4]`. `TensorShape` is fixed-rank inline (M636),
+/// tensor `[1, HEIGHT, WIDTH, 4]`. `TensorShape` is fixed-rank inline,
 /// so tensor caps are part of the no-alloc subset and the heap-free archive
 /// can carry them.
 fn frame_tensor_caps() -> Caps {

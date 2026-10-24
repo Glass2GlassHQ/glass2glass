@@ -467,11 +467,11 @@ impl AsyncElement for WavParse {
     }
 
     /// The layout is unknown until the `fmt ` chunk is read, so this advertises
-    /// what the audio decoder does (M754): a concrete default rate first, the
+    /// what the audio decoder does: a concrete default rate first, the
     /// `ANY_SAMPLE_RATE` wildcard second so a downstream `rate=` pin intersects
     /// to it. A lone wildcard cannot fixate. The real rate, channel count and
     /// format arrive with the `CapsChanged` the parsed header emits. The coded
-    /// payloads (M1073) come last, so a downstream that takes anything still
+    /// payloads come last, so a downstream that takes anything still
     /// gets PCM.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let stream_format = self.stream_format;

@@ -1,4 +1,4 @@
-//! Benchmarks for the raw-video frame-convert hot path (M284): the per-pixel
+//! Benchmarks for the raw-video frame-convert hot path: the per-pixel
 //! `videoconvert::convert` dispatch a software pipeline runs on every frame.
 //! Guards regressions in the conversion inner loops (RGBA<->NV12/I420 and the
 //! NV12<->I420 chroma repack) at 1080p.

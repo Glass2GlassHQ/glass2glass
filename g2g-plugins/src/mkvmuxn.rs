@@ -1,4 +1,4 @@
-//! Matroska / WebM multiplexer element (M294): N elementary streams in
+//! Matroska / WebM multiplexer element: N elementary streams in
 //! (H.264 / H.265 video + AAC audio), one Matroska byte stream out, so a muxed
 //! recording carries video and audio together:
 //!
@@ -10,7 +10,7 @@
 //!
 //! A [`MultiInputElement`] (input pad order = track order = Matroska TrackNumber):
 //! each pad takes one elementary stream, and access units interleave by
-//! presentation timestamp via the M204 [`InputAggregator`] merge before being
+//! presentation timestamp via the [`InputAggregator`] merge before being
 //! written to their track's SimpleBlocks. The Tracks element (one TrackEntry per
 //! stream) is built once every track has its `CodecPrivate`, which arrives in-band:
 //! a video track's avcC / hvcC record is synthesised from the parameter sets in
@@ -22,13 +22,13 @@
 //! muxer in `default_registry`, so any number of input links builds this element,
 //! the way gst's request sink pads do. Video is H.264/H.265 (avcC/hvcC + AVCC samples), VP8/VP9 (raw
 //! frames, no CodecPrivate) or AV1 (`V_AV1`, av1C `CodecPrivate` from the
-//! sequence header, temporal delimiters stripped, M773); audio is AAC (ASC) or
+//! sequence header, temporal delimiters stripped); audio is AAC (ASC) or
 //! Opus (an in-band `OpusHead` verbatim, else a synthesised one, plus the
-//! `CodecDelay` / `SeekPreRoll` its mapping needs, M792), so VP9 + Opus muxes a
-//! WebM. A `Caps::Text{Utf8}` pad adds a subtitle track (M898): one cue per frame,
+//! `CodecDelay` / `SeekPreRoll` its mapping needs), so VP9 + Opus muxes a
+//! WebM. A `Caps::Text{Utf8}` pad adds a subtitle track: one cue per frame,
 //! written as a `BlockGroup` whose `BlockDuration` is the cue's display window, in
 //! the `S_TEXT/*` syntax the `subtitle-format` property picks. A `Caps::SubPicture`
-//! pad adds a bitmap subtitle track (M927): `S_VOBSUB` or `S_DVBSUB` by the pad's
+//! pad adds a bitmap subtitle track: `S_VOBSUB` or `S_DVBSUB` by the pad's
 //! format, with the out-of-band configuration each needs (the `.idx` text, the
 //! page ids) taken from the config blob the stream carries ahead of its first cue
 //! and written as the track's `CodecPrivate`. Every A/V input pad must carry a
@@ -76,14 +76,14 @@ pub(crate) struct MkvMuxSettings {
     /// stream: an unknown-size Segment and unknown-size Clusters, nothing patched
     /// at EOS. Off by default (a recording stays seekable).
     pub(crate) streamable: bool,
-    /// Two-pass / seekable-finalize mode (M770): buffer the whole file and emit
+    /// Two-pass / seekable-finalize mode: buffer the whole file and emit
     /// it once at EOS with a front `SeekHead` indexing Info / Tracks / Cues, so
     /// the file seeks from byte 0 without reading past the Clusters, and with a
-    /// real `Info` `Duration` (M794), which only a caller holding the whole file
+    /// real `Info` `Duration`, which only a caller holding the whole file
     /// can fill in. Costs one file-sized buffer; mutually exclusive with
     /// `streamable`, whose live stream has no length to declare.
     pub(crate) seekable: bool,
-    /// The on-disk syntax a `Caps::Text` pad's cues are written in (M928): the
+    /// The on-disk syntax a `Caps::Text` pad's cues are written in: the
     /// `S_TEXT/*` CodecID and the block framing that goes with it. The pad always
     /// carries plain cue text; this only picks how it is stored.
     pub(crate) subtitle_format: TextFormat,
@@ -206,11 +206,11 @@ enum PadKind {
         channels: u8,
         rate: u32,
     },
-    /// A timed-text subtitle pad (M898): the pad carries one plain-UTF-8 cue per
+    /// A timed-text subtitle pad: the pad carries one plain-UTF-8 cue per
     /// frame, timed by the frame's PTS + duration. The on-disk `S_TEXT/*` syntax
     /// is the muxer's `subtitle-format`, not the pad's.
     Text,
-    /// A bitmap subtitle pad (M927): each frame is one cue (a VobSub subpicture
+    /// A bitmap subtitle pad: each frame is one cue (a VobSub subpicture
     /// unit, a DVB display set), and the out-of-band configuration each format
     /// needs arrives in band ahead of the first cue, the way both demuxers and
     /// `vobsubsrc` send it.
@@ -280,9 +280,9 @@ pub struct MkvMuxN {
     /// Whole-file metadata, written as an untargeted `Tag`.
     tags: TagList,
     /// Per-input metadata, written as `Targets`-scoped `Tag`s in the same `Tags`
-    /// element (M787). One (possibly empty) list per input pad.
+    /// element. One (possibly empty) list per input pad.
     track_tags: Vec<TagList>,
-    /// The table of contents, written as a `Chapters` element (M1046).
+    /// The table of contents, written as a `Chapters` element.
     chapters: Vec<Chapter>,
     /// Per-pad ASS event counter: the `ReadOrder` field leading each block.
     text_seq: Vec<u64>,
@@ -571,7 +571,7 @@ impl MkvMuxN {
     /// stored verbatim (keyframe from the frame header). AAC strips its ADTS
     /// header or is stored raw behind its config; Opus packets are stored raw.
     /// Audio frames are always sync samples. A text cue is framed in the track's
-    /// `S_TEXT/*` syntax (M898).
+    /// `S_TEXT/*` syntax.
     fn sample_for(&mut self, input: usize, au: &[u8]) -> (Vec<u8>, bool) {
         if let Some(config) = self.aac_config(input) {
             return (muxer_access_unit(config, au).to_vec(), true);
@@ -734,7 +734,7 @@ impl MultiInputElement for MkvMuxN {
         self.inputs
     }
 
-    /// Named request pads (M481): a container mux's inputs are caps-typed slots, so
+    /// Named request pads: a container mux's inputs are caps-typed slots, so
     /// `video_%u` / `audio_%u` / `sink_%u` each claim the next positional slot (the
     /// track type is read from the input's caps, not its index), so a launch line
     /// can name the pads (`m.video_0` / `m.audio_0`) in any order.

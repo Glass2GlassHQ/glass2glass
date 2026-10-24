@@ -725,7 +725,7 @@ pub(crate) async fn add_ice_candidates(
 }
 
 /// Drive `rtc` briefly after the media ends so packets still queued in str0m's
-/// pacer reach the wire before the socket drops (graceful EOS flush, M726).
+/// pacer reach the wire before the socket drops (graceful EOS flush).
 /// Bounded to a short window: the media is done, this only flushes the tail.
 pub(crate) async fn drain_pacer(rtc: &mut Rtc, socket: &UdpSocket, turn: &mut TurnSet) {
     use str0m::Output;
@@ -860,7 +860,7 @@ async fn gather_srflx(socket: &UdpSocket, stun_server: SocketAddr) -> Option<Soc
 
 /// Parse a STUN Binding Success Response for the (XOR-)MAPPED-ADDRESS, verifying
 /// the transaction id matches our request. IPv4 or IPv6 (the latter XORed with
-/// cookie + transaction id, M718).
+/// cookie + transaction id).
 fn parse_xor_mapped_address(msg: &[u8], txn: &[u8; 12]) -> Option<SocketAddr> {
     if msg.len() < 20 {
         return None;

@@ -1,4 +1,4 @@
-//! Software video compositor (M93): overlays N raw RGBA8 input streams onto one
+//! Software video compositor: overlays N raw RGBA8 input streams onto one
 //! output canvas at configurable positions, z-order, and per-pad alpha, with
 //! alpha blending. The `videomixer` / `compositor` analog (picture-in-picture,
 //! multi-camera grids, sub-window UIs). Our `mux` is a fan-in *multiplexer*
@@ -25,7 +25,7 @@
 //! (`compositor ! videorate`); the compositor stamps each output frame with
 //! input 0's PTS, so videorate resamples the cadence without any compositor-side
 //! frame-rate conversion. With
-//! [`with_timed_output`](Compositor::with_timed_output) (M875) output no longer
+//! [`with_timed_output`](Compositor::with_timed_output) output no longer
 //! stops when input 0 does: on a runner deadline tick the last frame it delivered
 //! is re-composited with the current overlays (zero-order-hold), one per empty
 //! frame period, so a live overlay keeps animating over a frozen background.

@@ -1,4 +1,4 @@
-//! GPU / compute device discovery (M939): the [`DeviceProvider`] for the
+//! GPU / compute device discovery: the [`DeviceProvider`] for the
 //! `Compute/GPU` class, g2g's extension beyond GStreamer's capture / render
 //! device model.
 //!

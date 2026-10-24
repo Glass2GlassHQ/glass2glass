@@ -1,4 +1,4 @@
-//! M306: Android hardware H.264 / H.265 encode via the NDK MediaCodec
+//! Android hardware H.264 / H.265 encode via the NDK MediaCodec
 //! (`AMediaCodec`).
 //!
 //! `MediaCodecEnc` is the encode mirror of [`MediaCodecDec`](crate::mediacodecdec::MediaCodecDec)

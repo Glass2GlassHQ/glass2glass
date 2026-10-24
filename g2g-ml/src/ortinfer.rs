@@ -4,7 +4,7 @@
 //! element body is backend-agnostic, and this module loads and runs an ONNX
 //! session under it.
 //!
-//! M21: `OrtInference` is an `AsyncElement` transform that negotiates
+//! `OrtInference` is an `AsyncElement` transform that negotiates
 //! `Caps::RawVideo` on its input pad and `Caps::Tensor` on its output pad,
 //! exactly like any other element in the graph. Each RGBA frame is converted
 //! to a normalized f32 NCHW tensor (RGB, `value / 255`), run through the
@@ -28,12 +28,12 @@
 //! - output dims static (a dynamic leading batch dim is treated as 1)
 //!
 //! Execution providers: `from_memory` uses ONNX Runtime's default (CPU) EP;
-//! `from_memory_with_directml` (M26) and `from_memory_with_cuda` (M53) register
+//! `from_memory_with_directml` and `from_memory_with_cuda` register
 //! a GPU EP ahead of the CPU fallback (best-effort, so the pipeline keeps
 //! flowing without the device). For Android edge, `from_memory_with_nnapi`
 //! (NPU / GPU / DSP via NNAPI), `from_memory_with_xnnpack` (ARM-optimized CPU),
 //! and `from_memory_for_android` (NNAPI then XNNPACK then CPU, the
-//! delegate-with-fallback shape) are the same constructor pattern (M439). All EP
+//! delegate-with-fallback shape) are the same constructor pattern. All EP
 //! choices are constructor variants; the element shape never changes. TensorRT,
 //! OpenVINO, ROCm and MIGraphX have the same constructors behind their features.
 //! A launch line names the provider instead (`execution-provider=cuda`), and
@@ -469,7 +469,7 @@ impl LoadedModel for OrtModel {
     }
 
     /// Feed an already-quantized u8 / i8 NCHW `[1, 3, H, W]` tensor straight to the
-    /// session (the quantized-model tensor-input path, M442): one byte per element,
+    /// session (the quantized-model tensor-input path): one byte per element,
     /// no normalize. The bytes are the integer tensor values (i8 reinterpreted from
     /// the byte). Returns the (f32) output, like [`run_f32`](Self::run_f32).
     fn run_int(&mut self, bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
@@ -533,7 +533,7 @@ pub(crate) fn f32_tensor_dims(dtype: &ValueType) -> Result<Vec<i64>, G2gError> {
 }
 
 /// Dims and dtype of an input tensor: f32 (RGBA / f32-tensor path) or a quantized
-/// u8 / i8 (a quantized model's integer input, M442). Other value types reject.
+/// u8 / i8 (a quantized model's integer input). Other value types reject.
 pub(crate) fn input_tensor_dims(dtype: &ValueType) -> Result<(Vec<i64>, TensorDType), G2gError> {
     match dtype {
         ValueType::Tensor { ty, shape, .. } => {

@@ -1,4 +1,4 @@
-//! Runtime fault-recovery proof (M652): the supervisor on the emulated
+//! Runtime fault-recovery proof: the supervisor on the emulated
 //! Cortex-M4. A `capture -> G.711 -> checksum` pipeline is driven by
 //! `run_supervised`, which turns a returned peripheral fault into a bounded
 //! retry / reset / escalate action instead of aborting, and pets a hardware

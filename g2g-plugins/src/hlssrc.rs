@@ -33,7 +33,7 @@
 //!
 //! Single-file CMAF is supported via `#EXT-X-BYTERANGE` (and `#EXT-X-MAP`'s
 //! `BYTERANGE`): a segment that carries one fetches only its sub-range with an
-//! HTTP `Range` request (M368), the offset continuing from the previous
+//! HTTP `Range` request, the offset continuing from the previous
 //! sub-range of the same resource when the tag omits an explicit `@offset`.
 //!
 //! Low-latency HLS (RFC 8216bis) is followed whenever the playlist offers it:
@@ -78,7 +78,7 @@ use crate::hls::{
 use crate::sampleaesdecrypt::{SampleAesKey, SampleAesKeyHandle};
 
 /// One decodable stream a master playlist's variant exposes, the unit the
-/// `playbin uri=hls://...` fan-out (M395) builds a branch from. The HLS analog of
+/// `playbin uri=hls://...` fan-out builds a branch from. The HLS analog of
 /// `MkvStreamInfo` / `TsStreamInfo` / `Mp4StreamInfo`, plus the rendition
 /// metadata HLS carries (a separate-rendition playlist `uri`, display `name`,
 /// `language`).
@@ -139,7 +139,7 @@ fn codec_to_stream(codec: &str) -> Option<(StreamType, Caps, bool)> {
     })
 }
 
-/// The decodable streams a master's `variant` exposes (M395 rendition discovery):
+/// The decodable streams a master's `variant` exposes (rendition discovery):
 /// the streams multiplexed in the variant's own segments (from its `CODECS`) plus
 /// the alternate audio renditions its `AUDIO` group offers (each a separate
 /// `#EXT-X-MEDIA` playlist). The muxed audio codec is dropped in favour of the
@@ -147,9 +147,9 @@ fn codec_to_stream(codec: &str) -> Option<(StreamType, Caps, bool)> {
 /// playlists; if it has a *URI-less* rendition, per the HLS spec the audio is
 /// carried in the variant's own segments (that rendition *is* the muxed track,
 /// e.g. the `DEFAULT=YES` entry of Apple's bipbop), so the muxed audio is kept
-/// (M422: without this, such a stream played silent, dropped as "a group is bound"
+/// (without this, such a stream played silent, dropped as "a group is bound"
 /// yet never surfaced as a separate playlist). Plus the alternate subtitle
-/// renditions its `SUBTITLES` group offers (M418: each a separate WebVTT playlist,
+/// renditions its `SUBTITLES` group offers (each a separate WebVTT playlist,
 /// surfaced as `Caps::Text { WebVtt }`).
 pub fn variant_streams(master: &MasterPlaylist, variant: &Variant) -> Vec<HlsStreamInfo> {
     let mut out = Vec::new();
@@ -272,28 +272,28 @@ pub struct HlsSrc {
     /// fetched key/IV here (for a downstream `SampleAesDecrypt`) and the bytes are
     /// forwarded undecrypted. Without it a SAMPLE-AES playlist is rejected.
     sample_aes_key: Option<SampleAesKeyHandle>,
-    /// Optional time-seek channel (M367). Unlike `FileSrc` (BYTES format), an
+    /// Optional time-seek channel. Unlike `FileSrc` (BYTES format), an
     /// adaptive source resolves a TIME seek to the media segment containing the
     /// target by walking the playlist's `#EXTINF` durations: it emits `Flush`,
     /// jumps to that segment, re-emits the `#EXT-X-MAP` init (so a downstream
     /// `fmp4demux` reset on the flush gets its `moov` again), emits the post-flush
     /// `Segment`, and resumes from there. The CMAF/DASH segment-transition case.
     seek: Option<SeekController>,
-    /// Throughput-driven ABR (M371): when set and the playlist is a master, the
+    /// Throughput-driven ABR: when set and the playlist is a master, the
     /// run loop measures each segment's download and re-selects the variant whose
     /// declared bandwidth fits the estimate (scaled, and under `max_bandwidth`),
     /// switching the active media playlist and re-emitting the init on a change.
     /// Off by default, so a plain run picks one variant up front and keeps it.
     abr: bool,
-    /// Text (subtitle) mode (M419): the playlist is a WebVTT subtitle rendition,
+    /// Text (subtitle) mode: the playlist is a WebVTT subtitle rendition,
     /// not an A/V variant. The source advertises `Caps::Text { WebVtt }` instead of
     /// a `ByteStream` container and forwards each `.vtt` segment's text (blank-line
     /// separated so a downstream `SubParse` sees each segment's `WEBVTT` /
     /// `X-TIMESTAMP-MAP` header as its own non-cue block). An fMP4 (`wvtt`)
-    /// rendition is de-framed to the same WebVTT text (M922). Off by default.
+    /// rendition is de-framed to the same WebVTT text. Off by default.
     text: bool,
     /// Start a live playlist from the front of the window (full DVR replay)
-    /// instead of near the live edge (M438). Off by default: live playback
+    /// instead of near the live edge. Off by default: live playback
     /// follows what is being published. Opt in for a from-the-beginning replay of
     /// the available window. No effect on VOD (always from the front).
     full_replay: bool,
@@ -302,7 +302,7 @@ pub struct HlsSrc {
     /// derives it from the playlist: `PART-HOLD-BACK` in low-latency mode, else
     /// [`DEFAULT_PREBUFFER_MS`].
     prebuffer_ms: Option<u64>,
-    /// Follow the playlist's low-latency tags when it publishes them (M1125):
+    /// Follow the playlist's low-latency tags when it publishes them:
     /// fetch and emit `#EXT-X-PART` partial segments and block the reload on the
     /// next part. On by default, since a playlist advertising parts and
     /// `CAN-BLOCK-RELOAD` is a server that expects a client to use them; `false`
@@ -359,7 +359,7 @@ impl HlsSrc {
     }
 
     /// Start a live playlist from the front of its sliding window (full DVR
-    /// replay) rather than near the live edge (M438). Off by default, so live
+    /// replay) rather than near the live edge. Off by default, so live
     /// playback follows what is being published; opt in to replay the whole
     /// available window from the beginning. No effect on VOD (always front-to-end).
     pub fn with_full_replay(mut self) -> Self {
@@ -367,20 +367,20 @@ impl HlsSrc {
         self
     }
 
-    /// Treat the playlist as a WebVTT subtitle rendition (M419): advertise
+    /// Treat the playlist as a WebVTT subtitle rendition: advertise
     /// `Caps::Text { WebVtt }` and forward each `.vtt` segment's text (for a
     /// `SubParse` -> overlay branch), rather than a TS / fMP4 byte stream for a
     /// demuxer. Used by the `playbin` HLS subtitle fan-out for a separate
     /// `#EXT-X-MEDIA:TYPE=SUBTITLES` rendition. Either segment carriage works: a
     /// raw `.vtt` segment forwards its own text, an fMP4 (`wvtt`) one is de-framed
-    /// through the fMP4 reader and rendered back to WebVTT (M922), so the branch
+    /// through the fMP4 reader and rendered back to WebVTT, so the branch
     /// is the same graph for both.
     pub fn with_text(mut self) -> Self {
         self.text = true;
         self
     }
 
-    /// Enable throughput-driven ABR (M371): measure each segment's download and
+    /// Enable throughput-driven ABR: measure each segment's download and
     /// re-select the variant whose declared bandwidth fits the smoothed estimate
     /// (under any `max_bandwidth` cap), switching mid-stream and re-emitting the
     /// init segment on a change. A no-op for a media-only playlist (one
@@ -390,7 +390,7 @@ impl HlsSrc {
         self
     }
 
-    /// Make the source time-seekable (M367): `run` polls `controller` before each
+    /// Make the source time-seekable: `run` polls `controller` before each
     /// segment fetch and, on a flushing seek, selects the media segment containing
     /// the target time (cumulative `#EXTINF` durations, clamped to the last
     /// segment), emits `Flush`, re-emits the `#EXT-X-MAP` init segment for a reset

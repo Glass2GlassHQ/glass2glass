@@ -1,5 +1,5 @@
 //! PTP-over-UDP (IEEE 1588-2008 / SMPTE ST 2059-2) wire format, the messages a
-//! SLAVE ordinary clock needs to parse and the Delay_Req it sends (M594).
+//! SLAVE ordinary clock needs to parse and the Delay_Req it sends.
 //!
 //! Only the subset a delay-request-response (E2E) slave uses: the common 34-byte
 //! header, plus Sync / Follow_Up / Delay_Resp bodies, plus a Delay_Req builder.

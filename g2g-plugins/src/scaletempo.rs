@@ -556,7 +556,7 @@ impl AsyncElement for ScaleTempo {
     }
 }
 
-/// `ScaleTempo`'s properties (M1075): gst `scaletempo`'s three window settings
+/// `ScaleTempo`'s properties: gst `scaletempo`'s three window settings
 /// plus its read-only current rate.
 static SCALETEMPO_PROPS: &[PropertySpec] = &[
     PropertySpec::new(

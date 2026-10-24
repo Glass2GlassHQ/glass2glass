@@ -177,7 +177,7 @@ fn first_display_offset_90khz(codec: VideoCodec, au: &[u8]) -> u64 {
     }
 }
 
-/// Per-frame video PTS synthesis for one elementary stream (M948). A transport
+/// Per-frame video PTS synthesis for one elementary stream. A transport
 /// stream need only carry a PES timestamp every 700 ms, so a conforming mux may
 /// leave most access units unstamped, and forwarding those unstamped lands them
 /// all at 0: a pacing sink plays that as a burst then a freeze.
@@ -188,7 +188,7 @@ fn first_display_offset_90khz(codec: VideoCodec, au: &[u8]) -> u64 {
 /// that is slightly off never drifts past one stamping interval.
 ///
 /// A stream that may reorder takes the display order from the picture order
-/// count instead (M952), and MPEG-2 from the picture header's
+/// count instead, and MPEG-2 from the picture header's
 /// `temporal_reference`. Both anchor on the real stamps the same way.
 #[derive(Debug, Default)]
 pub(crate) struct VideoPtsSynth {
@@ -329,7 +329,7 @@ impl VideoPtsSynth {
     /// stream coded ahead of its display slot.
     ///
     /// The first stamp alone carries the timeline when the SPS declares the
-    /// frame period (M1156): the count step per frame follows from the codec,
+    /// frame period: the count step per frame follows from the codec,
     /// so the slope is known before a second stamp measures it.
     fn stamp_by_poc(&mut self, codec: VideoCodec, au: &[u8], pts_90khz: &mut Option<u64>) {
         let Some(poc) = self.poc.push_access_unit(codec, au).map(i64::from) else {
@@ -380,11 +380,11 @@ const H264_POC_STEP_PER_FRAME: u64 = 2;
 const H264_PICTURE_COUNTING_POC_STEP: u64 = 1;
 
 /// Where a reordering stream's picture order counts sit on the presentation
-/// timeline (M952). Presentation time is linear in the count, so two real PES
+/// timeline. Presentation time is linear in the count, so two real PES
 /// stamps fix the line exactly, whatever reorder depth the stream codes at: the
 /// later of the two anchors it and the pair measures its slope.
 ///
-/// One stamp is enough when the SPS declares the frame period (M1156): the
+/// One stamp is enough when the SPS declares the frame period: the
 /// codec's count step per frame turns that period into a provisional slope, and
 /// the second stamp replaces it with the measured one.
 #[derive(Debug, Default)]

@@ -1,6 +1,6 @@
-//! CEA-608 / CEA-708 closed-caption decoding (M426, `no_std`): mine the
+//! CEA-608 / CEA-708 closed-caption decoding (`no_std`): mine the
 //! `cc_data` byte triples from H.264 / H.265 SEI `user_data_registered_itu_t_t35`
-//! messages (or MPEG-1 / MPEG-2 picture `user_data`, M963), then decode them into
+//! messages (or MPEG-1 / MPEG-2 picture `user_data`), then decode them into
 //! timed [`Cue`]s the existing overlay path
 //! renders (`crate::textoverlay`). Pure byte / bit work with no OS dependency, so
 //! it sits on the `no_std + alloc` baseline alongside `crate::subparse`; the
@@ -12,7 +12,7 @@
 //! block of `(cc_type, cc_data_1,
 //! cc_data_2)` triples. `cc_type` 0/1 are the two fields of legacy CEA-608
 //! line-21 captions; 2/3 are CEA-708 DTVCC packet bytes. This module decodes the
-//! CEA-608 field-1 path (M426: pop-on captions, the basic North-American
+//! CEA-608 field-1 path (pop-on captions, the basic North-American
 //! character set, channel CC1); CEA-608 positioning / channels / roll-up and
 //! CEA-708 are layered on in later milestones.
 //!

@@ -1,4 +1,4 @@
-//! In-terminal live pipeline telemetry (`g2g-launch --tui`, M1013).
+//! In-terminal live pipeline telemetry (`g2g-launch --tui`).
 //!
 //! The terminal sibling of the browser dashboard: it reads the same
 //! [`Observer`](g2g_core::runtime::Observer) tap in-process and draws it with

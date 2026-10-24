@@ -1,4 +1,4 @@
-//! Remote WebTransport sink (M901, `webtransport` feature): the WebTransport send
+//! Remote WebTransport sink (`webtransport` feature): the WebTransport send
 //! half of the distributed-graph primitive, the sibling of the TCP
 //! [`RemoteSink`](crate::remotesink) and the WebSocket
 //! [`RemoteWsSink`](crate::remotewssink).

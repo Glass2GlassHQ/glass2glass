@@ -1,4 +1,4 @@
-//! Device discovery (M938): the `GstDeviceProvider` / `GstDeviceMonitor`
+//! Device discovery: the `GstDeviceProvider` / `GstDeviceMonitor`
 //! analog. A [`DeviceProvider`] probes one backend (v4l2, ALSA, PipeWire,
 //! GPU adapters) for the capture / render / compute devices it can see; a
 //! [`DeviceMonitor`] aggregates providers, filters by device class and caps,

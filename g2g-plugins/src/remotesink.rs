@@ -1,4 +1,4 @@
-//! Remote transport sink (M551, `remote` feature): the send half of the
+//! Remote transport sink (`remote` feature): the send half of the
 //! distributed-graph primitive.
 //!
 //! `RemoteSink` accepts *any* caps and forwards the whole `PipelinePacket`
@@ -10,7 +10,7 @@
 //! let you cut any edge in a graph and run the downstream subgraph in another
 //! process or on another machine, without rewriting the graph: replace the edge
 //! with `... ! remotesink` on the near side and `remotesrc ! ...` on the far
-//! side. This is the general, media-agnostic form of the bespoke M549
+//! side. This is the general, media-agnostic form of the bespoke
 //! browser-to-server detect offload.
 //!
 //! `RemoteSink` is the TCP *client* (it dials the [`RemoteSrc`] server). It

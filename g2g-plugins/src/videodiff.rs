@@ -235,7 +235,7 @@ impl AsyncElement for VideoDiff {
     }
 }
 
-/// `VideoDiff`'s settable properties (M1084). GStreamer's element has none:
+/// `VideoDiff`'s settable properties. GStreamer's element has none:
 /// `threshold` is its internal constant made settable.
 static VIDEODIFF_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "threshold",

@@ -1,4 +1,4 @@
-//! Boundary-scoped time newtypes (M618): distinct types at the clock / PTP / RTP
+//! Boundary-scoped time newtypes: distinct types at the clock / PTP / RTP
 //! seam, where three different "just an integer" times meet and are easy to mix up.
 //!
 //! ST 2110 and PTP juggle several clocks: the pipeline's monotonic reference, PTP /

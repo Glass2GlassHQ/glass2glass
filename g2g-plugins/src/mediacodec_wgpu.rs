@@ -1,4 +1,4 @@
-//! M304: Android MediaCodec -> wgpu/Vulkan zero-copy bridge.
+//! Android MediaCodec -> wgpu/Vulkan zero-copy bridge.
 //!
 //! The Android analog of [`cudawgpu`](crate::cudawgpu): keep the decoded frame
 //! on the GPU (no CPU NV12 pack) by importing the `AImage`'s backing
@@ -132,7 +132,7 @@ pub async fn create_android_interop_device() -> Result<InteropDevice, G2gError> 
 impl InteropDevice {
     /// View this interop device as a shared [`GpuContext`](crate::gpu::GpuContext)
     /// so the on-screen [`WgpuSink`](crate::wgpusink) presents the decoder's RGBA
-    /// textures on the *same* device (M305). A `wgpu::Texture` binds only to the
+    /// textures on the *same* device. A `wgpu::Texture` binds only to the
     /// device that created it, so the decode element and the present sink must
     /// share one device; wgpu handles are reference-counted, so this clones the
     /// handles, not the GPU. Pair with [`create_android_surface`] and
@@ -147,7 +147,7 @@ impl InteropDevice {
     }
 }
 
-/// Create and configure a `wgpu::Surface` over an Android `ANativeWindow` (M305):
+/// Create and configure a `wgpu::Surface` over an Android `ANativeWindow`:
 /// the on-screen target for the decode -> GPU -> present path. The window is an
 /// app's `SurfaceView` / `NativeActivity` surface (or, headless, an
 /// `ImageReader`'s window for the present probe); the returned surface presents
@@ -345,7 +345,7 @@ unsafe fn create_ycbcr_conversion(
 
 /// Convert one decoded `AHardwareBuffer` (opaque vendor YCbCr) to RGBA on the
 /// GPU and read the result back to host memory, for on-device validation of the
-/// M304 conversion path. Returns `width * height * 4` bytes (R8G8B8A8).
+/// conversion path. Returns `width * height * 4` bytes (R8G8B8A8).
 ///
 /// The whole pipeline is raw Vulkan because wgpu's bind-group API cannot express
 /// the immutable `VkSamplerYcbcrConversion` an opaque buffer requires: import the

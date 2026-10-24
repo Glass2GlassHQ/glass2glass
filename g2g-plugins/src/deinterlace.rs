@@ -16,7 +16,7 @@
 //!   the two fields uniformly, so unlike the other two it has no field parity to
 //!   flip and `tff` does not change what it produces.
 //!
-//! The `mode` property (M935) mirrors GStreamer's:
+//! The `mode` property mirrors GStreamer's:
 //! `interlaced` (default) always weaves, `auto` weaves only when the incoming
 //! caps say `Interlace::Interleaved` (the ffmpeg decoder latches that from the
 //! per-picture flag) and passes everything else through untouched, `disabled` is
@@ -25,7 +25,7 @@
 //! `deinterlace` under `auto` would silently do nothing. `playbin` inserts this
 //! element with `auto` on every video branch.
 //!
-//! `fields` (M1048) selects how many output frames one input frame becomes and
+//! `fields` selects how many output frames one input frame becomes and
 //! `tff` the field order, both named after GStreamer's properties. `fields=all`
 //! emits one frame per field and doubles the output framerate; the default
 //! `auto` emits one frame per input frame, built from whichever field comes
@@ -100,14 +100,14 @@ impl DeinterlaceMethod {
     }
 }
 
-/// When the element weaves vs passes through (M935). See the module docs for
+/// When the element weaves vs passes through. See the module docs for
 /// why the default is `Interlaced`, not GStreamer's `auto`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeinterlaceMode {
     /// Weave only when the incoming caps say `Interlace::Interleaved` (and the
     /// format is one the kernels handle); otherwise forward untouched.
     Auto,
-    /// Always weave (the pre-M935 behavior).
+    /// Always weave.
     Interlaced,
     /// Never weave; pure passthrough.
     Disabled,

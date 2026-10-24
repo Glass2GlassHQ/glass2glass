@@ -327,7 +327,7 @@ impl PtpServo {
 
 /// A shareable, disciplined PTP clock: a [`PtpServo`] behind interior mutability
 /// so one worker can drive it (`sync_exchange`) while the pipeline reads the
-/// master estimate through an `Arc<dyn PipelineClock>` (M593 phase B).
+/// master estimate through an `Arc<dyn PipelineClock>`.
 ///
 /// A PTP-driven element offers it to clock election with
 /// [`candidate`](Self::candidate), which yields a

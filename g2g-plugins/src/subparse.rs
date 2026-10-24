@@ -1,4 +1,4 @@
-//! Subtitle cue parsing (M171, `no_std`): SRT (SubRip) and WebVTT text into a
+//! Subtitle cue parsing (`no_std`): SRT (SubRip) and WebVTT text into a
 //! common timed-text [`Cue`] list, the `subparse` analog. Pure parsing with no
 //! OS dependency, so it sits on the `no_std + alloc` baseline; the `TextOverlay`
 //! element ([`crate::textoverlay`]) renders the cues, and the `std`-gated
@@ -356,7 +356,7 @@ impl Cue {
     }
 }
 
-/// Per-frame metadata carrying a streamed cue's placement (M406): the
+/// Per-frame metadata carrying a streamed cue's placement: the
 /// [`CueSettings`] that `SubParse` parses but cannot put in the plain UTF-8
 /// payload, so a downstream overlay recovers WebVTT / SSA positioning instead of
 /// drawing every streamed cue bottom-centre. Gated behind the `metadata` feature
@@ -1666,7 +1666,7 @@ fn strip_ass_markup(raw: &str) -> String {
     out
 }
 
-/// De-frame one Matroska subtitle block payload to plain display text (M415). The
+/// De-frame one Matroska subtitle block payload to plain display text. The
 /// block carries a single cue and its timing rides the Matroska block (timestamp +
 /// `BlockDuration`), so only the text is extracted, by the track's source format:
 /// - [`TextFormat::Utf8`] (`S_TEXT/UTF8`): the payload is the text already.
@@ -1719,7 +1719,7 @@ Style: Default,Arial,16,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,
 Format: ReadOrder, Layer, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r\n";
 
 /// Frame plain UTF-8 cue text as the block payload an `S_TEXT/*` Matroska track
-/// carries (M898), the inverse of [`deframe_subtitle_block`]. The cue's window is
+/// carries, the inverse of [`deframe_subtitle_block`]. The cue's window is
 /// the block timestamp + `BlockDuration`, so only the text is framed:
 /// - [`TextFormat::Utf8`] / [`TextFormat::WebVtt`]: the text is the payload.
 /// - [`TextFormat::Ssa`]: the eight fields the de-frame skips are written ahead of
@@ -2575,7 +2575,7 @@ fn push_stripped(line: &str, out: &mut String) {
     }
 }
 
-/// Subtitle parser element (M400): a `Caps::Text{Srt}` / `Caps::Text{WebVtt}`
+/// Subtitle parser element: a `Caps::Text{Srt}` / `Caps::Text{WebVtt}`
 /// byte stream in, timed `Caps::Text{Utf8}` cues out, one frame per cue with the
 /// cue window carried as PTS + duration. The pipeline-native counterpart of the
 /// `parse_srt` / `parse_webvtt` functions above (which `TextOverlay` calls
@@ -2585,7 +2585,7 @@ fn push_stripped(line: &str, out: &mut String) {
 /// media type from a structured subtitle format to plain UTF-8 via the same
 /// [`CapsConstraint::DerivedOutput`] negotiation.
 ///
-/// Streaming (M405): SRT / WebVTT / SSA are line based, so complete cues are
+/// Streaming: SRT / WebVTT / SSA are line based, so complete cues are
 /// emitted as the bytes arrive. Each `process` call drains the blocks (or SSA
 /// `Dialogue:` lines) that are fully terminated, retains the trailing partial
 /// block in the buffer, and flushes the remainder at `Eos`. This unblocks a

@@ -1,4 +1,4 @@
-//! Local zero-copy CUDA transport elements (M556 phase 2, `local-ipc`): the
+//! Local zero-copy CUDA transport elements (`local-ipc`): the
 //! GPU-resident analog of the [`RemoteSink`](crate::remotesink) /
 //! [`RemoteSrc`](crate::remotesrc) pair. `LocalCudaSink` (Unix-socket client) and
 //! `LocalCudaSrc` (Unix-socket server) carry a `MemoryDomain::Cuda` NV12 frame

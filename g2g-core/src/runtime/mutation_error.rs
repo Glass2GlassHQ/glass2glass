@@ -33,7 +33,7 @@ pub enum MutationError {
     /// The run has ended (or its producer's arm has), so there is no graph left
     /// to mutate.
     GraphEnded,
-    /// The element refused the property value (M1175): its own
+    /// The element refused the property value: its own
     /// [`PropError`], so an unknown name, a kind mismatch and an out-of-range
     /// value are told apart the way a build-time `set_property` tells them apart.
     PropertyRejected(PropError),

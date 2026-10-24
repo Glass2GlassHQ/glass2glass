@@ -1,4 +1,4 @@
-//! RTP egress seam (M643): the [`PacketSender`] contract the board's network
+//! RTP egress seam: the [`PacketSender`] contract the board's network
 //! stack implements, plus [`RtpSink`], the heap-free [`StaticSink`] that
 //! turns each audio frame into one RTP packet, the last stage of the
 //! reference audio chain (capture -> convert -> resample -> mix -> encode ->

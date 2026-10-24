@@ -1,4 +1,4 @@
-//! Gapless playback channel (M383): the app <-> source side-channel a
+//! Gapless playback channel: the app <-> source side-channel a
 //! [`GaplessSrc`](../../../g2g_plugins/gaplesssrc/struct.GaplessSrc.html) uses to
 //! concatenate a playlist of sources into one continuous stream, the analog of
 //! GStreamer playbin's `about-to-finish` signal + next-`uri` enqueue.
@@ -11,7 +11,7 @@
 //! has no more items it calls [`finish`](GaplessController::finish) and the source
 //! emits a single terminal `Eos`.
 //!
-//! This is the source-swap counterpart of the M358 segment loop: that loops *one*
+//! This is the source-swap counterpart of the segment loop: that loops *one*
 //! item via a `SEGMENT` seek; this concatenates *different* items. Both are
 //! poll-based app <-> source channels with a wakeful idle (the source parks on
 //! [`wait_event`](GaplessController::wait_event) between items rather than
@@ -53,7 +53,7 @@ struct GaplessInner {
     /// App -> source end request: no more items will be enqueued, so the source
     /// emits `Eos` once the queue drains. Latches once set.
     finished: AtomicBool,
-    /// App -> source *instant* switch (M384, the `instant-uri` analog): play this
+    /// App -> source *instant* switch (the `instant-uri` analog): play this
     /// source **now**, preempting the current item (a flush + timeline reset),
     /// rather than waiting for the current item's EOS like the gapless `queue`.
     /// Latest-wins (a newer switch replaces an untaken one).
@@ -158,7 +158,7 @@ impl GaplessController {
         self.inner.finished.load(Ordering::SeqCst)
     }
 
-    /// Application side: switch to `source` **now** (M384, the `instant-uri`
+    /// Application side: switch to `source` **now** (the `instant-uri`
     /// analog), preempting the current item with a flush and a timeline reset
     /// rather than waiting for its EOS (the gapless [`enqueue`](Self::enqueue)
     /// path). Latest-wins: a newer `switch_now` replaces an untaken one. Use this

@@ -1,4 +1,4 @@
-//! Local zero-copy IPC over CUDA IPC memory handles (M556, `local-ipc` feature).
+//! Local zero-copy IPC over CUDA IPC memory handles (`local-ipc` feature).
 //!
 //! The wire codec ([`g2g_core::wire`]) and its transports (`remote`, `remote-ws`)
 //! only carry CPU memory: a device-resident frame must be downloaded first, so a

@@ -1,5 +1,5 @@
 //! Application source (`appsrc`): the application pushes buffers into a running
-//! pipeline (M233), the `gst-appsrc` analog.
+//! pipeline, the `gst-appsrc` analog.
 //!
 //! The element and the application live on different threads (the pipeline runs
 //! on its own thread, e.g. via `g2g-capi`), so the hand-off is a bounded

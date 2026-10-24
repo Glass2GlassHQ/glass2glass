@@ -1,4 +1,4 @@
-//! Pipeline progress handle (M203): the application's window into a running
+//! Pipeline progress handle: the application's window into a running
 //! pipeline's position and duration, the GStreamer `POSITION` / `DURATION`
 //! query analog.
 //!

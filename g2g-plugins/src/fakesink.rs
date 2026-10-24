@@ -45,7 +45,7 @@ pub struct FakeSink {
     configured: bool,
     caps_changes: Vec<CapsChange>,
     /// The most recent `Segment` received, and how many have arrived. A stream
-    /// opens with one (M80); a flushing seek emits another after the `Flush`.
+    /// opens with one; a flushing seek emits another after the `Flush`.
     last_segment: Option<Segment>,
     segments: u64,
     /// Glass-to-glass latency distribution recorded as
@@ -55,7 +55,7 @@ pub struct FakeSink {
     /// don't stamp) are skipped silently. Test code can pull a
     /// snapshot via [`FakeSink::latency_snapshot`] and assert bounds.
     latency: LatencyHistogram,
-    /// M180: data pointer of each received [`MemoryDomain::SystemView`] frame's
+    /// Data pointer of each received [`MemoryDomain::SystemView`] frame's
     /// backing, in arrival order. A test compares these to the source's emitted
     /// pointers to prove the frames crossed the pipeline (through a flip) with
     /// zero copies. `System` / GPU frames don't contribute. This is what makes
@@ -112,14 +112,14 @@ impl FakeSink {
         self.latency.snapshot()
     }
 
-    /// M180: data pointers of received [`MemoryDomain::SystemView`] frames, in
+    /// Data pointers of received [`MemoryDomain::SystemView`] frames, in
     /// arrival order. Equal to the source's emitted pointers iff every frame
     /// crossed the pipeline with zero copies.
     pub fn view_backing_ptrs(&self) -> &[usize] {
         &self.view_backing_ptrs
     }
 
-    /// M180: materialized dense bytes of the most recent `SystemView` frame, or
+    /// Materialized dense bytes of the most recent `SystemView` frame, or
     /// `None` if no shared-view frame has arrived.
     pub fn last_view_bytes(&self) -> Option<&[u8]> {
         self.last_view_bytes.as_deref()
@@ -136,7 +136,7 @@ impl AsyncElement for FakeSink {
         Ok(upstream_caps.clone())
     }
 
-    /// M16 step 5c: declare wildcard sink to the solver. `FakeSink`
+    /// Declare wildcard sink to the solver. `FakeSink`
     /// accepts whatever upstream produces (its `intercept_caps` is a
     /// pass-through), which is exactly what `CapsConstraint::AcceptsAny`
     /// models. Skips the dynamic intercept callback and lets the

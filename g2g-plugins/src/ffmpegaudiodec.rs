@@ -1,4 +1,4 @@
-//! Linux audio decode element using ffmpeg / libavcodec (M422).
+//! Linux audio decode element using ffmpeg / libavcodec.
 //!
 //! Consumes compressed audio access units (`Caps::Audio { format: Aac | Mp2 |
 //! Mp3 | Ac3 | Flac, .. }`; AAC ADTS-framed as MPEG-TS / HLS carry it, MPEG audio
@@ -25,7 +25,7 @@
 //! decodes, so the element advertises a `PcmS16Le { ANY_CHANNELS, .. }` output at
 //! negotiation, channels a wildcard (`fixate` pins it to a stereo placeholder for
 //! the edge) and the rate two alternatives, a concrete `48_000` default plus an
-//! `ANY_SAMPLE_RATE` wildcard (M754), so a downstream `rate=44100` / `rate=48000`
+//! `ANY_SAMPLE_RATE` wildcard, so a downstream `rate=44100` / `rate=48000`
 //! pin negotiates directly while an any-rate sink still fixates to the default. It
 //! then emits a `CapsChanged` with the real channels / rate before the first
 //! decoded `DataFrame`. A downstream `audioconvert` retargets the real channel
@@ -344,15 +344,15 @@ impl AsyncElement for FfmpegAudioDec {
     /// emits. `fixate` collapses the placeholder to stereo for the negotiated edge,
     /// which the downstream `audioconvert` retargets (mono fan-out, downmix).
     ///
-    /// The rate is two alternatives (M754): a concrete default first (`48_000`, the
+    /// The rate is two alternatives: a concrete default first (`48_000`, the
     /// fixate fallback when nothing downstream pins the rate, e.g. an any-rate sink)
     /// plus an `ANY_SAMPLE_RATE` wildcard second, so a downstream concrete pin (a
     /// `rate=44100` or `rate=48000` capsfilter) intersects to that rate and no
-    /// resampler is forced. A lone `ANY_SAMPLE_RATE` is deliberately unfixable
-    /// (M187), hence the concrete first alternative; this mirrors audioresample's
+    /// resampler is forced. A lone `ANY_SAMPLE_RATE` is deliberately unfixable,
+    /// hence the concrete first alternative; this mirrors audioresample's
     /// `[passthrough, ANY_SAMPLE_RATE]` set. The real rate still arrives via the
     /// CapsChanged a decoded frame emits, so a 44.1 kHz decode reaching a 48 kHz pin
-    /// with no `audioresample` still fails loud at runtime (M749).
+    /// with no `audioresample` still fails loud at runtime.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
             Caps::Audio { format, .. } if Self::decodes(*format) => {

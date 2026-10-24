@@ -1,4 +1,4 @@
-//! MPEG program stream demuxer element (M929): `Caps::ByteStream{MpegPs}` in,
+//! MPEG program stream demuxer element: `Caps::ByteStream{MpegPs}` in,
 //! one selected elementary stream out. The `.mpg` / `.vob` sibling of
 //! [`crate::tsdemux::TsDemux`], covering VCD-era MPEG-1 program streams and DVD
 //! MPEG-2 ones alike.
@@ -1525,7 +1525,7 @@ impl AsyncElement for PsDemux {
     }
 }
 
-/// `PsDemux`'s settable properties (M929).
+/// `PsDemux`'s settable properties.
 static PSDEMUX_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",

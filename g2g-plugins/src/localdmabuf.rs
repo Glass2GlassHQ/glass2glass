@@ -1,4 +1,4 @@
-//! Vendor-neutral local zero-copy transport (M557, `local-dmabuf`): the DMABUF
+//! Vendor-neutral local zero-copy transport (`local-dmabuf`): the DMABUF
 //! analog of the CUDA [`LocalCudaSink`](crate::localcuda::LocalCudaSink) /
 //! [`LocalCudaSrc`](crate::localcuda::LocalCudaSrc) pair. `DmaBufSink`
 //! (Unix-socket client) and `DmaBufSrc` (Unix-socket server) carry a
@@ -354,7 +354,7 @@ impl AsyncElement for DmaBufSink {
         CapsConstraint::Accepts(any_dmabuf_caps())
     }
 
-    /// Accepts only dma-buf frames (M354 domain nego), so the auto-plug splices
+    /// Accepts only dma-buf frames (domain negotiation), so the auto-plug splices
     /// this where an upstream produces a dma-buf.
     fn input_domains(&self) -> g2g_core::memory::DomainSet {
         g2g_core::memory::DomainSet::only(MemoryDomainKind::DmaBuf)

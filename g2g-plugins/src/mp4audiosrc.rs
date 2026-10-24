@@ -1,4 +1,4 @@
-//! Audio-only fragmented-MP4 demuxer source (M37), the read-side counterpart of
+//! Audio-only fragmented-MP4 demuxer source, the read-side counterpart of
 //! `Mp4AudioSink`: parses a single-`soun`-track AAC fMP4 and emits the raw AAC
 //! access units with recovered timing, so a recorded `.m4a` plays back through
 //! `MfAacDecode` like a live stream.

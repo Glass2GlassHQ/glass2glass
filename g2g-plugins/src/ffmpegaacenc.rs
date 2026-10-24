@@ -1,4 +1,4 @@
-//! libavcodec AAC-LC audio encoder (M292): interleaved PCM in
+//! libavcodec AAC-LC audio encoder: interleaved PCM in
 //! (`Caps::Audio{PcmS16Le|PcmF32Le}`), ADTS-framed AAC out
 //! (`Caps::Audio{Aac}`). The audio companion of [`crate::ffmpegenc::FfmpegH264Enc`],
 //! so the Linux path finally has an AAC encoder for `mp4mux` / `mpegtsmux` /

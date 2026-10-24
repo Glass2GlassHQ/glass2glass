@@ -2,7 +2,7 @@
 //! to the downstream allocation proposal, including mid-stream (the β re-cascade).
 //!
 //! It is the "real consumer that re-sizes its pool" the allocation negotiation
-//! was missing. The N-hop allocation re-cascade (M18 β) already delivers a
+//! was missing. The N-hop allocation re-cascade already delivers a
 //! re-derived [`AllocationParams`] to an interior element's
 //! [`configure_allocation`](AsyncElement::configure_allocation) when a mid-stream
 //! caps change makes the sink re-propose, but the elements that received it so

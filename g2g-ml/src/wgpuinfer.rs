@@ -1,7 +1,7 @@
-//! GPU-resident tensor inference via wgpu compute (design/ml.md, M216).
+//! GPU-resident tensor inference via wgpu compute (design/ml.md).
 //!
 //! `WgpuInference` is the consumer half of the keep-on-GPU inference branch
-//! `WgpuPreprocess::with_gpu_output` (M215) opened: it takes the f32 NCHW tensor
+//! `WgpuPreprocess::with_gpu_output` opened: it takes the f32 NCHW tensor
 //! straight out of the producer's `wgpu::Buffer` and runs the inference on the
 //! GPU, so the tensor never makes the GPU->CPU->GPU round-trip an opaque-backend
 //! consumer (burn / ort) would force. v1 ships the same single linear layer as
@@ -22,14 +22,14 @@
 //! consumer, so a stack of these elements runs a small CNN entirely on-device.
 //!
 //! Beyond the matmul `linear`, the element offers a small op zoo, each a compute
-//! pass on the producer's device: `conv2d` (the keystone, M261), the weightless
+//! pass on the producer's device: `conv2d` (the keystone), the weightless
 //! activations `relu` / `sigmoid`, and `maxpool2d` / `avgpool2d`. The weighted
 //! ops bind (meta, input, weights, bias, out); the weightless ones bind only
 //! (meta, input, out). Chaining them GPU-resident (conv -> relu -> pool -> ...)
 //! is a real CNN body with no GPU->CPU round-trip between layers. Trained weights
-//! load via `conv2d_from_safetensors` (M262).
+//! load via `conv2d_from_safetensors`.
 //!
-//! Transformer blocks run on the same machinery (M856): `matmul` (the `[S, K]`
+//! Transformer blocks run on the same machinery: `matmul` (the `[S, K]`
 //! token-matrix generalization of `linear`, which is now the `S = 1` case of the
 //! same shader), `layer_norm`, `softmax`, and a fused multi-head `attention`.
 //! Those four ops read the running tensor as `[1, 1, S, D]`: `S` tokens of `D`
@@ -1252,7 +1252,7 @@ impl WgpuInference {
     }
 
     /// Build a [`conv2d`](Self::conv2d) layer from trained weights in a parsed
-    /// safetensors file (M262): reads the `[Cout, Cin, KH, KW]` weight tensor and
+    /// safetensors file: reads the `[Cout, Cin, KH, KW]` weight tensor and
     /// the `[Cout]` bias by name, infers the kernel dimensions from the weight
     /// shape, and takes the spatial input size (`height`, `width`) from the
     /// runtime caps. Importing a different checkpoint is "parse a different file";

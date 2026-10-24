@@ -1,4 +1,4 @@
-//! ALSA device discovery (M939): lists the libasound PCM hints as
+//! ALSA device discovery: lists the libasound PCM hints as
 //! [`Device`] records, capture hints driving [`AlsaSrc`](crate::alsasrc) and
 //! playback hints [`AlsaSink`](crate::alsasink). One hint can serve both
 //! directions, and then yields one device per direction.

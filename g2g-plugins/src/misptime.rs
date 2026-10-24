@@ -1,5 +1,5 @@
 //! MISB ST 0604 MISP precision time stamps carried in the video bitstream
-//! (M809, `no_std`): in a STANAG 4609 motion imagery stream every coded frame
+//! (`no_std`): in a STANAG 4609 motion imagery stream every coded frame
 //! carries an absolute microsecond time in an SEI `user_data_unregistered`
 //! message, so the video stays correlated with the ST 0601 KLV telemetry (see
 //! [`crate::klv`]) through remux and transcode. [`MispTimeInsert`] stamps a

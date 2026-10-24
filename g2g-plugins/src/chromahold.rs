@@ -242,7 +242,7 @@ impl AsyncElement for ChromaHold {
     }
 }
 
-/// `ChromaHold`'s settable properties, named as GStreamer's (M1084).
+/// `ChromaHold`'s settable properties, named as GStreamer's.
 static CHROMAHOLD_PROPS: &[PropertySpec] = &[
     PropertySpec::new("target-r", PropKind::Uint, "the red target")
         .with_range("0", "255")

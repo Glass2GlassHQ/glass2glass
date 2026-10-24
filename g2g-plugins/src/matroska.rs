@@ -1,4 +1,4 @@
-//! Matroska / WebM demuxer (M110): parse an EBML byte stream into the
+//! Matroska / WebM demuxer: parse an EBML byte stream into the
 //! elementary-stream frames its Clusters carry (RFC 9559 / the matroska.org
 //! spec).
 //!
@@ -24,7 +24,7 @@
 //! are spaced by DefaultDuration, or by an Opus or Vorbis packet's own duration, and
 //! otherwise share the block timestamp. The `Cues` index is parsed into a time ->
 //! Cluster byte-position map ([`MatroskaDemuxer::cue_seek_offset`]) for indexed
-//! seeking (M373). A BlockGroup frame is a keyframe when the group holds no
+//! seeking. A BlockGroup frame is a keyframe when the group holds no
 //! ReferenceBlock.
 
 use alloc::borrow::Cow;
@@ -324,7 +324,7 @@ impl MkvCodec {
     }
 }
 
-/// Cap on one inflated block (M910). A Matroska zlib track is a subtitle or
+/// Cap on one inflated block. A Matroska zlib track is a subtitle or
 /// metadata carrier in practice, so a real block is kilobytes; the bound is what
 /// stops a crafted few-KiB block that inflates to gigabytes.
 const MAX_INFLATED_BLOCK_LEN: usize = 16 * 1024 * 1024;
@@ -590,7 +590,7 @@ fn undo_encodings(chain: &[ContentDecoding], stored: Vec<u8>, limit: usize) -> O
         .try_fold(stored, |data, step| step.undo(&data, limit))
 }
 
-/// Read a `TrackEntry`'s `ContentEncodings` (M910). `None` when any step is one
+/// Read a `TrackEntry`'s `ContentEncodings`. `None` when any step is one
 /// this demuxer does not undo, so the track is flagged rather than its encoded
 /// bytes forwarded as if they were the bitstream.
 fn parse_content_encodings(
@@ -913,10 +913,10 @@ pub struct MatroskaDemuxer {
     /// appended as they parse (never merged), so a consumer can post the newly
     /// parsed ones by count.
     track_tags: Vec<(u64, TagList)>,
-    /// Metadata a `TrackEntry` declares itself (`Name` / `Language`, M788), keyed
+    /// Metadata a `TrackEntry` declares itself (`Name` / `Language`), keyed
     /// by **track number**, not the `TagTrackUID` `track_tags` uses.
     track_entry_tags: Vec<(u64, TagList)>,
-    /// The Segment `Chapters` table of contents (M1046), empty until it is seen.
+    /// The Segment `Chapters` table of contents, empty until it is seen.
     chapters: Vec<Chapter>,
     /// The current Timestamp of the open Cluster. `Some` while its children are
     /// being parsed at the top level, `None` otherwise.
@@ -934,8 +934,8 @@ pub struct MatroskaDemuxer {
     /// time -> Cluster-position map [`cue_seek_offset`](Self::cue_seek_offset) uses.
     cues: Vec<CuePoint>,
     /// `Cues` byte position from a `SeekHead` (relative to the Segment data start),
-    /// so the demuxer can prefetch an end-of-file `Cues` before reaching it
-    /// (M374). `None` until a `SeekHead` indexing `Cues` is parsed.
+    /// so the demuxer can prefetch an end-of-file `Cues` before reaching it.
+    /// `None` until a `SeekHead` indexing `Cues` is parsed.
     cues_index_pos: Option<u64>,
     completed: Vec<MkvFrame>,
 }
@@ -1010,7 +1010,7 @@ impl MatroskaDemuxer {
     /// The absolute byte offset of the `Cues` element located by a `SeekHead`
     /// (Segment data start + the indexed position), or `None` if no `SeekHead`
     /// pointing at `Cues` has been parsed. The demuxer byte-seeks here to prefetch
-    /// an end-of-file `Cues` index before a seek (M374).
+    /// an end-of-file `Cues` index before a seek.
     pub fn cue_index_offset(&self) -> Option<u64> {
         Some(self.segment_data_pos?.saturating_add(self.cues_index_pos?))
     }
@@ -1114,7 +1114,7 @@ impl MatroskaDemuxer {
     }
 
     /// The `Targets`-scoped tags: one entry per track-scoped `Tag` element, the
-    /// `TagTrackUID` it names paired with its tags (M787). The UID maps to a
+    /// `TagTrackUID` it names paired with its tags. The UID maps to a
     /// track through [`MkvTrack::uid`]; a UID no track carries stays here
     /// unresolved. Accumulates across pushes, in parse order.
     pub fn track_tags(&self) -> &[(u64, TagList)] {
@@ -1122,7 +1122,7 @@ impl MatroskaDemuxer {
     }
 
     /// The metadata each `TrackEntry` declares itself, `Name` as [`Tag::Title`]
-    /// and `Language` / `LanguageBCP47` as [`Tag::Language`] (M788), keyed by
+    /// and `Language` / `LanguageBCP47` as [`Tag::Language`], keyed by
     /// track number. This is where ffmpeg puts a stream's title and language, so
     /// a consumer merges it with [`track_tags`](Self::track_tags) to get one view
     /// per track. Empty until `Tracks` is parsed; a track declaring neither has
@@ -1131,7 +1131,7 @@ impl MatroskaDemuxer {
         &self.track_entry_tags
     }
 
-    /// The Segment `Chapters` table of contents (M1046), empty until a
+    /// The Segment `Chapters` table of contents, empty until a
     /// `Chapters` element is parsed. Times are stream-time nanoseconds; hidden
     /// editions and atoms are already filtered out.
     pub fn chapters(&self) -> &[Chapter] {
@@ -1663,7 +1663,7 @@ fn collect_chapter_atoms(body: &[u8], depth: u32, budget: &mut usize, out: &mut 
 
 /// One parsed `TrackEntry`: the track, its `CodecPrivate` decoder-init bytes
 /// (empty for codecs that carry none), and the metadata the entry itself
-/// declares (`Name` / `Language`, M788).
+/// declares (`Name` / `Language`).
 #[derive(Debug)]
 struct ParsedTrack {
     track: MkvTrack,
@@ -2443,7 +2443,7 @@ pub struct SizePatch {
     pub data_at: usize,
 }
 
-/// Matroska / WebM multiplexer for a single track (M115): writes the EBML header,
+/// Matroska / WebM multiplexer for a single track: writes the EBML header,
 /// the Segment, Info + Tracks, then time-windowed Clusters of frames. The inverse
 /// of [`MatroskaDemuxer`]; the `MkvMuxN` element wraps it.
 ///
@@ -2451,18 +2451,18 @@ pub struct SizePatch {
 /// base timestamp (or time runs backward), amortizing the per-Cluster overhead.
 ///
 /// Streaming (the default), the Segment and each Cluster carry the unknown-size
-/// marker (the live shape, M143): a Cluster header opens the window and the next
+/// marker (the live shape): a Cluster header opens the window and the next
 /// one ends it, so frames go out incrementally with nothing held back to learn a
 /// length and nothing patched afterwards. The muxer still records a `Cues` index
 /// (one entry per Cluster holding a keyframe on the cue track) and emits it from
 /// [`finish`](Self::finish) at EOS, so the stream is seekable once read to the
-/// end (M375).
+/// end.
 ///
 /// [`with_two_pass`](Self::with_two_pass) is for a caller buffering the whole
 /// file: the Segment and every Cluster reserve an 8-byte size, and a front
 /// `SeekHead` and the `Info` `Duration` are reserved too, all filled in by
 /// [`finalize_seekable`]. The file then declares its bounds and seeks from byte 0
-/// without reading past the Clusters (the M374 `SeekHead` prefetch), which is the
+/// without reading past the Clusters (the `SeekHead` prefetch), which is the
 /// shape ffmpeg and GStreamer write.
 ///
 /// Scope: default TimestampScale (1 ms). One or more tracks (see
@@ -2476,7 +2476,7 @@ pub struct MatroskaMuxer {
     /// Per-track tags (track index, tags), each written as a `Targets`-scoped
     /// `Tag` inside the same `Tags` element.
     track_tags: Vec<(usize, TagList)>,
-    /// The table of contents, written as a `Chapters` element (M1046).
+    /// The table of contents, written as a `Chapters` element.
     chapters: Vec<Chapter>,
     max_cluster_span_ms: u64,
     header_written: bool,
@@ -2610,7 +2610,7 @@ impl MatroskaMuxer {
     /// Attach metadata scoped to one track (0-based, the same index
     /// [`push_frame_on`](Self::push_frame_on) takes): written in the same `Tags`
     /// element as a `Tag` whose `Targets` carries that track's `TagTrackUID`, so
-    /// a reader attaches it to that elementary stream (M787). Ignored for an
+    /// a reader attaches it to that elementary stream. Ignored for an
     /// out-of-range index; calling it twice for a track writes both `Tag`s.
     pub fn with_track_tags(mut self, track: usize, tags: TagList) -> Self {
         if track < self.tracks.len() {
@@ -2650,8 +2650,8 @@ impl MatroskaMuxer {
     /// (`0` when it does not). It only changes the output when it is *shorter*
     /// than the packet itself, the end-of-stream trim a container like Ogg
     /// carries in its granule: then the block is written as a `BlockGroup` with a
-    /// `BlockDuration`, the only way Matroska can say "this packet ends early"
-    /// (M792). Every other frame stays a bare SimpleBlock.
+    /// `BlockDuration`, the only way Matroska can say "this packet ends early".
+    /// Every other frame stays a bare SimpleBlock.
     pub fn push_frame_on(
         &mut self,
         track: usize,
@@ -2833,7 +2833,7 @@ impl MatroskaMuxer {
     /// it carries, or `None` when the block says nothing the next timestamp does
     /// not. Only Opus is judged: its packet length is readable from the TOC byte,
     /// so a trimmed tail is recognizable, which is exactly the end-of-stream trim
-    /// an Ogg granule or an MP4 sample table carries (M792). The shortfall must
+    /// an Ogg granule or an MP4 sample table carries. The shortfall must
     /// reach a whole tick, since a `BlockDuration` that rounds back to the packet
     /// length is noise.
     fn trimmed_block(&self, track: usize, data: &[u8], duration_ns: u64) -> Option<(u64, i64)> {
@@ -2912,9 +2912,9 @@ fn write_size_patch(file: &mut [u8], patch: SizePatch, end: usize) {
 }
 
 /// Finalize a buffered two-pass file in place: fill the `Info` `Duration`
-/// placeholder with the presentation length (M794) and each Cluster's reserved
-/// size with what it turned out to hold (M828), then append the `Cues`, point the
-/// front `SeekHead` at where they landed (M770), and close the Segment over the
+/// placeholder with the presentation length and each Cluster's reserved
+/// size with what it turned out to hold, then append the `Cues`, point the
+/// front `SeekHead` at where they landed, and close the Segment over the
 /// lot. The buffered-output half of [`MatroskaMuxer::with_two_pass`], shared by
 /// the single- and multi-track muxer elements; `file` must be everything the muxer
 /// emitted, from byte 0, since every patch offset is absolute.
@@ -2999,7 +2999,7 @@ fn info_element(with_duration: bool) -> (Vec<u8>, Option<usize>) {
 /// it is what a `Tags` `Targets` scopes a per-track tag to). A non-empty
 /// `CodecPrivate` (avcC / hvcC record, AAC AudioSpecificConfig) is written after
 /// the CodecID. A track's [`Tag::Title`] / [`Tag::Language`] ride the entry's own
-/// `Name` / `Language` elements (M788), where ffmpeg and every player look for
+/// `Name` / `Language` elements, where ffmpeg and every player look for
 /// them; the rest of its tags go to the `Tags` element.
 fn tracks_element(tracks: &[MkvTrackConfig], track_tags: &[(usize, TagList)]) -> Vec<u8> {
     let mut entries = Vec::new();
@@ -3089,7 +3089,7 @@ fn track_uid(index: usize) -> u64 {
 }
 
 /// The first value `pick` matches among track `index`'s tags: the `Name` /
-/// `Language` a `TrackEntry` carries instead of a `SimpleTag` (M788).
+/// `Language` a `TrackEntry` carries instead of a `SimpleTag`.
 fn track_entry_string(
     track_tags: &[(usize, TagList)],
     index: usize,
@@ -3111,9 +3111,9 @@ fn is_track_entry_tag(tag: &Tag) -> bool {
 
 /// The `Tags` element: the whole-stream tags as one `Tag` with an empty
 /// `Targets`, then one `Tag` per tagged track whose `Targets` carries that
-/// track's `TagTrackUID` (M787). The inverse of [`parse_tags`]; the typed keys
+/// track's `TagTrackUID`. The inverse of [`parse_tags`]; the typed keys
 /// write their conventional uppercase Matroska names. A track's title / language
-/// are skipped here, the `TrackEntry` carries them (M788).
+/// are skipped here, the `TrackEntry` carries them.
 fn tags_element(tags: &TagList, track_tags: &[(usize, TagList)]) -> Vec<u8> {
     let mut body = Vec::new();
     let whole_tags: Vec<&Tag> = tags.text_tags().collect();
@@ -3147,7 +3147,7 @@ fn tags_element(tags: &TagList, track_tags: &[(usize, TagList)]) -> Vec<u8> {
     elem_vec(ID_TAGS, &body)
 }
 
-/// The `Chapters` element (M1046): one default `EditionEntry` holding every
+/// The `Chapters` element: one default `EditionEntry` holding every
 /// top-level chapter as a `ChapterAtom`, the inverse of [`parse_chapters`].
 /// Empty when there are no chapters, so nothing is written.
 fn chapters_element(chapters: &[Chapter]) -> Vec<u8> {
@@ -3441,7 +3441,7 @@ mod tests {
     /// An `A_FLAC` track parses to `MkvCodec::Flac` with its `CodecPrivate`
     /// (the native `fLaC` STREAMINFO header) retrievable per track number, and an
     /// `A_AC3` track (incl. a BSID-suffixed CodecID) parses to `MkvCodec::Ac3`
-    /// with no private data. Drives M757's decoder extradata forwarding.
+    /// with no private data. Drives the decoder extradata forwarding.
     #[test]
     fn parses_ac3_and_flac_tracks_with_codec_private() {
         // track_entry has no CodecPrivate arg; build the FLAC entry by hand.
@@ -3653,7 +3653,7 @@ mod tests {
         [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
     }
 
-    /// zlib (`ContentCompAlgo` 0) blocks are inflated at demux (M910), so
+    /// zlib (`ContentCompAlgo` 0) blocks are inflated at demux, so
     /// downstream gets the real payload and the track is not flagged. A file of
     /// this shape decodes to the same text under ffmpeg.
     #[test]
@@ -5504,7 +5504,7 @@ mod tests {
         );
     }
 
-    /// M828: a live muxer keeps no Cues state. The bytes it writes are the same
+    /// A live muxer keeps no Cues state. The bytes it writes are the same
     /// as a recording muxer's, so only the index the caller would append at EOS
     /// differs, and there is nothing to append.
     #[test]

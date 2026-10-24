@@ -1,4 +1,4 @@
-//! Element-level cooperative offload (M760). A heavy synchronous element moves
+//! Element-level cooperative offload. A heavy synchronous element moves
 //! its per-frame compute onto tokio's blocking pool, so its arm future is
 //! pending at the `await` and the cooperative `run_graph` keeps polling the
 //! sibling arms (the sink renders while the convert runs), without opting into

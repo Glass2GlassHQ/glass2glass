@@ -1,4 +1,4 @@
-//! Multi-output fragmented-MP4 demuxer element (M391): one ISO-BMFF byte stream
+//! Multi-output fragmented-MP4 demuxer element: one ISO-BMFF byte stream
 //! in, N elementary streams out, one track per output port. The MP4 sibling of
 //! [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN) and
 //! [`TsDemuxN`](crate::tsdemux::TsDemuxN), and the multi-track read-side analog
@@ -10,9 +10,9 @@
 //! the port matching its `track_ID` (`parse_fragments_multi`), so one demuxer
 //! feeds several decode branches (audio + video together). Port `i` emits its
 //! elementary [`Caps`] ([`PipelinePacket::CapsChanged`]) before its first frame.
-//! With a bus, announces the file's tracks as a `StreamCollection` (M386).
+//! With a bus, announces the file's tracks as a `StreamCollection`.
 //!
-//! A *fragmented* (CMAF) file is demuxed **progressively** (M437): once the
+//! A *fragmented* (CMAF) file is demuxed **progressively**: once the
 //! `moov` is buffered, each complete `moof`+`mdat` is emitted and drained as it
 //! arrives, so a live / long stream flows segment by segment and the buffer stays
 //! bounded, rather than stalling until `Eos`. A *progressive* (non-fragmented)
@@ -81,7 +81,7 @@ enum PortTrack {
     },
 }
 
-/// A forwardable track for the `playbin uri=*.mp4` fan-out (M392): the
+/// A forwardable track for the `playbin uri=*.mp4` fan-out: the
 /// `track_ID` a demux port forwards, the elementary caps the decode branch plugs
 /// from, and whether it is video (vs audio). The MP4 analog of
 /// [`TsStreamInfo`](crate::tsdemux::TsStreamInfo).
@@ -188,7 +188,7 @@ use crate::aacparse::{is_raw_aac_config, require_adts, unframable_object_type};
 use crate::avidemux::is_pcm;
 use g2g_core::log::short_type_name;
 
-/// The forwardable tracks an MP4 carries, in `moov` order (M392): one
+/// The forwardable tracks an MP4 carries, in `moov` order: one
 /// [`Mp4StreamInfo`] per A/V `trak`, carrying the negotiation caps (what a decode
 /// branch plugs from). `data` must hold the `moov` (a file prefix covering the
 /// init is enough); returns empty for a non-MP4 or unparseable input, which the
@@ -325,7 +325,7 @@ const HDLR_HANDLER_TYPE: core::ops::Range<usize> = 8..12;
 const STSD_ENTRIES_AT: usize = 8;
 const STSD_FIRST_ENTRY_TYPE: core::ops::Range<usize> = 12..16;
 
-/// The subtitle (timed-text) tracks an MP4 carries (M412): one [`Mp4StreamInfo`]
+/// The subtitle (timed-text) tracks an MP4 carries: one [`Mp4StreamInfo`]
 /// per text `trak`, in `moov` order. The read-side complement of
 /// [`forwardable_streams`] (which is A/V-only, because the `playbin` fan-out has no
 /// text branch): the subtitle-overlay `playbin` builder pairs these with the A/V
@@ -351,7 +351,7 @@ pub fn subtitle_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
         .unwrap_or_default()
 }
 
-/// The raw closed-caption tracks an MP4 carries (M883): one [`Mp4StreamInfo`] per
+/// The raw closed-caption tracks an MP4 carries: one [`Mp4StreamInfo`] per
 /// `c608` / `c708` `trak`, in `moov` order, carrying the
 /// [`Caps::ClosedCaption`] a port forwards. The caption analog of
 /// [`subtitle_streams`]: a caption track's samples are `cc_data` triples, not
@@ -406,17 +406,17 @@ pub struct Mp4DemuxN {
     /// the incremental fragment emits, so only the first frame pays it.
     need_config: Vec<bool>,
     bus: Option<BusHandle>,
-    /// Set once the `StreamCollection` (M386) has been announced, so it posts once.
+    /// Set once the `StreamCollection` has been announced, so it posts once.
     collection_posted: bool,
-    /// Set once the container's tags have been posted, so they post once (M838).
+    /// Set once the container's tags have been posted, so they post once.
     tags_posted: bool,
-    /// App-driven stream selection (M475): the app names the track id each port
+    /// App-driven stream selection: the app names the track id each port
     /// should carry (port `i` <- selection id `i`); the demuxer re-maps its ports.
     /// Inert unless `with_stream_select` wired it. Unlike the codec-routed
     /// [`TsDemuxN`](crate::tsdemux::TsDemuxN) / [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN),
     /// MP4 routes by `track_ID`, so two same-codec tracks are distinguishable.
     stream_select: Option<StreamSelectController>,
-    /// Content keys for an encrypted file (M398): a clear key the app supplies,
+    /// Content keys for an encrypted file: a clear key the app supplies,
     /// or the store an [`HlsSrc`](crate::hlssrc) publishes its `#EXT-X-KEY`
     /// material into. The scheme, IV and pattern come from the file's own
     /// protection metadata. Without a key an encrypted track fails loud.
@@ -513,7 +513,7 @@ impl Mp4DemuxN {
         }
     }
 
-    /// Make the per-port track assignment app-selectable (M475): the controller
+    /// Make the per-port track assignment app-selectable: the controller
     /// carries track ids (from the announced collection, e.g. `"mp4-track-2"`);
     /// port `i` re-maps to the track named by selection id `i`. The demuxer
     /// re-emits that port's `CapsChanged` (and re-owes the `moov`'s parameter sets)
@@ -528,7 +528,7 @@ impl Mp4DemuxN {
         self
     }
 
-    /// Apply any pending app selection (M475): re-map port `i` to the track named
+    /// Apply any pending app selection: re-map port `i` to the track named
     /// by the `i`-th selected id, re-arming that port's `CapsChanged` and
     /// parameter-set debt when its track changes, and confirm the active ids on the
     /// bus. A no-op without a controller, with no pending selection, or before the
@@ -574,7 +574,7 @@ impl Mp4DemuxN {
         }
     }
 
-    /// Supply the clear-key content key (M398) for an encrypted file: the scheme,
+    /// Supply the clear-key content key for an encrypted file: the scheme,
     /// IV and pattern come from the file's own protection metadata. Without a key
     /// an encrypted track fails loud.
     #[cfg(feature = "mp4-cenc")]
@@ -615,8 +615,8 @@ impl Mp4DemuxN {
         self
     }
 
-    /// Attach the pipeline bus so the file's tracks post as a `StreamCollection`
-    /// (M386), the way [`Mp4Src::with_bus`](crate::mp4src::Mp4Src::with_bus) does.
+    /// Attach the pipeline bus so the file's tracks post as a `StreamCollection`,
+    /// the way [`Mp4Src::with_bus`](crate::mp4src::Mp4Src::with_bus) does.
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.bus = Some(bus);
         self
@@ -633,8 +633,8 @@ impl Mp4DemuxN {
     }
 
     /// The fan-out demuxer reads a whole MP4, so it accepts both the streaming
-    /// `IsoBmff` form (HLS / DASH fragments) and the whole-file `Mp4` form (M479,
-    /// a `filesrc` progressive `.mp4`); the parse is the same either way.
+    /// `IsoBmff` form (HLS / DASH fragments) and the whole-file `Mp4` form (a
+    /// `filesrc` progressive `.mp4`); the parse is the same either way.
     fn accepts(&self, caps: &Caps) -> bool {
         self.input_caps().accepts(caps)
     }
@@ -688,7 +688,7 @@ impl Mp4DemuxN {
         self.post_tags(tracks);
     }
 
-    /// Announce every forwardable track as a `StreamCollection` (M386), once. A
+    /// Announce every forwardable track as a `StreamCollection`, once. A
     /// no-op without a bus or once posted.
     fn post_stream_collection(&mut self, tracks: &[TrackHeader]) {
         if self.collection_posted {
@@ -720,8 +720,8 @@ impl Mp4DemuxN {
 
     /// Post the file's metadata, once: the `moov`'s own `udta/meta/ilst` as a
     /// [`BusMessage::Tag`], each `trak`'s as a [`BusMessage::StreamTag`] on that
-    /// track's stream id (M838), and the file's chapters as a
-    /// [`BusMessage::Chapters`] (M1046). The two tag scopes stay separate, so an
+    /// track's stream id, and the file's chapters as a
+    /// [`BusMessage::Chapters`]. The two tag scopes stay separate, so an
     /// application applies the conflict rule (`g2g_core::resolve_tags`: the
     /// stream's tag wins on its own pad) itself.
     fn post_tags(&mut self, tracks: &[TrackHeader]) {
@@ -755,7 +755,7 @@ impl Mp4DemuxN {
     }
 
     /// Parse the fragments in `data`, decrypting an encrypted track in place with
-    /// the supplied cbcs key (M398). `data` is either the whole progressive-`Eos`
+    /// the supplied cbcs key. `data` is either the whole progressive-`Eos`
     /// buffer or a single `moof`+`mdat` fragment (the progressive emit). Without the
     /// `mp4-cenc` feature (or a key), an encrypted track fails loud inside
     /// `parse_fragments_multi`.
@@ -787,7 +787,7 @@ impl Mp4DemuxN {
         parse_fragments_multi(data, tracks, base_offset, fragment_starts, None)
     }
 
-    /// Make progress on the buffered bytes (M437): learn the layout from the `moov`,
+    /// Make progress on the buffered bytes: learn the layout from the `moov`,
     /// then for a *fragmented* file emit every complete `moof`+`mdat` fragment that
     /// has landed and drain it, so captions / audio / video flow as segments arrive
     /// instead of all at `Eos`. A no-op until the `moov` is complete; a no-op for a
@@ -1274,7 +1274,7 @@ impl MultiOutputElement for Mp4DemuxN {
         CapsConstraint::Accepts(self.input_caps())
     }
 
-    /// Declare each port's elementary caps (M380), so the solver negotiates each
+    /// Declare each port's elementary caps, so the solver negotiates each
     /// branch against its track at startup. `None` for an out-of-range port.
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
         (port < self.ports.len()).then(|| self.port_caps(port).alternatives()[0].clone())
@@ -1743,7 +1743,7 @@ mod tests {
         );
     }
 
-    /// Progressive demux (M437): a fragmented file streamed in byte by byte must
+    /// Progressive demux: a fragmented file streamed in byte by byte must
     /// emit each fragment as it completes, *before* any `Eos` (the old demuxer
     /// emitted nothing until `Eos`). Feeding one byte at a time also exercises the
     /// partial-box buffering, and the result must match the all-at-once decode.

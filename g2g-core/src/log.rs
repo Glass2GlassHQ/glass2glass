@@ -1,4 +1,4 @@
-//! Element-granular logging facade (M179), the `GST_DEBUG` analog.
+//! Element-granular logging facade, the `GST_DEBUG` analog.
 //!
 //! A hand-rolled `no_std` logging layer: levels, per-category thresholds, and a
 //! pluggable sink, so an element emits a record only when its category is enabled
@@ -155,7 +155,7 @@ pub trait LogSource {
     fn log_instance(&self) -> Option<&str> {
         None
     }
-    /// A per-instance category override (M845), replacing the type category for
+    /// A per-instance category override, replacing the type category for
     /// *both* filtering and output, so `G2G_DEBUG=my-cat:debug` (and globs) key
     /// off the override. Default none: the type name is the category. An
     /// element stores one in a [`LogName`] and returns it here.
@@ -237,7 +237,7 @@ impl LogSource for Target<'_> {
 }
 
 /// Per-category instance counter, shared by every runner so an element is named
-/// and logged the same way whichever one drives it (M842). Hands out
+/// and logged the same way whichever one drives it. Hands out
 /// `<category>N` names (the GStreamer `videotestsrc0` convention) and emits the
 /// "added to pipeline" lifecycle line.
 #[derive(Debug, Default)]
@@ -319,7 +319,7 @@ impl<T: LogSource + ?Sized> LogSource for &mut T {
     }
 }
 
-/// A structured value on a log record (M845): the scalar kinds a sink can
+/// A structured value on a log record: the scalar kinds a sink can
 /// render or ship (JSON, a tracing field) without knowing the log site. `Str`
 /// borrows at the site, so a record a sink drops allocates nothing; the owned
 /// form comes from [`into_owned`](Self::into_owned).
@@ -681,7 +681,7 @@ pub fn emit(
     emit_fields(category, instance, level, &[], message);
 }
 
-/// [`emit`] with structured fields attached (M845).
+/// [`emit`] with structured fields attached.
 pub fn emit_fields(
     category: &str,
     instance: Option<&str>,
@@ -820,7 +820,7 @@ pub fn reset() {
     TIME_SOURCE.store(core::ptr::null_mut(), Ordering::Release);
 }
 
-/// A bounded in-memory [`LogSink`] (M845), the flight recorder: it keeps the
+/// A bounded in-memory [`LogSink`], the flight recorder: it keeps the
 /// most recent `capacity` records and overwrites the oldest, so a postmortem
 /// dump on a target with no live log stream (an RTOS board, a crashed field
 /// unit) still shows what led up to the fault. `no_std + alloc`: records are

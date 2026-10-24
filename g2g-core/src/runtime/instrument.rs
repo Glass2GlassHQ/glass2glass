@@ -1,6 +1,6 @@
-//! Measured per-element runtime instrumentation (M399).
+//! Measured per-element runtime instrumentation.
 //!
-//! `RunStats::report()` (M287) folds each element's *declared* `latency()`. This
+//! `RunStats::report()` folds each element's *declared* `latency()`. This
 //! module adds the *measured* counterpart: each instrumented arm holds an
 //! `Arc<ElementProbe>`, times the wall-clock cost of every `DataFrame`
 //! `process()` call, and samples its input link's fill at each pull. After the
@@ -66,7 +66,7 @@ pub struct ElementProbe {
     /// backpressure pools: a consistently-full input means this element is the
     /// bottleneck; a consistently-empty one means it is starved.
     fill: FillGauge,
-    /// M851: a bounded ring of recent per-frame visits, keyed by the frame's
+    /// A bounded ring of recent per-frame visits, keyed by the frame's
     /// sequence id, so one frame's path across stages can be joined at snapshot
     /// time. `None` unless an observer is attached (the aggregate histograms
     /// above serve the end-of-run report on their own).
@@ -362,8 +362,8 @@ pub struct ElementLatency {
     pub presentation: Option<PresentationStats>,
 }
 
-/// Per-edge live traffic counters (M846) plus the last caps that crossed
-/// (M980), shared between a link's [`SenderSink`](crate::runtime::SenderSink)
+/// Per-edge live traffic counters plus the last caps that crossed,
+/// shared between a link's [`SenderSink`](crate::runtime::SenderSink)
 /// (the writer) and the observer tap (the reader). Counter writes are wait-free
 /// (three relaxed `fetch_add`s), so an instrumented link pays a few atomics per
 /// packet; the caps slot is only touched on a `CapsChanged`.
@@ -528,7 +528,7 @@ mod tests {
         assert!(last.exit_ns >= last.enter_ns, "exit is stamped after enter");
     }
 
-    /// M951: the wait `record_proc_since` drains is handed back, so the visit it
+    /// The wait `record_proc_since` drains is handed back, so the visit it
     /// pairs with charges the same nanoseconds to blocked rather than work.
     #[cfg(feature = "std")]
     #[test]

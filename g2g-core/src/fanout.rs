@@ -121,7 +121,7 @@ pub trait MultiOutputSink {
     fn port_count(&self) -> usize;
 
     /// Add an output port carrying `caps` and return its index, or `None` if this
-    /// sink cannot grow (M1014). A duplex session calls it when the peer adds a
+    /// sink cannot grow. A duplex session calls it when the peer adds a
     /// track and none of its declared pads is free; the dynamic duplex runner
     /// answers by building that port's link and finding it a sink. Never blocks,
     /// so it is callable from a session's own poll loop: a sink that cannot take
@@ -203,7 +203,7 @@ impl MultiSenderSink {
         Self { ports }
     }
 
-    /// Bank every port's push-wait on the producing element's probe (M947), so a
+    /// Bank every port's push-wait on the producing element's probe, so a
     /// fan-out element's `proc` percentiles exclude the backpressure of whichever
     /// branch is slowest.
     // Only the std fan-out / demux runners build a probed multi-sink, so without
@@ -216,7 +216,7 @@ impl MultiSenderSink {
     }
 
     /// Append a port, for the growable multi-sink the dynamic duplex runner wraps
-    /// this in (M1014).
+    /// this in.
     // Only that runner grows a multi-sink, so without std this would be dead code
     // (which the workspace denies).
     #[cfg(feature = "std")]
@@ -288,8 +288,8 @@ pub trait MultiOutputSource: ElementBound {
     /// downstream branch is stranded. Returns the count of `DataFrame`s pushed.
     fn run<'a>(&'a mut self, out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a>;
 
-    /// Settable properties, so a `gst-launch` line can configure the source
-    /// (M727). Default none.
+    /// Settable properties, so a `gst-launch` line can configure the source.
+    /// Default none.
     fn properties(&self) -> &'static [PropertySpec] {
         &[]
     }
@@ -314,7 +314,7 @@ pub trait MultiOutputSource: ElementBound {
     fn set_log_category(&mut self, _category: alloc::string::String) {}
 
     /// Receive the run's bus, so a session that restarts itself can report that
-    /// out of band (M1170), mirroring
+    /// out of band, mirroring
     /// [`SourceLoop::set_bus`](crate::runtime::SourceLoop::set_bus). Default:
     /// ignore.
     fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
@@ -332,7 +332,7 @@ pub trait MultiOutputSource: ElementBound {
 }
 
 /// Dyn-safe mirror of [`MultiOutputSource`] (boxed-future `run`), so a terminal
-/// fan-out source can be a graph node payload (M727), like
+/// fan-out source can be a graph node payload, like
 /// [`DynSourceLoop`](crate::runtime::DynSourceLoop) for single-output sources.
 pub trait DynMultiOutputSource: ElementBound {
     fn output_count(&self) -> usize;
@@ -444,7 +444,7 @@ pub trait DuplexInbound {
     fn recv(&mut self) -> BoxFuture<'_, Option<(usize, PipelinePacket)>>;
 
     /// The [`ReverseChannel`] of send input `input`, for a pad the session only
-    /// learned about mid-run (M1014). The runner asks
+    /// learned about mid-run. The runner asks
     /// [`MultiDuplexSession::reverse_channel`] for the pads that exist when the
     /// run starts, so a track attached later has no route for its PLI / BWE until
     /// the session reads it back here, keyed by the index its packets arrive on.
@@ -562,7 +562,7 @@ pub trait MultiOutputElement: ElementBound {
         out: &'a mut dyn MultiOutputSink,
     ) -> Self::ProcessFuture<'a>;
 
-    /// M18 step 1: declare the fan-out's input-side negotiation
+    /// Declare the fan-out's input-side negotiation
     /// constraint. The default accepts anything, which suits a pass-through
     /// fan-out like `Router` whose output broadcasts the input verbatim. A
     /// fan-out that filters format on the input side overrides with
@@ -580,8 +580,8 @@ pub trait MultiOutputElement: ElementBound {
     }
 
     /// The caps output port `port` carries, if this fan-out is a **demux** whose
-    /// ports each carry a distinct elementary stream, rather than a broadcast tee
-    /// (M380). When every port returns `Some`, the graph solver negotiates each
+    /// ports each carry a distinct elementary stream, rather than a broadcast tee.
+    /// When every port returns `Some`, the graph solver negotiates each
     /// branch against its port's caps (decoupled from the byte-stream input), so a
     /// real decoder downstream of the port configures against its codec at startup
     /// instead of having to retype from the input caps at runtime. Default `None`
@@ -594,8 +594,8 @@ pub trait MultiOutputElement: ElementBound {
         None
     }
 
-    /// Whether output port `i` carries stream `i` of a [`Caps::Batch`] input
-    /// (M1233). The solver then derives each port's edge from the input edge,
+    /// Whether output port `i` carries stream `i` of a [`Caps::Batch`] input.
+    /// The solver then derives each port's edge from the input edge,
     /// and the input edge back from what every port accepts, in place of
     /// [`port_output_caps`](Self::port_output_caps). Default `false`.
     fn ports_unbatch(&self) -> bool {
@@ -641,7 +641,7 @@ pub trait MultiOutputElement: ElementBound {
     /// See [`set_instance_name`](Self::set_instance_name).
     fn set_log_category(&mut self, _category: alloc::string::String) {}
 
-    /// Runtime properties this demux exposes (M104), mirroring
+    /// Runtime properties this demux exposes, mirroring
     /// [`AsyncElement::properties`]. Default:
     /// none. A demux overrides this (with `set_property` / `get_property`) to be
     /// settable by name from a `gst-launch` line, the same as a transform.
@@ -649,12 +649,12 @@ pub trait MultiOutputElement: ElementBound {
         &[]
     }
 
-    /// Set a property by name (M104). Default: every name is unknown.
+    /// Set a property by name. Default: every name is unknown.
     fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
         Err(PropError::Unknown)
     }
 
-    /// Read a property back by name (M104). Default: `None`.
+    /// Read a property back by name. Default: `None`.
     fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
     }
@@ -731,7 +731,7 @@ pub trait MultiInputElement: ElementBound {
         None
     }
 
-    /// This fan-in's contribution to the pipeline latency query (M12).
+    /// This fan-in's contribution to the pipeline latency query.
     /// Default: zero, non-live. A fan-in that holds inputs back (a switch
     /// waiting out a stall, a time-aligning mixer) overrides it; the DAG runner
     /// folds it into `RunStats::latency` alongside the linear elements.
@@ -792,7 +792,7 @@ pub trait MultiInputElement: ElementBound {
     }
 
     /// Whether the merged output is a [`Caps::Batch`] of the inputs' caps in
-    /// pad order (M1233). The solver then derives the output edge from every
+    /// pad order. The solver then derives the output edge from every
     /// input edge, and each input edge back from its stream of the output, so
     /// [`caps_constraint_for_output`](Self::caps_constraint_for_output) is never
     /// asked. Default `false`.
@@ -800,11 +800,11 @@ pub trait MultiInputElement: ElementBound {
         false
     }
 
-    /// Map a named input-pad request to this element's concrete input index
-    /// (M481), so a `gst-launch` line can reference request pads by name
+    /// Map a named input-pad request to this element's concrete input index,
+    /// so a `gst-launch` line can reference request pads by name
     /// (`... ! mux.audio_0`, `... ! o.text`) instead of relying on the order the
-    /// branches are written. The transpose of the demuxer's output-pad selection
-    /// (M476): `req.kind` is `Video` / `Audio` / `Text` / `Any` with an ordinal.
+    /// branches are written. The transpose of the demuxer's output-pad selection:
+    /// `req.kind` is `Video` / `Audio` / `Text` / `Any` with an ordinal.
     ///
     /// The default maps a bare `mux.` (`PadKind::Any`) to `ordinal` (the
     /// positional behavior, unchanged), and declines a typed request (`None`) so a
@@ -823,7 +823,7 @@ pub trait MultiInputElement: ElementBound {
         }
     }
 
-    /// Whether this element takes another input at runtime (M975), asked before a
+    /// Whether this element takes another input at runtime, asked before a
     /// source added through
     /// [`DynamicFaninHandle::add_input`](crate::runtime::DynamicFaninHandle::add_input)
     /// is attached to `pad`, with the caps that source would arrive with. The
@@ -844,7 +844,7 @@ pub trait MultiInputElement: ElementBound {
 
     /// Combine one packet from `input` into the merged output.
     ///
-    /// M22: a per-input `Eos` is delivered here when that input ends, so a
+    /// A per-input `Eos` is delivered here when that input ends, so a
     /// stateful muxer (a batcher) can flush per-input state. Implementations
     /// must NOT forward `Eos` downstream: the runner aggregates input ends
     /// and emits the single merged `Eos` itself.
@@ -855,7 +855,7 @@ pub trait MultiInputElement: ElementBound {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a>;
 
-    /// M18 step 1: declare this input pad's negotiation-time
+    /// Declare this input pad's negotiation-time
     /// constraint. The default accepts anything, which suits a
     /// per-frame-tagged interleave muxer. A muxer restricting a pad's
     /// format overrides with `Accepts(set)`.
@@ -869,7 +869,7 @@ pub trait MultiInputElement: ElementBound {
         CapsConstraint::AcceptsAny
     }
 
-    /// M18 step 1: declare the merged output's negotiation-time
+    /// Declare the merged output's negotiation-time
     /// constraint, evaluated against the muxer's current configured
     /// inputs. Default eagerly calls `output_caps()` and produces that one
     /// caps. A muxer that can produce alternatives overrides with
@@ -959,7 +959,7 @@ pub trait MultiInputElement: ElementBound {
     /// See [`set_instance_name`](Self::set_instance_name).
     fn set_log_category(&mut self, _category: alloc::string::String) {}
 
-    /// Runtime properties this muxer exposes (M104), mirroring
+    /// Runtime properties this muxer exposes, mirroring
     /// [`AsyncElement::properties`]. Default:
     /// none. A muxer overrides this (with `set_property` / `get_property`) to be
     /// settable by name from a `gst-launch` line, the same as a transform.
@@ -967,17 +967,17 @@ pub trait MultiInputElement: ElementBound {
         &[]
     }
 
-    /// Set a property by name (M104). Default: every name is unknown.
+    /// Set a property by name. Default: every name is unknown.
     fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
         Err(PropError::Unknown)
     }
 
-    /// Read a property back by name (M104). Default: `None`.
+    /// Read a property back by name. Default: `None`.
     fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
     }
 
-    /// Static introspection metadata for this muxer (M178), the `gst-inspect`
+    /// Static introspection metadata for this muxer, the `gst-inspect`
     /// "Factory Details" (long-name / classification / description / author),
     /// mirroring [`AsyncElement::metadata`].
     /// Default: empty. A muxer overrides it with a `const ElementMetadata`.
@@ -1214,7 +1214,7 @@ impl MultiOutputElement for Router {
         Ok(upstream_caps.clone())
     }
 
-    /// M18 step 1: pass-through wildcard. `Router` broadcasts the
+    /// Pass-through wildcard. `Router` broadcasts the
     /// upstream caps verbatim to every active branch and has no
     /// per-branch format restriction. `AcceptsAny` is the native
     /// shape; skips the dynamic intercept callback on the solver

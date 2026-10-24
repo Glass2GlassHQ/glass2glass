@@ -1,4 +1,4 @@
-//! IMA ADPCM elements (M1073): `adpcmenc` packs mono or stereo
+//! IMA ADPCM elements: `adpcmenc` packs mono or stereo
 //! `Audio{PcmS16Le}` into the WAV / DVI block layout at 4 bits per sample,
 //! `adpcmdec` unpacks it.
 //! The block math is [`g2g_mcu::adpcm`], the heap-free MCU codec validated

@@ -1,4 +1,4 @@
-//! ST 2110-22 JPEG XS network elements (M604): a sink and source that put the
+//! ST 2110-22 JPEG XS network elements: a sink and source that put the
 //! sans-IO `st2110jxs` core (RFC 9134) on the wire over UDP, with RTP timestamps
 //! from the PTP media clock.
 //!

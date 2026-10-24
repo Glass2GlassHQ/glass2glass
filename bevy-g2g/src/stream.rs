@@ -13,7 +13,7 @@
 //! interop device is attempted and a failure (no NVIDIA / no CUDA) falls back
 //! to readback at runtime.
 //!
-//! Layout mirrors the validated bevy-g2g-stream demo (M267 -> M278): a
+//! Layout mirrors the validated bevy-g2g-stream demo: a
 //! render-world system produces frames after `RenderSystems::Render`, a
 //! main-world system pushes them into a g2g `AppSrc` feed, and the sink
 //! pipeline (`appsrc -> [convert -> encode] -> filesink | webrtcsink |

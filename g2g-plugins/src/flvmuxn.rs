@@ -1,4 +1,4 @@
-//! FLV multiplexer element (M120, M296): a video and an audio elementary stream
+//! FLV multiplexer element: a video and an audio elementary stream
 //! in, either one optional (`Caps::CompressedVideo{H264}` Annex-B, `Caps::Audio{Aac}`
 //! ADTS, or one of the legacy Flash codecs: Sorenson, VP6, VP6-alpha, MP3, Speex),
 //! one FLV byte stream out:
@@ -12,7 +12,7 @@
 //!
 //! A [`MultiInputElement`]: each pad takes one elementary stream (FLV implies the
 //! track by tag type, so the muxer routes by pad codec, not pad index), and access
-//! units interleave by presentation timestamp via the M204 [`InputAggregator`]
+//! units interleave by presentation timestamp via the [`InputAggregator`]
 //! merge before being written as FLV tags. The sequence-header tags a player needs
 //! are written up front, captured in-band from the first access unit: the video
 //! track's `avcC` record from the parameter sets in the first IDR, the audio
@@ -297,7 +297,7 @@ impl MultiInputElement for FlvMuxN {
         self.inputs
     }
 
-    /// Named request pads (M481): a container mux's inputs are caps-typed slots, so
+    /// Named request pads: a container mux's inputs are caps-typed slots, so
     /// `video_%u` / `audio_%u` / `sink_%u` each claim the next positional slot (the
     /// track type is read from the input's caps, not its index), so a launch line
     /// can name the pads (`m.video_0` / `m.audio_0`) in any order.

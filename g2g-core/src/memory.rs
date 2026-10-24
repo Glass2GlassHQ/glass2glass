@@ -19,7 +19,7 @@ pub enum MemoryDomain {
     // it is gated behind `alloc`. The heap-free MCU build carries only `System`,
     // which the `StaticLendRing` fills via `SystemSlice::from_foreign` (zero-copy).
     /// Shared-CPU strided buffer: reference-counted bytes plus a [`TensorView`]
-    /// describing how to read them (M180). A layout-preserving transform (flip,
+    /// describing how to read them. A layout-preserving transform (flip,
     /// transpose, crop) hands the frame downstream by composing strides on the
     /// *same* `Arc` allocation, so zero bytes are copied. The system-memory
     /// analog of the per-plane stride metadata the GPU domains (eg
@@ -74,7 +74,7 @@ pub enum MemoryDomain {
     #[cfg(feature = "alloc")]
     WgpuTexture(OwnedWgpuTexture),
     /// A GPU-resident tensor (or other linear data) in a native wgpu storage
-    /// buffer (M215). The buffer analog of [`WgpuTexture`](Self::WgpuTexture): a
+    /// buffer. The buffer analog of [`WgpuTexture`](Self::WgpuTexture): a
     /// GPU element (eg `WgpuPreprocess` in GPU-output mode) leaves a compute
     /// shader's output in a `wgpu::Buffer` rather than reading it back to the
     /// CPU, so a downstream GPU consumer reads it with no GPU->CPU copy. Owned by
@@ -85,7 +85,7 @@ pub enum MemoryDomain {
 }
 
 /// The memory domain of a [`MemoryDomain`] without its payload. Used by the
-/// allocation query (M12) so a consumer can name the kind of memory it wants
+/// allocation query so a consumer can name the kind of memory it wants
 /// allocated without holding a buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
@@ -308,8 +308,8 @@ impl MemoryDomain {
         }
     }
 
-    /// Produce a second handle to this frame's memory for a fan-out branch
-    /// (M213, M250). A **zero-copy** reference-count bump for every domain: the
+    /// Produce a second handle to this frame's memory for a fan-out branch.
+    /// A **zero-copy** reference-count bump for every domain: the
     /// GPU domains and the shared-CPU [`SystemView`] are handle-shared; owned-CPU
     /// [`System`](Self::System) bytes are too, **provided** [`make_shareable`]
     /// has run first (the tee does this once before fanning out). Without that
@@ -342,7 +342,7 @@ impl MemoryDomain {
         }
     }
 
-    /// Prepare this frame's memory to be fanned out zero-copy (M250): convert
+    /// Prepare this frame's memory to be fanned out zero-copy: convert
     /// owned-CPU [`System`](Self::System) bytes into a refcounted shareable handle
     /// once, so the subsequent per-branch [`share`](Self::share) calls are
     /// refcount bumps rather than deep copies. The other domains are already
@@ -567,7 +567,7 @@ impl SystemSlice {
         }
     }
 
-    /// Convert this slice into a refcounted shareable handle in place (M250), so
+    /// Convert this slice into a refcounted shareable handle in place, so
     /// a tee can hand each branch a second handle via [`share_handle`] with no
     /// byte copy. Owned bytes (and a pooled buffer) *move* into an `Arc`; a
     /// foreign lent buffer is copied out first (the lend stays single-owner,
@@ -613,7 +613,7 @@ impl SystemSlice {
     }
 }
 
-/// Foreign-owned CPU bytes lent to the pipeline (M234). Pointers are stored as
+/// Foreign-owned CPU bytes lent to the pipeline. Pointers are stored as
 /// `usize` so the type is `Send`/`Sync` without an `unsafe impl`, the same
 /// convention `OwnedCudaBuffer` uses for device pointers; the lender's
 /// contract (documented on [`SystemSlice::from_foreign`]) certifies the bytes
@@ -661,7 +661,7 @@ impl Drop for ForeignSlice {
     }
 }
 
-/// Shared-CPU strided buffer (M180): an `Arc<[u8]>` backing plus a
+/// Shared-CPU strided buffer: an `Arc<[u8]>` backing plus a
 /// [`TensorView`] over it. The payload of [`MemoryDomain::SystemView`]. Cloning
 /// it (or composing a new view, eg a flip) shares the same allocation, so a
 /// layout-preserving transform copies nothing. Two `SystemView`s alias the same
@@ -697,7 +697,7 @@ impl SystemView {
     }
 }
 
-/// `Clone` is a refcount bump on the shared fd (M213): a tee branch references
+/// `Clone` is a refcount bump on the shared fd: a tee branch references
 /// the same DMABUF, and the fd is closed once when the last share drops.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
@@ -707,7 +707,7 @@ pub struct OwnedDmaBuf {
     fd: Arc<DmaBufFd>,
     pub stride: u32,
     pub offset: u32,
-    /// Optional cross-process GPU-completion sync (M562): a shared
+    /// Optional cross-process GPU-completion sync: a shared
     /// [`SyncFd`] (an exported timeline-semaphore fd, one per stream) plus the
     /// timeline value this frame's producer GPU work signals on completion. When
     /// present, a GPU consumer imports the fd once and host-waits `value` before
@@ -826,8 +826,8 @@ impl OwnedDmaBuf {
 /// live inside the [`VulkanKeepAlive`] owner because `g2g-core` links no Vulkan
 /// loader. The image is idle and in `SHADER_READ_ONLY_OPTIMAL` layout when the
 /// frame is handed over; the producer waited its own work before emitting.
-/// `Clone` is a zero-copy refcount bump, so the frame fans out through a tee
-/// (M213); see [`MemoryDomain::share`].
+/// `Clone` is a zero-copy refcount bump, so the frame fans out through a tee;
+/// see [`MemoryDomain::share`].
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct OwnedVulkanTexture {
@@ -878,7 +878,7 @@ pub trait VulkanKeepAlive: core::fmt::Debug + Send + Sync {
     fn as_any(&self) -> &dyn core::any::Any;
 }
 
-/// `Clone` shares the buffer id (M213).
+/// `Clone` shares the buffer id.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct OwnedWebGPUBuffer {
@@ -897,8 +897,8 @@ pub struct OwnedWebGPUBuffer {
 /// frame back to its hwframe pool. The pointers stay valid for exactly the
 /// lifetime of the keep-alive.
 /// `Clone` is a zero-copy refcount bump (the device memory is shared, not
-/// copied), so the frame can fan out through a tee to several GPU consumers
-/// (M213); see [`MemoryDomain::share`].
+/// copied), so the frame can fan out through a tee to several GPU consumers;
+/// see [`MemoryDomain::share`].
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct OwnedCudaBuffer {
@@ -930,7 +930,7 @@ pub struct OwnedCudaBuffer {
 #[cfg(feature = "alloc")]
 impl OwnedCudaBuffer {
     /// Wrap CUDA device pointers with the owner that keeps them valid. The owner
-    /// is `Arc`-held so the frame is cheaply shareable across a tee (M213).
+    /// is `Arc`-held so the frame is cheaply shareable across a tee.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         luma_ptr: u64,
@@ -978,7 +978,7 @@ impl OwnedCudaBuffer {
 /// element boxes its owning handle as this trait object. Dropping the box
 /// releases the backing allocation. `Send + Sync` so a frame can cross the
 /// runner's worker-thread boundaries and, after a tee, be read concurrently by
-/// several GPU consumer branches (M213); the producing element certifies the
+/// several GPU consumer branches; the producing element certifies the
 /// device memory is safe for concurrent read-only access (immutable decoded
 /// surface), the same contract under which the owners assert `Send`.
 #[cfg(feature = "alloc")]
@@ -998,7 +998,7 @@ pub trait CudaKeepAlive: core::fmt::Debug + Send + Sync {}
 /// releases the sample back to the decoder. The pointer stays valid for
 /// exactly the keep-alive's lifetime. The Windows analog of [`OwnedCudaBuffer`].
 /// `Clone` is a zero-copy refcount bump (the texture is shared, not copied), so
-/// the frame can fan out through a tee (M213); see [`MemoryDomain::share`].
+/// the frame can fan out through a tee; see [`MemoryDomain::share`].
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct OwnedD3D11Texture {
@@ -1024,7 +1024,7 @@ pub struct OwnedD3D11Texture {
 #[cfg(feature = "alloc")]
 impl OwnedD3D11Texture {
     /// Wrap a D3D11 texture pointer with the owner that keeps it valid. The owner
-    /// is `Arc`-held so the frame is cheaply shareable across a tee (M213).
+    /// is `Arc`-held so the frame is cheaply shareable across a tee.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         texture: u64,
@@ -1059,7 +1059,7 @@ impl OwnedD3D11Texture {
 /// the `windows` crate, so the element boxes its owning handle as this trait
 /// object. Dropping the box releases the texture. `Send + Sync` so a frame can
 /// cross the runner's worker-thread boundaries and, after a tee, be read
-/// concurrently by several GPU consumer branches (M213); the producing element
+/// concurrently by several GPU consumer branches; the producing element
 /// certifies the texture is safe for concurrent read-only access, the same
 /// contract under which the owners assert `Send`.
 #[cfg(feature = "alloc")]
@@ -1149,7 +1149,7 @@ pub trait CvPixelBufferKeepAlive: core::fmt::Debug + Send + Sync {}
 /// downcasting [`WebGPUKeepAlive::as_any`]. The browser analog of
 /// [`OwnedD3D11Texture`] / [`OwnedCudaBuffer`].
 /// `Clone` is a zero-copy refcount bump (the `VideoFrame` is shared, not
-/// copied), so the frame can fan out through a tee (M213); see
+/// copied), so the frame can fan out through a tee; see
 /// [`MemoryDomain::share`].
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
@@ -1166,7 +1166,7 @@ pub struct OwnedWebGPUExternalTexture {
 #[cfg(feature = "alloc")]
 impl OwnedWebGPUExternalTexture {
     /// Wrap a decoded frame's dimensions with the owner that keeps the
-    /// backing `VideoFrame` alive. `Arc`-held so the frame is shareable (M213).
+    /// backing `VideoFrame` alive. `Arc`-held so the frame is shareable.
     pub fn new(width: u32, height: u32, keep_alive: Arc<dyn WebGPUKeepAlive>) -> Self {
         Self {
             width,
@@ -1191,8 +1191,8 @@ impl OwnedWebGPUExternalTexture {
 /// runner's worker boundaries like every other domain; on the single-threaded
 /// wasm target the concrete owner asserts `Send` under that contract (the
 /// frame never actually crosses a thread), as the `D3D11KeepAlive` owners do
-/// for their COM handles. `Sync` too, so a tee branch can read it concurrently
-/// (M213), under the same single-threaded-wasm / documented-contract rationale.
+/// for their COM handles. `Sync` too, so a tee branch can read it concurrently,
+/// under the same single-threaded-wasm / documented-contract rationale.
 #[cfg(feature = "alloc")]
 pub trait WebGPUKeepAlive: core::fmt::Debug + Send + Sync {
     /// Recover the concrete owner so a consumer can extract the `VideoFrame`.
@@ -1207,7 +1207,7 @@ pub trait WebGPUKeepAlive: core::fmt::Debug + Send + Sync {
 /// `g2g-core` never links wgpu. The desktop render-side analog of
 /// [`OwnedWebGPUExternalTexture`] (which is the browser/import side).
 /// `Clone` is a zero-copy refcount bump (the `wgpu::Texture` is shared, not
-/// copied), so the rendered frame can fan out through a tee (M213); see
+/// copied), so the rendered frame can fan out through a tee; see
 /// [`MemoryDomain::share`].
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
@@ -1223,7 +1223,7 @@ pub struct OwnedWgpuTexture {
 #[cfg(feature = "alloc")]
 impl OwnedWgpuTexture {
     /// Wrap a rendered texture's dimensions with the owner that keeps the
-    /// backing `wgpu::Texture` alive. `Arc`-held so the frame is shareable (M213).
+    /// backing `wgpu::Texture` alive. `Arc`-held so the frame is shareable.
     pub fn new(width: u32, height: u32, keep_alive: Arc<dyn WgpuKeepAlive>) -> Self {
         Self {
             width,
@@ -1252,13 +1252,13 @@ pub trait WgpuKeepAlive: core::fmt::Debug + Send + Sync {
     fn as_any(&self) -> &dyn core::any::Any;
 }
 
-/// A GPU-resident linear buffer (the payload of [`MemoryDomain::WgpuBuffer`],
-/// M215): a `wgpu::Buffer` holding a tensor or other linear data a compute
+/// A GPU-resident linear buffer (the payload of [`MemoryDomain::WgpuBuffer`]):
+/// a `wgpu::Buffer` holding a tensor or other linear data a compute
 /// shader produced. Carries the valid payload length in bytes and, for a raw
 /// video frame with padded rows, a [`PlaneLayout`]; the
 /// `wgpu::Buffer` itself lives inside the [`WgpuBufferKeepAlive`] owner because
 /// `g2g-core` never links wgpu. The buffer analog of [`OwnedWgpuTexture`].
-/// `Clone` is a zero-copy refcount bump (M213).
+/// `Clone` is a zero-copy refcount bump.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct OwnedWgpuBuffer {
@@ -1275,7 +1275,7 @@ pub struct OwnedWgpuBuffer {
 #[cfg(feature = "alloc")]
 impl OwnedWgpuBuffer {
     /// Wrap a GPU buffer's payload length with the owner that keeps the backing
-    /// `wgpu::Buffer` alive. `Arc`-held so the frame is shareable (M213).
+    /// `wgpu::Buffer` alive. `Arc`-held so the frame is shareable.
     pub fn new(len: usize, keep_alive: Arc<dyn WgpuBufferKeepAlive>) -> Self {
         Self {
             len,

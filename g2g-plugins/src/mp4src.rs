@@ -1,9 +1,9 @@
-//! Fragmented-MP4 demuxer source (M28, HEVC in M31), the read-side counterpart
+//! Fragmented-MP4 demuxer source (H.264 and HEVC), the read-side counterpart
 //! of `mp4mux`: parses a single-video-track fMP4 and emits Annex-B H.264 or
 //! H.265 access units with their recovered timing, so a recording plays back
 //! through `MfDecode` / `FfmpegH264Dec` exactly like a live stream.
 //!
-//! Caps discovery is the M18 async-source path: `intercept_caps` reads the
+//! Caps discovery is the async-source path: `intercept_caps` reads the
 //! file's `ftyp`/`moov` (dims from `tkhd`, codec + parameter sets from the
 //! `avc1`/`avcC` or `hvc1`/`hvcC` sample entry, timescale from `mdhd`) before
 //! negotiation, so downstream solves against the real geometry. The fragment
@@ -86,11 +86,11 @@ impl Mp4Src {
     /// flushing seek, emits `Flush`, repositions to the keyframe at or before the
     /// target, emits the post-flush `Segment`, and resumes. A non-flushing seek
     /// repositions and emits an accumulating `Segment` (no flush). A
-    /// `SeekFlags::SEGMENT` seek (M358) clips playback to the segment `stop` and,
+    /// `SeekFlags::SEGMENT` seek clips playback to the segment `stop` and,
     /// at the boundary, reports segment-done (`notify_segment_done`) and parks for
     /// the next loop seek or `shutdown` instead of running to `Eos`, so the app can
     /// loop a clip gaplessly. The application keeps a clone of the controller to
-    /// drive scrubbing / editing / looping. A reverse seek (`rate < 0`, M897)
+    /// drive scrubbing / editing / looping. A reverse seek (`rate < 0`)
     /// walks the sync samples backward from the segment `stop`, emitting each GOP
     /// forward so a decoder can decode it; [`GopReverse`](crate::gopreverse)
     /// restores presentation order downstream of the decoder.
@@ -159,7 +159,7 @@ impl SourceLoop for Mp4Src {
         Ok(ConfigureOutcome::Accepted)
     }
 
-    /// The movie duration parsed from `mdhd` (M203), known after the header
+    /// The movie duration parsed from `mdhd`, known after the header
     /// probe at negotiation. `None` for a file whose box reports `0`. The runner
     /// publishes it on the progress handle and posts `DurationChanged`.
     fn query_duration(&self) -> Option<u64> {
@@ -447,7 +447,7 @@ fn seek_from_stream_start(seek: Seek, stream_start_ns: u64) -> Seek {
 }
 
 /// Exclusive end of the GOP opened by the sync sample at `gop_start`: the next
-/// sync sample, or the end of the stream (M897, reverse playback).
+/// sync sample, or the end of the stream (reverse playback).
 fn gop_end_after(samples: &[Sample], gop_start: usize) -> usize {
     samples
         .iter()

@@ -79,21 +79,21 @@ pub struct VideoTestSrc {
     colorimetry: Colorimetry,
     configured: bool,
     pool: Option<BufferPool<Box<[u8]>>>,
-    /// Frames skipped in response to upstream QoS (M174). Cumulative across the
+    /// Frames skipped in response to upstream QoS. Cumulative across the
     /// run; surfaced for observability / tests.
     skipped: u64,
-    /// M180: emit frames in the shared-CPU [`MemoryDomain::SystemView`] domain
+    /// Emit frames in the shared-CPU [`MemoryDomain::SystemView`] domain
     /// (an `Arc`-backed contiguous `[H, W, 4]` view) instead of an owned
     /// `System` buffer, so a downstream stride transform (VideoFlip) can flip
     /// zero-copy. Off by default; opt in with [`VideoTestSrc::with_shared_memory`].
     /// Incompatible with the pool path (a pooled buffer isn't `Arc`-shared).
     shared: bool,
-    /// Data pointers of the shared backings emitted (M180), in push order. Lets
+    /// Data pointers of the shared backings emitted, in push order. Lets
     /// a test prove a downstream element aliased the source's buffer rather than
     /// copying it. Only populated in `shared` mode.
     emitted_ptrs: Vec<usize>,
-    /// Contiguous bytes of the last [`RECORDED_FRAMES`] shared frames emitted
-    /// (M180), oldest first. A test verifies a downstream flip against these.
+    /// Contiguous bytes of the last [`RECORDED_FRAMES`] shared frames emitted,
+    /// oldest first. A test verifies a downstream flip against these.
     /// Only populated in `shared` mode; test-only bookkeeping, independent of
     /// the zero-copy claim.
     emitted_frames: Vec<Vec<u8>>,
@@ -164,7 +164,7 @@ impl VideoTestSrc {
         }
     }
 
-    /// M180: emit frames in the shared-CPU [`MemoryDomain::SystemView`] domain
+    /// Emit frames in the shared-CPU [`MemoryDomain::SystemView`] domain
     /// so a downstream stride transform can flip / crop them zero-copy. See the
     /// `shared` field. Has no effect when a pool is configured.
     pub fn with_shared_memory(mut self) -> Self {
@@ -172,12 +172,12 @@ impl VideoTestSrc {
         self
     }
 
-    /// Frames skipped in response to upstream QoS over the run (M174).
+    /// Frames skipped in response to upstream QoS over the run.
     pub fn skipped(&self) -> u64 {
         self.skipped
     }
 
-    /// Data pointers of the shared backings emitted in `shared` mode (M180), in
+    /// Data pointers of the shared backings emitted in `shared` mode, in
     /// push order. A test asserts a downstream element's received pointers equal
     /// these to prove the frames flowed through with zero copies.
     pub fn emitted_ptrs(&self) -> &[usize] {
@@ -185,7 +185,7 @@ impl VideoTestSrc {
     }
 
     /// Contiguous pre-transform bytes of the last [`RECORDED_FRAMES`] shared
-    /// frames emitted (M180), oldest first. A test verifies a downstream flip's
+    /// frames emitted, oldest first. A test verifies a downstream flip's
     /// output against these.
     pub fn emitted_frames(&self) -> &[Vec<u8>] {
         &self.emitted_frames
@@ -302,7 +302,7 @@ impl SourceLoop for VideoTestSrc {
         core::future::ready(Ok(self.caps()))
     }
 
-    /// M16 step 5f: native `Produces` constraint. Synchronous override
+    /// Native `Produces` constraint. Synchronous override
     /// (no I/O), so we sidestep the default's `async move` indirection.
     fn caps_constraint<'a>(
         &'a mut self,
@@ -520,7 +520,7 @@ impl SourceLoop for VideoTestSrc {
     }
 }
 
-/// `VideoTestSrc`'s settable properties (M104).
+/// `VideoTestSrc`'s settable properties.
 static VIDEOTESTSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("pattern", PropKind::Str, "drawn pattern")
         .with_enum_values(

@@ -1,4 +1,4 @@
-//! Pure FLV (Flash Video) container parser (M119), the byte-stream sibling of
+//! Pure FLV (Flash Video) container parser, the byte-stream sibling of
 //! [`crate::mpegts::TsDemuxer`] / [`crate::ogg::OggDemuxer`]. `no_std`, no I/O.
 //!
 //! FLV is a flat tag stream: a 9-byte header, then `PreviousTagSize` (UI32) /
@@ -15,7 +15,7 @@
 //!
 //! The sequence-header tags (the `AVCDecoderConfigurationRecord` /
 //! `AudioSpecificConfig`) are retained as the codec-config side channel
-//! ([`FlvDemuxer::video_config`] / [`FlvDemuxer::audio_config`], M662) rather
+//! ([`FlvDemuxer::video_config`] / [`FlvDemuxer::audio_config`]) rather
 //! than emitted as units, so the element can convert the AVCC media frames to a
 //! self-describing elementary stream. VP6's one-byte dimension adjustment stays
 //! at the front of each unit, so a remux writes it back unchanged. The `onMetaData`
@@ -249,8 +249,8 @@ pub enum FlvTrack {
 /// One demuxed access unit: the codec it came from, its payload (AVCC NALUs for
 /// H.264, a raw frame for every other codec), and its millisecond timestamps.
 /// The FLV tag timestamp is the decode time; a video tag's signed
-/// composition-time offset yields the presentation time (`pts = dts + cts`,
-/// M662), so B-frame streams carry both.
+/// composition-time offset yields the presentation time (`pts = dts + cts`),
+/// so B-frame streams carry both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlvUnit {
     pub codec: FlvCodec,
@@ -258,7 +258,7 @@ pub struct FlvUnit {
     pub pts_ms: u32,
     pub dts_ms: u32,
     /// Whether this is a resync point: a video keyframe (FLV frame type 1) or any
-    /// audio frame. Used by the demuxer seek path (M362) to snap to a decodable
+    /// audio frame. Used by the demuxer seek path to snap to a decodable
     /// resume point.
     pub keyframe: bool,
 }
@@ -296,7 +296,7 @@ pub struct FlvDemuxer {
     /// The audio sequence-header body (the AAC `AudioSpecificConfig`).
     audio_config: Option<Vec<u8>>,
     /// Channels / sample rate the first audio tag's flags declared, for the
-    /// codecs that carry no decoder config (M831).
+    /// codecs that carry no decoder config.
     audio_params: Option<(u8, u32)>,
 }
 
@@ -322,13 +322,13 @@ impl FlvDemuxer {
     }
 
     /// The video decoder config (the `AVCDecoderConfigurationRecord` from the
-    /// AVC sequence-header tag), once seen (M662).
+    /// AVC sequence-header tag), once seen.
     pub fn video_config(&self) -> Option<&[u8]> {
         self.video_config.as_deref()
     }
 
     /// The audio decoder config (the AAC `AudioSpecificConfig` from the AAC
-    /// sequence-header tag), once seen (M662).
+    /// sequence-header tag), once seen.
     pub fn audio_config(&self) -> Option<&[u8]> {
         self.audio_config.as_deref()
     }
@@ -421,7 +421,7 @@ pub(crate) fn write_u24(out: &mut Vec<u8>, v: u32) {
 ///
 /// Single-track ([`new`](Self::new)) writes the one track's decoder config once
 /// set ([`set_video_config`](Self::set_video_config) /
-/// [`set_audio_config`](Self::set_audio_config), M662). [`new_av`](Self::new_av),
+/// [`set_audio_config`](Self::set_audio_config)). [`new_av`](Self::new_av),
 /// driven by [`crate::flvmuxn::FlvMuxN`], carries a video track, an audio track
 /// or both and writes each track's decoder config (the `avcC` record / AAC
 /// `AudioSpecificConfig`) as an FLV sequence-header tag up front, so a player can
@@ -492,14 +492,14 @@ impl FlvMuxer {
     }
 
     /// Set the video decoder config: the `avcC` record written as the video
-    /// sequence-header tag (M662), or VP6's one-byte dimension adjustment
+    /// sequence-header tag, or VP6's one-byte dimension adjustment
     /// written into every video tag. Effective before the first tag is emitted.
     pub fn set_video_config(&mut self, config: Vec<u8>) {
         self.video_config = config;
     }
 
     /// Set the audio decoder config (the AAC `AudioSpecificConfig`), written as
-    /// the audio sequence-header tag; effective before the first tag (M662).
+    /// the audio sequence-header tag; effective before the first tag.
     pub fn set_audio_config(&mut self, asc: Vec<u8>) {
         self.audio_config = asc;
     }
@@ -670,7 +670,7 @@ fn write_amf0_string(out: &mut Vec<u8>, s: &str) {
 
 /// A sequence-header tag's decoder config, or `None` for any other tag: the
 /// `AVCDecoderConfigurationRecord` of an AVC packet-type-0 video tag, or the
-/// `AudioSpecificConfig` of an AAC packet-type-0 audio tag (M662).
+/// `AudioSpecificConfig` of an AAC packet-type-0 audio tag.
 fn sequence_header(tag_type: u8, body: &[u8]) -> Option<(FlvTrack, &[u8])> {
     match tag_type {
         TAG_VIDEO if *body.first()? & 0x0F == VIDEO_CODEC_AVC && *body.get(1)? == 0 => {

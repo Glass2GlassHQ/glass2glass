@@ -1,4 +1,4 @@
-//! MQTT source (M1179): subscribes to a topic filter on an MQTT broker and
+//! MQTT source: subscribes to a topic filter on an MQTT broker and
 //! emits each message received as one `Caps::Text` frame holding its payload,
 //! the control-message side of `mqttsink`. A message is stamped with its
 //! arrival time and no presentation time, like a raw datagram out of `udpsrc`.

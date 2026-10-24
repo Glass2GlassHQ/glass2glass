@@ -49,7 +49,7 @@ pub(crate) struct Header {
     pub(crate) timescale: u32,
     /// Total track duration in nanoseconds from `mdhd`, or `None` when the box
     /// reports `0` (a fragmented / live init segment whose length is unknown
-    /// until the fragments arrive). Feeds the M203 `DURATION` query.
+    /// until the fragments arrive). Feeds the `DURATION` query.
     pub(crate) duration_ns: Option<u64>,
     // None when the stts deltas vary or the table is empty (a fragmented init)
     pub(crate) framerate_q16: Option<u32>,
@@ -342,7 +342,7 @@ pub(crate) enum TrackKind {
         sample_rate: u32,
         /// The track's out-of-band codec config, in the form the elementary
         /// stream carries it: AAC's AudioSpecificConfig (`esds`), or an Opus
-        /// `OpusHead` rebuilt from the `dOps` (M791). Empty when there is none.
+        /// `OpusHead` rebuilt from the `dOps`. Empty when there is none.
         config: Vec<u8>,
         /// How a PCM track stores its samples, `None` for a coded format.
         stored_pcm: Option<StoredPcm>,
@@ -980,7 +980,7 @@ fn clap_axis(picture: u32, aperture: (i32, i32), offset: (i32, i32)) -> Option<(
     Some((u32::try_from(first).ok()?, u32::try_from(after).ok()?))
 }
 
-/// The out-of-band config from an `av01` sample entry's `av1C` record (M779):
+/// The out-of-band config from an `av01` sample entry's `av1C` record:
 /// the trailing configOBUs (typically the sequence header), verbatim, as the
 /// one "parameter set". Samples are plain low-overhead OBUs, so an empty
 /// configOBUs just means the sequence header rides in-band.
@@ -1324,7 +1324,7 @@ fn visual_sample_entry(entries: &[u8]) -> bool {
 
 /// Read an audio sample entry into a [`TrackKind::Audio`] plus the cbcs `cenc`
 /// defaults for an encrypted track: AAC (`mp4a`/`esds`, or the encrypted
-/// `enca`) or Opus (`Opus`/`dOps`, M767). The sample rate is the media
+/// `enca`) or Opus (`Opus`/`dOps`). The sample rate is the media
 /// timescale (matching `Mp4AudioSrc`). `None` for a well-formed entry naming a
 /// codec with no reader here, so that track is skipped.
 fn parse_audio_entry(
@@ -2764,7 +2764,7 @@ pub(crate) fn parse_progressive_multi(
 /// cap: its count field is one byte.)
 const MAX_CHAPTER_TRACK_CHAPTERS: usize = 4096;
 
-/// The chapters a progressive MP4 declares (M1046): the QuickTime chapter text
+/// The chapters a progressive MP4 declares: the QuickTime chapter text
 /// track when the file has one and `data` holds its samples, else the Nero
 /// `chpl` list in `moov/udta`. The text track is preferred because it carries a
 /// duration per chapter, which `chpl` cannot express; a `moov`-first (faststart)
@@ -3124,7 +3124,7 @@ fn avcc_to_annexb(avcc: &[u8]) -> Result<Vec<u8>, G2gError> {
         .ok_or(G2gError::CapsMismatch)
 }
 
-/// Incremental CMAF chunk splitter for a segment still being written (M888): fed
+/// Incremental CMAF chunk splitter for a segment still being written: fed
 /// a segment response as its bytes arrive, it yields each complete chunk (the run
 /// of boxes up to and including an `mdat`), so a low-latency packager's
 /// `styp`+`moof`+`mdat` chunks flow downstream while the rest of the segment is

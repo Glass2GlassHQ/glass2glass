@@ -244,7 +244,7 @@ impl AsyncElement for ColorEffects {
     }
 }
 
-/// `ColorEffects`'s settable properties, named as GStreamer's (M1084).
+/// `ColorEffects`'s settable properties, named as GStreamer's.
 static COLOREFFECTS_PROPS: &[PropertySpec] =
     &[
         PropertySpec::new("preset", PropKind::Str, "colour effect preset to use")

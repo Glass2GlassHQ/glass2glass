@@ -116,7 +116,7 @@ pub struct PipeWireSink {
     queue: SharedQueue,
     caps: Option<Caps>,
     bytes_queued: Arc<AtomicU64>,
-    /// Playout-disciplined master clock (the ALSA sink's M590 analog). The
+    /// Playout-disciplined master clock, like the ALSA sink's. The
     /// realtime callback feeds it `(monotonic_now, graph_ticks_ns)`
     /// observations from `pw_stream_get_time_n`, so its `now_ns()` tracks the
     /// device rate; a video sink slaves to it when it is elected.

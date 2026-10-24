@@ -1,4 +1,4 @@
-//! SubRip (`.srt`) subtitle writer (M1096, `no_std`): the inverse of
+//! SubRip (`.srt`) subtitle writer (`no_std`): the inverse of
 //! [`SubParse`](crate::subparse::SubParse). Timed `Caps::Text{Utf8}` cues in, a
 //! `Caps::Text{Srt}` byte stream out, one frame per cue holding the numbered
 //! block a SubRip file is made of (sequence number, `HH:MM:SS,mmm -->

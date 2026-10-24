@@ -295,7 +295,7 @@ struct Node<E> {
     /// Per-instance log category (a launch line's `log-category=`); `None` keeps
     /// the element type as the category.
     log_category: Option<String>,
-    /// Animated properties (M882); `None` when nothing on this node is animated.
+    /// Animated properties; `None` when nothing on this node is animated.
     #[cfg(feature = "runtime")]
     control: Option<crate::controller::ControlProgram>,
 }
@@ -375,7 +375,7 @@ impl<E> Graph<E> {
     /// tee, all outputs initially carrying the input caps) but carries a
     /// routing `element`; the runner drives it via
     /// [`GraphNodeRef::Demux`](crate::runtime::GraphNodeRef::Demux) and each
-    /// branch retypes from a per-output `CapsChanged` at runtime (M210). Unlike
+    /// branch retypes from a per-output `CapsChanged` at runtime. Unlike
     /// `add_tee`, a demux carries an element payload.
     pub fn add_demux(&mut self, element: E, outputs: u8) -> Demux {
         Demux(self.push(NodeKind::Tee(outputs), Some(element)))
@@ -431,7 +431,7 @@ impl<E> Graph<E> {
             .map(|i| NodeId(i as u32))
     }
 
-    /// Animate this node's properties over stream time (M882): the runner samples
+    /// Animate this node's properties over stream time: the runner samples
     /// `program` at each frame's PTS and sets the bound properties on the element
     /// before it processes that frame. Replaces any program already attached.
     ///
@@ -495,7 +495,7 @@ impl<E> Graph<E> {
     /// iterating a snapshot of the original edge ids can splice several without
     /// re-indexing. The new node is a single-pad [`Transform`](NodeKind::Transform),
     /// so the spliced element must be a 1-in/1-out transform (e.g. a memory-domain
-    /// converter). Used by the domain-converter auto-plug (M354).
+    /// converter). Used by the domain-converter auto-plug.
     pub fn insert_on_edge(&mut self, edge_idx: usize, element: E) -> NodeId {
         let new = self.push(NodeKind::Transform, Some(element));
         let old_dst = self.edges[edge_idx].dst;
@@ -876,7 +876,7 @@ impl<E> ValidatedGraph<E> {
         self.nodes[node.0 as usize].element.take()
     }
 
-    /// Take this node's animated-property program (M882), which the runner
+    /// Take this node's animated-property program, which the runner
     /// resolves against the element and hands to the arm that owns it. `None`
     /// when nothing on the node is animated.
     #[cfg(feature = "runtime")]

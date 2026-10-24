@@ -1,11 +1,11 @@
-//! Ogg multiplexer element (M789, M790): N audio elementary streams in
+//! Ogg multiplexer element: N audio elementary streams in
 //! (`Caps::Audio{Opus|Vorbis|Flac}` per pad), one Ogg byte stream out, grouped
 //! when there are several. The inverse of [`crate::oggdemux::OggDemux`] and the
 //! write side of the grouped files [`crate::oggdemux::OggDemuxN`] reads.
 //!
 //! A [`MultiInputElement`]: each pad becomes its own logical bitstream with its
 //! own serial number, framed by [`crate::ogg::OggPageWriter`] under the pad's
-//! codec mapping. Packets interleave by presentation timestamp through the M204
+//! codec mapping. Packets interleave by presentation timestamp through the
 //! [`InputAggregator::take_earliest_by`](g2g_core::InputAggregator::take_earliest_by)
 //! merge, so the data pages of the streams alternate the way a player expects.
 //!
@@ -37,7 +37,7 @@
 //! sample count caps that packet's granule contribution, so a remux reproduces
 //! the source's end-of-stream trim exactly.
 //!
-//! **Chained streams (M858).** With one input pad, a `Segment` arriving after
+//! **Chained streams.** With one input pad, a `Segment` arriving after
 //! audio has flowed ends the logical bitstream and opens the next link of a
 //! chained file: the current link's pages are flushed with the end-of-stream
 //! flag, then the next link writes its own beginning-of-stream page on a fresh
@@ -255,7 +255,7 @@ impl OggStreamMux {
     }
 
     /// Close this logical bitstream and restart on `serial` as the next link of
-    /// a chained stream (M858), returning the closed link's remaining pages with
+    /// a chained stream, returning the closed link's remaining pages with
     /// the last flagged end-of-stream. The codec mapping survives; everything
     /// the link accumulated (headers, granule, Vorbis lapping) restarts, so the
     /// new link writes its own header pages from granule 0.
@@ -512,7 +512,7 @@ pub struct OggMuxN {
     inputs: usize,
     /// One logical bitstream per input pad, in pad order.
     streams: Vec<OggStreamMux>,
-    /// Per-input packet buffer; releases the globally earliest-PTS packet (M204).
+    /// Per-input packet buffer; releases the globally earliest-PTS packet.
     agg: InputAggregator<Frame>,
     /// Serial of the first stream; pad `i` takes `serial + i`.
     serial: u32,
@@ -671,7 +671,7 @@ impl MultiInputElement for OggMuxN {
         self.inputs
     }
 
-    /// Named request pads (M481): every input is an audio slot, so `audio_%u` /
+    /// Named request pads: every input is an audio slot, so `audio_%u` /
     /// `sink_%u` each claim the next positional one.
     fn input_pad_index(
         &self,

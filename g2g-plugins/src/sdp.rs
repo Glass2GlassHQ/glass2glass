@@ -1,5 +1,5 @@
 //! RFC 4566 SDP: the shared media-section scanner plus the RTP/AVP mapping from
-//! a media description to [`Caps`] (M833).
+//! a media description to [`Caps`].
 //!
 //! An RTP receiver has no in-band stream description, so the SDP a sender
 //! publishes (`ffmpeg -sdp_file`, an RTSP `DESCRIBE` body, a file next to the

@@ -76,19 +76,19 @@ impl<'a: 'c, 'c, Clk: PipelineClock> RunBuilder<'a, 'c, Clk> {
     }
 
     /// Drive the run through `state`'s `NULL -> READY -> PAUSED -> PLAYING`
-    /// machine (M78).
+    /// machine.
     pub fn with_state(mut self, state: &StateController) -> Self {
         self.state = Some(state.clone());
         self
     }
 
-    /// Publish playback position and duration into `progress` (M203).
+    /// Publish playback position and duration into `progress`.
     pub fn with_progress(mut self, progress: &'c PipelineProgress) -> Self {
         self.progress = Some(progress);
         self
     }
 
-    /// Refuse to start if the negotiated copy plan breaks `policy` (M617).
+    /// Refuse to start if the negotiated copy plan breaks `policy`.
     pub fn with_copy_policy(mut self, policy: CopyPolicy) -> Self {
         self.copy_policy = Some(policy);
         self
@@ -100,14 +100,13 @@ impl<'a: 'c, 'c, Clk: PipelineClock> RunBuilder<'a, 'c, Clk> {
         self
     }
 
-    /// Keep the last packets of every edge in `recorder` for a post-failure dump
-    /// (M1016).
+    /// Keep the last packets of every edge in `recorder` for a post-failure dump.
     pub fn with_recorder(mut self, recorder: &'c FlightRecorder) -> Self {
         self.recorder = Some(recorder);
         self
     }
 
-    /// The timer fan-in arms sleep on for their deadline tick (M880), overriding
+    /// The timer fan-in arms sleep on for their deadline tick, overriding
     /// the one `clock` hands out. Shared, since the thread-per-arm run moves each
     /// arm onto its own thread.
     pub fn with_ticker(mut self, ticker: Arc<dyn DynAsyncClock + Send + Sync>) -> Self {
@@ -155,7 +154,7 @@ impl<'a: 'c, 'c, Clk: PipelineClock> RunBuilder<'a, 'c, Clk> {
 
 #[cfg(feature = "multi-thread")]
 impl<'c, Clk: PipelineClock> RunBuilder<'static, 'c, Clk> {
-    /// Start the run with one OS thread per arm from `spawner` (M690). The
+    /// Start the run with one OS thread per arm from `spawner`. The
     /// graph owns its elements, since each moves onto its own thread.
     pub fn run_threaded<S: GraphSpawner>(
         self,

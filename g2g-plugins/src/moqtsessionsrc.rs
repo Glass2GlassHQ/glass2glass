@@ -1,4 +1,4 @@
-//! Multi-track MoQ Transport subscriber (`moqtsessionsrc`, M914, `moqt`
+//! Multi-track MoQ Transport subscriber (`moqtsessionsrc`, `moqt`
 //! feature): subscribes to several tracks of one broadcast over a single MoQT
 //! session and emits each on its own output pad.
 //!

@@ -1,4 +1,4 @@
-//! VobSub (DVD subpicture) decoder element (M899): `Caps::SubPicture{VobSub}` in,
+//! VobSub (DVD subpicture) decoder element: `Caps::SubPicture{VobSub}` in,
 //! `Caps::RawVideo{Rgba8}` canvases out.
 //!
 //! Each cue becomes two frames on a fully transparent canvas the size of the

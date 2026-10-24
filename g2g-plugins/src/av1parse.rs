@@ -268,7 +268,7 @@ impl PadTemplates for Av1Parse {
 /// The fields decoded from an AV1 sequence header: the geometry the caps need
 /// plus the first operating point's level/tier and the `color_config`, which
 /// together are exactly the `AV1CodecConfigurationRecord` (`av1C`) header a
-/// muxer writes (M773).
+/// muxer writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Av1SeqHeader {
     pub width: u32,
@@ -482,8 +482,7 @@ fn obu_extension(data: &[u8], start: usize) -> Option<ObuExtension> {
 }
 
 /// Whether a temporal unit carries a sequence-header OBU. The MP4 demuxers use
-/// it to decide if the `av1C` configOBUs need prepending to the first sample
-/// (M779).
+/// it to decide if the `av1C` configOBUs need prepending to the first sample.
 pub(crate) fn has_sequence_header(data: &[u8]) -> bool {
     obu_ranges(data).is_some_and(|obus| obus.iter().any(|o| o.obu_type == OBU_SEQUENCE_HEADER))
 }

@@ -1,4 +1,4 @@
-//! Visual smoke test for the Vulkan Video H.264 decoder (M486-M492).
+//! Visual smoke test for the Vulkan Video H.264 decoder.
 //!
 //! Decodes an H.264 Annex-B elementary stream on the GPU via `VK_KHR_video_*`
 //! (vendor-neutral, the `NvDec` analog that also runs on AMD/Intel) and writes

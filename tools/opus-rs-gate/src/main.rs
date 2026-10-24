@@ -1,5 +1,5 @@
 //! Correctness gate for replacing the libopus FFI decode path with a pure-Rust
-//! one (M916). Decodes identical packet sequences through `opus-rs` (the only
+//! one. Decodes identical packet sequences through `opus-rs` (the only
 //! complete pure-Rust Opus implementation on crates.io, a port of libopus 1.6)
 //! and through libopus, and reports how far apart the PCM lands.
 //!

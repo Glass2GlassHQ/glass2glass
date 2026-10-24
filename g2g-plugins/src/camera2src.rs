@@ -1,4 +1,4 @@
-//! M308: Android camera capture via the NDK Camera2 API (`libcamera2ndk`).
+//! Android camera capture via the NDK Camera2 API (`libcamera2ndk`).
 //!
 //! `Camera2Src` is a `SourceLoop` that captures `YUV_420_888` frames from a
 //! camera and emits tight NV12 (`MemoryDomain::System`, `Caps::RawVideo`), the

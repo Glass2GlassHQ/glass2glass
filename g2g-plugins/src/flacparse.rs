@@ -1,4 +1,4 @@
-//! FLAC stream parser element (`flacparse`, M774): a native `.flac` byte
+//! FLAC stream parser element (`flacparse`): a native `.flac` byte
 //! stream in (`Caps::Audio{Flac}`, arbitrary chunks from `filesrc`),
 //! frame-aligned FLAC out. The audio sibling of the re-framing `h264parse`:
 //! FLAC frames carry no length field, so a byte stream must be split by frame

@@ -1,4 +1,4 @@
-//! M739: ScreenCaptureKit display capture.
+//! ScreenCaptureKit display capture.
 //!
 //! [`ScreenCaptureSrc`] is a `SourceLoop` source that captures the main
 //! display as NV12 frames through an `SCStream`: shareable-content lookup ->
@@ -174,7 +174,7 @@ fn shareable_content() -> Option<Retained<SCShareableContent>> {
 #[derive(Debug)]
 pub struct ScreenCaptureSrc {
     target_buffers: u64,
-    /// Emit retained IOSurface-backed `CVPixelBuffer`s (the M735 zero-copy
+    /// Emit retained IOSurface-backed `CVPixelBuffer`s (the zero-copy
     /// domain) instead of packing NV12 to system memory.
     cv_output: bool,
     state: Option<StreamState>,

@@ -197,7 +197,7 @@ impl AsyncElement for CudaDownload {
 /// `Arc` ref, after every uploaded frame's [`DevAlloc`] is gone, since each holds
 /// one). `Send + Sync`: the context is used single-threaded by the element and
 /// only read-only by downstream GPU consumers, the same contract as the other
-/// CUDA owners (M213).
+/// CUDA owners.
 #[derive(Debug)]
 struct UploadCtx(u64);
 
@@ -400,7 +400,7 @@ impl AsyncElement for CudaUpload {
     }
 
     /// Emits CUDA NV12 (the uploaded frames; a passed-through Cuda frame keeps its
-    /// own domain), so a downstream link is a GPU link (M285).
+    /// own domain), so a downstream link is a GPU link.
     fn output_memory(&self) -> MemoryDomainKind {
         MemoryDomainKind::Cuda
     }
@@ -588,7 +588,7 @@ unsafe fn htod_plane(
 /// has none (the auto-plug then leaves the edge to fail loud). Covers the
 /// CUDA<->System pair: [`CudaDownload`] (`Cuda -> System`) and [`CudaUpload`]
 /// (`System -> Cuda`), plus `Cuda -> WgpuTexture` through the zero-copy
-/// external-memory bridge where that is built in. The factory the M354 auto-plug
+/// external-memory bridge where that is built in. The factory the domain auto-plug
 /// calls; see [`auto_plug_cuda_converters`].
 pub fn cuda_domain_converter(from: MemoryDomainKind, to: MemoryDomainKind) -> Option<GraphNode> {
     match (from, to) {
@@ -608,7 +608,7 @@ pub fn cuda_domain_converter(from: MemoryDomainKind, to: MemoryDomainKind) -> Op
     }
 }
 
-/// Auto-plug CUDA<->System domain converters into `graph` (M354): splices a
+/// Auto-plug CUDA<->System domain converters into `graph`: splices a
 /// [`CudaUpload`] / [`CudaDownload`] on any edge whose producer and consumer
 /// cannot agree on a memory domain. E.g. a System NV12 source feeding `NvEnc`
 /// (CUDA-only input) gains a `CudaUpload`; a CUDA decoder fanned out to a System
@@ -635,7 +635,7 @@ struct PlaneCopy {
 }
 
 /// Packed NV12 buffer size in bytes for a `width` x `height` frame. Used by
-/// `CudaGlSink` to size its M12 allocation proposal.
+/// `CudaGlSink` to size its allocation proposal.
 pub fn nv12_byte_size(width: u32, height: u32) -> usize {
     crate::pixel::frame_byte_size(RawVideoFormat::Nv12, width, height)
 }
@@ -672,7 +672,7 @@ fn nv12_plane_copies(
 /// Copy both semi-planar planes of `buf` from CUDA device memory into a freshly
 /// allocated packed system buffer (device->host). `format` is NV12 or the
 /// 10-bit P010 surface. `pub(crate)` so `NvDec`'s
-/// download-on-demand path (M352) reuses the same copy when negotiation settles
+/// download-on-demand path reuses the same copy when negotiation settles
 /// its output on `System`.
 ///
 /// # Safety

@@ -1,4 +1,4 @@
-//! Vorbis audio decoder element (VorbisDec, `vorbis` feature, M777):
+//! Vorbis audio decoder element (VorbisDec, `vorbis` feature):
 //! `Audio{Vorbis}` in, interleaved `Audio{PcmS16Le}` out, via symphonia's
 //! pure-Rust decoder (no system library, unlike the libopus-backed
 //! [`crate::opusdec::OpusDec`]).
@@ -10,7 +10,7 @@
 //! three in-band ahead of the audio; the prefixes are unambiguous (an audio
 //! packet's first byte always has bit 0 clear), so the decoder stashes ident +
 //! setup, ignores the comment header, and builds once setup arrives. Output PCM
-//! carries the demuxer's packet timing when present (M778: durations from the
+//! carries the demuxer's packet timing when present (durations from the
 //! setup-header mode tables, end-granule clamped, so the decoded PCM is trimmed
 //! to match), else it is stamped from the decoded sample count.
 

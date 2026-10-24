@@ -1,4 +1,4 @@
-//! Vendor-neutral OpenGL ES display sink (M891): system-memory NV12 or RGBA
+//! Vendor-neutral OpenGL ES display sink: system-memory NV12 or RGBA
 //! presented through EGL on a Wayland `xdg_toplevel`.
 //!
 //! The GStreamer `glimagesink` analog, and the driver-agnostic sibling of

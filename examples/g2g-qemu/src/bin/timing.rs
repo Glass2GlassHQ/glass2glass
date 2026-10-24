@@ -1,4 +1,4 @@
-//! Per-frame timing / jitter report for the flagship audio graph (M645):
+//! Per-frame timing / jitter report for the flagship audio graph:
 //! run `capture -> convert -> resample -> mix -> encode -> RTP` on the
 //! emulated Cortex-M4 with a SysTick stamp on every emitted packet, and
 //! report the per-frame execution cost over semihosting. `tools/

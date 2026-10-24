@@ -1,5 +1,5 @@
-//! Cross-process validation of the local CUDA transport elements (M556 phase 2,
-//! `local-ipc`). Two *separate processes* move NV12 frames GPU->GPU with no PCIe
+//! Cross-process validation of the local CUDA transport elements
+//! (`local-ipc`). Two *separate processes* move NV12 frames GPU->GPU with no PCIe
 //! round trip: the producer's VRAM is shared to the consumer through a CUDA IPC
 //! handle over a Unix socket, and only the handle + descriptor cross.
 //!

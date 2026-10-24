@@ -1,6 +1,6 @@
 //! Bounded multi-stream tensor batcher (design/ml.md).
 //!
-//! M22: `TensorBatcher` is a `MultiInputElement` that gathers one tensor
+//! `TensorBatcher` is a `MultiInputElement` that gathers one tensor
 //! frame from each input stream and emits the gathered round as a single
 //! batched tensor frame, stacked along the leading batch dimension (for the
 //! per-slot caps `[1, d...]`, a full round of `N` inputs emits `[N, d...]`;
@@ -13,7 +13,7 @@
 //! shrink to the surviving inputs and the batcher emits a `CapsChanged` with
 //! the smaller batch dim before the first shrunken frame. Queued frames of
 //! an ended input still drain into batches first. This needs the per-input
-//! `Eos` delivery added to `MultiInputElement::process` in M22.
+//! `Eos` delivery of `MultiInputElement::process`.
 //!
 //! Owed: a deadline-based partial-batch flush (the "Timeout" half of design/ml.md's
 //! select/timeout), gated on a runtime timer primitive; today a stalled

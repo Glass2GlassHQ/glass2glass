@@ -1,4 +1,4 @@
-//! Pipeline message bus (M11).
+//! Pipeline message bus.
 //!
 //! A pipeline-level channel for asynchronous out-of-band messages: elements
 //! notify the application of lifecycle events (EOS, errors, warnings) or
@@ -25,7 +25,7 @@ use crate::tag::TagList;
 pub enum BusMessage {
     /// A new stream has started: posted by the runner's source arm before the
     /// source produces any data, one per source (the GStreamer
-    /// `GST_MESSAGE_STREAM_START` analog, M206). Brackets a stream with the
+    /// `GST_MESSAGE_STREAM_START` analog). Brackets a stream with the
     /// matching [`Eos`](BusMessage::Eos) so an application can track stream
     /// lifetime (e.g. reset per-stream UI on each start).
     StreamStart,
@@ -34,7 +34,7 @@ pub enum BusMessage {
     /// `GST_MESSAGE_EOS` analog), and by any element that observes one itself.
     Eos,
     /// An informational, non-error notification (the GStreamer
-    /// `GST_MESSAGE_INFO` analog, M206), the third severity below
+    /// `GST_MESSAGE_INFO` analog), the third severity below
     /// [`Warning`](BusMessage::Warning) and [`Error`](BusMessage::Error). Carries
     /// a human-readable message. Posted by elements or the application for
     /// progress / status that is not a problem (a reconnect, a fallback taken),
@@ -58,9 +58,9 @@ pub enum BusMessage {
     /// [`NegotiationFailure`] that names *which* link conflicted on *what*.
     /// The runner still returns the (opaque) `G2gError::CapsMismatch` to its
     /// caller; this preserves the detail the error type can't, so the
-    /// application can report the offending element pair (M18 item 7).
+    /// application can report the offending element pair.
     NegotiationFailed(NegotiationFailure),
-    /// The pipeline's lifecycle state changed (M76). Posted by
+    /// The pipeline's lifecycle state changed. Posted by
     /// [`StateController::set_state`](crate::runtime::StateController) on every
     /// effective transition along the `NULL → READY → PAUSED → PLAYING` ladder.
     StateChanged {
@@ -69,12 +69,12 @@ pub enum BusMessage {
         /// State after the change.
         new: PipelineState,
     },
-    /// An async state change completed (M77): a non-live `Paused` transition
+    /// An async state change completed: a non-live `Paused` transition
     /// finished once the sink took its preroll buffer. The GStreamer
     /// `ASYNC_DONE` analog; posted once per preroll by
     /// [`StateController::notify_prerolled`](crate::runtime::StateController).
     AsyncDone,
-    /// Quality-of-service report (M85): a sink is running behind the pipeline
+    /// Quality-of-service report: a sink is running behind the pipeline
     /// clock and dropped a frame that arrived too late to present. The
     /// GStreamer `GST_MESSAGE_QOS` analog. Posted by a synchronizing sink
     /// (e.g. [`SyncSink`](../../g2g_plugins/syncsink/struct.SyncSink.html)) when
@@ -94,7 +94,7 @@ pub enum BusMessage {
         /// Frames the sink has dropped so far (cumulative, this drop included).
         dropped: u64,
     },
-    /// Buffering level report (M87): the fill percent (0-100) of a monitored
+    /// Buffering level report: the fill percent (0-100) of a monitored
     /// link. The GStreamer `GST_MESSAGE_BUFFERING` analog. g2g has no `queue`
     /// element (per-edge `LinkPolicy` is the leaky-queue analog), so this
     /// reports the bounded link channel's own occupancy, posted by the runner's
@@ -121,14 +121,14 @@ pub enum BusMessage {
         /// The program these tags describe, for a container whose metadata is
         /// per program: an MPEG-TS `program_number`, one message per SDT service
         /// entry, so a multi-program transport stream reports each service's own
-        /// name (M878). `None` for a container with a single metadata scope
+        /// name. `None` for a container with a single metadata scope
         /// (Matroska, MP4, Ogg, FLV), where the tags describe the whole stream.
         program: Option<u16>,
     },
     /// Metadata scoped to one elementary stream of a container, the stream-scoped
     /// sibling of [`Tag`](BusMessage::Tag) (which stays whole-container). Posted
     /// by a demuxer whose container tags name a track (a Matroska `Tag` whose
-    /// `Targets` carries a `TagTrackUID`, M787); `stream_id` is the id that track
+    /// `Targets` carries a `TagTrackUID`); `stream_id` is the id that track
     /// has in the posted [`StreamCollection`](BusMessage::StreamCollection), so
     /// the application attaches the tags to the stream it already knows.
     StreamTag {
@@ -138,14 +138,14 @@ pub enum BusMessage {
         tags: TagList,
     },
     /// The chapter list (table of contents) a demuxer recovered from the
-    /// container, in file order (the GStreamer `GST_MESSAGE_TOC` analog, M1046).
+    /// container, in file order (the GStreamer `GST_MESSAGE_TOC` analog).
     /// Posted out of band once the container's chapter element is parsed, like
     /// [`Tag`](BusMessage::Tag), so an application can build a chapter menu and
     /// seek to [`Chapter::start_ns`](crate::chapter::Chapter::start_ns) without
     /// intercepting the data path.
     Chapters(alloc::vec::Vec<crate::chapter::Chapter>),
     /// The elementary streams a demuxer found in the container (the GStreamer
-    /// `GST_MESSAGE_STREAM_COLLECTION` analog, M376, the data model playbin is
+    /// `GST_MESSAGE_STREAM_COLLECTION` analog, the data model playbin is
     /// built on). Posted out of band once the demuxer has parsed its track list,
     /// listing *every* available audio / video / text stream (its type and
     /// [`Caps`](crate::caps::Caps)) regardless of which one(s) the demuxer
@@ -154,7 +154,7 @@ pub enum BusMessage {
     StreamCollection(crate::stream::StreamCollection),
     /// The set of streams a demuxer now forwards changed in response to an
     /// application selection (the GStreamer `GST_MESSAGE_STREAMS_SELECTED`
-    /// analog, M377). Carries the active stream ids (the ids from the
+    /// analog). Carries the active stream ids (the ids from the
     /// [`StreamCollection`](BusMessage::StreamCollection)), so the app confirms
     /// which streams took effect after a
     /// [`StreamSelectController::select`](crate::runtime::StreamSelectController::select).
@@ -163,7 +163,7 @@ pub enum BusMessage {
         ids: alloc::vec::Vec<alloc::string::String>,
     },
     /// The total stream duration became known or changed (the GStreamer
-    /// `GST_MESSAGE_DURATION_CHANGED` analog, M203). Posted by the runner's
+    /// `GST_MESSAGE_DURATION_CHANGED` analog). Posted by the runner's
     /// source arm when a source first reports a duration
     /// ([`SourceLoop::query_duration`](crate::runtime::SourceLoop::query_duration)),
     /// so an application can refresh a seek bar's length. The value is also
@@ -211,7 +211,7 @@ pub enum BusMessage {
     ClockLost,
     /// Application-defined signal carrying an opaque code.
     Custom(u64),
-    /// A restarting source reported its state (M1164), gst `fallbacksrc`'s
+    /// A restarting source reported its state, gst `fallbacksrc`'s
     /// read-only `status` property and its `application/x-fallbacksrc-stats`
     /// structure. Posted on the bus rather than read back off the element,
     /// because a source arm owns its element for the whole run and so cannot
@@ -269,7 +269,7 @@ pub enum BusMessage {
     },
 }
 
-/// What a restarting source is doing, gst `fallbacksrc`'s `status` (M1164).
+/// What a restarting source is doing, gst `fallbacksrc`'s `status`.
 /// g2g has no buffering stage on this path, so gst's `buffering` has no analog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -282,8 +282,8 @@ pub enum SourceRestartStatus {
     Stopped,
 }
 
-/// Why a restarting source's last life ended, gst `fallbacksrc`'s `RetryReason`
-/// (M1164). gst folds `Rebuild` and `Negotiate` into one `StateChangeFailure`.
+/// Why a restarting source's last life ended, gst `fallbacksrc`'s `RetryReason`.
+/// gst folds `Rebuild` and `Negotiate` into one `StateChangeFailure`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SourceRestartReason {

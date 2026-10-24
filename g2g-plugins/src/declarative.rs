@@ -1,4 +1,4 @@
-//! Declarative graph format (M578): build a runnable [`Graph`] from a JSON or
+//! Declarative graph format: build a runnable [`Graph`] from a JSON or
 //! YAML document, the structured sibling of the `gst-launch` text parser
 //! ([`parse_launch`]). A launch string is the ergonomic one-liner; a declarative
 //! document is the version-controllable, tool-generated, comment-carrying form a
@@ -20,7 +20,7 @@
 //! inbound edge is a source, one with no outbound edge a sink, one with several
 //! inbound edges a muxer (built from the registry's `MuxerFactory`), and a node
 //! feeding several consumers gets an implicit `tee` spliced onto its output (the
-//! same auto-tee, M473). An explicit `element: tee` node is honored too, and a
+//! same auto-tee). An explicit `element: tee` node is honored too, and a
 //! registered demuxer fans out on its own pads. Per-edge backpressure is a
 //! `policy` string (`block` / `drop-oldest` / `drop-newest`, the [`LinkPolicy`]
 //! names) with an optional `capacity` (the per-edge channel depth).
@@ -31,7 +31,7 @@
 //! the same thing (no second, divergent JSON-number coercion). A top-level
 //! `pipeline:` string is an escape hatch that just defers to [`parse_launch`].
 //!
-//! This is also the shared spec model the Rhai builder ([`crate::script`], M579)
+//! This is also the shared spec model the Rhai builder ([`crate::script`])
 //! emits into, so a script and a static document reach the graph through one
 //! builder.
 

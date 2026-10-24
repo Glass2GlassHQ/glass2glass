@@ -1,9 +1,9 @@
-//! Interleaving muxer (M10). Combines N input streams into one output, ordering
-//! every input's frames by presentation timestamp (M204). Negotiation is
+//! Interleaving muxer. Combines N input streams into one output, ordering
+//! every input's frames by presentation timestamp. Negotiation is
 //! per-input: each pad accepts and records its own caps; the merged output caps
 //! are fixed at construction.
 //!
-//! Time-ordering (M204): frames are buffered per input in an [`InputAggregator`]
+//! Time-ordering: frames are buffered per input in an [`InputAggregator`]
 //! and released by smallest `pts_ns` only once every still-contributing input
 //! has one queued, so the merged stream is globally PTS-ordered (the
 //! `GstAggregator` collect-and-pick-earliest rule). A frame carries its own
@@ -171,7 +171,7 @@ pub struct InterleaveMux {
     output: Caps,
     configured: Vec<Option<Caps>>,
     /// Per-input frame buffer; releases the globally earliest-PTS frame once
-    /// every contributor has one queued (M204).
+    /// every contributor has one queued.
     agg: InputAggregator<Frame>,
 }
 
@@ -209,16 +209,16 @@ impl MultiInputElement for InterleaveMux {
         Ok(upstream_caps.clone())
     }
 
-    /// M18 step 1: per-input wildcard. The interleave forwards frames
+    /// Per-input wildcard. The interleave forwards frames
     /// straight through tagged with their own per-frame caps; it has
     /// no per-input format constraint. `AcceptsAny` is the native
-    /// shape (analogous to `FakeSink`'s migration in M16 5c). Skips
+    /// shape (analogous to `FakeSink`). Skips
     /// the dynamic intercept callback on the per-input solver path.
     fn caps_constraint_as_input(&self, _input: usize) -> CapsConstraint<'_> {
         CapsConstraint::AcceptsAny
     }
 
-    /// M18 step 1: the merged output caps are fixed at construction
+    /// The merged output caps are fixed at construction
     /// (`InterleaveMux::new(_, output)`). `Produces` is the native
     /// shape for a static muxer output.
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {

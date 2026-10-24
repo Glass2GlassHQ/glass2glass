@@ -170,7 +170,7 @@ impl AsyncElement for VideoBalance {
     }
 }
 
-/// `VideoBalance`'s settable properties (M104).
+/// `VideoBalance`'s settable properties.
 static VIDEOBALANCE_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "brightness",

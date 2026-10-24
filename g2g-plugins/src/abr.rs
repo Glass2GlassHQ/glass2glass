@@ -1,4 +1,4 @@
-//! Throughput-driven adaptive bitrate (ABR) support (M371), shared by
+//! Throughput-driven adaptive bitrate (ABR) support, shared by
 //! [`HlsSrc`](crate::hlssrc) and [`DashSrc`](crate::dashsrc).
 //!
 //! A source times each segment download (bytes over elapsed time) and feeds it

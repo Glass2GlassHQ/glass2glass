@@ -1,4 +1,4 @@
-//! Embedded Rhai scripting (M579): build a [`Graph`] from a script, the
+//! Embedded Rhai scripting: build a [`Graph`] from a script, the
 //! logic-carrying sibling of the static [`declarative`](crate::declarative)
 //! document. A JSON / YAML file describes a *fixed* graph; a script computes one,
 //! so the shape can depend on the environment, a loop, or a parameter:
@@ -26,8 +26,8 @@
 //! Rhai is pure Rust (no C toolchain, reaches the same wasm / embedded targets
 //! the core does), so scripting does not compromise the portability story.
 //!
-//! This module also hosts the `scriptelement` runtime transform
-//! (M580): an element whose *per-frame* logic is a Rhai `process(frame)`.
+//! This module also hosts the `scriptelement` runtime transform:
+//! an element whose *per-frame* logic is a Rhai `process(frame)`.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -219,7 +219,7 @@ pub fn build_from_script(registry: &Registry, src: &str) -> Result<Graph<GraphNo
 /// }
 /// ```
 ///
-/// Zero-copy (M581): the buffer is exposed through a guarded pointer, not copied
+/// Zero-copy: the buffer is exposed through a guarded pointer, not copied
 /// in and out (a full-buffer copy each way is pure waste for a script that reads
 /// metadata or edits a small region, and Rhai clones a *value* argument on entry,
 /// so a blob argument could not be copy-free anyway; a custom-type receiver is
@@ -390,7 +390,7 @@ impl FrameGuard {
     }
 }
 
-/// A zero-copy, script-side handle to the frame's raw bytes (M581). Index it
+/// A zero-copy, script-side handle to the frame's raw bytes. Index it
 /// (`frame[i]`) to read / write pixels in the live buffer; read `frame.width` /
 /// `.height` / `.format` / `.pts` / `.sequence` / `.len`. Cloning is a shallow
 /// `Arc` bump (Rhai's clone-on-argument-entry then costs nothing), and it is

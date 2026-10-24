@@ -332,7 +332,7 @@ impl AsyncElement for VideoBox {
     }
 }
 
-/// `VideoBox`'s settable properties (GStreamer `videobox` model, M183).
+/// `VideoBox`'s settable properties (GStreamer `videobox` model).
 static VIDEOBOX_PROPS: &[PropertySpec] = &[
     PropertySpec::new("top", PropKind::Int, "top edge: >0 crops, <0 borders").with_default("0"),
     PropertySpec::new("bottom", PropKind::Int, "bottom edge: >0 crops, <0 borders")

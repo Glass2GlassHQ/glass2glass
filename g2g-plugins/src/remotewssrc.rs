@@ -1,4 +1,4 @@
-//! Remote WebSocket transport source (M554, `remote-ws` feature): the WebSocket
+//! Remote WebSocket transport source (`remote-ws` feature): the WebSocket
 //! receive half of the distributed-graph primitive, the inverse of
 //! [`RemoteWsSink`](crate::remotewssink) and the sibling of the TCP
 //! [`RemoteSrc`](crate::remotesrc).

@@ -1,4 +1,4 @@
-//! V4L2 device discovery (M939): enumerates `/dev/videoN` capture nodes as
+//! V4L2 device discovery: enumerates `/dev/videoN` capture nodes as
 //! [`Device`] records so a [`DeviceMonitor`](g2g_core::runtime::DeviceMonitor)
 //! lists cameras with the modes their driver actually reports.
 //!

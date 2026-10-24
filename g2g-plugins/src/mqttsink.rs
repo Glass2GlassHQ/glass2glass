@@ -1,4 +1,4 @@
-//! MQTT sink (M1179): publishes the record `metasink` writes, one message per
+//! MQTT sink: publishes the record `metasink` writes, one message per
 //! frame, to a topic on an MQTT broker. The payload is the same JSON object,
 //! key for key (`pts`, `detections`, `text`, one key per JSON blob), so a
 //! subscriber reads what a `metasink` file holds, and a frame whose record

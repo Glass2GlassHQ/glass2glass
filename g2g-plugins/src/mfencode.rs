@@ -3,14 +3,14 @@
 //! [`MfEncode::with_codec`]; the default is H.264.
 //!
 //! H.264 uses the MS H.264 Encoder MFT at a fixed CLSID
-//! (`CLSID_MSH264EncoderMFT`). H.265/HEVC has no fixed CLSID, so M30
+//! (`CLSID_MSH264EncoderMFT`). H.265/HEVC has no fixed CLSID, so the element
 //! enumerates an encoder via `MFTEnumEx` for the HEVC output subtype. Both a
 //! synchronous MFT (the `ProcessInput`/`ProcessOutput` loop below) and an
 //! asynchronous, event-driven MFT (the common shape of a hardware HEVC encoder,
 //! driven by its `IMFMediaEventGenerator`) are supported; the path is chosen
 //! from the MFT's `MF_TRANSFORM_ASYNC` attribute at `configure_pipeline`.
 //!
-//! M19: consumes raw NV12 `DataFrame`s (`MemoryDomain::System`, tightly
+//! Consumes raw NV12 `DataFrame`s (`MemoryDomain::System`, tightly
 //! packed) and produces Annex-B H.264 access units, also
 //! `MemoryDomain::System` (one encoded sample per input picture; the MFT
 //! emits NALUs with start codes, SPS/PPS attached to each IDR). A
@@ -177,7 +177,7 @@ pub struct MfEncode {
     /// declared `DerivedOutput` closure, as in `mfdecode`.
     input_caps: Option<Caps>,
     emitted: u64,
-    /// M12: the downstream consumer's allocation proposal, recorded in
+    /// The downstream consumer's allocation proposal, recorded in
     /// `configure_allocation`. The encoder emits system-memory bitstream
     /// buffers, so the request is informational.
     requested_alloc: Option<AllocationParams>,
@@ -259,7 +259,7 @@ impl MfEncode {
         self.emitted
     }
 
-    /// The downstream consumer's recorded M12 allocation proposal, if any.
+    /// The downstream consumer's recorded allocation proposal, if any.
     pub fn requested_alloc(&self) -> Option<AllocationParams> {
         self.requested_alloc
     }
@@ -492,7 +492,7 @@ impl AsyncElement for MfEncode {
         }))
     }
 
-    /// M12: record the downstream consumer's allocation proposal. The encoder
+    /// Record the downstream consumer's allocation proposal. The encoder
     /// emits system-memory bitstream buffers sized per encoded frame, so the
     /// request is recorded for diagnostics.
     fn configure_allocation(&mut self, params: &AllocationParams) {

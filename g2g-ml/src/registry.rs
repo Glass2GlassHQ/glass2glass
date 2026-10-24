@@ -1,4 +1,4 @@
-//! Launch-line registration for the ML elements (M820).
+//! Launch-line registration for the ML elements.
 //!
 //! The stock element registry is assembled in `g2g-plugins`, which does not
 //! depend on `g2g-ml`, so an app that wants the ML elements by name calls

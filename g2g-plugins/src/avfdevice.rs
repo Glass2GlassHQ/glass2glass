@@ -1,4 +1,4 @@
-//! AVFoundation camera discovery (M943): the macOS camera half of the
+//! AVFoundation camera discovery: the macOS camera half of the
 //! [`DeviceMonitor`](g2g_core::runtime::DeviceMonitor). An
 //! `AVCaptureDeviceDiscoverySession` lists the cameras, each becoming a
 //! [`Device`] that [`AvfVideoSrc`](crate::avf::AvfVideoSrc) opens by `device`,

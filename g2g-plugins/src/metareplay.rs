@@ -1,4 +1,4 @@
-//! Metadata replay (M1176): reattaches the records a
+//! Metadata replay: reattaches the records a
 //! [`MetaSink`](crate::metasink::MetaSink) wrote to the frames at the same
 //! timestamps, the gst-python-ml `pyml_metareplay` analog. Pixels pass through
 //! untouched; only metadata is added, so a detector run once can be replayed onto

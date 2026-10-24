@@ -2,7 +2,7 @@
 //! `MemoryDomain::WebGPUExternalTexture` (the output of
 //! [`WebCodecsDecode::with_gpu_output`](crate::webcodecsdecode::WebCodecsDecode::with_gpu_output)),
 //! imports each `VideoFrame` as a `GPUExternalTexture`, and samples it in a render
-//! pass onto a `<canvas>` WebGPU context, with **no CPU readback** (M541).
+//! pass onto a `<canvas>` WebGPU context, with **no CPU readback**.
 //!
 //! This is the browser analog of the native Vulkan Video -> `wgpu::Texture` wedge:
 //! the browser's hardware decoder keeps the frame GPU-resident, and it is composited

@@ -1,4 +1,4 @@
-//! M575: HDR swapchain present.
+//! HDR swapchain present.
 //!
 //! The last HDR layer: present a decoded HDR texture on screen through a
 //! swapchain that carries an HDR colour space + mastering metadata, so an HDR
@@ -21,7 +21,7 @@
 //! correctness over throughput: the decode + ycbcr convert already completed
 //! synchronously before the texture reaches the sink, so the queue is idle.
 //!
-//! [`VulkanHdrPresentSink`] (M889) wraps the raw sink as an `AsyncElement` so the
+//! [`VulkanHdrPresentSink`] wraps the raw sink as an `AsyncElement` so the
 //! present is PTS-paced by the shared `PresentationPacer` (late frames dropped,
 //! QoS reported, `max-lateness` / `qos-interval` as properties) like every other
 //! display sink. The app still owns the window: it builds the raw sink, hands it
@@ -796,7 +796,7 @@ impl Drop for VulkanHdrSink {
     }
 }
 
-/// The [`VulkanHdrSink`] as a pipeline display sink (M889): consumes
+/// The [`VulkanHdrSink`] as a pipeline display sink: consumes
 /// [`MemoryDomain::WgpuTexture`] frames (the Vulkan Video decoder's passthrough
 /// GPU output) and presents each at its PTS deadline on the elected clock through
 /// the shared [`PresentationPacer`], so the HDR present drops late frames and

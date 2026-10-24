@@ -13,7 +13,7 @@
 //! copes with; a zero would have it believe the file is empty. Samples then pass
 //! through untouched: WAV is a header plus the payload as it arrived.
 //!
-//! G.711 and IMA ADPCM are written too (M1092), which is what `wavparse` already
+//! G.711 and IMA ADPCM are written too, which is what `wavparse` already
 //! reads back: `... ! mulawenc ! wavenc` files a telephony recording at half the
 //! size. ADPCM's `fmt ` chunk has to state the block size, and `Caps::Audio`
 //! carries none, so it comes from the `blockalign` property and must match the

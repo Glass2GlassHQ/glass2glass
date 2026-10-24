@@ -2,7 +2,7 @@
 //! pipeline (`noalloc_pipeline::run_display_with`, the same camera -> transform
 //! -> `SpiDisplaySink` graph every no_std proof covers) onto the ESP32-P4-EYE's
 //! ST7789 panel over esp-hal's SPI + GPIO, on real silicon. This is the payoff
-//! of the M656 port: the pipeline already links for `riscv32imafc`; here a real
+//! of the RISC-V port: the pipeline already links for `riscv32imafc`; here a real
 //! HAL supplies the peripherals the proof stub bus stood in for.
 //!
 //! STATUS (drafted, not CI-built). esp-hal's `esp32p4` support is on the esp-hal
@@ -13,7 +13,7 @@
 //! exact esp-hal revision before flashing. See README.md.
 //!
 //! The pipeline streams the full 240x240 panel in 16-row bands
-//! (`run_display_banded_with`, M659): the ring holds one 15 KB band, never a
+//! (`run_display_banded_with`): the ring holds one 15 KB band, never a
 //! 230 KB framebuffer, so a full refresh runs from MCU-small memory.
 
 #![no_std]

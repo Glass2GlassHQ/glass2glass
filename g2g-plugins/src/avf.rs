@@ -1,4 +1,4 @@
-//! M738: AVFoundation capture.
+//! AVFoundation capture.
 //!
 //! Two `SourceLoop` sources, the macOS analog of `Camera2Src` / `AAudioSrc`:
 //! - [`AvfVideoSrc`]: default camera -> NV12 frames (packed System bytes by
@@ -242,7 +242,7 @@ pub struct AvfVideoSrc {
     /// `AVCaptureDevice` unique id to open; empty takes the default camera.
     device: String,
     target_buffers: u64,
-    /// Emit retained IOSurface-backed `CVPixelBuffer`s (the M735 zero-copy
+    /// Emit retained IOSurface-backed `CVPixelBuffer`s (the zero-copy
     /// domain) instead of packing NV12 to system memory.
     cv_output: bool,
     state: Option<SessionState<VideoDelegate>>,

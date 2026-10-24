@@ -1,4 +1,4 @@
-//! RFC 3550 RTP fixed header (M643): the 12-byte wire header every RTP
+//! RFC 3550 RTP fixed header: the 12-byte wire header every RTP
 //! packetizer in the workspace emits, defined once. Pure `const fn`
 //! byte-building, part of the heap-free subset, so the MCU packet sink and
 //! the std packetizers in `g2g-plugins` (H.264, the ST 2110 essences) share

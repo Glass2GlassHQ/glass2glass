@@ -51,7 +51,7 @@ const FORMATS: [RawVideoFormat; 13] = [
 ];
 
 /// Upper bound on the scalable output range advertised in caps-driven (auto)
-/// mode (M185). Covers up to 8K with headroom; a downstream capsfilter pins a
+/// mode. Covers up to 8K with headroom; a downstream capsfilter pins a
 /// concrete dim within it.
 const MAX_DIM: u32 = 32768;
 
@@ -75,7 +75,7 @@ pub struct VideoScale {
     /// mid-stream `CapsChanged`. Carries the framerate so the output caps
     /// preserve it (scaling is spatial only).
     input: Option<(RawVideoFormat, u32, u32, Rate)>,
-    /// Output dims resolved from the negotiated output caps (M185), set by
+    /// Output dims resolved from the negotiated output caps, set by
     /// `configure_output`. Used when the properties are unset (auto); `None`
     /// until then, so `process` falls back to the properties and runners that
     /// don't deliver output caps keep the property-driven behavior.
@@ -231,7 +231,7 @@ impl AsyncElement for VideoScale {
         Ok(ConfigureOutcome::Accepted)
     }
 
-    /// M185: take the output geometry from the negotiated output caps when the
+    /// Take the output geometry from the negotiated output caps when the
     /// `width`/`height` properties are unset (caps-driven). When they are set,
     /// the solve already fixated the output to them, so this just records the
     /// same dims. Validates the resolved geometry is non-zero.
@@ -377,7 +377,7 @@ impl AsyncElement for VideoScale {
     }
 }
 
-/// `VideoScale`'s settable properties (M107).
+/// `VideoScale`'s settable properties.
 static VIDEOSCALE_PROPS: &[PropertySpec] = &[
     PropertySpec::new("width", PropKind::Uint, "output width in pixels"),
     PropertySpec::new("height", PropKind::Uint, "output height in pixels"),

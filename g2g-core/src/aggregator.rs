@@ -1,4 +1,4 @@
-//! Per-input collector for `MultiInputElement` aggregators (M199).
+//! Per-input collector for `MultiInputElement` aggregators.
 //!
 //! Every N-in-1-out element (muxer, compositor, tensor batcher, the Python
 //! aggregator host) needs the same bookkeeping: buffer items arriving per input

@@ -1,5 +1,5 @@
-//! G.711 (mu-law / A-law) fixed-point audio codec: the first MCU-fit codec
-//! (M638). Pure integer companding, one byte per sample, no tables beyond
+//! G.711 (mu-law / A-law) fixed-point audio codec: the first MCU-fit codec.
+//! Pure integer companding, one byte per sample, no tables beyond
 //! what the expressions fold to, so it runs on the heap-free subset like the
 //! peripheral elements around it.
 //!

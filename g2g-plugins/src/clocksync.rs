@@ -1,4 +1,4 @@
-//! Wall-clock pacing transform (`clocksync`, M945): holds each buffer until its
+//! Wall-clock pacing transform (`clocksync`): holds each buffer until its
 //! PTS comes due on the pipeline clock, so an upstream that produces as fast as
 //! the CPU allows feeds downstream at real time.
 //!

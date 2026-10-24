@@ -1,4 +1,4 @@
-//! AVI muxer elements (M1071): one video stream plus at most one audio stream
+//! AVI muxer elements: one video stream plus at most one audio stream
 //! in, a `ByteStream{Avi}` out. [`AviMux`] takes a single input
 //! (`... ! mjpegenc ! avimux ! filesink location=out.avi`), [`AviMuxN`] takes
 //! one per pad (`... ! m.video_0  ... ! m.audio_0  avimux name=m ! filesink`).

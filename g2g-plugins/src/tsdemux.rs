@@ -1,4 +1,4 @@
-//! MPEG-TS demuxers (M108, M388): `Caps::ByteStream{MpegTs}` in, selected
+//! MPEG-TS demuxers: `Caps::ByteStream{MpegTs}` in, selected
 //! elementary streams out. H.264 / H.265 video leave as `Caps::CompressedVideo`
 //! (Annex-B); AAC audio leaves as `Caps::Audio` (ADTS).
 //!
@@ -18,8 +18,8 @@
 //! picks which to emit, so a second `tsdemux` selecting another stream demuxes
 //! the rest of the multiplex. The choice is by codec, not a runtime-discovered
 //! "first video", because the output caps are fixed at negotiation before any
-//! packet is parsed (M109). Scope: the first stream of the selected codec within
-//! the active PAT program (`program-number`, default the first program; M781).
+//! packet is parsed. Scope: the first stream of the selected codec within
+//! the active PAT program (`program-number`, default the first program).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -55,12 +55,12 @@ use crate::oneport::OnePortElement;
 use crate::typefind::sized_by_sps;
 
 /// The published stream id of an elementary stream: the id it takes in the
-/// `StreamCollection` (M386), and the id its per-stream tags post on (M872).
+/// `StreamCollection`, and the id its per-stream tags post on.
 fn stream_id(pid: u16) -> alloc::string::String {
     alloc::format!("mpegts-pid-{pid}")
 }
 
-/// Posts a transport stream's tags on the bus once each (M872): each SDT service's
+/// Posts a transport stream's tags on the bus once each: each SDT service's
 /// text as a [`BusMessage::Tag`] scoped to its program (the service name as
 /// [`Tag::Title`], the provider as a [`Tag::Other`] under ffprobe's
 /// `service_provider` key), and each PMT stream's ISO 639 language as a
@@ -68,7 +68,7 @@ fn stream_id(pid: u16) -> alloc::string::String {
 /// the Matroska `MetadataPoster`.
 ///
 /// The SDT describes the whole multiplex, so every service it names posts under its
-/// own `program_number` (M878), not only the one this element routes: an
+/// own `program_number`, not only the one this element routes: an
 /// application learns what the transport stream carries from one demuxer. TS
 /// carries nothing else, the SDT and the language descriptor being its only
 /// standard tag slots. State survives a seek's parser reset, so re-reading the
@@ -77,7 +77,7 @@ fn stream_id(pid: u16) -> alloc::string::String {
 struct TagPoster {
     service_posted: bool,
     languages_posted: bool,
-    /// The parser's EIT generation this poster last posted at (M1049). Unlike the
+    /// The parser's EIT generation this poster last posted at. Unlike the
     /// SDT and the language descriptors, present/following events change during
     /// the stream, so they re-post whenever a new table version arrives and never
     /// on a table that only repeats itself.
@@ -87,7 +87,7 @@ struct TagPoster {
 impl TagPoster {
     /// Post whatever the demuxer has parsed since the last call; a no-op until the
     /// SDT / PMT parse, and once each thereafter. Takes the demuxer by `&mut`
-    /// because the EIT schedule events are drained rather than kept (M1056).
+    /// because the EIT schedule events are drained rather than kept.
     fn post(&mut self, demux: &mut TsDemuxer, bus: Option<&BusHandle>) {
         if !self.service_posted {
             for (program, service) in demux.services() {
@@ -132,7 +132,7 @@ impl TagPoster {
     }
 
     /// Post each service's EIT present/following text, start time and duration as
-    /// a [`BusMessage::Tag`] scoped to its program (M1049, M1056), the way the SDT
+    /// a [`BusMessage::Tag`] scoped to its program, the way the SDT
     /// service name posts: a `service_id` is a `program_number`, so the two
     /// describe the same program. The event on air and the one after it share one
     /// tag list per service, under their own keys, since [`Tag::Title`] there is
@@ -241,7 +241,7 @@ impl TagPoster {
 }
 
 /// Append an EIT event's start time (Unix seconds, UTC) and duration (seconds) to
-/// a tag list (M1056). A stream that declared either field undefined or encoded it
+/// a tag list. A stream that declared either field undefined or encoded it
 /// invalidly posts no tag for it, rather than a zero a consumer would read as a
 /// real time.
 fn push_event_timing(
@@ -294,7 +294,7 @@ pub enum TsStream {
     H265,
     /// The first MPEG-4 Part 2 (Visual) video elementary stream.
     Mpeg4Part2,
-    /// The first AV1 video elementary stream (M1049): a private PES (0x06)
+    /// The first AV1 video elementary stream: a private PES (0x06)
     /// carrying an AV1 registration descriptor. Each PES payload is one temporal
     /// unit in the low-overhead OBU format, which `av1parse` and the AV1 decoders
     /// read as-is.
@@ -377,15 +377,15 @@ impl TsDemux {
         self.map(|demux| demux.with_program_number(n))
     }
 
-    /// Attach the pipeline bus so the program's `StreamCollection` (M386) is
+    /// Attach the pipeline bus so the program's `StreamCollection` is
     /// announced once the PMT is parsed, and its SDT service text / per-stream
-    /// languages post as tags (M872), the MPEG-TS sibling of
+    /// languages post as tags, the MPEG-TS sibling of
     /// [`MkvDemux::with_bus`](crate::mkvdemux::MkvDemux::with_bus).
     pub fn with_bus(self, bus: BusHandle) -> Self {
         self.map(|demux| demux.with_bus(bus))
     }
 
-    /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
+    /// Make the demuxer seekable: `app` carries app time seeks; `upstream`
     /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
     /// On a time seek the demuxer rewinds the source and re-syncs from the
     /// keyframe at/before the target.
@@ -597,7 +597,7 @@ const PROGRAM_NUMBER_PROP: PropertySpec = PropertySpec::new(
     "PAT program to demux (-1 = the first program)",
 );
 
-/// A one-port `TsDemuxN`'s settable properties (M109, M781).
+/// A one-port `TsDemuxN`'s settable properties.
 static ONE_PORT_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
@@ -612,7 +612,7 @@ static ONE_PORT_PROPS: &[PropertySpec] = &[
     ),
 ];
 
-/// `TsDemuxN`'s settable properties with several ports (M781).
+/// `TsDemuxN`'s settable properties with several ports.
 static MULTI_PORT_PROPS: &[PropertySpec] = &[PROGRAM_NUMBER_PROP];
 
 /// Map the `program-number` property (`-1` = first program) to the demuxer's
@@ -729,8 +729,8 @@ fn es_to_ts_stream(es: &crate::mpegts::ElementaryStream) -> Option<TsStream> {
     }
 }
 
-/// One forwardable elementary stream discovered in a parsed transport stream
-/// (M389): which [`TsStream`] a demux port would carry, the elementary [`Caps`] a
+/// One forwardable elementary stream discovered in a parsed transport stream:
+/// which [`TsStream`] a demux port would carry, the elementary [`Caps`] a
 /// decode branch plugs from, and whether it is video (vs audio). The
 /// `playbin uri=*.ts` auto-fan-out builds one decode branch per entry. The
 /// MPEG-TS analog of [`crate::mkvdemux::MkvStreamInfo`].
@@ -746,7 +746,7 @@ pub struct TsStreamInfo {
 }
 
 /// The forwardable elementary streams a parsed transport stream carries, in PMT
-/// order within the active program (M389, M781): one [`TsStreamInfo`] per PMT
+/// order within the active program: one [`TsStreamInfo`] per PMT
 /// entry whose `stream_type` maps to a [`TsStream`]. `demux` must have parsed its
 /// PMT (feed a file prefix first);
 /// returns empty for a non-MPEG-TS or not-yet-parsed input, which the `playbin`
@@ -854,7 +854,7 @@ impl PadTemplates for TsDemux {
     }
 }
 
-/// Multi-output MPEG-TS demuxer (M388): one TS byte stream in, N elementary
+/// Multi-output MPEG-TS demuxer: one TS byte stream in, N elementary
 /// streams out, one selected [`TsStream`] per output port. The MPEG-TS sibling of
 /// [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN). [`TsDemux`] is this element with
 /// one port.
@@ -868,8 +868,8 @@ impl PadTemplates for TsDemux {
 /// emits its elementary [`Caps`] ([`PipelinePacket::CapsChanged`]) before its
 /// first frame (the branch retypes from the byte-stream input caps); a parsed
 /// stream no port carries is dropped, and a port whose stream the multiplex lacks
-/// stays dark. With a bus, announces the program's `StreamCollection` (M386).
-/// The `playbin uri=*.ts` fan-out (M389) builds this.
+/// stays dark. With a bus, announces the program's `StreamCollection`.
+/// The `playbin uri=*.ts` fan-out builds this.
 ///
 /// # Example
 ///
@@ -892,11 +892,11 @@ pub struct TsDemuxN {
     announced: Vec<bool>,
     port_pids: Vec<PortPid>,
     bus: Option<BusHandle>,
-    /// Set once the `StreamCollection` has been announced (M386), so it posts once.
+    /// Set once the `StreamCollection` has been announced, so it posts once.
     collection_posted: bool,
-    /// Posts the SDT service text and per-stream languages as tags (M872).
+    /// Posts the SDT service text and per-stream languages as tags.
     tags: TagPoster,
-    /// App-driven stream selection (M475): the app names the stream id each port
+    /// App-driven stream selection: the app names the stream id each port
     /// should carry (port `i` <- selection id `i`); the demuxer re-maps its ports.
     /// Inert unless `with_stream_select` wired it. The MPEG-TS sibling of
     /// [`MkvDemuxN::with_stream_select`](crate::mkvdemux::MkvDemuxN::with_stream_select).
@@ -905,7 +905,7 @@ pub struct TsDemuxN {
     /// preserved across a parser reset so a seek keeps the selection.
     program_number: Option<u16>,
     emitted: u64,
-    /// Seek support (M362): app time seeks drive an upstream byte-seek and a
+    /// Seek support: app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `set_seek` wired the controllers.
     seek: DemuxSeek<EsUnit>,
     // units of every PID held while a seek waits for the earliest stream's first pts
@@ -1051,9 +1051,9 @@ impl TsDemuxN {
             .filter(|&interval| interval > 0 && interval <= MAX_PTS_INTERVAL_NS);
     }
 
-    /// Attach the pipeline bus so the program's `StreamCollection` (M386) posts
+    /// Attach the pipeline bus so the program's `StreamCollection` posts
     /// once the PMT is parsed, and its SDT service text / per-stream languages
-    /// post as tags (M872).
+    /// post as tags.
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.bus = Some(bus);
         self
@@ -1067,7 +1067,7 @@ impl TsDemuxN {
         self
     }
 
-    /// Make the per-port stream assignment app-selectable (M475): the controller
+    /// Make the per-port stream assignment app-selectable: the controller
     /// carries stream ids (from the announced collection, e.g. `"mpegts-pid-256"`);
     /// port `i` re-maps to the stream named by selection id `i`. The demuxer
     /// re-emits that port's `CapsChanged` for the new stream and confirms the active
@@ -1079,7 +1079,7 @@ impl TsDemuxN {
         self
     }
 
-    /// Apply any pending app selection (M475): re-map port `i` to the stream named
+    /// Apply any pending app selection: re-map port `i` to the stream named
     /// by the `i`-th selected id, re-arming that port's `CapsChanged` when its
     /// stream changes, and confirm the active ids on the bus. A no-op without a
     /// controller, with no pending selection, or before the PMT is parsed (an id
@@ -1148,7 +1148,7 @@ impl TsDemuxN {
     }
 
     /// Announce the active program's elementary streams as a
-    /// [`BusMessage::StreamCollection`] (M386), once, when that program's PMT has
+    /// [`BusMessage::StreamCollection`], once, when that program's PMT has
     /// parsed. The collection is the selected program's streams (GStreamer's
     /// collection is per-program too). A no-op without a bus, before the PMT, or
     /// once already posted.
@@ -1419,7 +1419,7 @@ fn config_frame(blob: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
 /// Resolve a collection stream id (`"mpegts-pid-{pid}"`) to its PID and the [`TsStream`] that
 /// selects it, by looking the PID up in the parsed PMT and mapping its
 /// `stream_type`. `None` for an unparseable id, an unknown PID, or a stream_type
-/// g2g does not forward (M475).
+/// g2g does not forward.
 fn resolve_ts_stream_id(demux: &TsDemuxer, id: &str) -> Option<(u16, TsStream)> {
     let pid: u16 = id.strip_prefix("mpegts-pid-")?.parse().ok()?;
     let es = demux.streams().iter().find(|e| e.pid == pid)?;
@@ -1481,7 +1481,7 @@ impl MultiOutputElement for TsDemuxN {
         CapsConstraint::Accepts(CapsSet::one(input_caps()))
     }
 
-    /// Declare each port's elementary-stream caps (M380), so the solver negotiates
+    /// Declare each port's elementary-stream caps, so the solver negotiates
     /// each branch against its codec at startup. `None` for an out-of-range port.
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
         self.ports.get(port).map(|&stream| output_caps(stream))
@@ -2463,7 +2463,7 @@ mod tests {
         assert_eq!(sink.frames, alloc::vec![syncframe.to_vec()]);
     }
 
-    /// The one-port demuxer posts the tags a transport stream carries (M872):
+    /// The one-port demuxer posts the tags a transport stream carries:
     /// the SDT service text once as a `Tag`, each PMT language as a `StreamTag` on
     /// its stream's collection id. Re-feeding the same stream posts nothing more.
     #[tokio::test]

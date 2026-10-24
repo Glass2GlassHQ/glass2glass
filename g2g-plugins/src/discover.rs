@@ -1,4 +1,4 @@
-//! Media discovery (M1107): what a file or URI contains, without hand-writing a
+//! Media discovery: what a file or URI contains, without hand-writing a
 //! graph. The `gst-discoverer-1.0` analog behind the `g2g-discover` binary.
 //!
 //! [`discover`] sniffs the container with [`crate::typefind`], builds a headless

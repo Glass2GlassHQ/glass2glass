@@ -8,7 +8,7 @@
 //! The Python contract is `g2g_process_batch(buffers, width, height, fmt, meta)`
 //! where `buffers` is a list of writable buffer-protocol views (one per
 //! contributing input), `meta` is the analytics sink. GPU-resident inputs take the
-//! CUDA shape instead (M986): `g2g_process_cuda_batch(planes, width, height, meta)`
+//! CUDA shape instead: `g2g_process_cuda_batch(planes, width, height, meta)`
 //! with one `(luma, chroma)` `__cuda_array_interface__` pair per input, so a
 //! batched detector reads every stream's decoded surface with no readback. Because `MultiInputElement`
 //! is N-in-1-out, only the anchor (input-0) frame is emitted; the aggregate

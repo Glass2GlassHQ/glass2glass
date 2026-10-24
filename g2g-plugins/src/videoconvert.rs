@@ -1,4 +1,4 @@
-//! Software raw-video format converter (M23). Converts between the packed
+//! Software raw-video format converter. Converts between the packed
 //! raw formats (`Rgba8`, `Bgra8`) and the 4:2:0 planar/semi-planar formats
 //! (`Nv12`, `I420`) at the same geometry, so chains compose across format
 //! boundaries: `VideoTestSrc (RGBA) -> VideoConvert -> MfEncode (NV12)`, or
@@ -79,11 +79,11 @@ pub(crate) const FORMATS: [RawVideoFormat; 25] = [
 pub struct VideoConvert {
     /// Target output format from the `format` property. `None` means "auto":
     /// take the output format from the negotiated caps (a downstream
-    /// capsfilter), the gst caps-driven idiom (M186).
+    /// capsfilter), the gst caps-driven idiom.
     target: Option<RawVideoFormat>,
     /// The configured input stream, updated by a mid-stream `CapsChanged`.
     input: Option<InputStream>,
-    /// Output format resolved from the negotiated output caps (M186), set by
+    /// Output format resolved from the negotiated output caps, set by
     /// `configure_output`. Used in auto mode; `None` until then so `process`
     /// falls back to the property and runners that don't deliver output caps
     /// keep the property-driven behavior.
@@ -126,7 +126,7 @@ impl VideoConvert {
         }
     }
 
-    /// Caps-driven (M186): take the output format from the negotiated caps (a
+    /// Caps-driven: take the output format from the negotiated caps (a
     /// downstream capsfilter). With no downstream constraint it defaults to
     /// passthrough (no conversion).
     pub fn auto() -> Self {
@@ -260,7 +260,7 @@ impl AsyncElement for VideoConvert {
         Some(g2g_core::meta::Transform::Copy)
     }
 
-    /// M977: this element reads its input's rows wherever a `PlaneLayout` says
+    /// This element reads its input's rows wherever a `PlaneLayout` says
     /// they are, so an upstream producer with padded rows (a GPU readback) can
     /// hand them over as they are instead of repacking every frame. Requested
     /// from every consumer: the padded buffer is only safe where nothing else
@@ -274,7 +274,7 @@ impl AsyncElement for VideoConvert {
     /// Native `DerivedFields`: any supported raw input maps to the target
     /// format at the same dims/framerate, so geometry + framerate are the
     /// coupled fields and a downstream geometry pin couples back through this
-    /// format-only converter (M188's scale_then_convert case).
+    /// format-only converter (the scale-then-convert case).
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let shapes =
             match self.target {
@@ -304,7 +304,7 @@ impl AsyncElement for VideoConvert {
         Ok(ConfigureOutcome::Accepted)
     }
 
-    /// M186: take the output format from the negotiated output caps when the
+    /// Take the output format from the negotiated output caps when the
     /// `format` property is unset (caps-driven). Validates the format is
     /// producible.
     fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
@@ -545,7 +545,7 @@ impl AsyncElement for VideoConvert {
     }
 }
 
-/// `VideoConvert`'s settable properties (M107): the output pixel format.
+/// `VideoConvert`'s settable properties: the output pixel format.
 static VIDEOCONVERT_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "format",
     PropKind::Str,
@@ -577,7 +577,7 @@ pub(crate) fn converts_from(format: RawVideoFormat, w: u32, h: u32) -> bool {
 /// input frame, and `converts_from` holds for both formats at `w x h`.
 /// `colorimetry` is the YUV side's, from its caps: it picks the matrix and range
 /// the color step uses, and an `UNKNOWN` one converts BT.601 limited. Public so
-/// the `convert` benchmark (M284) can exercise this hot path directly.
+/// the `convert` benchmark can exercise this hot path directly.
 pub fn convert(
     src: &[u8],
     from: RawVideoFormat,
@@ -598,7 +598,7 @@ pub fn convert(
 }
 
 /// [`convert`] reading the input's rows `src_stride` bytes apart instead of
-/// tightly packed (M977). Only a packed RGBA / BGRA input can carry a pitch of
+/// tightly packed. Only a packed RGBA / BGRA input can carry a pitch of
 /// its own: every other format arrives packed, so `src_stride` is then its tight
 /// row size and this is exactly [`convert`].
 fn convert_strided(

@@ -1332,7 +1332,7 @@ mod tests {
         assert_eq!(data_payloads(&sink), expected);
     }
 
-    /// M1116: an upstream that hands over one access unit per buffer (RtspSrc, the
+    /// An upstream that hands over one access unit per buffer (RtspSrc, the
     /// depayloader, the demuxers) must not have its trailing picture held back for
     /// the next buffer's start code, which cost a frame period of latency on every
     /// live stream.
@@ -1363,7 +1363,7 @@ mod tests {
         assert_eq!(payloads, aus, "and each one whole, in order");
     }
 
-    /// The other half of M1116: a chunked byte stream (filesrc) still waits, since
+    /// The other half: a chunked byte stream (filesrc) still waits, since
     /// a buffer boundary there says nothing about where an access unit ends.
     #[tokio::test]
     async fn reframing_still_holds_the_tail_of_a_chunked_byte_stream() {

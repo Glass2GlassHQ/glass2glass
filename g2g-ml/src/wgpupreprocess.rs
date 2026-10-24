@@ -13,25 +13,25 @@
 //! `videoconvert` in front.
 //!
 //! Both ends of the compute can now stay on the GPU:
-//! - **Output (M215, [`with_gpu_output`](WgpuPreprocess::with_gpu_output)):** the
+//! - **Output ([`with_gpu_output`](WgpuPreprocess::with_gpu_output)):** the
 //!   f32 tensor is left in a `wgpu::Buffer` (`MemoryDomain::WgpuBuffer`) instead
 //!   of read back to `MemoryDomain::System`, so `WgpuInference` binds it on-device.
-//! - **Input (M217, surface-import):** when the NV12 frame arrives already on the
+//! - **Input (surface-import):** when the NV12 frame arrives already on the
 //!   GPU as a `MemoryDomain::WgpuTexture` (see [`WgpuNv12Texture`]), the element
 //!   samples it straight into the compute pass on the producer's own device, with
 //!   no CPU upload. Either NV12 texture layout works: the R8Uint plane holding
 //!   the standard NV12 byte layout that the bridges allocate, or the two-plane
-//!   `TextureFormat::NV12` a Vulkan Video decoder hands out (M1157), sampled
+//!   `TextureFormat::NV12` a Vulkan Video decoder hands out, sampled
 //!   through its luma and chroma views. The default `MemoryDomain::System` path
 //!   (upload NV12 bytes to a storage buffer) is unchanged.
-//! - **Input (M990, dma-buf import, `dmabuf-wgpu` feature, Linux):** a
+//! - **Input (dma-buf import, `dmabuf-wgpu` feature, Linux):** a
 //!   `MemoryDomain::DmaBuf` frame from a capture / decode path is imported
 //!   with Vulkan external memory into a buffer aliasing the same pixels and bound
 //!   into the compute pass. The frame's row stride and plane offset reach the
 //!   shader in the dims uniform, so a padded capture buffer needs no repack. A
 //!   webcam's capture buffer is CPU-backed, which only an integrated GPU can bind,
 //!   so `with_import_adapter` picks the GPU
-//!   the import opens on (M993). Windows D3D11 surface import is the remaining
+//!   the import opens on. Windows D3D11 surface import is the remaining
 //!   input path.
 //!
 //! With both ends GPU-resident, `capture / decode -> WgpuPreprocess ->
@@ -159,7 +159,7 @@ macro_rules! yuv_to_rgb {
 /// `dims.stride` / `dims.base` locate the first plane inside the input buffer: a
 /// system-memory frame is tightly packed from byte 0 (`stride` = the format's tight
 /// row bytes, `base == 0`), an imported dma-buf can have a padded row stride and a
-/// nonzero plane offset (M990). The output tensor is always tightly packed.
+/// nonzero plane offset. The output tensor is always tightly packed.
 macro_rules! yuv_shader {
     ($sample:expr) => {
         concat!(
@@ -215,7 +215,7 @@ const YUYV_SHADER: &str = yuv_shader!(
 "#
 );
 
-/// Surface-import variant of `SHADER` (M217): the NV12 frame arrives as an
+/// Surface-import variant of `SHADER`: the NV12 frame arrives as an
 /// R8Uint texture of `gpu::packed_nv12_extent` (Y plane in rows `[0, h)`,
 /// interleaved Cb,Cr in the `ceil(h/2)` rows after it, every row as wide as a
 /// chroma row, so an odd width leaves a spare byte after each luma row).
@@ -244,7 +244,7 @@ const TEX_SHADER: &str = concat!(
 
 /// Surface-import variant of `TEX_SHADER` for the two-plane
 /// `TextureFormat::NV12` / `TextureFormat::P010` texture a Vulkan Video decoder
-/// hands out (M1157): the luma and chroma planes arrive as the two views
+/// hands out: the luma and chroma planes arrive as the two views
 /// `gpu::nv12_plane_views` builds, the chroma one at half size with Cb in `r`
 /// and Cr in `g`, so this pixel's
 /// chroma is its texel `(x/2, y/2)`. `textureLoad` fetches that exact texel with
@@ -268,7 +268,7 @@ const TEX_SHADER_NV12_PLANES: &str = concat!(
     write_rgb_tensor!()
 );
 
-/// Surface-import variant for an already-RGB frame (M304): the input is an
+/// Surface-import variant for an already-RGB frame: the input is an
 /// `Rgba8Unorm` texture whose YCbCr->RGB conversion already happened upstream
 /// (the Android `MediaCodecDec` GPU path samples the decoded `AHardwareBuffer`
 /// through an immutable ycbcr sampler). `textureLoad` returns normalized f32
@@ -385,7 +385,7 @@ pub fn yuyv_to_rgb_tensor(yuyv: &[u8], width: usize, height: usize) -> Vec<f32> 
 
 /// The raw formats the element reads, in preference order: NV12 and packed YUYV
 /// through a compute shader, plus already-converted RGBA where a GPU decoder hands
-/// it over as a texture (M304).
+/// it over as a texture.
 fn input_formats() -> &'static [RawVideoFormat] {
     #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
     return &[
@@ -524,7 +524,7 @@ struct Gpu {
 /// frame's memory lives on (a texture or imported buffer is bindable only on its
 /// own device), so the bind group is rebuilt per dispatch.
 ///
-/// Serves the GPU-texture surface-import (M217) and the dma-buf import (M990).
+/// Serves the GPU-texture surface-import and the dma-buf import.
 #[derive(Debug)]
 struct ImportGpu {
     device: wgpu::Device,
@@ -556,35 +556,35 @@ pub struct WgpuPreprocess {
     configured: bool,
     gpu: Option<Gpu>,
     /// Surface-import resources, built on the first GPU-texture frame from that
-    /// frame's device (M217). Separate from `gpu` because the texture path binds
+    /// frame's device. Separate from `gpu` because the texture path binds
     /// a sampled texture, not a storage buffer, and adopts the producer's device.
     tex_gpu: Option<ImportGpu>,
-    /// Two-plane NV12 surface-import resources (M1157), built on the first such
+    /// Two-plane NV12 surface-import resources, built on the first such
     /// GPU-texture frame. Separate pipeline from `tex_gpu` because the planes are
     /// two normalized `texture_2d<f32>` bindings, not one packed uint plane.
     tex_planes_gpu: Option<ImportGpu>,
-    /// RGBA surface-import resources (M304), built on the first RGBA GPU-texture
+    /// RGBA surface-import resources, built on the first RGBA GPU-texture
     /// frame. Separate pipeline from `tex_gpu` (samples `texture_2d<f32>`, no
     /// YCbCr math); the input is already-converted RGBA from `MediaCodecDec`.
     #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
     tex_rgba_gpu: Option<ImportGpu>,
-    /// dma-buf import resources (M990), built on the first dma-buf frame. Separate
+    /// dma-buf import resources, built on the first dma-buf frame. Separate
     /// from `gpu` because the import needs a device carrying the Vulkan
     /// external-memory extensions, which the element's own device does not have.
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
     dmabuf_gpu: Option<ImportGpu>,
     /// The dma-buf import itself, holding the producer-sync state it keeps across
-    /// frames (M990).
+    /// frames.
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
     dmabuf_importer: g2g_plugins::dmabufwgpu::DmaBufImporter,
-    /// Which GPU the dma-buf import opens on (M993): a webcam's CPU-backed
+    /// Which GPU the dma-buf import opens on: a webcam's CPU-backed
     /// capture buffer binds only on an integrated one.
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
     import_adapter: g2g_plugins::dmabufwgpu::ImportAdapter,
     last_caps: Option<Caps>,
     emitted: u64,
     /// When set, emit the tensor as a GPU-resident `MemoryDomain::WgpuBuffer`
-    /// (no GPU->CPU read-back) instead of `MemoryDomain::System` (M215). Lets a
+    /// (no GPU->CPU read-back) instead of `MemoryDomain::System`. Lets a
     /// downstream GPU consumer read the tensor on-device.
     gpu_output: bool,
 }
@@ -621,7 +621,7 @@ impl WgpuPreprocess {
     }
 
     /// Emit the tensor GPU-resident (`MemoryDomain::WgpuBuffer`) rather than
-    /// reading it back to system memory (M215): the compute output stays in a
+    /// reading it back to system memory: the compute output stays in a
     /// `wgpu::Buffer`, so a downstream GPU consumer reads it with no
     /// GPU->CPU copy. A CPU consumer recovers the bytes via the buffer owner's
     /// `read_back`. Default off (the system-memory variant).
@@ -630,8 +630,8 @@ impl WgpuPreprocess {
         self
     }
 
-    /// Import dma-buf frames on a chosen GPU instead of the most capable one
-    /// (M993): a capture buffer from a USB webcam is CPU-backed, which a discrete
+    /// Import dma-buf frames on a chosen GPU instead of the most capable one:
+    /// a capture buffer from a USB webcam is CPU-backed, which a discrete
     /// GPU refuses to bind and an integrated one accepts. Same knob as the
     /// `import-adapter` property; the default is unchanged, which is what a
     /// GPU-exported dma-buf needs.
@@ -720,7 +720,7 @@ impl WgpuPreprocess {
         Ok(bytes.into_boxed_slice())
     }
 
-    /// GPU-output variant of [`dispatch`](Self::dispatch) (M215): run the same
+    /// GPU-output variant of [`dispatch`](Self::dispatch): run the same
     /// compute, then copy the result into a fresh per-frame `wgpu::Buffer` (a
     /// GPU->GPU copy, on-device) and hand it downstream, with NO map / poll /
     /// read-back. The fresh buffer is `STORAGE | COPY_SRC` so a downstream GPU
@@ -782,7 +782,7 @@ impl WgpuPreprocess {
         ))
     }
 
-    /// Build the surface-import pipeline and output buffers on `device` (M217).
+    /// Build the surface-import pipeline and output buffers on `device`.
     /// Idempotent: built once, on the first GPU-texture frame, because the
     /// device is only known once such a frame arrives.
     fn ensure_tex_gpu(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
@@ -800,8 +800,7 @@ impl WgpuPreprocess {
         ));
     }
 
-    /// [`ensure_tex_gpu`](Self::ensure_tex_gpu) for the two-plane NV12 pipeline
-    /// (M1157).
+    /// [`ensure_tex_gpu`](Self::ensure_tex_gpu) for the two-plane NV12 pipeline.
     fn ensure_tex_planes_gpu(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         if self.tex_planes_gpu.is_some() {
             return;
@@ -818,7 +817,7 @@ impl WgpuPreprocess {
     }
 
     /// Route a GPU-resident NV12 frame to the pipeline for the layout its
-    /// texture is in (M1157): one packed R8Uint plane from the NV12 bridges, or
+    /// texture is in: one packed R8Uint plane from the NV12 bridges, or
     /// the decoder's two-plane `TextureFormat::NV12`. Both produce the same
     /// tensor. Any other format under a `WgpuNv12Texture` is a producer bug, not
     /// something to guess at. Both shaders read only the negotiated picture, so
@@ -840,7 +839,7 @@ impl WgpuPreprocess {
         self.dispatch_tex_planes(owner)
     }
 
-    /// Surface-import dispatch (M217): sample the incoming NV12 texture straight
+    /// Surface-import dispatch: sample the incoming NV12 texture straight
     /// into the compute pass on its own device, no CPU upload. Returns the tensor
     /// domain, GPU-resident (`WgpuBuffer`) when `gpu_output` is set or read back
     /// to `System` otherwise, mirroring [`dispatch`] / [`dispatch_gpu`]. The bind
@@ -899,7 +898,7 @@ impl WgpuPreprocess {
         finish_import(tg, encoder, self.gpu_output)
     }
 
-    /// Two-plane surface-import dispatch (M1157): bind the decoder's
+    /// Two-plane surface-import dispatch: bind the decoder's
     /// `TextureFormat::NV12` picture through its luma and chroma views and run
     /// the same colour math [`dispatch_tex`](Self::dispatch_tex) does, so the
     /// tensor matches the packed path byte for byte up to the plane views'
@@ -966,7 +965,7 @@ impl WgpuPreprocess {
     }
 
     /// Try to consume the GPU texture as an already-RGB `WgpuRgbaTexture` (the
-    /// M304 Android decode path). Returns `Ok(None)` if the keep-alive is not one
+    /// Android decode path). Returns `Ok(None)` if the keep-alive is not one
     /// (so the caller falls through to `UnsupportedDomain`).
     #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
     fn try_dispatch_rgba(
@@ -1006,7 +1005,7 @@ impl WgpuPreprocess {
         ));
     }
 
-    /// RGBA surface-import dispatch (M304): sample the already-converted RGBA
+    /// RGBA surface-import dispatch: sample the already-converted RGBA
     /// texture straight into the tensor on its own device, no colour math, no CPU
     /// upload. Mirrors [`dispatch_tex`] but binds an `Rgba8Unorm` `texture_2d<f32>`
     /// sized `width x height` (not the NV12 `x 3/2`).
@@ -1059,7 +1058,7 @@ impl WgpuPreprocess {
         finish_import(tg, encoder, self.gpu_output)
     }
 
-    /// dma-buf import dispatch (M990): import the frame's dma-buf as a Vulkan
+    /// dma-buf import dispatch: import the frame's dma-buf as a Vulkan
     /// buffer aliasing the same memory and bind it straight into the compute
     /// pass, no CPU upload. The frame's row stride and plane offset go to the
     /// shader in the dims uniform, so a padded capture buffer needs no repack.
@@ -1221,12 +1220,12 @@ fn finish_import(
 /// consumer downcasts to bind the buffer directly, or calls
 /// [`read_back`](Self::read_back) for the CPU bytes.
 ///
-/// First produced by [`WgpuPreprocess`] in GPU-output mode (M215, the f32 NCHW
+/// First produced by [`WgpuPreprocess`] in GPU-output mode (the f32 NCHW
 /// RGB tensor); it is also the owner `WgpuInference` emits for its GPU-resident
 /// logits, so the same downcast recovers either producer's buffer. A consumer
 /// that adopts [`device`](Self::device) / [`queue`](Self::queue) keeps the
 /// tensor on the same device, so its work serializes after the producer's on the
-/// shared queue with no CPU round-trip (M216).
+/// shared queue with no CPU round-trip.
 #[derive(Debug)]
 pub struct WgpuBufferOwner {
     device: wgpu::Device,
@@ -1667,9 +1666,9 @@ fn dims_bytes(
 /// frame's GPU memory lives on (a texture) or the one that can import its fd (a
 /// dma-buf). Unlike [`build_gpu`] it requests no adapter / device, and allocates
 /// no input buffer, because the input arrives with the frame. `shader` picks what
-/// that input is: `TEX_SHADER` for an NV12 texture (M217), the imported dma-buf
-/// buffer's format shader (M990, see [`shader_for`]), `TEX_SHADER_RGBA` for an
-/// already-RGB texture (M304).
+/// that input is: `TEX_SHADER` for an NV12 texture, the imported dma-buf
+/// buffer's format shader (see [`shader_for`]), `TEX_SHADER_RGBA` for an
+/// already-RGB texture.
 #[allow(clippy::too_many_arguments)]
 fn build_import_gpu(
     device: &wgpu::Device,
@@ -1726,7 +1725,7 @@ fn build_import_gpu(
     }
 }
 
-/// Stand-in for a GPU NV12 decoder until one lands (M217): upload tight NV12
+/// Stand-in for a GPU NV12 decoder until one lands: upload tight NV12
 /// system bytes to a GPU R8Uint texture of `gpu::packed_nv12_extent` on a fresh
 /// wgpu device, and return it as the `MemoryDomain::WgpuTexture` domain
 /// [`WgpuPreprocess`] surface-imports. A real GPU decoder
@@ -1933,7 +1932,7 @@ mod tests {
         assert_eq!(layout.chroma_base, chroma_row * height);
     }
 
-    /// M993: the import-adapter knob is settable by name, defaults to the choice a
+    /// The import-adapter knob is settable by name, defaults to the choice a
     /// GPU-exported dma-buf needs, and refuses an unknown value.
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
     #[test]
@@ -1958,7 +1957,7 @@ mod tests {
         );
     }
 
-    /// M1127: the matrix comes from the caps, not a constant. A BT.709 stream
+    /// The matrix comes from the caps, not a constant. A BT.709 stream
     /// and a BT.601 one decode the same bytes to different colours, and the
     /// BT.709 result is the one BT.709's own weights predict.
     #[test]

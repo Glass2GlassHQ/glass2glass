@@ -1,4 +1,4 @@
-//! Windows AAC audio encode element (M35) wrapping the Media Foundation AAC
+//! Windows AAC audio encode element wrapping the Media Foundation AAC
 //! Encoder MFT. Consumes interleaved 16-bit PCM (`PcmS16Le`) `DataFrame`s and
 //! produces raw AAC-LC access units (`AudioFormat::Aac`, `MemoryDomain::System`,
 //! one access unit per 1024-sample frame, no ADTS header), the compressed-audio

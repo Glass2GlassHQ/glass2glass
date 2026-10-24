@@ -287,7 +287,7 @@ pub(crate) fn picture_temporal_reference(au: &[u8]) -> Option<(bool, u16)> {
     None
 }
 
-/// Per-frame video timestamp synthesis between container stamps (M934). Most
+/// Per-frame video timestamp synthesis between container stamps. Most
 /// pictures arrive unstamped; left as duplicates of the last stamp, a pacing
 /// sink plays each GOP as a burst then a freeze. The picture header's `temporal_reference` is the picture's display
 /// index within its GOP, so with the sequence header's frame period every

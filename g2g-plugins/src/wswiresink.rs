@@ -1,4 +1,4 @@
-//! Browser WebSocket sink for the distributed-graph primitive (M554, `web`):
+//! Browser WebSocket sink for the distributed-graph primitive (`web`):
 //! the wasm send half, the browser sibling of the native
 //! [`RemoteWsSink`](crate::remotewssink).
 //!
@@ -9,7 +9,7 @@
 //! wire protocol as the native pair, so a browser graph can cut an edge and ship
 //! its downstream subgraph to a native [`RemoteWsSrc`](crate::remotewssrc)
 //! server: `... -> WsWireSink` in the browser, `RemoteWsSrc -> ...` on the
-//! server. This is the media-agnostic generalization of the bespoke M549
+//! server. This is the media-agnostic generalization of the bespoke
 //! `WebRemoteDetect` shim (which hand-rolled a browser->server frame protocol);
 //! the wire codec compiles on wasm32 with no changes, so the browser and a native
 //! peer literally share the serializer.

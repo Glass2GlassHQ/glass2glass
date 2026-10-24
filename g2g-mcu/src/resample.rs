@@ -1,4 +1,4 @@
-//! Fixed-point polyphase audio resampler (M641): the first stage of the
+//! Fixed-point polyphase audio resampler: the first stage of the
 //! deterministic reference audio chain (capture -> convert -> **resample**
 //! -> mix -> encode -> RTP). Mono S16LE over the telephony rate set
 //! {8, 16, 48} kHz, pure integer Q14 MACs over generated coefficient tables

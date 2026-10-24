@@ -1,4 +1,4 @@
-//! On-screen live demo of the HDR swapchain present (M575): a 10-bit HDR10 (PQ,
+//! On-screen live demo of the HDR swapchain present: a 10-bit HDR10 (PQ,
 //! BT.2020) clip is decoded on the GPU via `VK_KHR_video_*` into an `Rgba16Float`
 //! texture holding the stream's PQ-encoded R'G'B' (the decoder's passthrough
 //! output), and presented by [`VulkanHdrSink`] to a raw Vulkan swapchain with the

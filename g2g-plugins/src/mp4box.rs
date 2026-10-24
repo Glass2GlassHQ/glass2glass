@@ -61,7 +61,7 @@ pub(crate) fn ftyp() -> Vec<u8> {
     brand_box(b"ftyp", b"iso5", 512, &[b"iso5", b"isom"])
 }
 
-/// The `ftyp` of a CMAF track file (M832). `cmfc` is CMAF's structural brand: one
+/// The `ftyp` of a CMAF track file. `cmfc` is CMAF's structural brand: one
 /// media track, `mvex`/`trex`, a `tfdt` in every `traf`, `default-base-is-moof`,
 /// and every fragment starting at a stream access point. The stricter `cmf2` is
 /// deliberately not claimed: its "sample defaults repeated in each track
@@ -72,11 +72,11 @@ pub(crate) fn ftyp_cmaf() -> Vec<u8> {
     brand_box(b"ftyp", b"cmfc", 0, &[b"cmfc", b"iso6", b"isom", b"mp41"])
 }
 
-/// The `styp` that opens each CMAF segment (M832), so one fragment of a track
+/// The `styp` that opens each CMAF segment, so one fragment of a track
 /// file is separately addressable by an HLS `#EXT-X-BYTERANGE` or a DASH
 /// `SegmentBase` range. Each unit this muxer emits is one CMAF fragment which is
 /// also one CMAF segment, hence both `cmfs` and `cmff`; `msdh` marks it a generic
-/// DASH media segment. `chunked` adds the CMAF chunk brand `cmfl` (M859): the
+/// DASH media segment. `chunked` adds the CMAF chunk brand `cmfl`: the
 /// segment is then delivered as a sequence of `moof`+`mdat` chunks, each a
 /// separately addressable prefix of it.
 pub(crate) fn styp_cmaf(chunked: bool) -> Vec<u8> {
@@ -89,7 +89,7 @@ pub(crate) fn styp_cmaf(chunked: bool) -> Vec<u8> {
 }
 
 /// The `prft` (ProducerReferenceTimeBox, ISO/IEC 14496-12 8.16.5) written ahead
-/// of a fragment's `moof` (M859): it maps `media_time`, the decode time of the
+/// of a fragment's `moof`: it maps `media_time`, the decode time of the
 /// fragment's first sample in the track's timescale, to the producer's wall clock
 /// as a 64-bit NTP timestamp, which is how a low-latency player measures its own
 /// end-to-end latency. Version 1 (64-bit `media_time`), matching what ffmpeg's
@@ -250,7 +250,7 @@ pub(crate) fn find_descriptor(data: &[u8], tag: u8) -> Option<&[u8]> {
 
 /// iTunes-style metadata from a container's `udta/meta/ilst`, mapped to a
 /// [`TagList`] (empty when it has none). The container is a `moov` for the
-/// file's own tags or a `trak` for one track's (M838). `meta` is a FullBox (a
+/// file's own tags or a `trak` for one track's. `meta` is a FullBox (a
 /// 4-byte version/flags before its children), so its body is tried both with and
 /// without that prefix for writers that omit it. Each `ilst` child is an item
 /// box named by a 4cc (`©nam`, `©ART`, ...) holding a `data` box: UTF-8 text
@@ -452,7 +452,7 @@ fn itunes_tag(kind: &[u8; 4], value: &str) -> Tag {
 /// atom, a [`Tag::Number`] its integer atom, and a [`Tag::Freeform`] a `----`
 /// item. `Tag::Language` (an MP4 track field) and `Tag::Other` (no namespace to
 /// write a `----` under) are skipped.
-/// `chapters` are written alongside as a Nero `chpl` list (M1046); pass `&[]`
+/// `chapters` are written alongside as a Nero `chpl` list; pass `&[]`
 /// for a per-track `udta`, which has no chapter slot.
 pub(crate) fn udta_with_tags(tags: &TagList, chapters: &[Chapter]) -> Option<Vec<u8>> {
     let ilst = ilst_items(tags);
@@ -478,7 +478,7 @@ const CHPL_TICK_NS: u64 = 100;
 /// this is the ceiling on both.
 const CHPL_ONE_BYTE_MAX: usize = u8::MAX as usize;
 
-/// Parse the Nero `chpl` chapter list out of `container`'s `udta` box (M1046).
+/// Parse the Nero `chpl` chapter list out of `container`'s `udta` box.
 /// Body layout: the full-box version / flags, then for a non-zero version a
 /// reserved `u32`, then a one-byte chapter count, then per chapter a big-endian
 /// `u64` start in 100 ns ticks, a one-byte title length, and that many UTF-8

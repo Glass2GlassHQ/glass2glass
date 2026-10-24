@@ -66,7 +66,7 @@ const RAW_AUDIO_FORMATS: [AudioFormat; 5] = [
 ];
 
 /// The channel count and rate an audio template leaves open (`Caps::Audio`'s own
-/// wildcards, M187).
+/// wildcards).
 const ANY_CHANNELS: u8 = 0;
 const ANY_SAMPLE_RATE: u32 = 0;
 

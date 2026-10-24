@@ -1,4 +1,4 @@
-//! Analytics alert (M1176): fires configurable rules on the detections a frame
+//! Analytics alert: fires configurable rules on the detections a frame
 //! carries, the gst-python-ml `pyml_alert` analog. A rule names a class, a
 //! minimum score and a zone; a detection matching all three raises an alert.
 //!

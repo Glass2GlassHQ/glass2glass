@@ -1,4 +1,4 @@
-//! Query a local `ptp4l`'s sync state over its management socket (M998).
+//! Query a local `ptp4l`'s sync state over its management socket.
 //!
 //! `PtpSystemClock` reads `CLOCK_TAI`, which is always readable whether or not
 //! `linuxptp` is actually locked to a grandmaster. This is the independent check:

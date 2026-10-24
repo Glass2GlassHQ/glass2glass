@@ -1,4 +1,4 @@
-//! MPEG-2 Transport Stream demuxer (M108): parse a TS byte stream into the
+//! MPEG-2 Transport Stream demuxer: parse a TS byte stream into the
 //! elementary-stream access units it carries (ISO/IEC 13818-1).
 //!
 //! Pure `no_std + alloc` parsing, like the `mp4box` precedent and `annexb`: this
@@ -50,7 +50,7 @@ const PID_EIT: u16 = 0x0012;
 /// EIT `table_id` for the present/following events of this transport stream. 0x4F
 /// is the other-TS variant (events of a service carried elsewhere) and is ignored.
 const TABLE_ID_EIT_PRESENT_FOLLOWING: u8 = 0x4E;
-/// EIT `table_id` range for the schedule events of this transport stream (M1056):
+/// EIT `table_id` range for the schedule events of this transport stream:
 /// what a service shows over the coming days, segmented across many sections.
 /// 0x60..=0x6F is the other-TS variant and is ignored like 0x4F.
 const TABLE_ID_EIT_SCHEDULE: core::ops::RangeInclusive<u8> = 0x50..=0x5F;
@@ -99,8 +99,8 @@ pub const TAG_KEY_SERVICE_PROVIDER: &str = "service_provider";
 pub const TAG_KEY_SERVICE_NAME: &str = "service_name";
 
 /// The [`g2g_core::Tag::Other`] keys the DVB EIT present/following event text
-/// rides under (M1049), and the [`g2g_core::Tag::Number`] keys its start time
-/// (Unix seconds, UTC) and duration (seconds) ride under (M1056). `Tag` has no
+/// rides under, and the [`g2g_core::Tag::Number`] keys its start time
+/// (Unix seconds, UTC) and duration (seconds) ride under. `Tag` has no
 /// typed event variant, and the SDT service name already owns
 /// [`g2g_core::Tag::Title`] for the same program, so the fields keep their own
 /// keys: the event on air now, and the one after it.
@@ -113,7 +113,7 @@ pub const TAG_KEY_NEXT_EVENT_TEXT: &str = "next_event_text";
 pub const TAG_KEY_NEXT_EVENT_START: &str = "next_event_start";
 pub const TAG_KEY_NEXT_EVENT_DURATION: &str = "next_event_duration";
 
-/// The keys one EIT schedule event posts under (M1056). A schedule table names
+/// The keys one EIT schedule event posts under. A schedule table names
 /// far more than the two events present/following holds, so each event posts as
 /// its own tag list (one [`g2g_core::BusMessage::Tag`] per event) and the keys do
 /// not distinguish a slot: the event id, the name and short description, the
@@ -224,8 +224,8 @@ pub struct ElementaryStream {
     /// (0x06) stream carrying a 'KLVA' registration descriptor (asynchronous
     /// KLV), or any metadata-in-PES (0x15) stream (synchronous KLV).
     pub klv: bool,
-    /// True for a private (0x06) stream carrying an AV1 `registration_descriptor`
-    /// (M1049), the AOM carriage of AV1 (disambiguating the generic 0x06). The PES
+    /// True for a private (0x06) stream carrying an AV1 `registration_descriptor`,
+    /// the AOM carriage of AV1 (disambiguating the generic 0x06). The PES
     /// payload is then one AV1 temporal unit in the low-overhead OBU format, which
     /// is what [`crate::av1parse::Av1Parse`] and the AV1 decoders read.
     pub av1: bool,
@@ -302,7 +302,7 @@ pub struct ServiceInfo {
     pub provider: String,
 }
 
-/// Which EIT table an event came from (M1056).
+/// Which EIT table an event came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EitSlot {
     /// The event on air now: present/following, section 0.
@@ -314,7 +314,7 @@ pub enum EitSlot {
     Schedule,
 }
 
-/// One DVB EIT event (M1049): what a service is showing now, what it shows next,
+/// One DVB EIT event: what a service is showing now, what it shows next,
 /// or an entry of its schedule. The text comes from the `short_event_descriptor`,
 /// so an event announced without one is not reported at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,26 +330,26 @@ pub struct EitEvent {
     pub name: String,
     /// `text_char`, the short description under the name; empty on the same terms.
     pub text: String,
-    /// `start_time` as seconds since the Unix epoch, UTC (M1056). `None` when the
+    /// `start_time` as seconds since the Unix epoch, UTC. `None` when the
     /// stream declared the field undefined (all ones) or encoded it invalidly.
     pub start_unix_secs: Option<u64>,
     /// `duration` in seconds, 0 when the stream encoded it invalidly.
     pub duration_secs: u32,
 }
 
-/// Cap on the EIT present/following events held (M1049). Present/following is two
+/// Cap on the EIT present/following events held. Present/following is two
 /// per service, so this holds a large multiplex; past it, later services go
 /// unreported rather than growing the table on a stream that churns `service_id`s.
 const MAX_EIT_EVENTS: usize = 64;
 
-/// Cap on the queued EIT schedule events (M1056). A whole multiplex's 8-day EPG
+/// Cap on the queued EIT schedule events. A whole multiplex's 8-day EPG
 /// runs to a few thousand events, so a consumer that drains between feeds sees a
 /// full one; past it, later events are dropped rather than growing the queue
 /// without bound on a stream that never stops announcing new ones.
 pub const MAX_EIT_SCHEDULE_EVENTS: usize = 4096;
 
-/// Cap on the `(service_id, table_id, section_number)` version slots tracked
-/// (M1056). Present/following is two sections per service, but a schedule table
+/// Cap on the `(service_id, table_id, section_number)` version slots tracked.
+/// Present/following is two sections per service, but a schedule table
 /// is segmented into up to 256 sections across 16 `table_id`s, so the version
 /// bookkeeping needs far more room than the present/following table itself. Past
 /// this a further section is ignored rather than growing the list.
@@ -516,15 +516,15 @@ pub struct TsDemuxer {
     /// Program to route (`None` = the first in PAT order). A set number with no
     /// matching program routes nothing (strict, no fallback to the first).
     selected_program: Option<u16>,
-    /// SDT services as `(service_id, text)`, in section order (M872). Kept apart
+    /// SDT services as `(service_id, text)`, in section order. Kept apart
     /// from `programs` because the SDT may parse before the PAT; a service_id is a
     /// `program_number`, so [`service`](Self::service) joins the two.
     services: Vec<(u16, ServiceInfo)>,
-    /// EIT present/following events (M1049), at most one per
+    /// EIT present/following events, at most one per
     /// `(service_id, slot)`: a later section of the same slot replaces the
     /// earlier one, so this always holds what the services are showing.
     eit_events: Vec<EitEvent>,
-    /// EIT schedule events (M1056), queued in arrival order for
+    /// EIT schedule events, queued in arrival order for
     /// [`take_eit_schedule`](Self::take_eit_schedule) to drain. A schedule table
     /// names days of events rather than the two present/following holds, so they
     /// are handed over once instead of kept in a replace-in-place table.
@@ -543,7 +543,7 @@ pub struct TsDemuxer {
     pending_sections: Vec<(u16, Vec<u8>)>,
     pending: Vec<PendingPes>,
     completed: Vec<EsUnit>,
-    /// Video PTS synthesis state, one entry per video PID (M948).
+    /// Video PTS synthesis state, one entry per video PID.
     video_pts: Vec<VideoStreamTiming>,
     // set by `flush`, so `take_units` lets go of units still waiting for a first stamp
     end_of_stream: bool,
@@ -590,7 +590,7 @@ impl TsDemuxer {
             .map(|p| (p.number, p.streams.as_slice()))
     }
 
-    /// The active program's SDT service text (M872), if an SDT named a service
+    /// The active program's SDT service text, if an SDT named a service
     /// whose `service_id` matches that program's number. `None` for a stream with
     /// no SDT, or before both tables parse.
     pub fn service(&self) -> Option<&ServiceInfo> {
@@ -601,22 +601,22 @@ impl TsDemuxer {
             .map(|(_, s)| s)
     }
 
-    /// Every service the SDT named, as `(program_number, text)` in section order
-    /// (M878): the SDT describes the whole transport stream, so a multi-program
+    /// Every service the SDT named, as `(program_number, text)` in section order:
+    /// the SDT describes the whole transport stream, so a multi-program
     /// multiplex reports one entry per program regardless of which one is selected.
     /// Empty for a stream with no SDT.
     pub fn services(&self) -> impl Iterator<Item = (u16, &ServiceInfo)> + '_ {
         self.services.iter().map(|(id, s)| (*id, s))
     }
 
-    /// Every EIT present/following event parsed so far (M1049), in arrival order.
+    /// Every EIT present/following event parsed so far, in arrival order.
     /// Empty for a stream with no EIT, or before the table parses.
     pub fn eit_events(&self) -> &[EitEvent] {
         &self.eit_events
     }
 
-    /// Take every EIT schedule event parsed since the last call, in arrival order
-    /// (M1056), leaving the queue empty. Empty for a stream carrying no schedule
+    /// Take every EIT schedule event parsed since the last call, in arrival order,
+    /// leaving the queue empty. Empty for a stream carrying no schedule
     /// table, and for one whose schedule sections have all been read already.
     pub fn take_eit_schedule(&mut self) -> Vec<EitEvent> {
         core::mem::take(&mut self.eit_schedule)
@@ -657,7 +657,7 @@ impl TsDemuxer {
     }
 
     /// Whether `pid` is an AV1 video stream (a private 0x06 stream with an AV1
-    /// registration descriptor, M1049); `false` for any other stream.
+    /// registration descriptor); `false` for any other stream.
     pub fn is_av1(&self, pid: u16) -> bool {
         self.streams()
             .iter()
@@ -981,7 +981,7 @@ impl TsDemuxer {
     }
 
     /// Parse an SDT section (PID 0x11, `table_id` 0x42) into the per-service
-    /// name / provider text (M872): the service loop follows the 8-byte PSI header,
+    /// name / provider text: the service loop follows the 8-byte PSI header,
     /// `original_network_id` and a reserved byte, and each entry's descriptor loop
     /// carries the DVB `service_descriptor`. First SDT wins, the PAT
     /// discipline (no version handling). The CRC is verified
@@ -1015,7 +1015,7 @@ impl TsDemuxer {
     }
 
     /// Parse a DVB EIT section (PID 0x12) into the per-service event text, start
-    /// time and duration (M1049, M1056). The event loop follows the 14-byte
+    /// time and duration. The event loop follows the 14-byte
     /// header, and each entry's descriptor loop carries the
     /// `short_event_descriptor`. `table_id` 0x4E is present/following, whose
     /// section 0 is the event on air and section 1 the one after it; 0x50..=0x5F
@@ -1609,7 +1609,7 @@ fn has_klv_registration(mut desc: &[u8]) -> bool {
 }
 
 /// Whether a PMT ES-info descriptor list carries an AV1 `registration_descriptor`
-/// (tag 0x05), the AOM marker for AV1 video on a private (0x06) stream (M1049).
+/// (tag 0x05), the AOM marker for AV1 video on a private (0x06) stream.
 /// Both the spec's 'AV01' and GStreamer's 'AV1G' are accepted, since only the
 /// latter has a live reader. The AV1_video_descriptor (tag 0x80) the spec pairs
 /// with the registration is not required: it carries profile / bit-depth fields
@@ -1635,7 +1635,7 @@ fn has_av1_registration(mut desc: &[u8]) -> bool {
 }
 
 /// The name and short description of an EIT event's DVB `short_event_descriptor`
-/// (tag 0x4D, M1049): a 3-letter language code, then the length-prefixed
+/// (tag 0x4D): a 3-letter language code, then the length-prefixed
 /// `event_name_char` and `text_char`. `None` when the loop names no such
 /// descriptor or a field runs past it; a field this parser will not decode comes
 /// back empty rather than garbled (see [`dvb_text`]). Bounds-checked throughout.
@@ -1993,12 +1993,12 @@ struct MuxProgram {
     /// Global stream index carrying this program's PCR (its first stream).
     pcr_stream: usize,
     last_pcr_27mhz: Option<u64>,
-    /// This program's own SDT service text (M878), overriding the muxer-wide
+    /// This program's own SDT service text, overriding the muxer-wide
     /// default set by [`TsMuxer::set_service`].
     service: Option<ServiceInfo>,
 }
 
-/// MPEG-TS multiplexer (M114, multi-stream since M207, multi-program since M783):
+/// MPEG-TS multiplexer (multi-stream, multi-program):
 /// wraps access units in PES packets and 188-byte TS packets, repeating the PAT
 /// and PMTs on one cadence and the SDT on another. The inverse of [`TsDemuxer`];
 /// the [`crate::tsmuxn::TsMux`] element wraps it. Each elementary stream (e.g.
@@ -2027,7 +2027,7 @@ pub struct TsMuxer {
     /// Continuity counter of the SDT PID, used only with a service set.
     sdt_cc: u8,
     /// The service text the SDT announces for every program that does not name
-    /// its own (M872). With this and every program's own service `None`, no SDT
+    /// its own. With this and every program's own service `None`, no SDT
     /// is written at all.
     default_service: Option<ServiceInfo>,
     tables_written: bool,
@@ -2070,7 +2070,7 @@ impl TsMuxer {
         Self::with_programs(&one_program)
     }
 
-    /// A multi-program muxer (M783): entry `i` of `streams` is
+    /// A multi-program muxer: entry `i` of `streams` is
     /// `(program_number, stream_type)` for elementary stream `i`. Streams keep
     /// their global index ([`push_au_on`](Self::push_au_on) still selects by it)
     /// and their PID `MUX_ES_PID + i`, so several programs can share the numbering.
@@ -2158,7 +2158,7 @@ impl TsMuxer {
         }
     }
 
-    /// Name the service the SDT announces (M872): the `service_name` and
+    /// Name the service the SDT announces: the `service_name` and
     /// `service_provider_name` of a DVB `service_descriptor`. With this set the mux
     /// writes an SDT (PID 0x11, `table_id` 0x42) alongside the PAT/PMT, on the same
     /// cadence, so a reader (ffprobe, [`TsDemuxer::service`]) reports the program's
@@ -2174,7 +2174,7 @@ impl TsMuxer {
         });
     }
 
-    /// Name one program's service (M878), overriding
+    /// Name one program's service, overriding
     /// [`set_service`](Self::set_service) for it: a multi-program multiplex gets
     /// one SDT entry per program, each with its own name / provider. `false` when
     /// no program carries `program_number` (nothing was recorded), so a caller
@@ -2204,7 +2204,7 @@ impl TsMuxer {
     }
 
     /// Declare elementary stream `index`'s language in its PMT entry, as an
-    /// `ISO_639_language_descriptor` (M872, what ffmpeg writes for
+    /// `ISO_639_language_descriptor` (what ffmpeg writes for
     /// `-metadata:s:0 language=deu`). A code that is not three ASCII letters is
     /// ignored, since the descriptor's field is exactly three bytes, as is an
     /// out-of-range index. Call before the first access unit (the PMT goes out then).
@@ -2221,7 +2221,7 @@ impl TsMuxer {
     }
 
     /// Declare elementary stream `index` as EBU teletext in its PMT entry, as a
-    /// DVB `teletext_descriptor` naming one service (M924). Without this the
+    /// DVB `teletext_descriptor` naming one service. Without this the
     /// stream is asynchronous KLV, the muxer's default reading of a private PES,
     /// which no receiver routes to a teletext decoder. An out-of-range index or a
     /// stream that is not a private PES is ignored. Call before the first access
@@ -2249,7 +2249,7 @@ impl TsMuxer {
     }
 
     /// Declare elementary stream `index` as DVB subtitles in its PMT entry, as a
-    /// `subtitling_descriptor` naming one subtitle stream (M927): the language,
+    /// `subtitling_descriptor` naming one subtitle stream: the language,
     /// the `subtitling_type`, and the composition / ancillary page ids a decoder
     /// follows. This is also what marks the stream's access units as display
     /// sets, so each goes out in the PES data field EN 300 743 wraps them in.
@@ -2295,7 +2295,7 @@ impl TsMuxer {
         }
     }
 
-    /// Declare elementary stream `index` as AV1 video in its PMT entry (M1049),
+    /// Declare elementary stream `index` as AV1 video in its PMT entry,
     /// as the AOM carriage's `registration_descriptor`, with the format_identifier
     /// a live receiver reads (see `AV1_REGISTRATION_ID_GSTREAMER`). Without this
     /// the stream is asynchronous KLV, the muxer's default reading of a private
@@ -2774,7 +2774,7 @@ impl TsMuxer {
 
     /// The SDT section body (from section[3]): the PSI header tail,
     /// `original_network_id` and a reserved byte, then one service entry per
-    /// program that names a service, carrying that program's own text (M878).
+    /// program that names a service, carrying that program's own text.
     /// `service_type` says digital television for a program carrying video and
     /// digital radio for one that does not. Empty when no program names a service,
     /// which writes no SDT.
@@ -3572,7 +3572,7 @@ pub(crate) mod tests {
         assert_eq!(sdt[15], SERVICE_TYPE_RADIO);
     }
 
-    /// Each program of a multi-program mux carries its own SDT entry (M878): the
+    /// Each program of a multi-program mux carries its own SDT entry: the
     /// per-program text where it is set, the muxer-wide default elsewhere, and the
     /// demuxer reads every service the SDT names whichever program it routes.
     #[test]

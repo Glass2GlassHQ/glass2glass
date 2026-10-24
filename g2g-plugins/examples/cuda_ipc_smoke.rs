@@ -1,5 +1,5 @@
-//! Cross-process zero-copy validation for the CUDA IPC primitive (M556,
-//! `local-ipc`). Proves two *separate processes* map the SAME VRAM: the only
+//! Cross-process zero-copy validation for the CUDA IPC primitive
+//! (`local-ipc`). Proves two *separate processes* map the SAME VRAM: the only
 //! thing transmitted is the 64-byte IPC handle (plus the size), no frame bytes.
 //!
 //! The one binary is both ends (it re-execs itself with a `child` argument):

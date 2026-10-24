@@ -273,7 +273,7 @@ pub struct DmaBufToWgpu {
     format: RawVideoFormat,
     /// Frames imported so far.
     imported: u64,
-    /// Which GPU the import device opens on (M993).
+    /// Which GPU the import device opens on.
     adapter: ImportAdapter,
     /// The import itself, plus the producer-sync state it keeps across frames.
     importer: DmaBufImporter,
@@ -389,7 +389,7 @@ impl AsyncElement for DmaBufToWgpu {
         }
     }
 
-    /// Input pad accepts only dma-buf frames (M354 domain nego); the auto-plug
+    /// Input pad accepts only dma-buf frames (domain negotiation); the auto-plug
     /// splices this element where an upstream produces a dma-buf.
     fn input_domains(&self) -> DomainSet {
         DomainSet::only(MemoryDomainKind::DmaBuf)
@@ -818,7 +818,7 @@ unsafe fn import_dmabuf(
 mod tests {
     use super::*;
 
-    /// M993: which GPU to import on is settable by name (a launch line's
+    /// Which GPU to import on is settable by name (a launch line's
     /// `import-adapter=`), defaults to the choice a GPU-exported dma-buf needs, and
     /// refuses an unknown value rather than silently importing on the wrong GPU.
     #[test]

@@ -705,7 +705,7 @@ mod tests {
         assert_eq!((default, min), (DMABUF_BUFFERS.0, DMABUF_BUFFERS.1));
     }
 
-    /// M1059: the descriptor a dma-buf block yields is what the emitted frame
+    /// The descriptor a dma-buf block yields is what the emitted frame
     /// declares, so a consumer that maps the buffer finds the producer's rows
     /// without going through the domain type.
     #[cfg(feature = "metadata")]

@@ -34,7 +34,7 @@
 //! stored nonce from the error response and un-caches the affected state, so
 //! the existing lazy paths retry with fresh credentials.
 //!
-//! Address-family agnostic (M718): the XOR address codec handles IPv4 and
+//! Address-family agnostic: the XOR address codec handles IPv4 and
 //! IPv6, and a v6-bound client requests a v6 relayed address (RFC 6156).
 //! Behind the `webrtc` feature.
 
@@ -459,7 +459,7 @@ enum TurnTransport {
     Tls,
 }
 
-/// A set of TURN allocations, one per configured server (M719): each
+/// A set of TURN allocations, one per configured server: each
 /// contributes its own relayed candidate, and the data plane routes by which
 /// relay / server address a transmit or datagram matches. The `Option`-like
 /// surface keeps the element run loops one-liner simple.

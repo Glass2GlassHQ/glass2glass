@@ -58,7 +58,7 @@ impl AsyncElement for IdentityTransform {
         Ok(upstream_caps.clone())
     }
 
-    /// M16 step 5h: wildcard pass-through transform. The native
+    /// Wildcard pass-through transform. The native
     /// `IdentityAny` variant couples input and output links without
     /// constraining either by a set — exactly what a probe / metering /
     /// tee element wants. Native chains containing this element pin

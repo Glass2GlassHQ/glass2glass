@@ -1,4 +1,4 @@
-//! Turnkey windowed runner for [`WgpuSink`] (M978): a synthetic source, synthetic
+//! Turnkey windowed runner for [`WgpuSink`]: a synthetic source, synthetic
 //! analytics metadata, the Vello GPU overlay and the sink presenting into a real
 //! winit window. No media file, no codec, no capture device: run it and watch the
 //! metadata overlay path draw live.

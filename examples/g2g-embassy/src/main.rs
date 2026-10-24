@@ -1,4 +1,4 @@
-//! Embassy executor proof (M632): the heap-free camera -> transform ->
+//! Embassy executor proof: the heap-free camera -> transform ->
 //! SPI-display pipeline (`noalloc-pipeline::run_async`, the same future the
 //! g2g-noalloc symbol proofs wrap) driven by a real Embassy executor on
 //! QEMU's MPS2-AN386 Cortex-M4. This is the production MCU shape: an Embassy

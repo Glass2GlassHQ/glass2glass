@@ -227,7 +227,7 @@ pub fn run_websocket_ortdetect_to_canvas(url: String, canvas_id: String, model_u
 /// WebSocket ingest -> decode -> **remote detect** -> overlay -> canvas
 /// (Architecture B: server-side inference, thin browser client). The same graph
 /// as [`run_websocket_ortdetect_to_canvas`], but the detect element is the
-/// **generic** `WsWireTransform` (M555): it ships each decoded frame to a native
+/// **generic** `WsWireTransform`: it ships each decoded frame to a native
 /// peer at `detect_url` over the g2g-core wire codec and emits the processed frame
 /// it returns (with `AnalyticsMeta` boxes attached), which `AnalyticsOverlay`
 /// draws. This is the distributed-graph primitive, not a bespoke shim: the browser
@@ -255,7 +255,7 @@ pub fn run_websocket_remotedetect_to_canvas(url: String, canvas_id: String, dete
 }
 
 /// WebSocket ingest -> WebCodecs decode -> **wire-codec offload** to a native
-/// subgraph (M554, the distributed-graph primitive over WebSocket). Decodes the
+/// subgraph (the distributed-graph primitive over WebSocket). Decodes the
 /// H.264 access units from `url` in the browser, then ships each decoded RGBA
 /// frame to a native `RemoteWsSrc` at `wire_url` via `WsWireSink`, which
 /// serializes the whole `PipelinePacket` stream with the *same* g2g-core wire
@@ -263,7 +263,7 @@ pub fn run_websocket_remotedetect_to_canvas(url: String, canvas_id: String, dete
 /// (`WebSocketSrc -> WebCodecsDecode -> WsWireSink`) cuts its edge right after
 /// decode and runs whatever tail the server wires behind `RemoteWsSrc` (e.g.
 /// `-> detect -> ...`), so this is the media-agnostic generalization of the
-/// bespoke M549 `WebRemoteDetect` shim: the browser no longer needs an element
+/// bespoke `WebRemoteDetect` shim: the browser no longer needs an element
 /// that knows about detection, only the generic transport. `wire_url` is the
 /// server's WebSocket (e.g. `ws://127.0.0.1:9601`).
 #[wasm_bindgen]
@@ -325,7 +325,7 @@ pub fn run_websocket_to_webgpu_canvas(url: String, canvas_id: String) {
 }
 
 /// Run a whole graph **inside a dedicated worker**, presenting to an
-/// `OffscreenCanvas` the page transferred in (M1054). Same elements, same
+/// `OffscreenCanvas` the page transferred in. Same elements, same
 /// single-threaded executor, one wasm instance per worker: the worker has no
 /// `window` and no `document`, so the clock reads its globals off
 /// `WorkerGlobalScope` and the sinks take the canvas object instead of an id.

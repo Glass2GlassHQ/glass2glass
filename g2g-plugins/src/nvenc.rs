@@ -3,7 +3,7 @@
 //! ffmpeg encoder takes system-memory I420 and copies it into libavcodec, this
 //! element ingests an NVDEC/CUDA NV12 surface ([`MemoryDomain::Cuda`]) *in place*
 //! and drives the NVIDIA Video Codec SDK (`nvEncodeAPI`) directly, so the pixels
-//! never leave the GPU. It is the encode-side mirror of the M220 `CudaToWgpu`
+//! never leave the GPU. It is the encode-side mirror of the `CudaToWgpu`
 //! bridge (which imports NVDEC output for wgpu): here the NVDEC output is handed
 //! straight to NVENC, closing the native `NvdecCuda -> NvEnc` loop with no PCIe
 //! download.
@@ -51,12 +51,12 @@
 //! same ownership-transfer contract as `FfmpegH264Enc` / `FfmpegVideoDec`.
 //!
 //! The output bitstream buffer is pooled (created once at session open, reused
-//! every frame; M277), and the target bitrate retargets a live session via
-//! `nvEncReconfigureEncoder` (M277): a `set_property("bitrate", ..)` (e.g. a
+//! every frame), and the target bitrate retargets a live session via
+//! `nvEncReconfigureEncoder`: a `set_property("bitrate", ..)` (e.g. a
 //! WebRTC BWE drop) is applied before the next frame with no session re-open.
 //!
 //! A CPU-side NV12 source is fed in via the `CudaUpload` converter, which the
-//! M354 domain auto-plug splices ahead of this Cuda-only encoder (`input_domains`
+//! domain auto-plug splices ahead of this Cuda-only encoder (`input_domains`
 //! declares `{Cuda}`); the encoder itself stays device-resident.
 //!
 //! Deferred (v1): mid-stream resolution reconfigure.
@@ -123,7 +123,7 @@ pub struct NvEnc {
     repeat_sequence_header: bool,
     /// The settings currently programmed into the open session. The targets are
     /// applied at session open and re-applied live via `nvEncReconfigureEncoder`
-    /// when they diverge (M277, runtime retarget for an adaptive sink, e.g. a
+    /// when they diverge (runtime retarget for an adaptive sink, e.g. a
     /// WebRTC BWE drop). `None` until a session is open.
     applied: Option<LiveConfig>,
     /// Open NVENC session (lazy): the SDK function table, the encoder handle, and
@@ -155,7 +155,7 @@ struct Session {
     encoder: *mut core::ffi::c_void,
     context: u64,
     /// Output bitstream buffer, created once at session open and reused every
-    /// frame (M277): NVENC runs in sync mode (one locked + copied output per
+    /// frame: NVENC runs in sync mode (one locked + copied output per
     /// encode), so a single buffer suffices and the per-frame create / destroy
     /// the v1 path paid is gone. Destroyed with the session.
     output: *mut core::ffi::c_void,
@@ -553,7 +553,7 @@ impl NvEnc {
     }
 
     /// Re-apply the rate control / GOP settings to a live session via
-    /// `nvEncReconfigureEncoder` (M277), so an adaptive sink (e.g. a WebRTC BWE
+    /// `nvEncReconfigureEncoder`, so an adaptive sink (e.g. a WebRTC BWE
     /// drop routed through `set_property("bitrate", ..)`) retargets without a
     /// session re-open or a forced IDR.
     fn reconfigure_live(&mut self) -> Result<(), G2gError> {
@@ -1023,7 +1023,7 @@ impl AsyncElement for NvEnc {
     }
 
     /// NVENC ingests device-resident frames only (`MemoryDomain::Cuda`); a System
-    /// frame is rejected at `process`. Declaring it lets the M354 converter
+    /// frame is rejected at `process`. Declaring it lets the converter
     /// auto-plug splice a `CudaUpload` ahead of a CPU-side NV12 source.
     fn input_domains(&self) -> DomainSet {
         DomainSet::only(MemoryDomainKind::Cuda)

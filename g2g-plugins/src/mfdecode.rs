@@ -3,13 +3,13 @@
 //! `IMFTransform`). Codec is selected with [`MfDecode::with_codec`]; the
 //! default is H.264.
 //!
-//! M13: consumes Annex-B H.264 `DataFrame`s (the bitstream `RtspSrc` /
+//! Consumes Annex-B H.264 `DataFrame`s (the bitstream `RtspSrc` /
 //! `H264Parse` already emit, `MemoryDomain::System`) and produces decoded
 //! NV12 frames, also `MemoryDomain::System` (CPU copy out of the MFT's output
 //! buffer). A `CapsChanged(Nv12, w, h)` is emitted before the first decoded
 //! frame and again whenever the decoder signals a resolution change.
 //!
-//! M30: the same pipeline carries H.265/HEVC when constructed with
+//! The same pipeline carries H.265/HEVC when constructed with
 //! `with_codec(VideoCodec::H265)`. The MS HEVC decoder MFT ships as the
 //! Store "HEVC Video Extensions" on many SKUs, so its `CoCreateInstance` can
 //! fail with `REGDB_E_CLASSNOTREG` when absent; that surfaces as a loud
@@ -155,7 +155,7 @@ pub struct MfDecode {
     /// decoder, system-memory output).
     use_d3d11: bool,
     last_caps: Option<Caps>,
-    /// M16 workaround #3 Phase A: most recent input caps received via
+    /// Most recent input caps received via
     /// `PipelinePacket::CapsChanged`. Used to validate the format on
     /// mid-stream changes and to debug-assert agreement between the
     /// declared `DerivedOutput` closure and the decode-time output
@@ -164,7 +164,7 @@ pub struct MfDecode {
     input_stamps: PendingInputStamps,
     emitted: u64,
     segment: Segment,
-    /// M12 / W1: the downstream consumer's allocation proposal, recorded in
+    /// The downstream consumer's allocation proposal, recorded in
     /// `configure_allocation`. A `MemoryDomainKind::D3D11Texture` request from a
     /// GPU sink (`D3D11Sink`) is satisfied by construction on the `with_d3d11`
     /// path (it already emits texture-resident frames). Mirrors
@@ -219,7 +219,7 @@ impl MfDecode {
         self.codec
     }
 
-    /// The downstream consumer's recorded M12 allocation proposal, if any
+    /// The downstream consumer's recorded allocation proposal, if any
     /// (see [`AsyncElement::configure_allocation`]).
     pub fn requested_alloc(&self) -> Option<AllocationParams> {
         self.requested_alloc
@@ -365,7 +365,7 @@ impl AsyncElement for MfDecode {
         upstream_caps.intersect(&supported)
     }
 
-    /// M16 step 5l: native `DerivedOutput` — accepts H.264 at any
+    /// Native `DerivedOutput`: accepts H.264 at any
     /// geometry and produces NV12 at the same dims/framerate. The closure
     /// validates the input format and returns an empty set on mismatch, so
     /// the solver rejects non-H.264 upstream at negotiation time instead of
@@ -380,7 +380,7 @@ impl AsyncElement for MfDecode {
         }))
     }
 
-    /// M12 / W1: record the downstream consumer's allocation proposal. A
+    /// Record the downstream consumer's allocation proposal. A
     /// `MemoryDomainKind::D3D11Texture` request (from `D3D11Sink`) is honoured
     /// by construction on the `with_d3d11` path, which already emits
     /// texture-resident frames; the software path emits system memory, so a

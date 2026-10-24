@@ -1,4 +1,4 @@
-//! Content sniffing (M112, text + MP4 M478): guess a media type from the first
+//! Content sniffing: guess a media type from the first
 //! bytes of a stream, the `typefind` analog.
 //!
 //! The typed `Caps` model has no "untyped bytes" variant, so a byte source must
@@ -303,7 +303,7 @@ pub(crate) fn riff_form(header: &[u8]) -> Option<[u8; 4]> {
 /// `filesrc location=x.png ! decodebin` plugs the matching image decoder.
 ///
 /// A JPEG types as `Mjpeg`: an auto-plugged decode chain splices `jpegparse`
-/// ahead of `mjpegdec` (M1087), so a file a byte source split across reads is
+/// ahead of `mjpegdec`, so a file a byte source split across reads is
 /// framed back into whole images before it reaches the decoder.
 fn sniff_still_image(header: &[u8]) -> Option<VideoCodec> {
     if header.starts_with(&PNG_MAGIC) {
@@ -328,7 +328,7 @@ fn sniff_still_image(header: &[u8]) -> Option<VideoCodec> {
 
 /// Caps for a raw video elementary stream at a fixable `Range` placeholder
 /// geometry: never `Dim::Any` (which cannot fixate), the parser refines it from
-/// the SPS or sequence header (M676). Shared by content sniffing and `FileSrc`'s extension typing so
+/// the SPS or sequence header. Shared by content sniffing and `FileSrc`'s extension typing so
 /// the two never drift.
 pub fn elementary_video_caps(codec: VideoCodec) -> Caps {
     /// A coded video stream is at least one macroblock.

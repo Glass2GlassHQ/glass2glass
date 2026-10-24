@@ -1,4 +1,4 @@
-//! Animated properties (M882), the `gst-controller` analog: a property's value
+//! Animated properties, the `gst-controller` analog: a property's value
 //! becomes a function of stream time instead of a constant set once at build
 //! time. A [`ControlSource`] is a keyframed curve, a [`ControlProgram`] binds
 //! curves to one node's property names, and the runner samples the bindings at

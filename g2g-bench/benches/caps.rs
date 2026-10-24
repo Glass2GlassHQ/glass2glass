@@ -1,4 +1,4 @@
-//! Benchmarks for the caps-negotiation hot path (M284), the latency-critical,
+//! Benchmarks for the caps-negotiation hot path, the latency-critical,
 //! hardest code in the framework. Guards regressions in the caps algebra
 //! (`intersect` / `fixate`), the linear solver, and the DAG solver.
 //!

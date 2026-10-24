@@ -1,4 +1,4 @@
-//! Closed-caption combiner (M1096, `no_std`): the `cccombiner` analog. A video
+//! Closed-caption combiner (`no_std`): the `cccombiner` analog. A video
 //! stream on input 0 and a closed-caption stream on input 1 go in, the same video
 //! comes out with each frame carrying the caption triples that belong with it as
 //! [`CaptionMeta`](g2g_core::meta::CaptionMeta). The pixels are untouched, so this

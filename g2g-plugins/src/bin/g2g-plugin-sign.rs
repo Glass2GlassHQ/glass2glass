@@ -1,5 +1,4 @@
-//! `g2g-plugin-sign`: keygen, sign, and verify for detached plugin signatures
-//! (M1061).
+//! `g2g-plugin-sign`: keygen, sign, and verify for detached plugin signatures.
 //!
 //! Usage:
 //!

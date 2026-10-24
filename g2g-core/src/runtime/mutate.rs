@@ -1,6 +1,6 @@
-//! Structural mutation of a running graph (M1115): splicing a chain of
+//! Structural mutation of a running graph: splicing a chain of
 //! transforms onto a live edge and lifting one back off, swapping the source or
-//! the sink at either end of it (M1149), attaching and dropping a tee branch and
+//! the sink at either end of it, attaching and dropping a tee branch and
 //! attaching a muxer input, without stopping the pipeline.
 //!
 //! The data plane pays for this once per push: a relaxed load of the edge's
@@ -10,11 +10,11 @@
 //!
 //! Scope: a transform position on a 1:1 edge. The producing end is a source, a
 //! transform or one output of a tee / demux; the consuming end is a transform, a
-//! sink, one input pad of a muxer or terminal fan-in (M1133), or the single
-//! input of a tee / demux (M1146). The structural nodes themselves are not
+//! sink, one input pad of a muxer or terminal fan-in, or the single
+//! input of a tee / demux. The structural nodes themselves are not
 //! splice points ([`MutationError::NotMutable`]), but a tee takes a whole branch
 //! and a muxer a whole input; the two ends are not splice points either, but the
-//! elements sitting on them are replaceable in place (M1149).
+//! elements sitting on them are replaceable in place.
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -58,7 +58,7 @@ use crate::segment::Segment;
 pub type ConverterFactory<'a> =
     Arc<dyn Fn(&Caps, &CapsSet) -> Option<Vec<Box<dyn DynAsyncElement + 'a>>> + Send + Sync + 'a>;
 
-/// A handle on a *running* graph's topology (M1115): splice a transform onto a
+/// A handle on a *running* graph's topology: splice a transform onto a
 /// live edge, or lift one back off. Obtained beside the run future from
 /// [`RunBuilder::run_mutable`](crate::runtime::RunBuilder::run_mutable) or
 /// [`run_graph_mutable`](crate::runtime::run_graph_mutable),
@@ -273,7 +273,7 @@ impl<'a> GraphMutator<'a> {
         .await
     }
 
-    /// Take over the sink named `node` with `element` (M1149), and hand the old
+    /// Take over the sink named `node` with `element`, and hand the old
     /// one back. Returns the instance name the replacement was given, which is a
     /// fresh one: the name the old sink had is never handed out again.
     ///
@@ -310,7 +310,7 @@ impl<'a> GraphMutator<'a> {
         .await
     }
 
-    /// Take over the source named `node` with `source` (M1149), and hand the old
+    /// Take over the source named `node` with `source`, and hand the old
     /// one back. Returns the fresh instance name the replacement was given, like
     /// [`replace_sink`](Self::replace_sink).
     ///
@@ -344,7 +344,7 @@ impl<'a> GraphMutator<'a> {
         .await
     }
 
-    /// Set a property on the element named `node` while it runs (M1175), the
+    /// Set a property on the element named `node` while it runs, the
     /// `gst-launch` knob applied mid-stream. The element's own
     /// [`set_property`](crate::AsyncElement::set_property) runs inside the arm
     /// that owns it, at that arm's next packet boundary, so the element is never
@@ -658,7 +658,7 @@ pub(crate) struct LiveNode<'a> {
     pub(crate) done: Option<Handback<'a>>,
     /// A transform: the only kind of node that can be lifted out.
     pub(crate) removable: bool,
-    /// Where a live property operation is queued for this node's arm (M1175).
+    /// Where a live property operation is queued for this node's arm.
     /// `None` on a node whose arm hands packets to no element of its own.
     pub(crate) properties: Option<PropertyMailbox>,
     pub(crate) growth: Growth,
@@ -716,7 +716,7 @@ pub(crate) type SpliceSpawn<'a, 'f, 's> = Box<
         + 's,
 >;
 
-/// [`SpliceSpawn`] for a replacement sink's arm (M1149).
+/// [`SpliceSpawn`] for a replacement sink's arm.
 pub(crate) type SinkSpawn<'a, 'f, 's> = Box<
     dyn Fn(
             Box<dyn DynAsyncElement + 'a>,
@@ -726,7 +726,7 @@ pub(crate) type SinkSpawn<'a, 'f, 's> = Box<
         + 's,
 >;
 
-/// [`SpliceSpawn`] for a replacement source's arm (M1149).
+/// [`SpliceSpawn`] for a replacement source's arm.
 pub(crate) type SourceSpawn<'a, 'f, 's> = Box<
     dyn Fn(
             Box<dyn DynSourceLoop + 'a>,
@@ -761,7 +761,7 @@ pub(crate) async fn spliced_arm<'a>(
     result
 }
 
-/// [`spliced_arm`] for a sink position (M1149): a mutable run drives every sink
+/// [`spliced_arm`] for a sink position: a mutable run drives every sink
 /// this way, so a replace can hand the old one back once it has finalized.
 pub(crate) async fn lent_sink_arm<'a>(
     mut element: Box<dyn DynAsyncElement + 'a>,
@@ -773,7 +773,7 @@ pub(crate) async fn lent_sink_arm<'a>(
     result
 }
 
-/// [`spliced_arm`] for a source position (M1149). A source that was retired ends
+/// [`spliced_arm`] for a source position. A source that was retired ends
 /// by failing its next push into the dead link the mutator left it, which is how
 /// every source ends when its consumer goes away: that is the swap completing,
 /// not the run failing, so its arm reports no frames rather than the error.
@@ -814,13 +814,13 @@ pub(crate) struct MutationService<'a, 'f, 's> {
     spawn: MutationSpawn<'a, 'f, 's>,
     bus: Option<BusHandle>,
     /// The run's position / duration handle, so a replacement source or sink
-    /// keeps answering the queries the one it took over from did (M1149).
+    /// keeps answering the queries the one it took over from did.
     progress: Option<PipelineProgress>,
     /// The run's leaky-drop tally, installed on a spliced hop so its drops
     /// reach `RunStats` like every other link's.
     dropped: Arc<spin::Mutex<u64>>,
     /// The liveness the runner folded at startup, handed to a spliced element
-    /// the way it reached the negotiated ones (M1123).
+    /// the way it reached the negotiated ones.
     path_is_live: bool,
     /// The latency-folded [`ClockSync`] the negotiated sinks received, so a
     /// replacement sink paces its presentation the way the one it took over
@@ -1082,7 +1082,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         }
     }
 
-    /// M1175: queue the set for the arm that owns the element and wait for that
+    /// Queue the set for the arm that owns the element and wait for that
     /// arm's answer. A reply channel that closes without an answer means the arm
     /// ended (or the whole run did) before it reached a packet boundary.
     async fn set_property(
@@ -1669,7 +1669,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         Ok(node)
     }
 
-    /// M1149: swap the element at the bottom of an edge. See
+    /// Swap the element at the bottom of an edge. See
     /// [`GraphMutator::replace_sink`].
     async fn replace_sink(
         &mut self,
@@ -1751,7 +1751,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         Ok((name, old))
     }
 
-    /// M1149: swap the element at the top of an edge. See
+    /// Swap the element at the top of an edge. See
     /// [`GraphMutator::replace_source`].
     async fn replace_source(
         &mut self,

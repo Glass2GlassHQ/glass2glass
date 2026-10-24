@@ -10,7 +10,7 @@
 //! ffmpeg's `hflip` / `vflip` / `transpose` do. CPU-only `no_std` baseline.
 //!
 //! When the sink downstream answers the first push with
-//! `Reconfigure::AbsorbOrientation` (M1058) and its set holds this element's
+//! `Reconfigure::AbsorbOrientation` and its set holds this element's
 //! method, the frame goes through untouched with an `OrientationMeta` on it
 //! instead and the output caps stay the input caps: the sink turns the picture
 //! at present time and the pixel work disappears. A method outside the set is
@@ -69,12 +69,12 @@ pub struct VideoFlip {
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
-    /// The orientations a downstream `Reconfigure::AbsorbOrientation` named
-    /// (M1058), empty until one arrives. While it holds `method`, frames pass
+    /// The orientations a downstream `Reconfigure::AbsorbOrientation` named,
+    /// empty until one arrives. While it holds `method`, frames pass
     /// through with an `OrientationMeta` attached and the output caps are the
     /// input caps.
     absorbed_orientations: OrientationSet,
-    /// Instance name assigned by the runner (M179), for this element's log lines.
+    /// Instance name assigned by the runner, for this element's log lines.
     log_name: LogName,
 }
 
@@ -520,7 +520,7 @@ impl AsyncElement for VideoFlip {
     }
 }
 
-/// `VideoFlip`'s settable properties (M104).
+/// `VideoFlip`'s settable properties.
 static VIDEOFLIP_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "method",
     PropKind::Str,
@@ -581,7 +581,7 @@ impl PadTemplates for VideoFlip {
     }
 }
 
-/// M179: log identity. Category is the short type name (matching what the runner
+/// Log identity. Category is the short type name (matching what the runner
 /// derives, so `G2G_DEBUG=VideoFlip:debug` filters both); instance is the
 /// runner-assigned name.
 impl LogSource for VideoFlip {
@@ -597,7 +597,7 @@ impl LogSource for VideoFlip {
 }
 
 /// The zero-copy analog of [`flip`] for a packed `[H, W, C]` view: express the
-/// method as stride manipulations over the same bytes (M180). A mirror reverses
+/// method as stride manipulations over the same bytes. A mirror reverses
 /// one spatial axis; a 90-degree rotation transposes the H/W axes then reverses
 /// one. The channel axis (2) is never touched, so each pixel's bytes stay
 /// intact. Matches [`src_coord`]'s mapping exactly, verified by the m180 test.

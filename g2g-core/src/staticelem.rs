@@ -1,10 +1,10 @@
 //! Static (heap-free) element model for the no-alloc / MCU path (Phase 2 of the
 //! alloc-optional core): the generic twin of the object-safe `AsyncElement` /
 //! `OutputSink`, which box a future per frame (`element.rs`, the honest
-//! per-frame allocation boundary pinned by M616). Elements here are concrete types
+//! per-frame allocation boundary). Elements here are concrete types
 //! wired by direct calls and driven by a const-arity runner, so a whole pipeline
 //! monomorphizes to unboxed `async` state machines: no `dyn`, no `Box`, no
-//! allocation. This is the M620 concrete-chain pattern promoted to an API.
+//! allocation. This is the concrete-chain pattern promoted to an API.
 //!
 //! The traits use `async fn` in trait (stable on MSRV 1.75), so a stage's future
 //! is an anonymous type inlined into the caller, never boxed. The runners are

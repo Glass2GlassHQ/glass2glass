@@ -230,7 +230,7 @@ impl AsyncElement for VideoMedian {
     }
 }
 
-/// `VideoMedian`'s settable properties, named as GStreamer's (M1084).
+/// `VideoMedian`'s settable properties, named as GStreamer's.
 /// `filtersize` is GStreamer's two-value enum, whose nicks are the sample counts
 /// themselves, so a launch line reads the same either way.
 static VIDEOMEDIAN_PROPS: &[PropertySpec] = &[

@@ -1,4 +1,4 @@
-//! ST 2110 SDP (M601): the Session Description (RFC 4566, SMPTE ST 2110-10/-20/
+//! ST 2110 SDP: the Session Description (RFC 4566, SMPTE ST 2110-10/-20/
 //! -30/-40) that describes a stream so a receiver auto-configures instead of being
 //! hand-set. This is the out-of-band half of ST 2110: the essence (-20 video, -30
 //! audio, -40 ancillary) carries no geometry / format / clock on the wire, so a

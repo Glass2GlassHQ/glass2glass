@@ -1,6 +1,6 @@
 //! Bidirectional LiveKit participant (`LiveKitDuplex`): publishes local
 //! video + Opus audio AND subscribes to the room's remote tracks over one
-//! signalling WebSocket, the real-SFU signaller for the duplex shape (M728).
+//! signalling WebSocket, the real-SFU signaller for the duplex shape.
 //!
 //! LiveKit does not use sendrecv m-lines: a participant owns TWO
 //! PeerConnections, a publisher PC (client offers, as in

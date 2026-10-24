@@ -1,4 +1,4 @@
-//! A/V offset transform (M385): shifts every `DataFrame`'s PTS/DTS by a signed
+//! A/V offset transform: shifts every `DataFrame`'s PTS/DTS by a signed
 //! nanosecond `offset`, the g2g form of GStreamer playbin's `av-offset`. Put one
 //! on a branch of a multi-stream playback graph (typically the audio branch) to
 //! re-align it against the others: a positive `offset` delays the stream (its
@@ -149,7 +149,7 @@ impl AsyncElement for AvOffset {
     }
 }
 
-/// `AvOffset`'s settable properties (M104).
+/// `AvOffset`'s settable properties.
 static AVOFFSET_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "offset",
     PropKind::Int,

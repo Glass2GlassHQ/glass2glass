@@ -1,6 +1,6 @@
 //! Linux H.264 / H.265 decode elements using the `cros-codecs` VAAPI backend.
 //!
-//! M13: consumes Annex-B `DataFrame`s (the bitstream `RtspSrc` / `H264Parse` /
+//! Consumes Annex-B `DataFrame`s (the bitstream `RtspSrc` / `H264Parse` /
 //! `H265Parse` already emit, `MemoryDomain::System`) and produces decoded NV12
 //! frames, also `MemoryDomain::System` (CPU copy out of the GBM-allocated
 //! surface). A `CapsChanged(Nv12, w, h)` is emitted before the first decoded
@@ -8,7 +8,7 @@
 //!
 //! [`VaapiDec`] holds the whole decode path; the codec picks the cros-codecs
 //! stateless decoder and the NAL splitter through the [`VaapiCodec`] binding,
-//! so [`VaapiH264Dec`] and [`VaapiH265Dec`] (M1036) are the same element with
+//! so [`VaapiH264Dec`] and [`VaapiH265Dec`] are the same element with
 //! a different binding.
 //!
 //! Pipeline:
@@ -201,14 +201,14 @@ pub struct VaapiDec<C: VaapiCodec> {
     decoder: Option<DynStatelessVideoDecoder<GenericDmaVideoFrame>>,
     info: Option<StreamInfo>,
     last_caps: Option<Caps>,
-    /// M16 workaround #3 Phase A: most recent input caps received via
+    /// Most recent input caps received via
     /// `PipelinePacket::CapsChanged`. See `ffmpegdec.rs` for the full
     /// notes; same shape across all three decoders.
     input_caps: Option<Caps>,
     /// Upstream request parked by a mid-stream resolution change, handed to
     /// the runner by `take_reconfigure`.
     pending_reconfigure: Option<Reconfigure>,
-    /// M1059: a downstream consumer asked for a `PlaneLayout`, so a decoded
+    /// A downstream consumer asked for a `PlaneLayout`, so a decoded
     /// surface is copied out at the hardware's own pitches with those declared
     /// instead of being repacked into tight rows.
     #[cfg(feature = "metadata")]
@@ -274,7 +274,7 @@ impl<C: VaapiCodec> VaapiDec<C> {
         self.emitted
     }
 
-    /// Whether a decoded surface keeps the hardware's row padding (M1059).
+    /// Whether a decoded surface keeps the hardware's row padding.
     /// Always false without the `metadata` feature, since nothing can then
     /// declare the layout.
     fn keeps_row_padding(&self) -> bool {
@@ -474,7 +474,7 @@ impl<C: VaapiCodec> AsyncElement for VaapiDec<C> {
         C::LOG_CATEGORY
     }
 
-    /// M16 step 5m: native `DerivedOutput` — accepts the codec at any
+    /// Native `DerivedOutput`: accepts the codec at any
     /// geometry and produces NV12 at the same dims/framerate. The closure
     /// validates the input format and returns an empty set on mismatch, so
     /// the solver rejects a foreign upstream at negotiation time instead of
@@ -538,7 +538,7 @@ impl<C: VaapiCodec> AsyncElement for VaapiDec<C> {
         }
     }
 
-    /// M1059: the decoder copies every surface row by row into a tightly packed
+    /// The decoder copies every surface row by row into a tightly packed
     /// buffer. When a consumer downstream has asked for a `PlaneLayout`, the
     /// hardware's own pitches are kept and declared, and the per-row copy
     /// becomes one bulk copy per plane.
@@ -751,7 +751,7 @@ struct CopiedNv12 {
 /// The source plane pitch may exceed `width` due to hardware alignment, so
 /// each row is copied individually.
 ///
-/// M1059: with `keep_row_padding` the surface's rows travel at its own pitches
+/// With `keep_row_padding` the surface's rows travel at its own pitches
 /// instead, one bulk copy per plane, and the returned layout says where they
 /// are. The mapping is not addressable downstream, so the frame is still a
 /// copy; what goes away is the per-row pass.
@@ -823,7 +823,7 @@ fn copy_nv12<F: VideoFrame>(frame: &F, keep_row_padding: bool) -> Result<CopiedN
 mod tests {
     use super::*;
 
-    /// M1059: the layout a kept-padding copy declares addresses the rows the
+    /// The layout a kept-padding copy declares addresses the rows the
     /// copy actually wrote, chroma plane included.
     #[cfg(feature = "metadata")]
     #[test]

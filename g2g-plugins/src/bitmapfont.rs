@@ -1,4 +1,4 @@
-//! A tiny embedded 8x8 bitmap font (M171) for the CPU `TextOverlay`, so the
+//! A tiny embedded 8x8 bitmap font for the CPU `TextOverlay`, so the
 //! `no_std` baseline can render subtitle text without a font file or a glyph
 //! rasterizer. Each glyph is 8 rows of 8 bits; the most-significant bit is the
 //! leftmost column, so a row's binary literal reads left to right as the glyph
@@ -7,7 +7,7 @@
 //! Coverage is uppercase `A-Z`, `0-9`, space, and common punctuation; lowercase
 //! ASCII letters fold to the uppercase glyph (this is an all-caps display font).
 //! Anything else renders blank. Proper mixed-case TrueType rendering is the
-//! `vello`-backed GPU overlay's job (the analytics-overlay CPU/GPU split, M172).
+//! `vello`-backed GPU overlay's job (the analytics-overlay CPU/GPU split).
 
 /// Width of a glyph cell in source pixels (5 drawn columns + 1 spacing column).
 pub const GLYPH_ADVANCE: u32 = 6;

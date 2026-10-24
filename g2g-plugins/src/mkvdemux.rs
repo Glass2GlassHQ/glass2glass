@@ -1,4 +1,4 @@
-//! Matroska / WebM demuxer element (M110): `Caps::ByteStream{Matroska}` in, one
+//! Matroska / WebM demuxer element: `Caps::ByteStream{Matroska}` in, one
 //! selected elementary stream out. Video leaves as `Caps::CompressedVideo`
 //! (H.264 / H.265 / VP8 / VP9 / AV1), audio as `Caps::Audio` (AAC / Opus).
 //!
@@ -20,12 +20,12 @@
 //! needed for the dimensions). The default is `Vp9`, WebM's video codec; set the
 //! `stream` property to match the file.
 //!
-//! Seeking uses the `Cues` index: with it parsed (M373) the demuxer byte-seeks
+//! Seeking uses the `Cues` index: with it parsed the demuxer byte-seeks
 //! straight to the target Cluster, keeping its parser state. When `Cues` sit at
 //! the end of the file (the common layout) and a `SeekHead` at the start locates
 //! them, a seek first prefetches them (a byte-seek to `Cues`, parse, then a
-//! byte-seek to the target, M374) so the first seek is index-fast without reading
-//! the whole file. With neither, it falls back to the M364 re-scan from offset 0.
+//! byte-seek to the target) so the first seek is index-fast without reading
+//! the whole file. With neither, it falls back to a re-scan from offset 0.
 //!
 //! Scope (v1): the first track of the selected codec; multi-track-of-one-codec
 //! selection and lacing are follow-ups (design/containers.md).
@@ -121,7 +121,7 @@ pub enum MkvStream {
     TaggedAudio(CodecTag),
 }
 
-/// A Matroska `Cues` prefetch in flight (M374): an end-of-file `Cues` index
+/// A Matroska `Cues` prefetch in flight: an end-of-file `Cues` index
 /// located by a `SeekHead` is fetched via a byte-seek *before* the real seek, so
 /// the demuxer can then jump straight to the target Cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,25 +156,25 @@ pub struct MkvDemux {
     bus: Option<BusHandle>,
     /// Bus posting of the container's tags and chapters, once each.
     metadata: MetadataPoster,
-    /// Set once the `StreamCollection` has been announced (M376), so the demuxer
+    /// Set once the `StreamCollection` has been announced, so the demuxer
     /// posts the available-streams list once, when the `Tracks` element parses.
     collection_posted: bool,
-    /// App-driven stream selection (M377): the app names the stream id to forward
+    /// App-driven stream selection: the app names the stream id to forward
     /// (from the announced collection); the demuxer switches its single output to
     /// that track. Inert unless `with_stream_select` wired it.
     stream_select: Option<StreamSelectController>,
-    /// Seek support (M362): app time seeks drive an upstream byte-seek and a
+    /// Seek support: app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek<crate::matroska::MkvFrame>,
     /// Whether the selected track's `CodecPrivate` has been forwarded in-band,
     /// once, before its first frame (see [`config_headers`]). Re-armed on a flush.
     config_sent: bool,
-    /// Clones of the seek controllers (M374): the `Cues` prefetch consumes the app
+    /// Clones of the seek controllers: the `Cues` prefetch consumes the app
     /// seek and drives the two-hop upstream byte-seek directly, so it needs the
     /// same channels `seek` holds. `None` unless `with_seek` wired them.
     app: Option<SeekController>,
     upstream: Option<SeekController>,
-    /// `Cues`-prefetch state (M374). `Idle` outside a prefetch.
+    /// `Cues`-prefetch state. `Idle` outside a prefetch.
     prefetch: CuePrefetch,
 }
 
@@ -205,17 +205,17 @@ impl MkvDemux {
         }
     }
 
-    /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
+    /// Make the demuxer seekable: `app` carries app time seeks; `upstream`
     /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
     /// On a time seek the demuxer rewinds the source and re-syncs from the
     /// keyframe at/before the target; with a `Cues` index (parsed, or located via a
-    /// `SeekHead` and prefetched, M373/M374) it jumps straight to the Cluster.
+    /// `SeekHead` and prefetched) it jumps straight to the Cluster.
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
         AsyncElement::set_seek(&mut self, app, upstream);
         self
     }
 
-    /// Service a pending app seek (M373/M374). Three paths, cheapest first:
+    /// Service a pending app seek. Three paths, cheapest first:
     /// `Cues` already parsed -> seek straight to the target Cluster; only a
     /// `SeekHead` locating `Cues` -> prefetch them (byte-seek to `Cues`, then to
     /// the target); neither -> re-scan from offset 0. A no-op while a seek or
@@ -281,7 +281,7 @@ impl MkvDemux {
         self
     }
 
-    /// Make the demuxer's output stream app-selectable (M377): the controller
+    /// Make the demuxer's output stream app-selectable: the controller
     /// carries a selection of stream ids (from the announced collection); the
     /// demuxer switches its single output to the named track and confirms the
     /// active id on the bus ([`BusMessage::StreamsSelected`]). Pair with
@@ -496,7 +496,7 @@ impl MkvDemux {
     }
 
     /// Announce every elementary stream the container declares as a
-    /// [`BusMessage::StreamCollection`] (M376), once, when the `Tracks` element
+    /// [`BusMessage::StreamCollection`], once, when the `Tracks` element
     /// has parsed. Lists all tracks regardless of which one this instance
     /// forwards: the discovery half of the playbin model. A no-op without a bus,
     /// before Tracks is parsed, or once already posted (kept across a mid-segment
@@ -597,7 +597,7 @@ impl MkvDemux {
         Some(Stream::new(id, stream_type, caps))
     }
 
-    /// Apply any pending app stream selection (M377): switch the single output to
+    /// Apply any pending app stream selection: switch the single output to
     /// the first selected id that names a forwardable track, force a `CapsChanged`
     /// for the new stream, and confirm the active id on the bus
     /// ([`BusMessage::StreamsSelected`]). A no-op without a controller, with no
@@ -912,7 +912,7 @@ impl AsyncElement for MkvDemux {
     }
 }
 
-/// `MkvDemux`'s settable properties (M110).
+/// `MkvDemux`'s settable properties.
 static MKVDEMUX_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
@@ -1065,8 +1065,8 @@ fn video_block_to_annexb(
     annexb
 }
 
-/// One forwardable elementary stream discovered in a parsed Matroska container
-/// (M382): which [`MkvStream`] a demux port would carry, the elementary [`Caps`]
+/// One forwardable elementary stream discovered in a parsed Matroska container:
+/// which [`MkvStream`] a demux port would carry, the elementary [`Caps`]
 /// a decode branch plugs from (the demux's per-port output caps), and whether it
 /// is video (vs audio). The `playbin uri=` auto-fan-out builds one decode branch
 /// per entry.
@@ -1127,7 +1127,7 @@ pub fn encoded_streams(demux: &MatroskaDemuxer) -> Vec<MkvStream> {
 }
 
 /// The forwardable elementary streams a parsed Matroska container carries, in
-/// track order (M382): one [`MkvStreamInfo`] per track whose codec maps to an
+/// track order: one [`MkvStreamInfo`] per track whose codec maps to an
 /// [`MkvStream`] (an unmappable track, or one whose `ContentEncoding` the demuxer
 /// cannot undo, is dropped). `demux` must have parsed its
 /// `Tracks` element (feed a file prefix first); returns empty for a
@@ -1202,8 +1202,8 @@ fn is_subtitle(stream: MkvStream) -> bool {
     )
 }
 
-/// The subtitle tracks a parsed Matroska container carries, in track order
-/// (M415): one [`MkvStreamInfo`] per timed-text or bitmap-subtitle track whose
+/// The subtitle tracks a parsed Matroska container carries, in track order:
+/// one [`MkvStreamInfo`] per timed-text or bitmap-subtitle track whose
 /// `ContentEncoding` the demuxer undoes. The
 /// read-side complement of [`forwardable_streams`] (which is A/V-only): the
 /// subtitle-overlay `playbin` builder pairs these with the A/V streams to plug an
@@ -1242,7 +1242,7 @@ fn resolve_stream_id(demux: &MatroskaDemuxer, id: &str) -> Option<(MkvStream, u6
 /// none for a codec that carries its config in the stream. FLAC needs the
 /// native `fLaC` STREAMINFO as extradata; an Opus track's `CodecPrivate` is its
 /// RFC 7845 `OpusHead`, and forwarding it is how the pre-skip reaches `OpusDec`
-/// and a remuxer (M792, the convention `OggDemux` / `Mp4DemuxN` already use).
+/// and a remuxer (the convention `OggDemux` / `Mp4DemuxN` already use).
 /// The `OpusHead` is validated rather than trusted: a `CodecPrivate` that is not
 /// one is dropped, since a decoder would read garbage from it. A Vorbis or
 /// Theora `CodecPrivate` laces the identification, comment and setup headers,
@@ -1309,9 +1309,9 @@ fn stream_id(number: u64) -> alloc::string::String {
 /// Posts a container's out-of-band metadata on the bus once each: the
 /// whole-stream tags as [`BusMessage::Tag`], the per-track ones as
 /// [`BusMessage::StreamTag`] on that track's stream id, and the `Chapters`
-/// table of contents as [`BusMessage::Chapters`] (M1046). A track's metadata
-/// reaches the file two ways, its `TrackEntry` (`Name` / `Language`, M788) and a
-/// `Targets`-scoped `Tag` (M787); both merge into one message per stream, so the
+/// table of contents as [`BusMessage::Chapters`]. A track's metadata
+/// reaches the file two ways, its `TrackEntry` (`Name` / `Language`) and a
+/// `Targets`-scoped `Tag`; both merge into one message per stream, so the
 /// application sees one view however the file stored it. Shared by the single-
 /// and multi-output demuxers, which both parse with one [`MatroskaDemuxer`]; the
 /// counts survive a mid-segment seek (same file, so nothing re-posts).
@@ -1542,7 +1542,7 @@ impl PadTemplates for MkvDemux {
     }
 }
 
-/// Multi-output Matroska / WebM demuxer (M378): one Matroska byte stream in, N
+/// Multi-output Matroska / WebM demuxer: one Matroska byte stream in, N
 /// elementary streams out, one per output port (the decodebin core). The
 /// multi-output counterpart of [`MkvDemux`] (which forwards a single selected
 /// stream); the read-side analog of [`crate::mkvmuxn::MkvMuxN`].
@@ -1561,7 +1561,7 @@ impl PadTemplates for MkvDemux {
 /// does not carry simply stays dark.
 ///
 /// The app picks the per-port streams from the announced
-/// [`StreamCollection`](BusMessage::StreamCollection) (M376); wiring a `demux`
+/// [`StreamCollection`](BusMessage::StreamCollection); wiring a `demux`
 /// node into the `gst-launch` text DSL and a `playbin` element are the follow-ups.
 ///
 /// # Example
@@ -1586,9 +1586,9 @@ pub struct MkvDemuxN {
     bus: Option<BusHandle>,
     /// Bus posting of the container's tags and chapters, once each.
     metadata: MetadataPoster,
-    /// Set once the `StreamCollection` has been announced (M376), so it posts once.
+    /// Set once the `StreamCollection` has been announced, so it posts once.
     collection_posted: bool,
-    /// App-driven stream selection (M381): the app names the stream id each port
+    /// App-driven stream selection: the app names the stream id each port
     /// should carry (port `i` <- selection id `i`); the demuxer re-maps its ports.
     /// Inert unless `with_stream_select` wired it.
     stream_select: Option<StreamSelectController>,
@@ -1640,14 +1640,14 @@ impl MkvDemuxN {
         self
     }
 
-    /// Attach the pipeline bus so the container's `StreamCollection` (M376) and
+    /// Attach the pipeline bus so the container's `StreamCollection` and
     /// `Tags` post once parsed, the way [`MkvDemux::with_bus`] does.
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.bus = Some(bus);
         self
     }
 
-    /// Make the per-port stream assignment app-selectable (M381): the controller
+    /// Make the per-port stream assignment app-selectable: the controller
     /// carries stream ids (from the announced collection); port `i` re-maps to the
     /// stream named by selection id `i`. The demuxer re-emits that port's
     /// `CapsChanged` for the new stream and confirms the active ids on the bus
@@ -1659,7 +1659,7 @@ impl MkvDemuxN {
         self
     }
 
-    /// Apply any pending app selection (M381): re-map port `i` to the stream named
+    /// Apply any pending app selection: re-map port `i` to the stream named
     /// by the `i`-th selected id, re-arming that port's `CapsChanged` when its
     /// stream changes, and confirm the active ids on the bus. A no-op without a
     /// controller, with no pending selection, or before `Tracks` is parsed.
@@ -1709,7 +1709,7 @@ impl MkvDemuxN {
         })
     }
 
-    /// Announce every container track as a [`BusMessage::StreamCollection`] (M376),
+    /// Announce every container track as a [`BusMessage::StreamCollection`],
     /// once, when `Tracks` has parsed. Mirrors [`MkvDemux::post_stream_collection`]
     /// (lists all tracks, not just the ported ones, so the app can re-select).
     fn post_stream_collection(&mut self) {
@@ -1764,7 +1764,7 @@ impl MultiOutputElement for MkvDemuxN {
         CapsConstraint::Accepts(CapsSet::one(MkvDemux::input_caps()))
     }
 
-    /// Declare each port's elementary-stream caps (M380), so the solver negotiates
+    /// Declare each port's elementary-stream caps, so the solver negotiates
     /// each branch against its codec at startup and a real decoder downstream of
     /// the port configures against it (geometry is a placeholder `Range`, refined
     /// at runtime by the port's `CapsChanged`). `None` for an out-of-range port.

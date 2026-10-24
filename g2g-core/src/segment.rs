@@ -1,4 +1,4 @@
-//! Seek requests and the playback segment (M79).
+//! Seek requests and the playback segment.
 //!
 //! The pure, `no_std` foundation of the seek track: a [`Seek`] request
 //! (`seek(rate, start, stop, flags)`, the GStreamer seek-event analog) and a

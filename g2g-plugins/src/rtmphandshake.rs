@@ -1,4 +1,4 @@
-//! RTMP "genuine FMS/FP" digest handshake (M521), the HMAC-SHA256 complex
+//! RTMP "genuine FMS/FP" digest handshake, the HMAC-SHA256 complex
 //! handshake strict CDNs (Adobe FMS, some Wowza / Facebook Live configs) require
 //! in place of the plain byte-echo simple handshake.
 //!

@@ -13,7 +13,7 @@
 //! are Annex-B from str0m's depayloader; audio is forwarded as Opus packets).
 //! STUN / TURN NAT traversal mirror [`crate::webrtcwhepsrc::WebRtcWhepSrc`].
 //!
-//! Status: on-network validated (M248) against a local mediamtx, behind the
+//! Status: on-network validated against a local mediamtx, behind the
 //! `webrtc` feature: subscribes to a WHEP session publishing both tracks
 //! (`webrtc_av_session_loopback`) and emits video + audio on its two outputs,
 //! mediamtx logging the read as `2 tracks (H264, Opus)`.

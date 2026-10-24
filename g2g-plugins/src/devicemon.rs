@@ -1,4 +1,4 @@
-//! Standard device-provider assembly (M939): [`default_device_monitor`]
+//! Standard device-provider assembly: [`default_device_monitor`]
 //! mirrors [`registry::default_registry`](crate::registry::default_registry),
 //! registering every discovery backend its feature + target allows, so an
 //! application (or the `g2g-device-monitor` binary) discovers the same devices

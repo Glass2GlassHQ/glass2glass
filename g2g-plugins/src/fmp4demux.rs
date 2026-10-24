@@ -70,7 +70,7 @@ pub struct Fmp4Demux {
     stream_pos: u64,
     sequence: u64,
     configured: bool,
-    /// Seek support (M362): app time seeks drive an upstream byte-seek and a
+    /// Seek support: app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek<Sample>,
 }
@@ -100,7 +100,7 @@ impl Fmp4Demux {
         }
     }
 
-    /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
+    /// Make the demuxer seekable: `app` carries app time seeks; `upstream`
     /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller,
     /// which a time seek drives to reposition the stream. On the resulting
     /// `Flush` the parser resets and re-syncs from the keyframe at/before target.

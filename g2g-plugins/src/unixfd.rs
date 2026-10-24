@@ -1,4 +1,4 @@
-//! GStreamer's fd-passing IPC pair (M1216, `unixfd` feature): [`UnixFdSink`] and
+//! GStreamer's fd-passing IPC pair (`unixfd` feature): [`UnixFdSink`] and
 //! [`UnixFdSrc`] speak the protocol of `gst/unixfd` in gst-plugins-bad, so
 //! either end can be a `gst-launch-1.0` process. The wire itself is in
 //! [`crate::unixfdwire`].

@@ -1,4 +1,4 @@
-//! ST 2110-22 JPEG XS over RTP (M604): the packetizer and depacketizer for
+//! ST 2110-22 JPEG XS over RTP: the packetizer and depacketizer for
 //! constant-bit-rate compressed video, RFC 9134 (ISO/IEC 21122 / JPEG XS).
 //!
 //! ST 2110-22 carries a compressed JPEG XS codestream where -20 carries raw

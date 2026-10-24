@@ -1,4 +1,4 @@
-//! M500: consume Vulkan-Video-decoded frames in an application-owned wgpu render
+//! Consume Vulkan-Video-decoded frames in an application-owned wgpu render
 //! pipeline (the game-engine / viewer integration surface), and dump the result as PPMs.
 //!
 //! Unlike `vulkan_video_smoke` (which reads the decoder's NV12 back on the CPU)

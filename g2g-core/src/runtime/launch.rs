@@ -1,9 +1,9 @@
-//! `gst-launch`-style text pipeline parser (M106, M117, M118): turn
+//! `gst-launch`-style text pipeline parser: turn
 //! `"videotestsrc num-buffers=3 ! videoflip method=rotate-180 ! fakesink"` into a
 //! runnable [`Graph`], the front door that makes g2g usable without hand-writing
 //! Rust for every pipeline.
 //!
-//! Built on the M104 property system and the M105 by-name registry: each `!`
+//! Built on the property system and the by-name registry: each `!`
 //! separated node is `element-name key=value ...`; the parser constructs the
 //! element by name from the [`Registry`], looks up each property's
 //! [`PropKind`](crate::PropKind) to parse its textual value, and applies it.
@@ -11,16 +11,16 @@
 //! with no outgoing link a sink, the rest transforms (so a linear chain is still
 //! source -> transforms -> sink).
 //!
-//! Branching (M118): `tee name=t` fans one output to many. A `tee` is the
+//! Branching: `tee name=t` fans one output to many. A `tee` is the
 //! structural fan-out node (no element), its output width derived from how many
 //! branches reference it; a branch is a `t.` pad reference that starts a chain (a
 //! head ref, linking *from* the named element) or, right after a `!`, ends one (a
 //! tail ref, linking *into* it). So
 //! `videotestsrc ! tee name=t ! fakesink   t. ! fakesink` broadcasts each frame
-//! to two sinks. The caps shorthand (`! video/x-raw,format=nv12,... !`, M117) is
+//! to two sinks. The caps shorthand (`! video/x-raw,format=nv12,... !`) is
 //! a bare media-type node rewritten to a `capsfilter`.
 //!
-//! Fan-in (M122): an element with several inbound links is a muxer, built from
+//! Fan-in: an element with several inbound links is a muxer, built from
 //! the registry's [`MuxerFactory`](crate::runtime::MuxerFactory) with that input
 //! count (so its `input_count` matches the node's pads). Each feeding chain ends
 //! with a `m.` tail ref, so
@@ -30,7 +30,7 @@
 //! previous element's property); the muxer chain is last. A muxer has one output
 //! pad, so it must feed a downstream consumer.
 //!
-//! Value grammar (M840): a value may carry spaces by quoting (`"..."` or
+//! Value grammar: a value may carry spaces by quoting (`"..."` or
 //! `'...'`, either anywhere in the fragment: `location=/tmp/"my dir"/a.ts`) or by
 //! escaping (`\ `). A `\` escapes a quote, another `\`, a `!`, a `#`, or
 //! whitespace; before anything else it stays literal, so a Windows path
@@ -41,12 +41,12 @@
 //! A pad-name suffix on a reference (`t.src_0`) is accepted but ignored (pads are
 //! positional).
 //!
-//! Encoding profiles (M1089): `encodebin profile="<container>:<stream>[:<stream>]"`
+//! Encoding profiles: `encodebin profile="<container>:<stream>[:<stream>]"`
 //! is a macro too, expanding into the encoder each stream names plus the muxer
 //! for the container (`encodebin2` and `transcodebin` are gst's other names for
 //! it, the latter being `decodebin ! encodebin`). The container picks the muxer
 //! and a stream picks its encoder; anything the profile does not name
-//! negotiates. A stream part may also pin what it does care about (M1097): a
+//! negotiates. A stream part may also pin what it does care about: a
 //! `width` / `height`, a `framerate`, a sample `rate` or a `channels` each
 //! splice the converter that applies it, and a `bitrate` is set on the encoder.
 //! Any other field is refused. An uncompressed stream
@@ -59,7 +59,7 @@
 //!
 //! Two `key=value` pairs are launch keywords rather than properties: `name=` is
 //! the instance name (and the handle pad references resolve against), and
-//! `log-category=` (M847) replaces that instance's `G2G_DEBUG` category, leaving
+//! `log-category=` replaces that instance's `G2G_DEBUG` category, leaving
 //! the auto `<type>N` naming alone.
 
 use alloc::boxed::Box;
@@ -138,13 +138,13 @@ pub enum ParseError {
     /// output pad must feed a downstream consumer.
     MuxerWithoutOutput(String),
     /// A named input-pad reference (`mux.foo_0`) names a request pad this muxer
-    /// does not define (M481): the element's `input_pad_index` scheme declined it.
+    /// does not define: the element's `input_pad_index` scheme declined it.
     UnknownInputPad(String),
-    /// Two input-pad references resolve to the same muxer input index (M481), e.g.
+    /// Two input-pad references resolve to the same muxer input index, e.g.
     /// `mux.video_0` named twice, or a named pad colliding with a positional one.
     DuplicateInputPad(String),
     /// An output-pad reference (`cap.foo`) names a pad this fan-out element does
-    /// not have, or one another link already took (M1241). An inline link or a
+    /// not have, or one another link already took. An inline link or a
     /// bare `cap.` reports an empty `pad`.
     UnknownOutputPad {
         element: String,
@@ -451,19 +451,19 @@ struct ElementSpec {
 
 /// An item in a chain: an element to build, a `t.` reference to a named element
 /// declared elsewhere (the branching / link-by-name syntax), or a node already
-/// constructed by a macro expansion (`uridecodebin` / `playbin`, M196), spliced
+/// constructed by a macro expansion (`uridecodebin` / `playbin`), spliced
 /// in directly rather than built by name.
 enum Item {
     Element(ElementSpec),
     /// A `t.` / `d.video_0` reference to a named element. `pad` is the suffix after
     /// the dot (`""` for a bare `t.`, `"video_0"` for `d.video_0`), used by the
-    /// explicit-demux fan-out (M476) to select which stream a branch reads; ignored
+    /// explicit-demux fan-out to select which stream a branch reads; ignored
     /// for a tee (positional).
     Ref {
         name: String,
         pad: String,
     },
-    /// `name` is the instance name the expansion chose for it (M1164), `None`
+    /// `name` is the instance name the expansion chose for it, `None`
     /// for a node no one addresses.
     Prebuilt {
         node: PrebuiltNode,
@@ -497,7 +497,7 @@ fn is_caps_token(tok: &str) -> bool {
 
 /// A pad reference (`t.`, `t.src_0`, `d.video_0`): a name, a `.`, and no `=` / `/`.
 /// Returns the referenced element name and the pad suffix after the first dot
-/// (`""` for a bare `t.`). The suffix drives the explicit-demux fan-out (M476);
+/// (`""` for a bare `t.`). The suffix drives the explicit-demux fan-out;
 /// a tee ignores it (positional).
 fn split_pad_ref(tok: &str) -> Option<(&str, &str)> {
     if tok.contains('=') || tok.contains('/') || !tok.contains('.') {
@@ -513,7 +513,7 @@ fn as_ref_name(tok: &str) -> Option<&str> {
     split_pad_ref(tok).map(|(name, _)| name)
 }
 
-/// Parse a demux output-pad suffix into a [`PadRequest`] (M476): `"video_0"` ->
+/// Parse a demux output-pad suffix into a [`PadRequest`]: `"video_0"` ->
 /// `{ Video, 0 }`, `"audio_1"` -> `{ Audio, 1 }`, `"text_0"` / `"subtitle_0"` ->
 /// `{ Text, 0 }`, `"caption"` -> `{ Text, 0 }`, `"src_2"` -> `{ Any, 2 }`. A bare `d.` (empty suffix) or an
 /// unrecognized prefix is `{ Any, ordinal }`, i.e. positional by reference order.
@@ -878,7 +878,7 @@ pub fn apply_props<T: PropTarget>(
 /// fan-out width) from its link degree, then construct and wire the nodes.
 /// `decodebin` and `parsebin`: not elements, but macros that expand, at parse
 /// time, into the chain the auto-plug search finds from their upstream caps:
-/// down to raw video or audio through decoders (M193), or for `parsebin` down to
+/// down to raw video or audio through decoders, or for `parsebin` down to
 /// the parsed elementary stream, with no decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutoplugBin {
@@ -1507,7 +1507,7 @@ fn demuxed_file_streams(
 
 /// `encodebin`: not an element either, but a macro that expands, at parse time,
 /// into one encoder per profile stream plus the muxer that writes the profile's
-/// container (M1089). `encodebin2` is gst's name for the same thing.
+/// container. `encodebin2` is gst's name for the same thing.
 fn is_encodebin(name: &str) -> bool {
     matches!(name, "encodebin" | "encodebin2")
 }
@@ -1524,7 +1524,7 @@ struct EncodingProfile {
 }
 
 /// One stream of a profile: the coded form it names, plus whatever its part
-/// pins (M1097). A pinned raw field is honoured by the converter spliced ahead
+/// pins. A pinned raw field is honoured by the converter spliced ahead
 /// of the encoder; a pinned bitrate is a property on the encoder itself.
 struct ProfileStream {
     caps: Caps,
@@ -1928,7 +1928,7 @@ fn togglerecord_secondary(
     }
 }
 
-/// `togglerecord name=t` with request pads (M1172): gst spells several streams
+/// `togglerecord name=t` with request pads: gst spells several streams
 /// that start and stop together as one element with `sink_%u` / `src_%u` pad
 /// pairs. Here that is one `ToggleRecord` per stream sharing one group, built by
 /// rewriting the references, so the graph holds plain 1-in 1-out transforms the
@@ -2237,13 +2237,13 @@ fn muxer_spec(
     }))
 }
 
-/// The caps a `decodebin` predecessor produces, used as the auto-plug input
-/// (M195). For a registered source, build it and apply its properties so a
+/// The caps a `decodebin` predecessor produces, used as the auto-plug input.
+/// For a registered source, build it and apply its properties so a
 /// property that re-types the output (a `filesrc`'s `bytestream-format`) is
 /// reflected via [`SourceLoop::probe_output_caps`]; fall back to the registry's
 /// declared caps (a fixed source, or a transform's source-pad template).
 /// `probe_output_caps` also sniffs a `bytestream-format=auto` source's header at
-/// parse time (M480), so `decodebin` picks the demuxer from the real content even
+/// parse time, so `decodebin` picks the demuxer from the real content even
 /// when the file extension is wrong, and content it does not recognize fails the
 /// parse.
 fn resolve_upstream_caps(
@@ -2302,14 +2302,14 @@ const FALLBACKSRC_PROPS: &[&str] = &[
     "manual-unblock",
 ];
 
-/// gst `fallbacksrc`'s defaults for its restart timeouts (M1163): a source that
+/// gst `fallbacksrc`'s defaults for its restart timeouts: a source that
 /// delivers nothing for `restart-timeout` is rebuilt, and rebuilding is given up
 /// after `retry-timeout` of failures.
 const FALLBACK_RESTART_TIMEOUT_NS: u64 = 5_000_000_000;
 const FALLBACK_RETRY_TIMEOUT_NS: u64 = 60_000_000_000;
 
 /// The launch keyword whose `sink_%u` / `src_%u` request pads expand into one
-/// element per stream, all joined by a shared group (M1172).
+/// element per stream, all joined by a shared group.
 const TOGGLERECORD: &str = "togglerecord";
 
 /// The properties the expansion writes on the elements it builds: the group that
@@ -2339,14 +2339,14 @@ pub const FALLBACK_SWITCH_NAME: &str = "g2g-fallbacksrc-switch";
 /// what makes the dummy play at the main stream's rate.
 const FALLBACK_PACER: &str = "clocksync";
 
-/// Instance-name suffixes for the two URI sources the expansion builds (M1164),
+/// Instance-name suffixes for the two URI sources the expansion builds,
 /// on the `fallbacksrc`'s own name: `fallbacksrc name=fb` gives `fb-source` and
 /// `fb-fallback-source`, so a launch line can address either.
 pub const FALLBACK_MAIN_SOURCE_SUFFIX: &str = "-source";
 pub const FALLBACK_FALLBACK_SOURCE_SUFFIX: &str = "-fallback-source";
 
 /// Instance-name suffixes telling the per-kind switches of a fanned-out
-/// `fallbacksrc` apart (M1168): `fallbacksrc name=fb` over a file carrying both
+/// `fallbacksrc` apart: `fallbacksrc name=fb` over a file carrying both
 /// kinds gives the switches `fb-video` and `fb-audio`.
 pub const FALLBACK_VIDEO_SUFFIX: &str = "-video";
 pub const FALLBACK_AUDIO_SUFFIX: &str = "-audio";
@@ -2431,9 +2431,9 @@ fn keyword_uint(spec: &ElementSpec, key: &str, default: u64) -> Result<u64, Pars
     })
 }
 
-/// Wrap a `fallbacksrc` URI source so it is rebuilt when it dies (M1163), when
+/// Wrap a `fallbacksrc` URI source so it is rebuilt when it dies, when
 /// the registry has a restart hook; else the source runs as it is. `unblock` is
-/// the handle each life waits on under `manual-unblock=true` (M1166).
+/// the handle each life waits on under `manual-unblock=true`.
 fn restartable_uri_source(
     registry: &Registry,
     source: Box<dyn DynSourceLoop>,
@@ -2470,7 +2470,7 @@ fn restartable_source(
     }
 }
 
-/// [`restartable_source`] for a session that produces every port itself (M1170).
+/// [`restartable_source`] for a session that produces every port itself.
 fn restartable_fanout_source(
     registry: &Registry,
     source: Box<dyn DynMultiOutputSource>,
@@ -2623,7 +2623,7 @@ fn fallbacksrc_settings<'a>(
 /// The expansion is single-stream, like `uridecodebin`: `enable-video` /
 /// `enable-audio` say which kind the decode chain may reach, video first.
 /// `consumer` is the element the switch output feeds, whose declared input memory
-/// picks the decoder (M1018). `auto_sink` appends the kind's automatic sink, so a
+/// picks the decoder. `auto_sink` appends the kind's automatic sink, so a
 /// `fallbacksrc` that is the whole line is still a runnable pipeline.
 fn expand_fallbacksrc(
     registry: &Registry,
@@ -3642,7 +3642,7 @@ fn build_graph(
 }
 
 /// Map a `queue` / `queue2` node's `leaky=` property to the edge backpressure
-/// policy it stands in for (M190). gst accepts the enum by value or nick:
+/// policy it stands in for. gst accepts the enum by value or nick:
 /// `0`/`no` (lossless, the default), `1`/`upstream` (drop the newest incoming
 /// buffer), `2`/`downstream` (drop the oldest queued buffer). The other buffering
 /// bounds (`max-size-bytes` / `max-size-time`, `min-threshold-*`, `silent`) are
@@ -3690,7 +3690,7 @@ pub fn parse_launch(registry: &Registry, pipeline: &str) -> Result<Graph<GraphNo
 }
 
 /// [`parse_launch`], with the auto-plug search forbidden from picking any
-/// factory named in `avoided` (M1023). The line is otherwise parsed identically,
+/// factory named in `avoided`. The line is otherwise parsed identically,
 /// so an element the text names explicitly is still built: this bounds only what
 /// a `decodebin` / `uridecodebin` / `playbin` may choose. An application retries
 /// through here after a chosen decoder turned out not to decode the stream.
@@ -3750,7 +3750,7 @@ pub fn parse_launch_avoiding(
 }
 
 /// The factory to bar from the auto-plug search after a run ended in
-/// `failed_element`, or `None` when re-plugging cannot help (M1023). Pass the
+/// `failed_element`, or `None` when re-plugging cannot help. Pass the
 /// result to [`parse_launch_avoiding`] (accumulating it into `avoided`) and run
 /// the line again; `None` means report the failure instead.
 ///
@@ -3910,7 +3910,7 @@ pub async fn set_property_text(
     mutator.set_property(node, name, value).await
 }
 
-/// Splice memory-domain converters into a just-parsed graph (M1017), where the
+/// Splice memory-domain converters into a just-parsed graph, where the
 /// registry carries a factory: a text pipeline that links a GPU decoder to a sink
 /// in another domain gets the bridge (or the download) it needs without naming
 /// it. A no-op when the domains already agree, or when no factory is registered.
@@ -3922,9 +3922,9 @@ fn splice_domain_converters(registry: &Registry, graph: Graph<GraphNode>) -> Gra
 }
 
 /// The `uri=` and sinks of a pipeline that is a single bare `playbin uri=X`
-/// element (and nothing else), the M382 multi-stream auto-fan-out trigger.
+/// element (and nothing else), the multi-stream auto-fan-out trigger.
 /// `None` for any other shape: a `playbin` mid-pipeline, alongside other
-/// elements, or without a `uri=` is left to the normal builder (the M196
+/// elements, or without a `uri=` is left to the normal builder (the
 /// single-stream expansion).
 fn lone_playbin(chains: &[Chain]) -> Option<(&str, PlaybinSinks<'_>)> {
     let [chain] = chains else { return None };
@@ -3942,7 +3942,7 @@ fn lone_playbin(chains: &[Chain]) -> Option<(&str, PlaybinSinks<'_>)> {
 }
 
 /// The spec of a pipeline that is a single bare `fallbacksrc` (and nothing else),
-/// the M1168 per-kind fan-out trigger. `None` for any other shape: an
+/// the per-kind fan-out trigger. `None` for any other shape: an
 /// inline `fallbacksrc` feeds user-written elements, and a launch line has no way
 /// to name a second output, so it stays single-stream.
 fn lone_fallbacksrc_spec(chains: &[Chain]) -> Option<&ElementSpec> {
@@ -4095,7 +4095,7 @@ fn uri_fanout(registry: &Registry, uri: &str) -> Result<Option<UriFanout>, Parse
 /// a `fallbacksrc` has no generator and no sink for (text, unclassified), which
 /// leaves the caller the single-stream expansion.
 ///
-/// A kind may repeat (M1171): a container carrying two audio tracks gets two
+/// A kind may repeat: a container carrying two audio tracks gets two
 /// audio branches. `ordinal` is how many earlier ports carried the same kind, so
 /// each switch takes a distinct name and each main port pairs with the matching
 /// fallback port rather than all of them with the first of their kind.
@@ -4114,7 +4114,7 @@ fn fallback_kinds(fanout: &UriFanout) -> Option<Vec<FanoutBranch>> {
 }
 
 /// The index of the `ordinal`-th port of `stream_type` in `ports`, or `None`
-/// when there is no such port (M1171).
+/// when there is no such port.
 fn nth_port_of_kind(
     ports: &[UriFanoutPort],
     stream_type: StreamType,
@@ -4170,7 +4170,7 @@ fn single_fallback_port(
 }
 
 /// One port's branch of a fanned-out `fallbacksrc`: its kind's shape, and which
-/// port of that kind it is (M1171).
+/// port of that kind it is.
 #[derive(Clone, Copy)]
 struct FanoutBranch {
     kind: FallbackKind,
@@ -4181,8 +4181,8 @@ impl FanoutBranch {
     /// The name of this branch's switch: the keyword's stem plus the kind's
     /// suffix, and for the second and later port of a kind the ordinal too, so a
     /// two-audio-track container's switches never collide. The first port of a
-    /// kind keeps the bare suffix, so a single-track container's names are the
-    /// ones M1168 already generated.
+    /// kind keeps the bare suffix, so a single-track container's names have no
+    /// ordinal.
     fn switch_name(&self, base: &str) -> String {
         match self.ordinal {
             0 => alloc::format!("{base}{}", self.kind.suffix),
@@ -4192,7 +4192,7 @@ impl FanoutBranch {
 }
 
 /// Add one fan-out's head to `graph`, restart-wrapped and named `name`, and
-/// answer the pad each port is read off (M1170). A file container's head is a
+/// answer the pad each port is read off. A file container's head is a
 /// byte source into a demuxer, so the name goes on the source and the pads come
 /// off the demuxer; a session's head is one multi-output source, so both are the
 /// same node.
@@ -4243,11 +4243,11 @@ fn add_fanout_head(
     }
 }
 
-/// Build the per-kind graph of a lone `fallbacksrc uri=X` (M1168): one restartable
+/// Build the per-kind graph of a lone `fallbacksrc uri=X`: one restartable
 /// byte source into one demuxer, then per demux port a decode chain into input 0
 /// of that kind's `fallbackswitch`, the fallback branch into input 1, and the
 /// switch output to that kind's automatic sink. An application-built fallback
-/// (M1203) is one stream, so it backs one switch and the rest take dummies.
+/// is one stream, so it backs one switch and the rest take dummies.
 ///
 /// `Ok(None)` declines, leaving the single-stream expansion to build the line: no
 /// hook claims the URI, the container carries one kind, a kind repeats, or either
@@ -4818,7 +4818,7 @@ mod tests {
     // parser splices one in. Covered end to end (build + run + topology) in
     // g2g-plugins/tests/m118_launch_branching.rs, where real elements exist.
 
-    /// M1155: an element whose output cadence is its own only gets the deadline
+    /// An element whose output cadence is its own only gets the deadline
     /// tick on a fan-in arm, and it has one input, so a name registered only as a
     /// muxer builds a fan-in node at link degree one. A name registered both ways
     /// still builds its single-input element there.

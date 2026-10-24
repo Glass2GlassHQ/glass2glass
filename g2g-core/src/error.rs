@@ -34,7 +34,7 @@ pub enum G2gError {
     /// it has no pad for that source, so the add fails and the run continues on
     /// the inputs it already has.
     InputRefused,
-    /// An animated property binding (M882) does not fit the element it was
+    /// An animated property binding does not fit the element it was
     /// attached to: an unknown or non-animatable property name (raised at
     /// startup, before any frame flows), or a sampled value the element refused
     /// mid-run. The offending node and property are named on the log's runtime
@@ -44,13 +44,13 @@ pub enum G2gError {
     /// transform's `timeout` elapsed with the stream stalled.
     Timeout,
     /// A demux built with `ports` output ports was handed a batch of `streams`
-    /// streams (M1233): each stream needs its own port.
+    /// streams: each stream needs its own port.
     PortCountMismatch {
         ports: usize,
         streams: usize,
     },
     /// The frame of mux input `index` was already taken out of its batch by an
-    /// earlier consumer (M1233).
+    /// earlier consumer.
     BatchFrameTaken {
         index: usize,
     },

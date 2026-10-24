@@ -18,13 +18,13 @@
 //! [`run`] takes the registry, so the `g2g-inspect` binary passes
 //! [`default_registry`](crate::registry::default_registry) and a launcher with
 //! more elements passes its own. Backed by
-//! [`g2g_core::runtime::Registry::inspect`] (M105/M107). Requires the `std`
+//! [`g2g_core::runtime::Registry::inspect`]. Requires the `std`
 //! feature (the registry is std-only). With the `plugin-loader` feature, plugins
 //! from `$G2G_PLUGIN_PATH` and `--plugin <path>` are loaded first so their
-//! elements appear in the listing and dumps (M201). With `plugin-signing`, each
+//! elements appear in the listing and dumps. With `plugin-signing`, each
 //! `--trusted-key <path>` (and each key file in `$G2G_PLUGIN_TRUSTED_KEYS`) adds
 //! an Ed25519 public key, and once any key is trusted every plugin must carry a
-//! signature from one of them (M1061).
+//! signature from one of them.
 
 use alloc::format;
 use alloc::string::{String, ToString};

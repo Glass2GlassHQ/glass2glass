@@ -298,7 +298,7 @@ impl ReconfigureSlot {
 }
 
 /// Capacity-1 latest-wins slot carrying the upstream-traveling [`QosMessage`] of
-/// a bidirectional link (M174). Same shape as [`ReconfigureSlot`]: a later QoS
+/// a bidirectional link. Same shape as [`ReconfigureSlot`]: a later QoS
 /// report supersedes an unobserved earlier one (lateness is a current condition,
 /// not a stream).
 #[derive(Debug, Clone, Default)]
@@ -344,7 +344,7 @@ impl BitrateSlot {
 pub struct LinkSender {
     pub(crate) data: Sender<PipelinePacket>,
     pub(crate) reconfigure: ReconfigureSlot,
-    /// Reverse QoS slot (M174): a downstream sink stores a lateness report here;
+    /// Reverse QoS slot: a downstream sink stores a lateness report here;
     /// the producer observes it on its next push as [`PushOutcome::Qos`].
     pub(crate) qos: QosSlot,
     /// Reverse bitrate slot: a downstream WebRTC sink stores its BWE estimate
@@ -370,14 +370,14 @@ pub struct LinkSender {
     /// observer tap so a live consumer reads this edge's traffic mid-run.
     /// `None` (zero cost) unless the runner installed them.
     pub(crate) counters: Option<Arc<EdgeCounters>>,
-    /// The mutation endpoint the [`SenderSink`] built over this link adopts
-    /// (M1115). `None` (one relaxed load per push, no gate) unless the runner
+    /// The mutation endpoint the [`SenderSink`] built over this link adopts.
+    /// `None` (one relaxed load per push, no gate) unless the runner
     /// was asked for a [`GraphMutator`](crate::runtime::GraphMutator).
     #[cfg(feature = "std")]
     pub(crate) mutation: Option<Arc<ProducerEndpoint>>,
 }
 
-/// The retargetable producing end of one edge (M1115). The arm pushing into the
+/// The retargetable producing end of one edge. The arm pushing into the
 /// edge holds it through its [`SenderSink`]; the graph mutator holds the same
 /// `Arc` and uses it to stop that producer at a packet boundary, take its
 /// [`LinkSender`] away, and hand back a different one, so a transform can be
@@ -413,16 +413,16 @@ struct EndpointState {
     /// consumer below it, so the claim is never taken by default.
     claimed: bool,
     /// A remove is lifting the element pushing here out, so its arm gives it an
-    /// `Eos` once its input closes and forwards whatever it was holding (M1132).
+    /// `Eos` once its input closes and forwards whatever it was holding.
     drain: bool,
-    /// M1149: a replacement took this producer's link away for good. Its arm is
+    /// A replacement took this producer's link away for good. Its arm is
     /// resuming onto a dead link so it ends by its own downstream-closed path,
     /// which is not a run failure.
     retired: bool,
     producer: Option<Waker>,
     mutator: Option<Waker>,
     caps: Option<Caps>,
-    /// M1149: the segment in force on this edge and the last `DataFrame` that
+    /// The segment in force on this edge and the last `DataFrame` that
     /// crossed under it (PTS, duration), so a source replacement can continue
     /// the running time its predecessor reached.
     segment: Option<Segment>,
@@ -483,7 +483,7 @@ impl ProducerEndpoint {
 
     /// The segment the packets on this edge are timed against, and the last
     /// `DataFrame` (PTS, duration) that crossed under it. Both `None` until
-    /// something crosses (M1149).
+    /// something crosses.
     pub(crate) fn timeline(&self) -> (Option<Segment>, Option<(u64, u64)>) {
         let g = self.state.lock();
         (g.segment, g.last_frame)
@@ -506,7 +506,7 @@ impl ProducerEndpoint {
         self.state.lock().claimed = true;
     }
 
-    /// Ask the arm pushing here to flush its element before it ends (M1132).
+    /// Ask the arm pushing here to flush its element before it ends.
     /// Set before the element's input is closed, so the arm sees it by the time
     /// it reaches the end of its input.
     pub(crate) fn begin_drain(&self) {
@@ -584,7 +584,7 @@ impl ProducerEndpoint {
         }
     }
 
-    /// End the producer parked here for good (M1149): it resumes on the dead
+    /// End the producer parked here for good: it resumes on the dead
     /// link it parked with, so its next push fails and its element leaves by the
     /// same path it takes when its consumer goes away. The packet it was holding
     /// at the park dies with it; the packets already queued on the link the
@@ -600,7 +600,7 @@ impl ProducerEndpoint {
         self.state.lock().retired
     }
 
-    /// Hand this endpoint to a fresh producer (M1149). Everything the retired
+    /// Hand this endpoint to a fresh producer. Everything the retired
     /// one left behind goes: without this the endpoint still reads as ended, and
     /// the next operation on the edge would be refused as
     /// [`GraphEnded`](crate::runtime::MutationError::GraphEnded). The timeline is
@@ -736,8 +736,7 @@ impl LinkSender {
     }
 
     /// The mutation endpoint a [`SenderSink`] built over this link would adopt.
-    /// A lent source arm reads it to tell a retirement from a real failure
-    /// (M1149).
+    /// A lent source arm reads it to tell a retirement from a real failure.
     #[cfg(feature = "std")]
     pub(crate) fn mutation_endpoint(&self) -> Option<Arc<ProducerEndpoint>> {
         self.mutation.clone()
@@ -760,7 +759,7 @@ impl LinkSender {
         self.send_packet(PipelinePacket::CapsChanged(caps)).await
     }
 
-    /// Queue an `Eos` the same way (M1149): the mutator ending a sink it is
+    /// Queue an `Eos` the same way: the mutator ending a sink it is
     /// replacing, behind everything already queued, so that sink's arm drains
     /// what it was given and then finalizes on its normal end-of-stream path.
     #[cfg(feature = "std")]
@@ -871,7 +870,7 @@ impl LinkReceiver {
         self.reconfigure.store(r);
     }
 
-    /// Latest-wins QoS signal (M174): the consuming sink reports it ran behind
+    /// Latest-wins QoS signal: the consuming sink reports it ran behind
     /// the clock; the producer observes it on its next [`OutputSinkExt::push`](crate::element::OutputSinkExt::push) as
     /// [`PushOutcome::Qos`] and may skip ahead to shed load.
     pub fn request_qos(&self, q: QosMessage) {
@@ -885,7 +884,7 @@ impl LinkReceiver {
         self.bitrate.store(bps);
     }
 
-    /// A clone of this link's reverse QoS slot (M175). A transform arm hands it
+    /// A clone of this link's reverse QoS slot. A transform arm hands it
     /// to its *output* [`SenderSink`] as a relay target, so a QoS report seen on
     /// the downstream link is forwarded onto this (upstream) link toward the
     /// source instead of being dropped at the transform.
@@ -894,14 +893,14 @@ impl LinkReceiver {
         self.qos.clone()
     }
 
-    /// A clone of this link's reverse reconfigure slot (M720), the
+    /// A clone of this link's reverse reconfigure slot, the
     /// keyframe-request analog of [`qos_slot`](Self::qos_slot).
     #[cfg(feature = "std")]
     pub(crate) fn reconfigure_slot(&self) -> ReconfigureSlot {
         self.reconfigure.clone()
     }
 
-    /// A clone of this link's reverse bitrate slot (M720).
+    /// A clone of this link's reverse bitrate slot.
     #[cfg(feature = "std")]
     pub(crate) fn bitrate_slot(&self) -> BitrateSlot {
         self.bitrate.clone()
@@ -1043,11 +1042,11 @@ impl ProbeSlot {
 pub struct SenderSink {
     link: LinkSender,
     probe: ProbeSlot,
-    /// Relay targets for a downstream QoS report (M175). Empty on a source's
+    /// Relay targets for a downstream QoS report. Empty on a source's
     /// output adapter: a QoS seen on the link surfaces as [`PushOutcome::Qos`]
     /// so the source element acts on it. A transform's or fan-out's output
     /// adapter holds its *input* link's reverse slot, a muxer's holds one per
-    /// input link (M1242): the report is stored into each instead, forwarding
+    /// input link: the report is stored into each instead, forwarding
     /// it one hop toward the source. A generic transform thus relays QoS
     /// without having to observe it in `process`.
     upstream_qos: Vec<QosSlot>,
@@ -1057,7 +1056,7 @@ pub struct SenderSink {
     /// `upstream_qos` set both observes the report and relays it.
     qos_answered: bool,
     /// As `upstream_qos`, for downstream reverse-channel `Reconfigure`s the
-    /// producer does not answer (M720): set on a transform's output adapter.
+    /// producer does not answer: set on a transform's output adapter.
     upstream_reconfigure: Option<ReconfigureSlot>,
     /// Which `Reconfigure` variants this adapter's own producer answers, i.e.
     /// which ones surface as `PushOutcome::Reconfigure` instead of travelling
@@ -1065,9 +1064,9 @@ pub struct SenderSink {
     /// other: `videoflip` takes `AbsorbOrientation` and still relays a
     /// keyframe request.
     reconfigure_answered: ReconfigureAnswered,
-    /// As `upstream_qos`, for downstream bitrate targets (M720).
+    /// As `upstream_qos`, for downstream bitrate targets.
     upstream_bitrate: Option<BitrateSlot>,
-    /// M759 auto-propagation: the propagated metadata set the owning transform
+    /// Metadata auto-propagation: the propagated metadata set the owning transform
     /// arm derived from its most recent input frame (its element declared a
     /// [`meta_transform`](crate::element::AsyncElement::meta_transform)). Attached
     /// to any outgoing `DataFrame` whose own meta is empty, so a transform that
@@ -1076,12 +1075,12 @@ pub struct SenderSink {
     /// came out empty (a Drop verdict must not leak a stale set).
     #[cfg(feature = "metadata")]
     meta_stash: Option<crate::meta::FrameMetaSet>,
-    /// M909: set once an `Eos` has been enqueued through this adapter. A runner
+    /// Set once an `Eos` has been enqueued through this adapter. A runner
     /// arm that forwards its own `Eos` after `process(Eos)` returns checks this
     /// so an element that already forwarded one (typically via a catch-all
     /// `other => out.push(other)` arm) does not emit a second.
     eos_forwarded: bool,
-    /// M947: the probe of the element pushing through this adapter, when the arm
+    /// The probe of the element pushing through this adapter, when the arm
     /// instruments it. Time spent awaiting capacity here is banked on that probe
     /// so the element's `process()` timing separates its own work from
     /// downstream backpressure. `None` on an uninstrumented adapter (no cost:
@@ -1090,12 +1089,12 @@ pub struct SenderSink {
     /// In-flight push phase, so `poll_push` runs the pre-send steps exactly
     /// once per packet and a blocked send resumes where it left off.
     push_phase: PushPhase,
-    /// M1115: the mutation gate this producer pushes through, when the run was
+    /// The mutation gate this producer pushes through, when the run was
     /// started with a [`GraphMutator`](crate::runtime::GraphMutator). Adopted
     /// from the link this adapter was built over, and kept across a retarget.
     #[cfg(feature = "std")]
     endpoint: Option<Arc<ProducerEndpoint>>,
-    /// M1132: an `Eos` pushed through here is swallowed instead of enqueued. Set
+    /// An `Eos` pushed through here is swallowed instead of enqueued. Set
     /// for the length of the flush a remove gives an element it is lifting out:
     /// the element's held frames must reach the consumer, its end of stream must
     /// not, since that would end the run.
@@ -1193,7 +1192,7 @@ impl SenderSink {
         }
     }
 
-    /// Bank this adapter's push-wait on `probe`, the producing element's (M947).
+    /// Bank this adapter's push-wait on `probe`, the producing element's.
     /// The arm calls this right after building the adapter, so the element's
     /// `proc` percentiles report compute and its `push_wait` percentiles report
     /// the backpressure it served.
@@ -1216,14 +1215,14 @@ impl SenderSink {
         self.link.counters.is_some() || self.push_wait_probe.is_some()
     }
 
-    /// Whether an `Eos` has already been enqueued through this adapter (M909).
+    /// Whether an `Eos` has already been enqueued through this adapter.
     #[cfg(feature = "std")]
     pub(crate) fn eos_forwarded(&self) -> bool {
         self.eos_forwarded
     }
 
-    /// Whether a remove asked the element pushing through here to be flushed
-    /// (M1132). Read by the arm when its input closes.
+    /// Whether a remove asked the element pushing through here to be flushed.
+    /// Read by the arm when its input closes.
     #[cfg(feature = "std")]
     pub(crate) fn drain_requested(&self) -> bool {
         self.endpoint.as_ref().is_some_and(|e| e.draining())
@@ -1236,8 +1235,8 @@ impl SenderSink {
         self.endpoint.as_ref().is_some_and(|e| e.retired())
     }
 
-    /// Swallow any `Eos` pushed from here on, for the length of a flush
-    /// (M1132). The frames the element releases still cross; its terminal
+    /// Swallow any `Eos` pushed from here on, for the length of a flush.
+    /// The frames the element releases still cross; its terminal
     /// marker does not, since the consumer's run continues without it.
     #[cfg(feature = "std")]
     pub(crate) fn strip_terminal(&mut self) {
@@ -1245,7 +1244,7 @@ impl SenderSink {
     }
 
     /// Stash the propagated metadata set to attach to outgoing meta-empty
-    /// `DataFrame`s (M759). The transform arm replaces it on each new input
+    /// `DataFrame`s. The transform arm replaces it on each new input
     /// frame, passing `None` to clear it (a Drop verdict, so no stale set leaks).
     // Only the graph runner's transform arm sets this, and that runner is std,
     // so without std the setter would be dead code (which the workspace denies).
@@ -1261,18 +1260,18 @@ impl SenderSink {
     }
 
     /// Make this adapter relay any downstream QoS report onto `upstream`, an
-    /// input link of the owning element (M175), and also surface it to the
+    /// input link of the owning element, and also surface it to the
     /// element when `answered` (it
     /// [`handles_qos`](crate::element::AsyncElement::handles_qos)). The runner
     /// wires this so QoS propagates source-ward through a transform, a tee or a
-    /// demux, and calls it once per input link for a muxer (M1242).
+    /// demux, and calls it once per input link for a muxer.
     #[cfg(feature = "std")]
     pub(crate) fn relay_qos_to(&mut self, upstream: QosSlot, answered: bool) {
         self.upstream_qos.push(upstream);
         self.qos_answered = answered;
     }
 
-    /// Relay onto the upstream link (M720) every downstream `Reconfigure` the
+    /// Relay onto the upstream link every downstream `Reconfigure` the
     /// owning transform does not answer itself (`answered`), so a PLI or an
     /// orientation advertisement crosses any number of pass-through transforms
     /// to reach the encoder / the flip.
@@ -1286,7 +1285,7 @@ impl SenderSink {
         self.reconfigure_answered = answered;
     }
 
-    /// Relay a downstream bitrate target onto the upstream link (M720).
+    /// Relay a downstream bitrate target onto the upstream link.
     #[cfg(feature = "std")]
     pub(crate) fn relay_bitrate_to(&mut self, upstream: BitrateSlot) {
         self.upstream_bitrate = Some(upstream);
@@ -1300,7 +1299,7 @@ impl SenderSink {
     /// Drain a pending downstream reconfigure. A variant this adapter's
     /// producer answers ([`ReconfigureAnswered`]) is returned for it to observe;
     /// anything else goes onto the upstream link when a relay target is set
-    /// (M720 for a PLI, M1058 for an orientation advertisement), so it crosses
+    /// (a PLI or an orientation advertisement), so it crosses
     /// pass-through elements, and is otherwise dropped. Shared by the pre-send
     /// check and the post-send outcome, which pass `pre_send` accordingly.
     fn take_reconfigure_or_relay(&self, pre_send: bool) -> Option<crate::element::Reconfigure> {
@@ -1406,7 +1405,7 @@ impl SenderSink {
     }
 }
 
-/// M1115: an arm that ends leaves its link on its mutation endpoint, so a
+/// An arm that ends leaves its link on its mutation endpoint, so a
 /// remove waiting for the removed element to drain gets the output link it was
 /// pushing through and can hand it to the producer that now bypasses it.
 #[cfg(feature = "std")]

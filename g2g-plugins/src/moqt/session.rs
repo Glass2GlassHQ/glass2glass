@@ -1,4 +1,4 @@
-//! MoQ Transport draft-16 session over the M901 WebTransport carrier: the
+//! MoQ Transport draft-16 session over the WebTransport carrier: the
 //! SETUP exchange, the control stream, and opening subgroup data streams.
 //!
 //! The QUIC ALPN for WebTransport is always `h3`, so draft-16 states its
@@ -103,7 +103,7 @@ impl MoqtSession {
     /// Dial `url`, complete the CONNECT handshake requesting [`MOQT_PROTOCOL`],
     /// open the control stream, and exchange CLIENT_SETUP / SERVER_SETUP.
     ///
-    /// `cert_hashes` is the `server-certificate-hashes` form the M901 carrier
+    /// `cert_hashes` is the `server-certificate-hashes` form the WebTransport carrier
     /// takes (empty means "a system root must sign it"). `max_request_id` is
     /// the limit we advertise to the peer; `implementation` is the optional
     /// MOQT_IMPLEMENTATION string.

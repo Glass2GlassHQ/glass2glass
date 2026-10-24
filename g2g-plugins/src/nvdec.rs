@@ -132,7 +132,7 @@ pub struct NvDec {
     /// configure, when the context is created.
     cuda_device_id: i32,
     configured: bool,
-    /// The memory domain the negotiation settled this decoder's output on (M352).
+    /// The memory domain the negotiation settled this decoder's output on.
     /// `Cuda` keeps frames device-resident (zero-copy, the default); `System`
     /// downloads each decoded surface to host memory before emitting. Chosen in
     /// `configure_allocation` by reconciling the downstream proposal against
@@ -425,8 +425,8 @@ impl NvDec {
         self
     }
 
-    /// Domains this decoder can emit (M352): `Cuda` (device-resident, zero-copy)
-    /// or `System` (downloaded). The producer-capability half of the M351
+    /// Domains this decoder can emit: `Cuda` (device-resident, zero-copy)
+    /// or `System` (downloaded). The producer-capability half of the
     /// two-sided allocation-domain negotiation.
     const OUTPUT_DOMAINS: DomainSet =
         DomainSet::only(MemoryDomainKind::Cuda).with(MemoryDomainKind::System);
@@ -1614,13 +1614,13 @@ impl AsyncElement for NvDec {
     /// hwframe domain, and the default) until the allocation cascade settles it
     /// on System for a host-memory consumer. Reporting the settled domain rather
     /// than the default is what keeps a graph dump honest about which links are
-    /// GPU links (M285). [`output_domains`](Self::output_domains) is the full set
+    /// GPU links. [`output_domains`](Self::output_domains) is the full set
     /// it can satisfy.
     fn output_memory(&self) -> g2g_core::memory::MemoryDomainKind {
         self.out_domain
     }
 
-    /// M352: the decoder can keep frames on the GPU *or* download them to System,
+    /// The decoder can keep frames on the GPU *or* download them to System,
     /// so it advertises both. The runner's allocation cascade narrows this against
     /// the downstream consumers' accepted domains (a tee join over the branches),
     /// and [`configure_allocation`](Self::configure_allocation) settles the choice.
@@ -1629,9 +1629,9 @@ impl AsyncElement for NvDec {
     }
 
     /// Receive the (possibly tee-joined) downstream allocation proposal and settle
-    /// this decoder's output domain (M352). Reconciles the consumer's accepted
+    /// this decoder's output domain. Reconciles the consumer's accepted
     /// domains against what NVDEC can emit (`resolve_for_producer`, the
-    /// producer-side of the M351 negotiation): a CUDA-capable consumer keeps the
+    /// producer-side of the domain negotiation): a CUDA-capable consumer keeps the
     /// frame device-resident (zero-copy), a System-only consumer makes the decoder
     /// download. No reconcilable domain leaves the default (`Cuda`) in place; the
     /// consumer then rejects the domain at `process` as it would today.

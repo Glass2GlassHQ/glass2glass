@@ -1,4 +1,4 @@
-//! Shared plumbing for the CPU video-effect transforms (M1084): negotiation,
+//! Shared plumbing for the CPU video-effect transforms: negotiation,
 //! the `DataFrame` loop, and the caps emit that every one of them repeats.
 //!
 //! An element implements [`PixelFilter`] (its accepted formats, its per-frame

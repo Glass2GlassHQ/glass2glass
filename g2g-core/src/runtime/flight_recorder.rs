@@ -1,4 +1,4 @@
-//! Flight recorder for pipeline errors (M1016).
+//! Flight recorder for pipeline errors.
 //!
 //! An hour into a live run something fails and the traffic that caused it is
 //! gone. A [`FlightRecorder`] handed to

@@ -1,4 +1,4 @@
-//! M219: Android hardware H.264 decode via the NDK MediaCodec (`AMediaCodec`).
+//! Android hardware H.264 decode via the NDK MediaCodec (`AMediaCodec`).
 //!
 //! `MediaCodecDec` is the Android counterpart of `VtDecode` (macOS VideoToolbox)
 //! and `MfDecode` (Windows Media Foundation): it consumes Annex-B H.264
@@ -69,7 +69,7 @@ use alloc::vec::Vec;
 /// output reorder depth so rendering never stalls waiting for us to acquire.
 const MAX_IMAGES: i32 = 8;
 
-/// One decoded frame ready to emit: NV12 bytes in the CPU path, or (in the M304
+/// One decoded frame ready to emit: NV12 bytes in the CPU path, or (in the
 /// zero-copy GPU path) the decoded `AHardwareBuffer` to convert to a wgpu texture.
 #[derive(Debug)]
 enum DecodedFrame {
@@ -139,13 +139,13 @@ pub struct MediaCodecDec {
     input_stamps: PendingInputStamps,
     emitted: u64,
     segment: Segment,
-    /// M304 probe hook: an owned reference to the first decoded frame's backing
+    /// Probe hook: an owned reference to the first decoded frame's backing
     /// `AHardwareBuffer`, captured so the GPU-interop bridge can query its Vulkan
     /// format / import it without re-driving the decode. Acquired (refcount bump)
     /// so it outlives the transient `Image` it came from.
     #[cfg(feature = "mediacodec-wgpu")]
     captured_ahb: Option<ndk::hardware_buffer::HardwareBufferRef>,
-    /// M304 zero-copy output: when set, each decoded frame is converted to an
+    /// Zero-copy output: when set, each decoded frame is converted to an
     /// RGBA `wgpu::Texture` on the GPU (no CPU NV12 pack) and emitted as
     /// `MemoryDomain::WgpuTexture` instead of system memory.
     #[cfg(feature = "mediacodec-wgpu")]
@@ -208,7 +208,7 @@ impl MediaCodecDec {
         }
     }
 
-    /// Enable the M304 zero-copy GPU output path: decoded frames are converted to
+    /// Enable the zero-copy GPU output path: decoded frames are converted to
     /// RGBA `wgpu::Texture`s on the GPU (importing each `AHardwareBuffer` through
     /// an immutable YCbCr-conversion sampler) and emitted as
     /// `MemoryDomain::WgpuTexture`, instead of the default CPU NV12 pack. The
@@ -222,7 +222,7 @@ impl MediaCodecDec {
     }
 
     /// Like [`with_gpu_output`](Self::with_gpu_output), but decode onto a
-    /// caller-supplied interop device instead of one created lazily (M305). The
+    /// caller-supplied interop device instead of one created lazily. The
     /// on-screen present path needs the decoder and the [`WgpuSink`] to share a
     /// single wgpu device (a texture binds only to its own device): the app builds
     /// one [`InteropDevice`](crate::mediacodec_wgpu::InteropDevice), derives a
@@ -283,7 +283,7 @@ impl MediaCodecDec {
         )))
     }
 
-    /// M304 probe accessor: the first decoded frame's `AHardwareBuffer` (owned
+    /// Probe accessor: the first decoded frame's `AHardwareBuffer` (owned
     /// reference), once at least one frame has been drained. `None` before then.
     /// Used by the `mediacodec_wgpu` bridge to inspect the vendor buffer's Vulkan
     /// format on-device.
@@ -827,7 +827,7 @@ fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
     }
 }
 
-/// Caps for the M304 zero-copy GPU path: RGBA (the converter's output format),
+/// Caps for the zero-copy GPU path: RGBA (the converter's output format),
 /// carried on a `MemoryDomain::WgpuTexture` frame.
 #[cfg(feature = "mediacodec-wgpu")]
 fn rgba_caps(w: u32, h: u32, framerate: Rate) -> Caps {

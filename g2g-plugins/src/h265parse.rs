@@ -13,7 +13,7 @@
 //! fixed 96 bits. The Annex-B / AVCC framing, the RBSP de-emulation, and the
 //! exp-Golomb bit reader are shared with `h264parse` via the `annexb` module.
 //!
-//! Framerate is recovered from the VUI `timing_info` (M663): the parse
+//! Framerate is recovered from the VUI `timing_info`: the parse
 //! continues past the scaling-list, PCM, short-term-ref-pic-set, and
 //! long-term-ref blocks (the RPS parse is the driver-validated one shared with
 //! the Vulkan Video decoder) to `vui_time_scale / vui_num_units_in_tick`,
@@ -342,7 +342,7 @@ pub(crate) fn parse_h265_pps_head(rbsp: &[u8]) -> Option<(H265PpsHead, BitReader
 }
 
 /// Parse the SPS RBSP (H.265 7.3.2.2): the cropped picture dimensions from the
-/// head, then (best-effort) the framerate from the VUI `timing_info` (M663).
+/// head, then (best-effort) the framerate from the VUI `timing_info`.
 /// `None` on a parse failure before the dimensions resolve.
 fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
     let (head, mut br) = parse_h265_sps_head(rbsp)?;
@@ -415,7 +415,7 @@ struct SpsTail {
 }
 
 /// Continue the SPS walk past the conformance window down to the VUI
-/// `timing_info` (M663), returning the framerate as Q16 fixed-point fps
+/// `timing_info`, returning the framerate as Q16 fixed-point fps
 /// (`vui_time_scale / vui_num_units_in_tick`; H.265 ticks are per picture, so
 /// there is no H.264-style field factor of 2). `None` when the VUI omits timing
 /// or a block on the way ends early / is out of range. The [`SpsTail`] fields are
@@ -963,7 +963,7 @@ pub(crate) fn read_profile_tier_level(
 /// the Vulkan Video `Std*` mapping always emit the explicit encoding (with
 /// `inter_ref_pic_set_prediction_flag == 0`), sidestepping the driver-facing
 /// ambiguity of the predicted form; the parser here only needs the pic counts
-/// to cross the RPS list on the way to the VUI (M663).
+/// to cross the RPS list on the way to the VUI.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct H265ShortTermRps {
     pub num_negative_pics: u8,
@@ -1158,7 +1158,7 @@ mod tests {
     };
 
     /// The SPS fields up to the conformance window, as a bit writer the caller
-    /// can extend (the M663 VUI variant) before wrapping into a NAL.
+    /// can extend (the VUI variant) before wrapping into a NAL.
     fn sps_head(
         pic_w: u32,
         pic_h: u32,
@@ -1251,7 +1251,7 @@ mod tests {
     }
 
     /// [`build_annexb_sps`] continued through the whole SPS tail to a VUI with
-    /// `timing_info` (M663): zero/absent optional blocks, then
+    /// `timing_info`: zero/absent optional blocks, then
     /// `vui_num_units_in_tick` / `vui_time_scale`. `color` optionally writes a
     /// `video_signal_type` block with a CICP colour description
     /// `(primaries, transfer, matrix, full_range)` ahead of the timing.

@@ -1,4 +1,4 @@
-//! VobSub sidecar source (M926): reads a `.idx` / `.sub` pair from disk and
+//! VobSub sidecar source: reads a `.idx` / `.sub` pair from disk and
 //! emits it as a [`Caps::SubPicture`] `VobSub` stream, so DVD subtitles that sit
 //! next to a video as two files play like a muxed track:
 //!

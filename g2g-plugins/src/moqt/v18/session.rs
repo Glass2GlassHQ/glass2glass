@@ -1,4 +1,4 @@
-//! MoQ Transport draft-18 session over the M901 WebTransport carrier.
+//! MoQ Transport draft-18 session over the WebTransport carrier.
 //!
 //! Draft-18 restructured the control plane, and this module is where that shows
 //! up:

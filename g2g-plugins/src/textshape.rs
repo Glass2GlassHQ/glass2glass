@@ -1,5 +1,5 @@
-//! Shaped text layout for [`TextOverlay`](crate::textoverlay::TextOverlay) (M892,
-//! the `text-shaping` feature): cosmic-text does harfrust shaping (Arabic
+//! Shaped text layout for [`TextOverlay`](crate::textoverlay::TextOverlay) (the
+//! `text-shaping` feature): cosmic-text does harfrust shaping (Arabic
 //! joining, Indic reordering, kerning / ligatures), unicode-bidi reordering, and
 //! per-codepoint fallback across the system faces fontdb discovers, then swash
 //! rasterizes each glyph to a coverage mask the overlay blits.

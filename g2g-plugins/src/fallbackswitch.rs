@@ -782,7 +782,7 @@ mod tests {
         );
     }
 
-    /// M1159: `latency` buys the upstream extra time before its pad counts as
+    /// `latency` buys the upstream extra time before its pad counts as
     /// stalled, so a gap between `timeout` and `timeout + latency` keeps the
     /// primary and only a longer one switches.
     #[tokio::test]

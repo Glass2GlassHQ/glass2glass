@@ -13,7 +13,7 @@ pub enum PipelinePacket {
     /// state. Unlike `Eos`, the stream resumes after a flush, so elements
     /// reset rather than terminate.
     Flush,
-    /// The playback [`Segment`] in force for subsequent `DataFrame`s (M80, the
+    /// The playback [`Segment`] in force for subsequent `DataFrame`s (the
     /// GStreamer SEGMENT-event analog). Like `CapsChanged` it is **ordered** in
     /// the stream: it sits before the first `DataFrame` it governs, so a sink
     /// maps each frame's timestamp to running time via the most recent

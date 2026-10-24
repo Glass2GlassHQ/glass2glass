@@ -1,7 +1,7 @@
 //! Native detection server for the browser demo's Architecture B: server-side
 //! inference, thin browser client.
 //!
-//! The browser's generic `WsWireTransform` element (M555, the distributed-graph
+//! The browser's generic `WsWireTransform` element (the distributed-graph
 //! primitive) ships each decoded RGBA frame here over a WebSocket, serialized by
 //! the g2g-core wire codec; this server runs the REAL native g2g detection chain
 //! (`OrtInference` -> native ONNX Runtime -> `DetectionPostprocess`, the exact

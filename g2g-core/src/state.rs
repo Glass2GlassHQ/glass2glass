@@ -1,4 +1,4 @@
-//! Pipeline lifecycle states (M76).
+//! Pipeline lifecycle states.
 //!
 //! Mirrors GStreamer's `NULL → READY → PAUSED → PLAYING` ladder. The state
 //! enum and the change-return code are pure data (no allocation, no OS), so
@@ -13,7 +13,7 @@
 //! - **`Ready`** — resources acquired, no data flow, no clock.
 //! - **`Paused`** — data flows up to the sink, which holds (preroll). The
 //!   pipeline is ready to play instantly. A non-live pipeline takes exactly one
-//!   preroll buffer here (M77); a live pipeline takes none.
+//!   preroll buffer here; a live pipeline takes none.
 //! - **`Playing`** — the clock runs and data flows to presentation.
 //!
 //! The variants are ordered `Null < Ready < Paused < Playing` so a gate can
@@ -63,7 +63,7 @@ impl PipelineState {
 ///
 /// A non-live `Paused` returns `Async` (the change completes when the sink
 /// prerolls); a live `Paused` returns `NoPreroll` (no preroll buffer is
-/// coming); every other target returns `Success` (M77).
+/// coming); every other target returns `Success`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StateChangeReturn {
     /// The change took effect immediately.

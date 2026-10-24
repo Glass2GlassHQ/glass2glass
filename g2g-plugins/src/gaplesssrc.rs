@@ -1,4 +1,4 @@
-//! Gapless playback source (M383): concatenates a playlist of sources into one
+//! Gapless playback source: concatenates a playlist of sources into one
 //! continuous, monotonically-timed stream, the analog of GStreamer playbin's
 //! `about-to-finish` + next-`uri` gapless playback.
 //!
@@ -16,8 +16,8 @@
 //! reused), the read-side analog of GStreamer reusing one decodebin across URIs.
 //! A per-item caps refinement (e.g. a resolution change) still flows downstream
 //! via the inner source's `CapsChanged`. An instant (flushing) switch that
-//! preempts the current item is also supported (M384,
-//! [`GaplessController::switch_now`], the `instant-uri` analog); an audio/video
+//! preempts the current item is also supported
+//! ([`GaplessController::switch_now`], the `instant-uri` analog); an audio/video
 //! offset is a follow-up.
 //!
 //! ```text
@@ -256,7 +256,7 @@ pub(crate) const INNER_TIMELINE_START: u64 = 0;
 
 /// Move one packet onto the outer timeline in place, inner time `origin`
 /// landing at `offset`: the rule [`ShiftSink`], `fallbacksrc`'s multi-output
-/// sibling (M1170) and `splitmuxsrc` share.
+/// sibling and `splitmuxsrc` share.
 pub(crate) fn shift_packet(
     packet: &mut Option<PipelinePacket>,
     origin: u64,
@@ -331,12 +331,12 @@ impl From<UriError> for GaplessPlaybinError {
     }
 }
 
-/// Build a gapless-playback graph from a playlist of URIs (M387), the convenience
+/// Build a gapless-playback graph from a playlist of URIs, the convenience
 /// over hand-wiring a [`GaplessSrc`]. Constructs the first URI's source, wraps it
 /// in a `GaplessSrc`, enqueues the remaining URIs' sources on a shared
 /// [`GaplessController`], and auto-plugs one decode chain (reused across items) to
 /// `sink`. Returns the runnable `GaplessSrc -> decode -> sink` graph plus the
-/// controller, so the caller can `enqueue` more items, `switch_now` (M384), and
+/// controller, so the caller can `enqueue` more items, `switch_now`, and
 /// must `finish()` the playlist when no more will be added (else the source parks
 /// after the last item rather than emitting `Eos`).
 ///

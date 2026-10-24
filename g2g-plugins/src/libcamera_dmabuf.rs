@@ -19,7 +19,7 @@
 //! the real `vkAllocateMemory` import then fails to bind for every reported
 //! memory type. So zero-copy import is NOT viable for a USB camera feeding a
 //! discrete GPU (the buffer is CPU/vmalloc-backed; the dGPU cannot map it), and
-//! the CPU-upload path (M315) is the correct one on this hardware. The import
+//! the CPU-upload path is the correct one on this hardware. The import
 //! would be expected to work on an integrated GPU (shared memory) or a CSI/ISP
 //! camera (GPU-visible buffers); that is where building the full
 //! import-to-`wgpu::Texture` element pays off, which is why it is gated behind

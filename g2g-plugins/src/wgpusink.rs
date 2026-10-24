@@ -1,4 +1,4 @@
-//! GPU presentation sink (M103): presents [`MemoryDomain::WgpuTexture`] frames
+//! GPU presentation sink: presents [`MemoryDomain::WgpuTexture`] frames
 //! (eg from `VelloAnalyticsOverlay`) by blitting them onto
 //! a target on the **same** wgpu device, with no GPU->CPU readback. The consuming
 //! end of the keep-on-GPU overlay path.
@@ -951,7 +951,7 @@ impl AsyncElement for WgpuSink {
 
     /// A GPU texture is blitted where it lies; system memory is uploaded. Any
     /// other domain (a CUDA frame, say) needs a converter spliced ahead, and
-    /// declaring this is what makes the M354 auto-plug do it.
+    /// declaring this is what makes the auto-plug do it.
     fn input_domains(&self) -> DomainSet {
         DomainSet::only(MemoryDomainKind::WgpuTexture).with(MemoryDomainKind::System)
     }
@@ -984,7 +984,7 @@ impl AsyncElement for WgpuSink {
         self.pacer.set_clock_sync(sync);
     }
 
-    /// Relay a late drop upstream (M174): the runner forwards it onto the
+    /// Relay a late drop upstream: the runner forwards it onto the
     /// incoming link, where the producer can shed load.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()

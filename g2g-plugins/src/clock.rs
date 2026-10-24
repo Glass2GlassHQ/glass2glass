@@ -102,7 +102,7 @@ mod tests {
     use super::*;
 
     /// The cooperative runner derives a fan-in element's deadline tick from the
-    /// pipeline clock (M880), so the clock every `g2g-launch` pipeline runs against
+    /// pipeline clock, so the clock every `g2g-launch` pipeline runs against
     /// has to offer itself as that timer, on the same timeline it reports.
     #[test]
     fn the_wall_clock_offers_itself_as_a_ticker() {
@@ -111,7 +111,7 @@ mod tests {
         assert!(ticker.now_ns() <= clock.now_ns(), "same timeline");
     }
 
-    /// The thread-per-arm runner reads the same timer as an owned handle (M953),
+    /// The thread-per-arm runner reads the same timer as an owned handle,
     /// since a borrow cannot cross onto the arm threads. The copy has to measure
     /// from the clock's own epoch, not a fresh one.
     #[test]

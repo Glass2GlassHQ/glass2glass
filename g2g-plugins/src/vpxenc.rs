@@ -642,7 +642,7 @@ mod tests {
         }
     }
 
-    /// M730: a downstream PLI rebuilds the encoder, so the next emitted VP8
+    /// A downstream PLI rebuilds the encoder, so the next emitted VP8
     /// frame is a key frame; a far-off bitrate target rebuilds at the new rate.
     #[tokio::test]
     async fn force_keyframe_and_retarget_rebuild_the_encoder() {

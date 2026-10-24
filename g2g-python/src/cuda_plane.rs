@@ -1,5 +1,5 @@
 //! GPU zero-copy handoff: NV12 CUDA planes described to Python through
-//! `__cuda_array_interface__` v3 (M984, `python` feature).
+//! `__cuda_array_interface__` v3 (`python` feature).
 //!
 //! A [`MemoryDomain::Cuda`](g2g_core::MemoryDomain::Cuda) frame carries device
 //! pointers, not bytes, so the buffer protocol the System path uses cannot
@@ -10,7 +10,7 @@
 //! read-only CAI export (see [`PLANE_READ_ONLY`]), so torch's path here is
 //! DLPack.
 //!
-//! The same plane also exports DLPack (M986): `__dlpack__` hands out a capsule
+//! The same plane also exports DLPack: `__dlpack__` hands out a capsule
 //! over the same device pointer, for the frameworks that prefer it (torch's
 //! `from_dlpack`, `cupy.from_dlpack`). DLPack carries a device and a stream in
 //! the protocol, which CAI does not.

@@ -1,4 +1,4 @@
-//! Synthetic audio source (M25), the audio analog of `VideoTestSrc`. Emits
+//! Synthetic audio source, the audio analog of `VideoTestSrc`. Emits
 //! interleaved signed 16-bit PCM (`AudioFormat::PcmS16Le`) buffers of a
 //! deterministic test waveform at a fixed sample rate. CPU-only, `no_std`.
 //!
@@ -254,7 +254,7 @@ impl SourceLoop for AudioTestSrc {
     }
 }
 
-/// `AudioTestSrc`'s settable properties (M107).
+/// `AudioTestSrc`'s settable properties.
 static AUDIOTESTSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("samplerate", PropKind::Uint, "samples per second"),
     PropertySpec::new("channels", PropKind::Uint, "channel count"),

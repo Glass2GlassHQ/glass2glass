@@ -1,4 +1,4 @@
-//! Spill-to-storage byte buffer (M861), the `downloadbuffer` analog: absorbs a
+//! Spill-to-storage byte buffer, the `downloadbuffer` analog: absorbs a
 //! pushed, non-seekable byte stream (HTTP, a pipe) into a temp file and serves
 //! downstream from that file, so the link below it is a *seekable* byte source.
 //!

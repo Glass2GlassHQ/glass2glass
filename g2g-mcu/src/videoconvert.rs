@@ -1,9 +1,9 @@
-//! Heap-free raw-video color convert (M661): packed YUYV 4:2:2 (the order a
+//! Heap-free raw-video color convert: packed YUYV 4:2:2 (the order a
 //! DCMI/DVP camera like the OV2640 puts on the bus) to planar I420 4:2:0 (what
 //! the hardware H.264 encoder wants), as a `no_std` [`StaticTransform`] that
 //! lends its output from a [`StaticLendRing`].
 //!
-//! This is the MCU twin of the host `g2g-plugins::VideoConvert` (M23): that
+//! This is the MCU twin of the host `g2g-plugins::VideoConvert`: that
 //! element does the full format matrix but is `alloc`-based (`Vec`/`Box`, a
 //! boxed future per frame), so it cannot enter the heap-free MCU pipeline. This
 //! one does the single conversion the camera -> encode path needs, in place,

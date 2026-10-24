@@ -338,7 +338,7 @@ impl AsyncElement for CudaKmsSink {
         self.pacer.set_clock_sync(sync);
     }
 
-    /// Relay a late drop upstream (M174): the runner forwards it onto the
+    /// Relay a late drop upstream: the runner forwards it onto the
     /// incoming link, where the producer can shed load.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()
@@ -380,7 +380,7 @@ impl AsyncElement for CudaKmsSink {
         }
     }
 
-    /// Presents from CUDA device memory only; declared for the M354 converter
+    /// Presents from CUDA device memory only; declared for the converter
     /// auto-plug (same as `CudaGlSink`).
     fn input_domains(&self) -> g2g_core::memory::DomainSet {
         g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::Cuda)

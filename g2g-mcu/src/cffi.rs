@@ -1,4 +1,4 @@
-//! C FFI seam adapters (M650): let existing C code *be* a `g2g-mcu` peripheral
+//! C FFI seam adapters: let existing C code *be* a `g2g-mcu` peripheral
 //! seam, so a shop with a large C driver investment integrates without writing
 //! Rust. The board keeps its C DMA/capture routine and its C network stack; it
 //! registers them as function pointers, and g2g calls them each frame across

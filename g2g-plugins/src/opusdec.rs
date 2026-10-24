@@ -13,10 +13,10 @@
 //! channel count arrives via a `CapsChanged`. A `CapsChanged` carries the output
 //! format before the first frame.
 //!
-//! A chained file (M827) hands the decoder a fresh `OpusHead` per physical
+//! A chained file hands the decoder a fresh `OpusHead` per physical
 //! stream, behind the `Segment` that opens the chain. That header rebuilds the
 //! decoder, so each chain decodes exactly as it would on its own instead of
-//! carrying the previous stream's state across the boundary (M830). A header
+//! carrying the previous stream's state across the boundary. A header
 //! merely re-stated mid-stream, identical bytes and no segment, does not.
 //!
 //! Pre-skip / end-trim: Opus streams carry encoder lookahead (pre-skip) at the
@@ -248,7 +248,7 @@ pub struct OpusDec {
     prev_samples: u64,
     /// A `Segment` arrived and nothing has been decoded since. The next in-band
     /// `OpusHead` then opens a new logical stream (a chained file's next
-    /// physical stream, M830) rather than re-stating the current one, so the
+    /// physical stream) rather than re-stating the current one, so the
     /// decoder is rebuilt even when the header is identical.
     new_segment: bool,
     segment: Segment,

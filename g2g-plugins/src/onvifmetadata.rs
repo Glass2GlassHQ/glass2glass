@@ -1,4 +1,4 @@
-//! ONVIF analytics metadata (M1151, `onvif` feature): the scene description a
+//! ONVIF analytics metadata (`onvif` feature): the scene description a
 //! camera streams on its `application/vnd.onvif.metadata` RTSP track, turned
 //! into the same [`AnalyticsMeta`] graph a detector writes.
 //!

@@ -1,4 +1,4 @@
-//! Hardware H.264 encoder seam (M660): the [`H264Encoder`] contract, shaped
+//! Hardware H.264 encoder seam: the [`H264Encoder`] contract, shaped
 //! like the ESP32-P4 (and STM32MP / i.MX) hardware H.264 encoder block (feed
 //! one raw I420 frame, the silicon emits one Annex-B access unit and reports
 //! its byte count + whether it is an IDR keyframe), plus [`HwH264Enc`], the
@@ -13,7 +13,7 @@
 //! `m660_hwh264.rs` replays that contract, so the element's real logic is
 //! host-tested. The output is Annex-B (start-code delimited NAL units), matching
 //! the framing the rest of the pipeline assumes (`h264parse`, `rtppay`). On the
-//! ESP32-P4 the encoder is reached over the M650 C-seam (`CH264Encoder`): the
+//! ESP32-P4 the encoder is reached over the C seam (`CH264Encoder`): the
 //! ESP-IDF encoder driver *is* the peripheral. On-device validation (a
 //! `Hardware` conformance row on real silicon) needs a board and stays open,
 //! like [`HwJpegDec`](crate::HwJpegDec)'s and `VtDecode`'s runtime tiers.

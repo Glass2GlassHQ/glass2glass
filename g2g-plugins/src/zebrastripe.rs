@@ -216,7 +216,7 @@ impl AsyncElement for ZebraStripe {
     }
 }
 
-/// `ZebraStripe`'s settable properties, named as GStreamer's (M1084).
+/// `ZebraStripe`'s settable properties, named as GStreamer's.
 static ZEBRASTRIPE_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "threshold",
     PropKind::Int,

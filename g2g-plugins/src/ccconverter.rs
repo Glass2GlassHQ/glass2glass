@@ -1,4 +1,4 @@
-//! Closed-caption transport converter (M1096, `no_std`): the `ccconverter`
+//! Closed-caption transport converter (`no_std`): the `ccconverter`
 //! analog. The same `(cc_type, cc_data_1, cc_data_2)` triples travel in four byte
 //! layouts, and each carrier picks a different one: an H.264 SEI and an MP4
 //! caption track hold packed ATSC `cc_data`, an ST 2110-40 ancillary packet holds

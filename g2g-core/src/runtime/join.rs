@@ -199,7 +199,7 @@ impl<'a, T: Unpin> Future for JoinAll<'a, T> {
 
 /// Like [`JoinAll`], but the arm set can grow *while the join is running*: new
 /// boxed futures arriving on a control channel are folded into the poll set on
-/// the fly. This is the no-spawn primitive behind runtime request pads (M310):
+/// the fly. This is the no-spawn primitive behind runtime request pads:
 /// a dynamic fan-out adds a branch arm mid-stream by sending its future here.
 ///
 /// Completion = the control channel is closed (every sender dropped) **and**
@@ -229,7 +229,7 @@ enum JoinMode {
     /// arm identity rides in `T`.
     UntilClosed,
     /// Finish as soon as every arm has resolved, whether or not more could
-    /// arrive; outputs in arm order. What the graph mutator (M1115) wants: its
+    /// arrive; outputs in arm order. What the graph mutator wants: its
     /// control sender belongs to a handle that outlives the run, and its caller
     /// indexes results by arm position.
     UntilIdle,
@@ -253,7 +253,7 @@ pub(crate) fn dynamic_join<'a, T: Unpin>(
 /// As [`dynamic_join`], but the join ends as soon as every arm has resolved,
 /// whether or not more arms could still be sent, and outputs keep arm order (the
 /// initial arms first, in the order given, then each later arm in the order it
-/// arrived). The graph mutator (M1115) holds its control sender for as long as
+/// arrived). The graph mutator holds its control sender for as long as
 /// the caller holds the handle, which is typically past the end of the run, and
 /// a graph whose every arm has ended has nothing left to splice onto.
 #[cfg(feature = "std")]

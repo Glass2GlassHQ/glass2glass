@@ -1,4 +1,4 @@
-//! WAV file sink (M25). Writes interleaved PCM (`PcmU8`, `PcmS16Le`,
+//! WAV file sink. Writes interleaved PCM (`PcmU8`, `PcmS16Le`,
 //! `PcmS24Le`, `PcmS32Le` or `PcmF32Le`)
 //! to a standard RIFF/WAVE file, so an audio pipeline's output is playable
 //! anywhere. The header's running sizes are patched in place on `Eos`

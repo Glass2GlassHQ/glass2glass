@@ -9,7 +9,7 @@
 //! objects with attach / typed-get / iterate / propagate, and the standard
 //! `AnalyticsMeta` is available for detection pipelines.
 //!
-//! **Why now:** the field was reserved at M88; the trait body and the relation
+//! **Why now:** the trait body and the relation
 //! graph land with the first metadata-producing element (a YOLO-style detection
 //! postprocess), so a real client shapes the API rather than speculation.
 //!

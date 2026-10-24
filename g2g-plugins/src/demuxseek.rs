@@ -1,4 +1,4 @@
-//! Shared seek helper for byte-stream demuxers (M362).
+//! Shared seek helper for byte-stream demuxers.
 //!
 //! A demuxer (`tsdemux`, `fmp4demux`, `mkvdemux`, `flvdemux`, `oggdemux`) is a
 //! transform fed a byte stream by an upstream source; unlike [`Mp4Src`] it has no
@@ -333,7 +333,7 @@ impl<U> DemuxSeek<U> {
     /// caller resolved itself. `keep_state` marks the landing mid-stream
     /// ([`keeps_state`](Self::keeps_state)); `false` is a re-scan from the file
     /// start, the fallback when a resolved offset turns out not to serve the
-    /// target (the Ogg proportional guess, M862).
+    /// target (the Ogg proportional guess).
     pub(crate) fn begin_seek_at(&mut self, target_pts_ns: u64, offset: u64, keep_state: bool) {
         self.await_flush(SeekTarget::Pts(target_pts_ns), offset, keep_state);
     }

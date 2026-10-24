@@ -1,4 +1,4 @@
-//! Windows AAC audio decode element (M36) wrapping the Media Foundation AAC
+//! Windows AAC audio decode element wrapping the Media Foundation AAC
 //! Decoder MFT (`CLSID_MSAACDecMFT`). Consumes raw AAC-LC access units
 //! (`AudioFormat::Aac`, `MemoryDomain::System`) and produces interleaved 16-bit
 //! PCM (`PcmS16Le`), the decode-side mirror of `MfAacEncode`.

@@ -1,4 +1,4 @@
-//! The flagship deterministic audio graph (M644): `capture -> convert ->
+//! The flagship deterministic audio graph: `capture -> convert ->
 //! resample -> mix -> encode -> RTP` composed as ONE static pipeline from the
 //! real `g2g-mcu` elements, heap-free end to end. This is the reference
 //! chain of the deterministic-audio wedge: the same graph an MCU sends from
@@ -6,7 +6,7 @@
 //! here with mock capture peripherals and a checksumming sender so every
 //! byte of RTP output is asserted.
 //!
-//! Two capture branches feed a fan-in ([`run_sources_fanin_sink`], the M642
+//! Two capture branches feed a fan-in ([`run_sources_fanin_sink`], the
 //! const-arity runner), each a fused linear chain in a source slot
 //! ([`SourceChain`], the static `source ! transform` bin):
 //!
@@ -81,7 +81,7 @@ pub const AUDIO_EXPECTED_CHECKSUM: u64 = 214_749_012_174;
 /// A deterministic tone standing in for a capture DMA: repeats a period
 /// table, S16LE (`wide = false`, the DMIC shape) or left-justified 32-bit
 /// slots (`wide = true`, the SAI shape). Phase persists across frames. `pub`
-/// so the M646 generated-graph proof (`mcugen-audio`) can drive its emitted
+/// so the generated-graph proof (`mcugen-audio`) can drive its emitted
 /// pipeline with the same capture peripherals this reference uses.
 pub struct ToneGrabber {
     table: &'static [i16],
@@ -157,7 +157,7 @@ impl PacketSender for SumSender {
 }
 
 /// A [`SumSender`] that additionally stamps every packet with a
-/// caller-supplied clock read: the timing/jitter report's probe (M645). The
+/// caller-supplied clock read: the timing/jitter report's probe. The
 /// QEMU harness passes a SysTick read and runs under `-icount`, where
 /// virtual time is a pure function of the instruction stream, so the stamps
 /// measure the pipeline's deterministic per-frame execution cost, not host

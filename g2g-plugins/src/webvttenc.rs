@@ -1,4 +1,4 @@
-//! WebVTT (`.vtt`) subtitle writer (M1096, `no_std`): the WebVTT half of the
+//! WebVTT (`.vtt`) subtitle writer (`no_std`): the WebVTT half of the
 //! pair [`crate::srtenc`] opens, and the inverse of the WebVTT side of
 //! [`SubParse`](crate::subparse::SubParse). Timed `Caps::Text{Utf8}` cues in, a
 //! `Caps::Text{WebVtt}` byte stream out.

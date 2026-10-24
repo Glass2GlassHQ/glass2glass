@@ -1,4 +1,4 @@
-//! GStreamer's shared-memory IPC pair (M1081, `shm` feature): [`ShmSink`] and
+//! GStreamer's shared-memory IPC pair (`shm` feature): [`ShmSink`] and
 //! [`ShmSrc`] speak the `shmpipe` protocol of `sys/shm/` in gst-plugins-bad, so
 //! either end can be a `gst-launch-1.0` process. The wire itself is in
 //! [`crate::shmpipe`].

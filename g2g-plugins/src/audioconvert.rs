@@ -1,4 +1,4 @@
-//! Software PCM converter (M34), the audio analog of `VideoConvert`. Converts
+//! Software PCM converter, the audio analog of `VideoConvert`. Converts
 //! interleaved PCM between sample formats (`PcmU8` / `PcmS16Le` / `PcmS24Le` /
 //! `PcmS32Le` / `PcmF32Le`, all via an f32 intermediate) and
 //! between channel counts (mono <-> multi-channel) at the same sample rate, so
@@ -534,7 +534,7 @@ impl AsyncElement for AudioConvert {
     }
 }
 
-/// `AudioConvert`'s settable properties (M107).
+/// `AudioConvert`'s settable properties.
 static AUDIOCONVERT_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "format",

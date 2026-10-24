@@ -1,6 +1,6 @@
 //! ST 2110-10 media clock: the mapping between a PTP/TAI time and an RTP
 //! timestamp, the piece that ties RTP media transport to the pipeline's PTP
-//! clock (M595).
+//! clock.
 //!
 //! In SMPTE ST 2110 every essence stream carries an RTP timestamp derived from a
 //! common media clock counting at a fixed rate from the PTP epoch: 90 kHz for

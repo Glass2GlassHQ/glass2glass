@@ -1,4 +1,4 @@
-//! SLAVE-mode PTP delay-request-response state machine (M594).
+//! SLAVE-mode PTP delay-request-response state machine.
 //!
 //! Transport-agnostic: fed each received PTP message (raw bytes + the local time
 //! it arrived) and the TX time of each Delay_Req it asks the transport to send,

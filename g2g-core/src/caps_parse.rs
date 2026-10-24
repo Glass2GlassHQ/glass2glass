@@ -15,7 +15,7 @@ use crate::caps::{
 };
 use crate::channels::ChannelLayout;
 
-/// The raw pixel formats a format-less `video/x-raw` expands to (M184). Order is
+/// The raw pixel formats a format-less `video/x-raw` expands to. Order is
 /// the preference the solver fixates by when several survive; in practice the
 /// upstream format narrows it to one.
 const RAW_VIDEO_FORMATS: [RawVideoFormat; 5] = [
@@ -26,7 +26,7 @@ const RAW_VIDEO_FORMATS: [RawVideoFormat; 5] = [
     RawVideoFormat::Yuyv,
 ];
 
-/// The raw sample formats a format-less `audio/x-raw` expands to (M184).
+/// The raw sample formats a format-less `audio/x-raw` expands to.
 fn raw_audio_formats() -> Vec<AudioFormat> {
     PCM_FORMATS.iter().map(|(format, _)| *format).collect()
 }
@@ -242,7 +242,7 @@ impl CapsSet {
     /// expands to all supported raw formats at the given geometry (the
     /// gst-idiomatic format-less caps). `None` on an unknown media type, a field
     /// with no `=`, or a field value that does not parse. Format values are case-insensitive (GStreamer's
-    /// uppercase or the historical lowercase, M182).
+    /// uppercase or the historical lowercase).
     pub fn from_gst_string(desc: &str) -> Option<CapsSet> {
         let mut parts = split_top_commas(desc).into_iter();
         let media = parts.next()?.trim();

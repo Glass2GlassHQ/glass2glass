@@ -41,7 +41,7 @@
 //!
 //! - NV12 input only.
 //! - Mid-stream geometry change tears down the existing worker and
-//!   spawns a fresh one (M16 5j). Same-dims `CapsChanged` is a no-op.
+//!   spawns a fresh one. Same-dims `CapsChanged` is a no-op.
 //! - No scaling: the window opens at the input video dimensions and
 //!   stays there. If the compositor's `configure` event resizes us we
 //!   ignore the new bounds (the video keeps drawing at its native
@@ -135,8 +135,8 @@ struct QueuedFrame {
     /// latency histogram when the matching `frame` callback fires.
     /// Zero means the frame was untimed; latency is not recorded.
     arrival_ns: u64,
-    /// The turn an upstream `videoflip` left for the compositor to apply
-    /// (M1058). `Identity` for a frame with no `OrientationMeta`.
+    /// The turn an upstream `videoflip` left for the compositor to apply.
+    /// `Identity` for a frame with no `OrientationMeta`.
     orientation: Orientation,
     ack: tokio::sync::oneshot::Sender<()>,
 }
@@ -284,7 +284,7 @@ pub struct WaylandSink {
     /// silent one.
     last_frame_callback_ns: Arc<AtomicU64>,
     pacing: PacingPolicy,
-    /// PTS pacing + QoS late-drop (M173 / M176), shared with the other
+    /// PTS pacing + QoS late-drop, shared with the other
     /// synchronizing sinks: the elected clock, the segment mapping, the
     /// presentation anchor, and the lateness bound. Idle until the runner hands
     /// over a clock; the default bound drops a frame more than 20 ms late.
@@ -356,7 +356,7 @@ impl WaylandSink {
         self
     }
 
-    /// Enable QoS late-drop (M173): once PTS pacing is engaged, a frame already
+    /// Enable QoS late-drop: once PTS pacing is engaged, a frame already
     /// past its deadline by more than `ns` is dropped instead of presented late,
     /// so the sink catches up rather than accumulating lag. `0` drops any frame
     /// that arrives after its deadline; the default is 20 ms, `u64::MAX` never drops.
@@ -501,7 +501,7 @@ impl AsyncElement for WaylandSink {
 
     /// The compositor turns the picture for us through
     /// `wl_surface::set_buffer_transform`, so a `videoflip` upstream should
-    /// attach an `OrientationMeta` rather than remap every pixel (M1058). Needs
+    /// attach an `OrientationMeta` rather than remap every pixel. Needs
     /// the `metadata` feature: without it a frame has nowhere to carry the turn.
     fn absorbed_orientations(&self) -> OrientationSet {
         if cfg!(feature = "metadata") {
@@ -518,7 +518,7 @@ impl AsyncElement for WaylandSink {
         self.pacer.set_clock_sync(sync);
     }
 
-    /// Relay a QoS report upstream (M174): the runner forwards this onto the
+    /// Relay a QoS report upstream: the runner forwards this onto the
     /// incoming link, where the producer observes it as `PushOutcome::Qos` and
     /// can shed load so the sink stops running behind.
     fn take_qos(&mut self) -> Option<QosMessage> {
@@ -541,7 +541,7 @@ impl AsyncElement for WaylandSink {
         Ok(upstream_caps.clone())
     }
 
-    /// M16 step 5: native NV12-only sink constraint. The solver intersects
+    /// Native NV12-only sink constraint. The solver intersects
     /// this against the upstream decoder's NV12 `DerivedOutput` and lands
     /// fixed NV12 on the link at startup, so a non-NV12 (undecoded) display
     /// chain fails loud in negotiation rather than reaching

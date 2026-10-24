@@ -1,4 +1,4 @@
-//! Manual-unblock channel (M1166): the app -> source side-channel a
+//! Manual-unblock channel: the app -> source side-channel a
 //! `fallbacksrc` restart wrapper waits on before each life of its source, so the
 //! application decides when a restarted source's data reaches downstream. This
 //! is gst `fallbacksrc`'s `manual-unblock` property plus its `unblock` action

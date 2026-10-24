@@ -1,13 +1,13 @@
 //! Linux video decode element using ffmpeg / libavcodec.
 //!
-//! M13 shipped H.264; M111 generalized it to any libavcodec video decoder the
+//! Wraps any libavcodec video decoder the
 //! negotiated caps name (H.264 / H.265 / VP8 / VP9 / AV1), so the MKV / TS
 //! demuxers' VP9 / AV1 elementary streams decode. Construction is unchanged: the
 //! codec is read from the input caps at `configure_pipeline` and the matching
 //! decoder opened. `FfmpegVideoDec` is the struct's name (`FfmpegH264Dec`
 //! remains a back-compat alias).
 //!
-//! M13 (Linux production path): consumes Annex-B `DataFrame`s (the
+//! Linux production path: consumes Annex-B `DataFrame`s (the
 //! bitstream `RtspSrc` / `H264Parse` already emit, `MemoryDomain::System`)
 //! and produces decoded I420 frames, also `MemoryDomain::System` (CPU copy
 //! out of libavcodec's frame buffer). A `CapsChanged(I420, w, h)` is emitted
@@ -92,7 +92,7 @@
 //! high-depth source stays a loud `CapsMismatch` (no depth conversion here; put a
 //! `videoconvert` downstream, which handles the planar 10-bit family).
 //!
-//! QoS (M997): with the `qos` property set, a downstream lateness report makes
+//! QoS: with the `qos` property set, a downstream lateness report makes
 //! the decoder skip the pictures nothing references (`AVDISCARD_NONREF`) for
 //! roughly as many pictures as the sink is behind, so decode cost drops without
 //! breaking a reference chain. Off by default, and while off the runner relays
@@ -472,7 +472,7 @@ struct DecodedPicture {
     /// format for a fixed choice; for `Auto` it is the source's native chroma
     /// resolved at decode, so the emitted output caps match the payload.
     format: OutputFormat,
-    /// libavcodec's per-picture interlaced flag (M935), read before the frame
+    /// libavcodec's per-picture interlaced flag, read before the frame
     /// is packed / moved so every backend reports it.
     interlaced: bool,
 }
@@ -524,7 +524,7 @@ pub struct FfmpegVideoDec {
     /// Which threading method the software decoder may use. See [`ThreadType`].
     thread_type: ThreadType,
     /// Whether the path this decoder sits on has a live source, from the
-    /// runner's latency fold (M1123). Only [`ThreadType::Auto`] reads it. True
+    /// runner's latency fold. Only [`ThreadType::Auto`] reads it. True
     /// until the runner says otherwise, so an element driven without one keeps
     /// the threading that holds no pictures back.
     live: bool,
@@ -533,7 +533,7 @@ pub struct FfmpegVideoDec {
     /// threading; folded into [`latency`](Self::latency) so a paced sink
     /// anchors on it.
     thread_delay_frames: u32,
-    /// M16 workaround #3 Phase A: most recent input caps, from
+    /// Most recent input caps, from
     /// `PipelinePacket::CapsChanged` or from a mid-stream
     /// `configure_pipeline`. Used to validate the format on
     /// mid-stream changes and to debug-assert that the decode-time
@@ -550,12 +550,12 @@ pub struct FfmpegVideoDec {
     /// system-memory backends. Stamped onto every emitted `OwnedCudaBuffer`
     /// so a consumer can push the right context before touching the memory.
     cuda_context: u64,
-    /// M12 / C3 step 3: the downstream consumer's allocation proposal,
+    /// The downstream consumer's allocation proposal,
     /// recorded in `configure_allocation`. A `MemoryDomainKind::Cuda` request
     /// from a GPU sink (`CudaGlSink`) is satisfied by construction on the
     /// `NvdecCuda` backend (it already emits device-resident frames). The
     /// `min_buffers` hint sizes the CUDA hwframe pool's `extra_hw_frames` at
-    /// open time: the runner's M12 allocation query now runs before
+    /// open time: the runner's allocation query now runs before
     /// `configure_pipeline`, so this is recorded by the time the decoder opens.
     requested_alloc: Option<AllocationParams>,
     /// DRM render node the `Vaapi` backend opens its hwdevice on (e.g.
@@ -571,12 +571,12 @@ pub struct FfmpegVideoDec {
     /// lazily on the first access unit so its parameter sets can seed the decoder
     /// as `extradata` (see [`Self::open_decoder`]).
     codec_kind: Option<VideoCodec>,
-    /// Sticky "this stream has shown an interlaced picture" (M935). Telecine /
+    /// Sticky "this stream has shown an interlaced picture". Telecine /
     /// mixed streams flip the per-picture flag frame to frame; latching keeps
     /// the output caps stable (one `CapsChanged` to `Interleaved`) instead of
     /// flapping, which would reset the downstream deinterlacer's window.
     saw_interlaced: bool,
-    /// M997: act on a downstream QoS report by skipping non-reference pictures
+    /// Act on a downstream QoS report by skipping non-reference pictures
     /// (`AVDISCARD_NONREF`) until the reported lateness is made up. Off by
     /// default, and while off the runner relays reports past this element to the
     /// source as before.
@@ -593,7 +593,7 @@ pub struct FfmpegVideoDec {
     /// Access units fed while skipping. The non-reference pictures among them are
     /// the work shed.
     qos_skipped: u64,
-    /// M1143: recycled destination buffers for the packed pictures, so a decode
+    /// Recycled destination buffers for the packed pictures, so a decode
     /// at rate stops paying the kernel's page-zeroing on a fresh multi-megabyte
     /// allocation per frame.
     pack_pool: PackPool,
@@ -684,7 +684,7 @@ impl FfmpegVideoDec {
         }
     }
 
-    /// The downstream consumer's recorded M12 allocation proposal, if any
+    /// The downstream consumer's recorded allocation proposal, if any
     /// (see [`AsyncElement::configure_allocation`]).
     pub fn requested_alloc(&self) -> Option<AllocationParams> {
         self.requested_alloc
@@ -852,7 +852,7 @@ impl FfmpegVideoDec {
     }
 
     /// Act on a downstream QoS report by skipping non-reference pictures until
-    /// the reported lateness is made up (M997). Nothing else references those
+    /// the reported lateness is made up. Nothing else references those
     /// pictures, so the frames that are still emitted decode exactly as they
     /// would have. While this is off the runner relays reports past the decoder
     /// to the source instead.
@@ -890,7 +890,7 @@ impl FfmpegVideoDec {
     }
 
     /// Push one packet downstream, arming the non-reference skip if the outcome
-    /// carried a QoS report (M997). Every push goes through here, so a report is
+    /// carried a QoS report. Every push goes through here, so a report is
     /// acted on whichever packet it rides back on.
     async fn push_downstream(
         &mut self,
@@ -1026,7 +1026,7 @@ struct DecodeConfig {
     cuda_device_id: i32,
 }
 
-/// State the M760 offload moves onto the blocking pool and hands back: the
+/// State the decode offload moves onto the blocking pool and hands back: the
 /// decoder, its pts->input map, the decoded pictures, and the decode result.
 #[cfg(feature = "offload")]
 struct OffloadDecode {
@@ -1586,7 +1586,7 @@ impl AsyncElement for FfmpegVideoDec {
         Err(G2gError::CapsMismatch)
     }
 
-    /// M16 step 5k: native `DerivedOutput` — accepts H.264 with any
+    /// Native `DerivedOutput`: accepts H.264 with any
     /// geometry and produces NV12 or I420 (chosen at construction) at
     /// the same dims and framerate. The closure validates the input
     /// format and returns an empty set on mismatch, so the solver
@@ -1605,7 +1605,7 @@ impl AsyncElement for FfmpegVideoDec {
         }))
     }
 
-    /// M12 / C3 step 3: record the downstream consumer's allocation proposal.
+    /// Record the downstream consumer's allocation proposal.
     /// A `MemoryDomainKind::Cuda` request (from `CudaGlSink`) is honoured by
     /// construction on the `NvdecCuda` backend, which already emits
     /// device-resident frames; the other backends emit system memory, so a
@@ -1673,7 +1673,7 @@ impl AsyncElement for FfmpegVideoDec {
         LatencyReport::buffered(ns, Some(ns))
     }
 
-    /// M1123: what `thread-type=auto` resolves against. The decoder opens on
+    /// What `thread-type=auto` resolves against. The decoder opens on
     /// the first frame, so this still lands before the threading is chosen.
     fn configure_liveness(&mut self, live: bool) {
         self.live = live;
@@ -3330,7 +3330,7 @@ mod tests {
         }
     }
 
-    /// M1143: a released picture's buffer is handed back to the next pack, and a
+    /// A released picture's buffer is handed back to the next pack, and a
     /// changed packed size rebuilds the pool at the new size.
     #[test]
     fn a_released_picture_returns_its_buffer_to_the_pool() {
@@ -3354,7 +3354,7 @@ mod tests {
         assert_eq!(resized.len(), 8 * 2 * 3 / 2, "pool rebuilt at the new size");
     }
 
-    /// M1143: holding every pooled buffer must not fail or block the next pack,
+    /// Holding every pooled buffer must not fail or block the next pack,
     /// and the fallback buffer carries the same pixels.
     #[test]
     fn an_exhausted_pool_packs_into_a_fresh_buffer() {
@@ -3510,7 +3510,7 @@ mod tests {
         frame
     }
 
-    /// M887: the semi-planar 10-bit output. A planar 10-bit decode packs into P010
+    /// The semi-planar 10-bit output. A planar 10-bit decode packs into P010
     /// (chroma interleaved, samples moved into the word's top 10 bits), a hardware
     /// `P010LE` frame copies through verbatim and unpacks to `I420p10`, and any
     /// other source depth is a loud mismatch.
@@ -4017,7 +4017,7 @@ mod tests {
         unsafe { (*decoder.as_mut_ptr()).thread_count }
     }
 
-    /// M1119: the property has to reach libavcodec, not just the struct. Reading
+    /// The property has to reach libavcodec, not just the struct. Reading
     /// `thread_count` back off the opened context is the only proof it applied.
     #[test]
     fn max_threads_reaches_the_codec_context() {
@@ -4034,7 +4034,7 @@ mod tests {
         );
     }
 
-    /// M1119 / M1123: on a live path the default threading must not buy
+    /// On a live path the default threading must not buy
     /// throughput with latency. libavcodec reports the pictures it will hold
     /// back in `delay`, and slice threading holds none at any count. This fails
     /// the moment `auto` starts resolving to frame threading off a live source.
@@ -4057,7 +4057,7 @@ mod tests {
         }
     }
 
-    /// M1123: nothing paces a file pipeline, so `auto` there takes the frame
+    /// Nothing paces a file pipeline, so `auto` there takes the frame
     /// threading, and declares the pictures that holds.
     #[test]
     fn auto_frame_threads_off_a_non_live_path() {
@@ -4077,7 +4077,7 @@ mod tests {
         }
     }
 
-    /// M1123: only `auto` reads the liveness. `frame` and `slice` are
+    /// Only `auto` reads the liveness. `frame` and `slice` are
     /// instructions and hold whatever they hold on either kind of path.
     #[test]
     fn explicit_threading_ignores_liveness() {
@@ -4097,7 +4097,7 @@ mod tests {
         }
     }
 
-    /// M1119: opting into frame threading is opting into holding
+    /// Opting into frame threading is opting into holding
     /// `thread_count - 1` pictures, and the element has to declare that, or a
     /// paced sink calls every frame late and drops it.
     #[test]

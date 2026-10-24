@@ -19,7 +19,7 @@ pub trait PipelineClock {
 
     /// This clock as a deadline sleeper, when it is one. The cooperative runner
     /// reads it to derive a fan-in element's tick timer
-    /// ([`PipelinePacket::Tick`](crate::PipelinePacket::Tick), M880) from the
+    /// ([`PipelinePacket::Tick`](crate::PipelinePacket::Tick)) from the
     /// pipeline clock itself, so a `parse_launch` line running against any
     /// sleepable clock ticks without a separate entry point.
     ///
@@ -125,7 +125,7 @@ impl PipelineClock for MonotonicClock {
     }
 }
 
-/// Election priority of a clock candidate (M12 live clock distribution).
+/// Election priority of a clock candidate (live clock distribution).
 ///
 /// A pipeline runs against a single clock. When a live element provides one
 /// (a camera or RTSP source pacing to a hardware capture clock, an audio sink
@@ -142,14 +142,14 @@ pub enum ClockPriority {
     /// A non-live element that can drive timing from a monotonic clock (eg a
     /// video display sink pacing to its presentation timeline).
     Provider,
-    /// An audio sink pacing to its DAC's real playout rate (M590). Preferred
+    /// An audio sink pacing to its DAC's real playout rate. Preferred
     /// over a plain [`Provider`](Self::Provider) so audio becomes the master
     /// and video slaves to it (GStreamer's model), but still below a live
     /// capture source, whose hardware clock leads a live pipeline.
     AudioProvider,
     /// A live capture source whose hardware clock should pace the pipeline.
     LiveSource,
-    /// A PTP grandmaster-disciplined clock (M593). The shared network reference
+    /// A PTP grandmaster-disciplined clock. The shared network reference
     /// every device in a synchronised system (Pro AV / SMPTE ST 2110) slaves to,
     /// so it outranks even a local live-capture clock: when a grandmaster is
     /// present the whole facility, capture included, follows it.
@@ -180,7 +180,7 @@ impl core::fmt::Debug for ClockCandidate {
     }
 }
 
-/// A presentation base time resolved lazily at the `Playing` transition (M176).
+/// A presentation base time resolved lazily at the `Playing` transition.
 ///
 /// The eager `ClockSync::base_time_ns` is sampled at runner startup, before the
 /// data plane and the `Playing` transition. For a non-live, prerolled pipeline
@@ -254,7 +254,7 @@ pub struct ClockSync {
     /// eager fallback used when no `Playing` anchor is armed (the non-stateful
     /// runners) or before it is stamped.
     pub base_time_ns: u64,
-    /// Optional `Playing`-transition anchor (M176). When armed and stamped it
+    /// Optional `Playing`-transition anchor. When armed and stamped it
     /// supersedes `base_time_ns`; `None` on the eager path.
     play_anchor: Option<PlayAnchor>,
     /// The aggregated path holds a live source (LatencyReport::live). A live
@@ -410,7 +410,7 @@ where
 }
 
 /// The elected pipeline clock as the sinks hold it: a stable shared handle whose
-/// target can be replaced (M1004).
+/// target can be replaced.
 ///
 /// [`ClockSync`] is handed to each sink once, before any frame flows, and the
 /// runner cannot reach the sinks again afterwards (their elements have moved
@@ -475,7 +475,7 @@ impl core::fmt::Debug for ElectedClock {
 }
 
 /// A disciplined clock that slaves a smooth pipeline timeline to a real
-/// hardware playout rate (M590 A/V sync, phase 2).
+/// hardware playout rate (A/V sync).
 ///
 /// The problem it solves: every clock the pipeline elects today is just
 /// `monotonic_ns()`, so there is a single wall-clock timeline and true A/V

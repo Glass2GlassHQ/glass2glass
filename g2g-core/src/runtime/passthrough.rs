@@ -342,7 +342,7 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
 /// sample's own value on a non-passthrough field), this *widens* every
 /// non-passthrough geometry / rate field to `Any`: the transform re-derives that
 /// field from whatever input it receives mid-stream, so the input edge must stay
-/// unconstrained on it. Freezing it to the startup sample (the M258 v1 behaviour)
+/// unconstrained on it. Freezing it to the startup sample
 /// made the snapshot reject a legitimately re-derived mid-stream geometry, the
 /// Caps-β forward gap.
 ///

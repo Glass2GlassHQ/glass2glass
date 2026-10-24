@@ -1,6 +1,6 @@
 //! ONVIF camera discovery + RTSP stream-URI resolution.
 //!
-//! M311: an ONVIF camera does not stream over ONVIF; the ONVIF SOAP services
+//! An ONVIF camera does not stream over ONVIF; the ONVIF SOAP services
 //! are a *control plane* that tells you the camera's RTSP URL (and could drive
 //! PTZ, events, imaging). This element handles the two things needed to turn a
 //! camera on the LAN into pixels:

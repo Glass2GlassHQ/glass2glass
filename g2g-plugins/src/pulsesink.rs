@@ -106,7 +106,7 @@ pub struct PulseSink {
     link: Option<crate::audioworker::WorkerLink<WorkerCmd>>,
     caps: Option<Caps>,
     bytes_written: Arc<AtomicU64>,
-    /// Playout-disciplined master clock (M884, the `AlsaSink` M590 mechanism
+    /// Playout-disciplined master clock (the `AlsaSink` mechanism
     /// over pulse's latency query). The worker feeds it
     /// `(monotonic_now, played_ns)` observations so its `now_ns()` tracks the
     /// real playout rate; a video sink slaves to it when it is elected.

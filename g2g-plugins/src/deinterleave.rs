@@ -272,7 +272,7 @@ impl MultiOutputElement for DeinterleaveN {
         })
     }
 
-    /// The declared input shape (M1072). gst reads format and rate from the sink
+    /// The declared input shape. gst reads format and rate from the sink
     /// pad's caps, which a fan-out here cannot read before it declares its ports.
     fn properties(&self) -> &'static [PropertySpec] {
         PCM_SHAPE_PROPS
@@ -451,7 +451,7 @@ impl AsyncElement for Deinterleave {
     }
 }
 
-/// `Deinterleave`'s properties (M1072): which channel the single-output form
+/// `Deinterleave`'s properties: which channel the single-output form
 /// emits. The fan-out form takes one channel per pad instead, so it has none.
 static DEINTERLEAVE_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "channel",

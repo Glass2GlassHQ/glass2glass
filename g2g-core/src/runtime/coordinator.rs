@@ -1,4 +1,4 @@
-//! M18 β scaffolding — the pipeline coordinator (control channel only).
+//! Scaffolding for the pipeline coordinator (control channel only).
 //!
 //! Today's linear runners spawn source / transform / sink as
 //! independent, spawn-and-forget futures. Mid-stream cross-element
@@ -29,7 +29,7 @@ use crate::runtime::channel::{bounded, Receiver, Sender};
 #[cfg(feature = "std")]
 use crate::runtime::solver::{solve_linear, NegotiationFailure};
 
-/// M18 item 7: post a structured negotiation failure to the bus when one is
+/// Post a structured negotiation failure to the bus when one is
 /// wired, so the application learns which link conflicted on what. The runner
 /// still surfaces the opaque `G2gError::CapsMismatch` to its caller (startup)
 /// or drives a reverse `Reconfigure` (mid-stream); this only adds the detail
@@ -138,7 +138,7 @@ pub(crate) enum ArmDirective {
     Recascade(AllocationParams),
 
     /// The pool a *producer* settled on for this arm's input link, pushed
-    /// downstream when a muxer re-derives its merged-output allocation (M839).
+    /// downstream when a muxer re-derives its merged-output allocation.
     /// The arm absorbs it (`configure_allocation`) and does **not** re-propose:
     /// it is being told what it will receive, not asked what it wants, and a
     /// reply would bounce straight back into the muxer it came from. Only the
@@ -204,7 +204,7 @@ pub fn coordinator(capacity: usize) -> (Coordinator, CoordinatorHandle) {
     (Coordinator { rx }, CoordinatorHandle { tx })
 }
 
-/// M18 α: element-local re-allocation on a mid-stream caps change. The element
+/// Element-local re-allocation on a mid-stream caps change. The element
 /// re-derives its allocation from the new caps and configures itself with it;
 /// cross-element propagation is β, not this.
 #[cfg(feature = "std")]

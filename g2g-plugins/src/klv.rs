@@ -1,4 +1,4 @@
-//! MISB ST 0601 UAS Datalink Local Set (M800): the KLV (SMPTE ST 336) metadata
+//! MISB ST 0601 UAS Datalink Local Set: the KLV (SMPTE ST 336) metadata
 //! a STANAG 4609 stream carries alongside its video, encoding platform / sensor
 //! telemetry (position, attitude, field of view, frame center), the mission /
 //! sensor identity strings, target geometry, the nested MISB ST 0102

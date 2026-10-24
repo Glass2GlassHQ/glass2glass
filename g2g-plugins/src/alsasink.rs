@@ -81,7 +81,7 @@ pub struct AlsaSink {
     link: Option<crate::audioworker::WorkerLink<WorkerCmd>>,
     caps: Option<Caps>,
     frames_rendered: Arc<AtomicU64>,
-    /// DAC-disciplined master clock (M590 A/V sync). The worker feeds it
+    /// DAC-disciplined master clock (A/V sync). The worker feeds it
     /// `(monotonic_now, frames_played)` observations so its `now_ns()` tracks
     /// the real playout rate; a video sink slaves to it when it is elected.
     clock: Arc<DriftClock>,

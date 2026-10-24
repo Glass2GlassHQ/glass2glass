@@ -1,4 +1,4 @@
-//! UDP ingress source for H.264 over RTP (M91): the receive-side inverse of
+//! UDP ingress source for H.264 over RTP: the receive-side inverse of
 //! [`UdpSink`](crate::udpsink). It binds a UDP socket, receives RTP packets,
 //! and depayloads them (via [`rtpdepay`](crate::rtpdepay)) into Annex-B access
 //! units pushed downstream as `CompressedVideo` H.264, ready for a decoder.
@@ -12,7 +12,7 @@
 //! (`with_video_size` / `with_framerate`, default 1280x720@30) is the fallback
 //! until one of those lands, and stays in force for the fields neither supplies.
 //!
-//! Setting `bytestream-format` switches the source to raw datagram mode (M1079),
+//! Setting `bytestream-format` switches the source to raw datagram mode,
 //! the broadcast `udpsrc port=5000 ! tsdemux` case: every datagram becomes one
 //! `DataFrame` of `Caps::ByteStream` with no RTP header, no depayloading and no
 //! jitter buffer. The RTP-only properties are rejected in that mode rather than

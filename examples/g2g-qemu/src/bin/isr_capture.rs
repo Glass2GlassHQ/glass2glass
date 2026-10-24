@@ -1,4 +1,4 @@
-//! ISR-driven capture proof (M651): the interrupt/DMA concurrency model on the
+//! ISR-driven capture proof: the interrupt/DMA concurrency model on the
 //! emulated Cortex-M4. A SysTick interrupt handler is the *producer*, running in
 //! real interrupt context: each tick it fills a frame into a `static`
 //! `SpscFrameRing` (standing in for a DMA-completion ISR marking a buffer ready).

@@ -32,7 +32,7 @@
 //!
 //! The interpreter must see the gst-python-ml package + its deps: set
 //! `PYTHONPATH` (plugin dir + venv site dirs) before launching, exactly as the
-//! M322 host test does. Build with `--features launch` (pulls g2g-plugins'
+//! Python host test does. Build with `--features launch` (pulls g2g-plugins'
 //! ffmpeg / wayland-sink / analytics).
 
 use std::future::Future;

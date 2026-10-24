@@ -95,7 +95,7 @@ pub const fn s32_slot_to_s16(slot: i32) -> i16 {
     (slot >> 16) as i16
 }
 
-/// The `convert` stage of the reference audio chain (M644): interleaved
+/// The `convert` stage of the reference audio chain: interleaved
 /// S32LE capture slots in (the shape an I2S/SAI DMA delivers when the bus
 /// runs 32-bit slots, left-justified), interleaved S16LE out (2:1), lent
 /// from a [`StaticLendRing`] like the codec transforms. A payload that is

@@ -284,7 +284,7 @@ impl MultiInputElement for Interleave {
         })
     }
 
-    /// The declared output shape (M1072). gst takes format and rate from the
+    /// The declared output shape. gst takes format and rate from the
     /// sink pads' caps, which a fan-in here cannot read before it declares its
     /// output.
     fn properties(&self) -> &'static [PropertySpec] {

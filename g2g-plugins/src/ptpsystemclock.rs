@@ -1,4 +1,4 @@
-//! PTP system clock (M593 phase C): a [`PtpClock`] driven from the OS's
+//! PTP system clock: a [`PtpClock`] driven from the OS's
 //! PTP-disciplined system time, the "works with `linuxptp` today" delegate
 //! backend.
 //!
@@ -11,7 +11,7 @@
 //! `PtpClock` is then offered to clock election at the
 //! [`PtpGrandmaster`](g2g_core::ClockPriority::PtpGrandmaster) tier through
 //! [`candidate`](PtpSystemClock::candidate), so a whole facility of g2g processes
-//! locked to the same grandmaster shares one timeline (see the M593 design).
+//! locked to the same grandmaster shares one timeline (design/timing.md).
 //!
 //! ## Honesty about "lock"
 //!

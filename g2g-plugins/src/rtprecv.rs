@@ -1,4 +1,4 @@
-//! Shared RTP H.264 receive loop (M520): the jitter-buffer + RTCP RR/NACK +
+//! Shared RTP H.264 receive loop: the jitter-buffer + RTCP RR/NACK +
 //! FEC/RTX + depayload-to-access-unit path used by both [`UdpSrc`](crate::udpsrc)
 //! (raw RTP) and [`RtspServerSrc`](crate::rtspserversrc) (RTSP RECORD ingest).
 //!

@@ -276,7 +276,7 @@ impl AsyncElement for ImageFreeze {
     }
 }
 
-/// `ImageFreeze`'s properties (M1067).
+/// `ImageFreeze`'s properties.
 static IMAGEFREEZE_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "framerate",

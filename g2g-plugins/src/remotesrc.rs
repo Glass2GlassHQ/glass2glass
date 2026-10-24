@@ -1,4 +1,4 @@
-//! Remote transport source (M551, `remote` feature): the receive half of the
+//! Remote transport source (`remote` feature): the receive half of the
 //! distributed-graph primitive, the inverse of [`RemoteSink`](crate::remotesink).
 //!
 //! `RemoteSrc` is the TCP *server*: it listens, accepts one [`RemoteSink`]

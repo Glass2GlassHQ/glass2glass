@@ -1,11 +1,11 @@
-//! Closed-caption extraction element (M429, `no_std`): tap a compressed
+//! Closed-caption extraction element (`no_std`): tap a compressed
 //! H.264 / H.265 / MPEG-2 video stream, mine the in-band closed-caption `cc_data`
 //! triples from each access unit (SEI, or MPEG-2 picture `user_data`), decode the
 //! selected service, and emit timed
 //! `Caps::Text{Utf8}` cues, one frame per cue (the same shape `crate::subparse`
 //! emits, so a `TextOverlay` / text sink consumes either interchangeably).
 //!
-//! It also takes a `Caps::ClosedCaption` link (M883), where the caption data is
+//! It also takes a `Caps::ClosedCaption` link, where the caption data is
 //! already its own elementary stream (an MP4 `c608` / `c708` raw-caption track a
 //! demuxer split out): those frames carry the same `cc_data` triples, so only the
 //! mining step differs and the decode below it is identical.

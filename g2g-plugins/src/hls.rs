@@ -274,8 +274,8 @@ impl MasterPlaylist {
             .or_else(|| self.variants.iter().min_by_key(|v| v.bandwidth))
     }
 
-    /// Pick a rendition from `group_id` of `media_type` by `language` preference
-    /// (M418): a `LANGUAGE` match wins (exact case-insensitive, then a primary-tag
+    /// Pick a rendition from `group_id` of `media_type` by `language` preference:
+    /// a `LANGUAGE` match wins (exact case-insensitive, then a primary-tag
     /// prefix so `en` matches `en-US`); absent a match or a preference, the
     /// `DEFAULT=YES` rendition, else the first in declaration order. `None` for an
     /// empty group. The `playbin` HLS fan-out uses this to honour a

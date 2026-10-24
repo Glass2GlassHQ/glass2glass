@@ -1,6 +1,6 @@
 //! Linux KMS/DRM display sink for NV12 frames.
 //!
-//! M14: direct scanout to a connected display via the primary plane on the
+//! Direct scanout to a connected display via the primary plane on the
 //! first usable CRTC. Consumes NV12 `DataFrame`s (the layout
 //! [`crate::ffmpegdec::FfmpegH264Dec`] emits when configured with
 //! [`crate::ffmpegdec::OutputFormat::Nv12`]) and presents them with vsync
@@ -545,7 +545,7 @@ impl AsyncElement for KmsSink {
         self.pacer.set_clock_sync(sync);
     }
 
-    /// Relay a late drop upstream (M174): the runner forwards it onto the
+    /// Relay a late drop upstream: the runner forwards it onto the
     /// incoming link, where the producer can shed load.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()
@@ -559,7 +559,7 @@ impl AsyncElement for KmsSink {
         Ok(upstream_caps.clone())
     }
 
-    /// M16 step 5: native NV12-only sink constraint. The solver intersects
+    /// Native NV12-only sink constraint. The solver intersects
     /// this against the upstream decoder's NV12 `DerivedOutput` and lands
     /// fixed NV12 on the link at startup, so a non-NV12 (undecoded) display
     /// chain fails loud in negotiation rather than reaching

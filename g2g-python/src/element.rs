@@ -16,7 +16,7 @@
 //! and their output is not the size of their input, so the hosted element
 //! returns it through `meta.emit` (see [`crate::host`]).
 //!
-//! Memory-domain model (M985): the frame is read where it lies and forwarded
+//! Memory-domain model: the frame is read where it lies and forwarded
 //! untouched, so both pads carry the one domain the hosted code reads, System or
 //! (under `cuda-frames`) CUDA. See [`AsyncElement::input_domains`] below.
 

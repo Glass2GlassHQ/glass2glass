@@ -273,7 +273,7 @@ impl AsyncElement for D3D11Sink {
         self.pacer.set_clock_sync(sync);
     }
 
-    /// Relay a late drop upstream (M174): the runner forwards it onto the
+    /// Relay a late drop upstream: the runner forwards it onto the
     /// incoming link, where the producer can shed load.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()
@@ -312,7 +312,7 @@ impl AsyncElement for D3D11Sink {
         Ok(upstream_caps.clone())
     }
 
-    /// M16 step 5: native NV12-only sink constraint. With every decoder a
+    /// Native NV12-only sink constraint. With every decoder a
     /// native `DerivedOutput`, the solver intersects this against the
     /// decoder's NV12 output and lands fixed NV12 on the link at startup,
     /// so a non-NV12 display chain fails loud in negotiation rather than
@@ -329,7 +329,7 @@ impl AsyncElement for D3D11Sink {
         }))
     }
 
-    /// M12 / W1: ask the decoder to keep buffers in D3D11 textures so the
+    /// Ask the decoder to keep buffers in D3D11 textures so the
     /// `MfDecode(with_d3d11)` -> sink handoff stays on the GPU. The runner
     /// conveys this `MemoryDomainKind::D3D11Texture` proposal to the decoder's
     /// `configure_allocation`. Returns `None` until the geometry is fixed.

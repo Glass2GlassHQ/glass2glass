@@ -1,13 +1,13 @@
-//! Dynamic (`dlopen`) loader for third-party plugins (M201, M1010).
+//! Dynamic (`dlopen`) loader for third-party plugins.
 //!
 //! Two plugin ABIs, probed in that order:
 //!
-//! - **v2 (M1010), cross-toolchain.** The plugin exports the data symbol
+//! - **v2, cross-toolchain.** The plugin exports the data symbol
 //!   [`V2_DESCRIPTOR_SYMBOL`], a `static` [`FfiPluginDescriptor`] carrying a
 //!   magic, an ABI generation, and the list of elements it will register.
 //!   Everything crossing the boundary is `repr(C)`, so the plugin may be built
 //!   by a different `rustc`, or written in C. See [`g2g_plugin::abi`].
-//! - **v1 (M201), same-toolchain.** The plugin exports `g2g_plugin_abi` +
+//! - **v1, same-toolchain.** The plugin exports `g2g_plugin_abi` +
 //!   `g2g_plugin_register` (the `declare_plugin!` macro) and passes Rust types
 //!   straight across, which is sound only when the ABI tag matches exactly.
 //!
@@ -22,7 +22,7 @@
 //! the caller's `Registry`. This is **policy, not sandboxing**, see the
 //! "Security" note below.
 //!
-//! **Signatures (M1061).** With the `plugin-signing` feature a caller can hand
+//! **Signatures.** With the `plugin-signing` feature a caller can hand
 //! the loader a set of trusted Ed25519 public keys ([`signing::TrustedKeys`],
 //! or the `G2G_PLUGIN_TRUSTED_KEYS` path list). While that set is empty nothing
 //! changes: signed and unsigned plugins load alike. Once it holds a key, every

@@ -5,7 +5,7 @@
 //!
 //! Like `FileSrc`, a raw byte stream carries no caps, so the caller declares
 //! them at construction; the source produces exactly that to the solver. Feed
-//! the output through `H264Parse` (then a `WebCodecsDecode`, M40) to recover
+//! the output through `H264Parse` (then a `WebCodecsDecode`) to recover
 //! access units. The JS `onmessage` callback is bridged to the async `run`
 //! loop through a [`crate::webutil::Inbox`].
 

@@ -201,12 +201,12 @@ impl SincTable {
 pub struct AudioResample {
     /// Target output rate from the `samplerate` property. `0` means "auto": take
     /// the output rate from the negotiated caps (a downstream capsfilter), the
-    /// gst caps-driven idiom (M187).
+    /// gst caps-driven idiom.
     target_rate: u32,
     /// Input format/channels/rate of the configured stream, updated by a
     /// mid-stream `CapsChanged`.
     input: Option<(AudioFormat, u8, u32)>,
-    /// Output rate resolved from the negotiated output caps (M187), set by
+    /// Output rate resolved from the negotiated output caps, set by
     /// `configure_output`. Used in auto mode; `None` until then so `process`
     /// falls back to the property and runners that don't deliver output caps
     /// keep the property-driven behavior.
@@ -239,7 +239,7 @@ impl AudioResample {
         }
     }
 
-    /// Caps-driven (M187): take the output rate from the negotiated caps (a
+    /// Caps-driven: take the output rate from the negotiated caps (a
     /// downstream capsfilter). With no downstream constraint it defaults to
     /// passthrough (no resampling).
     pub fn auto() -> Self {
@@ -367,7 +367,7 @@ impl AsyncElement for AudioResample {
         Ok(ConfigureOutcome::Accepted)
     }
 
-    /// M187: take the output rate from the negotiated output caps when the
+    /// Take the output rate from the negotiated output caps when the
     /// `samplerate` property is unset (caps-driven). The rate is already
     /// fixated, so it is concrete (non-zero).
     fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
@@ -531,7 +531,7 @@ impl AsyncElement for AudioResample {
     }
 }
 
-/// `AudioResample`'s settable properties (M107): the output sample rate and the
+/// `AudioResample`'s settable properties: the output sample rate and the
 /// interpolation quality.
 static AUDIORESAMPLE_PROPS: &[PropertySpec] = &[
     PropertySpec::new("samplerate", PropKind::Uint, "output samples per second"),

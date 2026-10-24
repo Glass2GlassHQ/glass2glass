@@ -1,4 +1,4 @@
-//! M231: macOS hardware H.264 / H.265 encode via VideoToolbox
+//! macOS hardware H.264 / H.265 encode via VideoToolbox
 //! (`VTCompressionSession`).
 //!
 //! `VtEncode` is the encode counterpart of [`VtDecode`](crate::vtdecode) and the
@@ -221,7 +221,7 @@ impl VtEncode {
         Ok(())
     }
 
-    /// Encode a decoded `CVPixelBuffer` frame directly (M735 zero-copy input):
+    /// Encode a decoded `CVPixelBuffer` frame directly (zero-copy input):
     /// no NV12 staging buffer, the decoder's pixels go straight into the
     /// compression session.
     fn feed_cv(&mut self, buf: &OwnedCvPixelBuffer, pts_ns: u64) -> Result<(), G2gError> {
@@ -753,7 +753,7 @@ unsafe fn encode_into(state: &EncoderState, nv12: &[u8], pts_ns: u64) -> Result<
 
 /// Submit one `CVPixelBuffer` to the compression session and complete it, so
 /// the output callback fires before returning. Shared by the packed-NV12 path
-/// (a staging buffer) and the M735 zero-copy `CvPixelBuffer` input.
+/// (a staging buffer) and the zero-copy `CvPixelBuffer` input.
 ///
 /// SAFETY: `state.session` is live; `pb` is a valid pixel buffer that outlives
 /// the synchronous encode.

@@ -7,7 +7,7 @@
 //! can't push faster than the sink consumes, and the sink consumes no faster
 //! than the clock advances toward each frame's PTS.
 //!
-//! Segment (M149): the sink tracks the playback `Segment` and maps each frame's
+//! Segment: the sink tracks the playback `Segment` and maps each frame's
 //! PTS to running time through it, so presentation follows running time (correct
 //! after a seek resets the base) rather than raw PTS. A frame outside the segment
 //! is clipped, which completes accurate seek: the source snaps upstream to the
@@ -15,7 +15,7 @@
 //! the decoded frames before the exact target so the first presented frame is the
 //! requested one. Without a segment the sink uses PTS directly, as before.
 //!
-//! QoS (M85): when given a max-lateness bound, a frame whose deadline is
+//! QoS: when given a max-lateness bound, a frame whose deadline is
 //! already past by more than that bound is dropped rather than presented late,
 //! so the sink catches up instead of compounding the lag. The decision and its
 //! reporting live in the shared [`PresentationPacer`]: each drop posts a
@@ -25,7 +25,7 @@
 //! periodically. Default behaviour is unchanged (no bound, no bus): every frame
 //! is presented after its deadline.
 //!
-//! Clock (M996): the sink is a display sink without a display, so it paces
+//! Clock: the sink is a display sink without a display, so it paces
 //! through the same [`PresentationPacer`] the real ones use and adopts the
 //! elected [`ClockSync`] when the runner hands one over: in an A/V graph whose
 //! audio sink provides the master `DriftClock`, presentation follows the audio
@@ -201,7 +201,7 @@ where
         Ok(upstream_caps.clone())
     }
 
-    /// M16 step 5c: wildcard sink. Same rationale as `FakeSink`.
+    /// Wildcard sink. Same rationale as `FakeSink`.
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
         CapsConstraint::AcceptsAny
     }
@@ -455,7 +455,7 @@ mod tests {
         }
     }
 
-    /// M996: once the runner hands over the elected `ClockSync`, deadlines are
+    /// Once the runner hands over the elected `ClockSync`, deadlines are
     /// measured on *that* timeline. The sink's own clock is stuck at 0, so
     /// nothing could ever be late on it; the late drop below can only come from
     /// the elected clock's reading.

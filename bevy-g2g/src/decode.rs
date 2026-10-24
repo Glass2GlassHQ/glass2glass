@@ -1,4 +1,4 @@
-//! Bring-your-own-device decode (from the M741 demo): a stock windowed Bevy
+//! Bring-your-own-device decode: a stock windowed Bevy
 //! app keeps its own wgpu device; g2g joins it via `GpuContext::from_wgpu` and
 //! decodes video straight onto it. Every decoded frame is a `wgpu::Texture`
 //! Bevy binds in its own render graph: no second device, no readback, no copy.

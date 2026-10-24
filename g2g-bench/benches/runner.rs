@@ -1,4 +1,4 @@
-//! Benchmark for the runner loop's inner transport (M286): the bounded per-edge
+//! Benchmark for the runner loop's inner transport: the bounded per-edge
 //! channel every frame crosses. The full `run_graph` paces to PTS (wall-clock
 //! bound, unsuitable for a microbench), so this isolates the hot mechanism, a
 //! producer filling a bounded channel while a consumer drains it, the

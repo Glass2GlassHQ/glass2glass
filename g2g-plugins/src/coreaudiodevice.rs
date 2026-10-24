@@ -1,4 +1,4 @@
-//! Core Audio device discovery (M943): the macOS audio half of the
+//! Core Audio device discovery: the macOS audio half of the
 //! [`DeviceMonitor`](g2g_core::runtime::DeviceMonitor), the counterpart of
 //! [`alsadevice`](crate::alsadevice) on Linux. The HAL
 //! (`kAudioHardwarePropertyDevices`) lists every audio device; one with input

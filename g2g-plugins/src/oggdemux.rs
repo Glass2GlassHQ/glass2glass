@@ -1,7 +1,7 @@
-//! Ogg demuxer element (M116): `Caps::ByteStream{Ogg}` in, the selected
+//! Ogg demuxer element: `Caps::ByteStream{Ogg}` in, the selected
 //! elementary stream out (by default the file's first stream of the kind the
-//! consumer takes, `stream=flac` for the Ogg-FLAC mapping (M775), `stream=vorbis`
-//! for Vorbis (M777), `stream=vp8` for the VP8 video mapping).
+//! consumer takes, `stream=flac` for the Ogg-FLAC mapping, `stream=vorbis`
+//! for Vorbis, `stream=vp8` for the VP8 video mapping).
 //!
 //! Wraps the pure [`crate::ogg::OggDemuxer`], the Ogg sibling of
 //! [`crate::mkvdemux::MkvDemux`]: it reassembles the logical bitstream's packets,
@@ -20,7 +20,7 @@
 //! Scope: one logical bitstream per physical stream; a stream not matching the
 //! `stream` selection is parsed but not forwarded.
 //!
-//! **Seeking (M362, M862).** Ogg carries no index, so a time seek guesses the
+//! **Seeking.** Ogg carries no index, so a time seek guesses the
 //! byte offset to land at: the page granules seen while playing give
 //! `(byte offset, stream time)` anchors, the target interpolates through them,
 //! and the landing is backed off so it sits before the target and, when the
@@ -32,10 +32,10 @@
 //! in an unparseable region falls back: one corrected guess, then the plain
 //! re-scan from offset `0`.
 //!
-//! **Chained files (M827).** A chain (a second physical stream after the first
+//! **Chained files.** A chain (a second physical stream after the first
 //! one's end-of-stream page, the radio-stream form) is *sequential*: the same
 //! output pad continues with the next chain's stream of the selected codec,
-//! distinct from the *concurrent* grouped streams (M790) that
+//! distinct from the *concurrent* grouped streams that
 //! [`OggDemuxN`] splits onto separate pads. Each chain is announced with a
 //! [`PipelinePacket::Segment`] whose `start` / `base` is the summed **playable**
 //! duration of the chains before it (the end-granule-clamped decode position,
@@ -90,7 +90,7 @@ fn samples_to_ns(samples: u64, sample_rate: u32) -> u64 {
 
 /// Fraction of a proportional seek guess to land early, plus a fixed slack: a
 /// stretch of the file denser than the observed average would otherwise land
-/// past the target, which costs a second seek (M862).
+/// past the target, which costs a second seek.
 const GUESS_BACKOFF_DIV: u64 = 8;
 const GUESS_SLACK_BYTES: u64 = 8 * 1024;
 /// Below this a re-scan from the start reads about as much, so it is not worth
@@ -144,7 +144,7 @@ fn guess_offset(
     (off >= MIN_GUESS_BYTES).then_some(off)
 }
 
-/// A byte-offset guess in flight (M862).
+/// A byte-offset guess in flight.
 #[derive(Debug, Default, Clone, Copy)]
 struct GuessedSeek {
     /// Offset of the landing, `None` when the seek in flight is a plain re-scan
@@ -184,10 +184,10 @@ pub struct OggDemux {
     output_kind: PadKind,
     /// Caps, in-band config and packet timing for the selected bitstream.
     emitter: StreamEmitter,
-    /// Seek support (M362): app time seeks drive an upstream byte-seek and a
+    /// Seek support: app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek<(Vec<u8>, FrameTiming)>,
-    /// Byte offset of the next source byte (M862): the seek guess is
+    /// Byte offset of the next source byte: the seek guess is
     /// proportional in bytes, so the element tracks where in the file it reads.
     read_offset: u64,
     /// Earliest and latest observed `(parsed byte offset, stream time ns)`, the
@@ -226,7 +226,7 @@ impl OggDemux {
         }
     }
 
-    /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
+    /// Make the demuxer seekable: `app` carries app time seeks; `upstream`
     /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
     /// On a time seek the demuxer repositions the source and re-syncs from the
     /// packet at/before the target (every audio packet is a resync point).
@@ -235,14 +235,14 @@ impl OggDemux {
         self
     }
 
-    /// Service a pending app time seek (M862). Ogg carries no index, so the
+    /// Service a pending app time seek. Ogg carries no index, so the
     /// byte offset to land at is guessed proportionally: the granule positions
     /// seen so far give `(byte offset, stream time)` anchors, and the target
     /// interpolates through them. The landing is deliberately early, and the
     /// scan from it to the last packet at/before the target delivers exactly
     /// what a re-scan from the file start would. Without usable anchors (too
     /// little played, a chained file, headers not yet in hand) it re-scans from
-    /// offset `0`, the M362 path.
+    /// offset `0`.
     fn poll_seek(&mut self) {
         if self.seek.is_seeking() {
             return;
@@ -424,13 +424,13 @@ impl OggDemux {
 
     /// The logical bitstream this element forwards out of the chain being
     /// parsed: the first one whose codec is the `stream` selection. A grouped
-    /// file (M790) carries several, so the selection picks among them; a
+    /// file carries several, so the selection picks among them; a
     /// single-stream file has only one candidate.
     fn selected(&self) -> Option<usize> {
         self.demux.stream_of(self.stream()?)
     }
 
-    /// The selected bitstream of every retained chain, in play order (M827): a
+    /// The selected bitstream of every retained chain, in play order: a
     /// chained file continues on this pad with the next physical stream's
     /// stream of the same codec.
     fn selected_streams(&self) -> Vec<usize> {
@@ -580,7 +580,7 @@ impl OggDemux {
 }
 
 /// What one demux step produced for a logical bitstream: the refined caps (when
-/// they changed), the segment opening a chained physical stream (M827), and the
+/// they changed), the segment opening a chained physical stream, and the
 /// frames to forward, the in-band codec config first.
 #[derive(Debug, Default)]
 struct StreamReady {
@@ -589,8 +589,8 @@ struct StreamReady {
     /// The frames to forward, each flagged when it is codec config rather than
     /// audio (config rides the same pad and flows whatever a seek is doing).
     frames: Vec<(Vec<u8>, FrameTiming, bool)>,
-    /// Stream time a mid-file landing anchored at, in the batch that anchored it
-    /// (M862). The caller compares it against the seek target.
+    /// Stream time a mid-file landing anchored at, in the batch that anchored it.
+    /// The caller compares it against the seek target.
     resumed_at: Option<u64>,
     // summed durations of the first audio page's packets, in the batch that carries them
     first_page_ns: Option<u64>,
@@ -617,7 +617,7 @@ struct StreamEmitter {
     /// STREAMINFO / the three Vorbis headers) was forwarded to the decoder.
     /// Reset on a flush so the re-read stream re-sends it.
     head_forwarded: bool,
-    /// Vorbis packet-duration tables (M778), parsed from the ident + setup
+    /// Vorbis packet-duration tables, parsed from the ident + setup
     /// headers once both land. `None` until then / for other codecs / when the
     /// setup scan fails (packets then ride untimed and untrimmed).
     vorbis: Option<crate::ogg::VorbisTiming>,
@@ -625,12 +625,12 @@ struct StreamEmitter {
     /// whose window has no predecessor: it primes the overlap and decodes to
     /// nothing, counting `blocksize / 2` on the timeline).
     prev_blocksize: Option<u32>,
-    /// Vorbis timeline anchor (M778): the excess of the natural packet
+    /// Vorbis timeline anchor: the excess of the natural packet
     /// durations over the first audio page's granule position, clipped off the
     /// front of the emitted timeline (initial encoder priming). `Some(0)` when
     /// the first page is the EOS page (an end clamp, not an anchor).
     anchor_offset: Option<u64>,
-    /// The chain (physical stream, M827) this timing state belongs to. A chained
+    /// The chain (physical stream) this timing state belongs to. A chained
     /// file's next chain restarts the state on top of `chain_offset_ns`.
     chain: u32,
     /// Where the current chain starts on the output timeline (ns): the summed
@@ -641,9 +641,9 @@ struct StreamEmitter {
     /// discards. Fixes where the next chain starts.
     playable_end_ns: u64,
     /// Timeline position (ns) after the last packet emitted, the time axis of
-    /// the proportional seek guess (M862).
+    /// the proportional seek guess.
     position_ns: u64,
-    /// Waiting for a mid-file landing's granule anchor (M862): packets are not
+    /// Waiting for a mid-file landing's granule anchor: packets are not
     /// timed from the file start any more, so nothing is emitted until the
     /// landing's first granule-bearing page says where it is.
     awaiting_anchor: bool,
@@ -678,7 +678,7 @@ impl StreamEmitter {
         self.awaiting_anchor
     }
 
-    /// Whether this emitter can time packets from a mid-file landing (M862).
+    /// Whether this emitter can time packets from a mid-file landing.
     /// Vorbis also needs its block-size tables and the priming anchor, both
     /// learned from the start of the stream the landing skips past.
     fn can_resume(&self, codec: OggCodec) -> bool {
@@ -690,7 +690,7 @@ impl StreamEmitter {
         }
     }
 
-    /// Arm a mid-file landing (M862): the position state is re-established from
+    /// Arm a mid-file landing: the position state is re-established from
     /// the landing's page granule, while the caps, the codec headers to re-send,
     /// the Vorbis tables and the priming anchor carry over (same stream, same
     /// file).
@@ -704,7 +704,7 @@ impl StreamEmitter {
         self.audio_packets_stepped = 0;
     }
 
-    /// Rebase onto a chained physical stream (M827): the previous chain's
+    /// Rebase onto a chained physical stream: the previous chain's
     /// playable end becomes the new chain's zero and the per-chain timing state
     /// restarts. The returned segment carries that offset as both `start` (the
     /// new chain's earliest stream timestamp) and `base` (its running time), so
@@ -1300,7 +1300,7 @@ impl AsyncElement for OggDemux {
     }
 }
 
-/// M845: log identity. Category is the short type name (what the runner derives
+/// Log identity. Category is the short type name (what the runner derives
 /// for the instance name, so one `G2G_DEBUG` entry filters both).
 impl LogSource for OggDemux {
     fn log_category(&self) -> &'static str {
@@ -1314,7 +1314,7 @@ impl LogSource for OggDemux {
     }
 }
 
-/// `OggDemux`'s settable properties (M775).
+/// `OggDemux`'s settable properties.
 static OGGDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
@@ -1347,7 +1347,7 @@ fn stream_id(slot: usize) -> alloc::string::String {
 pub struct OggPort {
     /// Slot of the logical bitstream within its physical stream, in
     /// beginning-of-stream order. A chained file's next chain continues on the
-    /// same port through the same slot (M827).
+    /// same port through the same slot.
     pub stream: usize,
     /// Expected codec, from the file probe. The port's runtime `CapsChanged`
     /// carries the concrete channels / rate.
@@ -1360,7 +1360,7 @@ impl OggPort {
     }
 }
 
-/// Multi-output Ogg demuxer (M790): one grouped Ogg byte stream in, N audio
+/// Multi-output Ogg demuxer: one grouped Ogg byte stream in, N audio
 /// elementary streams out, one per output port. The multi-output counterpart of
 /// [`OggDemux`] (which forwards a single selected stream); the read-side analog
 /// of [`crate::oggmuxn::OggMuxN`].
@@ -1374,7 +1374,7 @@ impl OggPort {
 /// negotiation-time expectation from the file probe, which its runtime
 /// `CapsChanged` then refines. A stream no port names is drained and dropped.
 ///
-/// A chained file (M827) continues each port with the same slot of the next
+/// A chained file continues each port with the same slot of the next
 /// physical stream, on the rebased timeline [`OggDemux`] documents, and
 /// re-announces the collection and tags per chain.
 ///

@@ -1,4 +1,4 @@
-//! Remote WebTransport transform (M901, `webtransport` feature): a media-agnostic
+//! Remote WebTransport transform (`webtransport` feature): a media-agnostic
 //! *remote stage* over WebTransport, the sibling of
 //! [`RemoteWsTransform`](crate::remotewstransform). Where the sink / source pair
 //! cuts an edge one-way, this keeps the graph shape and offloads a single middle

@@ -138,7 +138,7 @@ impl Observer {
     }
 
     /// Append a node that appeared after [`register`](Self::register): a fan-out
-    /// branch or a fan-in input attached while the run was going (M869). Returns
+    /// branch or a fan-in input attached while the run was going. Returns
     /// its `NodeId`. The three per-node vectors are pushed under one lock hold,
     /// so a concurrent [`snapshot`](Self::snapshot) sees the node whole or not at
     /// all, never half of it.
@@ -464,7 +464,7 @@ pub struct TelemetrySnapshot {
     pub journey: Option<FrameJourney>,
 }
 
-/// One frame's measured path through the graph's linear prefix (M851): the
+/// One frame's measured path through the graph's linear prefix: the
 /// per-stage wait + work + blocked of a *single* frame, as opposed to the
 /// per-stage distributions the aggregate waterfall stacks.
 ///
@@ -538,7 +538,7 @@ pub struct EdgeInfo {
     pub from: usize,
     pub to: usize,
     pub caps: Option<alloc::string::String>,
-    /// The last `CapsChanged` that crossed this link (M980). A stream whose
+    /// The last `CapsChanged` that crossed this link. A stream whose
     /// geometry only arrives with the data (a demuxed file) negotiates a
     /// placeholder and refines here, so this is the shape the frames really
     /// carried. `None` until one crosses, and on an uninstrumented edge.
@@ -598,7 +598,7 @@ mod tests {
         );
     }
 
-    /// M869: a dynamic runner's arm attaches mid-run, so its node and link join
+    /// A dynamic runner's arm attaches mid-run, so its node and link join
     /// an already-registered topology. The append lands both, keyed by the
     /// returned id, and the arm's live probe reads through the same snapshot.
     #[test]

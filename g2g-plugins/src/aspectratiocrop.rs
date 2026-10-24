@@ -275,7 +275,7 @@ impl AsyncElement for AspectRatioCrop {
     }
 }
 
-/// `AspectRatioCrop`'s settable properties, named as GStreamer's (M1084).
+/// `AspectRatioCrop`'s settable properties, named as GStreamer's.
 static ASPECTRATIOCROP_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "aspect-ratio",
     PropKind::Fraction,

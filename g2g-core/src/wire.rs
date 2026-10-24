@@ -1,4 +1,4 @@
-//! Wire serialization of a [`PipelinePacket`] (M551, the distributed-graph
+//! Wire serialization of a [`PipelinePacket`] (the distributed-graph
 //! primitive).
 //!
 //! A hand-rolled, versioned, little-endian binary codec that turns any
@@ -15,7 +15,7 @@
 //! `no_std + alloc`, no external dependency: the codec is pure computation
 //! (bytes in, bytes out), so it compiles on every target the core does,
 //! including `wasm32` (a browser client can speak the same wire format as a
-//! native peer, generalizing the bespoke M549 detect-server shim into a first
+//! native peer, generalizing the bespoke detect-server shim into a first
 //! class primitive).
 //!
 //! # What crosses the boundary
@@ -57,8 +57,8 @@ use crate::tensor::MAX_TENSOR_RANK;
 /// Wire format version, the first byte of every encoded packet. Bumped on any
 /// incompatible layout change so a decoder rejects a mismatched peer up front
 /// rather than mis-parsing. Version 2 added the four colorimetry bytes to both
-/// video caps (M1111); version 3 added the u16 channel-layout mask to audio
-/// caps (M1147).
+/// video caps; version 3 added the u16 channel-layout mask to audio
+/// caps.
 pub const WIRE_VERSION: u8 = 3;
 
 /// Failure decoding (or encoding) a [`PipelinePacket`].

@@ -1,4 +1,4 @@
-//! JPEG XS encode / decode via Intel SVT-JPEG-XS (M605): the ST 2110-22 compressed
+//! JPEG XS encode / decode via Intel SVT-JPEG-XS: the ST 2110-22 compressed
 //! essence. `SvtJpegXsEnc` takes planar YUV `RawVideo` and emits a
 //! `CompressedVideo{JpegXs}` codestream (one independent codestream per frame);
 //! `SvtJpegXsDec` is the inverse. Together they close the -22 loop: a plant can

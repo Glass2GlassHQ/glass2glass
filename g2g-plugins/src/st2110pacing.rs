@@ -1,4 +1,4 @@
-//! ST 2110-21 sender pacing (M609): the traffic-shaping schedule that spreads a
+//! ST 2110-21 sender pacing: the traffic-shaping schedule that spreads a
 //! frame's RTP packets across the frame period instead of bursting them, so the
 //! network sees a smooth flow a -21-conformant receiver can absorb.
 //!

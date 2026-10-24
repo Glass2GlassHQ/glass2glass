@@ -8,9 +8,9 @@
 //! ```
 //!
 //! Leading `gst-launch`-style options are accepted so pasted command lines run
-//! verbatim (M191). The remaining arguments are joined with spaces into one
-//! pipeline string, parsed by [`g2g_core::runtime::parse_launch`] (M106) against
-//! [`g2g_plugins::registry::default_registry`] (M107), and driven on a
+//! verbatim. The remaining arguments are joined with spaces into one
+//! pipeline string, parsed by [`g2g_core::runtime::parse_launch`] against
+//! [`g2g_plugins::registry::default_registry`], and driven on a
 //! single-thread tokio runtime against the [`WallClock`]. Requires the `std`
 //! feature (registry + wall clock are std-only).
 //!
@@ -37,17 +37,17 @@
 //! --record-on-error <dir>
 //!                     keep a bounded ring of recent packets per link while the
 //!                     run goes, and on failure write each link's ring into
-//!                     <dir> as a `replaysrc` recording (M1016)
+//!                     <dir> as a `replaysrc` recording
 //! --seek <seconds>    one flushing seek to that stream time before the first
 //!                     frame, then run to the end (`--help` says where the
 //!                     first frame lands)
 //! --plugin <path>     load a third-party plugin `.so` before parsing
 //!                     (repeatable; needs the `plugin-loader` build feature)
 //! --graph <file>      build the graph from a declarative JSON / YAML document
-//!                     instead of a text pipeline (M578; `declarative` /
+//!                     instead of a text pipeline (`declarative` /
 //!                     `declarative-yaml` build feature)
 //! --script <file>     build the graph from a Rhai script that calls the
-//!                     builder API (M579; `script-rhai` build feature)
+//!                     builder API (`script-rhai` build feature)
 //! -h, --help          print this help and exit
 //! -e, --eos-on-shutdown, -m, --messages, -f, --no-fault, -t, --tags
 //!                     accepted for compatibility (see notes below)
@@ -56,10 +56,10 @@
 //! Dynamic plugins: with the `plugin-loader` feature, every directory in
 //! `$G2G_PLUGIN_PATH` plus each `--plugin <path>` is `dlopen`ed and its elements
 //! registered before the pipeline parses, so a packaged binary extends without a
-//! rebuild (M201). The plugin's ABI tag must match this build's. With the
+//! rebuild. The plugin's ABI tag must match this build's. With the
 //! `plugin-signing` feature, listing Ed25519 public key files in
 //! `$G2G_PLUGIN_TRUSTED_KEYS` makes a matching `<plugin>.sig` mandatory for
-//! every one of them (M1061).
+//! every one of them.
 //!
 //! Compatibility notes: g2g sources run to their natural EOS (e.g.
 //! `num-buffers`) or until the process is killed; there is no run-time
@@ -159,8 +159,8 @@ type RunFuture<'r> = core::pin::Pin<
 
 const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads[=pinned]] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--seek <seconds>] [--plugin <path>] [-e] [-m] [-h] \
 <element> [key=value ...] ! <element> ! ...\n       \
-g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph (M578)\n       \
-g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script (M579)";
+g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph\n       \
+g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script";
 
 const SEEK_HELP: &str = "\n\
 --seek <seconds>: one flushing seek to that stream time before the first frame, then run to the end.\n  \
@@ -206,12 +206,12 @@ struct Opts {
     run_json: bool,
     /// Plugin `.so` paths from `--plugin` (repeatable), loaded before parsing.
     plugins: Vec<String>,
-    /// Build the graph from a declarative JSON / YAML file (`--graph <path>`,
-    /// M578) instead of a text pipeline. `.json` -> `from_json`, `.yaml` / `.yml`
+    /// Build the graph from a declarative JSON / YAML file (`--graph <path>`)
+    /// instead of a text pipeline. `.json` -> `from_json`, `.yaml` / `.yml`
     /// -> `from_yaml`. Needs the `declarative` (and, for YAML, `declarative-yaml`)
     /// build feature.
     graph: Option<String>,
-    /// Build the graph from a Rhai script file (`--script <path>`, M579) that
+    /// Build the graph from a Rhai script file (`--script <path>`) that
     /// calls the builder API. Needs the `script-rhai` build feature.
     script: Option<String>,
     /// Run each element on its own OS thread (opt-in multicore, `--threads`),
@@ -234,8 +234,8 @@ struct Opts {
     /// `Observer` telemetry the dashboard serves, drawn in this terminal
     /// instead of a browser. Needs the `tui` build.
     tui: bool,
-    /// Directory for the flight recorder's dump (`--record-on-error <dir>`,
-    /// M1016): while the run goes, every link keeps a bounded ring of its most
+    /// Directory for the flight recorder's dump (`--record-on-error <dir>`):
+    /// while the run goes, every link keeps a bounded ring of its most
     /// recent packets; if the run fails, each ring is written there as a
     /// `replaysrc` recording of the traffic that led to the failure.
     record_on_error: Option<String>,
@@ -380,7 +380,7 @@ fn load_plugins(reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
     }
 }
 
-/// The same with signature verification (M1061): the keys
+/// The same with signature verification: the keys
 /// `$G2G_PLUGIN_TRUSTED_KEYS` names gate the scanned directories and each
 /// explicit `--plugin` alike, so neither route is the unverified one.
 #[cfg(feature = "plugin-signing")]
@@ -1047,7 +1047,7 @@ fn dump_flight_recording(recorder: &FlightRecorder, dir: &str) {
     }
 }
 
-/// End-of-run report (M287): the RunStats telemetry plus the measured
+/// End-of-run report: the RunStats telemetry plus the measured
 /// wall-clock throughput this run achieved, and for each presenting sink the
 /// rate frames actually reached the display.
 fn print_run_summary(stats: &g2g_core::runtime::RunStats, elapsed: f64) {

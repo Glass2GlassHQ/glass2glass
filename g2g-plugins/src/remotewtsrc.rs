@@ -1,4 +1,4 @@
-//! Remote WebTransport source (M901, `webtransport` feature): the WebTransport
+//! Remote WebTransport source (`webtransport` feature): the WebTransport
 //! receive half of the distributed-graph primitive, the inverse of
 //! [`RemoteWtSink`](crate::remotewtsink) and the sibling of the TCP
 //! [`RemoteSrc`](crate::remotesrc) / WebSocket [`RemoteWsSrc`](crate::remotewssrc).

@@ -4,15 +4,15 @@
 //! a per-plane row copy.
 //!
 //! Properties follow GStreamer's `videocrop`: `top` / `bottom` / `left` /
-//! `right` are the pixels to crop off each edge (M183). Output geometry is the
+//! `right` are the pixels to crop off each edge. Output geometry is the
 //! input minus the edge insets. GStreamer's `-1` auto-crop sentinel is not
 //! supported; negative values are rejected.
 //!
 //! 4:2:0 (`Nv12`, `I420`) needs even insets on all four edges, since chroma is
 //! subsampled 2x2; odd values fail negotiation/configure loud. The frame itself
 //! may be odd-sized: its last chroma column or row is cropped like any other.
-//! With every inset zero, a frame carrying a `CropMeta` (an MP4 clean aperture,
-//! M1770) is cut to its rectangle, the origin and size rounded down to whole
+//! With every inset zero, a frame carrying a `CropMeta` (an MP4 clean aperture)
+//! is cut to its rectangle, the origin and size rounded down to whole
 //! chroma samples as ffmpeg's `crop` filter rounds them.
 //! Packed formats (`Rgba8`, `Bgra8`) crop at any inset. CPU-only `no_std`
 //! baseline.
@@ -435,7 +435,7 @@ impl AsyncElement for VideoCrop {
     }
 }
 
-/// `VideoCrop`'s settable properties (GStreamer `videocrop` model, M183): the
+/// `VideoCrop`'s settable properties (GStreamer `videocrop` model): the
 /// pixels to crop off each edge.
 static VIDEOCROP_PROPS: &[PropertySpec] = &[
     PropertySpec::new("top", PropKind::Int, "pixels to crop at the top").with_default("0"),

@@ -95,7 +95,7 @@ pub trait DynSourceLoop: ElementBound {
         DomainSet::only(self.output_memory())
     }
 
-    /// Dyn-safe mirror of [`SourceLoop::query_duration`] (M203), so the DAG
+    /// Dyn-safe mirror of [`SourceLoop::query_duration`], so the DAG
     /// runner can publish an erased source's duration on the progress handle.
     fn query_duration(&self) -> Option<u64> {
         None
@@ -110,16 +110,16 @@ pub trait DynSourceLoop: ElementBound {
     fn provide_clock(&self) -> Option<ClockCandidate>;
 
     /// Dyn-safe mirror of [`SourceLoop::configure_allocation`], the upstream end
-    /// of the M12 allocation cascade.
+    /// of the allocation cascade.
     fn configure_allocation(&mut self, params: &AllocationParams);
 
-    /// Dyn-safe mirror of [`SourceLoop::configured_output_caps`] (M195), so the
+    /// Dyn-safe mirror of [`SourceLoop::configured_output_caps`], so the
     /// `decodebin` parser can read an erased source's property-driven caps.
     fn configured_output_caps(&self) -> Option<Caps> {
         None
     }
 
-    /// Dyn-safe mirror of [`SourceLoop::probe_output_caps`] (M480): the parse-time
+    /// Dyn-safe mirror of [`SourceLoop::probe_output_caps`]: the parse-time
     /// caps `decodebin` uses to pick a demuxer, allowed to sniff the header.
     fn probe_output_caps(&mut self) -> Result<Option<Caps>, G2gError> {
         Ok(self.configured_output_caps())
@@ -137,7 +137,7 @@ pub trait DynSourceLoop: ElementBound {
         ElementMetadata::default()
     }
 
-    /// The log category for this erased source (M179): its short type name by
+    /// The log category for this erased source: its short type name by
     /// default (the blanket impl fills it), so the runner can name and log it.
     fn log_category(&self) -> &'static str {
         "source"
@@ -388,7 +388,7 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
 }
 
 /// The caps one fan-in branch runs: the highest-preference alternative of the
-/// source's produce set that the pad it feeds accepts (M955). A source offering
+/// source's produce set that the pad it feeds accepts. A source offering
 /// several formats (a camera's pixel formats) is therefore selected by what the
 /// merge point takes, the way the DAG runner selects it by what downstream takes.
 ///
@@ -444,7 +444,7 @@ pub trait DynMultiInputElement: ElementBound {
     fn min_upstream_latency_ns(&self) -> u64 {
         0
     }
-    /// Dyn-safe mirror of [`MultiInputElement::input_pad_index`] (M481): map a
+    /// Dyn-safe mirror of [`MultiInputElement::input_pad_index`]: map a
     /// named request pad to the concrete input index, for the launch parser.
     fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize>;
     fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_>;
@@ -508,7 +508,7 @@ pub trait DynMultiInputElement: ElementBound {
     /// Dyn-safe mirror of [`MultiInputElement::set_log_category`].
     fn set_log_category(&mut self, _category: alloc::string::String) {}
 
-    /// Consume this element into its graph-runner muxer arm (M1009), the fan-in
+    /// Consume this element into its graph-runner muxer arm, the fan-in
     /// analog of
     /// [`DynAsyncElement::drive_transform_arm`](crate::element::DynAsyncElement::drive_transform_arm).
     /// The blanket impl picks the arrival-order or PTS-ordered arm from
@@ -1016,7 +1016,7 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 ///
 /// Negotiation fixates each source's proposal independently and configures
 /// the sink against input 0's fixated caps (the merged-output caps);
-/// per-input caps negotiation is M10, so a `ReFixate` anywhere fails with
+/// this runner has no per-input caps negotiation, so a `ReFixate` anywhere fails with
 /// `FixationFailed`. The slice assumes inputs agree (the A/B case).
 pub async fn run_fanin_sink<Snk, Clk>(
     sources: Vec<&mut dyn DynSourceLoop>,
@@ -1032,7 +1032,7 @@ where
     run_fanin_sink_inner(sources, merger, sink, clock, link_capacity, None).await
 }
 
-/// As [`run_fanin_sink`], but taps live telemetry into `observer` (M846), the
+/// As [`run_fanin_sink`], but taps live telemetry into `observer`, the
 /// hand-built analog of [`run_graph_observed`](crate::runtime::run_graph_observed):
 /// the topology is the N sources, the merger, and the sink, and a concurrent task
 /// reads the sink's measured `process()` latency plus each link's packet / byte /
@@ -1237,11 +1237,11 @@ struct TaggingSink {
     /// each packet we surface any pending PLI / BWE for this track to the source
     /// as the push outcome, so a reverse signal reaches the matching upstream.
     reverse: Option<crate::fanout::ReverseChannel>,
-    /// Live traffic counters for this input's edge (M846). The tagged channel is
+    /// Live traffic counters for this input's edge. The tagged channel is
     /// shared by every input, so the per-edge count is kept here rather than on
     /// the channel. `None` unless an observer is attached.
     counters: Option<Arc<EdgeCounters>>,
-    /// Content-inspection slot for this input's edge (M849), the analog of the
+    /// Content-inspection slot for this input's edge, the analog of the
     /// one [`SenderSink`] shares with its link: the tagged channel is shared, so
     /// each input carries its own slot here. `None` unless an observer is
     /// attached, and empty (pass-through) until a tool installs an interceptor.
@@ -1379,7 +1379,7 @@ where
     run_fanin_session_inner(sources, session, clock, link_capacity, None).await
 }
 
-/// As [`run_fanin_session`], but taps live telemetry into `observer` (M846): the
+/// As [`run_fanin_session`], but taps live telemetry into `observer`: the
 /// topology is the N sources feeding the session, whose measured `process()`
 /// latency and per-input packet / byte counts a concurrent task reads mid-run via
 /// [`Observer::snapshot`].
@@ -1637,7 +1637,7 @@ where
     run_duplex_session_inner(sources, session, sinks, clock, link_capacity, None).await
 }
 
-/// As [`run_duplex_session`], but taps live telemetry into `observer` (M846):
+/// As [`run_duplex_session`], but taps live telemetry into `observer`:
 /// the send sources, the session, and the recv sinks, with each sink's measured
 /// `process()` latency and every link's packet / byte counts readable mid-run via
 /// [`Observer::snapshot`].
@@ -1873,7 +1873,7 @@ where
     })
 }
 
-/// Drives `N sources → muxer → 1 sink` (M10 true fan-in). Unlike
+/// Drives `N sources → muxer → 1 sink` (true fan-in). Unlike
 /// [`run_fanin_sink`], a [`MultiInputElement`] muxer combines **all** inputs
 /// into the output. Each input's packets are tagged with its index and merged
 /// into one channel; a single muxer task drains it and calls
@@ -1886,7 +1886,7 @@ where
 /// fails with `FixationFailed`.
 ///
 /// When `clock` can sleep on a deadline ([`PipelineClock::as_ticker`], which every
-/// [`AsyncClock`](crate::AsyncClock) answers), the muxer arm also gets a **deadline tick** (M880): a
+/// [`AsyncClock`](crate::AsyncClock) answers), the muxer arm also gets a **deadline tick**: a
 /// muxer declaring a [`MultiInputElement::tick_interval_ns`] receives
 /// [`PipelinePacket::Tick`] on that period even while its inputs are silent, so a
 /// compositor can keep emitting at its output rate when a pad stalls
@@ -2002,7 +2002,7 @@ const DYN_FANIN_SINK_NODE: usize = 1;
 
 /// Telemetry bookkeeping the aggregator / muxer arm of a dynamic fan-in carries,
 /// so an input attached mid-run gets named and put in the observer's topology
-/// before its first frame (M869). The runtime inputs are sources, so they carry
+/// before its first frame. The runtime inputs are sources, so they carry
 /// no `process()` probe; their telemetry is the per-input edge counters the
 /// [`TaggingSink`] advances.
 #[cfg(feature = "std")]
@@ -2027,7 +2027,7 @@ struct InputRequest<'a> {
     verdict: Sender<Result<(), G2gError>>,
 }
 
-/// The pending outcome of a [`DynamicFaninHandle::add_input`] (M975). The request
+/// The pending outcome of a [`DynamicFaninHandle::add_input`]. The request
 /// is queued; whether the element takes the input is only known once its arm has
 /// negotiated it, so [`accepted`](Self::accepted) resolves to the verdict (drive
 /// the run future while awaiting it, since that arm is what answers). Dropping
@@ -2055,7 +2055,7 @@ impl PendingInput {
     }
 }
 
-/// A handle to add inputs to a *running* dynamic aggregator (M320): the fan-in
+/// A handle to add inputs to a *running* dynamic aggregator: the fan-in
 /// dual of [`DynamicFanoutHandle`](crate::runtime::DynamicFanoutHandle), the
 /// runtime equivalent of GStreamer's aggregator/muxer request **sink** pads. Each
 /// [`add_input`](Self::add_input) attaches a new source feeding the next free
@@ -2129,7 +2129,7 @@ impl<'a> DynamicFaninHandle<'a> {
     }
 }
 
-/// Drives `N sources -> dynamic aggregator` (M320 fan-in request pads), where
+/// Drives `N sources -> dynamic aggregator` (fan-in request pads), where
 /// inputs can be added at runtime through the returned [`DynamicFaninHandle`].
 /// The fan-in dual of
 /// [`run_source_tee_dynamic`](crate::runtime::run_source_tee_dynamic): there
@@ -2165,7 +2165,7 @@ where
     run_aggregator_dynamic_inner(aggregator, link_capacity, None)
 }
 
-/// As [`run_aggregator_dynamic`], but taps live telemetry into `observer` (M869).
+/// As [`run_aggregator_dynamic`], but taps live telemetry into `observer`.
 /// The topology starts as the aggregator alone; each input attached through the
 /// handle appends its own node and link before its first frame, so a dashboard
 /// polling [`Observer::snapshot`] sees runtime inputs appear with their per-input
@@ -2381,7 +2381,7 @@ where
     run_muxer_sink_dynamic_inner(mux, sink, link_capacity, None)
 }
 
-/// As [`run_muxer_sink_dynamic`], but taps live telemetry into `observer` (M869).
+/// As [`run_muxer_sink_dynamic`], but taps live telemetry into `observer`.
 /// The muxer and the sink are registered up front with their measured-latency
 /// probes; each runtime input appends its node and link on attach, and the merged
 /// `muxer -> sink` link joins the topology once its caps firm up (they only exist
@@ -2614,7 +2614,7 @@ where
     (handle, run)
 }
 
-/// Negotiate a runtime-requested input before any of its frames can flow (M975):
+/// Negotiate a runtime-requested input before any of its frames can flow:
 /// fixate the source against the pad it would feed, hold the pad's own constraint
 /// as the last word on those caps, ask the element to accept the input, then
 /// configure both. Every failure here is the *add's*, not the run's.
@@ -2817,7 +2817,7 @@ impl MultiOutputSink for GrowableSenderSink {
 
 /// Telemetry bookkeeping the control arm of a dynamic duplex run carries, so a
 /// track or port attached mid-run is named and in the observer's topology before
-/// its first packet (M869).
+/// its first packet.
 #[cfg(feature = "std")]
 #[derive(Debug)]
 struct DuplexTap {
@@ -2830,7 +2830,7 @@ struct DuplexTap {
     session_id: usize,
 }
 
-/// A handle to add send-side tracks to a *running* duplex session (M1014): the
+/// A handle to add send-side tracks to a *running* duplex session: the
 /// duplex analog of [`DynamicFaninHandle`], for the case the fixed-arity
 /// [`run_duplex_session`] cannot serve, a track beyond the pads the session was
 /// built with. Cheap to clone (a channel sender plus an atomic).
@@ -2889,7 +2889,7 @@ impl<'a> DynamicDuplexHandle<'a> {
     }
 }
 
-/// Drives a terminal **duplex** session whose pad count grows at runtime (M1014),
+/// Drives a terminal **duplex** session whose pad count grows at runtime,
 /// the renegotiating counterpart of [`run_duplex_session`]: a sendrecv
 /// PeerConnection that takes a new local track, or receives a new peer track,
 /// with no pad reserved for it up front.

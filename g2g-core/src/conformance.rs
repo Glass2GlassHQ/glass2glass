@@ -1,4 +1,4 @@
-//! Conformance vocabulary + derived maturity (M614).
+//! Conformance vocabulary + derived maturity.
 //!
 //! g2g grows fast under agent-driven development, so "how validated is this
 //! element?" must be answerable honestly. The trap is a hand-authored maturity
