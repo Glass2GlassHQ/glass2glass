@@ -1,11 +1,12 @@
 #![cfg(feature = "std")]
 
 use g2g_core::frame::Frame;
-use g2g_core::runtime::{parse_launch, run_graph};
+use g2g_core::runtime::{parse_launch, run_graph, SourceLoop};
 use g2g_core::{Colorimetry, PipelineClock, RawVideoFormat};
 use g2g_plugins::appsink::{register_appsink_pull, Pull};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::videoconvert::convert;
+use g2g_plugins::videotestsrc::VideoTestSrc;
 
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
@@ -33,6 +34,60 @@ async fn run_into_appsink(channel: &str, source_and_filter: &str) -> Vec<Frame> 
 
 fn frame_bytes(frame: &Frame) -> usize {
     frame.domain.as_system_slice().expect("system memory").len()
+}
+
+fn property_default(name: &str) -> &'static str {
+    VideoTestSrc::new(1, 1, 1, 1)
+        .properties()
+        .iter()
+        .find(|spec| spec.name == name)
+        .and_then(|spec| spec.default)
+        .expect("the property declares a default")
+}
+
+fn default_dimension(name: &str) -> usize {
+    property_default(name).parse().expect("an integer default")
+}
+
+fn default_fps() -> u64 {
+    let (fps, denominator) = property_default("framerate")
+        .split_once('/')
+        .expect("a fraction default");
+    assert_eq!(denominator, "1");
+    fps.parse().expect("an integer numerator")
+}
+
+#[tokio::test]
+async fn a_width_range_fixates_nearest_the_default_width() {
+    const MIN_WIDTH: usize = 100;
+    const MAX_WIDTH: usize = 200;
+    let frames = run_into_appsink(
+        "videotestsrc_caps_filter_width_range",
+        &format!("videotestsrc num-buffers={FRAMES} ! video/x-raw,width=[{MIN_WIDTH},{MAX_WIDTH}]"),
+    )
+    .await;
+    let width = default_dimension("width").clamp(MIN_WIDTH, MAX_WIDTH);
+    let height = default_dimension("height");
+    for frame in &frames {
+        assert_eq!(frame_bytes(frame), width * height * RGBA_BYTES_PER_PIXEL);
+    }
+}
+
+#[tokio::test]
+async fn a_framerate_range_fixates_nearest_the_default_rate() {
+    const MIN_FPS: u64 = 0;
+    const MAX_FPS: u64 = 15;
+    let frames = run_into_appsink(
+        "videotestsrc_caps_filter_framerate_range",
+        &format!(
+            "videotestsrc num-buffers={FRAMES} ! video/x-raw,framerate=[{MIN_FPS}/1,{MAX_FPS}/1]"
+        ),
+    )
+    .await;
+    let fps = default_fps().clamp(MIN_FPS, MAX_FPS);
+    for frame in &frames {
+        assert_eq!(frame.timing.duration_ns, NANOSECONDS_PER_SECOND / fps);
+    }
 }
 
 #[tokio::test]

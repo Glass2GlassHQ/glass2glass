@@ -420,6 +420,33 @@ impl Caps {
         }
     }
 
+    // like gst_structure_fixate_field_nearest_int, a range takes the value nearest the same field of `preferred`
+    #[cfg(feature = "runtime")]
+    pub(crate) fn fixate_toward(&self, preferred: &Caps) -> Result<Caps, G2gError> {
+        let mut narrowed = self.clone();
+        if let (
+            Caps::CompressedVideo {
+                width,
+                height,
+                framerate,
+                ..
+            }
+            | Caps::RawVideo {
+                width,
+                height,
+                framerate,
+                ..
+            },
+            Some((preferred_width, preferred_height, preferred_framerate)),
+        ) = (&mut narrowed, preferred.dims())
+        {
+            *width = width.nearest_to(preferred_width);
+            *height = height.nearest_to(preferred_height);
+            *framerate = framerate.nearest_to(preferred_framerate);
+        }
+        narrowed.fixate()
+    }
+
     /// Borrow the geometry triple if this caps carries one. Both video
     /// variants (compressed + raw) currently do; `Audio` and `Tensor`
     /// return `None`. Used by element code that needs width/height/fps
@@ -879,6 +906,16 @@ impl Dim {
         }
     }
 
+    #[cfg(feature = "runtime")]
+    pub(crate) fn nearest_to(&self, preferred: &Dim) -> Dim {
+        match (self, preferred) {
+            (Dim::Range { min, max }, Dim::Fixed(value)) if min <= max => {
+                Dim::Fixed((*value).clamp(*min, *max))
+            }
+            _ => self.clone(),
+        }
+    }
+
     fn bounds(&self) -> (u32, u32) {
         match self {
             Dim::Any => (u32::MIN, u32::MAX),
@@ -930,6 +967,16 @@ impl Rate {
                 (min_q16 <= max_q16).then_some(Rate::Fixed(*min_q16))
             }
             Rate::Any => None,
+        }
+    }
+
+    #[cfg(feature = "runtime")]
+    pub(crate) fn nearest_to(&self, preferred: &Rate) -> Rate {
+        match (self, preferred) {
+            (Rate::Range { min_q16, max_q16 }, Rate::Fixed(value)) if min_q16 <= max_q16 => {
+                Rate::Fixed((*value).clamp(*min_q16, *max_q16))
+            }
+            _ => self.clone(),
         }
     }
 

@@ -156,10 +156,9 @@ pub fn solve_linear_preferred<'a>(
     let n_links = n - 1;
 
     // Endpoint shape check.
-    match constraints[0] {
-        CapsConstraint::Produces(_) => {}
-        _ => return Err(NegotiationFailure::EndpointShapeMismatch { index: 0 }),
-    }
+    let CapsConstraint::Produces(source_set) = constraints[0] else {
+        return Err(NegotiationFailure::EndpointShapeMismatch { index: 0 });
+    };
     match constraints[n - 1] {
         CapsConstraint::Accepts(_) | CapsConstraint::AcceptsAny => {}
         _ => return Err(NegotiationFailure::EndpointShapeMismatch { index: n - 1 }),
@@ -175,9 +174,7 @@ pub fn solve_linear_preferred<'a>(
     let mut links: Vec<Option<CapsSet>> = alloc::vec![None; n_links];
 
     // Pre-seed endpoints.
-    if let CapsConstraint::Produces(s) = constraints[0] {
-        links[0] = Some(s.clone());
-    }
+    links[0] = Some(source_set.clone());
     if let CapsConstraint::Accepts(s) = constraints[n - 1] {
         let li = n_links - 1;
         links[li] = match links[li].take() {
@@ -209,6 +206,7 @@ pub fn solve_linear_preferred<'a>(
 
     // Validate and fixate.
     let mut domains = Vec::with_capacity(n_links);
+    let mut target = producer_target(source_set);
     for (li, slot) in links.iter().enumerate() {
         let set = slot
             .as_ref()
@@ -216,19 +214,22 @@ pub fn solve_linear_preferred<'a>(
         if set.is_empty() {
             return Err(NegotiationFailure::empty_link(li, li + 1));
         }
-        let candidates = fixated_candidates(set);
+        let candidates = fixated_candidates(set, target.as_ref());
         if candidates.is_empty() {
             return Err(NegotiationFailure::Unfixable {
                 upstream: li,
                 downstream: li + 1,
             });
         }
+        if target.is_some() {
+            target = transform_target(constraints[li + 1], candidates[0].clone());
+        }
         domains.push(candidates);
     }
 
-    // Each link's first candidate is what `CapsSet::fixate` would have picked,
-    // so a chain where nobody declared costs keeps its per-link choice. With
-    // costs declared, the chain-wide minimum can prefer a later candidate.
+    // Each link's first candidate is its greedy pick, so a chain where nobody
+    // declared costs keeps its per-link choice. With costs declared, the
+    // chain-wide minimum can prefer a later candidate.
     let chain: Vec<ChainNode<'_, '_>> = constraints
         .iter()
         .enumerate()
@@ -1021,11 +1022,11 @@ pub fn solve_graph_preferred<E>(
         }
     }
 
-    // Build a per-edge candidate domain (each surviving alternative, fixated, in
-    // the set's own preference order so the first candidate is exactly what the
-    // old per-edge `fixate()` would have picked). Then assign one candidate per
-    // edge by backtracking search so the chosen combination is *globally*
-    // consistent. Arc consistency above narrows each edge against its neighbours
+    // Build a per-edge candidate domain (each surviving alternative, fixated with
+    // its ranges toward the edge's fixation target, in the set's own preference
+    // order so the first candidate is the per-edge greedy pick). Then assign one
+    // candidate per edge by backtracking search so the chosen combination is
+    // *globally* consistent. Arc consistency above narrows each edge against its neighbours
     // pairwise, but a diamond (a tee whose branches re-converge at a fan-in)
     // couples branch choices in a way pairwise narrowing cannot see, so per-edge
     // greedy fixation can pick a locally-valid yet jointly-impossible combination
@@ -1033,6 +1034,7 @@ pub fn solve_graph_preferred<E>(
     // alternative orders disagree). The search tries the greedy choice first, so a
     // chain or an independent fan-out fixates byte-for-byte as before and only a
     // genuinely coupled diamond ever explores alternatives.
+    let targets = fixation_targets(graph, constraints, &edges);
     let mut domains: Vec<Vec<Caps>> = Vec::with_capacity(ne);
     for (id, slot) in edges.iter().enumerate() {
         let (up, down) = edge_endpoints(graph, id);
@@ -1044,7 +1046,7 @@ pub fn solve_graph_preferred<E>(
                 return Err(f);
             }
         };
-        let doms = fixated_candidates(set);
+        let doms = fixated_candidates(set, targets[id].as_ref());
         if doms.is_empty() {
             crate::g2g_error!(
                 t,
@@ -1090,19 +1092,79 @@ pub fn solve_graph_preferred<E>(
 }
 
 /// Every alternative of `set` that collapses to a concrete `Caps`, deduped and
-/// in the set's own preference order, so the first entry is exactly what
-/// [`CapsSet::fixate`] would return and an empty result means the same as its
-/// `None`.
-fn fixated_candidates(set: &CapsSet) -> Vec<Caps> {
+/// in the set's own preference order, so an empty result means the same as
+/// [`CapsSet::fixate`]'s `None`. With no `preferred` caps the first entry is
+/// exactly what [`CapsSet::fixate`] would return.
+fn fixated_candidates(set: &CapsSet, preferred: Option<&Caps>) -> Vec<Caps> {
     let mut out: Vec<Caps> = Vec::new();
     for alt in set.alternatives() {
-        if let Ok(c) = alt.fixate() {
+        let toward_preferred = preferred.and_then(|p| alt.fixate_toward(p).ok());
+        // the minimum stays a candidate for when the preferred value breaks a node's relation
+        for c in toward_preferred.into_iter().chain(alt.fixate().ok()) {
             if !out.contains(&c) {
                 out.push(c);
             }
         }
     }
     out
+}
+
+// per edge, a producer's first alternative when fixed, else what the node passes on from a feeding edge that has one
+fn fixation_targets<E>(
+    graph: &ValidatedGraph<E>,
+    constraints: &[NodeConstraint<'_>],
+    edges: &[Option<CapsSet>],
+) -> Vec<Option<Caps>> {
+    let mut targets: Vec<Option<Caps>> = alloc::vec![None; edges.len()];
+    for &node in graph.topo() {
+        let first_fixation = |edge: usize| {
+            let target = targets[edge].as_ref()?;
+            fixated_candidates(edges[edge].as_ref()?, Some(target))
+                .into_iter()
+                .next()
+        };
+        let target = match (graph.kind(node), &constraints[node.0 as usize]) {
+            (_, NodeConstraint::Element(CapsConstraint::Produces(set))) => producer_target(set),
+            (NodeKind::Transform, NodeConstraint::Element(c)) => graph
+                .in_edges(node)
+                .first()
+                .and_then(|&e| first_fixation(e))
+                .and_then(|input| transform_target(c, input)),
+            (NodeKind::Tee(_), NodeConstraint::Element(_)) => graph
+                .in_edges(node)
+                .first()
+                .and_then(|&e| first_fixation(e)),
+            (
+                NodeKind::Muxer(_),
+                NodeConstraint::Muxer {
+                    follows: Some(pad), ..
+                },
+            ) => graph
+                .in_edges(node)
+                .iter()
+                .find(|&&e| graph.edge(e).dst.index as usize == *pad)
+                .and_then(|&e| first_fixation(e)),
+            _ => None,
+        };
+        for &edge in graph.out_edges(node) {
+            targets[edge] = target.clone();
+        }
+    }
+    targets
+}
+
+fn producer_target(set: &CapsSet) -> Option<Caps> {
+    set.alternatives().first().filter(|c| c.is_fixed()).cloned()
+}
+
+// what a transform outputs for a fixed `input`, `None` where its output is not a function of it
+fn transform_target(c: &CapsConstraint<'_>, input: Caps) -> Option<Caps> {
+    match c {
+        CapsConstraint::Identity(_) | CapsConstraint::IdentityAny => Some(input),
+        CapsConstraint::DerivedOutput(f) => f(&input).fixate(),
+        CapsConstraint::DerivedFields(t) => t.derive(&input).fixate(),
+        _ => None,
+    }
 }
 
 /// `preferences[i]`, tolerating a slice shorter than the chain.
@@ -4710,6 +4772,93 @@ mod tests {
         assert_eq!(
             solve(max + 1),
             Err(NegotiationFailure::TooManyBatchAlternatives { index: 1 })
+        );
+    }
+
+    #[test]
+    fn a_range_fixates_toward_the_source_first_alternative() {
+        const SOURCE_WIDTH: u32 = 320;
+        const FILTER_MIN: u32 = 100;
+        const FILTER_MAX: u32 = 200;
+        const PADDING: u32 = 16;
+        let with_width = |width: Dim| {
+            video(
+                RawVideoFormat::Rgba8,
+                width,
+                Dim::Fixed(240),
+                Rate::Fixed(30 << 16),
+            )
+        };
+        let source_range = with_width(Dim::Range {
+            min: 1,
+            max: u32::MAX - PADDING,
+        });
+        let constraints = |source: Vec<Caps>| {
+            vec![
+                CapsConstraint::Produces(CapsSet::from_alternatives(source)),
+                CapsConstraint::Identity(CapsSet::one(with_width(Dim::Range {
+                    min: FILTER_MIN,
+                    max: FILTER_MAX,
+                }))),
+                CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+                    let Some((width, _, _)) = input.dims() else {
+                        return CapsSet::from_alternatives(Vec::new());
+                    };
+                    let padded = match width {
+                        Dim::Fixed(w) => Dim::Fixed(w + PADDING),
+                        Dim::Range { min, max } => Dim::Range {
+                            min: min + PADDING,
+                            max: max + PADDING,
+                        },
+                        Dim::Any => Dim::Any,
+                    };
+                    CapsSet::one(with_width(padded))
+                })),
+                CapsConstraint::AcceptsAny,
+            ]
+        };
+        let mut g: Graph<()> = Graph::new();
+        let nodes = [
+            g.add_source(()),
+            g.add_transform(()),
+            g.add_transform(()),
+            g.add_sink(()),
+        ];
+        for pair in nodes.windows(2) {
+            g.link(pair[0], pair[1]).unwrap();
+        }
+        let v = g.finish().unwrap();
+        let solve_both = |source: Vec<Caps>| {
+            let linear = constraints(source.clone());
+            let linear = solve_linear(&linear.iter().collect::<Vec<_>>()).expect("chain solves");
+            let graph: Vec<NodeConstraint> = constraints(source)
+                .into_iter()
+                .map(NodeConstraint::Element)
+                .collect();
+            assert_eq!(solve_graph(&v, &graph), Ok(linear.clone()));
+            linear
+        };
+        let expected = |width: u32| {
+            vec![
+                with_width(Dim::Fixed(width)),
+                with_width(Dim::Fixed(width)),
+                with_width(Dim::Fixed(width + PADDING)),
+            ]
+        };
+
+        let preferred = solve_both(vec![
+            with_width(Dim::Fixed(SOURCE_WIDTH)),
+            source_range.clone(),
+        ]);
+        assert_eq!(
+            preferred,
+            expected(SOURCE_WIDTH.clamp(FILTER_MIN, FILTER_MAX))
+        );
+        let unpreferred = solve_both(vec![source_range]);
+        assert_eq!(
+            unpreferred,
+            expected(FILTER_MIN),
+            "no fixed first alternative keeps the minimum"
         );
     }
 }
