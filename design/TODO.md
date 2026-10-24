@@ -124,6 +124,9 @@ Highest leverage first:
   built to print its `StdVideo*` structs, since Mesa 25.3.6's `RADV_DEBUG=dumpibs`
   prints nothing for video. NVIDIA Turing cannot decode it at all (minimum H.265
   coded extent 144x144).
+- **`rtspsrc` SSRC change.** Follow a sender that changes SSRC mid-session, as
+  GStreamer does. retina fails every packet after the change with "wrong ssrc",
+  so today only `reconnect` recovers the stream.
 ## CUDA / display
 
 - Run `CudaKmsSink` from a bare VT with DRM master and verify the in-tree
