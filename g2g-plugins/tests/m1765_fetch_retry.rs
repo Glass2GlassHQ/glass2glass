@@ -322,3 +322,162 @@ async fn a_live_dash_segment_answering_too_early_is_waited_for() {
     expected.extend((0..=NEWEST_INDEX).flat_map(segment_body));
     assert_eq!(delivered_bytes(&sink), expected);
 }
+
+// the segment an origin lists and never serves
+const DROPPED_INDEX: usize = 1;
+const HLS_LIVE_TWO_SEGMENTS: &str = "#EXTM3U\n\
+    #EXT-X-TARGETDURATION:1\n\
+    #EXT-X-MEDIA-SEQUENCE:0\n\
+    #EXTINF:1.0,\n\
+    seg0.ts\n\
+    #EXTINF:1.0,\n\
+    seg1.ts\n";
+
+#[tokio::test]
+async fn a_live_hls_segment_failing_past_the_retry_budget_is_skipped() {
+    let counts = RequestCounts::default();
+    let seen = Arc::clone(&counts);
+    let origin = serve_answers(move |path| {
+        let attempt = count_request(&seen, path);
+        if path == HLS_PLAYLIST_PATH {
+            let playlist = if attempt == 0 {
+                HLS_LIVE_TWO_SEGMENTS
+            } else {
+                HLS_VOD_PLAYLIST
+            };
+            return Answer::Body(playlist.as_bytes().to_vec());
+        }
+        match segment_index(path, "ts") {
+            Some(DROPPED_INDEX) | None => Answer::Status(NOT_FOUND),
+            Some(index) => Answer::Body(segment_body(index)),
+        }
+    });
+    let mut src = HlsSrc::new(format!("{origin}{HLS_PLAYLIST_PATH}"))
+        .with_reload_interval_ms(RELOAD_INTERVAL_MS);
+    src.configure_pipeline(&mpeg_ts()).unwrap();
+    let mut sink = CollectSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    let mut expected = segment_body(0);
+    expected.extend(segment_body(DROPPED_INDEX + 1));
+    assert_eq!(delivered_bytes(&sink), expected);
+    assert_eq!(
+        requests_for(&counts, &segment_path(DROPPED_INDEX, "ts")),
+        ATTEMPTS_BEFORE_FAILING,
+        "retried to the budget, then not fetched again after the reload"
+    );
+}
+
+#[tokio::test]
+async fn a_vod_hls_segment_failing_past_the_retry_budget_ends_the_run_with_its_status() {
+    let (url, counts) = serve_segments(HLS_PLAYLIST_PATH, HLS_VOD_PLAYLIST, "ts", |index, _| {
+        if index == DROPPED_INDEX {
+            Answer::Status(NOT_FOUND)
+        } else {
+            Answer::Body(segment_body(index))
+        }
+    });
+    let mut src = HlsSrc::new(url);
+    src.configure_pipeline(&mpeg_ts()).unwrap();
+    let error = src
+        .run(&mut CollectSink::default())
+        .await
+        .expect_err("a VOD playlist has no reload to recover through");
+
+    assert_eq!(error, G2gError::Hardware(HardwareError::Http(NOT_FOUND)));
+    assert_eq!(
+        requests_for(&counts, &segment_path(DROPPED_INDEX + 1, "ts")),
+        0
+    );
+}
+
+const UNAUTHORIZED: u16 = 401;
+const MASTER_PATH: &str = "/master.m3u8";
+const LOST_SESSION: usize = 1;
+const NEW_SESSION: usize = 2;
+// the lost session lists segments 0 and the dropped one, the new one starts after them
+const NEW_SESSION_FIRST_INDEX: usize = DROPPED_INDEX + 1;
+
+fn session_media_path(session: usize) -> String {
+    format!("/media.m3u8?session={session}")
+}
+
+fn session_segment_path(index: usize, session: usize) -> String {
+    format!("/seg{index}.ts?session={session}")
+}
+
+fn session_playlist(session: usize, indices: std::ops::Range<usize>) -> String {
+    let mut playlist = format!(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{}\n",
+        indices.start
+    );
+    for index in indices {
+        playlist.push_str(&format!(
+            "#EXTINF:1.0,\n{}\n",
+            session_segment_path(index, session).trim_start_matches('/')
+        ));
+    }
+    playlist
+}
+
+// mediamtx's shape: a lost session answers 401 to its segments and to its media playlist
+#[tokio::test]
+async fn a_live_hls_segment_of_a_lost_session_resolves_the_master_again() {
+    let counts = RequestCounts::default();
+    let seen = Arc::clone(&counts);
+    let origin = serve_answers(move |path| {
+        let attempt = count_request(&seen, path);
+        if path == MASTER_PATH {
+            let session = if attempt == 0 {
+                LOST_SESSION
+            } else {
+                NEW_SESSION
+            };
+            let master = format!(
+                "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n{}\n",
+                session_media_path(session).trim_start_matches('/')
+            );
+            return Answer::Body(master.into_bytes());
+        }
+        if path == session_media_path(LOST_SESSION) && attempt == 0 {
+            return Answer::Body(
+                session_playlist(LOST_SESSION, 0..NEW_SESSION_FIRST_INDEX).into_bytes(),
+            );
+        }
+        if path == session_media_path(NEW_SESSION) {
+            let mut playlist = session_playlist(
+                NEW_SESSION,
+                NEW_SESSION_FIRST_INDEX..NEW_SESSION_FIRST_INDEX + 1,
+            );
+            playlist.push_str("#EXT-X-ENDLIST\n");
+            return Answer::Body(playlist.into_bytes());
+        }
+        if path == session_segment_path(0, LOST_SESSION) {
+            return Answer::Body(segment_body(0));
+        }
+        if path == session_segment_path(NEW_SESSION_FIRST_INDEX, NEW_SESSION) {
+            return Answer::Body(segment_body(NEW_SESSION_FIRST_INDEX));
+        }
+        Answer::Status(UNAUTHORIZED)
+    });
+    let mut src =
+        HlsSrc::new(format!("{origin}{MASTER_PATH}")).with_reload_interval_ms(RELOAD_INTERVAL_MS);
+    src.configure_pipeline(&mpeg_ts()).unwrap();
+    let mut sink = CollectSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    let mut expected = segment_body(0);
+    expected.extend(segment_body(NEW_SESSION_FIRST_INDEX));
+    assert_eq!(delivered_bytes(&sink), expected);
+    let flushes = sink
+        .packets
+        .iter()
+        .filter(|packet| matches!(packet, PipelinePacket::Flush))
+        .count();
+    assert_eq!(flushes, 1, "the new session's stream starts after a Flush");
+    assert_eq!(
+        requests_for(&counts, &session_segment_path(DROPPED_INDEX, LOST_SESSION)),
+        1,
+        "a 401 is not retried"
+    );
+}

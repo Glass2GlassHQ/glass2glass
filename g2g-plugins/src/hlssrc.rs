@@ -72,7 +72,9 @@ use crate::fetch::{
     get_text_retrying, resolve_url, FetchRetry, MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
 };
 use crate::fmp4::{TrackHeader, TrackKind};
-use crate::hls::{parse, KeyMethod, MasterPlaylist, MediaPlaylist, MediaType, Playlist, Variant};
+use crate::hls::{
+    parse, ByteRange, KeyMethod, MasterPlaylist, MediaPlaylist, MediaType, Playlist, Variant,
+};
 use crate::sampleaesdecrypt::{SampleAesKey, SampleAesKeyHandle};
 
 /// One decodable stream a master playlist's variant exposes, the unit the
@@ -443,6 +445,29 @@ impl HlsSrc {
         self.probed = Some((media, media_url));
         Ok(enc)
     }
+
+    // `None` when a live playlist's segment or part answers 4xx, as a dropped segment or a lost session does
+    async fn media_bytes_skipping_live_client_error(
+        &self,
+        client: &reqwest::Client,
+        media: &MediaPlaylist,
+        url: &str,
+        byte_range: Option<ByteRange>,
+    ) -> Result<Option<Vec<u8>>, G2gError> {
+        match media_bytes(client, url, byte_range).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(G2gError::Hardware(HardwareError::Http(status)))
+                if !media.end_list && is_client_error(status) =>
+            {
+                g2g_warn!(
+                    self,
+                    "{url} answered {status}, skipping it and reloading the playlist"
+                );
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// Resolve the playlist `text` fetched from `url` down to a media playlist, returning
@@ -550,21 +575,32 @@ pub(crate) async fn init_segment_bytes(
         return Ok(None);
     };
     let url = resolve_url(media_url, map);
-    let bytes = match media.map_byte_range {
+    Ok(Some(media_bytes(client, &url, media.map_byte_range).await?))
+}
+
+async fn media_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    byte_range: Option<ByteRange>,
+) -> Result<Vec<u8>, G2gError> {
+    match byte_range {
         Some(range) => {
             get_range_bytes_retrying(
                 client,
-                &url,
+                url,
                 range.offset,
                 range.length,
                 MAX_SEGMENT_BYTES,
                 FetchRetry::BUDGETED,
             )
-            .await?
+            .await
         }
-        None => get_bytes_retrying(client, &url, MAX_SEGMENT_BYTES, FetchRetry::BUDGETED).await?,
-    };
-    Ok(Some(bytes))
+        None => get_bytes_retrying(client, url, MAX_SEGMENT_BYTES, FetchRetry::BUDGETED).await,
+    }
+}
+
+fn is_client_error(status: u16) -> bool {
+    reqwest::StatusCode::from_u16(status).is_ok_and(|code| code.is_client_error())
 }
 
 // SAMPLE-AES leaves the container clear, so only AES-128 is undone here
@@ -580,20 +616,7 @@ pub(crate) async fn first_segment_clear_bytes(
         .find(|(_, segment)| !segment.gap && !segment.incomplete())
         .ok_or(G2gError::CapsMismatch)?;
     let url = resolve_url(media_url, &segment.uri);
-    let bytes = match segment.byte_range {
-        Some(range) => {
-            get_range_bytes_retrying(
-                client,
-                &url,
-                range.offset,
-                range.length,
-                MAX_SEGMENT_BYTES,
-                FetchRetry::BUDGETED,
-            )
-            .await?
-        }
-        None => get_bytes_retrying(client, &url, MAX_SEGMENT_BYTES, FetchRetry::BUDGETED).await?,
-    };
+    let bytes = media_bytes(client, &url, segment.byte_range).await?;
     let Some(key) = segment
         .key
         .as_ref()
@@ -1018,33 +1041,27 @@ impl SourceLoop for HlsSrc {
                             // already delivered
                         } else if use_parts {
                             let first = if seg_seq == next_seq { next_part } else { 0 };
+                            // the index past the last part this pass took or skipped
+                            let mut parts_end = segment.parts.len();
+                            let mut skipped = false;
                             for (part_index, part) in segment.parts.iter().enumerate().skip(first) {
                                 if part.gap {
                                     continue;
                                 }
                                 let part_url = resolve_url(&media_url, &part.uri);
                                 let t0 = g2g_core::metrics::monotonic_ns();
-                                let bytes = match part.byte_range {
-                                    Some(r) => {
-                                        get_range_bytes_retrying(
-                                            &client,
-                                            &part_url,
-                                            r.offset,
-                                            r.length,
-                                            MAX_SEGMENT_BYTES,
-                                            FetchRetry::BUDGETED,
-                                        )
-                                        .await?
-                                    }
-                                    None => {
-                                        get_bytes_retrying(
-                                            &client,
-                                            &part_url,
-                                            MAX_SEGMENT_BYTES,
-                                            FetchRetry::BUDGETED,
-                                        )
-                                        .await?
-                                    }
+                                let Some(bytes) = self
+                                    .media_bytes_skipping_live_client_error(
+                                        &client,
+                                        &media,
+                                        &part_url,
+                                        part.byte_range,
+                                    )
+                                    .await?
+                                else {
+                                    parts_end = part_index + 1;
+                                    skipped = true;
+                                    break;
                                 };
                                 g2g_debug!(
                                     self,
@@ -1063,12 +1080,17 @@ impl SourceLoop for HlsSrc {
                                     );
                                 }
                             }
-                            if segment.incomplete() {
-                                next_seq = seg_seq;
-                                next_part = segment.parts.len();
-                            } else {
+                            if parts_end == segment.parts.len() && !segment.incomplete() {
                                 next_seq = seg_seq + 1;
                                 next_part = 0;
+                            } else {
+                                next_seq = seg_seq;
+                                next_part = parts_end;
+                            }
+                            if skipped {
+                                // fetch nothing more from this playlist, the reload is next
+                                idx = media.segments.len();
+                                continue;
                             }
                         } else if segment.incomplete() {
                             // Being produced and not part-fetchable here: wait for
@@ -1082,27 +1104,20 @@ impl SourceLoop for HlsSrc {
                         } else {
                             let seg_url = resolve_url(&media_url, &segment.uri);
                             let t0 = g2g_core::metrics::monotonic_ns();
-                            let bytes = match segment.byte_range {
-                                Some(r) => {
-                                    get_range_bytes_retrying(
-                                        &client,
-                                        &seg_url,
-                                        r.offset,
-                                        r.length,
-                                        MAX_SEGMENT_BYTES,
-                                        FetchRetry::BUDGETED,
-                                    )
-                                    .await?
-                                }
-                                None => {
-                                    get_bytes_retrying(
-                                        &client,
-                                        &seg_url,
-                                        MAX_SEGMENT_BYTES,
-                                        FetchRetry::BUDGETED,
-                                    )
-                                    .await?
-                                }
+                            let Some(bytes) = self
+                                .media_bytes_skipping_live_client_error(
+                                    &client,
+                                    &media,
+                                    &seg_url,
+                                    segment.byte_range,
+                                )
+                                .await?
+                            else {
+                                next_seq = seg_seq + 1;
+                                next_part = 0;
+                                // fetch nothing more from this playlist, the reload is next
+                                idx = media.segments.len();
+                                continue;
                             };
                             // Measure the downloaded (pre-decrypt) size against wall time.
                             measured = Some((
@@ -1303,9 +1318,7 @@ impl SourceLoop for HlsSrc {
                             Ok(text) => text,
                             // a restarted server forgets the session its master put in the media playlist URL
                             Err(G2gError::Hardware(HardwareError::Http(status)))
-                                if reqwest::StatusCode::from_u16(status)
-                                    .is_ok_and(|code| code.is_client_error())
-                                    && media_url != self.url =>
+                                if is_client_error(status) && media_url != self.url =>
                             {
                                 g2g_warn!(
                                     self,

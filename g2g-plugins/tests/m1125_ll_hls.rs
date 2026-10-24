@@ -120,16 +120,18 @@ fn requested_part(query: &str, gap_segments: usize) -> Option<usize> {
 /// `CAN-BLOCK-RELOAD` but answers every request at once, the misbehaviour the
 /// client has to notice. Returns the playlist URL and the counters.
 fn serve_low_latency(honour_directives: bool) -> (String, ServerCounts) {
-    serve(honour_directives, 0, INITIAL_PARTS)
+    serve(honour_directives, 0, INITIAL_PARTS, None)
 }
 
 /// [`serve_low_latency`] with leading gap padding and a chosen number of parts
 /// already published at start (small enough and the client joins inside the
 /// first real segment, right after the padding, the fresh-packager shape).
+/// A `dropped_part` is listed but answers every request with 404.
 fn serve(
     honour_directives: bool,
     gap_segments: usize,
     initial_parts: usize,
+    dropped_part: Option<usize>,
 ) -> (String, ServerCounts) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -195,6 +197,7 @@ fn serve(
                     .strip_prefix("/part")
                     .and_then(|p| p.strip_suffix(".mp4"))
                     .and_then(|n| n.parse::<usize>().ok())
+                    .filter(|index| Some(*index) != dropped_part)
                 {
                     part_fetches.fetch_add(1, Ordering::SeqCst);
                     part_body(index)
@@ -370,7 +373,7 @@ async fn a_server_ignoring_the_directives_falls_back_to_timed_reloads() {
 /// replaying the live segment from part 0).
 #[tokio::test]
 async fn gap_padding_does_not_replay_the_live_segment() {
-    let (url, counts) = serve(true, 3, 2);
+    let (url, counts) = serve(true, 3, 2, None);
     let sink = play(HlsSrc::new(url).with_prebuffer_ms(0)).await;
 
     assert!(sink.eos);
@@ -382,6 +385,30 @@ async fn gap_padding_does_not_replay_the_live_segment() {
     assert!(
         part_fetches <= TOTAL_PARTS,
         "every part at most once, got {part_fetches} fetches for {TOTAL_PARTS} parts"
+    );
+}
+
+// published after the run joins, inside a segment, long before the playlist ends
+const DROPPED_PART: usize = INITIAL_PARTS + 1;
+
+#[tokio::test]
+async fn a_live_part_answering_404_is_skipped_and_the_rest_follow() {
+    let (url, _counts) = serve(true, 0, INITIAL_PARTS, Some(DROPPED_PART));
+    let sink = play(HlsSrc::new(url).with_prebuffer_ms(0)).await;
+
+    assert!(sink.eos);
+    let media = sink.media();
+    let after: Vec<u8> = (DROPPED_PART + 1..TOTAL_PARTS)
+        .flat_map(part_body)
+        .collect();
+    assert!(
+        media.ends_with(&after),
+        "every part after the dropped one is delivered in order"
+    );
+    let before = &media[..media.len() - after.len()];
+    assert!(
+        before.ends_with(&part_body(DROPPED_PART - 1)),
+        "the part before the dropped one directly precedes the parts after it"
     );
 }
 
