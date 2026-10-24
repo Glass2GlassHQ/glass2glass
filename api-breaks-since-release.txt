@@ -6,27 +6,4 @@
 # CI job verifies nothing until the next publish. This list is what still holds
 # a break to a deliberate act during that window, and it is the raw material for
 # the release notes when the bump ships.
-constructible_struct_adds_field: field CapabilityDescriptor.cost
-constructible_struct_adds_field: field ElementDesc.accepts_input
-constructible_struct_adds_field: field PrimaryStream.has_clean_aperture
-constructible_struct_adds_field: field QosMessage.taken_ns
-enum_discriminants_undefined_non_unit_variant: enum AudioFormat
-enum_struct_variant_field_added: field alignment of variant Caps::CompressedVideo
-enum_unit_variant_changed_kind: variant Reconfigure::AbsorbOrientation
-enum_variant_added: variant NodeConstraint:BatchDemux
-enum_variant_added: variant NodeConstraint:BatchMuxer
-enum_variant_missing: variant CapsConstraint::LegacySink
-enum_variant_missing: variant CapsConstraint::LegacySource
-enum_variant_missing: variant CapsConstraint::LegacyTransform
-enum_variant_missing: variant NegotiationFailure::MixedLegacyAndNative
-function_missing: function g2g_core::format_element::legacy_sink_constraint
-function_missing: function g2g_core::format_element::legacy_transform_constraint
-function_missing: function g2g_core::legacy_sink_constraint
-function_missing: function g2g_core::legacy_transform_constraint
-function_parameter_count_changed: g2g_core::runtime::find_chain_with now takes 6 parameters instead of 5
-inherent_method_missing: Registry::primary_stream
-method_parameter_count_changed: g2g_core::QosTracker::judge_frame takes 3 parameters
-method_parameter_count_changed: g2g_core::qos::QosTracker::judge_frame takes 3 parameters
-method_parameter_count_changed: g2g_core::runtime::Registry::build_source_decodebin takes 5 parameters
-trait_method_missing: method absorbs_orientation of trait AsyncElement
-trait_method_missing: method absorbs_orientation of trait DynAsyncElement
+
