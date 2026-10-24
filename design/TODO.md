@@ -126,7 +126,9 @@ Highest leverage first:
   coded extent 144x144).
 - **`rtspsrc` SSRC change.** Follow a sender that changes SSRC mid-session, as
   GStreamer does. retina fails every packet after the change with "wrong ssrc",
-  so today only `reconnect` recovers the stream.
+  so today only `reconnect` recovers the stream. Once a retina release carries
+  `PlayOptions::unknown_rtp_ssrc` (scottlamb/retina PR 153), set
+  `UnknownRtpSsrcPolicy::FollowNewSsrc` and add a relay test that switches SSRC.
 ## CUDA / display
 
 - Run `CudaKmsSink` from a bare VT with DRM master and verify the in-tree
@@ -158,7 +160,6 @@ Highest leverage first:
 
 ## Adaptive streaming (HLS / DASH)
 
-- **HLS init segment byte range.** `HlsPlaylists::init_segment` ignores `#EXT-X-MAP:BYTERANGE`, so a single-file CMAF variant probes the whole file, up to `MAX_SEGMENT_BYTES`. Fetch only the named range.
 - **HLS / CENC:** the multi-key shapes (`senc` v1/v2, multi-key `seig`
   entries) stay declined fail-loud: the 23001-7:2023 syntax is paywalled and
   the two available sources (the MPEG proposal and GPAC) contradict each
@@ -245,8 +246,6 @@ Highest leverage first:
   - The fan-in muxers refuse codecs the gst muxer of the same name takes:
     `matroskamux` PCM, Vorbis, Theora and VP6, `mp4mux` ADTS AAC and VP8,
     `flvmux` and `mpegtsmux` VP8 (calliope TESTING technique 23 lists the rest).
-  - `flvmux` writes an AAC sequence header no decoder accepts
-    (`fate-suite/aac/al04_44.mp4`).
   - Remux changes samples or frame counts: bipbop TS AAC into mp4mux,
     `twofields_packet.mp4` into mkv and ts, `test7_cut.mkv` into mp4, and
     `webm/opus_vp9-alpha.webm` Opus comes back 8 stereo samples longer through
@@ -258,8 +257,10 @@ Highest leverage first:
     (MPEG-2) default to one codec and refuse a file without it, where gst exposes
     the file's first stream. `oggdemux` behind a consumer that takes any caps
     fixates Opus, so a video-only Ogg there fails.
-  - `aacparse` forwards nothing, with no error, while it cannot refine a LOAS
-    stream's caps: fail loud at EOS instead.
+  - The FLV `rtmpsrc` writes (`flv_prev_tag_size` in `rtmp.rs`) ends without the
+    last tag's size, so gst's `flvdemux` drops the last frame.
+  - `flvmux` writes no `onMetaData` duration, where gst's does (ffprobe reports
+    the duration as N/A).
   - `mpegts/pmtchange.ts` audio 0 to 2 decode to other lengths and samples than
     ffmpeg's.
   - `flvdemux` and `avidemux` H.264/H.265 output declares no `alignment`, where gst's

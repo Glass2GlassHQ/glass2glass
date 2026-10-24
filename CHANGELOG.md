@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1882: the HLS probe and `hlssrc` fetch only the `#EXT-X-MAP` byte range of a single-file CMAF variant.
+- M1881: `flvmux` ends the file with the last tag's size, so gst's `flvdemux` keeps the last frame.
+- M1880: `aacparse` drops LOAS frames until one carries a config and fails at end of stream when none did, as gst's does.
 - M1879: `rtspsrc` with `reconnect` set reconnects when a live server closes the connection, where it ended the stream.
 - M1878: the fMP4 readers read every track of a `moof` that holds several, as ffmpeg and mediamtx write, where they read only the first.
 - M1875: `Mp4Demux` is a one-port `Mp4DemuxN`, which now takes `stream`, `track-id` and a seek, and announces a video track's frame rate.

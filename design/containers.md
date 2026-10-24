@@ -101,7 +101,9 @@ candidate frame by the sync header at its end, or by an ID3v2 tag there, since H
 segments of a bare ADTS or MP3 stream each open on one. A buffered tag found while
 scanning is skipped. `aacparse` holds input until the held bytes show LOAS, ADTS or a
 raw AudioSpecificConfig, up to 64 KiB or EOS, before it falls back to forwarding
-them as LATM.
+them as LATM. On LATM it drops frames until one carries a StreamMuxConfig it can
+read, so no frame goes out before its caps, and fails with `CapsMismatch` at EOS
+when none did, as gst's `aacparse` fails with "No valid frames found".
 
 ## Uncompressed video in containers
 
@@ -1073,7 +1075,9 @@ from the IDR and the first ADTS header, and writes it as the track's
 sequence-header tag, re-framing video Annex-B to AVCC with keyframes flagged from
 the IDR NAL and audio de-ADTS'd. The header flags name only the tracks the pads
 carry, so a single-track `flvmux` output is a playable FLV, which is what
-`RtmpSink` publishes.
+`RtmpSink` publishes. `PreviousTagSize0` follows the header and each tag is
+followed by its own size, so the file ends with the last tag's size: gst's
+`flvdemux` drops a last tag with no size after it.
 
 With MP4 through `Mp4Src` and `Mp4Sink`, MPEG-TS, Matroska/WebM, Ogg and FLV,
 the demux and mux coverage spans the major containers.
@@ -1351,7 +1355,9 @@ Single-file CMAF is supported through `#EXT-X-BYTERANGE` and `#EXT-X-MAP`'s
 `Range` request, the offset continuing from the previous sub-range of the same
 resource when the tag omits an explicit `@offset`. A server that ignores the
 `Range` and replies `200` is handled by slicing the requested window from the
-full body.
+full body. `hlssrc::init_segment_bytes` fetches the init segment for both `HlsSrc`
+and the `uridecodebin` fan-out probe, so the probe requests only the map's range
+too.
 
 ### Low-latency HLS
 
