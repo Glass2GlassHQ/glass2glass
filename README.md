@@ -174,7 +174,9 @@ parse error: unknown element: theoraenc
   `metasink` posts, snapshot a frame as PNG, cut a clip out of a file, and load
   the README's sample pipelines as prompts. Captioning a frame with a VLM and
   searching an embedding index by text stay in gst-python-ml's `pyml-mcp`, which
-  reads the same files. `claude mcp add g2g -- target/release/g2g-mcp`.
+  reads the same files. Install it with
+  `cargo install g2g-plugins --features mcp --bin g2g-mcp`, then register it
+  with `claude mcp add g2g -- g2g-mcp`.
 - **`g2g-launch-py`** (crate `g2g-python`) is `g2g-launch` plus the hosted
   gst-python-ml elements. `--inspect`, `--docgen` and `--mcp` run the three
   tools above with `pyelement` / `pysrc` / `pyaggregator` included, and
