@@ -5,12 +5,20 @@
 //! the `AsyncElement` execution trait, the pipeline clock, the link backpressure
 //! policy, and the error enum. It contains no I/O and no executor.
 //!
-//! The default build enables `alloc`. Building `--no-default-features` yields the
-//! heap-free MCU / safety subset: it links no allocator and carries only the
-//! data-plane types (`Frame`, `Caps`, `System`/`Foreign` memory, the const-generic
-//! `StaticLendRing`, the clock / time newtypes). The dynamic graph, caps solver,
-//! `parse_launch`, the `dyn` element traits, and the tooling (conformance, dot,
-//! copy plan, wire codec) all live behind the `alloc` feature.
+//! The default build has no features enabled. It is the heap-free MCU / safety
+//! subset: it links no allocator and carries only the data-plane types (`Frame`,
+//! `Caps`, `System`/`Foreign` memory, the const-generic `StaticLendRing`, the time
+//! newtypes) and the static element model. The features add the rest:
+//!
+//! - `alloc`: the heap. Adds `AsyncElement`, `CapsSet` / `CapsConstraint`, the
+//!   dynamic `Graph`, properties, logging, the clock traits, and the tooling
+//!   (conformance, dot, copy plan, wire codec).
+//! - `runtime` (implies `alloc`): the bounded channels, the caps solver, the
+//!   linear runners, `PadTemplates` and the message bus.
+//! - `std` (implies `alloc`): `DynAsyncElement`, the boxed element trait. With
+//!   `runtime` it also adds the `Registry`, `parse_launch` and `run_graph`.
+//!
+//! A crate that writes elements for `parse_launch` enables `std` and `runtime`.
 //!
 //! See `design/README.md` for the full specification.
 

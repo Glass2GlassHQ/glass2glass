@@ -6,7 +6,20 @@ benchmarks with a CI regression guard, and an end-of-run telemetry report. This
 page is the reference; the architecture notes live in
 [design/tooling.md](design/tooling.md).
 
-## `cargo xtask`
+`g2g-launch` and `g2g-inspect` install from crates.io. The launcher options
+below that need a build feature say which, and that feature goes on the install
+line:
+
+```sh
+cargo install g2g-plugins --features std,tooling-json,observe,tui --bin g2g-launch --bin g2g-inspect
+```
+
+A later `cargo install` replaces the binaries with the new feature set, so list
+every feature you want in one install (add `wayland-sink` for a window, see the
+README's system dependencies). Commands marked *(clone)* need a checkout of this
+repository.
+
+## `cargo xtask` *(clone)*
 
 `xtask` is a dependency-free command crate (a `.cargo/config.toml` alias onto the
 `xtask/` workspace member). It only orchestrates `cargo` and toolchain tools.
@@ -92,7 +105,8 @@ g2g-launch -v videotestsrc ! videoconvert ! video/x-raw,format=NV12 ! fakesink
 For a machine-readable form of the same thing, `g2g-launch --validate-json` prints
 every node and each edge's negotiated caps as JSON (or, when the pipeline cannot
 negotiate, the structured failure naming the offending link), and exits without
-running. Needs the `tooling-json` build feature:
+running. Needs the `tooling-json` build feature
+(`cargo install g2g-plugins --features tooling-json --bin g2g-launch`):
 
 ```sh
 g2g-launch --validate-json videotestsrc ! videoconvert ! fakesink
@@ -154,6 +168,8 @@ every `--all-targets` CI job). They guard the latency moat's hot paths:
 | `convert` | The per-pixel software frame conversion (RGBA ↔ NV12 / I420) at 1080p. |
 | `runner` | The bounded per-edge channel, the runner loop's inner transport. |
 
+*(clone)*
+
 ```sh
 cargo xtask bench                              # all of them
 cargo xtask bench -- --bench caps              # one
@@ -174,6 +190,8 @@ than drift. The comparison is `bench_compare.py`.
 assert convention used by `cuda.rs` / `nvenc.rs`): it generates a C program that
 includes a header and prints `sizeof` of a struct plus `offsetof` of each field,
 compiles and runs it, then emits the assert to paste beside the transcription.
+
+*(clone)*
 
 ```sh
 cargo xtask ffi-probe --header ffnvcodec/nvEncodeAPI.h \
@@ -211,9 +229,13 @@ the measured throughput.
 that port. Build with the `observe` feature:
 
 ```sh
+cargo install g2g-plugins --features observe --bin g2g-launch
+g2g-launch --observe 8787 videotestsrc ! videoscale ! fakesink
+# open http://127.0.0.1:8787 (wait for the "dashboard: ..." line first)
+
+# or, in a clone:
 cargo run -p g2g-plugins --features observe --bin g2g-launch -- \
   --observe 8787 videotestsrc ! videoscale ! fakesink
-# open http://127.0.0.1:8787 (wait for the "dashboard: ..." line first)
 ```
 
 By default the dashboard binds loopback (`127.0.0.1`), so open it on the same
@@ -266,6 +288,10 @@ follow-ups (see `design/TODO.md`).
 browser and no port. Build with the `tui` feature:
 
 ```sh
+cargo install g2g-plugins --features tui --bin g2g-launch
+g2g-launch --tui videotestsrc ! videoscale ! fakesink
+
+# or, in a clone:
 cargo run -p g2g-plugins --features tui --bin g2g-launch -- \
   --tui videotestsrc ! videoscale ! fakesink
 ```
@@ -285,7 +311,7 @@ while the UI holds the terminal, g2g logging is diverted from stderr into a ring
 buffer and shown as a log pane (`G2G_DEBUG` still selects what is recorded); the
 stderr sink comes back on exit.
 
-## Visual pipeline builder
+## Visual pipeline builder *(clone)*
 
 `tools/builder/` is a React Flow app (Vite + pnpm) that lets you assemble a
 pipeline visually: filter the palette, click to add nodes, drag a link from
@@ -394,8 +420,12 @@ agent-driven dev. Build with `mcp` and point an MCP client at the
 binary:
 
 ```sh
+cargo install g2g-plugins --features mcp --bin g2g-mcp
+# register g2g-mcp as an MCP stdio server in your client
+
+# or, in a clone:
 cargo build -p g2g-plugins --features mcp --bin g2g-mcp
-# register target/debug/g2g-mcp as an MCP stdio server in your client
+# register target/debug/g2g-mcp
 ```
 
 Tools: `list_elements`, `inspect {element}`, `validate {pipeline}` (parse +
@@ -426,6 +456,7 @@ self-contained `docs/elements.html` (one card each: role, klass, caps / pads,
 properties; a client-side search box, shareable via `?q=<term>`):
 
 ```
+# (clone)
 cargo run -p g2g-plugins --features linux-full --bin g2g-docgen
 # writes docs/elements.html (pass a path to write elsewhere)
 ```
@@ -439,7 +470,7 @@ like `g2g-inspect`. The page is linked from the project landing page.
 elements `pyelement`, `pysrc` and `pyaggregator`: `--inspect [g2g-inspect
 arguments]`, `--docgen [out.html]` and `--mcp`. Listing the hosted elements
 does not start the interpreter, but the binary links libpython. The checked-in
-page comes from this path, and CI regenerates it the same way:
+page comes from this path, and CI regenerates it the same way *(clone)*:
 
 ```
 cargo run -p g2g-python --features launch,g2g-plugins/linux-full --bin g2g-launch-py -- --docgen docs/elements.html

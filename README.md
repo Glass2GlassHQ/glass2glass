@@ -15,6 +15,10 @@ Architecture: [design/README.md](design/README.md). Developer tooling
 (`cargo xtask`, the pipeline visualizer, the caps explainer, benchmarks):
 [DEVTOOLS.md](DEVTOOLS.md).
 
+Commands that start with `cargo run -p`, `cargo test -p`, `cargo xtask`, or a
+`tools/` script run in a clone of this repository. The quick start below needs
+only the published crates.
+
 - [Quick start](#quick-start)
 - [Portability: one pipeline, five targets](#portability-one-pipeline-five-targets)
 - [Migrating an existing pipeline?](#migrating-an-existing-pipeline)
@@ -44,6 +48,9 @@ g2g-core    = "0.9"
 g2g-plugins = { version = "0.9", features = ["std", "wayland-sink"] }
 ```
 
+`wayland-sink` links the Wayland and xkbcommon system libraries. Install the
+packages in [System dependencies](#system-dependencies) first.
+
 ```rust
 // src/main.rs
 use g2g_core::runtime::{parse_launch, run_graph, LatencyProfile};
@@ -71,10 +78,11 @@ use the `metal-sink` feature instead of `wayland-sink`. With no display sink
 feature, `autovideosink` becomes `fakesink` with a warning: the program runs to
 the end and shows nothing.
 
-To run pipelines without writing a program, install the launcher:
+To run pipelines without writing a program, install the launcher and the
+element inspector:
 
 ```sh
-cargo install g2g-plugins --features std,wayland-sink --bin g2g-launch
+cargo install g2g-plugins --features std,wayland-sink --bin g2g-launch --bin g2g-inspect
 g2g-launch "videotestsrc num-buffers=90 pattern=ball ! videoconvert ! autovideosink"
 ```
 
@@ -118,11 +126,11 @@ The roadmap for `std` transports and a QNX Screen sink is in
 
 ## Migrating an existing pipeline?
 
-Many `gst-launch-1.0` lines run unchanged through `g2g-launch`:
+Many `gst-launch-1.0` lines run unchanged through `g2g-launch` (installed in the
+[quick start](#quick-start)):
 
 ```sh
-cargo run -p g2g-plugins --bin g2g-launch --features std -- \
-  "videotestsrc num-buffers=30 ! videoconvert ! fakesink"
+g2g-launch "videotestsrc num-buffers=30 ! videoconvert ! fakesink"
 ```
 
 Element names mostly match, with aliases where they differ (`avdec_h264` to
@@ -295,7 +303,8 @@ registry and negotiation, so any element, caps, or policy works in each:
   values are typed by the target element as in a launch string.
 
   ```sh
-  cargo run -p g2g-plugins --bin g2g-launch --features declarative-yaml -- --graph pipe.yaml
+  cargo install g2g-plugins --features declarative-yaml --bin g2g-launch
+  g2g-launch --graph pipe.yaml
   ```
   ```yaml
   # pipe.yaml
@@ -361,7 +370,7 @@ registry and negotiation, so any element, caps, or policy works in each:
   even, odd = g2g.AppSink("even"), g2g.AppSink("odd")   # pull() each, feed anywhere
   ```
 
-  End-to-end demo with two pull channels drained live:
+  End-to-end demo with two pull channels drained live, in a clone:
   `cargo run -p g2g-plugins --features script-rhai --example scriptrouter_appsink_egress`
 
 ## Embedded: heap-free pipelines on a bare-metal MCU
@@ -508,7 +517,7 @@ output byte-for-byte, checked in CI for both catalogs by
 
 Stable Rust, `resolver = "2"`. MSRV 1.92, except `g2g-core`, `g2g-mcu`,
 `g2g-mcugen`, and `g2g-plugin`, which build on 1.86 so a vendor-pinned
-toolchain can consume the portable core (see `STABILITY.md`).
+toolchain can consume the portable core (see `STABILITY.md`). In a clone:
 
 ```sh
 cargo check --workspace          # no_std baseline
@@ -976,8 +985,8 @@ Chromium with assertions on the decoded frames. Features:
 
 ## Running smoke tests
 
-Most integration tests are `#[ignore]` because they need a live RTSP feed or a
-display. The pattern is the same across recipes:
+These recipes run in a clone. Most integration tests are `#[ignore]` because
+they need a live RTSP feed or a display. The pattern is the same across recipes:
 
 ```sh
 cargo test -p g2g-plugins \
@@ -1298,9 +1307,9 @@ host.
 
 | Distro | Decoder (`ffmpeg`) | Wayland sink | KMS sink | VAAPI |
 | :--- | :--- | :--- | :--- | :--- |
-| Fedora | `ffmpeg-devel` (RPM Fusion) or `ffmpeg-free-devel` | `wayland-devel` | `libdrm-devel` | `libva-devel` |
-| Debian / Ubuntu | `libavcodec-dev libavformat-dev libavutil-dev libswscale-dev` | `libwayland-dev` | `libdrm-dev` | `libva-dev` |
-| Arch | `ffmpeg` | `wayland` | `libdrm` | `libva` |
+| Fedora | `ffmpeg-devel` (RPM Fusion) or `ffmpeg-free-devel` | `wayland-devel libxkbcommon-devel` | `libdrm-devel` | `libva-devel` |
+| Debian / Ubuntu | `libavcodec-dev libavformat-dev libavutil-dev libswscale-dev` | `libwayland-dev libxkbcommon-dev` | `libdrm-dev` | `libva-dev` |
+| Arch | `ffmpeg` | `wayland libxkbcommon` | `libdrm` | `libva` |
 
 USAC (xHE-AAC) decode needs libavcodec 62 (ffmpeg 8) or later.
 

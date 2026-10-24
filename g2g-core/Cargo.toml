@@ -14,9 +14,7 @@ authors.workspace = true
 repository.workspace = true
 
 [features]
-# `alloc` is on by default, so every existing consumer (all of which enable
-# `runtime` / `std` / `dyn-slot`, each implying `alloc`) is unchanged. The
-# heap-free MCU / safety build is the default (`[]`): it links no allocator,
+# The heap-free MCU / safety build is the default (`[]`): it links no allocator,
 # carrying only the data-plane subset (Frame, Caps, System/Foreign memory, the
 # const-generic StaticLendRing, time/clock traits) and none of the dynamic graph,
 # negotiation, launch, or tooling layer, which all live behind `alloc`. Host /

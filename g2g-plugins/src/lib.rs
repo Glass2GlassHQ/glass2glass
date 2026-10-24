@@ -14,6 +14,11 @@
 
 extern crate alloc;
 
+// runs the rust blocks in AUTHORING.md as doc tests
+#[cfg(all(doctest, feature = "std"))]
+#[doc = include_str!("../../AUTHORING.md")]
+struct AuthoringGuide;
+
 // Drive a leaf future to completion by spinning. Only for the `#[cfg(fuzzing)]`
 // element shims: they parse buffered bytes into a synchronous sink and never
 // await real IO, so a no-op waker never leaves them pending.
