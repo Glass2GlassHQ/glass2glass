@@ -234,7 +234,7 @@ The transform and sink defaults accept everything. A transform that overrides
 nothing negotiates as a pass-through of whatever upstream sends, audio included,
 so **override the method for your role** to state what the element handles. A
 mismatch then fails the run at startup with `CapsMismatch`, and the log names the
-two elements.
+two elements ([how to read it](DEVTOOLS.md#a-custom-element-gets-caps-it-cant-handle)).
 
 ### 4.1 The constraint variants
 

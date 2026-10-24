@@ -19,6 +19,156 @@ every feature you want in one install (add `wayland-sink` for a window, see the
 README's system dependencies). Commands marked *(clone)* need a checkout of this
 repository.
 
+## When a pipeline fails
+
+Start from what you see. Each case below shows the tool that explains it and
+links the longer section on that tool. The output comes from debug builds of
+`g2g-launch` and `g2g-inspect` with `std,wayland-sink` (plus `tooling-json` for
+`--validate-json`).
+
+### A link fails to negotiate
+
+```sh
+g2g-launch "videotestsrc ! video/x-raw,width=100000 ! fakesink"
+# Setting pipeline to PLAYING ...
+# ERROR caps             no caps overlap between VideoTestSrc and CapsFilter
+# ERROR caps               VideoTestSrc offers: video/x-raw,format=RGBA,width=320,height=240,framerate=30/1 | ... | (+196 more, G2G_CAPS_TRACE=trace lists them)
+# ERROR caps               CapsFilter wants: video/x-raw,format=NV12,width=100000 | ... | (+1 more, G2G_CAPS_TRACE=trace lists them)
+# ERROR caps               width: VideoTestSrc offers 320 | [1,16384], CapsFilter wants 100000
+# ERROR caps               VideoTestSrc -> CapsFilter: video/x-raw,format=RGBA,width=320,height=240,framerate=30/1 | ...
+# ERROR caps               CapsFilter -> FakeSink: (not narrowed yet)
+# pipeline error: CapsMismatch
+```
+
+The first line names the two elements whose link has no caps in common.
+`offers` lists the caps the upstream element can send and `wants` the caps the
+downstream element takes, alternatives split by `|` in order of preference. The
+field line names what keeps them apart: the source's alternatives carry width
+320 or the range 1 to 16384, and the capsfilter asks for 100000. The last lines
+show each link's caps where the solve stopped. More in the
+[caps-negotiation explainer](#caps-negotiation-explainer).
+
+`g2g-inspect` shows the same range on the element's output caps and on its
+`width` property:
+
+```sh
+g2g-inspect videotestsrc
+# ...
+# Output caps:
+#   video/x-raw,format=RGBA,width=[1,16384],height=[1,16384],framerate=[0/1,1000/1]
+#   ...
+# Element Properties:
+#   ...
+#   width: frame width in pixels
+#     flags: readable, writable
+#     Unsigned Integer. Range: 1 - 16384. Default: 320
+```
+
+For a script or an editor, `--validate-json` prints the failure as JSON on
+stdout and exits with status 1 without running. `upstream` and `downstream` are
+indices into `nodes` ([more](#pipeline-visualizer-dot--svg)):
+
+```sh
+g2g-launch --validate-json "videotestsrc ! video/x-raw,width=100000 ! fakesink"
+# {"failure":{"downstream":1,"downstream_caps":["video/x-raw,format=NV12,width=100000",...],"kind":"empty-link",
+#  "upstream":0,"upstream_caps":["video/x-raw,format=RGBA,width=320,height=240,framerate=30/1",...]},
+#  "nodes":[{"index":0,"name":"VideoTestSrc"},{"index":1,"name":"CapsFilter"},{"index":2,"name":"FakeSink"}],
+#  "ok":false,"stage":"negotiate"}
+```
+
+### An element name is unknown
+
+```sh
+g2g-launch "videotestsrc num-buffers=10 ! vpxenc ! fakesink"
+# parse error: unknown element: vpxenc
+#   hint: `vpxenc` is a g2g element but is not compiled into this build; rebuild with `--features vpx`
+```
+
+The hint names the cargo feature. Add it to the `cargo install` line together
+with the features you already use. `g2g-inspect --gst <name>` gives the same
+verdict for any name, and for a GStreamer element g2g lacks it names the
+replacement. A plain `g2g-inspect vpxenc` only says `No such element: vpxenc`.
+`g2g-inspect` with no argument lists the elements this build has
+([more](#element-reference-g2g-inspect-and-the-web-page)). The README's
+[feature-gated elements](README.md#feature-gated-elements) table lists each
+element's feature and the system library it needs.
+
+### The pipeline runs but shows nothing
+
+```sh
+g2g-launch "videotestsrc num-buffers=90 pattern=ball ! videoconvert ! autovideosink"
+# WARN  Registry         autovideosink found no usable sink (cannot run here: waylandsink (no Wayland compositor on wayland-0: Could not find wayland compositor); not in this build: wgpusink, kmssink, metalvideosink), using fakesink: the pipeline runs but its output goes nowhere
+# Setting pipeline to PLAYING ...
+# pipeline run summary:
+# ...
+```
+
+`autovideosink` takes the first display sink that is in the build and can
+present here, else `fakesink`. The warning lists each sink it skipped. Under
+"cannot run here", `waylandsink` is compiled in but found no compositor at
+`$WAYLAND_DISPLAY` (`wayland-0` when unset), so run it inside a Wayland session.
+Under "not in this build" are the sinks whose feature is off: `wgpu-present`
+for `wgpusink`, `kms-sink` for `kmssink` on a console with no compositor,
+`metal-sink` for `metalvideosink` on macOS. Install the README's
+[system dependencies](README.md#system-dependencies) before adding the feature.
+
+### It runs but stalls, stutters or drops frames
+
+`G2G_DEBUG='*:debug'` logs every control packet and every place that drops
+data, and `G2G_DEBUG='*:log'` adds a line per buffer, so the last element to log
+a buffer is where a stall is ([packet flow logging](#packet-flow-logging)). A
+display sink that drops frames for arriving after their deadline logs it under
+`pacing`:
+
+```sh
+G2G_DEBUG=pacing:debug g2g-launch "videotestsrc num-buffers=60 width=1920 height=1080 ! videoconvert ! waylandsink"
+# Setting pipeline to PLAYING ...
+# DEBUG pacing           dropping late frames from pts 0:00:00.066666666, 0:00:00.844750893 past its deadline
+# pipeline run summary:
+#   frames:  emitted 16, consumed 16, dropped 0 (0.0% drop)
+#   ...
+#   per-element [measured]:
+#     VideoConvert0    proc p50 134.01 ms / p99 134.01 ms (n=16), blocked p50 0.00 ms / p99 200.67 ms, age-out p50 536.87 ms / p99 837.96 ms, in-fill 59%/100% avg/max
+#     WaylandSink0     proc p50 0.00 ms / p99 911.35 ms (n=16), in-fill 42%/100% avg/max
+#   present: WaylandSink0     2 presented, 0 dropped, 14 late-dropped
+#   ...
+```
+
+In this debug build `videoconvert` takes 134 ms per 1080p frame against a 33 ms
+frame period. The sink drops 14 of the 16 frames it gets as late, and
+`videotestsrc` skips ahead on the sink's QoS reports, so it sends 16 of the 60.
+When the sink catches up it logs `presenting again at pts ...`. The
+[end-of-run report](#end-of-run-report) points at the slow stage: `proc` is the
+time in `process()` and `age-out` the frame's age as it leaves the element.
+
+To watch rates while the pipeline runs, `--tui` draws them in the terminal and
+`--observe <port>` serves them to a browser
+([terminal UI](#terminal-ui---tui), [live dashboard](#live-dashboard---observe)).
+The element whose input link stays full is the slow one. To keep the traffic
+for a replay, `--record-on-error <dir>` writes the last packets on every link
+when the run fails, and `recordsink` records one link of any run
+([flight recorder](#flight-recorder), [record / replay](#record--replay)).
+
+### A custom element gets caps it can't handle
+
+An element states the caps it handles through the constraint for its role
+([AUTHORING.md §4](AUTHORING.md#4-caps-negotiation)). The default accepts
+anything, so an element that does not override it receives whatever upstream
+sends. With the constraint in place, a mismatch fails at startup with the ERROR
+block above. The `invert` element of
+[AUTHORING.md §1](AUTHORING.md#1-a-complete-element) takes RGBA video only, and
+`cargo run` in that crate feeds it audio as its second pipeline
+(`audiotestsrc num-buffers=1 ! invert ! fakesink`):
+
+```
+ERROR caps             no caps overlap between AudioTestSrc and Invert
+ERROR caps               AudioTestSrc offers: audio/x-raw,format=S16LE,channels=2,rate=48000
+ERROR caps               Invert wants: video/x-raw,format=RGBA
+ERROR caps               media type: AudioTestSrc offers audio/x-raw, Invert wants video/x-raw
+ERROR caps               AudioTestSrc -> Invert: audio/x-raw,format=S16LE,channels=2,rate=48000
+ERROR caps               Invert -> FakeSink: (not narrowed yet)
+```
+
 ## `cargo xtask` *(clone)*
 
 `xtask` is a dependency-free command crate (a `.cargo/config.toml` alias onto the
@@ -469,11 +619,11 @@ binary:
 
 ```sh
 cargo install g2g-plugins --features mcp --bin g2g-mcp
-# register g2g-mcp as an MCP stdio server in your client
+claude mcp add g2g -- g2g-mcp
 
 # or, in a clone:
 cargo build -p g2g-plugins --features mcp --bin g2g-mcp
-# register target/debug/g2g-mcp
+claude mcp add g2g -- "$PWD/target/debug/g2g-mcp"
 ```
 
 Tools: `list_elements`, `inspect {element}`, `validate {pipeline}` (parse +

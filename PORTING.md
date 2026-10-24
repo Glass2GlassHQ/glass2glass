@@ -768,3 +768,6 @@ g2g-inspect --gst <gst-name>      # map a GStreamer element name to g2g
 g2g-inspect --gst-map             # every gst-name/g2g-name pair, tab separated
 g2g-discover <file> [--json]      # container, streams, caps, duration and tags
 ```
+
+When a line fails, [DEVTOOLS.md](DEVTOOLS.md#when-a-pipeline-fails) goes from
+the error to the tool that explains it.

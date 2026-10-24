@@ -15,6 +15,15 @@ Architecture: [design/README.md](design/README.md). Developer tooling
 (`cargo xtask`, the pipeline visualizer, the caps explainer, benchmarks):
 [DEVTOOLS.md](DEVTOOLS.md).
 
+Start here:
+
+1. Run the [quick start](#quick-start).
+2. Try pipelines with `g2g-launch` and look up elements with
+   [`g2g-inspect`](DEVTOOLS.md#element-reference-g2g-inspect-and-the-web-page).
+3. Write an element with [AUTHORING.md](AUTHORING.md).
+4. Debug with [When a pipeline fails](DEVTOOLS.md#when-a-pipeline-fails).
+5. Coming from GStreamer, read [PORTING.md](PORTING.md).
+
 Commands that start with `cargo run -p`, `cargo test -p`, `cargo xtask`, or a
 `tools/` script run in a clone of this repository. The quick start below needs
 only the published crates.
