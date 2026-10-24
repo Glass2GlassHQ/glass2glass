@@ -6,9 +6,11 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1889: a failed negotiation names the field that blocks it with both sides' values, `g2g-inspect` prints caps as gst strings, and the `auto*sink` fallback says which sinks were skipped and why.
+- M1888: `AUTHORING.md` opens with a complete element, compiled and run as a doc test, and documents negotiation through `caps_constraint_as_*`, and the README installs `g2g-inspect` and lists libxkbcommon.
+
 ## 0.9.0
 
-- M1888: `AUTHORING.md` opens with a complete element, compiled and run as a doc test, and documents negotiation through `caps_constraint_as_*`, and the README installs `g2g-inspect` and lists libxkbcommon.
 - M1887: `init_from_env` prints warnings by default, and an `autovideosink` or `autoaudiosink` that falls back to `fakesink` warns, as gst's does.
 - M1885: `srtsrc` drops a packet once the one after it is due, as libsrt does, and with `keep-listening` takes a new caller after the last one shuts down or stays silent for 5 s.
 - M1886: `hlssrc` skips a live segment or part that answers 4xx and reloads the playlist, where it ended the run.

@@ -59,7 +59,12 @@ naming the two conflicting nodes and dumping the set on every edge incident to
 them, so the log answers which two cannot agree and what each wanted. A
 transform whose derived output is empty for its input (an encoder fed a format it
 does not take) is named alone with that input, `X produces no output for <caps>`,
-since the element below it is not part of the failure. An edge that survives
+since the element below it is not part of the failure. After the two names the
+narration prints what each side still allowed (`X offers`, `Y wants`), then one
+line per field (media type, format, width, height, framerate, channels, rate)
+that the two sides compare on and never agree on, with each side's values. A set
+past four alternatives elides unless the `caps` category is at trace, and a link
+the solver had not reached prints `(not narrowed yet)`. An edge that survives
 narrowing but cannot reduce to one `Caps` logs `cannot fixate`.
 
 Node labels come from the caller via `solve_graph_labeled`. The runner passes
