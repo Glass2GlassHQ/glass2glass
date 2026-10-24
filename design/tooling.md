@@ -119,6 +119,20 @@ SDK version bump that resizes a struct fails the build rather than the GPU.
 It prints the `registry.rs` registration line to paste, since the registration
 function is context-dependent. The generated element compiles as is.
 
+## Packet flow logging
+
+The runner logs every packet it hands to an element's `process` and every packet
+a source pushes, under the element's category and instance name: buffers at LOG,
+control packets at DEBUG, the split gst makes between `GST_SCHEDULING` and
+`GST_EVENT`. The name travels on the arm's `ElementProbe` as an
+`ElementLogName`, so each arm makes one `log_received` call and no element needs
+code for it. Source pushes are logged by the source's `SenderSink`. With the
+category off a packet costs one atomic level check and no allocation, which the
+zero-allocation runner tests cover. Helpers shared by many elements log their
+drops under their own category: `pacing` for a synchronizing sink's late-drop
+runs and segment clips, `demuxseek` for demuxer seeks, `audiodecoder` for PCM
+segment clipping, `rtpjitterbuffer` for declared losses, and `aggregator`.
+
 ## README quick-start check
 
 The `readme-quickstart` CI job runs `tools/readme-quickstart-check.sh` in a
