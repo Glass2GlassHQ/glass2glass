@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1886: `hlssrc` skips a live segment or part that answers 4xx and reloads the playlist, where it ended the run.
 - M1884: `g2g-launch` ends by SIGPIPE only on a closed stdout, where a socket write to a reset RTSP server killed it.
 - M1883b: `h265parse` keeps the RASL pictures after a CRA when a demuxer only lowers its segment's start.
 - M1883: the mkv, flv, TS, PS and fragmented-MP4 demuxers lower their segment for a unit presenting before it, as gst's `matroskademux` does, where they clipped it.
