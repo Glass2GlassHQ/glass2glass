@@ -40,8 +40,8 @@ A complete program:
 # Cargo.toml
 [dependencies]
 tokio       = { version = "1", features = ["macros", "rt-multi-thread"] }
-g2g-core    = { git = "https://github.com/Glass2GlassHQ/glass2glass" }
-g2g-plugins = { git = "https://github.com/Glass2GlassHQ/glass2glass", features = ["std"] }
+g2g-core    = "0.8"
+g2g-plugins = { version = "0.8", features = ["std", "wayland-sink"] }
 ```
 
 ```rust
@@ -64,13 +64,16 @@ async fn main() {
 }
 ```
 
-With the `wayland-sink` feature, `autovideosink` opens a window. Without it,
-`autovideosink` becomes `fakesink` and the program runs headless. To run a
-pipeline straight from the repo instead:
+On a Wayland desktop this opens a window showing a bouncing ball. On macOS,
+use the `metal-sink` feature instead of `wayland-sink`. With no display sink
+feature, `autovideosink` becomes `fakesink`: the program runs to the end and
+shows nothing.
+
+To run pipelines without writing a program, install the launcher:
 
 ```sh
-cargo run -p g2g-plugins --bin g2g-launch --features std -- \
-  "videotestsrc num-buffers=90 pattern=ball ! videoconvert ! autovideosink"
+cargo install g2g-plugins --features std,wayland-sink --bin g2g-launch
+g2g-launch "videotestsrc num-buffers=90 pattern=ball ! videoconvert ! autovideosink"
 ```
 
 ## Portability: one pipeline, five targets

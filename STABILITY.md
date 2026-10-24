@@ -1,6 +1,6 @@
 # API Stability Audit & Policy
 
-Status: **pre-1.0, tagged `0.5.0`**. This document is both the audit that answers
+Status: **pre-1.0, published to crates.io**. This document is both the audit that answers
 "when is `g2g` ready for a 1.0 version indicator" and the **stability policy now in
 effect** (see "Versioning & MSRV policy" below). **Update (M561):** the
 `#[non_exhaustive]` pass has landed - the growth-prone vocabulary enums are now
@@ -26,8 +26,7 @@ is: **can we freeze the public vocabulary and treat changes to it as breaking?**
 - The cheap, high-leverage fix, **now done (M561)**: the growth-prone vocabulary
   enums are marked `#[non_exhaustive]`, converting their ongoing growth from
   breaking to non-breaking and removing the biggest 1.0 obstacle.
-- Recommendation: `0.5.0` is tagged (the `#[non_exhaustive]` + stability-split
-  work below is in). Land one real external adopter, and reserve `1.0` for when
+- Recommendation: land one real external adopter, and reserve `1.0` for when
   the vocabulary is frozen-and-extensible and someone depends on it. Consider
   `g2g-core` reaching 1.0 ahead of the sprawling plugin set.
 
@@ -179,9 +178,8 @@ The type tiers above translate to per-crate promises:
 4. **One real external adopter** — a downstream project (bindings, embedded, or a
    wgpu-viewer/game-engine consumer) that ships on g2g. 1.0 without a consumer is
    a promise nobody asked for.
-5. ~~**Intermediate release first**: tag `0.2`.~~ **DONE (`0.2.0`, current `0.5.0`)** —
-   tagged in-repo (not yet published to crates.io); the crates carry publish metadata
-   (description/license) and are crates.io-ready when an adopter warrants it.
+5. ~~**Intermediate release first**: tag `0.2`.~~ **DONE (`0.2.0`)**, published to
+   crates.io since `0.6.0`.
    `g2g-core` may reach 1.0 before `g2g-plugins`.
 
 Realistic read: the codebase is capability-rich and the traits have converged, so

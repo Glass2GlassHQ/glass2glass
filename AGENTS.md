@@ -106,7 +106,7 @@ Work is tracked by milestone `Mn`. The high-level roadmap is the top of
 `design/TODO.md`; the reading guide at the top of `design/README.md` maps each track to
 its own file. Record each milestone in `CHANGELOG.md` under
 `## Unreleased`, one terse line (see the Conventions note above).
-Pre-release `0.7.0` (tagged, published to crates.io). Stability tiers and the
+Pre-release, published to crates.io. Stability tiers and the
 versioning policy live in `STABILITY.md`.
 
 `design/TODO.md` is a terse catalogue of outstanding tasks only: no comparison
