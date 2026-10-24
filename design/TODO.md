@@ -154,6 +154,12 @@ Highest leverage first:
   - A data channel signalled through a WHIP / WHEP session.
   - Move the bevy-g2g input backchannel from its WebSocket side channel to
     `livekitdatasink` / `livekitdatasrc`.
+- **SRT:**
+  - `srtsrc` with `keep-listening` sends `Flush` between callers, which drops
+    the last ~1.2 s of frames held in the decoder. gst sends nothing there.
+    Drain the decoder without ending the stream instead.
+  - `SrtSender` stamps a resent packet with the current time where libsrt keeps
+    the original, so a receiver schedules it late and delays the packets behind it.
 - **RIST bonding test flake:** `ristsender_broadcast_bonding_feeds_ristsrc`
   failed once in 50 runs on hercules, after 2.4 s. Capture its failure output
   and fix the cause.

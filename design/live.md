@@ -708,6 +708,18 @@ and delivers in order, the same shape as the RTP jitter and NACK path.
 flow window from that field and shrinks it on every light ACK, so a caller fed
 only light ACKs stops sending after one window.
 
+`SrtReceiver` drops what a live sender has given up on, as libsrt's receiver
+does with TLPKTDROP: once a packet past a gap is due under TSBPD, it is released
+and the missing packets before it are dropped. A DROPREQ that covers the
+delivery cursor moves the cursor past the dropped range. TSBPD times are computed
+from the 32-bit microsecond sender timestamp relative to the last released
+packet, so the 71-minute wrap does not make every later packet due at once.
+`SrtSrc` ends a connection after 5 s without a packet from the peer, libsrt's
+`SRTO_PEERIDLETIMEO` default, and fails the run with a network error, where gst's
+listener posts a warning and ends the stream. With `keep-listening`, a SHUTDOWN or
+an idle peer instead sends `Flush` downstream and returns to the listener
+handshake, and `tsdemux` continues the timeline across the next caller's stream.
+
 Validated g2g to g2g end to end over a lossy loopback: handshake, data, and a
 dropped packet recovered via NAK. The wire format follows the SRT draft so
 real-peer interop is the design target. AES-256 encryption (`with_aes256`),
