@@ -25,13 +25,24 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, BitstreamAlignment, Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome,
     Dim, ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropValue, PropertySpec, Rate, VideoCodec,
+    PropError, PropValue, PropertySpec, Rate, Segment, VideoCodec,
 };
 
 use crate::access_unit::{
     AccessUnitFramer, CapsRefinement, ConfigInterval, StartCodeRole, MAX_CONFIG_INTERVAL_SECONDS,
 };
 use crate::annexb::{nal_units, nal_units_any, ANNEX_B_START_CODE};
+
+// a demuxer meeting a unit that presents earlier lowers the start of the same stream's segment
+fn lowers_start(last: &Segment, next: &Segment) -> bool {
+    let continued = Segment {
+        start: last.start,
+        time: last.time,
+        position: last.position,
+        ..*next
+    };
+    next.start <= last.start && continued == *last
+}
 
 /// Coded-picture geometry recovered from an SPS (post conformance-window
 /// cropping), plus the framerate when the codec recovers one.
@@ -121,6 +132,7 @@ pub struct NalParse<C: NalCodec> {
     /// (access-unit-aligned Annex-B) output.
     config_interval: ConfigInterval,
     leading_rasl: crate::h265parse::LeadingRaslFilter,
+    last_segment: Option<Segment>,
     /// Cached parameter-set NAL bodies (start codes stripped), one bucket per
     /// [`NalCodec::PARAM_SET_TYPES`] entry in the same order, refreshed as they
     /// flow so a keyframe lacking inline parameter sets can be prefixed.
@@ -157,6 +169,7 @@ impl<C: NalCodec> Default for NalParse<C> {
             input_alignment: BitstreamAlignment::Unspecified,
             config_interval: ConfigInterval::default(),
             leading_rasl: crate::h265parse::LeadingRaslFilter::default(),
+            last_segment: None,
             cached: C::PARAM_SET_TYPES.iter().map(|_| Vec::new()).collect(),
             #[cfg(feature = "metadata")]
             hdr: None,
@@ -548,6 +561,7 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                     self.framer.clear();
                     self.caps.forget();
                     self.leading_rasl.restart();
+                    self.last_segment = None;
                     #[cfg(feature = "metadata")]
                     {
                         self.input_stamps = crate::inputstamp::PendingInputStamps::default();
@@ -556,7 +570,13 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                 }
                 // A new segment may splice in a bitstream the decoder has no references for.
                 PipelinePacket::Segment(seg) => {
-                    self.leading_rasl.restart();
+                    if !self
+                        .last_segment
+                        .is_some_and(|last| lowers_start(&last, &seg))
+                    {
+                        self.leading_rasl.restart();
+                    }
+                    self.last_segment = Some(seg);
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 PipelinePacket::Eos => {

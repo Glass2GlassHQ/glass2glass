@@ -2,7 +2,9 @@
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, VideoCodec};
+use g2g_core::{
+    AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, Seek, Segment, VideoCodec,
+};
 use g2g_plugins::h265parse::H265Parse;
 
 const VPS: u8 = 32;
@@ -103,6 +105,33 @@ async fn drops_rasl_of_the_first_cra_and_keeps_rasl_of_later_cras() {
     ]
     .concat();
     assert_eq!(parse(stream).await, [1, 4, 5, 6, 7, 8]);
+}
+
+// a demuxer lowers its segment for a picture presenting before the first one, the stream goes on
+#[tokio::test]
+async fn a_segment_lowering_the_start_keeps_rasl_of_later_cras() {
+    const OPENING_NS: u64 = 1_000_000;
+    const LOWERED_NS: u64 = 600_000;
+    let segment_at = |start_ns| Segment::for_flush_seek(&Seek::flush_to(start_ns), None);
+    let tags = parse_packets(vec![
+        PipelinePacket::Segment(segment_at(OPENING_NS)),
+        data([parameter_sets(), picture(CRA, 1), picture(RASL_R, 2)].concat()),
+        PipelinePacket::Segment(segment_at(LOWERED_NS)),
+        data(
+            [
+                picture(RASL_N, 3),
+                picture(TRAIL_R, 4),
+                picture(CRA, 5),
+                picture(RASL_R, 6),
+                picture(RASL_N, 7),
+                picture(TRAIL_R, 8),
+            ]
+            .concat(),
+        ),
+        PipelinePacket::Eos,
+    ])
+    .await;
+    assert_eq!(tags, [1, 4, 5, 6, 7, 8]);
 }
 
 #[tokio::test]
