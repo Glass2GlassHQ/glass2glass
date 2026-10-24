@@ -2749,18 +2749,6 @@ fn blocking_get_text(url: &str) -> Option<alloc::string::String> {
     .ok()
 }
 
-/// Fetch a binary resource synchronously (the fMP4 `#EXT-X-MAP` init segment),
-/// the byte sibling of [`blocking_get_text`]. `None` on any failure.
-#[cfg(feature = "hls")]
-fn blocking_get_bytes(url: &str) -> Option<Vec<u8>> {
-    block_on_own_thread(|| async {
-        let client = reqwest::Client::new();
-        crate::fetch::get_bytes(&client, url, crate::fetch::MAX_SEGMENT_BYTES).await
-    })
-    .ok()?
-    .ok()
-}
-
 // parse-time hooks can run inside the caller's runtime, where block_on panics
 #[cfg(any(feature = "rtsp", feature = "hls"))]
 pub(crate) fn block_on_own_thread<F: core::future::Future>(
@@ -3324,8 +3312,12 @@ impl HlsPlaylists {
     /// The `#EXT-X-MAP` init segment of an fMP4 / CMAF variant, or `None` for a
     /// muxed MPEG-TS variant (no map) or a failed fetch.
     fn init_segment(&self) -> Option<Vec<u8>> {
-        let map = self.media.map_uri.as_ref()?;
-        blocking_get_bytes(&crate::fetch::resolve_url(&self.media_url, map))
+        block_on_own_thread(|| async {
+            let client = reqwest::Client::new();
+            crate::hlssrc::init_segment_bytes(&client, &self.media_url, &self.media).await
+        })
+        .ok()?
+        .ok()?
     }
 
     // CODECS names a codec once however many tracks carry it, so the ports come from the PMT

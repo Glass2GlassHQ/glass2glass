@@ -8,13 +8,13 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{SeekController, SourceLoop};
+use g2g_core::runtime::{Registry, SeekController, SourceLoop};
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, Dim, G2gError, MemoryDomain, MultiInputElement,
     OutputSink, PipelinePacket, PushOutcome, Rate, Seek, VideoCodec,
@@ -22,6 +22,7 @@ use g2g_core::{
 use g2g_plugins::fmp4demux::Fmp4Demux;
 use g2g_plugins::hlssrc::HlsSrc;
 use g2g_plugins::mp4muxn::Mp4MuxN;
+use g2g_plugins::uridecodebin::hls_uri_fanout;
 
 #[derive(Default)]
 struct CaptureSink {
@@ -942,11 +943,19 @@ fn parse_range_header(req: &str) -> Option<(usize, usize)> {
     Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
+// the inclusive `Range` of each `all.m4s` request, `None` for a whole-file request
+type RangeLog = Arc<Mutex<Vec<Option<(usize, usize)>>>>;
+
 /// Serve one resource `all.m4s` (init + fragments concatenated) honouring HTTP
-/// `Range` requests with `206 Partial Content`, plus the byte-range playlist.
-fn serve_byterange(resource: Vec<u8>, playlist: String) -> String {
+/// `Range` requests with `206 Partial Content`, plus the byte-range playlist
+/// (`/cmaf.m3u8`) and a master naming it (`/master.m3u8`). Returns the server's
+/// base URL and the log of `all.m4s` ranges.
+fn serve_byterange(resource: Vec<u8>, playlist: String) -> (String, RangeLog) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let ranges = RangeLog::default();
+    let logged = ranges.clone();
+    let master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100000\ncmaf.m3u8\n";
     thread::spawn(move || {
         for conn in listener.incoming() {
             let mut stream = match conn {
@@ -963,17 +972,24 @@ fn serve_byterange(resource: Vec<u8>, playlist: String) -> String {
             }
             let text = String::from_utf8_lossy(&req);
             let path = text.split_whitespace().nth(1).unwrap_or("");
-            if path == "/cmaf.m3u8" {
-                let body = playlist.clone().into_bytes();
+            let served_playlist = match path {
+                "/cmaf.m3u8" => Some(playlist.as_str()),
+                "/master.m3u8" => Some(master),
+                _ => None,
+            };
+            if let Some(served_playlist) = served_playlist {
+                let body = served_playlist.as_bytes();
                 let header = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = stream.write_all(header.as_bytes());
-                let _ = stream.write_all(&body);
+                let _ = stream.write_all(body);
             } else if path == "/all.m4s" {
+                let range = parse_range_header(&text);
+                logged.lock().unwrap().push(range);
                 // Honour a Range with 206 + the exact slice; otherwise full body.
-                let (body, status, extra) = match parse_range_header(&text) {
+                let (body, status, extra) = match range {
                     Some((a, b)) => {
                         let end = (b + 1).min(resource.len());
                         let start = a.min(end);
@@ -999,7 +1015,24 @@ fn serve_byterange(resource: Vec<u8>, playlist: String) -> String {
             }
         }
     });
-    format!("http://127.0.0.1:{port}/cmaf.m3u8")
+    (format!("http://127.0.0.1:{port}"), ranges)
+}
+
+// the playlist addressing init then `fragments` by byte range of one `all.m4s`
+fn byterange_playlist(init_len: usize, fragments: &[Vec<u8>]) -> String {
+    let mut playlist = format!(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"all.m4s\",BYTERANGE=\"{init_len}@0\"\n"
+    );
+    let mut offset = init_len;
+    for fragment in fragments {
+        playlist.push_str(&format!(
+            "#EXTINF:1.0,\n#EXT-X-BYTERANGE:{}@{offset}\nall.m4s\n",
+            fragment.len()
+        ));
+        offset += fragment.len();
+    }
+    playlist.push_str("#EXT-X-ENDLIST\n");
+    playlist
 }
 
 #[tokio::test]
@@ -1031,9 +1064,9 @@ async fn byterange_single_file_cmaf_fetches_subranges_and_demuxes() {
         segs[1].len(),
         segs[2].len(),
     );
-    let url = serve_byterange(resource.clone(), playlist);
+    let (base, _) = serve_byterange(resource.clone(), playlist);
 
-    let mut src = HlsSrc::new(url);
+    let mut src = HlsSrc::new(format!("{base}/cmaf.m3u8"));
     src.configure_pipeline(&Caps::ByteStream {
         encoding: ByteStreamEncoding::IsoBmff,
     })
@@ -1065,6 +1098,22 @@ async fn byterange_single_file_cmaf_fetches_subranges_and_demuxes() {
         dsink.aus, aus,
         "byte-range CMAF -> Fmp4Demux recovers the access units"
     );
+}
+
+#[tokio::test]
+async fn the_fanout_probe_fetches_only_the_init_byte_range() {
+    let (init, segs) = split_fmp4(&make_fmp4(&access_units()).await);
+    let mut resource = init.clone();
+    for s in &segs {
+        resource.extend_from_slice(s);
+    }
+    let (base, ranges) = serve_byterange(resource, byterange_playlist(init.len(), &segs));
+
+    let fanout = hls_uri_fanout(&Registry::new(), &format!("{base}/master.m3u8"))
+        .unwrap()
+        .expect("the init's video track fans out");
+    assert_eq!(fanout.ports.len(), 1);
+    assert_eq!(*ranges.lock().unwrap(), [Some((0, init.len() - 1))]);
 }
 
 #[derive(Default)]

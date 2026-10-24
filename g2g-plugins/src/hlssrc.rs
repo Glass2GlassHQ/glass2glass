@@ -540,6 +540,33 @@ async fn fetch_key(
     Ok(key)
 }
 
+// the EXT-X-MAP init segment, `None` for a playlist with no map
+pub(crate) async fn init_segment_bytes(
+    client: &reqwest::Client,
+    media_url: &str,
+    media: &MediaPlaylist,
+) -> Result<Option<Vec<u8>>, G2gError> {
+    let Some(map) = &media.map_uri else {
+        return Ok(None);
+    };
+    let url = resolve_url(media_url, map);
+    let bytes = match media.map_byte_range {
+        Some(range) => {
+            get_range_bytes_retrying(
+                client,
+                &url,
+                range.offset,
+                range.length,
+                MAX_SEGMENT_BYTES,
+                FetchRetry::BUDGETED,
+            )
+            .await?
+        }
+        None => get_bytes_retrying(client, &url, MAX_SEGMENT_BYTES, FetchRetry::BUDGETED).await?,
+    };
+    Ok(Some(bytes))
+}
+
 // SAMPLE-AES leaves the container clear, so only AES-128 is undone here
 pub(crate) async fn first_segment_clear_bytes(
     client: &reqwest::Client,
@@ -943,30 +970,8 @@ impl SourceLoop for HlsSrc {
                     // fMP4: (re-)emit the EXT-X-MAP init (ftyp+moov) before any
                     // media fragment, so a downstream fmp4demux sees the moov first.
                     if !init_emitted {
-                        if let Some(map) = &media.map_uri {
-                            let init_url = resolve_url(&media_url, map);
-                            let bytes = match media.map_byte_range {
-                                Some(r) => {
-                                    get_range_bytes_retrying(
-                                        &client,
-                                        &init_url,
-                                        r.offset,
-                                        r.length,
-                                        MAX_SEGMENT_BYTES,
-                                        FetchRetry::BUDGETED,
-                                    )
-                                    .await?
-                                }
-                                None => {
-                                    get_bytes_retrying(
-                                        &client,
-                                        &init_url,
-                                        MAX_SEGMENT_BYTES,
-                                        FetchRetry::BUDGETED,
-                                    )
-                                    .await?
-                                }
-                            };
+                        if let Some(bytes) = init_segment_bytes(&client, &media_url, &media).await?
+                        {
                             if text_mode {
                                 init_tracks = crate::fmp4::parse_all_tracks(&bytes).ok();
                             } else if !bytes.is_empty() {
