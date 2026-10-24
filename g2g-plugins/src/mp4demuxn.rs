@@ -2125,10 +2125,9 @@ mod tests {
         let tfdt = full_box(b"tfdt", 1, 0, &0u64.to_be_bytes());
         let trun = {
             let mut p = 1u32.to_be_bytes().to_vec(); // sample count
-            p.extend_from_slice(&0u32.to_be_bytes()); // data offset
             p.extend_from_slice(&3000u32.to_be_bytes()); // duration
             p.extend_from_slice(&(cipher.len() as u32).to_be_bytes()); // size
-            full_box(b"trun", 0, 0x000301, &p)
+            full_box(b"trun", 0, 0x000300, &p)
         };
         // senc with a subsample map (flags 0x2): one sample, one subsample with no
         // clear bytes so the whole 16-byte AU is the protected range.

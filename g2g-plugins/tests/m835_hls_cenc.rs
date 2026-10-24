@@ -387,13 +387,12 @@ fn fragment(
     let tfhd = full_box(b"tfhd", 0, 0x02_0008, &tfhd_p);
     let tfdt = full_box(b"tfdt", 1, 0, &base_time.to_be_bytes());
     let trun = {
-        // flags: data-offset (0x1) + sample-size (0x200)
+        // flags: sample-size (0x200)
         let mut p = (samples.len() as u32).to_be_bytes().to_vec();
-        p.extend_from_slice(&0u32.to_be_bytes());
         for s in samples {
             p.extend_from_slice(&(s.len() as u32).to_be_bytes());
         }
-        full_box(b"trun", 0, 0x201, &p)
+        full_box(b"trun", 0, 0x200, &p)
     };
 
     // Per-sample aux blobs: a constant-IV track carries no IV, only the map.
