@@ -34,6 +34,7 @@ use crate::fanout::{
 use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::PipelinePacket;
 use crate::graph::Graph;
+use crate::log::ElementLogName;
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
@@ -45,6 +46,7 @@ use crate::runtime::graph_runner::{run_graph_inner, sink_arm_on, GraphNodeRef, S
 use crate::runtime::instrument::{EdgeCounters, ElementProbe, Probe};
 use crate::runtime::join::{dynamic_join, join_all, select2, Either};
 use crate::runtime::observe::{link_tapped, register_runner_tap, EdgeTap, TapEdge, TapNode};
+use crate::runtime::packet_log::log_received;
 use crate::runtime::runner::{LinkCapacity, NullSink, RunStats, SourceLoop};
 use crate::runtime::seek::{SeekController, SeekFormat};
 use crate::runtime::{NodeRole, Observer};
@@ -1083,11 +1085,12 @@ where
         source.set_instance_name(name.clone());
         source_names.push(name);
     }
-    let sink_name = namer.add(crate::log::short_type_name::<Snk>(), None);
+    let sink_category = crate::log::short_type_name::<Snk>();
+    let sink_name = namer.add(sink_category, None);
     AsyncElement::set_instance_name(sink, sink_name.clone());
     // M846: the sink is the only node here with a `process()`, so it carries the
     // run's measured-latency probe (as in the linear runners).
-    let sink_probe = ElementProbe::new(sink_name);
+    let sink_probe = ElementProbe::new(ElementLogName::new(sink_category, sink_name));
 
     // Phase 1 + 2: fixate each source's caps and configure it; the sink is
     // configured against input 0's fixated caps (the merged-output caps). This
@@ -1426,7 +1429,11 @@ where
         source.set_instance_name(name.clone());
         source_names.push(name);
     }
-    let session_probe = ElementProbe::new(namer.add(crate::log::short_type_name::<Sess>(), None));
+    let session_category = crate::log::short_type_name::<Sess>();
+    let session_probe = ElementProbe::new(ElementLogName::new(
+        session_category,
+        namer.add(session_category, None),
+    ));
 
     // Phase 1 + 2 per input: each source is narrowed against the session input
     // pad it feeds; the fixated caps configure both the source and that pad (the
@@ -1514,7 +1521,11 @@ where
         let mut null = NullSink;
         let mut consumed: u64 = 0;
         loop {
-            match rx.recv().await {
+            let next = rx.recv().await;
+            if let Some((_, packet)) = &next {
+                log_received(probe_for_session.log_name(), packet);
+            }
+            match next {
                 Some((idx, PipelinePacket::Eos)) => {
                     // Per-input end: let the session flush that track, then finish
                     // once every input has ended (the session owns its own EOS to
@@ -1711,9 +1722,10 @@ where
     let session_name = namer.add(crate::log::short_type_name::<Sess>(), None);
     let mut sink_probes = Vec::with_capacity(output_count);
     for sink in sinks.iter_mut() {
-        let name = namer.add(sink.log_category(), None);
+        let category = sink.log_category();
+        let name = namer.add(category, None);
         sink.set_instance_name(name.clone());
-        sink_probes.push(ElementProbe::new(name));
+        sink_probes.push(ElementProbe::new(ElementLogName::new(category, name)));
     }
 
     // Negotiate the send inputs (like run_fanin_session): each source is narrowed
@@ -2219,7 +2231,11 @@ where
         // M869: instance naming + the aggregator's measured-latency probe, as in
         // `run_fanin_session`. Attached inputs are named off the same namer.
         let mut namer = crate::log::InstanceNamer::new();
-        let agg_probe = ElementProbe::new(namer.add(crate::log::short_type_name::<Agg>(), None));
+        let agg_category = crate::log::short_type_name::<Agg>();
+        let agg_probe = ElementProbe::new(ElementLogName::new(
+            agg_category,
+            namer.add(agg_category, None),
+        ));
         if let Some(obs) = &observer {
             register_runner_tap(
                 obs,
@@ -2259,7 +2275,11 @@ where
                 }
 
                 if accepting {
-                    match select2(tagged_rx.recv(), new_input_rx.recv()).await {
+                    let next = select2(tagged_rx.recv(), new_input_rx.recv()).await;
+                    if let Either::Left(Some((_, packet))) = &next {
+                        log_received(probe_for_agg.log_name(), packet);
+                    }
+                    match next {
                         Either::Left(Some((pad, PipelinePacket::Eos))) => {
                             // Per-input end: let the aggregator flush that pad. It
                             // must not forward Eos; the run owns the end.
@@ -2295,7 +2315,11 @@ where
                         }
                     }
                 } else {
-                    match tagged_rx.recv().await {
+                    let next = tagged_rx.recv().await;
+                    if let Some((_, packet)) = &next {
+                        log_received(probe_for_agg.log_name(), packet);
+                    }
+                    match next {
                         Some((pad, PipelinePacket::Eos)) => {
                             aggregator
                                 .process(pad, PipelinePacket::Eos, &mut null)
@@ -2438,10 +2462,15 @@ where
         // M869: instance naming + a probe per stage with a `process()`, as in the
         // static `run_muxer_sink`. Attached inputs are named off the same namer.
         let mut namer = crate::log::InstanceNamer::new();
-        let mux_probe = ElementProbe::new(namer.add(crate::log::short_type_name::<Mux>(), None));
-        let sink_name = namer.add(crate::log::short_type_name::<Snk>(), None);
+        let mux_category = crate::log::short_type_name::<Mux>();
+        let mux_probe = ElementProbe::new(ElementLogName::new(
+            mux_category,
+            namer.add(mux_category, None),
+        ));
+        let sink_category = crate::log::short_type_name::<Snk>();
+        let sink_name = namer.add(sink_category, None);
         AsyncElement::set_instance_name(sink, sink_name.clone());
-        let sink_probe = ElementProbe::new(sink_name.clone());
+        let sink_probe = ElementProbe::new(ElementLogName::new(sink_category, sink_name.clone()));
         if let Some(obs) = &observer {
             // The merged link's caps do not exist until a pad is configured, so
             // only the two nodes are registered here; the edge follows.
@@ -2472,6 +2501,7 @@ where
             let mut null = NullSink;
             let mut consumed = 0u64;
             while let Some(pkt) = out_rx.recv().await {
+                log_received(probe_for_sink.log_name(), &pkt);
                 match pkt {
                     PipelinePacket::CapsChanged(caps) => {
                         log_caps_rejected(
@@ -2536,6 +2566,9 @@ where
                 } else {
                     tagged_rx.recv().await
                 };
+                if let Some((_, packet)) = &next {
+                    log_received(probe_for_mux.log_name(), packet);
+                }
 
                 match next {
                     Some((pad, PipelinePacket::Eos)) => {
@@ -3033,9 +3066,10 @@ where
         let session_name = namer.add(crate::log::short_type_name::<Sess>(), None);
         let mut sink_probes = Vec::with_capacity(output_count);
         for sink in sinks.iter_mut() {
-            let name = namer.add(sink.log_category(), None);
+            let category = sink.log_category();
+            let name = namer.add(category, None);
             sink.set_instance_name(name.clone());
-            sink_probes.push(ElementProbe::new(name));
+            sink_probes.push(ElementProbe::new(ElementLogName::new(category, name)));
         }
 
         // Negotiate the declared send inputs and recv outputs exactly as the
@@ -3384,9 +3418,10 @@ fn prepare_grown_sink<'a>(
     edge: EdgeTap,
     tap: &mut DuplexTap,
 ) -> Option<(Box<dyn DynAsyncElement + 'a>, Arc<ElementProbe>)> {
-    let name = tap.namer.add(sink.log_category(), None);
+    let category = sink.log_category();
+    let name = tap.namer.add(category, None);
     sink.set_instance_name(name.clone());
-    let probe = ElementProbe::new(name.clone());
+    let probe = ElementProbe::new(ElementLogName::new(category, name.clone()));
     if let Some(obs) = &tap.obs {
         let id = obs.add_node(name, NodeRole::Sink, Some(probe.clone()));
         obs.add_edge(tap.session_id, id, caps.clone(), edge);

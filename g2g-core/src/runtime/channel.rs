@@ -14,7 +14,11 @@ use crate::element::{OutputSink, PushOutcome, QosMessage, Reconfigure};
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
 use crate::link::LinkPolicy;
+#[cfg(feature = "std")]
+use crate::log::ElementLogName;
 use crate::runtime::instrument::{EdgeCounters, Probe};
+#[cfg(feature = "std")]
+use crate::runtime::packet_log::log_pushed;
 #[cfg(feature = "std")]
 use crate::segment::Segment;
 
@@ -796,13 +800,17 @@ impl LinkSender {
 /// here, and a control packet none at all, so both count 0.
 pub(crate) fn packet_bytes(packet: &PipelinePacket) -> u64 {
     match packet {
-        PipelinePacket::DataFrame(f) => match &f.domain {
-            crate::memory::MemoryDomain::System(s) => s.as_slice().len() as u64,
-            #[cfg(feature = "alloc")]
-            crate::memory::MemoryDomain::SystemView(v) => v.backing().len() as u64,
-            #[cfg(feature = "alloc")]
-            _ => 0,
-        },
+        PipelinePacket::DataFrame(f) => frame_bytes(f),
+        _ => 0,
+    }
+}
+
+pub(crate) fn frame_bytes(frame: &crate::frame::Frame) -> u64 {
+    match &frame.domain {
+        crate::memory::MemoryDomain::System(s) => s.as_slice().len() as u64,
+        #[cfg(feature = "alloc")]
+        crate::memory::MemoryDomain::SystemView(v) => v.backing().len() as u64,
+        #[cfg(feature = "alloc")]
         _ => 0,
     }
 }
@@ -1100,6 +1108,9 @@ pub struct SenderSink {
     /// not, since that would end the run.
     #[cfg(feature = "std")]
     strip_terminal: bool,
+    // Set on a source's adapter, so each packet it pushes is logged under its name.
+    #[cfg(feature = "std")]
+    push_log: Option<ElementLogName>,
 }
 
 /// Tell the producer feeding `in_rx` which orientations this sink applies from
@@ -1189,7 +1200,14 @@ impl SenderSink {
             endpoint,
             #[cfg(feature = "std")]
             strip_terminal: false,
+            #[cfg(feature = "std")]
+            push_log: None,
         }
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn log_pushes_as(&mut self, source: ElementLogName) {
+        self.push_log = Some(source);
     }
 
     /// Bank this adapter's push-wait on `probe`, the producing element's.
@@ -1499,6 +1517,10 @@ impl OutputSink for SenderSink {
         // an Eos here is one the consumer will see (M909).
         if matches!(packet, PipelinePacket::Eos) {
             self.eos_forwarded = true;
+        }
+        #[cfg(feature = "std")]
+        if let Some(source) = &self.push_log {
+            log_pushed(source, packet);
         }
         // M980: keep the caps this link is carrying, so an observer reads the
         // shape data actually flows under, not just the solved one.
@@ -2212,7 +2234,10 @@ mod link_tests {
         let pause = std::time::Duration::from_millis(2);
         let (tx, rx) = link(1);
         let mut sink = SenderSink::new(tx);
-        let probe = crate::runtime::instrument::ElementProbe::new("producer".into());
+        let probe = crate::runtime::instrument::ElementProbe::new(crate::log::ElementLogName::new(
+            "producer",
+            "producer".into(),
+        ));
         sink.set_push_wait_probe(Some(probe.clone()));
 
         run_to_ready(sink.push(frame_seq(0))).expect("room for one");
@@ -2252,7 +2277,10 @@ mod link_tests {
     fn only_a_frame_stamped_on_arrival_reports_its_age() {
         let (tx, _rx) = link(4);
         let mut sink = SenderSink::new(tx);
-        let probe = crate::runtime::instrument::ElementProbe::new("producer".into());
+        let probe = crate::runtime::instrument::ElementProbe::new(crate::log::ElementLogName::new(
+            "producer",
+            "producer".into(),
+        ));
         sink.set_push_wait_probe(Some(probe.clone()));
         run_to_ready(sink.push(frame_seq(0))).expect("push ok");
         assert_eq!(probe.snapshot().age_at_emit.count, 0);

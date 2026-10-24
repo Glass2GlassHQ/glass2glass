@@ -14,6 +14,8 @@ use crate::error::G2gError;
 use crate::format_element::{CapsConstraint, CapsPreferences};
 #[cfg(feature = "std")]
 use crate::frame::PipelinePacket;
+#[cfg(feature = "std")]
+use crate::log::ElementLogName;
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
@@ -637,9 +639,11 @@ where
     // negotiation, so an element driven by this runner logs under `<category>N`
     // too. The sink's name also keys its measured-latency probe below.
     let mut namer = crate::log::InstanceNamer::new();
-    let source_name = namer.add(crate::log::short_type_name::<Src>(), None);
+    let source_category = crate::log::short_type_name::<Src>();
+    let source_name = namer.add(source_category, None);
     SourceLoop::set_instance_name(source, source_name.clone());
-    let sink_name = namer.add(crate::log::short_type_name::<Snk>(), None);
+    let sink_category = crate::log::short_type_name::<Snk>();
+    let sink_name = namer.add(sink_category, None);
     AsyncElement::set_instance_name(sink, sink_name.clone());
     // M16 step 5f: startup negotiation honors `SourceLoop::caps_constraint`.
     // A `ReFixate` retry negotiates the one counter-proposed caps instead.
@@ -740,12 +744,13 @@ where
 
     // M399: measured per-element telemetry for the sink (the linear runner's one
     // interior element with a `process()`); the source's cost surfaces as fill.
-    let sink_probe = ElementProbe::new(sink_name.clone());
+    let sink_probe = ElementProbe::new(ElementLogName::new(sink_category, sink_name.clone()));
     let source_io = SourceArmIo {
         out_tx: link_tx,
         bus: None,
         progress: None,
         segment: Segment::new(),
+        log_name: ElementLogName::new(source_category, source_name.clone()),
     };
     let sink_io = SinkArmIo {
         bus: bus.cloned(),
@@ -1130,7 +1135,8 @@ where
         // runner itself (there is no fan-out element), so it is named after the
         // distribution mode; each branch is named and probed when it attaches.
         let mut namer = crate::log::InstanceNamer::new();
-        let source_name = namer.add(crate::log::short_type_name::<Src>(), None);
+        let source_category = crate::log::short_type_name::<Src>();
+        let source_name = namer.add(source_category, None);
         SourceLoop::set_instance_name(source, source_name.clone());
         let fanout_name = namer.add(mode.category(), None);
 
@@ -1140,6 +1146,7 @@ where
         source.configure_pipeline(&sticky)?.reject_refixate()?;
 
         let (src_tx, src_rx, src_tap) = link_tapped(link_capacity, observer.is_some());
+        let source_log_name = ElementLogName::new(source_category, source_name.clone());
 
         // Dev-tooling tap: source 0, the routing stage 1. The routing stage has no
         // `process()` of its own (like a tee in `run_graph`), so it has no probe.
@@ -1165,6 +1172,7 @@ where
 
         let source_fut: BoxFuture<'a, Result<DynArmOut, G2gError>> = Box::pin(async move {
             let mut adapter = SenderSink::new(src_tx);
+            adapter.log_pushes_as(source_log_name);
             source.run(&mut adapter).await.map(DynArmOut::Source)
         });
 
@@ -1266,9 +1274,10 @@ async fn attach_branch<'a>(
     let mut sink = sink;
     // Named and probed like a branch the static fan-out was built with, so its
     // telemetry row is indistinguishable from one declared up front.
-    let name = tap.namer.add(sink.log_category(), None);
+    let category = sink.log_category();
+    let name = tap.namer.add(category, None);
     sink.set_instance_name(name.clone());
-    let probe = ElementProbe::new(name.clone());
+    let probe = ElementProbe::new(ElementLogName::new(category, name.clone()));
     tap.probes.lock().push(Some(probe.clone()));
 
     let (btx, brx, edge) = link_tapped(link_capacity, tap.obs.is_some());

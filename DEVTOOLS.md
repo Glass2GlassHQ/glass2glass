@@ -171,6 +171,39 @@ A set past four alternatives is cut short unless `G2G_CAPS_TRACE=trace`.
 `G2G_DEBUG=videoscale:trace,*:warn` set per-category (element-type) thresholds.
 Without it, errors and warnings print, and `G2G_DEBUG=error` keeps only errors.
 
+## Packet flow logging
+
+The runner logs every packet it hands to an element, under that element's
+category and instance name, the way `GST_DEBUG=GST_SCHEDULING:6,GST_EVENT:6`
+does. A source's pushes log under the source.
+
+- `*:debug` shows every control packet (`segment`, `caps`, `flush`, `eos`), plus
+  the places that drop data: a sink's late frames, a demuxer's seek, a source
+  skipping to its first keyframe, a jitter buffer declaring packets lost.
+- `*:log` adds one line per buffer: pts, duration, size and memory domain, and
+  per-buffer drops such as a decoder clipping to the segment.
+
+```sh
+G2G_DEBUG='*:log' g2g-launch videotestsrc num-buffers=2 ! videoconvert ! fakesink
+# DEBUG VideoTestSrc     <VideoTestSrc0> pushing event segment: rate 1, start 0:00:00.000000000, stop 99:99:99.999999999, base 0:00:00.000000000, time 0:00:00.000000000
+# LOG   VideoTestSrc     <VideoTestSrc0> pushing buffer pts 0:00:00.000000000, dur 0:00:00.033333333, size 307200, domain System
+# LOG   VideoTestSrc     <VideoTestSrc0> pushing buffer pts 0:00:00.033333333, dur 0:00:00.033333333, size 307200, domain System
+# DEBUG VideoTestSrc     <VideoTestSrc0> pushing event eos
+# LOG   VideoConvert     <VideoConvert0> have buffer pts 0:00:00.000000000, dur 0:00:00.033333333, size 307200, domain System
+# DEBUG FakeSink         <FakeSink0> have event caps: video/x-raw,format=RGBA,width=320,height=240,framerate=30/1
+# LOG   FakeSink         <FakeSink0> have buffer pts 0:00:00.000000000, dur 0:00:00.033333333, size 307200, domain System
+# DEBUG FakeSink         <FakeSink0> have event eos
+```
+
+Narrow it like `GST_DEBUG`: `G2G_DEBUG='FakeSink:log,*:warn'` follows one
+element. With the category off a packet costs one atomic load, and the run loop
+still allocates nothing.
+
+Drops by helpers that serve many elements log under the helper's category:
+`pacing` (a synchronizing sink's late drops and segment clips), `demuxseek` (a
+demuxer seeking), `audiodecoder` (decoded audio clipped to the segment),
+`rtpjitterbuffer` and `aggregator`.
+
 ## Benchmarks
 
 The criterion benchmarks live in `g2g-bench`, a standalone crate **excluded from

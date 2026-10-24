@@ -32,11 +32,14 @@
 use alloc::vec::Vec;
 use core::iter::Chain;
 
+use g2g_core::log::{ClockTime, Target};
 use g2g_core::runtime::SeekController;
 use g2g_core::{G2gError, MultiOutputSink, PipelinePacket, Seek, Segment};
 
 // a stream without a keyframe for this many units releases them early, the segment still clips them
 const KEPT_UNITS_MAX: usize = 1024;
+
+const LOG_CATEGORY: &str = "demuxseek";
 
 // stream time counts from the stream start, as seek targets do, so a position read back seeks to itself
 pub(crate) fn with_stream_time(segment: Segment, stream_start_ns: u64) -> Segment {
@@ -339,6 +342,10 @@ impl<U> DemuxSeek<U> {
     }
 
     fn await_flush(&mut self, target: SeekTarget, offset: u64, keep_state: bool) {
+        g2g_core::g2g_debug!(
+            Target::category(LOG_CATEGORY),
+            "seeking to {target:?} from byte {offset}, dropping input until the flush"
+        );
         if let Some(upstream) = &self.upstream {
             upstream.seek(Seek::flush_to(offset));
         }
@@ -359,6 +366,10 @@ impl<U> DemuxSeek<U> {
     /// without changing phase.
     pub(crate) fn on_flush(&mut self) -> bool {
         if let Phase::AwaitingFlush { target } = self.phase {
+            g2g_core::g2g_debug!(
+                Target::category(LOG_CATEGORY),
+                "flushed, discarding units before {target:?}"
+            );
             self.phase = Phase::Discarding { target };
         }
         self.kept.clear();
@@ -391,6 +402,12 @@ impl<U> DemuxSeek<U> {
             self.kept.push(unit);
             return Admitted::empty();
         }
+        g2g_core::g2g_debug!(
+            Target::category(LOG_CATEGORY),
+            "reached the seek target at pts {}, releasing {} units from the keyframe before it",
+            ClockTime(pts_ns),
+            self.kept.len() + 1
+        );
         self.phase = Phase::Idle;
         self.segment = StreamSegment::Fixed;
         Admitted::release(

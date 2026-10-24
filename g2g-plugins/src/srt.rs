@@ -15,6 +15,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::log::Target;
+
 /// The 16-byte SRT packet header precedes every packet.
 pub const HEADER_LEN: usize = 16;
 
@@ -75,6 +77,8 @@ const FULL_ACK_CIF_LEN: usize = 16;
 // first and last dropped sequence
 const DROP_REQUEST_CIF_LEN: usize = 8;
 const SEQUENCE_MASK: u32 = 0x7FFF_FFFF;
+// The receiver runs inside srtsrc, so its lines go under that element's category.
+const RECEIVER_LOG_CATEGORY: &str = "srtsrc";
 
 /// Whether a packet is a control packet (the top bit of the first word).
 pub fn is_control(buf: &[u8]) -> bool {
@@ -1105,6 +1109,13 @@ impl SrtReceiver {
             }
             let (payload, _) = self.pending.remove(&seq).unwrap();
             out.push(payload);
+            if seq != self.next_deliver {
+                g2g_core::g2g_debug!(
+                    Target::category(RECEIVER_LOG_CATEGORY),
+                    "dropped {} packets too late to deliver before seq {seq}",
+                    seq_distance(seq, self.next_deliver)
+                );
+            }
             self.next_deliver = (seq + 1) & SEQUENCE_MASK;
             self.tsbpd_anchor = Some(TsbpdAnchor {
                 timestamp,

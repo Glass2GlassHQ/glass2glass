@@ -28,6 +28,8 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
+const LOG_CATEGORY: &str = "aggregator";
+
 /// Buffers items per input pad and releases synchronized rounds. Generic over
 /// the queued item `T` (a `Frame`, a decoded plane, raw samples, ...).
 #[derive(Debug)]
@@ -76,6 +78,12 @@ impl<T> InputAggregator<T> {
         while q.len() > self.max_depth {
             q.pop_front();
             self.dropped += 1;
+            crate::g2g_log!(
+                crate::log::Target::category(LOG_CATEGORY),
+                "input {input} over its depth of {}, dropped its oldest item ({} dropped in total)",
+                self.max_depth,
+                self.dropped
+            );
         }
     }
 

@@ -21,9 +21,12 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use g2g_core::log::Target;
 // The sequence number lives at bytes 2..4 of the fixed header.
 use g2g_core::rtp::{RtpSequenceExtender, RtpTimestampExtender, RTP_HEADER_LEN};
 use g2g_core::time::ticks_to_ns;
+
+const LOG_CATEGORY: &str = "rtpjitterbuffer";
 
 /// Release policy. A packet missing a predecessor is held at most `max_hold_ns`
 /// (then the gap is declared lost), and the buffer never grows past `max_depth`
@@ -204,6 +207,13 @@ impl RtpJitterBuffer {
         let ready = overdue || (head_is_next && !self.constant_delay);
         if !ready && !full {
             return None;
+        }
+        if head > next {
+            g2g_core::g2g_debug!(
+                Target::category(LOG_CATEGORY),
+                "declared {} packets lost before extended seq {head}",
+                head - next
+            );
         }
         self.stats.lost += head - next;
         let buf = self.packets.remove(&head).expect("head present");

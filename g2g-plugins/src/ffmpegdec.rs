@@ -2062,6 +2062,11 @@ impl AsyncElement for FfmpegVideoDec {
             };
             for d in decoded {
                 if !self.segment.presents(d.pts_ns) {
+                    g2g_core::g2g_log!(
+                        self,
+                        "dropping frame pts {} outside the segment",
+                        g2g_core::log::ClockTime(d.pts_ns)
+                    );
                     continue;
                 }
                 self.saw_interlaced |= d.interlaced;

@@ -50,6 +50,9 @@ mod mutate;
 mod mutation_error;
 
 #[cfg(feature = "std")]
+mod packet_log;
+
+#[cfg(feature = "std")]
 mod parse_scope;
 
 #[cfg(feature = "std")]

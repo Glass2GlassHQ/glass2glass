@@ -54,6 +54,8 @@ use crate::mpegts::{
 use crate::oneport::OnePortElement;
 use crate::typefind::sized_by_sps;
 
+const LOG_CATEGORY: &str = "tsdemux";
+
 /// The published stream id of an elementary stream: the id it takes in the
 /// `StreamCollection`, and the id its per-stream tags post on.
 fn stream_id(pid: u16) -> alloc::string::String {
@@ -584,7 +586,7 @@ fn is_keyframe(stream: TsStream, au: &[u8]) -> bool {
 
 fn no_pinned_stream(pid: u16, stream: TsStream) -> G2gError {
     g2g_error!(
-        Target::category("tsdemux"),
+        Target::category(LOG_CATEGORY),
         "pid={pid} carries no {} stream",
         ts_stream_to_str(stream)
     );
@@ -923,6 +925,7 @@ pub struct TsDemuxN {
     /// keep their parameter sets in band and their decoders resynchronize on
     /// their own, so they are never dropped. Re-armed on a flush.
     mpeg2_tuned_in: Vec<bool>,
+    mpeg2_skipped_before_tune_in: Vec<u64>,
     last_unit_dts_ns: Vec<Option<u64>>,
     held_unit_ns: Vec<Option<u64>>,
     timeline: RestartTimeline,
@@ -1006,6 +1009,7 @@ impl TsDemuxN {
         let port_pids = alloc::vec![PortPid::FirstInPmtOrder; ports.len()];
         let segment_sent = alloc::vec![false; ports.len()];
         let mpeg2_tuned_in = alloc::vec![false; ports.len()];
+        let mpeg2_skipped_before_tune_in = alloc::vec![0; ports.len()];
         let last_unit_dts_ns = alloc::vec![None; ports.len()];
         let held_unit_ns = alloc::vec![None; ports.len()];
         Self {
@@ -1020,6 +1024,7 @@ impl TsDemuxN {
             segment: None,
             segment_sent,
             mpeg2_tuned_in,
+            mpeg2_skipped_before_tune_in,
             last_unit_dts_ns,
             held_unit_ns,
             timeline: RestartTimeline::default(),
@@ -1186,6 +1191,7 @@ impl TsDemuxN {
         self.announced.fill(false);
         self.segment_sent.fill(false);
         self.mpeg2_tuned_in.fill(false);
+        self.mpeg2_skipped_before_tune_in.fill(0);
         self.last_unit_dts_ns.fill(None);
     }
 
@@ -1252,9 +1258,16 @@ impl TsDemuxN {
             // sized, let alone decoded.
             if stream == TsStream::Mpeg2 && !self.mpeg2_tuned_in[port] {
                 if !mpeg2_can_open_here(&u.data) {
+                    self.mpeg2_skipped_before_tune_in[port] += 1;
                     continue;
                 }
                 self.mpeg2_tuned_in[port] = true;
+                g2g_core::g2g_debug!(
+                    Target::category(LOG_CATEGORY),
+                    "port {port} tuned in at the first sequence header after dropping {} units",
+                    self.mpeg2_skipped_before_tune_in[port]
+                );
+                self.mpeg2_skipped_before_tune_in[port] = 0;
             }
             let keyframe = is_keyframe(stream, &u.data);
             let admitted = self.seek.admit(pts_ns.unwrap_or(0), keyframe, u);

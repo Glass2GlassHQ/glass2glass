@@ -562,7 +562,10 @@ mod tests {
     #[test]
     fn snapshot_reflects_live_probe_writes() {
         let obs = Observer::new();
-        let probe = ElementProbe::new(String::from("decode0"));
+        let probe = ElementProbe::new(crate::log::ElementLogName::new(
+            "decode",
+            String::from("decode0"),
+        ));
         obs.register(
             alloc::vec![String::from("src0"), String::from("decode0")],
             alloc::vec![NodeRole::Source, NodeRole::Transform],
@@ -612,7 +615,10 @@ mod tests {
         );
         assert_eq!(obs.snapshot().nodes.len(), 1);
 
-        let probe = ElementProbe::new(String::from("fakesink0"));
+        let probe = ElementProbe::new(crate::log::ElementLogName::new(
+            "fakesink",
+            String::from("fakesink0"),
+        ));
         let counters = Arc::new(EdgeCounters::default());
         let id = obs.add_node(
             String::from("fakesink0"),
@@ -652,8 +658,14 @@ mod tests {
     #[test]
     fn journey_joins_one_frame_across_stages() {
         let obs = Observer::new();
-        let xform = ElementProbe::with_journeys(String::from("scale0"));
-        let sink = ElementProbe::with_journeys(String::from("fakesink0"));
+        let xform = ElementProbe::with_journeys(crate::log::ElementLogName::new(
+            "scale",
+            String::from("scale0"),
+        ));
+        let sink = ElementProbe::with_journeys(crate::log::ElementLogName::new(
+            "fakesink",
+            String::from("fakesink0"),
+        ));
         obs.register(
             alloc::vec![
                 String::from("src0"),
@@ -727,8 +739,14 @@ mod tests {
     #[test]
     fn journey_rejects_an_inconsistent_join() {
         let obs = Observer::new();
-        let xform = ElementProbe::with_journeys(String::from("dec0"));
-        let sink = ElementProbe::with_journeys(String::from("fakesink0"));
+        let xform = ElementProbe::with_journeys(crate::log::ElementLogName::new(
+            "dec",
+            String::from("dec0"),
+        ));
+        let sink = ElementProbe::with_journeys(crate::log::ElementLogName::new(
+            "fakesink",
+            String::from("fakesink0"),
+        ));
         obs.register(
             alloc::vec![
                 String::from("src0"),
@@ -772,7 +790,10 @@ mod tests {
     #[test]
     fn journey_stops_at_a_fan_node() {
         let obs = Observer::new();
-        let xform = ElementProbe::with_journeys(String::from("scale0"));
+        let xform = ElementProbe::with_journeys(crate::log::ElementLogName::new(
+            "scale",
+            String::from("scale0"),
+        ));
         obs.register(
             alloc::vec![
                 String::from("src0"),
@@ -823,7 +844,13 @@ mod tests {
         obs.register(
             alloc::vec![String::from("src0"), String::from("fakesink0")],
             alloc::vec![NodeRole::Source, NodeRole::Sink],
-            alloc::vec![None, Some(ElementProbe::new(String::from("fakesink0")))],
+            alloc::vec![
+                None,
+                Some(ElementProbe::new(crate::log::ElementLogName::new(
+                    "fakesink",
+                    String::from("fakesink0")
+                )))
+            ],
             alloc::vec![EdgeInfo {
                 from: 0,
                 to: 1,

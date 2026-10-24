@@ -23,6 +23,7 @@ use portable_atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::element::PresentationStats;
+use crate::log::ElementLogName;
 use crate::metrics::{LatencyHistogram, LatencySnapshot};
 
 /// How many recent frame visits a journey-recording probe keeps. Bounded and
@@ -35,7 +36,7 @@ const JOURNEY_RING: usize = 64;
 /// `fetch_add`/CAS), so an arm pays almost nothing on the hot path.
 #[derive(Debug)]
 pub struct ElementProbe {
-    name: String,
+    log_name: ElementLogName,
     /// Compute cost of each `DataFrame` `process()` call, in nanoseconds: the
     /// wall-clock span of the call minus the `push_wait_ns` below, so an element
     /// parked on a full downstream link reports its own work rather than the
@@ -78,9 +79,9 @@ pub struct ElementProbe {
 }
 
 impl ElementProbe {
-    pub fn new(name: String) -> Arc<Self> {
+    pub fn new(log_name: ElementLogName) -> Arc<Self> {
         Arc::new(Self {
-            name,
+            log_name,
             proc_ns: LatencyHistogram::new(),
             push_wait_ns: LatencyHistogram::new(),
             push_wait_accum: AtomicU64::new(0),
@@ -95,9 +96,9 @@ impl ElementProbe {
     /// As [`new`](Self::new), but also recording a bounded ring of per-frame
     /// visits for the single-frame waterfall. Only the observed graph runner
     /// mints these, so an untapped run keeps the cheaper probe.
-    pub fn with_journeys(name: String) -> Arc<Self> {
+    pub fn with_journeys(log_name: ElementLogName) -> Arc<Self> {
         Arc::new(Self {
-            name,
+            log_name,
             proc_ns: LatencyHistogram::new(),
             push_wait_ns: LatencyHistogram::new(),
             push_wait_accum: AtomicU64::new(0),
@@ -111,7 +112,11 @@ impl ElementProbe {
 
     /// The instance name of the element this probe measures.
     pub fn name(&self) -> &str {
-        &self.name
+        &self.log_name.instance
+    }
+
+    pub fn log_name(&self) -> &ElementLogName {
+        &self.log_name
     }
 
     /// A monotonic start stamp for the about-to-run `process()`, or `None` under
@@ -248,7 +253,7 @@ impl ElementProbe {
 
     pub fn snapshot(&self) -> ElementLatency {
         ElementLatency {
-            name: self.name.clone(),
+            name: self.log_name.instance.clone(),
             proc: self.proc_ns.snapshot(),
             push_wait: self.push_wait_ns.snapshot(),
             transit: self.transit_ns.snapshot(),
@@ -483,7 +488,10 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn probe_records_process_latency() {
-        let p = ElementProbe::new(String::from("slowelem0"));
+        let p = ElementProbe::new(crate::log::ElementLogName::new(
+            "slowelem",
+            String::from("slowelem0"),
+        ));
         // Record a few deliberate sleeps so the snapshot has a real distribution.
         for _ in 0..8 {
             let t0 = ElementProbe::mark();
@@ -505,7 +513,7 @@ mod tests {
     fn plain_probe_records_no_visits() {
         // The un-observed mint: recording is a no-op, so an untapped run keeps
         // nothing per frame.
-        let p = ElementProbe::new(String::from("x0"));
+        let p = ElementProbe::new(crate::log::ElementLogName::new("x", String::from("x0")));
         for i in 0..4 {
             p.record_visit(i, 10, Some(100 + i), 0);
         }
@@ -515,7 +523,8 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn journey_ring_keeps_the_newest_and_stays_bounded() {
-        let p = ElementProbe::with_journeys(String::from("x0"));
+        let p =
+            ElementProbe::with_journeys(crate::log::ElementLogName::new("x", String::from("x0")));
         for i in 0..(JOURNEY_RING as u64 * 2) {
             p.record_visit(i, i, Some(1_000 + i), 0);
         }
@@ -533,7 +542,8 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn a_visit_carries_the_push_wait_of_its_own_call() {
-        let p = ElementProbe::with_journeys(String::from("x0"));
+        let p =
+            ElementProbe::with_journeys(crate::log::ElementLogName::new("x", String::from("x0")));
         let t0 = ElementProbe::mark();
         p.add_push_wait(700);
         assert_eq!(p.record_proc_since(t0), 700, "the drained bank comes back");
@@ -552,8 +562,14 @@ mod tests {
 
     #[test]
     fn snapshot_all_skips_none() {
-        let probes: Vec<Probe> =
-            alloc::vec![None, Some(ElementProbe::new(String::from("a"))), None];
+        let probes: Vec<Probe> = alloc::vec![
+            None,
+            Some(ElementProbe::new(crate::log::ElementLogName::new(
+                "a",
+                String::from("a")
+            ))),
+            None
+        ];
         let rows = snapshot_all(&probes);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "a");

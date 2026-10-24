@@ -1098,8 +1098,9 @@ async fn run_rtsp_n(src: &mut RtspSrcN, out: &mut dyn MultiOutputSink) -> Result
                 let Some(backoff_ms) = retry.next_delay_ms(&src.reconnect) else {
                     return Err(e);
                 };
-                std::eprintln!(
-                    "rtspsrcn: session ended ({:?}); reconnect {}/{} after {}ms",
+                g2g_core::g2g_warn!(
+                    Target::category(LOG_CATEGORY),
+                    "session ended ({:?}), reconnect {}/{} after {}ms",
                     e,
                     retry.attempt,
                     src.reconnect.max_attempts,
@@ -1247,6 +1248,7 @@ async fn run_session(
     // access units until the first one or the decoder sees slices with no
     // parameter set ("non-existing PPS referenced") until the next IDR.
     let mut seen_keyframe = false;
+    let mut skipped_before_keyframe = 0u64;
     let mut origin_ns: Option<u64> = None;
     let limit = src.frame_limit;
 
@@ -1272,9 +1274,20 @@ async fn run_session(
             CodecItem::VideoFrame(vf) if vf.stream_id() == video_idx => {
                 if !seen_keyframe {
                     if !vf.is_random_access_point() {
+                        if skipped_before_keyframe == 0 {
+                            g2g_core::g2g_debug!(
+                                Target::category(LOG_CATEGORY),
+                                "dropping access units until the first keyframe"
+                            );
+                        }
+                        skipped_before_keyframe += 1;
                         continue;
                     }
                     seen_keyframe = true;
+                    g2g_core::g2g_debug!(
+                        Target::category(LOG_CATEGORY),
+                        "first keyframe after dropping {skipped_before_keyframe} access units"
+                    );
                 }
                 if vf.has_new_parameters() {
                     let refreshed = video_caps_for(&demuxed.streams()[video_idx], codec);

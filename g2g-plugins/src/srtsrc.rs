@@ -18,6 +18,7 @@ use alloc::string::{String, ToString};
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 
 use g2g_core::frame::Frame;
+use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
@@ -46,6 +47,7 @@ const ACK_INTERVAL_NS: u64 = 10_000_000;
 const TSBPD_WAKE_MS: u64 = 5;
 // libsrt's SRTO_PEERIDLETIMEO default
 const PEER_IDLE_TIMEOUT_NS: u64 = 5_000_000_000;
+const LOG_CATEGORY: &str = "srtsrc";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CallerEnd {
@@ -273,6 +275,10 @@ impl SourceLoop for SrtSrc {
                 let end = self
                     .receive_caller(&socket, &handshake, peer, out, &mut emitted)
                     .await?;
+                g2g_core::g2g_debug!(
+                    Target::category(LOG_CATEGORY),
+                    "caller {peer} ended: {end:?}"
+                );
                 match end {
                     CallerEnd::FrameLimit => break,
                     CallerEnd::Shutdown if !self.keep_listening => break,
@@ -389,7 +395,13 @@ impl SrtSrc {
                                     first_sequence,
                                     last_sequence,
                                     ..
-                                }) => receiver.on_drop_request(first_sequence, last_sequence),
+                                }) => {
+                                    g2g_core::g2g_debug!(
+                                        Target::category(LOG_CATEGORY),
+                                        "sender dropped seq {first_sequence}..={last_sequence}"
+                                    );
+                                    receiver.on_drop_request(first_sequence, last_sequence)
+                                }
                                 // Keepalive / handshake retries: ignored.
                                 _ => {}
                             }
@@ -417,6 +429,11 @@ impl SrtSrc {
             if now.saturating_sub(last_nack_ns) >= NACK_MIN_INTERVAL_NS {
                 let missing = receiver.missing();
                 if !missing.is_empty() {
+                    g2g_core::g2g_debug!(
+                        Target::category(LOG_CATEGORY),
+                        "requesting retransmission of {} lost packets",
+                        missing.len()
+                    );
                     let nak =
                         srt::build_control(&Control::Nak { loss: missing }, 0, peer_socket_id);
                     socket.send_to(&nak, peer).await.map_err(io_err)?;

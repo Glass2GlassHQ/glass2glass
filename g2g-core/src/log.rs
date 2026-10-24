@@ -236,6 +236,60 @@ impl LogSource for Target<'_> {
     }
 }
 
+// The name a runner logs an element instance's packet flow under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElementLogName {
+    pub category: &'static str,
+    pub category_override: Option<String>,
+    pub instance: String,
+}
+
+impl ElementLogName {
+    pub fn new(category: &'static str, instance: String) -> Self {
+        Self {
+            category,
+            category_override: None,
+            instance,
+        }
+    }
+}
+
+impl LogSource for ElementLogName {
+    fn log_category(&self) -> &'static str {
+        self.category
+    }
+    fn log_instance(&self) -> Option<&str> {
+        Some(&self.instance)
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.category_override.as_deref()
+    }
+}
+
+// Nanoseconds printed as gst's `h:mm:ss.nnnnnnnnn`, with an unset time as `99:99:99.999999999`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockTime(pub u64);
+
+impl core::fmt::Display for ClockTime {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        const NS_PER_SECOND: u64 = 1_000_000_000;
+        const SECONDS_PER_MINUTE: u64 = 60;
+        const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
+        if self.0 == crate::frame::FrameTiming::PTS_NONE {
+            return f.write_str("99:99:99.999999999");
+        }
+        let seconds = self.0 / NS_PER_SECOND;
+        write!(
+            f,
+            "{}:{:02}:{:02}.{:09}",
+            seconds / SECONDS_PER_HOUR,
+            (seconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE,
+            seconds % SECONDS_PER_MINUTE,
+            self.0 % NS_PER_SECOND,
+        )
+    }
+}
+
 /// Per-category instance counter, shared by every runner so an element is named
 /// and logged the same way whichever one drives it. Hands out
 /// `<category>N` names (the GStreamer `videotestsrc0` convention) and emits the
@@ -916,6 +970,9 @@ pub const CAPS_CATEGORY: &str = "caps";
 /// names the runner's own narration, notably which element instance raised the
 /// error that ended a run.
 pub const RUNTIME_CATEGORY: &str = "runtime";
+
+// The category a synchronizing sink's late drops and segment clips log under, gst's `basesink`.
+pub const PACING_CATEGORY: &str = "pacing";
 
 /// Name the element instance whose arm returned `err`, at error level (so it
 /// prints without `G2G_DEBUG`). The runners call this at the one point they pick

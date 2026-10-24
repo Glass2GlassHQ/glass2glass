@@ -32,6 +32,7 @@ use crate::element::{BoxFuture, DynAsyncElement};
 use crate::error::G2gError;
 use crate::graph::NodeId;
 use crate::link::LinkPolicy;
+use crate::log::ElementLogName;
 use crate::property::PropValue;
 use crate::runtime::channel::{
     advertise_orientation, bounded, link, LinkReceiver, LinkSender, ProducerEndpoint, Receiver,
@@ -42,6 +43,7 @@ use crate::runtime::graph_runner::{
     dead_directives, run_source, BranchMode, GraphCoordHandle, SinkArmIo, SourceArmIo,
     TransformArmIo,
 };
+use crate::runtime::instrument::ElementProbe;
 use crate::runtime::join::{select2, Either};
 use crate::runtime::mutation_error::{MutationError, MutationKind};
 use crate::runtime::progress::PipelineProgress;
@@ -1431,7 +1433,11 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
                 },
                 mode,
                 bus: self.bus.clone(),
-                probe: None,
+                // Names the packet log only: the run report leaves this element out.
+                probe: Some(ElementProbe::new(ElementLogName::new(
+                    element.log_category(),
+                    name.clone(),
+                ))),
                 control: None,
                 properties: Some(properties.clone()),
             };
@@ -1647,7 +1653,11 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             // no preroll for it to take and no state transition to gate on.
             state: None,
             progress: self.progress.clone(),
-            probe: None,
+            // Names the packet log only: the run report leaves this element out.
+            probe: Some(ElementProbe::new(ElementLogName::new(
+                element.log_category(),
+                name.clone(),
+            ))),
             control: None,
             properties: Some(properties.clone()),
         };
@@ -1833,6 +1843,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             bus: self.bus.clone(),
             progress: self.progress.clone(),
             segment: opening,
+            log_name: ElementLogName::new(source.log_category(), name.clone()),
         };
         let arm = (self.spawn.source)(source, io, done_tx);
         if self.arms.send(arm).await.is_err() {
@@ -1973,7 +1984,11 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
                 downstream_feasible: Some(CapsSet::one(out_caps[i].clone())),
                 mode,
                 bus: self.bus.clone(),
-                probe: None,
+                // Names the packet log only: the run report leaves this element out.
+                probe: Some(ElementProbe::new(ElementLogName::new(
+                    element.log_category(),
+                    name.clone(),
+                ))),
                 control: None,
                 properties: Some(properties.clone()),
             };
@@ -2159,6 +2174,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             bus: self.bus.clone(),
             progress: self.progress.clone(),
             segment: Segment::new(),
+            log_name: ElementLogName::new(source.log_category(), name.clone()),
         };
         let arm = (self.spawn.source)(source, io, done_tx);
         if self.arms.send(arm).await.is_err() {

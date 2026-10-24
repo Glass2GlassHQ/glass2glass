@@ -70,6 +70,7 @@ use crate::fanout::{
 use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::{Frame, PipelinePacket};
 use crate::graph::{FanOutPolicy, Graph, NodeId, NodeKind, ValidatedGraph};
+use crate::log::ElementLogName;
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::meta::MetaRequests;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
@@ -88,6 +89,7 @@ use crate::runtime::mutate::{
     lent_sink_arm, lent_source_arm, mutation_channel, spliced_arm, GraphMutator, Growth, Handback,
     LiveEdge, LiveNode, LiveTopology, MutationRequest, MutationService, MutationSpawn, PadAdd,
 };
+use crate::runtime::packet_log::log_received;
 use crate::runtime::progress::PipelineProgress;
 use crate::runtime::property_mailbox::{drain_properties, PropertyMailbox};
 use crate::runtime::runner::{
@@ -1618,7 +1620,8 @@ async fn prepare_graph<'a>(
             // this instance's own log lines and their filtering. Applied before
             // naming so the element's first lines already carry it; naming still
             // keys on the type category, so siblings keep counting `<type>N`.
-            if let Some(over) = vg.node_log_category(node).map(alloc::string::String::from) {
+            let category_override = vg.node_log_category(node).map(alloc::string::String::from);
+            if let Some(over) = category_override.clone() {
                 match vg.element_mut(node) {
                     Some(GraphNodeRef::Source(src)) => src.set_log_category(over),
                     Some(GraphNodeRef::Element(elem)) => elem.set_log_category(over),
@@ -1629,6 +1632,11 @@ async fn prepare_graph<'a>(
                 }
             }
             let name = namer.add(category, vg.node_name(node));
+            let log_name = ElementLogName {
+                category,
+                category_override,
+                instance: name.clone(),
+            };
             names[node.0 as usize] = name.clone();
             match vg.element_mut(node) {
                 Some(GraphNodeRef::Source(src)) => src.set_instance_name(name.clone()),
@@ -1660,9 +1668,9 @@ async fn prepare_graph<'a>(
                 // M851: only an observed run records per-frame journeys; the
                 // end-of-run report needs the histograms alone.
                 probes[node.0 as usize] = Some(if observer.is_some() {
-                    ElementProbe::with_journeys(name)
+                    ElementProbe::with_journeys(log_name)
                 } else {
-                    ElementProbe::new(name)
+                    ElementProbe::new(log_name)
                 });
             }
         }
@@ -2350,13 +2358,20 @@ fn plan_arms<'a>(
                 }
             }
             (NodeKind::Source, Some(GraphNodeRef::Source(source))) => ArmPlan::Source {
-                source,
                 io: SourceArmIo {
                     out_tx: out_txs.pop().expect("source output edge"),
                     bus: bus.cloned(),
                     progress: progress.cloned(),
                     segment: Segment::new(),
+                    log_name: ElementLogName {
+                        category: source.log_category(),
+                        category_override: vg
+                            .node_log_category(node)
+                            .map(alloc::string::String::from),
+                        instance: names[index].clone(),
+                    },
                 },
+                source,
                 done: live.as_mut().map(|topology| {
                     let (done_tx, done_rx) = bounded(1);
                     topology.nodes[index].done = Some(Handback::Source(done_rx));
@@ -4194,6 +4209,7 @@ pub(crate) struct SourceArmIo {
     /// for the source a run starts with; a replacement gets one whose `base`
     /// continues the running time its predecessor reached.
     pub(crate) segment: Segment,
+    pub(crate) log_name: ElementLogName,
 }
 
 pub(crate) async fn run_source(
@@ -4205,6 +4221,7 @@ pub(crate) async fn run_source(
         bus,
         progress,
         segment,
+        log_name,
     } = io;
     // M206: announce the stream start before any data, one per source, so an
     // application can bracket each stream's lifetime (StreamStart .. Eos).
@@ -4227,6 +4244,7 @@ pub(crate) async fn run_source(
         }
     }
     let mut adapter = SenderSink::new(out_tx);
+    adapter.log_pushes_as(log_name);
     // M81: open the stream with a SEGMENT ahead of the source's data, so every
     // downstream branch maps timestamps to running time from the first frame.
     let _ = adapter.push(PipelinePacket::Segment(segment)).await?;
@@ -4399,6 +4417,9 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
         } else {
             in_rx.recv().await
         };
+        if let (Some(probe), Some(packet)) = (&probe, &packet) {
+            log_received(probe.log_name(), packet);
+        }
         match packet {
             Some(PipelinePacket::Eos) => {
                 elem.process(PipelinePacket::Eos, &mut adapter).await?;
@@ -4677,6 +4698,9 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
         } else {
             in_rx.recv().await
         };
+        if let (Some(probe), Some(packet)) = (&probe, &packet) {
+            log_received(probe.log_name(), packet);
+        }
         match packet {
             // M360: discard stale pre-seek buffers while draining toward the
             // `Flush`; control packets fall through (the `Flush` ends drain).
@@ -4968,7 +4992,11 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
     let mut multi = MultiSenderSink::new(senders);
     multi.set_push_wait_probe(probe.clone());
     loop {
-        match in_rx.recv().await {
+        let packet = in_rx.recv().await;
+        if let (Some(probe), Some(packet)) = (&probe, &packet) {
+            log_received(probe.log_name(), packet);
+        }
+        match packet {
             Some(PipelinePacket::Eos) => {
                 demux.process(PipelinePacket::Eos, &mut multi).await?;
                 for port in 0..branch_count {
@@ -5334,6 +5362,9 @@ pub(crate) async fn fanin_sink_arm<E: MultiInputElement>(
             }
         };
         let pad = pad_rxs[slot].0;
+        if let Some(probe) = &probe {
+            log_received(probe.log_name(), &packet);
+        }
         match packet {
             PipelinePacket::Eos => {
                 session.process(pad, PipelinePacket::Eos, &mut null).await?;
@@ -5936,6 +5967,9 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
             }
         };
         let pad = pad_rxs[slot].0;
+        if let Some(probe) = &probe {
+            log_received(probe.log_name(), &packet);
+        }
         match packet {
             PipelinePacket::Eos => {
                 mux.process(pad, PipelinePacket::Eos, &mut adapter).await?;
@@ -6157,7 +6191,11 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
         next = (slot + 1) % input_count;
         let pad = pad_rxs[slot].0;
         // A closed channel with no `Eos` is an upstream end (as in `muxer_arm`).
-        match maybe.unwrap_or(PipelinePacket::Eos) {
+        let packet = maybe.unwrap_or(PipelinePacket::Eos);
+        if let Some(probe) = &probe {
+            log_received(probe.log_name(), &packet);
+        }
+        match packet {
             PipelinePacket::DataFrame(frame) => {
                 let transit_ns = pad_rxs[slot].1.pop_transit_ns();
                 if let (Some(p), Some(t)) = (probe.as_deref(), transit_ns) {

@@ -13,7 +13,6 @@
 //! padding handling, so a frame carried as a strided view is not what this sink
 //! takes (it needs one contiguous buffer).
 
-use core::fmt::Write as _;
 use core::future::Future;
 use core::pin::Pin;
 
@@ -25,7 +24,7 @@ use md5::Md5;
 use sha1::{Digest, Sha1};
 use sha2::{Sha256, Sha512};
 
-use g2g_core::log::{short_type_name, LogName, LogSource};
+use g2g_core::log::{short_type_name, ClockTime, LogName, LogSource};
 use g2g_core::{
     g2g_debug, AsyncElement, BusHandle, BusMessage, Caps, CapsConstraint, ConfigureOutcome,
     ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
@@ -36,10 +35,6 @@ use g2g_core::{
 pub(crate) const HASH_VALUES: &str = "md5 | sha1 | sha256 | sha512";
 /// gst `checksumsink`'s `hash` default.
 pub(crate) const DEFAULT_HASH: &str = "sha1";
-
-const NS_PER_SECOND: u64 = 1_000_000_000;
-const SECONDS_PER_MINUTE: u64 = 60;
-const MINUTES_PER_HOUR: u64 = 60;
 
 /// # Example
 ///
@@ -227,17 +222,7 @@ impl PadTemplates for ChecksumSink {
 
 /// One reported line: a pts in gst's `h:mm:ss.nnnnnnnnn` form, then the digest.
 pub fn checksum_line(pts_ns: u64, digest: String) -> String {
-    let seconds = pts_ns / NS_PER_SECOND;
-    let mut line = String::new();
-    let _ = write!(
-        line,
-        "{}:{:02}:{:02}.{:09} {digest}",
-        seconds / (SECONDS_PER_MINUTE * MINUTES_PER_HOUR),
-        (seconds / SECONDS_PER_MINUTE) % MINUTES_PER_HOUR,
-        seconds % SECONDS_PER_MINUTE,
-        pts_ns % NS_PER_SECOND,
-    );
-    line
+    alloc::format!("{} {digest}", ClockTime(pts_ns))
 }
 
 /// The lowercase hex digest of `bytes` under the named hash. An unknown name

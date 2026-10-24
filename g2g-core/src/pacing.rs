@@ -17,6 +17,7 @@
 use crate::clock::ClockSync;
 use crate::element::QosMessage;
 use crate::frame::FrameTiming;
+use crate::log::{ClockTime, Target, PACING_CATEGORY};
 use crate::property::{PropError, PropKind, PropValue, PropertySpec};
 use crate::qos::{upstream_report, QosTracker};
 use crate::segment::Segment;
@@ -108,6 +109,8 @@ pub struct PresentationPacer {
     /// Cleared by a `judge` that reaches no deadline (unpaced, unset PTS, or a
     /// clipped frame).
     last_deadline_ns: Option<u64>,
+    // Late drops since the last presented frame, so a run of them logs once at each end.
+    late_drops_in_a_row: u64,
 }
 
 /// GStreamer's `GstVideoSink` default.
@@ -246,6 +249,11 @@ impl PresentationPacer {
             return Pace::Now;
         };
         let Some(running_time) = self.running_time(pts_ns) else {
+            crate::g2g_log!(
+                Target::category(PACING_CATEGORY),
+                "clipping frame pts {} outside the segment",
+                ClockTime(pts_ns)
+            );
             return Pace::Drop;
         };
         let deadline = Self::due_at(
@@ -262,9 +270,27 @@ impl PresentationPacer {
         // posts the periodic running-stats report when the frame is on time and
         // the interval has elapsed.
         if let Some(q) = self.qos.judge_frame(deadline, now, running_time, presented) {
+            if self.late_drops_in_a_row == 0 {
+                crate::g2g_debug!(
+                    Target::category(PACING_CATEGORY),
+                    "dropping late frames from pts {}, {} past its deadline",
+                    ClockTime(pts_ns),
+                    ClockTime(now.saturating_sub(deadline))
+                );
+            }
+            self.late_drops_in_a_row += 1;
             self.pending_qos = Some(q);
             self.last_upstream_report_ns = Some(now);
             return Pace::Drop;
+        }
+        if self.late_drops_in_a_row > 0 {
+            crate::g2g_debug!(
+                Target::category(PACING_CATEGORY),
+                "presenting again at pts {} after dropping {} late frames",
+                ClockTime(pts_ns),
+                self.late_drops_in_a_row
+            );
+            self.late_drops_in_a_row = 0;
         }
         match self.last_upstream_report_ns {
             None => self.last_upstream_report_ns = Some(now),
