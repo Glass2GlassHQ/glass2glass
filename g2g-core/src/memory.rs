@@ -1352,7 +1352,7 @@ mod tests {
     fn refusing_a_device_frame_names_the_domain_that_arrived() {
         let _guard = crate::log::tests::GLOBAL_GUARD.lock();
         let logs = crate::log::RingSink::new(8);
-        crate::log::set_sink(alloc::boxed::Box::new(logs.clone()));
+        crate::log::set_sink(crate::log::tests::current_thread_only(logs.clone()));
 
         let domain = MemoryDomain::Cuda(OwnedCudaBuffer::new(
             0x1000,

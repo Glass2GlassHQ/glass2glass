@@ -1329,6 +1329,43 @@ pub(crate) mod tests {
     // Serializes the few tests that touch the process-global config / sink.
     pub(crate) static GLOBAL_GUARD: Mutex<()> = Mutex::new(());
 
+    extern crate std;
+
+    // solver and runner tests on other threads log errors through the same global sink
+    struct CurrentThreadSink<S> {
+        thread: std::thread::ThreadId,
+        sink: S,
+    }
+    impl<S: LogSink> LogSink for CurrentThreadSink<S> {
+        fn emit(&self, record: &LogRecord<'_>) {
+            if std::thread::current().id() == self.thread {
+                self.sink.emit(record);
+            }
+        }
+    }
+
+    pub(crate) fn current_thread_only(sink: impl LogSink + 'static) -> Box<dyn LogSink> {
+        Box::new(CurrentThreadSink {
+            thread: std::thread::current().id(),
+            sink,
+        })
+    }
+
+    #[test]
+    fn a_current_thread_sink_ignores_records_from_other_threads() {
+        let _g = GLOBAL_GUARD.lock();
+        reset();
+        let ring = RingSink::new(4);
+        set_sink(current_thread_only(ring.clone()));
+        std::thread::spawn(|| g2g_error!(Target::category("other"), "another test"))
+            .join()
+            .unwrap();
+        g2g_error!(Target::category("this"), "this test");
+        let categories: Vec<String> = ring.snapshot().into_iter().map(|r| r.category).collect();
+        assert_eq!(categories, ["this"]);
+        reset();
+    }
+
     // Logs from inside its own `emit`, as a sink that fails and reports it would.
     struct ReentrantSink(Arc<Mutex<Vec<CapturedRecord>>>);
     impl LogSink for ReentrantSink {
@@ -1350,7 +1387,7 @@ pub(crate) mod tests {
         let _g = GLOBAL_GUARD.lock();
         reset();
         let captured = Arc::new(Mutex::new(Vec::new()));
-        set_sink(Box::new(ReentrantSink(captured.clone())));
+        set_sink(current_thread_only(ReentrantSink(captured.clone())));
         emit("outer", None, LogLevel::Error, format_args!("first"));
         let categories: Vec<String> = captured.lock().iter().map(|r| r.1.clone()).collect();
         assert_eq!(categories, ["inner", "outer"]);
@@ -1362,7 +1399,7 @@ pub(crate) mod tests {
         let _g = GLOBAL_GUARD.lock();
         reset();
         let captured = Arc::new(Mutex::new(Vec::new()));
-        set_sink(Box::new(CaptureSink(captured.clone())));
+        set_sink(current_thread_only(CaptureSink(captured.clone())));
         configure("*:warning,opusenc:debug");
 
         let enc = Target::named("opusenc", "opusenc0");
@@ -1395,8 +1432,8 @@ pub(crate) mod tests {
         reset();
         let primary = RingSink::new(4);
         let subscriber = RingSink::new(4);
-        set_sink(Box::new(primary.clone()));
-        let id = add_sink(Box::new(subscriber.clone()));
+        set_sink(current_thread_only(primary.clone()));
+        let id = add_sink(current_thread_only(subscriber.clone()));
 
         g2g_error!(Target::category("demo"), "seen by both");
         assert_eq!(primary.len(), 1);
@@ -1433,7 +1470,7 @@ pub(crate) mod tests {
         let _g = GLOBAL_GUARD.lock();
         reset();
         let captured = Arc::new(Mutex::new(Vec::new()));
-        set_sink(Box::new(CaptureSink(captured.clone())));
+        set_sink(current_thread_only(CaptureSink(captured.clone())));
         // The type category is off; only the override (and a glob covering it)
         // is enabled.
         configure("*:off,flip-a:debug,*-glob:info");
@@ -1477,7 +1514,7 @@ pub(crate) mod tests {
                 self.0.lock().push(r.to_owned_record());
             }
         }
-        set_sink(Box::new(OwningSink(owned.clone())));
+        set_sink(current_thread_only(OwningSink(owned.clone())));
         set_time_source(|| 42);
         configure("*:debug");
 
@@ -1515,7 +1552,7 @@ pub(crate) mod tests {
         let _g = GLOBAL_GUARD.lock();
         reset();
         let ring = RingSink::new(3);
-        set_sink(Box::new(ring.clone()));
+        set_sink(current_thread_only(ring.clone()));
         configure("*:debug");
 
         for i in 0..5 {

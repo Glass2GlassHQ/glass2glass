@@ -863,6 +863,7 @@ fn explain(registry: &Registry, e: &ParseError) -> String {
             element,
             key,
             value,
+            ..
         } => {
             format!("`{element}` property `{key}` rejects `{value}`; check its type with `g2g-inspect {element}`")
         }

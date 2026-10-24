@@ -5,6 +5,8 @@
 //! The assertions are on the composited pixels, so a property that parsed but did
 //! not reach the blend fails the test.
 
+#![cfg(feature = "std")]
+
 use core::future::Future;
 use core::pin::Pin;
 use std::sync::{Mutex, OnceLock};
@@ -227,6 +229,7 @@ fn a_pad_the_compositor_does_not_have_is_rejected() {
             element: "compositor".into(),
             key: "sink4-xpos".into(),
             value: "4".into(),
+            range: None,
         }
     );
 }

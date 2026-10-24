@@ -251,7 +251,7 @@ const REQUESTED_DIMENSION: Dim = Dim::Range {
     max: MAX_REQUESTED_DIMENSION,
 };
 const REQUESTED_FRAMERATE: Rate = Rate::Range {
-    min_q16: 1,
+    min_q16: 0,
     max_q16: MAX_REQUESTED_FPS << 16,
 };
 
@@ -342,6 +342,12 @@ impl SourceLoop for VideoTestSrc {
 
             let fps_q16 = u64::from(self.framerate_q16);
             let pts_step_ns: u64 = (1_000_000_000u64 << 16).checked_div(fps_q16).unwrap_or(0);
+            // a 0/1 framerate is a still image, which gst sends as one frame
+            let frame_limit = if fps_q16 == 0 {
+                self.target_frames.min(1)
+            } else {
+                self.target_frames
+            };
 
             let bytes_per_frame = (self.width as usize)
                 .checked_mul(self.height as usize)
@@ -355,7 +361,7 @@ impl SourceLoop for VideoTestSrc {
 
             let mut seq = 0u64;
             let mut pushed = 0u64;
-            while seq < self.target_frames {
+            while seq < frame_limit {
                 let domain = if let Some(pool) = &self.pool {
                     let mut buf = pool.acquire().await;
                     if buf.len() < bytes_per_frame {
@@ -489,7 +495,8 @@ impl SourceLoop for VideoTestSrc {
                 }
                 let framerate_q16 =
                     framerate_q16_from_fraction(n as u32, d as u32).ok_or(PropError::Value)?;
-                if framerate_q16 > MAX_REQUESTED_FPS << 16 {
+                let rounds_to_still = framerate_q16 == 0 && n != 0;
+                if rounds_to_still || framerate_q16 > MAX_REQUESTED_FPS << 16 {
                     return Err(PropError::Value);
                 }
                 self.framerate_q16 = framerate_q16;
@@ -536,7 +543,7 @@ static VIDEOTESTSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "framerate",
         PropKind::Fraction,
-        "frames per second (e.g. 30/1), at most 1000/1",
+        "frames per second (e.g. 30/1), at most 1000/1, 0/1 sends one still frame",
     )
     .with_default("30/1"),
 ];
@@ -891,5 +898,42 @@ mod tests {
         ] {
             assert_eq!(pattern_from_str(pattern_to_str(pattern)), Some(pattern));
         }
+    }
+
+    #[test]
+    fn a_zero_framerate_sends_one_still_frame() {
+        const SIDE: u32 = 2;
+        const FPS: u32 = 30;
+        const REQUESTED_FRAMES: i64 = 3;
+        let mut src = VideoTestSrc::new(SIDE, SIDE, FPS, 0);
+        src.set_property("num-buffers", PropValue::Int(REQUESTED_FRAMES))
+            .unwrap();
+        // one step finer than Q16 can store would silently become a still image
+        assert_eq!(
+            src.set_property("framerate", PropValue::Fraction(1, (1 << 16) + 1)),
+            Err(PropError::Value)
+        );
+        src.set_property("framerate", PropValue::Fraction(0, 1))
+            .unwrap();
+        assert_eq!(
+            src.get_property("framerate"),
+            Some(PropValue::Fraction(0, 1))
+        );
+        let caps = src.caps();
+        src.configure_pipeline(&caps).unwrap();
+        let mut sink = crate::testutil::CollectSink::default();
+        let pushed = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(src.run(&mut sink))
+            .unwrap();
+        assert_eq!(pushed, 1);
+        let [PipelinePacket::DataFrame(frame), PipelinePacket::Eos] = sink.packets.as_slice()
+        else {
+            panic!("expected one frame then EOS, got {:?}", sink.packets);
+        };
+        assert_eq!(frame.timing.pts_ns, 0);
+        assert_eq!(frame.timing.duration_ns, 0, "a still frame has no duration");
     }
 }

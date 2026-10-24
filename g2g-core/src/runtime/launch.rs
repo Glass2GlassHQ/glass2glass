@@ -116,6 +116,7 @@ pub enum ParseError {
         element: String,
         key: String,
         value: String,
+        range: Option<(&'static str, &'static str)>,
     },
     /// The value names no declared choice of an enum / flag property. `value` is
     /// the offending nick (one entry of a `+`-joined set), or the whole value when
@@ -285,8 +286,12 @@ impl core::fmt::Display for ParseError {
                 element,
                 key,
                 value,
+                range,
             } => {
                 write!(f, "{element}: invalid value '{value}' for property '{key}'")?;
+                if let Some((min, max)) = range {
+                    write!(f, " (range {min} - {max})")?;
+                }
                 // Inline caps become a `capsfilter` (key `caps`); a gst dev often
                 // reaches for range / list / feature syntax g2g's launch parser
                 // does not accept, and the bare "invalid value" hides why.
@@ -834,12 +839,13 @@ pub fn apply_props<T: PropTarget>(
     props: &[(String, String)],
 ) -> Result<(), ParseError> {
     for (key, raw) in props {
+        let spec = target.specs().iter().find(|s| s.name == key).copied();
         let bad_value = || ParseError::BadValue {
             element: name.into(),
             key: key.clone(),
             value: raw.clone(),
+            range: spec.and_then(|spec| spec.range),
         };
-        let spec = target.specs().iter().find(|s| s.name == key).copied();
         let value = match spec {
             Some(spec) => spec.parse_value(raw).map_err(|e| match e {
                 ValueError::Kind(_) => bad_value(),
@@ -1167,6 +1173,7 @@ fn keyword_stream_index(spec: &ElementSpec, key: &str) -> Result<Option<usize>, 
         element: spec.name.clone(),
         key: key.to_string(),
         value: text.to_string(),
+        range: None,
     };
     let index: i32 = text.parse().map_err(|_| bad_value())?;
     if index == -1 {
@@ -2405,6 +2412,7 @@ fn keyword_bool(spec: &ElementSpec, key: &str, default: bool) -> Result<bool, Pa
             element: spec.name.clone(),
             key: key.to_string(),
             value: text.to_string(),
+            range: None,
         }),
     }
 }
@@ -2419,6 +2427,7 @@ fn keyword_uint(spec: &ElementSpec, key: &str, default: u64) -> Result<u64, Pars
         element: spec.name.clone(),
         key: key.to_string(),
         value: text.to_string(),
+        range: None,
     })
 }
 
@@ -2570,6 +2579,7 @@ fn fallbacksrc_settings<'a>(
             element: spec.name.clone(),
             key: "enable-video".to_string(),
             value: "false".to_string(),
+            range: None,
         });
     }
     // Without a registered handle a held source could never be released, so the
@@ -4646,6 +4656,7 @@ mod tests {
             element: "capsfilter".to_string(),
             key: "caps".to_string(),
             value: "video/x-raw,width=[1,1920]".to_string(),
+            range: None,
         };
         let msg = alloc::format!("{e}");
         assert!(msg.contains("ranges"), "caps range hint present: {msg}");
@@ -4654,6 +4665,7 @@ mod tests {
             element: "videobox".to_string(),
             key: "top".to_string(),
             value: "abc".to_string(),
+            range: None,
         };
         assert!(!alloc::format!("{plain}").contains("ranges"));
     }

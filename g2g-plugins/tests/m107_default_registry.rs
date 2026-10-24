@@ -7,7 +7,7 @@
 //! with `cargo test -p g2g-plugins --features std`.
 #![cfg(feature = "std")]
 
-use g2g_core::runtime::{parse_launch, run_graph};
+use g2g_core::runtime::{parse_launch, run_graph, SourceLoop};
 use g2g_core::{PipelineClock, PropValue, RawVideoFormat};
 use g2g_plugins::registry::default_registry;
 
@@ -79,6 +79,47 @@ async fn inline_caps_filter_parses_and_runs() {
     assert_eq!(
         stats.frames_consumed, 3,
         "frames pass the caps filter to the sink"
+    );
+}
+
+#[tokio::test]
+async fn a_zero_framerate_caps_filter_runs_one_still_frame() {
+    let reg = default_registry();
+    let graph = parse_launch(
+        &reg,
+        "videotestsrc num-buffers=3 ! video/x-raw,framerate=0/1 ! fakesink",
+    )
+    .expect("zero framerate pipeline parses");
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("zero framerate pipeline runs");
+    assert_eq!(
+        stats.frames_consumed, 1,
+        "gst sends a 0/1 stream as one frame"
+    );
+}
+
+#[test]
+fn an_out_of_range_value_names_the_declared_range() {
+    let source = g2g_plugins::videotestsrc::VideoTestSrc::new(1, 1, 1, 1);
+    let (min, max) = source
+        .properties()
+        .iter()
+        .find(|spec| spec.name == "width")
+        .and_then(|spec| spec.range)
+        .expect("width declares a range");
+    let past_max = max.parse::<u64>().unwrap() + 1;
+    let error = parse_launch(
+        &default_registry(),
+        &format!("videotestsrc width={past_max} ! fakesink"),
+    )
+    .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.ends_with(&format!(
+            "invalid value '{past_max}' for property 'width' (range {min} - {max})"
+        )),
+        "{message}"
     );
 }
 

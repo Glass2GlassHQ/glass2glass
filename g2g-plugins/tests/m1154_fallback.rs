@@ -305,6 +305,7 @@ fn fallbacksrc_rejects_a_non_boolean_enable_flag() {
             element: "fallbacksrc".to_string(),
             key: "enable-audio".to_string(),
             value: "maybe".to_string(),
+            range: None,
         }
     );
 }
@@ -396,6 +397,7 @@ async fn timeout_reaches_the_switch() {
             element: "fallbackswitch".to_string(),
             key: "timeout".to_string(),
             value: "-1".to_string(),
+            range: None,
         }
     );
 }

@@ -4025,7 +4025,7 @@ mod tests {
     fn an_alias_falling_back_to_fakesink_warns() {
         let _guard = crate::log::tests::GLOBAL_GUARD.lock();
         let logs = crate::log::RingSink::new(64);
-        crate::log::set_sink(alloc::boxed::Box::new(logs.clone()));
+        crate::log::set_sink(crate::log::tests::current_thread_only(logs.clone()));
         crate::log::set_default_level(crate::log::LogLevel::Warn);
         const UNBUILT_SINK: &str = "unbuiltsink";
         let mut reg = Registry::new();
@@ -4035,22 +4035,13 @@ mod tests {
         reg.register_launch(named_sink("fakesink"));
         reg.register_alias("autosink", &["displaysink", UNBUILT_SINK, "fakesink"]);
 
-        // other tests log caps narration through the same global sink meanwhile
-        let registry_records = || {
-            let category = crate::log::short_type_name::<Registry>();
-            let records = logs.snapshot();
-            records
-                .into_iter()
-                .filter(|record| record.category == category)
-                .collect::<Vec<_>>()
-        };
         assert!(reg.make_element("fakesink").is_some());
         assert!(
-            registry_records().is_empty(),
+            logs.snapshot().is_empty(),
             "naming fakesink outright is not a fallback"
         );
         assert!(reg.make_element("autosink").is_some());
-        let records = registry_records();
+        let records = logs.snapshot();
         crate::log::reset();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].level, crate::log::LogLevel::Warn);
