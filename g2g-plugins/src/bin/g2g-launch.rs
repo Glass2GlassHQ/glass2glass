@@ -102,6 +102,14 @@ use g2g_plugins::registry::default_registry;
 #[cfg(feature = "multi-thread")]
 use g2g_plugins::{PinnedThreadSpawner, TokioThreadSpawner};
 
+macro_rules! print_stdout {
+    ($($arg:tt)*) => { write_stdout(format_args!($($arg)*)) };
+}
+
+macro_rules! println_stdout {
+    ($($arg:tt)*) => { write_stdout(format_args!("{}\n", format_args!($($arg)*))) };
+}
+
 // Steady-state link depth. Matches the integration-test default; small enough to
 // keep latency low without starving the source (see design/README.md on
 // link_capacity dominating glass-to-glass latency).
@@ -481,7 +489,7 @@ fn print_validate_json(reg: &Registry, pipeline: &str) -> i32 {
         .build()
         .expect("build tokio runtime");
     let value = rt.block_on(g2g_plugins::toolingjson::validate_json(reg, pipeline));
-    println!("{value}");
+    println_stdout!("{value}");
     if value["ok"].as_bool().unwrap_or(false) {
         0
     } else {
@@ -504,7 +512,7 @@ fn print_run_json(reg: &Registry, pipeline: &str) -> i32 {
         .build()
         .expect("build tokio runtime");
     let value = rt.block_on(g2g_plugins::toolingjson::observed_graph_json(reg, pipeline));
-    println!("{value}");
+    println_stdout!("{value}");
     if value["ok"].as_bool().unwrap_or(false) {
         0
     } else {
@@ -519,17 +527,15 @@ fn print_run_json(_reg: &Registry, _pipeline: &str) -> i32 {
 }
 
 fn main() {
-    #[cfg(unix)]
-    end_quietly_on_closed_stdout();
     // Honor G2G_DEBUG (the GST_DEBUG analog): install the stderr log sink and
     // apply the category thresholds before the pipeline runs.
     g2g_core::log::init_from_env();
 
     let (opts, tokens) = parse_opts(std::env::args().skip(1));
     if opts.help {
-        println!("{USAGE}");
-        println!("{SEEK_HELP}");
-        println!("{SEE_ALSO}");
+        println_stdout!("{USAGE}");
+        println_stdout!("{SEEK_HELP}");
+        println_stdout!("{SEE_ALSO}");
         return;
     }
     let seek_ns = match opts.seek_seconds.as_deref().map(seek_target_ns).transpose() {
@@ -612,7 +618,7 @@ fn main() {
             .build()
             .expect("build tokio runtime");
         match rt.block_on(g2g_core::runtime::negotiate_graph(graph)) {
-            Ok((vg, caps, memory)) => print!(
+            Ok((vg, caps, memory)) => print_stdout!(
                 "{}",
                 vg.to_dot(
                     "pipeline",
@@ -632,7 +638,7 @@ fn main() {
                         process::exit(1);
                     }
                 };
-                print!(
+                print_stdout!(
                     "{}",
                     graph.to_dot(
                         "pipeline",
@@ -657,7 +663,7 @@ fn main() {
         match rt.block_on(g2g_core::runtime::negotiate_graph(graph)) {
             Ok((vg, caps, memory)) => {
                 let plan = g2g_core::runtime::copy_plan(&vg, &caps, &memory);
-                print!("{}", plan.to_report());
+                print_stdout!("{}", plan.to_report());
             }
             Err(err) => {
                 eprintln!("g2g-launch: negotiation failed ({err:?}); no copy plan");
@@ -780,7 +786,7 @@ fn main() {
     }
 
     if !opts.quiet {
-        println!("Setting pipeline to PLAYING ...");
+        println_stdout!("Setting pipeline to PLAYING ...");
     }
     // The auto-plug fallback (M1023). A decoder the search picked can turn out
     // not to decode this stream, and the run dies where another decoder would
@@ -954,13 +960,20 @@ fn main() {
     }
 }
 
-// Rust ignores SIGPIPE, so a write to a closed stdout (`| head`) panics instead of ending the process
-#[cfg(unix)]
-fn end_quietly_on_closed_stdout() {
-    // SAFETY: runs first in main, before any other thread exists, and SIG_DFL is a valid disposition
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+// SIGPIPE stays ignored for the sockets, so a closed stdout (`| head`) ends the run here as gst-launch does
+fn write_stdout(text: std::fmt::Arguments) {
+    let Err(err) = std::io::stdout().write_fmt(text) else {
+        return;
+    };
+    #[cfg(unix)]
+    if err.kind() == std::io::ErrorKind::BrokenPipe {
+        // SAFETY: SIG_DFL is a valid disposition and raise signals only this process
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            libc::raise(libc::SIGPIPE);
+        }
     }
+    panic!("failed printing to stdout: {err}");
 }
 
 fn seek_target_ns(seconds: &str) -> Result<u64, String> {
@@ -990,7 +1003,7 @@ fn handle_bus_message(message: BusMessage, verbose: bool, failed: &mut Option<St
     match message {
         BusMessage::ElementError { element, .. } => *failed = Some(element),
         BusMessage::Checksum { pts_ns, digest, .. } => {
-            println!(
+            println_stdout!(
                 "{}",
                 g2g_plugins::checksumsink::checksum_line(pts_ns, digest)
             );
@@ -1041,16 +1054,16 @@ fn dump_flight_recording(recorder: &FlightRecorder, dir: &str) {
 /// wall-clock throughput this run achieved, and for each presenting sink the
 /// rate frames actually reached the display.
 fn print_run_summary(stats: &g2g_core::runtime::RunStats, elapsed: f64) {
-    print!("{}", stats.report());
+    print_stdout!("{}", stats.report());
     if elapsed > 0.0 {
-        println!(
+        println_stdout!(
             "  run:     {:.2} s wall, {:.1} fps",
             elapsed,
             stats.frames_consumed as f64 / elapsed
         );
         for e in &stats.per_element {
             if let Some(p) = e.presentation {
-                println!(
+                println_stdout!(
                     "  display: {:<16} {:.1} fps presented",
                     e.name,
                     p.presented as f64 / elapsed
@@ -1109,7 +1122,7 @@ fn run_dashboard(
             // Show a dialable URL: for an all-interfaces bind, loopback is the
             // local one to open (the machine's routable IP reaches it too).
             let shown = if host == "0.0.0.0" || host == "::" { "127.0.0.1" } else { host };
-            println!("dashboard: http://{shown}:{port}  (bound {host}, pipeline running, Ctrl-C to stop)");
+            println_stdout!("dashboard: http://{shown}:{port}  (bound {host}, pipeline running, Ctrl-C to stop)");
         }
 
         // A bind error ends the server before the run, and we surface it.
@@ -1260,7 +1273,7 @@ fn run_tui(
         }
         None => {
             if !quiet {
-                println!("stopped after {:.2} s", started.elapsed().as_secs_f64());
+                println_stdout!("stopped after {:.2} s", started.elapsed().as_secs_f64());
             }
         }
     }
