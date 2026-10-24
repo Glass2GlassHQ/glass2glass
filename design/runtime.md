@@ -586,7 +586,13 @@ start until then. `tsdemux` holds every PID's units while a seek waits for the s
 start, until each PMT stream has shown a stamped unit (or EOS, or 5 MB, ffmpeg's
 probesize), and counts from the earliest of those first stamps, so a file whose audio
 starts before its video seeks as ffmpeg does. `Mp4Src` counts from the first sample, `Mp4Demux` from the later of
-the edit-list start and the first sample. Positions use the same origin. Every segment
+the edit-list start and the first sample. Positions use the same origin. Until a
+seek, a unit presenting before the segment start or the stream start lowers both, and
+the demuxer sends the lowered segment again on every port that opened, as
+`matroskademux` does. `tsdemux` compares by pts, so its opening at the first DTS stays.
+`PsDemuxN` lowers its first-DTS base where gst's `mpegpsdemux` opens at the first SCR.
+`Mp4DemuxN` lowers a port's start when a later fragment carries an earlier frame. A
+seek's segment and the one kept across a source restart are never lowered. Every segment
 a demuxer or `Mp4Src` sends has `time` set to its start minus the stream start, so the
 sink arm's `Segment::to_stream_time` publishes a position that a seek takes back to the
 same frame, as GStreamer's `matroskademux` does. `tsdemux` opens at the first DTS, so a

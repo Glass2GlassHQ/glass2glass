@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1883: the mkv, flv, TS, PS and fragmented-MP4 demuxers lower their segment for a unit presenting before it, as gst's `matroskademux` does, where they clipped it.
 - M1882: the HLS probe and `hlssrc` fetch only the `#EXT-X-MAP` byte range of a single-file CMAF variant.
 - M1881: `flvmux` ends the file with the last tag's size, so gst's `flvdemux` keeps the last frame.
 - M1880: `aacparse` drops LOAS frames until one carries a config and fails at end of stream when none did, as gst's does.
