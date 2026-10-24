@@ -7,3 +7,4 @@
 # a break to a deliberate act during that window, and it is the raw material for
 # the release notes when the bump ships.
 enum_struct_variant_field_added: field input of variant NegotiationFailure::NoOutputForInput
+enum_struct_variant_field_added: field range of variant ParseError::BadValue

@@ -24,6 +24,10 @@ zero-cost way `latency()` defaults to zero, so the baseline pays nothing and an
 element opts in only by overriding them. This is the GObject-property analog. The
 builders stay the type-checked path and this is the string-keyed one.
 
+A launch value the element rejects fails the parse with `ParseError::BadValue`,
+which carries the `PropertySpec` range when the spec declares one, so the message
+reads `invalid value '100000' for property 'width' (range 1 - 16384)`.
+
 ## By-name construction and introspection
 
 `Registry` (`std`) registers a transform or sink under a name through

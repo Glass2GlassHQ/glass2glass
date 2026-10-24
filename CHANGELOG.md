@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1891: videotestsrc sends one still frame at `framerate=0/1` as gst does, an out-of-range property value names the property's declared range, and g2g-core log-capture tests ignore records from other test threads.
 - M1889: a failed negotiation names the field that blocks it with both sides' values, `g2g-inspect` prints caps as gst strings, and the `auto*sink` fallback says which sinks were skipped and why.
 - M1888: `AUTHORING.md` opens with a complete element, compiled and run as a doc test, and documents negotiation through `caps_constraint_as_*`, and the README installs `g2g-inspect` and lists libxkbcommon.
 
