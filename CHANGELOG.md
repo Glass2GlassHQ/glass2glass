@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1892: a caps range left open after negotiation fixates to the value nearest the source's default, so videotestsrc through `width=[100,200]` gives 200 as gst does.
 - M1891: videotestsrc sends one still frame at `framerate=0/1` as gst does, an out-of-range property value names the property's declared range, and g2g-core log-capture tests ignore records from other test threads.
 - M1890: rustdoc and `g2g-launch --help` no longer carry internal milestone tags.
 - M1889: a failed negotiation names the field that blocks it with both sides' values, `g2g-inspect` prints caps as gst strings, and the `auto*sink` fallback says which sinks were skipped and why.

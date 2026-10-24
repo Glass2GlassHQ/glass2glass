@@ -139,6 +139,16 @@ When some element on a linear chain declares costs, `solve_linear_preferred` /
 a per-link DP, ties breaking to the greedy first-fixable pick; undeclared
 chains and non-linear graphs fixate exactly as before.
 
+A range that survives to fixation takes the value nearest a per-edge target,
+clamped into the range, as gst's per-element fixate does with
+`gst_structure_fixate_field_nearest_int`. A producer whose first alternative is
+fully fixed sets the target on its output edges. An identity transform, a
+broadcast tee or a following muxer passes on its input edge's first fixation,
+and a derived transform passes on its derived output for that input. The range
+minimum stays a later candidate, so backtracking reaches every assignment it
+reached before. An edge with no target fixates a range to its minimum, which is
+what gst's default `gst_value_fixate` does too.
+
 ```rust
 pub enum NegotiationFailure {
     EmptyLink { upstream: ElementId, downstream: ElementId, missed: CapsSet },
