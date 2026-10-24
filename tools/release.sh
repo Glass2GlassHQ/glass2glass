@@ -79,6 +79,8 @@ cmd_bump() {
     current=$(workspace_version)
     # only the workspace version and the g2g-* path dependencies, never a third-party pin
     sed -i -E "/^(version|g2g-[a-z]+) = /s/\"$current\"/\"$next\"/" Cargo.toml g2g-plugins/Cargo.toml
+    # the default user-agent property shows the version on the element cards
+    sed -i "s|<code>g2g/$current</code>|<code>g2g/$next</code>|" docs/elements.html
     cargo update -q --workspace
     tools/api-breaks.sh record
     git commit -q -am "rev to $next"
