@@ -856,6 +856,19 @@ jobs:
       - name: build + run the C example
         run: make -C examples/g2g-c-example run
 
+  # Runs the README quick start against this checkout in a container with only what the README installs.
+  readme-quickstart:
+    name: README quick start (clean container)
+    runs-on: ubuntu-26.04
+    container: rust:1
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # the checkout's rust-toolchain.toml otherwise makes rustup download stable
+      - run: echo "RUSTUP_TOOLCHAIN=$RUST_VERSION" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+      - run: tools/readme-quickstart-check.sh
+
   # Conformance matrix (validation-first, M614/M615/M619): run the resource-owning
   # conformance oracles against a real ffmpeg peer, accumulating peer-tagged
   # `Oracle` evidence in a shared log ($G2G_CONFORMANCE_LOG), then publish the

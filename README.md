@@ -40,6 +40,7 @@ only the published crates.
 
 A complete program:
 
+<!-- quickstart-check: Cargo.toml -->
 ```toml
 # Cargo.toml
 [dependencies]
@@ -51,6 +52,7 @@ g2g-plugins = { version = "0.9", features = ["std", "wayland-sink"] }
 `wayland-sink` links the Wayland and xkbcommon system libraries. Install the
 packages in [System dependencies](#system-dependencies) first.
 
+<!-- quickstart-check: main.rs -->
 ```rust
 // src/main.rs
 use g2g_core::runtime::{parse_launch, run_graph, LatencyProfile};
@@ -81,6 +83,7 @@ the end and shows nothing.
 To run pipelines without writing a program, install the launcher and the
 element inspector:
 
+<!-- quickstart-check: tools -->
 ```sh
 cargo install g2g-plugins --features std,wayland-sink --bin g2g-launch --bin g2g-inspect
 g2g-launch "videotestsrc num-buffers=90 pattern=ball ! videoconvert ! autovideosink"
@@ -129,6 +132,7 @@ The roadmap for `std` transports and a QNX Screen sink is in
 Many `gst-launch-1.0` lines run unchanged through `g2g-launch` (installed in the
 [quick start](#quick-start)):
 
+<!-- quickstart-check: migrate -->
 ```sh
 g2g-launch "videotestsrc num-buffers=30 ! videoconvert ! fakesink"
 ```
