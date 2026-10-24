@@ -112,7 +112,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 license = "MPL-2.0"
 # The host-side floor. The embedded-facing crates (g2g-core, g2g-mcu, g2g-mcugen,
@@ -127,10 +127,10 @@ repository = "https://github.com/boxerab/glass2glass"
 # in the member manifests. g2g-core's `default = []` is the heap-free baseline,
 # so `default-features = false` here keeps that subset the shared starting point.
 [workspace.dependencies]
-g2g-core = { version = "0.10.0", path = "g2g-core", default-features = false }
-g2g-plugins = { version = "0.10.0", path = "g2g-plugins" }
-g2g-ml = { version = "0.10.0", path = "g2g-ml", default-features = false }
-g2g-mcu = { version = "0.10.0", path = "g2g-mcu", default-features = false }
+g2g-core = { version = "0.11.0", path = "g2g-core", default-features = false }
+g2g-plugins = { version = "0.11.0", path = "g2g-plugins" }
+g2g-ml = { version = "0.11.0", path = "g2g-ml", default-features = false }
+g2g-mcu = { version = "0.11.0", path = "g2g-mcu", default-features = false }
 
 # cros-libva 0.0.12 misses two VP9 encode fields libva 2.23 added, and cros-codecs pins that exact version
 [patch.crates-io]
