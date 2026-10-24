@@ -20,7 +20,7 @@ GStreamer to **g2g**. It assumes familiarity with GStreamer (`gst-launch-1.0`,
 | Introspection | `gst-inspect-1.0` | `g2g-inspect` ([g2g-plugins/src/bin/g2g-inspect.rs](g2g-plugins/src/bin/g2g-inspect.rs)) |
 | Media discovery | `gst-discoverer-1.0` | `g2g-discover` ([g2g-plugins/src/bin/g2g-discover.rs](g2g-plugins/src/bin/g2g-discover.rs)) |
 | Element | `GstElement` (GObject, runtime) | a Rust type implementing `AsyncElement` / `SourceLoop` / `MultiInputElement` |
-| Pads / caps | `GstPad`, `GstCaps` strings | typed `Caps` enum + `intercept_caps`/negotiation |
+| Pads / caps | `GstPad`, `GstCaps` strings | typed `Caps` enum, negotiated from each element's `CapsConstraint` |
 | Pipeline object | `GstPipeline` | `Graph` + `run_graph` |
 | Bus | `GstBus` messages | `Bus` / `BusMessage` |
 | Plugins | scanned `.so` from a plugin path | Rust crates that call `Registry::register_*` (build time), or dynamic `.so` via `declare_plugin!` + `--plugin` / `$G2G_PLUGIN_PATH` (§7c) |
@@ -544,16 +544,23 @@ Method mapping (transform):
 
 | GStreamer vmethod | `AsyncElement` method |
 | :--- | :--- |
-| `set_caps` / caps query | `intercept_caps` (negotiate) |
-| `start` / pool setup | `configure_pipeline` (fixed caps in) |
+| `transform_caps` / `accept_caps` / caps query | `caps_constraint_as_transform` (`caps_constraint_as_sink` for a sink, `SourceLoop::caps_constraint` for a source) |
+| `fixate_caps` | `caps_preferences` (a cost per advertised alternative). An open range fixates toward a source's first alternative when that is fixed |
+| `set_caps(incaps, outcaps)` / `start` / pool setup | `configure_pipeline` (the solved input caps, every field fixed), then `configure_output` (the solved output caps) |
 | `transform` / `transform_ip` / `render` | `process(packet, out)` (async) |
 | `g_object_class_install_property` | `properties()` + `set_property`/`get_property` |
 | `gst_element_class_set_metadata` | `metadata()` |
 | pad templates | `PadTemplates::pad_templates()` |
 
+The runner negotiates the whole graph from these constraints before any data
+flows, and calls `configure_pipeline` again on a mid-stream caps change.
+`intercept_caps` is still required, but only a `GraphMutator` inserting the
+element into a running pipeline and the encoder expansion in `encodebin` /
+`transcodebin` call it ([AUTHORING.md §4](AUTHORING.md#4-caps-negotiation)).
+
 Caps refinement that GStreamer pushes as a `GST_EVENT_CAPS` is a
 `PipelinePacket::CapsChanged` you emit before the affected `DataFrame`. EOS is
-emitted by the runner for multi-input/source ends — a transform must **not**
+emitted by the runner for multi-input/source ends: a transform must **not**
 forward `Eos`.
 
 A complete, runnable example (a registered third-party transform used by name in
