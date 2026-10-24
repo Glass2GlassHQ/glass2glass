@@ -12,8 +12,8 @@ use spa::pod::{Object, Value};
 use spa::utils::SpaTypes;
 
 use g2g_core::{
-    AudioFormat as G2gAudioFormat, Caps, ChannelLayout, ChannelPosition, G2gError, ANY_CHANNELS,
-    ANY_SAMPLE_RATE,
+    AudioFormat as G2gAudioFormat, Caps, ChannelLayout, ChannelPosition, DriftClock, G2gError,
+    ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 /// The PCM sample formats the PipeWire elements open a stream with, and the SPA
@@ -137,6 +137,30 @@ pub(crate) fn stream_time(stream: &pipewire::stream::Stream) -> Option<pipewire:
     (res == 0).then_some(time)
 }
 
+/// The reference-clock instant `time` was sampled at, `None` when the report
+/// carries no sample time. Same liveness rule as [`stream_time`].
+pub(crate) fn reference_ns_at_sample(
+    stream: &pipewire::stream::Stream,
+    clock: &DriftClock,
+    time: &pipewire::sys::pw_time,
+) -> Option<u64> {
+    let reference_now_ns = clock.reference_now();
+    // SAFETY: the caller keeps the stream live for the duration of the call.
+    let stream_now_ns = unsafe { pipewire::sys::pw_stream_get_nsec(stream.as_raw_ptr()) };
+    reference_ns_of_sample(reference_now_ns, stream_now_ns, time.now)
+}
+
+// `pw_stream_get_nsec` reads the clock `pw_time.now` is on, so their difference is the sample's age
+fn reference_ns_of_sample(
+    reference_now_ns: u64,
+    stream_now_ns: u64,
+    sampled_ns: i64,
+) -> Option<u64> {
+    let sampled_ns = u64::try_from(sampled_ns).ok().filter(|&ns| ns > 0)?;
+    let age_ns = stream_now_ns.checked_sub(sampled_ns)?;
+    reference_now_ns.checked_sub(age_ns)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +183,27 @@ mod tests {
         assert_eq!(
             pw_params(&caps(G2gAudioFormat::Aac, 2)),
             Err(G2gError::CapsMismatch)
+        );
+    }
+
+    #[test]
+    fn a_sample_maps_back_by_its_age() {
+        const REFERENCE_NOW_NS: u64 = 5_000_000_000;
+        const STREAM_NOW_NS: u64 = 900_000_000_000;
+        const AGE_NS: u64 = 3_000_000;
+        let sampled_ns = (STREAM_NOW_NS - AGE_NS) as i64;
+        assert_eq!(
+            reference_ns_of_sample(REFERENCE_NOW_NS, STREAM_NOW_NS, sampled_ns),
+            Some(REFERENCE_NOW_NS - AGE_NS)
+        );
+        assert_eq!(
+            reference_ns_of_sample(REFERENCE_NOW_NS, STREAM_NOW_NS, 0),
+            None
+        );
+        let in_the_future = (STREAM_NOW_NS + AGE_NS) as i64;
+        assert_eq!(
+            reference_ns_of_sample(REFERENCE_NOW_NS, STREAM_NOW_NS, in_the_future),
+            None
         );
     }
 

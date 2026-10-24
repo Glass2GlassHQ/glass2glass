@@ -487,15 +487,17 @@ fn build_and_run(
 /// the timeline this source's frame counter actually runs on. It is independent
 /// of how promptly we drain the buffers, so a dropped or late callback never
 /// skews it; the constant graph delay from the microphone lands in the affine
-/// offset the fit absorbs. The local time is sampled next to the probe so the
-/// pair lines up.
+/// offset the fit absorbs. The local time is the report's own sample instant
+/// (`pw_time.now`), so a callback that runs late does not shift the pair.
 ///
 /// The callback runs once per graph quantum (~47 Hz at 1024 frames / 48 kHz),
 /// so the trace is throttled to [`CLOCK_LOG_INTERVAL_NS`]; `last_log_ns` carries
 /// the caller's stamp of the last line.
 fn discipline_clock(stream: &pw::stream::Stream, clock: &DriftClock, last_log_ns: &mut u64) {
-    let local_ns = clock.reference_now();
     let Some(time) = crate::pwaudio::stream_time(stream) else {
+        return;
+    };
+    let Some(local_ns) = crate::pwaudio::reference_ns_at_sample(stream, clock, &time) else {
         return;
     };
     let Some(outcome) =
