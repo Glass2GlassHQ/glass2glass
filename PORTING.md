@@ -180,6 +180,7 @@ The same guidance is available programmatically via
 | `autovideosink` etc. | resolved to an available backend | works; resolves Wayland→KMS→fake on Linux |
 | `# comment` in a pasted pipeline | supported | a `#` outside quotes runs to end of line and is ignored (handy for multi-line pastes) |
 | caps range `width=[1,1920]` / list `format={I420,NV12}` | supported | a range maps to a `Dim::Range` / `Rate::Range`, a list expands to alternatives; negotiation narrows it like GStreamer |
+| `videotestsrc ! fakesink` output differs byte for byte from gst | with no format downstream, gst takes the first format in its list (`A444_16LE`), g2g takes `RGBA`, the format it draws | pin the format in both pipelines, e.g. `videotestsrc ! video/x-raw,format=I420 ! ...` |
 
 ### Launch syntax g2g does not accept
 
