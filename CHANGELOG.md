@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1884: `g2g-launch` ends by SIGPIPE only on a closed stdout, where a socket write to a reset RTSP server killed it.
+- M1883b: `h265parse` keeps the RASL pictures after a CRA when a demuxer only lowers its segment's start.
 - M1883: the mkv, flv, TS, PS and fragmented-MP4 demuxers lower their segment for a unit presenting before it, as gst's `matroskademux` does, where they clipped it.
 - M1882: the HLS probe and `hlssrc` fetch only the `#EXT-X-MAP` byte range of a single-file CMAF variant.
 - M1881: `flvmux` ends the file with the last tag's size, so gst's `flvdemux` keeps the last frame.

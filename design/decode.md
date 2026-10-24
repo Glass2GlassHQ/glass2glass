@@ -33,6 +33,9 @@ CRA that starts the stream, follows an end-of-sequence or end-of-bitstream NAL,
 or follows a `Flush` or `Segment`. Those pictures reference pictures before the
 random access point that the decoder never received (`NoRaslOutputFlag == 1`,
 H.265 8.1.3). RASL pictures of any other CRA decode normally and pass through.
+A `Segment` that only lowers the previous one's start (same rate, base and stop), as a
+demuxer sends for a unit presenting earlier, continues the bitstream and leaves the
+filter alone.
 
 The access-unit framer behind `h264parse`, `h265parse` and the MPEG video parsers
 releases a buffer's trailing access unit at once only while every buffer so far

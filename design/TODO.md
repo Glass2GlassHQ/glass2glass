@@ -230,8 +230,6 @@ Highest leverage first:
   `~/.cache/calliope` on hercules):
   - `h264/H264_might_overflow.mkv` seeks from 1.086 where gst uses 1.003. Recheck it
     with the lowered stream start.
-  - `nalparse` restarts its H.265 RASL filter on every `Segment`, so a demuxer that
-    lowers its segment mid-stream makes it drop the RASL pictures after the next CRA.
   - `mpegtsmux` writes a DTS of exactly 0 as unset, so the PES carries no DTS.
   - Demuxers drop streams gst's parsebin exposes: DTS in `filter/242_4.mkv`, TTA,
     pcm_dvd LPCM in `coolitnow-partial.vob`, and the xan_dpcm audio of
