@@ -531,6 +531,30 @@ fn srtsrc_latency_and_passphrase() {
     );
 }
 
+#[cfg(feature = "srt")]
+#[test]
+fn srtsrc_keep_listening() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::srtsrc::SrtSrc;
+    let mut s = SrtSrc::new("0.0.0.0:9000".parse().unwrap());
+    let spec = s
+        .properties()
+        .iter()
+        .find(|p| p.name == "keep-listening")
+        .expect("declared");
+    assert_eq!(spec.kind, g2g_core::PropKind::Bool);
+    assert_eq!(
+        s.get_property("keep-listening"),
+        Some(PropValue::Bool(false))
+    );
+    s.set_property("keep-listening", PropValue::Bool(true))
+        .unwrap();
+    assert_eq!(
+        s.get_property("keep-listening"),
+        Some(PropValue::Bool(true))
+    );
+}
+
 /// M1098: `srtpenc` takes its key as hexadecimal digits, at any of the four
 /// cipher lengths, and never reads it back. A length matching none of them is
 /// refused rather than silently truncated.

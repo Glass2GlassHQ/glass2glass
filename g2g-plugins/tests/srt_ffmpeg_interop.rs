@@ -14,6 +14,7 @@
 #![cfg(feature = "srt")]
 
 use std::net::UdpSocket as StdUdpSocket;
+use std::sync::Arc;
 use std::time::Duration;
 
 use g2g_core::frame::{Frame, FrameTiming};
@@ -24,6 +25,7 @@ use g2g_core::{
     PushOutcome,
 };
 
+use g2g_plugins::srt;
 use g2g_plugins::srtsink::SrtSink;
 use g2g_plugins::srtsrc::SrtSrc;
 
@@ -470,4 +472,216 @@ async fn srtsink_streamid_reaches_the_ffmpeg_listener() {
         log.contains(&format!("accept streamid [{STREAM_ID}]")),
         "libsrt read the stream id the caller set"
     );
+}
+
+const MPEGTS_SYNC_BYTE: u8 = 0x47;
+
+fn spawn_ffmpeg_caller(url: &str) -> std::process::Child {
+    Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-re",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240:rate=15:duration=60",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-f",
+            "mpegts",
+            url,
+        ])
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the ffmpeg SRT caller")
+}
+
+#[derive(Debug, PartialEq)]
+enum Received {
+    Data(u8),
+    Flush,
+    Eos,
+}
+
+// signals `first_payloads` once that many payloads arrived and `flushed` on a Flush
+struct ReceivedLog {
+    events: Vec<Received>,
+    first_payload_count: usize,
+    first_payloads: Arc<tokio::sync::Notify>,
+    flushed: Arc<tokio::sync::Notify>,
+}
+
+impl OutputSink for ReceivedLog {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        match packet_slot.take().expect("poll_push without a packet") {
+            PipelinePacket::DataFrame(frame) => {
+                let slice = frame.domain.as_system_slice().expect("system frame");
+                self.events.push(Received::Data(slice[0]));
+                if self.events.len() == self.first_payload_count {
+                    self.first_payloads.notify_one();
+                }
+            }
+            PipelinePacket::Flush => {
+                self.events.push(Received::Flush);
+                self.flushed.notify_one();
+            }
+            PipelinePacket::Eos => self.events.push(Received::Eos),
+            _ => {}
+        }
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+    }
+}
+
+/// The canary's lost-caller case: libsrt's caller dies without a SHUTDOWN, the
+/// listener times the silent peer out and accepts the next ffmpeg caller.
+#[tokio::test]
+#[ignore = "needs ffmpeg built with libsrt; opens a local UDP socket"]
+async fn keep_listening_srtsrc_takes_a_new_ffmpeg_caller_after_one_dies() {
+    const FIRST_CALLER_PAYLOADS: usize = 20;
+    const SECOND_CALLER_PAYLOADS: u64 = 40;
+
+    let sock = StdUdpSocket::bind("127.0.0.1:0").expect("bind srt listener");
+    let url = format!("srt://127.0.0.1:{}", sock.local_addr().unwrap().port());
+    let mut src = SrtSrc::from_socket(sock)
+        .expect("adopt socket")
+        .with_frame_limit(FIRST_CALLER_PAYLOADS as u64 + SECOND_CALLER_PAYLOADS);
+    src.set_property("keep-listening", g2g_core::PropValue::Bool(true))
+        .expect("keep-listening");
+    let first_payloads = Arc::new(tokio::sync::Notify::new());
+    let flushed = Arc::new(tokio::sync::Notify::new());
+    let mut log = ReceivedLog {
+        events: Vec::new(),
+        first_payload_count: FIRST_CALLER_PAYLOADS,
+        first_payloads: first_payloads.clone(),
+        flushed: flushed.clone(),
+    };
+
+    let callers = async {
+        let mut first = spawn_ffmpeg_caller(&url);
+        first_payloads.notified().await;
+        first.kill().expect("kill the first caller");
+        first.wait().expect("reap the first caller");
+        flushed.notified().await;
+        spawn_ffmpeg_caller(&url)
+    };
+    // the second caller waits for the Flush, so the timeout covers both
+    let (result, mut second) = tokio::time::timeout(Duration::from_secs(40), async {
+        tokio::join!(src.run(&mut log), callers)
+    })
+    .await
+    .expect("the second caller streams within the timeout");
+    second.kill().expect("kill the second caller");
+    second.wait().expect("reap the second caller");
+
+    result.expect("run ok");
+    let flush_at = log
+        .events
+        .iter()
+        .position(|event| *event == Received::Flush)
+        .expect("a Flush between the callers");
+    let (before, after) = log.events.split_at(flush_at);
+    assert!(before.len() >= FIRST_CALLER_PAYLOADS);
+    assert_eq!(after.last(), Some(&Received::Eos));
+    let payloads = before.iter().chain(&after[1..after.len() - 1]);
+    assert!(
+        payloads
+            .clone()
+            .all(|event| *event == Received::Data(MPEGTS_SYNC_BYTE)),
+        "both callers' payloads start on a TS packet: {:?}",
+        log.events
+    );
+    assert_eq!(
+        payloads.count() as u64,
+        FIRST_CALLER_PAYLOADS as u64 + SECOND_CALLER_PAYLOADS
+    );
+}
+
+// drops every copy of the data packet after `skip_packets`, and every drop request
+async fn proxy_losing_one_packet_for_good(
+    proxy: tokio::net::UdpSocket,
+    listener: std::net::SocketAddr,
+    skip_packets: usize,
+) {
+    let mut caller = None;
+    let mut data_packets = 0;
+    let mut lost_seq = None;
+    let mut buf = [0u8; 2048];
+    loop {
+        let Ok((n, from)) = proxy.recv_from(&mut buf).await else {
+            return;
+        };
+        let packet = &buf[..n];
+        if from == listener {
+            if let Some(caller) = caller {
+                let _ = proxy.send_to(packet, caller).await;
+            }
+            continue;
+        }
+        caller = Some(from);
+        if let Some(data) = srt::parse_data_packet(packet) {
+            if lost_seq.is_none() && !data.retransmit {
+                data_packets += 1;
+                if data_packets > skip_packets {
+                    lost_seq = Some(data.seq);
+                }
+            }
+            if lost_seq == Some(data.seq) {
+                continue;
+            }
+        }
+        if matches!(
+            srt::parse_control(packet),
+            Some(srt::Control::DropRequest { .. })
+        ) {
+            continue;
+        }
+        let _ = proxy.send_to(packet, listener).await;
+    }
+}
+
+/// The canary's capped-link case: libsrt gives up on a packet, and the listener
+/// releases the packets after it once they are due instead of waiting forever.
+#[tokio::test]
+#[ignore = "needs ffmpeg built with libsrt; opens a local UDP socket"]
+async fn srtsrc_carries_on_past_a_packet_ffmpeg_never_delivers() {
+    const PAYLOADS_BEFORE_LOSS: usize = 10;
+    const PAYLOADS: u64 = 60;
+
+    let sock = StdUdpSocket::bind("127.0.0.1:0").expect("bind srt listener");
+    let listener = sock.local_addr().unwrap();
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy");
+    let url = format!("srt://{}", proxy.local_addr().unwrap());
+    let proxy_task = tokio::spawn(proxy_losing_one_packet_for_good(
+        proxy,
+        listener,
+        PAYLOADS_BEFORE_LOSS,
+    ));
+    let mut src = SrtSrc::from_socket(sock)
+        .expect("adopt socket")
+        .with_frame_limit(PAYLOADS);
+    let mut cap = Capture::default();
+
+    let mut caller = spawn_ffmpeg_caller(&url);
+    let result = tokio::time::timeout(Duration::from_secs(30), src.run(&mut cap)).await;
+    caller.kill().expect("kill the caller");
+    caller.wait().expect("reap the caller");
+    proxy_task.abort();
+
+    let received = result
+        .expect("delivery carries on past the lost packet")
+        .expect("run ok");
+    assert_eq!(received, PAYLOADS);
+    assert_all_ts_sync(&cap.first_bytes);
 }

@@ -39,6 +39,7 @@ pub const CTRL_ACK: u16 = 0x0002;
 pub const CTRL_NAK: u16 = 0x0003;
 pub const CTRL_SHUTDOWN: u16 = 0x0005;
 pub const CTRL_ACKACK: u16 = 0x0006;
+pub const CTRL_DROPREQ: u16 = 0x0007;
 /// User-defined / extended control type; SRT carries a mid-stream Keying
 /// Material update (rekey) here, with the subtype in the type-specific field.
 pub const CTRL_USER: u16 = 0x7FFF;
@@ -71,6 +72,9 @@ pub const INITIAL_RTT_VARIANCE_US: u32 = INITIAL_RTT_US / 2;
 const LIGHT_ACK_CIF_LEN: usize = 4;
 // sequence, RTT, RTT variance, available buffer
 const FULL_ACK_CIF_LEN: usize = 16;
+// first and last dropped sequence
+const DROP_REQUEST_CIF_LEN: usize = 8;
+const SEQUENCE_MASK: u32 = 0x7FFF_FFFF;
 
 /// Whether a packet is a control packet (the top bit of the first word).
 pub fn is_control(buf: &[u8]) -> bool {
@@ -175,6 +179,12 @@ pub enum Control {
         rsp: bool,
         km: Vec<u8>,
     },
+    // the sender no longer retransmits first_sequence..=last_sequence
+    DropRequest {
+        message_number: u32,
+        first_sequence: u32,
+        last_sequence: u32,
+    },
 }
 
 /// The HSv5 handshake Control Information Field.
@@ -261,6 +271,16 @@ pub fn build_control(ctrl: &Control, timestamp: u32, dst_socket_id: u32) -> Vec<
             },
             km.clone(),
         ),
+        Control::DropRequest {
+            message_number,
+            first_sequence,
+            last_sequence,
+        } => {
+            let mut cif = Vec::with_capacity(DROP_REQUEST_CIF_LEN);
+            cif.extend_from_slice(&first_sequence.to_be_bytes());
+            cif.extend_from_slice(&last_sequence.to_be_bytes());
+            (CTRL_DROPREQ, *message_number, cif)
+        }
     };
     let mut out = Vec::with_capacity(HEADER_LEN + cif.len());
     // word0: F=1 | Control Type (15 bits) | Subtype (16 bits, 0 here).
@@ -302,6 +322,11 @@ pub fn parse_control(buf: &[u8]) -> Option<Control> {
             loss: parse_nak_cif(cif),
         }),
         CTRL_SHUTDOWN => Some(Control::Shutdown),
+        CTRL_DROPREQ if cif.len() >= DROP_REQUEST_CIF_LEN => Some(Control::DropRequest {
+            message_number: type_info,
+            first_sequence: cif_word(0) & SEQUENCE_MASK,
+            last_sequence: cif_word(4) & SEQUENCE_MASK,
+        }),
         CTRL_USER if type_info == EXT_KMREQ as u32 || type_info == EXT_KMRSP as u32 => {
             Some(Control::KeyMaterial {
                 rsp: type_info == EXT_KMRSP as u32,
@@ -934,10 +959,8 @@ pub struct SrtReceiver {
     /// TSBPD target latency in microseconds (the held buffering delay); `None`
     /// delivers in order with no timing gate.
     tsbpd_latency_us: Option<u32>,
-    /// TSBPD time base: `delivery_time(pkt) = base + pkt.timestamp`. Anchored on
-    /// the first in-order packet to become deliverable. `i64` so the subtraction
-    /// of the anchor timestamp cannot underflow.
-    tsbpd_base_us: Option<i64>,
+    // set by the first packet TSBPD schedules, then moved to each released one
+    tsbpd_anchor: Option<TsbpdAnchor>,
     /// The two stream-key slots, selected per packet by its `KK` flag (even/odd),
     /// so a rekey can roll the active key while packets under the previous key
     /// still decrypt. `None` is cleartext.
@@ -945,6 +968,19 @@ pub struct SrtReceiver {
     crypto_even: Option<crate::srtcrypto::SrtCrypto>,
     #[cfg(feature = "srt")]
     crypto_odd: Option<crate::srtcrypto::SrtCrypto>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TsbpdAnchor {
+    timestamp: u32,
+    delivery_us: i64,
+}
+
+impl TsbpdAnchor {
+    // the sender timestamp wraps every 71 minutes, packets in flight are seconds apart
+    fn delivery_us(&self, timestamp: u32) -> i64 {
+        self.delivery_us + i64::from(timestamp.wrapping_sub(self.timestamp) as i32)
+    }
 }
 
 impl Default for SrtReceiver {
@@ -961,7 +997,7 @@ impl SrtReceiver {
             pending: alloc::collections::BTreeMap::new(),
             max_seen: 0,
             tsbpd_latency_us: None,
-            tsbpd_base_us: None,
+            tsbpd_anchor: None,
             #[cfg(feature = "srt")]
             crypto_even: None,
             #[cfg(feature = "srt")]
@@ -1046,30 +1082,60 @@ impl SrtReceiver {
     /// Pop every in-order payload whose TSBPD delivery time is due at `now_us`
     /// (a monotonic microsecond clock). Without TSBPD configured this is exactly
     /// [`take_ready`](Self::take_ready) (no timing gate). With it, the time base
-    /// is anchored on the first in-order packet to become deliverable so that
-    /// packet releases `latency_us` after `now_us`, and every later packet
-    /// inherits the same delay relative to the sender timestamps, holding the
-    /// stream back into a steady, jitter-smoothed output.
+    /// is anchored on the first packet to become deliverable so that packet
+    /// releases `latency_us` after `now_us`, and every later packet inherits the
+    /// same delay relative to the sender timestamps, holding the stream back into
+    /// a steady, jitter-smoothed output. A packet that is due past a gap releases
+    /// and drops the missing packets before it (libsrt's too-late packet drop),
+    /// since a live sender has stopped retransmitting them by then.
     pub fn take_ready_at(&mut self, now_us: u64) -> Vec<Vec<u8>> {
         let Some(latency) = self.tsbpd_latency_us else {
             return self.take_ready();
         };
+        let now_us = now_us as i64;
         let mut out = Vec::new();
-        while let Some(ts) = self.pending.get(&self.next_deliver).map(|(_, t)| *t) {
-            // Anchor on the first deliverable packet: schedule it `latency` from
-            // now, so delivery_time(pkt) = base + pkt.timestamp holds a fixed
-            // buffering delay for every later packet.
-            let base = *self
-                .tsbpd_base_us
-                .get_or_insert_with(|| now_us as i64 + latency as i64 - ts as i64);
-            if (now_us as i64) < base + ts as i64 {
+        while let Some((seq, timestamp)) = self.first_pending() {
+            let anchor = *self.tsbpd_anchor.get_or_insert(TsbpdAnchor {
+                timestamp,
+                delivery_us: now_us + i64::from(latency),
+            });
+            let delivery_us = anchor.delivery_us(timestamp);
+            if now_us < delivery_us {
                 break; // not yet this packet's scheduled delivery time
             }
-            let (payload, _) = self.pending.remove(&self.next_deliver).unwrap();
+            let (payload, _) = self.pending.remove(&seq).unwrap();
             out.push(payload);
-            self.next_deliver = (self.next_deliver + 1) & 0x7FFF_FFFF;
+            self.next_deliver = (seq + 1) & SEQUENCE_MASK;
+            self.tsbpd_anchor = Some(TsbpdAnchor {
+                timestamp,
+                delivery_us,
+            });
         }
         out
+    }
+
+    // on_data buffers nothing behind the cursor, so the wrap-order first is the smallest key at or past it
+    fn first_pending(&self) -> Option<(u32, u32)> {
+        self.pending
+            .range(self.next_deliver..)
+            .next()
+            .or_else(|| self.pending.range(..self.next_deliver).next())
+            .map(|(&seq, &(_, timestamp))| (seq, timestamp))
+    }
+
+    // a range ahead of the cursor is left to the too-late drop in take_ready_at
+    pub fn on_drop_request(&mut self, first_sequence: u32, last_sequence: u32) {
+        let covers_cursor =
+            seq_ge(self.next_deliver, first_sequence) && seq_ge(last_sequence, self.next_deliver);
+        if !self.have_base || !covers_cursor {
+            return;
+        }
+        self.next_deliver = (last_sequence + 1) & SEQUENCE_MASK;
+        if seq_gt(last_sequence, self.max_seen) {
+            self.max_seen = last_sequence;
+        }
+        let cursor = self.next_deliver;
+        self.pending.retain(|&seq, _| seq_ge(seq, cursor));
     }
 
     /// The sequence numbers between the delivery cursor and the highest seen
@@ -1594,6 +1660,97 @@ mod tests {
             vec![vec![3u8], vec![4u8], vec![5u8]],
             "delivered in sequence order regardless of arrival order",
         );
+    }
+
+    fn timestamped_packet(seq: u32, timestamp: u32) -> DataPacket {
+        DataPacket {
+            seq,
+            retransmit: false,
+            kk: 0,
+            timestamp,
+            dst_socket_id: 0,
+            payload: vec![seq as u8],
+        }
+    }
+
+    #[test]
+    fn tsbpd_drops_a_gap_once_the_packet_after_it_is_due() {
+        const LATENCY_US: u32 = 100_000;
+        const PACKET_INTERVAL_US: u32 = 10_000;
+        const ANCHOR_US: u64 = 1_000_000;
+        const LOST: u32 = 11;
+        let mut rx = SrtReceiver::new();
+        rx.set_tsbpd(LATENCY_US);
+        for seq in [10, 12, 13] {
+            rx.on_data(timestamped_packet(seq, (seq - 10) * PACKET_INTERVAL_US));
+        }
+        let due_us = |seq: u32| ANCHOR_US + u64::from(LATENCY_US + (seq - 10) * PACKET_INTERVAL_US);
+
+        assert!(rx.take_ready_at(ANCHOR_US).is_empty());
+        assert_eq!(rx.take_ready_at(due_us(10)), vec![vec![10u8]]);
+        assert!(
+            rx.take_ready_at(due_us(12) - 1).is_empty(),
+            "the gap waits for retransmission until the packet after it is due"
+        );
+        assert_eq!(rx.missing(), vec![LOST]);
+        assert_eq!(
+            rx.take_ready_at(due_us(12)),
+            vec![vec![12u8]],
+            "the due packet releases past the gap"
+        );
+        assert!(rx.missing().is_empty(), "the dropped packet is not NAKed");
+        assert_eq!(rx.ack_seq(), Some(13));
+        assert_eq!(rx.take_ready_at(due_us(13)), vec![vec![13u8]]);
+    }
+
+    #[test]
+    fn tsbpd_schedules_across_the_sender_timestamp_wrap() {
+        const LATENCY_US: u32 = 100_000;
+        const BEFORE_WRAP_US: u32 = 10_000;
+        const AFTER_WRAP_US: u32 = 10_000;
+        let mut rx = SrtReceiver::new();
+        rx.set_tsbpd(LATENCY_US);
+        rx.on_data(timestamped_packet(1, u32::MAX - BEFORE_WRAP_US + 1));
+        rx.on_data(timestamped_packet(2, AFTER_WRAP_US));
+
+        assert!(rx.take_ready_at(0).is_empty());
+        let first_due = u64::from(LATENCY_US);
+        assert_eq!(
+            rx.take_ready_at(first_due),
+            vec![vec![1u8]],
+            "the post-wrap packet is not due yet"
+        );
+        let second_due = first_due + u64::from(BEFORE_WRAP_US + AFTER_WRAP_US);
+        assert!(rx.take_ready_at(second_due - 1).is_empty());
+        assert_eq!(rx.take_ready_at(second_due), vec![vec![2u8]]);
+    }
+
+    #[test]
+    fn a_drop_request_moves_delivery_past_the_dropped_range() {
+        let mut rx = SrtReceiver::new();
+        rx.on_data(timestamped_packet(10, 0));
+        rx.on_data(timestamped_packet(13, 0));
+        assert_eq!(rx.take_ready(), vec![vec![10u8]]);
+        assert_eq!(rx.missing(), vec![11, 12]);
+
+        let request = Control::DropRequest {
+            message_number: 7,
+            first_sequence: 11,
+            last_sequence: 12,
+        };
+        let wire = build_control(&request, 0, 0);
+        let Some(Control::DropRequest {
+            first_sequence,
+            last_sequence,
+            ..
+        }) = parse_control(&wire)
+        else {
+            panic!("the drop request does not parse back");
+        };
+        assert_eq!(parse_control(&wire), Some(request));
+        rx.on_drop_request(first_sequence, last_sequence);
+        assert!(rx.missing().is_empty());
+        assert_eq!(rx.take_ready(), vec![vec![13u8]]);
     }
 
     #[test]

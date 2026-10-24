@@ -14,10 +14,10 @@ use std::sync::Arc;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{run_simple_pipeline, LatencyProfile};
+use g2g_core::runtime::{run_simple_pipeline, LatencyProfile, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, PushOutcome,
+    AsyncElement, Caps, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain, NetworkFailure,
+    OutputSink, PipelineClock, PipelinePacket, PropValue, PushOutcome,
 };
 
 use g2g_plugins::srt;
@@ -79,16 +79,22 @@ impl OutputSink for NullOut {
     }
 }
 
-/// Relay caller<->listener, dropping the SRT data packet with `drop_seq` once
-/// and counting the ACKs the listener sends.
+#[derive(Clone, Copy)]
+struct DroppedSequence {
+    seq: u32,
+    copies: usize,
+}
+
+/// Relay caller<->listener, dropping the first `copies` of the SRT data packet
+/// `dropped.seq` and counting the ACKs the listener sends.
 async fn lossy_proxy(
     proxy: tokio::net::UdpSocket,
     listener_addr: SocketAddr,
-    drop_seq: Option<u32>,
+    dropped: Option<DroppedSequence>,
     acks_seen: Arc<AtomicUsize>,
 ) {
     let mut caller: Option<SocketAddr> = None;
-    let mut dropped = false;
+    let mut copies_dropped = 0;
     let mut buf = [0u8; 2048];
     loop {
         let Ok((n, from)) = proxy.recv_from(&mut buf).await else {
@@ -96,13 +102,12 @@ async fn lossy_proxy(
         };
         if Some(from) == caller || (caller.is_none() && from != listener_addr) {
             caller = Some(from);
-            // Caller -> listener. Drop the target data packet exactly once.
-            if !srt::is_control(&buf[..n]) {
-                if let Some(d) = srt::parse_data_packet(&buf[..n]) {
-                    if Some(d.seq) == drop_seq && !dropped {
-                        dropped = true;
-                        continue;
-                    }
+            // Caller -> listener. Drop the target data packet's first copies.
+            let data_seq = srt::parse_data_packet(&buf[..n]).map(|d| d.seq);
+            if let Some(dropped) = dropped.filter(|d| Some(d.seq) == data_seq) {
+                if copies_dropped < dropped.copies {
+                    copies_dropped += 1;
+                    continue;
                 }
             }
             let _ = proxy.send_to(&buf[..n], listener_addr).await;
@@ -134,7 +139,13 @@ async fn srt_handshake_and_arq_recover_a_dropped_payload() {
     let proxy_addr = proxy.local_addr().unwrap();
 
     // Init seq is 1, so the 3rd data packet is seq 3; drop it once.
-    let proxy_task = tokio::spawn(lossy_proxy(proxy, listener_addr, Some(3), Arc::default()));
+    let dropped = DroppedSequence { seq: 3, copies: 1 };
+    let proxy_task = tokio::spawn(lossy_proxy(
+        proxy,
+        listener_addr,
+        Some(dropped),
+        Arc::default(),
+    ));
 
     let mut src = SrtSrc::from_socket(listener_std)
         .unwrap()
@@ -351,4 +362,231 @@ async fn congestion_control_paces_egress_to_the_bandwidth_cap() {
         elapsed.as_millis() as u64 >= expected_ms * 6 / 10,
         "pacing held egress near the {BW} B/s cap (elapsed {elapsed:?}, expected ~{expected_ms}ms)",
     );
+}
+
+fn tagged_frame(tag: u8) -> Frame {
+    Frame {
+        domain: MemoryDomain::System(SystemSlice::from_boxed(vec![tag; 100].into_boxed_slice())),
+        timing: FrameTiming::default(),
+        sequence: tag as u64,
+        meta: Default::default(),
+    }
+}
+
+async fn send_tagged(sink: &mut SrtSink, tag: u8) -> Result<(), G2gError> {
+    sink.process(PipelinePacket::DataFrame(tagged_frame(tag)), &mut NullOut)
+        .await
+}
+
+#[tokio::test]
+async fn a_packet_the_sender_never_resends_is_skipped_once_the_next_is_due() {
+    const N: u8 = 12;
+    // the caller's first sequence is 1, so the third payload is sequence 3
+    const LOST_TAG: u8 = 2;
+
+    let listener_std = StdUdpSocket::bind("127.0.0.1:0").expect("bind listener");
+    let listener_addr = listener_std.local_addr().unwrap();
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy");
+    let proxy_addr = proxy.local_addr().unwrap();
+    let dropped = DroppedSequence {
+        seq: u32::from(LOST_TAG) + 1,
+        copies: usize::MAX,
+    };
+    let proxy_task = tokio::spawn(lossy_proxy(
+        proxy,
+        listener_addr,
+        Some(dropped),
+        Arc::default(),
+    ));
+
+    let mut src = SrtSrc::from_socket(listener_std)
+        .unwrap()
+        .with_frame_limit(N as u64);
+    let mut sink_collect = TagSink::default();
+    let clock = ZeroClock;
+
+    let caller = async {
+        let mut sink = SrtSink::new(proxy_addr);
+        sink.configure_pipeline(&Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::MpegTs,
+        })
+        .expect("configure");
+        for tag in 0..N * 2 {
+            // Once the listener hits its limit + leaves, a send may fail; that is fine.
+            if send_tagged(&mut sink, tag).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+        }
+    };
+
+    let recv = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        run_simple_pipeline(
+            &mut src,
+            &mut sink_collect,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
+    );
+    let (recv_res, ()) = tokio::join!(recv, caller);
+    proxy_task.abort();
+
+    recv_res
+        .expect("delivery carries on past the lost packet")
+        .expect("receive pipeline ok");
+    let expected: Vec<u8> = (0..=N).filter(|&tag| tag != LOST_TAG).collect();
+    assert_eq!(sink_collect.tags, expected);
+}
+
+#[derive(Debug, PartialEq)]
+enum Received {
+    Data(u8),
+    Flush,
+    Eos,
+}
+
+struct ReceivedLog {
+    events: Vec<Received>,
+    flushed: Arc<tokio::sync::Notify>,
+}
+
+impl OutputSink for ReceivedLog {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        match packet_slot.take().expect("poll_push without a packet") {
+            PipelinePacket::DataFrame(frame) => {
+                let slice = frame.domain.as_system_slice().expect("system frame");
+                self.events.push(Received::Data(slice[0]));
+            }
+            PipelinePacket::Flush => {
+                self.events.push(Received::Flush);
+                self.flushed.notify_one();
+            }
+            PipelinePacket::Eos => self.events.push(Received::Eos),
+            _ => {}
+        }
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+    }
+}
+
+const PER_CALLER: u8 = 5;
+const LATENCY_MS: u16 = 50;
+// TSBPD holds each payload for the latency, and a caller's end drops what is still held
+const DELIVERY_WAIT: std::time::Duration = std::time::Duration::from_millis(4 * LATENCY_MS as u64);
+// past the 5 s peer idle timeout
+const RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+fn listening_source(keep_listening: bool) -> (SrtSrc, SocketAddr) {
+    let listener_std = StdUdpSocket::bind("127.0.0.1:0").expect("bind listener");
+    let listener_addr = listener_std.local_addr().unwrap();
+    let mut src = SrtSrc::from_socket(listener_std)
+        .unwrap()
+        .with_frame_limit(2 * PER_CALLER as u64);
+    src.set_property("latency", PropValue::Uint(LATENCY_MS.into()))
+        .unwrap();
+    src.set_property("keep-listening", PropValue::Bool(keep_listening))
+        .unwrap();
+    (src, listener_addr)
+}
+
+async fn caller_sending(listener_addr: SocketAddr, tags: core::ops::Range<u8>) -> SrtSink {
+    let mut sink = SrtSink::new(listener_addr).with_latency(LATENCY_MS);
+    sink.configure_pipeline(&Caps::ByteStream {
+        encoding: g2g_core::ByteStreamEncoding::MpegTs,
+    })
+    .expect("configure");
+    for tag in tags {
+        send_tagged(&mut sink, tag).await.expect("send");
+    }
+    tokio::time::sleep(DELIVERY_WAIT).await;
+    sink
+}
+
+fn both_callers_then_eos() -> Vec<Received> {
+    let mut expected: Vec<Received> = (0..PER_CALLER).map(Received::Data).collect();
+    expected.push(Received::Flush);
+    expected.extend((PER_CALLER..2 * PER_CALLER).map(Received::Data));
+    expected.push(Received::Eos);
+    expected
+}
+
+#[tokio::test]
+async fn keep_listening_takes_a_new_caller_after_a_shutdown() {
+    let (mut src, listener_addr) = listening_source(true);
+    let flushed = Arc::new(tokio::sync::Notify::new());
+    let mut log = ReceivedLog {
+        events: Vec::new(),
+        flushed: flushed.clone(),
+    };
+
+    let callers = async {
+        let mut first = caller_sending(listener_addr, 0..PER_CALLER).await;
+        first
+            .process(PipelinePacket::Eos, &mut NullOut)
+            .await
+            .expect("shutdown");
+        flushed.notified().await;
+        caller_sending(listener_addr, PER_CALLER..2 * PER_CALLER).await
+    };
+    // the second caller waits for the Flush, so the timeout covers both
+    let (result, _second) = tokio::time::timeout(RUN_TIMEOUT, async {
+        tokio::join!(src.run(&mut log), callers)
+    })
+    .await
+    .expect("the second caller streams within the timeout");
+
+    let emitted = result.expect("run ok");
+    assert_eq!(emitted, 2 * PER_CALLER as u64);
+    assert_eq!(log.events, both_callers_then_eos());
+}
+
+#[tokio::test]
+async fn keep_listening_takes_a_new_caller_after_the_first_goes_silent() {
+    let (mut src, listener_addr) = listening_source(true);
+    let flushed = Arc::new(tokio::sync::Notify::new());
+    let mut log = ReceivedLog {
+        events: Vec::new(),
+        flushed: flushed.clone(),
+    };
+
+    let callers = async {
+        drop(caller_sending(listener_addr, 0..PER_CALLER).await);
+        flushed.notified().await;
+        caller_sending(listener_addr, PER_CALLER..2 * PER_CALLER).await
+    };
+    // the second caller waits for the Flush, so the timeout covers both
+    let (result, _second) = tokio::time::timeout(RUN_TIMEOUT, async {
+        tokio::join!(src.run(&mut log), callers)
+    })
+    .await
+    .expect("the second caller streams within the timeout");
+
+    let emitted = result.expect("run ok");
+    assert_eq!(emitted, 2 * PER_CALLER as u64);
+    assert_eq!(log.events, both_callers_then_eos());
+}
+
+#[tokio::test]
+async fn a_silent_caller_fails_the_source_without_keep_listening() {
+    let (mut src, listener_addr) = listening_source(false);
+    let mut log = ReceivedLog {
+        events: Vec::new(),
+        flushed: Arc::default(),
+    };
+
+    let caller = async { drop(caller_sending(listener_addr, 0..PER_CALLER).await) };
+    let (result, ()) = tokio::join!(tokio::time::timeout(RUN_TIMEOUT, src.run(&mut log)), caller);
+
+    assert_eq!(
+        result.expect("run ends"),
+        Err(G2gError::Network(NetworkFailure::Stream))
+    );
+    let expected: Vec<Received> = (0..PER_CALLER).map(Received::Data).collect();
+    assert_eq!(log.events, expected);
 }

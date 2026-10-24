@@ -44,6 +44,15 @@ const ACK_INTERVAL_NS: u64 = 10_000_000;
 /// Receive timeout (ms) so the TSBPD buffer still flushes due packets when no new
 /// datagram arrives; bounds the extra delivery jitter a silent gap can add.
 const TSBPD_WAKE_MS: u64 = 5;
+// libsrt's SRTO_PEERIDLETIMEO default
+const PEER_IDLE_TIMEOUT_NS: u64 = 5_000_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallerEnd {
+    Shutdown,
+    PeerIdle,
+    FrameLimit,
+}
 
 /// # Example
 ///
@@ -60,6 +69,7 @@ pub struct SrtSrc {
     latency_ms: u16,
     frame_limit: u64,
     passphrase: Option<String>,
+    keep_listening: bool,
     std_socket: Option<StdUdpSocket>,
     configured: bool,
 }
@@ -72,6 +82,7 @@ impl SrtSrc {
             latency_ms: DEFAULT_LATENCY_MS,
             frame_limit: u64::MAX,
             passphrase: None,
+            keep_listening: false,
             std_socket: None,
             configured: false,
         }
@@ -191,6 +202,12 @@ impl SourceLoop for SrtSrc {
             )
             .with_default("-1")
             .with_range("-1", "9223372036854775807"),
+            PropertySpec::new(
+                "keep-listening",
+                PropKind::Bool,
+                "wait for a new caller when the current one disconnects or goes idle",
+            )
+            .with_default("false"),
         ];
         PROPS
     }
@@ -211,6 +228,10 @@ impl SourceLoop for SrtSrc {
                 Ok(())
             }
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
+            "keep-listening" => {
+                self.keep_listening = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -223,6 +244,7 @@ impl SourceLoop for SrtSrc {
             "latency" => Some(PropValue::Uint(self.latency_ms as u64)),
             "passphrase" => Some(PropValue::Str(self.passphrase.clone().unwrap_or_default())),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
+            "keep-listening" => Some(PropValue::Bool(self.keep_listening)),
             _ => None,
         }
     }
@@ -239,138 +261,182 @@ impl SourceLoop for SrtSrc {
             std.set_nonblocking(true).map_err(io_err)?;
             let socket = tokio::net::UdpSocket::from_std(std).map_err(io_err)?;
 
-            // Listener handshake: answer the caller until established. Seed the
-            // SYN cookie from the monotonic clock so an off-path attacker can't
-            // predict it from the public listener socket id (anti-spoof).
-            let cookie = {
-                let t = g2g_core::metrics::monotonic_ns();
-                ((t ^ (t >> 29)).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as u32 | 1
-            };
-            let mut hs = SrtHandshake::new_listener(LISTENER_SOCKET_ID, self.latency_ms, cookie);
-            let mut buf = [0u8; RECV_BUF];
-            let mut peer: Option<SocketAddr> = None;
-            while !hs.is_established() {
-                let (n, from) = socket.recv_from(&mut buf).await.map_err(io_err)?;
-                peer = Some(from);
-                let step = hs.on_packet(&buf[..n]);
-                if let Some(reply) = step.reply {
-                    socket.send_to(&reply, from).await.map_err(io_err)?;
-                }
-            }
-            let peer = peer.ok_or(G2gError::NotConfigured)?;
-            let peer_socket_id = hs.peer_socket_id();
-
-            // The MPEG-TS byte stream the depayloaded packets reconstruct.
-            out.push(PipelinePacket::CapsChanged(mpegts_caps())).await?;
-
-            let mut receiver = SrtReceiver::new();
-            // Hold packets back to the advertised latency (TSBPD): the negotiated
-            // delay smooths network jitter into a steady output stream.
-            receiver.set_tsbpd((self.latency_ms as u32) * 1000);
-            // Derive the shared stream key from the caller's KM and our passphrase.
-            if let Some(pass) = &self.passphrase {
-                let km = hs
-                    .peer_km()
-                    .ok_or(G2gError::Network(NetworkFailure::Connect))?;
-                let crypto = SrtCrypto::from_km(km, pass)
-                    .ok_or(G2gError::Network(NetworkFailure::Connect))?;
-                receiver.set_crypto(crypto);
-            }
-            let limit = self.frame_limit;
             let mut emitted = 0u64;
-            let mut last_nack_ns = 0u64;
-            let mut last_ack_ns = 0u64;
-            // Full ACK numbers start at 1 (0 marks a light ACK).
-            let mut ack_no = 0u32;
+            let mut first_caller = true;
             loop {
-                // A short receive timeout so buffered packets still flush on their
-                // TSBPD schedule when no new datagram arrives (a silent gap).
-                let recv = tokio::time::timeout(
-                    core::time::Duration::from_millis(TSBPD_WAKE_MS),
-                    socket.recv_from(&mut buf),
-                )
-                .await;
-                let now = g2g_core::metrics::monotonic_ns();
-                let now_us = now / 1000;
-
-                match recv {
-                    // Timer wake: no datagram, just drain due packets below.
-                    Err(_elapsed) => {}
-                    Ok(r) => {
-                        let (n, from) = r.map_err(io_err)?;
-                        if from == peer {
-                            if srt::is_control(&buf[..n]) {
-                                match srt::parse_control(&buf[..n]) {
-                                    Some(Control::Shutdown) => break,
-                                    // Mid-stream rekey (KMREQ): unwrap the new key
-                                    // and file it into the slot its parity names,
-                                    // so packets under the new key decrypt, then
-                                    // KMRSP so the sender stops retransmitting.
-                                    Some(Control::KeyMaterial { rsp: false, km }) => {
-                                        if let Some(pass) = &self.passphrase {
-                                            if let (Some(kk), Some(crypto)) = (
-                                                SrtCrypto::km_kk(&km),
-                                                SrtCrypto::from_km(&km, pass),
-                                            ) {
-                                                receiver.install_key(kk, crypto);
-                                            }
-                                        }
-                                        let rsp = srt::build_control(
-                                            &Control::KeyMaterial { rsp: true, km },
-                                            0,
-                                            peer_socket_id,
-                                        );
-                                        socket.send_to(&rsp, peer).await.map_err(io_err)?;
-                                    }
-                                    // Keepalive / handshake retries: ignored.
-                                    _ => {}
-                                }
-                            } else if let Some(pkt) = srt::parse_data_packet(&buf[..n]) {
-                                receiver.on_data(pkt);
-                            }
-                        }
-                    }
+                let (handshake, peer) = self.accept_caller(&socket).await?;
+                if first_caller {
+                    // The MPEG-TS byte stream the depayloaded packets reconstruct.
+                    out.push(PipelinePacket::CapsChanged(mpegts_caps())).await?;
+                    first_caller = false;
                 }
-
-                // Deliver packets whose TSBPD delivery time is due, in order.
-                for payload in receiver.take_ready_at(now_us) {
-                    out.push(PipelinePacket::DataFrame(ts_frame(payload, emitted)))
-                        .await?;
-                    emitted += 1;
-                    if emitted >= limit {
-                        out.push(PipelinePacket::Eos).await?;
-                        return Ok(emitted);
+                let end = self
+                    .receive_caller(&socket, &handshake, peer, out, &mut emitted)
+                    .await?;
+                match end {
+                    CallerEnd::FrameLimit => break,
+                    CallerEnd::Shutdown if !self.keep_listening => break,
+                    CallerEnd::PeerIdle if !self.keep_listening => {
+                        return Err(G2gError::Network(NetworkFailure::Stream));
                     }
-                }
-
-                // Request retransmission of any open gaps, rate-limited.
-                if now.saturating_sub(last_nack_ns) >= NACK_MIN_INTERVAL_NS {
-                    let missing = receiver.missing();
-                    if !missing.is_empty() {
-                        let nak =
-                            srt::build_control(&Control::Nak { loss: missing }, 0, peer_socket_id);
-                        socket.send_to(&nak, peer).await.map_err(io_err)?;
-                        last_nack_ns = now;
+                    // the next caller sends a new transport stream, a source restart downstream
+                    CallerEnd::Shutdown | CallerEnd::PeerIdle => {
+                        out.push(PipelinePacket::Flush).await?;
                     }
-                }
-                let ack_due = now.saturating_sub(last_ack_ns) >= ACK_INTERVAL_NS;
-                if let Some(ack_seq) = receiver.ack_seq().filter(|_| ack_due) {
-                    last_ack_ns = now;
-                    ack_no = ack_no.wrapping_add(1);
-                    let ack = Control::Ack {
-                        ack_no,
-                        ack_seq,
-                        rtt_us: srt::INITIAL_RTT_US,
-                        rtt_variance_us: srt::INITIAL_RTT_VARIANCE_US,
-                        available_buffer: receiver.available_buffer(),
-                    };
-                    let ack = srt::build_control(&ack, 0, peer_socket_id);
-                    socket.send_to(&ack, peer).await.map_err(io_err)?;
                 }
             }
-
             out.push(PipelinePacket::Eos).await?;
             Ok(emitted)
         })
+    }
+}
+
+impl SrtSrc {
+    async fn accept_caller(
+        &self,
+        socket: &tokio::net::UdpSocket,
+    ) -> Result<(SrtHandshake, SocketAddr), G2gError> {
+        // Listener handshake: answer the caller until established. Seed the
+        // SYN cookie from the monotonic clock so an off-path attacker can't
+        // predict it from the public listener socket id (anti-spoof).
+        let cookie = {
+            let t = g2g_core::metrics::monotonic_ns();
+            ((t ^ (t >> 29)).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as u32 | 1
+        };
+        let mut handshake = SrtHandshake::new_listener(LISTENER_SOCKET_ID, self.latency_ms, cookie);
+        let mut buf = [0u8; RECV_BUF];
+        loop {
+            let (n, from) = socket.recv_from(&mut buf).await.map_err(io_err)?;
+            let step = handshake.on_packet(&buf[..n]);
+            if let Some(reply) = step.reply {
+                socket.send_to(&reply, from).await.map_err(io_err)?;
+            }
+            if step.established {
+                return Ok((handshake, from));
+            }
+        }
+    }
+
+    async fn receive_caller(
+        &self,
+        socket: &tokio::net::UdpSocket,
+        handshake: &SrtHandshake,
+        peer: SocketAddr,
+        out: &mut dyn OutputSink,
+        emitted: &mut u64,
+    ) -> Result<CallerEnd, G2gError> {
+        let peer_socket_id = handshake.peer_socket_id();
+        let mut receiver = SrtReceiver::new();
+        // Hold packets back to the advertised latency (TSBPD): the negotiated
+        // delay smooths network jitter into a steady output stream.
+        receiver.set_tsbpd((self.latency_ms as u32) * 1000);
+        // Derive the shared stream key from the caller's KM and our passphrase.
+        if let Some(pass) = &self.passphrase {
+            let km = handshake
+                .peer_km()
+                .ok_or(G2gError::Network(NetworkFailure::Connect))?;
+            let crypto =
+                SrtCrypto::from_km(km, pass).ok_or(G2gError::Network(NetworkFailure::Connect))?;
+            receiver.set_crypto(crypto);
+        }
+        let mut buf = [0u8; RECV_BUF];
+        let mut last_nack_ns = 0u64;
+        let mut last_ack_ns = 0u64;
+        let mut last_peer_packet_ns = g2g_core::metrics::monotonic_ns();
+        // Full ACK numbers start at 1 (0 marks a light ACK).
+        let mut ack_no = 0u32;
+        loop {
+            // A short receive timeout so buffered packets still flush on their
+            // TSBPD schedule when no new datagram arrives (a silent gap).
+            let recv = tokio::time::timeout(
+                core::time::Duration::from_millis(TSBPD_WAKE_MS),
+                socket.recv_from(&mut buf),
+            )
+            .await;
+            let now = g2g_core::metrics::monotonic_ns();
+            let now_us = now / 1000;
+
+            match recv {
+                // Timer wake: no datagram, just drain due packets below.
+                Err(_elapsed) => {}
+                Ok(r) => {
+                    let (n, from) = r.map_err(io_err)?;
+                    if from == peer {
+                        last_peer_packet_ns = now;
+                        if srt::is_control(&buf[..n]) {
+                            match srt::parse_control(&buf[..n]) {
+                                Some(Control::Shutdown) => return Ok(CallerEnd::Shutdown),
+                                // Mid-stream rekey (KMREQ): unwrap the new key
+                                // and file it into the slot its parity names,
+                                // so packets under the new key decrypt, then
+                                // KMRSP so the sender stops retransmitting.
+                                Some(Control::KeyMaterial { rsp: false, km }) => {
+                                    if let Some(pass) = &self.passphrase {
+                                        if let (Some(kk), Some(crypto)) =
+                                            (SrtCrypto::km_kk(&km), SrtCrypto::from_km(&km, pass))
+                                        {
+                                            receiver.install_key(kk, crypto);
+                                        }
+                                    }
+                                    let rsp = srt::build_control(
+                                        &Control::KeyMaterial { rsp: true, km },
+                                        0,
+                                        peer_socket_id,
+                                    );
+                                    socket.send_to(&rsp, peer).await.map_err(io_err)?;
+                                }
+                                Some(Control::DropRequest {
+                                    first_sequence,
+                                    last_sequence,
+                                    ..
+                                }) => receiver.on_drop_request(first_sequence, last_sequence),
+                                // Keepalive / handshake retries: ignored.
+                                _ => {}
+                            }
+                        } else if let Some(pkt) = srt::parse_data_packet(&buf[..n]) {
+                            receiver.on_data(pkt);
+                        }
+                    }
+                }
+            }
+            if now.saturating_sub(last_peer_packet_ns) >= PEER_IDLE_TIMEOUT_NS {
+                return Ok(CallerEnd::PeerIdle);
+            }
+
+            // Deliver packets whose TSBPD delivery time is due, in order.
+            for payload in receiver.take_ready_at(now_us) {
+                out.push(PipelinePacket::DataFrame(ts_frame(payload, *emitted)))
+                    .await?;
+                *emitted += 1;
+                if *emitted >= self.frame_limit {
+                    return Ok(CallerEnd::FrameLimit);
+                }
+            }
+
+            // Request retransmission of any open gaps, rate-limited.
+            if now.saturating_sub(last_nack_ns) >= NACK_MIN_INTERVAL_NS {
+                let missing = receiver.missing();
+                if !missing.is_empty() {
+                    let nak =
+                        srt::build_control(&Control::Nak { loss: missing }, 0, peer_socket_id);
+                    socket.send_to(&nak, peer).await.map_err(io_err)?;
+                    last_nack_ns = now;
+                }
+            }
+            let ack_due = now.saturating_sub(last_ack_ns) >= ACK_INTERVAL_NS;
+            if let Some(ack_seq) = receiver.ack_seq().filter(|_| ack_due) {
+                last_ack_ns = now;
+                ack_no = ack_no.wrapping_add(1);
+                let ack = Control::Ack {
+                    ack_no,
+                    ack_seq,
+                    rtt_us: srt::INITIAL_RTT_US,
+                    rtt_variance_us: srt::INITIAL_RTT_VARIANCE_US,
+                    available_buffer: receiver.available_buffer(),
+                };
+                let ack = srt::build_control(&ack, 0, peer_socket_id);
+                socket.send_to(&ack, peer).await.map_err(io_err)?;
+            }
+        }
     }
 }
