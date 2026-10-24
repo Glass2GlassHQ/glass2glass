@@ -246,6 +246,11 @@ pub fn run(mut reg: Registry, args: Vec<String>) {
                     println_stdout!("{gst_name}: unknown to g2g; no known equivalent. List elements with `g2g-inspect`.");
                     process::exit(1);
                 }
+                GstEquivalent::BuildsOnlyOn { platform, feature } => {
+                    println_stdout!(
+                        "{gst_name}: a g2g element that only builds on {platform}, with `--features {feature}`"
+                    );
+                }
             }
         }
         // `--gst-map`: every gst element name g2g's runtime reports differently,

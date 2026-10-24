@@ -10,6 +10,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1894: a CI job installs the README quick start's packages, tools and program in a clean `rust:1` container and runs them against the checkout.
 - M1895: `DEVTOOLS.md` walks from a failing pipeline's symptom to the tool that explains it, and the README opens with a start-here path.
 - M1896: unknown-element hints name the feature for `x264enc` and in plain `g2g-inspect`, `--validate-json` lists the conflicting caps fields, and videotestsrc `num-buffers` counts frames pushed as gst does.
+- M1897: an element name gated to another OS gets a hint naming that OS instead of a `--features` rebuild that cannot work there.
 - M1892: a caps range left open after negotiation fixates to the value nearest the source's default, so videotestsrc through `width=[100,200]` gives 200 as gst does.
 - M1891: videotestsrc sends one still frame at `framerate=0/1` as gst does, an out-of-range property value names the property's declared range, and g2g-core log-capture tests ignore records from other test threads.
 - M1890: rustdoc and `g2g-launch --help` no longer carry internal milestone tags.

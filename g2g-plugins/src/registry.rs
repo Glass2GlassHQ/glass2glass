@@ -2572,7 +2572,8 @@ fn register_aliases(reg: &mut Registry) {
 }
 
 /// One feature-gated launch element: the name a pipeline writes, the cargo
-/// feature that compiles it, and whether this build has it.
+/// feature that compiles it, the target OS it is limited to, and whether this
+/// build has it.
 ///
 /// `compiled_in` mirrors the element's `#[cfg]` in `register_feature_gated`;
 /// the catalog itself is un-cfg'd, so a build that lacks an element can still
@@ -2581,6 +2582,8 @@ fn register_aliases(reg: &mut Registry) {
 pub struct FeatureGatedElement {
     pub name: &'static str,
     pub feature: &'static str,
+    pub platform: Option<&'static str>,
+    pub builds_on_this_target: bool,
     pub compiled_in: bool,
 }
 
@@ -2591,11 +2594,21 @@ pub struct FeatureGatedElement {
 pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
     // Each row's gate is built from the feature (and the platform, where the
     // element is target-gated), so it cannot drift from the row it describes.
+    macro_rules! platform {
+        () => {
+            None
+        };
+        ($os:literal) => {
+            Some($os)
+        };
+    }
     macro_rules! rows {
         ($($name:literal => $feature:literal $(on $os:literal)?;)*) => {
             [$(FeatureGatedElement {
                 name: $name,
                 feature: $feature,
+                platform: platform!($($os)?),
+                builds_on_this_target: cfg!(all($(target_os = $os)?)),
                 compiled_in: cfg!(all(feature = $feature $(, target_os = $os)?)),
             }),*]
         };
@@ -2751,13 +2764,10 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
     }
 };
 
-/// The cargo feature that would compile the launch element named `name`, `None`
-/// if the name is not in [`FEATURE_GATED_ELEMENTS`].
-pub fn required_feature(name: &str) -> Option<&'static str> {
+pub fn feature_gated_element(name: &str) -> Option<&'static FeatureGatedElement> {
     FEATURE_GATED_ELEMENTS
         .iter()
         .find(|element| element.name == name)
-        .map(|element| element.feature)
 }
 
 /// Register the feature- and platform-gated elements. Each block compiles only

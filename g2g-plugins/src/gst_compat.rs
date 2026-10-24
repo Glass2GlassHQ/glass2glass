@@ -33,6 +33,11 @@ pub enum GstEquivalent {
     DidYouMean(&'static str),
     /// Unknown to both the registry and the gst-compat table: cannot advise.
     Unknown,
+    /// g2g has this exact element, but it only builds on `platform`, with `feature`.
+    BuildsOnlyOn {
+        platform: &'static str,
+        feature: &'static str,
+    },
 }
 
 /// Launch keywords the parser handles that are not registry elements.
@@ -475,7 +480,7 @@ const GEOMETRIC_TRANSFORM_HINT: &str =
 /// with `nvdec` or `vaapidec` switched off still answers with its cargo feature
 /// instead of a hint pointing back at the same name.
 fn family_equivalent(gst_name: &str) -> Option<GstEquivalent> {
-    if crate::registry::required_feature(gst_name).is_some() {
+    if crate::registry::feature_gated_element(gst_name).is_some() {
         return None;
     }
     if GST_GEOMETRIC_TRANSFORM_NAMES.contains(&gst_name) {
@@ -512,8 +517,14 @@ pub fn gst_equivalent(registry: &Registry, gst_name: &str) -> GstEquivalent {
     if let Some(equivalent) = family_equivalent(gst_name) {
         return equivalent;
     }
-    if let Some(feature) = crate::registry::required_feature(gst_name) {
-        return GstEquivalent::NotCompiled(feature);
+    if let Some(element) = crate::registry::feature_gated_element(gst_name) {
+        return match element.platform {
+            Some(platform) if !element.builds_on_this_target => GstEquivalent::BuildsOnlyOn {
+                platform,
+                feature: element.feature,
+            },
+            _ => GstEquivalent::NotCompiled(element.feature),
+        };
     }
     match nearest_known_name(registry, gst_name) {
         Some(near) => GstEquivalent::DidYouMean(near),
@@ -697,6 +708,9 @@ fn finding(name: &str, equivalent: &GstEquivalent) -> Option<String> {
         )),
         GstEquivalent::Unknown => Some(format!(
             "`{name}` is unknown to g2g with no known equivalent; list elements with `g2g-inspect`"
+        )),
+        GstEquivalent::BuildsOnlyOn { platform, feature } => Some(format!(
+            "`{name}` is a g2g element that only builds on {platform}, with `--features {feature}`"
         )),
     }
 }
@@ -1071,6 +1085,35 @@ mod tests {
     }
 
     #[test]
+    fn an_element_for_another_platform_names_that_platform() {
+        let reg = default_registry();
+        let other_platform_elements = crate::registry::FEATURE_GATED_ELEMENTS
+            .iter()
+            .filter(|element| !element.builds_on_this_target)
+            .filter(|element| !GST_MAP.iter().any(|(name, _)| *name == element.name));
+        let mut checked = 0;
+        for element in other_platform_elements {
+            let platform = element
+                .platform
+                .expect("a row that cannot build here names its platform");
+            assert_eq!(
+                gst_equivalent(&reg, element.name),
+                GstEquivalent::BuildsOnlyOn {
+                    platform,
+                    feature: element.feature
+                }
+            );
+            let hint = element_name_finding(&reg, element.name).expect("a hint");
+            assert!(
+                hint.contains(platform) && hint.contains(element.feature),
+                "{hint}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "every target has rows for some other platform");
+    }
+
+    #[test]
     fn registered_appsrc_appsink_are_available_not_unsupported() {
         let reg = default_registry();
         assert_eq!(gst_equivalent(&reg, "appsrc"), GstEquivalent::Available);
@@ -1080,9 +1123,13 @@ mod tests {
     #[test]
     fn unixfd_elements_are_available_or_name_their_feature() {
         let reg = default_registry();
-        let expected = match cfg!(all(target_os = "linux", feature = "unixfd")) {
-            true => GstEquivalent::Available,
-            false => GstEquivalent::NotCompiled("unixfd"),
+        let expected = match (cfg!(target_os = "linux"), cfg!(feature = "unixfd")) {
+            (true, true) => GstEquivalent::Available,
+            (true, false) => GstEquivalent::NotCompiled("unixfd"),
+            (false, _) => GstEquivalent::BuildsOnlyOn {
+                platform: "linux",
+                feature: "unixfd",
+            },
         };
         assert_eq!(gst_equivalent(&reg, "unixfdsink"), expected);
         assert_eq!(gst_equivalent(&reg, "unixfdsrc"), expected);
@@ -1346,10 +1393,13 @@ mod tests {
         let reg = default_registry();
         // `nvdec` matches the `nv*dec` family and `videoconvert` is registered:
         // neither may come back as a family hint.
-        let expected = if cfg!(all(target_os = "linux", feature = "nvdec")) {
-            GstEquivalent::Available
-        } else {
-            GstEquivalent::NotCompiled("nvdec")
+        let expected = match (cfg!(target_os = "linux"), cfg!(feature = "nvdec")) {
+            (true, true) => GstEquivalent::Available,
+            (true, false) => GstEquivalent::NotCompiled("nvdec"),
+            (false, _) => GstEquivalent::BuildsOnlyOn {
+                platform: "linux",
+                feature: "nvdec",
+            },
         };
         assert_eq!(gst_equivalent(&reg, "nvdec"), expected);
         assert_eq!(
@@ -1373,7 +1423,7 @@ mod tests {
             assert!(
                 registry_has(&reg, target)
                     || LAUNCH_KEYWORDS.contains(&target)
-                    || crate::registry::required_feature(target).is_some(),
+                    || crate::registry::feature_gated_element(target).is_some(),
                 "`{target}` is named as a g2g equivalent but is neither registered, \
                  a launch keyword, nor a feature-gated element"
             );
