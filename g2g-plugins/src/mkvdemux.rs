@@ -47,7 +47,7 @@ use g2g_core::{
     CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
     MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
     PipelinePacket, ProResVariant, PropError, PropKind, PropValue, PropertySpec, Rate,
-    RawVideoFormat, Seek, Segment, Stream, StreamCollection, StreamType, SubPictureFormat, TagList,
+    RawVideoFormat, Seek, Stream, StreamCollection, StreamType, SubPictureFormat, TagList,
     TextFormat, VideoCodec,
 };
 
@@ -55,7 +55,7 @@ use crate::avidemux::pcm_alternatives;
 use crate::codectag::{tagged_stream_name, TaggedStream};
 
 use crate::aacparse::{adts_from_asc, is_raw_aac_config};
-use crate::demuxseek::DemuxSeek;
+use crate::demuxseek::{DemuxSeek, SharedSegment};
 use crate::matroska::{MatroskaDemuxer, MkvCodec, MkvTrack};
 use crate::typefind::{framerate_within_placeholder, with_picture_size, PLACEHOLDER_FRAMERATE};
 use crate::uncompressedvideo::{
@@ -682,8 +682,10 @@ impl MkvDemux {
                 // Stream start: map the first emitted timestamp to running time 0.
                 // Matroska normally starts at 0, so this is usually the identity, but
                 // a file cut from a live recording need not, and every demuxer opens
-                // its stream the same way.
-                if let Some(seg) = self.seek.opening_segment(f.pts_ns) {
+                // its stream the same way. A frame presenting earlier than the
+                // stream start, an open-GOP B frame, lowers it.
+                let opening = self.seek.opening_segment(f.pts_ns);
+                if let Some(seg) = self.seek.lowered_segment(f.pts_ns).or(opening) {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 // The track's decoder-init bytes go in band once, ahead of its first
@@ -1591,12 +1593,10 @@ pub struct MkvDemuxN {
     /// Inert unless `with_stream_select` wired it.
     stream_select: Option<StreamSelectController>,
     emitted: u64,
-    /// Stream-start timestamp (ns) latched from the first routed frame; every
-    /// port's opening `Segment` maps it to running time 0, so the ports share
-    /// one running-time origin.
-    segment_base: Option<u64>,
-    /// Whether port `i` has emitted its opening `Segment` yet.
-    segment_sent: Vec<bool>,
+    /// Stream-start timestamp (ns) from the first routed frame, lowered by any
+    /// later frame presenting earlier; every port's `Segment` maps it to
+    /// running time 0, so the ports share one running-time origin.
+    segment: SharedSegment,
 }
 
 impl MkvDemuxN {
@@ -1609,16 +1609,15 @@ impl MkvDemuxN {
         );
         let announced = alloc::vec![false; ports.len()];
         let config_sent = alloc::vec![false; ports.len()];
-        let segment_sent = alloc::vec![false; ports.len()];
         let port_tracks = alloc::vec![None; ports.len()];
+        let segment = SharedSegment::new(ports.len());
         Self {
             demux: MatroskaDemuxer::new(),
             ports,
             port_tracks,
             announced,
             config_sent,
-            segment_base: None,
-            segment_sent,
+            segment,
             bus: None,
             metadata: MetadataPoster::default(),
             collection_posted: false,
@@ -1809,12 +1808,9 @@ impl MultiOutputElement for MkvDemuxN {
                         let Some(port) = self.port_for_track(f.codec, f.track) else {
                             continue; // a track no selected port carries
                         };
-                        if !self.segment_sent[port] {
-                            self.segment_sent[port] = true;
-                            let base = *self.segment_base.get_or_insert(f.pts_ns);
-                            let seg = Segment::for_flush_seek(&Seek::flush_to(base), None);
-                            out.push_to(port, PipelinePacket::Segment(seg)).await?;
-                        }
+                        self.segment
+                            .send_before_unit(port, f.pts_ns, Some(f.pts_ns), out)
+                            .await?;
                         if !self.announced[port] {
                             let caps = MkvDemux::concrete_caps_of(
                                 &self.demux,

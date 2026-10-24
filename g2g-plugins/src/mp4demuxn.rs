@@ -854,6 +854,13 @@ impl Mp4DemuxN {
                     self.learn_held_fragment(&samples);
                     let samples = edit_track_samples(&forwarded, samples);
                     self.learn_presentation_start(&forwarded, &samples);
+                    for port in 0..self.announced.len() {
+                        if self.announced[port]
+                            && self.port_segment(port) != self.segment_sent[port]
+                        {
+                            self.send_port_segment(port, out).await?;
+                        }
+                    }
                     let framerates = forwarded
                         .iter()
                         .map(|track| track_fragment_framerate_q16(&self.buf[start..end], track))
@@ -939,11 +946,8 @@ impl Mp4DemuxN {
             let Some(port) = self.port_of(track.track_id) else {
                 continue;
             };
-            if self.port_first_presented_ns[port].is_some() {
-                continue;
-            }
             // a track's first pts past its edit-list start, as ffmpeg's start_time
-            self.port_first_presented_ns[port] = samples
+            let fragment_first_ns = samples
                 .iter()
                 .filter(|(track_id, _)| *track_id == track.track_id)
                 .map(|(_, sample)| sample.pts_ns)
@@ -951,6 +955,11 @@ impl Mp4DemuxN {
                 .map(|first_pts_ns| {
                     first_pts_ns.saturating_sub(track.presentation_segment().start)
                 });
+            // a later fragment can carry a frame presenting earlier, an open-GOP B frame
+            self.port_first_presented_ns[port] = self.port_first_presented_ns[port]
+                .into_iter()
+                .chain(fragment_first_ns)
+                .min();
         }
         // a fragment can carry one track alone, and a later track can start earlier
         if self.port_first_presented_ns.iter().all(Option::is_some) {

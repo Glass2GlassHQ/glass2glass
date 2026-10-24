@@ -33,7 +33,7 @@ use alloc::vec::Vec;
 use core::iter::Chain;
 
 use g2g_core::runtime::SeekController;
-use g2g_core::{Seek, Segment};
+use g2g_core::{G2gError, MultiOutputSink, PipelinePacket, Seek, Segment};
 
 // a stream without a keyframe for this many units releases them early, the segment still clips them
 const KEPT_UNITS_MAX: usize = 1024;
@@ -51,6 +51,50 @@ pub(crate) fn segment_from(start_pts_ns: u64, stream_start_ns: u64) -> Segment {
         Segment::for_flush_seek(&Seek::flush_to(start_pts_ns), None),
         stream_start_ns,
     )
+}
+
+// the segment every port of a fan-out demuxer opens with, so the ports share one running-time origin
+#[derive(Debug)]
+pub(crate) struct SharedSegment {
+    start_ns: Option<u64>,
+    sent: Vec<bool>,
+}
+
+impl SharedSegment {
+    pub(crate) fn new(ports: usize) -> Self {
+        Self {
+            start_ns: None,
+            sent: alloc::vec![false; ports],
+        }
+    }
+
+    // a unit presenting before the start lowers it on every opened port first, as matroskademux does
+    pub(crate) async fn send_before_unit(
+        &mut self,
+        port: usize,
+        opening_start_ns: u64,
+        pts_ns: Option<u64>,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
+        if let (Some(start_ns), Some(pts_ns)) = (self.start_ns, pts_ns) {
+            if pts_ns < start_ns {
+                self.start_ns = Some(pts_ns);
+                let lowered = Segment::for_flush_seek(&Seek::flush_to(pts_ns), None);
+                for opened_port in (0..self.sent.len()).filter(|&port| self.sent[port]) {
+                    out.push_to(opened_port, PipelinePacket::Segment(lowered))
+                        .await?;
+                }
+            }
+        }
+        if self.sent[port] {
+            return Ok(());
+        }
+        self.sent[port] = true;
+        let start_ns = *self.start_ns.get_or_insert(opening_start_ns);
+        let opening = Segment::for_flush_seek(&Seek::flush_to(start_ns), None);
+        out.push_to(port, PipelinePacket::Segment(opening)).await?;
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -96,6 +140,19 @@ enum Phase {
     Discarding { target: SeekTarget },
 }
 
+// the segment the stream runs under since the last flush
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum StreamSegment {
+    #[default]
+    Unsent,
+    // a unit presenting before this start, or before the stream start, lowers both, as matroskademux does
+    AtStreamStart {
+        start_ns: u64,
+    },
+    // a seek's segment, or one kept across a source restart
+    Fixed,
+}
+
 // a seek target counts from the stream's first pts, as ffmpeg -ss counts from the start time
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SeekTarget {
@@ -122,8 +179,7 @@ pub(crate) struct DemuxSeek<U> {
     // empty until the first keyframe after the flush, since nothing before it decodes
     kept: Vec<U>,
     stream_start_ns: Option<u64>,
-    // whether the stream since the last flush has its segment
-    opened: bool,
+    segment: StreamSegment,
 }
 
 impl<U> Default for DemuxSeek<U> {
@@ -135,7 +191,7 @@ impl<U> Default for DemuxSeek<U> {
             keep_state: false,
             kept: Vec::new(),
             stream_start_ns: None,
-            opened: false,
+            segment: StreamSegment::Unsent,
         }
     }
 }
@@ -211,12 +267,39 @@ impl<U> DemuxSeek<U> {
 
     // the segment a stream opens with, at its first unit or after a flush that was not a seek
     pub(crate) fn opening_segment(&mut self, start_pts_ns: u64) -> Option<Segment> {
-        if self.opened {
+        if self.segment != StreamSegment::Unsent {
             return None;
         }
-        self.opened = true;
+        self.segment = StreamSegment::AtStreamStart {
+            start_ns: start_pts_ns,
+        };
         let stream_start_ns = *self.stream_start_ns.get_or_insert(start_pts_ns);
         Some(segment_from(start_pts_ns, stream_start_ns))
+    }
+
+    // the stream after a source restart keeps the segment it had, and nothing lowers it
+    pub(crate) fn keep_segment(&mut self) {
+        self.segment = StreamSegment::Fixed;
+    }
+
+    // the segment to send before a unit presenting before the segment's start or the stream start, none if unchanged
+    pub(crate) fn lowered_segment(&mut self, pts_ns: u64) -> Option<Segment> {
+        let StreamSegment::AtStreamStart { start_ns } = self.segment else {
+            return None;
+        };
+        let stream_start_ns = self
+            .stream_start_ns
+            .expect("the opening segment set the stream start");
+        if pts_ns >= start_ns && pts_ns >= stream_start_ns {
+            return None;
+        }
+        let sent = segment_from(start_ns, stream_start_ns);
+        let start_ns = start_ns.min(pts_ns);
+        let stream_start_ns = stream_start_ns.min(pts_ns);
+        self.segment = StreamSegment::AtStreamStart { start_ns };
+        self.stream_start_ns = Some(stream_start_ns);
+        let lowered = segment_from(start_ns, stream_start_ns);
+        (lowered != sent).then_some(lowered)
     }
 
     /// The upstream stream length in bytes, when the source published one, so a
@@ -279,7 +362,7 @@ impl<U> DemuxSeek<U> {
             self.phase = Phase::Discarding { target };
         }
         self.kept.clear();
-        self.opened = false;
+        self.segment = StreamSegment::Unsent;
         true
     }
 
@@ -309,7 +392,7 @@ impl<U> DemuxSeek<U> {
             return Admitted::empty();
         }
         self.phase = Phase::Idle;
-        self.opened = true;
+        self.segment = StreamSegment::Fixed;
         Admitted::release(
             Some(segment_from(target_ns, stream_start_ns)),
             core::mem::take(&mut self.kept),
@@ -454,6 +537,43 @@ mod tests {
             .expect("a flush reopens the stream");
         assert_eq!(opening.to_stream_time(STREAM_START_NS), Some(0));
         assert_eq!(s.opening_segment(STREAM_START_NS), None);
+    }
+
+    #[test]
+    fn a_unit_before_the_opening_lowers_it() {
+        const OPENING_NS: u64 = 1_000;
+        const EARLIER_NS: u64 = 400;
+        let mut s: DemuxSeek<u64> = DemuxSeek::default();
+        s.note_stream_start(OPENING_NS);
+        s.opening_segment(OPENING_NS).expect("the first unit opens");
+        assert_eq!(s.lowered_segment(OPENING_NS + 1), None);
+
+        let lowered = s
+            .lowered_segment(EARLIER_NS)
+            .expect("an earlier unit lowers it");
+        assert_eq!(lowered.start, EARLIER_NS);
+        assert_eq!(lowered.to_stream_time(EARLIER_NS), Some(0));
+        assert_eq!(
+            s.stream_start_ns(),
+            Some(EARLIER_NS),
+            "seek targets count from the lowered start"
+        );
+    }
+
+    #[test]
+    fn a_seek_or_restart_segment_is_never_lowered() {
+        const STREAM_START_NS: u64 = 1_000;
+        let mut s = discarding_to_target(STREAM_START_NS);
+        s.admit(STREAM_START_NS, true, 0);
+        s.admit(TARGET_NS + STREAM_START_NS, false, 1)
+            .segment
+            .expect("the seek resumes");
+        assert_eq!(s.lowered_segment(0), None, "the seek's segment stays");
+
+        s.on_flush();
+        s.keep_segment();
+        assert_eq!(s.opening_segment(STREAM_START_NS), None);
+        assert_eq!(s.lowered_segment(0), None, "the restart's segment stays");
     }
 
     #[test]

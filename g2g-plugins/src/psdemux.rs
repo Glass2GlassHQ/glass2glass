@@ -42,6 +42,7 @@ use g2g_core::{
     Segment, Stream, StreamCollection, StreamType, SubPictureFormat, VideoCodec,
 };
 
+use crate::demuxseek::SharedSegment;
 use crate::mpeg2video::Mpeg2TimestampSynth;
 pub use crate::mpeg2video::{parse_sequence_header, SequenceHeader};
 use crate::mpegts::{decode_timestamp, parse_pes_header};
@@ -1681,12 +1682,11 @@ pub struct PsDemuxN {
     /// wired it.
     stream_select: Option<StreamSelectController>,
     emitted: u64,
-    /// Stream-start DTS (ns) latched from the first routed unit; every port's
-    /// opening `Segment` maps it to running time 0 so A/V stay aligned and a
-    /// mid-title slice's large PTS does not stall a paced sink.
-    segment_base: Option<u64>,
-    /// Whether port `i` has emitted its opening `Segment` yet.
-    segment_sent: Vec<bool>,
+    /// Stream-start DTS (ns) from the first routed unit, lowered by any later
+    /// unit presenting earlier; every port's `Segment` maps it to running time
+    /// 0 so A/V stay aligned and a mid-title slice's large PTS does not stall a
+    /// paced sink.
+    segment: SharedSegment,
     /// Whether port `i` has forwarded the synthesized `.idx` geometry in band
     /// ahead of its first cue (subpicture ports only), the per-port form of
     /// [`PsDemux`]'s `config_sent`.
@@ -1711,7 +1711,7 @@ impl PsDemuxN {
         let announced = alloc::vec![false; ports.len()];
         let selected_streams = alloc::vec![None; ports.len()];
         let refined = alloc::vec![None; ports.len()];
-        let segment_sent = alloc::vec![false; ports.len()];
+        let segment = SharedSegment::new(ports.len());
         let config_sent = alloc::vec![false; ports.len()];
         Self {
             demux: PsDemuxer::new(),
@@ -1723,8 +1723,7 @@ impl PsDemuxN {
             collection_posted: false,
             stream_select: None,
             emitted: 0,
-            segment_base: None,
-            segment_sent,
+            segment,
             config_sent,
             seed_geometry: None,
             held_picture_ns: 0,
@@ -1869,12 +1868,10 @@ impl PsDemuxN {
                     self.refined[port] = Some(seq);
                 }
             }
-            if !self.segment_sent[port] {
-                self.segment_sent[port] = true;
-                let base = *self.segment_base.get_or_insert(dts_ns);
-                let seg = Segment::for_flush_seek(&Seek::flush_to(base), None);
-                out.push_to(port, PipelinePacket::Segment(seg)).await?;
-            }
+            let presented_ns = ns_from_90khz(u.pts_90khz);
+            self.segment
+                .send_before_unit(port, dts_ns, presented_ns, out)
+                .await?;
             // A subpicture port opens on the same synthesized `.idx` the single
             // output demuxer sends, so a fan-out subtitle branch renders on the
             // video's geometry rather than the decoder's default.

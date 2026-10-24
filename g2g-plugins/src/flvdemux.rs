@@ -329,8 +329,10 @@ impl FlvDemux {
                 let pts_ns = u.pts_ns();
                 let dts_ns = u.dts_ns();
                 // Stream start: map the first emitted timestamp to running time 0,
-                // as every demuxer opens its stream.
-                if let Some(seg) = self.seek.opening_segment(pts_ns) {
+                // as every demuxer opens its stream. A unit presenting earlier than
+                // the stream start lowers it.
+                let opening = self.seek.opening_segment(pts_ns);
+                if let Some(seg) = self.seek.lowered_segment(pts_ns).or(opening) {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 let data =

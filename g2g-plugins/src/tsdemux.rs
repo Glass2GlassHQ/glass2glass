@@ -1288,10 +1288,20 @@ impl TsDemuxN {
         // Stream start: map the first emitted DTS to running time 0, since
         // open-GOP B frames present before the first I frame. A seek's resume
         // already did that for its own case.
-        if let Some(opening) = self.seek.opening_segment(dts_ns) {
-            match self.segment {
-                Some(_) if resuming => {}
-                _ => self.segment = Some(opening),
+        if resuming && self.segment.is_some() {
+            self.seek.keep_segment();
+        } else if let Some(opening) = self.seek.opening_segment(dts_ns) {
+            self.segment = Some(opening);
+        }
+        // another stream can start before the first unit out, gst's tsdemux opens at the lowest first pts
+        let lowered = u.pts_90khz.and_then(|_| self.seek.lowered_segment(pts_ns));
+        if let Some(lowered) = lowered {
+            self.segment = Some(lowered);
+            for opened_port in 0..self.ports.len() {
+                if self.segment_sent[opened_port] {
+                    out.push_to(opened_port, PipelinePacket::Segment(lowered))
+                        .await?;
+                }
             }
         }
         if !self.segment_sent[port] {
