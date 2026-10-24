@@ -550,6 +550,8 @@ pub struct AacParse {
     framing: Framing,
     // the buffers that arrived while the framing was undecided
     undecided: Vec<Frame>,
+    // LATM frames dropped because no caps were known when they arrived
+    frames_dropped_before_caps: u64,
     /// Unconsumed ADTS bytes, starting at stream offset `buf_offset`.
     buf: Vec<u8>,
     buf_offset: u64,
@@ -665,6 +667,10 @@ impl AacParse {
             Framing::Undecided | Framing::Latm => {
                 if let Some(info) = parse_aac(bytes) {
                     self.announce(info.caps(), out).await?;
+                } else if self.last_emitted_caps.is_none() {
+                    // a decoder cannot open on a frame that reuses a config it never saw
+                    self.frames_dropped_before_caps += 1;
+                    return Ok(());
                 }
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
@@ -815,6 +821,14 @@ impl AsyncElement for AacParse {
                     if self.framing == Framing::Adts {
                         self.strip_id3v1();
                         self.drain(true, out).await?;
+                    }
+                    if self.framing == Framing::Latm && self.headers_emitted == 0 {
+                        g2g_error!(
+                            self,
+                            "none of {} frames carried an ADTS header or a LATM StreamMuxConfig this can read",
+                            self.frames_dropped_before_caps
+                        );
+                        return Err(G2gError::CapsMismatch);
                     }
                 }
                 other => {
@@ -1764,6 +1778,59 @@ mod tests {
             panic!("the LOAS frame is forwarded");
         };
         assert_eq!(forwarded.domain.as_system_slice(), Some(frame.as_slice()));
+    }
+
+    // a LOAS frame whose AudioMuxElement sets useSameStreamMux, so it carries no config
+    fn loas_frame_reusing_the_config() -> Vec<u8> {
+        let mut w = BitWriter::default();
+        w.write_bits(1, 1);
+        w.write_bits(0, 7);
+        loas_frame(&w.into_bytes())
+    }
+
+    async fn push_frames(
+        parse: &mut AacParse,
+        sink: &mut CollectSink,
+        frames: &[Vec<u8>],
+    ) -> Result<(), G2gError> {
+        for (sequence, bytes) in frames.iter().enumerate() {
+            let frame = frame_with_bytes(sequence as u64, bytes.clone());
+            parse
+                .process(PipelinePacket::DataFrame(frame), sink)
+                .await?;
+        }
+        parse.process(PipelinePacket::Eos, sink).await
+    }
+
+    #[tokio::test]
+    async fn a_loas_stream_with_no_config_fails_at_eos() {
+        let mut parse = AacParse::new();
+        parse.configure_pipeline(&aac_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        let frames = vec![loas_frame_reusing_the_config(); 3];
+        assert_eq!(
+            push_frames(&mut parse, &mut sink, &frames).await,
+            Err(G2gError::CapsMismatch)
+        );
+        assert!(sink.packets.is_empty(), "nothing undescribed goes out");
+    }
+
+    #[tokio::test]
+    async fn loas_frames_ahead_of_the_first_config_are_dropped() {
+        let mut parse = AacParse::new();
+        parse.configure_pipeline(&aac_caps()).unwrap();
+        let mut sink = CollectSink::default();
+        let with_config = loas_frame(&latm_mux_element(2, 4, 2));
+        let reusing = loas_frame_reusing_the_config();
+        let frames = [reusing.clone(), with_config.clone(), reusing.clone()];
+        push_frames(&mut parse, &mut sink, &frames).await.unwrap();
+        assert_eq!(caps_params(&sink), [(2, 44_100)]);
+        assert!(matches!(sink.packets[0], PipelinePacket::CapsChanged(_)));
+        let forwarded: Vec<&[u8]> = data_frames(&sink)
+            .iter()
+            .filter_map(|frame| frame.domain.as_system_slice())
+            .collect();
+        assert_eq!(forwarded, [with_config.as_slice(), reusing.as_slice()]);
     }
 
     #[tokio::test]
