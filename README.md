@@ -52,6 +52,8 @@ use g2g_plugins::registry::default_registry;
 
 #[tokio::main]
 async fn main() {
+    // print warnings and errors, G2G_DEBUG=*:debug for more
+    g2g_core::log::init_from_env();
     let registry = default_registry();
     let graph = parse_launch(
         &registry,
@@ -66,8 +68,8 @@ async fn main() {
 
 On a Wayland desktop this opens a window showing a bouncing ball. On macOS,
 use the `metal-sink` feature instead of `wayland-sink`. With no display sink
-feature, `autovideosink` becomes `fakesink`: the program runs to the end and
-shows nothing.
+feature, `autovideosink` becomes `fakesink` with a warning: the program runs to
+the end and shows nothing.
 
 To run pipelines without writing a program, install the launcher:
 

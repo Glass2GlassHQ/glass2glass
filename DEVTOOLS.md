@@ -140,6 +140,7 @@ conflicting elements and the caps each wanted, with no env var, so a plain
 
 `G2G_DEBUG` is the general `GST_DEBUG` analog: `G2G_DEBUG=*:debug` or
 `G2G_DEBUG=videoscale:trace,*:warn` set per-category (element-type) thresholds.
+Without it, errors and warnings print, and `G2G_DEBUG=error` keeps only errors.
 
 ## Benchmarks
 

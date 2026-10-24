@@ -962,9 +962,9 @@ pub fn path_io_err<P: AsRef<std::path::Path>>(
 }
 
 /// Install the stderr sink and apply logging from the environment. The sink is
-/// always installed, so ERROR-level diagnostics print by default; the
-/// `G2G_DEBUG` environment variable (a `GST_DEBUG`-style spec) tunes thresholds
-/// up from the default Error level. Also honors `G2G_CAPS_TRACE`
+/// always installed and the default threshold set to Warn, so errors and
+/// warnings print by default; the `G2G_DEBUG` environment variable (a
+/// `GST_DEBUG`-style spec) tunes thresholds from there. Also honors `G2G_CAPS_TRACE`
 /// as a shortcut for the caps explainer: a boolean-ish value (`1` / `true` / `on`
 /// / `yes`) raises the [`CAPS_CATEGORY`] to `Debug`, or a level name / number
 /// (`debug`, `trace`, `7`) sets that verbosity, installing the stderr sink if
@@ -972,12 +972,13 @@ pub fn path_io_err<P: AsRef<std::path::Path>>(
 /// binaries and apps invoke it.
 #[cfg(feature = "std")]
 pub fn init_from_env() {
-    // Always install the stderr sink so ERROR-level diagnostics (notably the
+    // Always install the stderr sink so errors and warnings (notably the
     // caps-negotiation narration, which already runs on every failed solve) are
-    // visible by default without opting in. The default threshold is Error
-    // (LogConfig::new), so a normal run stays quiet; G2G_DEBUG only tunes it up.
+    // visible by default without opting in, as gst-launch prints its WARNING
+    // messages. G2G_DEBUG tunes the Warn default up or down.
     set_sink(Box::new(StderrSink));
     set_time_source(unix_time_source);
+    set_default_level(LogLevel::Warn);
     if let Ok(spec) = std::env::var("G2G_DEBUG") {
         configure(&spec);
     }

@@ -2246,10 +2246,17 @@ mod factory {
         /// tail element), default-configured. `None` if `name` is not registered
         /// via [`register_launch`](Self::register_launch) (after alias resolution).
         pub fn make_element(&self, name: &str) -> Option<Box<dyn DynAsyncElement>> {
-            let name = self.resolve_alias(name);
+            const DISCARDING_SINK: &str = "fakesink";
+            let resolved = self.resolve_alias(name);
+            if resolved == DISCARDING_SINK && name != DISCARDING_SINK {
+                crate::g2g_warn!(
+                    crate::log::Target::category(crate::log::short_type_name::<Self>()),
+                    "{name} found no usable sink in this build, using {DISCARDING_SINK}: the pipeline runs but its output goes nowhere"
+                );
+            }
             self.launch
                 .iter()
-                .find(|f| f.name == name)
+                .find(|f| f.name == resolved)
                 .map(|f| (f.build)())
         }
 
@@ -3965,6 +3972,35 @@ mod tests {
         assert!(
             reg.make_element("displaysink").is_some(),
             "naming the sink outright still builds it, so it reports its own failure"
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn an_alias_falling_back_to_fakesink_warns() {
+        let _guard = crate::log::tests::GLOBAL_GUARD.lock();
+        let logs = crate::log::RingSink::new(8);
+        crate::log::set_sink(alloc::boxed::Box::new(logs.clone()));
+        crate::log::set_default_level(crate::log::LogLevel::Warn);
+        let mut reg = Registry::new();
+        reg.register_launch(named_sink("displaysink").with_usable(|| false));
+        reg.register_launch(named_sink("fakesink"));
+        reg.register_alias("autosink", &["displaysink", "fakesink"]);
+
+        assert!(reg.make_element("fakesink").is_some());
+        assert!(
+            logs.snapshot().is_empty(),
+            "naming fakesink outright is not a fallback"
+        );
+        assert!(reg.make_element("autosink").is_some());
+        let records = logs.snapshot();
+        crate::log::reset();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].level, crate::log::LogLevel::Warn);
+        assert!(
+            records[0].message.contains("autosink"),
+            "the warning names the alias: {}",
+            records[0].message
         );
     }
 

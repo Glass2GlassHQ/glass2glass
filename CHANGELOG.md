@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1887: `init_from_env` prints warnings by default, and an `autovideosink` or `autoaudiosink` that falls back to `fakesink` warns, as gst's does.
 - M1885: `srtsrc` drops a packet once the one after it is due, as libsrt does, and with `keep-listening` takes a new caller after the last one shuts down or stays silent for 5 s.
 - M1886: `hlssrc` skips a live segment or part that answers 4xx and reloads the playlist, where it ended the run.
 - M1884: `g2g-launch` ends by SIGPIPE only on a closed stdout, where a socket write to a reset RTSP server killed it.
