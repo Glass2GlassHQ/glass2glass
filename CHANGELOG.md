@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+Breaking: `LaunchFactory::with_usable` / `usable` return `Result<(), String>`, `ElementProbe::new` / `with_journeys` take an `ElementLogName`, `NegotiationFailure::NoOutputForInput` and `ParseError::BadValue` gain a field, g2g-plugins' `required_feature` is now `feature_gated_element`, `FeatureGatedElement` gains two fields, and `GstEquivalent` gains `BuildsOnlyOn`.
+
 - M1893: the runner logs each packet an element receives or a source pushes at `log` / `debug` under its instance name, and silent drop paths log at `debug`.
 - M1894: a CI job installs the README quick start's packages, tools and program in a clean `rust:1` container and runs them against the checkout.
 - M1895: `DEVTOOLS.md` walks from a failing pipeline's symptom to the tool that explains it, and the README opens with a start-here path.
