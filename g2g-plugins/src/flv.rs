@@ -413,9 +413,10 @@ pub(crate) fn write_u24(out: &mut Vec<u8>, v: u32) {
 }
 
 /// Incremental FLV muxer, the inverse of [`FlvDemuxer`]: wrap each access unit of
-/// an elementary stream into an FLV tag. The "FLV" header is written ahead of the
-/// first tag; thereafter each tag is preceded by the previous tag's size, matching
-/// the layout [`FlvDemuxer`] reads (so a mux -> demux round trip recovers the
+/// an elementary stream into an FLV tag. The "FLV" header and `PreviousTagSize0`
+/// are written ahead of the first tag; thereafter each tag is followed by its own
+/// size, so the last tag's size closes the file and the byte stream matches the
+/// layout [`FlvDemuxer`] reads (so a mux -> demux round trip recovers the
 /// access units).
 ///
 /// Single-track ([`new`](Self::new)) writes the one track's decoder config once
@@ -441,7 +442,6 @@ pub struct FlvMuxer {
     /// First byte of every audio tag: sound format + rate / size / channel flags.
     audio_flags: u8,
     header_written: bool,
-    prev_tag_size: u32,
 }
 
 impl FlvMuxer {
@@ -472,7 +472,6 @@ impl FlvMuxer {
             audio_config,
             audio_flags: audio.map_or(0, |codec| audio_tag_flags(codec, 2, 44_100)),
             header_written: false,
-            prev_tag_size: 0,
         }
     }
 
@@ -553,7 +552,7 @@ impl FlvMuxer {
             body.push(0x01);
             body.extend_from_slice(&[(cts >> 16) as u8, (cts >> 8) as u8, cts as u8]);
         }
-        self.emit_tag(&mut out, TAG_VIDEO, dts_ms, &[&body, au]);
+        emit_tag(&mut out, TAG_VIDEO, dts_ms, &[&body, au]);
         out
     }
 
@@ -568,7 +567,7 @@ impl FlvMuxer {
         if self.audio == Some(FlvCodec::Aac) {
             body.push(0x01);
         }
-        self.emit_tag(&mut out, TAG_AUDIO, pts_ms, &[&body, au]);
+        emit_tag(&mut out, TAG_AUDIO, pts_ms, &[&body, au]);
         out
     }
 
@@ -587,43 +586,45 @@ impl FlvMuxer {
             flags |= FLV_FLAG_AUDIO;
         }
         put_file_header(out, flags);
+        // PreviousTagSize0, the size of the tag before the first one
+        out.extend_from_slice(&0u32.to_be_bytes());
         self.header_written = true;
 
         if !self.tags.is_empty() {
             let script = on_metadata_body(&self.tags);
-            self.emit_tag(out, TAG_SCRIPT, 0, &[&script]);
+            emit_tag(out, TAG_SCRIPT, 0, &[&script]);
         }
         // Sequence headers (AVC packet type 0 / AAC packet type 0) carry the
         // decoder config a player needs before the media frames. Only H.264 and
         // AAC have one: VP6's dimension byte leads each media unit instead.
         if self.video == Some(FlvCodec::H264) && !self.video_config.is_empty() {
-            let config = self.video_config.clone();
-            self.emit_tag(
+            emit_tag(
                 out,
                 TAG_VIDEO,
                 0,
-                &[&[0x17, 0x00, 0x00, 0x00, 0x00], &config],
+                &[&[0x17, 0x00, 0x00, 0x00, 0x00], &self.video_config],
             );
         }
         if self.audio == Some(FlvCodec::Aac) && !self.audio_config.is_empty() {
-            let config = self.audio_config.clone();
-            self.emit_tag(out, TAG_AUDIO, 0, &[&[self.audio_flags, 0x00], &config]);
+            emit_tag(
+                out,
+                TAG_AUDIO,
+                0,
+                &[&[self.audio_flags, 0x00], &self.audio_config],
+            );
         }
     }
+}
 
-    /// Append one tag whose body is `parts` in order, prefixed by the prior
-    /// tag's `PreviousTagSize` (0 for the first tag), and record this tag's size
-    /// for the next.
-    fn emit_tag(&mut self, out: &mut Vec<u8>, tag_type: u8, pts_ms: u32, parts: &[&[u8]]) {
-        let body_len: usize = parts.iter().map(|part| part.len()).sum();
-        out.reserve(PREV_TAG_SIZE_LEN + TAG_HEADER_LEN + body_len);
-        out.extend_from_slice(&self.prev_tag_size.to_be_bytes());
-        put_tag_header(out, tag_type, pts_ms, body_len);
-        for part in parts {
-            out.extend_from_slice(part);
-        }
-        self.prev_tag_size = (TAG_HEADER_LEN + body_len) as u32;
+// one tag whose body is `parts` in order, followed by its PreviousTagSize
+fn emit_tag(out: &mut Vec<u8>, tag_type: u8, pts_ms: u32, parts: &[&[u8]]) {
+    let body_len: usize = parts.iter().map(|part| part.len()).sum();
+    out.reserve(TAG_HEADER_LEN + body_len + PREV_TAG_SIZE_LEN);
+    put_tag_header(out, tag_type, pts_ms, body_len);
+    for part in parts {
+        out.extend_from_slice(part);
     }
+    out.extend_from_slice(&((TAG_HEADER_LEN + body_len) as u32).to_be_bytes());
 }
 
 /// Append one FLV tag's 11-byte header: type, 24-bit body size, 24+8-bit
@@ -1083,6 +1084,28 @@ mod tests {
                 keyframe: true
             }]
         );
+    }
+
+    #[test]
+    fn mux_closes_the_file_with_the_last_tag_size() {
+        let mut mux = FlvMuxer::new_av(None, Vec::new(), Some(FlvCodec::Aac), vec![0x12, 0x10]);
+        let mut stream = mux.push_audio(&[0x11, 0x22], 0);
+        stream.extend_from_slice(&mux.push_audio(&[0x33], 23));
+
+        let mut at = FLV_HEADER_MIN;
+        let mut previous_tag_size = 0u32;
+        let mut tags = 0;
+        while let Some((_, body)) = tag_at(&stream, at) {
+            assert_eq!(
+                stream[at..at + PREV_TAG_SIZE_LEN],
+                previous_tag_size.to_be_bytes()
+            );
+            previous_tag_size = (body.end - at - PREV_TAG_SIZE_LEN) as u32;
+            at = body.end;
+            tags += 1;
+        }
+        assert_eq!(tags, 3, "the sequence header and both frames");
+        assert_eq!(stream[at..], previous_tag_size.to_be_bytes());
     }
 
     #[test]

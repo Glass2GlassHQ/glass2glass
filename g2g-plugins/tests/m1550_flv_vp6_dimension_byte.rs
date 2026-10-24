@@ -20,10 +20,13 @@ const DIMENSION_BYTE: u8 = 0x4C;
 fn single_tag_flv(body: &[u8]) -> Vec<u8> {
     let mut flv = b"FLV\x01\x01\x00\x00\x00\x09".to_vec();
     flv.extend_from_slice(&0u32.to_be_bytes());
+    let tag_start = flv.len();
     flv.push(TAG_VIDEO);
     flv.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
     flv.extend_from_slice(&[0; 7]);
     flv.extend_from_slice(body);
+    let tag_len = (flv.len() - tag_start) as u32;
+    flv.extend_from_slice(&tag_len.to_be_bytes());
     flv
 }
 
