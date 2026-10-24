@@ -40,8 +40,8 @@ A complete program:
 # Cargo.toml
 [dependencies]
 tokio       = { version = "1", features = ["macros", "rt-multi-thread"] }
-g2g-core    = "0.8"
-g2g-plugins = { version = "0.8", features = ["std", "wayland-sink"] }
+g2g-core    = "0.9"
+g2g-plugins = { version = "0.9", features = ["std", "wayland-sink"] }
 ```
 
 ```rust
