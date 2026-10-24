@@ -16,7 +16,7 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::caps::{batch_alternatives, Caps, CapsSet, PassthroughFields};
+use crate::caps::{batch_alternatives, conflicting_fields, Caps, CapsSet, PassthroughFields};
 #[cfg(feature = "std")]
 use crate::caps_transform::CapsTransform;
 use crate::format_element::{CapsConstraint, CapsPreferences};
@@ -76,10 +76,14 @@ pub enum NegotiationFailure {
     /// fixation returns this.
     NoConsistentFixation,
     /// `upstream` is a transform whose derived output (`DerivedOutput` /
-    /// `DerivedFields`) is empty for the caps on its input link, so the link to
-    /// `downstream` has nothing to carry: an encoder fed a pixel format it does
-    /// not take. Reported by the DAG solver.
-    NoOutputForInput { upstream: usize, downstream: usize },
+    /// `DerivedFields`) is empty for the caps on its input link, `input`, so the
+    /// link to `downstream` has nothing to carry: an encoder fed a pixel format
+    /// it does not take. Reported by the DAG solver.
+    NoOutputForInput {
+        upstream: usize,
+        downstream: usize,
+        input: CapsSet,
+    },
     /// The batch demux `index` would accept more than
     /// [`MAX_BATCH_ALTERNATIVES`](crate::caps::MAX_BATCH_ALTERNATIVES)
     /// combinations of its streams' caps. A capsfilter on each stream narrows
@@ -944,20 +948,11 @@ pub fn solve_graph_preferred<E>(
         | NegotiationFailure::NoOutputForInput {
             upstream,
             downstream,
+            ..
         } => {
             let (up, down) = (NodeId(*upstream as u32), NodeId(*downstream as u32));
-            if matches!(f, NegotiationFailure::NoOutputForInput { .. }) {
-                let input: Vec<String> = graph
-                    .in_edges(up)
-                    .iter()
-                    .map(|&e| fmt_set_opt(&edges[e]))
-                    .collect();
-                crate::g2g_error!(
-                    t,
-                    "{} produces no output for {}",
-                    label(up),
-                    input.join(", ")
-                );
+            if let NegotiationFailure::NoOutputForInput { input, .. } = f {
+                crate::g2g_error!(t, "{} produces no output for {}", label(up), fmt_set(input));
             } else {
                 crate::g2g_error!(
                     t,
@@ -965,6 +960,26 @@ pub fn solve_graph_preferred<E>(
                     label(up),
                     label(down)
                 );
+            }
+            if let Some(conflict) = f.conflict() {
+                crate::g2g_error!(t, "  {} offers: {}", label(up), fmt_set(&conflict.upstream));
+                crate::g2g_error!(
+                    t,
+                    "  {} wants: {}",
+                    label(down),
+                    fmt_set(&conflict.downstream)
+                );
+                for field in conflicting_fields(&conflict.upstream, &conflict.downstream) {
+                    crate::g2g_error!(
+                        t,
+                        "  {}: {} offers {}, {} wants {}",
+                        field.field,
+                        label(up),
+                        fmt_alternatives(field.upstream.into_iter()),
+                        label(down),
+                        fmt_alternatives(field.downstream.into_iter())
+                    );
+                }
             }
             for (id, slot) in edges.iter().enumerate() {
                 let e = graph.edge(id);
@@ -1441,20 +1456,30 @@ fn kind_short(kind: NodeKind) -> &'static str {
 }
 
 /// Render a `CapsSet` for the explainer: its alternatives joined by ` | `, with
-/// `∅` for empty and a `(+N more)` elision past four so a wide set stays one
-/// readable line.
+/// `∅` for empty and the [`fmt_alternatives`] elision.
 fn fmt_set(set: &CapsSet) -> String {
-    let alts = set.alternatives();
-    if alts.is_empty() {
+    if set.is_empty() {
         return String::from("∅");
     }
-    let mut parts: Vec<String> = Vec::new();
-    for (i, a) in alts.iter().enumerate() {
-        if i == 4 {
-            parts.push(alloc::format!("(+{} more)", alts.len() - 4));
-            break;
-        }
-        parts.push(a.to_gst_string());
+    fmt_alternatives(set.alternatives().iter().map(Caps::to_gst_string))
+}
+
+// a wide set stays one readable line unless the caps category is at trace
+const ALTERNATIVES_SHOWN: usize = 4;
+
+fn fmt_alternatives(texts: impl ExactSizeIterator<Item = String>) -> String {
+    let total = texts.len();
+    let shown = if log::enabled(CAPS_CATEGORY, LogLevel::Trace) {
+        total
+    } else {
+        total.min(ALTERNATIVES_SHOWN)
+    };
+    let mut parts: Vec<String> = texts.take(shown).collect();
+    if shown < total {
+        parts.push(alloc::format!(
+            "(+{} more, G2G_CAPS_TRACE=trace lists them)",
+            total - shown
+        ));
     }
     parts.join(" | ")
 }
@@ -1462,7 +1487,7 @@ fn fmt_set(set: &CapsSet) -> String {
 fn fmt_set_opt(slot: &Option<CapsSet>) -> String {
     match slot {
         Some(s) => fmt_set(s),
-        None => String::from("(unconstrained)"),
+        None => String::from("(not narrowed yet)"),
     }
 }
 
@@ -1799,6 +1824,7 @@ fn apply_transform_node<E>(
                     return Err(NegotiationFailure::NoOutputForInput {
                         upstream,
                         downstream,
+                        input: in_set,
                     });
                 }
                 narrow_edge(graph, edges, out_e, &derived, node)?;
@@ -1828,6 +1854,7 @@ fn apply_transform_node<E>(
                     return Err(NegotiationFailure::NoOutputForInput {
                         upstream,
                         downstream,
+                        input: in_set,
                     });
                 }
                 narrow_edge(graph, edges, out_e, &derived, node)?;
@@ -3203,7 +3230,7 @@ mod tests {
             _ => CapsSet::from_alternatives(Vec::new()),
         }));
         let cs: Vec<NodeConstraint> = vec![
-            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(rgba))),
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(rgba.clone()))),
             NodeConstraint::Element(nv12_only),
             NodeConstraint::Element(CapsConstraint::AcceptsAny),
         ];
@@ -3221,6 +3248,7 @@ mod tests {
             NegotiationFailure::NoOutputForInput {
                 upstream: 1,
                 downstream: 2,
+                input: CapsSet::one(rgba),
             }
         );
     }
@@ -3851,7 +3879,7 @@ mod tests {
                 .map(|w| fixed_video(RawVideoFormat::Rgba8, w * 16, 48, 30))
                 .collect(),
         );
-        assert!(fmt_set(&wide).contains("(+2 more)"), "{}", fmt_set(&wide));
+        assert!(fmt_set(&wide).contains("(+2 more"), "{}", fmt_set(&wide));
 
         // Constraint summaries name the shape.
         assert!(

@@ -95,8 +95,9 @@ use g2g_core::runtime::{run_graph_observed, run_graph_observed_recorded, Observe
 use g2g_core::runtime::{run_graph_threaded_recorded, run_graph_threaded_with_progress};
 #[cfg(feature = "multi-thread")]
 use g2g_core::runtime::{GraphSpawner, LocalArmFuture};
-use g2g_core::Graph;
 use g2g_core::{Bus, BusMessage, Seek};
+use g2g_core::{Graph, NodeKind};
+use g2g_plugins::cli_stdout::write_stdout;
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
 #[cfg(feature = "multi-thread")]
@@ -573,9 +574,6 @@ fn main() {
     #[cfg(feature = "wayland-sink")]
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
         std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
-        if !opts.quiet {
-            eprintln!("WAYLAND_DISPLAY unset, defaulting to wayland-0");
-        }
     }
 
     let mut reg = default_registry();
@@ -681,23 +679,22 @@ fn main() {
         }
         // Show each link's negotiated caps + memory domain (gst `-v` style). The
         // solve lives in `negotiate_graph`, which consumes a graph, so negotiate a
-        // freshly-parsed throwaway copy and keep `graph` for the run. On any
-        // negotiation failure, fall back to the topology-only wiring dump.
-        let negotiated = tokio::runtime::Builder::new_current_thread()
+        // freshly-parsed throwaway copy and keep `graph` for the run. On a
+        // negotiation failure, dump the topology-only wiring and stop: the run
+        // would fail the same way and log the same ERROR block a second time.
+        let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .ok()
-            .and_then(|rt| {
-                let fresh = build_graph(&reg, &opts, &pipeline).ok()?;
-                rt.block_on(g2g_core::runtime::negotiate_graph(fresh)).ok()
-            });
-        match negotiated {
-            Some((vg, caps, memory)) => {
-                let name = |n: g2g_core::NodeId| {
-                    vg.element(n)
-                        .map(|el| el.log_category().to_string())
-                        .unwrap_or_else(|| format!("n{}", n.0))
-                };
+            .expect("build tokio runtime");
+        let fresh = match build_graph(&reg, &opts, &pipeline) {
+            Ok(fresh) => fresh,
+            Err(err) => {
+                eprintln!("{err}");
+                process::exit(1);
+            }
+        };
+        match rt.block_on(g2g_core::runtime::negotiate_graph(fresh)) {
+            Ok((vg, caps, memory)) => {
                 eprintln!("negotiated links ({}):", vg.edge_count());
                 for id in 0..vg.edge_count() {
                     let e = vg.edge(id);
@@ -710,20 +707,31 @@ fn main() {
                         .unwrap_or(g2g_core::MemoryDomainKind::System);
                     eprintln!(
                         "  [{id}] {} -> {} : {caps}  mem={mem:?} policy={:?}",
-                        name(e.src.node),
-                        name(e.dst.node),
+                        node_name(vg.element(e.src.node), vg.kind(e.src.node)),
+                        node_name(vg.element(e.dst.node), vg.kind(e.dst.node)),
                         e.policy
                     );
                 }
             }
-            None => {
+            Err(err) => {
                 eprintln!(
-                    "links ({}) [negotiation unavailable, topology only]:",
+                    "links ({}) [negotiation failed, topology only]:",
                     graph.edges().len()
                 );
+                let graph_node_name = |node| {
+                    let kind = graph.node_kind(node).expect("an edge endpoint is a node");
+                    node_name(graph.element(node), kind)
+                };
                 for (i, e) in graph.edges().iter().enumerate() {
-                    eprintln!("  [{i}] {:?} -> {:?}  policy={:?}", e.src, e.dst, e.policy);
+                    eprintln!(
+                        "  [{i}] {} -> {}  policy={:?}",
+                        graph_node_name(e.src.node),
+                        graph_node_name(e.dst.node),
+                        e.policy
+                    );
                 }
+                eprintln!("pipeline error: {err:?}");
+                process::exit(1);
             }
         }
     }
@@ -960,20 +968,9 @@ fn main() {
     }
 }
 
-// SIGPIPE stays ignored for the sockets, so a closed stdout (`| head`) ends the run here as gst-launch does
-fn write_stdout(text: std::fmt::Arguments) {
-    let Err(err) = std::io::stdout().write_fmt(text) else {
-        return;
-    };
-    #[cfg(unix)]
-    if err.kind() == std::io::ErrorKind::BrokenPipe {
-        // SAFETY: SIG_DFL is a valid disposition and raise signals only this process
-        unsafe {
-            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-            libc::raise(libc::SIGPIPE);
-        }
-    }
-    panic!("failed printing to stdout: {err}");
+// the label the DOT dump gives a node: its element's log category, or its kind for a tee
+fn node_name(element: Option<&GraphNode>, kind: NodeKind) -> &'static str {
+    element.map_or_else(|| g2g_core::dot::kind_label(kind), |e| e.log_category())
 }
 
 fn seek_target_ns(seconds: &str) -> Result<u64, String> {

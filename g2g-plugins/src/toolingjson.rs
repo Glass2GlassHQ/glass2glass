@@ -77,25 +77,26 @@ pub fn registry_json(reg: &Registry, name: Option<&str>) -> Result<Value, String
 
 /// Parse + negotiate a launch line without running it. On success reports every
 /// node (index + name) and the negotiated caps per edge (with the edge's
-/// endpoint node indices); on a solve conflict, the structured failure naming
-/// the offending link.
+/// endpoint node indices); on a solve conflict, every node and the structured
+/// failure naming the offending link.
 pub async fn validate_json(reg: &Registry, line: &str) -> Value {
     let graph = match parse_launch(reg, line) {
         Ok(g) => g,
         Err(e) => return json!({ "ok": false, "stage": "parse", "error": format!("{e}") }),
     };
+    // read before negotiating, which consumes the graph, so a failure can name nodes too
+    let nodes: Vec<Value> = (0..graph.node_count())
+        .map(|i| {
+            let node = NodeId(i as u32);
+            let name = match graph.element(node) {
+                Some(element) => element.log_category(),
+                None => kind_label(graph.node_kind(node).expect("a node below the node count")),
+            };
+            json!({ "index": i, "name": name })
+        })
+        .collect();
     match negotiate_graph_explained(graph).await {
         Ok((vg, edge_caps, _mem)) => {
-            let nodes: Vec<Value> = (0..vg.node_count())
-                .map(|i| {
-                    let node = NodeId(i as u32);
-                    let name = vg
-                        .element(node)
-                        .map(|e| e.log_category())
-                        .unwrap_or_else(|| kind_label(vg.kind(node)));
-                    json!({ "index": i, "name": name })
-                })
-                .collect();
             let edges: Vec<Value> = vg
                 .edges()
                 .iter()
@@ -114,7 +115,7 @@ pub async fn validate_json(reg: &Registry, line: &str) -> Value {
             json!({ "ok": false, "stage": "setup", "error": format!("{e:?}") })
         }
         Err(NegotiateError::Solve(nf)) => {
-            json!({ "ok": false, "stage": "negotiate", "failure": failure_json(&nf) })
+            json!({ "ok": false, "stage": "negotiate", "failure": failure_json(&nf), "nodes": nodes })
         }
         Err(e) => json!({ "ok": false, "stage": "negotiate", "error": format!("{e:?}") }),
     }
@@ -178,7 +179,8 @@ fn observed_graph(snap: &TelemetrySnapshot) -> Value {
 /// indices it names, so a caller (dashboard / MCP client) can highlight the
 /// offending link. An `EmptyLink` also carries what each end still allowed
 /// (`upstream_caps` / `downstream_caps`, one gst string per alternative) when
-/// the solver captured both sides.
+/// the solver captured both sides, and a `NoOutputForInput` the caps on the
+/// transform's input link (`input_caps`).
 fn failure_json(nf: &NegotiationFailure) -> Value {
     match nf {
         NegotiationFailure::EmptyLink {
@@ -197,8 +199,14 @@ fn failure_json(nf: &NegotiationFailure) -> Value {
         NegotiationFailure::NoOutputForInput {
             upstream,
             downstream,
+            input,
         } => {
-            json!({ "kind": "no-output-for-input", "upstream": upstream, "downstream": downstream })
+            json!({
+                "kind": "no-output-for-input",
+                "upstream": upstream,
+                "downstream": downstream,
+                "input_caps": set_strings(input),
+            })
         }
         NegotiationFailure::Unfixable {
             upstream,
@@ -688,6 +696,44 @@ mod tests {
             down.iter()
                 .all(|c| c.as_str().unwrap().starts_with("audio/x-raw")),
             "capsfilter demands raw audio, got {down:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_no_output_failure_names_the_nodes_and_the_input_caps() {
+        let reg = default_registry();
+        let line = "audiotestsrc ! videoflip ! fakesink";
+        let graph = parse_launch(&reg, line).expect("the line parses");
+        let expected_names: Vec<&str> = (0..graph.node_count())
+            .map(|i| graph.element(NodeId(i as u32)).unwrap().log_category())
+            .collect();
+        let source_caps = reg
+            .declared_output_caps("audiotestsrc")
+            .expect("audiotestsrc declares its output");
+
+        let bad = validate_json(&reg, line).await;
+        assert_eq!(bad["stage"], "negotiate", "{bad}");
+        let names: Vec<&str> = bad["nodes"]
+            .as_array()
+            .expect("a failure lists the nodes")
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, expected_names);
+        let f = &bad["failure"];
+        assert_eq!(f["kind"], "no-output-for-input");
+        // `upstream` is the transform that has no output, the line's middle element
+        let transform = f["upstream"].as_u64().unwrap() as usize;
+        assert_eq!(names[transform], expected_names[1]);
+        let media_type = source_caps.to_gst_string();
+        let media_type = media_type.split(',').next().unwrap();
+        let input = f["input_caps"].as_array().expect("the input caps");
+        assert!(
+            !input.is_empty()
+                && input
+                    .iter()
+                    .all(|c| c.as_str().unwrap().starts_with(media_type)),
+            "the input link carries the source's {media_type}, got {input:?}"
         );
     }
 

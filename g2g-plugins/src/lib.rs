@@ -635,6 +635,9 @@ pub mod gst_compat;
 pub mod docgen;
 #[cfg(feature = "std")]
 pub mod inspect_cli;
+// stdout for the command-line tools, ending the process on a closed pipe
+#[cfg(feature = "std")]
+pub mod cli_stdout;
 // Declarative graph format (M578): build a `Graph` from a JSON / YAML document,
 // the structured sibling of the `gst-launch` text parser. Behind `declarative`
 // (pulls serde + serde_json); `declarative-yaml` adds the YAML front-end.

@@ -7,7 +7,7 @@
 
 use g2g_core::runtime::solver::NegotiationFailure;
 use g2g_core::{
-    pad_link, types_can_link, Caps, Dim, PadCaps, PadDirection, PadTemplates, Rate, RawVideoFormat,
+    pad_link, types_can_link, Caps, PadCaps, PadDirection, PadTemplates, RawVideoFormat,
 };
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::h264parse::H264Parse;
@@ -20,16 +20,16 @@ fn introspects_pad_templates_without_constructing() {
     assert_eq!(src_pads.len(), 1);
     assert_eq!(src_pads[0].direction, PadDirection::Source);
     match &src_pads[0].caps {
-        PadCaps::Fixed(set) => assert_eq!(
-            set.alternatives()[0],
-            Caps::RawVideo {
-                format: RawVideoFormat::Rgba8,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN
-            }
+        PadCaps::Fixed(set) => assert!(
+            matches!(
+                set.alternatives()[0],
+                Caps::RawVideo {
+                    format: RawVideoFormat::Rgba8,
+                    ..
+                }
+            ),
+            "{:?}",
+            set.alternatives()[0]
         ),
         other => panic!("expected fixed RGBA caps, got {other:?}"),
     }

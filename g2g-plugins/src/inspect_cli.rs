@@ -29,12 +29,21 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use std::eprintln;
 use std::process;
-use std::{eprintln, print, println};
 
 use g2g_core::runtime::Registry;
 
+use crate::cli_stdout::write_stdout;
 use crate::gst_compat::{gst_equivalent, gst_name_synonyms, GstEquivalent};
+
+macro_rules! print_stdout {
+    ($($arg:tt)*) => { write_stdout(format_args!($($arg)*)) };
+}
+
+macro_rules! println_stdout {
+    ($($arg:tt)*) => { write_stdout(format_args!("{}\n", format_args!($($arg)*))) };
+}
 
 /// The plugin arguments, split out of the command line so what is left is the
 /// element name / mode flags.
@@ -142,7 +151,7 @@ fn load_plugins(_reg: &mut Registry, args: &PluginArgs) {
 #[cfg(feature = "tooling-json")]
 fn dump_json(reg: &Registry, name: Option<&str>) {
     match crate::toolingjson::registry_json(reg, name) {
-        Ok(v) => println!(
+        Ok(v) => println_stdout!(
             "{}",
             serde_json::to_string_pretty(&v).expect("serialize registry")
         ),
@@ -173,7 +182,7 @@ pub fn run(mut reg: Registry, args: Vec<String>) {
         // `gst-inspect` index.
         None => {
             for line in reg.element_listing() {
-                println!("{line}");
+                println_stdout!("{line}");
             }
         }
         // `--all` / `-a`: the full dump for every registered element, separated
@@ -183,9 +192,9 @@ pub fn run(mut reg: Registry, args: Vec<String>) {
             let total = names.len();
             for (i, name) in names.into_iter().enumerate() {
                 if let Some(dump) = reg.inspect(name) {
-                    print!("{dump}");
+                    print_stdout!("{dump}");
                     if i + 1 < total {
-                        println!("\n{}\n", "-".repeat(60));
+                        println_stdout!("\n{}\n", "-".repeat(60));
                     }
                 }
             }
@@ -203,7 +212,7 @@ pub fn run(mut reg: Registry, args: Vec<String>) {
             // In-process batteries + any persisted Oracle / Hardware evidence
             // ($G2G_CONFORMANCE_LOG) from the resource-owning conformance tests.
             let report = crate::conformance::persist::full_report();
-            print!("{}", report.to_table());
+            print_stdout!("{}", report.to_table());
         }
         // `--gst <name>`: map a GStreamer element name to its g2g equivalent,
         // for porting a pipeline element by element.
@@ -214,25 +223,27 @@ pub fn run(mut reg: Registry, args: Vec<String>) {
             };
             match gst_equivalent(&reg, &gst_name) {
                 GstEquivalent::Available => {
-                    println!("{gst_name}: available in g2g under the same name");
+                    println_stdout!("{gst_name}: available in g2g under the same name");
                 }
                 GstEquivalent::Renamed(g) => {
-                    println!("{gst_name}: g2g calls it `{g}` (run `g2g-inspect {g}` for details)");
+                    println_stdout!(
+                        "{gst_name}: g2g calls it `{g}` (run `g2g-inspect {g}` for details)"
+                    );
                 }
                 GstEquivalent::Unsupported(hint) => {
-                    println!("{gst_name}: no g2g element. {hint}");
+                    println_stdout!("{gst_name}: no g2g element. {hint}");
                 }
                 GstEquivalent::NotCompiled(feature) => {
-                    println!(
+                    println_stdout!(
                         "{gst_name}: a g2g element, but this build left it out; rebuild with `--features {feature}`"
                     );
                 }
                 GstEquivalent::DidYouMean(near) => {
-                    println!("{gst_name}: unknown to g2g; did you mean `{near}`?");
+                    println_stdout!("{gst_name}: unknown to g2g; did you mean `{near}`?");
                     process::exit(1);
                 }
                 GstEquivalent::Unknown => {
-                    println!("{gst_name}: unknown to g2g; no known equivalent. List elements with `g2g-inspect`.");
+                    println_stdout!("{gst_name}: unknown to g2g; no known equivalent. List elements with `g2g-inspect`.");
                     process::exit(1);
                 }
             }
@@ -242,7 +253,7 @@ pub fn run(mut reg: Registry, args: Vec<String>) {
         // two engines' graph dumps element by element.
         Some(flag) if flag == "--gst-map" => {
             for (gst_name, g2g_name) in gst_name_synonyms(&reg) {
-                println!("{gst_name}\t{g2g_name}");
+                println_stdout!("{gst_name}\t{g2g_name}");
             }
         }
         // `--gst-scan <file>`: scan a GStreamer application source file (C or
@@ -262,22 +273,22 @@ pub fn run(mut reg: Registry, args: Vec<String>) {
             };
             let report = crate::gst_compat::scan_source(&reg, &source);
             if report.findings.is_empty() {
-                println!("{path}: every element factory resolves to a g2g element");
+                println_stdout!("{path}: every element factory resolves to a g2g element");
             } else {
-                println!("{path}: elements needing attention:");
+                println_stdout!("{path}: elements needing attention:");
                 for f in &report.findings {
-                    println!("  - {f}");
+                    println_stdout!("  - {f}");
                 }
             }
             for n in &report.notes {
-                println!("  note: {n}");
+                println_stdout!("  note: {n}");
             }
             if !report.findings.is_empty() {
                 process::exit(1);
             }
         }
         Some(name) => match reg.inspect(&name) {
-            Some(dump) => print!("{dump}"),
+            Some(dump) => print_stdout!("{dump}"),
             None => {
                 eprintln!("No such element: {name}");
                 process::exit(1);

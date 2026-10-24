@@ -697,7 +697,8 @@ mod factory {
             .collect()
     }
 
-    /// Pad templates as `"DIR: caps"` lines, matching `format_templates`.
+    /// Each pad template as `DIR:` followed by one indented gst caps string per
+    /// alternative, or `DIR: ANY`.
     fn pad_docs(templates: &[PadTemplate]) -> Vec<String> {
         templates
             .iter()
@@ -707,11 +708,26 @@ mod factory {
                     PadDirection::Source => "SRC",
                 };
                 match &t.caps {
-                    PadCaps::Fixed(set) => format!("{dir}: {:?}", set.alternatives()),
+                    PadCaps::Fixed(set) => format!("{dir}:\n{}", indented(&caps_set_text(set))),
                     PadCaps::Any => format!("{dir}: ANY"),
                 }
             })
             .collect()
+    }
+
+    fn caps_set_text(set: &CapsSet) -> String {
+        set.alternatives()
+            .iter()
+            .map(Caps::to_gst_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn indented(text: &str) -> String {
+        text.lines()
+            .map(|line| format!("  {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// A registered element type: its autoplug metadata plus a constructor
@@ -816,7 +832,7 @@ mod factory {
         name: &'static str,
         templates: Vec<PadTemplate>,
         build: fn() -> Box<dyn DynAsyncElement>,
-        usable: Option<fn() -> bool>,
+        usable: Option<fn() -> Result<(), String>>,
         experimental: bool,
     }
 
@@ -848,12 +864,13 @@ mod factory {
 
         /// Declare a check for whether this element can run on this machine
         /// right now, beyond having been compiled in: a display sink asking
-        /// whether there is a display to present on, say.
+        /// whether there is a display to present on, say. The check returns why
+        /// not as its error, which the `auto*sink` fallback warning prints.
         ///
         /// Only [`register_alias`](Registry::register_alias) consults it, so an
         /// `autovideosink` falls through a sink with nothing to draw on while a
         /// pipeline naming that sink outright still fails and says why.
-        pub fn with_usable(mut self, usable: fn() -> bool) -> Self {
+        pub fn with_usable(mut self, usable: fn() -> Result<(), String>) -> Self {
             self.usable = Some(usable);
             self
         }
@@ -875,11 +892,17 @@ mod factory {
             self.name
         }
 
-        /// Whether this element can run here, per the check it declared.
-        /// `true` when it declared none.
-        pub fn usable(&self) -> bool {
-            self.usable.is_none_or(|check| check())
+        /// Whether this element can run here, per the check it declared, with
+        /// the reason when it cannot. `Ok` when it declared none.
+        pub fn usable(&self) -> Result<(), String> {
+            self.usable.map_or(Ok(()), |check| check())
         }
+    }
+
+    enum AliasTarget {
+        Usable,
+        Unusable(String),
+        NotBuilt,
     }
 
     impl core::fmt::Debug for LaunchFactory {
@@ -1013,26 +1036,13 @@ mod factory {
         properties: &'static [crate::property::PropertySpec],
     }
 
-    /// Format an element's pad templates the way `gst-inspect` lists them (one
-    /// line per pad: direction + the caps it accepts/produces).
+    /// Format an element's pad templates the way `gst-inspect` lists them: each
+    /// pad's direction, then the caps it accepts or produces.
     fn format_templates(templates: &[PadTemplate]) -> String {
-        use core::fmt::Write;
-        let mut out = String::new();
-        for t in templates {
-            let dir = match t.direction {
-                PadDirection::Sink => "SINK",
-                PadDirection::Source => "SRC",
-            };
-            match &t.caps {
-                PadCaps::Fixed(set) => {
-                    let _ = writeln!(out, "  {dir}: {:?}", set.alternatives());
-                }
-                PadCaps::Any => {
-                    let _ = writeln!(out, "  {dir}: ANY");
-                }
-            }
-        }
-        out
+        pad_docs(templates)
+            .iter()
+            .map(|pad| format!("{}\n", indented(pad)))
+            .collect()
     }
 
     /// Why [`Registry::decodebin`] could not splice a chain.
@@ -1112,10 +1122,7 @@ mod factory {
         }
 
         fn outputs_text(&self) -> String {
-            match self.outputs.alternatives() {
-                [only] => format!("{only:?}"),
-                all => format!("{all:?}"),
-            }
+            caps_set_text(&self.outputs)
         }
 
         /// Mark this source experimental: its runtime path is host- or
@@ -2126,7 +2133,7 @@ mod factory {
         fn has_usable_launch(&self, name: &str) -> bool {
             self.launch
                 .iter()
-                .any(|factory| factory.name == name && factory.usable())
+                .any(|factory| factory.name == name && factory.usable().is_ok())
         }
 
         /// Set the memory-domain converter factory a parsed pipeline is spliced
@@ -2215,21 +2222,53 @@ mod factory {
         pub(crate) fn resolve_alias<'a>(&self, name: &'a str) -> &'a str {
             if let Some((_, targets)) = self.aliases.iter().find(|(a, _)| *a == name) {
                 for &t in *targets {
-                    if let Some(factory) = self.launch.iter().find(|f| f.name == t) {
-                        if factory.usable() {
-                            return t;
-                        }
-                        continue;
-                    }
-                    if self.sources.iter().any(|s| s.name == t)
-                        || self.muxers.iter().any(|m| m.name == t)
-                        || self.demuxes.iter().any(|d| d.name == t)
-                    {
+                    if let AliasTarget::Usable = self.alias_target(t) {
                         return t;
                     }
                 }
             }
             name
+        }
+
+        fn alias_target(&self, target: &str) -> AliasTarget {
+            if let Some(factory) = self.launch.iter().find(|f| f.name == target) {
+                return match factory.usable() {
+                    Ok(()) => AliasTarget::Usable,
+                    Err(reason) => AliasTarget::Unusable(reason),
+                };
+            }
+            if self.sources.iter().any(|s| s.name == target)
+                || self.muxers.iter().any(|m| m.name == target)
+                || self.demuxes.iter().any(|d| d.name == target)
+            {
+                return AliasTarget::Usable;
+            }
+            AliasTarget::NotBuilt
+        }
+
+        fn alias_fallthrough(&self, alias: &str, resolved: &str) -> String {
+            let (_, targets) = self
+                .aliases
+                .iter()
+                .find(|(a, _)| *a == alias)
+                .expect("only an alias resolves to another name");
+            let mut skipped: Vec<String> = Vec::new();
+            let mut not_built: Vec<&str> = Vec::new();
+            for &target in targets.iter().take_while(|&&t| t != resolved) {
+                match self.alias_target(target) {
+                    AliasTarget::Unusable(reason) => skipped.push(format!("{target} ({reason})")),
+                    AliasTarget::NotBuilt => not_built.push(target),
+                    AliasTarget::Usable => {}
+                }
+            }
+            let mut parts: Vec<String> = Vec::new();
+            if !skipped.is_empty() {
+                parts.push(format!("cannot run here: {}", skipped.join(", ")));
+            }
+            if !not_built.is_empty() {
+                parts.push(format!("not in this build: {}", not_built.join(", ")));
+            }
+            parts.join("; ")
         }
 
         /// Construct a registered source by name (the parser's first element).
@@ -2251,7 +2290,8 @@ mod factory {
             if resolved == DISCARDING_SINK && name != DISCARDING_SINK {
                 crate::g2g_warn!(
                     crate::log::Target::category(crate::log::short_type_name::<Self>()),
-                    "{name} found no usable sink in this build, using {DISCARDING_SINK}: the pipeline runs but its output goes nowhere"
+                    "{name} found no usable sink ({}), using {DISCARDING_SINK}: the pipeline runs but its output goes nowhere",
+                    self.alias_fallthrough(name, resolved)
                 );
             }
             self.launch
@@ -2530,7 +2570,7 @@ mod factory {
                     role: "muxer (fan-in)",
                     experimental: false,
                     metadata: mux.metadata(),
-                    output_caps: mux.output_caps().ok().map(|caps| format!("{caps:?}")),
+                    output_caps: mux.output_caps().ok().map(|caps| caps.to_gst_string()),
                     templates: None,
                     link_degree: Some("Inputs: derived from link degree"),
                     properties: mux.properties(),
@@ -2562,7 +2602,7 @@ mod factory {
                 let _ = writeln!(out, "  Stability   experimental");
             }
             if let Some(caps) = &facts.output_caps {
-                let _ = writeln!(out, "\nOutput caps:\n  {caps}");
+                let _ = writeln!(out, "\nOutput caps:\n{}", indented(caps));
             }
             if let Some(templates) = facts.templates {
                 let _ = write!(out, "\nPad Templates:\n{}", format_templates(templates));
@@ -3956,6 +3996,9 @@ mod tests {
     }
 
     #[cfg(feature = "std")]
+    const NO_DISPLAY: &str = "no display";
+
+    #[cfg(feature = "std")]
     fn named_sink(name: &'static str) -> LaunchFactory {
         LaunchFactory::new(name, Vec::new(), || alloc::boxed::Box::new(Dummy))
     }
@@ -3964,7 +4007,9 @@ mod tests {
     #[test]
     fn an_alias_falls_past_a_target_that_cannot_run_here() {
         let mut reg = Registry::new();
-        reg.register_launch(named_sink("displaysink").with_usable(|| false));
+        reg.register_launch(
+            named_sink("displaysink").with_usable(|| Err(alloc::string::String::from(NO_DISPLAY))),
+        );
         reg.register_launch(named_sink("nullsink"));
         reg.register_alias("autosink", &["displaysink", "nullsink"]);
 
@@ -3979,28 +4024,50 @@ mod tests {
     #[test]
     fn an_alias_falling_back_to_fakesink_warns() {
         let _guard = crate::log::tests::GLOBAL_GUARD.lock();
-        let logs = crate::log::RingSink::new(8);
+        let logs = crate::log::RingSink::new(64);
         crate::log::set_sink(alloc::boxed::Box::new(logs.clone()));
         crate::log::set_default_level(crate::log::LogLevel::Warn);
+        const UNBUILT_SINK: &str = "unbuiltsink";
         let mut reg = Registry::new();
-        reg.register_launch(named_sink("displaysink").with_usable(|| false));
+        reg.register_launch(
+            named_sink("displaysink").with_usable(|| Err(alloc::string::String::from(NO_DISPLAY))),
+        );
         reg.register_launch(named_sink("fakesink"));
-        reg.register_alias("autosink", &["displaysink", "fakesink"]);
+        reg.register_alias("autosink", &["displaysink", UNBUILT_SINK, "fakesink"]);
 
+        // other tests log caps narration through the same global sink meanwhile
+        let registry_records = || {
+            let category = crate::log::short_type_name::<Registry>();
+            let records = logs.snapshot();
+            records
+                .into_iter()
+                .filter(|record| record.category == category)
+                .collect::<Vec<_>>()
+        };
         assert!(reg.make_element("fakesink").is_some());
         assert!(
-            logs.snapshot().is_empty(),
+            registry_records().is_empty(),
             "naming fakesink outright is not a fallback"
         );
         assert!(reg.make_element("autosink").is_some());
-        let records = logs.snapshot();
+        let records = registry_records();
         crate::log::reset();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].level, crate::log::LogLevel::Warn);
+        let message = &records[0].message;
         assert!(
-            records[0].message.contains("autosink"),
-            "the warning names the alias: {}",
-            records[0].message
+            message.contains("autosink"),
+            "the warning names the alias: {message}"
+        );
+        assert!(
+            message.contains(&alloc::format!(
+                "cannot run here: displaysink ({NO_DISPLAY})"
+            )),
+            "the warning names the skipped sink and why: {message}"
+        );
+        assert!(
+            message.contains(&alloc::format!("not in this build: {UNBUILT_SINK}")),
+            "the warning names the sink this build left out: {message}"
         );
     }
 
@@ -4008,7 +4075,7 @@ mod tests {
     #[test]
     fn an_alias_takes_the_first_target_that_can_run_here() {
         let mut reg = Registry::new();
-        reg.register_launch(named_sink("displaysink").with_usable(|| true));
+        reg.register_launch(named_sink("displaysink").with_usable(|| Ok(())));
         reg.register_launch(named_sink("nullsink"));
         reg.register_alias("autosink", &["displaysink", "nullsink"]);
 

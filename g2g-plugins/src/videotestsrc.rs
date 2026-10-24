@@ -241,10 +241,13 @@ impl VideoTestSrc {
     }
 }
 
+const MIN_REQUESTED_DIMENSION: u32 = 1;
 const MAX_REQUESTED_DIMENSION: u32 = 16_384;
+const MIN_REQUESTED_DIMENSION_TEXT: &str = "1";
+const MAX_REQUESTED_DIMENSION_TEXT: &str = "16384";
 const MAX_REQUESTED_FPS: u32 = 1_000;
 const REQUESTED_DIMENSION: Dim = Dim::Range {
-    min: 1,
+    min: MIN_REQUESTED_DIMENSION,
     max: MAX_REQUESTED_DIMENSION,
 };
 const REQUESTED_FRAMERATE: Rate = Rate::Range {
@@ -255,7 +258,25 @@ const REQUESTED_FRAMERATE: Rate = Rate::Range {
 const DRAWN_FORMAT: RawVideoFormat = RawVideoFormat::Rgba8;
 const DRAWN_BYTES_PER_PIXEL: usize = 4;
 
-fn raw_caps(format: RawVideoFormat, width: Dim, height: Dim, framerate: Rate) -> Caps {
+// the property takes the same sizes a caps filter can ask for
+fn requested_dimension(value: &PropValue) -> Result<u32, PropError> {
+    let dimension = value.as_uint().ok_or(PropError::Type)?;
+    u32::try_from(dimension)
+        .ok()
+        .filter(|d| (MIN_REQUESTED_DIMENSION..=MAX_REQUESTED_DIMENSION).contains(d))
+        .ok_or(PropError::Value)
+}
+
+// the factory's declared output, ahead of the other formats its template lists
+#[cfg(feature = "std")]
+pub(crate) const DRAWN_CAPS: Caps = raw_caps(
+    DRAWN_FORMAT,
+    REQUESTED_DIMENSION,
+    REQUESTED_DIMENSION,
+    REQUESTED_FRAMERATE,
+);
+
+const fn raw_caps(format: RawVideoFormat, width: Dim, height: Dim, framerate: Rate) -> Caps {
     Caps::RawVideo {
         format,
         width,
@@ -452,12 +473,12 @@ impl SourceLoop for VideoTestSrc {
             }
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.target_frames, &value),
             "width" => {
-                self.width = value.as_uint().ok_or(PropError::Type)? as u32;
+                self.width = requested_dimension(&value)?;
                 self.width_pinned = true;
                 Ok(())
             }
             "height" => {
-                self.height = value.as_uint().ok_or(PropError::Type)? as u32;
+                self.height = requested_dimension(&value)?;
                 self.height_pinned = true;
                 Ok(())
             }
@@ -466,8 +487,12 @@ impl SourceLoop for VideoTestSrc {
                 if n < 0 || d <= 0 {
                     return Err(PropError::Value);
                 }
-                self.framerate_q16 =
+                let framerate_q16 =
                     framerate_q16_from_fraction(n as u32, d as u32).ok_or(PropError::Value)?;
+                if framerate_q16 > MAX_REQUESTED_FPS << 16 {
+                    return Err(PropError::Value);
+                }
+                self.framerate_q16 = framerate_q16;
                 self.framerate_pinned = true;
                 Ok(())
             }
@@ -502,12 +527,16 @@ static VIDEOTESTSRC_PROPS: &[PropertySpec] = &[
     )
     .with_range("-1", "9223372036854775807")
     .with_default("-1"),
-    PropertySpec::new("width", PropKind::Uint, "frame width in pixels").with_default("320"),
-    PropertySpec::new("height", PropKind::Uint, "frame height in pixels").with_default("240"),
+    PropertySpec::new("width", PropKind::Uint, "frame width in pixels")
+        .with_range(MIN_REQUESTED_DIMENSION_TEXT, MAX_REQUESTED_DIMENSION_TEXT)
+        .with_default("320"),
+    PropertySpec::new("height", PropKind::Uint, "frame height in pixels")
+        .with_range(MIN_REQUESTED_DIMENSION_TEXT, MAX_REQUESTED_DIMENSION_TEXT)
+        .with_default("240"),
     PropertySpec::new(
         "framerate",
         PropKind::Fraction,
-        "frames per second (e.g. 30/1)",
+        "frames per second (e.g. 30/1), at most 1000/1",
     )
     .with_default("30/1"),
 ];
@@ -690,10 +719,17 @@ fn bounce(seq: u64, span: usize, speed: u64) -> usize {
 
 impl PadTemplates for VideoTestSrc {
     /// Static superset: the type produces every `videoconvert` format at any
-    /// geometry / framerate. A constructed instance narrows to its set
-    /// properties via `SourceLoop::caps_constraint`.
+    /// geometry / framerate it can draw. A constructed instance narrows to its
+    /// set properties via `SourceLoop::caps_constraint`.
     fn pad_templates() -> Vec<PadTemplate> {
-        let any_geometry = |format| raw_caps(format, Dim::Any, Dim::Any, Rate::Any);
+        let any_geometry = |format| {
+            raw_caps(
+                format,
+                REQUESTED_DIMENSION,
+                REQUESTED_DIMENSION,
+                REQUESTED_FRAMERATE,
+            )
+        };
         Vec::from([PadTemplate::source(CapsSet::from_alternatives(
             FORMATS.map(any_geometry).to_vec(),
         ))])

@@ -515,14 +515,7 @@ pub fn default_registry() -> Registry {
     reg.register_source(
         SourceFactory::new(
             "videotestsrc",
-            Caps::RawVideo {
-                format: RawVideoFormat::Rgba8,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            },
+            crate::videotestsrc::DRAWN_CAPS,
             // num-buffers defaults to forever (the property's documented `-1`),
             // matching gst videotestsrc; a launch line bounds it with `num-buffers=N`.
             || Box::new(VideoTestSrc::new(320, 240, 30, u64::MAX)),

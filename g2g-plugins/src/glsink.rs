@@ -557,7 +557,7 @@ mod tests {
     fn registry_resolves_glimagesink_and_glsink() {
         let reg = crate::registry::default_registry();
         // the alias skips glimagesink when no compositor is reachable, as on a headless runner
-        let names: &[&str] = if crate::waylanddisplay::compositor_reachable() {
+        let names: &[&str] = if crate::waylanddisplay::compositor_reachable().is_ok() {
             &["glimagesink", "glsink"]
         } else {
             &["glimagesink"]

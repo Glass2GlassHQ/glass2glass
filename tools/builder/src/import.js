@@ -10,27 +10,48 @@ import { topoOrder, roleClass, isSink, nodeData } from "./export.js";
 // only when both ends are known and disjoint. It never claims full validation;
 // the authoritative solver is Rust-only and runs at graph build time.
 
-// The leading variant token of a Rust Debug caps string names its family, e.g.
-// "RawVideo { format: Rgba8, ... }" -> RawVideo. ByteStream is deliberately left
-// out of the strict set: it is a raw byte container that legitimately feeds any
-// parser (filesrc ! h264parse), so treating it as a family would false-positive.
+// The media type of a gst caps string names its family, e.g.
+// "video/x-raw,format=RGBA" -> RawVideo. A container byte stream names none: it
+// legitimately feeds any parser (filesrc ! h264parse), so treating it as a family
+// would false-positive.
 export const CAPS_FAMILIES = ["RawVideo", "CompressedVideo", "Audio", "Text"];
-const ALL_FAMILY_TOKENS = [...CAPS_FAMILIES, "ByteStream"];
 
-// Families named in a caps blob. Matched against the allowlist by word boundary
-// so a nested field (`width: Range { .. }`) is never mistaken for a variant.
+// g2g's ByteStream encodings, as `Caps::to_gst_string` names them
+const CONTAINER_MEDIA_TYPES = new Set([
+  "video/mpegts", "video/x-matroska", "application/ogg", "video/x-flv",
+  "video/quicktime", "video/x-ivf", "video/mpeg", "audio/x-wav", "audio/x-aiff",
+  "audio/x-au", "video/x-msvideo", "application/x-yuv4mpeg",
+  "multipart/x-mixed-replace", "application/octet-stream", "application/x-rtp",
+  "application/x-srtp", "application/x-rtcp", "application/x-srtcp",
+  "application/x-dtls", "video/x-iv8",
+]);
+const TEXT_MEDIA_TYPES = new Set([
+  "text/x-raw", "application/x-subtitle", "application/x-subtitle-vtt",
+  "application/x-ssa", "application/ttml+xml", "private/teletext",
+]);
+
+function familyOf(mediaType) {
+  if (CONTAINER_MEDIA_TYPES.has(mediaType)) return null;
+  if (TEXT_MEDIA_TYPES.has(mediaType)) return "Text";
+  if (mediaType === "video/x-raw") return "RawVideo";
+  if (mediaType.startsWith("video/") || mediaType.startsWith("image/")) return "CompressedVideo";
+  if (mediaType.startsWith("audio/")) return "Audio";
+  return null;
+}
+
+// Families named in a caps blob, one gst caps string per line.
 function familiesIn(text) {
   const found = new Set();
-  if (!text) return found;
-  for (const f of ALL_FAMILY_TOKENS) {
-    if (new RegExp(`\\b${f}\\b`).test(text)) found.add(f);
+  for (const line of (text || "").split("\n")) {
+    const family = familyOf(line.trim().split(",")[0]);
+    if (family) found.add(family);
   }
   return found;
 }
 
 // { in, out }: the families an element accepts and produces. Pads carry both
-// (`"SINK: [RawVideo { .. }]"`, `"SRC: [..]"`); a pad-less source falls back to
-// its top-level `caps` string for the output side.
+// (`"SINK:\n  video/x-raw,..."`, `"SRC:\n  ..."`); a pad-less source falls back
+// to its top-level `caps` string for the output side.
 export function capsFamilies(doc) {
   const inFam = new Set();
   const outFam = new Set();

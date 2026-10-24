@@ -49,6 +49,11 @@ fn audio() -> Caps {
     }
 }
 
+fn media_type(caps: &Caps) -> String {
+    let text = caps.to_gst_string();
+    text.split(',').next().expect("a media type").to_string()
+}
+
 #[test]
 fn caps_trace_narrates_success_and_failure() {
     let captured = Arc::new(Mutex::new(Vec::new()));
@@ -112,6 +117,92 @@ fn caps_trace_narrates_success_and_failure() {
         blob.contains("video/x-raw,format=RGBA"),
         "upstream set missing:\n{blob}"
     );
+    // Both sides' sets, and the field that keeps them apart.
+    assert!(
+        blob.contains(&format!(
+            "n0:src offers: {}",
+            rgba(320, 240).to_gst_string()
+        )),
+        "what the source offers:\n{blob}"
+    );
+    assert!(
+        blob.contains(&format!("n1:sink wants: {}", audio().to_gst_string())),
+        "what the sink wants:\n{blob}"
+    );
+    assert!(
+        blob.contains(&format!(
+            "media type: n0:src offers {}, n1:sink wants {}",
+            media_type(&rgba(320, 240)),
+            media_type(&audio())
+        )),
+        "the conflicting field:\n{blob}"
+    );
+
+    // --- failure: an Identity transform declares video, its input is audio. ---
+    captured.lock().unwrap().clear();
+    let declared = rgba(320, 240);
+    let cs = vec![
+        NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(audio()))),
+        NodeConstraint::Element(CapsConstraint::Identity(CapsSet::one(declared.clone()))),
+        NodeConstraint::Element(CapsConstraint::AcceptsAny),
+    ];
+    let mut g: Graph<&str> = Graph::new();
+    let src = g.add_source("asrc");
+    let filter = g.add_transform("vfilter");
+    let sink = g.add_sink("sink");
+    g.link(src, filter).unwrap();
+    g.link(filter, sink).unwrap();
+    let v = g.finish().unwrap();
+    assert!(solve_graph(&v, &cs).is_err(), "audio into a video filter");
+    let blob = captured.lock().unwrap().join("\n");
+    assert!(
+        blob.contains(&format!("n1:xform wants: {}", declared.to_gst_string())),
+        "the filter's declared constraint:\n{blob}"
+    );
+    assert!(
+        !blob.contains("unconstrained"),
+        "an edge the solver never reached is not unconstrained:\n{blob}"
+    );
+
+    // --- a wide set elides past four alternatives unless caps logs at trace. ---
+    let offered: Vec<Caps> = (1..=6).map(|step| rgba(step * 100, 240)).collect();
+    let wanted = rgba(1_000, 240);
+    let wide_conflict = || {
+        let cs = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::from_alternatives(
+                offered.clone(),
+            ))),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(wanted.clone()))),
+        ];
+        let mut g: Graph<&str> = Graph::new();
+        let src = g.add_source("vsrc");
+        let sink = g.add_sink("vsink");
+        g.link(src, sink).unwrap();
+        let v = g.finish().unwrap();
+        assert!(solve_graph(&v, &cs).is_err(), "no offered width is wanted");
+    };
+    captured.lock().unwrap().clear();
+    wide_conflict();
+    let blob = captured.lock().unwrap().join("\n");
+    assert!(
+        !blob.contains(&offered[offered.len() - 1].to_gst_string()),
+        "the last alternatives are elided:\n{blob}"
+    );
+    assert!(
+        blob.contains("more, G2G_CAPS_TRACE=trace lists them)"),
+        "{blob}"
+    );
+    captured.lock().unwrap().clear();
+    log::set_category_level(log::CAPS_CATEGORY, LogLevel::Trace);
+    wide_conflict();
+    log::set_category_level(log::CAPS_CATEGORY, LogLevel::Debug);
+    let blob = captured.lock().unwrap().join("\n");
+    for caps in &offered {
+        assert!(
+            blob.contains(&caps.to_gst_string()),
+            "trace lists every alternative:\n{blob}"
+        );
+    }
 
     // --- failure: a transform derives no output from the RGBA it is given. ---
     captured.lock().unwrap().clear();

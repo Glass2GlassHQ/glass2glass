@@ -770,26 +770,53 @@ fn bytestream_gst_media_type(e: ByteStreamEncoding) -> &'static str {
     }
 }
 
-/// Append `,key=value` for a fixed dimension; omit `Any` / `Range` (a wildcard
-/// is the absence of the field in GStreamer caps).
+/// Append `,key=value` for a fixed dimension and `,key=[min,max]` for a range;
+/// omit `Any` (a wildcard is the absence of the field in GStreamer caps).
 #[cfg(feature = "alloc")]
 fn push_dim(s: &mut String, key: &str, d: &Dim) {
-    if let Dim::Fixed(v) = d {
+    if let Some(v) = dim_gst_value(d) {
         s.push_str(&format!(",{key}={v}"));
     }
 }
 
-/// Append `,framerate=N/D` for a fixed rate (Q16 fps). A whole-number fps prints
-/// as `fps/1`; otherwise the exact Q16 value prints as `q16/65536`, which the
-/// parser reads back to the same Q16.
+#[cfg(feature = "alloc")]
+pub(crate) fn dim_gst_value(d: &Dim) -> Option<String> {
+    match d {
+        Dim::Any => None,
+        Dim::Fixed(v) => Some(format!("{v}")),
+        Dim::Range { min, max } => Some(format!("[{min},{max}]")),
+    }
+}
+
+/// Append `,framerate=N/D` for a fixed rate (Q16 fps) and `,framerate=[a,b]` for
+/// a range; omit `Any`.
 #[cfg(feature = "alloc")]
 fn push_rate(s: &mut String, r: &Rate) {
-    if let Rate::Fixed(q16) = r {
-        if q16 % 65536 == 0 {
-            s.push_str(&format!(",framerate={}/1", q16 >> 16));
-        } else {
-            s.push_str(&format!(",framerate={q16}/65536"));
-        }
+    if let Some(v) = rate_gst_value(r) {
+        s.push_str(&format!(",framerate={v}"));
+    }
+}
+
+#[cfg(feature = "alloc")]
+pub(crate) fn rate_gst_value(r: &Rate) -> Option<String> {
+    match r {
+        Rate::Any => None,
+        Rate::Fixed(q16) => Some(q16_fraction(*q16)),
+        Rate::Range { min_q16, max_q16 } => Some(format!(
+            "[{},{}]",
+            q16_fraction(*min_q16),
+            q16_fraction(*max_q16)
+        )),
+    }
+}
+
+// a whole rate prints as fps/1, any other as the exact q16/65536 the parser reads back
+#[cfg(feature = "alloc")]
+fn q16_fraction(q16: u32) -> String {
+    if q16 % 65536 == 0 {
+        format!("{}/1", q16 >> 16)
+    } else {
+        format!("{q16}/65536")
     }
 }
 
@@ -1588,6 +1615,147 @@ pub(crate) fn intersect_channels(a: u8, b: u8) -> Option<u8> {
         (x, y) if x == y => Some(x),
         _ => None,
     }
+}
+
+// a field no alternative of one set shares with any of the other, with each side's values
+#[cfg(feature = "runtime")]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FieldConflict {
+    pub(crate) field: &'static str,
+    pub(crate) upstream: Vec<String>,
+    pub(crate) downstream: Vec<String>,
+}
+
+#[cfg(feature = "runtime")]
+struct CapsField {
+    name: &'static str,
+    // `None` when the field is not on both caps
+    overlaps: fn(&Caps, &Caps) -> Option<bool>,
+    value: fn(&Caps) -> Option<String>,
+}
+
+#[cfg(feature = "runtime")]
+fn media_type(caps: &Caps) -> String {
+    let text = caps.to_gst_string();
+    match text.split_once(',') {
+        Some((media_type, _)) => String::from(media_type),
+        None => text,
+    }
+}
+
+#[cfg(feature = "runtime")]
+fn raw_format_name(caps: &Caps) -> Option<&'static str> {
+    match caps {
+        Caps::RawVideo { format, .. } => Some(format.gst_name()),
+        Caps::Audio { format, .. } => pcm_gst_format(*format),
+        _ => None,
+    }
+}
+
+// raw video against PCM audio is a media type conflict, not a format one
+#[cfg(feature = "runtime")]
+fn raw_formats_overlap(a: &Caps, b: &Caps) -> Option<bool> {
+    match (a, b) {
+        (Caps::RawVideo { format: x, .. }, Caps::RawVideo { format: y, .. }) => Some(x == y),
+        (Caps::Audio { format: x, .. }, Caps::Audio { format: y, .. }) => {
+            (is_pcm(*x) && is_pcm(*y)).then_some(x == y)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "runtime")]
+fn audio_fields(caps: &Caps) -> Option<(u8, u32)> {
+    match caps {
+        Caps::Audio {
+            channels,
+            sample_rate,
+            ..
+        } => Some((*channels, *sample_rate)),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "runtime")]
+const CAPS_FIELDS: [CapsField; 7] = [
+    CapsField {
+        name: "media type",
+        overlaps: |a, b| Some(media_type(a) == media_type(b)),
+        value: |c| Some(media_type(c)),
+    },
+    CapsField {
+        name: "format",
+        overlaps: raw_formats_overlap,
+        value: |c| raw_format_name(c).map(String::from),
+    },
+    CapsField {
+        name: "width",
+        overlaps: |a, b| Some(a.dims()?.0.intersect(b.dims()?.0).is_some()),
+        value: |c| dim_gst_value(c.dims()?.0),
+    },
+    CapsField {
+        name: "height",
+        overlaps: |a, b| Some(a.dims()?.1.intersect(b.dims()?.1).is_some()),
+        value: |c| dim_gst_value(c.dims()?.1),
+    },
+    CapsField {
+        name: "framerate",
+        overlaps: |a, b| Some(a.dims()?.2.intersect(b.dims()?.2).is_some()),
+        value: |c| rate_gst_value(c.dims()?.2),
+    },
+    CapsField {
+        name: "channels",
+        overlaps: |a, b| Some(intersect_channels(audio_fields(a)?.0, audio_fields(b)?.0).is_some()),
+        value: |c| {
+            let channels = audio_fields(c)?.0;
+            (channels != ANY_CHANNELS).then(|| format!("{channels}"))
+        },
+    },
+    CapsField {
+        name: "rate",
+        overlaps: |a, b| {
+            Some(intersect_sample_rate(audio_fields(a)?.1, audio_fields(b)?.1).is_some())
+        },
+        value: |c| {
+            let rate = audio_fields(c)?.1;
+            (rate != ANY_SAMPLE_RATE).then(|| format!("{rate}"))
+        },
+    },
+];
+
+// a field counts when it was compared on at least one pair of alternatives and agreed on none
+#[cfg(feature = "runtime")]
+pub(crate) fn conflicting_fields(upstream: &CapsSet, downstream: &CapsSet) -> Vec<FieldConflict> {
+    let distinct_values = |set: &CapsSet, field: &CapsField| {
+        let mut values: Vec<String> = Vec::new();
+        for value in set.alternatives().iter().filter_map(field.value) {
+            if !values.contains(&value) {
+                values.push(value);
+            }
+        }
+        values
+    };
+    CAPS_FIELDS
+        .iter()
+        .filter(|field| {
+            let mut compared = false;
+            for up in upstream.alternatives() {
+                for down in downstream.alternatives() {
+                    match (field.overlaps)(up, down) {
+                        Some(true) => return false,
+                        Some(false) => compared = true,
+                        None => {}
+                    }
+                }
+            }
+            compared
+        })
+        .map(|field| FieldConflict {
+            field: field.name,
+            upstream: distinct_values(upstream, field),
+            downstream: distinct_values(downstream, field),
+        })
+        .collect()
 }
 
 /// Which caps fields a transform passes through unchanged (output field ==
@@ -4008,5 +4176,91 @@ mod tests {
         shape.dims_mut()[0] = 2;
         assert_eq!(shape.dims(), &[2, 3, 4]);
         assert_eq!(shape.elements(), 2 * 3 * 4);
+    }
+}
+
+#[cfg(all(test, feature = "runtime"))]
+mod field_conflict_tests {
+    use super::*;
+    use alloc::format;
+
+    const LIMIT: u32 = 16_384;
+
+    fn rgba(width: Dim, height: Dim, framerate: Rate) -> Caps {
+        Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width,
+            height,
+            framerate,
+            interlace: crate::Interlace::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
+        }
+    }
+
+    fn stereo_pcm() -> Caps {
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
+        }
+    }
+
+    #[test]
+    fn a_width_out_of_range_is_the_only_conflicting_field() {
+        let default_width = Dim::Fixed(320);
+        let drawable = Dim::Range { min: 1, max: LIMIT };
+        let upstream = CapsSet::from_alternatives(alloc::vec![
+            rgba(
+                default_width.clone(),
+                Dim::Fixed(240),
+                Rate::Fixed(30 << 16)
+            ),
+            rgba(drawable.clone(), drawable.clone(), Rate::Any),
+        ]);
+        let wanted_width = Dim::Fixed(LIMIT + 1);
+        let downstream = CapsSet::one(rgba(wanted_width.clone(), Dim::Fixed(100), Rate::Any));
+
+        let conflicts = conflicting_fields(&upstream, &downstream);
+
+        let text = |d: &Dim| dim_gst_value(d).expect("a bounded width");
+        assert_eq!(
+            conflicts,
+            [FieldConflict {
+                field: "width",
+                upstream: alloc::vec![text(&default_width), text(&drawable)],
+                downstream: alloc::vec![text(&wanted_width)],
+            }]
+        );
+    }
+
+    #[test]
+    fn audio_against_video_conflicts_on_media_type_alone() {
+        let video = rgba(Dim::Any, Dim::Any, Rate::Any);
+        let conflicts =
+            conflicting_fields(&CapsSet::one(stereo_pcm()), &CapsSet::one(video.clone()));
+        let fields: Vec<&str> = conflicts.iter().map(|c| c.field).collect();
+        assert_eq!(fields, ["media type"]);
+        assert_eq!(conflicts[0].upstream, [media_type(&stereo_pcm())]);
+        assert_eq!(conflicts[0].downstream, [media_type(&video)]);
+    }
+
+    #[test]
+    fn ranged_caps_print_their_ranges_and_parse_back() {
+        let caps = rgba(
+            Dim::Range { min: 1, max: LIMIT },
+            Dim::Range { min: 2, max: LIMIT },
+            Rate::Range {
+                min_q16: 1,
+                max_q16: 30 << 16,
+            },
+        );
+        let printed = caps.to_gst_string();
+        assert!(
+            printed.contains(&format!(",width=[1,{LIMIT}]")),
+            "{printed}"
+        );
+        let parsed = CapsSet::from_gst_string(&printed).expect("ranges parse back");
+        assert_eq!(parsed.alternatives(), [caps].as_slice(), "{printed}");
     }
 }

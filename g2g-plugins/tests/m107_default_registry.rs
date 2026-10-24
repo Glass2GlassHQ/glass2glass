@@ -8,7 +8,7 @@
 #![cfg(feature = "std")]
 
 use g2g_core::runtime::{parse_launch, run_graph};
-use g2g_core::{PipelineClock, PropValue};
+use g2g_core::{PipelineClock, PropValue, RawVideoFormat};
 use g2g_plugins::registry::default_registry;
 
 struct ZeroClock;
@@ -86,7 +86,7 @@ async fn inline_caps_filter_parses_and_runs() {
 fn default_registry_inspects_new_elements() {
     let reg = default_registry();
     assert!(reg.inspect("videoscale").unwrap().contains("width"));
-    assert!(reg.inspect("videocrop").unwrap().contains("height"));
+    assert!(reg.inspect("videocrop").unwrap().contains("top"));
     assert!(reg.inspect("videoconvert").unwrap().contains("format"));
     assert!(
         !reg.inspect("videoconvert")
@@ -240,9 +240,15 @@ fn a_source_lists_every_format_it_can_produce() {
     let inspected = reg
         .inspect("videotestsrc")
         .expect("videotestsrc is registered");
-    for format in ["Rgba8", "I420", "Nv12", "Yuyv"] {
-        assert!(caps.contains(format), "describe lists {format}: {caps}");
-        assert!(inspected.contains(format), "inspect lists {format}");
+    for format in [
+        RawVideoFormat::Rgba8,
+        RawVideoFormat::I420,
+        RawVideoFormat::Nv12,
+        RawVideoFormat::Yuyv,
+    ] {
+        let field = format!("format={}", format.gst_name());
+        assert!(caps.contains(&field), "describe lists {field}: {caps}");
+        assert!(inspected.contains(&field), "inspect lists {field}");
     }
 }
 

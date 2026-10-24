@@ -112,9 +112,6 @@ fn main() {
     // caller exporting it; an explicit value always wins.
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
         std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
-        if !quiet {
-            eprintln!("WAYLAND_DISPLAY unset, defaulting to wayland-0");
-        }
     }
 
     let reg = registry();

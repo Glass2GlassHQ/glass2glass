@@ -1,7 +1,9 @@
 #![cfg(feature = "std")]
 
+use g2g_core::log::LogSource;
 use g2g_core::runtime::{parse_launch, run_graph_with_bus};
 use g2g_core::{Bus, BusMessage, PipelineClock};
+use g2g_plugins::checksumsink::ChecksumSink;
 use g2g_plugins::registry::default_registry;
 
 const BUFFERS: usize = 5;
@@ -60,5 +62,22 @@ async fn launched_checksumsink_posts_every_buffer_under_its_name() {
     assert_ne!(
         checksums[0].2, checksums[1].2,
         "each frame of the moving test pattern has its own digest"
+    );
+}
+
+#[test]
+fn inspect_says_the_digests_go_to_the_bus_and_the_debug_log() {
+    let reg = default_registry();
+    let description = reg
+        .inspect("checksumsink")
+        .expect("checksumsink is registered");
+    let category = ChecksumSink::new().log_category();
+    assert!(
+        description.contains("BusMessage::Checksum"),
+        "{description}"
+    );
+    assert!(
+        description.contains(&format!("G2G_DEBUG={category}:debug")),
+        "{description}"
     );
 }

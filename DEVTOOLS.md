@@ -93,8 +93,8 @@ failure it falls back to a topology-only dump.
 
 For a quick text dump without Graphviz, `g2g-launch -v` prints the same per-link
 **negotiated caps** + memory domain + `LinkPolicy` to stderr before running (the
-gst `-v` analog), falling back to a topology-only wiring list if negotiation
-fails:
+gst `-v` analog). If negotiation fails it prints the topology-only wiring list
+and the negotiation ERROR block, then exits without running:
 
 ```sh
 g2g-launch -v videotestsrc ! videoconvert ! video/x-raw,format=NV12 ! fakesink
@@ -104,8 +104,9 @@ g2g-launch -v videotestsrc ! videoconvert ! video/x-raw,format=NV12 ! fakesink
 
 For a machine-readable form of the same thing, `g2g-launch --validate-json` prints
 every node and each edge's negotiated caps as JSON (or, when the pipeline cannot
-negotiate, the structured failure naming the offending link), and exits without
-running. Needs the `tooling-json` build feature
+negotiate, every node and the structured failure: the node indices it names and
+the caps involved), and exits without running. Needs the `tooling-json` build
+feature
 (`cargo install g2g-plugins --features tooling-json --bin g2g-launch`):
 
 ```sh
@@ -150,7 +151,21 @@ name / number (`debug`, `trace`, `7`) to tune verbosity.
 The mismatch half is on by default: a failed negotiation logs, at ERROR, the two
 conflicting elements and the caps each wanted, with no env var, so a plain
 `g2g-launch` run that fails to negotiate reads as a diagnosis rather than a bare
-`CapsMismatch`. `G2G_CAPS_TRACE` only adds the successful-edge narration on top.
+`CapsMismatch`. When a field keeps them apart (media type, format, width, height,
+framerate, channels, rate), a line names it with both sides' values:
+
+```sh
+g2g-launch videotestsrc ! video/x-raw,width=100000,height=100 ! fakesink
+# ERROR caps  no caps overlap between VideoTestSrc and CapsFilter
+# ERROR caps    VideoTestSrc offers: video/x-raw,format=RGBA,width=320,... | (+196 more, G2G_CAPS_TRACE=trace lists them)
+# ERROR caps    CapsFilter wants: video/x-raw,format=NV12,width=100000,height=100 | ...
+# ERROR caps    width: VideoTestSrc offers 320 | [1,16384], CapsFilter wants 100000
+# ERROR caps    VideoTestSrc -> CapsFilter: video/x-raw,format=RGBA,width=320,... | ...
+# ERROR caps    CapsFilter -> FakeSink: (not narrowed yet)
+```
+
+A set past four alternatives is cut short unless `G2G_CAPS_TRACE=trace`.
+`G2G_CAPS_TRACE` only adds the successful-edge narration on top.
 
 `G2G_DEBUG` is the general `GST_DEBUG` analog: `G2G_DEBUG=*:debug` or
 `G2G_DEBUG=videoscale:trace,*:warn` set per-category (element-type) thresholds.
@@ -443,6 +458,9 @@ g2g-inspect videotestsrc        # role, caps / pad templates, and all properties
 g2g-inspect --gst <name>        # what a GStreamer element name maps to in g2g
 g2g-inspect --gst-map           # gst-name/g2g-runtime-name pairs, tab separated
 ```
+
+Caps print as gst caps strings, one alternative per line, with ranges as
+`[min,max]` (`video/x-raw,format=RGBA,width=[1,16384],...`).
 
 `--gst-map` is for a tool comparing g2g's graph against GStreamer's: g2g names a
 graph node after the Rust type (`NalParse0`) where gst names it after the factory
