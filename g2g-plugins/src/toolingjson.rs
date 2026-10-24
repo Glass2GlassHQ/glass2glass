@@ -178,9 +178,9 @@ fn observed_graph(snap: &TelemetrySnapshot) -> Value {
 /// Structured form of a [`NegotiationFailure`]: the conflict kind plus the node
 /// indices it names, so a caller (dashboard / MCP client) can highlight the
 /// offending link. An `EmptyLink` also carries what each end still allowed
-/// (`upstream_caps` / `downstream_caps`, one gst string per alternative) when
-/// the solver captured both sides, and a `NoOutputForInput` the caps on the
-/// transform's input link (`input_caps`).
+/// (`upstream_caps` / `downstream_caps`, one gst string per alternative) and the
+/// fields that keep them apart (`fields`) when the solver captured both sides,
+/// and a `NoOutputForInput` the caps on the transform's input link (`input_caps`).
 fn failure_json(nf: &NegotiationFailure) -> Value {
     match nf {
         NegotiationFailure::EmptyLink {
@@ -193,6 +193,14 @@ fn failure_json(nf: &NegotiationFailure) -> Value {
             if let Some(c) = conflict {
                 v["upstream_caps"] = json!(set_strings(&c.upstream));
                 v["downstream_caps"] = json!(set_strings(&c.downstream));
+                let fields: Vec<Value> = c
+                    .conflicting_fields()
+                    .into_iter()
+                    .map(|f| {
+                        json!({ "field": f.field, "upstream": f.upstream, "downstream": f.downstream })
+                    })
+                    .collect();
+                v["fields"] = json!(fields);
             }
             v
         }
@@ -672,6 +680,20 @@ mod tests {
         if bad["stage"] == "negotiate" {
             assert_eq!(bad["failure"]["kind"], "empty-link");
         }
+    }
+
+    #[tokio::test]
+    async fn validate_caps_conflict_names_the_blocking_field() {
+        const WIDTH: u32 = 100_000;
+        let reg = default_registry();
+        let line = format!("videotestsrc ! video/x-raw,width={WIDTH} ! fakesink");
+        let bad = validate_json(&reg, &line).await;
+        let fields = bad["failure"]["fields"].as_array().expect("fields");
+        let width = fields
+            .iter()
+            .find(|f| f["field"] == "width")
+            .unwrap_or_else(|| panic!("no width field in {fields:?}"));
+        assert_eq!(width["downstream"], json!([format!("{WIDTH}")]));
     }
 
     #[tokio::test]

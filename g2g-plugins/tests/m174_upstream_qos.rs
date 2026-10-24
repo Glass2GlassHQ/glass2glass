@@ -1,7 +1,7 @@
 //! M174 upstream QoS propagation: a sink that runs behind the clock signals QoS
 //! upstream; the source observes it as `PushOutcome::Qos` and skips frames to
 //! shed load. Here a test sink requests QoS on every frame, and `VideoTestSrc`
-//! reacts by skipping ahead, so it emits fewer frames than its target.
+//! reacts by skipping ahead, so its frames span more than its target's timeline.
 
 #![cfg(feature = "std")]
 
@@ -30,6 +30,7 @@ impl PipelineClock for ZeroClock {
 /// each one so the source upstream sheds load.
 struct QosSink {
     received: u64,
+    last_pts_ns: u64,
     /// Lateness to report per frame, or `None` to never signal QoS.
     jitter_ns: Option<i64>,
     pending: Option<QosMessage>,
@@ -39,6 +40,7 @@ impl QosSink {
     fn behind(jitter_ns: i64) -> Self {
         Self {
             received: 0,
+            last_pts_ns: 0,
             jitter_ns: Some(jitter_ns),
             pending: None,
         }
@@ -46,6 +48,7 @@ impl QosSink {
     fn on_time() -> Self {
         Self {
             received: 0,
+            last_pts_ns: 0,
             jitter_ns: None,
             pending: None,
         }
@@ -75,6 +78,7 @@ impl AsyncElement for QosSink {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
                 self.received += 1;
+                self.last_pts_ns = f.timing.pts_ns;
                 if let Some(j) = self.jitter_ns {
                     self.pending = Some(QosMessage {
                         jitter_ns: j,
@@ -108,10 +112,14 @@ async fn source_skips_frames_under_upstream_qos() {
         "source skipped frames under QoS (skipped={})",
         src.skipped()
     );
+    assert_eq!(
+        stats.frames_emitted, target,
+        "num-buffers counts pushed frames"
+    );
     assert!(
-        stats.frames_emitted < target,
-        "source emitted fewer than target due to skips ({} < {target})",
-        stats.frames_emitted
+        sink.last_pts_ns > (target - 1) * FRAME_NS,
+        "skips moved the last frame past the unskipped timeline (pts {})",
+        sink.last_pts_ns
     );
     // The sink consumed exactly what the source pushed (this sink signals QoS but
     // drops nothing of its own).

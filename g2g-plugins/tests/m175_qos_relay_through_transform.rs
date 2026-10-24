@@ -35,6 +35,7 @@ impl PipelineClock for ZeroClock {
 /// source upstream sheds load.
 struct QosSink {
     received: u64,
+    last_pts_ns: u64,
     jitter_ns: i64,
     pending: Option<QosMessage>,
 }
@@ -43,6 +44,7 @@ impl QosSink {
     fn behind(jitter_ns: i64) -> Self {
         Self {
             received: 0,
+            last_pts_ns: 0,
             jitter_ns,
             pending: None,
         }
@@ -72,6 +74,7 @@ impl AsyncElement for QosSink {
         Box::pin(async move {
             if let PipelinePacket::DataFrame(f) = packet {
                 self.received += 1;
+                self.last_pts_ns = f.timing.pts_ns;
                 self.pending = Some(QosMessage {
                     jitter_ns: self.jitter_ns,
                     running_time_ns: f.timing.pts_ns,
@@ -105,9 +108,9 @@ async fn source_skips_through_transform_bespoke_runner() {
         src.skipped()
     );
     assert!(
-        stats.frames_emitted < target,
-        "source emitted fewer than target due to relayed skips ({} < {target})",
-        stats.frames_emitted
+        sink.last_pts_ns > (target - 1) * FRAME_NS,
+        "relayed skips moved the last frame past the unskipped timeline (pts {})",
+        sink.last_pts_ns
     );
     assert_eq!(
         sink.received, stats.frames_consumed,
@@ -123,7 +126,7 @@ async fn source_skips_through_transform_graph_runner() {
     let mut sink = QosSink::behind(3 * FRAME_NS as i64);
 
     let transforms: Vec<&mut dyn DynAsyncElement> = vec![&mut transform];
-    let stats = run_linear_chain(&mut src, transforms, &mut sink, &ZeroClock, 1)
+    run_linear_chain(&mut src, transforms, &mut sink, &ZeroClock, 1)
         .await
         .expect("pipeline runs");
 
@@ -133,8 +136,8 @@ async fn source_skips_through_transform_graph_runner() {
         src.skipped()
     );
     assert!(
-        stats.frames_emitted < target,
-        "source emitted fewer than target via the DAG runner relay ({} < {target})",
-        stats.frames_emitted
+        sink.last_pts_ns > (target - 1) * FRAME_NS,
+        "skips relayed through run_graph moved the last frame past the unskipped timeline (pts {})",
+        sink.last_pts_ns
     );
 }

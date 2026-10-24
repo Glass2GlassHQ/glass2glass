@@ -1667,10 +1667,10 @@ pub(crate) fn intersect_channels(a: u8, b: u8) -> Option<u8> {
 // a field no alternative of one set shares with any of the other, with each side's values
 #[cfg(feature = "runtime")]
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct FieldConflict {
-    pub(crate) field: &'static str,
-    pub(crate) upstream: Vec<String>,
-    pub(crate) downstream: Vec<String>,
+pub struct FieldConflict {
+    pub field: &'static str,
+    pub upstream: Vec<String>,
+    pub downstream: Vec<String>,
 }
 
 #[cfg(feature = "runtime")]

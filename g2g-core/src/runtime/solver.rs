@@ -16,7 +16,9 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::caps::{batch_alternatives, conflicting_fields, Caps, CapsSet, PassthroughFields};
+use crate::caps::{
+    batch_alternatives, conflicting_fields, Caps, CapsSet, FieldConflict, PassthroughFields,
+};
 #[cfg(feature = "std")]
 use crate::caps_transform::CapsTransform;
 use crate::format_element::{CapsConstraint, CapsPreferences};
@@ -42,6 +44,12 @@ pub struct CapsConflict {
     pub upstream: CapsSet,
     /// What the downstream end demanded.
     pub downstream: CapsSet,
+}
+
+impl CapsConflict {
+    pub fn conflicting_fields(&self) -> Vec<FieldConflict> {
+        conflicting_fields(&self.upstream, &self.downstream)
+    }
 }
 
 /// Structured solver failure (design/caps.md).
@@ -970,7 +978,7 @@ pub fn solve_graph_preferred<E>(
                     label(down),
                     fmt_set(&conflict.downstream)
                 );
-                for field in conflicting_fields(&conflict.upstream, &conflict.downstream) {
+                for field in conflict.conflicting_fields() {
                     crate::g2g_error!(
                         t,
                         "  {}: {} offers {}, {} wants {}",

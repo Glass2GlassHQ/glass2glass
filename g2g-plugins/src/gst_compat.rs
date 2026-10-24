@@ -55,6 +55,8 @@ static LAUNCH_KEYWORDS: &[&str] = &[
 /// `Available` before this table is consulted; keep this for the gst names that
 /// have no same-name g2g element. Extend freely.
 static GST_MAP: &[(&str, GstEquivalent)] = &[
+    // on Linux the `ffmpeg` feature builds `x264enc`, so the feature catalog answers
+    #[cfg(not(target_os = "linux"))]
     ("x264enc", GstEquivalent::Unsupported(
         "software H.264 encode (`x264enc`, libx264) needs the `ffmpeg` feature on Linux; \
          otherwise `nvenc` (NVIDIA), `mfencode` (Windows), or encode AV1/VP8/VP9 with `av1enc`/`vpxenc`",
@@ -497,9 +499,9 @@ fn family_equivalent(gst_name: &str) -> Option<GstEquivalent> {
 /// element this build left out), and finally the nearest known name (a spelling
 /// mistake).
 ///
-/// The hand-written table outranks the feature catalog: both know `x264enc`, and
-/// the table's entry also lists the alternatives for a platform where the feature
-/// cannot be built.
+/// The hand-written table outranks the feature catalog. Its `x264enc` entry lists
+/// the alternatives for a platform where the feature cannot be built, and is left
+/// out on Linux, where the catalog names the feature.
 pub fn gst_equivalent(registry: &Registry, gst_name: &str) -> GstEquivalent {
     if registry_has(registry, gst_name) || LAUNCH_KEYWORDS.contains(&gst_name) {
         return GstEquivalent::Available;
@@ -704,8 +706,12 @@ fn finding(name: &str, equivalent: &GstEquivalent) -> Option<String> {
 /// explainer.
 fn name_findings<'a>(registry: &Registry, names: impl Iterator<Item = &'a str>) -> Vec<String> {
     names
-        .filter_map(|name| finding(name, &gst_equivalent(registry, name)))
+        .filter_map(|name| element_name_finding(registry, name))
         .collect()
+}
+
+pub fn element_name_finding(registry: &Registry, name: &str) -> Option<String> {
+    finding(name, &gst_equivalent(registry, name))
 }
 
 /// Guidance for a [`ParseError`] that `line` already produced, without re-running
@@ -922,9 +928,23 @@ mod tests {
         assert!(r.ok, "findings: {:?}", r.findings);
     }
 
-    // Only meaningful when `x264enc` is NOT compiled in: with the `ffmpeg`
-    // feature it is a registered element, so the lint reports no finding.
-    #[cfg(not(feature = "ffmpeg"))]
+    #[cfg(all(target_os = "linux", not(feature = "ffmpeg")))]
+    #[test]
+    fn x264enc_names_its_feature_on_linux() {
+        let reg = default_registry();
+        assert_eq!(
+            gst_equivalent(&reg, "x264enc"),
+            GstEquivalent::NotCompiled("ffmpeg")
+        );
+        let r = lint_launch(&reg, "videotestsrc ! x264enc ! fakesink");
+        assert!(
+            r.findings[0].contains("--features ffmpeg"),
+            "{:?}",
+            r.findings
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn unknown_encoder_gets_a_suggestion() {
         let reg = default_registry();

@@ -35,7 +35,7 @@ use std::process;
 use g2g_core::runtime::Registry;
 
 use crate::cli_stdout::write_stdout;
-use crate::gst_compat::{gst_equivalent, gst_name_synonyms, GstEquivalent};
+use crate::gst_compat::{element_name_finding, gst_equivalent, gst_name_synonyms, GstEquivalent};
 
 macro_rules! print_stdout {
     ($($arg:tt)*) => { write_stdout(format_args!($($arg)*)) };
@@ -291,6 +291,9 @@ pub fn run(mut reg: Registry, args: Vec<String>) {
             Some(dump) => print_stdout!("{dump}"),
             None => {
                 eprintln!("No such element: {name}");
+                if let Some(hint) = element_name_finding(&reg, &name) {
+                    eprintln!("  hint: {hint}");
+                }
                 process::exit(1);
             }
         },

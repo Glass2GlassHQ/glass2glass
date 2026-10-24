@@ -361,7 +361,8 @@ impl SourceLoop for VideoTestSrc {
 
             let mut seq = 0u64;
             let mut pushed = 0u64;
-            while seq < frame_limit {
+            // num-buffers counts frames pushed, as in gst, so a QoS skip does not use it up
+            while pushed < frame_limit {
                 let domain = if let Some(pool) = &self.pool {
                     let mut buf = pool.acquire().await;
                     if buf.len() < bytes_per_frame {

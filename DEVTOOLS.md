@@ -66,11 +66,13 @@ g2g-inspect videotestsrc
 
 For a script or an editor, `--validate-json` prints the failure as JSON on
 stdout and exits with status 1 without running. `upstream` and `downstream` are
-indices into `nodes` ([more](#pipeline-visualizer-dot--svg)):
+indices into `nodes`, and `fields` carries the field line
+([more](#pipeline-visualizer-dot--svg)):
 
 ```sh
 g2g-launch --validate-json "videotestsrc ! video/x-raw,width=100000 ! fakesink"
-# {"failure":{"downstream":1,"downstream_caps":["video/x-raw,format=NV12,width=100000",...],"kind":"empty-link",
+# {"failure":{"downstream":1,"downstream_caps":["video/x-raw,format=NV12,width=100000",...],
+#  "fields":[{"downstream":["100000"],"field":"width","upstream":["320","[1,16384]"]}],"kind":"empty-link",
 #  "upstream":0,"upstream_caps":["video/x-raw,format=RGBA,width=320,height=240,framerate=30/1",...]},
 #  "nodes":[{"index":0,"name":"VideoTestSrc"},{"index":1,"name":"CapsFilter"},{"index":2,"name":"FakeSink"}],
 #  "ok":false,"stage":"negotiate"}
@@ -87,7 +89,7 @@ g2g-launch "videotestsrc num-buffers=10 ! vpxenc ! fakesink"
 The hint names the cargo feature. Add it to the `cargo install` line together
 with the features you already use. `g2g-inspect --gst <name>` gives the same
 verdict for any name, and for a GStreamer element g2g lacks it names the
-replacement. A plain `g2g-inspect vpxenc` only says `No such element: vpxenc`.
+replacement. A plain `g2g-inspect vpxenc` prints the same hint.
 `g2g-inspect` with no argument lists the elements this build has
 ([more](#element-reference-g2g-inspect-and-the-web-page)). The README's
 [feature-gated elements](README.md#feature-gated-elements) table lists each
@@ -123,21 +125,25 @@ display sink that drops frames for arriving after their deadline logs it under
 ```sh
 G2G_DEBUG=pacing:debug g2g-launch "videotestsrc num-buffers=60 width=1920 height=1080 ! videoconvert ! waylandsink"
 # Setting pipeline to PLAYING ...
-# DEBUG pacing           dropping late frames from pts 0:00:00.066666666, 0:00:00.844750893 past its deadline
+# DEBUG pacing           dropping late frames from pts 0:00:00.066666666, 0:00:00.718424041 past its deadline
+# DEBUG pacing           presenting again at pts 0:00:02.833333305 after dropping 18 late frames
+# ...
 # pipeline run summary:
-#   frames:  emitted 16, consumed 16, dropped 0 (0.0% drop)
+#   frames:  emitted 60, consumed 60, dropped on links 0 (0.0% drop)
 #   ...
 #   per-element [measured]:
-#     VideoConvert0    proc p50 134.01 ms / p99 134.01 ms (n=16), blocked p50 0.00 ms / p99 200.67 ms, age-out p50 536.87 ms / p99 837.96 ms, in-fill 59%/100% avg/max
-#     WaylandSink0     proc p50 0.00 ms / p99 911.35 ms (n=16), in-fill 42%/100% avg/max
-#   present: WaylandSink0     2 presented, 0 dropped, 14 late-dropped
+#     VideoConvert0    proc p50 134.22 ms / p99 134.32 ms (n=60), blocked p50 0.00 ms / p99 173.49 ms, age-out p50 536.87 ms / p99 711.76 ms, in-fill 63%/100% avg/max
+#     WaylandSink0     proc p50 0.01 ms / p99 784.99 ms (n=60), in-fill 44%/100% avg/max
+#   present: WaylandSink0     5 presented, 0 dropped, 55 late-dropped
 #   ...
 ```
 
 In this debug build `videoconvert` takes 134 ms per 1080p frame against a 33 ms
-frame period. The sink drops 14 of the 16 frames it gets as late, and
-`videotestsrc` skips ahead on the sink's QoS reports, so it sends 16 of the 60.
-When the sink catches up it logs `presenting again at pts ...`. The
+frame period. The sink drops 55 of the 60 frames as late, and logs
+`presenting again at pts ...` each time it catches up. `videotestsrc` skips
+ahead on the sink's QoS reports, so the 60 frames span 5 seconds instead of 2.
+`dropped on links` counts only frames a leaky link discarded. The
+`present:` line counts the frames the sink discarded. The
 [end-of-run report](#end-of-run-report) points at the slow stage: `proc` is the
 time in `process()` and `age-out` the frame's age as it leaves the element.
 
@@ -410,7 +416,7 @@ head allocation, and the measured wall-clock throughput.
 
 ```
 pipeline run summary:
-  frames:  emitted 20, consumed 20, dropped 0 (0.0% drop)
+  frames:  emitted 20, consumed 20, dropped on links 0 (0.0% drop)
   latency: 0.0 ms .. 0.0 ms (non-live) [declared]
   clock:   SystemFallback (base 136891 ns)
   run:     0.03 s wall, 601.8 fps
@@ -626,10 +632,25 @@ cargo build -p g2g-plugins --features mcp --bin g2g-mcp
 claude mcp add g2g -- "$PWD/target/debug/g2g-mcp"
 ```
 
-Tools: `list_elements`, `inspect {element}`, `validate {pipeline}` (parse +
-negotiate, no run), `launch {pipeline, duration_secs}` (run with a deadline,
-report `RunStats`). The tool bodies are the shared `toolingjson` internals, the
-same code behind `g2g-inspect --json`.
+Tools:
+
+- Elements and lines: `list_elements`, `inspect`, `validate` (parse and
+  negotiate, no run).
+- One-shot runs with a deadline that report `RunStats`: `launch` for a launch
+  line, `run_graph` for a JSON or YAML graph document.
+- One managed pipeline that keeps running: `start_pipeline`, `pipeline_status`,
+  `stop_pipeline`.
+- Watching it: `tail_events` (bus errors, warnings, QoS, state changes),
+  `tail_logs`, `set_log_level`, `sample_edge` (packet metadata on one link),
+  `snapshot_frame` (the newest frame at an element, as PNG).
+- Changing it while it runs: `get_property`, `set_property`,
+  `validate_insertion`, `insert_transform`, `remove_transform`, `insert_chain`,
+  `add_branch`, `remove_branch`, `add_input`.
+- `metasink` records: `latest_metadata`, `wait_for_records`, `load_metadata`.
+- Files: `clip_at` cuts the seconds around a pts out of a video.
+
+The introspection tools use the shared `toolingjson` internals, the same code
+behind `g2g-inspect --json`.
 
 ## Element reference (`g2g-inspect` and the web page)
 

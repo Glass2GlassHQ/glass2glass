@@ -425,7 +425,7 @@ impl RunStats {
 
         let mut s = alloc::string::String::from("pipeline run summary:\n");
         s.push_str(&format!(
-            "  frames:  emitted {}, consumed {}, dropped {} ({drop_pct:.1}% drop)\n",
+            "  frames:  emitted {}, consumed {}, dropped on links {} ({drop_pct:.1}% drop)\n",
             self.frames_emitted, self.frames_consumed, self.frames_dropped
         ));
         let max = match self.latency.max_ns {
@@ -1683,7 +1683,7 @@ mod profile_tests {
         let r = stats.report();
         // Frame line with the computed drop rate (10 / (90 + 10) = 10%).
         assert!(
-            r.contains("emitted 100, consumed 90, dropped 10 (10.0% drop)"),
+            r.contains("emitted 100, consumed 90, dropped on links 10 (10.0% drop)"),
             "{r}"
         );
         // Declared latency window + live flag.
