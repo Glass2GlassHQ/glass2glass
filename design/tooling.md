@@ -119,6 +119,18 @@ SDK version bump that resizes a struct fails the build rather than the GPU.
 It prints the `registry.rs` registration line to paste, since the registration
 function is context-dependent. The generated element compiles as is.
 
+## README quick-start check
+
+The `readme-quickstart` CI job runs `tools/readme-quickstart-check.sh` in a
+`rust:1` container. It installs only the Debian packages the README's System
+dependencies table lists for the Wayland sink, then runs the README blocks
+marked `<!-- quickstart-check: NAME -->` and the `g2g-mcp` install line, built
+from the checkout. The quick-start program builds through `[patch.crates-io]`,
+with its g2g version requirements moved to the workspace version by
+`tools/set-doc-dependency-version.sh`, the same script `tools/release.sh` uses.
+An unused patch fails the job, so the program cannot silently build from
+crates.io.
+
 ## Benchmarks
 
 The criterion benchmarks live in a standalone `g2g-bench` crate, excluded from

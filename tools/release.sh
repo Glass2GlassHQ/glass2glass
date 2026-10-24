@@ -63,7 +63,7 @@ cmd_publish() {
         require_clean_release_branch
         sed -i "0,/^## Unreleased$/s//## Unreleased\n\n## $version/" CHANGELOG.md
         # the dependency lines in the quick start and the authoring guide
-        sed -i -E "s/^(g2g-[a-z]+ += (\{ version = )?)\"[0-9]+\.[0-9]+\"/\1\"${version%.*}\"/" README.md AUTHORING.md
+        tools/set-doc-dependency-version.sh "${version%.*}" README.md AUTHORING.md
         git commit -q -am "release $version"
         git tag "$tag"
     fi

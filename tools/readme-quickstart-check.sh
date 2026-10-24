@@ -66,8 +66,8 @@ cargo new --quiet quickstart
 cd quickstart
 dependencies=$(readme_block Cargo.toml)
 workspace_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$checkout/Cargo.toml" | head -n 1)
-# the same rewrite tools/release.sh applies to the README at release
-dependencies=$(sed -E "s/^(g2g-[a-z]+ += (\{ version = )?)\"[0-9]+\.[0-9]+\"/\1\"${workspace_version%.*}\"/" <<<"$dependencies")
+# the README pins the last release until tools/release.sh moves it
+dependencies=$("$checkout/tools/set-doc-dependency-version.sh" "${workspace_version%.*}" <<<"$dependencies")
 sed -i '/^\[dependencies\]$/d' Cargo.toml
 {
     echo "$dependencies"

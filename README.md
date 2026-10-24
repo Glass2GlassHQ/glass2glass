@@ -1317,6 +1317,10 @@ host.
 | Debian / Ubuntu | `libavcodec-dev libavformat-dev libavutil-dev libswscale-dev` | `libwayland-dev libxkbcommon-dev` | `libdrm-dev` | `libva-dev` |
 | Arch | `ffmpeg` | `wayland libxkbcommon` | `libdrm` | `libva` |
 
+Each of these features also needs `pkg-config` and a C compiler to build:
+`pkgconf-pkg-config gcc` on Fedora, `pkg-config build-essential` on Debian /
+Ubuntu, `pkgconf base-devel` on Arch.
+
 USAC (xHE-AAC) decode needs libavcodec 62 (ffmpeg 8) or later.
 
 For the CUDA path, install the NVIDIA driver and CUDA runtime your
