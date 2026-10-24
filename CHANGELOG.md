@@ -14,6 +14,7 @@ Breaking: `LaunchFactory::with_usable` / `usable` return `Result<(), String>`, `
 - M1896: unknown-element hints name the feature for `x264enc` and in plain `g2g-inspect`, `--validate-json` lists the conflicting caps fields, and videotestsrc `num-buffers` counts frames pushed as gst does.
 - M1897: an element name gated to another OS gets a hint naming that OS instead of a `--features` rebuild that cannot work there.
 - M1898: `pipewiresink` and `pipewiresrc` time each clock observation by PipeWire's own sample instant, so a late callback no longer skews the playout-rate fit.
+- M1899: the `observe` dashboard page ships inside `g2g-plugins`, so a crates.io build with `observe` compiles.
 - M1892: a caps range left open after negotiation fixates to the value nearest the source's default, so videotestsrc through `width=[100,200]` gives 200 as gst does.
 - M1891: videotestsrc sends one still frame at `framerate=0/1` as gst does, an out-of-range property value names the property's declared range, and g2g-core log-capture tests ignore records from other test threads.
 - M1890: rustdoc and `g2g-launch --help` no longer carry internal milestone tags.

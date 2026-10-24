@@ -90,7 +90,7 @@ impl LinkInterceptor for PreviewTap {
 }
 
 /// The self-contained dashboard page, served on `GET /`.
-pub const INDEX_HTML: &str = include_str!("../../tools/dashboard/index.html");
+pub const INDEX_HTML: &str = include_str!("dashboard.html");
 
 /// Telemetry push cadence.
 const TICK: Duration = Duration::from_millis(250);

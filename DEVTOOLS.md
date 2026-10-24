@@ -448,7 +448,7 @@ machine. To reach it from another host, bind all interfaces with
 no auth and its telemetry / edge previews expose frame content, so only bind
 non-loopback on a trusted network.
 
-The page (`tools/dashboard/index.html`, self-contained, no build step) draws the
+The page (`g2g-plugins/src/dashboard.html`, self-contained, no build step) draws the
 graph left-to-right, colors each node by input-link fill, shows per-element
 `process()` p50 / p99 and frame counts, and logs bus events (state changes, QoS,
 buffering, negotiation failures, EOS, errors) as they arrive.

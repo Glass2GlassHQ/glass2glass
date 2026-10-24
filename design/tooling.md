@@ -262,7 +262,7 @@ stalls an arm.
 
 The transport lives in `g2g-plugins::dashboard` under the `observe` feature.
 `g2g-launch --observe <port>` serves one TCP port that answers a plain `GET /`
-with a self-contained dashboard page (`tools/dashboard/`) and a WebSocket upgrade
+with a self-contained dashboard page (`g2g-plugins/src/dashboard.html`) and a WebSocket upgrade
 with a JSON `telemetry` snapshot every 250 ms plus one `event` per `BusMessage`,
 fanned out to all clients via a broadcast channel drained off the `Bus`.
 When the run ends the server stops accepting, and each client gets the
