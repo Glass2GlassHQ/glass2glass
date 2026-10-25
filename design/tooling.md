@@ -59,7 +59,11 @@ naming the two conflicting nodes and dumping the set on every edge incident to
 them, so the log answers which two cannot agree and what each wanted. A
 transform whose derived output is empty for its input (an encoder fed a format it
 does not take) is named alone with that input, `X produces no output for <caps>`,
-since the element below it is not part of the failure. After the two names the
+since the element below it is not part of the failure. The launch parser records
+each element's sink pad template on its graph node, so the narration then prints
+`X accepts <caps>`, and when the input and those caps are both raw video or both
+raw audio with no alternative in common, a hint names `videoconvert` or
+`audioconvert`. After the two names the
 narration prints what each side still allowed (`X offers`, `Y wants`), then one
 line per field (media type, format, width, height, framerate, channels, rate)
 that the two sides compare on and never agree on, with each side's values. A set

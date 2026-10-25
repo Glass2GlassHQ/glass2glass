@@ -962,6 +962,12 @@ pub fn solve_graph_preferred<E>(
             let (up, down) = (NodeId(*upstream as u32), NodeId(*downstream as u32));
             if let NegotiationFailure::NoOutputForInput { input, .. } = f {
                 crate::g2g_error!(t, "{} produces no output for {}", label(up), fmt_set(input));
+                if let Some(accepted) = graph.node_declared_input_caps(up) {
+                    crate::g2g_error!(t, "  {} accepts: {}", label(up), fmt_set(accepted));
+                    if let Some(converter) = format_converter(input, accepted) {
+                        crate::g2g_error!(t, "  hint: put {converter} ahead of {}", label(up));
+                    }
+                }
             } else {
                 crate::g2g_error!(
                     t,
@@ -1559,6 +1565,26 @@ fn fmt_set_opt(slot: &Option<CapsSet>) -> String {
         Some(s) => fmt_set(s),
         None => String::from("(not narrowed yet)"),
     }
+}
+
+type MediaPredicate = fn(&Caps) -> bool;
+
+const FORMAT_CONVERTERS: [(MediaPredicate, &str); 2] = [
+    (crate::runtime::is_raw_video, "videoconvert"),
+    (crate::runtime::is_raw_audio, "audioconvert"),
+];
+
+fn format_converter(input: &CapsSet, accepted: &CapsSet) -> Option<&'static str> {
+    if input.is_empty() || !input.intersect(accepted).is_empty() {
+        return None;
+    }
+    FORMAT_CONVERTERS
+        .iter()
+        .find(|(is_media, _)| {
+            input.alternatives().iter().all(is_media)
+                && accepted.alternatives().iter().all(is_media)
+        })
+        .map(|(_, converter)| *converter)
 }
 
 /// One-line summary of a node's constraint for the explainer's setup dump.

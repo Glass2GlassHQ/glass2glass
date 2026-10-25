@@ -3550,6 +3550,9 @@ fn build_graph(
         if let Some(cat) = &spec.log_category {
             graph.set_node_log_category(node, cat.clone());
         }
+        if let Some(caps) = registry.declared_input_caps(&spec.name) {
+            graph.set_node_declared_input_caps(node, caps);
+        }
         node_of.push(Some(node));
     }
 
