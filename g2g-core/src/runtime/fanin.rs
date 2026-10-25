@@ -1983,6 +1983,7 @@ where
         None,
         None,
         None,
+        None,
         ticker,
         None,
     )

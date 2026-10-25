@@ -81,6 +81,7 @@ pub use coordinator::{coordinator, Coordinator, CoordinatorEvent, CoordinatorHan
 pub use flight_recorder::{FlightRecorder, FLIGHT_RING_BYTES, FLIGHT_RING_PACKETS};
 pub use instrument::{
     snapshot_all, EdgeCounters, EdgeCounts, ElementLatency, ElementProbe, Probe, StageVisit,
+    VisitRecorder,
 };
 pub use join::{join_all, select2, Either, Join2, JoinAll, Select2};
 pub use progress::PipelineProgress;

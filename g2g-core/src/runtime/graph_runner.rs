@@ -83,7 +83,7 @@ use crate::runtime::coordinator::{
     log_caps_forward, log_caps_rejected, realloc_local_dyn, report_nego_failure, ArmDirective,
 };
 use crate::runtime::fanin::{select_branch_caps, DynMultiInputElement, DynSourceLoop};
-use crate::runtime::instrument::{snapshot_all, ElementProbe, Probe};
+use crate::runtime::instrument::{journey_ring, snapshot_all, ElementProbe, Probe, VisitRecorder};
 use crate::runtime::join::{dynamic_join_open, join_all, select2, Either};
 use crate::runtime::mutate::{
     lent_sink_arm, lent_source_arm, mutation_channel, spliced_arm, GraphMutator, Growth, Handback,
@@ -980,6 +980,7 @@ pub async fn run_graph<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1015,6 +1016,7 @@ pub fn run_graph_mutable<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
         Some(requests),
     );
     (mutator, run)
@@ -1043,6 +1045,7 @@ pub async fn run_graph_with_copy_policy<'a, Clk: PipelineClock>(
         None,
         None,
         Some(policy),
+        None,
         None,
         None,
         None,
@@ -1167,6 +1170,7 @@ pub async fn run_graph_with_bus<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1197,6 +1201,7 @@ pub async fn run_graph_observed<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1224,6 +1229,7 @@ where
         None,
         None,
         Some(observer),
+        None,
         None,
         None,
         Some(requests),
@@ -1257,6 +1263,7 @@ pub async fn run_graph_with_progress<'a, Clk: PipelineClock>(
         bus,
         None,
         Some(progress),
+        None,
         None,
         None,
         None,
@@ -1355,6 +1362,7 @@ pub async fn run_graph_stateful<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1388,6 +1396,7 @@ pub async fn run_graph_recorded<'a, Clk: PipelineClock>(
         Some(recorder),
         None,
         None,
+        None,
     )
     .await
 }
@@ -1412,6 +1421,7 @@ pub async fn run_graph_observed_recorded<'a, Clk: PipelineClock>(
         None,
         Some(observer),
         Some(recorder),
+        None,
         None,
         None,
     )
@@ -1550,6 +1560,12 @@ fn upstream_source(vg: &ValidatedGraph<GraphNodeRef<'_>>, mut node: NodeId) -> O
     }
 }
 
+#[derive(Clone, Copy)]
+struct ProbeTaps<'t> {
+    observer: Option<&'t Observer>,
+    visit_recorder: Option<&'t alloc::sync::Arc<dyn VisitRecorder>>,
+}
+
 /// Phases 1-3.5 of the graph runner: name instances + mint probes, probe source
 /// caps, solve + configure the whole DAG, run the allocation cascade, and elect
 /// the clock. Mutates `vg` (configure / clock-sync / instance names) and returns
@@ -1562,9 +1578,13 @@ async fn prepare_graph<'a>(
     state: &Option<StateController>,
     bus: Option<&BusHandle>,
     clock: &dyn PipelineClock,
-    observer: Option<&Observer>,
+    taps: ProbeTaps<'_>,
     clock_monitor: bool,
 ) -> Result<(Vec<Probe>, Prepared), G2gError> {
+    let ProbeTaps {
+        observer,
+        visit_recorder,
+    } = taps;
     let n = vg.node_count();
     // M78: tell the controller how many sinks must preroll before the async
     // `Paused` transition completes (aggregated `AsyncDone`).
@@ -1667,11 +1687,11 @@ async fn prepare_graph<'a>(
             if has_process {
                 // M851: only an observed run records per-frame journeys; the
                 // end-of-run report needs the histograms alone.
-                probes[node.0 as usize] = Some(if observer.is_some() {
-                    ElementProbe::with_journeys(log_name)
-                } else {
-                    ElementProbe::new(log_name)
-                });
+                probes[node.0 as usize] = Some(ElementProbe::recording(
+                    log_name,
+                    observer.is_some().then(journey_ring),
+                    visit_recorder.cloned(),
+                ));
             }
         }
     }
@@ -2011,8 +2031,9 @@ fn build_channels<'a>(
         if policy != crate::link::LinkPolicy::Block {
             tx.set_drop_counter(dropped.clone());
         }
-        // Live per-edge traffic counters, on every edge while an observer is
-        // attached (unlike transit, they cost nothing to keep aligned).
+        // Live per-edge traffic counters, on every edge while an observer or a
+        // visit recorder is attached (unlike transit, they cost nothing to keep
+        // aligned).
         if instrument {
             tx.set_counters(alloc::sync::Arc::new(
                 crate::runtime::instrument::EdgeCounters::default(),
@@ -2484,6 +2505,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
     copy_policy: Option<crate::copyplan::CopyPolicy>,
     observer: Option<&Observer>,
     recorder: Option<&crate::runtime::FlightRecorder>,
+    visit_recorder: Option<alloc::sync::Arc<dyn VisitRecorder>>,
     ticker: Option<&'c dyn DynAsyncClock>,
     mutation: Option<Receiver<MutationRequest<'a>>>,
 ) -> Result<RunStats, G2gError> {
@@ -2523,7 +2545,10 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
         &state,
         bus,
         clock,
-        observer,
+        ProbeTaps {
+            observer,
+            visit_recorder: visit_recorder.as_ref(),
+        },
         bus.is_some() && ticker.is_some(),
     )
     .await?;
@@ -2549,7 +2574,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
         &vg,
         &topo,
         link_capacity,
-        observer.is_some(),
+        observer.is_some() || visit_recorder.is_some(),
         mutation.is_some(),
     );
 
@@ -2890,6 +2915,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     copy_policy: Option<crate::copyplan::CopyPolicy>,
     observer: Option<&Observer>,
     recorder: Option<&FlightRecorder>,
+    visit_recorder: Option<alloc::sync::Arc<dyn VisitRecorder>>,
     ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
     spawner: &S,
     mutation: Option<Receiver<MutationRequest<'static>>>,
@@ -2932,7 +2958,10 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         &state,
         bus,
         clock,
-        observer,
+        ProbeTaps {
+            observer,
+            visit_recorder: visit_recorder.as_ref(),
+        },
         bus.is_some() && ticker.is_some(),
     )
     .await?;
@@ -2953,7 +2982,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         &vg,
         &topo,
         link_capacity,
-        observer.is_some(),
+        observer.is_some() || visit_recorder.is_some(),
         mutation.is_some(),
     );
 
@@ -3150,6 +3179,7 @@ pub async fn run_graph_threaded<Clk: PipelineClock, S: GraphSpawner>(
         None,
         None,
         None,
+        None,
         spawner,
         None,
     )
@@ -3175,6 +3205,7 @@ pub fn run_graph_threaded_mutable<'s, Clk: PipelineClock, S: GraphSpawner>(
         graph,
         clock,
         capacity,
+        None,
         None,
         None,
         None,
@@ -3217,6 +3248,7 @@ pub async fn run_graph_threaded_ticked<S: GraphSpawner>(
         None,
         None,
         None,
+        None,
         Some(clock.clone()),
         spawner,
         None,
@@ -3241,6 +3273,7 @@ pub async fn run_graph_threaded_with_bus<Clk: PipelineClock, S: GraphSpawner>(
         clock,
         link_capacity,
         Some(bus),
+        None,
         None,
         None,
         None,
@@ -3275,6 +3308,7 @@ pub async fn run_graph_threaded_with_progress<Clk: PipelineClock, S: GraphSpawne
         None,
         None,
         None,
+        None,
         spawner,
         None,
     )
@@ -3303,6 +3337,7 @@ pub async fn run_graph_threaded_observed<Clk: PipelineClock, S: GraphSpawner>(
         None,
         None,
         Some(observer),
+        None,
         None,
         None,
         spawner,
@@ -3338,6 +3373,7 @@ pub async fn run_graph_threaded_recorded<Clk: PipelineClock, S: GraphSpawner>(
         None,
         None,
         Some(recorder),
+        None,
         None,
         spawner,
         None,
