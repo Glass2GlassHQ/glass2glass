@@ -3,6 +3,8 @@
 //! record / playback loop (e.g. testsrc -> encode -> filesink, then
 //! filesrc -> parse -> decode).
 
+#![cfg(feature = "std")]
+
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;

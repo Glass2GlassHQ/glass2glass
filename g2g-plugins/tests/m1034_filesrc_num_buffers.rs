@@ -1,6 +1,8 @@
 //! M1034: `FileSrc` honours `num-buffers`, the GStreamer `filesrc` property that
 //! caps how many chunks a source emits before EOS.
 
+#![cfg(feature = "std")]
+
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;

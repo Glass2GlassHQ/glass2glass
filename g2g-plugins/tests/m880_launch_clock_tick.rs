@@ -7,6 +7,8 @@
 //! over a stalled input with no ticked entry point of its own. A clock that only
 //! tells time leaves the same graph frozen with its input.
 
+#![cfg(feature = "std")]
+
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};

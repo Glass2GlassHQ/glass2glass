@@ -2,6 +2,8 @@
 //! runs in a text pipeline (changing geometry), with its signed `Int` / `Str`
 //! properties parsed from text. The canvas math is unit-tested in the module.
 
+#![cfg(feature = "std")]
+
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::PipelineClock;
 use g2g_plugins::registry::default_registry;

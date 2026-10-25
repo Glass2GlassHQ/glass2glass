@@ -113,6 +113,8 @@ jobs:
         with:
           env-vars: ImageOS
       - run: cargo clippy --workspace --all-targets --locked
+      # the workspace build turns on `std` for g2g-plugins, which hides test files missing their feature gate
+      - run: cargo clippy -p g2g-plugins --all-targets --locked
       # Intra-doc links rot silently: a renamed item, or one that moved behind a
       # feature, leaves a dead link nobody notices. The feature set is read out
       # of each crate's own `[package.metadata.docs.rs]` rather than repeated

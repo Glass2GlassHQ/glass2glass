@@ -16,7 +16,9 @@
 //! bottom caption, and a left-aligned note pinned to mid-height); all three cues
 //! run the whole clip, so overlapping cues show at once on every frame.
 
+#[cfg(feature = "std")]
 const WIDTH: u32 = 1280;
+#[cfg(feature = "std")]
 const HEIGHT: u32 = 720;
 
 /// Frame geometry from optional `WIDTHxHEIGHT` argument (`arg`), else the
@@ -34,6 +36,7 @@ fn geometry(arg: Option<String>) -> (u32, u32) {
 
 /// A WebVTT track using the placement settings. All three cues run the whole
 /// clip, so they overlap on every frame.
+#[cfg(feature = "std")]
 const SUBS: &str = "\
 WEBVTT
 

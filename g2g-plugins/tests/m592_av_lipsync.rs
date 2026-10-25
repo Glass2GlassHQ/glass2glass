@@ -18,6 +18,8 @@
 //!    drifts ~10 ms out over 10 s. Deterministic (a hand-advanced clock, no real
 //!    sleeping), so it runs in CI; a real-time host run would be 10 s+ and flaky.
 
+#![cfg(feature = "std")]
+
 use core::future::{ready, Ready};
 use core::pin::Pin;
 use std::future::Future;

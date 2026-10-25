@@ -5,6 +5,8 @@
 //! the bitstream, so hand-built access units exercise the full path on any
 //! platform.
 
+#![cfg(feature = "std")]
+
 use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};

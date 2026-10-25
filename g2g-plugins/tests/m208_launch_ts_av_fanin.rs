@@ -5,6 +5,8 @@
 //! test proves the launch text path reaches the multi-input muxer and that the
 //! one `mpegtsmux` name covers both the single- and multi-input shapes.
 
+#![cfg(feature = "std")]
+
 use core::future::Future;
 use core::pin::Pin;
 

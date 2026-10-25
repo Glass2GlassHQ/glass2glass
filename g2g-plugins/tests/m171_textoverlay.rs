@@ -2,6 +2,8 @@
 //! `TextOverlay` element rendering cues by PTS, and the registry / `gst-launch`
 //! wiring (`textoverlay`, `location=`).
 
+#![cfg(feature = "std")]
+
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::PipelineClock;
 use g2g_plugins::registry::default_registry;

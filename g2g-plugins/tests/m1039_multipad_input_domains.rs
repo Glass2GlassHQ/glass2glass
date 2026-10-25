@@ -14,6 +14,7 @@ fn fan_in_muxer_takes_system_frames() {
         g2g_plugins::tsmuxn::TsMux::new(2).input_domains(),
         SYSTEM_ONLY
     );
+    #[cfg(feature = "std")]
     assert_eq!(
         g2g_plugins::mp4muxn::Mp4MuxN::new(2).input_domains(),
         SYSTEM_ONLY

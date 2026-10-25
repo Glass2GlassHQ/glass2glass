@@ -3,6 +3,8 @@
 //! into one stream that runs end to end through `run_graph`. The summing math is
 //! unit-tested in the module.
 
+#![cfg(feature = "std")]
+
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::PipelineClock;
 use g2g_plugins::registry::default_registry;

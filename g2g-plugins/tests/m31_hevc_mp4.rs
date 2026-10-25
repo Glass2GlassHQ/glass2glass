@@ -4,6 +4,8 @@
 //! encoder needed: the elements only frame the bitstream, so hand-built NALUs
 //! exercise the full container path on any platform.
 
+#![cfg(feature = "std")]
+
 use g2g_core::element::{OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};

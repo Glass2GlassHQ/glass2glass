@@ -3,6 +3,8 @@
 //! `default_registry`), with the input count derived from link degree, and runs
 //! end to end through `run_graph`.
 
+#![cfg(feature = "std")]
+
 use core::future::Future;
 use core::pin::Pin;
 

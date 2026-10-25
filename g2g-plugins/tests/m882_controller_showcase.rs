@@ -5,6 +5,8 @@
 //! assertions are on where the red overlay actually lands in each composited
 //! frame, so a curve that sampled but never reached the blend fails the test.
 
+#![cfg(feature = "std")]
+
 use core::future::Future;
 use core::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};

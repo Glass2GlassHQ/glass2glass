@@ -3,6 +3,8 @@
 //! both negotiated through the converter (S16-producing source, PCM-accepting
 //! sink).
 
+#![cfg(feature = "std")]
+
 use g2g_core::runtime::run_source_transform_sink;
 use g2g_core::{AudioFormat, PipelineClock};
 use g2g_plugins::audioconvert::AudioConvert;

@@ -167,6 +167,7 @@ fn make_by_name_then_set_property() {
 /// description, so a bare `g2g-inspect` listing is a usable index rather than a
 /// column of names. Registering an element without metadata fails here instead
 /// of silently degrading the listing.
+#[cfg(feature = "std")]
 #[test]
 fn every_registered_element_declares_metadata() {
     let reg = g2g_plugins::registry::default_registry();

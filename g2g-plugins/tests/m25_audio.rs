@@ -1,6 +1,8 @@
 //! M25: first audio elements. `AudioTestSrc -> WavSink` through the real
 //! runner produces a structurally valid, byte-exact WAV file.
 
+#![cfg(feature = "std")]
+
 use g2g_core::runtime::run_simple_pipeline;
 use g2g_core::{AudioFormat, Caps, G2gError, PipelineClock};
 use g2g_plugins::audiotestsrc::{AudioTestSrc, Wave};

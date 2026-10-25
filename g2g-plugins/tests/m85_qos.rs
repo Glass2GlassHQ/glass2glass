@@ -3,6 +3,8 @@
 //! (instead of presenting them late) and posts a `BusMessage::Qos` per drop.
 //! The control case (an on-time clock) presents every frame and posts nothing.
 
+#![cfg(feature = "std")]
+
 use core::future::{ready, Ready};
 
 use g2g_core::runtime::{run_graph, GraphNodeRef};

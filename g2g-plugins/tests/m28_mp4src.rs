@@ -3,6 +3,8 @@
 //! recorded geometry during negotiation, and on Windows the full circle
 //! runs encode -> container -> demux -> decode through both real MFTs.
 
+#![cfg(feature = "std")]
+
 #[path = "common/collect_sink.rs"]
 mod collect_sink;
 use collect_sink::CollectSink;

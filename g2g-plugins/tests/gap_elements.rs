@@ -6,6 +6,8 @@
 //! their properties parsed from text. The per-element math is unit-tested in each
 //! module; this proves the registry wiring and the runner path.
 
+#![cfg(feature = "std")]
+
 use core::future::Future;
 use core::pin::Pin;
 

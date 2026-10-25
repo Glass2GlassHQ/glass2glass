@@ -2,6 +2,8 @@
 //! paces presentation to PTS, and that backpressure makes the upstream
 //! VideoTestSrc track the sink's rate without any explicit pacing.
 
+#![cfg(feature = "std")]
+
 use std::time::{Duration, Instant};
 
 use g2g_core::runtime::run_simple_pipeline;

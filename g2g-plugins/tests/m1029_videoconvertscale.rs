@@ -241,10 +241,6 @@ fn an_odd_size_nv12_frame_fuses_to_the_expected_rgb() {
     );
 }
 
-/// The element has to work through `parse_launch` and the runner, not just when
-/// a test configures it by hand: a caps filter downstream is what pins its
-/// output, and the runner is what calls `configure_pipeline` / `configure_output`.
-#[cfg(feature = "std")]
 #[test]
 fn a_format_the_scaler_cannot_take_is_refused() {
     let mut element = VideoConvertScale::auto();
@@ -254,6 +250,10 @@ fn a_format_the_scaler_cannot_take_is_refused() {
     );
 }
 
+/// The element has to work through `parse_launch` and the runner, not just when
+/// a test configures it by hand: a caps filter downstream is what pins its
+/// output, and the runner is what calls `configure_pipeline` / `configure_output`.
+#[cfg(feature = "std")]
 mod launch {
     use g2g_core::runtime::{parse_launch, run_graph};
     use g2g_core::{PipelineClock, RawVideoFormat};

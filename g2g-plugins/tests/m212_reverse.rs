@@ -12,6 +12,8 @@
 //! parsers can detect (`h264_au_is_keyframe`, vp8 `parse_keyframe`) but do not
 //! yet surface as a frame property.
 
+#![cfg(feature = "std")]
+
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
