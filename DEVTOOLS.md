@@ -534,6 +534,11 @@ of one push to the end of the next, so a live source's span includes the wait fo
 its next capture. It works with `--threads`, and does not combine with
 `--observe` or `--tui`.
 
+From code, `RunBuilder::with_visit_recorder` traces a graph run. An `Observer`
+built with `with_visit_recorder` traces any run it observes, graph or standalone
+runner. Setting both on one graph run fails.
+`g2g_plugins::perfetto_trace::PerfettoTrace` is the recorder that writes the file.
+
 ## Visual pipeline builder *(clone)*
 
 `tools/builder/` is a React Flow app (Vite + pnpm) that lets you assemble a

@@ -26,6 +26,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1917: `font-family: monospace` picks an installed monospaced face when cosmic-text's default Noto Sans Mono is missing.
 - M1918: `g2g-launch --trace` also records spans for sources, muxers, demuxers, fan-in sinks and elements a `GraphMutator` adds.
 - M1919: `wgpusink`, `glsink`, `cudaglsink`, `kmssink`, `cudakmssink`, `d3d11sink`, `metalvideosink` and `VulkanHdrPresentSink` report presented and late-dropped frames, so the run summary prints a `present:` line for them.
+- M1920: an `Observer` built with `with_visit_recorder` traces graph runs and the standalone runners' `_observed` entry points. A graph run given a recorder both there and through `RunBuilder::with_visit_recorder` fails with `G2gError::VisitRecorderConflict`.
 - M1924: text overlays use an installed sans-serif face when cosmic-text's default Open Sans is missing, instead of the 8x8 bitmap font.
 
 ## 0.10.0

@@ -333,8 +333,16 @@ element a mutator splices in records no wait, because the link it adds carries n
 transit ring. Source probes exist only for the trace and stay out of
 `RunStats::per_element`.
 
-The standalone runners in `fanin.rs` and `runner.rs` record no visits. None of
-their entry points takes a visit recorder, and `g2g-launch` does not use them.
+The standalone runners in `fanin.rs` and `runner.rs` take their recorder from the
+observer: `Observer::with_visit_recorder` sets one, and every `_observed` entry
+point passes it to the probes it mints. Their sources, sinks, muxers and fan-in
+sessions record like the graph runner's. A duplex session drives itself through
+`run`, so its outputs are wrapped like a source's. The links these runners build
+carry no transit ring, so their spans have no wait. `run_simple_pipeline`,
+`run_linear_chain`, `run_source_transform_sink` and `run_muxer_sink` have no
+observed entry point and record nothing. A graph run takes its recorder from
+`RunBuilder::with_visit_recorder` or from its observer, and fails with
+`G2gError::VisitRecorderConflict` when both are set.
 
 ## JSON introspection and the builder
 

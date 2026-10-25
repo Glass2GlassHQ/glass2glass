@@ -42,8 +42,10 @@ use crate::runtime::channel::{
     bounded, packet_bytes, ProbeAction, ProbeSlot, Receiver, SendError, Sender, SenderSink,
 };
 use crate::runtime::coordinator::log_caps_rejected;
-use crate::runtime::graph_runner::{run_graph_inner, sink_arm_on, GraphNodeRef, SinkArmIo};
-use crate::runtime::instrument::{EdgeCounters, ElementProbe, Probe};
+use crate::runtime::graph_runner::{
+    run_graph_inner, sink_arm_on, traced_source_probe, GraphNodeRef, SinkArmIo, SourceFrameSpans,
+};
+use crate::runtime::instrument::{frame_sequence, EdgeCounters, ElementProbe, Probe};
 use crate::runtime::join::{dynamic_join, join_all, select2, Either};
 use crate::runtime::observe::{link_tapped, register_runner_tap, EdgeTap, TapEdge, TapNode};
 use crate::runtime::packet_log::log_received;
@@ -1075,14 +1077,18 @@ where
     );
 
     let mut sources = sources;
+    let visit_recorder = observer.and_then(Observer::visit_recorder);
     // M842: instance naming + lifecycle logging, as in `run_graph`. The `Merger`
     // carries no element payload (it selects, like a structural tee), so it is
     // not named, matching the tee case there.
     let mut namer = crate::log::InstanceNamer::new();
     let mut source_names: Vec<alloc::string::String> = Vec::with_capacity(input_count);
+    let mut source_probes: Vec<Probe> = Vec::with_capacity(input_count);
     for source in sources.iter_mut() {
         let name = namer.add(source.log_category(), None);
         source.set_instance_name(name.clone());
+        let log_name = ElementLogName::new(source.log_category(), name.clone());
+        source_probes.push(traced_source_probe(&log_name, visit_recorder));
         source_names.push(name);
     }
     let sink_category = crate::log::short_type_name::<Snk>();
@@ -1090,7 +1096,11 @@ where
     AsyncElement::set_instance_name(sink, sink_name.clone());
     // M846: the sink is the only node here with a `process()`, so it carries the
     // run's measured-latency probe (as in the linear runners).
-    let sink_probe = ElementProbe::new(ElementLogName::new(sink_category, sink_name));
+    let sink_probe = ElementProbe::recording(
+        ElementLogName::new(sink_category, sink_name),
+        None,
+        visit_recorder.cloned(),
+    );
 
     // Phase 1 + 2: fixate each source's caps and configure it; the sink is
     // configured against input 0's fixated caps (the merged-output caps). This
@@ -1155,10 +1165,13 @@ where
 
     let mut source_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> =
         Vec::with_capacity(input_count);
-    for (source, in_tx) in sources.into_iter().zip(input_senders) {
+    for ((source, in_tx), probe) in sources.into_iter().zip(input_senders).zip(source_probes) {
         source_arms.push(Box::pin(async move {
             let mut adapter = SenderSink::new(in_tx);
-            source.run(&mut adapter).await
+            adapter.set_push_wait_probe(probe.clone());
+            source
+                .run(&mut SourceFrameSpans::new(&mut adapter, probe))
+                .await
         }));
     }
 
@@ -1422,18 +1435,23 @@ where
     // M846: instance naming, as in `run_fanin_sink`. The session is the only node
     // with a `process()`, so it carries the run's measured-latency probe.
     let mut sources = sources;
+    let visit_recorder = observer.and_then(Observer::visit_recorder);
     let mut namer = crate::log::InstanceNamer::new();
     let mut source_names: Vec<alloc::string::String> = Vec::with_capacity(input_count);
+    let mut source_probes: Vec<Probe> = Vec::with_capacity(input_count);
     for source in sources.iter_mut() {
         let name = namer.add(source.log_category(), None);
         source.set_instance_name(name.clone());
+        let log_name = ElementLogName::new(source.log_category(), name.clone());
+        source_probes.push(traced_source_probe(&log_name, visit_recorder));
         source_names.push(name);
     }
     let session_category = crate::log::short_type_name::<Sess>();
-    let session_probe = ElementProbe::new(ElementLogName::new(
-        session_category,
-        namer.add(session_category, None),
-    ));
+    let session_probe = ElementProbe::recording(
+        ElementLogName::new(session_category, namer.add(session_category, None)),
+        None,
+        visit_recorder.cloned(),
+    );
 
     // Phase 1 + 2 per input: each source is narrowed against the session input
     // pad it feeds; the fixated caps configure both the source and that pad (the
@@ -1502,14 +1520,16 @@ where
 
     let mut source_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> =
         Vec::with_capacity(input_count);
-    for (i, source) in sources.into_iter().enumerate() {
+    for ((i, source), source_probe) in sources.into_iter().enumerate().zip(source_probes) {
         let tx_i = tx.clone();
         let reverse_i = reverse[i].clone();
         let counters_i = counters[i].clone();
         let probe_i = probes[i].clone();
         source_arms.push(Box::pin(async move {
             let mut adapter = TaggingSink::new(i, tx_i, reverse_i, counters_i, probe_i);
-            let result = source.run(&mut adapter).await;
+            let result = source
+                .run(&mut SourceFrameSpans::new(&mut adapter, source_probe))
+                .await;
             wind_down_when_session_ended(result, &adapter)
         }));
     }
@@ -1546,15 +1566,15 @@ where
                         .await?;
                 }
                 Some((idx, packet)) => {
-                    let is_data = matches!(packet, PipelinePacket::DataFrame(_));
-                    if is_data {
+                    let sequence = frame_sequence(&packet);
+                    if sequence.is_some() {
                         consumed += 1;
                         probe_for_session.record_fill(rx.fill_percent());
                     }
-                    let t0 = is_data.then(ElementProbe::mark).flatten();
+                    let t0 = sequence.and_then(|_| ElementProbe::mark());
                     session.process(idx, packet, &mut null).await?;
-                    if is_data {
-                        probe_for_session.record_proc_since(t0);
+                    if let Some(sequence) = sequence {
+                        probe_for_session.record_frame_processed(sequence, 0, t0);
                     }
                 }
                 None => return Ok(consumed),
@@ -1711,21 +1731,34 @@ where
     // M846: instance naming + one measured-latency probe per recv sink (the
     // session drives itself through `run`, so it has no `process()` to time).
     let mut sources = sources;
+    let visit_recorder = observer.and_then(Observer::visit_recorder);
     let mut sinks = sinks;
     let mut namer = crate::log::InstanceNamer::new();
     let mut source_names: Vec<alloc::string::String> = Vec::with_capacity(input_count);
+    let mut source_probes: Vec<Probe> = Vec::with_capacity(input_count);
     for source in sources.iter_mut() {
         let name = namer.add(source.log_category(), None);
         source.set_instance_name(name.clone());
+        let log_name = ElementLogName::new(source.log_category(), name.clone());
+        source_probes.push(traced_source_probe(&log_name, visit_recorder));
         source_names.push(name);
     }
-    let session_name = namer.add(crate::log::short_type_name::<Sess>(), None);
+    let session_category = crate::log::short_type_name::<Sess>();
+    let session_name = namer.add(session_category, None);
+    let session_probe = traced_source_probe(
+        &ElementLogName::new(session_category, session_name.clone()),
+        visit_recorder,
+    );
     let mut sink_probes = Vec::with_capacity(output_count);
     for sink in sinks.iter_mut() {
         let category = sink.log_category();
         let name = namer.add(category, None);
         sink.set_instance_name(name.clone());
-        sink_probes.push(ElementProbe::new(ElementLogName::new(category, name)));
+        sink_probes.push(ElementProbe::recording(
+            ElementLogName::new(category, name),
+            None,
+            visit_recorder.cloned(),
+        ));
     }
 
     // Negotiate the send inputs (like run_fanin_session): each source is narrowed
@@ -1824,14 +1857,16 @@ where
 
     let mut source_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> =
         Vec::with_capacity(input_count);
-    for (i, source) in sources.into_iter().enumerate() {
+    for ((i, source), source_probe) in sources.into_iter().enumerate().zip(source_probes) {
         let tx_i = in_tx.clone();
         let reverse_i = reverse[i].clone();
         let counters_i = in_counters[i].clone();
         let probe_i = in_probes[i].clone();
         source_arms.push(Box::pin(async move {
             let mut adapter = TaggingSink::new(i, tx_i, reverse_i, counters_i, probe_i);
-            let result = source.run(&mut adapter).await;
+            let result = source
+                .run(&mut SourceFrameSpans::new(&mut adapter, source_probe))
+                .await;
             wind_down_when_session_ended(result, &adapter)
         }));
     }
@@ -1845,7 +1880,13 @@ where
             reverse: Arc::new(Mutex::new(Vec::new())),
         };
         let mut multi = MultiSenderSink::new(branch_senders);
-        session.run(&mut inbound, &mut multi).await
+        multi.set_push_wait_probe(session_probe.clone());
+        session
+            .run(
+                &mut inbound,
+                &mut SourceFrameSpans::new(&mut multi, session_probe),
+            )
+            .await
     });
 
     let mut sink_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> = Vec::with_capacity(output_count);
@@ -2233,10 +2274,14 @@ where
         // `run_fanin_session`. Attached inputs are named off the same namer.
         let mut namer = crate::log::InstanceNamer::new();
         let agg_category = crate::log::short_type_name::<Agg>();
-        let agg_probe = ElementProbe::new(ElementLogName::new(
-            agg_category,
-            namer.add(agg_category, None),
-        ));
+        let agg_probe = ElementProbe::recording(
+            ElementLogName::new(agg_category, namer.add(agg_category, None)),
+            None,
+            observer
+                .as_ref()
+                .and_then(Observer::visit_recorder)
+                .cloned(),
+        );
         if let Some(obs) = &observer {
             register_runner_tap(
                 obs,
@@ -2289,15 +2334,15 @@ where
                                 .await?;
                         }
                         Either::Left(Some((pad, packet))) => {
-                            let is_data = matches!(packet, PipelinePacket::DataFrame(_));
-                            if is_data {
+                            let sequence = frame_sequence(&packet);
+                            if sequence.is_some() {
                                 consumed += 1;
                                 probe_for_agg.record_fill(tagged_rx.fill_percent());
                             }
-                            let t0 = is_data.then(ElementProbe::mark).flatten();
+                            let t0 = sequence.and_then(|_| ElementProbe::mark());
                             aggregator.process(pad, packet, &mut null).await?;
-                            if is_data {
-                                probe_for_agg.record_proc_since(t0);
+                            if let Some(sequence) = sequence {
+                                probe_for_agg.record_frame_processed(sequence, 0, t0);
                             }
                         }
                         // Unreachable while `keepalive` is held (a live sender keeps
@@ -2327,15 +2372,15 @@ where
                                 .await?;
                         }
                         Some((pad, packet)) => {
-                            let is_data = matches!(packet, PipelinePacket::DataFrame(_));
-                            if is_data {
+                            let sequence = frame_sequence(&packet);
+                            if sequence.is_some() {
                                 consumed += 1;
                                 probe_for_agg.record_fill(tagged_rx.fill_percent());
                             }
-                            let t0 = is_data.then(ElementProbe::mark).flatten();
+                            let t0 = sequence.and_then(|_| ElementProbe::mark());
                             aggregator.process(pad, packet, &mut null).await?;
-                            if is_data {
-                                probe_for_agg.record_proc_since(t0);
+                            if let Some(sequence) = sequence {
+                                probe_for_agg.record_frame_processed(sequence, 0, t0);
                             }
                         }
                         None => return Ok(FaninArmOut::Aggregator(consumed)),
@@ -2464,14 +2509,20 @@ where
         // static `run_muxer_sink`. Attached inputs are named off the same namer.
         let mut namer = crate::log::InstanceNamer::new();
         let mux_category = crate::log::short_type_name::<Mux>();
-        let mux_probe = ElementProbe::new(ElementLogName::new(
-            mux_category,
-            namer.add(mux_category, None),
-        ));
+        let visit_recorder = observer.as_ref().and_then(Observer::visit_recorder);
+        let mux_probe = ElementProbe::recording(
+            ElementLogName::new(mux_category, namer.add(mux_category, None)),
+            None,
+            visit_recorder.cloned(),
+        );
         let sink_category = crate::log::short_type_name::<Snk>();
         let sink_name = namer.add(sink_category, None);
         AsyncElement::set_instance_name(sink, sink_name.clone());
-        let sink_probe = ElementProbe::new(ElementLogName::new(sink_category, sink_name.clone()));
+        let sink_probe = ElementProbe::recording(
+            ElementLogName::new(sink_category, sink_name.clone()),
+            None,
+            visit_recorder.cloned(),
+        );
         if let Some(obs) = &observer {
             // The merged link's caps do not exist until a pad is configured, so
             // only the two nodes are registered here; the edge follows.
@@ -2516,15 +2567,15 @@ where
                     }
                     PipelinePacket::Eos => break,
                     other => {
-                        let is_data = matches!(other, PipelinePacket::DataFrame(_));
-                        if is_data {
+                        let sequence = frame_sequence(&other);
+                        if sequence.is_some() {
                             consumed += 1;
                             probe_for_sink.record_fill(out_rx.fill_percent());
                         }
-                        let t0 = is_data.then(ElementProbe::mark).flatten();
+                        let t0 = sequence.and_then(|_| ElementProbe::mark());
                         sink.process(other, &mut null).await?;
-                        if is_data {
-                            probe_for_sink.record_proc_since(t0);
+                        if let Some(sequence) = sequence {
+                            probe_for_sink.record_frame_processed(sequence, 0, t0);
                         }
                     }
                 }
@@ -2578,8 +2629,8 @@ where
                         mux.process(pad, PipelinePacket::Eos, &mut out).await?;
                     }
                     Some((pad, packet)) => {
-                        let is_data = matches!(packet, PipelinePacket::DataFrame(_));
-                        if is_data {
+                        let sequence = frame_sequence(&packet);
+                        if sequence.is_some() {
                             // Couple the merged output to the sink: emit one
                             // `CapsChanged` whenever the derived output firms up or
                             // shifts (a newly attached pad can change it), before
@@ -2605,10 +2656,10 @@ where
                             consumed += 1;
                             probe_for_mux.record_fill(tagged_rx.fill_percent());
                         }
-                        let t0 = is_data.then(ElementProbe::mark).flatten();
+                        let t0 = sequence.and_then(|_| ElementProbe::mark());
                         mux.process(pad, packet, &mut out).await?;
-                        if is_data {
-                            probe_for_mux.record_proc_since(t0);
+                        if let Some(sequence) = sequence {
+                            probe_for_mux.record_frame_processed(sequence, 0, t0);
                         }
                     }
                     None => break,
@@ -2718,6 +2769,10 @@ async fn attach_input<'a>(
     // ride its `TaggingSink`.
     let name = tap.namer.add(source.log_category(), None);
     source.set_instance_name(name.clone());
+    let source_probe = traced_source_probe(
+        &ElementLogName::new(source.log_category(), name.clone()),
+        tap.obs.as_ref().and_then(Observer::visit_recorder),
+    );
     let (counters, slot) = match &tap.obs {
         Some(obs) => {
             let counters = Arc::new(EdgeCounters::default());
@@ -2741,7 +2796,9 @@ async fn attach_input<'a>(
     let arm: BoxFuture<'a, Result<FaninArmOut, G2gError>> = Box::pin(async move {
         let mut sink = TaggingSink::new(pad, tx, None, counters, slot);
         let mut source = source;
-        let result = source.run(&mut sink).await;
+        let result = source
+            .run(&mut SourceFrameSpans::new(&mut sink, source_probe))
+            .await;
         wind_down_when_session_ended(result, &sink).map(FaninArmOut::Source)
     });
     new_arm_tx.try_send(arm).map_err(|_| G2gError::Shutdown)?;
@@ -3057,20 +3114,33 @@ where
 
         let mut sources = sources;
         let mut sinks = sinks;
+        let visit_recorder = observer.as_ref().and_then(Observer::visit_recorder);
         let mut namer = crate::log::InstanceNamer::new();
         let mut source_names: Vec<alloc::string::String> = Vec::with_capacity(input_count);
+        let mut source_probes: Vec<Probe> = Vec::with_capacity(input_count);
         for source in sources.iter_mut() {
             let name = namer.add(source.log_category(), None);
             source.set_instance_name(name.clone());
+            let log_name = ElementLogName::new(source.log_category(), name.clone());
+            source_probes.push(traced_source_probe(&log_name, visit_recorder));
             source_names.push(name);
         }
-        let session_name = namer.add(crate::log::short_type_name::<Sess>(), None);
+        let session_category = crate::log::short_type_name::<Sess>();
+        let session_name = namer.add(session_category, None);
+        let session_probe = traced_source_probe(
+            &ElementLogName::new(session_category, session_name.clone()),
+            visit_recorder,
+        );
         let mut sink_probes = Vec::with_capacity(output_count);
         for sink in sinks.iter_mut() {
             let category = sink.log_category();
             let name = namer.add(category, None);
             sink.set_instance_name(name.clone());
-            sink_probes.push(ElementProbe::new(ElementLogName::new(category, name)));
+            sink_probes.push(ElementProbe::recording(
+                ElementLogName::new(category, name),
+                None,
+                visit_recorder.cloned(),
+            ));
         }
 
         // Negotiate the declared send inputs and recv outputs exactly as the
@@ -3162,14 +3232,16 @@ where
 
         let mut source_arms: Vec<BoxFuture<'a, Result<DuplexArmOut, G2gError>>> =
             Vec::with_capacity(input_count);
-        for (i, source) in sources.into_iter().enumerate() {
+        for ((i, source), source_probe) in sources.into_iter().enumerate().zip(source_probes) {
             let tx_i = in_tx.clone();
             let reverse_i = reverse[i].clone();
             let counters_i = in_counters[i].clone();
             let probe_i = in_probes[i].clone();
             source_arms.push(Box::pin(async move {
                 let mut adapter = TaggingSink::new(i, tx_i, reverse_i, counters_i, probe_i);
-                let result = source.run(&mut adapter).await;
+                let result = source
+                    .run(&mut SourceFrameSpans::new(&mut adapter, source_probe))
+                    .await;
                 wind_down_when_session_ended(result, &adapter).map(DuplexArmOut::Source)
             }));
         }
@@ -3188,14 +3260,19 @@ where
                 rx: in_rx,
                 reverse: session_reverse,
             };
+            let mut ports = MultiSenderSink::new(branch_senders);
+            ports.set_push_wait_probe(session_probe.clone());
             let mut multi = GrowableSenderSink {
-                ports: MultiSenderSink::new(branch_senders),
+                ports,
                 link_capacity,
                 tap,
                 grown_tx,
             };
             session
-                .run(&mut inbound, &mut multi)
+                .run(
+                    &mut inbound,
+                    &mut SourceFrameSpans::new(&mut multi, session_probe),
+                )
                 .await
                 .map(|_| DuplexArmOut::Session)
         });
@@ -3360,6 +3437,10 @@ async fn attach_send_track<'a>(
 
     let name = tap.namer.add(source.log_category(), None);
     source.set_instance_name(name.clone());
+    let source_probe = traced_source_probe(
+        &ElementLogName::new(source.log_category(), name.clone()),
+        tap.obs.as_ref().and_then(Observer::visit_recorder),
+    );
     let (counters, slot) = match &tap.obs {
         Some(obs) => {
             let counters = Arc::new(EdgeCounters::default());
@@ -3396,7 +3477,11 @@ async fn attach_send_track<'a>(
         let announced = adapter.push(PipelinePacket::CapsChanged(fixated)).await;
         let mut source = source;
         let result = match announced {
-            Ok(_) => source.run(&mut adapter).await,
+            Ok(_) => {
+                source
+                    .run(&mut SourceFrameSpans::new(&mut adapter, source_probe))
+                    .await
+            }
             Err(e) => Err(e),
         };
         wind_down_when_session_ended(result, &adapter).map(DuplexArmOut::Source)
@@ -3422,7 +3507,11 @@ fn prepare_grown_sink<'a>(
     let category = sink.log_category();
     let name = tap.namer.add(category, None);
     sink.set_instance_name(name.clone());
-    let probe = ElementProbe::new(ElementLogName::new(category, name.clone()));
+    let probe = ElementProbe::recording(
+        ElementLogName::new(category, name.clone()),
+        None,
+        tap.obs.as_ref().and_then(Observer::visit_recorder).cloned(),
+    );
     if let Some(obs) = &tap.obs {
         let id = obs.add_node(name, NodeRole::Sink, Some(probe.clone()));
         obs.add_edge(tap.session_id, id, caps.clone(), edge);

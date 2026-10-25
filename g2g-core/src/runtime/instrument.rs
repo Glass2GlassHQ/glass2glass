@@ -340,6 +340,14 @@ pub struct StageVisit {
     pub push_wait_ns: u64,
 }
 
+#[cfg(feature = "std")]
+pub(crate) fn frame_sequence(packet: &crate::frame::PipelinePacket) -> Option<u64> {
+    match packet {
+        crate::frame::PipelinePacket::DataFrame(frame) => Some(frame.sequence),
+        _ => None,
+    }
+}
+
 pub(crate) fn journey_ring() -> Mutex<VecDeque<StageVisit>> {
     Mutex::new(VecDeque::with_capacity(JOURNEY_RING))
 }

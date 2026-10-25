@@ -56,6 +56,8 @@ pub enum G2gError {
     },
     // the element holding the seek controller can no longer serve the seek it was given
     SeekRefused,
+    // a graph run got one visit recorder from `RunBuilder::with_visit_recorder` and another from its observer
+    VisitRecorderConflict,
     // a network session failed at this stage, with the peer's or protocol library's message logged by the element
     Network(NetworkFailure),
     // an RTSP session failed after media started flowing, in the transport or the payload, with retina's message logged by the element

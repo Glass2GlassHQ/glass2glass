@@ -83,7 +83,9 @@ use crate::runtime::coordinator::{
     log_caps_forward, log_caps_rejected, realloc_local_dyn, report_nego_failure, ArmDirective,
 };
 use crate::runtime::fanin::{select_branch_caps, DynMultiInputElement, DynSourceLoop};
-use crate::runtime::instrument::{journey_ring, snapshot_all, ElementProbe, Probe, VisitRecorder};
+use crate::runtime::instrument::{
+    frame_sequence, journey_ring, snapshot_all, ElementProbe, Probe, VisitRecorder,
+};
 use crate::runtime::join::{dynamic_join_open, join_all, select2, Either};
 use crate::runtime::mutate::{
     lent_sink_arm, lent_source_arm, mutation_channel, spliced_arm, GraphMutator, Growth, Handback,
@@ -2532,6 +2534,17 @@ fn finish_graph(
     graph.finish().map_err(|_| G2gError::CapsMismatch)
 }
 
+fn run_visit_recorder(
+    visit_recorder: Option<alloc::sync::Arc<dyn VisitRecorder>>,
+    observer: Option<&Observer>,
+) -> Result<Option<alloc::sync::Arc<dyn VisitRecorder>>, G2gError> {
+    match (visit_recorder, observer.and_then(Observer::visit_recorder)) {
+        (Some(_), Some(_)) => Err(G2gError::VisitRecorderConflict),
+        (Some(visit_recorder), None) => Ok(Some(visit_recorder)),
+        (None, from_observer) => Ok(from_observer.cloned()),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
     graph: Graph<GraphNodeRef<'a>>,
@@ -2547,6 +2560,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
     ticker: Option<&'c dyn DynAsyncClock>,
     mutation: Option<Receiver<MutationRequest<'a>>>,
 ) -> Result<RunStats, G2gError> {
+    let visit_recorder = run_visit_recorder(visit_recorder, observer)?;
     // A pipeline clock that can sleep on a deadline is the fan-in tick timer
     // (M880), so every entry point ticks without one of its own. An explicit
     // `ticker` still wins.
@@ -2960,6 +2974,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     spawner: &S,
     mutation: Option<Receiver<MutationRequest<'static>>>,
 ) -> Result<RunStats, G2gError> {
+    let visit_recorder = run_visit_recorder(visit_recorder, observer)?;
     // Same rule as the cooperative runner (M880), through the shared handle the
     // arm threads can own: a pipeline clock that can sleep on a deadline is the
     // fan-in tick timer, so every threaded entry point ticks without one of its
@@ -4298,26 +4313,27 @@ pub(crate) fn traced_source_probe(
 }
 
 // a source span runs from the end of its previous push to the end of this one
-struct SourceFrameSpans<S> {
-    output: S,
-    probe: alloc::sync::Arc<ElementProbe>,
+pub(crate) struct SourceFrameSpans<'o, S: ?Sized> {
+    output: &'o mut S,
+    probe: Probe,
     span_start_ns: Option<u64>,
     pushing_sequence: Option<u64>,
 }
 
-impl<S> SourceFrameSpans<S> {
-    fn new(output: S, probe: alloc::sync::Arc<ElementProbe>) -> Self {
+impl<'o, S: ?Sized> SourceFrameSpans<'o, S> {
+    pub(crate) fn new(output: &'o mut S, probe: Probe) -> Self {
         Self {
             output,
+            span_start_ns: probe.as_ref().and_then(|_| ElementProbe::mark()),
             probe,
-            span_start_ns: ElementProbe::mark(),
             pushing_sequence: None,
         }
     }
 
+    // an output that takes the packet on its first poll leaves the slot empty on the later ones
     fn start_poll(&mut self, packet: &Option<PipelinePacket>) {
-        if let Some(PipelinePacket::DataFrame(frame)) = packet {
-            self.pushing_sequence = Some(frame.sequence);
+        if let Some(sequence) = packet.as_ref().and_then(frame_sequence) {
+            self.pushing_sequence = Some(sequence);
         }
     }
 
@@ -4325,16 +4341,15 @@ impl<S> SourceFrameSpans<S> {
         if !matches!(outcome, core::task::Poll::Ready(Ok(_))) {
             return;
         }
-        let Some(sequence) = self.pushing_sequence.take() else {
+        let (Some(probe), Some(sequence)) = (&self.probe, self.pushing_sequence.take()) else {
             return;
         };
-        self.probe
-            .record_frame_processed(sequence, 0, self.span_start_ns);
+        probe.record_frame_processed(sequence, 0, self.span_start_ns);
         self.span_start_ns = ElementProbe::mark();
     }
 }
 
-impl OutputSink for SourceFrameSpans<SenderSink> {
+impl<S: OutputSink + ?Sized> OutputSink for SourceFrameSpans<'_, S> {
     fn begin_push(&mut self) {
         self.pushing_sequence = None;
         self.output.begin_push();
@@ -4352,7 +4367,7 @@ impl OutputSink for SourceFrameSpans<SenderSink> {
     }
 }
 
-impl MultiOutputSink for SourceFrameSpans<MultiSenderSink> {
+impl<S: MultiOutputSink + ?Sized> MultiOutputSink for SourceFrameSpans<'_, S> {
     fn begin_push_to(&mut self, port: usize) {
         self.pushing_sequence = None;
         self.output.begin_push_to(port);
@@ -4372,6 +4387,10 @@ impl MultiOutputSink for SourceFrameSpans<MultiSenderSink> {
 
     fn port_count(&self) -> usize {
         self.output.port_count()
+    }
+
+    fn add_port(&mut self, caps: &Caps) -> Option<usize> {
+        self.output.add_port(caps)
     }
 }
 
@@ -4412,13 +4431,9 @@ pub(crate) async fn run_source(
     // M81: open the stream with a SEGMENT ahead of the source's data, so every
     // downstream branch maps timestamps to running time from the first frame.
     let _ = adapter.push(PipelinePacket::Segment(segment)).await?;
-    match probe {
-        Some(probe) => {
-            adapter.set_push_wait_probe(Some(probe.clone()));
-            src.run(&mut SourceFrameSpans::new(adapter, probe)).await
-        }
-        None => src.run(&mut adapter).await,
-    }
+    adapter.set_push_wait_probe(probe.clone());
+    src.run(&mut SourceFrameSpans::new(&mut adapter, probe))
+        .await
 }
 
 /// An interior transform arm. Besides forwarding data, it (D4) selects on a β
@@ -4709,10 +4724,7 @@ pub(crate) async fn transform_arm_on<E: AsyncElement>(
                 // M399: time the data-frame `process()` and sample input fill;
                 // control packets (segment/flush) are excluded so the histogram
                 // reflects real per-frame work, not cheap signalling.
-                let seq = match &packet {
-                    PipelinePacket::DataFrame(f) => Some(f.sequence),
-                    _ => None,
-                };
+                let seq = frame_sequence(&packet);
                 let timed = probe.as_deref().filter(|_| seq.is_some());
                 // One clock read times the frame's queue residency and its process start.
                 let t0 = timed.and_then(|_| ElementProbe::mark());
@@ -4969,10 +4981,7 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                     }
                     _ => {}
                 }
-                let seq = match &packet {
-                    PipelinePacket::DataFrame(f) => Some(f.sequence),
-                    _ => None,
-                };
+                let seq = frame_sequence(&packet);
                 let is_buffer = seq.is_some();
                 if is_buffer {
                     consumed += 1;
@@ -5182,10 +5191,7 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
             Some(packet) => {
                 // M694: time the data-frame `process()` and sample input fill;
                 // control packets are excluded so the histogram reflects real work.
-                let sequence = match &packet {
-                    PipelinePacket::DataFrame(frame) => Some(frame.sequence),
-                    _ => None,
-                };
+                let sequence = frame_sequence(&packet);
                 let timed = probe.as_deref().filter(|_| sequence.is_some());
                 let t0 = timed.and_then(|_| ElementProbe::mark());
                 let mut wait_ns = 0;
@@ -5478,13 +5484,10 @@ async fn fanout_src_arm<'a>(
             .push_to(port, PipelinePacket::Segment(Segment::new()))
             .await?;
     }
-    match probe {
-        Some(probe) => {
-            sinks.set_push_wait_probe(Some(probe.clone()));
-            source.run(&mut SourceFrameSpans::new(sinks, probe)).await
-        }
-        None => source.run(&mut sinks).await,
-    }
+    sinks.set_push_wait_probe(probe.clone());
+    source
+        .run(&mut SourceFrameSpans::new(&mut sinks, probe))
+        .await
 }
 
 /// Everything a terminal fan-in arm needs besides its element.
@@ -5578,10 +5581,7 @@ pub(crate) async fn fanin_sink_arm<E: MultiInputElement>(
                 }
             }
             packet => {
-                let sequence = match &packet {
-                    PipelinePacket::DataFrame(frame) => Some(frame.sequence),
-                    _ => None,
-                };
+                let sequence = frame_sequence(&packet);
                 let timed = probe.as_deref().filter(|_| sequence.is_some());
                 if sequence.is_some() {
                     consumed += 1;
@@ -6185,10 +6185,7 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
             packet => {
                 // M694: time the data-frame `process()` and sample this pad's
                 // input fill and queue residency.
-                let sequence = match &packet {
-                    PipelinePacket::DataFrame(frame) => Some(frame.sequence),
-                    _ => None,
-                };
+                let sequence = frame_sequence(&packet);
                 let transit_ns = sequence.and_then(|_| pad_rxs[slot].1.pop_transit_ns());
                 let timed = probe.as_deref().filter(|_| sequence.is_some());
                 if let Some(p) = timed {

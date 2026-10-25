@@ -76,7 +76,8 @@ use crate::graph::Graph;
 use crate::runtime::channel::{bounded, Sender};
 #[cfg(feature = "std")]
 use crate::runtime::graph_runner::{
-    broadcast, run_graph_inner, run_source, sink_arm_on, GraphNodeRef, SinkArmIo, SourceArmIo,
+    broadcast, run_graph_inner, run_source, sink_arm_on, traced_source_probe, GraphNodeRef,
+    SinkArmIo, SourceArmIo, SourceFrameSpans,
 };
 #[cfg(feature = "std")]
 use crate::runtime::join::dynamic_join;
@@ -1149,6 +1150,10 @@ where
 
         let (src_tx, src_rx, src_tap) = link_tapped(link_capacity, observer.is_some());
         let source_log_name = ElementLogName::new(source_category, source_name.clone());
+        let source_probe = traced_source_probe(
+            &source_log_name,
+            observer.as_ref().and_then(Observer::visit_recorder),
+        );
 
         // Dev-tooling tap: source 0, the routing stage 1. The routing stage has no
         // `process()` of its own (like a tee in `run_graph`), so it has no probe.
@@ -1175,7 +1180,11 @@ where
         let source_fut: BoxFuture<'a, Result<DynArmOut, G2gError>> = Box::pin(async move {
             let mut adapter = SenderSink::new(src_tx);
             adapter.log_pushes_as(source_log_name);
-            source.run(&mut adapter).await.map(DynArmOut::Source)
+            adapter.set_push_wait_probe(source_probe.clone());
+            source
+                .run(&mut SourceFrameSpans::new(&mut adapter, source_probe))
+                .await
+                .map(DynArmOut::Source)
         });
 
         let router_fut: BoxFuture<'a, Result<DynArmOut, G2gError>> = Box::pin(async move {
@@ -1279,7 +1288,11 @@ async fn attach_branch<'a>(
     let category = sink.log_category();
     let name = tap.namer.add(category, None);
     sink.set_instance_name(name.clone());
-    let probe = ElementProbe::new(ElementLogName::new(category, name.clone()));
+    let probe = ElementProbe::recording(
+        ElementLogName::new(category, name.clone()),
+        None,
+        tap.obs.as_ref().and_then(Observer::visit_recorder).cloned(),
+    );
     tap.probes.lock().push(Some(probe.clone()));
 
     let (btx, brx, edge) = link_tapped(link_capacity, tap.obs.is_some());

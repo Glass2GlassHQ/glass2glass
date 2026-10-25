@@ -24,7 +24,7 @@ use spin::Mutex;
 use crate::caps::Caps;
 use crate::graph::NodeKind;
 use crate::runtime::channel::ProbeSlot;
-use crate::runtime::instrument::{EdgeCounters, EdgeCounts, Probe, StageVisit};
+use crate::runtime::instrument::{EdgeCounters, EdgeCounts, Probe, StageVisit, VisitRecorder};
 use crate::runtime::ElementLatency;
 
 /// The topology role of a node: the serialization-friendly projection of
@@ -61,6 +61,7 @@ impl From<NodeKind> for NodeRole {
 #[derive(Debug, Clone)]
 pub struct Observer {
     inner: Arc<Inner>,
+    visit_recorder: Option<Arc<dyn VisitRecorder>>,
 }
 
 #[derive(Debug)]
@@ -99,7 +100,17 @@ impl Observer {
                 start_ns: crate::metrics::monotonic_ns(),
                 state: Mutex::new(State::default()),
             }),
+            visit_recorder: None,
         }
+    }
+
+    pub fn with_visit_recorder(mut self, visit_recorder: Arc<dyn VisitRecorder>) -> Self {
+        self.visit_recorder = Some(visit_recorder);
+        self
+    }
+
+    pub(crate) fn visit_recorder(&self) -> Option<&Arc<dyn VisitRecorder>> {
+        self.visit_recorder.as_ref()
     }
 
     /// Install the graph's topology and probe set. Called once by the runner
