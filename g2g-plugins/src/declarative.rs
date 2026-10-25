@@ -25,7 +25,7 @@
 //! `policy` string (`block` / `drop-oldest` / `drop-newest`, the [`LinkPolicy`]
 //! names) with an optional `capacity` (the per-edge channel depth).
 //!
-//! Property values are typed by the target element's [`PropertySpec`] table and
+//! Property values are typed by the target element's [`PropertySpec`](g2g_core::PropertySpec)(g2g_core::PropertySpec) table and
 //! applied with [`apply_props`], the *same* path the launch parser uses, so a
 //! `num-buffers: 30` in JSON and `num-buffers=30` in a launch string mean exactly
 //! the same thing (no second, divergent JSON-number coercion). A top-level
@@ -45,8 +45,8 @@ use serde::{Deserialize, Serialize};
 
 /// A format-agnostic scalar property value. Deserializes the same from JSON and
 /// YAML (both hand us bool / integer / float / string), then converts to the
-/// textual form [`PropValue::parse`] consumes, so the type is fixed by the target
-/// element's [`PropertySpec`], not by how the document happened to spell it.
+/// textual form [`PropValue::parse`](g2g_core::PropValue::parse) consumes, so the type is fixed by the target
+/// element's [`PropertySpec`](g2g_core::PropertySpec)(g2g_core::PropertySpec), not by how the document happened to spell it.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ScalarVal {
@@ -80,7 +80,7 @@ pub struct NodeSpec {
     /// defaults to `capsfilter`).
     #[serde(default)]
     pub element: Option<String>,
-    /// `key=value` properties, typed by the element's [`PropertySpec`] table.
+    /// `key=value` properties, typed by the element's [`PropertySpec`](g2g_core::PropertySpec)(g2g_core::PropertySpec) table.
     #[serde(default)]
     pub props: BTreeMap<String, ScalarVal>,
     /// Caps-filter shorthand: a `video/x-raw,...` string. Sets the `caps`
