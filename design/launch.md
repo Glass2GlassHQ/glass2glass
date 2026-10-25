@@ -430,7 +430,9 @@ frame being processed rather than the normalized `BBox` it travels as.
 `meta.class_names()` is the table those labels index into, and `label` carries
 the id in decimal when the producer published no table.
 `meta.tracking_ids()` is the identity related to each detection, aligned with
-`objects()`. `meta.blobs()` is the opaque side-data keyed by canonical header, so
+`objects()`, and `meta.track_upstream(index, object_id)` relates a new identity
+to the detection at `index` in `objects()`, so a hosted tracker tags a
+detector's box rather than adding its own. `meta.blobs()` is the opaque side-data keyed by canonical header, so
 the `GST-ALERT:` gst-python-ml puts on the wire reads back as `alert`. A stream
 with no picture reports no objects, because a normalized box has no dims to
 scale by. What the element stages is appended to all this on the way out, so the
@@ -446,7 +448,8 @@ order, then puts them back in the batch and sends it on, so `streamdemux` splits
 it as usual. Results follow gst-python-ml's batch labels: a detection or
 classification whose class name starts with `stream_<i>_` goes on frame `i`, a
 tracking identity goes with the detection related to it, and everything else,
-blobs included, goes on frame 0. Labels keep their prefix. `meta` reads frame
+blobs included, goes on frame 0. Each frame holds one stream, so its class names
+drop the prefix, in a batch and out of one alike. `meta` reads frame
 0's upstream metadata. Two limits hold for now. Batch frames reach the class in
 system memory only, so `cuda-frames=true` refuses a batch at configure. Every
 stream in a batch must share one format and geometry, and a batch that mixes them

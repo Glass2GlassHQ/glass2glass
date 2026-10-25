@@ -10,6 +10,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1901: `VelloAnalyticsOverlay` draws the `show-label` / `show-track` / `show-score` captions.
 - M1902: `vellooverlay` and `wgpucolorconvert` are launch elements.
 - M1903: `pyelement` skips late frames only after the sink reports a late one.
+- M1904: hosted class names drop the `stream_<i>_` prefix, and `meta.track_upstream` tags an upstream detection.
 
 ## 0.10.0
 

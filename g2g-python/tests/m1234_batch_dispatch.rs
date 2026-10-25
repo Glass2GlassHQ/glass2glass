@@ -218,7 +218,7 @@ async fn each_stream_gets_its_own_results_from_one_call_per_batch() {
             assert_eq!(
                 detections,
                 &vec![Detection {
-                    class_name: format!("stream_{stream}_thing"),
+                    class_name: String::from("thing"),
                     x_pixels: (stream + 1) as f32,
                 }],
                 "stream {stream} carries only its own object"

@@ -309,6 +309,10 @@ enum Staged {
     ClassNames {
         names: Vec<String>,
     },
+    UpstreamTracking {
+        object: usize,
+        object_id: u64,
+    },
     Blob {
         header: String,
         payload: Vec<u8>,
@@ -504,6 +508,10 @@ impl MetaSink {
     /// when the frame's metadata is materialized.
     fn relate(&self, from: usize, to: usize) {
         self.stage(Staged::Relation { from, to });
+    }
+
+    fn track_upstream(&self, object: usize, object_id: u64) {
+        self.stage(Staged::UpstreamTracking { object, object_id });
     }
 
     /// Append an opaque tagged blob (the `FrameIO.append_blob` mirror): a
@@ -1320,9 +1328,9 @@ const STREAM_BATCH_EMITTED: &str =
 const STREAM_LABEL_PREFIX: &str = "stream_";
 
 // gst-python-ml labels a batch result `stream_<i>_<class>`, `i` the buffer's place in the batch
-fn stream_of_label_name(name: &str) -> Option<usize> {
-    let (index, _) = name.strip_prefix(STREAM_LABEL_PREFIX)?.split_once('_')?;
-    index.parse().ok()
+fn split_stream_label(name: &str) -> Option<(usize, &str)> {
+    let (index, class) = name.strip_prefix(STREAM_LABEL_PREFIX)?.split_once('_')?;
+    Some((index.parse().ok()?, class))
 }
 
 fn split_by_stream(staged: Vec<Staged>, streams: usize) -> Vec<Vec<Staged>> {
@@ -1334,7 +1342,8 @@ fn split_by_stream(staged: Vec<Staged>, streams: usize) -> Vec<Vec<Staged>> {
         class_names
             .as_ref()
             .and_then(|names| names.get(label as usize))
-            .and_then(|name| stream_of_label_name(name))
+            .and_then(|name| split_stream_label(name))
+            .map(|(stream, _)| stream)
             .filter(|stream| *stream < streams)
             .unwrap_or(0)
     };
@@ -1687,6 +1696,7 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_dims: Option<(u
     // staged before the record it names.
     let mut node_of_staged: Vec<Option<usize>> = vec![None; staged.len()];
     let mut relations: Vec<(usize, usize)> = Vec::new();
+    let mut upstream_tracking: Vec<(usize, u64)> = Vec::new();
     for (index, s) in staged.into_iter().enumerate() {
         match s {
             Staged::Object {
@@ -1733,7 +1743,15 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_dims: Option<(u
                     Some(analytics.push(AnalyticsNode::Tracking(Tracking { object_id })));
             }
             Staged::Relation { from, to } => relations.push((from, to)),
-            Staged::ClassNames { names } => analytics.set_class_names(names),
+            // each frame is one stream once a batch is split, so the prefix only reaches a display
+            Staged::ClassNames { names } => analytics.set_class_names(
+                names
+                    .iter()
+                    .map(|name| split_stream_label(name).map_or(name.as_str(), |(_, class)| class)),
+            ),
+            Staged::UpstreamTracking { object, object_id } => {
+                upstream_tracking.push((object, object_id))
+            }
             Staged::Blob { header, payload } => blobs.push(header, payload),
         }
     }
@@ -1768,11 +1786,47 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_dims: Option<(u
             None => frame.meta.attach(analytics),
         }
     }
+    if !upstream_tracking.is_empty() {
+        tag_upstream_detections(frame, upstream_tracking);
+    }
     if !blobs.is_empty() {
         match frame.meta.get_mut::<BlobMeta>() {
             Some(carried) => carried.blobs.extend(blobs.blobs),
             None => frame.meta.attach(blobs),
         }
+    }
+}
+
+// `object` counts the frame's detections in node order, as `upstream_meta` listed them
+#[cfg(feature = "analytics")]
+fn tag_upstream_detections(frame: &mut Frame, upstream_tracking: Vec<(usize, u64)>) {
+    use g2g_core::{AnalyticsMeta, AnalyticsNode, RelationKind, Tracking};
+
+    let Some(analytics) = frame.meta.get_mut::<AnalyticsMeta>() else {
+        g2g_warn!(
+            Target::category("pyelement"),
+            "hosted element tracked an upstream detection on a frame with none, dropping it"
+        );
+        return;
+    };
+    let detections: Vec<usize> = analytics
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| matches!(node, AnalyticsNode::Detection(_)))
+        .map(|(index, _)| index)
+        .collect();
+    for (object, object_id) in upstream_tracking {
+        let Some(&detection) = detections.get(object) else {
+            g2g_warn!(
+                Target::category("pyelement"),
+                "hosted element tracked upstream detection {object} of {}, dropping it",
+                detections.len()
+            );
+            continue;
+        };
+        let tracking = analytics.push(AnalyticsNode::Tracking(Tracking { object_id }));
+        analytics.relate(detection, tracking, RelationKind::Tracks);
     }
 }
 
