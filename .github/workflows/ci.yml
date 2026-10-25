@@ -622,7 +622,7 @@ jobs:
       # verified on-target. The C-shop integration path.
       - name: FreeRTOS executor proof (qemu mps2-an386)
         run: |
-          sudo apt-get install -y -q gcc-arm-none-eabi libnewlib-arm-none-eabi
+          sudo apt-get install -y -q --no-install-recommends gcc-arm-none-eabi libnewlib-arm-none-eabi
           bash tools/freertos-check.sh
       # Zephyr executor proof (M637): the same pipeline staticlib (built for
       # thumbv7m to match the board) linked into a Zephyr application via
