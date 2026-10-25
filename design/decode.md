@@ -45,51 +45,6 @@ goes back to holding each access unit until the next one starts. MPEG-TS muxers
 like Apple's fill each PES to a packet boundary, so a PES can begin with the
 previous picture's last bytes while some PES still open on a picture by chance.
 
-## VaapiDec (Linux VAAPI, cros-codecs)
-
-`VaapiDec<C>` (`g2g-plugins/src/vaapidec.rs`, feature `vaapi`,
-`cfg(target_os = "linux")`) is built on `cros-codecs` with its `vaapi` backend.
-The `VaapiCodec` binding picks the stateless decoder and NAL splitter, giving
-`VaapiH264Dec` and `VaapiH265Dec`. cros-codecs parses the bitstream and manages
-the DPB, and the decode runs on the GPU through libva.
-
-`VaapiDec` is Intel-only. cros-codecs allocates output surfaces through ChromeOS
-GBM extensions (`GBM_BO_USE_HW_VIDEO_DECODER`, contiguous NV12) that Mesa
-`radeonsi` does not provide, so the element cannot start on AMD desktop GPUs.
-The Linux hardware-decode ranking is `VulkanVideoDec` first, vendor-neutral and
-picked by the domain-aware search for GPU-domain consumers, with ffmpeg's VAAPI
-hwaccel (`Backend::Vaapi`) as the hardware route into system memory.
-
-- Input `Caps::CompressedVideo { codec: C::CODEC, .. }`: `intercept_caps`
-  intersects with the element's codec and rejects everything else.
-- Output `Caps::RawVideo { format: Nv12, .. }` in `MemoryDomain::System`, a CPU
-  copy out of the GBM-allocated surface.
-- `GbmDevice::open("/dev/dri/renderD128")`, configurable via
-  `VaapiH264Dec::with_render_node`, allocates `GenericDmaVideoFrame` surfaces,
-  one per output picture from the decoder's allocator callback.
-- The first `decode()` call surfaces `DecodeError::CheckEvents`. The element
-  drains events, takes the SPS-derived `StreamInfo` on `FormatChanged`, and
-  re-feeds the same NAL.
-- `PipelinePacket::Flush` forwards `decoder.flush()` downstream. EOS flushes the
-  decoder, drains the DPB, emits `Eos`.
-- `libva::Display` is `Rc<Display>` and therefore `!Send`. `unsafe impl Send`
-  rests on the runner's ownership model, move not share.
-
-```text
-H.264 Annex-B  (MemoryDomain::System)
-       │
-       ▼
-┌───────────────────────────────┐
-│  VaapiH264Dec                 │
-│   cros-codecs StatelessDecoder│
-│   <H264, VaapiBackend<...>>   │
-│   DPB + B-frame reorder       │
-└───────────┬───────────────────┘
-            │  NV12 row-copied out of GBM surface
-            ▼
-    downstream AsyncElement
-```
-
 ## MfDecode (Windows Media Foundation Transform)
 
 `MfDecode` (`g2g-plugins/src/mfdecode.rs`, feature `mf-decode`,
@@ -120,7 +75,11 @@ are `Caps::CompressedVideo { codec: H264, .. }`. The backend is selectable:
 | `Software` | `h264` | `System` | Software decode, broadest hardware coverage. |
 | `NvdecCuvid` | `h264_cuvid` | `System` | GPU decode, host copy. Pairs with CPU sinks. |
 | `NvdecCuda` | `h264` + `AV_HWDEVICE_TYPE_CUDA` | `Cuda` | Zero-copy device-memory output. |
-| `Vaapi` | `h264` + `AV_HWDEVICE_TYPE_VAAPI` | `System` | GPU decode, surface downloaded with `av_hwframe_transfer_data`. The Linux AMD / Intel hardware path, working on Mesa `radeonsi` where `VaapiH264Dec` cannot. Pin the render node with `with_vaapi_device` or the `device` property. Launch name `ffmpegvaapidec`. |
+| `Vaapi` | `h264` + `AV_HWDEVICE_TYPE_VAAPI` | `System` | GPU decode, surface downloaded with `av_hwframe_transfer_data`, NV12 unless `output-format` says otherwise. The Linux AMD / Intel hardware path for H.264 and H.265. Pin the render node with `with_vaapi_device` or the `device` property. Launch name `ffmpegvaapidec`, which the gst `va*dec` / `vaapi*dec` names resolve to. |
+
+The Linux hardware-decode ranking is `VulkanVideoDec` first, vendor-neutral and
+picked by the domain-aware search for GPU-domain consumers, with `Vaapi` as the
+hardware route into system memory.
 
 The other codecs libavcodec decodes open the same way. A ProRes decoder gets
 the profile fourcc as its `codec_tag`, which picks its sample depth. Theora's identification,
@@ -173,7 +132,7 @@ drained until `EAGAIN`. `PipelinePacket::Flush` calls `decoder.flush()`, and EOS
 calls `send_eof()` plus a final drain before forwarding `Eos`.
 `ffmpeg::decoder::Video` wraps a raw `*mut AVCodecContext` and is `!Send` by
 default, so `unsafe impl Send` rests on the same ownership-transfer argument as
-`MfDecode` and `VaapiH264Dec`.
+`MfDecode`.
 
 ## FfmpegH264Enc
 
@@ -417,7 +376,7 @@ RtspSrc ──► H264Parse ──► [decoder] ──► [ML / display / encode
 | :--- | :--- | :--- | :--- |
 | Linux software | `FfmpegH264Dec` (`Software`) | `ffmpeg` | `System` / I420 |
 | Linux + NVIDIA | `FfmpegH264Dec` (`NvdecCuvid` / `NvdecCuda`) | `ffmpeg` + `cuda` | `System` / `Cuda` / NV12 |
-| Linux + VAAPI | `VaapiH264Dec` / `VaapiH265Dec` | `vaapi` | `System` / NV12 |
+| Linux + VAAPI | `FfmpegH264Dec` (`Vaapi`) | `ffmpeg` | `System` / NV12 |
 | Windows | `MfDecode` | `mf-decode` | `System` / NV12 |
 
 ### RtspSrc and RtspSrcN

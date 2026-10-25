@@ -136,12 +136,11 @@ fn decodebin_uses_the_reflected_container() {
 // The contrast that nails it down: without the property, filesrc's MPEG-TS
 // default emits H.264, which the VP9 stub cannot decode, so the same line fails.
 // Only valid without a real decoder for any default TS stream: an H.264 decoder
-// (`ffmpegdec` / `vaapidec` / `nvdec` / `mediacodecdec` / `vulkanvideodec`) or
+// (`ffmpegdec` / `nvdec` / `mediacodecdec` / `vulkanvideodec`) or
 // an audio decoder for the default's audio (`opusdec`) would give decodebin a
 // route to raw and the contrast would not hold.
 #[cfg(not(any(
     feature = "ffmpeg",
-    feature = "vaapi",
     feature = "nvdec",
     feature = "mediacodec",
     feature = "vulkan-video",

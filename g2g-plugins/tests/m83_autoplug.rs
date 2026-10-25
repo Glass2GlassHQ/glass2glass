@@ -229,21 +229,3 @@ fn registry_finds_real_ffmpeg_decoder_for_h264() {
         .expect("ffmpegdec bridges H.264 to raw video");
     assert_eq!(chain, Vec::from(["ffmpegdec"]));
 }
-
-/// The VAAPI H.264 decoder's templates route H.264 to raw NV12. Compile + run
-/// only under the `vaapi` feature; reads templates only, no decode (so no GPU /
-/// libva surface is touched, which the AMD path can't allocate anyway).
-#[cfg(all(target_os = "linux", feature = "vaapi"))]
-#[test]
-fn registry_finds_real_vaapi_decoder_for_h264() {
-    use g2g_plugins::vaapidec::VaapiH264Dec;
-    let mut reg = Registry::new();
-    reg.register(ElementFactory::of::<VaapiH264Dec>(
-        "vaapih264dec",
-        |_caps| Box::new(VaapiH264Dec::new()),
-    ));
-    let chain = reg
-        .autoplug_names(&h264(Dim::Any), &is_raw_video, 4)
-        .expect("vaapih264dec bridges H.264 to raw video");
-    assert_eq!(chain, Vec::from(["vaapih264dec"]));
-}

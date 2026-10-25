@@ -24,13 +24,12 @@ impl PipelineClock for ZeroClock {
 
 // Used by the baseline "no route" test (no decoder feature) and the ffmpeg
 // "routes to raw" test; gate the helper to exactly those builds so it is not
-// dead code under another decoder feature (vaapi / nvdec / mediacodec /
+// dead code under another decoder feature (nvdec / mediacodec /
 // vulkan-video).
 #[cfg(any(
     all(target_os = "linux", feature = "ffmpeg"),
     not(any(
         feature = "ffmpeg",
-        feature = "vaapi",
         feature = "nvdec",
         feature = "mediacodec",
         feature = "vulkan-video"
@@ -48,7 +47,7 @@ fn h264_any() -> Caps {
 }
 
 /// VP9 has no in-tree decoder, so a stub decoder for it never competes with the
-/// real (H.264-only) `ffmpegdec` / `vaapidec` when those features are on, keeping
+/// real `ffmpegdec` when that feature is on, keeping
 /// the expansion test deterministic across feature combinations.
 fn vp9_any() -> Caps {
     Caps::CompressedVideo {
@@ -162,12 +161,11 @@ async fn decodebin_without_upstream_fails_loud() {
 }
 
 // Only meaningful without an H.264 decoder compiled in; any of `ffmpegdec`,
-// `vaapidec`, `nvdec` (Linux), `mediacodecdec` (Android) or `vulkanvideodec`
+// `nvdec` (Linux), `mediacodecdec` (Android) or `vulkanvideodec`
 // (its NV12 System fallback) would (correctly) provide the route this asserts is
 // absent.
 #[cfg(not(any(
     feature = "ffmpeg",
-    feature = "vaapi",
     feature = "nvdec",
     feature = "mediacodec",
     feature = "vulkan-video"

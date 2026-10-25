@@ -6,7 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
-Breaking: `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, and `RtpRecvConfig` gains an `encoding` field.
+Breaking: `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, and the `vaapi` feature with `vaapidec` / `vaapidech265` is removed.
 
 - M1900: `VelloAnalyticsOverlay` draws on RGBA wgpu textures, `WgpuColorConvert` converts NV12 wgpu textures to RGBA, and `CudaToWgpu` keeps frame metadata.
 - M1901: `VelloAnalyticsOverlay` draws the `show-label` / `show-track` / `show-score` captions.
@@ -32,6 +32,7 @@ Breaking: `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty`
 - M1923: `udpsink` sends Opus over RTP, and `udpsrc` receives it with `encoding-name=OPUS` or an Opus SDP.
 - M1924: text overlays use an installed sans-serif face when cosmic-text's default Open Sans is missing, instead of the 8x8 bitmap font.
 - M1925: the `ffmpeg` feature builds against FFmpeg 9 as well as 7 and 8 (ffmpeg-next 9.0).
+- M1926: the gst VA-API decoder names resolve to `ffmpegvaapidec` for H.264 and H.265, replacing the cros-codecs `vaapidec`, and `ffmpegvaapidec` emits NV12 by default.
 
 ## 0.10.0
 

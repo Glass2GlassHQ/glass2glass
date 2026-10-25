@@ -262,7 +262,7 @@ jobs:
 
   # Linux platform / feature build. Compiles the OS-coupled and GPU/ML elements
   # that build with stable, apt-installable system libraries. The docgen step
-  # below builds the whole `linux-full` union (ffmpeg, vaapi, vpx, pipewire
+  # below builds the whole `linux-full` union (ffmpeg, vpx, pipewire
   # included); the per-feature steps stay narrower so a failure names one
   # feature. Intentionally omitted (need proprietary deps, add separately):
   #   cuda / cuda-gl (NVIDIA driver),
@@ -337,7 +337,7 @@ jobs:
           cargo package --workspace --locked --no-verify
           packaged="$RUNNER_TEMP/packaged"
           mkdir -p "$packaged"
-          patches=(--config "patch.crates-io.cros-libva.path='$GITHUB_WORKSPACE/g2g-plugins/vendor/cros-libva'")
+          patches=()
           for crate in target/package/*.crate; do
             tar xzf "$crate" -C "$packaged"
             name=$(basename "$crate" .crate)

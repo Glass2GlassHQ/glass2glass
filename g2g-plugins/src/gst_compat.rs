@@ -77,8 +77,10 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
     ("nvh265dec", GstEquivalent::Renamed("nvdec")),
     ("nvh264enc", GstEquivalent::Renamed("nvenc")),
     ("nvh265enc", GstEquivalent::Renamed("nvenc")),
-    ("vaapih264dec", GstEquivalent::Renamed("vaapidec")),
-    ("vah264dec", GstEquivalent::Renamed("vaapidec")),
+    ("vaapih264dec", GstEquivalent::Renamed("ffmpegvaapidec")),
+    ("vah264dec", GstEquivalent::Renamed("ffmpegvaapidec")),
+    ("vaapih265dec", GstEquivalent::Renamed("ffmpegvaapidec")),
+    ("vah265dec", GstEquivalent::Renamed("ffmpegvaapidec")),
     ("vp8enc", GstEquivalent::Renamed("vpxenc")),
     ("vp9enc", GstEquivalent::Renamed("vpxenc")),
     ("jpegenc", GstEquivalent::Renamed("mjpegenc")),
@@ -406,8 +408,8 @@ static GST_FAMILY_MAP: &[(&str, &str, GstEquivalent)] = &[
     ("nv", "dec", GstEquivalent::Renamed("nvdec")),
     ("nv", "enc", GstEquivalent::Renamed("nvenc")),
     // Only the decoders map; a bare `va` prefix would also catch `valve`.
-    ("vaapi", "dec", GstEquivalent::Renamed("vaapidec")),
-    ("va", "dec", GstEquivalent::Renamed("vaapidec")),
+    ("vaapi", "dec", GstEquivalent::Renamed("ffmpegvaapidec")),
+    ("va", "dec", GstEquivalent::Renamed("ffmpegvaapidec")),
     (
         "vaapi",
         "enc",
@@ -485,7 +487,7 @@ const GEOMETRIC_TRANSFORM_HINT: &str =
 /// The family guidance for `gst_name`, `None` when no family covers it.
 ///
 /// A name that is itself a g2g element declines every family rule, so a build
-/// with `nvdec` or `vaapidec` switched off still answers with its cargo feature
+/// with `nvdec` or `ffmpegvaapidec` switched off still answers with its cargo feature
 /// instead of a hint pointing back at the same name.
 fn family_equivalent(gst_name: &str) -> Option<GstEquivalent> {
     if crate::registry::feature_gated_element(gst_name).is_some() {

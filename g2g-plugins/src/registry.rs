@@ -9,7 +9,7 @@
 //!
 //! `std`-only (the `Registry` is). Feature- and platform-gated elements (the
 //! opus / av1 / vpx / mjpeg codecs, `fmp4demux`, the rtsp / udp / http / hls /
-//! dash / rtmp network sources and sinks, and the Linux v4l2 / ffmpeg / vaapi /
+//! dash / rtmp network sources and sinks, and the Linux v4l2 / ffmpeg /
 //! wayland / kms / alsa / pulse elements) are registered by
 //! `register_feature_gated`, each block `#[cfg]`-gated like its module, so they
 //! appear in `gst-inspect` / `parse_launch` when their feature is enabled.
@@ -229,8 +229,6 @@ use crate::udpsink::UdpSink;
 use crate::udpsrc::UdpSrc;
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 use crate::v4l2src::V4l2Src;
-#[cfg(all(target_os = "linux", feature = "vaapi"))]
-use crate::vaapidec::{VaapiH264Dec, VaapiH265Dec};
 #[cfg(feature = "vorbis")]
 use crate::vorbisdec::VorbisDec;
 #[cfg(feature = "vpx")]
@@ -2140,16 +2138,6 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         })
         .hardware(),
     );
-    #[cfg(all(target_os = "linux", feature = "vaapi"))]
-    reg.register(
-        ElementFactory::of::<VaapiH264Dec>("vaapidec", |_| Box::new(VaapiH264Dec::new()))
-            .hardware(),
-    );
-    #[cfg(all(target_os = "linux", feature = "vaapi"))]
-    reg.register(
-        ElementFactory::of::<VaapiH265Dec>("vaapidech265", |_| Box::new(VaapiH265Dec::new()))
-            .hardware(),
-    );
     // Native NVDEC (M270), registered last so a default (System-memory) auto-plug
     // still picks a CPU decoder: `NvDec` emits NV12 in CUDA device memory, which
     // caps geometry / format does not encode. M276 makes that domain a first-class
@@ -2472,25 +2460,20 @@ fn register_aliases(reg: &mut Registry) {
         "glsink",
         &["glimagesink", "waylandsink", "kmssink", "fakesink"],
     );
-    // Decoders: GStreamer's libav / VA-API names -> the g2g decoders. The VA-API
-    // names prefer the ffmpeg VAAPI hwaccel (`ffmpegvaapidec`, works on Mesa
-    // radeonsi) and fall back to the cros-codecs `vaapidec` when only that
-    // feature is on; the alias resolves to the first registered target.
-    // `avdec_h264` falls back to VideoToolbox `vtdec` on macOS builds without
+    // Decoders: GStreamer's libav / VA-API names -> the g2g decoders, resolving
+    // to the first registered target. `avdec_h264` falls back to VideoToolbox `vtdec` on macOS builds without
     // the ffmpeg feature.
     reg.register_alias("avdec_h264", &["ffmpegdec", "vtdec"]);
     reg.register_alias("avdec_h265", &["ffmpegdec"]);
-    reg.register_alias("vaapih264dec", &["ffmpegvaapidec", "vaapidec"]);
+    reg.register_alias("vaapih264dec", &["ffmpegvaapidec"]);
     // AV1 decode: gst's libav name and its aom plugin name -> the libdav1d
     // decoder, falling back to the pure-Rust re_rav1d decoder when only the
     // `rav1d` feature is built.
     reg.register_alias("avdec_av1", &["dav1ddec", "rav1ddec"]);
     reg.register_alias("av1dec", &["dav1ddec", "rav1ddec"]);
-    reg.register_alias("vah264dec", &["ffmpegvaapidec", "vaapidec"]);
-    // H.265 has no ffmpeg VAAPI hwaccel element here, so both gst names go
-    // straight to the cros-codecs decoder.
-    reg.register_alias("vaapih265dec", &["vaapidech265"]);
-    reg.register_alias("vah265dec", &["vaapidech265"]);
+    reg.register_alias("vah264dec", &["ffmpegvaapidec"]);
+    reg.register_alias("vaapih265dec", &["ffmpegvaapidec"]);
+    reg.register_alias("vah265dec", &["ffmpegvaapidec"]);
     // VPx encoders: gst splits vp8enc / vp9enc; g2g has one vpxenc.
     reg.register_alias("vp8enc", &["vpxenc"]);
     reg.register_alias("vp9enc", &["vpxenc"]);
@@ -2722,8 +2705,6 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "ffmpegenc" => "ffmpeg" on "linux";
         "x264enc" => "ffmpeg" on "linux";
         "avenc_aac" => "ffmpeg" on "linux";
-        "vaapidec" => "vaapi" on "linux";
-        "vaapidech265" => "vaapi" on "linux";
         "cudadownload" => "cuda" on "linux";
         "cudaupload" => "cuda" on "linux";
         "nvdec" => "nvdec" on "linux";
@@ -3410,16 +3391,6 @@ fn register_feature_gated(reg: &mut Registry) {
         "avenc_aac",
         || Box::new(crate::ffmpegaacenc::FfmpegAacEnc::new()),
     ));
-    #[cfg(all(target_os = "linux", feature = "vaapi"))]
-    reg.register_launch(
-        LaunchFactory::of::<VaapiH264Dec>("vaapidec", || Box::new(VaapiH264Dec::new()))
-            .with_experimental(),
-    );
-    #[cfg(all(target_os = "linux", feature = "vaapi"))]
-    reg.register_launch(
-        LaunchFactory::of::<VaapiH265Dec>("vaapidech265", || Box::new(VaapiH265Dec::new()))
-            .with_experimental(),
-    );
     // Native NVIDIA Video Codec SDK elements (M269 / M270): zero-copy CUDA NV12
     // <-> H.264, the gst-`nvcodec`-style pair. Explicit-select by name.
     #[cfg(all(target_os = "linux", feature = "nvdec"))]

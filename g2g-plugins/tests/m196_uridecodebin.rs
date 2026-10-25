@@ -111,7 +111,6 @@ fn no_decoder_feature_fails_loud() {
         // Baseline build: no decoder, must fail loud.
         #[cfg(not(any(
             feature = "ffmpeg",
-            feature = "vaapi",
             feature = "nvdec",
             feature = "mediacodec",
             feature = "vulkan-video"
@@ -119,7 +118,6 @@ fn no_decoder_feature_fails_loud() {
         Ok(_) => panic!("expected NoDecodeChain without a decoder feature"),
         #[cfg(not(any(
             feature = "ffmpeg",
-            feature = "vaapi",
             feature = "nvdec",
             feature = "mediacodec",
             feature = "vulkan-video"
@@ -128,7 +126,6 @@ fn no_decoder_feature_fails_loud() {
         // With a real decoder feature on, it resolves instead, also fine.
         #[cfg(any(
             feature = "ffmpeg",
-            feature = "vaapi",
             feature = "nvdec",
             feature = "mediacodec",
             feature = "vulkan-video"

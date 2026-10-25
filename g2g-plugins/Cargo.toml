@@ -28,7 +28,7 @@ linux-full = [
     "rtsp", "rtsp-server", "rtsp-client-sink", "srt", "rist", "srtp", "dtls-srtp", "tcp", "shm", "unixfd", "udp-egress", "udp-ingress", "rtmp", "webrtc",
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
-    "ffmpeg", "ffmpeg-long-tail", "vaapi", "v4l2",
+    "ffmpeg", "ffmpeg-long-tail", "v4l2",
     "opus", "vorbis", "webrtcdsp", "vpx", "av1-encode", "mjpeg", "mjpeg-encode", "png", "webp",
     "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire", "portal", "decklink",
     "wayland-sink", "gl-sink", "kms-sink", "wgpu-sink", "wgpu-present", "vello-overlay", "analytics",
@@ -351,14 +351,10 @@ wasapi-src = ["std", "dep:windows", "dep:windows-core"]
 # (NV12->RGB on the GPU). The Windows analog of CudaGlSink. Windows-only,
 # implies std. Pairs with MfDecode::with_d3d11().
 d3d11-sink = ["std", "dep:windows"]
-# Linux hardware H.264 decode via VAAPI through the `cros-codecs` crate.
-# Pulls cros-codecs (+ libva + GBM bindings); Linux-only, implies std.
-vaapi = ["std", "dep:cros-codecs"]
 # ffmpeg/libavcodec decode (software, NVDEC, and VAAPI hwaccel backends).
 # Pulls ffmpeg-next + ffmpeg-sys; Linux-only, implies std. Needs system libav*
 # (Fedora: ffmpeg-free-devel; Debian/Ubuntu: libavcodec-dev libavformat-dev
-# libavutil-dev). Its VAAPI backend is the AMD hardware path, the `vaapi`
-# feature works on Intel only (cros-codecs has no radeonsi NV12 surfaces).
+# libavutil-dev). Its VAAPI backend is the Intel and AMD hardware path.
 ffmpeg = ["std", "dep:ffmpeg-next"]
 # The AVI, QuickTime / MP4 and Matroska demuxers forward a stream whose codec
 # g2g has no caps type for under its container tag, and the ffmpeg decoders open
@@ -1243,10 +1239,7 @@ ndk = { version = "0.9", optional = true, default-features = false, features = [
 # symbols are not behind a feature). It captures into a safe ndk `ImageReader`.
 ndk-sys = { version = "0.6", optional = true }
 
-# VAAPI / GBM bindings are Linux-only; target-gate so other platforms never try
-# to resolve cros-codecs (which pulls libva-sys, gbm-sys, drm-sys via bindgen).
 [target.'cfg(target_os = "linux")'.dependencies]
-cros-codecs = { version = "0.0.6", optional = true, default-features = false, features = ["vaapi"] }
 drm = { version = "0.15", optional = true }
 # `drm` drops the value names of a bitmask property such as a plane `rotation`.
 drm-ffi = { version = "0.9", optional = true }

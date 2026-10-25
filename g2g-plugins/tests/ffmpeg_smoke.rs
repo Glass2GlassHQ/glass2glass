@@ -12,8 +12,7 @@
 //!     --features ffmpeg --test ffmpeg_smoke -- --ignored --nocapture
 //! ```
 //!
-//! Unlike `vaapi_smoke`, this test asserts decoded frames are produced —
-//! ffmpeg's software decoder is portable enough that a green run is a real
+//! Each test asserts decoded frames are produced, so a green run is a real
 //! end-to-end signal.
 
 #![cfg(all(target_os = "linux", feature = "ffmpeg"))]
@@ -50,26 +49,29 @@ async fn ffmpeg_vp9_decodes_fixture() {
 
 // M(vaapi): VAAPI hardware decode through ffmpeg. Same fixture + assertion as
 // the software path, but `Backend::Vaapi` pinned to a render node (default
-// `/dev/dri/renderD128`, overridable via `G2G_VAAPI_DEVICE`). Validates the
-// libavcodec VAAPI hwaccel path on AMD / Intel where cros-codecs `VaapiH264Dec`
-// is blocked. `configure_pipeline` fails loud if the libavcodec build lacks the
-// VAAPI hwaccel or the render node isn't libva-capable, so a green run is a
-// real end-to-end hardware-decode signal.
+// `/dev/dri/renderD128`, overridable via `G2G_VAAPI_DEVICE`).
+// `configure_pipeline` fails loud if the libavcodec build lacks the VAAPI
+// hwaccel or the render node isn't libva-capable, so a green run is a real
+// end-to-end hardware-decode signal.
 #[tokio::test]
 #[ignore = "requires libav* with VAAPI, a libva render node, and a G2G_H264_FIXTURE path"]
 async fn ffmpeg_h264_decodes_fixture_vaapi() {
+    decode_fixture_vaapi(VideoCodec::H264, "G2G_H264_FIXTURE").await;
+}
+
+#[tokio::test]
+#[ignore = "requires libav* with VAAPI, a libva render node, and a G2G_H265_FIXTURE path"]
+async fn ffmpeg_h265_decodes_fixture_vaapi() {
+    decode_fixture_vaapi(VideoCodec::H265, "G2G_H265_FIXTURE").await;
+}
+
+async fn decode_fixture_vaapi(codec: VideoCodec, env_var: &str) {
     let device = std::env::var("G2G_VAAPI_DEVICE").unwrap_or_else(|_| "/dev/dri/renderD128".into());
     let dec = FfmpegVideoDec::new()
         .with_output_format(OutputFormat::Nv12)
         .with_backend(Backend::Vaapi)
         .with_vaapi_device(Some(&device));
-    decode_fixture_with(
-        dec,
-        VideoCodec::H264,
-        "G2G_H264_FIXTURE",
-        OutputFormat::Nv12,
-    )
-    .await;
+    decode_fixture_with(dec, codec, env_var, OutputFormat::Nv12).await;
 }
 
 async fn decode_fixture(codec: VideoCodec, env_var: &str, output: OutputFormat) {

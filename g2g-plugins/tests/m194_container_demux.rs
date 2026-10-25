@@ -13,7 +13,6 @@ use g2g_core::runtime::is_raw_video;
     all(target_os = "linux", feature = "ffmpeg"),
     not(any(
         feature = "ffmpeg",
-        feature = "vaapi",
         feature = "nvdec",
         feature = "mediacodec",
         feature = "vulkan-video",
@@ -56,13 +55,12 @@ fn demuxers_route_containers_to_an_elementary_stream() {
     }
 }
 
-// Only meaningful without a decoder: any of `ffmpegdec`, `vaapidec`, `nvdec`
+// Only meaningful without a decoder: any of `ffmpegdec`, `nvdec`
 // (Linux), `mediacodecdec` (Android) or `vulkanvideodec` (its NV12 System
 // fallback) provides the video route to raw this asserts is absent, and
 // `opusdec` an audio one (decodebin expands through any decoder).
 #[cfg(not(any(
     feature = "ffmpeg",
-    feature = "vaapi",
     feature = "nvdec",
     feature = "mediacodec",
     feature = "vulkan-video",

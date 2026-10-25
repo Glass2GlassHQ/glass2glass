@@ -557,7 +557,7 @@ does by default. The time is the frame's `WallClockMeta` when it has one,
 otherwise the moment the frame entered the sender's pipeline (`arrival_ns`)
 read on the Unix clock. The shared receive loop reads the extension off each
 packet and attaches a `WallClockMeta` to the access unit with the same RTP
-timestamp. `ffmpegdec`, `nvdec`, `vaapidec`, `vulkanvideodec`, the AV1
+timestamp. `ffmpegdec`, `nvdec`, `vulkanvideodec`, the AV1
 decoders and the platform decoders key each input's metadata and arrival time
 by PTS in `PendingInputStamps` and put them on the picture that PTS decodes
 to, so the capture time survives a software or hardware decode.

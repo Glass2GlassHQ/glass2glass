@@ -694,12 +694,10 @@ row by row.
 `WgpuCompositor` asks `wants::<PlaneLayout>()` when the cascade configures its
 output: when a consumer downstream requested one it hands over the canvas as the
 GPU wrote it and declares the pitch, and the per-frame repack disappears.
-`V4l2Src`, `PipeWireVideoSrc` and `VaapiDec` ask the same question of the same
-cascade. The capture sources hand over the driver's or daemon's mapped buffer at
-its `bytesperline`, deriving each later plane's stride from plane 0's, the same
-pitch for NV12's interleaved chroma and half of it for I420's, and the VAAPI
-decoder copies the surface out at its own `y_pitch` and `uv_pitch` in one pass per
-plane rather than row by row.
+`V4l2Src` and `PipeWireVideoSrc` ask the same question of the same cascade. They
+hand over the driver's or daemon's mapped buffer at its `bytesperline`, deriving
+each later plane's stride from plane 0's, the same pitch for NV12's interleaved
+chroma and half of it for I420's.
 
 A `WgpuBuffer` frame carries the layout on its `OwnedWgpuBuffer` rather than as
 meta, which is why `PlaneLayout` sits outside the `metadata` gate. `DmaBufToWgpu`

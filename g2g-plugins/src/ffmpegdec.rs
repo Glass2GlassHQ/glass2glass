@@ -14,12 +14,6 @@
 //! before the first decoded frame and again whenever the decoder signals a
 //! resolution change.
 //!
-//! Why this element exists alongside `VaapiH264Dec`: cros-codecs 0.0.6
-//! cannot allocate decoder output surfaces on AMD desktop GPUs (see
-//! `vaapidec.rs` module header for the full diagnosis). libavcodec's
-//! software H.264 decoder works on every Linux system out of the box; this
-//! is the production-ready baseline.
-//!
 //! NVDEC (NVIDIA) hardware decode is available via the same element by
 //! constructing with [`Backend::NvdecCuvid`]: libavcodec ships an
 //! `h264_cuvid` standalone codec (not a hwaccel hook), so we just swap the
@@ -36,9 +30,7 @@
 //! hook selecting `AV_PIX_FMT_VAAPI` (a true hwaccel, not a standalone codec
 //! like cuvid), decodes on the GPU, then `av_hwframe_transfer_data`s the
 //! surface into system memory (NV12 on radeonsi / Intel) and packs it like the
-//! software path. Unlike `VaapiH264Dec` (cros-codecs, blocked on Mesa
-//! `radeonsi` GBM surface allocation), it uses libavcodec's own hwframe pool,
-//! so it works on AMD desktop / iGPU. Pin the render node with
+//! software path. Pin the render node with
 //! [`FfmpegVideoDec::with_vaapi_device`] on multi-GPU hosts.
 //!
 //! [`Backend::NvdecCuda`] (C3) is that true-hwaccel path for NVIDIA: instead
@@ -66,7 +58,7 @@
 //! is `!Send` and `!Sync` by default. The element is moved between worker
 //! threads but never shared (the runner holds at most one `&mut self`
 //! reference at a time), so an `unsafe impl Send` is sound on the same
-//! grounds as `MfDecode` and `VaapiH264Dec`: ownership transfer, never
+//! grounds as `MfDecode`: ownership transfer, never
 //! aliasing.
 //!
 //! Output format: I420 by default; NV12 selectable via
@@ -447,9 +439,7 @@ pub enum Backend {
     /// with `av_hwframe_transfer_data` (radeonsi / Intel transfer to NV12),
     /// then packed into the element's `OutputFormat` like the software path, so
     /// frames are emitted as `MemoryDomain::System`. This is the Linux AMD /
-    /// Intel hardware path: unlike `VaapiH264Dec` (cros-codecs), it allocates
-    /// surfaces through libavcodec's hwframe pool rather than GBM, so it works
-    /// on Mesa `radeonsi` where cros-codecs 0.0.6 cannot. Pin the render node
+    /// Intel hardware path. Pin the render node
     /// with [`FfmpegVideoDec::with_vaapi_device`] on multi-GPU hosts. Requires
     /// libavcodec built with the VAAPI hwaccel and a libva-capable render node.
     Vaapi,
@@ -698,7 +688,7 @@ impl FfmpegVideoDec {
 
     /// Switch the output layout. NV12 is required by `KmsSink` and most GPU
     /// samplers; I420 is the default for backwards compatibility with
-    /// existing tests and the documented Linux ML path.
+    /// existing tests and the documented Linux ML path, NV12 for `Backend::Vaapi`.
     pub fn with_output_format(mut self, format: OutputFormat) -> Self {
         self.requested_output_format = Some(format);
         self
@@ -708,6 +698,8 @@ impl FfmpegVideoDec {
         match (self.backend, self.requested_output_format) {
             // NV12 is the CUDA surface's native layout
             (Backend::NvdecCuda, None | Some(OutputFormat::Auto)) => OutputFormat::Nv12,
+            // NV12 is the VA surface's layout and what gst's va decoders emit
+            (Backend::Vaapi, None) => OutputFormat::Nv12,
             (_, Some(requested)) => requested,
             (_, None) => OutputFormat::I420,
         }
@@ -3887,6 +3879,12 @@ mod tests {
             .with_backend(Backend::Vaapi);
         assert_eq!(dec.backend(), Backend::Vaapi);
         assert_eq!(dec.output_format(), OutputFormat::I420);
+        assert_eq!(
+            FfmpegVideoDec::new()
+                .with_backend(Backend::Vaapi)
+                .output_format(),
+            OutputFormat::Nv12
+        );
         // VAAPI has no cuvid-style deep pipeline, so low-delay stays off for
         // B-frame reorder correctness, and the cuvid surface knob is unset.
         assert!(!dec.low_delay());

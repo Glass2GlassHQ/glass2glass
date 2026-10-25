@@ -102,7 +102,6 @@ mod fifobuffer;
     feature = "metadata",
     all(target_os = "linux", feature = "ffmpeg"),
     all(target_os = "linux", feature = "nvdec"),
-    all(target_os = "linux", feature = "vaapi"),
     all(
         any(target_os = "linux", target_os = "windows"),
         feature = "vulkan-video"
@@ -291,7 +290,7 @@ pub mod gpu;
 #[cfg(any(
     feature = "wgpu-sink",
     all(target_os = "linux", feature = "cuda"),
-    all(target_os = "linux", feature = "vaapi")
+    all(target_os = "linux", feature = "ffmpeg")
 ))]
 pub mod gpudevice;
 
@@ -302,7 +301,7 @@ pub mod gpudevice;
         feature = "wgpu-sink",
         all(
             target_os = "linux",
-            any(feature = "cuda", feature = "vaapi", feature = "gl-sink")
+            any(feature = "cuda", feature = "ffmpeg", feature = "gl-sink")
         )
     )
 ))]
@@ -317,7 +316,7 @@ pub(crate) static EGL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
         feature = "vulkan-video",
         feature = "mediacodec-wgpu",
         all(target_os = "linux", feature = "dmabuf-wgpu"),
-        all(target_os = "linux", any(feature = "cuda", feature = "vaapi"))
+        all(target_os = "linux", any(feature = "cuda", feature = "ffmpeg"))
     )
 ))]
 pub(crate) static GPU_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1503,11 +1502,6 @@ pub mod mfvideosrc;
 // with the native modes mfvideosrc can deliver.
 #[cfg(all(target_os = "windows", feature = "mf-video-src"))]
 pub mod mfdevice;
-
-// VAAPI H.264 / H.265 decode via cros-codecs is Linux-only. The dependency is
-// target-gated; enabling the feature on other platforms is a no-op.
-#[cfg(all(target_os = "linux", feature = "vaapi"))]
-pub mod vaapidec;
 
 // ffmpeg/libavcodec H.264 decode is Linux-only here (the ffmpeg-next dep is
 // target-gated). Currently software decode; VAAPI hwaccel is a follow-up that

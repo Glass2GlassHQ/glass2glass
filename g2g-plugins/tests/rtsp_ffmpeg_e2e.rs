@@ -8,10 +8,9 @@
 //!  System/H.264 Annex-B        System/I420
 //! ```
 //!
-//! Why this exists: the Linux production decode path is `ffmpeg` (the
-//! `vaapi` feature is blocked on cros-codecs 0.0.6 GBM/NV12 allocation on
-//! AMD iGPUs — see `vaapidec.rs`). This test exercises the full chain a
-//! user would actually deploy against a public camera.
+//! Why this exists: the Linux production decode path is `ffmpeg`. This test
+//! exercises the full chain a user would actually deploy against a public
+//! camera.
 //!
 //! Ignored by default: needs outbound RTSP (TCP 554 / RTP). Run with:
 //!

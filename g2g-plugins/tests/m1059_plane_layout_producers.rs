@@ -10,11 +10,9 @@
 //! there is no device or when the device's rows are already tight, since then
 //! there is no padding to declare.
 //!
-//! The `pipewirevideosrc` and `vaapidec` legs of the milestone are
-//! compile-checked only: PipeWire's capture needs a running daemon with a shared
-//! node, and VAAPI needs an Intel / AMD GPU this host does not have. Their
-//! derivations are unit-tested in the crate (`pwvideo`, `pipewirevideosrc`,
-//! `vaapidec`).
+//! The `pipewirevideosrc` leg of the milestone is compile-checked only:
+//! PipeWire's capture needs a running daemon with a shared node. Its
+//! derivation is unit-tested in the crate (`pwvideo`, `pipewirevideosrc`).
 
 #![cfg(all(target_os = "linux", feature = "v4l2", feature = "metadata"))]
 

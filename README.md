@@ -553,7 +553,6 @@ cargo clippy --workspace --all-targets
 | `H264Parse` | (default) | none |
 | `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda` / `Vaapi`) | `ffmpeg` | Linux + libavcodec |
 | AVI / QuickTime / Matroska streams g2g has no caps type for (Cinepak, Indeo, Ut Video, QuickTime RLE, ADPCM, MACE, ...), demuxed under their container tag and decoded by `ffmpegdec` / `ffmpegaudiodec` | `ffmpeg-long-tail` | Linux + libavcodec + libavformat |
-| `VaapiH264Dec` | `vaapi` | Linux + libva + GBM |
 | `MfDecode` / `MfEncode` / `MfAacEncode` / `MfAacDecode` | `mf-decode`, `mf-encode`, `mf-aac` | Windows + Media Foundation |
 | `VtDecode` / `VtEncode` (H.264 / H.265, zero-copy `CVPixelBuffer` output via `cv-output`) | `vtdecode`, `vtencode` | macOS + VideoToolbox |
 | `MediaCodecDec` (H.264 / H.265, zero-copy GPU output via `with_gpu_output`) | `mediacodec`, `mediacodec-wgpu` | Android + NDK MediaCodec (+ wgpu / Vulkan for GPU output) |
@@ -1342,11 +1341,11 @@ access to `master`.
 The cargo features pull pure Rust crates. OS-level dependencies must be on the
 host.
 
-| Distro | Decoder (`ffmpeg`) | Wayland sink | KMS sink | VAAPI |
-| :--- | :--- | :--- | :--- | :--- |
-| Fedora | `ffmpeg-devel` (RPM Fusion) or `ffmpeg-free-devel` | `wayland-devel libxkbcommon-devel` | `libdrm-devel` | `libva-devel` |
-| Debian / Ubuntu | `libavcodec-dev libavformat-dev libavutil-dev libswscale-dev` | `libwayland-dev libxkbcommon-dev` | `libdrm-dev` | `libva-dev` |
-| Arch | `ffmpeg` | `wayland libxkbcommon` | `libdrm` | `libva` |
+| Distro | Decoder (`ffmpeg`) | Wayland sink | KMS sink |
+| :--- | :--- | :--- | :--- |
+| Fedora | `ffmpeg-devel` (RPM Fusion) or `ffmpeg-free-devel` | `wayland-devel libxkbcommon-devel` | `libdrm-devel` |
+| Debian / Ubuntu | `libavcodec-dev libavformat-dev libavutil-dev libswscale-dev` | `libwayland-dev libxkbcommon-dev` | `libdrm-dev` |
+| Arch | `ffmpeg` | `wayland libxkbcommon` | `libdrm` |
 
 Each of these features also needs `pkg-config` and a C compiler to build:
 `pkgconf-pkg-config gcc` on Fedora, `pkg-config build-essential` on Debian /
@@ -1354,14 +1353,7 @@ Ubuntu, `pkgconf base-devel` on Arch.
 
 USAC (xHE-AAC) decode needs libavcodec 62 (ffmpeg 8) or later.
 
-From crates.io, `vaapi` fails to build against libva 2.23 or later, because
-cros-libva 0.0.12 lacks two VP9 encode fields that libva added. The glass2glass
-repo carries a fixed copy, so add it to your workspace `Cargo.toml`:
-
-```toml
-[patch.crates-io]
-cros-libva = { git = "https://github.com/Glass2GlassHQ/glass2glass" }
-```
+`ffmpegvaapidec` also needs the GPU's VA-API driver at runtime.
 
 For the CUDA path, install the NVIDIA driver and CUDA runtime your
 distribution ships, with `libnvcuvid.so` and `libcuda.so` on the linker path.

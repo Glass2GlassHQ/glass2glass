@@ -714,8 +714,8 @@ profiles vary purely based on the top-level orchestration binary.
 
 - Runtime driver: Tokio multi-threaded runtime.
 - Inter-element channels: bounded MPMC async channels (`flume`).
-- Hardware interop: `cros-codecs` bitstream parsing feeding Linux kernel VAAPI and
-  V4L2 drivers, producing `OwnedDmaBuf` handles.
+- Hardware interop: VAAPI decode through libavcodec, and V4L2 drivers producing
+  `OwnedDmaBuf` handles.
 - Cargo features: `multi-thread`, `std`.
 
 ### Deep embedded and bare-metal RTOS

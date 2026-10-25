@@ -227,11 +227,12 @@ of any line with `g2g-launch -v`, or a Graphviz graph with `--dot`.
 Most names match GStreamer. Differences are handled two ways:
 
 - **Aliases** resolve automatically in the registry (e.g. `autovideosink`,
-  `autovideosrc`/`autoaudiosrc`, `avdec_h264`/`avdec_h265` → `ffmpegdec`, `vah264dec` →
-  `vaapidec`, `vp8enc`/`vp9enc` → `vpxenc`, `webmmux` → `matroskamux`,
-  `adder`/`liveadder` → `audiomixer`, `videomixer` → `compositor`, `rtmp2sink` →
-  `rtmpsink`, and the plain decoder names `vp8dec`/`vp9dec`/`mpeg2dec` →
-  `ffmpegdec`, `mpg123audiodec`/`flacdec`/`a52dec`/`faad` → `ffmpegaudiodec`).
+  `autovideosrc`/`autoaudiosrc`, `avdec_h264`/`avdec_h265` → `ffmpegdec`,
+  `vah264dec`/`vah265dec` → `ffmpegvaapidec`, `vp8enc`/`vp9enc` → `vpxenc`,
+  `webmmux` → `matroskamux`, `adder`/`liveadder` → `audiomixer`, `videomixer` →
+  `compositor`, `rtmp2sink` → `rtmpsink`, and the plain decoder names
+  `vp8dec`/`vp9dec`/`mpeg2dec` → `ffmpegdec`,
+  `mpg123audiodec`/`flacdec`/`a52dec`/`faad` → `ffmpegaudiodec`).
   See `default_registry` in [g2g-plugins/src/registry.rs](g2g-plugins/src/registry.rs).
   `autovideosrc`/`autoaudiosrc` have no test-source fallback, so a build with no
   capture element leaves the name unresolved rather than producing a test pattern.
@@ -301,7 +302,7 @@ Whole plugins answer by family rather than name:
 | `gl*` | no OpenGL elements; `wgpusink`, `wgpucompositor`, `dmabuftowgpu` / `wgputodmabuf` |
 | `cuda*` | `nvdec` / `nvenc`, and `localcudasrc` / `localcudasink` for cross-process CUDA memory |
 | `vulkan*` | `vulkanvideodec` decodes, `wgpusink` presents |
-| `va*dec` / `vaapi*dec` | `vaapidec` |
+| `va*dec` / `vaapi*dec` | `ffmpegvaapidec` |
 | `nv*dec` / `nv*enc` | `nvdec` / `nvenc` |
 | `ladspa*` | no LADSPA host; `volume`, `audiopanorama`, `equalizer-3bands`, `level`, `cutter` |
 | effectv (`*tv`) and geometrictransform (`bulge`, `fisheye`, ...) | no effects plugins; `videoflip`, `videocrop`, `videobox`, `videoscale` are the geometry elements |
@@ -309,7 +310,7 @@ Whole plugins answer by family rather than name:
 | `decklink*` | `decklinkvideosink` and `decklinkaudiosink` on Linux (`decklink` feature), no capture elements |
 
 Registered names and the exact table always win over a family rule, so `nvdec`
-and `vaapidec` still answer for themselves.
+still answers for itself.
 
 ### SRTP gaps
 

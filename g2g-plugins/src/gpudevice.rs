@@ -8,9 +8,9 @@
 //!   Dx12, Metal, ...), so the same GPU legitimately shows up once per backend
 //!   that can drive it.
 //! - `cuda` (Linux): every CUDA driver-API device ordinal.
-//! - `vaapi` (Linux): every `/dev/dri/renderD*` node.
+//! - `ffmpeg` (Linux): every `/dev/dri/renderD*` node.
 //!
-//! Only the VAAPI nodes name an element (`vaapidec device=...`). A wgpu adapter
+//! Only the VAAPI nodes name an element (`ffmpegvaapidec device=...`). A wgpu adapter
 //! or a CUDA ordinal is informational: no element in the tree takes an adapter
 //! index or a device ordinal as a property today, so those devices carry an
 //! empty [`Device::element`] and [`Device::create`] on them fails with
@@ -64,7 +64,7 @@ impl DeviceProvider for GpuDeviceProvider {
         devices.extend(probe_wgpu());
         #[cfg(all(target_os = "linux", feature = "cuda"))]
         devices.extend(probe_cuda());
-        #[cfg(all(target_os = "linux", feature = "vaapi"))]
+        #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
         devices.extend(probe_vaapi());
         Ok(devices)
     }
@@ -271,7 +271,7 @@ mod ffi {
 
 /// One device per DRM render node. An unreadable or absent `/dev/dri` yields
 /// nothing.
-#[cfg(all(target_os = "linux", feature = "vaapi"))]
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 fn probe_vaapi() -> Vec<Device> {
     let Ok(entries) = std::fs::read_dir(DRI_DIR) else {
         return Vec::new();
@@ -288,12 +288,12 @@ fn probe_vaapi() -> Vec<Device> {
         .collect()
 }
 
-#[cfg(all(target_os = "linux", feature = "vaapi"))]
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 const DRI_DIR: &str = "/dev/dri";
 
 /// `renderD<n>`, the unprivileged DRM node VA-API opens. `card<n>` is the
 /// primary node (needs master / a seat) and is not one of these.
-#[cfg(all(target_os = "linux", feature = "vaapi"))]
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 fn is_render_node(name: &str) -> bool {
     let Some(rest) = name.strip_prefix("renderD") else {
         return false;
@@ -301,15 +301,15 @@ fn is_render_node(name: &str) -> bool {
     !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Map a render-node path onto a `vaapidec device=<path>` device.
-#[cfg(all(target_os = "linux", feature = "vaapi"))]
+/// Map a render-node path onto a `ffmpegvaapidec device=<path>` device.
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 fn vaapi_device(path: &str) -> Device {
     gpu_device(
         format!("VAAPI render node {path}"),
         // minor numbers can move across boots when GPUs are added or the
         // probe order changes; the path is still the best handle VA-API takes.
         path.to_string(),
-        "vaapidec",
+        "ffmpegvaapidec",
         vec![("device".to_string(), path.to_string())],
         Vec::new(),
     )
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(cuda_name(b"RTX 3060"), "RTX 3060");
     }
 
-    #[cfg(all(target_os = "linux", feature = "vaapi"))]
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     #[test]
     fn only_render_nodes_are_devices() {
         assert!(is_render_node("renderD128"));
@@ -393,13 +393,13 @@ mod tests {
         assert!(!is_render_node("by-path"));
     }
 
-    #[cfg(all(target_os = "linux", feature = "vaapi"))]
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     #[test]
     fn vaapi_device_is_launchable() {
         let device = vaapi_device("/dev/dri/renderD128");
         assert_eq!(
             device.launch_fragment(),
-            "vaapidec device=/dev/dri/renderD128"
+            "ffmpegvaapidec device=/dev/dri/renderD128"
         );
         assert_eq!(device.persistent_id, "/dev/dri/renderD128");
     }

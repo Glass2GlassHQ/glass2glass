@@ -29,9 +29,8 @@ Highest leverage first:
 ## Architecture guarantees (validation-first)
 
 - **CI never runs m960 or m961 with `ffmpeg`.** The conformance job runs them with `rav1d` alone and linux-full enables neither rav1d nor dav1d, so a regression that only shows with both decoders built stays invisible. Add an `ffmpeg,rav1d` run of both files to a job that has the libav packages.
-- **Drop the vendored `cros-libva`.** The workspace patches cros-libva 0.0.12 with the libva 2.23 VP9 fields, and `[patch]` does not reach crates.io users, so the published `vaapi` feature fails on libva 2.23. Remove the patch once a cros-codecs release accepts a cros-libva with upstream commit 5938445.
 - **Grow the conformance matrix.** Persist evidence from the resource-owning
-  tests still uncovered as they are validated (`vaapi` decode on Intel, the Android and
+  tests still uncovered as they are validated (`ffmpegvaapidec` on Intel and AMD, the Android and
   macOS device paths). Get the device-tagged `Hardware` rows into CI by wiring a
   runner that has the hardware: a `Hardware` row can only come from a run on the
   device, so a runner without a GPU or a camera will never produce one.
@@ -281,7 +280,7 @@ Highest leverage first:
   emit (Media Foundation, VideoToolbox, MediaCodec), so a tagged stream
   survives a re-encode there too.
 - Tag the raw output of the platform decoders that still leave colorimetry
-  unknown (Media Foundation, VideoToolbox, MediaCodec, and `VaapiDec` on Intel).
+  unknown (Media Foundation, VideoToolbox, MediaCodec).
 
 ## Transforms and effects
 

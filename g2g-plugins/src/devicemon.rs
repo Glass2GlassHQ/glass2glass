@@ -45,7 +45,7 @@ pub fn default_device_monitor() -> DeviceMonitor {
     #[cfg(any(
         feature = "wgpu-sink",
         all(target_os = "linux", feature = "cuda"),
-        all(target_os = "linux", feature = "vaapi")
+        all(target_os = "linux", feature = "ffmpeg")
     ))]
     monitor.register(alloc::boxed::Box::new(
         crate::gpudevice::GpuDeviceProvider::new(),
