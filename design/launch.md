@@ -109,9 +109,9 @@ backpressure `policy` and `capacity`. It reaches the graph through exactly the
 launch parser's machinery: roles follow link degree, so no inbound means source,
 several inbound means a `MuxerFactory` muxer, and a fan-out node gets the
 auto-tee spliced in. Every property value is typed by the target element's
-`PropertySpec` and parsed with the same `PropValue::parse`, so a
+`PropertySpec` and set through the launch parser's `apply_props`, so a
 `num-buffers: 30` in JSON means exactly what `num-buffers=30` does in a launch
-string.
+string, and a rejected value reports the same range or allowed values.
 
 A top-level `pipeline:` string is an escape hatch that defers to `parse_launch`.
 Both formats deserialize into one shared `GraphSpec`, a format-agnostic serde

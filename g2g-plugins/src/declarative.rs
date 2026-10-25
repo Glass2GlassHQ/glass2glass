@@ -26,7 +26,7 @@
 //! names) with an optional `capacity` (the per-edge channel depth).
 //!
 //! Property values are typed by the target element's [`PropertySpec`] table and
-//! parsed with [`PropValue::parse`], the *same* path the launch parser uses, so a
+//! applied with [`apply_props`], the *same* path the launch parser uses, so a
 //! `num-buffers: 30` in JSON and `num-buffers=30` in a launch string mean exactly
 //! the same thing (no second, divergent JSON-number coercion). A top-level
 //! `pipeline:` string is an escape hatch that just defers to [`parse_launch`].
@@ -39,8 +39,8 @@ use std::collections::BTreeMap;
 use std::string::{String, ToString};
 use std::vec::Vec;
 
-use g2g_core::runtime::{parse_launch, GraphNode, GraphNodeRef, ParseError, Registry};
-use g2g_core::{Graph, GraphError, LinkPolicy, NodeId, PadId, PropError, PropValue, PropertySpec};
+use g2g_core::runtime::{apply_props, parse_launch, GraphNode, GraphNodeRef, ParseError, Registry};
+use g2g_core::{Graph, GraphError, LinkPolicy, NodeId, PadId};
 use serde::{Deserialize, Serialize};
 
 /// A format-agnostic scalar property value. Deserializes the same from JSON and
@@ -148,14 +148,8 @@ pub enum SpecError {
     UnknownElement(String),
     /// A node with several inbound edges names no registered muxer.
     NotAMuxer(String),
-    /// The element has no property of that name.
-    UnknownProperty { node: String, key: String },
-    /// A value did not parse for the property's kind, or was rejected.
-    BadValue {
-        node: String,
-        key: String,
-        value: String,
-    },
+    /// A node's property is unknown or its value rejected, with the node id as `element`.
+    Property(ParseError),
     /// An edge `policy` was not one of the [`LinkPolicy`] names.
     BadPolicy(String),
     /// Linking the nodes into the graph failed.
@@ -189,12 +183,7 @@ impl core::fmt::Display for SpecError {
             SpecError::NotAMuxer(n) => {
                 write!(f, "'{n}' has several inputs but is not a registered muxer")
             }
-            SpecError::UnknownProperty { node, key } => {
-                write!(f, "node '{node}': no property '{key}'")
-            }
-            SpecError::BadValue { node, key, value } => {
-                write!(f, "node '{node}': bad value '{value}' for '{key}'")
-            }
+            SpecError::Property(e) => write!(f, "node {e}"),
             SpecError::BadPolicy(p) => {
                 write!(
                     f,
@@ -226,51 +215,17 @@ fn resolved_name(node: &NodeSpec) -> Result<String, SpecError> {
 /// The effective `key=value` list for a node: its `props` plus the `caps`
 /// shorthand folded in as a `caps` property (last, so it wins over an explicit
 /// `props.caps`).
-fn effective_props(node: &NodeSpec) -> Vec<(String, ScalarVal)> {
-    let mut kv: Vec<(String, ScalarVal)> = node
+fn effective_props(node: &NodeSpec) -> Vec<(String, String)> {
+    let mut kv: Vec<(String, String)> = node
         .props
         .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| (k.clone(), v.to_prop_text()))
         .collect();
     if let Some(caps) = &node.caps {
         kv.retain(|(k, _)| k != "caps");
-        kv.push(("caps".to_string(), ScalarVal::Str(caps.clone())));
+        kv.push(("caps".to_string(), caps.clone()));
     }
     kv
-}
-
-/// Apply a node's typed properties to a freshly-built element, looking each key
-/// up in the element's [`PropertySpec`] table for its [`PropKind`] and parsing
-/// the textual value exactly as the launch parser does. `specs` is `&'static`, so
-/// reading it does not borrow the element the `set` closure mutates.
-fn apply_props(
-    specs: &'static [PropertySpec],
-    node_id: &str,
-    kv: &[(String, ScalarVal)],
-    mut set: impl FnMut(&str, PropValue) -> Result<(), PropError>,
-) -> Result<(), SpecError> {
-    for (key, val) in kv {
-        let kind = specs
-            .iter()
-            .find(|s| s.name == key)
-            .ok_or_else(|| SpecError::UnknownProperty {
-                node: node_id.into(),
-                key: key.clone(),
-            })?
-            .kind;
-        let text = val.to_prop_text();
-        let parsed = PropValue::parse(kind, &text).map_err(|_| SpecError::BadValue {
-            node: node_id.into(),
-            key: key.clone(),
-            value: text.clone(),
-        })?;
-        set(key, parsed).map_err(|_| SpecError::BadValue {
-            node: node_id.into(),
-            key: key.clone(),
-            value: text,
-        })?;
-    }
-    Ok(())
 }
 
 /// Map an edge `policy` string to a [`LinkPolicy`]. Accepts the g2g names
@@ -339,15 +294,13 @@ pub fn build_spec(registry: &Registry, spec: &GraphSpec) -> Result<Graph<GraphNo
             let mut src = registry
                 .make_source(&name)
                 .ok_or_else(|| SpecError::UnknownSource(name.clone()))?;
-            let specs = src.properties();
-            apply_props(specs, &node.id, &kv, |k, v| src.set_property(k, v))?;
+            apply_props(&mut src, &node.id, &kv).map_err(SpecError::Property)?;
             graph.add_source(GraphNodeRef::Source(src))
         } else if in_deg[i] > 1 {
             let mut mux = registry
                 .make_muxer(&name, in_deg[i])
                 .ok_or_else(|| SpecError::NotAMuxer(name.clone()))?;
-            let specs = mux.properties();
-            apply_props(specs, &node.id, &kv, |k, v| mux.set_property(k, v))?;
+            apply_props(&mut mux, &node.id, &kv).map_err(SpecError::Property)?;
             graph
                 .add_muxer(GraphNodeRef::Muxer(mux), in_deg[i] as u8)
                 .node()
@@ -355,8 +308,7 @@ pub fn build_spec(registry: &Registry, spec: &GraphSpec) -> Result<Graph<GraphNo
             let mut demux = registry
                 .make_demux(&name, out_deg[i])
                 .ok_or_else(|| SpecError::UnknownElement(name.clone()))?;
-            let specs = demux.properties();
-            apply_props(specs, &node.id, &kv, |k, v| demux.set_property(k, v))?;
+            apply_props(&mut demux, &node.id, &kv).map_err(SpecError::Property)?;
             graph
                 .add_demux(GraphNodeRef::Demux(demux), out_deg[i] as u8)
                 .node()
@@ -364,15 +316,13 @@ pub fn build_spec(registry: &Registry, spec: &GraphSpec) -> Result<Graph<GraphNo
             let mut el = registry
                 .make_element(&name)
                 .ok_or_else(|| SpecError::UnknownElement(name.clone()))?;
-            let specs = el.properties();
-            apply_props(specs, &node.id, &kv, |k, v| el.set_property(k, v))?;
+            apply_props(&mut el, &node.id, &kv).map_err(SpecError::Property)?;
             graph.add_sink(GraphNodeRef::Element(el))
         } else {
             let mut el = registry
                 .make_element(&name)
                 .ok_or_else(|| SpecError::UnknownElement(name.clone()))?;
-            let specs = el.properties();
-            apply_props(specs, &node.id, &kv, |k, v| el.set_property(k, v))?;
+            apply_props(&mut el, &node.id, &kv).map_err(SpecError::Property)?;
             graph.add_transform(GraphNodeRef::Element(el))
         };
         node_of.push(nid);
@@ -454,6 +404,8 @@ pub fn from_yaml(registry: &Registry, yaml: &str) -> Result<Graph<GraphNode>, Sp
 mod tests {
     use super::*;
     use crate::registry::default_registry;
+    use g2g_core::AsyncElement;
+    use std::format;
 
     #[test]
     fn json_linear_pipeline_builds_and_validates() {
@@ -564,7 +516,37 @@ mod tests {
         let reg = default_registry();
         assert!(matches!(
             from_json(&reg, json),
-            Err(SpecError::BadValue { .. })
+            Err(SpecError::Property(ParseError::BadValue { .. }))
         ));
+    }
+
+    #[test]
+    fn an_out_of_range_value_names_the_declared_range() {
+        let (min, max) = crate::chopmydata::ChopMyData::new()
+            .properties()
+            .iter()
+            .find(|spec| spec.name == "max-size")
+            .and_then(|spec| spec.range)
+            .expect("max-size declares a range");
+        let past_max = max.parse::<i64>().unwrap() + 1;
+        let json = format!(
+            r#"{{
+            "nodes": [
+                {{ "id": "src",  "element": "videotestsrc", "props": {{ "num-buffers": 1 }} }},
+                {{ "id": "chop", "element": "chopmydata", "props": {{ "max-size": {past_max} }} }},
+                {{ "id": "sink", "element": "fakesink" }}
+            ],
+            "edges": [ {{ "from": "src", "to": "chop" }}, {{ "from": "chop", "to": "sink" }} ]
+        }}"#
+        );
+        let message = from_json(&default_registry(), &json)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            message,
+            format!(
+                "node chop: invalid value '{past_max}' for property 'max-size' (range {min} - {max})"
+            )
+        );
     }
 }
