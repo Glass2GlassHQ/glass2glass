@@ -22,7 +22,6 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use std::collections::VecDeque;
 use std::time::Instant;
 
 use g2g_core::metrics::monotonic_ns;
@@ -42,7 +41,6 @@ use crate::hosted_input::{
 use crate::props::{fixed_caps, hosted_element_props, HostedClassProperties};
 use g2g_core::caps_parse::parse_raw_format;
 
-const RECENT_PUSH_CAPACITY: usize = 64;
 // a run that ran long once must not drop every later frame, a dropped frame never runs to correct it
 const RUN_TIME_STALE_AFTER_NS: u64 = 100_000_000;
 
@@ -51,12 +49,6 @@ struct SinkClock {
     running_time_ns: u64,
     taken_ns: u64,
     behind: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RecentPush {
-    running_time_ns: u64,
-    pushed_ns: u64,
 }
 
 /// A gst-python-ml element hosted as a first-class g2g transform.
@@ -77,10 +69,6 @@ pub struct PyTransform {
     qos: bool,
     segment: Option<Segment>,
     sink_clock: Option<SinkClock>,
-    /// Time from this element pushing a frame to the sink judging it, learned
-    /// from a QoS report on a frame in `recent_pushes`.
-    downstream_delay_ns: u64,
-    recent_pushes: VecDeque<RecentPush>,
     last_run_ns: u64,
     last_run_measured_ns: u64,
     late_dropped: u64,
@@ -100,8 +88,6 @@ impl PyTransform {
             qos: true,
             segment: None,
             sink_clock: None,
-            downstream_delay_ns: 0,
-            recent_pushes: VecDeque::with_capacity(RECENT_PUSH_CAPACITY),
             last_run_ns: 0,
             last_run_measured_ns: 0,
             late_dropped: 0,
@@ -175,7 +161,7 @@ impl PyTransform {
         let Some(sink_clock) = self.sink_clock else {
             return false;
         };
-        // the delay learned through full queues predicts false lateness while the sink keeps up
+        // a sink showing frames on time overrules the run time prediction
         if !sink_clock.behind {
             return false;
         }
@@ -187,25 +173,16 @@ impl PyTransform {
         let run_is_fresh =
             now_ns.saturating_sub(self.last_run_measured_ns) <= RUN_TIME_STALE_AFTER_NS;
         let predicted_run_ns = if run_is_fresh { self.last_run_ns } else { 0 };
+        // no downstream delay: the frames queued ahead of this one show before it comes due
         let reaches_sink_at = sink_clock
             .running_time_ns
             .saturating_add(elapsed_ns)
-            .saturating_add(predicted_run_ns)
-            .saturating_add(self.downstream_delay_ns);
+            .saturating_add(predicted_run_ns);
         running_time.saturating_add(VIDEO_SINK_MAX_LATENESS_NS) < reaches_sink_at
     }
 
     async fn push_frame(&mut self, frame: Frame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         self.emitted += 1;
-        if let Some(running_time_ns) = self.running_time(&frame) {
-            if self.recent_pushes.len() == RECENT_PUSH_CAPACITY {
-                self.recent_pushes.pop_front();
-            }
-            self.recent_pushes.push_back(RecentPush {
-                running_time_ns,
-                pushed_ns: monotonic_ns(),
-            });
-        }
         let outcome = out.push(PipelinePacket::DataFrame(frame)).await?;
         self.note_push(outcome);
         Ok(())
@@ -217,14 +194,6 @@ impl PyTransform {
         };
         if !self.qos {
             return;
-        }
-        let reported_push = self
-            .recent_pushes
-            .iter()
-            .rev()
-            .find(|push| push.running_time_ns == report.running_time_ns);
-        if let Some(push) = reported_push {
-            self.downstream_delay_ns = report.taken_ns.saturating_sub(push.pushed_ns);
         }
         self.sink_clock = Some(SinkClock {
             running_time_ns: report
@@ -276,8 +245,6 @@ impl PyTransform {
             }
             PipelinePacket::Flush => {
                 self.sink_clock = None;
-                self.downstream_delay_ns = 0;
-                self.recent_pushes.clear();
                 out.push(PipelinePacket::Flush).await?;
             }
             PipelinePacket::Segment(seg) => {

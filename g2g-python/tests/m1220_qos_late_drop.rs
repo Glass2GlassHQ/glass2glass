@@ -13,7 +13,8 @@ const HEIGHT: u32 = 1;
 const FRAME_PERIOD_NS: u64 = 33_000_000;
 const JITTER_NS: i64 = 70_000_000;
 const EARLY_NS: i64 = 20_000_000;
-const DOWNSTREAM_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+const FULL_QUEUE_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+const DRAINED_FRAMES: u64 = 8;
 const CALLS_HEADER: &str = "calls";
 
 #[derive(Default)]
@@ -309,9 +310,35 @@ fn an_early_report_ends_the_drops_a_late_one_started() {
     assert_eq!(sink.packets.len(), 3);
 }
 
-// The sink reports its clock at `jitter_ns` past frame 0, when frame 0 reached it
-// `delay` after this element pushed it.
-fn frame_two_is_dropped_after(delay: std::time::Duration, jitter_ns: i64) -> bool {
+#[test]
+fn a_slow_run_drops_nothing_while_the_sink_is_early() {
+    let mut element = hosted("m1220_element", "SlowTransform");
+    let mut sink = LateSink::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let process = |element: &mut PyTransform, sink: &mut LateSink, pts_ns, sequence| {
+        runtime
+            .block_on(element.process(PipelinePacket::DataFrame(frame(pts_ns, sequence)), sink))
+            .unwrap();
+    };
+    sink.report = Some(QosMessage {
+        jitter_ns: -EARLY_NS,
+        running_time_ns: 0,
+        taken_ns: 0,
+    });
+    process(&mut element, &mut sink, 0, 0);
+    process(&mut element, &mut sink, 5_000_000, 1);
+    assert_eq!(
+        element.late_dropped_count(),
+        0,
+        "the 30 ms run makes 5 ms late by the arithmetic alone"
+    );
+}
+
+// frame 0 waited in full queues, the queues are empty for every frame after it
+#[test]
+fn a_delay_learned_through_full_queues_drops_nothing_once_they_drain() {
     let mut element = counting_element();
     let mut sink = LateSink::default();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -320,42 +347,61 @@ fn frame_two_is_dropped_after(delay: std::time::Duration, jitter_ns: i64) -> boo
     runtime
         .block_on(element.process(PipelinePacket::DataFrame(frame(0, 0)), &mut sink))
         .unwrap();
-    std::thread::sleep(delay);
+    std::thread::sleep(FULL_QUEUE_DELAY);
     sink.report = Some(QosMessage {
-        jitter_ns,
+        jitter_ns: JITTER_NS,
         running_time_ns: 0,
         taken_ns: 0,
     });
-    runtime
-        .block_on(element.process(
-            PipelinePacket::DataFrame(frame(FRAME_PERIOD_NS, 1)),
-            &mut sink,
-        ))
-        .unwrap();
-    runtime
-        .block_on(element.process(
-            PipelinePacket::DataFrame(frame(2 * FRAME_PERIOD_NS, 2)),
-            &mut sink,
-        ))
-        .unwrap();
-    element.late_dropped_count() == 1
-}
-
-#[test]
-fn the_learned_downstream_delay_counts_toward_lateness() {
-    let behind = 2 * FRAME_PERIOD_NS as i64;
-    assert!(
-        !frame_two_is_dropped_after(std::time::Duration::ZERO, behind),
-        "a frame due at the sink's clock is within the sink's bound"
-    );
-    assert!(
-        frame_two_is_dropped_after(DOWNSTREAM_DELAY, behind),
-        "it reaches the sink a delay later, past the bound"
+    for sequence in 1..=DRAINED_FRAMES {
+        runtime
+            .block_on(element.process(
+                PipelinePacket::DataFrame(frame(sequence * FRAME_PERIOD_NS, sequence)),
+                &mut sink,
+            ))
+            .unwrap();
+    }
+    assert_eq!(
+        element.late_dropped_count(),
+        0,
+        "from 66 ms on every frame reaches the sink's 70 ms clock within its 20 ms bound"
     );
 }
 
+// a live source delivers frame n at n frame periods, the queues are empty after frame 0
 #[test]
-fn a_learned_delay_drops_nothing_while_the_sink_is_early() {
-    // a delay this long makes frame 2 late by the arithmetic alone
-    assert!(!frame_two_is_dropped_after(3 * DOWNSTREAM_DELAY, -EARLY_NS));
+fn a_live_stream_keeps_running_after_a_delay_learned_through_full_queues() {
+    let mut element = counting_element();
+    let mut sink = LateSink::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let started = std::time::Instant::now();
+    runtime
+        .block_on(element.process(PipelinePacket::DataFrame(frame(0, 0)), &mut sink))
+        .unwrap();
+    std::thread::sleep(FULL_QUEUE_DELAY);
+    sink.report = Some(QosMessage {
+        jitter_ns: FULL_QUEUE_DELAY.as_nanos() as i64,
+        running_time_ns: 0,
+        taken_ns: 0,
+    });
+    let first_live = FULL_QUEUE_DELAY.as_nanos() as u64 / FRAME_PERIOD_NS + 1;
+    for sequence in first_live..first_live + 2 * DRAINED_FRAMES {
+        let pts_ns = sequence * FRAME_PERIOD_NS;
+        std::thread::sleep(
+            std::time::Duration::from_nanos(pts_ns).saturating_sub(started.elapsed()),
+        );
+        runtime
+            .block_on(element.process(
+                PipelinePacket::DataFrame(frame(pts_ns, sequence)),
+                &mut sink,
+            ))
+            .unwrap();
+    }
+    assert_eq!(
+        element.late_dropped_count(),
+        0,
+        "each frame reaches the empty queue as the sink's clock reaches it"
+    );
 }
