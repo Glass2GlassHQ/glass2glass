@@ -210,11 +210,23 @@ impl ConfigureOutcome {
     }
 }
 
+/// A transform or sink element. `run_graph` negotiates its caps through
+/// [`caps_constraint_as_transform`](Self::caps_constraint_as_transform) or
+/// [`caps_constraint_as_sink`](Self::caps_constraint_as_sink), passes the solved
+/// caps to [`configure_pipeline`](Self::configure_pipeline), then feeds each
+/// packet to [`process`](Self::process). Sources implement `SourceLoop` instead.
 pub trait AsyncElement: ElementBound {
     type ProcessFuture<'a>: Future<Output = Result<(), G2gError>> + 'a
     where
         Self: 'a;
 
+    /// Returns the caps this element accepts for `upstream_caps`, or
+    /// `Err(G2gError::CapsMismatch)`. `run_graph` never calls this on a
+    /// transform or sink, at startup or on a mid-stream `CapsChanged`: it
+    /// negotiates through the `caps_constraint_as_*` methods. A `GraphMutator`
+    /// calls it when inserting the element into a running pipeline, and a launch
+    /// line that expands an encoder calls it to decide whether a converter goes
+    /// in front. Keep the answer consistent with the constraint.
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError>;
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
@@ -499,7 +511,7 @@ pub trait AsyncElement: ElementBound {
         CapsConstraint::AcceptsAny
     }
 
-    /// Same as `caps_constraint_as_sink` but for the
+    /// The constraint `run_graph` negotiates this element with in the
     /// **transform** role. The default passes caps through unchanged. A
     /// transform that narrows or changes caps overrides with `Identity` /
     /// `Mapping` / `DerivedOutput` / `DerivedFields`.
