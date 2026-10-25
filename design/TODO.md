@@ -163,6 +163,12 @@ Highest leverage first:
 - **RIST bonding test flake:** `ristsender_broadcast_bonding_feeds_ristsrc`
   failed once in 50 runs on hercules, after 2.4 s. Capture its failure output
   and fix the cause.
+- **RIST round-robin to gst flake:** `g2g_round_robin_bonding_feeds_gst_ristsrc`
+  fails about 1 run in 30. gst never outputs the first RTP packet (link 0),
+  every later packet arrives. gst `ristsrc` puts each bonded link in its own RTP
+  session, and probation drops non-consecutive packets until a source is
+  validated. Capture a failing run with `GST_DEBUG=rtpsource:5,rtpjitterbuffer:5`
+  to see why packet 0 is dropped.
 
 ## Adaptive streaming (HLS / DASH)
 
