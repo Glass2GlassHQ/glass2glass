@@ -21,6 +21,8 @@ use cosmic_text::{
     Weight, Wrap,
 };
 
+use cosmic_text::fontdb::{Database, FaceInfo, Family as DbFamily};
+
 use crate::subparse::FontStretch;
 
 /// Identifies one rasterized glyph (face, glyph index, size, subpixel bin).
@@ -293,6 +295,24 @@ fn styled_attrs<'text, 'attrs>(
     spans
 }
 
+// cosmic-text names Noto Sans Mono as the generic monospace whether or not it is installed
+fn use_an_installed_monospace(db: &mut Database) {
+    let named = String::from(db.family_name(&DbFamily::Monospace));
+    let installed = |face: &FaceInfo| face.families.iter().any(|(name, _)| *name == named);
+    if db.faces().any(installed) {
+        return;
+    }
+    let first_monospaced = db
+        .faces()
+        .filter(|face| face.monospaced)
+        .filter_map(|face| face.families.first())
+        .map(|(name, _)| name.clone())
+        .min();
+    if let Some(name) = first_monospaced {
+        db.set_monospace_family(name);
+    }
+}
+
 /// Shaping + rasterization state: the discovered font database and the glyph
 /// raster cache.
 #[derive(Debug)]
@@ -312,6 +332,7 @@ impl TextShaper {
     /// alongside them.
     pub fn new(explicit: &[Vec<u8>]) -> Self {
         let mut fonts = FontSystem::new();
+        use_an_installed_monospace(fonts.db_mut());
         let mut primary = None;
         for bytes in explicit {
             let ids = fonts
@@ -508,6 +529,24 @@ impl TextShaper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_monospace_family_falls_to_an_installed_monospaced_face() {
+        let mut db = Database::new();
+        db.load_system_fonts();
+        if !db.faces().any(|face| face.monospaced) {
+            std::eprintln!("no monospaced system font; skipping");
+            return;
+        }
+        db.set_monospace_family("No Such Mono");
+        use_an_installed_monospace(&mut db);
+        let query = cosmic_text::fontdb::Query {
+            families: &[DbFamily::Monospace],
+            ..cosmic_text::fontdb::Query::default()
+        };
+        let face = db.query(&query).and_then(|id| db.face(id));
+        assert!(face.is_some_and(|face| face.monospaced));
+    }
 
     /// A styled span reaches the shaped glyphs: the run it covers is shaped at
     /// its own weight (which the raster key carries, so swash scales the `wght`
