@@ -2494,6 +2494,29 @@ fn plan_arms<'a>(
     Ok(planned)
 }
 
+fn finish_graph(
+    graph: Graph<GraphNodeRef<'_>>,
+) -> Result<ValidatedGraph<GraphNodeRef<'_>>, G2gError> {
+    for index in 0..graph.node_count() {
+        let node = NodeId(index as u32);
+        if graph.node_kind(node) != Some(NodeKind::Transform) {
+            continue;
+        }
+        let Some(GraphNodeRef::Element(element)) = graph.element(node) else {
+            continue;
+        };
+        if element.metadata().is_sink() {
+            let name = graph.node_name(node).unwrap_or(element.log_category());
+            crate::g2g_error!(
+                crate::log::Target::category(crate::log::RUNTIME_CATEGORY),
+                "{name} is a sink and has no output, but the graph links it to a downstream element"
+            );
+            return Err(G2gError::CapsMismatch);
+        }
+    }
+    graph.finish().map_err(|_| G2gError::CapsMismatch)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
     graph: Graph<GraphNodeRef<'a>>,
@@ -2514,7 +2537,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
     // `ticker` still wins.
     let ticker = ticker.or_else(|| clock.as_ticker());
     let link_capacity: usize = link_capacity.into().get();
-    let mut vg = graph.finish().map_err(|_| G2gError::CapsMismatch)?;
+    let mut vg = finish_graph(graph)?;
     let n = vg.node_count();
     if n < 2 {
         return Err(G2gError::CapsMismatch);
@@ -2926,7 +2949,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     // own. An explicit `ticker` still wins.
     let ticker = ticker.or_else(|| clock.shared_ticker());
     let link_capacity: usize = link_capacity.into().get();
-    let mut vg = graph.finish().map_err(|_| G2gError::CapsMismatch)?;
+    let mut vg = finish_graph(graph)?;
     let n = vg.node_count();
     if n < 2 {
         return Err(G2gError::CapsMismatch);
@@ -3670,9 +3693,7 @@ pub async fn negotiate_graph_explained<'a>(
     ),
     NegotiateError,
 > {
-    let mut vg = graph
-        .finish()
-        .map_err(|_| NegotiateError::Setup(G2gError::CapsMismatch))?;
+    let mut vg = finish_graph(graph).map_err(NegotiateError::Setup)?;
     let n = vg.node_count();
     if n < 2 {
         return Err(NegotiateError::Setup(G2gError::CapsMismatch));

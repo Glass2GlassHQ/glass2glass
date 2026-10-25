@@ -156,6 +156,10 @@ pub enum SpecError {
     Graph(GraphError),
     /// The JSON / YAML did not deserialize (the message is the parser's).
     Deserialize(String),
+    LinkFromSink {
+        node: String,
+        downstream: String,
+    },
 }
 
 impl From<GraphError> for SpecError {
@@ -192,6 +196,10 @@ impl core::fmt::Display for SpecError {
             }
             SpecError::Graph(e) => write!(f, "graph error: {e:?}"),
             SpecError::Deserialize(m) => write!(f, "deserialize error: {m}"),
+            SpecError::LinkFromSink { node, downstream } => write!(
+                f,
+                "could not link node '{node}' to '{downstream}': '{node}' is a sink and has no output"
+            ),
         }
     }
 }
@@ -322,6 +330,17 @@ pub fn build_spec(registry: &Registry, spec: &GraphSpec) -> Result<Graph<GraphNo
             let mut el = registry
                 .make_element(&name)
                 .ok_or_else(|| SpecError::UnknownElement(name.clone()))?;
+            if el.metadata().is_sink() {
+                let downstream = edge_idx
+                    .iter()
+                    .find(|&&(source, _)| source == i)
+                    .map(|&(_, consumer)| spec.nodes[consumer].id.clone())
+                    .expect("a node with outgoing edges");
+                return Err(SpecError::LinkFromSink {
+                    node: node.id.clone(),
+                    downstream,
+                });
+            }
             apply_props(&mut el, &node.id, &kv).map_err(SpecError::Property)?;
             graph.add_transform(GraphNodeRef::Element(el))
         };

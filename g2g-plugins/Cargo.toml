@@ -1587,6 +1587,10 @@ required-features = ["hls", "ffmpeg", "wayland-sink", "pipewire"]
 name = "m636_fixed_rank_tensor_caps"
 harness = false
 
+[[test]]
+name = "m1910_sink_has_no_output"
+required-features = ["declarative"]
+
 [lints]
 workspace = true
 

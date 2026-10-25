@@ -454,6 +454,11 @@ impl ElementMetadata {
             && self.description.is_empty()
             && self.author.is_empty())
     }
+
+    // as in gst, an element classed `Sink` has no output pad
+    pub fn is_sink(&self) -> bool {
+        self.klass.split('/').any(|class| class == "Sink")
+    }
 }
 
 /// Why a [`set_property`](crate::AsyncElement::set_property) (or a value parse)

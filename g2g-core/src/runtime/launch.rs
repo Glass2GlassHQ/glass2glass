@@ -250,6 +250,10 @@ pub enum ParseError {
     StreamIndexUnsupported(String),
     // a parsebin found no demuxer chain from its input caps to an elementary stream
     NoParseChain(String),
+    LinkFromSink {
+        sink: String,
+        downstream: String,
+    },
 }
 
 impl ParseError {
@@ -433,6 +437,10 @@ impl core::fmt::Display for ParseError {
             ParseError::NoParseChain(caps) => write!(
                 f,
                 "parsebin: no demuxer chain from {caps} to an elementary stream"
+            ),
+            ParseError::LinkFromSink { sink, downstream } => write!(
+                f,
+                "could not link {sink} to {downstream}: {sink} is a sink and has no output"
             ),
         }
     }
@@ -3519,6 +3527,17 @@ fn build_graph(
             graph.add_sink(GraphNodeRef::Element(el))
         } else {
             let el = build_element(registry, &spec.name, &spec.props)?;
+            if el.metadata().is_sink() {
+                let downstream = links
+                    .iter()
+                    .find(|&&(source, ..)| source == ei)
+                    .map(|&(_, consumer, ..)| specs[consumer].name.clone())
+                    .expect("an element with outgoing links");
+                return Err(ParseError::LinkFromSink {
+                    sink: spec.name.clone(),
+                    downstream,
+                });
+            }
             graph.add_transform(GraphNodeRef::Element(el))
         };
         // M842: a `name=` is the element's instance name at run time, not just

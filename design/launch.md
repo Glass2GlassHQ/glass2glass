@@ -69,6 +69,12 @@ reference opens a branch, with `tee` the structural fan-out node broadcasting to
 every branch, its width derived from the branch count. Roles follow
 connectivity.
 
+An element classed `Sink` (`ElementMetadata::is_sink`) has no output pad, as in
+gst. A launch line or a declarative document that links one to a downstream
+element fails to build with `LinkFromSink`, and a hand-built `Graph` that puts
+one in a transform node fails `run_graph` before negotiation, logging the sink's
+name.
+
 A named demuxer with several branches (`tsdemux name=d d. ! ... d. ! ...`) is
 built at parse time with one port per branch. A file upstream is probed for its
 streams by a `DemuxSelectHook`. A network source has nothing to probe before the
