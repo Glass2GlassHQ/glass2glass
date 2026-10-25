@@ -393,6 +393,8 @@ pub mod multipart;
 // compute dispatch, System or MemoryDomain::WgpuTexture out. Shares the wgpu
 // GPU feature with the sink that consumes its textures.
 #[cfg(feature = "wgpu-sink")]
+pub mod wgpucolorconvert;
+#[cfg(feature = "wgpu-sink")]
 pub mod wgpucompositor;
 #[cfg(feature = "wgpu-sink")]
 pub mod wgpusink;

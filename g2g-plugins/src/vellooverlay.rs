@@ -8,14 +8,17 @@
 //! detection, a translucent image fill per segmentation mask, and a dashed
 //! rectangle per region of interest.
 //!
-//! `Caps::RawVideo{Rgba8}` in (system memory), [`MemoryDomain::WgpuTexture`] out:
-//! the input picture is drawn into a Vello scene as a full-frame image, the
-//! analytics are drawn on top, and the scene is rendered into a
-//! `wgpu::Texture` that the output frame carries by keep-alive. Nothing is read
-//! back to the CPU, so a downstream GPU sink presents it directly (the keep-on-GPU
-//! contract the decode-side CUDA / D3D11 domains already use). The pixel format
-//! and geometry are unchanged, so the negotiated caps are identity; only the
-//! memory domain changes.
+//! `Caps::RawVideo{Rgba8}` in, [`MemoryDomain::WgpuTexture`] out: the input
+//! picture is drawn into a Vello scene as a full-frame image, the analytics are
+//! drawn on top, and the scene is rendered into a `wgpu::Texture` that the
+//! output frame carries by keep-alive. The analytics overlay takes the picture
+//! from system memory or from an `Rgba8Unorm` [`MemoryDomain::WgpuTexture`]
+//! frame, which Vello copies into its image atlas on the GPU, so a GPU-decoded
+//! frame (through `WgpuColorConvert`) is drawn on without leaving the GPU.
+//! Nothing is read back to the CPU, so a downstream GPU sink presents it
+//! directly (the keep-on-GPU contract the decode-side CUDA / D3D11 domains
+//! already use). The pixel format and geometry are unchanged, so the
+//! negotiated caps are identity; only the memory domain changes.
 //!
 //! `vello-overlay` feature (implies `std` + `analytics`). The CPU overlay remains
 //! the `no_std` baseline; this element is never on the RTOS path.
@@ -161,30 +164,41 @@ async fn ensure_gpu(gpu: &mut Option<Gpu>, ctx: &Option<GpuContext>) -> Result<(
         Some(ctx) => ctx,
         None => GpuContext::headless().await?,
     };
-    let device = ctx.device;
-    let queue = ctx.queue;
-    let renderer = Renderer::new(
-        &device,
-        RendererOptions {
-            use_cpu: false,
-            // Area AA only: we never request MSAA, so do not compile those
-            // pipeline permutations.
-            antialiasing_support: AaSupport {
-                area: true,
-                msaa8: false,
-                msaa16: false,
-            },
-            num_init_threads: None,
-            pipeline_cache: None,
-        },
-    )
-    .map_err(gpu_err)?;
-    *gpu = Some(Gpu {
-        device,
-        queue,
-        renderer,
-    });
+    *gpu = Some(Gpu::new(ctx.device, ctx.queue)?);
     Ok(())
+}
+
+impl Gpu {
+    fn new(device: wgpu::Device, queue: wgpu::Queue) -> Result<Self, G2gError> {
+        let renderer = Renderer::new(
+            &device,
+            RendererOptions {
+                use_cpu: false,
+                // Area AA only: we never request MSAA, so do not compile those
+                // pipeline permutations.
+                antialiasing_support: AaSupport {
+                    area: true,
+                    msaa8: false,
+                    msaa16: false,
+                },
+                num_init_threads: None,
+                pipeline_cache: None,
+            },
+        )
+        .map_err(gpu_err)?;
+        Ok(Self {
+            device,
+            queue,
+            renderer,
+        })
+    }
+}
+
+/// The picture an analytics overlay draws over: host pixels, or an RGBA texture
+/// on the device the overlay renders on.
+enum FramePicture {
+    Pixels(Vec<u8>),
+    Texture(wgpu::Texture),
 }
 
 /// Draw `rgba` (a full-frame `w` x `h` picture, consumed) as the scene's
@@ -245,6 +259,7 @@ impl VelloAnalyticsOverlay {
     /// Render on a shared [`GpuContext`] instead of opening a private device.
     /// Pass the same context the downstream [`WgpuSink`](crate::wgpusink) uses so
     /// the produced texture lives on the sink's device and presents with no copy.
+    /// A `WgpuTexture` input frame is drawn on the device it lives on instead.
     pub fn with_context(mut self, ctx: GpuContext) -> Self {
         self.ctx = Some(ctx);
         self
@@ -292,11 +307,45 @@ impl VelloAnalyticsOverlay {
         )
     }
 
-    /// Render `rgba` (full-frame image, consumed) with `shapes` drawn over it into
-    /// a fresh `wgpu::Texture`, returned for the output frame to own.
+    /// The full-frame picture of a system-memory or RGBA `WgpuTexture` frame,
+    /// opening the GPU on the texture's own device when it is the first frame.
+    async fn frame_picture(&mut self, domain: &MemoryDomain) -> Result<FramePicture, G2gError> {
+        let MemoryDomain::WgpuTexture(owned) = domain else {
+            let slice = domain.require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+            let need = self.width as usize * self.height as usize * 4;
+            if slice.len() < need {
+                return Err(G2gError::CapsMismatch);
+            }
+            let rgba = slice[..need].to_vec();
+            ensure_gpu(&mut self.gpu, &self.ctx).await?;
+            return Ok(FramePicture::Pixels(rgba));
+        };
+        let source = owned
+            .keep_alive()
+            .as_any()
+            .downcast_ref::<WgpuTextureKeepAlive>()
+            .ok_or(G2gError::UnsupportedDomain)?;
+        let texture = source.texture();
+        // Vello copies the picture into its Rgba8Unorm atlas.
+        let copyable = texture.usage().contains(wgpu::TextureUsages::COPY_SRC)
+            && texture.format().remove_srgb_suffix() == wgpu::TextureFormat::Rgba8Unorm;
+        if !copyable {
+            return Err(G2gError::UnsupportedDomain);
+        }
+        if (texture.width(), texture.height()) != (self.width, self.height) {
+            return Err(G2gError::CapsMismatch);
+        }
+        if self.gpu.is_none() {
+            self.gpu = Some(Gpu::new(source.device().clone(), source.queue().clone())?);
+        }
+        Ok(FramePicture::Texture(texture.clone()))
+    }
+
+    /// Render `picture` with `shapes` drawn over it into a fresh
+    /// `wgpu::Texture`, returned for the output frame to own.
     fn render(
         &mut self,
-        rgba: Vec<u8>,
+        picture: FramePicture,
         shapes: &AnalyticsShapes,
     ) -> Result<wgpu::Texture, G2gError> {
         let (w, h) = (self.width, self.height);
@@ -305,8 +354,18 @@ impl VelloAnalyticsOverlay {
         let gpu = self.gpu.as_mut().ok_or(G2gError::NotConfigured)?;
 
         let mut scene = Scene::new();
-        // The caller already owns this buffer, so move it into the blob.
-        draw_frame_image(&mut scene, rgba, w, h);
+        let registered = match picture {
+            // The caller already owns this buffer, so move it into the blob.
+            FramePicture::Pixels(rgba) => {
+                draw_frame_image(&mut scene, rgba, w, h);
+                None
+            }
+            FramePicture::Texture(texture) => {
+                let image = gpu.renderer.register_texture(texture);
+                scene.draw_image(&image, Affine::IDENTITY);
+                Some(image)
+            }
+        };
 
         // Mask fills first, so a box or ROI stroke stays readable over one.
         for mask in &shapes.masks {
@@ -337,7 +396,11 @@ impl VelloAnalyticsOverlay {
             }
         }
 
-        gpu.render_scene(&scene, w, h)
+        let rendered = gpu.render_scene(&scene, w, h);
+        if let Some(image) = registered {
+            gpu.renderer.unregister_texture(image);
+        }
+        rendered
     }
 }
 
@@ -402,10 +465,14 @@ impl AsyncElement for VelloAnalyticsOverlay {
     where
         Self: 'a;
 
-    /// Reads host memory, so it takes system frames only. The allocation
-    /// cascade turns that into a download demand on a GPU producer.
+    /// Host memory, or an RGBA texture drawn where it lies.
     fn input_domains(&self) -> g2g_core::memory::DomainSet {
         g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+            .with(g2g_core::memory::MemoryDomainKind::WgpuTexture)
+    }
+
+    fn output_memory(&self) -> g2g_core::memory::MemoryDomainKind {
+        g2g_core::memory::MemoryDomainKind::WgpuTexture
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -452,17 +519,8 @@ impl AsyncElement for VelloAnalyticsOverlay {
                         .get::<AnalyticsMeta>()
                         .map(AnalyticsShapes::collect)
                         .unwrap_or_default();
-                    let slice = frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let need = self.width as usize * self.height as usize * 4;
-                    if slice.len() < need {
-                        return Err(G2gError::CapsMismatch);
-                    }
-                    let rgba = slice[..need].to_vec();
-
-                    ensure_gpu(&mut self.gpu, &self.ctx).await?;
-                    let texture = self.render(rgba, &shapes)?;
+                    let picture = self.frame_picture(&frame.domain).await?;
+                    let texture = self.render(picture, &shapes)?;
                     let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
 
                     let domain = MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
@@ -1404,6 +1462,120 @@ mod tests {
             top_edge.iter().any(|p| p[0] < 150),
             "a gap leaves the ROI edge unstroked: {top_edge:?}"
         );
+        assert_eq!(ov.drawn_count(), 1);
+    }
+
+    /// A GPU-resident RGBA frame is drawn on where it lies: the overlay adopts the
+    /// texture's device, the box strokes land in the palette colour, and every
+    /// pixel clear of the outline keeps the input value exactly.
+    #[tokio::test]
+    async fn renders_box_over_wgpu_texture_input() {
+        let _gpu = crate::GPU_TEST_LOCK.lock().await;
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping Vello texture-input test");
+            return;
+        };
+        let (w, h) = (64u32, 64u32);
+        let mut input = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                input.extend_from_slice(&[(x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8, 255]);
+            }
+        }
+        let size = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
+        let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test-rgba-frame"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        ctx.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &input,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            size,
+        );
+        let mut frame = Frame::new(
+            MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
+                w,
+                h,
+                alloc::sync::Arc::new(WgpuTextureKeepAlive::new(
+                    ctx.device.clone(),
+                    ctx.queue.clone(),
+                    texture,
+                )),
+            )),
+            FrameTiming::default(),
+            0,
+        );
+        let mut analytics = AnalyticsMeta::new();
+        // box outline at pixels 16 and 48 on both axes
+        analytics.add_detection(det(0.25, 0.25, 0.5, 0.5, 0));
+        frame.meta.attach(analytics);
+
+        let mut ov = VelloAnalyticsOverlay::new().with_thickness(4.0);
+        ov.configure_pipeline(&rgba_caps(w, h)).unwrap();
+        let mut sink = FrameSink::default();
+        ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+
+        let out = sink.last.expect("frame forwarded");
+        assert!(out.meta.get::<AnalyticsMeta>().is_some());
+        let MemoryDomain::WgpuTexture(owned) = &out.domain else {
+            panic!("output is a GPU texture domain");
+        };
+        let tex = crate::gpu::texture_of(owned).expect("texture keep-alive");
+        let pixels = crate::gpu::read_rgba_texture_dq(&ctx.device, &ctx.queue, tex).unwrap();
+        let px = |x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+        };
+        let red = palette_rgb(0);
+        let stroke = [red[0], red[1], red[2], 255];
+        for (x, y) in [(32, 15), (32, 48), (15, 32), (48, 32)] {
+            assert_eq!(px(x, y), stroke, "stroke pixel ({x}, {y})");
+        }
+        // the 4px stroke covers 14..18 and 46..50, antialiasing one more pixel
+        let near_outline = |x: u32, y: u32| {
+            let within = |v: u32, lo: u32, hi: u32| (lo..hi).contains(&v);
+            within(x, 13, 51) && within(y, 13, 51) && !(within(x, 19, 45) && within(y, 19, 45))
+        };
+        let mut checked = 0;
+        for y in 0..h {
+            for x in 0..w {
+                if near_outline(x, y) {
+                    continue;
+                }
+                let i = ((y * w + x) * 4) as usize;
+                assert_eq!(
+                    px(x, y),
+                    input[i..i + 4],
+                    "pixel ({x}, {y}) is the input frame"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 3000);
         assert_eq!(ov.drawn_count(), 1);
     }
 }

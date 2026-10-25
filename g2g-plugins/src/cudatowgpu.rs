@@ -273,7 +273,7 @@ impl AsyncElement for CudaToWgpu {
                         domain,
                         timing: frame.timing,
                         sequence: frame.sequence,
-                        meta: Default::default(),
+                        meta: frame.meta,
                     };
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }

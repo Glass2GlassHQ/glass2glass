@@ -839,6 +839,17 @@ the shared `gpu::WgpuTextureKeepAlive` type. This closes the analytics path end 
 end: `decode -> tee -> {detect, video} -> overlay -> WgpuSink`, detections
 rendered on the GPU reaching the display with no system-memory round-trip.
 
+A CUDA-decoded frame takes the same path with no download:
+`nvdec -> inference -> CudaToWgpu -> WgpuColorConvert -> VelloAnalyticsOverlay ->
+WgpuSink`. `CudaToWgpu` keeps the frame's metadata, so the detections an
+inference element attached in CUDA memory survive the bridge.
+`wgpucolorconvert::WgpuColorConvert` (`wgpu-sink`) renders the NV12 texture into
+an `Rgba8Unorm` texture with the sink's YCbCr -> RGB shaders, and the overlay
+registers an RGBA texture input with Vello as the frame image, which Vello copies
+into its image atlas on the GPU. Both elements adopt the device the incoming
+texture lives on, so the whole chain runs on the CUDA bridge's interop device and
+the sink presents on that device too.
+
 Window and event-loop ownership stay with the application, since wgpu surfaces are
 built from a window handle and must drive the app's event loop, so the sink
 presents to a surface the app supplies rather than opening its own window. The app

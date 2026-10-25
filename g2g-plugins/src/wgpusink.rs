@@ -83,7 +83,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 /// fetches texels instead of sampling. The picture size comes from the
 /// negotiated caps: at an odd width the texture is one column wider than the
 /// picture.
-const FRAGMENT_PACKED_NV12: &str = r#"
+pub(crate) const FRAGMENT_PACKED_NV12: &str = r#"
 @group(0) @binding(0) var nv12_tex: texture_2d<u32>;
 @group(0) @binding(1) var<uniform> picture_size: vec2<u32>;
 
@@ -115,7 +115,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 /// chroma texel off the left-sited 4:2:0 grid and shifts colour across edges.
 /// The picture size comes from the negotiated caps: a decoder may round the
 /// planes up to an even size.
-const FRAGMENT_MULTIPLANAR_NV12: &str = r#"
+pub(crate) const FRAGMENT_MULTIPLANAR_NV12: &str = r#"
 @group(0) @binding(0) var luma_plane: texture_2d<f32>;
 @group(0) @binding(1) var chroma_plane: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> picture_size: vec2<u32>;
@@ -137,7 +137,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 /// weights the GL sink's shader gets) followed by `plane_fetch`, the per-layout
 /// stage above that reads the planes. All three sample values are normalized,
 /// with chroma still centred on the neutral 0.5.
-fn fragment_nv12(colorimetry: Colorimetry, plane_fetch: &str) -> alloc::string::String {
+pub(crate) fn fragment_nv12(colorimetry: Colorimetry, plane_fetch: &str) -> alloc::string::String {
     let w = YuvToRgbWeights::new(colorimetry);
     alloc::format!(
         r#"
@@ -236,7 +236,7 @@ fn blit_bindings(layout: WgpuTextureLayout) -> BlitBindings {
 
 /// A blit pipeline plus the bind group layout its fragment stage expects.
 #[derive(Debug)]
-struct BlitPipeline {
+pub(crate) struct BlitPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
 }
@@ -245,7 +245,7 @@ impl BlitPipeline {
     /// Build the pipeline for one source layout: `fragment_stage` is appended to
     /// the shared vertex stage, and the bind group layout matches the bindings
     /// that stage declares (see [`blit_bindings`]).
-    fn build(
+    pub(crate) fn build(
         device: &wgpu::Device,
         target_format: wgpu::TextureFormat,
         layout: WgpuTextureLayout,
@@ -328,6 +328,106 @@ impl BlitPipeline {
             pipeline,
             bind_group_layout,
         }
+    }
+
+    /// Record a pass that draws `src`, stored in `layout`, over the whole of
+    /// `target`.
+    pub(crate) fn encode(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        src: &wgpu::Texture,
+        layout: WgpuTextureLayout,
+        resources: &BlitResources,
+        target: &wgpu::TextureView,
+    ) {
+        let bindings = blit_bindings(layout);
+        // A two-plane NV12 texture cannot be bound whole, only through its two
+        // plane views.
+        let views: Vec<wgpu::TextureView> = match layout {
+            WgpuTextureLayout::MultiplanarNv12 => Vec::from(nv12_plane_views(src)),
+            WgpuTextureLayout::Rgba | WgpuTextureLayout::PackedNv12 => {
+                Vec::from([src.create_view(&wgpu::TextureViewDescriptor::default())])
+            }
+        };
+        let mut entries: Vec<wgpu::BindGroupEntry> = views
+            .iter()
+            .enumerate()
+            .map(|(plane, view)| wgpu::BindGroupEntry {
+                binding: plane as u32,
+                resource: wgpu::BindingResource::TextureView(view),
+            })
+            .collect();
+        if bindings.sampler {
+            entries.push(wgpu::BindGroupEntry {
+                binding: bindings.sampler_binding(),
+                resource: wgpu::BindingResource::Sampler(&resources.sampler),
+            });
+        }
+        if bindings.picture_size {
+            entries.push(wgpu::BindGroupEntry {
+                binding: bindings.picture_size_binding(),
+                resource: resources.picture_size.as_entire_binding(),
+            });
+        }
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("wgpu-sink-bg"),
+            layout: &self.bind_group_layout,
+            entries: &entries,
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("wgpu-sink-blit"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+}
+
+/// The sampler and picture size uniform a blit binds besides the source planes.
+#[derive(Debug)]
+pub(crate) struct BlitResources {
+    sampler: wgpu::Sampler,
+    picture_size: wgpu::Buffer,
+}
+
+impl BlitResources {
+    pub(crate) fn new(device: &wgpu::Device) -> Self {
+        Self {
+            sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("wgpu-sink-sampler"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
+            picture_size: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("wgpu-sink-picture-size"),
+                size: PICTURE_SIZE_BYTES,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+        }
+    }
+
+    pub(crate) fn write_picture_size(&self, queue: &wgpu::Queue, width: u32, height: u32) {
+        queue.write_buffer(
+            &self.picture_size,
+            0,
+            &[width.to_le_bytes(), height.to_le_bytes()].concat(),
+        );
     }
 }
 
@@ -478,8 +578,7 @@ pub struct WgpuSink {
     nv12_colorimetry: Colorimetry,
     /// Format of whatever the blits render into, needed to rebuild a pipeline.
     target_format: wgpu::TextureFormat,
-    sampler: wgpu::Sampler,
-    picture_size: wgpu::Buffer,
+    resources: BlitResources,
     target: Target,
     /// Pixel format + geometry negotiated for the incoming frames, which a
     /// system-memory frame needs to be uploaded (a GPU frame carries its own).
@@ -549,18 +648,7 @@ impl WgpuSink {
 
     fn build(ctx: GpuContext, target_format: wgpu::TextureFormat, target: Target) -> Self {
         let device = &ctx.device;
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("wgpu-sink-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-        let picture_size = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("wgpu-sink-picture-size"),
-            size: PICTURE_SIZE_BYTES,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let resources = BlitResources::new(device);
         Self {
             rgba_blit: BlitPipeline::build(
                 device,
@@ -583,8 +671,7 @@ impl WgpuSink {
             nv12_colorimetry: Colorimetry::UNKNOWN,
             target_format,
             ctx,
-            sampler,
-            picture_size,
+            resources,
             target,
             source: None,
             upload: None,
@@ -806,43 +893,6 @@ impl WgpuSink {
             WgpuTextureLayout::PackedNv12 => &self.nv12_blit,
             WgpuTextureLayout::MultiplanarNv12 => &self.nv12_planes_blit,
         };
-        let bindings = blit_bindings(layout);
-        // A two-plane NV12 texture cannot be bound whole, only through its two
-        // plane views.
-        let views: Vec<wgpu::TextureView> = match layout {
-            WgpuTextureLayout::MultiplanarNv12 => Vec::from(nv12_plane_views(src)),
-            WgpuTextureLayout::Rgba | WgpuTextureLayout::PackedNv12 => {
-                Vec::from([src.create_view(&wgpu::TextureViewDescriptor::default())])
-            }
-        };
-        let mut entries: Vec<wgpu::BindGroupEntry> = views
-            .iter()
-            .enumerate()
-            .map(|(plane, view)| wgpu::BindGroupEntry {
-                binding: plane as u32,
-                resource: wgpu::BindingResource::TextureView(view),
-            })
-            .collect();
-        if bindings.sampler {
-            entries.push(wgpu::BindGroupEntry {
-                binding: bindings.sampler_binding(),
-                resource: wgpu::BindingResource::Sampler(&self.sampler),
-            });
-        }
-        if bindings.picture_size {
-            entries.push(wgpu::BindGroupEntry {
-                binding: bindings.picture_size_binding(),
-                resource: self.picture_size.as_entire_binding(),
-            });
-        }
-        let bind_group = self
-            .ctx
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("wgpu-sink-bg"),
-                layout: &blit.bind_group_layout,
-                entries: &entries,
-            });
 
         // Acquire the destination view. For a surface, hold the SurfaceTexture
         // until after submit so it can be presented.
@@ -879,27 +929,14 @@ impl WgpuSink {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("wgpu-sink"),
             });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("wgpu-sink-blit"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &dst_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&blit.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
+        blit.encode(
+            &self.ctx.device,
+            &mut encoder,
+            src,
+            layout,
+            &self.resources,
+            &dst_view,
+        );
         self.ctx.queue.submit([encoder.finish()]);
         if let Some(frame) = surface_frame {
             frame.present();
@@ -968,11 +1005,8 @@ impl AsyncElement for WgpuSink {
         if let Caps::RawVideo { colorimetry, .. } = absolute_caps {
             self.set_nv12_colorimetry(*colorimetry);
         }
-        self.ctx.queue.write_buffer(
-            &self.picture_size,
-            0,
-            &[source.width.to_le_bytes(), source.height.to_le_bytes()].concat(),
-        );
+        self.resources
+            .write_picture_size(&self.ctx.queue, source.width, source.height);
         self.source = Some(source);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
