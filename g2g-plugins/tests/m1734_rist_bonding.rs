@@ -11,6 +11,7 @@ use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::{Command, Stdio};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -33,8 +34,8 @@ use g2g_plugins::ristsrc::RistSrc;
 mod rist_common;
 use rist_common::{
     assert_recovered_through, bound_even_port_pair, collect_from_gst, free_even_port, loopback,
-    output_path, spawn_gst, stop_gst, synthetic_ts, LossyRelay, PacedTsSource, PeerProcess,
-    RelayLog, ZeroClock, GST_BIND_WAIT, GST_DEADLINE, RELAY_POLL,
+    output_path, spawn_gst, stop_gst, synthetic_ts, FirstMediaOrder, LossyRelay, PacedTsSource,
+    PeerProcess, RelayLog, ZeroClock, GST_BIND_WAIT, GST_DEADLINE, RELAY_POLL,
 };
 
 const MEDIA_SSRC: u32 = 0x1234_5670;
@@ -480,6 +481,7 @@ fn relays_to(
     lossy_link: usize,
     dropped: &'static [u16],
 ) -> Vec<LossyRelay> {
+    let first_link_led = Arc::new(AtomicBool::new(false));
     receiver_ports
         .iter()
         .enumerate()
@@ -489,7 +491,12 @@ fn relays_to(
             } else {
                 NO_DROPS
             };
-            LossyRelay::start(loopback(port), dropped)
+            let order = if link == FIRST_LINK {
+                FirstMediaOrder::Leads(first_link_led.clone())
+            } else {
+                FirstMediaOrder::Follows(first_link_led.clone())
+            };
+            LossyRelay::start(loopback(port), dropped, order)
         })
         .collect()
 }
@@ -714,7 +721,11 @@ fn extension_sink_properties(first_sequence: u16, port: u16) -> Vec<(&'static st
 async fn the_extension_carries_g2g_to_g2g_across_the_sequence_wrap() {
     let sent = ts_with_null_packets(SENT_RTP_PACKETS);
     let receiver_port = free_even_port();
-    let relay = LossyRelay::start(loopback(receiver_port), DROPPED_ACROSS_THE_WRAP);
+    let relay = LossyRelay::start(
+        loopback(receiver_port),
+        DROPPED_ACROSS_THE_WRAP,
+        FirstMediaOrder::Unordered,
+    );
     let first_sequence = first_sequence_before_wrap(PACKETS_BEFORE_WRAP);
     let sink = ristsink_with(&extension_sink_properties(first_sequence, relay.media_port));
     let source = ristsrc_with(&[
@@ -888,7 +899,11 @@ async fn gst_ristrtpext_feeds_ristsrc_across_the_wrap() {
     }
     let played = ts_with_null_packets(GST_SENT_RTP_PACKETS);
     let receiver_port = free_even_port();
-    let relay = LossyRelay::start(loopback(receiver_port), NO_DROPS);
+    let relay = LossyRelay::start(
+        loopback(receiver_port),
+        NO_DROPS,
+        FirstMediaOrder::Unordered,
+    );
     let first_sequence = first_sequence_before_wrap(GST_PACKETS_BEFORE_WRAP);
     let source = ristsrc_with(&[
         ("address", PropValue::Str("127.0.0.1".into())),
@@ -1081,7 +1096,11 @@ async fn g2g_ristsink_feeds_ristreceiver_through_loss() {
         sent.len(),
     );
     tokio::time::sleep(GST_BIND_WAIT).await;
-    let relay = LossyRelay::start(loopback(receiver_port), DROPPED_ON_LOSSY_LINK);
+    let relay = LossyRelay::start(
+        loopback(receiver_port),
+        DROPPED_ON_LOSSY_LINK,
+        FirstMediaOrder::Unordered,
+    );
     let sink = ristsink_with(&[
         ("address", PropValue::Str("127.0.0.1".into())),
         ("port", PropValue::Uint(relay.media_port.into())),

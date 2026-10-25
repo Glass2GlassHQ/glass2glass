@@ -228,6 +228,34 @@ impl RelayLog {
     }
 }
 
+// How long a following link holds its first media packet after the leading link handled its own.
+const FOLLOWER_LAG: Duration = Duration::from_millis(10);
+const FOLLOWER_POLL: Duration = Duration::from_millis(1);
+
+// gst ristsrc anchors its jitterbuffer on the first packet any link delivers and
+// drops lower sequence numbers that arrive after it, so bonded relays start in link order.
+#[allow(dead_code)] // only the bonding tests order their links
+pub(crate) enum FirstMediaOrder {
+    Unordered,
+    Leads(Arc<AtomicBool>),
+    Follows(Arc<AtomicBool>),
+}
+
+impl FirstMediaOrder {
+    fn take_turn(&self, stop: &AtomicBool) {
+        match self {
+            Self::Unordered => {}
+            Self::Leads(led) => led.store(true, Ordering::Release),
+            Self::Follows(led) => {
+                while !led.load(Ordering::Acquire) && !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(FOLLOWER_POLL);
+                }
+                std::thread::sleep(FOLLOWER_LAG);
+            }
+        }
+    }
+}
+
 /// A UDP forwarder between a RIST sender and receiver. It drops the media
 /// packets at the given indices once, passes every retransmission and every
 /// RTCP packet, and records the NACK forms the receiver sent back.
@@ -239,7 +267,11 @@ pub(crate) struct LossyRelay {
 }
 
 impl LossyRelay {
-    pub(crate) fn start(receiver_media: SocketAddr, dropped_indices: &'static [u16]) -> Self {
+    pub(crate) fn start(
+        receiver_media: SocketAddr,
+        dropped_indices: &'static [u16],
+        first_media_order: FirstMediaOrder,
+    ) -> Self {
         let (media_in, rtcp_in) = bound_even_port_pair();
         let media_port = media_in.local_addr().expect("bound address").port();
         let media_out = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind relay output");
@@ -268,6 +300,9 @@ impl LossyRelay {
                 let packet = &datagram[..length];
                 if let Some(parsed) = RtpHeader::parse(packet) {
                     let header = parsed.header;
+                    if first_original.is_none() && !rist::is_retransmission(header.ssrc) {
+                        first_media_order.take_turn(&worker_stop);
+                    }
                     let mut log = worker_log.lock().unwrap();
                     if rist::is_retransmission(header.ssrc) {
                         log.retransmissions += 1;

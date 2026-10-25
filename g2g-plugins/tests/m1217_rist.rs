@@ -35,8 +35,8 @@ use g2g_plugins::rtpjitter::{JitterConfig, RtpJitterBuffer};
 mod rist_common;
 use rist_common::{
     assert_recovered_through, collect_from_gst, free_even_port, loopback, output_path, spawn_gst,
-    stop_gst, synthetic_ts, LossyRelay, PacedTsSource, RelayLog, ZeroClock, GST_BIND_WAIT,
-    GST_DEADLINE,
+    stop_gst, synthetic_ts, FirstMediaOrder, LossyRelay, PacedTsSource, RelayLog, ZeroClock,
+    GST_BIND_WAIT, GST_DEADLINE,
 };
 
 const MEDIA_SSRC: u32 = 0x1234_5670;
@@ -594,7 +594,11 @@ async fn g2g_to_g2g_without_loss() {
 async fn g2g_to_g2g_recovers_dropped_packets() {
     let sent = synthetic_ts(SENT_RTP_PACKETS);
     let receiver_port = free_even_port();
-    let relay = LossyRelay::start(loopback(receiver_port), DROPPED_FROM_G2G);
+    let relay = LossyRelay::start(
+        loopback(receiver_port),
+        DROPPED_FROM_G2G,
+        FirstMediaOrder::Unordered,
+    );
     let received = g2g_to_g2g(
         relay.media_port,
         receiver_port,
@@ -623,7 +627,11 @@ async fn gst_ristsink_feeds_ristsrc_through_loss() {
     let reference = output_path("g2g_m1217_gst_sent.ts");
     let received_path = output_path("g2g_m1217_from_gst.ts");
     let receiver_port = free_even_port();
-    let relay = LossyRelay::start(loopback(receiver_port), DROPPED_FROM_GST);
+    let relay = LossyRelay::start(
+        loopback(receiver_port),
+        DROPPED_FROM_GST,
+        FirstMediaOrder::Unordered,
+    );
 
     let mut source = ristsrc_on(receiver_port);
     let mut recorder = FileSink::new(&received_path);
@@ -689,7 +697,11 @@ async fn ristsink_feeds_gst_ristsrc_through_loss() {
         received_path.display()
     ));
     tokio::time::sleep(GST_BIND_WAIT).await;
-    let relay = LossyRelay::start(loopback(receiver_port), DROPPED_FROM_G2G);
+    let relay = LossyRelay::start(
+        loopback(receiver_port),
+        DROPPED_FROM_G2G,
+        FirstMediaOrder::Unordered,
+    );
 
     let mut player = PacedTsSource {
         stream: sent.clone(),
