@@ -350,8 +350,11 @@ frame's running time plus its signed jitter, at the moment the sink judged the
 frame, which the report carries as `taken_ns` since the relay delivers it one push
 per element later. It also remembers when it pushed each of its last 64 frames,
 so a report on one of them gives the downstream delay, the time from its push to
-the sink's verdict. It drops a frame, before any Python call, when the frame's
-running time plus the sink's 20 ms bound is below that clock advanced to now plus
+the sink's verdict. That delay is mostly time spent waiting in full queues, so
+it overestimates once the queues drain, and `pyelement` drops nothing while
+the sink's latest report is on time or early. After a late report it drops a
+frame, before any Python call, when the frame's running time plus the sink's
+20 ms bound is below that clock advanced to now plus
 the hosted element's last run time and the downstream delay, that is when the
 frame would reach the sink later than the sink accepts. The last run time counts
 only for 100 ms after that run (`RUN_TIME_STALE_AFTER_NS`): a dropped frame never

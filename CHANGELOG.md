@@ -9,6 +9,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1900: `VelloAnalyticsOverlay` draws on RGBA wgpu textures, `WgpuColorConvert` converts NV12 wgpu textures to RGBA, and `CudaToWgpu` keeps frame metadata.
 - M1901: `VelloAnalyticsOverlay` draws the `show-label` / `show-track` / `show-score` captions.
 - M1902: `vellooverlay` and `wgpucolorconvert` are launch elements.
+- M1903: `pyelement` skips late frames only after the sink reports a late one.
 
 ## 0.10.0
 

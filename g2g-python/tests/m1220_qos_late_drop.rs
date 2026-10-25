@@ -246,9 +246,9 @@ fn a_run_time_measured_long_ago_no_longer_predicts() {
             .block_on(element.process(PipelinePacket::DataFrame(frame(pts_ns, sequence)), sink))
             .unwrap();
     };
-    // the sink is on time at frame 0, the 30 ms run alone makes 5 ms late
+    // the sink is just behind at frame 0, the 30 ms run alone makes 5 ms late
     sink.report = Some(QosMessage {
-        jitter_ns: 0,
+        jitter_ns: 1,
         running_time_ns: 0,
         taken_ns: 0,
     });
@@ -309,9 +309,9 @@ fn an_early_report_ends_the_drops_a_late_one_started() {
     assert_eq!(sink.packets.len(), 3);
 }
 
-// The sink reports its clock at frame 2's running time, when frame 0 reached it
+// The sink reports its clock at `jitter_ns` past frame 0, when frame 0 reached it
 // `delay` after this element pushed it.
-fn frame_two_is_dropped_after(delay: std::time::Duration) -> bool {
+fn frame_two_is_dropped_after(delay: std::time::Duration, jitter_ns: i64) -> bool {
     let mut element = counting_element();
     let mut sink = LateSink::default();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -322,7 +322,7 @@ fn frame_two_is_dropped_after(delay: std::time::Duration) -> bool {
         .unwrap();
     std::thread::sleep(delay);
     sink.report = Some(QosMessage {
-        jitter_ns: 2 * FRAME_PERIOD_NS as i64,
+        jitter_ns,
         running_time_ns: 0,
         taken_ns: 0,
     });
@@ -343,12 +343,19 @@ fn frame_two_is_dropped_after(delay: std::time::Duration) -> bool {
 
 #[test]
 fn the_learned_downstream_delay_counts_toward_lateness() {
+    let behind = 2 * FRAME_PERIOD_NS as i64;
     assert!(
-        !frame_two_is_dropped_after(std::time::Duration::ZERO),
+        !frame_two_is_dropped_after(std::time::Duration::ZERO, behind),
         "a frame due at the sink's clock is within the sink's bound"
     );
     assert!(
-        frame_two_is_dropped_after(DOWNSTREAM_DELAY),
+        frame_two_is_dropped_after(DOWNSTREAM_DELAY, behind),
         "it reaches the sink a delay later, past the bound"
     );
+}
+
+#[test]
+fn a_learned_delay_drops_nothing_while_the_sink_is_early() {
+    // a delay this long makes frame 2 late by the arithmetic alone
+    assert!(!frame_two_is_dropped_after(3 * DOWNSTREAM_DELAY, -EARLY_NS));
 }

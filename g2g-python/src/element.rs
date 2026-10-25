@@ -50,6 +50,7 @@ const RUN_TIME_STALE_AFTER_NS: u64 = 100_000_000;
 struct SinkClock {
     running_time_ns: u64,
     taken_ns: u64,
+    behind: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -174,6 +175,10 @@ impl PyTransform {
         let Some(sink_clock) = self.sink_clock else {
             return false;
         };
+        // the delay learned through full queues predicts false lateness while the sink keeps up
+        if !sink_clock.behind {
+            return false;
+        }
         let Some(running_time) = self.running_time(frame) else {
             return false;
         };
@@ -226,6 +231,7 @@ impl PyTransform {
                 .running_time_ns
                 .saturating_add_signed(report.jitter_ns),
             taken_ns: report.taken_ns,
+            behind: report.jitter_ns > 0,
         });
     }
 
