@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+Breaking: `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, and `RtpRecvConfig` gains an `encoding` field.
+
 - M1900: `VelloAnalyticsOverlay` draws on RGBA wgpu textures, `WgpuColorConvert` converts NV12 wgpu textures to RGBA, and `CudaToWgpu` keeps frame metadata.
 - M1901: `VelloAnalyticsOverlay` draws the `show-label` / `show-track` / `show-score` captions.
 - M1902: `vellooverlay` and `wgpucolorconvert` are launch elements.

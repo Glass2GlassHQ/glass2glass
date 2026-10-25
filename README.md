@@ -1354,6 +1354,15 @@ Ubuntu, `pkgconf base-devel` on Arch.
 
 USAC (xHE-AAC) decode needs libavcodec 62 (ffmpeg 8) or later.
 
+From crates.io, `vaapi` fails to build against libva 2.23 or later, because
+cros-libva 0.0.12 lacks two VP9 encode fields that libva added. The glass2glass
+repo carries a fixed copy, so add it to your workspace `Cargo.toml`:
+
+```toml
+[patch.crates-io]
+cros-libva = { git = "https://github.com/Glass2GlassHQ/glass2glass" }
+```
+
 For the CUDA path, install the NVIDIA driver and CUDA runtime your
 distribution ships, with `libnvcuvid.so` and `libcuda.so` on the linker path.
 `Backend::NvdecCuvid` / `Backend::NvdecCuda` need an `ffmpeg` build with cuvid
