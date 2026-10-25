@@ -337,7 +337,7 @@ jobs:
           cargo package --workspace --locked --no-verify
           packaged="$RUNNER_TEMP/packaged"
           mkdir -p "$packaged"
-          patches=()
+          patches=(--config "patch.crates-io.cros-libva.path='$GITHUB_WORKSPACE/g2g-plugins/vendor/cros-libva'")
           for crate in target/package/*.crate; do
             tar xzf "$crate" -C "$packaged"
             name=$(basename "$crate" .crate)
