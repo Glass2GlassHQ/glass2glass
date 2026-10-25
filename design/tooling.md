@@ -69,7 +69,9 @@ line per field (media type, format, width, height, framerate, channels, rate)
 that the two sides compare on and never agree on, with each side's values. A set
 past four alternatives elides unless the `caps` category is at trace, and a link
 the solver had not reached prints `(not narrowed yet)`. An edge that survives
-narrowing but cannot reduce to one `Caps` logs `cannot fixate`.
+narrowing but cannot reduce to one `Caps` logs `cannot fixate`. A caps filter
+from a launch line prints as the line wrote it, with the number of alternatives
+it parses to, unless the `caps` category is at trace.
 
 Node labels come from the caller via `solve_graph_labeled`. The runner passes
 each element's `log_category`, so the narration reads `h264parse -> nvdec`, while

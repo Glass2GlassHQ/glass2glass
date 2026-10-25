@@ -19,6 +19,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1910: linking an element downstream of a sink fails the graph build and names the sink, as gst refuses the link.
 - M1911: `autovideosink` / `autoaudiosink` fall back to `fakevideosink` / `fakeaudiosink`, so a wrong-media stream fails negotiation headless too.
 - M1913: a transform that derives no output from its input names the caps it accepts, and a raw format mismatch hints `videoconvert` or `audioconvert`.
+- M1914: caps errors show a launch line's caps filter as written, and list the alternatives it parses to only at `G2G_CAPS_TRACE=trace`.
 - M1917: `font-family: monospace` picks an installed monospaced face when cosmic-text's default Noto Sans Mono is missing.
 
 ## 0.10.0

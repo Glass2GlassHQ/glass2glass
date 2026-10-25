@@ -296,6 +296,8 @@ struct Node<E> {
     /// Per-instance log category (a launch line's `log-category=`); `None` keeps
     /// the element type as the category.
     log_category: Option<String>,
+    /// A caps filter's caps as the launch line wrote them, for error messages.
+    written_caps: Option<String>,
     /// The caps the element's sink pad template declares, for error messages.
     declared_input_caps: Option<CapsSet>,
     /// Animated properties; `None` when nothing on this node is animated.
@@ -392,6 +394,7 @@ impl<E> Graph<E> {
             fanout: FanOutPolicy::FailLoud,
             name: None,
             log_category: None,
+            written_caps: None,
             declared_input_caps: None,
             #[cfg(feature = "runtime")]
             control: None,
@@ -424,6 +427,10 @@ impl<E> Graph<E> {
         self.nodes
             .get(node.0 as usize)
             .and_then(|n| n.log_category.as_deref())
+    }
+
+    pub fn set_node_written_caps(&mut self, node: NodeId, caps: String) {
+        self.nodes[node.0 as usize].written_caps = Some(caps);
     }
 
     pub fn set_node_declared_input_caps(&mut self, node: NodeId, caps: CapsSet) {
@@ -856,6 +863,10 @@ impl<E> ValidatedGraph<E> {
     /// any. The runner hands it to the element in place of the type category.
     pub fn node_log_category(&self, node: NodeId) -> Option<&str> {
         self.nodes[node.0 as usize].log_category.as_deref()
+    }
+
+    pub fn node_written_caps(&self, node: NodeId) -> Option<&str> {
+        self.nodes[node.0 as usize].written_caps.as_deref()
     }
 
     pub fn node_declared_input_caps(&self, node: NodeId) -> Option<&CapsSet> {

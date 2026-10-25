@@ -961,7 +961,11 @@ pub fn solve_graph_preferred<E>(
         } => {
             let (up, down) = (NodeId(*upstream as u32), NodeId(*downstream as u32));
             if let NegotiationFailure::NoOutputForInput { input, .. } = f {
-                crate::g2g_error!(t, "{} produces no output for {}", label(up), fmt_set(input));
+                let input_text = match graph.edges().iter().find(|e| e.dst.node == up) {
+                    Some(feed) => fmt_node_set(graph, feed.src.node, input),
+                    None => fmt_set(input),
+                };
+                crate::g2g_error!(t, "{} produces no output for {}", label(up), input_text);
                 if let Some(accepted) = graph.node_declared_input_caps(up) {
                     crate::g2g_error!(t, "  {} accepts: {}", label(up), fmt_set(accepted));
                     if let Some(converter) = format_converter(input, accepted) {
@@ -977,12 +981,17 @@ pub fn solve_graph_preferred<E>(
                 );
             }
             if let Some(conflict) = f.conflict() {
-                crate::g2g_error!(t, "  {} offers: {}", label(up), fmt_set(&conflict.upstream));
+                crate::g2g_error!(
+                    t,
+                    "  {} offers: {}",
+                    label(up),
+                    fmt_node_set(graph, up, &conflict.upstream)
+                );
                 crate::g2g_error!(
                     t,
                     "  {} wants: {}",
                     label(down),
-                    fmt_set(&conflict.downstream)
+                    fmt_node_set(graph, down, &conflict.downstream)
                 );
                 for field in conflict.conflicting_fields() {
                     crate::g2g_error!(
@@ -1002,12 +1011,16 @@ pub fn solve_graph_preferred<E>(
                     .iter()
                     .any(|&x| x == up || x == down)
                 {
+                    let text = match slot {
+                        Some(set) => fmt_node_set(graph, e.src.node, set),
+                        None => String::from("(not narrowed yet)"),
+                    };
                     crate::g2g_error!(
                         t,
                         "  {} -> {}: {}",
                         label(e.src.node),
                         label(e.dst.node),
-                        fmt_set_opt(slot)
+                        text
                     );
                 }
             }
@@ -1560,11 +1573,19 @@ fn fmt_alternatives(texts: impl ExactSizeIterator<Item = String>) -> String {
     parts.join(" | ")
 }
 
-fn fmt_set_opt(slot: &Option<CapsSet>) -> String {
-    match slot {
-        Some(s) => fmt_set(s),
-        None => String::from("(not narrowed yet)"),
+// a caps filter prints as the launch line wrote it unless the caps category is at trace
+fn fmt_node_set<E>(graph: &ValidatedGraph<E>, node: NodeId, set: &CapsSet) -> String {
+    let Some(written) = graph.node_written_caps(node) else {
+        return fmt_set(set);
+    };
+    let alternatives = set.alternatives().len();
+    if alternatives == 0 || log::enabled(CAPS_CATEGORY, LogLevel::Trace) {
+        return fmt_set(set);
     }
+    if alternatives == 1 {
+        return String::from(written);
+    }
+    alloc::format!("{written} ({alternatives} alternatives, G2G_CAPS_TRACE=trace lists them)")
 }
 
 type MediaPredicate = fn(&Caps) -> bool;
