@@ -11,6 +11,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1902: `vellooverlay` and `wgpucolorconvert` are launch elements.
 - M1903: `pyelement` skips late frames only after the sink reports a late one.
 - M1904: hosted class names drop the `stream_<i>_` prefix, and `meta.track_upstream` tags an upstream detection.
+- M1906: `pyelement` QoS no longer adds the time a frame waits in downstream queues, so a live stream keeps running after the queues drain.
 
 ## 0.10.0
 
