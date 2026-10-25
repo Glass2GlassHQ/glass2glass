@@ -66,8 +66,9 @@ use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
     ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, OutputSink,
-    PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue, PropertySpec,
-    Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer, PropError,
+    PropKind, PropValue, PropertySpec, RawVideoFormat, MAX_LATENESS_PROPERTY,
+    QOS_INTERVAL_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -509,6 +510,16 @@ impl PipelineClock for KmsClock {
     }
 }
 
+fn accepted_caps() -> CapsSet {
+    CapsSet::one(crate::videofx::any_geometry(RawVideoFormat::Nv12))
+}
+
+impl PadTemplates for KmsSink {
+    fn pad_templates() -> Vec<PadTemplate> {
+        Vec::from([PadTemplate::sink(accepted_caps())])
+    }
+}
+
 impl AsyncElement for KmsSink {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -566,14 +577,7 @@ impl AsyncElement for KmsSink {
     /// `configure_pipeline`. Geometry stays open (`Dim::Any`); the decoder
     /// fixates it.
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::one(Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        }))
+        CapsConstraint::Accepts(accepted_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

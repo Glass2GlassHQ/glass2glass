@@ -55,8 +55,8 @@ use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
     g2g_warn, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, HardwareError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Reconfigure,
+    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Reconfigure,
 };
 
 use crate::filesink::io_err;
@@ -349,6 +349,16 @@ static WEBRTCSINK_PROPS: &[PropertySpec] = &[
     TURN_PASS_PROP,
 ];
 
+fn accepted_caps() -> CapsSet {
+    CapsSet::from_alternatives(sink_caps_alternatives())
+}
+
+impl PadTemplates for WebRtcSink {
+    fn pad_templates() -> Vec<PadTemplate> {
+        Vec::from([PadTemplate::sink(accepted_caps())])
+    }
+}
+
 impl AsyncElement for WebRtcSink {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -371,7 +381,7 @@ impl AsyncElement for WebRtcSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::from_alternatives(sink_caps_alternatives()))
+        CapsConstraint::Accepts(accepted_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

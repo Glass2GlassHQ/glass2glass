@@ -3497,7 +3497,7 @@ fn register_feature_gated(reg: &mut Registry) {
     // through to, never what a pipeline naming the sink outright does.
     #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
     reg.register_launch(
-        LaunchFactory::new("waylandsink", Vec::new(), || Box::new(WaylandSink::new()))
+        LaunchFactory::of::<WaylandSink>("waylandsink", || Box::new(WaylandSink::new()))
             .with_usable(crate::waylanddisplay::compositor_reachable)
             .with_experimental(),
     );
@@ -3533,7 +3533,7 @@ fn register_feature_gated(reg: &mut Registry) {
     // defaults empty (set it via `webrtcsink location=...`); publishing starts
     // on the first frame.
     #[cfg(feature = "webrtc")]
-    reg.register_launch(LaunchFactory::new("webrtcsink", Vec::new(), || {
+    reg.register_launch(LaunchFactory::of::<WebRtcSink>("webrtcsink", || {
         Box::new(WebRtcSink::new(""))
     }));
     #[cfg(feature = "webrtc-janus")]
@@ -3623,7 +3623,7 @@ fn register_feature_gated(reg: &mut Registry) {
     ));
     #[cfg(all(target_os = "linux", feature = "kms-sink"))]
     reg.register_launch(
-        LaunchFactory::new("kmssink", Vec::new(), || Box::new(KmsSink::new())).with_experimental(),
+        LaunchFactory::of::<KmsSink>("kmssink", || Box::new(KmsSink::new())).with_experimental(),
     );
     #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
     reg.register_launch(
