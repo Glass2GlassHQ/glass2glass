@@ -11,18 +11,18 @@ deployment shell picks the executor and the hardware elements.
 The name is the metric the project optimizes: **glass-to-glass latency**, from
 photon capture to hardware presentation.
 
-Architecture: [design/README.md](design/README.md). Developer tooling
+Architecture: [design/README.md](https://github.com/Glass2GlassHQ/glass2glass/blob/master/design/README.md). Developer tooling
 (`cargo xtask`, the pipeline visualizer, the caps explainer, benchmarks):
-[DEVTOOLS.md](DEVTOOLS.md).
+[DEVTOOLS.md](https://github.com/Glass2GlassHQ/glass2glass/blob/master/DEVTOOLS.md).
 
 Start here:
 
 1. Run the [quick start](#quick-start).
 2. Try pipelines with `g2g-launch` and look up elements with
-   [`g2g-inspect`](DEVTOOLS.md#element-reference-g2g-inspect-and-the-web-page).
-3. Write an element with [AUTHORING.md](AUTHORING.md).
-4. Debug with [When a pipeline fails](DEVTOOLS.md#when-a-pipeline-fails).
-5. Coming from GStreamer, read [PORTING.md](PORTING.md).
+   [`g2g-inspect`](https://github.com/Glass2GlassHQ/glass2glass/blob/master/DEVTOOLS.md#element-reference-g2g-inspect-and-the-web-page).
+3. Write an element with [AUTHORING.md](https://github.com/Glass2GlassHQ/glass2glass/blob/master/AUTHORING.md).
+4. Debug with [When a pipeline fails](https://github.com/Glass2GlassHQ/glass2glass/blob/master/DEVTOOLS.md#when-a-pipeline-fails).
+5. Coming from GStreamer, read [PORTING.md](https://github.com/Glass2GlassHQ/glass2glass/blob/master/PORTING.md).
 
 Commands that start with `cargo run -p`, `cargo test -p`, `cargo xtask`, or a
 `tools/` script run in a clone of this repository. The quick start below needs
@@ -112,7 +112,7 @@ every target. Only the executor and the hardware elements change.
 | **GPU** | zero-copy hardware pipelines | frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode to `wgpu::Texture`, NVDEC / NVENC, a CUDA to wgpu bridge. Embeds in an app's own wgpu device (`GpuContext::from_wgpu`, packaged for Bevy as `bevy-g2g`). |
 | **WASM** | the same graph in the browser | `wasm32`, single-threaded, optionally in a Worker presenting to an `OffscreenCanvas`. WebCodecs H.264 / H.265 decode, WebGPU present, in-browser or server-offloaded ML. |
 
-[PORTABILITY.md](PORTABILITY.md) runs one detection-overlay pipeline, with its
+[PORTABILITY.md](https://github.com/Glass2GlassHQ/glass2glass/blob/master/PORTABILITY.md) runs one detection-overlay pipeline, with its
 processing stages defined once in `overlay_stages()`, on the native runner and
 in the browser, and records the evidence for each target: Cortex-M footprint,
 Embassy smoke, CPU render, GPU-resident wgpu, in-browser canvas.
@@ -121,7 +121,7 @@ OS-, GPU-, and device-coupled elements (camera, display, NVDEC / VA-API /
 Vulkan Video, VideoToolbox, MediaCodec, ML device EPs) are **experimental**.
 They compile and some have host tests, but their runtime is not a CI promise.
 `g2g-inspect` prints `Stability   experimental` on those factories. See
-[STABILITY.md](STABILITY.md).
+[STABILITY.md](https://github.com/Glass2GlassHQ/glass2glass/blob/master/STABILITY.md).
 
 ### QNX
 
@@ -134,7 +134,7 @@ baseline build for `aarch64-unknown-nto-qnx800` and `x86_64-pc-nto-qnx800`
 with no code changes. Every OS element is gated on a specific `target_os`,
 never `cfg(unix)`, so the Linux hardware paths stay out of the `nto` build.
 The roadmap for `std` transports and a QNX Screen sink is in
-[PORTABILITY.md](PORTABILITY.md#spike-qnx-safety-certified-rtos).
+[PORTABILITY.md](https://github.com/Glass2GlassHQ/glass2glass/blob/master/PORTABILITY.md#spike-qnx-safety-certified-rtos).
 
 ## Migrating an existing pipeline?
 
@@ -200,8 +200,8 @@ parse error: unknown element: theoraenc
   `gstwrap` hosts an un-ported GStreamer element in a g2g graph.
 
 Full guide, with the equivalence cookbook and application / element porting:
-[PORTING.md](PORTING.md). Writing an element from scratch:
-[AUTHORING.md](AUTHORING.md).
+[PORTING.md](https://github.com/Glass2GlassHQ/glass2glass/blob/master/PORTING.md). Writing an element from scratch:
+[AUTHORING.md](https://github.com/Glass2GlassHQ/glass2glass/blob/master/AUTHORING.md).
 
 ## Changing a running pipeline
 
@@ -300,10 +300,10 @@ with the link's current caps before you swap it in.
 
 The thread-per-arm runner works the same way through `run_threaded_mutable`.
 The Python and C bindings have the same operations minus the validate calls,
-and take launch-line text for the elements ([g2g-pyapi](g2g-pyapi/README.md),
-[g2g-capi](g2g-capi/README.md)). The `g2g-mcp` server can edit a running
+and take launch-line text for the elements ([g2g-pyapi](https://github.com/Glass2GlassHQ/glass2glass/blob/master/g2g-pyapi/README.md),
+[g2g-capi](https://github.com/Glass2GlassHQ/glass2glass/blob/master/g2g-capi/README.md)). The `g2g-mcp` server can edit a running
 pipeline too.
-[examples/g2g-mutate-demo](examples/g2g-mutate-demo) does this to a live RTSP
+[examples/g2g-mutate-demo](https://github.com/Glass2GlassHQ/glass2glass/tree/master/examples/g2g-mutate-demo) does this to a live RTSP
 feed in a window. If you're coming from GStreamer pad probes, PORTING.md §5.2
 maps each recipe to its call here.
 
@@ -444,7 +444,7 @@ no-heap targets (MISRA, certification processes).
   driver over `embedded-hal` I2C (single-shot command, CRC-8 checked against
   the datasheet vector, fixed-point conversion). `UartSink` / `UartSrc` carry
   byte streams over serial.
-- **Safety case.** [`docs/safety/`](docs/safety/) holds a requirements
+- **Safety case.** [`docs/safety/`](https://github.com/Glass2GlassHQ/glass2glass/tree/master/docs/safety) holds a requirements
   traceability matrix (15 requirements, each linked to the proof script, test,
   or CI job that verifies it) and a safety manual (conditions of use,
   assumptions, the `unsafe` inventory). `tools/traceability-check.sh` fails CI
@@ -682,7 +682,7 @@ run_source_transform_sink(src, dec, sink, &clock, LatencyProfile::Live).await?;
 ```
 
 Features: `rtsp ffmpeg cuda cuda-gl`. Linux + NVIDIA only. See
-[design/decode.md](design/decode.md).
+[design/decode.md](https://github.com/Glass2GlassHQ/glass2glass/blob/master/design/decode.md).
 
 ### Native NVDEC → NVENC transcode, GPU-resident, with domain auto-plug
 
@@ -977,7 +977,7 @@ videotestsrc ! c.  v4l2src device=/dev/video0 ! videoconvert ! videoscale ! c. \
 ```
 
 Features: `v4l2 wayland-sink`. Full graph in
-[`g2g-plugins/tests/pip_smoke.rs`](g2g-plugins/tests/pip_smoke.rs).
+[`g2g-plugins/tests/pip_smoke.rs`](https://github.com/Glass2GlassHQ/glass2glass/blob/master/g2g-plugins/tests/pip_smoke.rs).
 `WgpuCompositor` is the bit-exact GPU sibling and composites `WgpuTexture`
 frames in place. `with_timed_output()` (`timed-output=true`) holds the output
 rate over a stalled input when the pipeline clock can sleep on a deadline.
@@ -989,7 +989,7 @@ libcamerasrc width=640 height=480 framerate=30 ! videoconvert ! x264enc ! mp4mux
   ! moqtsink location=https://127.0.0.1:4443/ namespace=live
 ```
 
-[`tools/moqt-demo/`](tools/moqt-demo/) runs that end to end: `node
+[`tools/moqt-demo/`](https://github.com/Glass2GlassHQ/glass2glass/tree/master/tools/moqt-demo) runs that end to end: `node
 watch-live.mjs` starts a local `moq-relay-ietf`, publishes the camera into it,
 and opens a browser that subscribes and plays. The page's MoQT client is the
 third-party [MOQtail](https://github.com/moqtail/moqtail) draft-16
@@ -1363,4 +1363,4 @@ docs/            # GitHub Pages site
 ## License
 
 The whole repository is MPL-2.0: every crate, including the examples, tools,
-and test fixtures. See [LICENSE](LICENSE).
+and test fixtures. See [LICENSE](https://github.com/Glass2GlassHQ/glass2glass/blob/master/LICENSE).
