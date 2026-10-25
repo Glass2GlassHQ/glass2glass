@@ -773,6 +773,11 @@ impl NvDec {
         for f in frames {
             let input = self.input_stamps.take(f.pts_ns);
             if !self.segment.presents(f.pts_ns) {
+                g2g_core::g2g_log!(
+                    g2g_core::log::Target::category(g2g_core::AsyncElement::log_category(self)),
+                    "dropping frame pts {} outside the segment",
+                    g2g_core::log::ClockTime(f.pts_ns)
+                );
                 continue;
             }
             // Announce the frame's own format / geometry, so a mid-stream

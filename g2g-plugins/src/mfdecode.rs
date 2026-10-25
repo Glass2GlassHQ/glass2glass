@@ -496,6 +496,11 @@ impl AsyncElement for MfDecode {
             for d in decoded {
                 let input = self.input_stamps.take(d.pts_ns);
                 if !self.segment.presents(d.pts_ns) {
+                    g2g_core::g2g_log!(
+                        g2g_core::log::Target::category(g2g_core::AsyncElement::log_category(self)),
+                        "dropping frame pts {} outside the segment",
+                        g2g_core::log::ClockTime(d.pts_ns)
+                    );
                     continue;
                 }
                 let new_caps = nv12_caps(d.width, d.height, out_framerate.clone());

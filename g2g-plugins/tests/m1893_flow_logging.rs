@@ -139,3 +139,71 @@ fn a_run_of_late_drops_logs_once_when_it_starts_and_once_when_it_ends() {
         ended[0].message
     );
 }
+
+#[cfg(feature = "mjpeg")]
+#[path = "common/collect_sink.rs"]
+mod collect_sink;
+
+#[cfg(feature = "mjpeg")]
+#[test]
+fn a_decoder_logs_each_frame_it_clips_to_the_segment() {
+    use g2g_core::memory::SystemSlice;
+    use g2g_core::{
+        AsyncElement, BitstreamAlignment, Caps, Colorimetry, Dim, Frame, FrameTiming, MemoryDomain,
+        PipelinePacket, Rate, Segment, VideoCodec,
+    };
+    use g2g_plugins::mjpegdec::MjpegDec;
+
+    let (ring, _guard) = capture("*:log");
+    let mut decoder = MjpegDec::new();
+    decoder
+        .configure_pipeline(&Caps::CompressedVideo {
+            codec: VideoCodec::Mjpeg,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+            colorimetry: Colorimetry::UNKNOWN,
+            alignment: BitstreamAlignment::Unspecified,
+        })
+        .expect("configures");
+    let segment = Segment {
+        start: FRAME_PERIOD_NS,
+        ..Segment::new()
+    };
+    // the clip comes before the decode, so the frame needs no JPEG in it
+    let before_the_segment = Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8]))),
+        FrameTiming {
+            pts_ns: 0,
+            ..FrameTiming::default()
+        },
+        0,
+    );
+    let mut out = collect_sink::CollectSink::default();
+    block_on(async {
+        decoder
+            .process(PipelinePacket::Segment(segment), &mut out)
+            .await
+            .expect("takes the segment");
+        decoder
+            .process(PipelinePacket::DataFrame(before_the_segment), &mut out)
+            .await
+            .expect("clips the frame");
+    });
+    log::reset();
+    let records = ring.drain();
+
+    let clipped = lines(
+        &records,
+        short_type_name::<MjpegDec>(),
+        LogLevel::Log,
+        "dropping frame pts ",
+    );
+    assert_eq!(clipped.len(), 1, "{records:#?}");
+    assert!(
+        !out.packets
+            .iter()
+            .any(|packet| matches!(packet, PipelinePacket::DataFrame(_))),
+        "the clipped frame is not pushed"
+    );
+}

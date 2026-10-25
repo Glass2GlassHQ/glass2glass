@@ -226,6 +226,11 @@ macro_rules! av1_decoder {
                 for picture in frames {
                     let input = self.input_stamps.take(picture.pts_ns);
                     if !self.segment.presents(picture.pts_ns) {
+                        g2g_core::g2g_log!(
+                            g2g_core::log::Target::category(g2g_core::AsyncElement::log_category(self)),
+                            "dropping frame pts {} outside the segment",
+                            g2g_core::log::ClockTime(picture.pts_ns)
+                        );
                         continue;
                     }
                     if self.out != Some(picture.shape) {

@@ -517,6 +517,11 @@ impl VtDecode {
         };
         let input = self.input_stamps.take(pts_ns);
         if !self.segment.presents(pts_ns) {
+            g2g_core::g2g_log!(
+                g2g_core::log::Target::category(g2g_core::AsyncElement::log_category(self)),
+                "dropping frame pts {} outside the segment",
+                g2g_core::log::ClockTime(pts_ns)
+            );
             return Ok(());
         }
         // `Any` when the stream declared no rate, never a guess.

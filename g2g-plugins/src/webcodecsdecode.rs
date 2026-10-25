@@ -180,6 +180,11 @@ impl WebCodecsDecode {
     async fn drain_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         while let Some(frame) = self.inbox.as_ref().and_then(|i| i.try_pop()) {
             if !self.segment.presents(video_frame_pts_ns(&frame)) {
+                g2g_core::g2g_log!(
+                    g2g_core::log::Target::category(g2g_core::AsyncElement::log_category(self)),
+                    "dropping frame pts {} outside the segment",
+                    g2g_core::log::ClockTime(video_frame_pts_ns(&frame))
+                );
                 frame.close();
                 continue;
             }

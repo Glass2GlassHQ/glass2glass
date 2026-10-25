@@ -693,6 +693,13 @@ impl AsyncElement for MjpegDec {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if !self.segment.presents(frame.timing.pts_ns) {
+                        g2g_core::g2g_log!(
+                            g2g_core::log::Target::category(g2g_core::AsyncElement::log_category(
+                                self
+                            )),
+                            "dropping frame pts {} outside the segment",
+                            g2g_core::log::ClockTime(frame.timing.pts_ns)
+                        );
                         return Ok(());
                     }
                     let slice = frame

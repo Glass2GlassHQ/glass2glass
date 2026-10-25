@@ -729,6 +729,11 @@ impl AsyncElement for MediaCodecDec {
                 };
                 let input = self.input_stamps.take(pts_ns);
                 if !self.segment.presents(pts_ns) {
+                    g2g_core::g2g_log!(
+                        g2g_core::log::Target::category(g2g_core::AsyncElement::log_category(self)),
+                        "dropping frame pts {} outside the segment",
+                        g2g_core::log::ClockTime(pts_ns)
+                    );
                     continue;
                 }
                 if self.last_caps.as_ref() != Some(&new_caps) {

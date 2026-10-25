@@ -15989,6 +15989,11 @@ impl VulkanVideoDec {
     ) -> Result<(), G2gError> {
         let input = self.input_stamps.take(src_timing.pts_ns);
         if !self.segment.presents(src_timing.pts_ns) {
+            g2g_core::g2g_log!(
+                g2g_core::log::Target::category(g2g_core::AsyncElement::log_category(self)),
+                "dropping frame pts {} outside the segment",
+                g2g_core::log::ClockTime(src_timing.pts_ns)
+            );
             return Ok(());
         }
         let caps = Caps::RawVideo {
@@ -16093,6 +16098,11 @@ impl VulkanVideoDec {
         for (timing, tex) in textures {
             let input = self.input_stamps.take(timing.pts_ns);
             if !self.segment.presents(timing.pts_ns) {
+                g2g_core::g2g_log!(
+                    g2g_core::log::Target::category(g2g_core::AsyncElement::log_category(self)),
+                    "dropping frame pts {} outside the segment",
+                    g2g_core::log::ClockTime(timing.pts_ns)
+                );
                 continue;
             }
             let (w, h) = (tex.width(), tex.height());
