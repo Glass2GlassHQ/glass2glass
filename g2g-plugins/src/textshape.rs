@@ -22,6 +22,7 @@ use cosmic_text::{
 };
 
 use cosmic_text::fontdb::{Database, FaceInfo, Family as DbFamily};
+use cosmic_text::{Fallback, PlatformFallback};
 
 use crate::subparse::FontStretch;
 
@@ -295,11 +296,14 @@ fn styled_attrs<'text, 'attrs>(
     spans
 }
 
+fn has_family(face: &FaceInfo, family: &str) -> bool {
+    face.families.iter().any(|(name, _)| name == family)
+}
+
 // cosmic-text names Noto Sans Mono as the generic monospace whether or not it is installed
 fn use_an_installed_monospace(db: &mut Database) {
     let named = String::from(db.family_name(&DbFamily::Monospace));
-    let installed = |face: &FaceInfo| face.families.iter().any(|(name, _)| *name == named);
-    if db.faces().any(installed) {
+    if db.faces().any(|face| has_family(face, &named)) {
         return;
     }
     let first_monospaced = db
@@ -310,6 +314,21 @@ fn use_an_installed_monospace(db: &mut Database) {
         .min();
     if let Some(name) = first_monospaced {
         db.set_monospace_family(name);
+    }
+}
+
+// cosmic-text names Open Sans as the generic sans-serif, and without it no default face is seeded
+fn use_an_installed_sans_serif(db: &mut Database) {
+    let named = String::from(db.family_name(&DbFamily::SansSerif));
+    if db.faces().any(|face| has_family(face, &named)) {
+        return;
+    }
+    let first_installed = PlatformFallback.common_fallback().iter().find(|name| {
+        db.faces()
+            .any(|face| !face.monospaced && has_family(face, name))
+    });
+    if let Some(name) = first_installed {
+        db.set_sans_serif_family(*name);
     }
 }
 
@@ -333,6 +352,7 @@ impl TextShaper {
     pub fn new(explicit: &[Vec<u8>]) -> Self {
         let mut fonts = FontSystem::new();
         use_an_installed_monospace(fonts.db_mut());
+        use_an_installed_sans_serif(fonts.db_mut());
         let mut primary = None;
         for bytes in explicit {
             let ids = fonts
@@ -546,6 +566,28 @@ mod tests {
         };
         let face = db.query(&query).and_then(|id| db.face(id));
         assert!(face.is_some_and(|face| face.monospaced));
+    }
+
+    #[test]
+    fn a_missing_sans_serif_family_falls_to_an_installed_face() {
+        let mut db = Database::new();
+        db.load_system_fonts();
+        let installed = |name: &&str| {
+            db.faces()
+                .any(|face| !face.monospaced && has_family(face, name))
+        };
+        if !PlatformFallback.common_fallback().iter().any(installed) {
+            std::eprintln!("no sans-serif fallback face installed; skipping");
+            return;
+        }
+        db.set_sans_serif_family("No Such Sans");
+        use_an_installed_sans_serif(&mut db);
+        let query = cosmic_text::fontdb::Query {
+            families: &[DbFamily::SansSerif],
+            ..cosmic_text::fontdb::Query::default()
+        };
+        let face = db.query(&query).and_then(|id| db.face(id));
+        assert!(face.is_some_and(|face| !face.monospaced));
     }
 
     /// A styled span reaches the shaped glyphs: the run it covers is shaped at
