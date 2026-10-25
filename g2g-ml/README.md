@@ -1,7 +1,7 @@
 # g2g-ml
 
 ML inference elements for
-[glass2glass](https://github.com/boxerab/glass2glass): Burn (pure Rust, wgpu),
+[glass2glass](https://github.com/Glass2GlassHQ/glass2glass): Burn (pure Rust, wgpu),
 ONNX Runtime and ExecuTorch backends, GPU tensor preprocessing, detection
 post-processing into the frame analytics metadata, and a multi-stream tensor
 batcher.

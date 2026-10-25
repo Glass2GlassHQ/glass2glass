@@ -1,7 +1,7 @@
 # GitHub Pages site
 
 This directory is the source for the project's GitHub Pages site at
-<https://boxerab.github.io/glass2glass/>.
+<https://glass2glasshq.github.io/glass2glass/>.
 
 To publish: in the repo settings, set **Pages → Source = Deploy from a
 branch**, pick the branch hosting `main`, and select **/docs** as the
