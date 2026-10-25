@@ -75,11 +75,12 @@ impl TraceState {
             let id = self.wait_spans;
             let begin = microseconds(visit.enter_ns - visit.wait_ns);
             let end = microseconds(visit.enter_ns);
+            // a plain `id` puts every element's waits on one global track
             self.write_event(format_args!(
-                r#"{{"ph":"b","cat":"wait","name":"wait","id":{id},"pid":{process},"tid":{process},"ts":{begin},"args":{{"sequence":{sequence}}}}}"#
+                r#"{{"ph":"b","cat":"wait","name":"wait","id2":{{"local":"{id:#x}"}},"pid":{process},"tid":{process},"ts":{begin},"args":{{"sequence":{sequence}}}}}"#
             ))?;
             self.write_event(format_args!(
-                r#"{{"ph":"e","cat":"wait","name":"wait","id":{id},"pid":{process},"tid":{process},"ts":{end}}}"#
+                r#"{{"ph":"e","cat":"wait","name":"wait","id2":{{"local":"{id:#x}"}},"pid":{process},"tid":{process},"ts":{end}}}"#
             ))?;
         }
         let begin = microseconds(visit.enter_ns);

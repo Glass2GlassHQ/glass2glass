@@ -42,6 +42,7 @@ async fn spans_by_element(line: &str, trace_name: &str) -> BTreeMap<String, Elem
     let mut spans: BTreeMap<u64, ElementSpans> = BTreeMap::new();
     for event in events {
         let process = event["pid"].as_u64().expect("every event has a pid");
+        let process_scoped = event["id2"]["local"].is_string();
         match (event["ph"].as_str(), event["name"].as_str()) {
             (Some("M"), Some("process_name")) => {
                 let name = event["args"]["name"].as_str().expect("a process name");
@@ -54,8 +55,8 @@ async fn spans_by_element(line: &str, trace_name: &str) -> BTreeMap<String, Elem
                     .work_sequences
                     .insert(event["args"]["sequence"].as_u64().expect("a sequence id"));
             }
-            (Some("b"), Some("wait")) => spans.entry(process).or_default().wait_begins += 1,
-            (Some("e"), Some("wait")) => spans.entry(process).or_default().wait_ends += 1,
+            (Some("b"), Some("wait")) if process_scoped => spans.entry(process).or_default().wait_begins += 1,
+            (Some("e"), Some("wait")) if process_scoped => spans.entry(process).or_default().wait_ends += 1,
             _ => {}
         }
     }
