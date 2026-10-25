@@ -68,7 +68,7 @@ use gbm::{
 };
 use khronos_egl as egl;
 
-use g2g_core::element::QosMessage;
+use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::memory::OwnedCudaBuffer;
 use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
@@ -342,6 +342,14 @@ impl AsyncElement for CudaKmsSink {
     /// incoming link, where the producer can shed load.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()
+    }
+
+    fn presentation_stats(&self) -> Option<PresentationStats> {
+        Some(PresentationStats {
+            presented: self.frames_presented(),
+            dropped: 0,
+            late_dropped: self.late_dropped(),
+        })
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

@@ -55,7 +55,7 @@ use crate::gpu::GpuContext;
 use crate::waylandwindow::{run_window, WindowParams, WindowRenderer, WorkerChannels, WorkerCmd};
 use crate::wgpusink::WgpuSink;
 use crate::worker_ready::Handshake;
-use g2g_core::element::QosMessage;
+use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::log::{short_type_name, LogName, LogSource, Target};
 use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
@@ -397,6 +397,14 @@ impl AsyncElement for WgpuPresentSink {
     /// link, where the producer can shed load.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()
+    }
+
+    fn presentation_stats(&self) -> Option<PresentationStats> {
+        Some(PresentationStats {
+            presented: self.frames_presented(),
+            dropped: 0,
+            late_dropped: self.late_dropped(),
+        })
     }
 
     fn set_instance_name(&mut self, name: String) {

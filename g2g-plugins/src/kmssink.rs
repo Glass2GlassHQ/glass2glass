@@ -58,7 +58,7 @@ use drm::control::{
 };
 use drm::Device;
 
-use g2g_core::element::QosMessage;
+use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::meta::{Orientation, OrientationSet};
@@ -562,6 +562,14 @@ impl AsyncElement for KmsSink {
         self.pacer.take_qos()
     }
 
+    fn presentation_stats(&self) -> Option<PresentationStats> {
+        Some(PresentationStats {
+            presented: self.frames_presented(),
+            dropped: 0,
+            late_dropped: self.late_dropped(),
+        })
+    }
+
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // Pass-through at negotiation; NV12 is validated in
         // `configure_pipeline`. See WaylandSink for the rationale: with the
@@ -937,6 +945,14 @@ mod tests {
 
         assert_eq!(sink.late_dropped(), 1, "the late frame was dropped");
         assert_eq!(sink.frames_presented(), 0, "nothing was scanned out");
+        assert_eq!(
+            AsyncElement::presentation_stats(&sink),
+            Some(PresentationStats {
+                presented: 0,
+                dropped: 0,
+                late_dropped: 1,
+            })
+        );
         let upstream = AsyncElement::take_qos(&mut sink).expect("upstream QoS report");
         assert_eq!(upstream.jitter_ns, 1_000_000);
         match bus.try_recv() {

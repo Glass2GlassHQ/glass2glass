@@ -40,7 +40,7 @@ use core::pin::Pin;
 use ash::vk;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
-use g2g_core::element::QosMessage;
+use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, ClockSync, ConfigureOutcome, G2gError,
     HardwareError, MemoryDomain, OutputSink, PipelinePacket, PresentationPacer, PropError,
@@ -960,6 +960,14 @@ impl AsyncElement for VulkanHdrPresentSink {
     /// where the producer can shed load.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()
+    }
+
+    fn presentation_stats(&self) -> Option<PresentationStats> {
+        Some(PresentationStats {
+            presented: self.presented_count(),
+            dropped: 0,
+            late_dropped: self.late_dropped(),
+        })
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

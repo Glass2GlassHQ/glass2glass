@@ -60,7 +60,7 @@ use crate::glnv12::{GlMode, GlState};
 use crate::glwindow::{run_gl_window, FramePresenter};
 use crate::waylandwindow::{WindowParams, WorkerChannels, WorkerCmd};
 use crate::worker_ready::Handshake;
-use g2g_core::element::QosMessage;
+use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
@@ -282,6 +282,14 @@ impl AsyncElement for GlSink {
     /// link, where the producer can shed load.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()
+    }
+
+    fn presentation_stats(&self) -> Option<PresentationStats> {
+        Some(PresentationStats {
+            presented: self.frames_presented(),
+            dropped: 0,
+            late_dropped: self.late_dropped(),
+        })
     }
 
     fn metadata(&self) -> ElementMetadata {

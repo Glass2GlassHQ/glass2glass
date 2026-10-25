@@ -29,7 +29,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use g2g_core::element::QosMessage;
+use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockSync, Colorimetry,
@@ -1024,6 +1024,14 @@ impl AsyncElement for WgpuSink {
         self.pacer.take_qos()
     }
 
+    fn presentation_stats(&self) -> Option<PresentationStats> {
+        Some(PresentationStats {
+            presented: self.presented_count(),
+            dropped: 0,
+            late_dropped: self.late_dropped(),
+        })
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         PACING_PROPERTIES
     }
@@ -1642,6 +1650,14 @@ mod tests {
             .expect("a dropped frame is not an error");
         assert_eq!(sink.presented_count(), 2, "the late frame was not blitted");
         assert_eq!(sink.late_dropped(), 1);
+        assert_eq!(
+            AsyncElement::presentation_stats(&sink),
+            Some(PresentationStats {
+                presented: 2,
+                dropped: 0,
+                late_dropped: 1,
+            })
+        );
         let upstream = AsyncElement::take_qos(&mut sink).expect("upstream QoS report");
         assert_eq!(upstream.jitter_ns, 90_000_000);
         assert_eq!(upstream.running_time_ns, 10_000_000);
