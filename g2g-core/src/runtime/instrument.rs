@@ -72,6 +72,7 @@ pub struct ElementProbe {
     /// time. `None` unless an observer is attached (the aggregate histograms
     /// above serve the end-of-run report on their own).
     journeys: Option<Mutex<VecDeque<StageVisit>>>,
+    #[cfg(feature = "std")]
     visit_recorder: Option<Arc<dyn VisitRecorder>>,
     /// A paced sink's cumulative presented / dropped counters, stored once by
     /// the sink arm as it ends (from
@@ -96,6 +97,8 @@ impl ElementProbe {
         journeys: Option<Mutex<VecDeque<StageVisit>>>,
         visit_recorder: Option<Arc<dyn VisitRecorder>>,
     ) -> Arc<Self> {
+        #[cfg(not(feature = "std"))]
+        let _ = visit_recorder;
         Arc::new(Self {
             log_name,
             proc_ns: LatencyHistogram::new(),
@@ -105,6 +108,7 @@ impl ElementProbe {
             age_at_emit_ns: LatencyHistogram::new(),
             fill: FillGauge::default(),
             journeys,
+            #[cfg(feature = "std")]
             visit_recorder,
             presentation: Mutex::new(None),
         })
