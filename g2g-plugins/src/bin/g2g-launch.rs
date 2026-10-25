@@ -38,6 +38,8 @@
 //!                     keep a bounded ring of recent packets per link while the
 //!                     run goes, and on failure write each link's ring into
 //!                     <dir> as a `replaysrc` recording
+//! --trace <file>      write each element's per-frame wait and work spans to
+//!                     <file> as Chrome trace JSON, for ui.perfetto.dev
 //! --seek <seconds>    one flushing seek to that stream time before the first
 //!                     frame, then run to the end (`--help` says where the
 //!                     first frame lands)
@@ -78,7 +80,9 @@
 
 use std::future::Future;
 use std::io::{IsTerminal, Write};
+use std::path::Path;
 use std::process;
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
@@ -86,19 +90,17 @@ use std::time::{Duration, Instant};
 use g2g_core::element::BoxFuture;
 use g2g_core::runtime::{
     attach_seek, fallback_factory, has_live_source, parse_launch, parse_launch_avoiding,
-    run_graph_recorded, run_graph_with_progress, FlightRecorder, GraphNode, PipelineProgress,
-    Registry,
+    FlightRecorder, GraphNode, PipelineProgress, Registry, RunBuilder,
 };
 #[cfg(any(feature = "observe", feature = "tui"))]
 use g2g_core::runtime::{run_graph_observed, run_graph_observed_recorded, Observer};
-#[cfg(feature = "multi-thread")]
-use g2g_core::runtime::{run_graph_threaded_recorded, run_graph_threaded_with_progress};
 #[cfg(feature = "multi-thread")]
 use g2g_core::runtime::{GraphSpawner, LocalArmFuture};
 use g2g_core::{Bus, BusMessage, Seek};
 use g2g_core::{Graph, NodeKind};
 use g2g_plugins::cli_stdout::write_stdout;
 use g2g_plugins::clock::WallClock;
+use g2g_plugins::perfetto_trace::PerfettoTrace;
 use g2g_plugins::registry::default_registry;
 #[cfg(feature = "multi-thread")]
 use g2g_plugins::{PinnedThreadSpawner, TokioThreadSpawner};
@@ -157,7 +159,7 @@ type RunFuture<'r> = core::pin::Pin<
     >,
 >;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads[=pinned]] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--seek <seconds>] [--plugin <path>] [-e] [-m] [-h] \
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads[=pinned]] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--trace <file>] [--seek <seconds>] [--plugin <path>] [-e] [-m] [-h] \
 <element> [key=value ...] ! <element> ! ...\n       \
 g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph\n       \
 g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script";
@@ -181,7 +183,8 @@ see the graph         g2g-launch --dot <pipeline> | dot -Tsvg -o pipe.svg\n  \
 inspect an element    g2g-inspect [<name>]                    role, caps, and every property\n  \
 build it visually     tools/builder/ (React Flow: assemble, import, export a pipeline)\n  \
 record / replay       <pipeline> ! recordsink location=cap.g2g   then   replaysrc location=cap.g2g ! ...\n  \
-repro a crash         g2g-launch --record-on-error dumps/ <pipeline>   then   replaysrc location=dumps/<file> ! ...";
+repro a crash         g2g-launch --record-on-error dumps/ <pipeline>   then   replaysrc location=dumps/<file> ! ...\n  \
+time every frame      g2g-launch --trace run.json <pipeline>  then open run.json in https://ui.perfetto.dev";
 
 /// Parsed command-line options plus the leftover pipeline tokens.
 #[derive(Default)]
@@ -239,6 +242,7 @@ struct Opts {
     /// recent packets; if the run fails, each ring is written there as a
     /// `replaysrc` recording of the traffic that led to the failure.
     record_on_error: Option<String>,
+    trace: Option<String>,
     seek_seconds: Option<String>,
 }
 
@@ -295,6 +299,10 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             opts.record_on_error = Some(dir.to_string());
             continue;
         }
+        if let Some(path) = arg.strip_prefix("--trace=") {
+            opts.trace = Some(path.to_string());
+            continue;
+        }
         if let Some(seconds) = arg.strip_prefix("--seek=") {
             opts.seek_seconds = Some(seconds.to_string());
             continue;
@@ -333,6 +341,13 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             "--record-on-error" => match args.next() {
                 Some(dir) => opts.record_on_error = Some(dir),
                 None => eprintln!("g2g-launch: --record-on-error needs a directory argument"),
+            },
+            "--trace" => match args.next() {
+                Some(path) => opts.trace = Some(path),
+                None => {
+                    eprintln!("g2g-launch: --trace needs a file argument");
+                    process::exit(2);
+                }
             },
             "--seek" => match args.next() {
                 Some(seconds) => opts.seek_seconds = Some(seconds),
@@ -552,12 +567,17 @@ fn main() {
         || opts.run_json
         || opts.observe.is_some()
         || opts.tui;
-    if seek_ns.is_some() && skips_the_run {
-        eprintln!(
-            "g2g-launch: --seek takes the plain run, not --dot / --copy-plan / --validate-json / \
-             --run-json / --observe / --tui"
-        );
-        process::exit(2);
+    for (flag, given) in [
+        ("--seek", seek_ns.is_some()),
+        ("--trace", opts.trace.is_some()),
+    ] {
+        if given && skips_the_run {
+            eprintln!(
+                "g2g-launch: {flag} takes the plain run, not --dot / --copy-plan / --validate-json / \
+                 --run-json / --observe / --tui"
+            );
+            process::exit(2);
+        }
     }
     let pipeline = tokens.join(" ");
     let use_file = opts.graph.is_some() || opts.script.is_some();
@@ -836,59 +856,37 @@ fn main() {
             },
             _ => LaunchSpawner::Free(TokioThreadSpawner),
         };
+        // a re-plugged retry starts the file over
+        let trace = opts.trace.as_deref().map(create_trace);
         let result = rt.block_on(async {
+            let mut run_builder = RunBuilder::new(graph, &clock, LINK_CAPACITY)
+                .with_progress(&progress)
+                .with_bus(&bus_handle);
+            if let Some(recorder) = &recorder {
+                run_builder = run_builder.with_recorder(recorder);
+            }
+            if let Some(trace) = &trace {
+                run_builder = run_builder.with_visit_recorder(trace.clone());
+            }
             // `--threads` runs one OS thread per arm (opt-in multicore); the default
             // is the cooperative single-thread runner. Both return the same
             // `Result<RunStats, _>`, boxed to one type so the heartbeat loop is shared.
             let mut run: RunFuture = if opts.threads.is_some() {
                 #[cfg(feature = "multi-thread")]
                 {
-                    match &recorder {
-                        Some(rec) => Box::pin(run_graph_threaded_recorded(
-                            graph,
-                            &clock,
-                            LINK_CAPACITY,
-                            Some(&progress),
-                            Some(&bus_handle),
-                            rec,
-                            &spawner,
-                        )),
-                        None => Box::pin(run_graph_threaded_with_progress(
-                            graph,
-                            &clock,
-                            LINK_CAPACITY,
-                            &progress,
-                            Some(&bus_handle),
-                            &spawner,
-                        )),
-                    }
+                    Box::pin(run_builder.run_threaded(&spawner))
                 }
                 #[cfg(not(feature = "multi-thread"))]
                 {
-                    let _ = graph;
+                    let _ = run_builder;
                     eprintln!(
                         "pipeline error: --threads requires a multi-thread build \
                      (rebuild with --features multi-thread)"
                     );
                     process::exit(1);
                 }
-            } else if let Some(rec) = &recorder {
-                Box::pin(run_graph_recorded(
-                    graph,
-                    &clock,
-                    LINK_CAPACITY,
-                    Some(&progress),
-                    Some(&bus_handle),
-                    rec,
-                ))
             } else {
-                Box::pin(run_graph_with_progress(
-                    graph,
-                    &clock,
-                    LINK_CAPACITY,
-                    &progress,
-                    Some(&bus_handle),
-                ))
+                Box::pin(run_builder.run())
             };
             let mut status_due = std::pin::pin!(tokio::time::sleep(STATUS_INTERVAL));
             std::future::poll_fn(|cx| {
@@ -918,6 +916,12 @@ fn main() {
         });
         if printed_status {
             eprintln!(); // move off the \r status line before the summary
+        }
+        if let Some(trace) = trace {
+            if let Err(error) = trace.finish() {
+                eprintln!("g2g-launch: --trace: {error}");
+                process::exit(1);
+            }
         }
         drain_bus(&bus, opts.verbose, &mut failed);
         match result {
@@ -971,6 +975,16 @@ fn main() {
 // the label the DOT dump gives a node: its element's log category, or its kind for a tee
 fn node_name(element: Option<&GraphNode>, kind: NodeKind) -> &'static str {
     element.map_or_else(|| g2g_core::dot::kind_label(kind), |e| e.log_category())
+}
+
+fn create_trace(path: &str) -> Arc<PerfettoTrace> {
+    match PerfettoTrace::create(Path::new(path)) {
+        Ok(trace) => trace,
+        Err(error) => {
+            eprintln!("g2g-launch: --trace {path}: {error}");
+            process::exit(1);
+        }
+    }
 }
 
 fn seek_target_ns(seconds: &str) -> Result<u64, String> {

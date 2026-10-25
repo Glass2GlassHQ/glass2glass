@@ -221,17 +221,17 @@ distinguish a healthy display from one silently shedding or stalling, and
 next to the pipeline throughput.
 
 The `process()` timing is the work half of a stage's latency. The wait half is
-queue residency, added as measured per-link transit. When an observer is
-attached, the graph runner builds `Block` edges into transform and sink arms with
-a per-link transit ring (`link_with_transit`): the producer's `SenderSink` stamps
-a monotonic send time as each `DataFrame` is queued, and the consuming arm pops
-the stamp when it pulls the frame (`LinkReceiver::pop_transit_ns`), recording the
-elapsed queue time into `ElementProbe::transit`. The ring stays aligned with the
-data channel because `Block` links never drop, leaky edges being left plain so
-their transit is simply not measured, and it is `Option`-gated so an
-uninstrumented run carries no stamp and pays nothing. `RunStats::report()` prints
-`wait p50/p99` beside `proc`, and the dashboard stacks the two per stage into a
-latency waterfall.
+queue residency, added as measured per-link transit. When an observer or a visit
+recorder is attached, the graph runner builds `Block` edges into transform and
+sink arms with a per-link transit ring (`link_with_transit`): the producer's
+`SenderSink` stamps a monotonic send time as each `DataFrame` is queued, and the
+consuming arm pops the stamp when it pulls the frame
+(`LinkReceiver::pop_transit_ns`), recording the elapsed queue time into
+`ElementProbe::transit`. The ring stays aligned with the data channel because
+`Block` links never drop, leaky edges being left plain so their transit is
+simply not measured, and it is `Option`-gated so an uninstrumented run carries
+no stamp and pays nothing. `RunStats::report()` prints `wait p50/p99` beside
+`proc`, and the dashboard stacks the two per stage into a latency waterfall.
 
 ### Edge probes
 
@@ -297,6 +297,24 @@ demux fan nodes. The standalone hand-built fan-in, fan-out and session runners
 their nodes like the graph runner, and fill `RunStats::per_element` even
 unobserved. The dynamic runners, whose arms attach at runtime, still report no
 per-element rows.
+
+### Per-frame trace
+
+`g2g-launch --trace <file>` and `g2g-launch-py --trace <file>` write every frame
+visit of the run to a Chrome trace event JSON file that ui.perfetto.dev opens.
+It is the g2g counterpart of `GST_TRACERS`. `RunBuilder::with_visit_recorder`
+gives each probe an `Arc<dyn VisitRecorder>` that receives every `StageVisit` as
+the arm records it, and turns on transit measurement like an observer does.
+`g2g-plugins::perfetto_trace::PerfettoTrace` streams the visits to the file
+through a `BufWriter`, so a long run holds nothing in memory.
+
+Each element is one Perfetto process named after its instance. Its `work` thread
+has one complete event per `process()` call, with the frame's `sequence` and the
+call's `push_wait_ns` in the args. Its `wait` track has async events for the
+frame's queue residency on the input link, because waits overlap each other and
+the previous frame's work. The transform and sink arms of the cooperative and
+threaded graph runners record visits. Muxers, demuxers, fan-in sinks, sources,
+and elements a `GraphMutator` splices in do not.
 
 ## JSON introspection and the builder
 

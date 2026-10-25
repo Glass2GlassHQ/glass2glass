@@ -37,16 +37,15 @@
 
 use std::future::Future;
 use std::io::IsTerminal;
+use std::path::Path;
 use std::pin::Pin;
 use std::process;
 use std::time::{Duration, Instant};
 
-use g2g_core::runtime::{
-    parse_launch, run_graph_threaded_with_progress, run_graph_with_progress, PipelineProgress,
-    Registry, RunStats,
-};
+use g2g_core::runtime::{parse_launch, PipelineProgress, Registry, RunBuilder, RunStats};
 use g2g_core::G2gError;
 use g2g_plugins::clock::WallClock;
+use g2g_plugins::perfetto_trace::PerfettoTrace;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::TokioThreadSpawner;
 
@@ -55,7 +54,7 @@ use g2g_plugins::TokioThreadSpawner;
 const LINK_CAPACITY: usize = 4;
 
 const USAGE: &str =
-    "usage: g2g-launch-py [-q] [--threads] <element> [key=value ...] ! <element> ! ...
+    "usage: g2g-launch-py [-q] [--threads] [--trace <file>] <element> [key=value ...] ! <element> ! ...
        g2g-launch-py --inspect [g2g-inspect arguments]
        g2g-launch-py --inspect pyelement|pyaggregator|pysink module=<module> class=<class>
        g2g-launch-py --docgen [out.html]
@@ -69,6 +68,7 @@ fn main() {
     // gst-launch flags so a pasted line still runs.
     let mut quiet = false;
     let mut threads = false;
+    let mut trace_path: Option<String> = None;
     let mut tokens: Vec<String> = Vec::new();
     let mut in_pipeline = false;
     let mut args = std::env::args().skip(1);
@@ -77,6 +77,13 @@ fn main() {
             match arg.as_str() {
                 "-q" | "--quiet" => quiet = true,
                 "--threads" => threads = true,
+                "--trace" => match args.next() {
+                    Some(path) => trace_path = Some(path),
+                    None => {
+                        eprintln!("g2g-launch-py: --trace needs a file argument");
+                        process::exit(2);
+                    }
+                },
                 "--inspect" => {
                     inspect(args.collect());
                     return;
@@ -132,30 +139,31 @@ fn main() {
     if !quiet {
         println!("Setting pipeline to PLAYING ...");
     }
+    let trace = trace_path
+        .as_deref()
+        .map(|path| match PerfettoTrace::create(Path::new(path)) {
+            Ok(trace) => trace,
+            Err(error) => {
+                eprintln!("g2g-launch-py: --trace {path}: {error}");
+                process::exit(1);
+            }
+        });
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
     let started = Instant::now();
     let mut printed_status = false;
     let spawner = TokioThreadSpawner;
     let result = rt.block_on(async {
+        let mut run_builder =
+            RunBuilder::new(graph, &clock, LINK_CAPACITY).with_progress(&progress);
+        if let Some(trace) = &trace {
+            run_builder = run_builder.with_visit_recorder(trace.clone());
+        }
         // one OS thread per element, so a CPU-bound convert does not hold up every other element's handoff
         let mut run: Pin<Box<dyn Future<Output = Result<RunStats, G2gError>> + '_>> = if threads {
-            Box::pin(run_graph_threaded_with_progress(
-                graph,
-                &clock,
-                LINK_CAPACITY,
-                &progress,
-                None,
-                &spawner,
-            ))
+            Box::pin(run_builder.run_threaded(&spawner))
         } else {
-            Box::pin(run_graph_with_progress(
-                graph,
-                &clock,
-                LINK_CAPACITY,
-                &progress,
-                None,
-            ))
+            Box::pin(run_builder.run())
         };
         loop {
             match tokio::time::timeout(Duration::from_secs(1), &mut run).await {
@@ -180,6 +188,12 @@ fn main() {
     });
     if printed_status {
         eprintln!();
+    }
+    if let Some(trace) = trace {
+        if let Err(error) = trace.finish() {
+            eprintln!("g2g-launch-py: --trace: {error}");
+            process::exit(1);
+        }
     }
     match result {
         Ok(stats) => {

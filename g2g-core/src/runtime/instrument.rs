@@ -72,6 +72,7 @@ pub struct ElementProbe {
     /// time. `None` unless an observer is attached (the aggregate histograms
     /// above serve the end-of-run report on their own).
     journeys: Option<Mutex<VecDeque<StageVisit>>>,
+    visit_recorder: Option<Arc<dyn VisitRecorder>>,
     /// A paced sink's cumulative presented / dropped counters, stored once by
     /// the sink arm as it ends (from
     /// [`presentation_stats`](crate::AsyncElement::presentation_stats)).
@@ -80,23 +81,21 @@ pub struct ElementProbe {
 
 impl ElementProbe {
     pub fn new(log_name: ElementLogName) -> Arc<Self> {
-        Arc::new(Self {
-            log_name,
-            proc_ns: LatencyHistogram::new(),
-            push_wait_ns: LatencyHistogram::new(),
-            push_wait_accum: AtomicU64::new(0),
-            transit_ns: LatencyHistogram::new(),
-            age_at_emit_ns: LatencyHistogram::new(),
-            fill: FillGauge::default(),
-            journeys: None,
-            presentation: Mutex::new(None),
-        })
+        Self::recording(log_name, None, None)
     }
 
     /// As [`new`](Self::new), but also recording a bounded ring of per-frame
     /// visits for the single-frame waterfall. Only the observed graph runner
     /// mints these, so an untapped run keeps the cheaper probe.
     pub fn with_journeys(log_name: ElementLogName) -> Arc<Self> {
+        Self::recording(log_name, Some(journey_ring()), None)
+    }
+
+    pub(crate) fn recording(
+        log_name: ElementLogName,
+        journeys: Option<Mutex<VecDeque<StageVisit>>>,
+        visit_recorder: Option<Arc<dyn VisitRecorder>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             log_name,
             proc_ns: LatencyHistogram::new(),
@@ -105,7 +104,8 @@ impl ElementProbe {
             transit_ns: LatencyHistogram::new(),
             age_at_emit_ns: LatencyHistogram::new(),
             fill: FillGauge::default(),
-            journeys: Some(Mutex::new(VecDeque::with_capacity(JOURNEY_RING))),
+            journeys,
+            visit_recorder,
             presentation: Mutex::new(None),
         })
     }
@@ -188,12 +188,15 @@ impl ElementProbe {
     /// [`mark`](Self::mark) taken just before `process()` (exit is stamped here),
     /// and the `push_wait_ns` that call spent blocked pushing downstream (what
     /// [`record_proc_since`](Self::record_proc_since) returned for it). A no-op
-    /// when the probe records no journeys, under `no_std`, or when `enter` is
-    /// `None`.
+    /// when the probe records no journeys and has no visit recorder, under
+    /// `no_std`, or when `enter` is `None`.
     #[inline]
     pub fn record_visit(&self, sequence: u64, wait_ns: u64, enter: Option<u64>, push_wait_ns: u64) {
         #[cfg(feature = "std")]
-        if let (Some(_), Some(enter_ns)) = (self.journeys.as_ref(), enter) {
+        if let (true, Some(enter_ns)) = (
+            self.journeys.is_some() || self.visit_recorder.is_some(),
+            enter,
+        ) {
             self.push_visit(StageVisit {
                 sequence,
                 wait_ns,
@@ -226,6 +229,9 @@ impl ElementProbe {
 
     #[cfg(feature = "std")]
     pub(crate) fn push_visit(&self, visit: StageVisit) {
+        if let Some(recorder) = &self.visit_recorder {
+            recorder.record(&self.log_name.instance, visit);
+        }
         if let Some(ring) = self.journeys.as_ref() {
             let mut ring = ring.lock();
             if ring.len() == JOURNEY_RING {
@@ -328,6 +334,14 @@ pub struct StageVisit {
     /// as the aggregate `push_wait`: a push made outside `process()` (an arm
     /// forwarding a mid-stream `CapsChanged`) lands on the next visit.
     pub push_wait_ns: u64,
+}
+
+pub(crate) fn journey_ring() -> Mutex<VecDeque<StageVisit>> {
+    Mutex::new(VecDeque::with_capacity(JOURNEY_RING))
+}
+
+pub trait VisitRecorder: Send + Sync + core::fmt::Debug {
+    fn record(&self, element: &str, visit: StageVisit);
 }
 
 /// A measured per-element summary, one row of [`RunStats::per_element`](crate::runtime::RunStats::per_element).

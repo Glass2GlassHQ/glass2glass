@@ -515,6 +515,23 @@ while the UI holds the terminal, g2g logging is diverted from stderr into a ring
 buffer and shown as a log pane (`G2G_DEBUG` still selects what is recorded); the
 stderr sink comes back on exit.
 
+## Per-frame trace (`--trace`)
+
+`g2g-launch --trace <file>` writes a span for every frame each element handles
+to a Chrome trace JSON file, the `GST_TRACERS` analog. Open the file in
+<https://ui.perfetto.dev>. `g2g-launch-py` takes the same flag.
+
+```sh
+g2g-launch --trace run.json videotestsrc num-buffers=100 ! videoconvert ! fakesink
+```
+
+Each element is one process in the Perfetto timeline. Its `work` track has one
+span per `process()` call, and its `wait` track has the time the frame sat
+queued on the element's input link. Click a span for the frame's `sequence`
+and `push_wait_ns`, the part of the call spent blocked on a full downstream link.
+Sources, muxers and demuxers have no spans. It works with `--threads`, and does
+not combine with `--observe` or `--tui`.
+
 ## Visual pipeline builder *(clone)*
 
 `tools/builder/` is a React Flow app (Vite + pnpm) that lets you assemble a

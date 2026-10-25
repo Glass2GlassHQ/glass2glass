@@ -73,8 +73,8 @@ a muxer by an input. `RunBuilder::run_mutable` and `run_threaded_mutable` hand t
 caller the handle beside the run future, the way `run_source_router_dynamic` does.
 
 `RunBuilder` is the one entry point for a run, whatever it carries: a bus, a state
-controller, progress, a copy budget, an observer, a flight recorder, a tick timer
-and the mutator, in any combination. `RunBuilder::new(graph, &clock, capacity)`
+controller, progress, a copy budget, an observer, a flight recorder, a visit
+recorder, a tick timer and the mutator, in any combination. `RunBuilder::new(graph, &clock, capacity)`
 takes the required parts and each `with_*` adds one. The `run_graph_*` functions
 remain as shorthands for the single-feature cases.
 

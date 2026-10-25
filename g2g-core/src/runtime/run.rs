@@ -1,6 +1,6 @@
 //! One entry point for running a graph, whatever the run is asked to carry:
 //! a bus, a state controller, progress, a copy budget, an observer, a flight
-//! recorder, a tick timer, and a [`GraphMutator`] over the running graph, in
+//! recorder, a visit recorder, a tick timer, and a [`GraphMutator`] over the running graph, in
 //! any combination. The `run_graph_*` functions are shorthands for the common
 //! single-feature cases.
 
@@ -20,7 +20,7 @@ use crate::runtime::mutate::{mutation_channel, GraphMutator, MutationRequest};
 use crate::runtime::progress::PipelineProgress;
 use crate::runtime::runner::{LinkCapacity, RunStats};
 use crate::runtime::state::StateController;
-use crate::runtime::{FlightRecorder, Observer};
+use crate::runtime::{FlightRecorder, Observer, VisitRecorder};
 
 /// A graph run being set up. `'a` is the elements' lifetime (and the
 /// [`GraphMutator`]'s), `'c` the lifetime of the clock and the handles the run
@@ -44,6 +44,7 @@ pub struct RunBuilder<'a, 'c, Clk: PipelineClock> {
     copy_policy: Option<CopyPolicy>,
     observer: Option<&'c Observer>,
     recorder: Option<&'c FlightRecorder>,
+    visit_recorder: Option<Arc<dyn VisitRecorder>>,
     ticker: Option<Arc<dyn DynAsyncClock + Send + Sync>>,
 }
 
@@ -65,6 +66,7 @@ impl<'a: 'c, 'c, Clk: PipelineClock> RunBuilder<'a, 'c, Clk> {
             copy_policy: None,
             observer: None,
             recorder: None,
+            visit_recorder: None,
             ticker: None,
         }
     }
@@ -103,6 +105,11 @@ impl<'a: 'c, 'c, Clk: PipelineClock> RunBuilder<'a, 'c, Clk> {
     /// Keep the last packets of every edge in `recorder` for a post-failure dump.
     pub fn with_recorder(mut self, recorder: &'c FlightRecorder) -> Self {
         self.recorder = Some(recorder);
+        self
+    }
+
+    pub fn with_visit_recorder(mut self, visit_recorder: Arc<dyn VisitRecorder>) -> Self {
+        self.visit_recorder = Some(visit_recorder);
         self
     }
 
@@ -145,6 +152,7 @@ impl<'a: 'c, 'c, Clk: PipelineClock> RunBuilder<'a, 'c, Clk> {
             self.copy_policy,
             self.observer,
             self.recorder,
+            self.visit_recorder,
             self.ticker.as_deref().map(|t| t as &dyn DynAsyncClock),
             mutation,
         )
@@ -190,6 +198,7 @@ impl<'c, Clk: PipelineClock> RunBuilder<'static, 'c, Clk> {
             self.copy_policy,
             self.observer,
             self.recorder,
+            self.visit_recorder,
             self.ticker,
             spawner,
             mutation,
