@@ -94,9 +94,12 @@ element inspector:
 
 <!-- quickstart-check: tools -->
 ```sh
-cargo install g2g-plugins --features std,wayland-sink --bin g2g-launch --bin g2g-inspect
+cargo install g2g-plugins --features std,wayland-sink,png --bin g2g-launch --bin g2g-inspect
 g2g-launch "videotestsrc num-buffers=90 pattern=ball ! videoconvert ! autovideosink"
+g2g-launch "videotestsrc num-buffers=1 pattern=ball ! videoconvert ! pngenc ! filesink location=ball.png"
 ```
+
+The last line needs no display: it writes the first frame to `ball.png`.
 
 ## Portability: one pipeline, five targets
 
