@@ -18,9 +18,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use g2g_core::{G2gError, OutputSink, PipelinePacket, PushOutcome};
 
-use crate::rtpdepay::RtpH264Depayloader;
-use crate::rtpjitter::RtpPtsRebase;
-use crate::rtprecv::{push_access_unit, CaptureTimeLatch, RtpRecvConfig};
+use crate::rtpdepay::{RtpEncoding, RtpH264Depayloader};
+use crate::rtprecv::{AccessUnitEmitter, CaptureTimeLatch, RtpRecvConfig};
 use crate::rtspserver::{
     interleaved_frame, RtspEvent, RtspRequest, RtspResponder, INTERLEAVED_HEADER_LEN,
     INTERLEAVED_MARKER,
@@ -381,8 +380,7 @@ pub(crate) async fn receive_interleaved(
     out: &mut SessionTap<'_>,
 ) -> Result<SessionEnd, G2gError> {
     let mut depay = RtpH264Depayloader::new();
-    let mut seq = seq_base;
-    let mut pts_rebase = RtpPtsRebase::new();
+    let mut emitter = AccessUnitEmitter::new(RtpEncoding::H264, seq_base, frame_limit);
     let capture_time_ids = responder.capture_time_ids();
     let mut capture_time = CaptureTimeLatch::default();
     let mut buf = [0u8; CTRL_BUF];
@@ -402,17 +400,7 @@ pub(crate) async fn receive_interleaved(
                         capture_time.observe(&capture_time_ids, packet);
                         if let Some(au) = depay.depacketize(packet) {
                             let capture_unix_ns = capture_time.take(au.rtp_timestamp);
-                            if push_access_unit(
-                                au,
-                                capture_unix_ns,
-                                &mut pts_rebase,
-                                &mut seq,
-                                seq_base,
-                                frame_limit,
-                                out,
-                            )
-                            .await?
-                            {
+                            if emitter.push(au, capture_unix_ns, out).await? {
                                 return Ok(SessionEnd::Limit);
                             }
                         }

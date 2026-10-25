@@ -399,6 +399,11 @@ configure the flow. The sink also keeps a bounded history of recently sent
 packets and honours a receive-side RTCP NACK by retransmitting from it
 (`with_retransmit(enabled, capacity)`).
 
+Opus input selects `RtpOpusPacketizer` instead (RFC 7587): one Opus packet per
+RTP packet with no fragmentation, and the RTP timestamp at the 48 kHz Opus clock.
+`payload-type`, `ssrc`, NACK, RTX, FEC and sender reports work the same for both
+payloads. A demuxer's leading `OpusHead` / `OpusTags` frames are not sent.
+
 ### SRTP
 
 The `srtp` module (`srtp` feature) protects raw RTP and RTCP packets under an
@@ -463,9 +468,10 @@ GStreamer's SRTP elements.
 ## Live ingress over UDP and RTP
 
 `UdpSrc` (`udpsrc.rs`, `udp-ingress` feature) is the receive-side inverse of
-`UdpSink`. It receives RTP on a tokio `UdpSocket` and depayloads H.264 into
-Annex-B access units pushed downstream as `CompressedVideo` H.264, so the
-canonical chain is `UdpSrc -> FfmpegH264Dec -> sink`. The I/O is async, so
+`UdpSink`. It receives RTP on a tokio `UdpSocket` and by default depayloads
+H.264 into Annex-B access units pushed downstream as `CompressedVideo` H.264, so
+the canonical chain is `UdpSrc -> FfmpegH264Dec -> sink`. Opus is the other
+payload it takes, described below. The I/O is async, so
 unlike `V4l2Src` it needs no capture thread.
 
 The protocol logic is sans-IO, mirroring the egress split. `rtpdepay.rs`'s
@@ -475,6 +481,16 @@ fragments reassemble with the original NAL header rebuilt from the FU
 indicator's F and NRI bits plus the FU header's type, and the RTP marker bit
 closes an access unit. A sequence-number gap drops the in-flight reassembly, so
 loss or reorder never welds two access units together.
+
+`encoding-name=OPUS` (`RtpEncoding::Opus`), or an SDP whose first mappable
+section has an `opus` rtpmap, switches the source to Opus. Each RTP payload goes
+downstream as one Opus packet, typed `Caps::Audio { format: Opus, channels: 2,
+sample_rate: 48000 }` (the RFC 7587 rtpmap always says two channels, and libopus
+decodes a mono packet into stereo). PTS comes from the 48 kHz RTP timestamp, and
+an empty payload or a packet too short for its header is dropped. The jitter
+buffer, RTCP, NACK, RTX and FEC path is shared: `RtpRecvConfig::encoding` picks
+the depayloader and the media clock, and nothing else in the loop depends on the
+codec. `width` / `height` are refused in Opus mode.
 
 ### Jitter buffer, RTCP, NACK, RTX and FEC
 

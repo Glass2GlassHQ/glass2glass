@@ -1,13 +1,14 @@
-//! UDP egress sink for H.264 over RTP. The I/O half of the live-egress
-//! path whose Sans-IO half is `rtppay::RtpH264Packetizer`: this sink
-//! drives the packetizer over each Annex-B access unit and sends the resulting
-//! RTP packets to a destination on a UDP socket, the send-side inverse of
-//! `RtspSrc`'s receive path.
+//! UDP egress sink for H.264 or Opus over RTP. The I/O half of the live-egress
+//! path whose Sans-IO half is `rtppay::RtpH264Packetizer` /
+//! `rtppay::RtpOpusPacketizer`: this sink drives the packetizer over each
+//! Annex-B access unit or Opus packet and sends the resulting RTP packets to a
+//! destination on a UDP socket, the send-side inverse of `RtspSrc`'s receive
+//! path.
 //!
 //! The RTP timestamp is derived from `FrameTiming::pts_ns` at the 90 kHz H.264
-//! media clock; sequence numbers and the per-AU marker bit come from the
-//! packetizer. Opt-in RFC 3550 sender reports (`with_rtcp_sender_reports`) let a
-//! receiver sync the RTP clock to wall time. The RTSP `ANNOUNCE`/`RECORD`
+//! or 48 kHz Opus media clock; sequence numbers and the per-AU marker bit come
+//! from the packetizer. Opt-in RFC 3550 sender reports
+//! (`with_rtcp_sender_reports`) let a receiver sync the RTP clock to wall time. The RTSP `ANNOUNCE`/`RECORD`
 //! handshake for Wowza-style ingest is the remaining live-egress follow-up (it
 //! needs the network port the sandbox blocks).
 //!
@@ -28,22 +29,70 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket as StdUdpSocket};
 
 use g2g_core::rtp::CaptureTimeExtensionIds;
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    Dim, ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::bytestream::{carried_bytestream_caps, datagram_chunk, is_packet_encoding};
 use crate::filesink::io_err;
 use crate::flexfec::FlexFecEncoder;
+use crate::opusparse::is_opus_config;
 use crate::rtcp::{self, RtcpPacket};
 use crate::rtpcapturetime::{
     get_capture_time_prop, set_capture_time_prop, CaptureClock, ABS_CAPTURE_TIME_ID_PROPERTY,
     NTP_64_ID_PROPERTY,
 };
-use crate::rtppay::RtpH264Packetizer;
+use crate::rtpdepay::RtpEncoding;
+use crate::rtpklv::rtp_timestamp_at_clock;
+use crate::rtppay::{RtpH264Packetizer, RtpOpusPacketizer};
 use crate::rtx::{self, SentPackets};
 use crate::ulpfec::{FecEncoder, InterleavedFecEncoder};
+
+#[derive(Debug)]
+enum RtpPacketizer {
+    H264(RtpH264Packetizer),
+    Opus(RtpOpusPacketizer),
+}
+
+impl RtpPacketizer {
+    fn encoding(&self) -> RtpEncoding {
+        match self {
+            RtpPacketizer::H264(_) => RtpEncoding::H264,
+            RtpPacketizer::Opus(_) => RtpEncoding::Opus,
+        }
+    }
+
+    // wraps the u32 RTP field as the protocol expects
+    fn rtp_timestamp(&self, pts_ns: u64) -> u32 {
+        rtp_timestamp_at_clock(pts_ns, u64::from(self.encoding().clock_rate_hz()))
+    }
+
+    fn packetize(
+        &mut self,
+        unit: &[u8],
+        rtp_timestamp: u32,
+        capture_time_ids: CaptureTimeExtensionIds,
+        capture_ntp: u64,
+    ) -> Vec<Vec<u8>> {
+        match self {
+            RtpPacketizer::H264(packetizer) => packetizer.packetize_with_capture_time(
+                unit,
+                rtp_timestamp,
+                capture_time_ids,
+                capture_ntp,
+            ),
+            // a demuxer's OpusHead / OpusTags frames describe the stream, they are not audio
+            RtpPacketizer::Opus(_) if is_opus_config(unit) => Vec::new(),
+            RtpPacketizer::Opus(packetizer) => packetizer.packetize_with_capture_time(
+                unit,
+                rtp_timestamp,
+                capture_time_ids,
+                capture_ntp,
+            ),
+        }
+    }
+}
 
 /// FEC mode for the sink: off, single-level ULPFEC (one repair per contiguous
 /// group, recovers one loss per group), interleaved ULPFEC (column repairs
@@ -157,10 +206,19 @@ fn h264_any() -> Caps {
     }
 }
 
-/// Everything the sink takes: H.264 to RTP-payload, or a byte stream to send
-/// as raw datagrams. H.264 leads, so an ambiguous solve keeps the RTP path.
+fn opus_any() -> Caps {
+    Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: ANY_CHANNELS,
+        sample_rate: ANY_SAMPLE_RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+    }
+}
+
+/// Everything the sink takes: H.264 or Opus to RTP-payload, or a byte stream to
+/// send as raw datagrams. H.264 leads, so an ambiguous solve keeps the RTP path.
 fn accepted_caps() -> CapsSet {
-    let mut alternatives = Vec::from([h264_any()]);
+    let mut alternatives = Vec::from([h264_any(), opus_any()]);
     alternatives.extend(carried_bytestream_caps());
     CapsSet::from_alternatives(alternatives)
 }
@@ -209,7 +267,7 @@ pub struct UdpSink {
     payload_type: u8,
     ssrc: u32,
     max_payload: usize,
-    packetizer: Option<RtpH264Packetizer>,
+    packetizer: Option<RtpPacketizer>,
     // Bound synchronously in `configure_pipeline` (no runtime needed); wrapped
     // into the tokio socket lazily on first `process`, where a runtime context
     // is guaranteed (`UdpSocket::from_std` requires one).
@@ -460,12 +518,6 @@ impl UdpSink {
         self.eos_seen
     }
 
-    /// 90 kHz RTP timestamp for a presentation time (the H.264 media clock,
-    /// RFC 6184). Wraps the u32 RTP field as the protocol expects.
-    fn rtp_timestamp(pts_ns: u64) -> u32 {
-        crate::rtpklv::rtp_timestamp_from_pts(pts_ns)
-    }
-
     /// Where each datagram goes: the `clients` list when set, else `host`:`port`.
     fn destinations(&self) -> &[SocketAddr] {
         if self.clients.is_empty() {
@@ -564,11 +616,13 @@ impl AsyncElement for UdpSink {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // A byte stream goes out verbatim; everything else is RTP-payloaded
-        // H.264.
+        // H.264 or Opus.
         if matches!(upstream_caps, Caps::ByteStream { .. }) {
             return Ok(upstream_caps.clone());
         }
-        upstream_caps.intersect(&h264_any())
+        upstream_caps
+            .intersect(&h264_any())
+            .or_else(|_| upstream_caps.intersect(&opus_any()))
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
@@ -582,10 +636,21 @@ impl AsyncElement for UdpSink {
                 ..
             } => {
                 self.bytestream = None;
-                self.packetizer = Some(
+                self.packetizer = Some(RtpPacketizer::H264(
                     RtpH264Packetizer::new(self.payload_type, self.ssrc)
                         .with_max_payload(self.max_payload),
-                );
+                ));
+                self.fec = self.fec_config.build();
+            }
+            Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            } => {
+                self.bytestream = None;
+                self.packetizer = Some(RtpPacketizer::Opus(RtpOpusPacketizer::new(
+                    self.payload_type,
+                    self.ssrc,
+                )));
                 self.fec = self.fec_config.build();
             }
             Caps::ByteStream { encoding } => self.bytestream = Some(*encoding),
@@ -618,7 +683,7 @@ impl AsyncElement for UdpSink {
         ElementMetadata::new(
             "UDP sink",
             "Sink/Network",
-            "Sends RTP H.264 over UDP honoring NACK retransmit, or a byte stream as raw datagrams",
+            "Sends RTP H.264 or Opus over UDP honoring NACK retransmit, or a byte stream as raw datagrams",
             "g2g",
         )
     }
@@ -906,22 +971,19 @@ impl AsyncElement for UdpSink {
                         self.frames_sent += 1;
                         return Ok(());
                     }
-                    let timestamp = Self::rtp_timestamp(frame.timing.pts_ns);
-                    self.last_rtp_ts = timestamp;
                     let capture_ntp = if self.capture_time_ids.is_empty() {
                         0
                     } else {
                         self.capture_clock.capture_ntp(&frame)
                     };
-                    let packets = {
-                        let packetizer = self.packetizer.as_mut().ok_or(G2gError::NotConfigured)?;
-                        packetizer.packetize_with_capture_time(
-                            slice,
-                            timestamp,
-                            self.capture_time_ids,
-                            capture_ntp,
-                        )
-                    };
+                    let packetizer = self.packetizer.as_mut().ok_or(G2gError::NotConfigured)?;
+                    let timestamp = packetizer.rtp_timestamp(frame.timing.pts_ns);
+                    let packets =
+                        packetizer.packetize(slice, timestamp, self.capture_time_ids, capture_ntp);
+                    if packets.is_empty() {
+                        return Ok(());
+                    }
+                    self.last_rtp_ts = timestamp;
                     self.ensure_socket()?;
                     // Generate any ULPFEC repair packets for the just-built media
                     // (before the borrow of `self.socket` below).
@@ -1080,10 +1142,18 @@ mod tests {
 
     #[test]
     fn rtp_timestamp_is_90khz_of_pts() {
-        assert_eq!(UdpSink::rtp_timestamp(0), 0);
+        let h264 = RtpPacketizer::H264(RtpH264Packetizer::new(96, 0));
+        assert_eq!(h264.rtp_timestamp(0), 0);
         // 1 second of pts -> 90000 ticks.
-        assert_eq!(UdpSink::rtp_timestamp(1_000_000_000), 90_000);
+        assert_eq!(h264.rtp_timestamp(1_000_000_000), 90_000);
         // 1/30 s -> 3000 ticks, though the ns PTS is truncated just under it.
-        assert_eq!(UdpSink::rtp_timestamp(33_333_333), 3000);
+        assert_eq!(h264.rtp_timestamp(33_333_333), 3000);
+    }
+
+    #[test]
+    fn opus_rtp_timestamp_is_48khz_of_pts() {
+        let opus = RtpPacketizer::Opus(RtpOpusPacketizer::new(96, 0));
+        // one 20 ms Opus frame -> 960 ticks
+        assert_eq!(opus.rtp_timestamp(20_000_000), 960);
     }
 }

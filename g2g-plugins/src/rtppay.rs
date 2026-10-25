@@ -346,6 +346,21 @@ impl RtpOpusPacketizer {
         self.writer
             .write(&[Payload::whole(opus_packet)], rtp_timestamp, &[])
     }
+
+    pub fn packetize_with_capture_time(
+        &mut self,
+        opus_packet: &[u8],
+        rtp_timestamp: u32,
+        capture_time_ids: CaptureTimeExtensionIds,
+        capture_ntp: u64,
+    ) -> Vec<Vec<u8>> {
+        self.writer.write_with_capture_time(
+            &[Payload::whole(opus_packet)],
+            rtp_timestamp,
+            capture_time_ids,
+            capture_ntp,
+        )
+    }
 }
 
 #[cfg(test)]

@@ -568,8 +568,8 @@ cargo clippy --workspace --all-targets
 | `WgpuDownload` (`wgpudownload`: wgpu texture or buffer to System), `WgpuUpload` (`wgpuupload`: System to wgpu buffer) | `wgpu-sink` | wgpu adapter |
 | `CudaGlSink` (CUDA-GL present), `CudaKmsSink` (CUDA-GL on KMS) | `cuda-gl`, `cuda-kms` | Linux + NVIDIA + EGL + GL (+ libdrm for KMS) |
 | `CudaToWgpu` / `WgpuToCuda` (zero-copy bridge) | `cuda-wgpu` | Linux + NVIDIA + Vulkan |
-| `UdpSink` + RTP packetizer, or raw datagrams (`multiudpsink` `clients=`) | `udp-egress` | none |
-| `UdpSrc` (RTP ingest + jitter buffer + RTCP / NACK, or raw MPEG-TS datagrams) | `udp-ingress` | none |
+| `UdpSink` + H.264 / Opus RTP packetizer, or raw datagrams (`multiudpsink` `clients=`) | `udp-egress` | none |
+| `UdpSrc` (H.264 / Opus RTP ingest + jitter buffer + RTCP / NACK, or raw MPEG-TS datagrams) | `udp-ingress` | none |
 | `SrtpEnc` / `SrtpDec` (RFC 3711 / RFC 7714 SRTP and SRTCP, per-SSRC receive contexts) | `srtp` | none |
 | `DtlsSrtpEnc` / `DtlsSrtpDec` (DTLS-SRTP handshake over the media socket keys SRTP) | `dtls-srtp` | none |
 | `RistSink` / `RistSrc` (RIST Simple Profile: MPEG-TS over RTP with NACK retransmission) | `rist` | none |
@@ -918,6 +918,23 @@ run_source_transform_sink(src, dec, sink, &clock, LatencyProfile::Live).await?;
 ```
 
 Features: `udp-ingress ffmpeg wayland-sink`.
+
+### Opus over plain RTP
+
+The plain RTP audio that SFU forwarders (Janus `rtp_forward`, mediasoup
+`PlainTransport`) and SIP peers send. `udpsink` payloads Opus input at the 48 kHz
+RTP clock (RFC 7587), and `udpsrc` depayloads it when given `encoding-name=OPUS`
+or an SDP with an `opus/48000/2` rtpmap. Both interoperate with gst's
+`rtpopuspay` / `rtpopusdepay`.
+
+```sh
+# receiver
+g2g-launch udpsrc port=5004 encoding-name=OPUS ! opusdec ! autoaudiosink
+# sender
+g2g-launch audiotestsrc ! clocksync ! opusenc ! udpsink host=192.0.2.10 port=5004
+```
+
+Features: `udp-ingress` / `udp-egress` plus `opus`.
 
 ### Per-frame loss and latency across an RTP hop
 

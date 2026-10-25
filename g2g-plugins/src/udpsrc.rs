@@ -1,7 +1,10 @@
-//! UDP ingress source for H.264 over RTP: the receive-side inverse of
+//! UDP ingress source for H.264 or Opus over RTP: the receive-side inverse of
 //! [`UdpSink`](crate::udpsink). It binds a UDP socket, receives RTP packets,
 //! and depayloads them (via [`rtpdepay`](crate::rtpdepay)) into Annex-B access
 //! units pushed downstream as `CompressedVideo` H.264, ready for a decoder.
+//! `encoding-name=OPUS`, or an SDP with an `opus` rtpmap, selects Opus instead:
+//! each RTP payload goes downstream as one Opus packet, PTS from the 48 kHz RTP
+//! timestamp.
 //!
 //! Caps come from three places. The `sdp` property takes the description a
 //! sender publishes (`ffmpeg -sdp_file`, an RTSP `DESCRIBE` body) and sets the
@@ -30,9 +33,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
 use g2g_core::log::LogSource;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
-    G2gError, LatencyReport, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
+    ElementMetadata, G2gError, LatencyReport, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::bytestream::byte_frame;
@@ -40,9 +43,20 @@ use crate::filesink::io_err;
 use crate::rtpcapturetime::{
     get_capture_time_prop, set_capture_time_prop, ABS_CAPTURE_TIME_ID_PROPERTY, NTP_64_ID_PROPERTY,
 };
+use crate::rtpdepay::RtpEncoding;
 use crate::rtpjitter::JitterConfig;
 use crate::rtprecv::RtpRecvConfig;
-use crate::sdp::SdpMedia;
+use crate::sdp::{SdpMedia, OPUS_CLOCK_HZ, OPUS_RTPMAP_CHANNELS};
+
+// libopus decodes a mono packet into the stereo the RFC 7587 rtpmap always announces
+fn opus_caps() -> Caps {
+    Caps::Audio {
+        format: AudioFormat::Opus,
+        channels: OPUS_RTPMAP_CHANNELS,
+        sample_rate: OPUS_CLOCK_HZ,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+    }
+}
 
 /// Resolve an `sdp` value: a document starts with its RFC 4566 `v=` version
 /// line, anything else is a path to read it from.
@@ -82,7 +96,8 @@ pub struct UdpSrc {
     /// after this many access units and emit EOS (the test / bounded path).
     frame_limit: u64,
     /// Receive-path tuning (jitter reorder, RTCP RR/NACK, RTX, ULPFEC/FlexFEC),
-    /// the shared-path config handed to [`crate::rtprecv::receive_rtp_h264`].
+    /// the shared-path config handed to [`crate::rtprecv::receive_rtp`]. Its
+    /// `encoding` is the payload format this source depayloads.
     recv: RtpRecvConfig,
     /// The `sdp` property as set (inline text or a file path), kept only so the
     /// property reads back; its effect is already folded into the fields above.
@@ -141,11 +156,17 @@ impl UdpSrc {
         self
     }
 
+    pub fn with_encoding(mut self, encoding: RtpEncoding) -> Self {
+        self.recv.encoding = encoding;
+        self
+    }
+
     /// Configure from an SDP: either the document text or the path to a `.sdp`
-    /// file. The first H.264 media section sets the output geometry / frame rate
-    /// (from its `fmtp` parameter sets and `a=framerate`) and the receive port,
-    /// so a published description is all a receiver needs. Fields the SDP leaves
-    /// out keep their declared values.
+    /// file. The first mappable media section sets the codec (H.264 or Opus) and
+    /// the receive port, and an H.264 section also sets the output geometry /
+    /// frame rate (from its `fmtp` parameter sets and `a=framerate`), so a
+    /// published description is all a receiver needs. Fields the SDP leaves out
+    /// keep their declared values.
     pub fn with_sdp(mut self, sdp: &str) -> Result<Self, G2gError> {
         let text = read_sdp(sdp)?;
         let media = SdpMedia::parse(&text).ok_or(G2gError::CapsMismatch)?;
@@ -157,24 +178,31 @@ impl UdpSrc {
     }
 
     /// Apply one parsed media description. Returns `false` (changing nothing)
-    /// for a description this source cannot receive: it depayloads H.264 only.
+    /// for a description this source cannot receive: it depayloads H.264 and
+    /// Opus only.
     pub fn apply_sdp(&mut self, media: &SdpMedia) -> bool {
-        let Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width,
-            height,
-            framerate,
-            ..
-        } = &media.caps
-        else {
-            return false;
-        };
-        if let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) {
-            self.width = *w;
-            self.height = *h;
-        }
-        if let Rate::Fixed(q16) = framerate {
-            self.fps = (q16 >> 16).max(1);
+        match &media.caps {
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                width,
+                height,
+                framerate,
+                ..
+            } => {
+                self.recv.encoding = RtpEncoding::H264;
+                if let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) {
+                    self.width = *w;
+                    self.height = *h;
+                }
+                if let Rate::Fixed(q16) = framerate {
+                    self.fps = (q16 >> 16).max(1);
+                }
+            }
+            Caps::Audio {
+                format: AudioFormat::Opus,
+                ..
+            } => self.recv.encoding = RtpEncoding::Opus,
+            _ => return false,
         }
         // The m= port is where the sender is sending; 0 means the SDP pins none.
         if media.port != 0 {
@@ -261,18 +289,21 @@ impl UdpSrc {
     }
 
     fn caps(&self) -> Caps {
-        Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width: Dim::Fixed(self.width),
-            height: Dim::Fixed(self.height),
-            framerate: Rate::Fixed(self.fps << 16),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
+        match self.recv.encoding {
+            RtpEncoding::H264 => Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                width: Dim::Fixed(self.width),
+                height: Dim::Fixed(self.height),
+                framerate: Rate::Fixed(self.fps << 16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
+            },
+            RtpEncoding::Opus => opus_caps(),
         }
     }
 
     /// What this source puts on its pad: the raw container in datagram mode, the
-    /// declared H.264 hint in RTP mode.
+    /// declared H.264 hint or the Opus caps in RTP mode.
     fn output_caps(&self) -> Caps {
         match self.bytestream {
             Some(encoding) => Caps::ByteStream { encoding },
@@ -284,7 +315,7 @@ impl UdpSrc {
     /// and the geometry hints (a byte stream carries no geometry). `framerate`
     /// is not one of them, it still sets the live latency report.
     fn is_rtp_only(&self, name: &str) -> bool {
-        matches!(name, "sdp" | "width" | "height")
+        matches!(name, "sdp" | "width" | "height" | "encoding-name")
             || crate::rtprecv::get_recv_prop(&self.recv, name).is_some()
             || get_capture_time_prop(&self.recv.capture_time_ids, name).is_some()
     }
@@ -358,10 +389,11 @@ impl SourceLoop for UdpSrc {
         core::future::ready(Ok(self.output_caps()))
     }
 
-    /// Produces the declared H.264 hint caps in RTP mode, or the container
-    /// `bytestream-format` names in raw mode (no I/O at negotiation; the socket
-    /// binds in `configure_pipeline`). In RTP mode a downstream decoder corrects
-    /// the real geometry from the in-band SPS via a mid-stream `CapsChanged`.
+    /// Produces the declared H.264 hint caps or the Opus caps in RTP mode, or the
+    /// container `bytestream-format` names in raw mode (no I/O at negotiation; the
+    /// socket binds in `configure_pipeline`). For H.264 a downstream decoder
+    /// corrects the real geometry from the in-band SPS via a mid-stream
+    /// `CapsChanged`.
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
@@ -370,12 +402,15 @@ impl SourceLoop for UdpSrc {
         ))))
     }
 
-    /// The container is a property, so the auto-plug parser can read the raw
-    /// output type without negotiating. RTP mode keeps the registry's declared
-    /// H.264 caps.
+    /// The container and the RTP encoding are properties, so the auto-plug parser
+    /// can read the output type without negotiating. H.264 keeps the registry's
+    /// declared caps.
     fn configured_output_caps(&self) -> Option<Caps> {
-        self.bytestream
-            .map(|encoding| Caps::ByteStream { encoding })
+        match (self.bytestream, self.recv.encoding) {
+            (Some(encoding), _) => Some(Caps::ByteStream { encoding }),
+            (None, RtpEncoding::Opus) => Some(opus_caps()),
+            (None, RtpEncoding::H264) => None,
+        }
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -390,7 +425,7 @@ impl SourceLoop for UdpSrc {
         ElementMetadata::new(
             "UDP source",
             "Source/Network",
-            "Receives RTP H.264 over UDP with a jitter buffer, or raw datagrams as a byte stream",
+            "Receives RTP H.264 or Opus over UDP with a jitter buffer, or raw datagrams as a byte stream",
             "g2g",
         )
     }
@@ -422,12 +457,19 @@ impl SourceLoop for UdpSrc {
             PropertySpec::new(
                 "sdp",
                 PropKind::Str,
-                "SDP describing the stream (document text or a .sdp file path): sets geometry, frame rate, and port",
+                "SDP describing the stream (document text or a .sdp file path): sets codec, geometry, frame rate, and port",
             ),
+            PropertySpec::new(
+                "encoding-name",
+                PropKind::Str,
+                "RTP payload format to depayload, as in gst application/x-rtp caps",
+            )
+            .with_default("H264")
+            .with_enum_values("H264 | OPUS"),
             PropertySpec::new(
                 "bytestream-format",
                 PropKind::Str,
-                "receive raw datagrams in this format instead of depayloading RTP: mpegts | matroska | ogg | flv | mp4 | rtp | srtp | rtcp | srtcp | dtls (unset = H.264 over RTP)",
+                "receive raw datagrams in this format instead of depayloading RTP: mpegts | matroska | ogg | flv | mp4 | rtp | srtp | rtcp | srtcp | dtls (unset = RTP, see encoding-name)",
             ),
             PropertySpec::new(
                 "multicast-group",
@@ -518,6 +560,11 @@ impl SourceLoop for UdpSrc {
             g2g_core::g2g_warn!(self, "`{name}` needs RTP mode, not bytestream-format");
             return Err(PropError::Value);
         }
+        let is_geometry = matches!(name, "width" | "height");
+        if self.recv.encoding == RtpEncoding::Opus && is_geometry {
+            g2g_core::g2g_warn!(self, "`{name}` needs H.264, not encoding-name=OPUS");
+            return Err(PropError::Value);
+        }
         if name == "multicast-group" {
             return crate::netprop::set_addr_prop(&mut self.bind, name, name, &value)
                 .unwrap_or(Err(PropError::Unknown));
@@ -554,6 +601,11 @@ impl SourceLoop for UdpSrc {
                 self.sdp = Some(raw.to_string());
                 Ok(())
             }
+            "encoding-name" => {
+                let text = value.as_str().ok_or(PropError::Type)?;
+                self.recv.encoding = RtpEncoding::from_name(text).ok_or(PropError::Value)?;
+                Ok(())
+            }
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
             "bytestream-format" => {
                 let text = value.as_str().ok_or(PropError::Type)?;
@@ -588,6 +640,7 @@ impl SourceLoop for UdpSrc {
             "height" => Some(PropValue::Uint(self.height as u64)),
             "framerate" => Some(PropValue::Uint(self.fps as u64)),
             "sdp" => Some(PropValue::Str(self.sdp.clone().unwrap_or_default())),
+            "encoding-name" => Some(PropValue::Str(self.recv.encoding.name().into())),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             "bytestream-format" => Some(PropValue::Str(
                 self.bytestream
@@ -624,27 +677,31 @@ impl SourceLoop for UdpSrc {
             }
 
             // The jitter + RTCP RR/NACK + FEC/RTX + depayload receive path is
-            // shared with RtspServerSrc; the caps in force ride along so the
-            // stream's SPS can refine them mid-flight.
+            // shared with RtspServerSrc; the caps in force ride along so an
+            // H.264 stream's SPS can refine them mid-flight.
             let mut recv = self.recv.clone();
             recv.declared_caps = Some(self.caps());
-            crate::rtprecv::receive_rtp_h264(&socket, &recv, self.frame_limit, 0, out).await
+            crate::rtprecv::receive_rtp(&socket, &recv, self.frame_limit, 0, out).await
         })
     }
 }
 
 impl PadTemplates for UdpSrc {
-    /// Produces H.264 at any geometry (RTP mode), or a raw byte stream in any
-    /// carried container; an instance fixes one via `bytestream-format`.
+    /// Produces H.264 at any geometry or Opus (RTP mode), or a raw byte stream in
+    /// any carried container; an instance fixes one via `encoding-name` or
+    /// `bytestream-format`.
     fn pad_templates() -> alloc::vec::Vec<PadTemplate> {
-        let mut alternatives = alloc::vec::Vec::from([Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            alignment: g2g_core::BitstreamAlignment::Unspecified,
-        }]);
+        let mut alternatives = alloc::vec::Vec::from([
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                alignment: g2g_core::BitstreamAlignment::Unspecified,
+            },
+            opus_caps(),
+        ]);
         alternatives.extend(crate::bytestream::carried_bytestream_caps());
         alloc::vec::Vec::from([PadTemplate::source(CapsSet::from_alternatives(
             alternatives,

@@ -246,7 +246,8 @@ g2g-inspect videoconvert         # one element's properties + pad templates
 ```
 
 Common mappings: `jpegenc`/`jpegdec` → `mjpegenc`/`mjpegdec`; `souphttpsrc` →
-`httpsrc`; `rtph264depay` → built into `udpsrc`/`rtspsrc`. RIST keeps its gst
+`httpsrc`; `rtph264depay` → built into `udpsrc`/`rtspsrc`; `rtpopusdepay` /
+`rtpopuspay` → `udpsrc encoding-name=OPUS` / `udpsink`. RIST keeps its gst
 names but drops the MPEG-TS payloader around it: `mpegtsmux ! rtpmp2tpay !
 ristsink` is `mpegtsmux ! ristsink`, and `ristsrc ! rtpmp2tdepay ! tsdemux` is
 `ristsrc ! tsdemux` (Simple Profile only: no bonding, no header extension, no
@@ -295,7 +296,7 @@ Whole plugins answer by family rather than name:
 
 | gst names | g2g |
 | :--- | :--- |
-| `rtp*pay` / `rtp*depay` | payloading is inside `udpsink` / `udpsrc` (and `rtspsrc`, `rtspclientsink`, `webrtcsink`) |
+| `rtp*pay` / `rtp*depay` | payloading is inside `udpsink` / `udpsrc` (and `rtspsrc`, `rtspclientsink`, `webrtcsink`). Plain RTP carries H.264 or Opus: `udpsink` picks the payloader from its input caps, and `udpsrc` takes `encoding-name=OPUS` (or an `sdp` with an opus rtpmap) where gst writes `caps="application/x-rtp,encoding-name=OPUS" ! rtpopusdepay` |
 | `rtpbin`, `rtpsession`, `rtpjitterbuffer`, `rtprtx*`, `rtpulpfec*`, `rtpst2022-1-fec*` | `udpsrc` properties (`jitter-latency`, `jitter-depth`, `rtcp-rr-interval`, `nack`, `rtx-payload-type`, `fec-payload-type`, `flexfec-payload-type`) and `udpsink` properties (`rtcp-sr-interval`, `retransmit`, `fec-columns`, `fec-rows`) |
 | `gl*` | no OpenGL elements; `wgpusink`, `wgpucompositor`, `dmabuftowgpu` / `wgputodmabuf` |
 | `cuda*` | `nvdec` / `nvenc`, and `localcudasrc` / `localcudasink` for cross-process CUDA memory |

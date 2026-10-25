@@ -384,7 +384,7 @@ fn parse_q16_fps(s: &str) -> Option<u32> {
 const VIDEO_CLOCK_HZ: u32 = MediaClock::VIDEO_RATE_HZ;
 // RFC 7587 fixes the Opus rtpmap at 48 kHz and two channels whatever the stream carries
 pub const OPUS_CLOCK_HZ: u32 = 48_000;
-const OPUS_RTPMAP_CHANNELS: u8 = 2;
+pub const OPUS_RTPMAP_CHANNELS: u8 = 2;
 
 pub fn session_description(media_sections: &[String]) -> String {
     let mut sdp = String::from(

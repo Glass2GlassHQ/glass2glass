@@ -3,7 +3,8 @@
 //! turns a stream of RTP packets back into Annex-B access units: single-NAL
 //! and STAP-A payloads pass through; FU-A fragments reassemble; the RTP marker
 //! bit closes an access unit. No I/O: `UdpSrc` wraps this and feeds it the
-//! datagrams a socket receives.
+//! datagrams a socket receives. Opus (RFC 7587) needs no reassembly: each RTP
+//! payload is one Opus packet.
 //!
 //! This is the basic in-order depayloader. A jitter buffer (packet reorder,
 //! loss concealment, RTCP) is the larger receive-side follow-up (design/TODO.md);
@@ -12,15 +13,19 @@
 
 use alloc::vec::Vec;
 
+use g2g_core::mediaclock::MediaClock;
 use g2g_core::rtp::RtpHeader;
+use g2g_core::VideoCodec;
+
+use crate::sdp::OPUS_CLOCK_HZ;
 
 /// RFC 6184 aggregation / fragmentation NAL types.
 const STAP_A_TYPE: u8 = 24;
 const FU_A_TYPE: u8 = 28;
 const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
 
-/// One depayloaded access unit: Annex-B bytes plus the RTP timestamp shared by
-/// its packets (90 kHz for H.264).
+/// One depayloaded access unit: Annex-B bytes for H.264, one Opus packet for
+/// Opus, plus the RTP timestamp shared by its packets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessUnit {
     pub data: Vec<u8>,
@@ -33,6 +38,82 @@ pub struct AccessUnit {
 /// in-flight data and resync at the next start-of-AU. 8 MiB covers a large
 /// keyframe.
 const MAX_ASSEMBLY_BYTES: usize = 8 * 1024 * 1024;
+
+// the payload formats the plain RTP receive path depayloads, named as in gst `encoding-name`
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RtpEncoding {
+    #[default]
+    H264,
+    Opus,
+}
+
+impl RtpEncoding {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "H264" => Some(RtpEncoding::H264),
+            "OPUS" => Some(RtpEncoding::Opus),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            RtpEncoding::H264 => "H264",
+            RtpEncoding::Opus => "OPUS",
+        }
+    }
+
+    pub fn clock_rate_hz(self) -> u32 {
+        match self {
+            RtpEncoding::H264 => MediaClock::VIDEO_RATE_HZ,
+            RtpEncoding::Opus => OPUS_CLOCK_HZ,
+        }
+    }
+
+    // every Opus packet decodes without the ones before it
+    pub fn is_keyframe(self, unit: &[u8]) -> bool {
+        match self {
+            RtpEncoding::H264 => crate::annexb::au_is_keyframe(VideoCodec::H264, unit),
+            RtpEncoding::Opus => true,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum RtpDepayloader {
+    H264(RtpH264Depayloader),
+    Opus,
+}
+
+impl RtpDepayloader {
+    pub fn new(encoding: RtpEncoding) -> Self {
+        match encoding {
+            RtpEncoding::H264 => RtpDepayloader::H264(RtpH264Depayloader::new()),
+            RtpEncoding::Opus => RtpDepayloader::Opus,
+        }
+    }
+
+    pub fn depacketize(&mut self, packet: &[u8]) -> Option<AccessUnit> {
+        match self {
+            RtpDepayloader::H264(depayloader) => depayloader.depacketize(packet),
+            RtpDepayloader::Opus => depacketize_opus(packet),
+        }
+    }
+}
+
+// RFC 7587 never fragments, so each payload is one whole Opus packet
+fn depacketize_opus(packet: &[u8]) -> Option<AccessUnit> {
+    let parsed = RtpHeader::parse(packet)?;
+    let end = parsed.payload_offset.checked_add(parsed.payload_len)?;
+    let payload = packet.get(parsed.payload_offset..end)?;
+    if payload.is_empty() {
+        return None;
+    }
+    Some(AccessUnit {
+        data: payload.to_vec(),
+        rtp_timestamp: parsed.header.timestamp,
+    })
+}
 
 #[derive(Debug, Default)]
 pub struct RtpH264Depayloader {
@@ -312,6 +393,27 @@ mod tests {
             .depacketize(&fu_a_packet(101, 2, true, false, true, &[4, 5, 6]))
             .expect("resyncs and completes a new AU");
         assert_eq!(unit.data, wrap(&[&[0x65, 1, 2, 3, 4, 5, 6]]));
+    }
+
+    #[test]
+    fn opus_payload_round_trips_and_short_packets_drop() {
+        let opus = [0xFCu8, 1, 2, 3];
+        let packets = crate::rtppay::RtpOpusPacketizer::new(111, 9).packetize(&opus, 960);
+        let mut depay = RtpDepayloader::new(RtpEncoding::Opus);
+        let unit = depay
+            .depacketize(&packets[0])
+            .expect("one RTP packet carries one Opus packet");
+        assert_eq!(unit.data, opus);
+        assert_eq!(unit.rtp_timestamp, 960);
+
+        let header_only = &packets[0][..g2g_core::rtp::RTP_HEADER_LEN];
+        assert!(depay.depacketize(header_only).is_none(), "empty payload");
+        for len in 0..g2g_core::rtp::RTP_HEADER_LEN {
+            assert!(
+                depay.depacketize(&packets[0][..len]).is_none(),
+                "{len} bytes"
+            );
+        }
     }
 
     #[test]

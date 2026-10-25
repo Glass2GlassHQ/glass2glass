@@ -50,6 +50,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
+use crate::rtpdepay::RtpEncoding;
 use crate::rtpjitter::JitterConfig;
 use crate::rtprecv::RtpRecvConfig;
 use crate::rtspingest::{
@@ -128,6 +129,7 @@ impl RtspServerSrc {
                 flexfec_pt: None,
                 declared_caps: None,
                 capture_time_ids: Default::default(),
+                encoding: RtpEncoding::H264,
             },
             max_sessions: 0,
             session_timeout_ns: DEFAULT_SESSION_TIMEOUT_SECS as u64 * 1_000_000_000,
@@ -594,7 +596,7 @@ impl SourceLoop for RtspServerSrc {
                         } => {
                             let session_recv = session_recv_config(&recv, &responder);
                             tokio::select! {
-                                r = crate::rtprecv::receive_rtp_h264(&rtp_socket, &session_recv, remaining, seq_base, &mut tap) => {
+                                r = crate::rtprecv::receive_rtp(&rtp_socket, &session_recv, remaining, seq_base, &mut tap) => {
                                     r?;
                                     SessionEnd::Limit
                                 }
@@ -618,7 +620,7 @@ impl SourceLoop for RtspServerSrc {
                     };
                     served.set(served.get().saturating_add(1));
                     match end {
-                        // `push_access_unit` already emitted the EOS.
+                        // `AccessUnitEmitter::push` already emitted the EOS.
                         SessionEnd::Limit => return Ok(tap.frames()),
                         SessionEnd::PeerGone => {
                             tap.end_session();

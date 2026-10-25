@@ -94,6 +94,14 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
     // to Available before this table; no row is needed (and an Unsupported one
     // would contradict reality).
     ("rtph264depay", GstEquivalent::Unsupported("RTP depayloading is built into `udpsrc` / `rtspsrc`")),
+    ("rtpopusdepay", GstEquivalent::Unsupported(
+        "Opus RTP depayloading is built into `udpsrc`: set `encoding-name=OPUS`, or an `sdp` with an \
+         opus rtpmap, and link it to `opusdec` directly",
+    )),
+    ("rtpopuspay", GstEquivalent::Unsupported(
+        "Opus RTP payloading is built into `udpsink`: link `opusenc` to it directly and set \
+         `payload-type` there",
+    )),
     ("intervideosink", GstEquivalent::Unsupported(INTER_HINT)),
     ("intervideosrc", GstEquivalent::Unsupported(INTER_HINT)),
     ("interaudiosink", GstEquivalent::Unsupported(INTER_HINT)),
@@ -1386,6 +1394,19 @@ mod tests {
             panic!("rtph264depay has an exact row");
         };
         assert_eq!(hint, "RTP depayloading is built into `udpsrc` / `rtspsrc`");
+    }
+
+    #[test]
+    fn opus_rtp_names_point_at_the_udp_elements() {
+        let reg = default_registry();
+        let GstEquivalent::Unsupported(depay) = gst_equivalent(&reg, "rtpopusdepay") else {
+            panic!("rtpopusdepay has an exact row");
+        };
+        assert!(depay.contains("encoding-name=OPUS"), "{depay}");
+        let GstEquivalent::Unsupported(pay) = gst_equivalent(&reg, "rtpopuspay") else {
+            panic!("rtpopuspay has an exact row");
+        };
+        assert!(pay.contains("opusenc"), "{pay}");
     }
 
     #[test]

@@ -1,11 +1,12 @@
-//! Shared RTP H.264 receive loop: the jitter-buffer + RTCP RR/NACK +
+//! Shared RTP receive loop: the jitter-buffer + RTCP RR/NACK +
 //! FEC/RTX + depayload-to-access-unit path used by both [`UdpSrc`](crate::udpsrc)
 //! (raw RTP) and [`RtspServerSrc`](crate::rtspserversrc) (RTSP RECORD ingest).
 //!
 //! Given a bound UDP socket it reorders (jitter buffer), recovers (ULPFEC /
-//! FlexFEC / RTX), and depayloads RTP into Annex-B access units, pushing each as
-//! a `CompressedVideo` H.264 frame downstream, while driving RTCP receiver
-//! reports and Generic NACK retransmission requests back to the sender.
+//! FlexFEC / RTX), and depayloads RTP into H.264 Annex-B access units or Opus
+//! packets ([`RtpRecvConfig::encoding`]), pushing each as one frame downstream,
+//! while driving RTCP receiver reports and Generic NACK retransmission requests
+//! back to the sender.
 //!
 //! Both ingest sources differ only in how they obtain the socket (a raw bind vs
 //! the RTP port negotiated over an RTSP control channel); the receive path is
@@ -27,13 +28,11 @@ use crate::filesink::io_err;
 use crate::flexfec::FlexFecDecoder;
 use crate::nalparse::NalCodec;
 use crate::rtcp::{self, ReceptionStats, RtcpPacket};
-use crate::rtpdepay::{AccessUnit, RtpH264Depayloader};
+use crate::rtpdepay::{AccessUnit, RtpDepayloader, RtpEncoding};
 use crate::rtpjitter::{JitterConfig, RtpJitterBuffer, RtpPtsRebase};
 use crate::rtx;
 use crate::ulpfec::FecDecoder;
 
-/// H.264 RTP media clock (RFC 6184): timestamps tick at 90 kHz.
-const RTP_CLOCK_HZ: u32 = 90_000;
 /// Receive buffer: a UDP datagram tops out at 65507 payload bytes.
 const RECV_BUF: usize = 65_536;
 /// Default receiver-report cadence.
@@ -67,6 +66,7 @@ pub struct RtpRecvConfig {
     /// new geometry ([`SpsCapsRefiner`]). `None` leaves the stream unrefined.
     pub declared_caps: Option<Caps>,
     pub capture_time_ids: CaptureTimeExtensionIds,
+    pub encoding: RtpEncoding,
 }
 
 impl Default for RtpRecvConfig {
@@ -80,6 +80,7 @@ impl Default for RtpRecvConfig {
             flexfec_pt: None,
             declared_caps: None,
             capture_time_ids: CaptureTimeExtensionIds::default(),
+            encoding: RtpEncoding::default(),
         }
     }
 }
@@ -233,65 +234,86 @@ impl CaptureTimeLatch {
     }
 }
 
-/// Turn one depayloaded access unit into a downstream H.264 frame and push it,
-/// tracking the RTP-timestamp rebase (`pts_rebase`, so downstream PTS starts at
-/// zero) and the emitted sequence counter. Returns `Ok(true)` once `frame_limit`
-/// access units have been emitted (after pushing `Eos`), so the caller stops.
-/// `u64::MAX` never reaches the limit, which is how "run forever" is spelled.
-/// Shared by the UDP ([`receive_rtp_h264`]) and TCP-interleaved
-/// ([`crate::rtspserversrc`]) ingest paths, which differ only in how they obtain
-/// each RTP packet.
-pub(crate) async fn push_access_unit(
-    au: AccessUnit,
-    capture_unix_ns: Option<i64>,
-    pts_rebase: &mut RtpPtsRebase,
-    seq: &mut u64,
+// turns depayloaded access units into frames with PTS rebased to start at zero,
+// shared by the UDP (`receive_rtp`) and TCP-interleaved (`rtspingest`) ingest paths
+#[derive(Debug)]
+pub(crate) struct AccessUnitEmitter {
+    encoding: RtpEncoding,
+    pts_rebase: RtpPtsRebase,
+    seq: u64,
     seq_base: u64,
+    // u64::MAX never reaches the limit, which is how "run forever" is spelled
     frame_limit: u64,
-    out: &mut dyn OutputSink,
-) -> Result<bool, G2gError> {
-    let pts = pts_rebase.pts_ns(au.rtp_timestamp, RTP_CLOCK_HZ);
-    let arrival_ns = g2g_core::metrics::monotonic_ns();
-    // IDR NAL => keyframe; false (the safe default) otherwise.
-    let keyframe = crate::annexb::au_is_keyframe(g2g_core::VideoCodec::H264, &au.data);
-    let frame = Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(au.data.into_boxed_slice())),
-        timing: FrameTiming {
-            pts_ns: pts,
-            dts_ns: pts,
-            duration_ns: 0,
-            capture_ns: pts,
-            arrival_ns,
-            keyframe,
-        },
-        sequence: *seq,
-        meta: Default::default(),
-    };
-    #[cfg(feature = "metadata")]
-    let frame = {
-        let mut frame = frame;
-        if let Some(unix_nanos) = capture_unix_ns {
-            frame.meta.attach(g2g_core::WallClockMeta { unix_nanos });
-        }
-        frame
-    };
-    #[cfg(not(feature = "metadata"))]
-    let _ = capture_unix_ns;
-    out.push(PipelinePacket::DataFrame(frame)).await?;
-    *seq += 1;
-    if seq.saturating_sub(seq_base) >= frame_limit {
-        out.push(PipelinePacket::Eos).await?;
-        return Ok(true);
-    }
-    Ok(false)
 }
 
-/// Run the RTP H.264 receive loop on `socket` until `frame_limit` access units
+impl AccessUnitEmitter {
+    // `seq_base` is the sequence number the first emitted frame carries
+    pub(crate) fn new(encoding: RtpEncoding, seq_base: u64, frame_limit: u64) -> Self {
+        Self {
+            encoding,
+            pts_rebase: RtpPtsRebase::new(),
+            seq: seq_base,
+            seq_base,
+            frame_limit,
+        }
+    }
+
+    fn emitted(&self) -> u64 {
+        self.seq - self.seq_base
+    }
+
+    // true once `frame_limit` access units are out and `Eos` is pushed
+    pub(crate) async fn push(
+        &mut self,
+        au: AccessUnit,
+        capture_unix_ns: Option<i64>,
+        out: &mut dyn OutputSink,
+    ) -> Result<bool, G2gError> {
+        let pts = self
+            .pts_rebase
+            .pts_ns(au.rtp_timestamp, self.encoding.clock_rate_hz());
+        let arrival_ns = g2g_core::metrics::monotonic_ns();
+        // false (the safe default) for H.264 without an IDR NAL.
+        let keyframe = self.encoding.is_keyframe(&au.data);
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(au.data.into_boxed_slice())),
+            timing: FrameTiming {
+                pts_ns: pts,
+                dts_ns: pts,
+                duration_ns: 0,
+                capture_ns: pts,
+                arrival_ns,
+                keyframe,
+            },
+            sequence: self.seq,
+            meta: Default::default(),
+        };
+        #[cfg(feature = "metadata")]
+        let frame = {
+            let mut frame = frame;
+            if let Some(unix_nanos) = capture_unix_ns {
+                frame.meta.attach(g2g_core::WallClockMeta { unix_nanos });
+            }
+            frame
+        };
+        #[cfg(not(feature = "metadata"))]
+        let _ = capture_unix_ns;
+        out.push(PipelinePacket::DataFrame(frame)).await?;
+        self.seq += 1;
+        if self.emitted() >= self.frame_limit {
+            out.push(PipelinePacket::Eos).await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+}
+
+/// Run the RTP receive loop on `socket` until `frame_limit` access units
 /// have been emitted (`u64::MAX` = run until a socket error or downstream
 /// shutdown, 0 = emit nothing), pushing each completed access unit downstream
 /// and emitting `Eos` on the bounded path. `seq_base` is the sequence number the
 /// first emitted frame carries. Returns the number of access units pushed.
-pub async fn receive_rtp_h264(
+pub async fn receive_rtp(
     socket: &tokio::net::UdpSocket,
     cfg: &RtpRecvConfig,
     frame_limit: u64,
@@ -301,12 +323,11 @@ pub async fn receive_rtp_h264(
     if crate::numbuffers::finished_at_zero_limit(frame_limit, out).await? {
         return Ok(0);
     }
-    let mut depay = RtpH264Depayloader::new();
+    let mut depay = RtpDepayloader::new(cfg.encoding);
     let mut jitter = RtpJitterBuffer::new(cfg.jitter);
-    let mut stats = ReceptionStats::new(0, RTP_CLOCK_HZ);
+    let mut stats = ReceptionStats::new(0, cfg.encoding.clock_rate_hz());
     let mut buf = vec![0u8; RECV_BUF];
-    let mut seq = seq_base;
-    let mut pts_rebase = RtpPtsRebase::new();
+    let mut emitter = AccessUnitEmitter::new(cfg.encoding, seq_base, frame_limit);
     // The original media stream's SSRC, learned from the first non-RTX packet;
     // an RFC 4588 RTX resend is restamped back onto it.
     let mut media_ssrc_seen: Option<u32> = None;
@@ -337,18 +358,8 @@ pub async fn receive_rtp_h264(
                 out.push(PipelinePacket::CapsChanged(caps)).await?;
             }
             let capture_unix_ns = capture_time.take(au.rtp_timestamp);
-            if push_access_unit(
-                au,
-                capture_unix_ns,
-                &mut pts_rebase,
-                &mut seq,
-                seq_base,
-                frame_limit,
-                out,
-            )
-            .await?
-            {
-                return Ok(seq - seq_base);
+            if emitter.push(au, capture_unix_ns, out).await? {
+                return Ok(emitter.emitted());
             }
         }
 

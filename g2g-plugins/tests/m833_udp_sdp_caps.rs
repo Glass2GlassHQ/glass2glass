@@ -141,31 +141,27 @@ async fn sdp_property_accepts_a_file_path() {
 }
 
 #[test]
-fn opus_section_maps_to_audio_caps_and_is_refused_by_the_h264_source() {
+fn pcmu_section_maps_to_audio_caps_and_is_refused_by_udpsrc() {
     let text = "v=0\r\n\
         c=IN IP4 127.0.0.1\r\n\
-        m=audio 5006 RTP/AVP 111\r\n\
-        a=rtpmap:111 opus/48000/2\r\n\
-        a=fmtp:111 minptime=10;useinbandfec=1\r\n";
-    let media = SdpMedia::parse(text).expect("the opus section maps");
+        m=audio 5006 RTP/AVP 0\r\n\
+        a=rtpmap:0 PCMU/8000\r\n";
+    let media = SdpMedia::parse(text).expect("the PCMU section maps");
     assert_eq!(
         media.caps,
         Caps::Audio {
-            format: AudioFormat::Opus,
-            channels: 2,
-            sample_rate: 48_000,
+            format: AudioFormat::Mulaw,
+            channels: 1,
+            sample_rate: 8_000,
             channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     );
-    assert_eq!(media.payload_type, 111);
+    assert_eq!(media.payload_type, 0);
 
-    // UdpSrc depayloads H.264 only, so it must refuse the description outright
-    // rather than accept a property it cannot honour.
+    // UdpSrc depayloads H.264 and Opus only, so it must refuse the description
+    // outright rather than accept a property it cannot honour.
     let mut src = UdpSrc::new("0.0.0.0:5004".parse().unwrap());
-    assert!(
-        !src.apply_sdp(&media),
-        "an audio SDP is not receivable here"
-    );
+    assert!(!src.apply_sdp(&media), "a PCMU SDP is not receivable here");
     assert!(src
         .set_property("sdp", PropValue::Str(text.into()))
         .is_err());
