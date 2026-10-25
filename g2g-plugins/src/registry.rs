@@ -2702,6 +2702,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "wgpucompositor" => "wgpu-sink";
         "wgpudownload" => "wgpu-sink";
         "wgpuupload" => "wgpu-sink";
+        "wgpucolorconvert" => "wgpu-sink";
+        "vellooverlay" => "vello-overlay";
         "gstwrap" => "gstreamer";
         "mp4mux" => "std";
         "localcudasrc" => "local-ipc" on "linux";
@@ -3461,6 +3463,14 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(feature = "wgpu-sink")]
     reg.register_launch(LaunchFactory::new("wgpuupload", Vec::new(), || {
         Box::new(crate::wgpuupload::WgpuUpload::new())
+    }));
+    #[cfg(feature = "wgpu-sink")]
+    reg.register_launch(LaunchFactory::new("wgpucolorconvert", Vec::new(), || {
+        Box::new(crate::wgpucolorconvert::WgpuColorConvert::new())
+    }));
+    #[cfg(feature = "vello-overlay")]
+    reg.register_launch(LaunchFactory::new("vellooverlay", Vec::new(), || {
+        Box::new(crate::vellooverlay::VelloAnalyticsOverlay::new())
     }));
     // Export mirror (M559): a GPU-resident wgpu buffer out to a dma-buf fd.
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
