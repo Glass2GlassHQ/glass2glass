@@ -15,6 +15,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1906: `pyelement` QoS no longer adds the time a frame waits in downstream queues, so a live stream keeps running after the queues drain.
 - M1907: a rejected property value in a JSON or YAML graph names its allowed range or values.
 - M1908: every video decoder logs the frames it drops outside the segment at `log`.
+- M1909: `g2g-launch` and `g2g-inspect` accept `-h` / `--help` and `--version`.
 - M1917: `font-family: monospace` picks an installed monospaced face when cosmic-text's default Noto Sans Mono is missing.
 
 ## 0.10.0

@@ -51,6 +51,7 @@
 //! --script <file>     build the graph from a Rhai script that calls the
 //!                     builder API (`script-rhai` build feature)
 //! -h, --help          print this help and exit
+//! --version           print the version and exit
 //! -e, --eos-on-shutdown, -m, --messages, -f, --no-fault, -t, --tags
 //!                     accepted for compatibility (see notes below)
 //! ```
@@ -159,7 +160,7 @@ type RunFuture<'r> = core::pin::Pin<
     >,
 >;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads[=pinned]] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--trace <file>] [--seek <seconds>] [--plugin <path>] [-e] [-m] [-h] \
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads[=pinned]] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--trace <file>] [--seek <seconds>] [--plugin <path>] [-e] [-m] [-h] [--version] \
 <element> [key=value ...] ! <element> ! ...\n       \
 g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph\n       \
 g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script";
@@ -192,6 +193,7 @@ struct Opts {
     verbose: bool,
     quiet: bool,
     help: bool,
+    version: bool,
     /// Dump the parsed pipeline as Graphviz DOT to stdout and exit without
     /// running it (`--dot`, the `GST_DEBUG_DUMP_DOT_DIR` analog).
     dot: bool,
@@ -311,6 +313,7 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             "-v" | "--verbose" => opts.verbose = true,
             "-q" | "--quiet" => opts.quiet = true,
             "-h" | "--help" => opts.help = true,
+            "--version" => opts.version = true,
             "--dot" => opts.dot = true,
             "--copy-plan" => opts.copy_plan = true,
             "--validate-json" => opts.validate_json = true,
@@ -552,6 +555,10 @@ fn main() {
         println_stdout!("{USAGE}");
         println_stdout!("{SEEK_HELP}");
         println_stdout!("{SEE_ALSO}");
+        return;
+    }
+    if opts.version {
+        println_stdout!("g2g-launch {}", env!("CARGO_PKG_VERSION"));
         return;
     }
     let seek_ns = match opts.seek_seconds.as_deref().map(seek_target_ns).transpose() {

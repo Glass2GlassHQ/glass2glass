@@ -13,6 +13,8 @@
 //! g2g-inspect --gst-map        # gst-name/g2g-runtime-name pairs, TSV
 //! g2g-inspect --plugin <path>  # load a plugin first, so its elements list
 //! g2g-inspect --trusted-key <path>  # only load plugins signed by this key
+//! g2g-inspect -h, --help       # print the usage and exit
+//! g2g-inspect --version        # print the version and exit
 //! ```
 //!
 //! [`run`] takes the registry, so the `g2g-inspect` binary passes
@@ -171,6 +173,12 @@ fn dump_json(_reg: &Registry, _name: Option<&str>) {
     process::exit(1);
 }
 
+const USAGE: &str =
+    "usage: g2g-inspect [--plugin <path>] [--trusted-key <path>] [<element>]\n       \
+g2g-inspect --all | --json [<element>] | --maturity\n       \
+g2g-inspect --gst <gstreamer-element> | --gst-map | --gst-scan <source-file.c|.py>\n       \
+g2g-inspect -h | --help | --version";
+
 /// Run `g2g-inspect` over `reg` with the command-line `args` (program name
 /// excluded), printing to stdout and exiting the process on an error.
 pub fn run(mut reg: Registry, args: Vec<String>) {
@@ -184,6 +192,12 @@ pub fn run(mut reg: Registry, args: Vec<String>) {
             for line in reg.element_listing() {
                 println_stdout!("{line}");
             }
+        }
+        Some(flag) if flag == "--help" || flag == "-h" => {
+            println_stdout!("{USAGE}");
+        }
+        Some(flag) if flag == "--version" => {
+            println_stdout!("g2g-inspect {}", env!("CARGO_PKG_VERSION"));
         }
         // `--all` / `-a`: the full dump for every registered element, separated
         // by a rule, so the whole catalog can be read or grepped at once.
