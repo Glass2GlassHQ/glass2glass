@@ -16,8 +16,8 @@ use std::path::PathBuf;
 
 use g2g_core::runtime::{run_simple_pipeline, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, HardwareError, OutputSink,
-    PipelineClock, PipelinePacket, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, OutputSink, PipelineClock,
+    PipelinePacket, Rate, VideoCodec,
 };
 use g2g_plugins::filesink::FileSink;
 use g2g_plugins::filesrc::FileSrc;
@@ -201,10 +201,7 @@ async fn filesink_fails_loud_before_configure_and_on_bad_path() {
     let err = bad
         .configure_pipeline(&h264_caps())
         .expect_err("create must fail");
-    assert!(
-        matches!(err, G2gError::Hardware(HardwareError::Io(_))),
-        "expected structured Io error, got {err:?}"
-    );
+    assert_eq!(err, G2gError::FileNotFound);
 }
 
 #[tokio::test]
@@ -214,9 +211,6 @@ async fn filesrc_missing_file_fails_loud() {
     src.configure_pipeline(&caps).expect("configure");
     let mut out = CollectSink::default();
     let err = src.run(&mut out).await.expect_err("open must fail");
-    assert!(
-        matches!(err, G2gError::Hardware(HardwareError::Io(_))),
-        "expected structured Io error, got {err:?}"
-    );
+    assert_eq!(err, G2gError::FileNotFound);
     assert!(out.packets.is_empty(), "nothing may be emitted on failure");
 }

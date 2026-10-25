@@ -1153,7 +1153,8 @@ as before.
   runner posts `BusMessage::ElementError`, naming the element instance that failed
   (`G2gError` carries no identity, and the runner previously only logged the
   name); `Registry::factory_of_instance` maps that instance back to the factory
-  that built it; and `parse_launch_avoiding(registry, line, avoided)` parses the
+  that built it, constructing only the factories the auto-plug search can choose;
+  and `parse_launch_avoiding(registry, line, avoided)` parses the
   same line with those factories barred from the search, so the next candidate is
   chosen. Barring every candidate fails the parse rather than substituting
   something, which is what lets a caller retry in a loop and terminate. Only the

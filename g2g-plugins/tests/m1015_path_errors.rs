@@ -55,7 +55,10 @@ fn logs_of(failing: impl FnOnce() -> G2gError) -> (Vec<String>, MutexGuard<'stat
     log::set_default_level(LogLevel::Error);
     let err = failing();
     assert!(
-        matches!(err, G2gError::Hardware(HardwareError::Io(_))),
+        matches!(
+            err,
+            G2gError::Hardware(HardwareError::Io(_)) | G2gError::FileNotFound
+        ),
         "an I/O failure: {err:?}"
     );
     (ring.drain().into_iter().map(|r| r.message).collect(), guard)

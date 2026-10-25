@@ -1000,9 +1000,10 @@ pub fn io_err(e: std::io::Error) -> crate::G2gError {
     ))
 }
 
-/// [`io_err`] plus an error log naming the file and the OS message. The errno in
-/// `Hardware(Io)` alone does not say which path failed or what went wrong, so
-/// every element that opens a path reports through here.
+/// [`io_err`] plus an error log naming the file and the OS message, with a
+/// missing path reported as `FileNotFound`. The errno in `Hardware(Io)` alone
+/// does not say which path failed or what went wrong, so every element that
+/// opens a path reports through here.
 #[cfg(feature = "std")]
 pub fn path_io_err<P: AsRef<std::path::Path>>(
     category: &'static str,
@@ -1015,6 +1016,9 @@ pub fn path_io_err<P: AsRef<std::path::Path>>(
         "cannot {verb} {}: {e}",
         path.as_ref().display()
     );
+    if e.kind() == std::io::ErrorKind::NotFound {
+        return crate::G2gError::FileNotFound;
+    }
     io_err(e)
 }
 

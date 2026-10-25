@@ -2773,16 +2773,19 @@ mod factory {
         /// The bus names a failing element by instance; acting on it per factory,
         /// to auto-plug around the one that failed, needs the way back.
         ///
-        /// Each candidate is default-constructed to be asked its category, which
+        /// Only a launch factory the auto-plug search can also choose is a
+        /// candidate. Each is default-constructed to be asked its category, which
         /// costs an allocation and opens nothing (a decoder reaches its device at
-        /// `configure_pipeline`). `None` if no registered factory matches.
+        /// `configure_pipeline`). `None` if no such factory matches.
         pub fn factory_of_instance(&self, instance: &str) -> Option<&'static str> {
             let category = instance.trim_end_matches(|c: char| c.is_ascii_digit());
             if category.is_empty() {
                 return None;
             }
+            // `FpsDisplaySink::new` probes for a display and logs a warning when there is none
             self.launch
                 .iter()
+                .filter(|f| self.factories.iter().any(|a| a.desc.name == f.name))
                 .find(|f| (f.build)().log_category() == category)
                 .map(|f| f.name)
         }

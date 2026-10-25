@@ -139,10 +139,8 @@ impl FileSrc {
     /// the header at most once.
     fn resolve_auto_caps(&mut self) -> Result<(), G2gError> {
         if self.verify_extension {
-            // an unreadable file still fails at run, naming its path
-            if let Ok(header) = read_file_header(&self.path, short_type_name::<Self>()) {
-                self.verify_extension_against(&header);
-            }
+            let header = read_file_header(&self.path, short_type_name::<Self>())?;
+            self.verify_extension_against(&header);
         }
         if !self.auto_detect {
             return Ok(());

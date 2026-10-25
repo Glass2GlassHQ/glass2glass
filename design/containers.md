@@ -18,7 +18,9 @@ constraint maps it to the elementary stream type.
 A launch `filesrc` types its file from the extension, and sniffs the header when
 the extension is unknown or `bytestream-format=auto`. An extension that names a
 container is checked against the header too: a different container the sniff
-recognizes wins, so a transport stream saved as `.mpg` reaches `tsdemux`. When the sniff recognizes
+recognizes wins, so a transport stream saved as `.mpg` reaches `tsdemux`. A file
+that cannot be read for either check fails negotiation, logging the open error
+once, and a missing one fails with `G2gError::FileNotFound`. When the sniff recognizes
 nothing, `probe_output_caps` returns an error and `decodebin` fails the parse
 with `ParseError::UnrecognizedContent` instead of guessing a container. `.m4v`
 has no extension mapping, since it names both an MP4 and a raw MPEG-4 Part 2

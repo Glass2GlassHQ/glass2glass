@@ -60,6 +60,8 @@ pub enum G2gError {
     Network(NetworkFailure),
     // an RTSP session failed after media started flowing, in the transport or the payload, with retina's message logged by the element
     RtspStream,
+    // a path an element opens does not exist, with the path logged by the element
+    FileNotFound,
 }
 
 // the stage of a network session that failed
