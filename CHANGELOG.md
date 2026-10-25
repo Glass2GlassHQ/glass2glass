@@ -25,7 +25,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1916: `y4menc` sends the stream header inside the first frame's buffer as gst does, so each frame makes one packet.
 - M1917: `font-family: monospace` picks an installed monospaced face when cosmic-text's default Noto Sans Mono is missing.
 - M1918: `g2g-launch --trace` also records spans for sources, muxers, demuxers, fan-in sinks and elements a `GraphMutator` adds.
-- M1919: `wgpusink`, `glsink`, `cudaglsink`, `kmssink`, `cudakmssink` and `VulkanHdrPresentSink` report presented and late-dropped frames, so the run summary prints a `present:` line for them.
+- M1919: `wgpusink`, `glsink`, `cudaglsink`, `kmssink`, `cudakmssink`, `d3d11sink`, `metalvideosink` and `VulkanHdrPresentSink` report presented and late-dropped frames, so the run summary prints a `present:` line for them.
 
 ## 0.10.0
 

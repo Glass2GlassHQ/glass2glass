@@ -84,7 +84,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::videoflip::frame_orientation;
 use crate::worker_ready::Handshake;
-use g2g_core::element::QosMessage;
+use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
 use g2g_core::meta::{Orientation, OrientationSet};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
@@ -277,6 +277,14 @@ impl AsyncElement for D3D11Sink {
     /// incoming link, where the producer can shed load.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()
+    }
+
+    fn presentation_stats(&self) -> Option<PresentationStats> {
+        Some(PresentationStats {
+            presented: self.frames_presented(),
+            dropped: 0,
+            late_dropped: self.late_dropped(),
+        })
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
