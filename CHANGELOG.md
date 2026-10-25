@@ -31,6 +31,7 @@ Breaking: `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty`
 - M1920: an `Observer` built with `with_visit_recorder` traces graph runs and the standalone runners' `_observed` entry points. A graph run given a recorder both there and through `RunBuilder::with_visit_recorder` fails with `G2gError::VisitRecorderConflict`.
 - M1923: `udpsink` sends Opus over RTP, and `udpsrc` receives it with `encoding-name=OPUS` or an Opus SDP.
 - M1924: text overlays use an installed sans-serif face when cosmic-text's default Open Sans is missing, instead of the 8x8 bitmap font.
+- M1925: the `ffmpeg` feature builds against FFmpeg 9 as well as 7 and 8 (ffmpeg-next 9.0).
 
 ## 0.10.0
 

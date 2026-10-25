@@ -1265,7 +1265,7 @@ libcamera = { version = "0.7", optional = true }
 # ffmpeg-next links against system libavcodec/libavformat/libavutil/libswscale.
 # Linux-only target-gate keeps Windows/Wasm/RTOS builds from trying to resolve
 # it (the underlying pkg-config probe doesn't fit those targets).
-ffmpeg-next = { version = "8.1", optional = true, default-features = false, features = ["codec", "format", "software-scaling"] }
+ffmpeg-next = { version = "9.0", optional = true, default-features = false, features = ["codec", "format", "software-scaling"] }
 smithay-client-toolkit = { version = "0.20", optional = true }
 # The libwayland-backed client backend, so a display / surface raw pointer can be
 # handed to a native API (Vulkan WSI under `wgpu-present`). The GL sinks get the
