@@ -896,9 +896,9 @@ an IRAP that starts a coded video sequence it drops the waiting pictures on
 next CRA start a sequence, which skips its RASL pictures and resets the
 order-count MSB.
 
-NVIDIA's Vulkan HEVC slice-header parser needs a 3-byte start code (`00 00 01`).
-A 4-byte one breaks every non-IDR slice, while the IDR tolerates it via the
-picture info, so the H.265 path frames slices with 3 bytes and H.264 keeps 4.
+Both paths frame slices with a 3-byte start code (`00 00 01`). NVIDIA's Vulkan
+HEVC slice-header parser breaks every non-IDR slice on a 4-byte one, and ANV
+starts the H.264 slice read three bytes past each slice offset.
 
 ### Long-term reference pictures
 

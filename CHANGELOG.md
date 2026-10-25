@@ -33,6 +33,7 @@ Breaking: `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty`
 - M1924: text overlays use an installed sans-serif face when cosmic-text's default Open Sans is missing, instead of the 8x8 bitmap font.
 - M1925: the `ffmpeg` feature builds against FFmpeg 9 as well as 7 and 8 (ffmpeg-next 9.0).
 - M1926: the gst VA-API decoder names resolve to `ffmpegvaapidec` for H.264 and H.265, replacing the cros-codecs `vaapidec`, and `ffmpegvaapidec` emits NV12 by default.
+- M1927: `vulkanvideodec` H.264 decodes correctly on Intel ANV, which reads each slice from three bytes past its offset.
 
 ## 0.10.0
 

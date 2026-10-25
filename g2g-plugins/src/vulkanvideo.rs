@@ -12115,10 +12115,10 @@ impl H264DpbDecoder {
         let (w, h) = self.core.coded_extent;
         let num_refs = active.len();
 
-        // Each slice NAL framed with a 4-byte start code.
+        // ANV starts reading three bytes past each slice offset
         let (bitstream, buf_size, slice_offsets) = self.core.write_bitstream(
             to_system,
-            &crate::annexb::ANNEX_B_START_CODE,
+            &crate::annexb::START_CODE_PREFIX,
             &picture.slices,
             &self.profile.profile,
         )?;
@@ -12958,8 +12958,7 @@ impl H265DpbDecoder {
         // form. NVIDIA's Vulkan H.265 slice-header parser mis-locates the header
         // with a 4-byte start code and reads a garbage PPS id for every non-IDR
         // slice (the IDR tolerates it because its decode uses the picture info,
-        // not the parsed header). ffmpeg's Vulkan HEVC path uses 3 bytes too; the
-        // H.264 path (M492) is unaffected and keeps its 4-byte code.
+        // not the parsed header). ffmpeg's Vulkan HEVC path uses 3 bytes too.
         let (bitstream, buf_size, slice_offsets) = self.core.write_bitstream(
             to_system,
             &crate::annexb::START_CODE_PREFIX,
@@ -15039,8 +15038,7 @@ fn extract_first_idr_slice(au: &[u8]) -> Option<alloc::vec::Vec<u8>> {
             continue;
         }
         if nal[0] & 0x1F == 5 {
-            let mut out = alloc::vec::Vec::with_capacity(nal.len() + 4);
-            out.extend_from_slice(&[0, 0, 0, 1]);
+            let mut out = crate::annexb::START_CODE_PREFIX.to_vec();
             out.extend_from_slice(nal);
             return Some(out);
         }
