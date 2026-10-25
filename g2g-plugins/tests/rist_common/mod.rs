@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -122,15 +122,23 @@ impl SourceLoop for PacedTsSource {
     }
 }
 
+// Linux hands out ephemeral ports from 32768 and Windows from 49152, so a
+// bind to port 0 in a parallel test never takes a port from this range.
+const FIRST_TEST_PORT: u16 = 20_000;
+const TEST_PORT_PAIRS: u32 = 6_000;
+
 /// Two adjacent loopback UDP sockets, the first on an even port: a RIST
 /// media + RTCP pair.
 pub(crate) fn bound_even_port_pair() -> (UdpSocket, UdpSocket) {
+    // the process id offsets the start so two test binaries running at once pick different pairs
+    static NEXT_PAIR: AtomicU32 = AtomicU32::new(0);
     loop {
-        let media = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind an ephemeral port");
-        let port = media.local_addr().expect("bound address").port();
-        if !port.is_multiple_of(2) || port == u16::MAX {
+        let pair = std::process::id().wrapping_add(NEXT_PAIR.fetch_add(1, Ordering::Relaxed))
+            % TEST_PORT_PAIRS;
+        let port = FIRST_TEST_PORT + 2 * u16::try_from(pair).expect("pair fits the port range");
+        let Ok(media) = UdpSocket::bind((Ipv4Addr::LOCALHOST, port)) else {
             continue;
-        }
+        };
         if let Ok(rtcp) = UdpSocket::bind((Ipv4Addr::LOCALHOST, port + 1)) {
             return (media, rtcp);
         }
