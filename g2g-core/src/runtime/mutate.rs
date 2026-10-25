@@ -40,10 +40,10 @@ use crate::runtime::channel::{
 };
 use crate::runtime::fanin::DynSourceLoop;
 use crate::runtime::graph_runner::{
-    dead_directives, run_source, BranchMode, GraphCoordHandle, SinkArmIo, SourceArmIo,
-    TransformArmIo,
+    dead_directives, run_source, traced_source_probe, BranchMode, GraphCoordHandle, SinkArmIo,
+    SourceArmIo, TransformArmIo,
 };
-use crate::runtime::instrument::ElementProbe;
+use crate::runtime::instrument::{ElementProbe, VisitRecorder};
 use crate::runtime::join::{select2, Either};
 use crate::runtime::mutation_error::{MutationError, MutationKind};
 use crate::runtime::progress::PipelineProgress;
@@ -834,6 +834,7 @@ pub(crate) struct MutationService<'a, 'f, 's> {
     /// The timer a handle's timeout is measured on: the run's tick clock, which
     /// is what sleeps on a deadline. `None` leaves every wait unbounded.
     ticker: Option<&'s dyn DynAsyncClock>,
+    visit_recorder: Option<Arc<dyn VisitRecorder>>,
 }
 
 impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
@@ -850,6 +851,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         sink_clock_sync: Option<ClockSync>,
         link_capacity: usize,
         ticker: Option<&'s dyn DynAsyncClock>,
+        visit_recorder: Option<Arc<dyn VisitRecorder>>,
     ) -> Self {
         Self {
             rx,
@@ -864,6 +866,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             sink_clock_sync,
             link_capacity,
             ticker,
+            visit_recorder,
         }
     }
 
@@ -1433,11 +1436,12 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
                 },
                 mode,
                 bus: self.bus.clone(),
-                // Names the packet log only: the run report leaves this element out.
-                probe: Some(ElementProbe::new(ElementLogName::new(
-                    element.log_category(),
-                    name.clone(),
-                ))),
+                // Names the packet log and the trace: the run report leaves this element out.
+                probe: Some(ElementProbe::recording(
+                    ElementLogName::new(element.log_category(), name.clone()),
+                    None,
+                    self.visit_recorder.clone(),
+                )),
                 control: None,
                 properties: Some(properties.clone()),
             };
@@ -1653,11 +1657,12 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             // no preroll for it to take and no state transition to gate on.
             state: None,
             progress: self.progress.clone(),
-            // Names the packet log only: the run report leaves this element out.
-            probe: Some(ElementProbe::new(ElementLogName::new(
-                element.log_category(),
-                name.clone(),
-            ))),
+            // Names the packet log and the trace: the run report leaves this element out.
+            probe: Some(ElementProbe::recording(
+                ElementLogName::new(element.log_category(), name.clone()),
+                None,
+                self.visit_recorder.clone(),
+            )),
             control: None,
             properties: Some(properties.clone()),
         };
@@ -1838,12 +1843,14 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             endpoint.set_caps(&caps);
         }
         let (done_tx, done_rx) = bounded(1);
+        let log_name = ElementLogName::new(source.log_category(), name.clone());
         let io = SourceArmIo {
             out_tx,
             bus: self.bus.clone(),
             progress: self.progress.clone(),
             segment: opening,
-            log_name: ElementLogName::new(source.log_category(), name.clone()),
+            probe: traced_source_probe(&log_name, self.visit_recorder.as_ref()),
+            log_name,
         };
         let arm = (self.spawn.source)(source, io, done_tx);
         if self.arms.send(arm).await.is_err() {
@@ -1984,11 +1991,12 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
                 downstream_feasible: Some(CapsSet::one(out_caps[i].clone())),
                 mode,
                 bus: self.bus.clone(),
-                // Names the packet log only: the run report leaves this element out.
-                probe: Some(ElementProbe::new(ElementLogName::new(
-                    element.log_category(),
-                    name.clone(),
-                ))),
+                // Names the packet log and the trace: the run report leaves this element out.
+                probe: Some(ElementProbe::recording(
+                    ElementLogName::new(element.log_category(), name.clone()),
+                    None,
+                    self.visit_recorder.clone(),
+                )),
                 control: None,
                 properties: Some(properties.clone()),
             };
@@ -2169,12 +2177,14 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         endpoint.set_caps(&fixated);
         out_tx.set_mutation(Some(endpoint.clone()));
         let (done_tx, done_rx) = bounded(1);
+        let log_name = ElementLogName::new(source.log_category(), name.clone());
         let io = SourceArmIo {
             out_tx,
             bus: self.bus.clone(),
             progress: self.progress.clone(),
             segment: Segment::new(),
-            log_name: ElementLogName::new(source.log_category(), name.clone()),
+            probe: traced_source_probe(&log_name, self.visit_recorder.as_ref()),
+            log_name,
         };
         let arm = (self.spawn.source)(source, io, done_tx);
         if self.arms.send(arm).await.is_err() {

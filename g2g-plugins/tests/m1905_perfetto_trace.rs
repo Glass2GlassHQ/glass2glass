@@ -19,11 +19,9 @@ struct ElementSpans {
     wait_ends: u64,
 }
 
-#[tokio::test]
-async fn every_frame_gets_a_wait_and_a_work_span_per_element() {
-    let path = std::env::temp_dir().join(format!("m1905-trace-{}.json", std::process::id()));
-    let line = format!("videotestsrc num-buffers={FRAMES} ! videoconvert ! fakesink");
-    let graph = parse_launch(&default_registry(), &line).expect("the line parses");
+async fn spans_by_element(line: &str, trace_name: &str) -> BTreeMap<String, ElementSpans> {
+    let path = std::env::temp_dir().join(format!("{trace_name}-{}.json", std::process::id()));
+    let graph = parse_launch(&default_registry(), line).expect("the line parses");
     let clock = WallClock::new();
     let trace = PerfettoTrace::create(&path).expect("the trace file opens");
     RunBuilder::new(graph, &clock, LINK_CAPACITY)
@@ -61,19 +59,77 @@ async fn every_frame_gets_a_wait_and_a_work_span_per_element() {
             _ => {}
         }
     }
+    spans
+        .into_iter()
+        .map(|(process, element)| (element_names[&process].clone(), element))
+        .collect()
+}
 
-    let names: BTreeSet<&str> = element_names.values().map(String::as_str).collect();
-    assert_eq!(names, BTreeSet::from(["VideoConvert0", "FakeSink0"]));
-    for (process, element) in &spans {
-        let name = &element_names[process];
+fn every_sequence() -> BTreeSet<u64> {
+    (0..FRAMES).collect()
+}
+
+#[tokio::test]
+async fn every_frame_gets_a_wait_and_a_work_span_per_element() {
+    let line = format!("videotestsrc num-buffers={FRAMES} ! videoconvert ! fakesink");
+    let spans = spans_by_element(&line, "m1905-trace").await;
+
+    let names: BTreeSet<&str> = spans.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        BTreeSet::from(["VideoTestSrc0", "VideoConvert0", "FakeSink0"])
+    );
+    for name in ["VideoConvert0", "FakeSink0"] {
+        let element = &spans[name];
         assert_eq!(element.work_spans, FRAMES, "{name} work spans");
         assert_eq!(
             element.work_sequences,
-            (0..FRAMES).collect::<BTreeSet<u64>>(),
+            every_sequence(),
             "{name} has one work span per frame sequence id"
         );
         assert_eq!(element.wait_begins, FRAMES, "{name} wait spans");
         assert_eq!(element.wait_ends, FRAMES, "{name} wait spans close");
     }
-    assert_eq!(spans.len(), 2, "both elements recorded spans");
+    let source = &spans["VideoTestSrc0"];
+    assert_eq!(
+        source.work_sequences,
+        every_sequence(),
+        "one span per frame pushed"
+    );
+    assert_eq!(source.wait_begins, 0, "a source waits on no input link");
+}
+
+#[tokio::test]
+async fn a_demuxer_and_a_muxer_record_spans_per_input_frame() {
+    let line = format!(
+        "audiotestsrc name=src num-buffers={FRAMES} channels=2 ! deinterleave name=split \
+         split.src_0 ! merge.sink_0 \
+         split.src_1 ! merge.sink_1 \
+         interleave name=merge ! fakesink name=out"
+    );
+    let spans = spans_by_element(&line, "m1918-trace").await;
+
+    let names: BTreeSet<&str> = spans.keys().map(String::as_str).collect();
+    assert_eq!(names, BTreeSet::from(["src", "split", "merge", "out"]));
+    assert_eq!(spans["src"].work_sequences, every_sequence());
+    assert_eq!(
+        spans["split"].work_spans, FRAMES,
+        "one span per stereo frame"
+    );
+    assert_eq!(
+        spans["merge"].work_spans,
+        2 * FRAMES,
+        "one span per mono frame on either pad"
+    );
+    for name in ["split", "merge"] {
+        let element = &spans[name];
+        assert_eq!(
+            element.wait_begins, element.work_spans,
+            "{name} has a wait span for every frame"
+        );
+        assert_eq!(
+            element.wait_ends, element.wait_begins,
+            "{name} wait spans close"
+        );
+    }
 }

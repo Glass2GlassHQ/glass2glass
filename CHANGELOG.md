@@ -24,6 +24,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1915: `waylandsink`, `kmssink` and `webrtcsink` declare a sink pad template, so `g2g-inspect` lists the caps they take.
 - M1916: `y4menc` sends the stream header inside the first frame's buffer as gst does, so each frame makes one packet.
 - M1917: `font-family: monospace` picks an installed monospaced face when cosmic-text's default Noto Sans Mono is missing.
+- M1918: `g2g-launch --trace` also records spans for sources, muxers, demuxers, fan-in sinks and elements a `GraphMutator` adds.
 
 ## 0.10.0
 

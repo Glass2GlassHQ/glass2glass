@@ -867,8 +867,12 @@ impl LinkReceiver {
     // As `pop_transit_ns`, with the caller's clock read.
     #[cfg(feature = "std")]
     pub(crate) fn pop_transit_at(&self, now_ns: u64) -> Option<u64> {
-        let sent = self.transit.as_ref()?.lock().pop_front()?;
-        Some(now_ns.saturating_sub(sent))
+        Some(now_ns.saturating_sub(self.pop_sent_ns()?))
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn pop_sent_ns(&self) -> Option<u64> {
+        self.transit.as_ref()?.lock().pop_front()
     }
 
     /// Latest-wins: overwrites any pending request that the producer

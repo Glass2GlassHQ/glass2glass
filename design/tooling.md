@@ -228,8 +228,9 @@ next to the pipeline throughput.
 
 The `process()` timing is the work half of a stage's latency. The wait half is
 queue residency, added as measured per-link transit. When an observer or a visit
-recorder is attached, the graph runner builds `Block` edges into transform and
-sink arms with a per-link transit ring (`link_with_transit`): the producer's
+recorder is attached, the graph runner builds `Block` edges into transform, sink,
+muxer, fan-in sink and demux arms with a per-link transit ring
+(`link_with_transit`): the producer's
 `SenderSink` stamps a monotonic send time as each `DataFrame` is queued, and the
 consuming arm pops the stamp when it pulls the frame
 (`LinkReceiver::pop_transit_ns`), recording the elapsed queue time into
@@ -318,9 +319,22 @@ Each element is one Perfetto process named after its instance. Its `work` thread
 has one complete event per `process()` call, with the frame's `sequence` and the
 call's `push_wait_ns` in the args. Its `wait` track has async events for the
 frame's queue residency on the input link, because waits overlap each other and
-the previous frame's work. The transform and sink arms of the cooperative and
-threaded graph runners record visits. Muxers, demuxers, fan-in sinks, sources,
-and elements a `GraphMutator` splices in do not.
+the previous frame's work.
+
+Every arm of the cooperative and threaded graph runners records visits, and so do
+the elements a `GraphMutator` adds. Transforms, sinks, demuxers, muxers and
+fan-in sinks record one per input `DataFrame`. A PTS-ordered muxer's wait runs
+from the frame's send to its `process()`, so it includes the time the frame sat in
+the aggregator for the other pads. A source has no `process()`, so its runner
+wraps the source's output in `SourceFrameSpans`, which records a work span per
+pushed frame from the end of the previous push to the end of this one, with no
+wait. A live source's span therefore includes its wait for the next capture. An
+element a mutator splices in records no wait, because the link it adds carries no
+transit ring. Source probes exist only for the trace and stay out of
+`RunStats::per_element`.
+
+The standalone runners in `fanin.rs` and `runner.rs` record no visits. None of
+their entry points takes a visit recorder, and `g2g-launch` does not use them.
 
 ## JSON introspection and the builder
 

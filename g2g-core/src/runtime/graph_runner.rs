@@ -1560,6 +1560,8 @@ fn upstream_source(vg: &ValidatedGraph<GraphNodeRef<'_>>, mut node: NodeId) -> O
     }
 }
 
+const FANOUT_SOURCE_CATEGORY: &str = "session-src";
+
 #[derive(Clone, Copy)]
 struct ProbeTaps<'t> {
     observer: Option<&'t Observer>,
@@ -1625,13 +1627,13 @@ async fn prepare_graph<'a>(
                 // sink, not a merging mux; name it accordingly. The fan-out
                 // source is its receive-side mirror.
                 NodeKind::FaninSink(_) => "session",
-                NodeKind::FanoutSrc(_) => "session-src",
+                NodeKind::FanoutSrc(_) => FANOUT_SOURCE_CATEGORY,
                 NodeKind::Tee(_) if vg.element(node).is_none() => "tee",
                 _ => match vg.element_mut(node) {
                     Some(GraphNodeRef::Source(src)) => src.log_category(),
                     Some(GraphNodeRef::Element(elem)) => elem.log_category(),
                     Some(GraphNodeRef::Muxer(_)) => "mux",
-                    Some(GraphNodeRef::FanoutSource(_)) => "session-src",
+                    Some(GraphNodeRef::FanoutSource(_)) => FANOUT_SOURCE_CATEGORY,
                     Some(GraphNodeRef::Demux(_)) => "demux",
                     None => continue, // no element and no structural name of its own
                 },
@@ -2012,15 +2014,16 @@ fn build_channels<'a>(
         // default; most edges leave it `None` and take `link_capacity`.
         let cap = vg.edge(eid).capacity.unwrap_or(link_capacity);
         // Transit instrumentation only where it is measured + read: `Block` edges
-        // (no drops -> the stamp ring stays aligned) into a transform, sink or muxer
-        // arm (which pops the stamp). Elsewhere a plain link (zero cost).
-        let dst_kind = vg.kind(vg.edge(eid).dst.node);
-        let instr_edge = instrument
-            && vg.edge(eid).policy == crate::link::LinkPolicy::Block
-            && matches!(
-                dst_kind,
-                NodeKind::Transform | NodeKind::Sink | NodeKind::Muxer(_)
-            );
+        // (no drops -> the stamp ring stays aligned) into a transform, sink, muxer,
+        // fan-in sink or demux arm (which pops the stamp). Elsewhere a plain link
+        // (zero cost).
+        let dst = vg.edge(eid).dst.node;
+        let pops_transit = matches!(
+            vg.kind(dst),
+            NodeKind::Transform | NodeKind::Sink | NodeKind::Muxer(_) | NodeKind::FaninSink(_)
+        ) || matches!(vg.element(dst), Some(GraphNodeRef::Demux(_)));
+        let instr_edge =
+            instrument && vg.edge(eid).policy == crate::link::LinkPolicy::Block && pops_transit;
         let (mut tx, rx) = if instr_edge {
             link_with_transit(cap)
         } else {
@@ -2204,6 +2207,7 @@ enum ArmPlan<'a> {
         source: Box<dyn DynMultiOutputSource + 'a>,
         ports: MultiSenderSink,
         bus: Option<BusHandle>,
+        probe: Probe,
     },
     Muxer {
         muxer: Box<dyn DynMultiInputElement + 'a>,
@@ -2263,9 +2267,12 @@ impl<'a> ArmPlan<'a> {
                 adds,
             } => Box::pin(tee_arm(in_rx, out_txs, branch_drop, adds)),
             ArmPlan::FaninSink { session, io } => session.drive_fanin_sink_arm(io),
-            ArmPlan::FanoutSrc { source, ports, bus } => {
-                Box::pin(fanout_src_arm(source, ports, bus))
-            }
+            ArmPlan::FanoutSrc {
+                source,
+                ports,
+                bus,
+                probe,
+            } => Box::pin(fanout_src_arm(source, ports, bus, probe)),
             ArmPlan::Muxer { muxer, parts } => drive_muxer(muxer, parts),
         }
     }
@@ -2287,6 +2294,7 @@ struct ArmInputs<'r, 'a> {
     solution: &'r [Caps],
     feasibility: &'r [Option<CapsSet>],
     probes: &'r [Probe],
+    visit_recorder: Option<&'r alloc::sync::Arc<dyn VisitRecorder>>,
     names: &'r [alloc::string::String],
     controllers: &'r mut [Option<ArmController>],
     live: &'r mut Option<LiveTopology<'a>>,
@@ -2310,6 +2318,7 @@ fn plan_arms<'a>(
         solution,
         feasibility,
         probes,
+        visit_recorder,
         names,
         controllers,
         live,
@@ -2378,27 +2387,29 @@ fn plan_arms<'a>(
                     },
                 }
             }
-            (NodeKind::Source, Some(GraphNodeRef::Source(source))) => ArmPlan::Source {
-                io: SourceArmIo {
-                    out_tx: out_txs.pop().expect("source output edge"),
-                    bus: bus.cloned(),
-                    progress: progress.cloned(),
-                    segment: Segment::new(),
-                    log_name: ElementLogName {
-                        category: source.log_category(),
-                        category_override: vg
-                            .node_log_category(node)
-                            .map(alloc::string::String::from),
-                        instance: names[index].clone(),
+            (NodeKind::Source, Some(GraphNodeRef::Source(source))) => {
+                let log_name = ElementLogName {
+                    category: source.log_category(),
+                    category_override: vg.node_log_category(node).map(alloc::string::String::from),
+                    instance: names[index].clone(),
+                };
+                ArmPlan::Source {
+                    io: SourceArmIo {
+                        out_tx: out_txs.pop().expect("source output edge"),
+                        bus: bus.cloned(),
+                        progress: progress.cloned(),
+                        segment: Segment::new(),
+                        probe: traced_source_probe(&log_name, visit_recorder),
+                        log_name,
                     },
-                },
-                source,
-                done: live.as_mut().map(|topology| {
-                    let (done_tx, done_rx) = bounded(1);
-                    topology.nodes[index].done = Some(Handback::Source(done_rx));
-                    done_tx
-                }),
-            },
+                    source,
+                    done: live.as_mut().map(|topology| {
+                        let (done_tx, done_rx) = bounded(1);
+                        topology.nodes[index].done = Some(Handback::Source(done_rx));
+                        done_tx
+                    }),
+                }
+            }
             (NodeKind::Transform, Some(GraphNodeRef::Element(element))) => {
                 let out_edge = out_e[0];
                 ArmPlan::Transform {
@@ -2481,6 +2492,10 @@ fn plan_arms<'a>(
                             .collect(),
                     ),
                     bus: bus.cloned(),
+                    probe: traced_source_probe(
+                        &ElementLogName::new(FANOUT_SOURCE_CATEGORY, names[index].clone()),
+                        visit_recorder,
+                    ),
                 }
             }
             _ => return Err(G2gError::CapsMismatch),
@@ -2639,6 +2654,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
             solution: &solution,
             feasibility: &feasibility,
             probes: &probes,
+            visit_recorder: visit_recorder.as_ref(),
             names: &names,
             controllers: &mut controllers,
             live: &mut live,
@@ -2692,6 +2708,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
                 sink_clock_sync.clone(),
                 link_capacity,
                 ticker,
+                visit_recorder.clone(),
             )
             .run(),
         ),
@@ -3042,6 +3059,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             solution: &solution,
             feasibility: &feasibility,
             probes: &probes,
+            visit_recorder: visit_recorder.as_ref(),
             names: &names,
             controllers: &mut controllers,
             live: &mut live,
@@ -3132,6 +3150,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                     sink_clock_sync.clone(),
                     link_capacity,
                     ticker.as_deref().map(|t| t as &dyn DynAsyncClock),
+                    visit_recorder.clone(),
                 )
                 .run(),
             )
@@ -4267,6 +4286,93 @@ pub(crate) struct SourceArmIo {
     /// continues the running time its predecessor reached.
     pub(crate) segment: Segment,
     pub(crate) log_name: ElementLogName,
+    pub(crate) probe: Probe,
+}
+
+pub(crate) fn traced_source_probe(
+    log_name: &ElementLogName,
+    visit_recorder: Option<&alloc::sync::Arc<dyn VisitRecorder>>,
+) -> Probe {
+    visit_recorder
+        .map(|recorder| ElementProbe::recording(log_name.clone(), None, Some(recorder.clone())))
+}
+
+// a source span runs from the end of its previous push to the end of this one
+struct SourceFrameSpans<S> {
+    output: S,
+    probe: alloc::sync::Arc<ElementProbe>,
+    span_start_ns: Option<u64>,
+    pushing_sequence: Option<u64>,
+}
+
+impl<S> SourceFrameSpans<S> {
+    fn new(output: S, probe: alloc::sync::Arc<ElementProbe>) -> Self {
+        Self {
+            output,
+            probe,
+            span_start_ns: ElementProbe::mark(),
+            pushing_sequence: None,
+        }
+    }
+
+    fn start_poll(&mut self, packet: &Option<PipelinePacket>) {
+        if let Some(PipelinePacket::DataFrame(frame)) = packet {
+            self.pushing_sequence = Some(frame.sequence);
+        }
+    }
+
+    fn finish_poll(&mut self, outcome: &core::task::Poll<Result<PushOutcome, G2gError>>) {
+        if !matches!(outcome, core::task::Poll::Ready(Ok(_))) {
+            return;
+        }
+        let Some(sequence) = self.pushing_sequence.take() else {
+            return;
+        };
+        self.probe
+            .record_frame_processed(sequence, 0, self.span_start_ns);
+        self.span_start_ns = ElementProbe::mark();
+    }
+}
+
+impl OutputSink for SourceFrameSpans<SenderSink> {
+    fn begin_push(&mut self) {
+        self.pushing_sequence = None;
+        self.output.begin_push();
+    }
+
+    fn poll_push(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        self.start_poll(packet);
+        let outcome = self.output.poll_push(cx, packet);
+        self.finish_poll(&outcome);
+        outcome
+    }
+}
+
+impl MultiOutputSink for SourceFrameSpans<MultiSenderSink> {
+    fn begin_push_to(&mut self, port: usize) {
+        self.pushing_sequence = None;
+        self.output.begin_push_to(port);
+    }
+
+    fn poll_push_to(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        port: usize,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        self.start_poll(packet);
+        let outcome = self.output.poll_push_to(cx, port, packet);
+        self.finish_poll(&outcome);
+        outcome
+    }
+
+    fn port_count(&self) -> usize {
+        self.output.port_count()
+    }
 }
 
 pub(crate) async fn run_source(
@@ -4279,6 +4385,7 @@ pub(crate) async fn run_source(
         progress,
         segment,
         log_name,
+        probe,
     } = io;
     // M206: announce the stream start before any data, one per source, so an
     // application can bracket each stream's lifetime (StreamStart .. Eos).
@@ -4305,7 +4412,13 @@ pub(crate) async fn run_source(
     // M81: open the stream with a SEGMENT ahead of the source's data, so every
     // downstream branch maps timestamps to running time from the first frame.
     let _ = adapter.push(PipelinePacket::Segment(segment)).await?;
-    src.run(&mut adapter).await
+    match probe {
+        Some(probe) => {
+            adapter.set_push_wait_probe(Some(probe.clone()));
+            src.run(&mut SourceFrameSpans::new(adapter, probe)).await
+        }
+        None => src.run(&mut adapter).await,
+    }
 }
 
 /// An interior transform arm. Besides forwarding data, it (D4) selects on a β
@@ -5069,19 +5182,23 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
             Some(packet) => {
                 // M694: time the data-frame `process()` and sample input fill;
                 // control packets are excluded so the histogram reflects real work.
-                let timed = probe
-                    .as_deref()
-                    .filter(|_| matches!(&packet, PipelinePacket::DataFrame(_)));
+                let sequence = match &packet {
+                    PipelinePacket::DataFrame(frame) => Some(frame.sequence),
+                    _ => None,
+                };
+                let timed = probe.as_deref().filter(|_| sequence.is_some());
                 let t0 = timed.and_then(|_| ElementProbe::mark());
+                let mut wait_ns = 0;
                 if let Some(p) = timed {
                     p.record_fill(in_rx.fill_percent());
                     if let Some(t) = t0.and_then(|now| in_rx.pop_transit_at(now)) {
                         p.record_transit(t);
+                        wait_ns = t;
                     }
                 }
                 demux.process(packet, &mut multi).await?;
-                if let Some(p) = timed {
-                    p.record_proc_since(t0);
+                if let (Some(p), Some(sequence)) = (timed, sequence) {
+                    p.record_frame_processed(sequence, wait_ns, t0);
                 }
                 latency.observe(demux.latency());
             }
@@ -5351,6 +5468,7 @@ async fn fanout_src_arm<'a>(
     mut source: Box<dyn DynMultiOutputSource + 'a>,
     mut sinks: MultiSenderSink,
     bus: Option<BusHandle>,
+    probe: Probe,
 ) -> Result<u64, G2gError> {
     if let Some(b) = &bus {
         b.try_post(BusMessage::StreamStart);
@@ -5360,7 +5478,13 @@ async fn fanout_src_arm<'a>(
             .push_to(port, PipelinePacket::Segment(Segment::new()))
             .await?;
     }
-    source.run(&mut sinks).await
+    match probe {
+        Some(probe) => {
+            sinks.set_push_wait_probe(Some(probe.clone()));
+            source.run(&mut SourceFrameSpans::new(sinks, probe)).await
+        }
+        None => source.run(&mut sinks).await,
+    }
 }
 
 /// Everything a terminal fan-in arm needs besides its element.
@@ -5454,18 +5578,26 @@ pub(crate) async fn fanin_sink_arm<E: MultiInputElement>(
                 }
             }
             packet => {
-                let is_frame = matches!(packet, PipelinePacket::DataFrame(_));
-                let timed = probe.as_deref().filter(|_| is_frame);
-                if let Some(p) = timed {
-                    p.record_fill(pad_rxs[slot].1.fill_percent());
-                }
-                if is_frame {
+                let sequence = match &packet {
+                    PipelinePacket::DataFrame(frame) => Some(frame.sequence),
+                    _ => None,
+                };
+                let timed = probe.as_deref().filter(|_| sequence.is_some());
+                if sequence.is_some() {
                     consumed += 1;
                 }
                 let t0 = ElementProbe::mark();
-                session.process(pad, packet, &mut null).await?;
+                let mut wait_ns = 0;
                 if let Some(p) = timed {
-                    p.record_proc_since(t0);
+                    p.record_fill(pad_rxs[slot].1.fill_percent());
+                    if let Some(t) = t0.and_then(|now| pad_rxs[slot].1.pop_transit_at(now)) {
+                        p.record_transit(t);
+                        wait_ns = t;
+                    }
+                }
+                session.process(pad, packet, &mut null).await?;
+                if let (Some(p), Some(sequence)) = (timed, sequence) {
+                    p.record_frame_processed(sequence, wait_ns, t0);
                 }
                 // The session may have raised a reverse signal for this track
                 // during `process`; relay it up its pad now.
@@ -6053,9 +6185,12 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
             packet => {
                 // M694: time the data-frame `process()` and sample this pad's
                 // input fill and queue residency.
-                let is_data = matches!(&packet, PipelinePacket::DataFrame(_));
-                let transit_ns = is_data.then(|| pad_rxs[slot].1.pop_transit_ns()).flatten();
-                let timed = probe.as_deref().filter(|_| is_data);
+                let sequence = match &packet {
+                    PipelinePacket::DataFrame(frame) => Some(frame.sequence),
+                    _ => None,
+                };
+                let transit_ns = sequence.and_then(|_| pad_rxs[slot].1.pop_transit_ns());
+                let timed = probe.as_deref().filter(|_| sequence.is_some());
                 if let Some(p) = timed {
                     p.record_fill(pad_rxs[slot].1.fill_percent());
                     if let Some(t) = transit_ns {
@@ -6076,8 +6211,8 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
                 )?;
                 let t0 = ElementProbe::mark();
                 mux.process(pad, packet, &mut adapter).await?;
-                if let Some(p) = timed {
-                    p.record_proc_since(t0);
+                if let (Some(p), Some(sequence)) = (timed, sequence) {
+                    p.record_frame_processed(sequence, transit_ns.unwrap_or(0), t0);
                 }
             }
         }
@@ -6130,7 +6265,8 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
         adapter.relay_qos_to(slot, false);
     }
     let mut open = alloc::vec![true; input_count];
-    let mut agg: InputAggregator<Frame> = InputAggregator::new(input_count);
+    // each frame with the stamp its producer queued it at
+    let mut agg: InputAggregator<(Frame, Option<u64>)> = InputAggregator::new(input_count);
     // Round-robin wake cursor, so a fast input does not bias the block path.
     let mut next = 0usize;
     let mut control_open = true;
@@ -6155,7 +6291,9 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
         // Release every frame now safe to emit, in global PTS order: the
         // aggregator yields the earliest only once every still-contributing input
         // has a head, so no later input can still deliver something earlier.
-        while let Some((slot, frame)) = agg.take_earliest_by(|f| f.timing.pts_ns) {
+        while let Some((slot, (frame, sent_ns))) =
+            agg.take_earliest_by(|(frame, _)| frame.timing.pts_ns)
+        {
             let pad = pad_rxs[slot].0;
             // M694: released frames are all DataFrames; time each `process()` and
             // sample this pad's input fill.
@@ -6175,11 +6313,16 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
                 frame.timing.pts_ns,
                 &probe,
             )?;
+            let sequence = frame.sequence;
             let t0 = ElementProbe::mark();
             mux.process(pad, PipelinePacket::DataFrame(frame), &mut adapter)
                 .await?;
             if let Some(p) = probe.as_deref() {
-                p.record_proc_since(t0);
+                // the wait covers the input link and the aggregator queue
+                let wait_ns = t0
+                    .zip(sent_ns)
+                    .map_or(0, |(enter, sent)| enter.saturating_sub(sent));
+                p.record_frame_processed(sequence, wait_ns, t0);
             }
         }
         // Once every input has ended, the loop above has drained the aggregator
@@ -6254,11 +6397,11 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
         }
         match packet {
             PipelinePacket::DataFrame(frame) => {
-                let transit_ns = pad_rxs[slot].1.pop_transit_ns();
-                if let (Some(p), Some(t)) = (probe.as_deref(), transit_ns) {
-                    p.record_transit(t);
+                let sent_ns = pad_rxs[slot].1.pop_sent_ns();
+                if let (Some(p), Some(sent)) = (probe.as_deref(), sent_ns) {
+                    p.record_transit(crate::metrics::monotonic_ns().saturating_sub(sent));
                 }
-                agg.push(slot, frame);
+                agg.push(slot, (frame, sent_ns));
             }
             PipelinePacket::Eos => {
                 mux.process(pad, PipelinePacket::Eos, &mut adapter).await?;

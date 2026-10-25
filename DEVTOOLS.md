@@ -529,8 +529,10 @@ Each element is one process in the Perfetto timeline. Its `work` track has one
 span per `process()` call, and its `wait` track has the time the frame sat
 queued on the element's input link. Click a span for the frame's `sequence`
 and `push_wait_ns`, the part of the call spent blocked on a full downstream link.
-Sources, muxers and demuxers have no spans. It works with `--threads`, and does
-not combine with `--observe` or `--tui`.
+Muxers and demuxers get a span per input frame. A source's span runs from the end
+of one push to the end of the next, so a live source's span includes the wait for
+its next capture. It works with `--threads`, and does not combine with
+`--observe` or `--tui`.
 
 ## Visual pipeline builder *(clone)*
 

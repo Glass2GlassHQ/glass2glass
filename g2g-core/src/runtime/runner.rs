@@ -751,6 +751,7 @@ where
         progress: None,
         segment: Segment::new(),
         log_name: ElementLogName::new(source_category, source_name.clone()),
+        probe: None,
     };
     let sink_io = SinkArmIo {
         bus: bus.cloned(),
