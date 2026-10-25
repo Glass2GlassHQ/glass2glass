@@ -329,6 +329,20 @@ jobs:
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
           rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,png,webp,opus,vorbis,alsa-sink,pulse-sink,alsa-src,pulse-src,decklink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,plugin-signing,declarative-yaml,script-rhai,webtransport,moqt,mqtt
+      # cargo publish --dry-run builds only default features, so a feature-gated include of a file outside the crate passes it
+      - name: packaged g2g-plugins checks (linux-full)
+        run: |
+          cargo package --workspace --locked --no-verify
+          packaged="$RUNNER_TEMP/packaged"
+          mkdir -p "$packaged"
+          patches=()
+          for crate in target/package/*.crate; do
+            tar xzf "$crate" -C "$packaged"
+            name=$(basename "$crate" .crate)
+            patches+=(--config "patch.crates-io.${name%-*}.path='$packaged/$name'")
+          done
+          cd "$packaged"/g2g-plugins-*/
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo check --features linux-full "${patches[@]}"
       # Plugin loading v1 (same-toolchain dlopen) + v2 (frozen C ABI, M1010):
       # each test builds its fixture cdylib (v2 also compiles the plain-C
       # plugin with cc), so the dynamic boundary is exercised, not just checked.
