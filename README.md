@@ -86,7 +86,7 @@ async fn main() {
 
 On a Wayland desktop this opens a window showing a bouncing ball. On macOS,
 use the `metal-sink` feature instead of `wayland-sink`. With no display sink
-feature, `autovideosink` becomes `fakesink` with a warning: the program runs to
+feature, `autovideosink` becomes `fakevideosink` with a warning: the program runs to
 the end and shows nothing.
 
 To run pipelines without writing a program, install the launcher and the
@@ -862,8 +862,10 @@ run_graph(graph, &clock, LatencyProfile::Live).await?;
 
 Feature-gated capture, decode, and display elements register their launch
 factories when their feature is enabled. `autovideosink` / `autoaudiosink`
-resolve to whichever sink is built, falling back to `fakesink` so a tutorial
-line runs headless.
+resolve to whichever sink is built, falling back to `fakevideosink` /
+`fakeaudiosink` so a tutorial line runs headless. The fallback takes only raw video
+/ raw audio, like the real sink, so audio into `autovideosink` still fails to
+negotiate.
 
 When the input's picture size is known, as for a raw `.h264` / `.hevc` file,
 `decodebin` picks the decoder with the lowest measured per-frame cost, download

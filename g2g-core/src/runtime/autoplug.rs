@@ -1747,7 +1747,7 @@ mod factory {
         /// gst-canonical-name aliases: each maps a name to an ordered list
         /// of registered targets, the first that is actually registered wins. A
         /// plain rename is a one-entry list; `autovideosink` is a fallback chain
-        /// (`waylandsink`, `kmssink`, ..., `fakesink`). Resolved at `make_*` time,
+        /// (`waylandsink`, `kmssink`, ..., `fakevideosink`). Resolved at `make_*` time,
         /// so an alias whose targets are all feature-gated-out simply misses.
         aliases: Vec<(&'static str, &'static [&'static str])>,
         /// The `playbin uri=X` auto-fan-out hooks. A lone
@@ -2199,7 +2199,7 @@ mod factory {
         /// `make_source` / `make_element` time, to the first of `targets` that is
         /// actually registered. Use a one-entry list for a plain rename
         /// (`avdec_h264` -> `ffmpegdec`) and a fallback chain for an auto element
-        /// (`autovideosink` -> `["waylandsink", "kmssink", "fakesink"]`). Returns
+        /// (`autovideosink` -> `["waylandsink", "kmssink", "fakevideosink"]`). Returns
         /// `&mut self` to chain calls.
         pub fn register_alias(
             &mut self,
@@ -2218,7 +2218,7 @@ mod factory {
         /// [`with_usable`](LaunchFactory::with_usable) check is skipped when the
         /// check says no, so `autovideosink` falls past a display sink that was
         /// compiled in but has no display to present on. The last entry of an
-        /// auto alias is `fakesink`, which always runs.
+        /// auto alias is a fake sink, which always runs.
         pub(crate) fn resolve_alias<'a>(&self, name: &'a str) -> &'a str {
             if let Some((_, targets)) = self.aliases.iter().find(|(a, _)| *a == name) {
                 for &t in *targets {
@@ -2285,12 +2285,12 @@ mod factory {
         /// tail element), default-configured. `None` if `name` is not registered
         /// via [`register_launch`](Self::register_launch) (after alias resolution).
         pub fn make_element(&self, name: &str) -> Option<Box<dyn DynAsyncElement>> {
-            const DISCARDING_SINK: &str = "fakesink";
+            const DISCARDING_SINKS: [&str; 3] = ["fakesink", "fakevideosink", "fakeaudiosink"];
             let resolved = self.resolve_alias(name);
-            if resolved == DISCARDING_SINK && name != DISCARDING_SINK {
+            if DISCARDING_SINKS.contains(&resolved) && name != resolved {
                 crate::g2g_warn!(
                     crate::log::Target::category(crate::log::short_type_name::<Self>()),
-                    "{name} found no usable sink ({}), using {DISCARDING_SINK}: the pipeline runs but its output goes nowhere",
+                    "{name} found no usable sink ({}), using {resolved}: the pipeline runs but its output goes nowhere",
                     self.alias_fallthrough(name, resolved)
                 );
             }

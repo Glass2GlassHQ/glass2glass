@@ -17,6 +17,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1908: every video decoder logs the frames it drops outside the segment at `log`.
 - M1909: `g2g-launch` and `g2g-inspect` accept `-h` / `--help` and `--version`.
 - M1910: linking an element downstream of a sink fails the graph build and names the sink, as gst refuses the link.
+- M1911: `autovideosink` / `autoaudiosink` fall back to `fakevideosink` / `fakeaudiosink`, so a wrong-media stream fails negotiation headless too.
 - M1917: `font-family: monospace` picks an installed monospaced face when cosmic-text's default Noto Sans Mono is missing.
 
 ## 0.10.0

@@ -2389,9 +2389,11 @@ fn register_autoplug_candidates(reg: &mut Registry) {
 /// at construction time to the first of its targets that is actually registered,
 /// so the decoder / display aliases work only when their feature is on, and the
 /// `auto*sink` aliases fall back through the available display / audio sinks to
-/// `fakesink` (always present), which keeps a tutorial line running headless.
+/// `fakevideosink` / `fakeaudiosink` (always present), which keeps a tutorial line
+/// running headless.
 fn register_aliases(reg: &mut Registry) {
-    // Auto sinks: prefer a real display / audio sink, fall back to fakesink.
+    // Auto sinks: prefer a real display / audio sink, fall back to the fake sink
+    // that accepts the same media as the real ones.
     // `wgpusink` leads: it is the only one that presents a GPU-resident frame
     // without a round trip through system memory.
     reg.register_alias(
@@ -2401,7 +2403,7 @@ fn register_aliases(reg: &mut Registry) {
             "waylandsink",
             "kmssink",
             "metalvideosink",
-            "fakesink",
+            "fakevideosink",
         ],
     );
     reg.register_alias(
@@ -2411,7 +2413,7 @@ fn register_aliases(reg: &mut Registry) {
             "pulsesink",
             "coreaudiosink",
             "wasapisink",
-            "fakesink",
+            "fakeaudiosink",
         ],
     );
     // Auto sources: the first capture element this build actually has, in

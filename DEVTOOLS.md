@@ -99,14 +99,14 @@ element's feature and the system library it needs.
 
 ```sh
 g2g-launch "videotestsrc num-buffers=90 pattern=ball ! videoconvert ! autovideosink"
-# WARN  Registry         autovideosink found no usable sink (cannot run here: waylandsink (no Wayland compositor on wayland-0: Could not find wayland compositor); not in this build: wgpusink, kmssink, metalvideosink), using fakesink: the pipeline runs but its output goes nowhere
+# WARN  Registry         autovideosink found no usable sink (cannot run here: waylandsink (no Wayland compositor on wayland-0: Could not find wayland compositor); not in this build: wgpusink, kmssink, metalvideosink), using fakevideosink: the pipeline runs but its output goes nowhere
 # Setting pipeline to PLAYING ...
 # pipeline run summary:
 # ...
 ```
 
 `autovideosink` takes the first display sink that is in the build and can
-present here, else `fakesink`. The warning lists each sink it skipped. Under
+present here, else `fakevideosink`. The warning lists each sink it skipped. Under
 "cannot run here", `waylandsink` is compiled in but found no compositor at
 `$WAYLAND_DISPLAY` (`wayland-0` when unset), so run it inside a Wayland session.
 Under "not in this build" are the sinks whose feature is off: `wgpu-present`
