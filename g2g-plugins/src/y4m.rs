@@ -637,27 +637,28 @@ impl AsyncElement for Y4mEnc {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let header = self.input.ok_or(G2gError::NotConfigured)?;
-                    if !self.header_written {
-                        out.push(PipelinePacket::CapsChanged(y4m_caps())).await?;
-                        let bytes = stream_header(
-                            header.format,
-                            header.width,
-                            header.height,
-                            header.framerate_q16(),
-                            header.interlace,
-                        )
-                        .ok_or(G2gError::CapsMismatch)?;
-                        let packet = self.frame(bytes);
-                        out.push(packet).await?;
-                        self.header_written = true;
-                    }
                     let planes = frame
                         .domain
                         .require_system_slice(short_type_name::<Self>())?;
                     if planes.len() != header.frame_bytes {
                         return Err(G2gError::CapsMismatch);
                     }
-                    let mut bytes = Vec::with_capacity(FRAME_MAGIC.len() + 1 + planes.len());
+                    // gst's y4menc also sends the stream header inside the first frame's buffer
+                    let mut bytes = if self.header_written {
+                        Vec::new()
+                    } else {
+                        out.push(PipelinePacket::CapsChanged(y4m_caps())).await?;
+                        stream_header(
+                            header.format,
+                            header.width,
+                            header.height,
+                            header.framerate_q16(),
+                            header.interlace,
+                        )
+                        .ok_or(G2gError::CapsMismatch)?
+                    };
+                    self.header_written = true;
+                    bytes.reserve_exact(FRAME_MAGIC.len() + 1 + planes.len());
                     bytes.extend_from_slice(FRAME_MAGIC);
                     bytes.push(b'\n');
                     bytes.extend_from_slice(planes);
