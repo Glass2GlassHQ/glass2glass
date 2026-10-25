@@ -492,8 +492,8 @@ pub trait AsyncElement: ElementBound {
     /// upstream, so a producer any number of hops away can ask
     /// `MetaRequests::wants` in
     /// [`configure_allocation`](Self::configure_allocation) and skip work nobody
-    /// downstream reads. Default: nothing requested, and a graph where every
-    /// element defaults cascades exactly as it did before the hook existed.
+    /// downstream reads. Default: nothing requested, so the element adds no
+    /// meta to the cascade.
     ///
     /// Requesting a meta is a hint, never a guarantee: a consumer must still
     /// handle a frame arriving without it (no producer upstream may be able to
