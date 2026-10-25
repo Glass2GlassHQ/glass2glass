@@ -39,8 +39,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::OwnedWgpuTexture;
 use g2g_core::{
     AnalyticsMeta, AsyncElement, BBox, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, RawVideoFormat,
+    ElementMetadata, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, RawVideoFormat,
 };
 
 use crate::analyticsoverlay::{
@@ -55,8 +55,6 @@ use vello::wgpu;
 use vello::Glyph;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 
-#[cfg(feature = "vello-text-overlay")]
-use g2g_core::ElementMetadata;
 #[cfg(feature = "vello-text-overlay")]
 use vello::NormalizedCoord;
 
@@ -623,6 +621,15 @@ impl AsyncElement for VelloAnalyticsOverlay {
             }
             Ok(())
         })
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Vello analytics overlay",
+            "Filter/Editing/Video",
+            "Draws detection boxes, captions, segmentation masks and regions of interest on the GPU, output as a wgpu texture",
+            "g2g",
+        )
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
