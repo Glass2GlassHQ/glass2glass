@@ -820,6 +820,13 @@ blend, the `no_std` baseline. The GPU `vellooverlay::VelloAnalyticsOverlay`
 alpha image fill over a full-frame image with the Vello GPU 2D renderer, emitting
 the result in the `MemoryDomain::WgpuTexture` domain.
 
+Both backends draw the same caption above a detection box when `show-label`,
+`show-track` or `show-score` is set: the class name from the meta's name table,
+`ID:n` and the two-decimal confidence, in a bar of the box colour with black or
+white text. The CPU backend draws the 8x8 bitmap font. The Vello backend shapes
+the text with cosmic-text from the system fonts, which is why `vello-overlay`
+pulls in `text-shaping`, and draws the glyph outlines as Vello glyph runs.
+
 That domain, an `OwnedWgpuTexture` whose `wgpu::Texture` lives in a
 `WgpuKeepAlive` owner since `g2g-core` never links wgpu, is the render-side analog
 of the decode-side CUDA and D3D11 texture domains: the rendered frame stays on the

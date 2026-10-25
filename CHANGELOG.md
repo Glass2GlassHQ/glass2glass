@@ -7,6 +7,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M1900: `VelloAnalyticsOverlay` draws on RGBA wgpu textures, `WgpuColorConvert` converts NV12 wgpu textures to RGBA, and `CudaToWgpu` keeps frame metadata.
+- M1901: `VelloAnalyticsOverlay` draws the `show-label` / `show-track` / `show-score` captions.
 
 ## 0.10.0
 

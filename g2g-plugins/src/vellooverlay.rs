@@ -6,7 +6,9 @@
 //!
 //! Same three shapes as the CPU backend, in the same palette: a solid box per
 //! detection, a translucent image fill per segmentation mask, and a dashed
-//! rectangle per region of interest.
+//! rectangle per region of interest. `show-label` / `show-track` / `show-score`
+//! add the CPU backend's caption bar above each box, its text shaped from the
+//! system fonts and drawn as Vello glyph runs.
 //!
 //! `Caps::RawVideo{Rgba8}` in, [`MemoryDomain::WgpuTexture`] out: the input
 //! picture is drawn into a Vello scene as a full-frame image, the analytics are
@@ -42,20 +44,21 @@ use g2g_core::{
 };
 
 use crate::analyticsoverlay::{
-    palette_rgb, AnalyticsShapes, PaintedMask, MASK_ALPHA_DEFAULT, ROI_DASH_PX,
+    caption_bar_origin, contrast_ink, palette_rgb, AnalyticsShapes, CaptionParts, PaintedMask,
+    MASK_ALPHA_DEFAULT, ROI_DASH_PX, SHOW_LABEL_PROPERTY, SHOW_SCORE_PROPERTY, SHOW_TRACK_PROPERTY,
 };
 use crate::gpu::{gpu_err, GpuContext, WgpuTextureKeepAlive};
+use crate::textshape::{FontId, TextShaper};
 use vello::kurbo::{Affine, Rect, Stroke};
-use vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
+use vello::peniko::{Blob, Color, Fill, FontData, ImageAlphaType, ImageData, ImageFormat};
 use vello::wgpu;
+use vello::Glyph;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 
 #[cfg(feature = "vello-text-overlay")]
 use g2g_core::ElementMetadata;
 #[cfg(feature = "vello-text-overlay")]
-use vello::peniko::{Fill, FontData};
-#[cfg(feature = "vello-text-overlay")]
-use vello::{Glyph, NormalizedCoord};
+use vello::NormalizedCoord;
 
 #[cfg(feature = "vello-text-overlay")]
 use crate::subparse::{Cue, TextShadow};
@@ -64,19 +67,17 @@ use crate::textoverlay::{
     stroke_offsets, BlurredShadowMask, ChainGlyph, FontAxis, GlyphPaint, PlacedCue, PlacedGlyph,
     TextOverlay,
 };
-#[cfg(feature = "vello-text-overlay")]
-use crate::textshape::FontId;
 
-/// Renders the detection boxes, segmentation masks and regions of interest of an
-/// attached [`AnalyticsMeta`] onto an RGBA8 frame with Vello, emitting a
-/// GPU-resident [`MemoryDomain::WgpuTexture`].
+/// Renders the detection boxes and their captions, segmentation masks and
+/// regions of interest of an attached [`AnalyticsMeta`] onto an RGBA8 frame with
+/// Vello, emitting a GPU-resident [`MemoryDomain::WgpuTexture`].
 ///
 /// # Example
 ///
 /// ```no_run
 /// use g2g_plugins::vellooverlay::VelloAnalyticsOverlay;
 ///
-/// let element = VelloAnalyticsOverlay::new().with_thickness(2.0);
+/// let element = VelloAnalyticsOverlay::new().with_thickness(2.0).with_label(true);
 /// ```
 pub struct VelloAnalyticsOverlay {
     width: u32,
@@ -85,6 +86,8 @@ pub struct VelloAnalyticsOverlay {
     thickness: f64,
     /// Alpha the mask fill is drawn at (0 = invisible, 255 = opaque).
     mask_alpha: u8,
+    caption: CaptionParts,
+    caption_fonts: CaptionFonts,
     configured: bool,
     drawn: u64,
     /// A shared device to render on, set via [`with_context`](Self::with_context)
@@ -216,7 +219,6 @@ fn draw_frame_image(scene: &mut Scene, rgba: Vec<u8>, w: u32, h: u32) {
 }
 
 /// An opaque-or-translucent RGBA colour as a Vello brush colour.
-#[cfg(feature = "vello-text-overlay")]
 fn brush_color(rgba: [u8; 4]) -> Color {
     Color::from_rgba8(rgba[0], rgba[1], rgba[2], rgba[3])
 }
@@ -228,6 +230,7 @@ impl core::fmt::Debug for VelloAnalyticsOverlay {
             .field("height", &self.height)
             .field("thickness", &self.thickness)
             .field("mask_alpha", &self.mask_alpha)
+            .field("caption", &self.caption)
             .field("configured", &self.configured)
             .field("drawn", &self.drawn)
             .field("gpu_ready", &self.gpu.is_some())
@@ -249,6 +252,8 @@ impl VelloAnalyticsOverlay {
             height: 0,
             thickness: 3.0,
             mask_alpha: MASK_ALPHA_DEFAULT,
+            caption: CaptionParts::default(),
+            caption_fonts: CaptionFonts::default(),
             configured: false,
             drawn: 0,
             ctx: None,
@@ -274,6 +279,21 @@ impl VelloAnalyticsOverlay {
     /// Set the alpha the segmentation mask fill is drawn at (0..=255).
     pub fn with_mask_alpha(mut self, alpha: u8) -> Self {
         self.mask_alpha = alpha;
+        self
+    }
+
+    pub fn with_label(mut self, show: bool) -> Self {
+        self.caption.label = show;
+        self
+    }
+
+    pub fn with_score(mut self, show: bool) -> Self {
+        self.caption.score = show;
+        self
+    }
+
+    pub fn with_track(mut self, show: bool) -> Self {
+        self.caption.track = show;
         self
     }
 
@@ -373,14 +393,15 @@ impl VelloAnalyticsOverlay {
         }
         let stroke = Stroke::new(thickness);
         for painted in &shapes.detections {
-            if let Some(rect) = pixel_rect(painted.detection.bbox, w, h) {
-                scene.stroke(
-                    &stroke,
-                    Affine::IDENTITY,
-                    palette_color(painted.detection.label),
-                    None,
-                    &rect,
-                );
+            let Some(rect) = pixel_rect(painted.detection.bbox, w, h) else {
+                continue;
+            };
+            let label = painted.detection.label;
+            scene.stroke(&stroke, Affine::IDENTITY, palette_color(label), None, &rect);
+            if let Some(text) = self.caption.text(painted, shapes.class_name(label)) {
+                let bar_color = crate::analyticsoverlay::palette_color(label);
+                self.caption_fonts
+                    .draw(&mut scene, rect, &text, bar_color, (w, h));
             }
         }
         let dashed = Stroke::new(thickness).with_dashes(0.0, [ROI_DASH_PX as f64; 2]);
@@ -457,6 +478,58 @@ fn draw_mask(scene: &mut Scene, painted: &PaintedMask, w: u32, h: u32, mask_alph
 fn palette_color(index: u32) -> Color {
     let c = palette_rgb(index);
     Color::from_rgba8(c[0], c[1], c[2], 0xFF)
+}
+
+#[derive(Debug, Default)]
+struct CaptionFonts {
+    // built on the first caption because building it scans the system fonts
+    shaper: Option<TextShaper>,
+    faces: Vec<(FontId, FontData)>,
+}
+
+impl CaptionFonts {
+    fn draw(
+        &mut self,
+        scene: &mut Scene,
+        box_rect: Rect,
+        text: &str,
+        bar_color: [u8; 4],
+        (w, h): (u32, u32),
+    ) {
+        // the CPU caption's glyph height, an 8px font at one font pixel per 240 rows
+        let px = (h as f32 / 30.0).max(12.0);
+        let pad = (px * 0.25).ceil();
+        let shaper = self.shaper.get_or_insert_with(|| TextShaper::new(&[]));
+        let block = shaper.layout(text, px, px * 1.2, None, &[]);
+        let bar_w = (block.width + 2.0 * pad).ceil() as i32;
+        let bar_h = (block.height + 2.0 * pad).ceil() as i32;
+        let box_origin = (box_rect.x0.round() as i32, box_rect.y0.round() as i32);
+        let (bar_x, bar_y) = caption_bar_origin(box_origin, (bar_w, bar_h), w as i32);
+        fill_rect(scene, (bar_x, bar_y, bar_w, bar_h), bar_color);
+
+        let ink = brush_color(contrast_ink(bar_color));
+        let (pen_x, pen_y) = (bar_x as f32 + pad, bar_y as f32 + pad);
+        for line in &block.lines {
+            // a fallback face starts a new run
+            for run in line.glyphs.chunk_by(|a, b| a.key.font_id == b.key.font_id) {
+                let face = run[0].key.font_id;
+                let Some(font) = font_handle(&mut self.faces, face, |id| shaper.face_data(id))
+                else {
+                    continue;
+                };
+                let glyphs = run.iter().map(|g| Glyph {
+                    id: g.glyph_id as u32,
+                    x: pen_x + g.x as f32,
+                    y: pen_y + g.y as f32,
+                });
+                scene
+                    .draw_glyphs(font)
+                    .font_size(px)
+                    .brush(ink)
+                    .draw(Fill::NonZero, glyphs);
+            }
+        }
+    }
 }
 
 impl AsyncElement for VelloAnalyticsOverlay {
@@ -568,6 +641,9 @@ impl AsyncElement for VelloAnalyticsOverlay {
             )
             .with_range("0", "255")
             .with_default("96"),
+            SHOW_LABEL_PROPERTY,
+            SHOW_SCORE_PROPERTY,
+            SHOW_TRACK_PROPERTY,
         ];
         PROPS
     }
@@ -582,6 +658,18 @@ impl AsyncElement for VelloAnalyticsOverlay {
                 self.mask_alpha = value.as_uint().ok_or(PropError::Type)?.min(255) as u8;
                 Ok(())
             }
+            "show-label" => {
+                self.caption.label = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "show-score" => {
+                self.caption.score = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "show-track" => {
+                self.caption.track = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -590,6 +678,9 @@ impl AsyncElement for VelloAnalyticsOverlay {
         match name {
             "thickness" => Some(PropValue::Double(self.thickness)),
             "mask-alpha" => Some(PropValue::Uint(self.mask_alpha as u64)),
+            "show-label" => Some(PropValue::Bool(self.caption.label)),
+            "show-score" => Some(PropValue::Bool(self.caption.score)),
+            "show-track" => Some(PropValue::Bool(self.caption.track)),
             _ => None,
         }
     }
@@ -836,7 +927,11 @@ impl VelloTextOverlay {
                     },
                     GlyphLayer::Fill => alloc::vec![((0.0, 0.0), paint.color)],
                 };
-                let Some(font) = font_handle(&mut self.fonts, &mut self.text, face) else {
+                let text = &mut self.text;
+                let Some(font) = font_handle(&mut self.fonts, face, |key| match key {
+                    FaceKey::Shaped(id) => text.face_data(id),
+                    FaceKey::Chain(face) => text.chain_face_data(face),
+                }) else {
                     continue;
                 };
                 let coords = normalized_coords(font, instance, self.text.font_axes());
@@ -1005,7 +1100,6 @@ fn draw_blurred_shadow(
 }
 
 /// Fill one `(x, y, width, height)` rectangle in frame pixels.
-#[cfg(feature = "vello-text-overlay")]
 fn fill_rect(scene: &mut Scene, (x, y, w, h): (i32, i32, i32, i32), color: [u8; 4]) {
     scene.fill(
         Fill::NonZero,
@@ -1016,22 +1110,18 @@ fn fill_rect(scene: &mut Scene, (x, y, w, h): (i32, i32, i32, i32), color: [u8; 
     );
 }
 
-/// The Vello handle for face `key`, copying the face bytes into the cache on
-/// first use. A free function so the cache and the text element are borrowed
-/// separately from the element.
-#[cfg(feature = "vello-text-overlay")]
-fn font_handle<'a>(
-    cache: &'a mut Vec<(FaceKey, FontData)>,
-    text: &mut TextOverlay,
-    key: FaceKey,
-) -> Option<&'a FontData> {
+/// The Vello handle for face `key`, copying the bytes `face_data` returns into
+/// the cache on first use. A free function so the cache and the face source are
+/// borrowed separately from the element.
+fn font_handle<Key: Copy + PartialEq>(
+    cache: &mut Vec<(Key, FontData)>,
+    key: Key,
+    face_data: impl FnOnce(Key) -> Option<(Vec<u8>, u32)>,
+) -> Option<&FontData> {
     if let Some(pos) = cache.iter().position(|(cached, _)| *cached == key) {
         return Some(&cache[pos].1);
     }
-    let (bytes, index) = match key {
-        FaceKey::Shaped(id) => text.face_data(id)?,
-        FaceKey::Chain(face) => text.chain_face_data(face)?,
-    };
+    let (bytes, index) = face_data(key)?;
     cache.push((key, FontData::new(Blob::from(bytes), index)));
     cache.last().map(|(_, font)| font)
 }

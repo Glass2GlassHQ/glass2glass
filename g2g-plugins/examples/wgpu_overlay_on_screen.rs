@@ -7,9 +7,9 @@
 //! link, so the source is paced by the display rather than free-running. Each
 //! redraw takes the next frame, attaches an [`AnalyticsMeta`] whose boxes sweep
 //! across the picture (the stand-in for a detector on a second branch), and runs
-//! `VelloAnalyticsOverlay -> WgpuSink`: the overlay strokes the boxes into a
-//! `wgpu::Texture` and the sink blits that texture onto the window's swapchain,
-//! with no GPU->CPU readback.
+//! `VelloAnalyticsOverlay -> WgpuSink`: the overlay strokes the boxes and their
+//! captions into a `wgpu::Texture` and the sink blits that texture onto the
+//! window's swapchain, with no GPU->CPU readback.
 //!
 //! Window + event loop ownership belongs to the application (a wgpu surface is
 //! built from a window handle and driven by the app's event loop), which is why
@@ -137,7 +137,9 @@ impl App {
 
         let mut overlay = VelloAnalyticsOverlay::new()
             .with_context(ctx.clone())
-            .with_thickness(4.0);
+            .with_thickness(4.0)
+            .with_label(true)
+            .with_score(true);
         overlay
             .configure_pipeline(&video_caps())
             .expect("overlay configure");
@@ -167,6 +169,7 @@ impl App {
         };
 
         let mut analytics = AnalyticsMeta::new();
+        analytics.set_class_names(["person", "bicycle", "car"]);
         for detection in sweeping_detections(self.seq) {
             analytics.add_detection(detection);
         }

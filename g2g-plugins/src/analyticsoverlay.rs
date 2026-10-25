@@ -28,7 +28,8 @@
 //! the shapes it paints. Boxes are normalized `[0,1]` in the metadata and a mask
 //! spans exactly its instance's box, so this works at any frame size without an
 //! upstream coordinate rewrite. A frame with no `AnalyticsMeta` passes through
-//! untouched. The Vello GPU backend is the separate `vello-overlay` feature.
+//! untouched. The Vello GPU backend is the separate `vello-overlay` feature, and
+//! draws the same captions in a shaped system font.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -92,13 +93,7 @@ pub struct AnalyticsOverlay {
     thickness: u32,
     /// Alpha the mask fill is blended at (0 = invisible, 255 = opaque).
     mask_alpha: u8,
-    /// Draw each detection's class name in its caption, where the producer
-    /// published a name table.
-    show_label: bool,
-    /// Draw each detection's confidence in its caption.
-    show_score: bool,
-    /// Draw each detection's tracking id in its caption, where it has one.
-    show_track: bool,
+    caption: CaptionParts,
     /// Draw the path each tracked object took.
     show_trail: bool,
     /// How many past positions a trail keeps.
@@ -204,6 +199,73 @@ impl AnalyticsShapes {
     pub(crate) fn is_empty(&self) -> bool {
         self.detections.is_empty() && self.masks.is_empty() && self.rois.is_empty()
     }
+
+    pub(crate) fn class_name(&self, label: u32) -> Option<&str> {
+        let names = self.class_names.as_ref()?;
+        names.get(label as usize).map(|name| &**name)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CaptionParts {
+    pub label: bool,
+    pub track: bool,
+    pub score: bool,
+}
+
+impl CaptionParts {
+    /// The caption for one detection, or `None` when no part is enabled (or a
+    /// tracking id was asked for and the producer wired none).
+    pub(crate) fn text(&self, painted: &PaintedDetection, name: Option<&str>) -> Option<String> {
+        let mut caption = String::new();
+        let mut add = |part: &str| {
+            if !caption.is_empty() {
+                caption.push(' ');
+            }
+            caption.push_str(part);
+        };
+        if let Some(name) = name.filter(|_| self.label) {
+            add(name);
+        }
+        if let Some(id) = painted.track_id.filter(|_| self.track) {
+            add(&format!("ID:{id}"));
+        }
+        if self.score {
+            add(&score_text(&painted.detection));
+        }
+        (!caption.is_empty()).then_some(caption)
+    }
+}
+
+pub(crate) const SHOW_LABEL_PROPERTY: PropertySpec = PropertySpec::new(
+    "show-label",
+    PropKind::Bool,
+    "draw each detection's class name above its box",
+)
+.with_default("false");
+
+pub(crate) const SHOW_SCORE_PROPERTY: PropertySpec = PropertySpec::new(
+    "show-score",
+    PropKind::Bool,
+    "draw each detection's confidence above its box",
+)
+.with_default("false");
+
+pub(crate) const SHOW_TRACK_PROPERTY: PropertySpec = PropertySpec::new(
+    "show-track",
+    PropKind::Bool,
+    "draw each detection's tracking id above its box",
+)
+.with_default("false");
+
+pub(crate) fn caption_bar_origin(
+    (x0, y0): (i32, i32),
+    (bar_w, bar_h): (i32, i32),
+    frame_w: i32,
+) -> (i32, i32) {
+    let bar_x = x0.min((frame_w - bar_w).max(0)).max(0);
+    let bar_y = if y0 - bar_h >= 0 { y0 - bar_h } else { y0 };
+    (bar_x, bar_y)
 }
 
 /// The `object_id` of the tracking node the detection at `index` tracks as, if
@@ -232,9 +294,7 @@ impl AnalyticsOverlay {
             height: 0,
             thickness: 2,
             mask_alpha: MASK_ALPHA_DEFAULT,
-            show_label: false,
-            show_score: false,
-            show_track: false,
+            caption: CaptionParts::default(),
             show_trail: false,
             trail_length: TRAIL_LENGTH_DEFAULT,
             trails: BTreeMap::new(),
@@ -245,19 +305,19 @@ impl AnalyticsOverlay {
 
     /// Draw each detection's class name above its box.
     pub fn with_label(mut self, show: bool) -> Self {
-        self.show_label = show;
+        self.caption.label = show;
         self
     }
 
     /// Draw each detection's confidence above its box.
     pub fn with_score(mut self, show: bool) -> Self {
-        self.show_score = show;
+        self.caption.score = show;
         self
     }
 
     /// Draw each detection's tracking id above its box.
     pub fn with_track(mut self, show: bool) -> Self {
-        self.show_track = show;
+        self.caption.track = show;
         self
     }
 
@@ -329,12 +389,8 @@ impl AnalyticsOverlay {
         for painted in &shapes.detections {
             let color = palette_color(painted.detection.label);
             self.outline(buf, painted.detection.bbox, color, false);
-            let name = shapes
-                .class_names
-                .as_ref()
-                .and_then(|names| names.get(painted.detection.label as usize))
-                .map(|name| &**name);
-            if let Some(text) = self.caption(painted, name) {
+            let name = shapes.class_name(painted.detection.label);
+            if let Some(text) = self.caption.text(painted, name) {
                 self.draw_caption(buf, painted.detection.bbox, &text, color);
             }
         }
@@ -429,28 +485,6 @@ impl AnalyticsOverlay {
         canvas.fill_rect_alpha(x - half, y - half, side, side, color, alpha);
     }
 
-    /// The caption for one detection, or `None` when neither part is enabled (or
-    /// a tracking id was asked for and the producer wired none).
-    fn caption(&self, painted: &PaintedDetection, name: Option<&str>) -> Option<String> {
-        let mut caption = String::new();
-        let mut add = |part: &str| {
-            if !caption.is_empty() {
-                caption.push(' ');
-            }
-            caption.push_str(part);
-        };
-        if let Some(name) = name.filter(|_| self.show_label) {
-            add(name);
-        }
-        if let Some(id) = painted.track_id.filter(|_| self.show_track) {
-            add(&format!("ID:{id}"));
-        }
-        if self.show_score {
-            add(&score_text(&painted.detection));
-        }
-        (!caption.is_empty()).then_some(caption)
-    }
-
     /// One source font pixel per this many output pixels, from the frame height
     /// so a caption stays readable across resolutions.
     fn text_scale(&self) -> i32 {
@@ -470,8 +504,7 @@ impl AnalyticsOverlay {
         let cell_w = GLYPH_ADVANCE as i32 * scale;
         let bar_w = text.chars().count() as i32 * cell_w + 2 * pad;
         let bar_h = GLYPH_HEIGHT as i32 * scale + 2 * pad;
-        let bar_x = x0.min((w - bar_w).max(0)).max(0);
-        let bar_y = if y0 - bar_h >= 0 { y0 - bar_h } else { y0 };
+        let (bar_x, bar_y) = caption_bar_origin((x0, y0), (bar_w, bar_h), w);
         let mut canvas = Canvas {
             pixels: buf,
             width: w,
@@ -600,7 +633,7 @@ fn score_text(detection: &ObjectDetection) -> String {
 
 /// Black or white, whichever reads on `background`. Rec. 601 luma, since the
 /// palette is sRGB and the threshold only has to separate light from dark.
-fn contrast_ink(background: [u8; 4]) -> [u8; 4] {
+pub(crate) fn contrast_ink(background: [u8; 4]) -> [u8; 4] {
     let luma =
         (background[0] as u32 * 299 + background[1] as u32 * 587 + background[2] as u32 * 114)
             / 1000;
@@ -630,7 +663,7 @@ pub(crate) fn palette_rgb(index: u32) -> [u8; 3] {
 }
 
 /// The opaque RGBA outline colour of a palette slot.
-fn palette_color(index: u32) -> [u8; 4] {
+pub(crate) fn palette_color(index: u32) -> [u8; 4] {
     let c = palette_rgb(index);
     [c[0], c[1], c[2], 0xFF]
 }
@@ -692,24 +725,9 @@ impl AsyncElement for AnalyticsOverlay {
             )
             .with_range("0", "255")
             .with_default("96"),
-            PropertySpec::new(
-                "show-label",
-                PropKind::Bool,
-                "draw each detection's class name above its box",
-            )
-            .with_default("false"),
-            PropertySpec::new(
-                "show-score",
-                PropKind::Bool,
-                "draw each detection's confidence above its box",
-            )
-            .with_default("false"),
-            PropertySpec::new(
-                "show-track",
-                PropKind::Bool,
-                "draw each detection's tracking id above its box",
-            )
-            .with_default("false"),
+            SHOW_LABEL_PROPERTY,
+            SHOW_SCORE_PROPERTY,
+            SHOW_TRACK_PROPERTY,
             PropertySpec::new(
                 "show-trail",
                 PropKind::Bool,
@@ -738,15 +756,15 @@ impl AsyncElement for AnalyticsOverlay {
                 Ok(())
             }
             "show-label" => {
-                self.show_label = value.as_bool().ok_or(PropError::Type)?;
+                self.caption.label = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
             "show-score" => {
-                self.show_score = value.as_bool().ok_or(PropError::Type)?;
+                self.caption.score = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
             "show-track" => {
-                self.show_track = value.as_bool().ok_or(PropError::Type)?;
+                self.caption.track = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
             "show-trail" => {
@@ -765,9 +783,9 @@ impl AsyncElement for AnalyticsOverlay {
         match name {
             "thickness" => Some(PropValue::Uint(self.thickness as u64)),
             "mask-alpha" => Some(PropValue::Uint(self.mask_alpha as u64)),
-            "show-label" => Some(PropValue::Bool(self.show_label)),
-            "show-score" => Some(PropValue::Bool(self.show_score)),
-            "show-track" => Some(PropValue::Bool(self.show_track)),
+            "show-label" => Some(PropValue::Bool(self.caption.label)),
+            "show-score" => Some(PropValue::Bool(self.caption.score)),
+            "show-track" => Some(PropValue::Bool(self.caption.track)),
             "show-trail" => Some(PropValue::Bool(self.show_trail)),
             "trail-length" => Some(PropValue::Uint(self.trail_length as u64)),
             _ => None,
@@ -875,9 +893,7 @@ mod tests {
             height,
             thickness,
             mask_alpha: MASK_ALPHA_DEFAULT,
-            show_label: false,
-            show_score: false,
-            show_track: false,
+            caption: CaptionParts::default(),
             show_trail: false,
             trail_length: TRAIL_LENGTH_DEFAULT,
             trails: BTreeMap::new(),
@@ -967,9 +983,12 @@ mod tests {
     fn captions_are_off_until_asked_for() {
         let shapes = detection_shapes(&[det(0.25, 0.25, 0.5, 0.5, 0)]);
         let painted = &shapes.detections[0];
-        assert_eq!(overlay(64, 64, 1).caption(painted, None), None);
+        assert_eq!(overlay(64, 64, 1).caption.text(painted, None), None);
         assert_eq!(
-            overlay(64, 64, 1).with_score(true).caption(painted, None),
+            overlay(64, 64, 1)
+                .with_score(true)
+                .caption
+                .text(painted, None),
             Some(String::from("0.90"))
         );
     }
@@ -984,14 +1003,18 @@ mod tests {
         let painted = &shapes.detections[0];
 
         assert_eq!(
-            overlay(64, 64, 1).with_track(true).caption(painted, None),
+            overlay(64, 64, 1)
+                .with_track(true)
+                .caption
+                .text(painted, None),
             Some(String::from("ID:4"))
         );
         assert_eq!(
             overlay(64, 64, 1)
                 .with_track(true)
                 .with_score(true)
-                .caption(painted, None),
+                .caption
+                .text(painted, None),
             Some(String::from("ID:4 0.90"))
         );
     }
