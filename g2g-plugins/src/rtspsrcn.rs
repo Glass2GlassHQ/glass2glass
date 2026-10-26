@@ -145,7 +145,7 @@ pub struct RtspSrcN {
     /// to the next, as gst's `rtspsrc protocols=` does.
     transports: Vec<LowerTransport>,
     reconnect: ReconnectPolicy,
-    // a session that delivers nothing for this long is lost, 0 waits for the connection to fail
+    // a session that delivers nothing or a request with no reply for this long is lost, 0 waits for the connection to fail
     stall_timeout_ms: u64,
     /// Access units each output emits before its `Eos`. `u64::MAX` runs until
     /// the server disconnects.
@@ -328,7 +328,10 @@ impl RtspSrcN {
     async fn prepare_session_with_retries(&self) -> Result<PreparedSession, G2gError> {
         let mut retry = ReconnectState::new(&self.reconnect);
         loop {
-            match self.prepare_session().await {
+            match self
+                .within_stall_timeout("DESCRIBE and SETUP", self.prepare_session())
+                .await
+            {
                 Ok(prepared) => return Ok(prepared),
                 // a bad URL or a stream without the tracks asked for, which a retry cannot fix
                 Err(G2gError::CapsMismatch) => return Err(G2gError::CapsMismatch),
@@ -338,6 +341,30 @@ impl RtspSrcN {
                     };
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 }
+            }
+        }
+    }
+
+    // a connect made while the link is down resends its SYN on a doubling backoff and never fails on its own
+    async fn within_stall_timeout<T>(
+        &self,
+        step: &str,
+        request: impl Future<Output = Result<T, G2gError>>,
+    ) -> Result<T, G2gError> {
+        if self.stall_timeout_ms == 0 {
+            return request.await;
+        }
+        let stall_timeout = Duration::from_millis(self.stall_timeout_ms);
+        match tokio::time::timeout(stall_timeout, request).await {
+            Ok(result) => result,
+            Err(_) => {
+                g2g_core::g2g_warn!(
+                    Target::category(LOG_CATEGORY),
+                    "{}: no reply to {step} within {} ms",
+                    self.url,
+                    self.stall_timeout_ms
+                );
+                Err(G2gError::Network(NetworkFailure::Connect))
             }
         }
     }
@@ -856,7 +883,7 @@ const RTSPSRCN_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stall-timeout",
         PropKind::Uint,
-        "treat a session that delivers nothing for this many milliseconds as lost, as reconnect retries (0 = never)",
+        "treat a session that delivers nothing, or a request that gets no reply, for this many milliseconds as lost, as reconnect retries (0 = never)",
     )
     .with_default("0"),
     PropertySpec::new(
@@ -1180,7 +1207,10 @@ async fn run_session(
     let metadata_port = src.metadata_port();
     let prepared = match src.prepared.take() {
         Some(prepared) => prepared,
-        None => match src.prepare_session().await {
+        None => match src
+            .within_stall_timeout("DESCRIBE and SETUP", src.prepare_session())
+            .await
+        {
             Ok(prepared) => prepared,
             Err(e) => return SessionOutcome::NetworkError(e),
         },
@@ -1210,16 +1240,19 @@ async fn run_session(
     // them on one timeline; permissive keeps a server that omits `rtptime`
     // playable (each stream then starts at its own first packet).
     let play_options = PlayOptions::default().initial_timestamp(InitialTimestampPolicy::Permissive);
-    let played = match session.play(play_options).await {
-        Ok(p) => p,
-        Err(e) => {
-            return SessionOutcome::NetworkError(rtsp_failure(
+    let play = async {
+        session.play(play_options).await.map_err(|e| {
+            rtsp_failure(
                 G2gError::Network(NetworkFailure::Connect),
                 "PLAY",
                 &src.url,
                 &e,
-            ))
-        }
+            )
+        })
+    };
+    let played = match src.within_stall_timeout("PLAY", play).await {
+        Ok(p) => p,
+        Err(e) => return SessionOutcome::NetworkError(e),
     };
     let mut demuxed = match played.demuxed() {
         Ok(d) => d,

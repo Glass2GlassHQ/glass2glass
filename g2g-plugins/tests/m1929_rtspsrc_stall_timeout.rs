@@ -27,7 +27,7 @@ const RECONNECT_BACKOFF_MS: u64 = 10;
 // fewer than the datagrams of the frames the source waits for
 const DATAGRAMS_BEFORE_STALL: usize = 3;
 const STALL_TIMEOUT_MS: u64 = 300;
-// without the stall timeout the run waits on the silent connection forever
+// without the stall timeout the run waits on the silent or unanswered connection forever
 const RUN_DEADLINE: Duration = Duration::from_secs(20);
 
 #[tokio::test]
@@ -55,6 +55,45 @@ async fn a_session_that_goes_silent_is_reconnected() {
         relay.sessions(),
         2,
         "the stalled session, then the one that played"
+    );
+    let frames = sink
+        .packets
+        .iter()
+        .filter(|packet| matches!(packet, PipelinePacket::DataFrame(_)))
+        .count();
+    assert_eq!(frames, DECODED_FRAMES as usize);
+}
+
+#[tokio::test]
+async fn a_reconnect_that_gets_no_reply_is_retried() {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg not present; skipping the unanswered RTSP reconnect");
+        return;
+    }
+    let relay = rtsp_h265_relay::serve_h265_fixture(
+        &[
+            EarlyEnd::StallAfter(DATAGRAMS_BEFORE_STALL),
+            EarlyEnd::NoReply,
+        ],
+        None,
+    );
+    let mut src = RtspSrc::new(relay.url.clone())
+        .with_frame_limit(DECODED_FRAMES)
+        .with_reconnect(2)
+        .with_reconnect_backoff(RECONNECT_BACKOFF_MS, RECONNECT_BACKOFF_MS);
+    src.set_property("stall-timeout", PropValue::Uint(STALL_TIMEOUT_MS))
+        .unwrap();
+    src.intercept_caps().await.expect("negotiation connects");
+    let mut sink = CollectSink::default();
+    tokio::time::timeout(RUN_DEADLINE, src.run(&mut sink))
+        .await
+        .expect("the unanswered reconnect ends")
+        .expect("the run ends cleanly");
+
+    assert_eq!(
+        relay.sessions(),
+        3,
+        "the stalled session, the unanswered one, then the one that played"
     );
     let frames = sink
         .packets

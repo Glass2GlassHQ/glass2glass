@@ -36,6 +36,7 @@ Breaking: `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty`
 - M1927: `vulkanvideodec` H.264 decodes correctly on Intel ANV, which reads each slice from three bytes past its offset.
 - M1928: `hlssrc` also skips a live segment or part that answers 5xx or drops the connection past its retries, where it ended the run.
 - M1929: `rtspsrc` `stall-timeout` reconnects a session that delivers nothing for that long.
+- M1930: `rtspsrc` `stall-timeout` also retries a connect, DESCRIBE, SETUP or PLAY that gets no reply for that long.
 
 ## 0.10.0
 

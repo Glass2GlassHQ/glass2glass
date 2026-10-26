@@ -427,8 +427,11 @@ nothing for that long with the same `NetworkFailure::Stream`, so `reconnect`
 retries it. A TCP connection over a link that dropped otherwise stays open until
 the server's retransmit timer fires, up to about 30 s after a 30 s outage, and
 then delivers the held-back backlog. A new connection does not inherit that
-backoff and starts at the live edge. gst's `rtspsrc` has no equivalent: its
-receive timeout sends a keep-alive and keeps waiting.
+backoff and starts at the live edge. The same timeout bounds connect, DESCRIBE,
+SETUP and PLAY, as `NetworkFailure::Connect`: a reconnect made while the link is
+still down resends its SYN on the kernel's doubling backoff and otherwise waits
+for the next resend after the link returns. gst's `rtspsrc` has no equivalent:
+its receive timeout sends a keep-alive and keeps waiting.
 
 Both RTSP clients fail DESCRIBE, SETUP, PLAY and depacketizer setup with
 `G2gError::Network(NetworkFailure::Connect)`, and any error after media starts

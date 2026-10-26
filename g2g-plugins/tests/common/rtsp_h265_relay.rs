@@ -46,6 +46,8 @@ pub(crate) enum EarlyEnd {
     CloseAfter(usize),
     // the connection stays open and silent after this many datagrams, as one over a dropped link does
     StallAfter(usize),
+    // the connection is accepted and never answered, as a connect made over a dropped link is
+    NoReply,
 }
 
 // session `n` ends as `early_ends[n]` says, and a `range` goes into the SDP as `a=range`
@@ -91,7 +93,10 @@ pub(crate) fn serve_h265_fixture(early_ends: &[EarlyEnd], range: Option<&str>) -
         for stream in listener.incoming() {
             let Ok(stream) = stream else { return };
             let index = accepted.fetch_add(1, Ordering::SeqCst);
-            serve_client(stream, &sdp, &rtp, early_ends.get(index).copied());
+            match early_ends.get(index).copied() {
+                Some(EarlyEnd::NoReply) => hold_open(BufReader::new(stream)),
+                early_end => serve_client(stream, &sdp, &rtp, early_end),
+            }
         }
     });
     H265Relay {
@@ -133,6 +138,7 @@ fn serve_client(stream: TcpStream, sdp: &str, rtp: &UdpSocket, early_end: Option
             return;
         }
         Some(EarlyEnd::CloseAfter(datagrams) | EarlyEnd::StallAfter(datagrams)) => datagrams,
+        Some(EarlyEnd::NoReply) => unreachable!("the accept loop holds a NoReply connection"),
         None => usize::MAX,
     };
     let mut datagram = vec![0u8; MAX_DATAGRAM];
@@ -146,12 +152,13 @@ fn serve_client(stream: TcpStream, sdp: &str, rtp: &UdpSocket, early_end: Option
         }
     }
     if let Some(EarlyEnd::StallAfter(_)) = early_end {
-        // another thread holds the connection, so the relay can accept the client's reconnect
-        std::thread::spawn(move || {
-            let _write_half = write_half;
-            while read_request(&mut reader).is_some() {}
-        });
+        hold_open(reader);
     }
+}
+
+// another thread holds the connection, so the relay can accept the client's reconnect
+fn hold_open(mut reader: BufReader<TcpStream>) {
+    std::thread::spawn(move || while read_request(&mut reader).is_some() {});
 }
 
 fn interleaved(packet: &[u8]) -> Vec<u8> {
