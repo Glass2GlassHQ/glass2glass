@@ -651,7 +651,7 @@ impl WorkerState {
                 let info = card.get_connector(h, true).ok()?;
                 (info.state() == connector::State::Connected).then_some(h)
             })
-            .ok_or("no connected DRM connector")?;
+            .ok_or_else(|| alloc::format!("{} has no connected screen", device_path.display()))?;
         let con_info = card.get_connector(connector, true)?;
         let mode = *con_info.modes().first().ok_or("connector has no modes")?;
         let crtc = *res.crtcs().first().ok_or("no DRM CRTC")?;
@@ -678,6 +678,13 @@ impl WorkerState {
             egl.get_platform_display(EGL_PLATFORM_GBM_KHR, gbm_ptr, &[egl::ATTRIB_NONE])
         }?;
         egl.initialize(egl_display)?;
+        if crate::egldevice::display_cuda_ordinal(&egl, egl_display)?.is_none() {
+            return Err(alloc::format!(
+                "{} renders on a GPU without CUDA, so CUDA cannot write its GL textures",
+                device_path.display()
+            )
+            .into());
+        }
         egl.bind_api(egl::OPENGL_ES_API)?;
 
         let config_attribs = [

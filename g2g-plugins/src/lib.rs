@@ -1787,6 +1787,10 @@ pub(crate) mod waylandwindow;
 ))]
 pub(crate) mod waylanddisplay;
 
+// EGL device queries that put the CUDA-GL sinks' GL context on a CUDA GPU.
+#[cfg(all(target_os = "linux", any(feature = "cuda-gl", feature = "cuda-kms")))]
+pub(crate) mod egldevice;
+
 // EGL + GL ES renderer over that worker for the GL sinks; each sink supplies
 // only its per-frame upload.
 #[cfg(all(target_os = "linux", any(feature = "cuda-gl", feature = "gl-sink")))]

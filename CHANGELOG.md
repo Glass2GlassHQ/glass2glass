@@ -39,6 +39,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1930: `rtspsrc` `stall-timeout` also retries a connect, DESCRIBE, SETUP or PLAY that gets no reply for that long.
 - M1931: the Python host sets `MP_BACKEND=g2g`, the variable modelpipe reads, so hosted elements load the g2g backend instead of the gst one.
 - M1932: a QoS report sums the processing time of the elements it crosses, and `pyelement` counts it, so a chain of slow hosted elements drops frames ahead of the slow stages instead of freezing the display.
+- M1933: `cudaglsink` opens its EGL display on the EGL device of its new `cuda-device-id`, so it presents on a hybrid iGPU and NVIDIA laptop without `__NV_PRIME_RENDER_OFFLOAD`, and refuses a frame from another CUDA device.
 
 ## 0.10.0
 

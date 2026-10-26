@@ -37,9 +37,9 @@
 //! `unsafe`, and importing `alloc::string::ToString`; the crate-API spots that
 //! were flagged `// VERIFY:` (the `wayland-client` 0.31 raw-pointer accessors,
 //! glow 0.17's `tex_image_2d` pixel-source parameter, the `eglGetProcAddress`
-//! cast) all held. On a hybrid iGPU+NVIDIA host the GL context must be forced
-//! onto the NVIDIA GPU (`__NV_PRIME_RENDER_OFFLOAD` / `__EGL_VENDOR_LIBRARY_FILENAMES`)
-//! or `cuGraphicsGLRegisterImage` fails. The `cudagl_vs_wayland` A/B benchmark
+//! cast) all held. On a hybrid iGPU+NVIDIA host the sink opens the EGL display on
+//! the device that exposes `EGL_NV_device_cuda`, since `cuGraphicsGLRegisterImage`
+//! fails on the iGPU's context. The `cudagl_vs_wayland` A/B benchmark
 //! measured this device-resident path at **10.7x lower present latency**
 //! than the `NvdecCuvid -> WaylandSink` baseline at 1080p (p50 ~8 ms vs ~90 ms):
 //! the GPU NV12->RGB convert replaces the baseline's per-frame CPU convert +
@@ -73,14 +73,18 @@ use g2g_core::{
     AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
     ClockPriority, ClockSync, Colorimetry, ConfigureOutcome, Dim, Frame, G2gError, HardwareError,
     MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError,
-    PropValue, PropertySpec, Rate, RawVideoFormat, PACING_PROPERTIES,
+    PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
 use crate::cuda::nv12_byte_size;
+use crate::cudadeviceid::{
+    get_cuda_device_id, set_cuda_device_id, CUDA_DEVICE_ID_PROP, DEFAULT_CUDA_DEVICE_ID,
+};
 use crate::glnv12::{GlMode, GlState};
-use crate::glwindow::{run_gl_window, FramePresenter};
+use crate::glwindow::{open_cuda_display, run_gl_window, FramePresenter};
 use crate::waylandwindow::{WindowParams, WorkerChannels, WorkerCmd};
+use g2g_core::log::Target;
 
 /// Device-buffer pool headroom the sink asks the producer to keep resident:
 /// the frame in flight on the GL thread plus the one the runner link holds, so
@@ -122,6 +126,7 @@ pub struct CudaGlSink {
     /// until the runner hands over a clock, and the default lateness bound never
     /// drops.
     pacer: PresentationPacer,
+    cuda_device_id: i32,
 }
 
 impl core::fmt::Debug for CudaGlSink {
@@ -157,6 +162,7 @@ impl CudaGlSink {
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyHistogram::new()),
             pacer: PresentationPacer::for_video_sink(),
+            cuda_device_id: DEFAULT_CUDA_DEVICE_ID,
         }
     }
 
@@ -289,16 +295,27 @@ impl AsyncElement for CudaGlSink {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        PACING_PROPERTIES
+        const PROPS: &[PropertySpec] = &[
+            MAX_LATENESS_PROPERTY,
+            QOS_INTERVAL_PROPERTY,
+            CUDA_DEVICE_ID_PROP,
+        ];
+        PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if name == "cuda-device-id" {
+            return set_cuda_device_id(&mut self.cuda_device_id, self.worker.is_some(), &value);
+        }
         self.pacer
             .set_property(name, &value)
             .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if name == "cuda-device-id" {
+            return Some(get_cuda_device_id(self.cuda_device_id));
+        }
         self.pacer.get_property(name)
     }
 
@@ -368,6 +385,7 @@ impl AsyncElement for CudaGlSink {
 
         let ready = Arc::new(Handshake::new());
         let ready_for_worker = Arc::clone(&ready);
+        let cuda_device_id = self.cuda_device_id;
 
         let join = thread::Builder::new()
             .name(String::from(WORKER_NAME))
@@ -378,7 +396,10 @@ impl AsyncElement for CudaGlSink {
                     latency,
                     ready: ready_for_worker,
                 };
-                let presenter = CudaPresenter { colorimetry };
+                let presenter = CudaPresenter {
+                    colorimetry,
+                    cuda_device_id,
+                };
                 if let Err(e) = run_gl_window(presenter, params, channels) {
                     std::eprintln!("{WORKER_NAME} worker error: {e:?}");
                 }
@@ -412,6 +433,15 @@ impl AsyncElement for CudaGlSink {
                     let MemoryDomain::Cuda(buf) = domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    if buf.device_ordinal != self.cuda_device_id {
+                        g2g_core::g2g_error!(
+                            Target::category(WORKER_NAME),
+                            "a frame on CUDA device {} reached a window on cuda-device-id {}",
+                            buf.device_ordinal,
+                            self.cuda_device_id
+                        );
+                        return Err(G2gError::UnsupportedDomain);
+                    }
                     // PTS pacing: hold the frame until its deadline on the
                     // elected clock, or drop it when it is already too late (the
                     // QoS bound) or outside the segment. Unpaced without a clock:
@@ -466,6 +496,7 @@ impl AsyncElement for CudaGlSink {
 /// and the present are the shared worker's ([`crate::glwindow`]).
 struct CudaPresenter {
     colorimetry: Colorimetry,
+    cuda_device_id: i32,
 }
 
 impl FramePresenter for CudaPresenter {
@@ -481,6 +512,14 @@ impl FramePresenter for CudaPresenter {
 
     fn present(&mut self, gl: &mut GlState, frame: &OwnedCudaBuffer) -> Result<(), G2gError> {
         gl.upload_and_draw(frame)
+    }
+
+    fn open_display(
+        &self,
+        egl: &khronos_egl::Instance<khronos_egl::Static>,
+        native_display: khronos_egl::NativeDisplayType,
+    ) -> Result<khronos_egl::Display, Box<dyn std::error::Error>> {
+        open_cuda_display(egl, native_display, self.cuda_device_id)
     }
 }
 
@@ -525,6 +564,57 @@ mod tests {
             Err(G2gError::CapsMismatch) => {}
             other => panic!("expected CapsMismatch on odd dims, got {other:?}"),
         }
+    }
+
+    #[derive(Debug)]
+    struct NoAllocation;
+    impl g2g_core::memory::CudaKeepAlive for NoAllocation {}
+
+    struct NullSink;
+    impl OutputSink for NullSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            packet_slot.take();
+            core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
+        }
+    }
+
+    fn cuda_frame(device_ordinal: i32) -> PipelinePacket {
+        let buffer = OwnedCudaBuffer::new(
+            0,
+            0,
+            320,
+            320,
+            320,
+            240,
+            0,
+            device_ordinal,
+            Arc::new(NoAllocation),
+        );
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::Cuda(buffer),
+            g2g_core::FrameTiming::default(),
+            0,
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_frame_from_another_cuda_device_is_refused() {
+        let mut sink = CudaGlSink::new();
+        sink.set_property("cuda-device-id", PropValue::Int(1))
+            .expect("settable before the window opens");
+        assert_eq!(
+            sink.process(cuda_frame(0), &mut NullSink).await.err(),
+            Some(G2gError::UnsupportedDomain)
+        );
+        assert_eq!(
+            sink.process(cuda_frame(1), &mut NullSink).await.err(),
+            Some(G2gError::NotConfigured),
+            "a frame on the window's device gets past the check"
+        );
     }
 
     #[test]

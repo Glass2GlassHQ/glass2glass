@@ -8,6 +8,7 @@
 //! [`crate::cudaglsink`], a `glTexSubImage2D` for [`crate::glsink`]).
 
 use alloc::boxed::Box;
+use core::ffi::c_void;
 
 use khronos_egl as egl;
 use smithay_client_toolkit::reexports::client::{protocol::wl_surface, Connection, Proxy};
@@ -32,6 +33,41 @@ pub(crate) trait FramePresenter: 'static {
 
     /// Upload `frame` into `gl`'s textures and draw it. The worker presents.
     fn present(&mut self, gl: &mut GlState, frame: &Self::Frame) -> Result<(), G2gError>;
+
+    fn open_display(
+        &self,
+        egl: &egl::Instance<egl::Static>,
+        native_display: egl::NativeDisplayType,
+    ) -> Result<egl::Display, Box<dyn std::error::Error>> {
+        // SAFETY: `native_display` is the live connection's libwayland `*mut wl_display`,
+        // valid for the worker thread's lifetime (the `Connection` outlives the EGL
+        // display via the caller's `conn`); `get_display` only records the handle.
+        Ok(unsafe { egl.get_display(native_display) }.ok_or("eglGetDisplay failed")?)
+    }
+}
+
+// CUDA registers only textures of a GL context on its own GPU, and a hybrid laptop's default EGL is the iGPU's
+#[cfg(feature = "cuda-gl")]
+pub(crate) fn open_cuda_display(
+    egl: &egl::Instance<egl::Static>,
+    native_display: egl::NativeDisplayType,
+    cuda_device_id: i32,
+) -> Result<egl::Display, Box<dyn std::error::Error>> {
+    const EGL_PLATFORM_WAYLAND_KHR: egl::Enum = 0x31D8;
+    let device = crate::egldevice::cuda_egl_device(egl, cuda_device_id)?;
+    // SAFETY: as for `get_display` in `open_display`; the attribute list ends in ATTRIB_NONE.
+    let display = unsafe {
+        egl.get_platform_display(
+            EGL_PLATFORM_WAYLAND_KHR,
+            native_display,
+            &[
+                crate::egldevice::EGL_DEVICE_EXT as egl::Attrib,
+                device as egl::Attrib,
+                egl::ATTRIB_NONE,
+            ],
+        )
+    }?;
+    Ok(display)
 }
 
 /// Open the GL window and run the shared present loop until the sink sends
@@ -44,7 +80,7 @@ pub(crate) fn run_gl_window<P: FramePresenter>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     run_window(
         |conn, wl_surface, width, height| {
-            let (egl, gl) = EglWindow::new(conn, wl_surface, width, height)?;
+            let (egl, gl) = EglWindow::new(&presenter, conn, wl_surface, width, height)?;
             // SAFETY: `gl` wraps the GL ES 3 context `EglWindow::new` made
             // current on this thread.
             let state = unsafe {
@@ -101,7 +137,8 @@ struct EglWindow {
 impl EglWindow {
     /// Bring up EGL on `wl_surface` at `width` x `height`, make the GL ES 3
     /// context current on this thread, and load the GL entry points.
-    fn new(
+    fn new<P: FramePresenter>(
+        presenter: &P,
         conn: &Connection,
         wl_surface: &wl_surface::WlSurface,
         width: u32,
@@ -112,11 +149,8 @@ impl EglWindow {
         // The wl_display raw pointer on wayland-client 0.31. The display is a
         // special global; `backend().display_ptr()` returns the libwayland
         // `*mut wl_display` EGL wants as its native display handle.
-        let display_ptr = conn.backend().display_ptr() as *mut core::ffi::c_void;
-        // SAFETY: `display_ptr` is the live connection's libwayland `*mut wl_display`,
-        // valid for the worker thread's lifetime (the `Connection` outlives the EGL
-        // display via the caller's `conn`); `get_display` only records the handle.
-        let display = unsafe { egl.get_display(display_ptr) }.ok_or("eglGetDisplay failed")?;
+        let display_ptr = conn.backend().display_ptr() as *mut c_void;
+        let display = presenter.open_display(&egl, display_ptr)?;
         egl.initialize(display)?;
         egl.bind_api(egl::OPENGL_ES_API)?;
 
