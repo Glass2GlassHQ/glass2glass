@@ -61,9 +61,9 @@ use g2g_core::log::LogSource;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     g2g_debug, g2g_warn, AudioFormat, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, OutputSink, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, StreamType, TextFormat,
-    VideoCodec,
+    ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, HttpTransportFailure,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment,
+    StreamType, TextFormat, VideoCodec,
 };
 
 use crate::abr::BandwidthEstimator;
@@ -446,27 +446,26 @@ impl HlsSrc {
         Ok(enc)
     }
 
-    // `None` when a live playlist's segment or part answers 4xx, as a dropped segment or a lost session does
-    async fn media_bytes_skipping_live_client_error(
+    // `None` when a live playlist's segment or part still fails after its retries, as a dropped segment or a lost session does
+    async fn media_bytes_skipping_live_fetch_failure(
         &self,
         client: &reqwest::Client,
         media: &MediaPlaylist,
         url: &str,
         byte_range: Option<ByteRange>,
     ) -> Result<Option<Vec<u8>>, G2gError> {
-        match media_bytes(client, url, byte_range).await {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(G2gError::Hardware(HardwareError::Http(status)))
-                if !media.end_list && is_client_error(status) =>
-            {
-                g2g_warn!(
-                    self,
-                    "{url} answered {status}, skipping it and reloading the playlist"
-                );
-                Ok(None)
-            }
-            Err(error) => Err(error),
+        let error = match media_bytes(client, url, byte_range).await {
+            Ok(bytes) => return Ok(Some(bytes)),
+            Err(error) => error,
+        };
+        if media.end_list || !is_origin_failure(&error) {
+            return Err(error);
         }
+        g2g_warn!(
+            self,
+            "{url} failed with {error:?}, skipping it and reloading the playlist"
+        );
+        Ok(None)
     }
 }
 
@@ -601,6 +600,22 @@ async fn media_bytes(
 
 fn is_client_error(status: u16) -> bool {
     reqwest::StatusCode::from_u16(status).is_ok_and(|code| code.is_client_error())
+}
+
+// a restarting origin answers 4xx or 5xx, or drops the connection
+fn is_origin_failure(error: &G2gError) -> bool {
+    match error {
+        G2gError::Hardware(HardwareError::Http(status)) => reqwest::StatusCode::from_u16(*status)
+            .is_ok_and(|code| code.is_client_error() || code.is_server_error()),
+        G2gError::Hardware(HardwareError::HttpTransport(failure)) => matches!(
+            failure,
+            HttpTransportFailure::Timeout
+                | HttpTransportFailure::Connect
+                | HttpTransportFailure::Request
+                | HttpTransportFailure::Body
+        ),
+        _ => false,
+    }
 }
 
 // SAMPLE-AES leaves the container clear, so only AES-128 is undone here
@@ -1051,7 +1066,7 @@ impl SourceLoop for HlsSrc {
                                 let part_url = resolve_url(&media_url, &part.uri);
                                 let t0 = g2g_core::metrics::monotonic_ns();
                                 let Some(bytes) = self
-                                    .media_bytes_skipping_live_client_error(
+                                    .media_bytes_skipping_live_fetch_failure(
                                         &client,
                                         &media,
                                         &part_url,
@@ -1105,7 +1120,7 @@ impl SourceLoop for HlsSrc {
                             let seg_url = resolve_url(&media_url, &segment.uri);
                             let t0 = g2g_core::metrics::monotonic_ns();
                             let Some(bytes) = self
-                                .media_bytes_skipping_live_client_error(
+                                .media_bytes_skipping_live_fetch_failure(
                                     &client,
                                     &media,
                                     &seg_url,

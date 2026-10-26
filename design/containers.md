@@ -1343,9 +1343,10 @@ session, waits through the restarted origin's 404s with the not-yet-published
 retry, starts at the new playlist's live edge and sends a `Flush` ahead of the
 new stream. gst's hlsdemux fails on the same restart.
 
-A live segment, part or byte range that still answers 4xx after its retries is
-skipped and the run goes to the playlist reload, as gst's adaptivedemux2 does, so a
-lost session reaches the re-resolve above. Nothing is signalled downstream for the
+A live segment, part or byte range that still answers 4xx or 5xx, or drops the
+connection, after its retries is skipped and the run goes to the playlist reload,
+as gst's adaptivedemux2 does for 4xx and 5xx, so a lost session reaches the
+re-resolve above. A reload that fails the same way still ends the run. Nothing is signalled downstream for the
 skipped media, as for an `#EXT-X-GAP` segment. A playlist with `#EXT-X-ENDLIST`
 still fails the run on the same answer.
 

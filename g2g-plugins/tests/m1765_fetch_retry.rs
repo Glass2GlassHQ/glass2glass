@@ -335,6 +335,30 @@ const HLS_LIVE_TWO_SEGMENTS: &str = "#EXTM3U\n\
 
 #[tokio::test]
 async fn a_live_hls_segment_failing_past_the_retry_budget_is_skipped() {
+    assert_live_hls_skips_the_dropped_segment(|_| Answer::Status(NOT_FOUND)).await;
+}
+
+// a restarting mediamtx answers 404 and then closes the connection
+#[tokio::test]
+async fn a_live_hls_segment_whose_last_retry_drops_the_connection_is_skipped() {
+    assert_live_hls_skips_the_dropped_segment(|attempt| {
+        if attempt + 1 == ATTEMPTS_BEFORE_FAILING {
+            Answer::Drop
+        } else {
+            Answer::Status(NOT_FOUND)
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_live_hls_segment_answering_5xx_past_the_retry_budget_is_skipped() {
+    assert_live_hls_skips_the_dropped_segment(|_| Answer::Status(SERVICE_UNAVAILABLE)).await;
+}
+
+async fn assert_live_hls_skips_the_dropped_segment(
+    dropped_answer: impl Fn(usize) -> Answer + Send + 'static,
+) {
     let counts = RequestCounts::default();
     let seen = Arc::clone(&counts);
     let origin = serve_answers(move |path| {
@@ -348,7 +372,8 @@ async fn a_live_hls_segment_failing_past_the_retry_budget_is_skipped() {
             return Answer::Body(playlist.as_bytes().to_vec());
         }
         match segment_index(path, "ts") {
-            Some(DROPPED_INDEX) | None => Answer::Status(NOT_FOUND),
+            Some(DROPPED_INDEX) => dropped_answer(attempt),
+            None => Answer::Status(NOT_FOUND),
             Some(index) => Answer::Body(segment_body(index)),
         }
     });
