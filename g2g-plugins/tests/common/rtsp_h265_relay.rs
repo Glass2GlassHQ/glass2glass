@@ -44,6 +44,8 @@ pub(crate) enum EarlyEnd {
     CorruptPacket,
     // the connection closes after this many datagrams, as a restarting server does
     CloseAfter(usize),
+    // the connection stays open and silent after this many datagrams, as one over a dropped link does
+    StallAfter(usize),
 }
 
 // session `n` ends as `early_ends[n]` says, and a `range` goes into the SDP as `a=range`
@@ -130,7 +132,7 @@ fn serve_client(stream: TcpStream, sdp: &str, rtp: &UdpSocket, early_end: Option
             let _ = write_half.write_all(&interleaved(&CORRUPT_RTP));
             return;
         }
-        Some(EarlyEnd::CloseAfter(datagrams)) => datagrams,
+        Some(EarlyEnd::CloseAfter(datagrams) | EarlyEnd::StallAfter(datagrams)) => datagrams,
         None => usize::MAX,
     };
     let mut datagram = vec![0u8; MAX_DATAGRAM];
@@ -142,6 +144,13 @@ fn serve_client(stream: TcpStream, sdp: &str, rtp: &UdpSocket, early_end: Option
         {
             return;
         }
+    }
+    if let Some(EarlyEnd::StallAfter(_)) = early_end {
+        // another thread holds the connection, so the relay can accept the client's reconnect
+        std::thread::spawn(move || {
+            let _write_half = write_half;
+            while read_request(&mut reader).is_some() {}
+        });
     }
 }
 

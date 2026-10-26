@@ -216,6 +216,7 @@ fn rtspsrc_limit_dims_and_reconnect_properties() {
         "reconnect",
         "reconnect-backoff",
         "reconnect-backoff-max",
+        "stall-timeout",
     ] {
         assert!(declares(s.properties(), name), "missing spec: {name}");
     }
@@ -249,6 +250,10 @@ fn rtspsrc_limit_dims_and_reconnect_properties() {
         s.get_property("reconnect-backoff-max"),
         Some(PropValue::Uint(2000))
     );
+    assert_eq!(s.get_property("stall-timeout"), Some(PropValue::Uint(0)));
+    s.set_property("stall-timeout", PropValue::Uint(5000))
+        .unwrap();
+    assert_eq!(s.get_property("stall-timeout"), Some(PropValue::Uint(5000)));
 }
 
 /// A half-set width/height pair must not advertise a 0 dim: intercept_caps

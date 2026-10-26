@@ -422,6 +422,14 @@ is a lost session when `reconnect` is set, failing with
 `G2gError::Network(NetworkFailure::Stream)` once the attempts run out, and an
 `Eos` without it, as GStreamer's `rtspsrc` ends on a server EOF.
 
+`stall-timeout` (milliseconds, 0 by default) ends a session that delivers
+nothing for that long with the same `NetworkFailure::Stream`, so `reconnect`
+retries it. A TCP connection over a link that dropped otherwise stays open until
+the server's retransmit timer fires, up to about 30 s after a 30 s outage, and
+then delivers the held-back backlog. A new connection does not inherit that
+backoff and starts at the live edge. gst's `rtspsrc` has no equivalent: its
+receive timeout sends a keep-alive and keeps waiting.
+
 Both RTSP clients fail DESCRIBE, SETUP, PLAY and depacketizer setup with
 `G2gError::Network(NetworkFailure::Connect)`, and any error after media starts
 with `G2gError::RtspStream`, logging retina's message on the element's category.

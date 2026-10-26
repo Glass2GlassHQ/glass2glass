@@ -145,6 +145,8 @@ pub struct RtspSrcN {
     /// to the next, as gst's `rtspsrc protocols=` does.
     transports: Vec<LowerTransport>,
     reconnect: ReconnectPolicy,
+    // a session that delivers nothing for this long is lost, 0 waits for the connection to fail
+    stall_timeout_ms: u64,
     /// Access units each output emits before its `Eos`. `u64::MAX` runs until
     /// the server disconnects.
     frame_limit: u64,
@@ -175,6 +177,7 @@ impl RtspSrcN {
             creds: None,
             transports: Vec::from([LowerTransport::Tcp]),
             reconnect: ReconnectPolicy::DISABLED,
+            stall_timeout_ms: 0,
             frame_limit: u64::MAX,
             expected_dims: None,
             probed_video: None,
@@ -851,6 +854,12 @@ const RTSPSRCN_PROPS: &[PropertySpec] = &[
     )
     .with_default("5000"),
     PropertySpec::new(
+        "stall-timeout",
+        PropKind::Uint,
+        "treat a session that delivers nothing for this many milliseconds as lost, as reconnect retries (0 = never)",
+    )
+    .with_default("0"),
+    PropertySpec::new(
         "protocols",
         PropKind::Flags,
         "lower transports to request at SETUP, tried in the order written",
@@ -995,6 +1004,10 @@ impl MultiOutputSource for RtspSrcN {
                 self.reconnect.max_backoff_ms = value.as_uint().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "stall-timeout" => {
+                self.stall_timeout_ms = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
             "protocols" => {
                 self.transports = transports_from_flags(&value)?;
                 Ok(())
@@ -1033,6 +1046,7 @@ impl MultiOutputSource for RtspSrcN {
             "reconnect" => Some(PropValue::Uint(self.reconnect.max_attempts as u64)),
             "reconnect-backoff" => Some(PropValue::Uint(self.reconnect.initial_backoff_ms)),
             "reconnect-backoff-max" => Some(PropValue::Uint(self.reconnect.max_backoff_ms)),
+            "stall-timeout" => Some(PropValue::Uint(self.stall_timeout_ms)),
             "protocols" => Some(transports_to_flags(&self.transports)),
             _ => None,
         }
@@ -1252,8 +1266,30 @@ async fn run_session(
     let mut origin_ns: Option<u64> = None;
     let limit = src.frame_limit;
 
+    let stall_timeout =
+        (src.stall_timeout_ms > 0).then(|| Duration::from_millis(src.stall_timeout_ms));
     while state.iter().any(|p| p.emitted < limit) {
-        let item = match demuxed.next().await {
+        let next = match stall_timeout {
+            Some(stall_timeout) => {
+                match tokio::time::timeout(stall_timeout, demuxed.next()).await {
+                    Ok(next) => next,
+                    // a tcp connection whose link dropped stays open until the server's retransmit backs off
+                    Err(_) => {
+                        g2g_core::g2g_warn!(
+                            Target::category(LOG_CATEGORY),
+                            "{}: nothing received for {} ms, ending the session",
+                            src.url,
+                            src.stall_timeout_ms
+                        );
+                        return SessionOutcome::NetworkError(G2gError::Network(
+                            NetworkFailure::Stream,
+                        ));
+                    }
+                }
+            }
+            None => demuxed.next().await,
+        };
+        let item = match next {
             Some(Ok(item)) => item,
             Some(Err(e)) => {
                 return SessionOutcome::NetworkError(rtsp_failure(
