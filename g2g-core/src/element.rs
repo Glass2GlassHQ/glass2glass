@@ -71,6 +71,8 @@ pub struct QosMessage {
     pub running_time_ns: u64,
     /// `metrics::monotonic_ns` when the sink judged the frame, 0 without `std`.
     pub taken_ns: u64,
+    // summed processing time of the elements the report crossed from the sink, queue waits left out
+    pub downstream_proc_ns: u64,
 }
 
 /// Cumulative presentation counters a paced sink kept over a run, read via

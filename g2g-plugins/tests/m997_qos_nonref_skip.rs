@@ -110,6 +110,7 @@ impl OutputSink for QosSink {
                 jitter_ns: LATE_NS,
                 running_time_ns: 0,
                 taken_ns: 0,
+                downstream_proc_ns: 0,
             })));
         }
         Poll::Ready(Ok(PushOutcome::Accepted))

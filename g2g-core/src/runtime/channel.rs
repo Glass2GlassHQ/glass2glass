@@ -1354,8 +1354,16 @@ impl SenderSink {
             return PushOutcome::Reconfigure(r);
         }
         if let Some(q) = self.link.qos.take() {
+            let producer_proc_ns = self
+                .push_wait_probe
+                .as_ref()
+                .map_or(0, |probe| probe.last_frame_proc_ns());
+            let relayed = QosMessage {
+                downstream_proc_ns: q.downstream_proc_ns.saturating_add(producer_proc_ns),
+                ..q
+            };
             for upstream in &self.upstream_qos {
-                upstream.store(q);
+                upstream.store(relayed);
             }
             if self.qos_answered {
                 return PushOutcome::Qos(q);
@@ -1547,6 +1555,7 @@ impl OutputSink for SenderSink {
         // element buffering frames internally. Skipped for unstamped frames.
         #[cfg(feature = "std")]
         if let (Some(probe), PipelinePacket::DataFrame(frame)) = (&self.push_wait_probe, &*packet) {
+            probe.note_frame_emitted();
             if frame.timing.arrival_ns != 0 {
                 probe.record_age_at_emit(now.get().saturating_sub(frame.timing.arrival_ns));
             }
@@ -1736,6 +1745,7 @@ mod link_tests {
             jitter_ns: 5_000_000,
             running_time_ns: 100,
             taken_ns: 0,
+            downstream_proc_ns: 0,
         });
         let outcome = run_to_ready(sink.push(dummy_frame())).expect("push ok");
         match outcome {
@@ -1762,6 +1772,7 @@ mod link_tests {
             jitter_ns: 1_000,
             running_time_ns: 0,
             taken_ns: 0,
+            downstream_proc_ns: 0,
         });
         rx.request_reconfigure(Reconfigure::Renegotiate);
         let first = run_to_ready(sink.push(dummy_frame())).unwrap();
@@ -1784,6 +1795,7 @@ mod link_tests {
             jitter_ns: 5_000_000,
             running_time_ns: 100,
             taken_ns: 0,
+            downstream_proc_ns: 0,
         };
         for answered in [true, false] {
             let (up_tx, up_rx) = link(2);
@@ -1807,6 +1819,49 @@ mod link_tests {
                 "the report reaches the upstream link either way (answered={answered})"
             );
         }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_relayed_qos_report_adds_the_producers_processing_time() {
+        extern crate std;
+        let work = std::time::Duration::from_millis(2);
+        let downstream_proc_ns = 5_000_000;
+        let report = QosMessage {
+            jitter_ns: 5_000_000,
+            running_time_ns: 100,
+            taken_ns: 0,
+            downstream_proc_ns,
+        };
+        let (up_tx, up_rx) = link(2);
+        let (down_tx, down_rx) = link(4);
+        drop(up_tx);
+        let mut adapter = SenderSink::new(down_tx);
+        let probe = crate::runtime::instrument::ElementProbe::new(crate::log::ElementLogName::new(
+            "producer",
+            "producer".into(),
+        ));
+        adapter.set_push_wait_probe(Some(probe.clone()));
+        adapter.relay_qos_to(up_rx.qos_slot(), true);
+
+        let started = crate::runtime::instrument::ElementProbe::mark();
+        std::thread::sleep(work);
+        run_to_ready(adapter.push(frame_seq(0))).expect("push ok");
+        probe.record_proc_since(started);
+        let producer_proc_ns = probe.last_frame_proc_ns();
+        assert!(producer_proc_ns >= work.as_nanos() as u64);
+
+        down_rx.request_qos(report);
+        let outcome = run_to_ready(adapter.push(frame_seq(1))).expect("push ok");
+        assert_eq!(
+            outcome,
+            PushOutcome::Qos(report),
+            "the producer sees only what lies below it"
+        );
+        assert_eq!(
+            up_rx.qos.take().map(|relayed| relayed.downstream_proc_ns),
+            Some(downstream_proc_ns + producer_proc_ns)
+        );
     }
 
     #[test]

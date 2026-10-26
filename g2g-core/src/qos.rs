@@ -45,6 +45,7 @@ pub(crate) fn upstream_report(deadline_ns: u64, now_ns: u64, running_time_ns: u6
         jitter_ns: jitter_ns(deadline_ns, now_ns),
         running_time_ns,
         taken_ns: taken_ns(),
+        downstream_proc_ns: 0,
     }
 }
 

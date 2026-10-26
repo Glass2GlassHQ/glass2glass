@@ -6,7 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
-Breaking: `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, and the `vaapi` feature with `vaapidec` / `vaapidech265` is removed.
+Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty` / `BadValue` are replaced by `SpecError::Property(ParseError)`, `receive_rtp_h264` is renamed `receive_rtp`, `RtpRecvConfig` gains an `encoding` field, and the `vaapi` feature with `vaapidec` / `vaapidech265` is removed.
 
 - M1900: `VelloAnalyticsOverlay` draws on RGBA wgpu textures, `WgpuColorConvert` converts NV12 wgpu textures to RGBA, and `CudaToWgpu` keeps frame metadata.
 - M1901: `VelloAnalyticsOverlay` draws the `show-label` / `show-track` / `show-score` captions.
@@ -38,6 +38,7 @@ Breaking: `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty`
 - M1929: `rtspsrc` `stall-timeout` reconnects a session that delivers nothing for that long.
 - M1930: `rtspsrc` `stall-timeout` also retries a connect, DESCRIBE, SETUP or PLAY that gets no reply for that long.
 - M1931: the Python host sets `MP_BACKEND=g2g`, the variable modelpipe reads, so hosted elements load the g2g backend instead of the gst one.
+- M1932: a QoS report sums the processing time of the elements it crosses, and `pyelement` counts it, so a chain of slow hosted elements drops frames ahead of the slow stages instead of freezing the display.
 
 ## 0.10.0
 

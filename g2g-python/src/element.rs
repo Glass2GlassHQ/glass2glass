@@ -48,6 +48,7 @@ const RUN_TIME_STALE_AFTER_NS: u64 = 100_000_000;
 struct SinkClock {
     running_time_ns: u64,
     taken_ns: u64,
+    downstream_proc_ns: u64,
     behind: bool,
 }
 
@@ -173,11 +174,12 @@ impl PyTransform {
         let run_is_fresh =
             now_ns.saturating_sub(self.last_run_measured_ns) <= RUN_TIME_STALE_AFTER_NS;
         let predicted_run_ns = if run_is_fresh { self.last_run_ns } else { 0 };
-        // no downstream delay: the frames queued ahead of this one show before it comes due
+        // no queue wait further down: the frames queued ahead of this one show before it comes due
         let reaches_sink_at = sink_clock
             .running_time_ns
             .saturating_add(elapsed_ns)
-            .saturating_add(predicted_run_ns);
+            .saturating_add(predicted_run_ns)
+            .saturating_add(sink_clock.downstream_proc_ns);
         running_time.saturating_add(VIDEO_SINK_MAX_LATENESS_NS) < reaches_sink_at
     }
 
@@ -200,6 +202,7 @@ impl PyTransform {
                 .running_time_ns
                 .saturating_add_signed(report.jitter_ns),
             taken_ns: report.taken_ns,
+            downstream_proc_ns: report.downstream_proc_ns,
             behind: report.jitter_ns > 0,
         });
     }

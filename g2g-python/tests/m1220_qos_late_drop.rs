@@ -93,6 +93,7 @@ fn run_three_frames(element: &mut PyTransform, sink: &mut LateSink) {
         jitter_ns: JITTER_NS,
         running_time_ns: 0,
         taken_ns: 0,
+        downstream_proc_ns: 0,
     });
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -165,6 +166,7 @@ fn lateness_is_measured_in_running_time_and_a_flush_clears_it() {
         jitter_ns: JITTER_NS,
         running_time_ns: 0,
         taken_ns: 0,
+        downstream_proc_ns: 0,
     });
     runtime
         .block_on(element.process(
@@ -217,6 +219,7 @@ fn a_frame_that_would_be_late_after_the_run_time_is_dropped() {
         jitter_ns: JITTER_NS,
         running_time_ns: 0,
         taken_ns: 0,
+        downstream_proc_ns: 0,
     });
     for sequence in 0..4u64 {
         runtime
@@ -252,6 +255,7 @@ fn a_run_time_measured_long_ago_no_longer_predicts() {
         jitter_ns: 1,
         running_time_ns: 0,
         taken_ns: 0,
+        downstream_proc_ns: 0,
     });
     process(&mut element, &mut sink, 0, 0);
     process(&mut element, &mut sink, 5_000_000, 1);
@@ -289,6 +293,7 @@ fn an_early_report_ends_the_drops_a_late_one_started() {
         jitter_ns: JITTER_NS,
         running_time_ns: 0,
         taken_ns: 0,
+        downstream_proc_ns: 0,
     });
     process(&mut element, &mut sink, 0, 0);
     process(&mut element, &mut sink, FRAME_PERIOD_NS, 1);
@@ -299,6 +304,7 @@ fn an_early_report_ends_the_drops_a_late_one_started() {
         jitter_ns: -EARLY_NS,
         running_time_ns: 0,
         taken_ns: 0,
+        downstream_proc_ns: 0,
     });
     process(&mut element, &mut sink, FrameTiming::PTS_NONE, 2);
     process(&mut element, &mut sink, 2 * FRAME_PERIOD_NS, 3);
@@ -326,6 +332,7 @@ fn a_slow_run_drops_nothing_while_the_sink_is_early() {
         jitter_ns: -EARLY_NS,
         running_time_ns: 0,
         taken_ns: 0,
+        downstream_proc_ns: 0,
     });
     process(&mut element, &mut sink, 0, 0);
     process(&mut element, &mut sink, 5_000_000, 1);
@@ -352,6 +359,7 @@ fn a_delay_learned_through_full_queues_drops_nothing_once_they_drain() {
         jitter_ns: JITTER_NS,
         running_time_ns: 0,
         taken_ns: 0,
+        downstream_proc_ns: 0,
     });
     for sequence in 1..=DRAINED_FRAMES {
         runtime
@@ -385,6 +393,7 @@ fn a_live_stream_keeps_running_after_a_delay_learned_through_full_queues() {
         jitter_ns: FULL_QUEUE_DELAY.as_nanos() as i64,
         running_time_ns: 0,
         taken_ns: 0,
+        downstream_proc_ns: 0,
     });
     let first_live = FULL_QUEUE_DELAY.as_nanos() as u64 / FRAME_PERIOD_NS + 1;
     for sequence in first_live..first_live + 2 * DRAINED_FRAMES {
@@ -404,4 +413,33 @@ fn a_live_stream_keeps_running_after_a_delay_learned_through_full_queues() {
         0,
         "each frame reaches the empty queue as the sink's clock reaches it"
     );
+}
+
+#[test]
+fn a_frame_late_after_the_processing_further_down_is_dropped() {
+    let mut element = counting_element();
+    let mut sink = LateSink::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    sink.report = Some(QosMessage {
+        jitter_ns: 1,
+        running_time_ns: 0,
+        taken_ns: 0,
+        downstream_proc_ns: 100_000_000,
+    });
+    for (sequence, pts_ns) in [0, 50_000_000, 90_000_000].into_iter().enumerate() {
+        runtime
+            .block_on(element.process(
+                PipelinePacket::DataFrame(frame(pts_ns, sequence as u64)),
+                &mut sink,
+            ))
+            .unwrap();
+    }
+    assert_eq!(
+        element.late_dropped_count(),
+        1,
+        "50 ms reaches the sink at 100 ms, past its 20 ms bound, 90 ms is within it"
+    );
+    assert_eq!(sink.packets.len(), 2);
 }

@@ -79,6 +79,7 @@ impl AsyncElement for QosSink {
                     jitter_ns: self.jitter_ns,
                     running_time_ns: f.timing.pts_ns,
                     taken_ns: 0,
+                    downstream_proc_ns: 0,
                 });
             }
             Ok(())

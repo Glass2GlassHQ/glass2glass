@@ -52,6 +52,10 @@ pub struct ElementProbe {
     /// own control push between two `process()` calls (a muxer forwarding a
     /// mid-stream `CapsChanged`) lands on the next call.
     push_wait_accum: AtomicU64,
+    // set by the output adapter when the running process() call pushes a DataFrame
+    #[cfg(feature = "std")]
+    frame_emitted: portable_atomic::AtomicBool,
+    last_frame_proc_ns: AtomicU64,
     /// Queue-residency (transit) time of each `DataFrame` on this element's input
     /// link: how long the frame sat queued between the producer sending it and
     /// this element pulling it. The per-stage "wait" half of a latency waterfall
@@ -104,6 +108,9 @@ impl ElementProbe {
             proc_ns: LatencyHistogram::new(),
             push_wait_ns: LatencyHistogram::new(),
             push_wait_accum: AtomicU64::new(0),
+            #[cfg(feature = "std")]
+            frame_emitted: portable_atomic::AtomicBool::new(false),
+            last_frame_proc_ns: AtomicU64::new(0),
             transit_ns: LatencyHistogram::new(),
             age_at_emit_ns: LatencyHistogram::new(),
             fill: FillGauge::default(),
@@ -145,6 +152,26 @@ impl ElementProbe {
         self.push_wait_accum.fetch_add(ns, Ordering::Relaxed);
     }
 
+    #[cfg(feature = "std")]
+    #[inline]
+    pub(crate) fn note_frame_emitted(&self) {
+        self.frame_emitted.store(true, Ordering::Relaxed);
+    }
+
+    // compute time of the latest process() call that pushed a frame, not of a dropped one
+    #[inline]
+    pub fn last_frame_proc_ns(&self) -> u64 {
+        self.last_frame_proc_ns.load(Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "std")]
+    fn record_proc(&self, proc_ns: u64) {
+        self.proc_ns.record(proc_ns);
+        if self.frame_emitted.swap(false, Ordering::Relaxed) {
+            self.last_frame_proc_ns.store(proc_ns, Ordering::Relaxed);
+        }
+    }
+
     /// Record the `process()` call that started at `start` (from
     /// [`mark`](Self::mark)), split into the push-wait banked by
     /// [`add_push_wait`](Self::add_push_wait) and the compute time that is what
@@ -159,7 +186,7 @@ impl ElementProbe {
         if let Some(t0) = start {
             let now = crate::metrics::monotonic_ns();
             let elapsed = now.saturating_sub(t0);
-            self.proc_ns.record(elapsed.saturating_sub(waited));
+            self.record_proc(elapsed.saturating_sub(waited));
             self.push_wait_ns.record(waited);
         }
         #[cfg(not(feature = "std"))]
@@ -219,8 +246,7 @@ impl ElementProbe {
         let waited = self.push_wait_accum.swap(0, Ordering::Relaxed);
         let Some(enter_ns) = start else { return };
         let exit_ns = crate::metrics::monotonic_ns();
-        self.proc_ns
-            .record(exit_ns.saturating_sub(enter_ns).saturating_sub(waited));
+        self.record_proc(exit_ns.saturating_sub(enter_ns).saturating_sub(waited));
         self.push_wait_ns.record(waited);
         self.push_visit(StageVisit {
             sequence,

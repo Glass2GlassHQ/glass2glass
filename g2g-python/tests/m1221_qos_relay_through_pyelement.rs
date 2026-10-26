@@ -105,6 +105,7 @@ impl AsyncElement for LateSink {
                     jitter_ns: JITTER_NS,
                     running_time_ns: frame.timing.pts_ns,
                     taken_ns: monotonic_ns(),
+                    downstream_proc_ns: 0,
                 });
             }
             Ok(())

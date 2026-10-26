@@ -352,7 +352,13 @@ per element later. `pyelement` drops nothing while the sink's latest report is o
 time or early. After a late report it drops a frame, before any Python call, when
 the frame's running time plus the sink's 20 ms bound is below that clock advanced
 to now plus the hosted element's last run time, that is when the frame would reach
-the sink later than the sink accepts. Time the frame will wait in queues further
+the sink later than the sink accepts. The report also carries
+`downstream_proc_ns`, the processing time of the elements it crossed on the way
+up: each relaying output adapter adds its element's compute time on the latest
+`process()` call that pushed a frame, and an element sees the report before its
+own time is added. `pyelement` adds that sum, so a detector ahead of a pose model
+and an overlay drops a frame that its own run would deliver on time but the
+stages below it would not. Time the frame will wait in queues further
 down is left out: the frames queued ahead of it have earlier running times, so a
 paced sink shows them before this one comes due. Counting that wait drops every
 frame of a live stream once the queues drain, because a dropped frame reaches no
