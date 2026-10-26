@@ -5,7 +5,7 @@
 //! imports, and drives a hosted element instance per frame.
 //!
 //! Contract with the Python side (the `backend/g2g` package the gst-python-ml
-//! team writes against `PYML_BACKEND=g2g`): importing an element module yields
+//! team writes against `MP_BACKEND=g2g`): importing an element module yields
 //! a class whose instances expose
 //!
 //! ```text
@@ -602,8 +602,8 @@ fn g2g(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 pub fn init_host() {
     INIT.call_once(|| {
         // Selected before the Python `backend` package is imported so its
-        // PYML_BACKEND branch binds to `backend/g2g`.
-        std::env::set_var("PYML_BACKEND", "g2g");
+        // MP_BACKEND branch binds to `backend/g2g`.
+        std::env::set_var("MP_BACKEND", "g2g");
         // append_to_inittab! must run before the interpreter is initialized;
         // `auto-initialize` defers init to the first `attach`, and `Once`
         // guarantees this runs first.

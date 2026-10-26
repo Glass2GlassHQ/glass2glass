@@ -37,6 +37,7 @@ Breaking: `ElementProbe` is no longer `UnwindSafe`, `SpecError::UnknownProperty`
 - M1928: `hlssrc` also skips a live segment or part that answers 5xx or drops the connection past its retries, where it ended the run.
 - M1929: `rtspsrc` `stall-timeout` reconnects a session that delivers nothing for that long.
 - M1930: `rtspsrc` `stall-timeout` also retries a connect, DESCRIBE, SETUP or PLAY that gets no reply for that long.
+- M1931: the Python host sets `MP_BACKEND=g2g`, the variable modelpipe reads, so hosted elements load the g2g backend instead of the gst one.
 
 ## 0.10.0
 

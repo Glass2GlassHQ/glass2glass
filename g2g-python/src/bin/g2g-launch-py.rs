@@ -5,7 +5,7 @@
 //! It is `g2g-launch` plus one line: after [`default_registry`] it calls
 //! [`g2g_python::register`], which adds `pyelement` / `pysink` / `pysrc` /
 //! `pyaggregator`.
-//! The hosted element runs under `PYML_BACKEND=g2g` (set by the host on first
+//! The hosted element runs under `MP_BACKEND=g2g` (set by the host on first
 //! GIL acquisition), so its detections come back as `AnalyticsMeta` and an
 //! `analyticsoverlay` can draw them before an `autovideosink`:
 //!
