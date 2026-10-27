@@ -158,6 +158,11 @@ low-latency preset and tune, `p4`/`ll`/CBR/`delay=0` for NVENC and
 The input frame's nanosecond PTS is mapped through the encoder's frame-index PTS
 (`time_base = 1/fps`) and recovered on the output packet, surviving any reorder.
 
+Rate control follows gst's x264enc `pass`: `cbr` (default) encodes at `bitrate`,
+`quant` at the constant `quantizer` (`qp`, with `rc=constqp` on NVENC) and sets
+no bitrate. Quantizer 0 on libx264 is lossless, High 4:4:4 Predictive with 4:2:0
+input, and a test decodes it back bit for bit.
+
 A round-trip test on the RTX 3060 encodes I420 through `Nvenc` and `Software` and
 decodes back through `FfmpegVideoDec`, asserting Annex-B framing and I420 at the
 original geometry. The `ffmpeg` feature is CI-excluded for libav version
