@@ -31,9 +31,9 @@ use g2g_core::runtime::{
     Registry, RunBuilder, SourceLoop, ThreadSpawner,
 };
 use g2g_core::{
-    AsyncClock, AsyncElement, Bus, BusMessage, Caps, ConfigureOutcome, Dim, DynAsyncClock, Frame,
-    FrameTiming, G2gError, Graph, MultiInputElement, OutputSink, PipelineClock, PipelinePacket,
-    Rate, RawVideoFormat,
+    AsyncClock, AsyncElement, Bus, BusHandle, BusMessage, Caps, ConfigureOutcome, Dim,
+    DynAsyncClock, Frame, FrameTiming, G2gError, Graph, MultiInputElement, OutputSink,
+    PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 /// Shallow, so a stream keeps its producer inside a blocking send: the state a
@@ -1013,6 +1013,87 @@ fn a_caps_changing_insert_takes_its_converter_from_the_handle() {
         !record.caps.iter().any(|(_, caps)| *caps == nv12()),
         "the converter kept NV12 off the sink's edge"
     );
+}
+
+/// Posts a [`BusMessage::Custom`] for every frame, on the bus the runner hands it.
+#[derive(Default)]
+struct BusPostingSink {
+    bus: Option<BusHandle>,
+}
+
+const POSTED_CODE: u64 = 1952;
+
+impl AsyncElement for BusPostingSink {
+    type ProcessFuture<'a>
+        = core::future::Ready<Result<(), G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream.clone())
+    }
+
+    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn set_bus(&mut self, bus: BusHandle) {
+        self.bus = Some(bus);
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        if let (PipelinePacket::DataFrame(_), Some(bus)) = (&packet, &self.bus) {
+            bus.try_post(BusMessage::Custom(POSTED_CODE));
+        }
+        core::future::ready(Ok(()))
+    }
+}
+
+/// M1952: an element the mutator starts gets the run's bus, as the ones the
+/// runner started with do.
+#[test]
+fn a_sink_added_under_a_tee_posts_on_the_run_bus() {
+    let left = Arc::new(Mutex::new(Record::default()));
+    let right = Arc::new(Mutex::new(Record::default()));
+    let pushed = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let graph = tee_graph(&left, &right, &pushed, &stop);
+    let (bus, handle) = Bus::new(1024);
+
+    let (mutator, run) = RunBuilder::new(graph, &ZeroClock, LINK_CAPACITY)
+        .with_bus(&handle)
+        .run_mutable();
+    let watched = Arc::clone(&left);
+    let halt = Arc::clone(&stop);
+    let driver = async move {
+        until(|| frames_seen(&watched) >= 3).await;
+        let names = within_deadline(
+            "the branch add",
+            mutator.add_branch(TEE_NAME, vec![Box::new(BusPostingSink::default())]),
+        )
+        .await
+        .expect("a tee takes a branch while it runs");
+        let seen = frames_seen(&watched);
+        until(|| frames_seen(&watched) > seen + 3).await;
+        within_deadline("the branch drop", mutator.remove_branch(&names[0]))
+            .await
+            .expect("the branch comes back out through its sink");
+        halt.store(true, Ordering::SeqCst);
+    };
+    let (stats, ()) = block_on(Join2::new(run, driver));
+    stats.expect("the run survives a branch coming and going");
+
+    let mut posted = 0;
+    while let Some(message) = bus.try_recv() {
+        if message == BusMessage::Custom(POSTED_CODE) {
+            posted += 1;
+        }
+    }
+    assert!(posted > 0, "the added sink posted on the run's bus");
 }
 
 /// M1238: a branch of a transform and a sink joins a running tee, sees every

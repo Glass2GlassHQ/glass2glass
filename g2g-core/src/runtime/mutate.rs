@@ -1141,6 +1141,13 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             .ok_or_else(|| MutationError::UnknownNode(name.to_string()))
     }
 
+    // the runner hands its bus to every element it starts, so one started here gets it too
+    fn hand_bus(&self, set_bus: impl FnOnce(BusHandle)) {
+        if let Some(bus) = &self.bus {
+            set_bus(bus.clone());
+        }
+    }
+
     /// `<category>N`, counting past every name the graph already carries, so a
     /// spliced element is addressable the way a negotiated one is.
     fn unique_name(&self, category: &str) -> String {
@@ -1412,6 +1419,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             element.configure_liveness(self.path_is_live);
             let name = self.unique_name_among(element.log_category(), &names);
             element.set_instance_name(name.clone());
+            self.hand_bus(|bus| element.set_bus(bus));
             let mut out_tx = outputs.remove(0);
             if i + 1 < count {
                 out_tx.set_mutation(Some(endpoints[i].clone()));
@@ -1710,6 +1718,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         let feasible = self.prepare_sink(&edge_caps, &mut element)?;
         let name = self.unique_name(element.log_category());
         element.set_instance_name(name.clone());
+        self.hand_bus(|bus| element.set_bus(bus));
 
         let done = self
             .take_element_handback(replaced)
@@ -1805,6 +1814,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             .map_err(MutationError::Refused)?;
         let name = self.unique_name(source.log_category());
         source.set_instance_name(name.clone());
+        self.hand_bus(|bus| source.set_bus(bus));
 
         let done = self
             .take_source_handback(replaced)
@@ -1978,6 +1988,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             element.configure_liveness(self.path_is_live);
             let name = self.unique_name(element.log_category());
             element.set_instance_name(name.clone());
+            self.hand_bus(|bus| element.set_bus(bus));
             let node = first_node + i;
             let (done_tx, done_rx) = bounded(1);
             let properties = PropertyMailbox::new();
@@ -2030,6 +2041,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         }
         let sink_name = self.unique_name(sink.log_category());
         sink.set_instance_name(sink_name.clone());
+        self.hand_bus(|bus| sink.set_bus(bus));
         let sink_edge = self.edges.len();
         self.edges.push(LiveEdge {
             endpoint: endpoints[count - 1].clone(),
@@ -2172,6 +2184,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
             .map_err(MutationError::Refused)?;
         let name = self.unique_name(source.log_category());
         source.set_instance_name(name.clone());
+        self.hand_bus(|bus| source.set_bus(bus));
 
         let endpoint = ProducerEndpoint::new();
         endpoint.set_caps(&fixated);
