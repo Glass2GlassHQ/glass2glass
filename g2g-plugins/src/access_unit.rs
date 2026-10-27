@@ -281,6 +281,15 @@ impl AccessUnitFramer {
                 });
                 self.seen_picture = false;
             }
+            let opened_by_leading_units = self.access_unit_starts.len() > 1
+                && self
+                    .access_unit_starts
+                    .last()
+                    .is_some_and(|unit| unit.picture.is_none());
+            // leading units followed by a later slice sit inside the picture before them
+            if role == StartCodeRole::PictureContinuation && opened_by_leading_units {
+                self.access_unit_starts.pop();
+            }
             if matches!(
                 role,
                 StartCodeRole::Picture | StartCodeRole::PictureContinuation

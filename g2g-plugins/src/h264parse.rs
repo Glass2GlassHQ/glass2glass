@@ -1395,6 +1395,49 @@ mod tests {
         assert_eq!(data_payloads(&sink), aus, "Eos flushes it, bytes intact");
     }
 
+    // live555 marks every slice as the end of a picture and retina prepends the parameter sets to each keyframe slice
+    #[tokio::test]
+    async fn reframing_joins_slices_split_into_buffers_behind_parameter_sets() {
+        let mut parse = H264Parse::reframing();
+        parse.configure_pipeline(&h264_parse_caps()).unwrap();
+        let mut sink = CollectSink::default();
+
+        let mut parameter_sets = build_test_annexb_sps(320, 240);
+        parameter_sets.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xCE, 0x38, 0x80]);
+        let pictures: Vec<Vec<Vec<u8>>> = (0..4u8)
+            .map(|picture| {
+                (0..3u8)
+                    .map(|slice| {
+                        let mut buffer = if picture == 0 {
+                            parameter_sets.clone()
+                        } else {
+                            Vec::new()
+                        };
+                        buffer.extend_from_slice(&annexb_vcl(slice == 0, picture * 3 + slice));
+                        buffer
+                    })
+                    .collect()
+            })
+            .collect();
+        for (sequence, buffer) in pictures.iter().flatten().enumerate() {
+            parse
+                .process(
+                    PipelinePacket::DataFrame(frame_with_bytes(sequence as u64, buffer.clone())),
+                    &mut sink,
+                )
+                .await
+                .unwrap();
+        }
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let expected: Vec<Vec<u8>> = pictures.iter().map(|buffers| buffers.concat()).collect();
+        assert_eq!(
+            data_payloads(&sink),
+            expected,
+            "one access unit per picture"
+        );
+    }
+
     #[tokio::test]
     async fn reframing_reassembles_an_au_split_across_buffers() {
         // The regression that made HLS video garbage: one Annex-B access unit
