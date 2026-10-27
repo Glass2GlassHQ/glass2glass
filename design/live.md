@@ -736,6 +736,15 @@ listener posts a warning and ends the stream. With `keep-listening`, a SHUTDOWN 
 an idle peer instead sends `Flush` downstream and returns to the listener
 handshake, and `tsdemux` continues the timeline across the next caller's stream.
 
+`SrtSink` drops its connection on a socket error or after the same 5 s without
+a packet from the listener and, with `auto-reconnect` (default on, as gst's
+srtsink), calls again on the next frame, dropping frames until a handshake
+completes and waiting 1 s after a failed one. The caller resends an unanswered
+handshake packet every 250 ms, as libsrt does, so a call made during an outage
+completes as soon as the link returns. Packet timestamps count from the first
+frame of each connection, because a listener schedules TSBPD from the start of
+the call and holds packets stamped minutes ahead.
+
 Validated g2g to g2g end to end over a lossy loopback: handshake, data, and a
 dropped packet recovered via NAK. The wire format follows the SRT draft so
 real-peer interop is the design target. AES-256 encryption (`with_aes256`),

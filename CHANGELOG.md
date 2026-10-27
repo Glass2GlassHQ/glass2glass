@@ -43,6 +43,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1934: closing the window of `cudaglsink`, `glsink` or `wgpusink` fails the run with the new `G2gError::WindowClosed` instead of `Hardware(Other)`.
 - M1940: `x264enc` gains gst's `pass` (`cbr` / `quant`) and `quantizer` properties, and `pass=quant quantizer=0` encodes losslessly.
 - M1941: a keyframe request no longer drops the encoded frame the encoder was pushing when it arrived.
+- M1942: `srtsink` calls the listener again after a failed or silent connection, under the new `auto-reconnect` property (default on), and counts each call's packet timestamps from that call's start.
 
 ## 0.10.0
 

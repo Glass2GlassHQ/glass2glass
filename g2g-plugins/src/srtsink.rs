@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 
 use std::net::SocketAddr;
 
+use g2g_core::log::Target;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
     NetworkFailure, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
@@ -44,6 +45,11 @@ const KM_RETRANSMIT_US: u64 = 5_000;
 /// Stop retransmitting the KM after this many tries (a peer that never KMRSPs,
 /// e.g. an older receiver); the new key is already active locally regardless.
 const KM_MAX_RETRANSMITS: u32 = 20;
+// libsrt resends an unanswered handshake packet this often
+const HANDSHAKE_RESEND_NS: u64 = 250_000_000;
+// a call that failed is not retried sooner, frames in between are dropped
+const RECONNECT_INTERVAL_NS: u64 = 1_000_000_000;
+const LOG_CATEGORY: &str = "srtsink";
 
 /// A mid-stream rekey KM awaiting the peer's KMRSP. Retransmitted on a timer
 /// until acknowledged (or [`KM_MAX_RETRANSMITS`] is reached).
@@ -95,6 +101,12 @@ pub struct SrtSink {
     packets_sent: u64,
     retransmits: u64,
     eos_seen: bool,
+    auto_reconnect: bool,
+    // the pts of the first frame sent on the current connection
+    connection_pts_ns: Option<u64>,
+    last_peer_packet_ns: u64,
+    // monotonic time before which a failed connection is not called again
+    reconnect_at_ns: u64,
 }
 
 impl SrtSink {
@@ -120,6 +132,10 @@ impl SrtSink {
             packets_sent: 0,
             retransmits: 0,
             eos_seen: false,
+            auto_reconnect: true,
+            connection_pts_ns: None,
+            last_peer_packet_ns: 0,
+            reconnect_at_ns: 0,
         }
     }
 
@@ -225,24 +241,37 @@ impl SrtSink {
             self.stream_id.clone(),
             km,
         );
-        if let Some(first) = hs.start() {
-            socket.send(&first).await.map_err(io_err)?;
+        let mut last_sent = hs.start();
+        if let Some(first) = &last_sent {
+            socket.send(first).await.map_err(io_err)?;
         }
         let mut buf = [0u8; 2048];
         // Bound the *whole* handshake, not each recv: a peer that keeps sending
         // non-converging packets (a handshake mismatch, a flood) must not reset
         // the deadline every datagram and hang the pipeline forever.
         let deadline = tokio::time::Instant::now() + core::time::Duration::from_secs(8);
+        let resend = core::time::Duration::from_nanos(HANDSHAKE_RESEND_NS);
         while !hs.is_established() {
-            let n = match tokio::time::timeout_at(deadline, socket.recv(&mut buf)).await {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(G2gError::Network(NetworkFailure::Connect));
+            }
+            let n = match tokio::time::timeout(resend, socket.recv(&mut buf)).await {
                 Ok(r) => r.map_err(io_err)?,
-                Err(_) => return Err(G2gError::Network(NetworkFailure::Connect)),
+                // without a resend a lost handshake packet stalls the call until the deadline
+                Err(_) => {
+                    if let Some(packet) = &last_sent {
+                        socket.send(packet).await.map_err(io_err)?;
+                    }
+                    continue;
+                }
             };
             let step = hs.on_packet(&buf[..n]);
             if let Some(reply) = step.reply {
                 socket.send(&reply).await.map_err(io_err)?;
+                last_sent = Some(reply);
             }
         }
+        self.last_peer_packet_ns = g2g_core::metrics::monotonic_ns();
         let mut sender = SrtSender::new(hs.peer_socket_id(), INIT_SEQ, SEND_CAPACITY);
         if let Some(c) = crypto {
             sender.set_crypto(c);
@@ -261,6 +290,7 @@ impl SrtSink {
             match socket.try_recv(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    self.last_peer_packet_ns = g2g_core::metrics::monotonic_ns();
                     if let Some(ctrl) = srt::parse_control(&buf[..n]) {
                         // A KMRSP acknowledges the outstanding rekey: stop
                         // retransmitting the KM once its blob matches.
@@ -275,7 +305,8 @@ impl SrtSink {
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => break,
+                // the listener's port refused a datagram
+                Err(e) => return Err(io_err(e)),
             }
         }
         let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
@@ -311,6 +342,99 @@ impl SrtSink {
             }
         }
         self.retransmits = self.sender.as_ref().map(|s| s.retransmits()).unwrap_or(0);
+        Ok(())
+    }
+
+    async fn send_frame(&mut self, bytes: &[u8], pts_ns: u64) -> Result<(), G2gError> {
+        // srt timestamps count from the start of the connection
+        let connection_pts_ns = *self.connection_pts_ns.get_or_insert(pts_ns);
+        let timestamp = (pts_ns.saturating_sub(connection_pts_ns) / 1000) as u32;
+        // Fragment the TS byte stream into SRT payloads (7 TS packets).
+        let mut sent = Vec::new();
+        {
+            let sender = self.sender.as_mut().ok_or(G2gError::NotConfigured)?;
+            for chunk in bytes.chunks(TS_DATAGRAM_PAYLOAD) {
+                sent.push(sender.send(chunk, timestamp));
+            }
+        }
+        let n_packets = sent.len() as u64;
+        for pkt in &sent {
+            // Congestion control: pace each packet to the target rate
+            // so the egress does not burst-flood the path.
+            if let Some(cc) = self.cc.as_mut() {
+                let now = g2g_core::metrics::monotonic_ns() / 1000;
+                if now < self.next_send_us {
+                    tokio::time::sleep(core::time::Duration::from_micros(self.next_send_us - now))
+                        .await;
+                }
+                let sent_at = g2g_core::metrics::monotonic_ns() / 1000;
+                cc.on_packet(pkt.len(), sent_at);
+                let period = cc.snd_period_us(pkt.len());
+                self.next_send_us = sent_at.max(self.next_send_us).saturating_add(period);
+            }
+            let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
+            socket.send(pkt).await.map_err(io_err)?;
+            self.packets_sent += 1;
+        }
+        self.frames_sent += 1;
+        self.service_control().await?;
+
+        // Mid-stream rekey when due (encrypted streams only): roll the
+        // cipher to a fresh key in the other parity slot, announce it,
+        // and make it active for the next packets. The KM goes out
+        // before any packet under the new key so the receiver installs
+        // it first; the previous key stays live for retransmits.
+        if let Some(interval) = self.rekey_interval {
+            self.packets_since_rekey += n_packets;
+            if self.packets_since_rekey >= interval {
+                self.packets_since_rekey = 0;
+                if let Some(pass) = self.passphrase.clone() {
+                    let new = SrtCrypto::generate(self.key_size);
+                    let km_pkt = {
+                        let sender = self.sender.as_mut().ok_or(G2gError::NotConfigured)?;
+                        sender.rekey(new, &pass)
+                    };
+                    let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
+                    socket.send(&km_pkt).await.map_err(io_err)?;
+                    self.rekeys += 1;
+                    // Track it for KMRSP-acked retransmission so the
+                    // rekey survives KM-packet loss.
+                    let km_blob = match srt::parse_control(&km_pkt) {
+                        Some(srt::Control::KeyMaterial { km, .. }) => km,
+                        _ => Vec::new(),
+                    };
+                    let now_us = g2g_core::metrics::monotonic_ns() / 1000;
+                    self.pending_km = Some(PendingKm {
+                        pkt: km_pkt,
+                        km: km_blob,
+                        next_at_us: now_us + KM_RETRANSMIT_US,
+                        retries: 0,
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn peer_idle(&self) -> bool {
+        g2g_core::metrics::monotonic_ns().saturating_sub(self.last_peer_packet_ns)
+            >= srt::PEER_IDLE_TIMEOUT_NS
+    }
+
+    fn connection_failed(&mut self, error: G2gError) -> Result<(), G2gError> {
+        if !self.auto_reconnect {
+            return Err(error);
+        }
+        g2g_core::g2g_warn!(
+            Target::category(LOG_CATEGORY),
+            "connection to {} failed ({error:?}), calling again",
+            self.dest
+        );
+        self.socket = None;
+        self.sender = None;
+        self.pending_km = None;
+        self.connection_pts_ns = None;
         Ok(())
     }
 }
@@ -374,6 +498,12 @@ impl AsyncElement for SrtSink {
                 PropKind::Str,
                 "stream id sent in the handshake, the listener routes on it (empty = none)",
             ),
+            PropertySpec::new(
+                "auto-reconnect",
+                PropKind::Bool,
+                "call the listener again when the connection fails or the listener goes silent, dropping frames until it answers",
+            )
+            .with_default("true"),
         ];
         PROPS
     }
@@ -401,6 +531,10 @@ impl AsyncElement for SrtSink {
                 self.stream_id = (!s.is_empty()).then(|| s.to_string());
                 Ok(())
             }
+            "auto-reconnect" => {
+                self.auto_reconnect = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -413,6 +547,7 @@ impl AsyncElement for SrtSink {
             "latency" => Some(PropValue::Uint(self.latency_ms as u64)),
             "passphrase" => Some(PropValue::Str(self.passphrase.clone().unwrap_or_default())),
             "streamid" => Some(PropValue::Str(self.stream_id.clone().unwrap_or_default())),
+            "auto-reconnect" => Some(PropValue::Bool(self.auto_reconnect)),
             _ => None,
         }
     }
@@ -431,78 +566,28 @@ impl AsyncElement for SrtSink {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    if self.socket.is_some() {
+                        // acks queued while the pipeline stalled are not silence
+                        if let Err(error) = self.service_control().await {
+                            self.connection_failed(error)?;
+                        }
+                    }
+                    if self.socket.is_some() && self.peer_idle() {
+                        self.connection_failed(G2gError::Network(NetworkFailure::Stream))?;
+                    }
                     if self.socket.is_none() {
-                        self.connect_and_handshake().await?;
-                    }
-                    let timestamp = (frame.timing.pts_ns / 1000) as u32;
-                    // Fragment the TS byte stream into SRT payloads (7 TS packets).
-                    let bytes = slice;
-                    let mut sent = Vec::new();
-                    {
-                        let sender = self.sender.as_mut().ok_or(G2gError::NotConfigured)?;
-                        for chunk in bytes.chunks(TS_DATAGRAM_PAYLOAD) {
-                            sent.push(sender.send(chunk, timestamp));
+                        if g2g_core::metrics::monotonic_ns() < self.reconnect_at_ns {
+                            return Ok(());
+                        }
+                        if let Err(error) = self.connect_and_handshake().await {
+                            self.connection_failed(error)?;
+                            self.reconnect_at_ns =
+                                g2g_core::metrics::monotonic_ns() + RECONNECT_INTERVAL_NS;
+                            return Ok(());
                         }
                     }
-                    let n_packets = sent.len() as u64;
-                    for pkt in &sent {
-                        // Congestion control: pace each packet to the target rate
-                        // so the egress does not burst-flood the path.
-                        if let Some(cc) = self.cc.as_mut() {
-                            let now = g2g_core::metrics::monotonic_ns() / 1000;
-                            if now < self.next_send_us {
-                                tokio::time::sleep(core::time::Duration::from_micros(
-                                    self.next_send_us - now,
-                                ))
-                                .await;
-                            }
-                            let sent_at = g2g_core::metrics::monotonic_ns() / 1000;
-                            cc.on_packet(pkt.len(), sent_at);
-                            let period = cc.snd_period_us(pkt.len());
-                            self.next_send_us =
-                                sent_at.max(self.next_send_us).saturating_add(period);
-                        }
-                        let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
-                        socket.send(pkt).await.map_err(io_err)?;
-                        self.packets_sent += 1;
-                    }
-                    self.frames_sent += 1;
-                    self.service_control().await?;
-
-                    // Mid-stream rekey when due (encrypted streams only): roll the
-                    // cipher to a fresh key in the other parity slot, announce it,
-                    // and make it active for the next packets. The KM goes out
-                    // before any packet under the new key so the receiver installs
-                    // it first; the previous key stays live for retransmits.
-                    if let Some(interval) = self.rekey_interval {
-                        self.packets_since_rekey += n_packets;
-                        if self.packets_since_rekey >= interval {
-                            self.packets_since_rekey = 0;
-                            if let Some(pass) = self.passphrase.clone() {
-                                let new = SrtCrypto::generate(self.key_size);
-                                let km_pkt = {
-                                    let sender =
-                                        self.sender.as_mut().ok_or(G2gError::NotConfigured)?;
-                                    sender.rekey(new, &pass)
-                                };
-                                let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
-                                socket.send(&km_pkt).await.map_err(io_err)?;
-                                self.rekeys += 1;
-                                // Track it for KMRSP-acked retransmission so the
-                                // rekey survives KM-packet loss.
-                                let km_blob = match srt::parse_control(&km_pkt) {
-                                    Some(srt::Control::KeyMaterial { km, .. }) => km,
-                                    _ => Vec::new(),
-                                };
-                                let now_us = g2g_core::metrics::monotonic_ns() / 1000;
-                                self.pending_km = Some(PendingKm {
-                                    pkt: km_pkt,
-                                    km: km_blob,
-                                    next_at_us: now_us + KM_RETRANSMIT_US,
-                                    retries: 0,
-                                });
-                            }
-                        }
+                    if let Err(error) = self.send_frame(slice, frame.timing.pts_ns).await {
+                        self.connection_failed(error)?;
                     }
                 }
                 PipelinePacket::Eos => {
