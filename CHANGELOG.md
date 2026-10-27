@@ -44,6 +44,7 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1935: `hlssrc` and `dashsrc` ABR average the download time per bit instead of the rate, so the first slow segment after fast ones switches down.
 - M1936: an `hlssrc` ABR switch resumes at the next media sequence when the new variant's live window has moved on, instead of skipping segments.
 - M1937: `tsdemux` keeps both access units at a splice whose continuity counter repeats or jumps, as at an HLS variant switch.
+- M1938: a `dashsrc` ABR switch resumes after the last segment played when the new Representation's live window has moved on, instead of skipping segments.
 - M1940: `x264enc` gains gst's `pass` (`cbr` / `quant`) and `quantizer` properties, and `pass=quant quantizer=0` encodes losslessly.
 - M1941: a keyframe request no longer drops the encoded frame the encoder was pushing when it arrived.
 - M1942: `srtsink` calls the listener again after a failed or silent connection, under the new `auto-reconnect` property (default on), and counts each call's packet timestamps from that call's start.

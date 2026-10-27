@@ -293,7 +293,8 @@ pub struct DashSrc {
     /// Throughput-driven ABR: when set, the run loop measures each segment
     /// download and re-selects the Representation whose bandwidth fits the
     /// estimate (under `max_bandwidth`), switching mid-stream (new init re-emitted,
-    /// aligned index kept). Off by default (a fixed up-front Representation).
+    /// resuming after the last segment played). Off by default (a fixed up-front
+    /// Representation).
     abr: bool,
     /// Duration-keyed prebuffer target in ms (0 = off): fetch this much media
     /// ahead before emitting, posting `Buffering` on the attached bus.
@@ -678,8 +679,10 @@ impl SourceLoop for DashSrc {
 
                         // ABR: feed the measured throughput and, if the best-fitting
                         // Representation changed, switch to it (re-resolve its segments
-                        // / init, re-emit the init), keeping the time-aligned index.
-                        // The `seg` borrow above has ended, so reassigning is safe.
+                        // / init, re-emit the init). A live list resolved now can start
+                        // later than the old one, so the walk restarts at its front and
+                        // `last_time` skips what was played. The `seg` borrow above has
+                        // ended, so reassigning is safe.
                         if self.abr {
                             if let Some((len, elapsed)) = measured {
                                 estimator.sample(len, elapsed);
@@ -699,10 +702,17 @@ impl SourceLoop for DashSrc {
                                         )
                                         .await?;
                                         period_listed_whole = lists_period_end(best, switched_unix);
+                                        // rounded up, so the segment just played stays played
+                                        last_time = last_time.map(|time| {
+                                            let rescaled = (u128::from(time) * u128::from(ts))
+                                                .div_ceil(u128::from(timescale));
+                                            u64::try_from(rescaled).unwrap_or(u64::MAX)
+                                        });
                                         segs = s;
                                         timescale = ts;
                                         init = ini;
                                         init_emitted = false;
+                                        idx = 0;
                                     }
                                 }
                             }

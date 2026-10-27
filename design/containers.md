@@ -1356,11 +1356,12 @@ still fails the run on the same answer.
 keeps an EWMA of the download time per bit, elapsed `monotonic_ns` over the
 bits fetched, so one slow segment after loopback-speed ones brings the estimate
 down to at most twice the slow rate. It yields an effective bandwidth cap, the
-estimate scaled by a safety factor and bounded by `max-bandwidth`. The run loop feeds that cap to the
-existing `MasterPlaylist` selection, re-picks the best-fitting variant after each
-segment, and on a change swaps the active media playlist and re-emits the init,
-keeping the time-aligned segment index. It is off by default, which is a fixed
-up-front variant.
+estimate scaled by a safety factor and bounded by `max-bandwidth`. The run loop
+feeds that cap to the existing `MasterPlaylist` selection, re-picks the
+best-fitting variant after each segment, and on a change swaps the active media
+playlist and re-emits the init. It resumes at the next media sequence, since a
+live playlist fetched at the switch can start later than the old one. It is off
+by default, which is a fixed up-front variant.
 
 Single-file CMAF is supported through `#EXT-X-BYTERANGE` and `#EXT-X-MAP`'s
 `BYTERANGE`: a segment carrying one fetches only its sub-range with an HTTP
@@ -1518,7 +1519,9 @@ manifest may list a Period before the one playing has ended.
 Representation, Template, List or `sidx`-fetched SegmentBase, into the run loop's
 segment, timescale and init working set, and the estimate-derived cap drives both
 the per-reload pick and a per-segment re-selection, so a static VOD adapts within
-one pass, re-emitting the init on a switch.
+one pass, re-emitting the init on a switch. After a switch the walk resumes
+after the last segment played, its start time rescaled to the new timescale,
+since a live list resolved at the switch can start later than the old one.
 
 `low-latency=true` changes how a segment is consumed, not when it is fetched. The
 response body is read as a stream and each complete CMAF chunk, `styp` or `moof`
