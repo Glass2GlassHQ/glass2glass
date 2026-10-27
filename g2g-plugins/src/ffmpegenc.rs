@@ -61,6 +61,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use ffmpeg::codec::encoder::video::Encoder as VideoEncoder;
@@ -88,6 +89,18 @@ const DEFAULT_BITRATE_BPS: usize = 4_000_000;
 const DEFAULT_GOP: u32 = 60;
 
 const DEFAULT_FRAMERATE: (u32, u32) = (30, 1);
+
+// gst x264enc's `quantizer` default and upper bound
+const DEFAULT_QUANTIZER: u32 = 21;
+const MAX_QUANTIZER: u32 = 50;
+
+// gst x264enc's `pass` nicks, for the two modes this element applies
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Cbr,
+    // quantizer 0 on libx264 is lossless
+    Quant,
+}
 
 /// libavcodec H.264 encoder backend. The element shape (raw video in, H.264
 /// Annex-B out) is identical; only the encoder opened changes.
@@ -196,6 +209,8 @@ pub struct FfmpegH264Enc {
     colorimetry: Colorimetry,
     /// Target constant bitrate (bits/second).
     bitrate_bps: usize,
+    pass: Pass,
+    quantizer: u32,
     /// The opened video encoder. Derefs to the base `Encoder` for
     /// `send_frame` / `receive_packet`.
     encoder: Option<VideoEncoder>,
@@ -262,6 +277,8 @@ impl FfmpegH264Enc {
             framerate: Rate::Any,
             colorimetry: Colorimetry::UNKNOWN,
             bitrate_bps: DEFAULT_BITRATE_BPS,
+            pass: Pass::Cbr,
+            quantizer: DEFAULT_QUANTIZER,
             encoder: None,
             input_frame: None,
             pts_by_frameno: alloc::collections::BTreeMap::new(),
@@ -341,14 +358,21 @@ impl FfmpegH264Enc {
                 // releases each frame as soon as it is encoded (no reorder hold).
                 opts.set("preset", "p4");
                 opts.set("tune", "ll");
-                opts.set("rc", "cbr");
                 opts.set("delay", "0");
                 opts.set("zerolatency", "1");
+                match self.pass {
+                    Pass::Cbr => opts.set("rc", "cbr"),
+                    Pass::Quant => opts.set("rc", "constqp"),
+                }
             }
             Backend::Software => {
                 opts.set("preset", "veryfast");
                 opts.set("tune", "zerolatency");
             }
+        }
+        // both encoders take the constant quantizer as `qp`
+        if self.pass == Pass::Quant {
+            opts.set("qp", &self.quantizer.to_string());
         }
         opts
     }
@@ -394,8 +418,10 @@ impl FfmpegH264Enc {
         // the encoder pace its rate control.
         video.set_time_base(Rational::new(fps_den, fps_num));
         video.set_frame_rate(Some(Rational::new(fps_num, fps_den)));
-        video.set_bit_rate(self.bitrate_bps);
-        video.set_max_bit_rate(self.bitrate_bps);
+        if self.pass == Pass::Cbr {
+            video.set_bit_rate(self.bitrate_bps);
+            video.set_max_bit_rate(self.bitrate_bps);
+        }
         video.set_gop(DEFAULT_GOP);
         // No B-frames: output stays in presentation order (no reorder latency),
         // which the low-latency streaming path wants.
@@ -526,7 +552,9 @@ impl FfmpegH264Enc {
         // at open, so a BWE change reopens the encoder. Hysteresis-gated like
         // `Av1Enc`, since each retarget costs a keyframe. A target of 0 is the
         // shed-layer idle hint (see `PushOutcome::Bitrate`).
-        if let Some(bps) = feedback.bitrate_bps {
+        // a constant quantizer encode has no rate to retarget
+        let bitrate_target = feedback.bitrate_bps.filter(|_| self.pass == Pass::Cbr);
+        if let Some(bps) = bitrate_target {
             if bps == 0 {
                 self.idle = true;
             } else {
@@ -552,6 +580,10 @@ impl FfmpegH264Enc {
     /// rate, which the first open then picks up.
     fn retarget(&mut self, bps: usize) -> Result<(), G2gError> {
         self.bitrate_bps = bps.max(1);
+        self.reopen()
+    }
+
+    fn reopen(&mut self) -> Result<(), G2gError> {
         if self.encoder.is_none() {
             return Ok(());
         }
@@ -693,6 +725,22 @@ impl AsyncElement for FfmpegH264Enc {
                 self.retarget(bps as usize).map_err(|_| PropError::Value)?;
                 Ok(())
             }
+            "pass" => {
+                self.pass = match value.as_str().ok_or(PropError::Type)? {
+                    "cbr" => Pass::Cbr,
+                    "quant" => Pass::Quant,
+                    _ => return Err(PropError::Value),
+                };
+                self.reopen().map_err(|_| PropError::Value)
+            }
+            "quantizer" => {
+                let quantizer = value.as_uint().ok_or(PropError::Type)?;
+                self.quantizer = u32::try_from(quantizer)
+                    .ok()
+                    .filter(|&quantizer| quantizer <= MAX_QUANTIZER)
+                    .ok_or(PropError::Value)?;
+                self.reopen().map_err(|_| PropError::Value)
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -707,6 +755,14 @@ impl AsyncElement for FfmpegH264Enc {
                 .into(),
             )),
             "bitrate" => Some(PropValue::Uint(self.bitrate_bps as u64)),
+            "pass" => Some(PropValue::Str(
+                match self.pass {
+                    Pass::Cbr => "cbr",
+                    Pass::Quant => "quant",
+                }
+                .into(),
+            )),
+            "quantizer" => Some(PropValue::Uint(u64::from(self.quantizer))),
             _ => None,
         }
     }
@@ -774,7 +830,7 @@ impl PadTemplates for FfmpegH264Enc {
     }
 }
 
-/// Settable properties: backend (nvenc | software) and the target bitrate, so a
+/// Settable properties: backend (nvenc | software), rate control and its target, so a
 /// `gst-launch` line can pick the encoder and rate without the builder.
 static FFMPEGENC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
@@ -789,8 +845,18 @@ static FFMPEGENC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "bitrate",
         PropKind::Uint,
-        "constant target bitrate, bits/second",
+        "constant target bitrate, bits/second, under pass=cbr",
     ),
+    PropertySpec::new("pass", PropKind::Str, "rate control: cbr | quant")
+        .with_enum_values("cbr | quant")
+        .with_default("cbr"),
+    PropertySpec::new(
+        "quantizer",
+        PropKind::Uint,
+        "constant quantizer under pass=quant, 0 is lossless on libx264",
+    )
+    .with_default("21")
+    .with_range("0", "50"),
 ];
 
 /// Preferred alias once this encodes more than H.264 (HEVC via `hevc_nvenc` is
@@ -1412,6 +1478,60 @@ mod tests {
             low * 1.5 < high,
             "100 kb/s tail ({low:.0} B/AU) must be far smaller than 2 Mb/s ({high:.0} B/AU)"
         );
+    }
+
+    #[tokio::test]
+    async fn quantizer_zero_round_trips_bit_exact() {
+        let mut enc = FfmpegH264Enc::new().with_backend(Backend::Software);
+        enc.set_property("pass", PropValue::Str("quant".into()))
+            .expect("set pass");
+        enc.set_property("quantizer", PropValue::Uint(0))
+            .expect("set quantizer");
+        assert_eq!(
+            enc.set_property("quantizer", PropValue::Uint(u64::from(MAX_QUANTIZER) + 1)),
+            Err(PropError::Value)
+        );
+        if enc.configure_pipeline(&i420_caps(W, H)).is_err() {
+            std::eprintln!("skipping: libx264 not available");
+            return;
+        }
+        let luma_bytes = (W * H) as usize;
+        let frames: Vec<Vec<u8>> = (0..10u64)
+            .map(|seq| {
+                let mut frame = noise_frame(seq);
+                for (i, chroma) in frame[luma_bytes..].iter_mut().enumerate() {
+                    *chroma = (i as u64 * 7 + seq) as u8;
+                }
+                frame
+            })
+            .collect();
+        let mut sink = CaptureSink::default();
+        for (seq, raw) in frames.iter().enumerate() {
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(raw.clone().into_boxed_slice())),
+                FrameTiming {
+                    pts_ns: seq as u64 * 33_000_000,
+                    ..FrameTiming::default()
+                },
+                seq as u64,
+            );
+            enc.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .expect("encode frame");
+        }
+        enc.process(PipelinePacket::Eos, &mut sink)
+            .await
+            .expect("flush encoder");
+        // profile_idc 244 (0xF4) is High 4:4:4 Predictive, the only profile with lossless coding
+        let codec = crate::h264util::h264_codec_string(&sink.frames[0])
+            .expect("first access unit carries the SPS");
+        assert!(
+            codec.starts_with("avc1.F4"),
+            "lossless profile, got {codec}"
+        );
+        let (format, decoded) = decode_back(&sink.frames).await;
+        assert_eq!(format, RawVideoFormat::I420);
+        assert!(decoded == frames, "decoded frames equal the input frames");
     }
 
     fn mean_len(frames: &[Vec<u8>]) -> f64 {

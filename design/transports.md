@@ -387,7 +387,12 @@ IDR. Ingress originates a PLI on a mid-GOP join. str0m's BWE
 `take_bitrate`, and the encoder retargets, rav1e by a hysteresis-gated context
 rebuild. `OpusEnc` retargets live through `OPUS_SET_BITRATE` with no rebuild,
 and `FfmpegH264Enc` by a hysteresis-gated reopen, zerolatency with nothing in
-flight.
+flight. `FfmpegH264Enc` under `pass=quant` has no rate and ignores the target.
+
+A keyframe request reaches an encoder that answers it after the frame it was
+pushing has entered the link. The link's pre-send check holds a packet back
+only for a request its producer resends the packet for, which a keyframe
+request is not.
 
 Both signals hop past intervening transforms. An element that does not consume
 them has its output adapter relay the pending `ForceKeyframe` or bitrate onto

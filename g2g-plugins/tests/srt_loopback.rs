@@ -9,7 +9,7 @@
 use core::future::Future;
 use core::pin::Pin;
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use g2g_core::frame::Frame;
@@ -589,4 +589,115 @@ async fn a_silent_caller_fails_the_source_without_keep_listening() {
     );
     let expected: Vec<Received> = (0..PER_CALLER).map(Received::Data).collect();
     assert_eq!(log.events, expected);
+}
+
+// replies go to the newest caller address, and nothing passes while `blackhole` is set
+async fn blackhole_proxy(
+    proxy: tokio::net::UdpSocket,
+    listener_addr: SocketAddr,
+    blackhole: Arc<AtomicBool>,
+    first_timestamps: Arc<std::sync::Mutex<Vec<u32>>>,
+) {
+    let mut caller = None;
+    let mut timestamped_caller = None;
+    let mut buf = [0u8; 2048];
+    loop {
+        let Ok((n, from)) = proxy.recv_from(&mut buf).await else {
+            return;
+        };
+        if blackhole.load(Ordering::Relaxed) {
+            continue;
+        }
+        if from == listener_addr {
+            if let Some(caller) = caller {
+                let _ = proxy.send_to(&buf[..n], caller).await;
+            }
+        } else {
+            caller = Some(from);
+            if let Some(data) = srt::parse_data_packet(&buf[..n]) {
+                if timestamped_caller != Some(from) {
+                    timestamped_caller = Some(from);
+                    first_timestamps.lock().unwrap().push(data.timestamp);
+                }
+            }
+            let _ = proxy.send_to(&buf[..n], listener_addr).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_caller_calls_again_after_the_listener_goes_silent() {
+    // longer than the 5 s peer idle timeout of both ends
+    const SILENCE: std::time::Duration = std::time::Duration::from_millis(5_500);
+    const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+    let (mut src, listener_addr) = listening_source(true);
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    let blackhole = Arc::new(AtomicBool::new(false));
+    let first_timestamps = Arc::new(std::sync::Mutex::new(Vec::new()));
+    tokio::spawn(blackhole_proxy(
+        proxy,
+        listener_addr,
+        blackhole.clone(),
+        first_timestamps.clone(),
+    ));
+    let mut log = ReceivedLog {
+        events: Vec::new(),
+        flushed: Arc::default(),
+    };
+
+    // frames keep coming through the silence, as from a live encoder
+    let caller = async {
+        let mut sink = caller_sending(proxy_addr, 0..PER_CALLER).await;
+        blackhole.store(true, Ordering::Relaxed);
+        let blackhole = blackhole.clone();
+        // sends block in the new handshake while the proxy is silent
+        tokio::spawn(async move {
+            tokio::time::sleep(SILENCE).await;
+            blackhole.store(false, Ordering::Relaxed);
+        });
+        for tag in PER_CALLER..=u8::MAX {
+            let mut frame = tagged_frame(tag);
+            frame.timing.pts_ns = FRAME_INTERVAL.as_nanos() as u64 * u64::from(tag);
+            sink.process(PipelinePacket::DataFrame(frame), &mut NullOut)
+                .await
+                .expect("send");
+            tokio::time::sleep(FRAME_INTERVAL).await;
+        }
+    };
+    let result = tokio::time::timeout(RUN_TIMEOUT, async {
+        tokio::select! {
+            result = src.run(&mut log) => result,
+            () = caller => panic!("the listener never took {PER_CALLER} frames from a second call"),
+        }
+    })
+    .await
+    .expect("the caller reconnects within the timeout");
+
+    assert_eq!(result.expect("run ok"), 2 * PER_CALLER as u64);
+    let first_call: Vec<Received> = (0..PER_CALLER).map(Received::Data).collect();
+    assert_eq!(log.events[..first_call.len()], first_call[..]);
+    let rest = &log.events[first_call.len()..];
+    let Some((Received::Flush, rest)) = rest.split_first() else {
+        panic!(
+            "the silent first call ends in a flush, got {:?}",
+            log.events
+        );
+    };
+    let Some(Received::Data(first_tag)) = rest.first() else {
+        panic!("the second call delivers data, got {:?}", log.events);
+    };
+    let second_call: Vec<Received> = (*first_tag..first_tag + PER_CALLER)
+        .map(Received::Data)
+        .chain([Received::Eos])
+        .collect();
+    assert_eq!(
+        rest, second_call,
+        "the second call delivers consecutive frames"
+    );
+    assert_eq!(
+        first_timestamps.lock().unwrap()[1],
+        0,
+        "the second call's timestamps count from its own start"
+    );
 }

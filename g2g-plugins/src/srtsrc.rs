@@ -45,8 +45,6 @@ const ACK_INTERVAL_NS: u64 = 10_000_000;
 /// Receive timeout (ms) so the TSBPD buffer still flushes due packets when no new
 /// datagram arrives; bounds the extra delivery jitter a silent gap can add.
 const TSBPD_WAKE_MS: u64 = 5;
-// libsrt's SRTO_PEERIDLETIMEO default
-const PEER_IDLE_TIMEOUT_NS: u64 = 5_000_000_000;
 const LOG_CATEGORY: &str = "srtsrc";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -411,7 +409,7 @@ impl SrtSrc {
                     }
                 }
             }
-            if now.saturating_sub(last_peer_packet_ns) >= PEER_IDLE_TIMEOUT_NS {
+            if now.saturating_sub(last_peer_packet_ns) >= srt::PEER_IDLE_TIMEOUT_NS {
                 return Ok(CallerEnd::PeerIdle);
             }
 

@@ -17,6 +17,9 @@ use alloc::vec::Vec;
 
 use g2g_core::log::Target;
 
+// libsrt's SRTO_PEERIDLETIMEO default
+pub const PEER_IDLE_TIMEOUT_NS: u64 = 5_000_000_000;
+
 /// The 16-byte SRT packet header precedes every packet.
 pub const HEADER_LEN: usize = 16;
 

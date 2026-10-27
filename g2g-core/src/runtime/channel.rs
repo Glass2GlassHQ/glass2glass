@@ -1341,6 +1341,11 @@ impl SenderSink {
                 self.link.reconfigure.store(r);
                 return None;
             }
+            // Nothing resends a packet held back for a keyframe request.
+            if pre_send && matches!(r, Reconfigure::ForceKeyframe) {
+                self.link.reconfigure.store(r);
+                return None;
+            }
             return Some(r);
         }
         if let Some(upstream) = &self.upstream_reconfigure {
@@ -1515,7 +1520,8 @@ impl OutputSink for SenderSink {
         // reconfigure, surface it before this packet enters the
         // link. Caller renegotiates and decides what to do with
         // `packet` (resend under agreed caps, drop, etc.). A relayed
-        // ForceKeyframe hops upstream instead (M720).
+        // ForceKeyframe hops upstream instead (M720), an answered one
+        // surfaces after the send.
         // An Eos is exempt: the producer that would resend the held-back packet
         // has already finished, so holding one back loses it and the consumer
         // waits for an end of stream that never comes.
@@ -1923,6 +1929,10 @@ mod link_tests {
         assert!(
             up_rx.reconfigure.take().is_none(),
             "an answered variant must not also travel upstream"
+        );
+        assert!(
+            down_rx.try_recv().is_some(),
+            "an answered keyframe request does not hold the packet back"
         );
 
         down_rx.request_reconfigure(Reconfigure::AbsorbOrientation(OrientationSet::ALL));

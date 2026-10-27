@@ -41,6 +41,9 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1932: a QoS report sums the processing time of the elements it crosses, and `pyelement` counts it, so a chain of slow hosted elements drops frames ahead of the slow stages instead of freezing the display.
 - M1933: `cudaglsink` opens its EGL display on the EGL device of its new `cuda-device-id`, so it presents on a hybrid iGPU and NVIDIA laptop without `__NV_PRIME_RENDER_OFFLOAD`, and refuses a frame from another CUDA device.
 - M1934: closing the window of `cudaglsink`, `glsink` or `wgpusink` fails the run with the new `G2gError::WindowClosed` instead of `Hardware(Other)`.
+- M1940: `x264enc` gains gst's `pass` (`cbr` / `quant`) and `quantizer` properties, and `pass=quant quantizer=0` encodes losslessly.
+- M1941: a keyframe request no longer drops the encoded frame the encoder was pushing when it arrived.
+- M1942: `srtsink` calls the listener again after a failed or silent connection, under the new `auto-reconnect` property (default on), and counts each call's packet timestamps from that call's start.
 - M1945: `splitmuxsink` repeats the stream's parameter sets at the start of each file, so `qtdemux ! h264parse ! splitmuxsink` writes a playable second file.
 - M1955: `g2g-core` with `alloc` builds for targets without 64-bit atomics.
 - M1956: the heap-free, panic-free proof also runs on the ESP32-S3 (Xtensa).
