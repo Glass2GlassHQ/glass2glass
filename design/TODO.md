@@ -105,8 +105,10 @@ Highest leverage first:
     `SpiDisplaySink` for an on-panel preview.
 - **ESP32-S3 on a XIAO ESP32S3 Sense (Xtensa on-device).** Build with
   Espressif's Rust toolchain (`espup`) for `xtensa-esp32s3-none-elf`.
-  - Add the target to the heap-free, panic-free and footprint checks
-    (`tools/footprint.py` parses only ARM and RISC-V disassembly).
+  - Add the target to the footprint report (`tools/footprint.py` parses only
+    ARM and RISC-V disassembly).
+  - Boot the heap-free pipeline on Espressif's QEMU fork (`-machine esp32s3`),
+    as `tools/qemu-check.sh` does for Cortex-M.
   - PDM microphone source on esp-hal's I2S PDM receive mode, then the keyword
     graph live on the board, reproducing the pinned scores in
     `g2g-mcu/tests/fixtures/keyword`.

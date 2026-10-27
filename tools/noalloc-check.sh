@@ -9,18 +9,19 @@
 # Finally, the same crate is built for the host and actually run (via
 # host-harness.c) so the symbol proofs are backed by a real execution.
 #
-# The proof is run for BOTH a Cortex-M (ARM) and a RISC-V bare target (M656):
-# the guarantees are ISA-independent Rust properties, so proving them on two
+# The proof is run for a Cortex-M (ARM), a RISC-V (M656) and an Xtensa bare target:
+# the guarantees are ISA-independent Rust properties, so proving them on three
 # ISAs shows the portability claim is real, not an ARM accident. The RISC-V
 # target (riscv32imafc-unknown-none-elf) matches the ESP32-P4 class.
 #
 # Usage: tools/noalloc-check.sh
-# Requires: rustup targets (added automatically); llvm-nm or nm; cc (host run).
+# Requires: rustup targets (added automatically); the esp toolchain from espup
+# for xtensa; llvm-nm or nm; cc (host run).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MANIFEST="$ROOT/examples/g2g-noalloc/Cargo.toml"
-TARGETS=("thumbv7em-none-eabihf" "riscv32imafc-unknown-none-elf")
+TARGETS=("thumbv7em-none-eabihf" "riscv32imafc-unknown-none-elf" "xtensa-esp32s3-none-elf")
 
 if command -v llvm-nm >/dev/null 2>&1; then NM=llvm-nm; else NM=nm; fi
 
@@ -30,8 +31,16 @@ if command -v llvm-nm >/dev/null 2>&1; then NM=llvm-nm; else NM=nm; fi
 check_target() {
   local target="$1"
   echo "== building g2g-noalloc for $target (default-features=false: no alloc crate) =="
-  rustup target add "$target" >/dev/null 2>&1 || true
-  cargo build --manifest-path "$MANIFEST" --release --target "$target"
+  case "$target" in
+    xtensa-*)
+      # the esp fork ships no prebuilt core for xtensa, so build it from rust-src
+      cargo +esp build -Zbuild-std=core --manifest-path "$MANIFEST" --release --target "$target"
+      ;;
+    *)
+      rustup target add "$target" >/dev/null 2>&1 || true
+      cargo build --manifest-path "$MANIFEST" --release --target "$target"
+      ;;
+  esac
 
   local ar="$ROOT/examples/g2g-noalloc/target/$target/release/libg2g_noalloc.a"
   [ -f "$ar" ] || { echo "FAIL: archive not produced at $ar"; exit 1; }
@@ -108,5 +117,5 @@ cargo test --manifest-path "$ROOT/examples/noalloc-pipeline/Cargo.toml" --quiet
 echo "PASS: g2g-noalloc links the video pipeline, the flagship audio graph"
 echo "      (capture->convert->resample->mix->encode->RTP) and the keyword graph"
 echo "      (log-mel->int8 quantize->MicroFlow model) with zero allocator"
-echo "      symbols and zero panic symbols on BOTH ${TARGETS[*]}."
+echo "      symbols and zero panic symbols on ${TARGETS[*]}."
 echo "      The heap-free + panic-free guarantees hold at link time, cross-ISA."

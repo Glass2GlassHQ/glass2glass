@@ -570,7 +570,12 @@ jobs:
       # assert the archive references no allocator symbols and no panic
       # machinery; then run the same pipeline on the host via a C harness. The
       # machine-checkable form of the heap-free + panic-free MCU guarantee.
-      - name: link-time no-heap + panic-free proof (thumbv7em)
+      - name: install the esp toolchain for the xtensa proof
+        uses: esp-rs/xtensa-toolchain@v1.7.0
+        with:
+          buildtargets: esp32s3
+          version: 1.97.0.0
+      - name: link-time no-heap + panic-free proof (thumbv7em, riscv32, xtensa)
         run: bash tools/noalloc-check.sh
       # Build-time worst-case RAM/stack/ROM report (M627): link the no-alloc
       # pipeline into a gc-sectioned ELF and report ROM / static RAM /
