@@ -51,6 +51,10 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1945: `splitmuxsink` repeats the stream's parameter sets at the start of each file, so `qtdemux ! h264parse ! splitmuxsink` writes a playable second file.
 - M1948: `rtspserversink` drops a player that leaves before PLAY and waits for the next one, instead of failing the stream.
 - M1949: `h264parse` / `h265parse` keep a slice that follows repeated parameter sets in the picture before it, so an RTSP stream that marks every slice as a picture end decodes whole pictures.
+- M1950: `set_state(Null)` on a running graph ends the run with its stats instead of `Shutdown`.
+- M1951: `examples/g2g-api-soak` rebuilds or mutates a live RTSP decode graph forever through the Rust API, for the calliope canary.
+- M1952: elements the `GraphMutator` starts get the run's bus, so a `checksumsink` added with `add_branch` posts its digests.
+- M1953: naming an element the `GraphMutator` starts no longer rescans every name the run has given out.
 - M1955: `g2g-core` with `alloc` builds for targets without 64-bit atomics.
 - M1956: the heap-free, panic-free proof also runs on the ESP32-S3 (Xtensa).
 - M1957: `rtspserversink` drops frames while no player is playing instead of holding the first one, so a player starts at the current frame.

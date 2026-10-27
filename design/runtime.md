@@ -488,7 +488,9 @@ then holds. The runner calls `expect_prerolls(n)` and each sink's
 `AsyncDone` once all sinks have prerolled. Live pipelines under `set_live(true)`
 take the `NoPreroll` path, holding no frame. The lifecycle is opt-in via
 `run_simple_pipeline_stateful` and `run_graph_stateful`, and the plain runners are
-unchanged.
+unchanged. `set_state(Null)` ends a running pipeline: each sink stops at its gate,
+the arms upstream end on the closed links, and the run returns its stats without
+posting `Eos`.
 
 ### Seek, segment and running time
 

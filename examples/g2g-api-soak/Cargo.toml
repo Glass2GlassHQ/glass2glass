@@ -1,0 +1,18 @@
+# NOT a workspace member (see root Cargo.toml `exclude`): the rtsp + ffmpeg +
+# observe feature set pulls libavcodec, which the workspace's default-feature
+# build and CI stay clear of. Built against g2g as path packages with its own
+# Cargo.lock. See README.md.
+[package]
+name = "g2g-api-soak"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+publish = false
+
+# Its own workspace root, so cargo does not fold it into the parent.
+[workspace]
+
+[dependencies]
+g2g-core = { path = "../../g2g-core", features = ["std", "runtime"] }
+g2g-plugins = { path = "../../g2g-plugins", features = ["rtsp", "ffmpeg", "observe"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
