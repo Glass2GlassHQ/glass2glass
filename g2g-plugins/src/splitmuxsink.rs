@@ -21,13 +21,14 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, PushOutcome, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, Frame,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, PushOutcome, Rate, SystemSlice, VideoCodec,
 };
 
 use g2g_core::runtime::DynMultiInputElement;
 
+use crate::annexb::{nal_units, nalu_type, prepend_param_sets};
 use crate::filesink::{io_err, path_io_err};
 use g2g_core::log::short_type_name;
 
@@ -111,6 +112,52 @@ impl OutputSink for SegmentSink {
     }
 }
 
+fn parameter_set_types(codec: VideoCodec) -> &'static [u8] {
+    match codec {
+        VideoCodec::H265 => &[32, 33, 34],
+        _ => &[7, 8],
+    }
+}
+
+// each file's muxer needs the parameter sets, which a demuxed stream sends only before its first frame
+#[derive(Debug, Default)]
+struct ParameterSets {
+    // the latest NAL units of each parameter-set type, in the codec's order
+    by_type: Vec<Vec<Vec<u8>>>,
+}
+
+impl ParameterSets {
+    // returns whether `au` carries every parameter-set type
+    fn refresh(&mut self, codec: VideoCodec, au: &[u8]) -> bool {
+        let types = parameter_set_types(codec);
+        self.by_type.resize(types.len(), Vec::new());
+        let mut carried = alloc::vec![false; types.len()];
+        for nal in nal_units(au) {
+            let Some(slot) = types.iter().position(|&t| t == nalu_type(codec, nal)) else {
+                continue;
+            };
+            if !carried[slot] {
+                self.by_type[slot].clear();
+                carried[slot] = true;
+            }
+            self.by_type[slot].push(nal.to_vec());
+        }
+        carried.iter().all(|&carries| carries)
+    }
+
+    fn prepend(&self, codec: VideoCodec, frame: Frame) -> Frame {
+        let Some(au) = frame.domain.as_system_slice() else {
+            return frame;
+        };
+        let sets: Vec<Vec<u8>> = self.by_type.iter().flatten().cloned().collect();
+        let prefixed = prepend_param_sets(au, &sets, codec);
+        Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(prefixed.into_boxed_slice())),
+            ..frame
+        }
+    }
+}
+
 /// # Example
 ///
 /// ```no_run
@@ -131,6 +178,7 @@ pub struct SplitMuxSink {
     segment_start_ns: u64,
     started: bool,
     files_written: u64,
+    parameter_sets: ParameterSets,
 }
 
 // `dyn DynMultiInputElement` is not Debug, so implement it by hand (like StreamDemux).
@@ -163,6 +211,7 @@ impl SplitMuxSink {
             segment_start_ns: 0,
             started: false,
             files_written: 0,
+            parameter_sets: ParameterSets::default(),
         }
     }
 
@@ -260,17 +309,28 @@ impl AsyncElement for SplitMuxSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(frame) => {
+                PipelinePacket::DataFrame(mut frame) => {
                     let pts = frame.timing.pts_ns;
-                    if self.started && frame.timing.keyframe && self.split_due(pts) {
+                    let codec = match &self.caps {
+                        Some(Caps::CompressedVideo { codec, .. }) => *codec,
+                        _ => return Err(G2gError::NotConfigured),
+                    };
+                    let carries_parameter_sets = frame
+                        .domain
+                        .as_system_slice()
+                        .is_some_and(|au| self.parameter_sets.refresh(codec, au));
+                    let opens_segment =
+                        !self.started || (frame.timing.keyframe && self.split_due(pts));
+                    if self.started && opens_segment {
                         self.finalize_current().await?;
-                        self.open_segment()?;
-                        self.segment_start_ns = pts;
                     }
-                    if !self.started {
+                    if opens_segment {
                         self.open_segment()?;
                         self.segment_start_ns = pts;
                         self.started = true;
+                        if !carries_parameter_sets {
+                            frame = self.parameter_sets.prepend(codec, frame);
+                        }
                     }
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     let seg = self.seg.as_mut().ok_or(G2gError::NotConfigured)?;
@@ -413,13 +473,16 @@ mod tests {
         }
     }
 
+    const SPS: &[u8] = &[0x67, 0x42, 0x00, 0x0a, 0x8b, 0x95];
+    const PPS: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+    const IDR: &[u8] = &[0x65, 0x88, 0x80];
+
     fn keyframe(pts_ns: u64) -> PipelinePacket {
-        // SPS (type 7), PPS (type 8), IDR (type 5).
-        let bytes = au(&[
-            &[0x67, 0x42, 0x00, 0x0a, 0x8b, 0x95],
-            &[0x68, 0xce, 0x3c, 0x80],
-            &[0x65, 0x88, 0x80],
-        ]);
+        keyframe_of(pts_ns, &[SPS, PPS, IDR])
+    }
+
+    fn keyframe_of(pts_ns: u64, nals: &[&[u8]]) -> PipelinePacket {
+        let bytes = au(nals);
         PipelinePacket::DataFrame(Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
             timing: FrameTiming {
@@ -458,6 +521,38 @@ mod tests {
             let meta = std::fs::metadata(&path).expect("segment file exists");
             assert!(meta.len() > 0, "segment {i} has data");
             let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    #[tokio::test]
+    async fn every_file_gets_the_parameter_sets_the_stream_sent_once() {
+        let pat = std::env::temp_dir()
+            .join("g2g_smux_params_%03d.mp4")
+            .to_string_lossy()
+            .into_owned();
+        let mut sink = SplitMuxSink::new(&pat).with_max_size_time(50_000_000);
+        sink.configure_pipeline(&h264(320, 240)).unwrap();
+        let mut out = NullSink;
+        sink.process(keyframe(0), &mut out).await.unwrap();
+        // later keyframes carry no SPS or PPS, as after a demuxer that read them from avcC
+        sink.process(keyframe_of(60_000_000, &[IDR]), &mut out)
+            .await
+            .unwrap();
+        sink.process(keyframe_of(120_000_000, &[IDR]), &mut out)
+            .await
+            .unwrap();
+        sink.process(PipelinePacket::Eos, &mut out).await.unwrap();
+        assert_eq!(sink.files_written(), 3);
+        for i in 0..3 {
+            let path = crate::multifilesink::expand(&pat, i);
+            let file = std::fs::read(&path).expect("segment file exists");
+            let _ = std::fs::remove_file(&path);
+            for set in [SPS, PPS] {
+                assert!(
+                    file.windows(set.len()).any(|window| window == set),
+                    "segment {i} lacks a parameter set"
+                );
+            }
         }
     }
 
