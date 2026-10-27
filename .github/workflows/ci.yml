@@ -575,6 +575,8 @@ jobs:
         with:
           buildtargets: esp32s3
           version: 1.97.0.0
+          # the exported esp libclang makes every later bindgen build generate xtensa bindings
+          export: false
       - name: link-time no-heap + panic-free proof (thumbv7em, riscv32, xtensa)
         run: bash tools/noalloc-check.sh
       # Build-time worst-case RAM/stack/ROM report (M627): link the no-alloc
