@@ -89,7 +89,7 @@ async fn ffmpeg_plays_interleaved_from_rtspserversink() {
     let aus = access_units(FIXTURE);
     assert!(!aus.is_empty(), "fixture split into access units");
 
-    // Drive the sink: the first frame blocks until ffmpeg has PLAYed. Loop the
+    // Drive the sink: frames before ffmpeg PLAYs are dropped. Loop the
     // fixture so ffmpeg reliably decodes its 3 frames, then it exits and a send
     // fails (which just means it is done).
     let server = async move {

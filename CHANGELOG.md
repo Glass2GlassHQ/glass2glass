@@ -49,8 +49,11 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1941: a keyframe request no longer drops the encoded frame the encoder was pushing when it arrived.
 - M1942: `srtsink` calls the listener again after a failed or silent connection, under the new `auto-reconnect` property (default on), and counts each call's packet timestamps from that call's start.
 - M1945: `splitmuxsink` repeats the stream's parameter sets at the start of each file, so `qtdemux ! h264parse ! splitmuxsink` writes a playable second file.
+- M1948: `rtspserversink` drops a player that leaves before PLAY and waits for the next one, instead of failing the stream.
+- M1949: `h264parse` / `h265parse` keep a slice that follows repeated parameter sets in the picture before it, so an RTSP stream that marks every slice as a picture end decodes whole pictures.
 - M1955: `g2g-core` with `alloc` builds for targets without 64-bit atomics.
 - M1956: the heap-free, panic-free proof also runs on the ESP32-S3 (Xtensa).
+- M1957: `rtspserversink` drops frames while no player is playing instead of holding the first one, so a player starts at the current frame.
 - M1958: `rtspsrc` keeps frame timestamps when a server's RTP-Info `rtptime` is ahead of its first packets.
 
 ## 0.10.0
