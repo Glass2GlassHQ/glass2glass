@@ -178,11 +178,13 @@ searches again when a packet does not start with the sync byte. At end of
 stream it hands over a last packet that is shorter than its stride.
 
 The demuxer checks each PID's continuity counter on packets that carry payload.
-A packet that repeats the counter once is a duplicate and is skipped. Any other
-gap is a lost packet: the PID's partial PES or table section is dropped, and
-nothing more is collected on it until the next unit start. A packet whose
-adaptation field sets `discontinuity_indicator` starts a new counter run and
-drops nothing.
+A packet that repeats the counter and the payload once is a duplicate and is
+skipped. Any other gap is a lost packet: the PID's partial table section is
+dropped, and so is its partial PES unless the packet after the gap starts the
+next PES. Two segments from different muxers joined at an HLS variant switch
+leave such a gap with a whole PES on each side. Nothing more is collected on a
+PID until the next unit start. A packet whose adaptation field sets
+`discontinuity_indicator` starts a new counter run and drops nothing.
 
 PAT, PMT, SDT and EIT sections reassemble across packets, capped at 1024 bytes
 for the first three and 4096 for the EIT.
@@ -1351,9 +1353,10 @@ skipped media, as for an `#EXT-X-GAP` segment. A playlist with `#EXT-X-ENDLIST`
 still fails the run on the same answer.
 
 `with_abr()` makes it throughput-adaptive. A shared `abr::BandwidthEstimator`
-keeps an EWMA of measured download throughput, bytes over elapsed
-`monotonic_ns`, and yields an effective bandwidth cap, the estimate scaled by a
-safety factor and bounded by `max-bandwidth`. The run loop feeds that cap to the
+keeps an EWMA of the download time per bit, elapsed `monotonic_ns` over the
+bits fetched, so one slow segment after loopback-speed ones brings the estimate
+down to at most twice the slow rate. It yields an effective bandwidth cap, the
+estimate scaled by a safety factor and bounded by `max-bandwidth`. The run loop feeds that cap to the
 existing `MasterPlaylist` selection, re-picks the best-fitting variant after each
 segment, and on a change swaps the active media playlist and re-emits the init,
 keeping the time-aligned segment index. It is off by default, which is a fixed

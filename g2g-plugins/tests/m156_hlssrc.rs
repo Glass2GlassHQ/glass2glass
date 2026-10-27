@@ -629,19 +629,26 @@ const ABR_MASTER: &str = "#EXTM3U\n\
     #EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=320x180\n\
     v/low.m3u8\n";
 
-/// Two time-aligned media playlists (same 3 x 1s segments), distinct URIs.
-fn abr_media(kind: &str) -> String {
-    format!(
-        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n\
-         #EXTINF:1.0,\n{kind}0.ts\n#EXTINF:1.0,\n{kind}1.ts\n#EXTINF:1.0,\n{kind}2.ts\n\
-         #EXT-X-ENDLIST\n"
-    )
+/// Two time-aligned media playlists (same 1s segments), distinct URIs. Segment
+/// `{kind}{n}.ts` has media sequence `n`, and the window starts at `first`.
+fn abr_media(kind: &str, first: usize, segments: usize) -> String {
+    let mut playlist = format!("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
+    for index in first..segments {
+        playlist += &format!("#EXTINF:1.0,\n{kind}{index}.ts\n");
+    }
+    playlist + "#EXT-X-ENDLIST\n"
 }
 
-/// Serve the ABR master + variants, throttling each `.ts` response by sleeping
-/// ~1ms per KiB so a large (high-variant) segment yields a low measured
-/// throughput, forcing a downswitch; small (low-variant) segments stay cheap.
-fn serve_abr(high: Vec<Vec<u8>>, low: Vec<Vec<u8>>) -> String {
+/// Serve the ABR master + variants, the low playlist's window starting at
+/// `low_window_start`, delaying each `.ts` response by
+/// `throttle(path, body length)` so a segment's download time is measurable.
+fn serve_abr(
+    high: Vec<Vec<u8>>,
+    low: Vec<Vec<u8>>,
+    low_window_start: usize,
+    throttle: impl Fn(&str, usize) -> std::time::Duration + Send + 'static,
+) -> String {
+    let segments = high.len();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
@@ -668,8 +675,8 @@ fn serve_abr(high: Vec<Vec<u8>>, low: Vec<Vec<u8>>) -> String {
             };
             let body: Vec<u8> = match path {
                 "/master.m3u8" => ABR_MASTER.as_bytes().to_vec(),
-                "/v/high.m3u8" => abr_media("high").into_bytes(),
-                "/v/low.m3u8" => abr_media("low").into_bytes(),
+                "/v/high.m3u8" => abr_media("high", 0, segments).into_bytes(),
+                "/v/low.m3u8" => abr_media("low", low_window_start, segments).into_bytes(),
                 p if p.starts_with("/v/high") => seg(&high, p, "/v/high").unwrap_or_default(),
                 p if p.starts_with("/v/low") => seg(&low, p, "/v/low").unwrap_or_default(),
                 _ => {
@@ -679,10 +686,9 @@ fn serve_abr(high: Vec<Vec<u8>>, low: Vec<Vec<u8>>) -> String {
                     continue;
                 }
             };
-            // Throttle media segments so download time is measurable (~1ms/KiB);
-            // playlists are served immediately.
+            // Playlists are served immediately.
             if path.ends_with(".ts") {
-                thread::sleep(std::time::Duration::from_millis((body.len() / 1024) as u64));
+                thread::sleep(throttle(path, body.len()));
             }
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -704,7 +710,11 @@ async fn abr_downswitches_when_measured_bandwidth_is_low() {
     let low: Vec<Vec<u8>> = (0..3u8)
         .map(|s| (0..2_000u32).map(|i| (i as u8) ^ (0xF0 + s)).collect())
         .collect();
-    let url = serve_abr(high.clone(), low.clone());
+    // ~1ms per KiB, so a large (high-variant) segment yields a low measured
+    // throughput, forcing a downswitch; small (low-variant) segments stay cheap.
+    let url = serve_abr(high.clone(), low.clone(), 0, |_, len| {
+        std::time::Duration::from_millis((len / 1024) as u64)
+    });
 
     let mut src = HlsSrc::new(url).with_abr();
     src.configure_pipeline(&Caps::ByteStream {
@@ -727,6 +737,86 @@ async fn abr_downswitches_when_measured_bandwidth_is_low() {
     assert_eq!(
         sink.body, expected,
         "ABR starts on high, then switches to low after measuring the slow download"
+    );
+}
+
+const ABR_SEGMENTS: usize = 6;
+
+// large high segments and small low ones, distinct per segment
+fn abr_variants() -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let high = (0..ABR_SEGMENTS as u8)
+        .map(|s| (0..600_000u32).map(|i| (i as u8) ^ (s + 1)).collect())
+        .collect();
+    let low = (0..ABR_SEGMENTS as u8)
+        .map(|s| (0..2_000u32).map(|i| (i as u8) ^ (0xF0 + s)).collect())
+        .collect();
+    (high, low)
+}
+
+// a 600 kB high segment from `slow_from` on takes 500 ms, 9.6 Mbit/s against the high variant's 50 Mbit/s,
+// and every other segment arrives at loopback speed
+fn high_slow_from(slow_from: usize) -> impl Fn(&str, usize) -> std::time::Duration {
+    move |path, _| {
+        let high_index = path
+            .strip_prefix("/v/high")
+            .and_then(|s| s.strip_suffix(".ts"))
+            .and_then(|s| s.parse::<usize>().ok());
+        match high_index {
+            Some(index) if index >= slow_from => std::time::Duration::from_millis(500),
+            _ => std::time::Duration::ZERO,
+        }
+    }
+}
+
+async fn abr_body(url: String) -> Vec<u8> {
+    let mut src = HlsSrc::new(url).with_abr();
+    src.configure_pipeline(&Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    })
+    .unwrap();
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+    sink.body
+}
+
+#[tokio::test]
+async fn abr_downswitches_on_the_first_slow_segment_after_fast_ones() {
+    const SLOW_FROM: usize = 3;
+    let (high, low) = abr_variants();
+    let url = serve_abr(high.clone(), low.clone(), 0, high_slow_from(SLOW_FROM));
+    let expected: Vec<u8> = high[..=SLOW_FROM]
+        .iter()
+        .chain(&low[SLOW_FROM + 1..])
+        .flatten()
+        .copied()
+        .collect();
+    assert!(
+        abr_body(url).await == expected,
+        "the fast downloads keep the high variant, the first slow one switches to low"
+    );
+}
+
+#[tokio::test]
+async fn abr_switch_resumes_at_the_next_sequence_when_the_new_window_has_moved() {
+    const SLOW_FROM: usize = 1;
+    // a live playlist fetched later than the old one starts further on
+    const LOW_WINDOW_START: usize = 1;
+    let (high, low) = abr_variants();
+    let url = serve_abr(
+        high.clone(),
+        low.clone(),
+        LOW_WINDOW_START,
+        high_slow_from(SLOW_FROM),
+    );
+    let expected: Vec<u8> = high[..=SLOW_FROM]
+        .iter()
+        .chain(&low[SLOW_FROM + 1..])
+        .flatten()
+        .copied()
+        .collect();
+    assert!(
+        abr_body(url).await == expected,
+        "the switch to low neither repeats nor skips a media sequence"
     );
 }
 

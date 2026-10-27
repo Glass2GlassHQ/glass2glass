@@ -41,6 +41,9 @@ Breaking: `QosMessage` gains `downstream_proc_ns`, `ElementProbe` is no longer `
 - M1932: a QoS report sums the processing time of the elements it crosses, and `pyelement` counts it, so a chain of slow hosted elements drops frames ahead of the slow stages instead of freezing the display.
 - M1933: `cudaglsink` opens its EGL display on the EGL device of its new `cuda-device-id`, so it presents on a hybrid iGPU and NVIDIA laptop without `__NV_PRIME_RENDER_OFFLOAD`, and refuses a frame from another CUDA device.
 - M1934: closing the window of `cudaglsink`, `glsink` or `wgpusink` fails the run with the new `G2gError::WindowClosed` instead of `Hardware(Other)`.
+- M1935: `hlssrc` and `dashsrc` ABR average the download time per bit instead of the rate, so the first slow segment after fast ones switches down.
+- M1936: an `hlssrc` ABR switch resumes at the next media sequence when the new variant's live window has moved on, instead of skipping segments.
+- M1937: `tsdemux` keeps both access units at a splice whose continuity counter repeats or jumps, as at an HLS variant switch.
 - M1940: `x264enc` gains gst's `pass` (`cbr` / `quant`) and `quantizer` properties, and `pass=quant quantizer=0` encodes losslessly.
 - M1941: a keyframe request no longer drops the encoded frame the encoder was pushing when it arrived.
 - M1942: `srtsink` calls the listener again after a failed or silent connection, under the new `auto-reconnect` property (default on), and counts each call's packet timestamps from that call's start.

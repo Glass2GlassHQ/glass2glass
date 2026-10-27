@@ -1225,11 +1225,14 @@ impl SourceLoop for HlsSrc {
                                         parse(&text).map_err(|_| G2gError::CapsMismatch)?
                                     {
                                         // Variants are time-aligned by media sequence, so
-                                        // `idx` / `next_seq` carry over; re-emit the init.
+                                        // `next_seq` carries over; re-emit the init. The new
+                                        // window can start later than the old one, so the walk
+                                        // restarts at its front and skips what was delivered.
                                         media = m;
                                         media_url = new_url;
                                         current_variant = Some(new_uri);
                                         init_emitted = false;
+                                        idx = 0;
                                     }
                                 }
                             }
